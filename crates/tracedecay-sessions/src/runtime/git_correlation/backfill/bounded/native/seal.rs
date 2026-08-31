@@ -111,15 +111,18 @@ mod tests {
     use crate::observation::ObservationCancellation;
 
     fn git(path: &Path, args: &[&str]) {
-        let output = Command::new(tracedecay_runtime_core::git::git_program())
-            .current_dir(path)
-            .args(args)
-            .env("GIT_AUTHOR_NAME", "TraceDecay")
-            .env("GIT_AUTHOR_EMAIL", "test@tracedecay.invalid")
-            .env("GIT_COMMITTER_NAME", "TraceDecay")
-            .env("GIT_COMMITTER_EMAIL", "test@tracedecay.invalid")
-            .output()
-            .unwrap();
+        let output = Command::new(
+            tracedecay_runtime_core::git::try_git_program()
+                .expect("absolute git executable should resolve"),
+        )
+        .current_dir(path)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "TraceDecay")
+        .env("GIT_AUTHOR_EMAIL", "test@tracedecay.invalid")
+        .env("GIT_COMMITTER_NAME", "TraceDecay")
+        .env("GIT_COMMITTER_EMAIL", "test@tracedecay.invalid")
+        .output()
+        .unwrap();
         assert!(
             output.status.success(),
             "git {args:?}: {}",

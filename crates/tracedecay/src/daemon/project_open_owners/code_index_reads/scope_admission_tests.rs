@@ -18,8 +18,8 @@ use tracedecay_application::{
     RequestContext, RequestId, ResolvedScope,
 };
 use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, RefId, UtcMicros, WorktreeId};
-use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 use tracedecay_graph_query::{CodeGraphReadError, CodeGraphReadRequest};
+use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::project_code_graph_projection_read_port;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
@@ -269,11 +269,14 @@ async fn wait_for_ready_root_generation(
 }
 
 fn git(root: &Path, arguments: &[&str]) {
-    let status = Command::new(tracedecay_runtime_core::git::git_program())
-        .current_dir(root)
-        .args(arguments)
-        .status()
-        .expect("run git fixture command");
+    let status = Command::new(
+        tracedecay_runtime_core::git::try_git_program()
+            .expect("absolute git executable should resolve"),
+    )
+    .current_dir(root)
+    .args(arguments)
+    .status()
+    .expect("run git fixture command");
     assert!(
         status.success(),
         "git fixture command failed: {arguments:?}"

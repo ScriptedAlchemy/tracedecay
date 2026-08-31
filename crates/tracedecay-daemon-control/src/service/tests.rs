@@ -1,5 +1,5 @@
 use std::ffi::{OsStr, OsString};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
 use std::io::{BufRead, Write};
@@ -7,6 +7,8 @@ use std::io::{BufRead, Write};
 use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
 use std::os::unix::net::UnixListener;
+#[cfg(target_os = "linux")]
+use std::process::Command;
 use tempfile::TempDir;
 
 #[cfg(target_os = "linux")]
@@ -95,6 +97,7 @@ fn released_windows_replacement_lease_is_reacquired_shared_before_restore() {
         previous_state: DaemonServiceState::RunningEnabled,
         lifecycle_lease: None,
         expected_version: TEST_BUILD_VERSION.to_owned(),
+        runner: ServiceRunner::WindowsTask,
         restored: false,
     };
 
@@ -1049,11 +1052,15 @@ fn refresh_installed_service_skips_missing_unit() {
     let home = dir.path().join("home");
     std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
     std::fs::create_dir_all(&home).expect("home dir");
+    let systemctl = fake_bin.join("systemctl");
+    std::fs::write(&systemctl, "#!/bin/sh\nexit 0\n").expect("fake systemctl");
+    std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
+        .expect("systemctl permissions");
+    let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
 
     let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
     let _home_guard = EnvVarGuard::set("HOME", &home);
     let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
-    let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
     let spec = DaemonServiceSpec {
         tracedecay_bin: PathBuf::from("/opt/tracedecay/bin/tracedecay"),
         socket_path: PathBuf::from("/run/user/1000/tracedecay.sock"),
@@ -1062,10 +1069,18 @@ fn refresh_installed_service_skips_missing_unit() {
     };
 
     let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
-    let outcome = super::with_quiesced_installed_service(
+    let outcome = super::with_quiesced_installed_service_with_runner(
+        runner,
         "daemon service refresh",
         TEST_BUILD_VERSION,
-        |_| super::refresh_installed_service_with_state(&spec, None, TEST_BUILD_VERSION),
+        |_, runner| {
+            super::refresh_installed_service_with_state_and_runner(
+                runner,
+                &spec,
+                None,
+                TEST_BUILD_VERSION,
+            )
+        },
     )
     .expect("refresh service");
 
@@ -1115,11 +1130,11 @@ fn refresh_installed_service_preserves_existing_socket_path() {
         .expect("fake systemctl");
     std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
         .expect("systemctl permissions");
+    let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
 
     let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
     let _home_guard = EnvVarGuard::set("HOME", &home);
     let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
-    let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
     let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
     let _stopped_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_STOPPED", &stopped);
 
@@ -1142,16 +1157,22 @@ fn refresh_installed_service_preserves_existing_socket_path() {
         remote_tls: None,
     };
 
-    let previous_state = super::quiesce_installed_service_before_lease(TEST_BUILD_VERSION)
-        .expect("quiesce installed service");
-    let outcome = super::refresh_installed_service_under_lease_with_state(
+    let previous_state =
+        super::quiesce_installed_service_before_lease_with_runner(&runner, TEST_BUILD_VERSION)
+            .expect("quiesce installed service");
+    let outcome = super::refresh_installed_service_with_state_and_runner(
+        &runner,
         &spec,
-        DaemonServiceState::StoppedEnabled,
+        Some(DaemonServiceState::StoppedEnabled),
         TEST_BUILD_VERSION,
     )
     .expect("refresh service");
-    super::restore_installed_service_after_update(previous_state, TEST_BUILD_VERSION)
-        .expect("restore service state");
+    super::restore_installed_service_after_update_with_runner(
+        &runner,
+        previous_state,
+        TEST_BUILD_VERSION,
+    )
+    .expect("restore service state");
 
     assert_eq!(outcome, Some(service_path.clone()));
     let unit = std::fs::read_to_string(service_path).expect("service unit");
@@ -1201,11 +1222,11 @@ fn refresh_installed_service_migrates_overlong_generated_socket_path() {
     .expect("fake systemctl");
     std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
         .expect("systemctl permissions");
+    let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
 
     let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
     let _home_guard = EnvVarGuard::set("HOME", &home);
     let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile);
-    let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
 
     let legacy_socket = profile.join("daemon.sock");
     let expected_socket = super::default_socket_path().expect("short default socket");
@@ -1228,9 +1249,10 @@ fn refresh_installed_service_migrates_overlong_generated_socket_path() {
         data_dir_override: Some(profile),
         remote_tls: None,
     };
-    let outcome = super::refresh_installed_service_under_lease_with_state(
+    let outcome = super::refresh_installed_service_with_state_and_runner(
+        &runner,
         &spec,
-        DaemonServiceState::StoppedEnabled,
+        Some(DaemonServiceState::StoppedEnabled),
         TEST_BUILD_VERSION,
     )
     .expect("refresh service");
@@ -1261,11 +1283,11 @@ fn restore_quiesced_service_starts_existing_unit_without_rewriting_it() {
     .expect("fake systemctl");
     std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
         .expect("systemctl permissions");
+    let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
 
     let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
     let _home_guard = EnvVarGuard::set("HOME", &home);
     let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
-    let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
     let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
     let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
@@ -1273,7 +1295,8 @@ fn restore_quiesced_service_starts_existing_unit_without_rewriting_it() {
         "[Service]\nExecStart=/old/tracedecay daemon run --socket /custom/tracedecay.sock\n";
     std::fs::write(&service_path, original_unit).expect("existing service unit");
 
-    super::restore_installed_service_after_update(
+    super::restore_installed_service_after_update_with_runner(
+        &runner,
         DaemonServiceState::RunningEnabled,
         TEST_BUILD_VERSION,
     )
@@ -1317,11 +1340,11 @@ fn restore_after_update_starts_a_dead_installed_unit() {
     .expect("fake systemctl");
     std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
         .expect("systemctl permissions");
+    let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
 
     let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
     let _home_guard = EnvVarGuard::set("HOME", &home);
     let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
-    let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
     let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
     let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
@@ -1329,7 +1352,8 @@ fn restore_after_update_starts_a_dead_installed_unit() {
         "[Service]\nExecStart=/old/tracedecay daemon run --socket /custom/tracedecay.sock\n";
     std::fs::write(&service_path, original_unit).expect("existing service unit");
 
-    super::restore_installed_service_after_update(
+    super::restore_installed_service_after_update_with_runner(
+        &runner,
         DaemonServiceState::StoppedDisabled,
         TEST_BUILD_VERSION,
     )
@@ -1374,15 +1398,19 @@ fn restore_after_update_leaves_masked_and_missing_units_untouched() {
     .expect("fake systemctl");
     std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
         .expect("systemctl permissions");
+    let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
 
     let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
     let _home_guard = EnvVarGuard::set("HOME", &home);
     let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
-    let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
     let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
 
-    super::restore_installed_service_after_update(DaemonServiceState::Missing, TEST_BUILD_VERSION)
-        .expect("missing stays missing");
+    super::restore_installed_service_after_update_with_runner(
+        &runner,
+        DaemonServiceState::Missing,
+        TEST_BUILD_VERSION,
+    )
+    .expect("missing stays missing");
     assert!(
         !log.exists()
             || std::fs::read_to_string(&log)
@@ -1399,8 +1427,12 @@ fn restore_after_update_leaves_masked_and_missing_units_untouched() {
     )
     .expect("masked unit");
 
-    super::restore_installed_service_after_update(DaemonServiceState::Masked, TEST_BUILD_VERSION)
-        .expect("masked stays masked");
+    super::restore_installed_service_after_update_with_runner(
+        &runner,
+        DaemonServiceState::Masked,
+        TEST_BUILD_VERSION,
+    )
+    .expect("masked stays masked");
     assert!(
         !log.exists()
             || std::fs::read_to_string(&log)
@@ -1429,10 +1461,10 @@ fn refresh_installed_service_preserves_stopped_state() {
         .expect("fake systemctl");
     std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
         .expect("systemctl permissions");
+    let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
     let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
     let _home_guard = EnvVarGuard::set("HOME", &home);
     let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
-    let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
     let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
     let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
@@ -1448,9 +1480,19 @@ fn refresh_installed_service_preserves_stopped_state() {
         remote_tls: None,
     };
 
-    super::with_quiesced_installed_service("daemon service refresh", TEST_BUILD_VERSION, |_| {
-        super::refresh_installed_service_with_state(&spec, None, TEST_BUILD_VERSION)
-    })
+    super::with_quiesced_installed_service_with_runner(
+        runner,
+        "daemon service refresh",
+        TEST_BUILD_VERSION,
+        |_, runner| {
+            super::refresh_installed_service_with_state_and_runner(
+                runner,
+                &spec,
+                None,
+                TEST_BUILD_VERSION,
+            )
+        },
+    )
     .expect("refresh service");
 
     let commands = std::fs::read_to_string(log).expect("systemctl log");
@@ -1474,13 +1516,95 @@ fn systemd_service_state_detects_runtime_mask() {
         .expect("fake systemctl");
     std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
         .expect("systemctl permissions");
-    let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
+    let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
 
     assert_eq!(
-        ServiceRunner::Systemd
+        runner
             .service_state(&dir.path().join("daemon.sock"))
             .expect("systemd service state"),
         DaemonServiceState::Masked
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn service_fixture_does_not_hide_git_during_concurrent_spawn() {
+    let git_program = tracedecay_runtime_core::git::try_git_program()
+        .expect("canonical Git executable")
+        .to_os_string();
+    assert!(
+        Path::new(&git_program).is_absolute(),
+        "the canonical Git authority must resolve before fixture overlap"
+    );
+    let original_path = std::env::var_os("PATH");
+    let dir = TempDir::new().expect("temp dir");
+    let fake_bin = dir.path().join("bin");
+    std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
+    let systemctl = fake_bin.join("systemctl");
+    let observed = dir.path().join("systemctl.observed");
+    let ready = dir.path().join("systemctl.ready");
+    let release = dir.path().join("systemctl.release");
+    let mkfifo = Command::new("/usr/bin/mkfifo")
+        .args([&ready, &release])
+        .status()
+        .expect("spawn mkfifo");
+    assert!(mkfifo.success(), "create synchronization FIFOs");
+    std::fs::write(
+        &systemctl,
+        format!(
+            "#!/bin/sh\n\
+             if [ ! -e '{observed}' ]; then\n\
+               : > '{observed}'\n\
+               printf 'ready\\n' > '{ready}'\n\
+               IFS= read -r release < '{release}'\n\
+             fi\n\
+             [ \"$2\" = is-active ] && exit 3\n\
+             [ \"$2\" = is-enabled ] && echo enabled\n\
+             exit 0\n",
+            observed = observed.display(),
+            ready = ready.display(),
+            release = release.display(),
+        ),
+    )
+    .expect("fake systemctl");
+    std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
+        .expect("systemctl permissions");
+    let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
+
+    let socket_path = dir.path().join("daemon.sock");
+    let fixture = std::thread::spawn(move || {
+        runner
+            .service_state(&socket_path)
+            .expect("fixture systemd state")
+    });
+
+    let ready_event = std::fs::read_to_string(&ready).expect("wait for systemctl ready event");
+    let path_during_overlap = std::env::var_os("PATH");
+    let git_output = Command::new(&git_program).arg("--version").output();
+    std::fs::write(&release, "continue\n").expect("release systemctl fixture");
+    assert_eq!(
+        fixture.join().expect("join service fixture"),
+        DaemonServiceState::StoppedEnabled
+    );
+    assert_eq!(
+        ready_event, "ready\n",
+        "systemctl fixture must reach barrier"
+    );
+
+    if let Err(error) = &git_output {
+        assert_ne!(
+            error.kind(),
+            std::io::ErrorKind::NotFound,
+            "concurrent Git spawn must never fail with ENOENT"
+        );
+    }
+    assert!(
+        git_output.expect("spawn canonical Git").status.success(),
+        "canonical Git invocation must succeed"
+    );
+    assert_eq!(
+        path_during_overlap, original_path,
+        "service fixtures must not mutate process-global PATH"
     );
 }
 

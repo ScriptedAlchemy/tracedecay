@@ -234,9 +234,10 @@ async fn install_production_composition_stores(
     static HARNESS_CODEX_PREPARATION_MEMORY: std::sync::OnceLock<
         Arc<tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1>,
     > = std::sync::OnceLock::new();
-    let preparation_memory = Arc::clone(HARNESS_CODEX_PREPARATION_MEMORY.get_or_init(|| {
-        invocation.code_index_schedulers.process_resident_memory()
-    }));
+    let preparation_memory = Arc::clone(
+        HARNESS_CODEX_PREPARATION_MEMORY
+            .get_or_init(|| invocation.code_index_schedulers.process_resident_memory()),
+    );
     store_administration
         .configure_codex_preparation_resources(preparation_memory)
         .map_err(|error| TraceDecayError::Config {
@@ -993,11 +994,14 @@ mod code_index_activation_test {
                 "seed project",
             ],
         ] {
-            let status = Command::new(tracedecay_runtime_core::git::git_program())
-                .args(&arguments)
-                .current_dir(&project)
-                .status()
-                .expect("git fixture command");
+            let status = Command::new(
+                tracedecay_runtime_core::git::try_git_program()
+                    .expect("absolute git executable should resolve"),
+            )
+            .args(&arguments)
+            .current_dir(&project)
+            .status()
+            .expect("git fixture command");
             assert!(status.success(), "git {arguments:?}");
         }
 

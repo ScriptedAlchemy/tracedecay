@@ -1,4 +1,6 @@
-use std::path::Path;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -6,16 +8,22 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use super::probe::{DaemonSocketState, daemon_socket_state};
 use super::{DaemonServiceState, LAUNCHD_LABEL, tracedecay_data_dir, windows_task};
 
-/// All variants exist on every platform so that `match` dispatch stays
-/// exhaustive everywhere; `current()` is the only constructor and returns an
-/// error on platforms without a supported service manager.
+/// All variants exist on every platform so that dispatch stays exhaustive.
+#[derive(Clone, Debug)]
 pub(super) enum ServiceRunner {
+    Systemd { systemctl: PathBuf },
+    Launchd { launchctl: PathBuf, id: PathBuf },
+    WindowsTask,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ServicePlatform {
     Systemd,
     Launchd,
     WindowsTask,
 }
 
-impl ServiceRunner {
+impl ServicePlatform {
     pub(super) fn current() -> Result<Self> {
         if cfg!(target_os = "linux") {
             Ok(Self::Systemd)
@@ -27,6 +35,53 @@ impl ServiceRunner {
             Err(unsupported_service_platform())
         }
     }
+}
+
+impl ServiceRunner {
+    pub(super) fn current() -> Result<Self> {
+        let path_var = std::env::var_os("PATH");
+        match ServicePlatform::current()? {
+            ServicePlatform::Systemd => Self::systemd(require_service_program_on_path(
+                "systemctl",
+                "systemd user service management",
+                path_var.as_deref(),
+            )?),
+            ServicePlatform::Launchd => Self::launchd(
+                require_service_program_on_path(
+                    "launchctl",
+                    "launchd agent management",
+                    path_var.as_deref(),
+                )?,
+                require_service_program_on_path(
+                    "id",
+                    "launchd user-domain resolution",
+                    path_var.as_deref(),
+                )?,
+            ),
+            ServicePlatform::WindowsTask => Ok(Self::WindowsTask),
+        }
+    }
+
+    pub(super) fn systemd(systemctl: impl AsRef<Path>) -> Result<Self> {
+        Ok(Self::Systemd {
+            systemctl: required_service_program(
+                "systemctl",
+                "systemd user service management",
+                systemctl.as_ref(),
+            )?,
+        })
+    }
+
+    pub(super) fn launchd(launchctl: impl AsRef<Path>, id: impl AsRef<Path>) -> Result<Self> {
+        Ok(Self::Launchd {
+            launchctl: required_service_program(
+                "launchctl",
+                "launchd agent management",
+                launchctl.as_ref(),
+            )?,
+            id: required_service_program("id", "launchd user-domain resolution", id.as_ref())?,
+        })
+    }
 
     #[hotpath::measure(label = "daemon.service.runner.install")]
     pub(super) fn install(
@@ -37,17 +92,19 @@ impl ServiceRunner {
         expected_version: &str,
     ) -> Result<()> {
         match self {
-            Self::Systemd => {
+            Self::Systemd { systemctl } => {
                 // `install-service` (start=true) both enables the unit and
                 // starts it. `--no-start` writes the unit file only, so the
                 // operator can inspect it before the first enable.
                 if start {
-                    run_systemctl(&["daemon-reload"])?;
-                    run_systemctl(&["enable", "--now", crate::SERVICE_NAME])?;
+                    run_systemctl(systemctl, &["daemon-reload"])?;
+                    run_systemctl(systemctl, &["enable", "--now", crate::SERVICE_NAME])?;
                 }
                 Ok(())
             }
-            Self::Launchd => launchd_install(service_path, start, socket_path),
+            Self::Launchd { launchctl, id } => {
+                launchd_install(launchctl, id, service_path, start, socket_path)
+            }
             Self::WindowsTask => windows_task::apply_state(
                 if start {
                     DaemonServiceState::RunningEnabled
@@ -68,41 +125,47 @@ impl ServiceRunner {
         expected_version: &str,
     ) -> Result<()> {
         match self {
-            Self::Systemd => {
-                run_systemctl(&["daemon-reload"])?;
+            Self::Systemd { systemctl } => {
+                run_systemctl(systemctl, &["daemon-reload"])?;
                 if previous_state.is_enabled() {
-                    run_systemctl(&["enable", crate::SERVICE_NAME])?;
+                    run_systemctl(systemctl, &["enable", crate::SERVICE_NAME])?;
                 }
                 if previous_state.is_running() {
-                    run_systemctl(&["restart", crate::SERVICE_NAME])?;
+                    run_systemctl(systemctl, &["restart", crate::SERVICE_NAME])?;
                 }
                 Ok(())
             }
-            Self::Launchd if previous_state.is_running() => {
-                launchd_refresh(service_path, socket_path)?;
+            Self::Launchd { launchctl, id } if previous_state.is_running() => {
+                launchd_refresh(launchctl, id, service_path, socket_path)?;
                 if !previous_state.is_enabled() {
-                    run_launchctl(&["disable", &launchd_service_target()?])?;
+                    run_launchctl(launchctl, &["disable", &launchd_service_target(id)?])?;
                 }
                 Ok(())
             }
-            Self::Launchd => Ok(()),
+            Self::Launchd { .. } => Ok(()),
             Self::WindowsTask => windows_task::apply_state(previous_state, expected_version),
         }
     }
 
     pub(super) fn service_state(&self, socket_path: &Path) -> Result<DaemonServiceState> {
         match self {
-            Self::Systemd => {
-                let running = Command::new("systemctl")
+            Self::Systemd { systemctl } => {
+                let running = Command::new(systemctl)
                     .args(["--user", "is-active", "--quiet", crate::SERVICE_NAME])
                     .status()
-                    .is_ok_and(|status| status.success());
-                let enablement = Command::new("systemctl")
+                    .map_err(|error| {
+                        service_program_spawn_error("systemctl", "systemd service state", error)
+                    })?
+                    .success();
+                let enablement = Command::new(systemctl)
                     .args(["--user", "is-enabled", crate::SERVICE_NAME])
                     .output()
-                    .ok()
-                    .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
-                    .unwrap_or_default();
+                    .map_err(|error| {
+                        service_program_spawn_error("systemctl", "systemd service state", error)
+                    })?;
+                let enablement = String::from_utf8_lossy(&enablement.stdout)
+                    .trim()
+                    .to_string();
                 if enablement.starts_with("masked") {
                     Ok(DaemonServiceState::Masked)
                 } else if running && enablement.starts_with("enabled") {
@@ -115,12 +178,12 @@ impl ServiceRunner {
                     Ok(DaemonServiceState::StoppedDisabled)
                 }
             }
-            Self::Launchd => {
+            Self::Launchd { launchctl, id } => {
                 let running = matches!(
                     daemon_socket_state(socket_path),
                     DaemonSocketState::Connectable
                 );
-                let enabled = !launchd_service_is_disabled();
+                let enabled = !launchd_service_is_disabled(launchctl, id)?;
                 Ok(match (running, enabled) {
                     (true, true) => DaemonServiceState::RunningEnabled,
                     (true, false) => DaemonServiceState::RunningDisabled,
@@ -135,13 +198,13 @@ impl ServiceRunner {
     #[hotpath::measure(label = "daemon.service.runner.before_uninstall")]
     pub(super) fn before_uninstall(&self, stop: bool, expected_version: &str) -> Result<()> {
         match self {
-            Self::Systemd => {
+            Self::Systemd { systemctl } => {
                 if stop {
-                    let _ = run_systemctl(&["disable", "--now", crate::SERVICE_NAME]);
+                    let _ = run_systemctl(systemctl, &["disable", "--now", crate::SERVICE_NAME]);
                 }
                 Ok(())
             }
-            Self::Launchd => launchd_before_uninstall(stop),
+            Self::Launchd { launchctl, id } => launchd_before_uninstall(launchctl, id, stop),
             Self::WindowsTask if stop => windows_task::deactivate(expected_version),
             Self::WindowsTask => Ok(()),
         }
@@ -155,10 +218,18 @@ impl ServiceRunner {
         expected_version: &str,
     ) -> Result<()> {
         match self {
-            Self::Systemd => run_systemctl(&["start", crate::SERVICE_NAME]),
-            Self::Launchd => {
-                let target = launchd_service_target()?;
-                launchd_start_preserving_enablement(&target, service_path, socket_path)
+            Self::Systemd { systemctl } => {
+                run_systemctl(systemctl, &["start", crate::SERVICE_NAME])
+            }
+            Self::Launchd { launchctl, id } => {
+                let target = launchd_service_target(id)?;
+                launchd_start_preserving_enablement(
+                    launchctl,
+                    id,
+                    &target,
+                    service_path,
+                    socket_path,
+                )
             }
             Self::WindowsTask => windows_task::start(expected_version),
         }
@@ -167,8 +238,8 @@ impl ServiceRunner {
     #[hotpath::measure(label = "daemon.service.runner.stop")]
     pub(super) fn stop(&self, expected_version: &str) -> Result<()> {
         match self {
-            Self::Systemd => run_systemctl(&["stop", crate::SERVICE_NAME]),
-            Self::Launchd => launchd_stop(),
+            Self::Systemd { systemctl } => run_systemctl(systemctl, &["stop", crate::SERVICE_NAME]),
+            Self::Launchd { launchctl, id } => launchd_stop(launchctl, id),
             Self::WindowsTask => windows_task::stop(expected_version),
         }
     }
@@ -188,19 +259,19 @@ impl ServiceRunner {
             return Ok(());
         }
         match self {
-            Self::Systemd => {
-                run_systemctl(&["daemon-reload"])?;
+            Self::Systemd { systemctl } => {
+                run_systemctl(systemctl, &["daemon-reload"])?;
                 if previous_state.is_enabled() {
-                    run_systemctl(&["enable", crate::SERVICE_NAME])?;
+                    run_systemctl(systemctl, &["enable", crate::SERVICE_NAME])?;
                 } else {
-                    run_systemctl(&["disable", crate::SERVICE_NAME])?;
+                    run_systemctl(systemctl, &["disable", crate::SERVICE_NAME])?;
                 }
-                run_systemctl(&["start", crate::SERVICE_NAME])
+                run_systemctl(systemctl, &["start", crate::SERVICE_NAME])
             }
-            Self::Launchd => {
-                launchd_refresh(service_path, socket_path)?;
+            Self::Launchd { launchctl, id } => {
+                launchd_refresh(launchctl, id, service_path, socket_path)?;
                 if !previous_state.is_enabled() {
-                    run_launchctl(&["disable", &launchd_service_target()?])?;
+                    run_launchctl(launchctl, &["disable", &launchd_service_target(id)?])?;
                 }
                 Ok(())
             }
@@ -210,20 +281,22 @@ impl ServiceRunner {
 
     pub(super) fn after_uninstall(&self, stop: bool) {
         match self {
-            Self::Systemd => {
+            Self::Systemd { systemctl } => {
                 if stop {
-                    let _ = run_systemctl(&["daemon-reload"]);
+                    let _ = run_systemctl(systemctl, &["daemon-reload"]);
                 }
             }
-            Self::Launchd => {}
+            Self::Launchd { .. } => {}
             Self::WindowsTask => {}
         }
     }
 
     pub(super) fn log_hint(&self) -> String {
         match self {
-            Self::Systemd => format!("journalctl --user -u {} -f", crate::SERVICE_NAME),
-            Self::Launchd => tracedecay_runtime_core::config::user_data_dir().map_or_else(
+            Self::Systemd { .. } => {
+                format!("journalctl --user -u {} -f", crate::SERVICE_NAME)
+            }
+            Self::Launchd { .. } => tracedecay_runtime_core::config::user_data_dir().map_or_else(
                 || "tail -f <tracedecay-data-dir>/daemon.err.log".to_string(),
                 |dir| format!("tail -f \"{}\"", dir.join("daemon.err.log").display()),
             ),
@@ -236,8 +309,8 @@ impl ServiceRunner {
 
     pub(super) fn service_detail_hint(&self) -> Option<String> {
         match self {
-            Self::Systemd => None,
-            Self::Launchd => launchd_service_target()
+            Self::Systemd { .. } => None,
+            Self::Launchd { id, .. } => launchd_service_target(id)
                 .ok()
                 .map(|target| format!("launchctl print {target}")),
             Self::WindowsTask => windows_task::task_name()
@@ -259,21 +332,21 @@ fn launchctl_failure(args: &[&str], output: &std::process::Output) -> TraceDecay
     }
 }
 
-fn run_launchctl(args: &[&str]) -> Result<std::process::Output> {
-    let output = launchctl_spawn(args)?;
+fn run_launchctl(launchctl: &Path, args: &[&str]) -> Result<std::process::Output> {
+    let output = launchctl_spawn(launchctl, args)?;
     if output.status.success() {
         return Ok(output);
     }
     Err(launchctl_failure(args, &output))
 }
 
-fn run_systemctl(args: &[&str]) -> Result<()> {
-    let output = Command::new("systemctl")
+fn run_systemctl(systemctl: &Path, args: &[&str]) -> Result<()> {
+    let output = Command::new(systemctl)
         .arg("--user")
         .args(args)
         .output()
-        .map_err(|e| TraceDecayError::Config {
-            message: format!("failed to run systemctl --user {}: {e}", args.join(" ")),
+        .map_err(|error| {
+            service_program_spawn_error("systemctl", "systemd service management", error)
         })?;
     if output.status.success() {
         return Ok(());
@@ -292,6 +365,95 @@ fn unsupported_service_platform() -> TraceDecayError {
     TraceDecayError::Config {
         message: "daemon service install is currently supported on Linux systemd user services, macOS launchd agents, and per-user Windows scheduled tasks"
             .to_string(),
+    }
+}
+
+fn required_service_program(program: &str, lifecycle: &str, candidate: &Path) -> Result<PathBuf> {
+    if !candidate.is_absolute() {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "{program} program path '{}' must be absolute for {lifecycle}",
+                candidate.display()
+            ),
+        });
+    }
+    canonical_service_program_candidate(program, lifecycle, candidate)?
+        .ok_or_else(|| service_program_unavailable(program, lifecycle))
+}
+
+fn require_service_program_on_path(
+    program: &str,
+    lifecycle: &str,
+    path_var: Option<&std::ffi::OsStr>,
+) -> Result<PathBuf> {
+    let Some(path_var) = path_var else {
+        return Err(service_program_unavailable(program, lifecycle));
+    };
+    for directory in std::env::split_paths(path_var) {
+        let candidate = directory.join(program);
+        if let Some(canonical) =
+            canonical_service_program_candidate(program, lifecycle, &candidate)?
+        {
+            return Ok(canonical);
+        }
+    }
+    Err(service_program_unavailable(program, lifecycle))
+}
+
+fn canonical_service_program_candidate(
+    program: &str,
+    lifecycle: &str,
+    candidate: &Path,
+) -> Result<Option<PathBuf>> {
+    let metadata = match std::fs::metadata(candidate) {
+        Ok(metadata) if !metadata.is_file() => return Ok(None),
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(TraceDecayError::Io(error)),
+    };
+    if !service_program_is_executable(&metadata) {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "{program} candidate '{}' exists but is not executable for {lifecycle}",
+                candidate.display()
+            ),
+        });
+    }
+    match std::fs::canonicalize(candidate) {
+        Ok(canonical) => Ok(Some(canonical)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(TraceDecayError::Io(error)),
+    }
+}
+
+#[cfg(unix)]
+fn service_program_is_executable(metadata: &std::fs::Metadata) -> bool {
+    metadata.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn service_program_is_executable(_metadata: &std::fs::Metadata) -> bool {
+    true
+}
+
+fn service_program_spawn_error(
+    program: &str,
+    lifecycle: &str,
+    error: std::io::Error,
+) -> TraceDecayError {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        service_program_unavailable(program, lifecycle)
+    } else {
+        TraceDecayError::Config {
+            message: format!("failed to run {program} for {lifecycle}: {error}"),
+        }
+    }
+}
+
+fn service_program_unavailable(program: &str, lifecycle: &str) -> TraceDecayError {
+    TraceDecayError::HostCliUnavailable {
+        program: program.to_owned(),
+        lifecycle: lifecycle.to_owned(),
     }
 }
 
@@ -325,8 +487,12 @@ pub(super) fn launchctl_output_is_transient_bootstrap_failure(output: &str) -> b
     output.contains("Bootstrap failed: 5:")
 }
 
-fn run_launchctl_retrying_transient_bootstrap(args: &[&str]) -> Result<()> {
-    retry_transient_bootstrap(args, || launchctl_spawn(args), std::thread::sleep)
+fn run_launchctl_retrying_transient_bootstrap(launchctl: &Path, args: &[&str]) -> Result<()> {
+    retry_transient_bootstrap(
+        args,
+        || launchctl_spawn(launchctl, args),
+        std::thread::sleep,
+    )
 }
 
 pub(super) fn retry_transient_bootstrap(
@@ -390,32 +556,31 @@ pub(super) fn launchd_uninstall_command_plan(target: &str) -> Vec<LaunchdCommand
     ]
 }
 
-fn run_launchd_commands(commands: &[LaunchdCommand]) -> Result<()> {
+fn run_launchd_commands(launchctl: &Path, commands: &[LaunchdCommand]) -> Result<()> {
     for command in commands {
         let args: Vec<&str> = command.args.iter().map(String::as_str).collect();
         match command.failure_mode {
             LaunchctlFailureMode::Fail => {
-                run_launchctl(&args)?;
+                run_launchctl(launchctl, &args)?;
             }
-            LaunchctlFailureMode::TolerateNotLoaded => run_launchctl_allow_not_loaded(&args)?,
+            LaunchctlFailureMode::TolerateNotLoaded => {
+                run_launchctl_allow_not_loaded(launchctl, &args)?
+            }
             LaunchctlFailureMode::Ignore => {
-                let _ = run_launchctl(&args);
+                let _ = run_launchctl(launchctl, &args);
             }
             LaunchctlFailureMode::RetryTransientBootstrap => {
-                run_launchctl_retrying_transient_bootstrap(&args)?;
+                run_launchctl_retrying_transient_bootstrap(launchctl, &args)?;
             }
         }
     }
     Ok(())
 }
 
-fn launchd_domain() -> Result<String> {
-    let output = Command::new("id")
-        .arg("-u")
-        .output()
-        .map_err(|e| TraceDecayError::Config {
-            message: format!("failed to determine user id for launchd domain: {e}"),
-        })?;
+fn launchd_domain(id: &Path) -> Result<String> {
+    let output = Command::new(id).arg("-u").output().map_err(|error| {
+        service_program_spawn_error("id", "launchd user-domain resolution", error)
+    })?;
     if !output.status.success() {
         return Err(TraceDecayError::Config {
             message: format!(
@@ -434,21 +599,22 @@ fn launchd_domain() -> Result<String> {
     Ok(format!("gui/{uid}"))
 }
 
-fn launchd_service_target() -> Result<String> {
-    Ok(format!("{}/{}", launchd_domain()?, LAUNCHD_LABEL))
+fn launchd_service_target(id: &Path) -> Result<String> {
+    Ok(format!("{}/{}", launchd_domain(id)?, LAUNCHD_LABEL))
 }
 
-fn launchd_service_is_disabled() -> bool {
-    let Ok(domain) = launchd_domain() else {
-        return false;
-    };
-    let Ok(output) = Command::new("launchctl")
+fn launchd_service_is_disabled(launchctl: &Path, id: &Path) -> Result<bool> {
+    let domain = launchd_domain(id)?;
+    let output = Command::new(launchctl)
         .args(["print-disabled", &domain])
         .output()
-    else {
-        return false;
-    };
-    launchd_disabled_output_contains_label(&String::from_utf8_lossy(&output.stdout), LAUNCHD_LABEL)
+        .map_err(|error| {
+            service_program_spawn_error("launchctl", "launchd service state", error)
+        })?;
+    Ok(launchd_disabled_output_contains_label(
+        &String::from_utf8_lossy(&output.stdout),
+        LAUNCHD_LABEL,
+    ))
 }
 
 pub(super) fn launchd_disabled_output_contains_label(output: &str, label: &str) -> bool {
@@ -470,35 +636,48 @@ fn ensure_launchd_runtime_dirs() -> Result<()> {
     })
 }
 
-fn launchd_install(service_path: &Path, start: bool, socket_path: &Path) -> Result<()> {
+fn launchd_install(
+    launchctl: &Path,
+    id: &Path,
+    service_path: &Path,
+    start: bool,
+    socket_path: &Path,
+) -> Result<()> {
     ensure_launchd_runtime_dirs()?;
-    let target = launchd_service_target()?;
+    let target = launchd_service_target(id)?;
     if !start {
         // launchd bootstraps every plist in ~/Library/LaunchAgents at login,
         // so persist a disabled state to keep --no-start meaning "do not run".
-        run_launchctl(&["disable", &target])?;
+        run_launchctl(launchctl, &["disable", &target])?;
         return Ok(());
     }
-    launchd_start(&target, service_path, socket_path)
+    launchd_start(launchctl, id, &target, service_path, socket_path)
 }
 
-fn launchd_refresh(service_path: &Path, socket_path: &Path) -> Result<()> {
+fn launchd_refresh(
+    launchctl: &Path,
+    id: &Path,
+    service_path: &Path,
+    socket_path: &Path,
+) -> Result<()> {
     ensure_launchd_runtime_dirs()?;
-    let target = launchd_service_target()?;
-    launchd_start(&target, service_path, socket_path)
+    let target = launchd_service_target(id)?;
+    launchd_start(launchctl, id, &target, service_path, socket_path)
 }
 
 fn launchd_start_preserving_enablement(
+    launchctl: &Path,
+    id: &Path,
     target: &str,
     service_path: &Path,
     socket_path: &Path,
 ) -> Result<()> {
-    let was_disabled = launchd_service_is_disabled();
-    let start_result = launchd_start(target, service_path, socket_path);
+    let was_disabled = launchd_service_is_disabled(launchctl, id)?;
+    let start_result = launchd_start(launchctl, id, target, service_path, socket_path);
     if !was_disabled {
         return start_result;
     }
-    let restore_result = run_launchctl(&["disable", target]).map(|_| ());
+    let restore_result = run_launchctl(launchctl, &["disable", target]).map(|_| ());
     match (start_result, restore_result) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
@@ -510,43 +689,56 @@ fn launchd_start_preserving_enablement(
     }
 }
 
-fn launchd_start(target: &str, service_path: &Path, socket_path: &Path) -> Result<()> {
-    let domain = launchd_domain()?;
-    run_launchd_commands(&launchd_start_command_plan(&domain, target, service_path))?;
-    verify_launchd_started(target, socket_path)
+fn launchd_start(
+    launchctl: &Path,
+    id: &Path,
+    target: &str,
+    service_path: &Path,
+    socket_path: &Path,
+) -> Result<()> {
+    let domain = launchd_domain(id)?;
+    run_launchd_commands(
+        launchctl,
+        &launchd_start_command_plan(&domain, target, service_path),
+    )?;
+    verify_launchd_started(launchctl, target, socket_path)
 }
 
-fn launchd_before_uninstall(stop: bool) -> Result<()> {
+fn launchd_before_uninstall(launchctl: &Path, id: &Path, stop: bool) -> Result<()> {
     if !stop {
         return Ok(());
     }
-    let target = launchd_service_target()?;
-    run_launchd_commands(&launchd_uninstall_command_plan(&target))
+    let target = launchd_service_target(id)?;
+    run_launchd_commands(launchctl, &launchd_uninstall_command_plan(&target))
 }
 
-fn launchd_stop() -> Result<()> {
-    let target = launchd_service_target()?;
-    run_launchctl_allow_not_loaded(&["bootout", &target])
+fn launchd_stop(launchctl: &Path, id: &Path) -> Result<()> {
+    let target = launchd_service_target(id)?;
+    run_launchctl_allow_not_loaded(launchctl, &["bootout", &target])
 }
 
-fn verify_launchd_started(target: &str, socket_path: &Path) -> Result<()> {
+fn verify_launchd_started(launchctl: &Path, target: &str, socket_path: &Path) -> Result<()> {
     if daemon_socket_state(socket_path) == DaemonSocketState::Connectable {
         return Ok(());
     }
-    run_launchctl(&["print", target]).map(|_| ())
+    run_launchctl(launchctl, &["print", target]).map(|_| ())
 }
 
-fn launchctl_spawn(args: &[&str]) -> Result<std::process::Output> {
-    Command::new("launchctl")
+fn launchctl_spawn(launchctl: &Path, args: &[&str]) -> Result<std::process::Output> {
+    Command::new(launchctl)
         .args(args)
         .output()
-        .map_err(|e| TraceDecayError::Config {
-            message: format!("failed to run launchctl {}: {e}", args.join(" ")),
+        .map_err(|error| {
+            service_program_spawn_error(
+                "launchctl",
+                &format!("launchd command `{}`", args.join(" ")),
+                error,
+            )
         })
 }
 
-fn run_launchctl_allow_not_loaded(args: &[&str]) -> Result<()> {
-    let output = launchctl_spawn(args)?;
+fn run_launchctl_allow_not_loaded(launchctl: &Path, args: &[&str]) -> Result<()> {
+    let output = launchctl_spawn(launchctl, args)?;
     if output.status.success()
         || launchctl_stderr_is_not_loaded(&String::from_utf8_lossy(&output.stderr))
     {
