@@ -292,10 +292,14 @@ impl RmcpConnectionAdapter {
         method: &str,
         params: Option<Value>,
     ) -> Result<JsonRpcResponse, ErrorData> {
-        crate::daemon::in_connection_admission(
+        // Heap-allocate the admission + dispatch composition: rmcp's generated
+        // `handle_request` polls every handler-method future inline, and the
+        // combined resident frame overflows the worker stack in perf-profile
+        // layouts when this mega-future is embedded by value.
+        Box::pin(crate::daemon::in_connection_admission(
             self.admission.clone(),
             self.dispatch_admitted(context, method, params),
-        )
+        ))
         .await
     }
 

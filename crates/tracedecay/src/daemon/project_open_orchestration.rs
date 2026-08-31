@@ -318,11 +318,13 @@ pub(super) async fn portable_cached_project_server(
     let Some(server) = server else {
         return Ok(None);
     };
-    ensure_registered_project_route(
+    // Boxed for the same reason as the callers: the registration route is a
+    // mega-future whose by-value frame overflows perf-profile worker stacks.
+    Box::pin(ensure_registered_project_route(
         store_administration,
         canonical_project_path,
         handshake.allow_init,
-    )
+    ))
     .await?;
     Ok(Some(server))
 }
@@ -433,12 +435,15 @@ pub(super) async fn portable_project_server_for_request(
     #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
 ) -> Result<Arc<crate::mcp::McpServer>> {
     let (canonical_project_path, route) = project_route_for_handshake(handshake)?;
-    if let Some(server) = portable_cached_project_server(
+    // Heap-allocate the cached-server probe: this future is embedded by value
+    // in every connection-serving composition, and its resident frame
+    // overflows the worker stack in perf-profile layouts when inlined.
+    if let Some(server) = Box::pin(portable_cached_project_server(
         &store_administration,
         &canonical_project_path,
         handshake,
         requirement,
-    )
+    ))
     .await?
     {
         return Ok(server);
