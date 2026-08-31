@@ -72,7 +72,6 @@ mod dispatch_tests;
 pub mod edit;
 pub mod git;
 pub mod graph;
-pub mod grep;
 pub mod health;
 pub mod hook_runtime;
 pub mod info;

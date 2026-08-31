@@ -12,6 +12,7 @@ use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_mcp::ToolResult;
 use tracedecay_mcp::handlers::analysis as portable_analysis;
 use tracedecay_mcp::handlers::graph as portable_graph;
+use tracedecay_mcp::handlers::grep as portable_grep;
 use tracedecay_mcp::handlers::info as portable_info;
 
 use super::ToolCallRegistryOptions;
@@ -19,7 +20,7 @@ use super::tool_call_support::handle_retrieve;
 use super::unknown_tool_error;
 use super::{
     admin_cli, admin_project, analysis, application_surface, ast_grep_search, automation_runs,
-    dashboard, dispatch_controls, edit, git, graph, grep, hook_runtime, info, skills, workflow,
+    dashboard, dispatch_controls, edit, git, graph, hook_runtime, info, skills, workflow,
 };
 
 mod health_dispatch;
@@ -231,8 +232,8 @@ fn dispatch_graph_tools_inner<'a>(
                 .await
             }
             "tracedecay_grep" => {
-                grep::handle_grep(
-                    cg,
+                portable_grep::handle_grep(
+                    cg.project_root(),
                     args,
                     selected_scope_prefix,
                     options.application_deadline.clone(),

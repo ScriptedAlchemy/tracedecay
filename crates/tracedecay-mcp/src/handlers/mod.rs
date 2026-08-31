@@ -2,13 +2,16 @@
 //! and catalog crates.
 
 pub mod analysis;
+mod bounded_search;
 pub mod graph;
+pub mod grep;
 pub mod health;
 pub mod info;
 mod multi_root;
 mod retained_response;
 pub mod support;
 
+pub use bounded_search::run_bounded_search;
 pub use multi_root::handle_multi_root;
 pub use retained_response::{
     retained_problem_envelope, retained_safe_diagnostic, validated_retained_response,
