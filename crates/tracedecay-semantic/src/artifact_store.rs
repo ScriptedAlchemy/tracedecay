@@ -41,10 +41,8 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-
-use super::manifest::{
-    ArtifactMemberRoleV1, ArtifactPackageMemberV1, ModelArtifactManifestV1, ResourceCeilingV1,
-    Sha256DigestHex,
+use tracedecay_semantic_contracts::{
+    ArtifactMemberRoleV1, ArtifactPackageMemberV1, ModelArtifactManifestV1, Sha256DigestHex,
 };
 
 const RECOVERY_SCHEMA_V1: &str = "tracedecay.artifact-store-recovery.v1";

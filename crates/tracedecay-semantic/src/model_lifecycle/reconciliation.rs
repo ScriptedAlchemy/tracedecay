@@ -16,7 +16,7 @@ impl SemanticModelLifecycleOwnerV1 {
                     install_path_of(state).is_some_and(|path| path.starts_with(&store_root))
                 })
                 .map(|state| {
-                    super::manifest::Sha256DigestHex::new(state.artifact_digest().to_owned())
+                    Sha256DigestHex::new(state.artifact_digest().to_owned())
                         .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)
                 })
                 .transpose()

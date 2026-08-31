@@ -7,10 +7,10 @@ use tracedecay_application::memory::FactSearchGraphCoverageV1;
 use tracedecay_store::FactReadControl;
 
 use super::{ExplorerQueryRequestV1, ExplorerSourceIdV1, ExplorerSourceProgressV1, ready_source};
-use tracedecay_session_memory::context::CancellationToken;
 use crate::memory_service::MemoryFactsCoverageV1;
 use crate::read_model::DashboardCoverageCompletenessV1;
 use crate::{DashboardHttpRequestControlV1, DashboardState, memory_service};
+use tracedecay_session_memory::context::CancellationToken;
 
 fn coverage_summary(
     coverage: &MemoryFactsCoverageV1,

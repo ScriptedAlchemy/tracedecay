@@ -30,6 +30,7 @@ use tracedecay_search_eval::{
     PackagedNativeActivationCandidateV1, PackagedNativeQualificationErrorV1,
     qualified_default_activation_candidate,
 };
+use tracedecay_semantic_contracts::SemanticProfileSelection;
 
 use super::accepted_profile_authority::SemanticEvaluationPublicationIdentityV1;
 
@@ -1236,7 +1237,7 @@ fn validate_evaluation_snapshot(
 
 pub struct SemanticProtectedActivationOperationV1 {
     pub authority: ConfigurationMutationAuthority,
-    pub selected_profile: crate::config::SemanticProfileSelection,
+    pub selected_profile: SemanticProfileSelection,
     pub central_mutation: DirectConfigurationMutation,
     pub now: UtcMicros,
 }

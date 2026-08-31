@@ -1,5 +1,9 @@
 //! Path, lock, and inventory-file helpers for ModelArtifactStore.
 
+#[cfg(test)]
+use tracedecay_semantic_contracts::ArtifactMemberRoleV1;
+use tracedecay_semantic_contracts::{ModelArtifactManifestV1, Sha256DigestHex};
+
 use super::*;
 
 impl ModelArtifactStore {

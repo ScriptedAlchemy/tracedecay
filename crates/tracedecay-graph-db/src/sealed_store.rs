@@ -57,9 +57,8 @@ use crate::lease::GenerationLocator;
 use crate::location::PersistentGraphStoreState;
 use crate::projection::graph_properties_live_bytes;
 use crate::state::{
-    EndpointIdentityCache, latest_projection, load_entity, load_entity_by_node,
-    load_relation_by_locator_cached, projection_entity_nodes_sorted_checked,
-    projection_relation_nodes_sorted_checked,
+    EndpointIdentityCache, latest_projection, load_entity, load_relation_by_locator_cached,
+    projection_entity_nodes_sorted_checked, projection_relation_nodes_sorted_checked,
 };
 use crate::{
     GraphDb, GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDurability, GraphEntity,
@@ -164,26 +163,34 @@ const SEALED_STORE_DISABLE_ENV: &str = "TRACEDECAY_GRAPH_SEALED_STORE";
 const SEALED_STORE_FORM_COMPACT: &str = "compact";
 const SEALED_STORE_FORM_REPLAY: &str = "replay";
 
-/// Whether the pinned grafeo revision round-trips `Value::Bytes` through the
-/// columnar `CompactStore` codecs.
+/// Whether Bytes-carrying generations may seal in compact columnar form on
+/// the pinned grafeo revision.
 ///
-/// At rev `019d353b14` it does not: a Bytes column falls back to the
-/// dictionary codec (`compact/builder.rs`, `infer_type_from_values`), and
-/// `Column::value()` restores every dictionary entry as `Value::String`
-/// (`compact/column.rs`). TraceDecay serializes a Bytes payload onto nearly
-/// every code-graph entity, so compacting such a generation would fail its
-/// post-reopen recovered-digest proof. The fork fix exists: branch
-/// `tracedecay/0.5.42-compact-bytes-roundtrip` (rev `0bc27542`, stacked on
-/// the pinned `tracedecay/0.5.42-close-and-overlay`) encodes Bytes entries
-/// losslessly inside the string dictionary, and the full sealed-store
-/// contract passes against it with this constant flipped. Until that branch
-/// is picked up by the workspace pin, a generation whose rows carry any
-/// Bytes property is sealed in **replay form**: still its own isolated
-/// single-generation store — generation-scoped open, retirement by directory
-/// delete, read routing — just without the columnar base. Flip this with the
-/// pin move (and the `bytes_rows_seal_in_replay_form_and_read_exactly`
-/// expectation with it); the post-reopen digest proof will refuse any store
-/// the flip mis-declares.
+/// The original blocker — the columnar Dict codec restoring every `Bytes`
+/// entry as `Value::String` — is fixed at the pinned rev (`adb623efec`
+/// carries `tracedecay/0.5.42-compact-bytes-roundtrip`: marked hex dictionary
+/// entries with a legacy-section escape, decoded back to `Value::Bytes`), and
+/// the byte-exact round-trip contract passes with this constant flipped.
+///
+/// Flipping it is now blocked by a different, scale-shaped defect: a real
+/// code generation (measured at 431 files / ~45k chunk and symbol entities
+/// with serialized-record Bytes payloads) fails its post-reopen
+/// recovered-digest proof in compact form with "relation scalar endpoints do
+/// not match native topology", the discarded artifact leaves the generation
+/// permanently unseated behind `code_index_graph_activation_retry_scheduled`
+/// retries, and the graph never activates — while the same corpus seals,
+/// proves, and serves in replay form. The toy-scale contract fixtures
+/// (single-digit rows) compact and read exactly, so the defect is invisible
+/// to this suite; do not flip this constant on their evidence alone. Flip it
+/// only with a generation-scale compact seal proven end to end (the
+/// `sealed_artifact_open_probe` harness scaled up, or a sandbox index of a
+/// real corpus with graph activation seated).
+///
+/// Vector-carrying generations never compact regardless of this constant
+/// (`saw_vector_property` in [`seal_generation_store`]): the sealed lane
+/// never serves vector search, so the columnar base buys them nothing, and
+/// mixed-dimension vector columns fall back to the dictionary codec's
+/// `Display` encoding, which does not round-trip.
 const COMPACT_ROUND_TRIPS_BYTES: bool = false;
 
 /// Receipt binding a sealed store directory to the exact generation and
@@ -415,6 +422,15 @@ fn properties_carry_bytes(
     properties
         .values()
         .any(|property| matches!(property, crate::GraphProperty::Bytes(_)))
+}
+
+#[hotpath::measure]
+fn properties_carry_vectors(
+    properties: &std::collections::BTreeMap<crate::GraphPropertyName, crate::GraphProperty>,
+) -> bool {
+    properties
+        .values()
+        .any(|property| matches!(property, crate::GraphProperty::Vector(_)))
 }
 
 #[hotpath::measure]
@@ -832,7 +848,8 @@ fn copy_compact_and_close(
         let store = database.graph_store();
         for (_, locator) in chunk {
             check()?;
-            let stored = load_relation_by_locator_cached(database, *locator, &mut endpoint_cache)?;
+            let stored =
+                load_relation_by_locator_cached(store.as_ref(), *locator, &mut endpoint_cache)?;
             let from = recovered_entity_ref(store.as_ref(), stored.source, &namespace_projection)?;
             let to = recovered_entity_ref(store.as_ref(), stored.target, &namespace_projection)?;
             for endpoint in [&from, &to] {
@@ -871,6 +888,9 @@ fn copy_compact_and_close(
     let mut saw_bytes_property = relation_rows
         .iter()
         .any(|relation| properties_carry_bytes(&relation.properties));
+    let mut saw_vector_property = relation_rows
+        .iter()
+        .any(|relation| properties_carry_vectors(&relation.properties));
 
     // 1. Dependency endpoint copies, so cross-generation edges resolve.
     for (projection, copies) in dependency_endpoints {
@@ -884,6 +904,7 @@ fn copy_compact_and_close(
         for (_, entity) in copies {
             check()?;
             saw_bytes_property |= properties_carry_bytes(&entity.properties);
+            saw_vector_property |= properties_carry_vectors(&entity.properties);
             let live_bytes = entity_copy_live_bytes(&entity);
             pager.push(
                 &sealed,
@@ -907,13 +928,22 @@ fn copy_compact_and_close(
         {
             let guard = source.read_guard()?;
             let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+            let store = database.graph_store();
             for (_, node) in chunk {
                 check()?;
-                loaded.push(load_entity_by_node(database, *node)?.entity);
+                // Decode straight from the enumerated node: the sorted
+                // enumeration already proved identity uniqueness, so the
+                // unique-key index round-trip `load_entity_by_node` pays
+                // per row contributes nothing here.
+                let record = store.get_node(*node).ok_or_else(|| GraphDbError::Corrupt {
+                    message: "sealed copy entity disappeared during enumeration".to_owned(),
+                })?;
+                loaded.push(crate::schema::decode_entity(&record)?);
             }
         }
         for entity in loaded {
             saw_bytes_property |= properties_carry_bytes(&entity.properties);
+            saw_vector_property |= properties_carry_vectors(&entity.properties);
             let live_bytes = entity_copy_live_bytes(&entity);
             pager.push(
                 &sealed,
@@ -988,10 +1018,15 @@ fn copy_compact_and_close(
 
     // Compact only when the pinned engine round-trips every scalar the rows
     // carry; otherwise the artifact stays in replay form, still isolated per
-    // generation. The post-reopen digest proof checks the exact durable form
-    // before installation, so copy, compaction, or persistence corruption all
-    // surface as typed refusal rather than silently wrong reads.
-    let form = if saw_bytes_property && !COMPACT_ROUND_TRIPS_BYTES {
+    // generation. Vector-carrying generations always stay in replay form: on
+    // the pinned engine a compacted vector generation fails its post-reopen
+    // recovered-digest proof (relation endpoints no longer resolve to their
+    // native topology), and the sealed lane never serves vector search, so
+    // the columnar base buys those generations nothing. The post-reopen
+    // digest proof checks the exact durable form before installation, so
+    // copy, compaction, or persistence corruption all surface as typed
+    // refusal rather than silently wrong reads.
+    let form = if saw_vector_property || (saw_bytes_property && !COMPACT_ROUND_TRIPS_BYTES) {
         SEALED_STORE_FORM_REPLAY
     } else {
         sealed
@@ -1120,4 +1155,329 @@ fn sealed_copy_proof(
         canonical_bytes,
     );
     Ok(canonical_bytes)
+}
+
+/// Measurement harness for the sealed-store verification path, phase by
+/// phase, against production-shaped rows (a Bytes payload on every entity —
+/// the shape that forces replay form today — or a String payload for the
+/// compact-form comparison).
+///
+/// ```text
+/// TRACEDECAY_VERIFY_PROBE_ROWS=50000 TRACEDECAY_VERIFY_PROBE_PAYLOAD=700 \
+///   cargo test -p tracedecay-graph-db --features graph-sealed-store \
+///   --profile perf --lib -- --ignored --nocapture \
+///   sealed_store::cost_probe::sealed_verification_cost_probe
+/// ```
+#[cfg(test)]
+mod cost_probe {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    use super::{build_or_open_sealed_store, open_sealed_store};
+    use crate::generation::verify_recovered_generation;
+    use crate::{
+        GraphDbLocation, GraphDbOpenOptions, GraphDbOwner, GraphDurability, GraphEntity,
+        GraphEntityId, GraphEntityRef, GraphFormatVersion, GraphGenerationId,
+        GraphGenerationManifest, GraphGenerationRelation, GraphLabel, GraphNamespace,
+        GraphProjectionId, GraphProjectionIdentity, GraphProperty, GraphPropertyName,
+        GraphRelationId, GraphRelationKind, GraphWatermark, NeverCancelled, SourceGeneration,
+    };
+
+    fn env_usize(name: &str, default: usize) -> usize {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(default)
+    }
+
+    fn property_name(name: &str) -> GraphPropertyName {
+        GraphPropertyName::new(name).unwrap()
+    }
+
+    fn entity_identity(index: usize) -> GraphEntityId {
+        GraphEntityId::new(format!("symbol:{index:07}")).unwrap()
+    }
+
+    /// Deterministic pseudo-random payload so runs are reproducible and the
+    /// JSON number-array encoding sees realistic digit-length dispersion.
+    fn payload_bytes(seed: usize, len: usize) -> Vec<u8> {
+        let mut state = seed as u64 ^ 0x9e37_79b9_7f4a_7c15;
+        (0..len)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (state >> 33) as u8
+            })
+            .collect()
+    }
+
+    fn probe_manifest(
+        entities: usize,
+        relations: usize,
+        payload: usize,
+        bytes_payload: bool,
+    ) -> GraphGenerationManifest {
+        let projection = GraphProjectionIdentity::new(
+            GraphNamespace::new("sealed-cost-probe").unwrap(),
+            GraphProjectionId::new("code").unwrap(),
+        );
+        let entity_rows = (0..entities)
+            .map(|index| {
+                let payload_property = if bytes_payload {
+                    GraphProperty::Bytes(payload_bytes(index, payload))
+                } else {
+                    // Sized so the canonical JSON frame roughly matches the
+                    // Bytes number-array encoding (~3.7 chars per byte).
+                    GraphProperty::String("x".repeat(payload.saturating_mul(37) / 10))
+                };
+                GraphEntity::new(
+                    entity_identity(index),
+                    BTreeSet::from([
+                        GraphLabel::new("function").unwrap(),
+                        GraphLabel::new(format!("bucket-{}", index % 7)).unwrap(),
+                    ]),
+                    BTreeMap::from([
+                        (
+                            property_name("name"),
+                            GraphProperty::String(format!("fn_symbol_{index:07}")),
+                        ),
+                        (
+                            property_name("path"),
+                            GraphProperty::String(format!(
+                                "crates/probe/src/module_{:03}/file_{:04}.rs",
+                                index % 251,
+                                index % 4093
+                            )),
+                        ),
+                        (
+                            property_name("arity"),
+                            GraphProperty::I64((index % 9) as i64),
+                        ),
+                        (
+                            property_name("exported"),
+                            GraphProperty::Bool(index % 3 == 0),
+                        ),
+                        (property_name("payload"), payload_property),
+                    ]),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let entity_ref =
+            |index: usize| GraphEntityRef::new(projection.clone(), entity_identity(index));
+        let relation_rows = (0..relations)
+            .map(|index| {
+                let from = index % entities.max(1);
+                // Hub-heavy mix: every eighth edge points at entity 0, the
+                // rest chain, mirroring call-graph endpoint reuse.
+                let to = if index % 8 == 0 {
+                    0
+                } else {
+                    (from + 1) % entities.max(1)
+                };
+                GraphGenerationRelation::new(
+                    GraphRelationId::new(format!("call:{index:07}")).unwrap(),
+                    entity_ref(from),
+                    entity_ref(to),
+                    GraphRelationKind::new("calls").unwrap(),
+                    BTreeMap::from([(property_name("weight"), GraphProperty::I64(index as i64))]),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        GraphGenerationManifest::new(
+            projection,
+            GraphGenerationId::new("generation:cost-probe").unwrap(),
+            SourceGeneration::new("source:cost-probe").unwrap(),
+            GraphWatermark::new("watermark:cost-probe").unwrap(),
+            Vec::new(),
+            entity_rows,
+            relation_rows,
+        )
+        .unwrap()
+    }
+
+    fn directory_bytes(path: &std::path::Path) -> u64 {
+        let Ok(entries) = std::fs::read_dir(path) else {
+            return std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+        };
+        entries
+            .filter_map(Result::ok)
+            .map(|entry| {
+                let path = entry.path();
+                if path.is_dir() {
+                    directory_bytes(&path)
+                } else {
+                    std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0)
+                }
+            })
+            .sum()
+    }
+
+    fn gib_per_second(bytes: u64, seconds: f64) -> f64 {
+        if seconds <= 0.0 {
+            return 0.0;
+        }
+        bytes as f64 / (1024.0 * 1024.0 * 1024.0) / seconds
+    }
+
+    #[test]
+    #[ignore = "measurement harness; see module doc"]
+    fn sealed_verification_cost_probe() {
+        let entities = env_usize("TRACEDECAY_VERIFY_PROBE_ROWS", 50_000);
+        let relations = entities.saturating_mul(8) / 7;
+        let payload = env_usize("TRACEDECAY_VERIFY_PROBE_PAYLOAD", 700);
+        let bytes_payload = std::env::var("TRACEDECAY_VERIFY_PROBE_FORM")
+            .map(|form| form != "compact")
+            .unwrap_or(true);
+        let check: &dyn Fn() -> Result<(), crate::GraphDbError> = &|| Ok(());
+
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("probe.grafeo");
+        let owner = GraphDbOwner::open(GraphDbOpenOptions {
+            location: GraphDbLocation::Persistent(database_path.clone()),
+            expected_format: GraphFormatVersion::current(),
+            durability: GraphDurability::WalSync,
+            cancellation: Arc::new(NeverCancelled),
+        })
+        .unwrap();
+        let database = owner.issue_lease().unwrap();
+
+        let built = Instant::now();
+        let manifest = probe_manifest(entities, relations, payload, bytes_payload);
+        let identity = manifest.identity();
+        let manifest_build_s = built.elapsed().as_secs_f64();
+
+        let started = Instant::now();
+        let expected = manifest.expected_recovered_digest(check).unwrap();
+        let manifest_digest_s = started.elapsed().as_secs_f64();
+
+        let started = Instant::now();
+        database
+            .apply_generation_unverified_with_digest(Arc::new(manifest), &expected, check)
+            .unwrap();
+        let stage_s = started.elapsed().as_secs_f64();
+
+        // The serial full proof, exactly as every open before the parallel
+        // pipeline streamed it.
+        let started = Instant::now();
+        let serial_bytes = {
+            let guard = database.read_guard().unwrap();
+            let native = guard.as_ref().unwrap();
+            crate::generation::recovered_generation_digest_chunked(
+                native,
+                &identity,
+                check,
+                usize::MAX,
+            )
+            .unwrap()
+            .1
+        };
+        let serial_proof_s = started.elapsed().as_secs_f64();
+
+        // The pure full proof through the production entry, exactly as the
+        // publication path streams it over the staging rows.
+        let started = Instant::now();
+        let canonical_bytes = {
+            let guard = database.read_guard().unwrap();
+            let native = guard.as_ref().unwrap();
+            verify_recovered_generation(native, &identity, &expected, check)
+                .unwrap()
+                .1
+        };
+        let staging_proof_s = started.elapsed().as_secs_f64();
+        assert_eq!(serial_bytes, canonical_bytes);
+
+        // The sealed build: copy + (compact | replay) + durable close +
+        // reopen + full post-reopen proof.
+        let started = Instant::now();
+        let (store, staging_proof) =
+            build_or_open_sealed_store(&database, &identity, &expected, &database_path, check)
+                .unwrap();
+        let build_s = started.elapsed().as_secs_f64();
+        assert!(staging_proof.is_some(), "fresh build must carry its proof");
+        let directory = store.directory.clone();
+        let _ = store.database().close();
+        drop(store);
+
+        // Reopen + full proof in isolation: drop the verify-once marker so
+        // the open pays the entire row proof, as a foreign host adopting the
+        // artifact (or any container whose identity moved) would.
+        std::fs::remove_file(directory.join("generation.verified")).unwrap();
+        let started = Instant::now();
+        let reopened = open_sealed_store(&directory, &identity, &expected)
+            .unwrap()
+            .unwrap();
+        let reopen_full_proof_s = started.elapsed().as_secs_f64();
+        let _ = reopened.database().close();
+        drop(reopened);
+
+        // Reopen resolved by marker: what every later boot of unchanged
+        // bytes pays.
+        let started = Instant::now();
+        let marker_hit = open_sealed_store(&directory, &identity, &expected)
+            .unwrap()
+            .unwrap();
+        let marker_reopen_s = started.elapsed().as_secs_f64();
+        let _ = marker_hit.database().close();
+        drop(marker_hit);
+
+        let staging_bytes = std::fs::metadata(&database_path)
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        let artifact_bytes = directory_bytes(&directory);
+        let receipt = std::fs::read_to_string(directory.join("sealed.json")).unwrap();
+        let form = receipt
+            .split("\"form\": \"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .unwrap_or("unknown");
+
+        println!("=== sealed verification cost probe ===");
+        println!(
+            "rows                    : {entities} entities + {relations} relations \
+             (payload {payload}B, form {form})"
+        );
+        println!(
+            "canonical proof stream  : {canonical_bytes} bytes ({:.2} GiB)",
+            canonical_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+        );
+        println!(
+            "staging store           : {:.1} MiB; sealed artifact: {:.1} MiB",
+            staging_bytes as f64 / (1024.0 * 1024.0),
+            artifact_bytes as f64 / (1024.0 * 1024.0)
+        );
+        println!("manifest build          : {manifest_build_s:.2}s");
+        println!(
+            "manifest digest (seal)  : {manifest_digest_s:.2}s ({:.3} GiB/s canonical)",
+            gib_per_second(canonical_bytes, manifest_digest_s)
+        );
+        println!("stage (durable pages)   : {stage_s:.2}s");
+        println!(
+            "staging proof (serial)  : {serial_proof_s:.2}s ({:.3} GiB/s canonical, \
+             {:.0} rows/s)",
+            gib_per_second(canonical_bytes, serial_proof_s),
+            (entities + relations) as f64 / serial_proof_s
+        );
+        println!(
+            "staging full proof      : {staging_proof_s:.2}s ({:.3} GiB/s canonical, \
+             {:.0} rows/s)",
+            gib_per_second(canonical_bytes, staging_proof_s),
+            (entities + relations) as f64 / staging_proof_s
+        );
+        println!("sealed build (copy+close+reopen+proof): {build_s:.2}s");
+        println!(
+            "reopen + full proof     : {reopen_full_proof_s:.2}s ({:.3} GiB/s canonical, \
+             {:.0} rows/s)",
+            gib_per_second(canonical_bytes, reopen_full_proof_s),
+            (entities + relations) as f64 / reopen_full_proof_s
+        );
+        println!("reopen via marker       : {marker_reopen_s:.3}s");
+        println!(
+            "seconds per canonical GiB (staging proof): {:.1}",
+            staging_proof_s / (canonical_bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+        );
+    }
 }

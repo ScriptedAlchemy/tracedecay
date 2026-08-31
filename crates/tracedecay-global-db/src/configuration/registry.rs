@@ -29,8 +29,11 @@ use tracedecay_domain::configuration::{
     safe_work_topology_policy_v1,
 };
 use tracedecay_domain::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1;
-
-use super::semantic::SemanticConfig;
+use tracedecay_semantic_contracts::SemanticConfig;
+#[cfg(test)]
+use tracedecay_semantic_contracts::{
+    DEFAULT_FASTEMBED_MODEL_ID, SemanticProfileSelection, SemanticResourceCeilings,
+};
 
 /// Canonical default for configured-tier proximity warnings.
 pub const DEFAULT_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1: u64 = 7_000;
@@ -993,9 +996,6 @@ mod semantic_runtime_payload_tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::configuration::semantic::{
-        DEFAULT_FASTEMBED_MODEL_ID, SemanticProfileSelection, SemanticResourceCeilings,
-    };
     use tracedecay_domain::ManifestDigest;
     use tracedecay_domain::canonical_text::CANONICAL_TEXT_MAX_BYTES;
 

@@ -3,14 +3,14 @@ use std::sync::Mutex;
 
 use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationSnapshotV1};
 use tracedecay_domain::{ManifestDigest, UtcMicros, VectorGenerationIdV1};
+use tracedecay_semantic_contracts::SemanticFallbackReasonV1;
 
 use super::{
     SemanticActivationCommandV1, SemanticActivationReceiptV1, SemanticActivationRequestV1,
-    SemanticConfigurationPinV1, SemanticConfigurationSnapshotSourceV1, SemanticFallbackReasonV1,
-    SemanticRollbackCommandV1, SemanticRollbackReceiptV1, SemanticRollbackRequestV1,
-    SemanticRuntimeBackendErrorV1, SemanticRuntimeBackendV1, SemanticRuntimeFuture,
-    SemanticRuntimeOwnerV1, SemanticRuntimeRouteV1, SemanticRuntimeStateV1,
-    SemanticRuntimeStatusV1,
+    SemanticConfigurationPinV1, SemanticConfigurationSnapshotSourceV1, SemanticRollbackCommandV1,
+    SemanticRollbackReceiptV1, SemanticRollbackRequestV1, SemanticRuntimeBackendErrorV1,
+    SemanticRuntimeBackendV1, SemanticRuntimeFuture, SemanticRuntimeOwnerV1,
+    SemanticRuntimeRouteV1, SemanticRuntimeStateV1, SemanticRuntimeStatusV1,
 };
 use crate::configuration::{
     ConfigurationCurrentStateV1, ConfigurationError, ConfigurationOperationFuture,

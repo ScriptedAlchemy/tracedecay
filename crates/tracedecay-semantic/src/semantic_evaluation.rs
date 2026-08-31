@@ -10,6 +10,7 @@ use tracedecay_query::retrieval::semantic::{
     EphemeralQueryEmbeddingV1, SemanticExecutionControl, SemanticQueryEmbeddingPort,
     SemanticQueryEmbeddingRequestV1,
 };
+use tracedecay_semantic_contracts::SemanticRuntimeScheduleFailureV1;
 
 use super::fastembed_adapter::{
     AdmittedProjectionArtifactV1, FastEmbedEmbeddingRuntime, SemanticExecutionAuthority,
@@ -20,8 +21,8 @@ use super::projector::{
 };
 use super::runtime_query::{PooledSemanticQueryEmbedder, PooledSemanticQueryEmbedderFactory};
 use super::runtime_service::{
-    SemanticRuntimeScheduleCancellationV1, SemanticRuntimeScheduleFailureV1,
-    SemanticRuntimeService, SharedEmbeddingRuntimeFactory, fastembed_runtime_factory,
+    SemanticRuntimeScheduleCancellationV1, SemanticRuntimeService, SharedEmbeddingRuntimeFactory,
+    fastembed_runtime_factory,
 };
 use super::session_pool::SessionPoolConfigV1;
 use super::{LoadedSemanticArtifactV1, RuntimeChunkVectorEncoderV1};
@@ -694,6 +695,7 @@ mod tests {
         PolicyRevisionId, ProjectionBatchRequestV1, ProjectionReplayReasonV1, SanitizerRevision,
         SensitivityDecision, SensitivityLevelV1, SourceSpan,
     };
+    use tracedecay_semantic_contracts::SemanticResourceCeilings;
 
     use super::{
         CachedSemanticEvaluationChunkEncoderV1, CanonicalChunkVectorEncoderV1, CodeSearchChunkV1,
@@ -701,8 +703,8 @@ mod tests {
         SemanticEvaluationProjectionBatchCachePolicyV1, SemanticEvaluationProjectionBatchCacheV1,
         SemanticExecutionAuthority, SemanticExecutionInterruptionV1, prepare_vector_generation,
     };
+    use crate::AdmittedProjectionArtifactV1;
     use crate::model_catalog::{CatalogMemberPinV1, CatalogSourceV1, CatalogedFastEmbedModelV1};
-    use crate::{AdmittedProjectionArtifactV1, SemanticResourceCeilings};
 
     struct ActiveCancellation;
 

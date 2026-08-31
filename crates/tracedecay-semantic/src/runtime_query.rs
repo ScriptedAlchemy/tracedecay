@@ -10,12 +10,13 @@ use tracedecay_query::retrieval::ports::RetrievalPortError;
 use tracedecay_query::retrieval::semantic::{
     EphemeralQueryEmbeddingV1, SemanticQueryEmbeddingPort, SemanticQueryEmbeddingRequestV1,
 };
+use tracedecay_semantic_contracts::SemanticGenerationPointerV1;
 
 use super::fastembed_adapter::{
     BoundedSanitizedTextBatchV1, EmbedError, EmbeddingRuntime, EmbeddingSession,
     SemanticExecutionAuthority, SemanticExecutionInterruptionV1,
 };
-use super::runtime_service::{SemanticGenerationPointerV1, SemanticRuntimeService};
+use super::runtime_service::SemanticRuntimeService;
 use super::session_pool::SessionAcquireError;
 
 /// Owned factory for request-scoped query embedders.
@@ -214,6 +215,7 @@ fn map_acquire_error(error: SessionAcquireError) -> RetrievalPortError {
         | SessionAcquireError::QueueFull { .. }
         | SessionAcquireError::MemoryCeilingExceeded { .. }
         | SessionAcquireError::LoadDeadlineExceeded { .. }
+        | SessionAcquireError::ResidentCeilingExceeded { .. }
         | SessionAcquireError::Closed => {
             RetrievalPortError::AuthorityUnavailable("semantic runtime unavailable".to_owned())
         }

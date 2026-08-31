@@ -27,11 +27,12 @@ per-worktree `CARGO_TARGET_DIR=/tmp/...` as the compile cache.
   at `src/daemon/code_index_scheduler/`. Also extracted: `tracedecay-mcp`,
   `tracedecay-session-temporal-store`, `tracedecay-maintenance`,
   `tracedecay-source-edit`, `tracedecay-host-admission`,
-  `tracedecay-daemon-protocol`, `tracedecay-automation-runtime`.
+  `tracedecay-daemon-protocol`, `tracedecay-daemon-control`,
+  `tracedecay-automation-runtime`.
   `tracedecay-cli` absorbs the work, workflow, remote, and upgrade verbs.
 - Daemon lifecycle: start a dead installed unit after update
-  (`crates/tracedecay/src/daemon/service.rs`); treat `WouldBlock` connect as
-  saturation; doctor names a stopped-and-disabled installed unit
+  (`crates/tracedecay-daemon-control/src/service.rs`); treat `WouldBlock`
+  connect as saturation; doctor names a stopped-and-disabled installed unit
   (`crates/tracedecay/src/doctor.rs`).
 - Domain move-ups: file-document / extraction / lineage records left domain
   for code-index; root-only graph shapes moved to the root crate.

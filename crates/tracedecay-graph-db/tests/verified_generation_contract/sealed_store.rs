@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
-use tracedecay_graph_db::{GraphTraversalDirection, TraversalRequest};
+use tracedecay_graph_db::{GraphTraversalDirection, GraphVector, TraversalRequest, VectorMetric};
 
 use super::*;
 
@@ -227,8 +227,10 @@ fn seal_builds_compact_store_while_second_generation_stages_and_seals() {
     assert_snapshot_reads(&g1_commit.snapshot, &identity, "one");
 }
 
-/// Rows carrying Bytes properties seal in replay form (the pinned engine's
-/// columnar Dict codec does not round-trip Bytes) and still read exactly.
+/// Rows carrying Bytes properties seal in replay form and still read exactly.
+/// The dictionary codec round-trips Bytes at the pinned rev, but compact form
+/// stays off for these generations until a generation-scale compact seal
+/// passes its post-reopen proof (see `COMPACT_ROUND_TRIPS_BYTES`).
 #[test]
 fn bytes_rows_seal_in_replay_form_and_read_exactly() {
     let temp = TempDir::new().unwrap();
@@ -263,7 +265,7 @@ fn bytes_rows_seal_in_replay_form_and_read_exactly() {
         .expect("seal must write the artifact receipt");
     assert!(
         receipt.contains("\"form\": \"replay\""),
-        "Bytes rows must seal in replay form on the pinned engine: {receipt}"
+        "Bytes rows must seal in replay form until compact seals prove out at scale: {receipt}"
     );
     assert_snapshot_reads(&commit.snapshot, &identity, "payload");
     let entity = commit
@@ -279,6 +281,63 @@ fn bytes_rows_seal_in_replay_form_and_read_exactly() {
             .properties
             .get(&GraphPropertyName::new("record").unwrap()),
         Some(&GraphProperty::Bytes(payload)),
+    );
+}
+
+/// Rows carrying Vector properties seal in replay form — the pinned engine
+/// does not round-trip a vector generation through compaction (its
+/// post-reopen recovered-digest proof fails on relation endpoints), and the
+/// sealed lane never serves vector search — and still read exactly.
+#[test]
+fn vector_rows_seal_in_replay_form_and_read_exactly() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("sealed-store:vectors", "code");
+
+    let mut g1 = rich_manifest(identity.clone(), "vectors-g1", "payload");
+    let vector = GraphVector::new(vec![0.25_f32, -0.5, 0.75], 3, VectorMetric::Cosine).unwrap();
+    for entity in &mut g1.entities {
+        entity.properties.insert(
+            GraphPropertyName::new("embedding").unwrap(),
+            GraphProperty::Vector(vector.clone()),
+        );
+    }
+    let record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &g1,
+        "publish:vectors-g1",
+        None,
+        '4',
+    );
+    let commit = publish(
+        &registered,
+        temp.path(),
+        &mut authority,
+        &record.publication.key,
+    );
+    assert!(commit.snapshot.serves_from_sealed_store());
+    let receipt = receipt_for_generation(temp.path(), "vectors-g1")
+        .expect("seal must write the artifact receipt");
+    assert!(
+        receipt.contains("\"form\": \"replay\""),
+        "vector rows must seal in replay form on the pinned engine: {receipt}"
+    );
+    assert_snapshot_reads(&commit.snapshot, &identity, "payload");
+    let entity = commit
+        .snapshot
+        .entity(
+            &GraphEntityRef::new(identity.clone(), GraphEntityId::new("entity:b").unwrap()),
+            Arc::new(TestCancellation),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        entity
+            .properties
+            .get(&GraphPropertyName::new("embedding").unwrap()),
+        Some(&GraphProperty::Vector(vector)),
     );
 }
 

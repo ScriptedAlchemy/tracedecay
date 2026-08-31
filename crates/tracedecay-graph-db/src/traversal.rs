@@ -381,7 +381,7 @@ pub(crate) fn incoming_relations(
 /// [`GraphDbError::BudgetExhausted`] rather than returning a truncated batch
 /// that could be mistaken for a complete fan-out.
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure]
+#[hotpath::measure(label = "graph_db.compact.directed_relations")]
 fn directed_relations(
     database: &GrafeoDB,
     namespace: &GraphNamespace,
@@ -528,7 +528,7 @@ fn projection_relation_projection(
     GraphProjection::new(store, spec)
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "graph_db.compact.native_outgoing")]
 fn native_outgoing_traversal(
     store: &dyn GraphStore,
     start: NodeId,
@@ -732,7 +732,7 @@ enum NativeTraversalStop {
     Error(GraphDbError),
 }
 
-#[hotpath::measure]
+#[hotpath::measure(label = "graph_db.compact.directional")]
 fn directional_traversal(
     store: &dyn GraphStore,
     start: NodeId,

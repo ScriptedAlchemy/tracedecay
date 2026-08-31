@@ -49,6 +49,18 @@ tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version =
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 
+# COM Task Scheduler bindings for the per-user Windows daemon task
+# (`service/windows_task.rs`). `Win32_System_Ole` is not imported by name but
+# is required by the `windows` crate's VARIANT/TaskScheduler machinery.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_TaskScheduler",
+    "Win32_System_Variant",
+] }
+
 [dev-dependencies]
 tempfile = "3"
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }

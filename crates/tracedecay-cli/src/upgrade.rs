@@ -340,6 +340,16 @@ pub enum UpgradeOutcome {
         /// binary: `which_tracedecay()`'s current-exe-first order can point
         /// at the OLD binary (e.g. a stale Homebrew keg) after an upgrade.
         binary: Option<PathBuf>,
+        /// Version of the freshly installed binary: the release-manifest
+        /// version for GitHub-release installs, the linked binary's
+        /// self-reported version for Homebrew. Daemon restore validates this
+        /// version — the binary it actually restarts — instead of the one
+        /// that was running before the upgrade. `None` only when Homebrew's
+        /// install could not be interrogated; restore verification then
+        /// validates the pre-upgrade version and, if a new daemon really was
+        /// installed, fails with a typed identity mismatch rather than
+        /// silently passing.
+        version: Option<String>,
     },
     /// Already on the latest version — the binary was not replaced.
     AlreadyCurrent,
@@ -419,7 +429,10 @@ fn run_versioned_upgrade(
     let binary = install_upgrade_version(latest, is_beta, method)?;
     record_previous_version();
     eprintln!("\x1b[32m✔\x1b[0m Successfully upgraded to v{latest}!");
-    Ok(UpgradeOutcome::Installed { binary })
+    Ok(UpgradeOutcome::Installed {
+        binary,
+        version: Some(latest.to_owned()),
+    })
 }
 
 /// Atomically replace a binary at `target` by copying `src` to a temp file
@@ -939,7 +952,14 @@ fn run_brew_upgrade() -> Result<UpgradeOutcome> {
     }
 
     record_previous_version();
-    Ok(UpgradeOutcome::Installed { binary })
+    // `installed_version` may be None here (assumed install, undetectable
+    // binary): daemon restore then validates the pre-upgrade version and
+    // reports a typed identity mismatch if Homebrew really did install a new
+    // daemon — truthful failure over a fabricated version.
+    Ok(UpgradeOutcome::Installed {
+        binary,
+        version: installed_version,
+    })
 }
 
 /// Check for a newer version and perform the upgrade if one is available.

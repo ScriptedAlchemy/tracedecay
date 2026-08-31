@@ -25,7 +25,9 @@ use tracedecay_dashboard_api::code_index_freshness_api::{
     CodeGraphServingReadinessV1, CodeIndexConvergenceParkedV1,
 };
 use tracedecay_domain::configuration::ConfigurationRevisionId;
-use tracedecay_domain::{CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, WorktreeId};
+use tracedecay_domain::{
+    CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, WorktreeId, host_cpu_target,
+};
 use tracedecay_lsp::LspRuntimeFailure;
 
 use super::graph_activation::{CodeGraphActivationAuthorityV1, CodeGraphActivationPolicyV1};
@@ -238,29 +240,10 @@ fn existing_semantic_schedule_replacement_gate()
 mod resident_memory;
 pub mod watch_ingress;
 
-/// Bounded daemon-wide concurrency for expensive background reconciles and
-/// mounts. A single global permit serialized EVERY project/worktree cold build
-/// across the whole daemon, turning independent opens into an N-way queue.
-///
-/// The bound is 2, not 4. Per-file extraction now fans out across the shared
-/// reserved-width indexing pool (`tracedecay_code_index::parallelism`), so a
-/// SINGLE worktree already saturates every non-reserved core. Admitting more
-/// worktrees cannot add throughput — the pool is the same pool — it only
-/// interleaves them, so every worktree's index lands N times later and every
-/// worktree's snapshot bytes sit in RSS N times longer. Race-to-idle: run a
-/// worktree at full width, finish it, take the next one.
-///
-/// Two rather than one because a reconcile is not pure CPU: gix
-/// classification, store writes and publication are I/O and lock phases that
-/// do not touch the indexing pool, so a second admitted worktree overlaps
-/// those with the first one's extraction at negligible CPU cost.
-///
-/// Same-store (same-worktree) exclusion does NOT depend on this bound: each
-/// mounted worktree owns exactly one reconcile worker task that dequeues wakes
-/// one at a time, and every reconcile additionally runs under that worktree's
-/// per-scheduler `Mutex`. Raising the global bound therefore only lets DISTINCT
-/// worktrees (which write to path-scoped stores) reconcile in parallel; it can
-/// never overlap two reconciles for the same worktree/store.
+/// At most two distinct worktrees may reconcile concurrently. Each reconcile
+/// already saturates the shared indexing pool during extraction; the second
+/// permit overlaps its I/O and publication phases without admitting an
+/// unbounded number of full-width indexing owners.
 const MAX_CONCURRENT_RECONCILE_WORKTREES: usize = 2;
 
 #[hotpath::measure]
@@ -1016,6 +999,14 @@ impl Drop for PendingWakeClaimV1 {
         }
     }
 }
+
+/// Seat handles the ready probe validates outside the mounted-map lock:
+/// scheduler, serving generation slot, and the exact-source currency witness.
+type ReadyProbeServingPartsV1 = (
+    Arc<Mutex<CodeIndexWorktreeSchedulerV1>>,
+    Arc<RwLock<Option<LatestCompleteCodeIndexV1>>>,
+    Arc<RwLock<Option<super::ServingSourceWitnessV1>>>,
+);
 
 #[derive(Clone)]
 pub struct CodeIndexSchedulerRegistryV1 {
@@ -5136,20 +5127,40 @@ impl CodeIndexSchedulerRegistryV1 {
         scope: &tracedecay_application::ResolvedScope,
     ) -> Option<LatestCompleteCodeIndexV1> {
         let project_root = project_root.canonicalize().ok()?;
-        let (scheduler, serving_generation, serving_source_witness) = {
+        // A synchronous census abstains under map contention; the verified
+        // read path awaits the map instead (see
+        // [`Self::latest_complete_ready_decoded_for_root_scope`]).
+        let parts = {
             let mounted = self.mounted.try_lock().ok()?;
-            let worktree = mounted.get(&project_root)?;
-            if worktree.repository_id != scope.repository_id
-                || worktree.worktree_id != scope.worktree_id
-            {
-                return None;
-            }
-            (
-                Arc::clone(&worktree.scheduler),
-                Arc::clone(&worktree.serving_generation),
-                Arc::clone(&worktree.serving_source_witness),
-            )
+            Self::serving_parts_for_root_scope(&mounted, &project_root, scope)?
         };
+        Self::ready_decoded_from_serving_parts(parts, &project_root, scope)
+    }
+
+    /// Extract the seat handles the ready probe needs from one mounted route.
+    fn serving_parts_for_root_scope(
+        mounted: &BTreeMap<PathBuf, MountedCodeIndexWorktreeV1>,
+        project_root: &Path,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> Option<ReadyProbeServingPartsV1> {
+        let worktree = mounted.get(project_root)?;
+        if worktree.repository_id != scope.repository_id
+            || worktree.worktree_id != scope.worktree_id
+        {
+            return None;
+        }
+        Some((
+            Arc::clone(&worktree.scheduler),
+            Arc::clone(&worktree.serving_generation),
+            Arc::clone(&worktree.serving_source_witness),
+        ))
+    }
+
+    fn ready_decoded_from_serving_parts(
+        (scheduler, serving_generation, serving_source_witness): ReadyProbeServingPartsV1,
+        project_root: &Path,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> Option<LatestCompleteCodeIndexV1> {
         // The census asks only whether a fully decoded generation is already
         // seated. A graph-off mount deliberately leaves this slot empty while
         // its authenticated text owner is warming. Return that known answer
@@ -5204,7 +5215,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .clone()?;
                 if witness.generation_id != serving.generation().manifest().generation_id
-                    || !witness.proves_current(&project_root)
+                    || !witness.proves_current(project_root)
                 {
                     return None;
                 }
@@ -5233,16 +5244,24 @@ impl CodeIndexSchedulerRegistryV1 {
 
     /// Return the exact ready generation without blocking the async executor
     /// on the bounded synchronous freshness probe.
+    #[hotpath::measure(label = "daemon.code_index.query.latest_ready_decoded", future = true)]
     pub async fn latest_complete_ready_decoded_for_root_scope(
         &self,
         project_root: &Path,
         scope: &tracedecay_application::ResolvedScope,
     ) -> Option<LatestCompleteCodeIndexV1> {
-        let registry = self.clone();
-        let project_root = project_root.to_path_buf();
+        let project_root = project_root.canonicalize().ok()?;
+        // Await the map mutex rather than try-locking it: its critical
+        // sections are brief map reads, while an abstention under contention
+        // here falsely demotes a proven-current answer to the stale serving
+        // arm for that read.
+        let parts = {
+            let mounted = self.mounted.lock().await;
+            Self::serving_parts_for_root_scope(&mounted, &project_root, scope)?
+        };
         let scope = scope.clone();
         tokio::task::spawn_blocking(move || {
-            registry.current_ready_decoded_for_root_scope(&project_root, &scope)
+            Self::ready_decoded_from_serving_parts(parts, &project_root, &scope)
         })
         .await
         .ok()
@@ -5470,6 +5489,42 @@ impl CodeIndexSchedulerRegistryV1 {
         // Relaxed identity gate: this arm is stale by construction, so a moved
         // reference is exactly the condition it exists to survive.
         latest_matches_scope_identity(&latest, scope).then_some(latest)
+    }
+
+    /// Whether a rebuild remedy is actually in motion for the exact mounted
+    /// root: a reconcile pass owns the worktree right now, or a wake is
+    /// pending for the background worker. A caller serving the stale seat
+    /// quotes this so a wedged route — days-old seat, nothing progressing —
+    /// is distinguishable from a routine rebuild window.
+    #[hotpath::measure(
+        label = "daemon.code_index.query.rebuild_pass_in_flight",
+        future = true
+    )]
+    pub async fn rebuild_pass_in_flight_for_root_scope(
+        &self,
+        project_root: &Path,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> bool {
+        let Ok(project_root) = project_root.canonicalize() else {
+            return false;
+        };
+        let mounted = self.mounted.lock().await;
+        let Some(worktree) = mounted.get(&project_root) else {
+            return false;
+        };
+        if worktree.repository_id != scope.repository_id
+            || worktree.worktree_id != scope.worktree_id
+        {
+            return false;
+        }
+        worktree.reconcile_in_progress.load(Ordering::Acquire) != 0
+            || worktree
+                .pending_wake
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .micros
+                != 0
     }
 
     /// Whether an exact mounted route has no admissible generation because its

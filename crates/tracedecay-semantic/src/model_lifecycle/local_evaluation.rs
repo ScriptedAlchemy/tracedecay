@@ -1,12 +1,10 @@
-use super::manifest::{
-    ArtifactMemberPinV1, ArtifactPackageMemberV1, ArtifactProfileKindV1, DeviceClassV1,
-    EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1,
-    MODEL_ARTIFACT_MANIFEST_SCHEMA_V1, ModelArtifactManifestPayloadV1, PlatformTargetV1,
-    ResourceCeilingV1, RuntimeCompatibilityV1, SemanticMetricV1, Sha256DigestHex,
-    TruncationPolicyV1, TruncationSideV1, UpstreamSourceV1,
-};
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt, ambient_authority};
 use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
+use tracedecay_domain::{
+    EmbeddingDeviceClassV1 as DeviceClassV1, EmbeddingMetricV1 as SemanticMetricV1,
+    EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1,
+    EmbeddingTruncationSideV1 as TruncationSideV1,
+};
 
 /// Import the production embedding package into an explicit evaluator-owned
 /// lifecycle root. This path never consults a profile, daemon registry,
@@ -70,8 +68,7 @@ fn copy_local_evaluation_member(
         .create_new(true)
         .open(destination)
         .map_err(|_| ModelLifecycleErrorV1::StoreUnavailable)?;
-    io::copy(&mut source, &mut destination)
-        .map_err(|_| ModelLifecycleErrorV1::StoreUnavailable)?;
+    io::copy(&mut source, &mut destination).map_err(|_| ModelLifecycleErrorV1::StoreUnavailable)?;
     destination
         .sync_all()
         .map_err(|_| ModelLifecycleErrorV1::StoreUnavailable)

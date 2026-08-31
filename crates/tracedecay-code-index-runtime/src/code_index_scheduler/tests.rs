@@ -38,11 +38,12 @@ use crate::semantic_code::{
     production_fastembed_catalog,
 };
 #[cfg(feature = "semantic-fastembed")]
-use tracedecay_global_db::configuration::semantic::SemanticResourceCeilings;
-#[cfg(feature = "semantic-fastembed")]
 use tracedecay_graph_db::NeverCancelled;
 #[cfg(feature = "semantic-fastembed")]
 use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+use tracedecay_semantic_contracts::{
+    DEFAULT_FASTEMBED_MODEL_ID, SemanticFallbackReasonV1, SemanticResourceCeilings,
+};
 #[cfg(feature = "semantic-fastembed")]
 use tracedecay_usecases::semantic_runtime::{
     ProductionSemanticRuntimeV1, RetainedSemanticVectorGraphV1, SemanticRuntimeFuture,
@@ -1281,8 +1282,7 @@ fn semantic_mcp_reasons_bind_runtime_state_and_exact_source_generation() {
         (
             tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::Degraded {
                 active_generation: None,
-                reason:
-                    tracedecay_usecases::semantic_runtime::SemanticFallbackReasonV1::RuntimeFailure,
+                reason: SemanticFallbackReasonV1::RuntimeFailure,
             },
             "semantic_degraded",
         ),
@@ -1739,6 +1739,78 @@ fn saved_edit_incremental_publish() {
     let _ = latest
         .production_graph_serving()
         .expect("graph owner is activated");
+}
+
+/// Committing content the index already serves re-seals for provenance (see
+/// `same_content_head_move_publishes_new_source_identity`), and that re-seal
+/// must be delta-empty at the parse boundary: zero capture-declared changed
+/// files and zero changed chunks, with every chunk reused. This pins the
+/// evidence the downstream phases receive — graph activation, text-artifact
+/// projection, and semantic staging currently rebuild generation-scoped
+/// state from scratch even when these counters say the corpus is
+/// byte-identical, which is what makes a small drift cost a full pass.
+#[test]
+fn provenance_only_reseal_carries_the_full_parse_forward() {
+    let fixture = GitFixture::new(&[
+        ("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n"),
+        ("src/other.rs", "pub fn gamma() -> u32 { 3 }\n"),
+    ]);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let mut scheduler = scheduler(&fixture, store.path().to_path_buf(), bytes);
+    published(scheduler.reconcile_now().expect("initial publish"));
+
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    scheduler.notify_path(fixture.path().join("src/lib.rs"));
+    let dirty = published(scheduler.reconcile_now().expect("dirty incremental publish"));
+    assert!(
+        scheduler
+            .latest_complete()
+            .expect("dirty generation serves")
+            .generation()
+            .snapshot()
+            .source_revision
+            .is_none(),
+        "a dirty capture seals without an exact source revision"
+    );
+
+    git(fixture.path(), &["add", "."]);
+    git(fixture.path(), &["commit", "-qm", "commit indexed content"]);
+    let resealed = published(
+        scheduler
+            .reconcile_now()
+            .expect("provenance-only reseal publishes"),
+    );
+    assert_ne!(dirty.generation_id, resealed.generation_id);
+    assert_eq!(
+        resealed.snapshot_content_identity, dirty.snapshot_content_identity,
+        "committing indexed content must not change the content identity"
+    );
+    assert_eq!(
+        resealed.reextracted_files, 0,
+        "a provenance-only reseal declares no changed files to re-extract"
+    );
+    assert_eq!(
+        resealed.changed_chunks, 0,
+        "a provenance-only reseal produces no added, changed, or deleted chunks"
+    );
+    assert!(
+        resealed.reused_chunks > 0,
+        "a provenance-only reseal reuses every sealed chunk"
+    );
+    assert_eq!(
+        scheduler
+            .latest_complete()
+            .expect("resealed generation serves")
+            .generation()
+            .snapshot()
+            .source_revision
+            .clone()
+            .expect("the reseal carries the committed revision")
+            .as_str(),
+        git_stdout(fixture.path(), &["rev-parse", "HEAD"]),
+        "the reseal records the moved tip as its exact source revision"
+    );
 }
 
 #[test]
@@ -5332,7 +5404,7 @@ async fn root_graph_ready_does_not_depend_on_the_publication_decode_cache() {
 /// mutex for its whole pass — sealing a production-scale corpus holds it for
 /// minutes per generation — while the seated serving generation stays fully
 /// decoded, activated, and proven current from before the pass began.
-/// Verified graph reads (redundancy, diagnose, dead_code, callers, impact)
+/// Verified graph reads (redundancy, diagnose, `dead_code`, callers, impact)
 /// resolve through `latest_complete_ready_decoded_for_root_scope`; refusing
 /// them "not ready" for the whole pass turned bounded background work into a
 /// tool outage that outlived exact/lexical retrieval by 25+ minutes.
@@ -8085,10 +8157,7 @@ async fn configured_jina_lifecycle_publishes_and_restores_semantic_generation() 
         .expect("Jina lifecycle"),
     );
     lifecycle
-        .select_model(
-            Some(tracedecay_global_db::configuration::semantic::DEFAULT_FASTEMBED_MODEL_ID),
-            true,
-        )
+        .select_model(Some(DEFAULT_FASTEMBED_MODEL_ID), true)
         .expect("select configured Jina model");
     lifecycle
         .acquire_blocking_for_tests()
@@ -12507,10 +12576,9 @@ async fn terminal_graph_activation_failure_is_typed_for_current_text_generation(
                 ref reason,
             },
         ) = freshness.code_graph_serving
+            && reason != "generation_unavailable"
         {
-            if reason != "generation_unavailable" {
-                break reason.clone();
-            }
+            break reason.clone();
         }
         assert!(
             Instant::now() <= deadline,
