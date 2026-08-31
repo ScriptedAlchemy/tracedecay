@@ -29,6 +29,7 @@ struct GenerationCountsV1 {
     symbols: usize,
 }
 
+#[hotpath::measure]
 fn generation_counts(
     generation: &crate::code_index::production::CodeIndexPublishedGenerationV1,
 ) -> GenerationCountsV1 {
@@ -39,12 +40,14 @@ fn generation_counts(
     }
 }
 
+#[hotpath::measure]
 fn generation_exceeds_bound(counts: GenerationCountsV1) -> bool {
     counts.files > MAX_BRANCH_DIFF_FILES_PER_GENERATION
         || counts.chunks > MAX_BRANCH_DIFF_CHUNKS_PER_GENERATION
         || counts.symbols > MAX_BRANCH_DIFF_SYMBOLS_PER_GENERATION
 }
 
+#[hotpath::measure]
 fn unavailable(
     base_generation: Option<String>,
     head_generation: Option<String>,
@@ -59,6 +62,7 @@ fn unavailable(
     )
 }
 
+#[hotpath::measure]
 fn symbol_key(symbol: &code_search::CodeIndexBranchSymbolV1) -> SymbolKey {
     symbol.symbol_identity.clone()
 }
@@ -181,6 +185,7 @@ pub fn generation_symbols(
     Ok(symbols)
 }
 
+#[hotpath::measure]
 fn page_diff_changes(
     base_generation: &str,
     head_generation: &str,
@@ -238,6 +243,7 @@ pub fn bounded_diff(
     diff_symbols(base_id, base_symbols, head_id, head_symbols)
 }
 
+#[hotpath::measure]
 fn prepared_error_reason(
     error: PreparedQueryErrorV1,
 ) -> code_search::CodeIndexSearchUnavailableReasonV1 {
@@ -254,6 +260,7 @@ fn prepared_error_reason(
     }
 }
 
+#[hotpath::measure]
 fn branch_diff_scope_digest(
     scope: &tracedecay_application::ResolvedScope,
     request: &code_search::CodeIndexBranchDiffRequestV1,
@@ -275,6 +282,7 @@ fn branch_diff_scope_digest(
     ))
 }
 
+#[hotpath::measure]
 fn branch_diff_query_binding_digest(
     request: &code_search::CodeIndexBranchDiffRequestV1,
 ) -> Result<tracedecay_domain::ManifestDigest, tracedecay_domain::DomainError> {

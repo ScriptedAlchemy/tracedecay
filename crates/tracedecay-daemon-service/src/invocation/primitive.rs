@@ -4,14 +4,14 @@ use super::*;
 use tracedecay_agent_hosts::agents::context_scout_v2::{
     ContextScoutDurableClaimOutcomeV1, ContextScoutDurableStoreOutcomeV1,
 };
-use tracedecay_api::HttpApplicationOperation as ApplicationSurfaceOperation;
 use tracedecay_application::CallableCodeSurfaceRequest;
-use tracedecay_daemon_protocol::{
-    ContextScoutClaimWindowSurfaceV1, ContextScoutControlSurfaceRequest,
-};
 use tracedecay_application::context_scout::{
     ContextScoutAddressV1, ContextScoutDeliveryWindowV1, ContextScoutLeaseV1,
 };
+use tracedecay_daemon_protocol::{
+    ContextScoutClaimWindowSurfaceV1, ContextScoutControlSurfaceRequest,
+};
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 mod context_scout_registry;
 
@@ -180,18 +180,15 @@ pub(super) async fn execute_callable_code(
             CallableCodeSurfaceRequest::PhraseSearch(_),
             ApplicationSurfaceOperation::CodePhraseSearch,
         ) => CallableCodeOperationKind::PhraseSearch,
-        (
-            CallableCodeSurfaceRequest::Callees(_),
-            ApplicationSurfaceOperation::CodeCallees,
-        ) => CallableCodeOperationKind::Callees,
-        (
-            CallableCodeSurfaceRequest::Facets(_),
-            ApplicationSurfaceOperation::CodeFacets,
-        ) => CallableCodeOperationKind::Facets,
-        (
-            CallableCodeSurfaceRequest::Timeline(_),
-            ApplicationSurfaceOperation::CodeTimeline,
-        ) => CallableCodeOperationKind::Timeline,
+        (CallableCodeSurfaceRequest::Callees(_), ApplicationSurfaceOperation::CodeCallees) => {
+            CallableCodeOperationKind::Callees
+        }
+        (CallableCodeSurfaceRequest::Facets(_), ApplicationSurfaceOperation::CodeFacets) => {
+            CallableCodeOperationKind::Facets
+        }
+        (CallableCodeSurfaceRequest::Timeline(_), ApplicationSurfaceOperation::CodeTimeline) => {
+            CallableCodeOperationKind::Timeline
+        }
         (
             CallableCodeSurfaceRequest::Declaration(_),
             ApplicationSurfaceOperation::CodeDeclaration,
@@ -533,9 +530,11 @@ pub(super) async fn execute_context_scout(
         );
     }
     let mut owner = None;
-    for candidate in tracedecay_agent_hosts::agents::context_scout_owner::lookup_registered_context_scout_owners(
-        address.project_id,
-    ) {
+    for candidate in
+        tracedecay_agent_hosts::agents::context_scout_owner::lookup_registered_context_scout_owners(
+            address.project_id,
+        )
+    {
         if is_state_control
             || candidate.configured_status().await.is_ok_and(|status| {
                 status.configuration_revision == configuration.control().configuration_revision

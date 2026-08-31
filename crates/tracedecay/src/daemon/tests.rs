@@ -13,6 +13,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 #[cfg(unix)]
 use tokio::task::JoinHandle;
 use tracedecay_query::code_search;
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 #[cfg(unix)]
 use super::explicit_git_state;
@@ -136,7 +137,6 @@ fn multi_root_git_generation_reads_each_explicit_root() {
 
 #[test]
 fn multi_root_families_refuse_cross_family_fallback() {
-    use crate::application_surface::ApplicationSurfaceOperation;
     use tracedecay_application::MultiRootOperationV1;
 
     let git = MultiRootOperationV1::Git { request: json!({}) };
@@ -554,7 +554,7 @@ async fn apply_project_automation_patch_via_surface(
         project_root,
         scope,
     );
-    let operation = crate::application_surface::ApplicationSurfaceOperation::ConfigurationBatch;
+    let operation = ApplicationSurfaceOperation::ConfigurationBatch;
     let application_operation =
         tracedecay_application::configuration_surface_operation(operation.as_str())
             .expect("configuration operation contract")

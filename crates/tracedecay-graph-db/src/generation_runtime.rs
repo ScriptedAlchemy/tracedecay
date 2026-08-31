@@ -91,10 +91,6 @@ impl GenerationStageOutcome {
             Self::Applied(commit) | Self::Reseated(commit) => commit,
         }
     }
-
-    pub(crate) fn was_applied(&self) -> bool {
-        matches!(self, Self::Applied(_))
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -106,6 +102,7 @@ enum GenerationRetirementPageKind {
 #[hotpath::measure_all]
 impl GraphDb {
     #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
+    #[hotpath::measure(label = "graph_db.generation.verify_in_place", impl_type = "GraphDb")]
     pub(crate) fn verify_generation_in_place(
         &self,
         manifest: &GraphGenerationManifest,
@@ -136,6 +133,7 @@ impl GraphDb {
     /// which generation is served and it cannot make a wrong digest pass.
     /// Corruption remains a typed failure from the full proof: this returns
     /// `Err` exactly where the full proof would have.
+    #[hotpath::measure(label = "graph_db.generation.verify_activated", impl_type = "GraphDb")]
     pub(crate) fn verify_activated_generation(
         &self,
         identity: &GraphGenerationManifestIdentity,
@@ -180,6 +178,7 @@ impl GraphDb {
         self.inner.markers.forget_admitted();
     }
 
+    #[hotpath::measure(label = "graph_db.generation.verify_existing", impl_type = "GraphDb")]
     pub(crate) fn verify_existing_generation(
         &self,
         identity: &GraphGenerationManifestIdentity,
@@ -2597,7 +2596,7 @@ mod tests {
                 &|| Ok(()),
             )
             .expect("an exact legacy partial stage must migrate to the wider page layout");
-        assert!(outcome.was_applied());
+        assert!(matches!(outcome, GenerationStageOutcome::Applied(_)));
         assert_eq!(
             batch_canonicalizations(),
             2,

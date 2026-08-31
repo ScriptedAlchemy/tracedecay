@@ -13,6 +13,7 @@ use crate::contract::{
 use crate::handshake::DaemonHandshake;
 use tracedecay_application::{CancellationContext, CancellationSignal, Deadline};
 use tracedecay_domain::UtcMicros;
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 fn now_micros() -> UtcMicros {
     let micros = SystemTime::now()
@@ -40,7 +41,7 @@ fn invocation_request(request_id: &str, deadline: Deadline) -> DaemonInvocationR
     let observed_at = now_micros();
     DaemonInvocationRequest::feedback(
         request_id,
-        crate::surface::ApplicationSurfaceOperation::FeedbackList,
+        ApplicationSurfaceOperation::FeedbackList,
         "feedback.remote-controlled-settlement".to_owned(),
         observed_at,
         deadline,

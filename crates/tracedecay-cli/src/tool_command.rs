@@ -49,9 +49,8 @@ use tokio::time::{Instant, timeout_at};
 
 use tracedecay::application_surface::{
     ApplicationSurfaceAdapterError, ApplicationSurfaceInvocationResult,
-    ApplicationSurfaceOperation, normalize_application_tool_args,
-    observe_surface_argument_rejection, parse_application_surface_request,
-    resolve_catalog_tool_binding,
+    normalize_application_tool_args, observe_surface_argument_rejection,
+    parse_application_surface_request, resolve_catalog_tool_binding,
 };
 use tracedecay::daemon::{DaemonHandshake, call_default_tool_awaiting_project_open};
 use tracedecay::mcp::tools::LegacyToolCompatibilityOwner;
@@ -59,11 +58,12 @@ use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global
 use tracedecay_application::{CancellationSignal, Deadline};
 use tracedecay_daemon_protocol::RequestedOutputFormat;
 use tracedecay_domain::UtcMicros;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::{
     RESERVED_FLAGS_FOOTER, ToolDefinition, get_tool_definitions, internal_daemon_tool_definition,
     render_tool_cli_help, short_tool_name,
 };
-use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 use tracedecay_tool_catalog::BindingSurface;
 
 use crate::cli::dispatch::resolve_cli_application_surface;

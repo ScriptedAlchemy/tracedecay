@@ -4,6 +4,7 @@ use std::process::Command;
 use super::*;
 #[cfg(unix)]
 use tracedecay_daemon_protocol::{FramePoll, FrameSend};
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 #[cfg(unix)]
 fn future_lsp_deadline(after: std::time::Duration) -> tracedecay_application::Deadline {
@@ -121,7 +122,7 @@ fn closed_feedback_list_request(
     );
     super::super::DaemonInvocationRequest::feedback(
         request_id,
-        crate::application_surface::ApplicationSurfaceOperation::FeedbackList,
+        ApplicationSurfaceOperation::FeedbackList,
         request_handle.to_owned(),
         observed_at,
         tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(

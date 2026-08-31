@@ -31,19 +31,16 @@ use crate::{
     GraphReplayCollectionOutcome, VerifiedGraphCommit,
 };
 
-/// The three publication mode choices `publish_verified_inner` varies on.
+/// The publication mode choices `publish_verified_inner` varies on.
 ///
 /// Grouped because passing them positionally put the function at 8 arguments,
-/// and three adjacent bools at a call site read as noise: `false, true` says
+/// and adjacent bools at a call site read as noise: `false, true` says
 /// nothing about which knob is which.
 struct GraphPublishModeV1 {
     /// A manifest supplied by the caller instead of one derived from replay.
     supplied_manifest: Option<Arc<GraphGenerationManifest>>,
     /// Reopen metadata rather than treating the existing handle as current.
     reopen_metadata: bool,
-    /// This call writes a durable staging page, so it retries across the
-    /// boundary to prove the exact commit rather than assuming it landed.
-    durable_stage_boundary: bool,
 }
 
 /// A publication whose durable generation proof completed but whose
@@ -588,33 +585,6 @@ impl GraphDbRegistry {
             GraphPublishModeV1 {
                 supplied_manifest,
                 reopen_metadata: false,
-                durable_stage_boundary: false,
-            },
-        )
-    }
-
-    /// Publishes a native generation in two bounded, crash-safe attempts when
-    /// this call writes any durable staging page. The retry proves the exact
-    /// finalization receipt, then performs the durable generation proof
-    /// without repeating native staging.
-    pub fn publish_verified_with_durable_stage_boundary(
-        &self,
-        registration: GraphDbRegistration,
-        authority: &mut dyn GraphPublicationStoreV1,
-        context: &GraphPublicationOperationContextV1<'_>,
-        publication_key: &GraphPublicationKeyV1,
-        supplied_manifest: Option<Arc<GraphGenerationManifest>>,
-    ) -> Result<VerifiedGraphCommit, GraphDbError> {
-        let operation = self.registered_operation(registration)?;
-        self.publish_verified_inner(
-            &operation,
-            authority,
-            context,
-            publication_key,
-            GraphPublishModeV1 {
-                supplied_manifest,
-                reopen_metadata: false,
-                durable_stage_boundary: true,
             },
         )
     }
@@ -636,7 +606,6 @@ impl GraphDbRegistry {
         context: &GraphPublicationOperationContextV1<'_>,
         publication_key: &GraphPublicationKeyV1,
         supplied_manifest: Option<Arc<GraphGenerationManifest>>,
-        durable_stage_boundary: bool,
     ) -> Result<GraphPublicationPreparationV1, GraphDbError> {
         let operation = self.registered_operation(registration)?;
         self.prepare_verified_publication_inner(
@@ -647,7 +616,6 @@ impl GraphDbRegistry {
             GraphPublishModeV1 {
                 supplied_manifest,
                 reopen_metadata: false,
-                durable_stage_boundary,
             },
         )
     }
@@ -690,7 +658,6 @@ impl GraphDbRegistry {
             GraphPublishModeV1 {
                 supplied_manifest: None,
                 reopen_metadata: false,
-                durable_stage_boundary: false,
             },
         )
     }
@@ -711,7 +678,6 @@ impl GraphDbRegistry {
             GraphPublishModeV1 {
                 supplied_manifest: None,
                 reopen_metadata: true,
-                durable_stage_boundary: false,
             },
         )
     }
@@ -760,7 +726,6 @@ impl GraphDbRegistry {
         let GraphPublishModeV1 {
             supplied_manifest,
             reopen_metadata,
-            durable_stage_boundary,
         } = mode;
         operation.check(self, context)?;
         operation.require_publication_binding(publication_key)?;
@@ -913,9 +878,6 @@ impl GraphDbRegistry {
                                     sealed_digest,
                                     &check,
                                 )?;
-                            if durable_stage_boundary && staged.was_applied() {
-                                return Err(GraphDbError::DeadlineExceeded);
-                            }
                             let commit = staged.commit();
                             let (_, recovered) = database.verify_generation_for_publication(
                                 &identity,
@@ -1041,9 +1003,6 @@ impl GraphDbRegistry {
                     sealed_digest,
                     &check,
                 )?;
-                if durable_stage_boundary && staged.was_applied() {
-                    return Err(GraphDbError::DeadlineExceeded);
-                }
                 let commit = staged.commit();
                 database
                     .verify_generation_for_publication(

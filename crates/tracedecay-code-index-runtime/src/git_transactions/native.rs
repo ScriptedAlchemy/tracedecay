@@ -89,6 +89,7 @@ pub struct NativeGitIndexPreviewAssembler {
     worktree_id: WorktreeId,
 }
 
+#[hotpath::measure_all]
 impl NativeGitIndexPreviewAssembler {
     pub fn new(
         repository_root: impl Into<PathBuf>,
@@ -326,6 +327,7 @@ pub struct DaemonProjectGitIndexPreviewAssembler {
     project_id: ProjectId,
 }
 
+#[hotpath::measure_all]
 impl DaemonProjectGitIndexPreviewAssembler {
     pub fn new(repository_root: impl Into<PathBuf>, project_id: ProjectId) -> Self {
         let repository_root = repository_root.into();
@@ -659,6 +661,7 @@ impl GitIndexPreviewAssembler for NativeGitIndexPreviewAssembler {
     }
 }
 
+#[hotpath::measure]
 fn completed_execution(request: &GitIndexPreviewRequestV1) -> OperationReceipt {
     OperationReceipt {
         started_at: request.observed_at,
@@ -670,6 +673,7 @@ fn completed_execution(request: &GitIndexPreviewRequestV1) -> OperationReceipt {
     }
 }
 
+#[hotpath::measure]
 fn completed_apply_execution(request: &GitIndexApplyRequestV1) -> OperationReceipt {
     OperationReceipt {
         started_at: request.observed_at,
@@ -681,6 +685,7 @@ fn completed_apply_execution(request: &GitIndexApplyRequestV1) -> OperationRecei
     }
 }
 
+#[hotpath::measure]
 fn receipt_id(
     transaction_id: &GitIndexTransactionId,
 ) -> Result<GitIndexReceiptId, GitIndexTransactionPortError> {
@@ -688,6 +693,7 @@ fn receipt_id(
         .map_err(|_| GitIndexTransactionPortError::NeedsInspection)
 }
 
+#[hotpath::measure]
 fn unsupported_state(
     snapshot: &RepositoryStateSnapshotV1,
     _runner: &FixedGitIndexRunner,
@@ -741,6 +747,7 @@ fn unsupported_state(
     }
 }
 
+#[hotpath::measure]
 fn unsupported_native_preflight(
     runner: &FixedGitIndexRunner,
 ) -> Result<Option<GitIndexUnsupportedStateV1>, GitIndexTransactionPortError> {
@@ -764,6 +771,7 @@ fn unsupported_native_preflight(
     Ok(None)
 }
 
+#[hotpath::measure]
 fn unsupported_commit_preflight(
     request: &GitIndexPreviewRequestV1,
 ) -> Result<Option<GitIndexUnsupportedStateV1>, GitIndexTransactionPortError> {
@@ -778,10 +786,12 @@ fn unsupported_commit_preflight(
     ))
 }
 
+#[hotpath::measure]
 fn supported_object_format(format: &str) -> bool {
     matches!(format, "sha1" | "sha256")
 }
 
+#[hotpath::measure]
 fn unsupported_materialized(
     request: &GitIndexPreviewRequestV1,
     runner: FixedGitIndexRunner,
@@ -811,6 +821,7 @@ fn unsupported_materialized(
     })
 }
 
+#[hotpath::measure]
 fn unsupported_hunk_selection(
     selected_hunks: &[tracedecay_domain::HunkRefV1],
     runner: &FixedGitIndexRunner,
@@ -857,6 +868,7 @@ fn unsupported_path_state(
     unsupported_selected_paths(runner, intelligence, operation, &[path.to_owned()])
 }
 
+#[hotpath::measure]
 fn unsupported_selected_paths(
     runner: &FixedGitIndexRunner,
     intelligence: &NativeGitIntelligence,
@@ -922,6 +934,7 @@ fn unsupported_selected_paths(
         .then_some(GitIndexUnsupportedStateV1::FiltersOrEndOfLine)
 }
 
+#[hotpath::measure]
 fn check_attr_filter_paths(
     repository_root: &Path,
     paths: &[String],
@@ -969,6 +982,7 @@ struct PatchDigestMaterial<'a> {
     body: &'a [String],
 }
 
+#[hotpath::measure]
 fn read_scope_diff(
     repository_root: &Path,
     scope: &GitDiffScopeV1,
@@ -995,6 +1009,7 @@ fn read_scope_diff(
     String::from_utf8(output.stdout).map_err(|_| GitIndexTransactionPortError::StalePreview)
 }
 
+#[hotpath::measure]
 fn extract_patch_from_diff(
     text: &str,
     hunk: &tracedecay_domain::HunkRefV1,
@@ -1057,6 +1072,7 @@ fn extract_patch_from_diff(
     Err(GitIndexTransactionPortError::StalePreview)
 }
 
+#[hotpath::measure]
 fn diff_markers_match_path(old_marker: Option<&str>, new_marker: Option<&str>, path: &str) -> bool {
     [old_marker, new_marker]
         .into_iter()
@@ -1064,6 +1080,7 @@ fn diff_markers_match_path(old_marker: Option<&str>, new_marker: Option<&str>, p
         .any(|marker| marker_path(marker).is_some_and(|candidate| candidate == path))
 }
 
+#[hotpath::measure]
 fn marker_path(line: &str) -> Option<&str> {
     let rest = line
         .strip_prefix("--- ")
@@ -1078,6 +1095,7 @@ fn marker_path(line: &str) -> Option<&str> {
     )
 }
 
+#[hotpath::measure]
 fn normalize_hunk_header(header: &str) -> Option<String> {
     let parsed = parse_hunk_header(header)?;
     Some(format!(
@@ -1086,6 +1104,7 @@ fn normalize_hunk_header(header: &str) -> Option<String> {
     ))
 }
 
+#[hotpath::measure]
 fn read_git_command(repository_root: &Path) -> Command {
     let mut command = Command::new("git");
     command.current_dir(repository_root);
@@ -1100,6 +1119,7 @@ fn read_git_command(repository_root: &Path) -> Command {
     command
 }
 
+#[hotpath::measure]
 fn commit_matches_preview(
     repository_root: &Path,
     old: &RepositoryStateSnapshotV1,
@@ -1141,6 +1161,7 @@ fn commit_matches_preview(
         && commit_intent_matches_preview(repository_root, head, preview)
 }
 
+#[hotpath::measure]
 fn hunk_commit_matches_preview(
     current: &RepositoryStateSnapshotV1,
     old: &RepositoryStateSnapshotV1,
@@ -1156,6 +1177,7 @@ fn hunk_commit_matches_preview(
 /// success receipt. Native publication proves which process crossed the
 /// boundary; this observation additionally refuses success if HEAD/ref or
 /// stable repository authority drifted before the terminal receipt.
+#[hotpath::measure]
 fn live_result_matches_preview(
     repository_root: &Path,
     preview: &GitIndexPreviewV1,
@@ -1213,6 +1235,7 @@ fn live_result_matches_preview(
 /// moving a path between the index and untracked set preserves the digest.
 /// Status and the untracked-name digest remain operation-relative and are
 /// therefore owned by the operation-specific proof.
+#[hotpath::measure]
 fn same_stable_native_evidence(
     current: &RepositoryStateSnapshotV1,
     old: &RepositoryStateSnapshotV1,
@@ -1243,6 +1266,7 @@ fn same_stable_native_evidence(
 /// intent field from the immutable commit object. Signed intents intentionally
 /// retain only a key-reference digest in the preview, so they remain
 /// `NeedsInspection` rather than guessing a key identity.
+#[hotpath::measure]
 fn commit_intent_matches_preview(
     repository_root: &Path,
     head: &tracedecay_domain::GitOidV1,
@@ -1328,6 +1352,7 @@ fn commit_intent_matches_preview(
     .is_ok_and(|digest| digest == *expected_digest)
 }
 
+#[hotpath::measure]
 fn read_git_value(repository_root: &Path, expression: &str) -> Option<String> {
     let output = read_git_command(repository_root)
         .args(["rev-parse", "--verify", expression])
@@ -1506,6 +1531,7 @@ where
 }
 
 #[allow(clippy::needless_pass_by_value)]
+#[hotpath::measure]
 fn map_native_error(error: NativeGitIndexError) -> GitIndexTransactionPortError {
     match error {
         NativeGitIndexError::IndexLocked | NativeGitIndexError::PartialHunkSelectionUnsupported => {
@@ -1530,6 +1556,7 @@ fn map_native_error(error: NativeGitIndexError) -> GitIndexTransactionPortError 
     }
 }
 
+#[hotpath::measure]
 fn classify_native_failure(error: &NativeGitIndexError) -> NativeGitIndexApplyOutcomeV1 {
     if error.is_commit_boundary_unknown() {
         NativeGitIndexApplyOutcomeV1::CommitBoundaryUnknown

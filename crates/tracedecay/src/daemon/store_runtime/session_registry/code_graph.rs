@@ -56,11 +56,6 @@ const GRAPH_OPERATION_DEADLINE: Duration = Duration::from_secs(30);
 /// and generation publication); cancellation is the governing mechanism.
 const GRAPH_BACKGROUND_OPERATION_BUDGET: Duration = Duration::from_hours(168);
 const GRAPH_OPEN_DEADLINE: Duration = Duration::from_secs(30);
-/// The size-scaled projection model no longer bounds the projection (see
-/// [`sealed_projection_deadline`]); it survives only as the heuristic that
-/// decides when stage boundaries are worth recording.
-const SEALED_PROJECTION_DEADLINE_FLOOR: Duration = GRAPH_OPERATION_DEADLINE;
-const SEALED_PROJECTION_BYTES_PER_SECOND: u64 = 4 * 1024 * 1024;
 /// How many orphaned pending predecessors one publication attempt will
 /// complete before reporting Conflict. Each completion advances the verified
 /// head by one, so even a journal wedged across many interrupted boots drains
@@ -111,7 +106,7 @@ fn observe_code_graph_publication<T>(
     })
 }
 
-fn sealed_projection_deadline(sealed_bytes: u64) -> Duration {
+const fn sealed_projection_deadline() -> Duration {
     // The background projection has no wall-clock bail-out. It is bounded by
     // cancellation (request and lifecycle), which is the mechanism that
     // reclaims a genuinely wedged projection; a wall clock cannot tell
@@ -120,18 +115,8 @@ fn sealed_projection_deadline(sealed_bytes: u64) -> Duration {
     // turning slow into never. The registration API wants an `Instant`, so
     // "no deadline" is expressed as a far-future one. Projection latency
     // itself is the number to fix (see the code_graph hotpath spans), not a
-    // policy to tune. The size-scaled model remains only for the
-    // stage-boundary heuristic in [`sealed_projection_requires_stage_boundary`].
-    let _ = sealed_bytes;
+    // policy to tune.
     GRAPH_BACKGROUND_OPERATION_BUDGET
-}
-
-fn sealed_projection_scaled_deadline(sealed_bytes: u64) -> Duration {
-    Duration::from_secs(sealed_bytes.div_ceil(SEALED_PROJECTION_BYTES_PER_SECOND))
-}
-
-fn sealed_projection_requires_stage_boundary(sealed_bytes: u64) -> bool {
-    sealed_projection_scaled_deadline(sealed_bytes) > SEALED_PROJECTION_DEADLINE_FLOOR
 }
 
 struct AtomicGraphCancellationV1 {
@@ -917,7 +902,6 @@ struct PreparedSealedPublicationV1 {
     source: SealedCodeGenerationReplay,
     idempotency_key: GraphIdempotencyKey,
     publication_key: GraphPublicationKeyV1,
-    durable_stage_boundary: bool,
     request_cancelled: Arc<AtomicBool>,
 }
 
@@ -988,22 +972,6 @@ impl RetainedCodeGraphRuntimeV1 {
         generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
         request_cancelled: Arc<AtomicBool>,
     ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError> {
-        let sealed_bytes = self.sealed_generation_bytes()?;
-        self.publish_verified_snapshot_with_stage_boundary(
-            generation,
-            request_cancelled,
-            sealed_bytes,
-            sealed_projection_requires_stage_boundary(sealed_bytes),
-        )
-    }
-
-    fn publish_verified_snapshot_with_stage_boundary(
-        &self,
-        generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
-        request_cancelled: Arc<AtomicBool>,
-        sealed_bytes: u64,
-        durable_stage_boundary: bool,
-    ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError> {
         if generation.manifest().generation_id != self.generation_id {
             return Err(GraphDbError::Conflict);
         }
@@ -1017,7 +985,7 @@ impl RetainedCodeGraphRuntimeV1 {
         // pass and the background reconcile still share one projection. The
         // deadline window consequently also spans the gate wait; under the
         // background budget, cancellation stays the governing mechanism.
-        let projection_deadline = sealed_projection_deadline(sealed_bytes);
+        let projection_deadline = sealed_projection_deadline();
         let deadline_at = Instant::now() + projection_deadline;
         let graph_generation = tracedecay_code_index::graph_projection::code_graph_generation_id(
             &self.generation_id,
@@ -1115,7 +1083,6 @@ impl RetainedCodeGraphRuntimeV1 {
             source,
             idempotency_key,
             publication_key,
-            durable_stage_boundary,
             request_cancelled,
         };
         self.publish_prepared_sealed_generation(&prepared, &probe, &context)
@@ -1343,7 +1310,6 @@ impl RetainedCodeGraphRuntimeV1 {
                 &context,
                 key,
                 manifest,
-                prepared.durable_stage_boundary,
             )?;
             let proven = match preparation {
                 GraphPublicationPreparationV1::Settled(commit) => return Ok(*commit),
@@ -1665,25 +1631,6 @@ impl RetainedCodeGraphRuntimeV1 {
                 );
             }
         }
-    }
-
-    fn sealed_generation_bytes(&self) -> std::result::Result<u64, GraphDbError> {
-        let digest = self
-            .sealed_state_digest
-            .as_str()
-            .strip_prefix("sha256:")
-            .ok_or_else(|| GraphDbError::invalid("sealed state digest is not sha256"))?;
-        let path = self
-            .generations_root
-            .join(format!("generation-{digest}.json"));
-        std::fs::metadata(&path)
-            .map(|metadata| metadata.len())
-            .map_err(|error| {
-                GraphDbError::unavailable(format!(
-                    "sealed code generation file is unreadable at '{}': {error}",
-                    path.display()
-                ))
-            })
     }
 
     pub(crate) fn recover_semantic_vector_projection(
@@ -2473,17 +2420,14 @@ mod sealed_projection_deadline_tests {
 
     #[test]
     fn sealed_projection_has_no_wall_clock_bail_out() {
-        // Background projection is bounded by cancellation, not wall clock:
-        // any artifact size gets the effectively-unbounded background budget.
-        // The live incident shape (a ~1.6 GB sealed generation died at a
-        // 30-second wall, then at a size-scaled wall) must never be budgeted
-        // below hours again.
-        for sealed_bytes in [0, 8 * 1024 * 1024, 1_603_803_371, u64::MAX] {
-            assert_eq!(
-                sealed_projection_deadline(sealed_bytes),
-                GRAPH_BACKGROUND_OPERATION_BUDGET
-            );
-        }
+        // Background projection is bounded by cancellation, not wall clock,
+        // regardless of artifact size. The live incident shape (a ~1.6 GB
+        // sealed generation died at a 30-second wall, then at a size-scaled
+        // wall) must never be budgeted below hours again.
+        assert_eq!(
+            sealed_projection_deadline(),
+            GRAPH_BACKGROUND_OPERATION_BUDGET
+        );
         assert!(GRAPH_BACKGROUND_OPERATION_BUDGET >= std::time::Duration::from_hours(24));
     }
 }

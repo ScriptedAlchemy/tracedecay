@@ -5,15 +5,13 @@
 //! delivery carries the application crate's scout wire vocabulary.
 
 use serde::{Deserialize, Serialize};
-use tracedecay_api::HttpApplicationOperation;
 use tracedecay_application::context_scout::{
     ContextScoutAddressV1, ContextScoutDeliveryReceiptV1, ContextScoutDurableClaimV1,
     ContextScoutFeedbackV1, ContextScoutWorkV1,
 };
 use tracedecay_application::git::GitReadRequestV1;
 use tracedecay_domain::configuration::{ConfigurationIdempotencyKey, ConfigurationRevisionId};
-
-pub type ApplicationSurfaceOperation = HttpApplicationOperation;
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
