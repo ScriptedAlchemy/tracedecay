@@ -204,7 +204,10 @@ tree-sitter-rust = { git = "https://github.com/vanessa-rodrigues/tree-sitter-rus
 # tracedecay/0.5.42-mvcc-gc-baseline branch: the last consumed patch-branch
 # rev (arena multi-chunk fix, streaming serialization + mmap compact open,
 # compact/overlay/close correctness fixes, transaction-bounded WAL recovery)
-# plus the version-gc fix that collects baselines deleted below the horizon.
+# plus the version-gc fix that collects baselines deleted below the horizon
+# and the LPG block-directory fix that widens offsets to u64 (a v1 section
+# larger than 4 GiB panicked on read and truncated on write) with typed
+# errors on corrupt directory entries.
 # The patch branch tip (tracedecay/0.5.42-vector-index-durable) carries the
 # same gc fix over newer, not-yet-consumed vector-index work; the next bump
 # reconciles onto it.
@@ -215,8 +218,8 @@ tree-sitter-rust = { git = "https://github.com/vanessa-rodrigues/tree-sitter-rus
 # resolves sibling crates by path, so every grafeo crate must come from the
 # same fork rev — a mixed registry/git graph would build two type-incompatible
 # instances of the unpatched crates.
-grafeo-adapters = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "be05c923ba719d9deb5277101e1b060f63e679cb" }
-grafeo-common = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "be05c923ba719d9deb5277101e1b060f63e679cb" }
-grafeo-core = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "be05c923ba719d9deb5277101e1b060f63e679cb" }
-grafeo-engine = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "be05c923ba719d9deb5277101e1b060f63e679cb" }
-grafeo-storage = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "be05c923ba719d9deb5277101e1b060f63e679cb" }
+grafeo-adapters = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "87d062a700d795269221d9335f9884246f511eea" }
+grafeo-common = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "87d062a700d795269221d9335f9884246f511eea" }
+grafeo-core = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "87d062a700d795269221d9335f9884246f511eea" }
+grafeo-engine = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "87d062a700d795269221d9335f9884246f511eea" }
+grafeo-storage = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "87d062a700d795269221d9335f9884246f511eea" }
