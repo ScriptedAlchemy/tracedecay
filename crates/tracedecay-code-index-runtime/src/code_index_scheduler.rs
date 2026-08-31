@@ -3608,8 +3608,18 @@ impl LatestCodeTextGenerationV1 {
         {
             return Ok(source);
         }
-        self.text_artifact_store
-            .open_sealed_source(sealed_identity, control)
+        let mut source = self
+            .text_artifact_store
+            .open_sealed_source(sealed_identity, control)?;
+        if let Ok(Some(published)) = self
+            .text_artifact_store
+            .publication
+            .active_already_decoded()
+            && published.manifest().generation_id == self.metadata.manifest().generation_id
+        {
+            let _ = source.attach_published_files(&published);
+        }
+        Ok(source)
     }
 
     /// One claimed head-open pass, run with the slot lock released: reopen
@@ -5562,6 +5572,15 @@ impl CodeIndexWorktreeSchedulerV1 {
                 },
             )
             .ok()?;
+        let mut source = source;
+        if let Ok(Some(published)) = self.publication.active_already_decoded()
+            && published.manifest().generation_id == generation_id
+        {
+            // Same-process successor: the builder still holds the decoded
+            // files. Re-decoding the sealed files array is how a 455 MiB
+            // cancel-batch successor spent the receipt wait in source_scan.
+            let _ = source.attach_published_files(&published);
+        }
         let metadata = source.metadata();
         if metadata.manifest().project_id != self.project_id
             || metadata.manifest().generation_id != generation_id

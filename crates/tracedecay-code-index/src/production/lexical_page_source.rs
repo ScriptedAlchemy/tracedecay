@@ -13,7 +13,7 @@ use crate::{capabilities::expected_seal_digest, intake::INTAKE_DIGEST_SEPARATOR}
 use super::sealed_codec::{
     LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION, PersistedFileGenerationArtifactsV1,
 };
-use super::*;
+use super::{FileGenerationArtifactsV1, *};
 
 const PAGE_DIGEST_DOMAIN: &[u8] = b"tracedecay.sealed-lexical-page.v1\0";
 const SOURCE_DIGEST_DOMAIN: &[u8] = b"tracedecay.sealed-lexical-source.v1\0";
@@ -863,6 +863,11 @@ pub struct VerifiedSealedLexicalPageSourceV1<R> {
     maximum_page_bytes: usize,
     cursor: VerifiedSealedLexicalCursorV1,
     admitted_window: BTreeMap<u64, Arc<AdmittedSealedLexicalFileV1>>,
+    /// Same-process published files, when the decoded generation is still
+    /// resident. Layout scan still records real sealed-file ranges so a
+    /// later restart can resume from durable cursors; admit then skips the
+    /// JSON decode of bytes the builder already holds.
+    memory_files: Option<Vec<Arc<FileGenerationArtifactsV1>>>,
 }
 
 /// Authenticated generation metadata needed by exact and lexical serving.
@@ -943,6 +948,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             maximum_page_bytes,
             cursor,
             admitted_window: BTreeMap::new(),
+            memory_files: None,
         })
     }
 
@@ -1034,11 +1040,32 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             maximum_page_bytes,
             cursor,
             admitted_window: BTreeMap::new(),
+            memory_files: None,
         })
     }
 
     pub fn metadata(&self) -> &VerifiedSealedTextGenerationMetadataV1 {
         &self.metadata
+    }
+
+    /// Admit later pages from an already-decoded published generation.
+    ///
+    /// The sealed file remains the layout and cursor authority. This only
+    /// replaces per-file JSON decode when the in-memory files match the
+    /// scanned ranges one-for-one. A count mismatch leaves the disk path in
+    /// place rather than inventing offsets.
+    pub fn attach_published_files(
+        &mut self,
+        generation: &CodeIndexPublishedGenerationV1,
+    ) -> Result<(), CodeIndexProductionErrorV1> {
+        if generation.files.len() != self.file_ranges.len() {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "published generation file count does not match the sealed lexical layout"
+                    .to_owned(),
+            ));
+        }
+        self.memory_files = Some(generation.files.clone());
+        Ok(())
     }
 
     /// Reopen an authenticated durable source at an accepted persisted cursor.
@@ -1610,6 +1637,9 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         if self.admitted_window.contains_key(&file_offset) {
             return Ok(());
         }
+        if self.memory_files.is_some() {
+            return self.fill_admitted_window_from_memory(file_offset, control);
+        }
         self.fill_admitted_window(file_offset, control)
     }
 
@@ -1662,6 +1692,60 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             super::collect_bounded_ordered(&inputs, |(_start, bytes, next_offset), _| {
                 admit_persisted_file_bytes(bytes, *next_offset, control)
             })?;
+        for ((start, _, _), admitted) in inputs.into_iter().zip(admitted) {
+            self.admitted_window.insert(start, Arc::new(admitted));
+        }
+        Ok(())
+    }
+
+    fn fill_admitted_window_from_memory(
+        &mut self,
+        file_offset: u64,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<(), CodeIndexProductionErrorV1> {
+        let files = self.memory_files.as_ref().ok_or_else(|| {
+            CodeIndexProductionErrorV1::Contract(
+                "sealed lexical memory admit ran without published files".to_owned(),
+            )
+        })?;
+        let start_index = self.file_range_index(file_offset)?;
+        let mut prefetch_bytes = 0u64;
+        let mut inputs = Vec::new();
+        for (index, file) in files[start_index..].iter().enumerate() {
+            let &(start, end) = self.file_ranges.get(start_index + index).ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract(
+                    "published generation file is missing a sealed lexical range".to_owned(),
+                )
+            })?;
+            let file_bytes = end.checked_sub(start).ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract(
+                    "sealed lexical file byte range is invalid".to_owned(),
+                )
+            })?;
+            if index > 0
+                && prefetch_bytes
+                    .checked_add(file_bytes)
+                    .is_some_and(|total| total > LEXICAL_FILE_PREFETCH_BYTES_V1)
+            {
+                break;
+            }
+            checkpoint(control)?;
+            let next_file_offset = self
+                .file_ranges
+                .get(start_index + index + 1)
+                .map(|(next_start, _)| *next_start)
+                .unwrap_or(self.files_end_offset);
+            prefetch_bytes = prefetch_bytes.saturating_add(file_bytes);
+            inputs.push((start, Arc::clone(file), next_file_offset));
+        }
+        if inputs.is_empty() {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed lexical memory range produced no published files".to_owned(),
+            ));
+        }
+        let admitted = super::collect_bounded_ordered(&inputs, |(_start, file, next_offset), _| {
+            admit_file_generation_artifacts(file, *next_offset, control)
+        })?;
         for ((start, _, _), admitted) in inputs.into_iter().zip(admitted) {
             self.admitted_window.insert(start, Arc::new(admitted));
         }
@@ -2523,33 +2607,66 @@ fn admit_persisted_file_bytes(
                 ))
             })
         })?;
+    let exact_authority = ExactExtractionAuthorityV1::restore(&file.artifacts.chunks)
+        .map_err(CodeIndexProductionErrorV1::Chunk)?;
+    admit_validated_file_parts(
+        &file.authority,
+        &file.extraction,
+        &file.artifacts,
+        &exact_authority,
+        next_file_offset,
+        control,
+    )
+}
+
+fn admit_file_generation_artifacts(
+    file: &FileGenerationArtifactsV1,
+    next_file_offset: u64,
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<AdmittedSealedLexicalFileV1, CodeIndexProductionErrorV1> {
+    checkpoint(control)?;
+    admit_validated_file_parts(
+        &file.authority,
+        &file.extraction,
+        &file.artifacts,
+        &file.exact_authority,
+        next_file_offset,
+        control,
+    )
+}
+
+fn admit_validated_file_parts(
+    authority: &ReceiptBoundCodeFileAuthorityV1,
+    extraction: &ExtractionBatchV1,
+    artifacts: &CodeFileIndexArtifactsV1,
+    exact_authority: &ExactExtractionAuthorityV1,
+    next_file_offset: u64,
+    _control: &dyn CodeIndexExecutionControlV1,
+) -> Result<AdmittedSealedLexicalFileV1, CodeIndexProductionErrorV1> {
     hotpath::measure_block!("code_index.restore.file_admit", {
-        file.artifacts
+        artifacts
             .validate()
             .map_err(CodeIndexProductionErrorV1::Chunk)?;
-        file.artifacts
-            .validate_generation_import_authority(&file.extraction)
+        artifacts
+            .validate_generation_import_authority(extraction)
             .map_err(CodeIndexProductionErrorV1::Chunk)?;
-        let document = &file.artifacts.chunks.document;
-        if file.extraction.file_occurrence_id != document.file_occurrence_id
-            || file.extraction.content_digest != document.content_digest
-            || file.authority.content_digest != document.content_digest
-            || file
-                .artifacts
+        let document = &artifacts.chunks.document;
+        if extraction.file_occurrence_id != document.file_occurrence_id
+            || extraction.content_digest != document.content_digest
+            || authority.content_digest != document.content_digest
+            || artifacts
                 .chunks
                 .chunks
                 .iter()
-                .any(|chunk| chunk.anchor.generation_id != file.extraction.generation_id)
+                .any(|chunk| chunk.anchor.generation_id != extraction.generation_id)
         {
             return Err(CodeIndexProductionErrorV1::Contract(
                 "sealed lexical extraction authority does not match its admitted document"
                     .to_owned(),
             ));
         }
-        let exact_authority = ExactExtractionAuthorityV1::restore(&file.artifacts.chunks)
-            .map_err(CodeIndexProductionErrorV1::Chunk)?;
         let mut symbol_displays = BTreeMap::new();
-        for symbol in &file.artifacts.symbols {
+        for symbol in &artifacts.symbols {
             let display = VerifiedSealedLexicalSymbolDisplayV1 {
                 occurrence: symbol.occurrence.clone(),
                 simple_name: symbol.simple_name.clone(),
@@ -2565,9 +2682,9 @@ fn admit_persisted_file_bytes(
                 ));
             }
         }
-        let imports = file.artifacts.imports;
+        let imports = artifacts.imports.clone();
         let chunks = exact_authority
-            .admit_all(file.artifacts.chunks.chunks)
+            .admit_all(artifacts.chunks.chunks.clone())
             .map_err(CodeIndexProductionErrorV1::Chunk)?;
         let mut serialized_chunks = Vec::with_capacity(chunks.len());
         let mut serialized_displays = Vec::with_capacity(chunks.len());
@@ -2859,6 +2976,7 @@ mod lexical_page_source_tests {
     struct SealedSourceFixture {
         sealed: Vec<u8>,
         state_digest: ManifestDigest,
+        generation: Arc<CodeIndexPublishedGenerationV1>,
     }
 
     impl SealedSourceFixture {
@@ -2929,6 +3047,34 @@ mod lexical_page_source_tests {
             source.metadata().manifest().privacy_domain.as_str(),
             "privacy.lexical-page-batch"
         );
+    }
+
+    #[test]
+    fn published_memory_files_admit_the_same_pages_as_sealed_decode() {
+        let fixture = fixture();
+        let disk = one_page_expectations(&fixture);
+        let mut source = fixture.open();
+        source
+            .attach_published_files(&fixture.generation)
+            .expect("published files attach onto the scanned layout");
+        let mut memory = Vec::new();
+        loop {
+            match source
+                .next_page(&ActiveControl)
+                .expect("memory-admitted page")
+            {
+                VerifiedSealedLexicalPageReadV1::Page(page) => {
+                    memory.push(expectation(&page));
+                }
+                VerifiedSealedLexicalPageReadV1::Complete(receipt) => {
+                    receipt
+                        .verify_completion(Some(source.cursor()))
+                        .expect("memory-admitted receipt verifies");
+                    break;
+                }
+            }
+        }
+        assert_eq!(disk, memory);
     }
 
     fn fixture_for_source(source: &str) -> SealedSourceFixture {
@@ -3017,6 +3163,7 @@ mod lexical_page_source_tests {
         SealedSourceFixture {
             sealed,
             state_digest,
+            generation,
         }
     }
 
