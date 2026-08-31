@@ -636,25 +636,6 @@ impl McpServer {
                 message: "registered test context is missing its host-admission runtime".to_owned(),
             })?;
         let retained_root = context.cg.project_root().to_path_buf();
-        // The daemon mounts the project retained owner at project open, so
-        // retained application tools (`tracedecay_lcm_*`, fact-store, session
-        // and workflow reads) execute against the real in-process owner
-        // instead of reporting the daemon transport as unavailable. Mirror
-        // that mount for registered test servers. A graph without a
-        // registered project identity has no owner to mount — production
-        // refuses to open such a project — so those direct fixtures keep the
-        // typed unavailable envelope.
-        let retained_owner_transport = if context.application_invocation_executor.is_none()
-            && context.cg.store_layout().identity.project_id.is_some()
-        {
-            let transport = crate::daemon::retained_test_support::project_retained_owner_transport(
-                context.cg.project_root(),
-            )?;
-            context = context.with_application_invocation_executor(Arc::clone(&transport.executor));
-            Some(transport)
-        } else {
-            None
-        };
         // The daemon always has the active project mounted, so its resolver can
         // serve it like any other registered project. Mirror that here through
         // a late-bound weak slot: the server is only available after
@@ -722,13 +703,6 @@ impl McpServer {
             });
         context = context.with_retained_project_server_resolver(resolver);
         let server = Self::new_with_context(context).await;
-        if let Some(transport) = retained_owner_transport {
-            crate::daemon::retained_test_support::register_project_retained_owner_for_test(
-                &transport.service,
-                server.as_ref(),
-            )
-            .await?;
-        }
         // Registered test servers exercise real completion without consulting
         // the operator's network. A fresh cache entry for this exact build
         // keeps version-notice behavior deterministic while preserving the

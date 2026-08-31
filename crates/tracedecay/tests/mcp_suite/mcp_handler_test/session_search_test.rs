@@ -165,8 +165,7 @@ async fn message_search_rejects_invalid_scope() {
             .await,
         );
         assert!(
-            err.contains("scope")
-                && err.contains("expected one of `all`, `parents_only`, `subagents_only`"),
+            err.contains("scope must be one of all, parents_only, subagents_only"),
             "unexpected error for scope {invalid:?}: {err}"
         );
     }
@@ -197,8 +196,7 @@ async fn message_search_rejects_invalid_scope() {
         .await,
     );
     assert!(
-        err.contains("message_type")
-            && err.contains("expected one of `all`, `direct_user`, `tool_result`"),
+        err.contains("message_type must be one of all, direct_user, tool_result"),
         "unexpected message_type error: {err}"
     );
 }

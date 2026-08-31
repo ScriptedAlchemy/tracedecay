@@ -100,47 +100,14 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RetainedOwnerTestE
     }
 }
 
-/// In-process transport for the project retained owner: the invocation
-/// service the owner registers with and the executor the server dispatches
-/// through. Both halves must share one service or dispatch resolves no owner.
-pub(crate) struct ProjectRetainedOwnerTransport {
-    pub(crate) service: DaemonInvocationService,
-    pub(crate) executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
-}
-
-/// Builds the in-process retained transport for `project_root`.
-pub(crate) fn project_retained_owner_transport(
-    project_root: &std::path::Path,
-) -> Result<ProjectRetainedOwnerTransport> {
-    let project_root = project_root.canonicalize()?;
-    let resident_memory = Arc::new(
-        tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1::new(
-            tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
-        ),
-    );
-    let service = DaemonInvocationService::with_code_index_schedulers(
-        CodeIndexSchedulerRegistryV1::with_resident_memory(1, resident_memory),
-    );
-    let executor = RetainedOwnerTestExecutor {
-        service: service.clone(),
-        lsp_registry: Arc::new(Mutex::new(LspSessionRegistry::default())),
-        project_root,
-    };
-    Ok(ProjectRetainedOwnerTransport {
-        service,
-        executor: Arc::new(executor),
-    })
-}
-
-/// Registers `server`'s project retained owner on `service`, mirroring the
-/// daemon's project-open registration.
-pub(crate) async fn register_project_retained_owner_for_test(
-    service: &DaemonInvocationService,
-    server: &crate::mcp::McpServer,
-) -> Result<()> {
-    let graph = server.cg().await;
-    let project_root = graph.project_root().canonicalize()?;
-    let project_id = graph
+/// Constructs an MCP server from `context` with the project retained owner
+/// mounted in process, mirroring the daemon's project-open registration.
+pub(crate) async fn mcp_server_with_project_retained_owner_for_test(
+    context: crate::mcp::server::McpServerConstructionContext,
+) -> Result<Arc<crate::mcp::McpServer>> {
+    let project_root = context.cg.project_root().canonicalize()?;
+    let project_id = context
+        .cg
         .store_layout()
         .identity
         .project_id
@@ -157,6 +124,22 @@ pub(crate) async fn register_project_retained_owner_for_test(
             message: format!("retained test owner scope is invalid: {error}"),
         }
     })?;
+    let resident_memory = Arc::new(
+        tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1::new(
+            tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
+        ),
+    );
+    let service = DaemonInvocationService::with_code_index_schedulers(
+        CodeIndexSchedulerRegistryV1::with_resident_memory(1, resident_memory),
+    );
+    let executor = RetainedOwnerTestExecutor {
+        service: service.clone(),
+        lsp_registry: Arc::new(Mutex::new(LspSessionRegistry::default())),
+        project_root: project_root.clone(),
+    };
+    let context = context.with_application_invocation_executor(Arc::new(executor));
+    let server = crate::mcp::McpServer::new_with_context(context).await;
+    let graph = server.cg().await;
     let observed_at = invocation_now_micros();
     let configuration = graph
         .configuration_runtime()
@@ -181,20 +164,8 @@ pub(crate) async fn register_project_retained_owner_for_test(
         scope.project_id.clone(),
         access.configuration_digest.clone(),
     );
-    DaemonRetainedRuntimeRegistrar::new(service)
+    DaemonRetainedRuntimeRegistrar::new(&service)
         .register(project_root, scope, access.requester, grant, ports)
-        .await
-}
-
-/// Constructs an MCP server from `context` with the project retained owner
-/// mounted in process, mirroring the daemon's project-open registration.
-#[cfg(test)]
-pub(crate) async fn mcp_server_with_project_retained_owner_for_test(
-    context: crate::mcp::server::McpServerConstructionContext,
-) -> Result<Arc<crate::mcp::McpServer>> {
-    let transport = project_retained_owner_transport(context.cg.project_root())?;
-    let context = context.with_application_invocation_executor(Arc::clone(&transport.executor));
-    let server = crate::mcp::McpServer::new_with_context(context).await;
-    register_project_retained_owner_for_test(&transport.service, server.as_ref()).await?;
+        .await?;
     Ok(server)
 }

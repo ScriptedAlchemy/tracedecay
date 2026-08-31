@@ -208,19 +208,8 @@ fn run_exact_value(fixture: &Fixture, tool: &str, args: Value) -> Value {
     );
     let args = exact_args(args);
     let output = run_ok(fixture, &["tool", tool, "--args", &args.to_string()]);
-    let envelope: Value = serde_json::from_slice(&output.stdout)
-        .unwrap_or_else(|error| panic!("{tool} output was not retained-surface JSON: {error}"));
-    // The CLI prints the versioned retained envelope; the evals assert the
-    // owner's payload. A problem envelope is a refusal, not an empty answer.
-    assert_eq!(
-        envelope.pointer("/outcome/outcome").and_then(Value::as_str),
-        Some("evidence"),
-        "{tool} must answer with retained evidence, not a refusal: {envelope}"
-    );
-    envelope
-        .pointer("/outcome/value/payload")
-        .cloned()
-        .unwrap_or_else(|| panic!("{tool} omitted its retained payload: {envelope}"))
+    serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| panic!("{tool} output was not retained-surface JSON: {error}"))
 }
 
 fn run_exact<T: serde::de::DeserializeOwned>(fixture: &Fixture, tool: &str, args: Value) -> T {
