@@ -5934,6 +5934,18 @@ fn graph_publication_conflict_re_arms_activation_instead_of_orphaning_serving() 
         "a publication conflict leaves the sealed artifact intact and must retry with backoff"
     );
     assert!(
+        super::CodeIndexSchedulerErrorV1::GraphProjection(CodeGraphProjectionError::Cancelled)
+            .is_retryable_activation(),
+        "cancellation mid-publication is typed and must resume from the journaled replay"
+    );
+    assert!(
+        super::CodeIndexSchedulerErrorV1::GraphProjection(
+            CodeGraphProjectionError::DeadlineExceeded
+        )
+        .is_retryable_activation(),
+        "a deadline mid-publication is typed and must resume from the journaled replay"
+    );
+    assert!(
         !super::CodeIndexSchedulerErrorV1::GraphProjection(CodeGraphProjectionError::Corrupt(
             "sealed payload mismatch".to_owned()
         ))
