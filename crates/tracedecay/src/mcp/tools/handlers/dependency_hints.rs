@@ -10,7 +10,7 @@ use tracedecay_usecases::code_index::{
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::tools::render::{self, Md};
-use tracedecay_usecases::graph::VerifiedGraphQuery;
+use tracedecay_graph_query::VerifiedGraphQuery;
 
 pub(super) fn should_check_external_import_hint(result_count: usize, limit: usize) -> bool {
     result_count == 0 || result_count < limit.clamp(1, 20)

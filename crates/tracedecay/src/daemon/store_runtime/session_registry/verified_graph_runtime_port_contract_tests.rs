@@ -594,7 +594,7 @@ async fn exact_shard_retirement_closes_retained_graph_after_root_is_absent() {
 #[tokio::test]
 async fn session_relation_close_refusal_restores_route_and_retry_closes_exact_graph() {
     let fixture = ContractFixture::new("session-relation-close-retry").await;
-    let session_sync = Arc::new(crate::daemon::session_sync::DaemonSessionSyncService::default());
+    let session_sync = Arc::new(tracedecay_session_runtime::session_sync::DaemonSessionSyncService::default());
     fixture
         .registry
         .install_session_sync_service(&session_sync)

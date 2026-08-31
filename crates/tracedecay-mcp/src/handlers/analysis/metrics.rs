@@ -4,7 +4,7 @@ use super::*;
 
 #[hotpath::measure(future = true, label = "mcp.analysis.rank.total")]
 pub async fn handle_rank(
-    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -134,7 +134,7 @@ pub async fn handle_rank(
 
 #[hotpath::measure(future = true, label = "mcp.analysis.largest.total")]
 pub async fn handle_largest(
-    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -202,7 +202,7 @@ pub async fn handle_largest(
 
 #[hotpath::measure(future = true, label = "mcp.analysis.coupling.total")]
 pub async fn handle_coupling(
-    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -296,7 +296,7 @@ pub async fn handle_coupling(
 
 #[hotpath::measure(future = true, label = "mcp.analysis.inheritance_depth.total")]
 pub async fn handle_inheritance_depth(
-    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -392,7 +392,7 @@ fn inheritance_depth(
 
 #[hotpath::measure(future = true, label = "mcp.analysis.distribution.total")]
 pub async fn handle_distribution(
-    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {

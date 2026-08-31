@@ -2,7 +2,7 @@
 
 use tracedecay_code_index::graph_projection::{CodeGraphProjectionError, CodeGraphSymbolSummaryV1};
 use tracedecay_domain::{SourceSpan, SymbolOccurrenceId};
-use tracedecay_usecases::graph::{map_code_graph_read_runtime_error, map_projection_error};
+use tracedecay_graph_query::{map_code_graph_read_runtime_error, map_projection_error};
 use tracedecay_usecases::tracedecay::SourceEditGraphReadV1;
 
 use tracedecay_domain::code_intelligence::{NodeKind, Visibility};

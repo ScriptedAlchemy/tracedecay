@@ -5,9 +5,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use tokio::time::Duration;
 
+pub(crate) use tracedecay_session_runtime::DAEMON_CLIENT_DRAIN_DEADLINE;
+
 use super::shutdown_orchestration::{DaemonShutdownFailures, DaemonShutdownReceipt};
 
-pub(crate) const DAEMON_CLIENT_DRAIN_DEADLINE: Duration = Duration::from_secs(2);
 pub(crate) const DAEMON_TASK_ABORT_DEADLINE: Duration =
     tracedecay_daemon_service::TASK_ABORT_DEADLINE;
 

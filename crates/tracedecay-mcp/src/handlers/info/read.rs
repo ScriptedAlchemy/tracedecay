@@ -5,9 +5,9 @@ use crate::rendered_tool_result;
 use crate::tools::render::{self, Md};
 use serde_json::{Value, json};
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_usecases::context::read_modes::{LineRange, ReadMode};
-use tracedecay_usecases::context::source_read::SourceReadRequest;
-use tracedecay_usecases::graph::VerifiedGraphQuery;
+use tracedecay_graph_query::context::read_modes::{LineRange, ReadMode};
+use tracedecay_graph_query::context::source_read::SourceReadRequest;
+use tracedecay_graph_query::VerifiedGraphQuery;
 
 use super::{enrich_markdown_sections, render_section_md};
 

@@ -466,7 +466,7 @@ impl DaemonFeedbackRuntimeRegistrar {
         evidence_horizon: PolicyEvidenceHorizonV1,
         evaluated_at: UtcMicros,
         provider_candidates: Vec<(DiagnosticProviderIdentity, AnalyzerAdmissionInputV1)>,
-        code_graph: Arc<dyn tracedecay_usecases::graph::CodeGraphProjectionReadPort>,
+        code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
         affected_tests: Arc<dyn AffectedTestsRetrievalPort + Send + Sync>,
         operation: ApplicationOperation,
         graph_operation: ApplicationOperation,

@@ -172,7 +172,7 @@ pub(super) async fn resolved_project_server_key(
         return Ok(None);
     }
     Ok(Some(ProjectServerKey {
-        owner: StoreOwnerKey::from_paths(
+        owner: store_owner_key_from_paths(
             &handshake.client_identity.profile_root,
             &handshake.client_identity.global_db_path,
             layout.identity.project_id,

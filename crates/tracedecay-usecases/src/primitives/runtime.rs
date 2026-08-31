@@ -512,8 +512,8 @@ fn transport_context(
 #[hotpath::measure(label = "usecases.primitives.open_runtime")]
 pub fn open_primitive_project_runtime(
     database: Database,
-    source_runtime: Arc<crate::tracedecay::SourceReadRuntime>,
-    code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
+    source_runtime: Arc<tracedecay_graph_query::SourceReadRuntime>,
+    code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
     symbol_graph_cursors: Arc<dyn SymbolGraphCursorPort>,
     ignored_dependency_admission: Option<Arc<dyn CodeIndexIgnoredDependencyAdmissionPortV1>>,
     tests: Arc<dyn TestPrimitivePort + Send + Sync>,

@@ -141,7 +141,7 @@ pub const fn affected_test_proximity(distance: usize) -> &'static str {
 
 #[hotpath::measure(label = "usecases.primitives.affected_tests_traverse", future = true)]
 pub(crate) async fn collect_affected_test_files(
-    graph: &crate::graph::queries::GraphQueryManager<'_>,
+    graph: &tracedecay_graph_query::queries::GraphQueryManager<'_>,
     files: &[String],
     max_depth: usize,
     custom_glob: Option<&glob::Pattern>,

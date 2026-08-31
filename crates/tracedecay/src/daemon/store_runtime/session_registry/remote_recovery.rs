@@ -61,7 +61,7 @@ pub(super) struct RemoteRecoveryPublicationContextV1 {
     project_owners: ProjectRuntimeOwnerRegistryV1,
     replay: Arc<crate::daemon::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1>,
     session_sync_service:
-        Arc<OnceLock<Weak<crate::daemon::session_sync::DaemonSessionSyncService>>>,
+        Arc<OnceLock<Weak<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>>>,
     project_lifecycle: Arc<
         OnceLock<
             Weak<
@@ -86,7 +86,7 @@ impl RemoteRecoveryPublicationContextV1 {
             crate::daemon::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1,
         >,
         session_sync_service: Arc<
-            OnceLock<Weak<crate::daemon::session_sync::DaemonSessionSyncService>>,
+            OnceLock<Weak<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>>,
         >,
         project_lifecycle: Arc<
             OnceLock<
@@ -114,7 +114,7 @@ impl RemoteRecoveryPublicationContextV1 {
     fn session_sync_service(
         &self,
         operation: &'static str,
-    ) -> Result<Arc<crate::daemon::session_sync::DaemonSessionSyncService>> {
+    ) -> Result<Arc<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>> {
         self.session_sync_service
             .get()
             .and_then(std::sync::Weak::upgrade)

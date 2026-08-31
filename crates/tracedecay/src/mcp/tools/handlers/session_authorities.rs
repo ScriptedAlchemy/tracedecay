@@ -17,8 +17,8 @@ pub struct SessionAuthorities<'a> {
         Option<&'a crate::daemon::retained_owner::ProfileRetainedConnectionAuthorityV1>,
     pub(crate) project_registered: Option<&'a RegisteredGlobalDbLeaseV1>,
     pub(crate) profile_registered: Option<&'a RegisteredGlobalDbLeaseV1>,
-    pub(crate) project_lcm: Option<&'a dyn crate::daemon::lcm_authority::MountedLcmAuthorityPort>,
-    pub(crate) profile_lcm: Option<&'a dyn crate::daemon::lcm_authority::MountedLcmAuthorityPort>,
+    pub(crate) project_lcm: Option<&'a dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>,
+    pub(crate) profile_lcm: Option<&'a dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>,
 }
 
 impl<'a> SessionAuthorities<'a> {
@@ -66,8 +66,8 @@ impl<'a> SessionAuthorities<'a> {
 
     pub(crate) const fn with_lcm_authorities(
         mut self,
-        project: Option<&'a dyn crate::daemon::lcm_authority::MountedLcmAuthorityPort>,
-        profile: Option<&'a dyn crate::daemon::lcm_authority::MountedLcmAuthorityPort>,
+        project: Option<&'a dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>,
+        profile: Option<&'a dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>,
     ) -> Self {
         self.project_lcm = project;
         self.profile_lcm = profile;

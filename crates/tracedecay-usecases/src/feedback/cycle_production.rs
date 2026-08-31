@@ -77,7 +77,7 @@ pub struct ProductionFeedbackCycleOpenV1 {
     pub access_configuration: ConfigurationCurrentStateV1,
     pub requester: ActorId,
     pub authorization: Arc<dyn ProductionFeedbackCycleAuthorizationPort>,
-    pub code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
+    pub code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
     pub project_runtime_db: RegisteredGlobalDbLeaseV1,
     pub runtime_state: Arc<dyn FeedbackRuntimeStatePort + Send + Sync>,
     pub document_identity: Arc<dyn ProductionFeedbackDocumentIdentityPort + Send + Sync>,

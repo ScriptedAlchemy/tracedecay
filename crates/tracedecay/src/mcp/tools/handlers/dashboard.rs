@@ -658,7 +658,7 @@ pub(super) async fn handle_dashboard(
     daemon_user_profile_id: Option<UserProfileId>,
     daemon_profile_root: Option<PathBuf>,
     session_retrieval: Option<
-        Arc<dyn crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1>,
+        Arc<dyn tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalPortV1>,
     >,
     session_identity: Option<tracedecay_session_memory::context::ResolvedSessionIdentity>,
     registered_savings_db: Option<RegisteredGlobalDbLeaseV1>,

@@ -109,6 +109,7 @@ hotpath = [
     "tracedecay-daemon-service/hotpath",
     "tracedecay-global-db/hotpath",
     "tracedecay-graph-db/hotpath",
+    "tracedecay-graph-query/hotpath",
     "tracedecay-hooks/hotpath",
     "tracedecay-host-admission/hotpath",
     "tracedecay-lsp/hotpath",
@@ -122,6 +123,7 @@ hotpath = [
     "tracedecay-search-eval/hotpath",
     "tracedecay-semantic/hotpath",
     "tracedecay-session-memory/hotpath",
+    "tracedecay-session-runtime/hotpath",
     "tracedecay-session-temporal-store/hotpath",
     "tracedecay-lcm/hotpath",
     "tracedecay-sessions/hotpath",
@@ -151,6 +153,7 @@ hotpath-alloc = [
     "tracedecay-daemon-service/hotpath-alloc",
     "tracedecay-global-db/hotpath-alloc",
     "tracedecay-graph-db/hotpath-alloc",
+    "tracedecay-graph-query/hotpath-alloc",
     "tracedecay-hooks/hotpath-alloc",
     "tracedecay-host-admission/hotpath-alloc",
     "tracedecay-lsp/hotpath-alloc",
@@ -164,6 +167,7 @@ hotpath-alloc = [
     "tracedecay-search-eval/hotpath-alloc",
     "tracedecay-semantic/hotpath-alloc",
     "tracedecay-session-memory/hotpath-alloc",
+    "tracedecay-session-runtime/hotpath-alloc",
     "tracedecay-session-temporal-store/hotpath-alloc",
     "tracedecay-lcm/hotpath-alloc",
     "tracedecay-sessions/hotpath-alloc",
@@ -193,6 +197,7 @@ hotpath-cpu = [
     "tracedecay-daemon-service/hotpath-cpu",
     "tracedecay-global-db/hotpath-cpu",
     "tracedecay-graph-db/hotpath-cpu",
+    "tracedecay-graph-query/hotpath-cpu",
     "tracedecay-hooks/hotpath-cpu",
     "tracedecay-host-admission/hotpath-cpu",
     "tracedecay-lsp/hotpath-cpu",
@@ -206,6 +211,7 @@ hotpath-cpu = [
     "tracedecay-search-eval/hotpath-cpu",
     "tracedecay-semantic/hotpath-cpu",
     "tracedecay-session-memory/hotpath-cpu",
+    "tracedecay-session-runtime/hotpath-cpu",
     "tracedecay-session-temporal-store/hotpath-cpu",
     "tracedecay-lcm/hotpath-cpu",
     "tracedecay-sessions/hotpath-cpu",
@@ -312,6 +318,7 @@ test-helpers = [
     "tracedecay-daemon-service/test-helpers",
     "tracedecay-host-admission/test-helpers",
     "tracedecay-maintenance/test-helpers",
+    "tracedecay-session-runtime/test-helpers",
 ]
 
 test-transport = [
@@ -323,6 +330,7 @@ test-transport = [
     "tracedecay-dashboard-api/test-transport",
     "tracedecay-host-admission/test-transport",
     "tracedecay-usecases/test-transport",
+    "tracedecay-graph-query/test-helpers",
     "tracedecay-mcp/test-transport",
     # The observation-seed fixture bridge (`dashboard::observation_seed`) is
     # test-transport-gated and drives the global-db session-temporal refresh
@@ -413,6 +421,7 @@ tracedecay-lsp = { path = "../tracedecay-lsp", version = "0.1.0" }
 tracedecay-maintenance = { path = "../tracedecay-maintenance", version = "0.1.0" }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
 tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
+tracedecay-graph-query = { path = "../tracedecay-graph-query", version = "0.1.0" }
 tracedecay-policy = { path = "../tracedecay-policy", version = "0.1.0" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
 tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
@@ -420,6 +429,7 @@ tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.
 tracedecay-search-eval = { path = "../tracedecay-search-eval", version = "0.1.0" }
 tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0" }
 tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
+tracedecay-session-runtime = { path = "../tracedecay-session-runtime", version = "0.1.0" }
 tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
 tracedecay-lcm = { path = "../tracedecay-lcm", version = "0.1.0" }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
@@ -514,6 +524,7 @@ tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0", feat
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0", features = ["test-helpers"] }
 # Same policy for the extracted global-db harness the root test suite drives.
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-graph-query = { path = "../tracedecay-graph-query", version = "0.1.0", features = ["test-helpers"] }
 # The root's cfg(test) host-admission support composes the dashboard test
 # authority, which lives behind the dashboard-api test-transport feature.
 tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api", version = "0.1.0", features = ["test-transport"] }
@@ -531,6 +542,9 @@ tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", ver
 # Root lib tests call daemon-service fixture constructors (`invoke`,
 # publication gates). Feature unification keeps them off the CLI lane.
 tracedecay-daemon-service = { path = "../tracedecay-daemon-service", version = "0.1.0", features = ["test-helpers"] }
+# Root host-admission integration tests drive session-runtime worker pass
+# internals; the fixture surface stays off the CLI lane.
+tracedecay-session-runtime = { path = "../tracedecay-session-runtime", version = "0.1.0", features = ["test-helpers"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fault_harness)"] }

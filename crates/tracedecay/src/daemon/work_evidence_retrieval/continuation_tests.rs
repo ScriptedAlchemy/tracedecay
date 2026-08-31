@@ -76,7 +76,7 @@ async fn continuation_resumes_the_same_provider_session_without_repeating_eviden
     .expect("materialize provider session temporal projection");
 
     let root =
-        crate::daemon::session_retrieval::DaemonSessionRetrievalRoot::project_identity_for_test(
+        tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalRoot::project_identity_for_test(
             project_id,
             repository_id,
             worktree_id,
@@ -87,7 +87,7 @@ async fn continuation_resumes_the_same_provider_session_without_repeating_eviden
         .session_request_scope()
         .expect("resolved Work scope");
     let retrieval =
-        crate::daemon::session_retrieval::DaemonSessionRetrievalService::new(database, root, None)
+        tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalService::new(database, root, None)
             .expect("mounted project retrieval service");
     let adapter = DaemonWorkEvidenceRetrievalV1::new(Arc::new(retrieval)).with_federated_authority(
         Arc::new(StaticFederatedAuthority(Arc::new(federated_authority(

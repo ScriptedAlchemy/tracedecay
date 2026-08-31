@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use tracedecay_usecases::graph::{
+use tracedecay_graph_query::{
     CodeGraphProjectionReadPort, CodeGraphReadAdmissionPort, CodeGraphSourceAuthorityPort,
     CodeGraphSourceBindFuture, CodeGraphSourceBindRequest, VerifiedGraphQueryFuture,
     VerifiedGraphQueryPort, VerifiedGraphQueryRequest, open_verified_graph_query,
 };
-use tracedecay_usecases::tracedecay::SourceReadRuntimePort;
+use tracedecay_graph_query::SourceReadRuntimePort;
 
 struct BoundCodeGraphSourceAuthority {
     source: Arc<dyn SourceReadRuntimePort>,

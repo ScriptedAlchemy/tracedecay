@@ -2875,7 +2875,7 @@ pub(crate) struct DaemonSessionRuntimeRegistryV1 {
     registered_schema_convergence: RegisteredSchemaConvergenceMaintenance,
     retained_hook_tasks: RetainedHookTasks,
     session_sync_service:
-        Arc<OnceLock<Weak<crate::daemon::session_sync::DaemonSessionSyncService>>>,
+        Arc<OnceLock<Weak<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>>>,
     remote_recovery_project_lifecycle: Arc<
         OnceLock<Weak<crate::daemon::branch_admin::remote_recovery_lifecycle::RemoteRecoveryProjectLifecycleV1>>,
     >,
@@ -2940,7 +2940,7 @@ impl DaemonSessionRuntimeRegistryV1 {
 
     pub(crate) fn install_session_sync_service(
         &self,
-        service: &Arc<crate::daemon::session_sync::DaemonSessionSyncService>,
+        service: &Arc<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>,
     ) -> Result<()> {
         let service = Arc::downgrade(service);
         if let Some(retained) = self.session_sync_service.get() {
@@ -3005,14 +3005,14 @@ impl DaemonSessionRuntimeRegistryV1 {
 
     fn session_sync_service(
         &self,
-    ) -> Arc<OnceLock<Weak<crate::daemon::session_sync::DaemonSessionSyncService>>> {
+    ) -> Arc<OnceLock<Weak<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>>> {
         Arc::clone(&self.session_sync_service)
     }
 
     fn active_session_sync_service(
         &self,
         operation: &'static str,
-    ) -> Result<Arc<crate::daemon::session_sync::DaemonSessionSyncService>> {
+    ) -> Result<Arc<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>> {
         self.session_sync_service
             .get()
             .and_then(Weak::upgrade)

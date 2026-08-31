@@ -19,7 +19,7 @@ use super::{
 
 impl<C> CanonicalSymbolGraphAdapter<C> {
     pub fn new(
-        code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
+        code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
         cursors: C,
         ignored_dependency_admission: Option<Arc<dyn CodeIndexIgnoredDependencyAdmissionPortV1>>,
     ) -> Self {

@@ -25,6 +25,13 @@ use tracedecay_mcp::response_handles::{
     cleanup_expired_response_handles, response_handle_stats_json,
 };
 use tracedecay_sessions::admission::{HostAdmissionOutcome, HostAdmissionStatus};
+use tracedecay_session_runtime::lcm_authority::{
+    MountedLcmAuthorityPort, mount_registered_lcm_authority,
+};
+use tracedecay_session_runtime::session_retrieval::{
+    DaemonSessionRetrievalRoot, DaemonSessionRetrievalService, SessionApplicationRetrievalPortV1,
+    SessionRetrievalServingIdentityV1, UnavailableSessionApplicationRetrievalV1,
+};
 use tracedecay_sessions::runtime::git_correlation::{
     self as git_correlation, DEFAULT_SPAN_MERGE_GAP_SECS, DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS,
     SpanObservation, SpanSource,
@@ -291,8 +298,8 @@ pub struct McpServer {
     session_sync_service:
         Option<std::sync::Weak<dyn tracedecay_application::session_sync::SessionSyncServicePort>>,
     project_application_retrieval: Option<MountedProjectApplicationRetrievalV1>,
-    project_lcm_authority: Option<Arc<dyn crate::daemon::lcm_authority::MountedLcmAuthorityPort>>,
-    user_lcm_authority: Option<Arc<dyn crate::daemon::lcm_authority::MountedLcmAuthorityPort>>,
+    project_lcm_authority: Option<Arc<dyn MountedLcmAuthorityPort>>,
+    user_lcm_authority: Option<Arc<dyn MountedLcmAuthorityPort>>,
     /// Owned cancellable project replay worker (daemon-owned servers). Joined on
     /// [`Self::shutdown`] so Unix and Windows drain the same way.
     project_host_admission_replay:
@@ -334,7 +341,7 @@ pub struct McpServer {
     code_graph_projection_read_port: Option<CodeGraphProjectionReadPort>,
     code_graph_read_admission_port: Option<CodeGraphReadAdmissionPort>,
     verified_graph_query_port:
-        Option<Arc<dyn tracedecay_usecases::graph::VerifiedGraphQueryPort + 'static>>,
+        Option<Arc<dyn tracedecay_graph_query::VerifiedGraphQueryPort + 'static>>,
     code_index_ignored_dependency_admission: Option<CodeIndexIgnoredDependencyAdmissionPort>,
     /// Exact-scope sealed-generation census authority. It is installed only
     /// by daemon project-open after the route identity has resolved.
@@ -462,14 +469,14 @@ pub struct McpServer {
 #[derive(Clone)]
 struct MountedProjectApplicationRetrievalV1 {
     identity: tracedecay_session_memory::context::ResolvedSessionIdentity,
-    service: Arc<dyn crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1>,
+    service: Arc<dyn SessionApplicationRetrievalPortV1>,
 }
 
 impl MountedProjectApplicationRetrievalV1 {
     fn retrieval_for_scope(
         &self,
         expected_scope: &tracedecay_application::ResolvedScope,
-    ) -> Result<Arc<dyn crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1>> {
+    ) -> Result<Arc<dyn SessionApplicationRetrievalPortV1>> {
         let mounted_scope =
             self.identity
                 .session_request_scope()
@@ -907,15 +914,26 @@ impl McpServer {
         let active_project_id = cg.store_layout().identity.project_id.clone();
         let project_session_retrieval_root = match registry_db.as_deref() {
             Some(registry) => {
-                crate::daemon::session_retrieval::DaemonSessionRetrievalRoot::project(&cg, registry)
-                    .await
+                let serving_db = cg.db_path();
+                DaemonSessionRetrievalRoot::project(
+                    SessionRetrievalServingIdentityV1 {
+                        project_id: cg.store_layout().identity.project_id.as_deref(),
+                        serving_db: &serving_db,
+                        project_root: cg.project_root(),
+                    },
+                    registry,
+                )
+                .await
             }
             None => None,
         };
         #[cfg(any(test, feature = "test-transport"))]
         let project_session_retrieval_root = project_session_retrieval_root.or_else(|| {
             session_db.as_ref().map(|_| {
-                crate::daemon::session_retrieval::DaemonSessionRetrievalRoot::project_for_test(&cg)
+                DaemonSessionRetrievalRoot::project_for_test(
+                    cg.project_root(),
+                    cg.store_layout().identity.project_id.clone(),
+                )
             })
         });
         let project_session_retrieval_root =
@@ -930,7 +948,7 @@ impl McpServer {
             .as_ref()
             .map(|root| root.identity().root_id().clone());
         let profile_session_retrieval_root =
-            crate::daemon::session_retrieval::DaemonSessionRetrievalRoot::profile().and_then(
+            DaemonSessionRetrievalRoot::profile().and_then(
                 |root| match profile_identity.as_deref() {
                     Some(identity) => root.with_profile_runtime_shard(identity),
                     None => Some(root),
@@ -958,14 +976,14 @@ impl McpServer {
                 let identity = root.identity().clone();
                 let service = match registered_session_db.as_ref() {
                     Some(registered) => {
-                    crate::daemon::session_retrieval::DaemonSessionRetrievalService::new_registered_with_serving_port(
+                    DaemonSessionRetrievalService::new_registered_with_serving_port(
                         database.clone(),
                         registered.clone(),
                         root,
                         project_session_refresh_serving.clone(),
                     )
                     }
-                    None => crate::daemon::session_retrieval::DaemonSessionRetrievalService::new_with_serving_port(
+                    None => DaemonSessionRetrievalService::new_with_serving_port(
                         database.clone(),
                         root,
                         project_session_refresh_serving.clone(),
@@ -975,7 +993,7 @@ impl McpServer {
                     identity,
                     service: Arc::new(service)
                         as Arc<
-                            dyn crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1,
+                            dyn SessionApplicationRetrievalPortV1,
                         >,
                 })
             });
@@ -983,7 +1001,7 @@ impl McpServer {
             .as_ref()
             .zip(registered_session_db.as_ref())
             .and_then(|(root, database)| {
-                crate::daemon::lcm_authority::mount_registered_lcm_authority(
+                mount_registered_lcm_authority(
                     database.clone(),
                     root.identity().clone(),
                     root.expected_runtime_shard()?,
@@ -993,7 +1011,7 @@ impl McpServer {
             .as_ref()
             .zip(registered_user_session_db.as_ref())
             .and_then(|(root, database)| {
-                crate::daemon::lcm_authority::mount_registered_lcm_authority(
+                mount_registered_lcm_authority(
                     database.clone(),
                     root.identity().clone(),
                     root.expected_runtime_shard()?,
@@ -1278,18 +1296,18 @@ impl McpServer {
     pub(crate) fn project_session_application_retrieval_service(
         &self,
         expected_scope: &tracedecay_application::ResolvedScope,
-    ) -> Result<Arc<dyn crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1>> {
+    ) -> Result<Arc<dyn SessionApplicationRetrievalPortV1>> {
         self.project_session_retrieval_for_scope(expected_scope)
     }
 
     fn project_session_retrieval_for_scope(
         &self,
         expected_scope: &tracedecay_application::ResolvedScope,
-    ) -> Result<Arc<dyn crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1>> {
+    ) -> Result<Arc<dyn SessionApplicationRetrievalPortV1>> {
         match self.project_application_retrieval.as_ref() {
             Some(mounted) => mounted.retrieval_for_scope(expected_scope),
             None => Ok(Arc::new(
-                crate::daemon::session_retrieval::UnavailableSessionApplicationRetrievalV1::new(
+                UnavailableSessionApplicationRetrievalV1::new(
                     expected_scope.clone(),
                 ),
             )),

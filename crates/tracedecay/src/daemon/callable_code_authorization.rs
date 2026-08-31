@@ -15,7 +15,7 @@ use tracedecay_domain::{ComponentVersion, UtcMicros};
 use tracedecay_usecases::configuration::{
     ConfigurationControlStore, ConfigurationError, ProjectConfigurationRuntime,
 };
-use tracedecay_usecases::graph::CodeGraphReadError;
+use tracedecay_graph_query::CodeGraphReadError;
 use tracedecay_usecases::{
     CallableCodeAuthorizationSourcePort, CurrentCallableCodeAccessFuture,
     ProjectSourceAccessSnapshot,
@@ -142,7 +142,7 @@ impl DaemonCodeGraphReadAdmission {
 
     async fn admit_graph_read(
         &self,
-        request: tracedecay_usecases::graph::CodeGraphReadAdmissionRequest<'_>,
+        request: tracedecay_graph_query::CodeGraphReadAdmissionRequest<'_>,
     ) -> Result<RequestContext, CodeGraphReadError> {
         let access = self
             .authorization
@@ -171,11 +171,11 @@ impl DaemonCodeGraphReadAdmission {
     }
 }
 
-impl tracedecay_usecases::graph::CodeGraphReadAdmissionPort for DaemonCodeGraphReadAdmission {
+impl tracedecay_graph_query::CodeGraphReadAdmissionPort for DaemonCodeGraphReadAdmission {
     fn admit<'a>(
         &'a self,
-        request: tracedecay_usecases::graph::CodeGraphReadAdmissionRequest<'a>,
-    ) -> tracedecay_usecases::graph::CodeGraphReadAdmissionFuture<'a> {
+        request: tracedecay_graph_query::CodeGraphReadAdmissionRequest<'a>,
+    ) -> tracedecay_graph_query::CodeGraphReadAdmissionFuture<'a> {
         Box::pin(async move {
             let admission = hotpath::measure_block!(
                 "daemon.authority.callable_code.admit",
@@ -583,9 +583,9 @@ mod tests {
         let cancellation =
             CancellationSignal::active("cancel.graph-read-admission").expect("cancellation");
 
-        let context = tracedecay_usecases::graph::CodeGraphReadAdmissionPort::admit(
+        let context = tracedecay_graph_query::CodeGraphReadAdmissionPort::admit(
             &admission,
-            tracedecay_usecases::graph::CodeGraphReadAdmissionRequest::new(
+            tracedecay_graph_query::CodeGraphReadAdmissionRequest::new(
                 &operation,
                 request_id.clone(),
                 Deadline::new(mounted.grant_expires_at).expect("deadline"),
@@ -613,7 +613,7 @@ mod tests {
             "a warming configuration authority must not read as a denial: {read_error:?}"
         );
 
-        let routed = tracedecay_usecases::graph::map_code_graph_read_runtime_error(read_error);
+        let routed = tracedecay_graph_query::map_code_graph_read_runtime_error(read_error);
         let tracedecay_domain::errors::TraceDecayError::ProjectRoute {
             reason_code,
             retryable,

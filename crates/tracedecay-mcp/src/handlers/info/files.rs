@@ -6,7 +6,7 @@ use crate::tools::render::Md;
 use crate::{effective_path, rendered_tool_result, require_object_args};
 use serde_json::{Value, json};
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_usecases::graph::VerifiedGraphQuery;
+use tracedecay_graph_query::VerifiedGraphQuery;
 
 use super::verified::{self, indexed_files};
 

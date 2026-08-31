@@ -26,7 +26,7 @@ fn wrap_profile_identity(
 }
 
 fn wrap_refresh_wake(
-    wake: crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
+    wake: tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
 ) -> (
     Arc<dyn SessionTemporalRefreshWakePort>,
     Arc<dyn SessionProjectionServingStatusPort>,
@@ -43,9 +43,9 @@ pub(crate) type DatabaseOwnerReconciler = Arc<
 >;
 
 pub(crate) type CodeGraphProjectionReadPort =
-    Arc<dyn tracedecay_usecases::graph::CodeGraphProjectionReadPort + 'static>;
+    Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort + 'static>;
 pub(crate) type CodeGraphReadAdmissionPort =
-    Arc<dyn tracedecay_usecases::graph::CodeGraphReadAdmissionPort + 'static>;
+    Arc<dyn tracedecay_graph_query::CodeGraphReadAdmissionPort + 'static>;
 pub(crate) type CodeIndexIgnoredDependencyAdmissionPort =
     Arc<dyn tracedecay_usecases::code_index::CodeIndexIgnoredDependencyAdmissionPortV1 + 'static>;
 
@@ -169,7 +169,7 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) code_graph_projection_read_port: Option<CodeGraphProjectionReadPort>,
     pub(crate) code_graph_read_admission_port: Option<CodeGraphReadAdmissionPort>,
     pub(crate) verified_graph_query_port:
-        Option<Arc<dyn tracedecay_usecases::graph::VerifiedGraphQueryPort + 'static>>,
+        Option<Arc<dyn tracedecay_graph_query::VerifiedGraphQueryPort + 'static>>,
     pub(crate) code_index_ignored_dependency_admission:
         Option<CodeIndexIgnoredDependencyAdmissionPort>,
     pub(crate) code_index_search_authority: Option<super::CodeIndexSearchAuthorityV1>,
@@ -208,9 +208,9 @@ pub(crate) struct McpServerDaemonAuthority {
     pub(crate) databases: McpServerDaemonDatabases,
     pub(crate) host_admission_broker: Option<tracedecay_host_admission::SharedHostAdmissionBroker>,
     pub(crate) project_session_refresh_wake:
-        crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
+        tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
     pub(crate) user_session_refresh_wake:
-        crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
+        tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
     pub(crate) session_sync_service:
         std::sync::Weak<dyn tracedecay_application::session_sync::SessionSyncServicePort>,
     pub(crate) database_owner_reconciler: DatabaseOwnerReconciler,
@@ -535,7 +535,7 @@ impl McpServerConstructionContext {
 
     pub(crate) fn with_verified_graph_query_port(
         mut self,
-        port: Arc<dyn tracedecay_usecases::graph::VerifiedGraphQueryPort + 'static>,
+        port: Arc<dyn tracedecay_graph_query::VerifiedGraphQueryPort + 'static>,
     ) -> Self {
         self.verified_graph_query_port = Some(port);
         self

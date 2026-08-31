@@ -116,7 +116,7 @@ where
 /// Production adapter from the transport-neutral application primitive family
 /// to the admitted, generation-pinned graph projection.
 pub struct CanonicalSymbolGraphAdapter<C> {
-    code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
+    code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
     cursors: C,
     ignored_dependency_admission: Option<Arc<dyn CodeIndexIgnoredDependencyAdmissionPortV1>>,
 }
@@ -732,12 +732,12 @@ struct OpenSymbolGraph {
 
 #[hotpath::measure(label = "usecases.primitives.open_graph", future = true)]
 async fn open_graph(
-    port: &Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
+    port: &Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
     context: SymbolGraphPortContext<'_>,
 ) -> Result<OpenSymbolGraph, ()> {
-    let cancellation = crate::graph::request_graph_cancellation(context.request);
+    let cancellation = tracedecay_graph_query::request_graph_cancellation(context.request);
     let verified = port
-        .open(crate::graph::CodeGraphReadRequest::new(
+        .open(tracedecay_graph_query::CodeGraphReadRequest::new(
             context.request,
             context.observed_at,
             Arc::clone(&cancellation),

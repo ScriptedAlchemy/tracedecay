@@ -29,10 +29,10 @@ use tracedecay_session_memory::context::{SessionRootId, SessionStoreId};
 use super::{DirectRetainedSessionPortV1, ProjectRetainedSessionAuthoritiesV1};
 use crate::daemon::StoreOwnerKey;
 use crate::daemon::retained_owner::session_refresh::admitted_session_refresh_command;
-use crate::daemon::session_retrieval::{
+use tracedecay_session_runtime::session_retrieval::{
     DaemonSessionRetrievalRoot, DaemonSessionRetrievalService, SessionApplicationRetrievalPortV1,
 };
-use crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry;
+use tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry;
 use crate::host_admission::HostAdmissionTestRuntimeV1;
 use crate::mcp::server::{DaemonSessionRefreshService, DaemonWorkflowIndexReadService};
 use tracedecay_mcp::{SessionRefreshServiceOutcome, SessionRefreshServicePort};

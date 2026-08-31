@@ -68,7 +68,7 @@ impl VerifiedAnalysisSymbol {
 }
 
 fn verified_analysis_symbols(
-    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
     scope_prefix: Option<&str>,
 ) -> Result<Vec<VerifiedAnalysisSymbol>> {
     let page = graph.symbols_page(None, ANALYSIS_SYMBOL_BUDGET)?;

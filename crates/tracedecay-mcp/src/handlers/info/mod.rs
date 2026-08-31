@@ -30,7 +30,7 @@ use std::path::Path;
 use crate::tools::render::Md;
 use serde_json::Value;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
-use tracedecay_usecases::context::markdown_sections::{
+use tracedecay_graph_query::context::markdown_sections::{
     SectionEnrichment, is_markdown_file, section_summary_lines,
 };
 

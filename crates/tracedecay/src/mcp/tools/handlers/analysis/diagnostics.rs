@@ -40,7 +40,7 @@ fn required_diagnostics_scope_value(args: &Value, scope: &str, name: &str) -> Re
 }
 
 fn enclosing_diagnostic_node(
-    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
     spans_by_file: &mut HashMap<String, Vec<NodeSpan>>,
     file: &str,
     line_start: u32,
@@ -150,7 +150,7 @@ async fn session_correlation_health_json(
 #[hotpath::measure(future = true, label = "mcp.analysis.diagnostics.total")]
 pub(crate) async fn handle_diagnostics(
     cg: &TraceDecay,
-    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     diagnostics_cache: Option<&DiagnosticsCache>,
     diagnostics_lsp: Option<&tokio::sync::Mutex<DiagnosticBroker>>,

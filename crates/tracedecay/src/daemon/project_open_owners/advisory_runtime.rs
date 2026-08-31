@@ -529,7 +529,7 @@ struct ProjectOpenScoutProducerV1 {
     code_index_schedulers:
         tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-    code_graph: Arc<dyn tracedecay_usecases::graph::CodeGraphProjectionReadPort>,
+    code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
     requester: tracedecay_domain::ActorId,
     diagnostic_broker: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
 }

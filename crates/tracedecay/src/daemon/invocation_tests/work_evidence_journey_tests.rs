@@ -304,7 +304,7 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
     .expect("materialize provider session");
 
     let retrieval_root =
-        crate::daemon::session_retrieval::DaemonSessionRetrievalRoot::project_identity_for_test(
+        tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalRoot::project_identity_for_test(
             project_id.clone(),
             repository_id.clone(),
             worktree_id.clone(),
@@ -314,7 +314,7 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
         .identity()
         .session_request_scope()
         .expect("Work scope");
-    let retrieval = crate::daemon::session_retrieval::DaemonSessionRetrievalService::new(
+    let retrieval = tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalService::new(
         database.clone(),
         retrieval_root,
         None,

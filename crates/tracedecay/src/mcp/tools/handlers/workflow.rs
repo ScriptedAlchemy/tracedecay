@@ -128,7 +128,7 @@ fn test_target_key(node: &GraphTestSymbol) -> String {
 #[hotpath::measure(future = true, label = "mcp.workflow.diagnose.total")]
 pub(super) async fn handle_diagnose(
     cg: &TraceDecay,
-    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     code_index_identity: Option<&dyn CodeIndexPublicationIdentityPortV1>,
 ) -> Result<ToolResult> {
@@ -284,7 +284,7 @@ fn normalized_diagnostic_path(project_root: &Path, file: &str) -> String {
 }
 
 fn diagnostic_symbol_at_location(
-    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
     file: &str,
     one_based_line: u32,
 ) -> Result<Option<CodeGraphSymbolSummaryV1>> {
@@ -467,7 +467,7 @@ fn compiler_publication_report(
 #[hotpath::measure(future = true, label = "mcp.workflow.diagnose.redundancy")]
 async fn diagnose_redundancy_index(
     cg: &TraceDecay,
-    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
 ) -> Result<HashMap<String, Vec<Value>>> {
     let options = RedundancyOptions {
         path_prefix: None,
@@ -532,7 +532,7 @@ pub(super) async fn handle_run_affected_tests<F>(
     code_index_identity: Option<&dyn CodeIndexPublicationIdentityPortV1>,
 ) -> Result<ToolResult>
 where
-    F: Future<Output = Result<tracedecay_usecases::graph::VerifiedGraphQuery>>,
+    F: Future<Output = Result<tracedecay_graph_query::VerifiedGraphQuery>>,
 {
     handle_run_affected_tests_with_runner(
         cg,
@@ -555,7 +555,7 @@ async fn handle_run_affected_tests_with_runner<F, Runner, RunFuture>(
     runner: Runner,
 ) -> Result<ToolResult>
 where
-    F: Future<Output = Result<tracedecay_usecases::graph::VerifiedGraphQuery>>,
+    F: Future<Output = Result<tracedecay_graph_query::VerifiedGraphQuery>>,
     Runner: FnOnce(PathBuf, TestProfile, Vec<String>, Duration, TestRunControl) -> RunFuture,
     RunFuture: Future<Output = std::result::Result<TestRunOutput, TestRunFailure>>,
 {
@@ -952,7 +952,7 @@ fn resolve_changed_paths(
 }
 
 fn collect_affected_test_targets(
-    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
     changed_paths: &[String],
 ) -> Result<HashMap<String, TestTarget>> {
     // Two paths feed into the test set:
@@ -1000,7 +1000,7 @@ fn add_direct_test_targets(
 }
 
 fn add_indirect_test_targets(
-    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
     nodes: &[GraphTestSymbol],
     annotations_by_file: &mut HashMap<String, HashSet<String>>,
     test_targets: &mut HashMap<String, TestTarget>,
@@ -1055,7 +1055,7 @@ fn add_indirect_test_targets(
 }
 
 fn affected_test_symbols_in_file(
-    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
     path: &str,
 ) -> Result<Vec<CodeGraphSymbolSummaryV1>> {
     const MAX_FILE_SYMBOLS: usize = 50_000;
@@ -1097,7 +1097,7 @@ fn graph_test_symbol(summary: &CodeGraphSymbolSummaryV1) -> Result<Option<GraphT
 }
 
 fn test_annotations_in_file<'a>(
-    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
     path: &str,
     cache: &'a mut HashMap<String, HashSet<String>>,
 ) -> Result<&'a HashSet<String>> {

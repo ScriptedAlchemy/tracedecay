@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use tracedecay_usecases::graph::VerifiedGraphQuery;
+use tracedecay_graph_query::VerifiedGraphQuery;
 
 const VERIFIED_GRAPH_MAX_SYMBOLS: usize = 500_000;
 const VERIFIED_GRAPH_MAX_RELATIONS: usize = 2_000_000;

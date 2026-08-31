@@ -24,13 +24,13 @@ pub(in crate::daemon) struct RemoteRecoveryProjectLifecycleV1 {
     lsp_session_registry: Arc<tokio::sync::Mutex<tracedecay_lsp::LspSessionRegistry>>,
     project_open_gates: Arc<tokio::sync::Mutex<super::super::ProjectOpenGates>>,
     session_temporal_refresh_schedulers: Arc<
-        super::super::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry,
+        tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry,
     >,
     git_index_transaction_services: Arc<
         tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry,
     >,
     native_integration_services: Arc<DaemonNativeIntegrationRuntimeRegistrar>,
-    session_sync_service: Arc<super::super::session_sync::DaemonSessionSyncService>,
+    session_sync_service: Arc<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>,
     project_server_retirements:
         Arc<tokio::sync::Mutex<Vec<super::project_retirement::ProjectServerRetirement>>>,
     #[cfg(unix)]
@@ -381,7 +381,7 @@ pub(super) async fn project_roots(
 
 pub(super) async fn retire_runtime_work(
     project_servers: &tokio::sync::Mutex<DatabaseOwnerRegistry>,
-    temporal: &super::super::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry,
+    temporal: &tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry,
     #[cfg(unix)] automation: &tokio::sync::Mutex<
         std::collections::HashMap<
             super::super::ProjectServerKey,
