@@ -4,12 +4,9 @@ use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 
 use super::super::StorageRuntimeContractErrorV1;
 use super::types::{
-    MAX_SEMANTIC_VECTOR_STAGE_CHUNKS, SemanticVectorChunkDigest, SemanticVectorChunkId,
-    SemanticVectorChunkManifestDigest, SemanticVectorStageChunkOperation,
+    SemanticVectorChunkDigest, SemanticVectorChunkId, SemanticVectorChunkManifestDigest,
+    SemanticVectorStageChunkOperation,
 };
-
-pub const MAX_SEMANTIC_VECTOR_CHUNK_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
-const MAX_SEMANTIC_VECTOR_CHUNK_MANIFEST_BYTES_U64: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -22,8 +19,6 @@ pub struct SemanticVectorChunkManifestMember {
 pub struct SemanticVectorChunkManifestAccumulator {
     hasher: Sha256,
     last_chunk_id: Option<SemanticVectorChunkId>,
-    members: u64,
-    bytes: usize,
 }
 
 impl SemanticVectorChunkManifestAccumulator {
@@ -33,8 +28,6 @@ impl SemanticVectorChunkManifestAccumulator {
         Self {
             hasher,
             last_chunk_id: None,
-            members: 0,
-            bytes: 0,
         }
     }
 
@@ -51,13 +44,6 @@ impl SemanticVectorChunkManifestAccumulator {
                 field: "semantic vector chunk manifest order",
             });
         }
-        if self.members >= MAX_SEMANTIC_VECTOR_STAGE_CHUNKS {
-            return Err(StorageRuntimeContractErrorV1::LimitExceeded {
-                field: "semantic vector chunk manifest members",
-                actual: self.members + 1,
-                max: MAX_SEMANTIC_VECTOR_STAGE_CHUNKS,
-            });
-        }
         let encoded = tracedecay_domain::canonical_sha256(&(
             "tracedecay.semantic-vector-chunk-manifest-member",
             member,
@@ -65,35 +51,9 @@ impl SemanticVectorChunkManifestAccumulator {
         .map_err(|_| StorageRuntimeContractErrorV1::NonCanonical {
             field: "semantic vector chunk manifest member",
         })?;
-        let next_bytes = self
-            .bytes
-            .checked_add(member.chunk_id.as_str().len())
-            .and_then(|value| value.checked_add(member.chunk_digest.as_str().len()))
-            .and_then(|value| value.checked_add(encoded.as_str().len()))
-            .ok_or(StorageRuntimeContractErrorV1::LimitExceeded {
-                field: "semantic vector chunk manifest bytes",
-                actual: u64::MAX,
-                max: MAX_SEMANTIC_VECTOR_CHUNK_MANIFEST_BYTES_U64,
-            })?;
-        if next_bytes > MAX_SEMANTIC_VECTOR_CHUNK_MANIFEST_BYTES {
-            let actual = u64::try_from(next_bytes).map_err(|_| {
-                StorageRuntimeContractErrorV1::LimitExceeded {
-                    field: "semantic vector chunk manifest bytes",
-                    actual: u64::MAX,
-                    max: MAX_SEMANTIC_VECTOR_CHUNK_MANIFEST_BYTES_U64,
-                }
-            })?;
-            return Err(StorageRuntimeContractErrorV1::LimitExceeded {
-                field: "semantic vector chunk manifest bytes",
-                actual,
-                max: MAX_SEMANTIC_VECTOR_CHUNK_MANIFEST_BYTES_U64,
-            });
-        }
         self.hasher.update(encoded.as_str().as_bytes());
         self.hasher.update([0]);
         self.last_chunk_id = Some(member.chunk_id.clone());
-        self.members += 1;
-        self.bytes = next_bytes;
         Ok(())
     }
 
@@ -120,4 +80,28 @@ pub fn semantic_vector_chunk_manifest_digest(
         accumulator.push(member)?;
     }
     accumulator.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_digest_streams_beyond_the_legacy_project_size() {
+        const LEGACY_PROJECT_CHUNK_LIMIT: u64 = 100_000;
+        let digest = SemanticVectorChunkDigest::new(format!("sha256:{}", "a".repeat(64)))
+            .expect("canonical chunk digest");
+        let mut accumulator = SemanticVectorChunkManifestAccumulator::new();
+        for ordinal in 0..=LEGACY_PROJECT_CHUNK_LIMIT {
+            accumulator
+                .push(&SemanticVectorChunkManifestMember {
+                    chunk_id: SemanticVectorChunkId::new(format!("chunk.{ordinal:06}"))
+                        .expect("canonical ordered chunk id"),
+                    chunk_digest: digest.clone(),
+                    operation: SemanticVectorStageChunkOperation::Embed,
+                })
+                .expect("streaming manifests are bounded per member, not by project size");
+        }
+        accumulator.finish().expect("streaming manifest digest");
+    }
 }
