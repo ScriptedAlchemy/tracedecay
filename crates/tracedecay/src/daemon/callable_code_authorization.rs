@@ -12,10 +12,10 @@ use tracedecay_application::{
 use tracedecay_daemon_service::callable_code_request_context;
 use tracedecay_domain::{ComponentVersion, UtcMicros};
 
-use tracedecay_graph_query::CodeGraphReadError;
-use tracedecay_usecases::configuration::{
+use tracedecay_configuration::{
     ConfigurationControlStore, ConfigurationError, ProjectConfigurationRuntime,
 };
+use tracedecay_graph_query::CodeGraphReadError;
 use tracedecay_usecases::{
     CallableCodeAuthorizationSourcePort, CurrentCallableCodeAccessFuture,
     ProjectSourceAccessSnapshot,
@@ -44,7 +44,7 @@ impl CurrentCallableCodeAccessPort for ProductionCallableCodeAccessPort {
                 .current()
                 .await
                 .map_err(configuration_current_problem)?;
-            let configuration = tracedecay_usecases::config::PinnedRuntimeConfiguration::new(
+            let configuration = tracedecay_configuration::config::PinnedRuntimeConfiguration::new(
                 self.configuration.configuration_target().clone(),
                 current.revision_id,
                 current.snapshot,

@@ -18,8 +18,8 @@ use tracedecay_domain::configuration::{
 
 use tracedecay_application::{ProjectSettingsPatchInputV1, validate_project_settings_patch};
 
-use crate::config::PinnedRuntimeConfiguration;
-use crate::configuration::DirectConfigurationMutation;
+use tracedecay_configuration::DirectConfigurationMutation;
+use tracedecay_configuration::config::PinnedRuntimeConfiguration;
 
 pub use tracedecay_application::SettingsValidationIssueV1;
 
@@ -318,13 +318,13 @@ mod tests {
         )
         .unwrap();
         let current = PinnedRuntimeConfiguration {
-            target: crate::config::RuntimeConfigurationTarget {
+            target: tracedecay_configuration::config::RuntimeConfigurationTarget {
                 project_id: project_id.clone(),
                 project_root: PathBuf::from("/project"),
             },
             revision_id: revision.clone(),
             snapshot,
-            config: crate::config::TraceDecayConfig::default(),
+            config: tracedecay_configuration::config::TraceDecayConfig::default(),
         };
         let changed_timings = !current.config.telemetry.timings;
         let preview = preview_project_settings(
@@ -357,13 +357,13 @@ mod tests {
         )
         .unwrap();
         let current = PinnedRuntimeConfiguration {
-            target: crate::config::RuntimeConfigurationTarget {
+            target: tracedecay_configuration::config::RuntimeConfigurationTarget {
                 project_id: project_id.clone(),
                 project_root: PathBuf::from("/project"),
             },
             revision_id: revision.clone(),
             snapshot,
-            config: crate::config::TraceDecayConfig::default(),
+            config: tracedecay_configuration::config::TraceDecayConfig::default(),
         };
         // A snapshot without the key renders the canonical stock state: off.
         let current_settings = effective_context_scout_settings(&current.snapshot);

@@ -130,7 +130,7 @@ pub(crate) async fn execute_profile_retained_mcp_tool(
     operation: RetainedSurfaceOperation,
     tool_name: &str,
     mut args: Value,
-    runtime_registry: &crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
+    runtime_registry: &tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1,
     authority: &crate::daemon::retained_owner::ProfileRetainedConnectionAuthorityV1,
     lcm_authority: Option<&dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>,
     protocol_request_id: Option<tracedecay_application::RequestId>,
