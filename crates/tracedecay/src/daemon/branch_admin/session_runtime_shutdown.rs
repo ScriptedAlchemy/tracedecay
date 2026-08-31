@@ -1,6 +1,7 @@
 use std::sync::{Arc, atomic::Ordering};
 
-use super::{SessionRuntimeRegistryEntryV1, StoreAdministration, authority};
+use super::{SessionRuntimeRegistryEntryV1, StoreAdministration};
+use tracedecay_daemon_identity::authority;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 #[derive(Clone)]

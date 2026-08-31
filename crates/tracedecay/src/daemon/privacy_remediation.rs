@@ -125,8 +125,8 @@ mod tests {
     use tracedecay_session_memory::memory::{MemoryApplication, PrivacyRemediationTriggerV1};
 
     use super::{remediation_read_control, remediation_write_control};
-    use crate::daemon::profile_identity;
     use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
+    use tracedecay_daemon_identity::profile_identity;
     use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 
     fn secret() -> String {

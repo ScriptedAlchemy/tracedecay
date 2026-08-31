@@ -50,7 +50,7 @@ fn lsp_test_invocation(
         moved_store_adoption: crate::tracedecay::MovedStoreAdoption::Never,
     };
     tracedecay_daemon_protocol::DaemonInvocationClient::new(
-        super::super::DaemonConnection {
+        tracedecay_daemon_identity::DaemonConnection {
             endpoint,
             auth_token: None,
             authority_record: None,
@@ -567,7 +567,7 @@ async fn stdio_bridge_session_reconnects_on_a_fresh_socket_and_resumes_frames() 
         moved_store_adoption: crate::tracedecay::MovedStoreAdoption::Never,
     };
     let invocation = tracedecay_daemon_protocol::DaemonInvocationClient::new(
-        super::super::DaemonConnection {
+        tracedecay_daemon_identity::DaemonConnection {
             endpoint,
             auth_token: None,
             authority_record: None,
@@ -734,7 +734,7 @@ async fn user_session_read_bypasses_unregistered_project_route() {
     let endpoint = tracedecay_daemon_protocol::DaemonEndpoint::Unix(
         client_identity.profile_root.join("daemon.sock"),
     );
-    let daemon_authority = super::super::authority::DaemonAuthority::acquire(
+    let daemon_authority = tracedecay_daemon_identity::authority::DaemonAuthority::acquire(
         &client_identity.profile_root,
         &endpoint,
         "user-session-read-test",

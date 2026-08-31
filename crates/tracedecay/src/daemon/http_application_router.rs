@@ -18,7 +18,7 @@ fn build_http_application_router(project_id: &str, project_path: &Path) -> Resul
         false,
         false,
     )?;
-    let client = crate::daemon::invocation_client_for_current(handshake)?;
+    let client = tracedecay_daemon_identity::invocation_client_for_current(handshake)?;
     crate::application_surface::http_application_router(
         client,
         tracedecay_daemon_service::daemon_operation_event_authority(),

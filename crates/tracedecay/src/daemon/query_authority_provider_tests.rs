@@ -463,8 +463,8 @@ async fn evaluated_initial_query_state_is_available_without_a_fake_activation_ev
 
     let directory = TempDir::new().expect("temporary cursor store");
     let profile_root = directory.path().join("profile");
-    let identity =
-        crate::daemon::profile_identity::load_or_create(&profile_root).expect("profile identity");
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+        .expect("profile identity");
     let _scope_guard =
         tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 1, "query-initial")
             .expect("database scope");
@@ -541,7 +541,7 @@ async fn retiring_project_query_authority_preserves_same_project_in_another_prof
     let directory = TempDir::new().expect("temporary cursor store");
     let (retiring_profile, retiring_cursor_keys) = {
         let profile_root = directory.path().join("retiring-profile");
-        let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+        let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
             .expect("retiring profile identity");
         let _scope_guard = tracedecay_runtime_core::db::enter_daemon_database_scope(
             &profile_root,
@@ -570,7 +570,7 @@ async fn retiring_project_query_authority_preserves_same_project_in_another_prof
     };
     let (surviving_profile, surviving_cursor_keys) = {
         let profile_root = directory.path().join("surviving-profile");
-        let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+        let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
             .expect("surviving profile identity");
         let _scope_guard = tracedecay_runtime_core::db::enter_daemon_database_scope(
             &profile_root,

@@ -21,6 +21,8 @@ use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunLedgerRecord, AutomationTrigger,
 };
 use tracedecay_automation_runtime::automation::skill_writer::deploy_managed_skills_to_project;
+#[cfg(feature = "test-transport")]
+use tracedecay_daemon_identity::authority;
 use tracedecay_daemon_service::DaemonInvocationService;
 use tracedecay_dashboard_api::{
     DashboardAutomationAuthorityErrorV1, DashboardAutomationAuthorityV1,
@@ -160,18 +162,16 @@ pub(crate) fn compose_dashboard_automation_authority_for_test(
             let retained = Arc::clone(&retained);
             let retained_root = retained_root.clone();
             Box::pin(async move {
-                let requested = super::authority::canonical_identity_path(&requested_project_root)
+                let requested = authority::canonical_identity_path(&requested_project_root)
                     .map_err(|error| DashboardAutomationAuthorityErrorV1::Unavailable {
                         detail: format!("dashboard automation project is unavailable: {error}"),
                     })?;
-                let retained_identity = super::authority::canonical_identity_path(&retained_root)
-                    .map_err(|error| {
-                    DashboardAutomationAuthorityErrorV1::Unavailable {
+                let retained_identity = authority::canonical_identity_path(&retained_root)
+                    .map_err(|error| DashboardAutomationAuthorityErrorV1::Unavailable {
                         detail: format!(
                             "retained dashboard automation project is unavailable: {error}"
                         ),
-                    }
-                })?;
+                    })?;
                 if requested != retained_identity {
                     return Err(DashboardAutomationAuthorityErrorV1::Denied {
                         detail: "dashboard automation project authority resolved a different root"

@@ -6,6 +6,7 @@
 
 use super::*;
 use tracedecay_code_index_runtime::code_index_scheduler;
+use tracedecay_daemon_identity::profile_identity;
 use tracedecay_daemon_service::DaemonSemanticRuntimeRegistrationError;
 
 mod code_index_activation;
@@ -1335,7 +1336,7 @@ fn project_code_index_authorities(
     cg: &Arc<crate::tracedecay::TraceDecay>,
     canonical_project_path: &Path,
     authoritative_project_id: &str,
-    profile_identity: &crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
+    profile_identity: &profile_identity::LocalProfileIdentityAuthorityV1,
     route_registered: &Arc<AtomicBool>,
     project_database_is_read_only: bool,
 ) -> Result<ProjectCodeIndexAuthorities> {

@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::sync::{Mutex as StdMutex, MutexGuard as StdMutexGuard};
+use tracedecay_daemon_identity::authority;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct ProjectServerKey {

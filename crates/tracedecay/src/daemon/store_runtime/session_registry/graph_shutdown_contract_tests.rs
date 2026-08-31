@@ -21,7 +21,7 @@ use tracedecay_session_memory::memory::{
 };
 
 use super::{DaemonSessionRuntimeRegistryV1, ProjectRuntimeOwnerStateV1};
-use crate::daemon::profile_identity;
+use tracedecay_daemon_identity::profile_identity;
 use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 
 fn enrolled_root(base: &Path, project_id: &ProjectId) -> PathBuf {

@@ -8,6 +8,8 @@ use super::*;
 use std::collections::HashSet;
 #[cfg(unix)]
 use tracedecay_code_index_runtime::{GitWatchSyncConfigV1, git_watch};
+#[cfg(unix)]
+use tracedecay_daemon_identity::profile_identity;
 
 #[cfg(unix)]
 fn git_watch_sync_config(config: &crate::config::SyncConfig) -> GitWatchSyncConfigV1 {

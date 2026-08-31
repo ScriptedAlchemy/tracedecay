@@ -120,8 +120,8 @@ async fn failed_cold_mount_graph_replay_preserves_retained_text_generation() {
         project_id.as_str(),
     )
     .expect("project enrollment");
-    let identity =
-        crate::daemon::profile_identity::load_or_create(&profile_root).expect("profile identity");
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+        .expect("profile identity");
     let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         93,
@@ -256,8 +256,8 @@ async fn persistent_graph_activation_publishes_a_small_generation() {
         project_id.as_str(),
     )
     .expect("project enrollment");
-    let identity =
-        crate::daemon::profile_identity::load_or_create(&profile_root).expect("profile identity");
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+        .expect("profile identity");
     let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         94,

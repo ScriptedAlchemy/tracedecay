@@ -712,7 +712,7 @@ async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition
     let project_id = enroll_benchmark_project(&project)?;
 
     let profile = env.data_dir().join("profile");
-    let profile_identity = crate::daemon::profile_identity::load_or_create(&profile)
+    let profile_identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile)
         .map_err(|error| format!("create benchmark profile identity: {error}"))?;
     let brain_id = profile_identity.brain_id().clone();
     let profile_id = profile_identity.profile_id().clone();

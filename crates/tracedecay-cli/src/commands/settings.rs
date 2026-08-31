@@ -113,7 +113,7 @@ async fn invoke_configuration_surface(
         false,
         false,
     )?;
-    let client = tracedecay::daemon::invocation_client_for_current(handshake)?;
+    let client = tracedecay_daemon_identity::invocation_client_for_current(handshake)?;
     loop {
         let result = crate::cli::dispatch::resolve_cli_application_surface(
             operation,

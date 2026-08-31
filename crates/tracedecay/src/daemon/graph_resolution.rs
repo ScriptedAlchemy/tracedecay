@@ -8,6 +8,7 @@
 //! a graph-only authority from registry paths.
 
 use super::*;
+use tracedecay_daemon_identity::authority;
 
 fn sole_mounted_server_matching(
     servers: &[(

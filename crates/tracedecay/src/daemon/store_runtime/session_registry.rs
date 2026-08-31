@@ -26,7 +26,7 @@ use super::resolver::{
     LocalProfileStoreAuthorityV1, LocalProjectEnrollmentAuthorityV1, LocalStoreLocatorResolutionV1,
     LocalStoreRuntimeResolverV1,
 };
-use crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1;
+use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV1;
 use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1};
 use tracedecay_graph_db::{GraphDbOwnerAttachmentV1, GraphDbRetirementCommit};
 use tracedecay_runtime_core::db::MemoryGraphReconciliationRetirementTerminalV1;
@@ -3088,14 +3088,15 @@ impl ProfileRuntime for DaemonSessionRuntimeRegistryV1 {
 
 fn runtime_incarnation(identity: &LocalProfileIdentityAuthorityV1) -> Result<StoreIncarnationV1> {
     let process_run_id = tracedecay_runtime_core::runtime_identity::process_run_id();
-    let daemon_generation = crate::daemon::authority::current_record(identity.profile_root())?
-        .filter(|record| {
-            record.process_run_id == process_run_id
-                && record.profile_root == identity.profile_root()
-                && record.brain_id.as_ref() == Some(identity.brain_id())
-                && record.profile_id.as_ref() == Some(identity.profile_id())
-        })
-        .map(|record| record.epoch);
+    let daemon_generation =
+        tracedecay_daemon_identity::authority::current_record(identity.profile_root())?
+            .filter(|record| {
+                record.process_run_id == process_run_id
+                    && record.profile_root == identity.profile_root()
+                    && record.brain_id.as_ref() == Some(identity.brain_id())
+                    && record.profile_id.as_ref() == Some(identity.profile_id())
+            })
+            .map(|record| record.epoch);
     let generation = match daemon_generation {
         Some(generation) => generation,
         None => process_runtime_generation(process_run_id).ok_or_else(|| {

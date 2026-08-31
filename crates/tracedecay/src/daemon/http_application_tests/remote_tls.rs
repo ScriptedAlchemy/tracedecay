@@ -788,9 +788,12 @@ async fn remote_tls_listener_serves_only_remote_routes_and_isolates_credential_a
         tracedecay_daemon_protocol::DaemonEndpoint::Unix(profile_root.join("remote-tls.sock"));
     #[cfg(not(unix))]
     let endpoint = tracedecay_daemon_protocol::default_loopback_endpoint();
-    let daemon_authority =
-        crate::daemon::authority::DaemonAuthority::acquire(&profile_root, &endpoint, "test")
-            .expect("daemon authority");
+    let daemon_authority = tracedecay_daemon_identity::authority::DaemonAuthority::acquire(
+        &profile_root,
+        &endpoint,
+        "test",
+    )
+    .expect("daemon authority");
     let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         daemon_authority.record().epoch,
@@ -911,9 +914,12 @@ async fn remote_tls_listener_bounds_connections_and_expires_incomplete_headers()
         tracedecay_daemon_protocol::DaemonEndpoint::Unix(profile_root.join("remote-tls.sock"));
     #[cfg(not(unix))]
     let daemon_endpoint = tracedecay_daemon_protocol::default_loopback_endpoint();
-    let daemon_authority =
-        crate::daemon::authority::DaemonAuthority::acquire(&profile_root, &daemon_endpoint, "test")
-            .expect("daemon authority");
+    let daemon_authority = tracedecay_daemon_identity::authority::DaemonAuthority::acquire(
+        &profile_root,
+        &daemon_endpoint,
+        "test",
+    )
+    .expect("daemon authority");
     let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         daemon_authority.record().epoch,

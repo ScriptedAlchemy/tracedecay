@@ -2630,8 +2630,9 @@ async fn portable_broker_bootstrap_bypasses_project_writer_gate() {
         ..test_handshake_defaults()
     };
     let owners = Arc::new(tokio::sync::Mutex::new(DatabaseOwnerRegistry::default()));
-    let profile_identity = crate::daemon::profile_identity::load_or_create(&profile_root)
-        .expect("load test profile identity");
+    let profile_identity =
+        tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+            .expect("load test profile identity");
     let store_administration = StoreAdministration::with_project_servers(Arc::clone(&owners))
         .with_profile_identity(profile_identity);
     store_administration
@@ -2938,8 +2939,9 @@ async fn portable_project_warmup_rejects_after_shutdown_snapshot() {
         }))
         .expect("initialize request");
     let owners = Arc::new(tokio::sync::Mutex::new(DatabaseOwnerRegistry::default()));
-    let profile_identity = crate::daemon::profile_identity::load_or_create(&profile_root)
-        .expect("load test profile identity");
+    let profile_identity =
+        tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+            .expect("load test profile identity");
     let store_administration = StoreAdministration::with_project_servers(Arc::clone(&owners))
         .with_profile_identity(profile_identity);
     let project_open_gates = Arc::new(tokio::sync::Mutex::new(
@@ -3822,8 +3824,9 @@ async fn production_composition_harness_shutdown_allows_immediate_profile_reopen
     let profile_root = harness.profile_root().to_path_buf();
     harness.shutdown().await;
 
-    let profile_identity = crate::daemon::profile_identity::load_or_create(&profile_root)
-        .expect("reload isolated profile identity");
+    let profile_identity =
+        tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+            .expect("reload isolated profile identity");
     let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         100,

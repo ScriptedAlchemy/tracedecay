@@ -36,8 +36,10 @@ impl WorkflowTestStore {
 
 async fn workflow_test_store(project_root: &Path) -> WorkflowTestStore {
     let profile = tempfile::tempdir().unwrap();
-    let identity =
-        crate::daemon::profile_identity::load_or_create(&profile.path().join("profile")).unwrap();
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(
+        &profile.path().join("profile"),
+    )
+    .unwrap();
     let nonce = WORKFLOW_TEST_NONCE.fetch_add(1, Ordering::Relaxed);
     let scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         identity.profile_root(),

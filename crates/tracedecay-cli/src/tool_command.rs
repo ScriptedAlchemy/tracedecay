@@ -361,7 +361,7 @@ fn dispatch_cli_application_surface_inner(
                     false,
                     false,
                 ) && let Ok(client) =
-                    tracedecay::daemon::invocation_client_for_current(handshake)
+                    tracedecay_daemon_identity::invocation_client_for_current(handshake)
                 {
                     observe_surface_argument_rejection(
                         Some(&client),
@@ -379,7 +379,7 @@ fn dispatch_cli_application_surface_inner(
         };
         let handshake =
             tracedecay::daemon::handshake_for_current_client(project, None, false, false)?;
-        let client = tracedecay::daemon::invocation_client_for_current(handshake)?;
+        let client = tracedecay_daemon_identity::invocation_client_for_current(handshake)?;
         // A cold daemon answers a retryable pre-admission problem while the
         // project open still warms in the background (bounded by the daemon's
         // foreground open wait). The compatibility tool path rides that state out

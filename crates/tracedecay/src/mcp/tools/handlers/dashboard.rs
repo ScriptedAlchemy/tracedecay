@@ -207,7 +207,7 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
         )
         .map_err(|error| error.to_string())?;
         let executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor> = Arc::new(
-            crate::daemon::invocation_client_for_current(handshake)
+            tracedecay_daemon_identity::invocation_client_for_current(handshake)
                 .map_err(|error| error.to_string())?,
         );
         Self::new(executor, self.user_profile_id.clone())

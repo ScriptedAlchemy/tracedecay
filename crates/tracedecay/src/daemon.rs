@@ -146,7 +146,6 @@ pub fn error_is_read_deadline(error: &TraceDecayError) -> bool {
     ) || error_message_is_read_deadline(&error.to_string())
 }
 
-mod authority;
 pub(crate) mod automation_effect;
 mod bootstrap;
 mod bootstrap_route;
@@ -291,7 +290,6 @@ use projectless::projectless_tools_call_response;
 use projectless::{
     projectless_tool_call, projectless_user_session_request, serve_projectless_client,
 };
-pub(crate) mod profile_identity;
 mod project_composition;
 mod project_delivery_mount;
 #[cfg(test)]

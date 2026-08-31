@@ -279,7 +279,8 @@ export function GenerationAnchor(value: PublicWidget) { return value; }
     tracedecay_runtime_core::storage::pin_fixture_repository_identity(fixture.path(), PROJECT_ID)
         .expect("project enrollment");
     let identity =
-        crate::daemon::profile_identity::load_or_create(&profile_root).expect("profile identity");
+        tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+            .expect("profile identity");
     let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         92,
