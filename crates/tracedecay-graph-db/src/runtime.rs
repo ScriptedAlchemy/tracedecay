@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use grafeo_common::types::Value;
@@ -83,13 +83,6 @@ pub(crate) struct Inner {
     /// after every database write claim; see
     /// [`crate::projection_identity_index`].
     pub(crate) identity_indexes: crate::projection_identity_index::IdentityIndexCache,
-    /// Mutation records committed through the batch apply paths since the
-    /// last apply-state release (or since open). Bulk staging accumulates
-    /// MVCC version chains and transaction metadata beside the live rows, so
-    /// this counter is the truthful trigger for
-    /// [`GraphDb::maybe_release_apply_state`]: it grows with exactly the
-    /// records whose apply-state overhead a release prunes.
-    pub(crate) applied_mutations_since_release: AtomicU64,
     pub(crate) closed: AtomicBool,
     pub(crate) poisoned: AtomicBool,
 }
@@ -189,7 +182,6 @@ impl GraphDb {
                 sealed_read_only: AtomicBool::new(false),
                 markers,
                 identity_indexes: crate::projection_identity_index::IdentityIndexCache::default(),
-                applied_mutations_since_release: AtomicU64::new(0),
                 closed: AtomicBool::new(false),
                 poisoned: AtomicBool::new(false),
             }),
@@ -937,7 +929,6 @@ impl GraphDb {
             Ok::<_, GraphDbError>(vector_updates)
         })?;
         let namespace = batch.namespace.clone();
-        let applied_mutations = batch.mutations.len() as u64;
         let commit = mutation::apply(
             database,
             state,
@@ -947,9 +938,6 @@ impl GraphDb {
             &self.inner.poisoned,
             check,
         )?;
-        self.inner
-            .applied_mutations_since_release
-            .fetch_add(applied_mutations, Ordering::AcqRel);
         // The Grafeo transaction (including any publication record) is durably
         // committed from this point. Cancellation is deliberately not observed
         // in the commit->refresh window: reporting Cancelled here would mistype
@@ -1021,7 +1009,6 @@ impl GraphDb {
         endpoint_namespaces: &mutation::RelationEndpointNamespaces,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<GraphCommit, GraphDbError> {
-        let applied_mutations = batch.mutations.len() as u64;
         let commit = mutation::apply(
             database,
             state,
@@ -1031,9 +1018,6 @@ impl GraphDb {
             &self.inner.poisoned,
             check,
         )?;
-        self.inner
-            .applied_mutations_since_release
-            .fetch_add(applied_mutations, Ordering::AcqRel);
         if self.inner.durability == GraphDurability::WalSync
             && let Err(error) = hotpath::measure_block!("graph_db.wal.sync", sync_wal(database))
         {

@@ -24,28 +24,6 @@ pub const MAX_VERIFIED_GENERATION_BATCH_LIVE_BYTES: usize = 32 * 1024 * 1024;
 /// and cancellation is observed before and after every durable page.
 pub(crate) const MAX_NATIVE_GENERATION_STAGE_MUTATIONS: usize = 65_536;
 pub(crate) const MAX_NATIVE_GENERATION_STAGE_LIVE_BYTES: usize = 128 * 1024 * 1024;
-/// Applied mutation records after which a completed publication releases
-/// the staging database's accumulated apply-state (engine MVCC GC plus
-/// returning freed allocator arenas to the kernel).
-///
-/// The live engine keeps every applied record heap-resident, and bulk
-/// staging additionally accumulates MVCC version chains and transaction
-/// metadata that only an explicit GC prunes; on glibc the freed nodes then
-/// sit in retained arenas that the kernel still counts as anon RSS
-/// (`tests/quarantine_replay_rss.rs` prices both effects). Before the
-/// release existed, that overhead came back only through a process restart —
-/// which is exactly how the quarantine-replay OOM loop "converged": every
-/// corpus-sized replay grew anon RSS until the kernel killed the daemon,
-/// and the restart resumed from the durable page receipts. The release does
-/// the same reclamation at a publication boundary, without the kill.
-///
-/// One million records is roughly one whole-corpus code generation of a
-/// large repository (the TraceDecay checkout seals ~170k entities and
-/// ~165k relations per scope plus occurrence rows): corpus-sized replay
-/// publications trip it about once per generation, while incremental
-/// vector/retirement traffic accumulates toward it slowly instead of paying
-/// a GC walk per small batch.
-pub(crate) const GRAPH_APPLY_STATE_RELEASE_MUTATIONS: u64 = 1_000_000;
 pub const MAX_GRAPH_VECTOR_DIMENSION: usize = 4_096;
 pub const MAX_GRAPH_IDENTIFIER_BYTES: usize = 1_024;
 pub const MAX_GRAPH_ENTITY_LABELS: usize = 128;
