@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use super::Database;
+use crate::store_runtime::{VerifiedGraphRuntimePortV1, VerifiedGraphRuntimeWeakProxyV1};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_db::GraphWatermark;
-use crate::store_runtime::{VerifiedGraphRuntimePortV1, VerifiedGraphRuntimeWeakProxyV1};
 
 /// Watermark of the projected memory-graph source at an exact lineage stamp.
 ///

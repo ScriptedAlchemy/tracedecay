@@ -2759,8 +2759,10 @@ mod tests {
         let mut store = VectorGenerationStateMachineV1::with_staged_value_retention(
             StagedVectorValueRetentionV1::Elided,
         );
-        store.published =
-            PublishedStateV1::immutable_graph_generation(BTreeMap::from([(base_id.clone(), elided)]));
+        store.published = PublishedStateV1::immutable_graph_generation(BTreeMap::from([(
+            base_id.clone(),
+            elided,
+        )]));
 
         let target_source = id("code-generation.target");
         let prepared = reused_prepared(
@@ -2789,7 +2791,10 @@ mod tests {
             .generation(&publication.generation_id)
             .expect("published generation");
         assert!(
-            published.vectors().values().all(|row| row.values.is_empty()),
+            published
+                .vectors()
+                .values()
+                .all(|row| row.values.is_empty()),
             "the elided machine never fabricates payloads"
         );
 

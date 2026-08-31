@@ -1425,8 +1425,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         Ok(handshake) => handshake,
         Err(_) => {
             drop(setup_activity);
-            refuse_unparseable_handshake(&mut transport, &handshake_line, binary_version()?)
-                .await;
+            refuse_unparseable_handshake(&mut transport, &handshake_line, binary_version()?).await;
             return Ok(());
         }
     };

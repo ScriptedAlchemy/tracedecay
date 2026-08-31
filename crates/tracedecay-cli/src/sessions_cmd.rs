@@ -119,9 +119,7 @@ async fn handle_sessions_import(
 }
 
 #[hotpath::measure(label = "cli.sessions.search", future = true)]
-async fn handle_sessions_search(
-    args: SessionsSearchArgs,
-) -> tracedecay_domain::errors::Result<()> {
+async fn handle_sessions_search(args: SessionsSearchArgs) -> tracedecay_domain::errors::Result<()> {
     let project_id = args.project_id.clone();
     let project_path = args.project_path.clone();
     let project_path = resolve_cli_project_root(None, project_id, project_path).await?;

@@ -35,9 +35,7 @@ pub(super) fn validate_lineage_projection(
         })
         .collect::<BTreeMap<_, _>>();
     for source in &publication.draft.source_refs {
-        let tracedecay_lcm::types::LcmSourceRef::SummaryNode { node_id } =
-            source
-        else {
+        let tracedecay_lcm::types::LcmSourceRef::SummaryNode { node_id } = source else {
             continue;
         };
         if node_id == summary_id {

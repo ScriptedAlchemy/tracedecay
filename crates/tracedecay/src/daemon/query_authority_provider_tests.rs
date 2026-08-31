@@ -4,11 +4,6 @@ use crate::config::retrieval::{
     RetrievalProfileStateSnapshotV1, RetrievalRuntimeCompatibilityV1, SemanticCompatibilityPinsV1,
     SemanticResourceRequirementV1,
 };
-use tracedecay_search_eval::{
-    DirectEvaluationReportV1, DirectEvaluationStatusV1, DirectProfileEvaluationV1,
-    DirectQualityMetricsV1, DirectRatioMetricV1, EvaluationExecutionContractV1,
-    OptionalStageMeasurementV1, OptionalStageMeasurementsV1,
-};
 use std::{collections::BTreeMap, path::Path, process::Command, time::Duration};
 use tempfile::TempDir;
 use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationSnapshotId};
@@ -25,6 +20,11 @@ use tracedecay_domain::{
     SanitizerRevision, SingleRootScopeV1, TemporalModeV1, VectorWatermark, WorktreeId,
 };
 use tracedecay_query::retrieval::semantic::SemanticCalibrationProfileV1;
+use tracedecay_search_eval::{
+    DirectEvaluationReportV1, DirectEvaluationStatusV1, DirectProfileEvaluationV1,
+    DirectQualityMetricsV1, DirectRatioMetricV1, EvaluationExecutionContractV1,
+    OptionalStageMeasurementV1, OptionalStageMeasurementsV1,
+};
 use tracedecay_usecases::semantic_runtime::{
     CommittedRetrievalProfileStateV1, SemanticActivationCommandV1, SemanticActivationReceiptV1,
     SemanticActivationRequestV1, SemanticConfigurationPinV1, SemanticCurrentLinkedActivationV1,
@@ -91,11 +91,12 @@ fn passing_report(evaluated_profile_id: &str) -> DirectEvaluationReportV1 {
             fusion_revision: "fusion.aggregate-only-test.v1".to_owned(),
             runtime_revision: "runtime.aggregate-only-test.v1".to_owned(),
             cache_state: "empty".to_owned(),
-            concurrency: tracedecay_search_eval::candidate_output::EvaluationConcurrencyContractV1 {
-                query_workers: 1,
-                projection_workers: 1,
-                query_execution: "serial".to_owned(),
-            },
+            concurrency:
+                tracedecay_search_eval::candidate_output::EvaluationConcurrencyContractV1 {
+                    query_workers: 1,
+                    projection_workers: 1,
+                    query_execution: "serial".to_owned(),
+                },
         },
         profile_material_digests: BTreeMap::new(),
         raw_output_digest: "sha256:aggregate-only-test".to_owned(),

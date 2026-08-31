@@ -1,5 +1,5 @@
-use tracedecay_runtime_core::db::engine::QueryExecutor;
 use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_runtime_core::db::engine::QueryExecutor;
 use tracedecay_store::{StoreRuntimeBindingV1, StoreShardScopeV1};
 
 const LEGACY_SESSION_RELATION_TABLES: [&str; 5] = [

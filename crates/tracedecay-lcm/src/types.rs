@@ -211,10 +211,7 @@ pub struct LcmGrepRequest {
     /// Optional git-scope constraint (branch/worktree/commit). When set,
     /// hits are limited to sessions correlated with the git ref via EXISTS
     /// pushdown against the git-correlation tables. Defaults to `None`.
-    #[serde(
-        default,
-        skip_serializing_if = "crate::GitScopeFilter::is_empty"
-    )]
+    #[serde(default, skip_serializing_if = "crate::GitScopeFilter::is_empty")]
     pub git_filter: crate::GitScopeFilter,
 }
 

@@ -136,8 +136,10 @@ impl EmbeddingRuntime for GatedOpenRuntime {
             .expect("gate lock")
             .recv()
             .expect("gate release signal");
-        self.inner
-            .open_session(authority, &crate::fastembed_adapter::ManualCancellation::new())
+        self.inner.open_session(
+            authority,
+            &crate::fastembed_adapter::ManualCancellation::new(),
+        )
     }
 }
 

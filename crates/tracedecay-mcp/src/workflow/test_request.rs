@@ -1,9 +1,9 @@
 //! Validation for the bounded `tracedecay_run_affected_tests` request.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use crate::tools::render;
 use crate::ToolResult;
+use crate::tools::render;
 
 const DEFAULT_TEST_TIMEOUT_SECS: u64 = 300;
 /// Maximum exact test identities admitted to one managed foreground request.

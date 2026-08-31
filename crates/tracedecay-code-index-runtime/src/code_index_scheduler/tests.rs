@@ -1762,7 +1762,11 @@ fn provenance_only_reseal_carries_the_full_parse_forward() {
 
     fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
     scheduler.notify_path(fixture.path().join("src/lib.rs"));
-    let dirty = published(scheduler.reconcile_now().expect("dirty incremental publish"));
+    let dirty = published(
+        scheduler
+            .reconcile_now()
+            .expect("dirty incremental publish"),
+    );
     assert!(
         scheduler
             .latest_complete()

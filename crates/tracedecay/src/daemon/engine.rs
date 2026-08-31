@@ -303,10 +303,7 @@ impl DaemonEngine {
 
     /// Logs a `daemon_version_skew` event when this handshake's client runs a
     /// different binary version, deduped per distinct client version.
-    pub(super) async fn log_client_version_skew(
-        &self,
-        handshake: &DaemonHandshake,
-    ) -> Result<()> {
+    pub(super) async fn log_client_version_skew(&self, handshake: &DaemonHandshake) -> Result<()> {
         let Some(client_version) = self.client_version_skew_to_log(handshake).await? else {
             return Ok(());
         };

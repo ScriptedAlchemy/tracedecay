@@ -1328,12 +1328,11 @@ fn fastembed_model(
         special_tokens_map_file: member_bytes(ArtifactMemberRoleV1::SpecialTokensMap)?,
         tokenizer_config_file: member_bytes(ArtifactMemberRoleV1::TokenizerConfig)?,
     };
-    Ok(UserDefinedEmbeddingModel::new(
-        member_bytes(ArtifactMemberRoleV1::Model)?,
-        tokenizer_files,
+    Ok(
+        UserDefinedEmbeddingModel::new(member_bytes(ArtifactMemberRoleV1::Model)?, tokenizer_files)
+            .with_pooling(fastembed_pooling(artifact.pooling())?)
+            .with_quantization(fastembed_quantization(artifact.precision())),
     )
-    .with_pooling(fastembed_pooling(artifact.pooling())?)
-    .with_quantization(fastembed_quantization(artifact.precision())))
 }
 
 #[cfg(feature = "semantic-fastembed")]
@@ -2209,7 +2208,9 @@ mod tests {
             EmbeddingMetricV1::DotProduct,
             EmbeddingNormalizationV1::L2,
         );
-        let mut session = runtime.open_session(&authority, &never_cancelled()).expect("session");
+        let mut session = runtime
+            .open_session(&authority, &never_cancelled())
+            .expect("session");
         let vectors = session
             .embed_batch(&batch(&["echo me"]), &never_cancelled())
             .expect("embed");
@@ -2235,7 +2236,9 @@ mod tests {
             EmbeddingMetricV1::Cosine,
             EmbeddingNormalizationV1::None,
         );
-        let mut session = runtime.open_session(&authority, &never_cancelled()).expect("session");
+        let mut session = runtime
+            .open_session(&authority, &never_cancelled())
+            .expect("session");
         let vectors = session
             .embed_batch(&batch(&["raw values"]), &never_cancelled())
             .expect("embed");
@@ -2249,7 +2252,9 @@ mod tests {
     #[test]
     fn cancellation_before_embed_aborts() {
         let runtime = FakeEmbeddingRuntime::new();
-        let mut session = runtime.open_session(&authority(8), &never_cancelled()).expect("session");
+        let mut session = runtime
+            .open_session(&authority(8), &never_cancelled())
+            .expect("session");
         let cancel = ManualCancellation::new();
         cancel.cancel();
         let result = session.embed_batch(&batch(&["a", "b"]), &cancel);
@@ -2272,7 +2277,9 @@ mod tests {
         }
 
         let runtime = FakeEmbeddingRuntime::new();
-        let mut session = runtime.open_session(&authority(8), &never_cancelled()).expect("session");
+        let mut session = runtime
+            .open_session(&authority(8), &never_cancelled())
+            .expect("session");
         let result = session.embed_batch(&batch(&["a", "b"]), &ExpiredAuthority);
 
         assert_eq!(result, Err(EmbedError::DeadlineExceeded));
@@ -2286,7 +2293,9 @@ mod tests {
     #[test]
     fn cancellation_mid_embed_discards_partial_batch() {
         let runtime = FakeEmbeddingRuntime::new();
-        let mut session = runtime.open_session(&authority(8), &never_cancelled()).expect("session");
+        let mut session = runtime
+            .open_session(&authority(8), &never_cancelled())
+            .expect("session");
         // First poll (before text 1) passes, second poll cancels.
         let cancel = ScriptedCancellation::new(1);
         let result = session.embed_batch(&batch(&["a", "b", "c", "d"]), &cancel);
@@ -2303,7 +2312,9 @@ mod tests {
         let runtime = FakeEmbeddingRuntime::new();
         let mut authority = authority(8);
         authority.runtime_artifact.max_batch_texts = 1;
-        let mut session = runtime.open_session(&authority, &never_cancelled()).expect("session");
+        let mut session = runtime
+            .open_session(&authority, &never_cancelled())
+            .expect("session");
         let result = session.embed_batch(&batch(&["a", "b"]), &never_cancelled());
         assert!(matches!(
             result,
@@ -2413,7 +2424,9 @@ mod tests {
         let runtime = FakeEmbeddingRuntime::new().with_resident_bytes_per_session(4096);
         let counters = runtime.counters();
         {
-            let session = runtime.open_session(&authority(8), &never_cancelled()).expect("session");
+            let session = runtime
+                .open_session(&authority(8), &never_cancelled())
+                .expect("session");
             assert_eq!(session.resident_bytes_estimate(), 4096);
             assert_eq!(counters.sessions_opened.load(Ordering::SeqCst), 1);
             assert_eq!(counters.sessions_closed.load(Ordering::SeqCst), 0);

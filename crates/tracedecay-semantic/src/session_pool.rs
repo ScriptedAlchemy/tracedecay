@@ -384,9 +384,12 @@ where
         clock: C,
         config: SessionPoolConfigV1,
     ) -> Result<Self, SessionPoolConfigError> {
-        Self::with_resident_sampler(runtime, clock, config, Arc::new(|| {
-            sampled_process_resident_bytes_v1()
-        }))
+        Self::with_resident_sampler(
+            runtime,
+            clock,
+            config,
+            Arc::new(|| sampled_process_resident_bytes_v1()),
+        )
     }
 
     /// [`Self::new`] with an injected process-resident sampler, so tests can
