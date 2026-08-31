@@ -421,9 +421,7 @@ async fn compression_boundary_link_preserves_payload_owner_and_projects_debt() {
         db.lcm_expand(tracedecay_lcm::LcmExpandRequest {
             provider: "cursor".into(),
             session_id: "session-new".into(),
-            target: tracedecay_lcm::LcmExpandTarget::ExternalPayload {
-                payload_ref
-            },
+            target: tracedecay_lcm::LcmExpandTarget::ExternalPayload { payload_ref },
             content_slice: None,
             source_offset: 0,
             source_limit: None,

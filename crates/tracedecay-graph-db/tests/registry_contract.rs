@@ -1442,7 +1442,9 @@ fn preexisting_empty_graph_file_is_quarantined_and_remounted_fresh() {
         .expect("the empty container must be quarantined, not silently replaced")
         .path();
     assert_eq!(
-        std::fs::metadata(quarantine.join("graph.grafeo")).unwrap().len(),
+        std::fs::metadata(quarantine.join("graph.grafeo"))
+            .unwrap()
+            .len(),
         0,
         "the forensic zero-byte container is retained"
     );

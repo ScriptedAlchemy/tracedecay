@@ -20,15 +20,15 @@ use tracedecay_application::{
     SourceMetadataRequest, callable_code_operation,
 };
 use tracedecay_domain::{
-    ActorId, AuthorizationRevision, CalibrationProfileId, CodeGenerationId, CommitId,
-    ComponentRevision, DiversityPolicy, EphemeralSanitizedQueryViewV1, ExactAdmissionRuleRevision,
-    ExactClass, FreshnessVectorDigest, FusedCandidate, FusionProfile, LogicalEvidenceId,
-    ManifestDigest, OptionalStagePublicStatus, PrincipalId, PrivacyDomainId, ProjectId,
-    PublicRetrieverStatus, QueryNormalizationRevision, RankedCandidate, RefId, RelationEdgeKindV1,
-    RepositoryId, RerankPolicy, RetrievalAnchorId, RetrievalBudget, RetrievalCursorKeyId,
-    RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverKind, RetrieverOutcome,
-    SanitizerRevision, ScoreDomainCalibrationV1, ScoreDomainId, SensitivityLevelV1,
-    SingleRootScopeV1, TemporalModeV1, UtcMicros, VectorWatermark, WorktreeId,
+    ActorId, AuthorizationRevision, CalibrationProfileId, ChunkerRevision, CodeGenerationId,
+    CommitId, ComponentRevision, DiversityPolicy, EphemeralSanitizedQueryViewV1,
+    ExactAdmissionRuleRevision, ExactClass, FreshnessVectorDigest, FusedCandidate, FusionProfile,
+    LogicalEvidenceId, ManifestDigest, OptionalStagePublicStatus, PolicyRevisionId, PrincipalId,
+    PrivacyDomainId, ProjectId, PublicRetrieverStatus, QueryNormalizationRevision, RankedCandidate,
+    RefId, RelationEdgeKindV1, RepositoryId, RerankPolicy, RetrievalAnchorId, RetrievalBudget,
+    RetrievalCursorKeyId, RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverKind,
+    RetrieverOutcome, SanitizerRevision, ScoreDomainCalibrationV1, ScoreDomainId,
+    SensitivityLevelV1, SingleRootScopeV1, TemporalModeV1, UtcMicros, VectorWatermark, WorktreeId,
 };
 
 #[cfg(feature = "semantic-fastembed")]
@@ -210,6 +210,35 @@ fn scheduler(
 ) -> CodeIndexWorktreeSchedulerV1 {
     CodeIndexWorktreeSchedulerV1::open(test_project_id(), fixture.path(), store_root, bytes)
         .expect("open worktree scheduler")
+}
+
+fn replace_scheduler_policy_revision(scheduler: &mut CodeIndexWorktreeSchedulerV1, revision: &str) {
+    let mut config = scheduler.production_config.clone();
+    config.policy_revision = PolicyRevisionId::new(revision).expect("policy revision");
+    scheduler.owner = super::open_production_code_index_owner_v1(
+        config.clone(),
+        scheduler.publication.clone(),
+        super::DaemonProjectionSinkV1,
+    )
+    .expect("open reconfigured production owner")
+    .with_physical_artifact_pool(scheduler.byte_pool.physical_artifacts.clone());
+    scheduler.production_config = config;
+}
+
+fn replace_scheduler_chunker_revision(
+    scheduler: &mut CodeIndexWorktreeSchedulerV1,
+    revision: &str,
+) {
+    let mut config = scheduler.production_config.clone();
+    config.chunker_revision = ChunkerRevision::new(revision).expect("chunker revision");
+    scheduler.owner = super::open_production_code_index_owner_v1(
+        config.clone(),
+        scheduler.publication.clone(),
+        super::DaemonProjectionSinkV1,
+    )
+    .expect("open reconfigured production owner")
+    .with_physical_artifact_pool(scheduler.byte_pool.physical_artifacts.clone());
+    scheduler.production_config = config;
 }
 
 fn build_progress_snapshot(
@@ -1762,7 +1791,11 @@ fn provenance_only_reseal_carries_the_full_parse_forward() {
 
     fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
     scheduler.notify_path(fixture.path().join("src/lib.rs"));
-    let dirty = published(scheduler.reconcile_now().expect("dirty incremental publish"));
+    let dirty = published(
+        scheduler
+            .reconcile_now()
+            .expect("dirty incremental publish"),
+    );
     assert!(
         scheduler
             .latest_complete()
@@ -1810,6 +1843,187 @@ fn provenance_only_reseal_carries_the_full_parse_forward() {
             .as_str(),
         git_stdout(fixture.path(), &["rev-parse", "HEAD"]),
         "the reseal records the moved tip as its exact source revision"
+    );
+}
+
+#[test]
+fn policy_transition_rebuilds_incompatible_active_generation() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let mut config_a = scheduler(&fixture, store.path().to_path_buf(), Arc::clone(&bytes));
+    let generation_a = published(
+        config_a
+            .reconcile_now()
+            .expect("publish configuration A generation"),
+    )
+    .generation_id;
+    drop(config_a);
+
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    let mut config_b = scheduler(&fixture, store.path().to_path_buf(), bytes);
+    replace_scheduler_policy_revision(&mut config_b, "policy.daemon.v2");
+
+    let generation_b = published(
+        config_b
+            .reconcile_now()
+            .expect("configuration B must rebuild instead of rejecting A"),
+    )
+    .generation_id;
+    assert_ne!(generation_b, generation_a);
+    assert!(
+        config_b
+            .latest_complete()
+            .expect("configuration B generation")
+            .generation()
+            .chunks()
+            .chunks()
+            .iter()
+            .all(|chunk| chunk.sensitivity.policy_revision.as_str() == "policy.daemon.v2")
+    );
+}
+
+#[test]
+fn unchanged_policy_transition_refuses_unsafe_serving_and_rebuilds_once() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let mut config_a = scheduler(&fixture, store.path().to_path_buf(), Arc::clone(&bytes));
+    let generation_a = published(
+        config_a
+            .reconcile_now()
+            .expect("publish configuration A generation"),
+    )
+    .generation_id;
+    drop(config_a);
+
+    let mut config_b = scheduler(&fixture, store.path().to_path_buf(), Arc::clone(&bytes));
+    replace_scheduler_policy_revision(&mut config_b, "policy.daemon.v2");
+    assert!(
+        config_b.latest_complete().is_none(),
+        "a generation sealed under a foreign policy must not serve while B rebuilds"
+    );
+    let recovery = config_b
+        .generation_recovery()
+        .read()
+        .expect("generation recovery status")
+        .clone()
+        .expect("policy recovery status");
+    assert_eq!(recovery.incompatible_generation_id, generation_a.as_str());
+    assert_eq!(recovery.incompatibilities, ["policy_revision"]);
+    assert_eq!(
+        recovery.serving,
+        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexGenerationRecoveryServingV1::Refused
+    );
+    let generation_b = published(
+        config_b
+            .reconcile_now()
+            .expect("unchanged source still requires a configuration B generation"),
+    )
+    .generation_id;
+    assert_ne!(generation_b, generation_a);
+    let pointer = config_b
+        .publication
+        .read_publication_pointer()
+        .expect("read configuration B publication")
+        .expect("configuration B publication pointer");
+    assert_eq!(pointer.generation_id, generation_b.as_str());
+    assert_eq!(
+        pointer
+            .generation_index
+            .iter()
+            .filter(|entry| entry.generation_id == generation_a.as_str())
+            .count(),
+        0,
+        "the replacement is the sole durable candidate for this exact Git evidence"
+    );
+    assert!(
+        config_b
+            .generation_recovery()
+            .read()
+            .expect("generation recovery status")
+            .is_none(),
+        "the replacement publication clears recovery status"
+    );
+    assert!(matches!(
+        config_b
+            .reconcile_now()
+            .expect("configuration B must settle after one rebuild"),
+        CodeIndexReconcileOutcomeV1::Noop(_)
+    ));
+    drop(config_b);
+
+    let mut restarted = scheduler(&fixture, store.path().to_path_buf(), bytes);
+    replace_scheduler_policy_revision(&mut restarted, "policy.daemon.v2");
+    assert!(matches!(
+        restarted
+            .reconcile_now()
+            .expect("restart must adopt the persisted configuration B generation"),
+        CodeIndexReconcileOutcomeV1::Noop(_)
+    ));
+    assert_eq!(
+        restarted
+            .latest_complete()
+            .expect("configuration B survives restart")
+            .generation()
+            .manifest()
+            .generation_id,
+        generation_b
+    );
+}
+
+#[test]
+fn chunker_transition_preserves_safe_serving_until_replacement() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let mut config_a = scheduler(&fixture, store.path().to_path_buf(), Arc::clone(&bytes));
+    let generation_a = published(
+        config_a
+            .reconcile_now()
+            .expect("publish configuration A generation"),
+    )
+    .generation_id;
+    drop(config_a);
+
+    let mut config_b = scheduler(&fixture, store.path().to_path_buf(), bytes);
+    replace_scheduler_chunker_revision(&mut config_b, "chunker.daemon.v4");
+    assert_eq!(
+        config_b
+            .latest_complete()
+            .expect("chunker-only incompatibility may preserve serving")
+            .generation()
+            .manifest()
+            .generation_id,
+        generation_a
+    );
+    let recovery = config_b
+        .generation_recovery()
+        .read()
+        .expect("generation recovery status")
+        .clone()
+        .expect("chunker recovery status");
+    assert_eq!(recovery.incompatibilities, ["chunker_revision"]);
+    assert_eq!(
+        recovery.serving,
+        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexGenerationRecoveryServingV1::Preserved
+    );
+    let generation_b = published(
+        config_b
+            .reconcile_now()
+            .expect("chunker transition must publish a replacement"),
+    )
+    .generation_id;
+    assert_ne!(generation_b, generation_a);
+    assert_eq!(
+        config_b
+            .latest_complete()
+            .expect("replacement generation")
+            .generation()
+            .manifest()
+            .chunker_revision
+            .as_str(),
+        "chunker.daemon.v4"
     );
 }
 
@@ -6574,6 +6788,47 @@ async fn elapsed_freshness_window_alone_does_not_make_dashboard_state_stale() {
         .expect("dashboard freshness");
     assert_eq!(projected.staleness_state.as_deref(), Some("fresh"));
     assert_eq!(projected.coverage, "complete");
+    registry.shutdown().await;
+}
+
+#[tokio::test]
+async fn dashboard_freshness_reports_active_reconcile_liveness() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount daemon-owned scheduler");
+    wait_for_initial_generation(&registry, fixture.path()).await;
+    wait_for_dashboard_ready(&registry, fixture.path()).await;
+    let canonical = fixture.path().canonicalize().expect("canonical fixture");
+    let reconcile_in_progress = {
+        let mounted = registry.mounted.lock().await;
+        Arc::clone(
+            &mounted
+                .get(&canonical)
+                .expect("mounted worktree")
+                .reconcile_in_progress,
+        )
+    };
+
+    reconcile_in_progress.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    let projected = registry
+        .dashboard_freshness(fixture.path())
+        .await
+        .expect("dashboard freshness");
+    reconcile_in_progress.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+
+    assert!(
+        projected.rebuild_in_flight,
+        "an active scheduler pass must keep stale serving typed as rebuilding"
+    );
     registry.shutdown().await;
 }
 

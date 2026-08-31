@@ -14,11 +14,10 @@ use tracedecay_application::retrieval::SessionRetrievalStructuralRefusalV1;
 use tracedecay_application::{
     OpaqueCursor, RequestContext, ResolvedScope, WorkAnchorHydrationFuture,
     WorkAnchorHydrationPortV1, WorkAnchorHydrationRequestV1, WorkEvidenceCoverageStateV1,
-    WorkEvidenceRetrievalPortV1,
-    WorkEvidenceFreshnessV1, WorkEvidenceHydrationErrorV1, WorkTaskSessionContinuationV1,
-    WorkTaskSessionCoverageV1, WorkTaskSessionEvidenceV1, WorkTaskSessionFuture,
-    WorkTaskSessionHydrationStateV1, WorkTaskSessionHydrationV1, WorkTaskSessionPortV1,
-    WorkTaskSessionRankContributionV1, WorkTaskSessionRankedAnchorV1,
+    WorkEvidenceFreshnessV1, WorkEvidenceHydrationErrorV1, WorkEvidenceRetrievalPortV1,
+    WorkTaskSessionContinuationV1, WorkTaskSessionCoverageV1, WorkTaskSessionEvidenceV1,
+    WorkTaskSessionFuture, WorkTaskSessionHydrationStateV1, WorkTaskSessionHydrationV1,
+    WorkTaskSessionPortV1, WorkTaskSessionRankContributionV1, WorkTaskSessionRankedAnchorV1,
     WorkTaskSessionReauthorizationErrorV1, WorkTaskSessionReauthorizationPortV1,
     WorkTaskSessionRequestV1,
 };
@@ -31,6 +30,10 @@ use tracedecay_query::retrieval::QueryAuthorityV1;
 use tracedecay_query::retrieval::evidence_lanes::{
     TaskSessionBindingV1, TaskSessionCandidateSelectionV1, TaskSessionLaneEvidenceV1,
 };
+use tracedecay_session_memory::session::{
+    SessionDataFreshness, SessionRetrievalScope, SessionTemporalQuery,
+    TaskSessionRetrievalOutcomeV1,
+};
 use tracedecay_session_temporal_store::execution::{
     TaskSessionExecutionOmissionReasonV1, TaskSessionRankSelectorV1,
     TaskSessionReauthorizationStageV1, TaskSessionSelectionCallbackErrorV1,
@@ -38,10 +41,6 @@ use tracedecay_session_temporal_store::execution::{
 use tracedecay_temporal_query::context::ContextBudget;
 use tracedecay_temporal_query::ports::ExecutionLimits;
 use tracedecay_temporal_query::ranking::DiversityLimits;
-use tracedecay_session_memory::session::{
-    SessionDataFreshness, SessionRetrievalScope, SessionTemporalQuery,
-    TaskSessionRetrievalOutcomeV1,
-};
 
 use tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalPortV1;
 
@@ -950,10 +949,11 @@ pub(crate) mod tests {
             .identity()
             .session_request_scope()
             .expect("resolved Work scope");
-        let retrieval = tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalService::new(
-            database, root, None,
-        )
-        .expect("mounted project retrieval service");
+        let retrieval =
+            tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalService::new(
+                database, root, None,
+            )
+            .expect("mounted project retrieval service");
         let privacy_domain = id::<PrivacyDomainId>("privacy.work-task-session");
         let adapter = DaemonWorkEvidenceRetrievalV1::new(Arc::new(retrieval))
             .with_federated_authority(Arc::new(StaticFederatedAuthority(Arc::new(

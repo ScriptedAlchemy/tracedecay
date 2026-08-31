@@ -21,6 +21,9 @@ use tracedecay_application::retained_surfaces::{
 use tracedecay_domain::{
     ActorId, Confidence, FactIdentitySourceV1, FactOwnerV1, PayloadAccessState, ProvenanceId,
 };
+use tracedecay_session_memory::memory::{
+    MemoryApplicationError, ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome,
+};
 use tracedecay_store::{
     FactCommitReceipt, FactStoreError, ProjectMemoryFactAddDispositionV1,
     ProjectMemoryFactContradictionPageV1, ProjectMemoryFactFeedbackActionV1,
@@ -35,9 +38,12 @@ use tracedecay_store::{
     ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryFactUpdatePatchV1, ProjectMemoryFactV1,
     ProjectMemoryMemoryStatusV1,
 };
+<<<<<<< HEAD:crates/tracedecay-session-memory/src/memory_mapping.rs
 use crate::memory::{
     MemoryApplicationError, ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome,
 };
+=======
+>>>>>>> origin/codex/tracedecay-total-redesign-plan-reopened:crates/tracedecay/src/daemon/retained_owner/memory_mapping.rs
 
 pub const MAX_RETAINED_FACT_LIMIT: usize = 200;
 pub const MAX_RETAINED_FEEDBACK_HISTORY_LIMIT: usize = 1_000;
