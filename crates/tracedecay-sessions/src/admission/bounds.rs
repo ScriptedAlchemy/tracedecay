@@ -5,8 +5,7 @@
 //! transcript sweep can never queue more than one admission pass will accept.
 
 /// Maximum bytes retained for a single durable host-admission record (1 MiB).
-pub const DEFAULT_MAX_RECORD_BYTES: usize =
-    tracedecay_daemon_protocol::wire::MAX_WIRE_MESSAGE_BYTES;
+pub const DEFAULT_MAX_RECORD_BYTES: usize = tracedecay_framing::MAX_WIRE_RECORD_BYTES;
 
 /// Maximum bytes retained for one source identity in the spool.
 pub const DEFAULT_MAX_SOURCE_BYTES: usize = 256;

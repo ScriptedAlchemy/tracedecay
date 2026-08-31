@@ -4,9 +4,9 @@ use serde_json::{Value, json};
 use tracedecay_dashboard_api::project_registry::{
     ProjectRegistryView, render_project_registry_view,
 };
+use tracedecay_domain::errors::{Result, TraceDecayError};
 #[cfg(test)]
 use tracedecay_global_db::ProjectRegistryContext;
-use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use crate::cli::ProjectsAction;
 

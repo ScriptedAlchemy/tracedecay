@@ -25,7 +25,8 @@ use crate::db::{Database, DatabaseMemoryTransaction};
 
 use super::envelope::finish_read_snapshot;
 use super::graph_manifest::{
-    MemoryGraphSource, SourceRelation, build_manifest, ensure_source_read_active, source_watermark,
+    MemoryGraphSource, SourceRelation, build_manifest, ensure_source_read_active,
+    generation_for_watermark, source_watermark,
 };
 use super::primitives::{
     OwnerKey, row_i64, row_optional_string, row_string, storage_error, storage_message,
@@ -99,6 +100,7 @@ impl SourceLoadMeasurement {
     }
 }
 
+#[hotpath::measure(label = "runtime_core.memory_graph.query_read")]
 pub(super) async fn project_memory_graph(
     db: &Database,
     query: ProjectMemoryGraphQueryV1,
@@ -114,17 +116,9 @@ pub(super) async fn project_memory_graph(
         GraphProjectionId::new(PROJECTION).map_err(|error| graph_error(&owner, error))?;
     let projection_identity = GraphProjectionIdentity::new(namespace.clone(), projection.clone());
     ensure_not_cancelled(read_control)?;
-    let loaded = load_source(db, &owner, Some(read_control), None).await?;
-    let expected_watermark = source_watermark(&owner, &loaded.source, Some(read_control))?;
-    let expected_manifest = build_manifest(
-        &owner,
-        projection_identity.clone(),
-        &loaded.source,
-        expected_watermark.clone(),
-        Some(read_control),
-    )?;
-    let source_stamp = loaded.lineage_stamp;
-    let expected_generation = expected_manifest.generation;
+    let (source_stamp, expected_watermark) =
+        expected_source_watermark(db, &owner, Some(read_control)).await?;
+    let expected_generation = generation_for_watermark(&owner, &expected_watermark)?;
     ensure_source_read_active(Some(read_control))?;
     let control_for_snapshot = read_control.clone();
     let projection_for_snapshot = projection_identity.clone();
@@ -236,7 +230,11 @@ pub(super) async fn project_memory_graph(
                     GraphRelationRef::new(projection_identity_for_read.clone(), relation_id);
                 let relation = snapshot_for_read
                     .relation(&reference, Arc::clone(&cancellation))?
-                    .ok_or(tracedecay_graph_db::GraphDbError::Conflict)?;
+                    .ok_or_else(|| {
+                        tracedecay_graph_db::GraphDbError::conflict(
+                            "memory_graph.project_relations.missing_relation",
+                        )
+                    })?;
                 relations.push(ProjectedRelation {
                     source: relation.from.identity,
                     target: relation.to.identity,
@@ -259,18 +257,47 @@ pub(super) async fn project_memory_graph(
 
     ensure_not_cancelled(read_control)?;
     let hydrated = hydrate_page(db, owner.clone(), &hydration_roots, page, read_control).await?;
-    if !source_unchanged_since(db, source_stamp, Some(read_control)).await?
-        && source_watermark(
-            &owner,
-            &load_source(db, &owner, Some(read_control), None)
-                .await?
-                .source,
-            Some(read_control),
-        )? != expected_watermark
-    {
-        return Err(FactStoreError::GraphConflict);
+    if !source_unchanged_since(db, source_stamp, Some(read_control)).await? {
+        let (_, current_watermark) =
+            expected_source_watermark(db, &owner, Some(read_control)).await?;
+        if current_watermark != expected_watermark {
+            return Err(FactStoreError::GraphConflict);
+        }
     }
     Ok(hydrated)
+}
+
+/// Resolves the canonical projected-source watermark for the lineage stamp
+/// currently visible, reusing the database's stamped memo when the append-only
+/// lineage stamp proves the projected source is unchanged since the memoized
+/// watermark was hashed (see `source_unchanged_since` for the invariant).
+/// A miss falls back to the full source load and re-arms the memo, so a
+/// quiescent store pays one single-row stamp read per graph read instead of
+/// rescanning and rehashing every canonical source row.
+async fn expected_source_watermark(
+    db: &Database,
+    owner: &FactOwnerV1,
+    read_control: Option<&FactReadControl>,
+) -> FactStoreResult<(Option<i64>, tracedecay_graph_db::GraphWatermark)> {
+    ensure_source_read_active(read_control)?;
+    let transaction = db
+        .begin_memory_read_transaction(OPERATION)
+        .await
+        .map_err(|error| storage_error(OPERATION, error))?;
+    let result = lineage_stamp_tx(&transaction).await;
+    let observed_stamp = finish_read_snapshot(transaction, result).await?;
+    ensure_source_read_active(read_control)?;
+    if let Some(stamp) = observed_stamp
+        && let Some(watermark) = db.memory_graph_source_watermark_at(stamp)
+    {
+        return Ok((Some(stamp), watermark));
+    }
+    let loaded = load_source(db, owner, read_control, None).await?;
+    let watermark = source_watermark(owner, &loaded.source, read_control)?;
+    if let Some(stamp) = loaded.lineage_stamp {
+        db.record_memory_graph_source_watermark(stamp, watermark.clone());
+    }
+    Ok((loaded.lineage_stamp, watermark))
 }
 
 pub(super) fn schedule_project_memory_graph_reconciliation(
@@ -337,12 +364,18 @@ async fn reconcile_project_memory_graph_pass(db: &Database) -> FactStoreResult<(
     hotpath::gauge!("runtime_core.memory_graph.source_relations")
         .set(loaded.source.relations.len() as f64);
     let watermark = source_watermark(&owner, &loaded.source, None)?;
-    let manifest = build_manifest(
-        &owner,
-        projection.clone(),
-        &loaded.source,
-        watermark.clone(),
-        None,
+    if let Some(stamp) = loaded.lineage_stamp {
+        db.record_memory_graph_source_watermark(stamp, watermark.clone());
+    }
+    let manifest = hotpath::measure_block!(
+        "runtime_core.memory_graph.manifest_build",
+        build_manifest(
+            &owner,
+            projection.clone(),
+            &loaded.source,
+            watermark.clone(),
+            None,
+        )
     )?;
     let source_stamp = loaded.lineage_stamp;
     let expected_generation = manifest.generation.clone();
@@ -399,13 +432,12 @@ async fn finish_reconciliation_watermark(
     if source_unchanged_since(db, source_stamp, None).await? {
         return Ok(());
     }
-    if source_watermark(
-        owner,
-        &load_source(db, owner, None, Some(db)).await?.source,
-        None,
-    )? != watermark
-        && !db.memory_graph_reconciliation_pending()
-    {
+    let reloaded = load_source(db, owner, None, Some(db)).await?;
+    let reloaded_watermark = source_watermark(owner, &reloaded.source, None)?;
+    if let Some(stamp) = reloaded.lineage_stamp {
+        db.record_memory_graph_source_watermark(stamp, reloaded_watermark.clone());
+    }
+    if reloaded_watermark != watermark && !db.memory_graph_reconciliation_pending() {
         return Err(FactStoreError::GraphConflict);
     }
     Ok(())
@@ -487,7 +519,9 @@ pub(super) fn validate_rooted_relations(
         !accepted_entities.contains(&relation.source)
             || !accepted_entities.contains(&relation.target)
     }) {
-        return Err(tracedecay_graph_db::GraphDbError::Conflict);
+        return Err(tracedecay_graph_db::GraphDbError::conflict(
+            "memory_graph.accept_relations.unaccepted_endpoint",
+        ));
     }
     if relations.len() > max_relations {
         return Err(tracedecay_graph_db::GraphDbError::budget_exhausted_count(
@@ -958,6 +992,7 @@ fn push_source_relation(
     Ok(())
 }
 
+#[hotpath::measure(label = "runtime_core.memory_graph.hydrate")]
 async fn hydrate_page(
     db: &Database,
     owner: FactOwnerV1,
@@ -1136,7 +1171,7 @@ pub(super) fn graph_error(
     error: tracedecay_graph_db::GraphDbError,
 ) -> FactStoreError {
     match error {
-        tracedecay_graph_db::GraphDbError::Conflict => FactStoreError::GraphConflict,
+        tracedecay_graph_db::GraphDbError::Conflict { .. } => FactStoreError::GraphConflict,
         tracedecay_graph_db::GraphDbError::Cancelled => FactStoreError::GraphCancelled,
         tracedecay_graph_db::GraphDbError::BudgetExhausted { .. } => {
             FactStoreError::GraphBudgetExhausted

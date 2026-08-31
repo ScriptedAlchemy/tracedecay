@@ -23,6 +23,10 @@ use tracedecay_domain::{
     SessionSourceCoverageV1, TemporalCoverageCountsV1, TemporalModeV1, UserProfileId,
     ValidCoverageIntervalV1 as DomainValidCoverageIntervalV1, canonical_sha256,
 };
+use tracedecay_session_memory::context::{ResolvedSessionIdentity, SessionRootId, SessionStoreId};
+use tracedecay_session_memory::session::{
+    SessionDataFreshness, SessionFreshnessPolicy, SessionRetrievalScope, SessionTemporalQuery,
+};
 use tracedecay_sessions::WorkflowIndexReadPort;
 use tracedecay_sessions::runtime::git_correlation::{GitScopeFilter, git_scope_filter_from_args};
 use tracedecay_sessions::runtime::{
@@ -34,21 +38,17 @@ use tracedecay_temporal_query::ports::{
     TemporalCandidateFilterV1, TemporalMessageTypeFilterV1, TemporalSessionScopeFilterV1,
 };
 use tracedecay_temporal_query::ranking::DiversityLimits;
-use tracedecay_session_memory::context::{ResolvedSessionIdentity, SessionRootId, SessionStoreId};
-use tracedecay_session_memory::session::{
-    SessionDataFreshness, SessionFreshnessPolicy, SessionRetrievalScope, SessionTemporalQuery,
-};
 
 use super::receipts::{evidence_outcome, session_refresh_effect_outcome};
 use super::session_refresh::{RetainedSessionRefreshPortV1, admitted_session_refresh_command};
+use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
+use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_runtime_core::timeutil::{SearchTimeBound, parse_search_time_filter_bound};
 use tracedecay_session_runtime::session_retrieval::{
     DaemonSessionRetrievalService, SessionApplicationRetrievalPortV1, SessionRetrievalPageView,
     SessionRetrievalServiceOutcome, SessionRetrievalStoreScope, SessionTemporalMetadataView,
 };
-use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use tracedecay_domain::errors::TraceDecayError;
-use tracedecay_runtime_core::timeutil::{SearchTimeBound, parse_search_time_filter_bound};
 
 mod refresh;
 #[cfg(test)]
@@ -516,9 +516,11 @@ impl MessageSearchInput {
                 // `ExecutionLimits::default()`, which the admitted binding
                 // refuses terminally — every message search would answer
                 // a structural budget refusal instead of searching.
-                .with_execution_limits(tracedecay_session_runtime::session_retrieval::admitted_execution_limits(
-                    self.limit,
-                ))
+                .with_execution_limits(
+                    tracedecay_session_runtime::session_retrieval::admitted_execution_limits(
+                        self.limit,
+                    ),
+                )
         })
     }
 

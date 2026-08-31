@@ -29,12 +29,9 @@ pub(super) async fn bind_verified_project_graph_runtime(
 ) -> tracedecay_domain::errors::Result<()> {
     sessions
         .bind_project_graph_runtime(database.deferred_memory_graph_runtime())
-        .map_err(
-            |_| tracedecay_domain::errors::TraceDecayError::Config {
-                message: "project graph runtime was already mounted for project sessions"
-                    .to_owned(),
-            },
-        )
+        .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
+            message: "project graph runtime was already mounted for project sessions".to_owned(),
+        })
 }
 
 #[derive(Clone)]

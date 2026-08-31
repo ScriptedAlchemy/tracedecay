@@ -9,7 +9,6 @@ use tracedecay_domain::{
     ActorId, ProjectId, RepositoryId, UtcMicros, WorktreeId, canonical_sha256,
 };
 use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 use tracedecay_session_memory::context::{
     BranchId, ProfileId, RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId,
     SessionStoreId, session_application_grant_digest,
@@ -18,6 +17,7 @@ use tracedecay_session_memory::session::SessionRequestBinding;
 use tracedecay_session_memory::session::lcm::{
     LcmAuthorityTarget, LcmCompressionEvidence, LcmHostProtocol,
 };
+use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::*;
 
