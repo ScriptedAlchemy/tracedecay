@@ -466,4 +466,18 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn decode_rejection_names_wrong_type_argument() {
+        let error = decode_request(
+            RetainedSurfaceOperation::FactStoreAdd,
+            json!({ "content": 17, "category": "general" }),
+        )
+        .expect_err("non-string content must be rejected");
+        let message = error.to_string();
+        assert!(
+            message.contains("content"),
+            "wrong-type rejection must name the offending argument: {message}"
+        );
+    }
 }
