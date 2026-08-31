@@ -3531,6 +3531,12 @@ impl CodeIndexSchedulerRegistryV1 {
                                     "graph activation failed retryably; the sealed generation \
                                      stays unseated until the scheduled retry"
                                 );
+                                hotpath::gauge!("daemon.code_index.graph_seat.retry_total")
+                                    .inc(1_u64);
+                                hotpath::gauge!(
+                                    "daemon.code_index.graph_seat.retry_backoff_micros"
+                                )
+                                .set(retry_delay.as_micros() as u64);
                                 seat_retry_backoff = seat_retry_backoff
                                     .saturating_mul(2)
                                     .min(ACTIVATION_RETRY_BACKOFF_CEILING);

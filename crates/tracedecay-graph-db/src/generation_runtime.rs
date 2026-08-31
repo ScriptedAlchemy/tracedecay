@@ -234,6 +234,7 @@ impl GraphDb {
     /// The staging database remains the WAL-backed replay and fallback
     /// authority; configurations without a sealed artifact retain the
     /// original close/reopen proof when `reopen_fallback` requires it.
+    #[hotpath::measure(label = "graph_db.generation.publish.verify_proof", impl_type = "GraphDb")]
     pub(crate) fn verify_generation_for_publication(
         &self,
         identity: &GraphGenerationManifestIdentity,
