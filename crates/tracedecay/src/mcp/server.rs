@@ -39,7 +39,7 @@ use tracedecay_sessions::runtime::git_correlation::{
 
 use super::tools::default_catalog_discovery_authority;
 use tracedecay_application::ProjectRegistryReadPort;
-use tracedecay_mcp::SessionRefreshServicePort;
+use tracedecay_session_memory::session::SessionRefreshServicePort;
 use tracedecay_mcp::hook_events::{self, HookAgent, HookEventPlan};
 use tracedecay_mcp::{
     ErrorCode, JsonRpcRequest, JsonRpcResponse, ToolRegistryMode, explore_call_budget,

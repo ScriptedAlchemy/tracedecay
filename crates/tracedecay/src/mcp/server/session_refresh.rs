@@ -12,16 +12,14 @@ use tracedecay_application::RequestContext;
 use tracedecay_domain::ProjectId;
 
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use tracedecay_mcp::{
-    SessionRefreshCommand, SessionRefreshCoverageView, SessionRefreshFrontierView,
-    SessionRefreshProgressView, SessionRefreshReceiptView, SessionRefreshServiceOutcome,
-    SessionRefreshServicePort, utc_micros_value,
-};
 use tracedecay_session_memory::session::{
     AuthorizationGrantId, SessionAuthorizationError, SessionAuthorizationGrant,
-    SessionRefreshConfiguration, SessionRefreshHandle, SessionRefreshOutcome,
+    SessionRefreshAction, SessionRefreshCommand, SessionRefreshConfiguration,
+    SessionRefreshCoverageView, SessionRefreshFrontierView, SessionRefreshHandle,
+    SessionRefreshOutcome, SessionRefreshProgressView, SessionRefreshReceiptView,
     SessionRefreshSchedulerError, SessionRefreshSchedulerPort, SessionRefreshService,
-    SessionRequestBinding, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
+    SessionRefreshServiceOutcome, SessionRefreshServicePort, SessionRequestBinding,
+    SessionScopeAuthorizationRequest, SessionScopeAuthorizer, utc_micros_value,
 };
 use tracedecay_session_temporal_store::GlobalDbSessionTemporalStore;
 
@@ -159,12 +157,12 @@ impl DaemonSessionRefreshService {
             return SessionRefreshServiceOutcome::Unavailable;
         };
         let outcome = match command.action {
-            tracedecay_mcp::SessionRefreshAction::Begin => {
+            SessionRefreshAction::Begin => {
                 service
                     .begin_or_join(&command.context, &command.binding, command.target)
                     .await
             }
-            tracedecay_mcp::SessionRefreshAction::Status => {
+            SessionRefreshAction::Status => {
                 let handle = match command.handle.as_deref().map(|token| self.handle(token)) {
                     Some(SessionRefreshHandleLookup::Found(handle)) => handle,
                     Some(SessionRefreshHandleLookup::Stale) => {
@@ -178,7 +176,7 @@ impl DaemonSessionRefreshService {
                     .status(&command.context, &command.binding, &handle)
                     .await
             }
-            tracedecay_mcp::SessionRefreshAction::Cancel => {
+            SessionRefreshAction::Cancel => {
                 let handle = match command.handle.as_deref().map(|token| self.handle(token)) {
                     Some(SessionRefreshHandleLookup::Found(handle)) => handle,
                     Some(SessionRefreshHandleLookup::Stale) => {

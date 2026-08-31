@@ -17,7 +17,7 @@ use tracedecay_sessions::{
     WorkflowRunListRequest, WorkflowRunScope, WorkflowStatus,
 };
 
-use crate::tracedecay::current_timestamp;
+use tracedecay_runtime_core::tracedecay::current_timestamp;
 use tracedecay_global_db::GlobalDbGitCorrelationStore;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::timeutil::{SearchTimeBound, parse_search_time_filter_bound};
@@ -26,7 +26,7 @@ const DEFAULT_LIMIT: usize = 20;
 const MAX_LIMIT: usize = 100;
 
 #[hotpath::measure(label = "daemon.retained.session.sessions_for", future = true)]
-pub(crate) async fn sessions_for(
+pub async fn sessions_for(
     database: Option<&RegisteredGlobalDb>,
     request: &SessionsForRequestV1,
 ) -> Result<SessionsForResultV1, RetainedSurfaceExecutionErrorV1> {
@@ -143,7 +143,7 @@ pub(crate) async fn sessions_for(
 }
 
 #[hotpath::measure(label = "daemon.retained.session.workflows", future = true)]
-pub(crate) async fn workflows(
+pub async fn workflows(
     workflow_index: Option<&dyn WorkflowIndexReadPort>,
     request: &WorkflowsRequestV1,
 ) -> Result<WorkflowsResultV1, RetainedSurfaceExecutionErrorV1> {

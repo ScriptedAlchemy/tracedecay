@@ -2,27 +2,33 @@
 
 use tracedecay_application::{RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1};
 use tracedecay_domain::{FactOwnerV1, ManifestDigest, ProvenanceId};
+<<<<<<< HEAD:crates/tracedecay-session-memory/src/memory_tracking.rs
+use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+=======
 use tracedecay_session_memory::memory::MemoryApplication;
+>>>>>>> origin/codex/tracedecay-total-redesign-plan-reopened:crates/tracedecay/src/daemon/retained_owner/memory_tracking.rs
 use tracedecay_store::{
     ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactRetrievalCommandV1,
     ProjectMemoryFactRetrievalReceiptV1, ProjectMemoryFactSearchPageV1,
 };
 
-use super::memory::{bounded_memory_operation, fact_write_control};
-use super::memory_mapping;
-use super::memory_mutation::{MemoryMutationSettlement, memory_mutation_settlement};
-use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+use crate::memory::MemoryApplication;
+use crate::memory_mapping;
+use crate::memory_mutation::{
+    MemoryMutationSettlement, bounded_memory_operation, fact_write_control,
+    memory_mutation_settlement,
+};
 
 #[derive(Default)]
-pub(super) struct TrackedExplicitSearch {
-    pub(super) projections: Vec<ProjectMemoryFactProjectionV1>,
-    pub(super) receipt: Option<ProjectMemoryFactRetrievalReceiptV1>,
-    pub(super) authority_result_invalid: bool,
-    pub(super) settled_after_expiry: bool,
+pub struct TrackedExplicitSearch {
+    pub projections: Vec<ProjectMemoryFactProjectionV1>,
+    pub receipt: Option<ProjectMemoryFactRetrievalReceiptV1>,
+    pub authority_result_invalid: bool,
+    pub settled_after_expiry: bool,
 }
 
 impl TrackedExplicitSearch {
-    pub(super) fn committed_state(&self) -> Option<&ManifestDigest> {
+    pub fn committed_state(&self) -> Option<&ManifestDigest> {
         self.receipt
             .as_ref()
             .map(ProjectMemoryFactRetrievalReceiptV1::committed_state_digest)
@@ -30,7 +36,7 @@ impl TrackedExplicitSearch {
 }
 
 #[hotpath::measure(label = "daemon.retained.memory.track", future = true)]
-pub(super) async fn track_explicit_search(
+pub async fn track_explicit_search(
     context: &RetainedSurfaceExecutionContextV1<'_>,
     memory: &MemoryApplication<DatabaseFactStore<'_>>,
     owner: &FactOwnerV1,
