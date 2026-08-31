@@ -2897,6 +2897,50 @@ impl DaemonSessionRuntimeRegistryV1 {
 }
 
 impl DaemonSessionRuntimeRegistryV1 {
+    /// Awaits settlement (attached or detached) of the profile session
+    /// relation graph, which `profile_sessions` opens as bounded background
+    /// work. Production callers tolerate the warming window through typed
+    /// retryable refusals; deterministic fixtures await settlement instead so
+    /// graph-dependent operations do not race the open task.
+    pub(crate) async fn settle_profile_session_graph(&self) -> Result<()> {
+        let waiter = {
+            let mounted = self
+                .profile_sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            mounted.as_ref().map(|owner| {
+                (
+                    Arc::clone(&owner.relation_graph),
+                    Arc::clone(&owner.graph_settled),
+                )
+            })
+        };
+        let Some((relation_graph, graph_settled)) = waiter else {
+            return Ok(());
+        };
+        loop {
+            let notified = graph_settled.notified();
+            let warming = matches!(
+                &*relation_graph
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+                SessionGraphAttachmentStateV1::Warming
+            );
+            if !warming {
+                return Ok(());
+            }
+            notified.await;
+        }
+    }
+
+    /// Project-scope counterpart of [`Self::settle_profile_session_graph`].
+    pub(crate) async fn settle_project_session_graph(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<()> {
+        self.project_owners.wait_for_session_graph(project_id).await
+    }
+
     pub(crate) fn install_session_sync_service(
         &self,
         service: &Arc<crate::daemon::session_sync::DaemonSessionSyncService>,

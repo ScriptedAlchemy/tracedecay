@@ -1,5 +1,10 @@
 use super::*;
 
+use tracedecay_domain::EdgeAuthorityV1;
+
+use crate::chunks::{CROSS_FILE_REFERENCE_BLOCKLIST, relation_target_kind_is_compatible};
+use crate::lineage::LineageSymbolRecordV1;
+
 pub(crate) struct StagedGenerationV1 {
     pub(crate) files: Vec<Arc<FileGenerationArtifactsV1>>,
     pub(crate) chunks: GenerationChunkManifestV1,
@@ -212,6 +217,7 @@ where
         .iter()
         .flat_map(|file| file.as_ref().artifacts.edges.clone())
         .collect::<Vec<_>>();
+    edges.extend(resolve_cross_file_references(files));
     edges.sort_by(edge_order);
     let mut abstentions = files
         .iter()
@@ -219,4 +225,69 @@ where
         .collect::<Vec<_>>();
     abstentions.sort();
     (edges, abstentions)
+}
+
+/// Resolve the retained per-file unresolved references against the whole
+/// staged file set. Sealing is the first moment every file's symbols exist
+/// together, so this is where cross-file call/use/implements edges are
+/// derived; incremental generations re-run it over their full carried +
+/// re-extracted file set, so an edge disappears with either endpoint.
+///
+/// Binding is deliberately conservative, mirroring the same-file binder:
+/// a reference binds only when exactly one kind-compatible symbol matches
+/// its simple name across the generation, and never when its own file also
+/// defines a compatible candidate (local ambiguity or suppression owns those).
+/// Everything else stays truthfully unresolved. Bound edges carry the
+/// `NameResolved` authority class, not `SyntaxExact`.
+fn resolve_cross_file_references<T>(files: &[T]) -> Vec<CanonicalRelationEdgeV1>
+where
+    T: AsRef<FileGenerationArtifactsV1>,
+{
+    let mut by_simple_name: BTreeMap<&str, Vec<(usize, &LineageSymbolRecordV1)>> = BTreeMap::new();
+    for (index, file) in files.iter().enumerate() {
+        for symbol in &file.as_ref().artifacts.symbols {
+            by_simple_name
+                .entry(symbol.simple_name.as_str())
+                .or_default()
+                .push((index, symbol));
+        }
+    }
+    let mut edges = Vec::new();
+    for (index, file) in files.iter().enumerate() {
+        for reference in &file.as_ref().artifacts.unresolved_references {
+            let simple_name = reference
+                .reference_name
+                .rsplit("::")
+                .next()
+                .unwrap_or(reference.reference_name.as_str());
+            // Retention already narrows names, but carried artifacts outlive
+            // policy revisions; the blocklist is a resolution rule, so apply
+            // it to every retained reference regardless of when it was sealed.
+            if simple_name.is_empty() || CROSS_FILE_REFERENCE_BLOCKLIST.contains(&simple_name) {
+                continue;
+            }
+            let Some(candidates) = by_simple_name.get(simple_name) else {
+                continue;
+            };
+            let mut compatible = candidates.iter().filter(|(_, symbol)| {
+                relation_target_kind_is_compatible(reference.kind, &symbol.kind)
+            });
+            let Some((first_index, target)) = compatible.next() else {
+                continue;
+            };
+            if *first_index == index || compatible.next().is_some() {
+                continue;
+            }
+            edges.push(CanonicalRelationEdgeV1 {
+                from_occurrence: reference.from_occurrence.clone(),
+                to_occurrence: target.occurrence.clone(),
+                kind: reference.kind,
+                authority: EdgeAuthorityV1::NameResolved,
+                evidence_span: reference.evidence_span,
+            });
+        }
+    }
+    edges.sort_by(edge_order);
+    edges.dedup();
+    edges
 }

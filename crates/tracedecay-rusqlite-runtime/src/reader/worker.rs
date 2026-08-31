@@ -274,15 +274,29 @@ impl WorkerClient {
         }
     }
 
-    pub fn table_sizes(&self) -> Result<Vec<TableSizeTelemetrySample>, ReaderWorkerError> {
+    /// Table-size telemetry walks `dbstat` for every table, which is
+    /// proportional to the whole store on disk; a worker that cannot answer
+    /// within `reply_bound` is interrupted and reported unavailable instead
+    /// of capturing the caller for the duration of a multi-gigabyte scan.
+    pub fn table_sizes(
+        &self,
+        reply_bound: Duration,
+    ) -> Result<Vec<TableSizeTelemetrySample>, ReaderWorkerError> {
         let sender = self.snapshot_sender()?;
         let (reply, receive) = mpsc::sync_channel(1);
         sender
             .send(SnapshotCommand::TableSizes { reply })
             .map_err(|_| ReaderWorkerError::WorkerClosed)?;
-        receive
-            .recv()
-            .map_err(|_| ReaderWorkerError::WorkerClosed)?
+        match receive.recv_timeout(reply_bound) {
+            Ok(result) => result,
+            Err(RecvTimeoutError::Timeout) => {
+                self.interrupt.interrupt();
+                Err(ReaderWorkerError::Interrupted {
+                    reason: UnavailableReasonV1::DeadlineExceeded,
+                })
+            }
+            Err(RecvTimeoutError::Disconnected) => Err(ReaderWorkerError::WorkerClosed),
+        }
     }
 
     /// Releases this worker's own SQLite page cache.

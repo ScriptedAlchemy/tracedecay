@@ -173,6 +173,49 @@ fn sealed_seek_reader_restore_reencodes_identically() {
     );
 }
 
+/// `unresolved_references` was added to the per-file artifact after revision
+/// six had already been persisted. Those earlier records mean exactly “no
+/// retained cross-file reference candidates”; restoring them must preserve
+/// that meaning so the scheduler can observe the old chunker revision and
+/// build a current successor rather than retrying a decode failure forever.
+#[test]
+fn sealed_restore_defaults_absent_unresolved_references() {
+    let sealed = sealed_multi_file_generation();
+    let mut envelope: Value = serde_json::from_slice(&sealed).expect("sealed envelope JSON");
+    let files = envelope["generation"]["files"]
+        .as_array_mut()
+        .expect("sealed generation files");
+    for file in files {
+        file["artifacts"]
+            .as_object_mut()
+            .expect("file artifacts")
+            .remove("unresolved_references");
+    }
+    let state_digest = sealed_generation_payload_digest(6, &envelope["generation"])
+        .expect("compatible generation digest");
+    envelope["state_digest"] = Value::String(state_digest.as_str().to_owned());
+    let historical = serde_json::to_vec(&envelope).expect("historical sealed generation");
+
+    let restored = CodeIndexPublishedGenerationV1::decode_sealed(&historical)
+        .expect("revision-six records without the additive field restore");
+    let restored: Value = serde_json::from_slice(
+        &restored
+            .encode_sealed()
+            .expect("restored generation reseals"),
+    )
+    .expect("restored envelope JSON");
+    assert!(
+        restored["generation"]["files"]
+            .as_array()
+            .expect("restored files")
+            .iter()
+            .all(|file| file["artifacts"]["unresolved_references"]
+                .as_array()
+                .is_some_and(Vec::is_empty)),
+        "historical files must restore with an explicit empty unresolved-reference authority"
+    );
+}
+
 #[test]
 fn sealed_restore_rejects_one_corrupt_payload_byte() {
     let mut sealed = sealed_multi_file_generation();

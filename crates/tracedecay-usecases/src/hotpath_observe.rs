@@ -84,6 +84,11 @@ pub(crate) fn semantic_candidate_chunks(chunks: usize) {
 }
 
 #[inline]
+pub(crate) fn semantic_stage_descriptor_failed() {
+    hotpath::gauge!("usecases.semantic.schedule.stage_descriptor_failed_total").inc(1.0);
+}
+
+#[inline]
 pub(crate) fn semantic_model_resident_bytes(bytes: u64) {
     hotpath::gauge!("usecases.semantic.model_resident_bytes").set(bytes as f64);
 }

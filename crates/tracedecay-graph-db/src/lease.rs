@@ -519,6 +519,24 @@ impl VerifiedGraphSnapshot {
         })
     }
 
+    pub fn visit_outgoing_relation_targets(
+        &self,
+        start: &GraphEntityId,
+        relation_kinds: &BTreeSet<crate::GraphRelationKind>,
+        cancellation: Arc<dyn GraphCancellation>,
+        visitor: &mut dyn FnMut(crate::GraphRelationTarget),
+    ) -> Result<usize, GraphDbError> {
+        self.with_operation(|| {
+            self.database.visit_outgoing_relation_targets(
+                &self.head.locator.physical_namespace()?,
+                start,
+                relation_kinds,
+                cancellation,
+                visitor,
+            )
+        })
+    }
+
     /// Bulk incoming relation rows over this verified generation.
     #[hotpath::measure(
         label = "graph_db.lease.incoming_relations",

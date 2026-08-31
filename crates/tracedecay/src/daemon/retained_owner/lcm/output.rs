@@ -632,8 +632,11 @@ pub(super) fn assemble_query(
             system: LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT.to_owned(),
             user: format!(
                 "QUESTION:\n{prompt}\n\nEXPANDED CONTEXT:\n{}",
-                serde_json::to_string(&context_blocks)
-                    .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?
+                serde_json::to_string(&context_blocks).map_err(|error| {
+                    RetainedSurfaceExecutionErrorV1::unavailable(format!(
+                        "the LCM expand-query context could not be serialized: {error}"
+                    ))
+                })?
             ),
         })
     } else {

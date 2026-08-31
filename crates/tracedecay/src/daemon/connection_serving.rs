@@ -1873,7 +1873,10 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
     }
     let user_session_request = projectless_user_session_request(&first_request_line);
     if handshake.project_path.is_some() && !user_session_request {
-        let server = match await_project_owner_or_disconnect(
+        // Heap-allocate the owner-await composition: embedded by value it
+        // dominates this serve future's resident frame and overflows the
+        // worker stack in perf-profile layouts.
+        let server = match Box::pin(await_project_owner_or_disconnect(
             &mut transport,
             Box::pin(portable_project_server_for_request(
                 lifecycle.clone(),
@@ -1886,7 +1889,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
                 #[cfg(test)]
                 project_open_attempts.clone(),
             )),
-        )
+        ))
         .await
         {
             Ok(Some(server)) => server,

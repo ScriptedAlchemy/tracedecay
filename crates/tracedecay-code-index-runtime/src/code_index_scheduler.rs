@@ -2061,6 +2061,29 @@ impl CodeIndexBuildProgressSlotStateV1 {
     }
 }
 
+/// Publishes an observational scan sample without delaying sealed-byte authentication.
+/// Generation ownership and durable phase transitions continue to use blocking writes.
+fn try_publish_build_progress(
+    slot: &CodeIndexBuildProgressSlotV1,
+    generation_id: &CodeGenerationId,
+    owner_epoch: u64,
+    snapshot: CodeIndexBuildProgressV1,
+) -> bool {
+    match slot.try_write() {
+        Ok(mut slot) => slot.publish(generation_id, owner_epoch, snapshot),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            #[cfg(feature = "hotpath")]
+            hotpath::gauge!("query.artifact.progress.skipped_busy_total").inc(1u64);
+            false
+        }
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+            poisoned
+                .into_inner()
+                .publish(generation_id, owner_epoch, snapshot)
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct CodeIndexCommittedProgressSampleV1 {
     observed_at: Instant,
@@ -3585,8 +3608,18 @@ impl LatestCodeTextGenerationV1 {
         {
             return Ok(source);
         }
-        self.text_artifact_store
-            .open_sealed_source(sealed_identity, control)
+        let mut source = self
+            .text_artifact_store
+            .open_sealed_source(sealed_identity, control)?;
+        if let Ok(Some(published)) = self
+            .text_artifact_store
+            .publication
+            .active_already_decoded()
+            && published.manifest().generation_id == self.metadata.manifest().generation_id
+        {
+            let _ = source.attach_published_files(&published);
+        }
+        Ok(source)
     }
 
     /// One claimed head-open pass, run with the slot lock released: reopen
@@ -4522,7 +4555,11 @@ impl CodeIndexWorktreeSchedulerV1 {
             repository: repository_id.clone(),
             sanitizer_revision,
             policy_revision: id::<PolicyRevisionId>("policy.daemon.v1")?,
-            chunker_revision: id::<ChunkerRevision>("chunker.daemon.v2")?,
+            // V3 retains unresolved per-file references and derives
+            // conservative cross-file edges at generation sealing. V2
+            // artifacts remain decodable, but cannot be reused as a current
+            // graph because they never recorded that evidence.
+            chunker_revision: id::<ChunkerRevision>("chunker.daemon.v3")?,
             privacy_domain: id::<PrivacyDomainId>("privacy.local-code-index")?,
             privacy_key_epoch: 1,
             max_snapshot_age_micros: None,
@@ -4647,26 +4684,20 @@ impl CodeIndexWorktreeSchedulerV1 {
     ) -> Result<ResidentMemoryReservationV1, CodeIndexSchedulerErrorV1> {
         self.ensure_worker_plan()?;
         let planned_workers = tracedecay_code_index::parallelism::indexing_workers();
-        let planned_bytes =
-            tracedecay_code_index::parallelism::worker_reservation_bytes(planned_workers);
         let snapshot = self.resident_memory.snapshot();
         let remaining = snapshot.limit_bytes.saturating_sub(snapshot.used_bytes);
         // The process-global worker plan may have been installed against a
-        // larger authority (standalone seed, or a host-RAM plan). This
-        // scheduler's resident authority can already hold the seated text
-        // owner. Asking for the full planned slab then refuses a graph-off
-        // rebuild that still has gigabytes free. Cap to whole workers that
-        // fit; a remainder smaller than one worker still requests one so
+        // larger authority (standalone seed using detected host RAM). This
+        // scheduler's remaining bytes are a different authority: the 6 GiB
+        // default still has to leave the typed non-worker headroom that
+        // `memory_safe_worker_count` already models. Capping to
+        // `remaining / 128MiB` spends that headroom as extra workers, so a
+        // later 31-byte snapshot charge sees used==limit. A remainder that
+        // cannot admit one memory-safe worker still requests one so
         // admission produces the canonical denial.
-        let affordable_workers = usize::try_from(
-            remaining / tracedecay_code_index::parallelism::INDEX_WORKER_RESIDENT_BUDGET_BYTES_V1,
-        )
-        .unwrap_or(0);
-        let workers = if planned_bytes <= remaining {
-            planned_workers
-        } else {
-            affordable_workers
-        };
+        let affordable_workers =
+            tracedecay_code_index::parallelism::memory_safe_worker_count(remaining);
+        let workers = planned_workers.min(affordable_workers);
         let requested_bytes = NonZeroU64::new(
             tracedecay_code_index::parallelism::worker_reservation_bytes(workers.max(1)),
         )
@@ -5536,13 +5567,24 @@ impl CodeIndexWorktreeSchedulerV1 {
                         last_progress_micros: now_micros().0,
                         blocked_reason: None,
                     };
-                    let _ = progress_slot
-                        .write()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .publish(&progress_generation, text_progress_owner_epoch, snapshot);
+                    let _ = try_publish_build_progress(
+                        &progress_slot,
+                        &progress_generation,
+                        text_progress_owner_epoch,
+                        snapshot,
+                    );
                 },
             )
             .ok()?;
+        let mut source = source;
+        if let Ok(Some(published)) = self.publication.active_already_decoded()
+            && published.manifest().generation_id == generation_id
+        {
+            // Same-process successor: the builder still holds the decoded
+            // files. Re-decoding the sealed files array is how a 455 MiB
+            // cancel-batch successor spent the receipt wait in source_scan.
+            let _ = source.attach_published_files(&published);
+        }
         let metadata = source.metadata();
         if metadata.manifest().project_id != self.project_id
             || metadata.manifest().generation_id != generation_id
@@ -5971,7 +6013,9 @@ impl CodeIndexWorktreeSchedulerV1 {
         // sealed from different content means the seat lags the reconciled
         // truth and stays refused.
         self.publication
-            .active_pointer_covers_snapshot_content(&serving.generation().snapshot().content_identity)
+            .active_pointer_covers_snapshot_content(
+                &serving.generation().snapshot().content_identity,
+            )
             .map_err(CodeIndexProductionErrorV1::Publication)
             .map_err(Into::into)
     }
@@ -6151,6 +6195,22 @@ impl CodeIndexWorktreeSchedulerV1 {
 
     pub const fn verified_against_source(&self) -> bool {
         self.verified_against_source
+    }
+
+    /// True when reconciliation has verified the live worktree against source
+    /// truth and that verified source publishes no code generation at all —
+    /// the typed state of a project whose files are all unsupported,
+    /// unextractable, or absent. Distinct from a warming scheduler, whose
+    /// verification has not run yet, and from a publish failure, which leaves
+    /// `verified_against_source` untouched by returning an error instead.
+    pub fn reconciled_without_generation(&self) -> bool {
+        self.verified_against_source
+            && self
+                .publication
+                .load_active_shared()
+                .ok()
+                .flatten()
+                .is_none()
     }
 
     pub fn pending_hint_count(&self) -> Option<u64> {

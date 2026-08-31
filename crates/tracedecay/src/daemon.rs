@@ -45,11 +45,11 @@ pub use tracedecay_daemon_protocol::{DaemonClientIdentity, DaemonHandshake};
 pub(crate) use tracedecay_daemon_protocol::{
     ensure_private_socket_parent, unix_socket_path_within_limit,
 };
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::transport::ReplayTransport;
 use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 use tracedecay_mcp::{ToolRegistryMode, explore_call_budget, project_catalog_discovery_scope};
 use tracedecay_runtime_core::cancellation::CancellationToken;
-use tracedecay_domain::errors::{Result, TraceDecayError};
 
 pub const SERVICE_NAME: &str = "tracedecay.service";
 pub use tracedecay_daemon_protocol::SOCKET_ENV;
@@ -221,6 +221,7 @@ pub(crate) mod query_authority_provider;
 pub(crate) mod retained_test_support;
 mod shutdown_coordination;
 mod shutdown_orchestration;
+mod shutdown_watchdog;
 mod store_shutdown;
 pub(crate) use core_admission::*;
 pub use core_client::*;

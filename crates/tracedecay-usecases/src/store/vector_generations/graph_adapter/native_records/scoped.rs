@@ -30,11 +30,6 @@ use super::{
     relation_kind, require_labels, required_bytes, required_string, required_u64, rows_with_owner,
 };
 
-// Each logical row can contribute one entity and one relation; builds also
-// retain one expected-member record and, in the worst case, one batch record.
-const MAX_BUILD_SCOPE_RECORDS: usize = super::super::MAX_RESIDENT_VECTOR_ROWS * 6 + 4;
-const MAX_GENERATION_SCOPE_RECORDS: usize = super::super::MAX_RESIDENT_VECTOR_ROWS * 4 + 4;
-
 pub(crate) struct ScopedBuildRecordsV1 {
     pub staged: StagedVectorGenerationV1,
 }
@@ -43,7 +38,7 @@ pub(crate) struct ScopedBuildRecordsV1 {
 pub(crate) struct ScopedGenerationRecordsV1 {
     pub generation: PublishedVectorGenerationV1,
     pub vector_bytes: u64,
-    pub entities: BTreeMap<GraphEntityId, GraphEntity>,
+    pub local_vector_entities: u64,
 }
 
 pub(crate) fn read_build_records(
@@ -51,12 +46,7 @@ pub(crate) fn read_build_records(
     build: &VectorGenerationBuildIdV1,
     cancellation: Arc<dyn GraphCancellation>,
 ) -> Result<Option<ScopedBuildRecordsV1>, VectorGenerationStoreErrorV1> {
-    let Some((entities, relations)) = read_scope(
-        snapshot,
-        build_entity_id(build)?,
-        MAX_BUILD_SCOPE_RECORDS,
-        cancellation,
-    )?
+    let Some((entities, relations)) = read_scope(snapshot, build_entity_id(build)?, cancellation)?
     else {
         return Ok(None);
     };
@@ -331,7 +321,6 @@ fn read_generation_records_inner(
     let Some((entities, relations)) = read_scope(
         snapshot,
         generation_entity_id(generation)?,
-        MAX_GENERATION_SCOPE_RECORDS,
         Arc::clone(&cancellation),
     )?
     else {
@@ -492,7 +481,7 @@ fn read_generation_records_inner(
     Ok(Some(ScopedGenerationRecordsV1 {
         generation: generation_record,
         vector_bytes: measured_vector_bytes,
-        entities,
+        local_vector_entities: u64::try_from(local_vector_count).map_err(super::storage_error)?,
     }))
 }
 
@@ -500,7 +489,6 @@ fn read_generation_records_inner(
 fn read_scope(
     snapshot: &super::super::snapshot::SemanticVectorVerifiedRead,
     owner: GraphEntityId,
-    max_records: usize,
     cancellation: Arc<dyn GraphCancellation>,
 ) -> Result<
     Option<(
@@ -517,39 +505,28 @@ fn read_scope(
         return Ok(None);
     };
     let relation_kinds = BTreeSet::from([relation_kind(CONTAINS_KIND)?, relation_kind(BASE_KIND)?]);
-    let target_pages = snapshot
-        .outgoing_relation_targets(
-            &namespace,
-            std::slice::from_ref(&owner),
-            &relation_kinds,
-            max_records,
-            Arc::clone(&cancellation),
-        )
-        .map_err(map_graph_error)?;
-    let targets = target_pages.into_iter().next().unwrap_or_default();
     let mut entities = BTreeMap::from([(owner.clone(), owner_row)]);
     let mut relations = BTreeMap::new();
     let mut visited_targets = BTreeSet::from([owner.clone()]);
-    for target in targets {
-        let relation = target.relation;
-        if relation.from != owner || !visited_targets.insert(relation.to.clone()) {
-            continue;
-        }
-        if relation.kind.as_str() == CONTAINS_KIND {
-            let child = target.target;
-            entities.insert(child.identity.clone(), child);
-        }
-        relations.insert(relation.identity.clone(), relation);
-    }
-    if entities
-        .len()
-        .checked_add(relations.len())
-        .is_none_or(|count| count > max_records)
-    {
-        return Err(VectorGenerationStoreErrorV1::Unavailable(
-            "semantic vector record scope exceeds its transition ceiling".to_owned(),
-        ));
-    }
+    snapshot
+        .visit_outgoing_relation_targets(
+            &namespace,
+            &owner,
+            &relation_kinds,
+            Arc::clone(&cancellation),
+            &mut |target| {
+                let relation = target.relation;
+                if relation.from != owner || !visited_targets.insert(relation.to.clone()) {
+                    return;
+                }
+                if relation.kind.as_str() == CONTAINS_KIND {
+                    let child = target.target;
+                    entities.insert(child.identity.clone(), child);
+                }
+                relations.insert(relation.identity.clone(), relation);
+            },
+        )
+        .map_err(map_graph_error)?;
     Ok(Some((entities, relations)))
 }
 

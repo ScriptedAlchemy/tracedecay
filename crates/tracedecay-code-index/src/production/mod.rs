@@ -282,6 +282,12 @@ struct FileGenerationArtifactsV1 {
     exact_authority: ExactExtractionAuthorityV1,
 }
 
+impl AsRef<FileGenerationArtifactsV1> for FileGenerationArtifactsV1 {
+    fn as_ref(&self) -> &FileGenerationArtifactsV1 {
+        self
+    }
+}
+
 enum IncrementFileMaterializationV1 {
     CarryForward(Arc<FileGenerationArtifactsV1>),
     ReExtracted {
@@ -1088,16 +1094,16 @@ impl CodeIndexPublishedGenerationV1 {
                     "published generation does not match file artifacts".to_owned(),
                 ));
             }
-            let mut edges = files
-                .iter()
-                .flat_map(|file| file.artifacts.edges.iter())
-                .collect::<Vec<_>>();
-            edges.sort_by(|left, right| edge_order(left, right));
+            // Re-derive the generation's edge evidence (per-file edges plus
+            // the seal-time cross-file resolution) with the same authority
+            // that sealed it, so a published generation whose derivation and
+            // stored evidence disagree is refused.
+            let (edges, _) = collect_edge_evidence(&files);
             let edges_match = edges.len() == self.edges.len()
                 && edges
                     .iter()
                     .zip(&self.edges)
-                    .all(|(left, right)| *left == right);
+                    .all(|(left, right)| left == right);
             let mut edge_abstentions = files
                 .iter()
                 .flat_map(|file| file.artifacts.edge_abstentions.iter())

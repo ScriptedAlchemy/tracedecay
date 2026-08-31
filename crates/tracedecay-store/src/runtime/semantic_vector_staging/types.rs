@@ -9,7 +9,6 @@ use super::super::{
     StoreRuntimeBindingV1, StoreShardIdV1, StoreShardScopeV1,
 };
 
-pub const MAX_SEMANTIC_VECTOR_STAGE_CHUNKS: u64 = 100_000;
 pub const MAX_SEMANTIC_VECTOR_STAGE_CHUNKS_PER_BATCH: usize = 512;
 pub const MAX_SEMANTIC_VECTOR_STAGE_PAGE_RECORDS: u16 = 64;
 pub const MAX_SEMANTIC_VECTOR_PENDING_EFFECT_PAGE_RECORDS: u16 = 64;
@@ -363,13 +362,6 @@ impl SemanticVectorStagePlan {
         if self.publication_key.projection != self.key.projection {
             return Err(StorageRuntimeContractErrorV1::ReceiptBindingMismatch {
                 field: "semantic vector publication projection",
-            });
-        }
-        if self.expected_chunk_count > MAX_SEMANTIC_VECTOR_STAGE_CHUNKS {
-            return Err(StorageRuntimeContractErrorV1::InvalidRange {
-                field: "semantic vector expected chunk count",
-                min: 0,
-                max: MAX_SEMANTIC_VECTOR_STAGE_CHUNKS,
             });
         }
         if !matches!(

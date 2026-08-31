@@ -652,12 +652,16 @@ async fn search_on_db(
         )
     };
     if tracked.authority_result_invalid {
-        let committed_state = tracked
-            .committed_state()
-            .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?;
-        let prepared = prepared
-            .as_ref()
-            .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?;
+        let committed_state = tracked.committed_state().ok_or_else(|| {
+            RetainedSurfaceExecutionErrorV1::unavailable(
+                "the tracked retrieval telemetry carried no committed state",
+            )
+        })?;
+        let prepared = prepared.as_ref().ok_or_else(|| {
+            RetainedSurfaceExecutionErrorV1::unavailable(
+                "the retained memory effect was not prepared before settlement",
+            )
+        })?;
         return prepared.partial_with_digest(
             committed_state,
             "application.retained.memory-search-authority-result-invalid",
@@ -670,9 +674,11 @@ async fn search_on_db(
             let Some(committed_state) = tracked.committed_state() else {
                 return Err(error);
             };
-            let prepared = prepared
-                .as_ref()
-                .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?;
+            let prepared = prepared.as_ref().ok_or_else(|| {
+                RetainedSurfaceExecutionErrorV1::unavailable(
+                    "the retained memory effect was not prepared before settlement",
+                )
+            })?;
             return prepared.partial_with_digest(
                 committed_state,
                 "application.retained.memory-search-projection-failed",
@@ -684,11 +690,15 @@ async fn search_on_db(
         && memory_mapping::refresh_search_hits(&mut mapped, &tracked.projections).is_err()
     {
         let Some(committed_state) = tracked.committed_state() else {
-            return Err(RetainedSurfaceExecutionErrorV1::Unavailable);
+            return Err(RetainedSurfaceExecutionErrorV1::unavailable(
+                "the refreshed search hits could not be projected and no telemetry state committed",
+            ));
         };
-        let prepared = prepared
-            .as_ref()
-            .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?;
+        let prepared = prepared.as_ref().ok_or_else(|| {
+            RetainedSurfaceExecutionErrorV1::unavailable(
+                "the retained memory effect was not prepared before settlement",
+            )
+        })?;
         return prepared.partial_with_digest(
             committed_state,
             "application.retained.memory-search-telemetry-projection-failed",
@@ -701,9 +711,11 @@ async fn search_on_db(
                 tracedecay_application::CancellationStage::DuringRead,
             ));
         };
-        let prepared = prepared
-            .as_ref()
-            .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?;
+        let prepared = prepared.as_ref().ok_or_else(|| {
+            RetainedSurfaceExecutionErrorV1::unavailable(
+                "the retained memory effect was not prepared before settlement",
+            )
+        })?;
         return prepared.partial_with_digest(
             committed_state,
             "application.retained.memory-search-admission-expiry-after-telemetry-commit",
@@ -721,18 +733,22 @@ async fn search_on_db(
                     tracedecay_application::CancellationStage::DuringRead,
                 ));
             };
-            let prepared = prepared
-                .as_ref()
-                .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?;
+            let prepared = prepared.as_ref().ok_or_else(|| {
+                RetainedSurfaceExecutionErrorV1::unavailable(
+                    "the retained memory effect was not prepared before settlement",
+                )
+            })?;
             prepared.memory_expiry_failed(committed_state)
         }
         Err(error) => {
             let Some(committed_state) = tracked.committed_state() else {
                 return Err(error);
             };
-            let prepared = prepared
-                .as_ref()
-                .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?;
+            let prepared = prepared.as_ref().ok_or_else(|| {
+                RetainedSurfaceExecutionErrorV1::unavailable(
+                    "the retained memory effect was not prepared before settlement",
+                )
+            })?;
             prepared.partial_with_digest(
                 committed_state,
                 "application.retained.memory-search-delivery-failed",

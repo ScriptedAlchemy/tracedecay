@@ -199,8 +199,11 @@ pub(crate) async fn workflows(
             label = "daemon.retained.session.workflows.list"
         )
         .await
-        .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?
-        {
+        .map_err(|error| {
+            RetainedSurfaceExecutionErrorV1::unavailable(format!(
+                "the workflow index query failed: {error}"
+            ))
+        })? {
             WorkflowRunListOutcome::Runs(runs) => workflow_list(
                 WorkflowQueryModeV1::Session,
                 Some(session_id.to_owned()),
@@ -228,8 +231,11 @@ pub(crate) async fn workflows(
             label = "daemon.retained.session.workflows.list"
         )
         .await
-        .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?
-        {
+        .map_err(|error| {
+            RetainedSurfaceExecutionErrorV1::unavailable(format!(
+                "the workflow index query failed: {error}"
+            ))
+        })? {
             WorkflowRunListOutcome::Runs(runs) => workflow_list(
                 WorkflowQueryModeV1::GitScope,
                 None,
@@ -277,8 +283,8 @@ fn map_git_error(error: GitCorrelationError) -> RetainedSurfaceExecutionErrorV1 
         GitCorrelationError::BudgetExhausted => RetainedSurfaceExecutionErrorV1::TimedOut(
             tracedecay_application::CancellationStage::DuringRead,
         ),
-        GitCorrelationError::Db(_) | GitCorrelationError::Unavailable(_) => {
-            RetainedSurfaceExecutionErrorV1::Unavailable
+        error @ (GitCorrelationError::Db(_) | GitCorrelationError::Unavailable(_)) => {
+            RetainedSurfaceExecutionErrorV1::unavailable(error.to_string())
         }
     }
 }
@@ -385,7 +391,11 @@ async fn workflow_run_query(
             .await
         }
     }
-    .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
+    .map_err(|error| {
+        RetainedSurfaceExecutionErrorV1::unavailable(format!(
+            "the workflow index query failed: {error}"
+        ))
+    })?;
     let detail = match outcome {
         WorkflowRunDetailOutcome::Run(detail) => detail,
         WorkflowRunDetailOutcome::NotFound => return Ok(workflow_not_found(run_id)),

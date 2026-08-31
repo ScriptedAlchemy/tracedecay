@@ -194,6 +194,9 @@ impl HostAdmissionTestRuntimeV1 {
             .session_registry
             .project_sessions(project_id.clone(), [project_root.to_path_buf()])
             .await?;
+        self.session_registry
+            .settle_project_session_graph(&project_id)
+            .await?;
         // The shared registry caches project mounts, so a project that was
         // mounted before (opened, dropped, reopened while a sibling keeps the
         // registry alive) already carries its weak graph proxy; only a first
@@ -275,9 +278,18 @@ impl HostAdmissionTestRuntimeV1 {
         };
         let profile_database = session_registry.profile_database().await?;
         let profile_registered = session_registry.profile_sessions().await?;
+        // The session relation graph opens as bounded background work behind
+        // the mounted lease. Production tolerates the warming window through
+        // typed retryable refusals; the deterministic fixture awaits
+        // settlement so graph-dependent operations (LCM compression, relation
+        // projection) do not race the open task.
+        session_registry.settle_profile_session_graph().await?;
         let (project_id, project_registered) = if let Some((project_root, project_id)) = project {
             let registered = session_registry
                 .project_sessions(project_id.clone(), [project_root.clone()])
+                .await?;
+            session_registry
+                .settle_project_session_graph(&project_id)
                 .await?;
             // Production project open binds a weak project graph proxy to
             // the registered project-sessions authority before

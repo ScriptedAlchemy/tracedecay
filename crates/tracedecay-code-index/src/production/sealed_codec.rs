@@ -315,7 +315,10 @@ struct PersistedPublishedGenerationRefV1<'a> {
     repository_parse_identity: &'a CodeIndexRepositoryParseIdentityV1,
     ignored_source_admissions: &'a [CodeIndexIgnoredSourceAdmissionV1],
     ignored_source_admissions_digest: &'a ManifestDigest,
-    files: Vec<PersistedFileGenerationArtifactsRefV1<'a>>,
+    /// Pre-encoded file JSON. Each file is serialized on the indexing pool
+    /// before the envelope is stitched so a 700+ file generation does not
+    /// pay a single-threaded `to_writer` of the whole files array.
+    files: Vec<Box<RawValue>>,
     lineage: &'a [SymbolLineageCandidateV1],
     coverage: CoverageSummaryV1,
     capability: &'a CodeIndexCapabilityManifestV1,
@@ -736,6 +739,25 @@ fn write_generation_envelope_with_limits<T: Serialize, W: Write + Seek>(
     Ok(written)
 }
 
+fn encode_persisted_files_parallel(
+    files: &[Arc<FileGenerationArtifactsV1>],
+) -> Result<Vec<Box<RawValue>>, CodeIndexProductionErrorV1> {
+    hotpath::measure_block!("code_index.sealed_encode.files", {
+        super::collect_bounded_ordered(files, |file, _| {
+            let persisted = PersistedFileGenerationArtifactsRefV1 {
+                authority: &file.authority,
+                extraction: &file.extraction,
+                artifacts: &file.artifacts,
+            };
+            serde_json::value::to_raw_value(&persisted).map_err(|error| {
+                CodeIndexProductionErrorV1::Contract(format!(
+                    "sealed generation file serialization failed: {error}"
+                ))
+            })
+        })
+    })
+}
+
 fn json_generation_digest(
     generation_bytes: &[u8],
 ) -> Result<ManifestDigest, CodeIndexProductionErrorV1> {
@@ -765,6 +787,7 @@ impl CodeIndexPublishedGenerationV1 {
         writer: &mut W,
     ) -> Result<u64, CodeIndexProductionErrorV1> {
         self.validate()?;
+        let files = encode_persisted_files_parallel(&self.files)?;
         let generation = PersistedPublishedGenerationRefV1 {
             format_revision: SEALED_GENERATION_FORMAT_REVISION_V1,
             manifest: &self.manifest,
@@ -772,15 +795,7 @@ impl CodeIndexPublishedGenerationV1 {
             repository_parse_identity: &self.repository_parse_identity,
             ignored_source_admissions: self.ignored_source_roster.admissions(),
             ignored_source_admissions_digest: self.ignored_source_roster.digest(),
-            files: self
-                .files
-                .iter()
-                .map(|file| PersistedFileGenerationArtifactsRefV1 {
-                    authority: &file.authority,
-                    extraction: &file.extraction,
-                    artifacts: &file.artifacts,
-                })
-                .collect(),
+            files,
             lineage: &self.lineage,
             coverage: self.coverage,
             capability: &self.capability,

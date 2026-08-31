@@ -352,11 +352,14 @@ pub(crate) async fn handle_diff_context(
 }
 
 #[hotpath::measure(future = true, label = "mcp.git.changelog.total")]
-pub(crate) async fn handle_changelog(
+pub(crate) async fn handle_changelog<F>(
     cg: &TraceDecay,
-    graph: &VerifiedGraphQuery,
+    graph: F,
     args: Value,
-) -> Result<ToolResult> {
+) -> Result<ToolResult>
+where
+    F: Future<Output = Result<VerifiedGraphQuery>>,
+{
     require_object_args(&args, "tracedecay_changelog")?;
     let from_ref = args
         .get("from_ref")
@@ -372,7 +375,10 @@ pub(crate) async fn handle_changelog(
                 message: "missing required parameter: to_ref".to_string(),
             })?;
 
-    // Use gix to diff the two trees, off the request runtime's workers.
+    // Use gix to diff the two trees, off the request runtime's workers. The
+    // graph admission stays unawaited until the diff succeeds: a repository
+    // that git itself refuses must report its typed git error rather than
+    // whatever state the graph projection mount is in.
     let changes = {
         let project_root = cg.project_root().to_path_buf();
         let from_ref = from_ref.to_owned();
@@ -391,6 +397,7 @@ pub(crate) async fn handle_changelog(
             }
         }
     };
+    let graph = &hotpath::future!(graph, label = "mcp.git.changelog.graph_admission").await?;
     let changed_files: Vec<String> = changes.iter().map(|change| change.path.clone()).collect();
     let changed_paths = changed_files.iter().cloned().collect::<HashSet<_>>();
     let graph_symbols = hotpath::measure_block!(

@@ -1192,9 +1192,15 @@ impl McpServer {
 
     #[cfg(feature = "test-transport")]
     #[doc(hidden)]
+    /// Mounts the daemon-owned source-edit authority on a test server.
+    ///
+    /// Returns `Ok(false)` when this server was constructed without the
+    /// production code-graph projection port (a direct test server), so the
+    /// authority cannot mount; dispatch-boundary behavior is unaffected and
+    /// actual edits then report their typed executor-unavailable refusal.
     pub async fn install_project_open_source_edit_authority_for_test(
         &self,
-    ) -> tracedecay_domain::errors::Result<()> {
+    ) -> tracedecay_domain::errors::Result<bool> {
         crate::daemon::project_open_owners::install_project_open_source_edit_owners_for_test(self)
             .await
     }

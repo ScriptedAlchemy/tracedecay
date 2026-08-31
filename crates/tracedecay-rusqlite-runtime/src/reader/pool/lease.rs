@@ -236,6 +236,7 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
 
     pub(super) fn read_table_sizes(
         &mut self,
+        reply_bound: std::time::Duration,
     ) -> Result<Vec<worker::TableSizeTelemetrySample>, ReaderAcquireError> {
         if self.snapshot_active {
             return Err(ReaderAcquireError::Worker(
@@ -251,7 +252,7 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
         self.checkout
             .worker
             .client
-            .table_sizes()
+            .table_sizes(reply_bound)
             .map_err(map_worker_error)
     }
 
