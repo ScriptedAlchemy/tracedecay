@@ -138,6 +138,7 @@ impl VibeSource {
     }
 }
 
+#[hotpath::measure_all]
 impl TranscriptSource for VibeSource {
     fn provider(&self) -> &'static str {
         PROVIDER

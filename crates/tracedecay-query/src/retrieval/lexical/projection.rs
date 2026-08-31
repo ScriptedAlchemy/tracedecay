@@ -991,17 +991,17 @@ impl CodeLexicalProjectionAdapterV1 {
         request: &LexicalLaneRequest<'_>,
     ) -> Result<RetrieverBatch<LexicalLaneEvidence>, RetrievalPortError> {
         let fuzzy = self.fuzzy_expansions(request)?;
+        let prepared = PreparedLexicalQueryV1::new(request);
         // Intersect the n-gram postings for each normalized phrase exactly once,
         // then reuse the candidate set for both the document-frequency tally and
         // the lexical document set below (previously each phrase was intersected
         // twice per query).
-        let phrase_candidates: BTreeMap<String, RoaringBitmap> = request
+        let phrase_candidates: BTreeMap<String, RoaringBitmap> = prepared
             .phrases
             .iter()
-            .map(|phrase| {
-                let normalized = normalize_lexical(phrase);
-                let candidates = self.postings.phrase_candidate_documents(&normalized);
-                (normalized, candidates)
+            .map(|(_, normalized)| {
+                let candidates = self.postings.phrase_candidate_documents(normalized);
+                (normalized.clone(), candidates)
             })
             .collect();
         let phrase_document_frequencies = phrase_candidates
@@ -1020,8 +1020,13 @@ impl CodeLexicalProjectionAdapterV1 {
         let mut excluded = self.rows.len() as u64 - documents.len();
         for document in documents {
             let row = &self.rows[document as usize];
-            let score =
-                self.score_row(document, row, request, &fuzzy, &phrase_document_frequencies);
+            let score = self.score_row(
+                document,
+                row,
+                &prepared,
+                &fuzzy,
+                &phrase_document_frequencies,
+            );
             if score.field_scores.is_empty() {
                 excluded += 1;
                 continue;
@@ -1146,12 +1151,12 @@ impl CodeLexicalProjectionAdapterV1 {
         &self,
         document: u32,
         row: &ProjectedChunkV1,
-        request: &LexicalLaneRequest<'_>,
+        prepared: &PreparedLexicalQueryV1<'_>,
         fuzzy: &FuzzyExpansionsV1,
         phrase_document_frequencies: &BTreeMap<String, usize>,
     ) -> LexicalRowScoreV1 {
         crate::hotpath_metrics::measure_frequent("query.lane.lexical.score_row", || {
-            self.score_row_inner(document, row, request, fuzzy, phrase_document_frequencies)
+            self.score_row_inner(document, row, prepared, fuzzy, phrase_document_frequencies)
         })
     }
 
@@ -1159,7 +1164,7 @@ impl CodeLexicalProjectionAdapterV1 {
         &self,
         document: u32,
         row: &ProjectedChunkV1,
-        request: &LexicalLaneRequest<'_>,
+        prepared: &PreparedLexicalQueryV1<'_>,
         fuzzy: &FuzzyExpansionsV1,
         phrase_document_frequencies: &BTreeMap<String, usize>,
     ) -> LexicalRowScoreV1 {
@@ -1171,21 +1176,20 @@ impl CodeLexicalProjectionAdapterV1 {
         let mut typo_recovery_applied = false;
         for field in row.field_lengths.keys() {
             if *field != LexicalFieldV1::Subtoken {
-                for query_term in &request.whole_terms {
-                    let normalized_query = normalize_lexical(query_term);
-                    let exact_tf =
-                        self.postings
-                            .term_frequency(*field, &normalized_query, document);
+                for (query_term, normalized_query) in &prepared.whole_terms {
+                    let exact_tf = self
+                        .postings
+                        .term_frequency(*field, normalized_query, document);
                     if exact_tf > 0 {
                         add_score(
                             &mut field_scores,
                             *field,
-                            self.term_score(*field, &normalized_query, exact_tf, row),
+                            self.term_score(*field, normalized_query, exact_tf, row),
                         );
-                        matched_whole_terms.insert(query_term.clone());
-                        collect_term_kinds(&row.exact_terms, &normalized_query, &mut matched_kinds);
+                        matched_whole_terms.insert((*query_term).to_owned());
+                        collect_term_kinds(&row.exact_terms, normalized_query, &mut matched_kinds);
                     }
-                    if let Some(expansions) = fuzzy.by_query.get(query_term) {
+                    if let Some(expansions) = fuzzy.by_query.get(*query_term) {
                         for expansion in expansions {
                             let fuzzy_tf =
                                 self.postings.term_frequency(*field, expansion, document);
@@ -1197,7 +1201,7 @@ impl CodeLexicalProjectionAdapterV1 {
                                 .saturating_mul(FUZZY_SCORE_MILLIS)
                                 / 1_000;
                             add_score(&mut field_scores, *field, score);
-                            matched_whole_terms.insert(query_term.clone());
+                            matched_whole_terms.insert((*query_term).to_owned());
                             typo_recovery_applied = true;
                             collect_term_kinds(&row.exact_terms, expansion, &mut matched_kinds);
                         }
@@ -1205,23 +1209,21 @@ impl CodeLexicalProjectionAdapterV1 {
                 }
             }
             if *field == LexicalFieldV1::Subtoken {
-                for subtoken in &request.subtokens {
-                    let normalized = normalize_lexical(subtoken);
-                    let tf = self.postings.term_frequency(*field, &normalized, document);
+                for (subtoken, normalized) in &prepared.subtokens {
+                    let tf = self.postings.term_frequency(*field, normalized, document);
                     if tf > 0 {
                         add_score(
                             &mut field_scores,
                             *field,
-                            self.term_score(*field, &normalized, tf, row),
+                            self.term_score(*field, normalized, tf, row),
                         );
-                        matched_subtokens.insert(subtoken.clone());
+                        matched_subtokens.insert((*subtoken).to_owned());
                     }
                 }
             }
         }
-        for phrase in &request.phrases {
-            let normalized = normalize_lexical(phrase);
-            let tf = substring_count(&row.normalized_text, &normalized);
+        for (phrase, normalized) in &prepared.phrases {
+            let tf = substring_count(&row.normalized_text, normalized);
             if tf == 0 {
                 continue;
             }
@@ -1236,18 +1238,17 @@ impl CodeLexicalProjectionAdapterV1 {
                     tf,
                     row,
                     phrase_document_frequencies
-                        .get(&normalized)
+                        .get(normalized)
                         .copied()
                         .unwrap_or_default(),
                 )
                 .saturating_mul(PHRASE_SCORE_MILLIS)
                 / 1_000;
             add_score(&mut field_scores, field, score);
-            matched_phrases.insert(phrase.clone());
+            matched_phrases.insert((*phrase).to_owned());
         }
-        let normalized_query = normalize_lexical(request.query_view.as_str().trim_matches('"'));
         let echo_penalty_applied =
-            !normalized_query.is_empty() && normalized_query == row.normalized_text.trim();
+            !prepared.echo_query.is_empty() && prepared.echo_query == row.normalized_text.trim();
         if echo_penalty_applied {
             for score in field_scores.values_mut() {
                 *score = score.saturating_mul(ECHO_SCORE_MILLIS) / 1_000;
@@ -1401,6 +1402,7 @@ where
         let documents = self.projection.postings.exact_candidate_documents(request);
         let mut pairs = Vec::new();
         let mut excluded = self.projection.rows.len() as u64 - documents.len();
+        let mut proofs = LiteralProofCacheV1::new(request.literals.len());
         for document in documents {
             let row = &self.projection.rows[document as usize];
             let (matched_literals, matched_kinds) = exact_matches(row.exact_match_view(), request);
@@ -1408,22 +1410,17 @@ where
                 excluded += 1;
                 continue;
             }
-            let admitted = matched_literals
-                .iter()
-                .find_map(|literal| {
-                    self.authority
-                        .admit(literal.field, &literal.original_bytes, &request.base)
-                        .transpose()
-                        .map(|result| result.map(|proof| (literal, proof)))
-                })
-                .transpose()
-                .map_err(contract_error)?
+            let (_, proof) = proofs
+                .first_admitted(&matched_literals, request, &self.authority)?
                 .ok_or_else(|| {
                     RetrievalPortError::Contract(
                         "central authority rejected every projected exact match".to_owned(),
                     )
                 })?;
-            let proof = admitted.1;
+            let matched_literals = matched_literals
+                .iter()
+                .map(|ordinal| request.literals[*ordinal].clone())
+                .collect::<Vec<_>>();
             let candidate = self.projection.candidate(
                 row,
                 RetrieverKind::ExactLiteral,
@@ -1496,16 +1493,16 @@ struct ExactMatchRowViewV1<'a> {
     exact_terms: &'a [ExactTechnicalTermV1],
 }
 
+/// Match one row against every request literal, returning matched literal
+/// ordinals into `request.literals`. Ordinals defer the literal clones to
+/// the cap-bounded winners instead of paying them per visited document.
 fn exact_matches(
     row: ExactMatchRowViewV1<'_>,
     request: &ExactLaneRequest,
-) -> (
-    Vec<crate::retrieval::exact::ExactLiteralV1>,
-    Vec<ExactTechnicalTermKindV1>,
-) {
+) -> (Vec<usize>, Vec<ExactTechnicalTermKindV1>) {
     let mut matched_literals = Vec::new();
     let mut matched_kinds = BTreeSet::new();
-    for literal in &request.literals {
+    for (ordinal, literal) in request.literals.iter().enumerate() {
         let mut matched = false;
         if matches!(
             literal.field,
@@ -1531,10 +1528,118 @@ fn exact_matches(
             }
         }
         if matched {
-            matched_literals.push(literal.clone());
+            matched_literals.push(ordinal);
         }
     }
     (matched_literals, matched_kinds.into_iter().collect())
+}
+
+/// Per-request lazily admitted proofs, one slot per request literal.
+///
+/// An admission proof depends only on the literal and the request — never on
+/// the matched document — while one `admit` costs four canonical-JSON SHA-256
+/// digests. Both posting adapters previously re-admitted per matching
+/// document, which dominated exact retrieval for high-cardinality literals.
+/// Laziness preserves the original failure surface: a literal no document
+/// matches is never admitted at all.
+struct LiteralProofCacheV1 {
+    slots: Vec<Option<Option<tracedecay_domain::ExactAdmissionProof>>>,
+}
+
+impl LiteralProofCacheV1 {
+    fn new(literal_count: usize) -> Self {
+        Self {
+            slots: vec![None; literal_count],
+        }
+    }
+
+    /// The first matched literal ordinal the central authority admits, with
+    /// its proof — the same first-admitting-literal selection the per-document
+    /// `find_map` performed, at most one `admit` per literal per request.
+    fn first_admitted<A>(
+        &mut self,
+        matched_ordinals: &[usize],
+        request: &ExactLaneRequest<'_>,
+        authority: &A,
+    ) -> Result<Option<(usize, tracedecay_domain::ExactAdmissionProof)>, RetrievalPortError>
+    where
+        A: ExactAdmissionAuthority,
+    {
+        for ordinal in matched_ordinals {
+            let slot = self.slots.get_mut(*ordinal).ok_or_else(|| {
+                RetrievalPortError::Contract(
+                    "exact match ordinal is outside the request literals".to_owned(),
+                )
+            })?;
+            if slot.is_none() {
+                let literal = &request.literals[*ordinal];
+                *slot = Some(
+                    authority
+                        .admit(literal.field, &literal.original_bytes, &request.base)
+                        .map_err(contract_error)?,
+                );
+            }
+            if let Some(Some(proof)) = slot {
+                return Ok(Some((*ordinal, proof.clone())));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The already-admitted proof for one literal ordinal. Winner
+    /// materialization resolves through this instead of retaining a proof
+    /// clone per visited document.
+    fn admitted_proof(
+        &self,
+        ordinal: usize,
+    ) -> Result<tracedecay_domain::ExactAdmissionProof, RetrievalPortError> {
+        self.slots
+            .get(ordinal)
+            .and_then(|slot| slot.as_ref())
+            .and_then(|admitted| admitted.clone())
+            .ok_or_else(|| {
+                RetrievalPortError::Contract(
+                    "exact winner names a literal the authority never admitted".to_owned(),
+                )
+            })
+    }
+}
+
+/// Query-derived strings normalized once per retrieval. Row scoring reuses
+/// these instead of re-normalizing every query term, subtoken, phrase, and
+/// the whole echo query for every visited document.
+struct PreparedLexicalQueryV1<'request> {
+    /// `(original, normalized)` per request whole term.
+    whole_terms: Vec<(&'request str, String)>,
+    /// `(original, normalized)` per request subtoken.
+    subtokens: Vec<(&'request str, String)>,
+    /// `(original, normalized)` per request phrase.
+    phrases: Vec<(&'request str, String)>,
+    /// The normalized quote-trimmed query for the echo penalty.
+    echo_query: String,
+}
+
+impl<'request> PreparedLexicalQueryV1<'request> {
+    fn new(request: &'request LexicalLaneRequest<'_>) -> Self {
+        Self {
+            whole_terms: request
+                .whole_terms
+                .iter()
+                .map(|term| (term.as_str(), normalize_lexical(term)))
+                .collect(),
+            subtokens: request
+                .subtokens
+                .iter()
+                .map(|subtoken| (subtoken.as_str(), normalize_lexical(subtoken)))
+                .collect(),
+            phrases: request
+                .phrases
+                .iter()
+                .map(|phrase| (phrase.as_str(), normalize_lexical(phrase)))
+                .collect(),
+            echo_query: normalize_lexical(request.query_view.as_str().trim_matches('"')),
+        }
+    }
 }
 
 fn exact_field_for_kind(kind: ExactTechnicalTermKindV1) -> ExactFieldV1 {
@@ -1580,8 +1685,11 @@ fn collect_term_kinds(
     kinds: &mut BTreeSet<ExactTechnicalTermKindV1>,
 ) {
     for term in exact_terms {
+        // `normalized_term` is already ASCII-lowercased, so the allocation-free
+        // case-insensitive comparison is exactly `normalize_lexical(value) ==
+        // normalized_term`.
         if std::str::from_utf8(term.canonical_bytes())
-            .is_ok_and(|value| normalize_lexical(value) == normalized_term)
+            .is_ok_and(|value| value.eq_ignore_ascii_case(normalized_term))
         {
             kinds.insert(term.kind());
         }
