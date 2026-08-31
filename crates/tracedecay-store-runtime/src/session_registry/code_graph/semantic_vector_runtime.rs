@@ -26,7 +26,7 @@ pub(crate) struct DaemonVerifiedSemanticVectorGraphRuntimeV1 {
 }
 
 impl DaemonVerifiedSemanticVectorGraphRuntimeV1 {
-    pub(crate) fn new(
+    pub fn new(
         retained: Arc<RetainedCodeGraphRuntimeV1>,
         scope: SemanticVectorGraphScopeV1,
         source_scope: StoreShardIdV1,

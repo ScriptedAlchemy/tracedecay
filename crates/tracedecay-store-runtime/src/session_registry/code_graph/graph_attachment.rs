@@ -16,7 +16,7 @@ use tracedecay_store::{
 use super::super::{Result, session_registry_error};
 use super::{AtomicGraphCancellationV1, GRAPH_OPEN_DEADLINE};
 
-pub(in crate::daemon::store_runtime::session_registry) async fn open_session_relation_owner(
+pub async fn open_session_relation_owner(
     registry: &StoreRuntimeRegistry,
     graph_registry: &tracedecay_graph_db::GraphDbRegistry,
     lifecycle_cancelled: &Arc<AtomicBool>,
@@ -41,7 +41,7 @@ pub(in crate::daemon::store_runtime::session_registry) async fn open_session_rel
     .await
 }
 
-pub(in crate::daemon::store_runtime::session_registry) async fn open_session_relation_owner_for_task(
+pub async fn open_session_relation_owner_for_task(
     registry: &StoreRuntimeRegistry,
     graph_registry: &tracedecay_graph_db::GraphDbRegistry,
     lifecycle_cancelled: &Arc<AtomicBool>,
@@ -123,7 +123,7 @@ async fn open_session_relation_owner_with_cancellation(
     Ok((graph, store_target))
 }
 
-pub(in crate::daemon::store_runtime::session_registry) async fn close_retained_for_shutdown(
+pub async fn close_retained_for_shutdown(
     graph_registry: &tracedecay_graph_db::GraphDbRegistry,
     binding: StoreRuntimeBindingV1,
     verified_locator: VerifiedStoreLocatorV1,
@@ -146,7 +146,7 @@ pub(in crate::daemon::store_runtime::session_registry) async fn close_retained_f
 impl super::RetainedVerifiedGraphRuntimeV1 {
     /// Exact store identity of the retained memory-graph runtime, captured
     /// for the shutdown close after this owner has been drained and dropped.
-    pub(in crate::daemon::store_runtime::session_registry) fn graph_store_identity(
+    pub fn graph_store_identity(
         &self,
     ) -> (StoreRuntimeBindingV1, VerifiedStoreLocatorV1) {
         (

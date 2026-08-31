@@ -28,7 +28,7 @@ use tracedecay_domain::{
 use tracedecay_store::SessionRefreshCompletionRequestV1;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
+use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 use tracedecay_runtime_core::storage::{

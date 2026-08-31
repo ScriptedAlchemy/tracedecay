@@ -1,6 +1,7 @@
 use std::io::Read;
 use std::path::Path;
 
+use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use tracedecay_application::remote::recovery::RecoveryAuthorityExpectationV1;
@@ -90,11 +91,11 @@ pub(super) fn converge_interrupted_restore(
 pub(super) fn validate_isolated_restore(
     path: &Path,
 ) -> Result<(), RemoteRecoveryPhysicalEffectErrorV1> {
-    let connection = rusqlite::Connection::open_with_flags(
+    let connection = Connection::open_with_flags(
         path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
-            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
-            | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_URI,
     )
     .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?;
     let integrity_check: String = connection
@@ -205,7 +206,7 @@ mod tests {
     use super::*;
 
     fn project_database(path: &Path, marker: &str) {
-        let connection = rusqlite::Connection::open(path).unwrap();
+        let connection = Connection::open(path).unwrap();
         connection
             .execute_batch(
                 "PRAGMA journal_mode=DELETE;

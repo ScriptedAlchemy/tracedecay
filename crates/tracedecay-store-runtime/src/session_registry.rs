@@ -5,7 +5,9 @@ use std::path::Path;
 #[cfg(feature = "hotpath")]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -15,14 +17,13 @@ use tracedecay_store::{
     AdmissionConfigV1, ProjectId, StoreIncarnationV1, StoreShardIdV1, StoreShardScopeV1,
 };
 
-use super::register_registered_schema_installer;
-use super::registry::{
+use tracedecay_runtime_core::store_runtime::registry::{
     DestructiveMaintenanceReservation, DestructiveMaintenanceTarget,
     LifecycleShardRuntimePublisher, ProfileAuthorityPin, ProfileAuthorityPinResult,
     StoreRuntimeClientLease, StoreRuntimeKey, StoreRuntimeOpenRequest, StoreRuntimeOpenResult,
     StoreRuntimeRegistry, StoreRuntimeRegistryFailure, StoreRuntimeResolver,
 };
-use super::resolver::{
+use tracedecay_runtime_core::store_runtime::resolver::{
     LocalProfileStoreAuthorityV1, LocalProjectEnrollmentAuthorityV1, LocalStoreLocatorResolutionV1,
     LocalStoreRuntimeResolverV1,
 };
@@ -43,7 +44,7 @@ use tracedecay_session_temporal_store::relations::SessionRelationScope;
 mod code_graph;
 mod code_graph_manifest;
 mod code_reads;
-mod maintenance;
+pub mod maintenance;
 mod memory_graph_reconciliation_tasks;
 mod mounts;
 mod profile_memory;
@@ -55,7 +56,54 @@ mod terminal_tasks;
 use maintenance::RegisteredSchemaConvergenceMaintenance;
 use retained_hook_tasks::RetainedHookTasks;
 
-pub(crate) use profile_memory::open_user_memory_db;
+pub use profile_memory::open_user_memory_db;
+
+/// RAII hold for a root-owned remote-recovery writer admission.
+///
+/// The concrete guard type stays in the composition root; this crate only
+/// needs the admission to remain live for the recovery effect.
+pub struct RemoteRecoveryAdmission {
+    _hold: Box<dyn Send + Sync>,
+}
+
+impl RemoteRecoveryAdmission {
+    pub fn hold<T: Send + Sync + 'static>(value: T) -> Self {
+        Self {
+            _hold: Box::new(value),
+        }
+    }
+}
+
+/// RAII hold for a root-owned remote-recovery project quiescence fence.
+pub struct RemoteRecoveryQuiescence {
+    _hold: Box<dyn Send + Sync>,
+}
+
+impl RemoteRecoveryQuiescence {
+    pub fn hold<T: Send + Sync + 'static>(value: T) -> Self {
+        Self {
+            _hold: Box::new(value),
+        }
+    }
+}
+
+/// Operations the composition root installs after opening a registry.
+///
+/// The concrete `RemoteRecoveryProjectLifecycleV1` stays in root because it
+/// holds daemon invocation, project-open, and retirement state. This is the
+/// existing install seam, not a new recovery port.
+pub trait RemoteRecoveryProjectLifecycle: Send + Sync {
+    fn authorize_project_recovery<'a>(
+        &'a self,
+        project_id: &'a ProjectId,
+    ) -> Pin<Box<dyn Future<Output = Result<RemoteRecoveryAdmission>> + Send + 'a>>;
+
+    fn quiesce<'a>(
+        &'a self,
+        project_id: &'a ProjectId,
+        database: &'a RegisteredGlobalDbLeaseV1,
+    ) -> Pin<Box<dyn Future<Output = Result<RemoteRecoveryQuiescence>> + Send + 'a>>;
+}
 
 /// Sanity ceiling on concurrently mounted project runtime owners, not a bound
 /// on how many projects a profile may enrol.
@@ -90,7 +138,7 @@ const PROJECT_GRAPH_OWNER_ADMISSION_DEMAND: usize = 3;
 /// profile-wide owners take their slots first: a hand-picked number is short by
 /// exactly that many, and the last project then fails inside the graph registry
 /// before ever reaching [`MAX_RETAINED_PROJECT_RUNTIME_OWNERS`].
-pub(crate) const MAX_RETAINED_GRAPH_DB_OWNERS: usize = PROFILE_WIDE_GRAPH_DB_OWNERS
+pub const MAX_RETAINED_GRAPH_DB_OWNERS: usize = PROFILE_WIDE_GRAPH_DB_OWNERS
     + PROJECT_GRAPH_OWNER_ADMISSION_DEMAND * MAX_RETAINED_PROJECT_RUNTIME_OWNERS;
 
 /// Remote Brain node ceiling, taken from the credential registry rather than
@@ -101,7 +149,7 @@ pub(crate) const MAX_RETAINED_GRAPH_DB_OWNERS: usize = PROFILE_WIDE_GRAPH_DB_OWN
 /// provisioned database behind, and startup remounts every discovered
 /// `remote.db`, turning the residue into a hard failure on the next start.
 const MAX_RETAINED_REMOTE_NODE_OWNERS: usize =
-    crate::daemon::remote_protocol::MAX_REGISTERED_REMOTE_NODES;
+    crate::MAX_REGISTERED_REMOTE_NODES;
 
 #[cfg(feature = "hotpath")]
 static SESSION_STORE_MOUNTS_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
@@ -111,11 +159,11 @@ static SESSION_STORE_MOUNTS_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 /// Entering counts the attempt; dropping restores the in-flight gauge on
 /// every exit path, so failed, denied, or cancelled mounts cannot leak it.
 #[cfg(feature = "hotpath")]
-struct StoreMountObservationV1;
+pub(crate) struct StoreMountObservationV1;
 
 #[cfg(feature = "hotpath")]
 impl StoreMountObservationV1 {
-    fn enter() -> Self {
+    pub fn enter() -> Self {
         let in_flight = SESSION_STORE_MOUNTS_IN_FLIGHT
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
@@ -932,7 +980,7 @@ impl ProjectSessionClosedRetirementProofV1 {
 /// a fresh candidate in the same terminal vacancy.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(in crate::daemon::store_runtime::session_registry) struct ProjectSessionTerminalVacancyAuthorityV1
+pub(crate) struct ProjectSessionTerminalVacancyAuthorityV1
 {
     binding: tracedecay_store::StoreRuntimeBindingV1,
     locator: tracedecay_store::VerifiedStoreLocatorV1,
@@ -980,7 +1028,7 @@ enum ProjectRuntimeRetirementFaultV1 {
     ReservationTargetConsumed,
     Reconciliation(MemoryGraphReconciliationRetirementTerminalV1),
     GraphRefusal(tracedecay_graph_db::GraphDbError),
-    StoreStart(super::registry::StoreRuntimeRegistryFailure),
+    StoreStart(tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRegistryFailure),
     Terminal {
         graph: GraphDbRetirementCommit,
         store: StoreRuntimeRetirementCommit,
@@ -1777,7 +1825,7 @@ impl ProjectSessionReplacementVacancyV1 {
         }
     }
 
-    pub(in crate::daemon::store_runtime::session_registry) fn durable_terminal_authority(
+    pub fn durable_terminal_authority(
         &self,
     ) -> Result<ProjectSessionTerminalVacancyAuthorityV1> {
         self.require_verified_proof()?;
@@ -2574,11 +2622,15 @@ fn remote_restore_quarantine_fence_path(database: &Path) -> std::path::PathBuf {
     database.with_extension("remote-restore-quarantine.json")
 }
 
-pub(crate) fn mark_process_long_lived_for_session_maintenance() {
+pub fn mark_process_long_lived_for_session_maintenance() {
     LONG_LIVED_SESSION_MAINTENANCE.store(true, Ordering::Relaxed);
 }
 
-pub(crate) fn release_process_allocator_memory() {
+pub fn log_store_runtime_event(event: &str, fields: &[(&str, String)]) {
+    tracing::warn!(event, ?fields, "store-runtime event");
+}
+
+pub fn release_process_allocator_memory() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
         // SAFETY: `malloc_trim` is a process-wide, thread-safe glibc allocator
@@ -2590,15 +2642,15 @@ pub(crate) fn release_process_allocator_memory() {
 }
 
 impl DaemonSessionRuntimeRegistryV1 {
-    pub(crate) fn profile_id(&self) -> &tracedecay_domain::configuration::UserProfileId {
+    pub fn profile_id(&self) -> &tracedecay_domain::configuration::UserProfileId {
         self.identity.profile_id()
     }
 
-    pub(crate) fn runtime_telemetry(
+    pub fn runtime_telemetry(
         &self,
-    ) -> crate::daemon::store_runtime::telemetry::RuntimeTelemetryProjection {
+    ) -> tracedecay_runtime_core::store_runtime::telemetry::RuntimeTelemetryProjection {
         let inventory = self.registry.inventory(AdmissionConfigV1::default(), None);
-        crate::daemon::store_runtime::telemetry::project_runtime_telemetry(&inventory)
+        tracedecay_runtime_core::store_runtime::telemetry::project_runtime_telemetry(&inventory)
     }
 
     async fn profile_authority_pin(&self, operation: &'static str) -> Result<ProfileAuthorityPin> {
@@ -2833,7 +2885,7 @@ impl DaemonSessionRuntimeRegistryV1 {
 }
 
 /// One canonical registry and profile pin shared by every daemon session shard.
-pub(crate) struct DaemonSessionRuntimeRegistryV1 {
+pub struct DaemonSessionRuntimeRegistryV1 {
     identity: LocalProfileIdentityAuthorityV1,
     incarnation: StoreIncarnationV1,
     resolver: Arc<LocalStoreRuntimeResolverV1>,
@@ -2849,9 +2901,9 @@ pub(crate) struct DaemonSessionRuntimeRegistryV1 {
     profile_sessions: StdMutex<Option<RegisteredSessionOwnerV1>>,
     remote_nodes: StdMutex<BTreeMap<BrainNodeId, RemoteNodeOwnerStateV1>>,
     remote_credential_authority:
-        Arc<crate::daemon::remote_protocol::DaemonRemoteCredentialAuthorityV1>,
+        Arc<crate::DaemonRemoteCredentialAuthorityV1>,
     remote_replay_transaction:
-        Arc<crate::daemon::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1>,
+        Arc<crate::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1>,
     remote_recovery_authorities: Mutex<
         BTreeMap<
             BrainNodeId,
@@ -2875,10 +2927,8 @@ pub(crate) struct DaemonSessionRuntimeRegistryV1 {
     registered_schema_convergence: RegisteredSchemaConvergenceMaintenance,
     retained_hook_tasks: RetainedHookTasks,
     session_sync_service:
-        Arc<OnceLock<Weak<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>>>,
-    remote_recovery_project_lifecycle: Arc<
-        OnceLock<Weak<crate::daemon::branch_admin::remote_recovery_lifecycle::RemoteRecoveryProjectLifecycleV1>>,
-    >,
+        Arc<OnceLock<Arc<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>>>,
+    remote_recovery_project_lifecycle: Arc<OnceLock<Arc<dyn RemoteRecoveryProjectLifecycle>>>,
     /// Fixed at construction: whether this registry's process runs long-lived
     /// session maintenance (background historical schema convergence) for the
     /// shards it attaches. Short-lived CLI/hook processes stay `false`.
@@ -2888,7 +2938,7 @@ pub(crate) struct DaemonSessionRuntimeRegistryV1 {
 impl DaemonSessionRuntimeRegistryV1 {
     /// Whether the canonical graph registry can admit the code and session
     /// relation owners created by one previously unmounted project.
-    pub(crate) fn has_project_graph_admission_capacity(&self) -> Result<bool> {
+    pub fn has_project_graph_admission_capacity(&self) -> Result<bool> {
         let capacity = self.graph_registry.capacity().map_err(|error| {
             session_registry_error("read graph runtime capacity", error.to_string())
         })?;
@@ -2903,7 +2953,7 @@ impl DaemonSessionRuntimeRegistryV1 {
     /// retryable refusals; deterministic fixtures await settlement instead so
     /// graph-dependent operations do not race the open task.
     #[hotpath::measure(label = "daemon.session_registry.settle_profile_graph", future = true)]
-    pub(crate) async fn settle_profile_session_graph(&self) -> Result<()> {
+    pub async fn settle_profile_session_graph(&self) -> Result<()> {
         let waiter = {
             let mounted = self
                 .profile_sessions
@@ -2936,17 +2986,17 @@ impl DaemonSessionRuntimeRegistryV1 {
 
     /// Project-scope counterpart of [`Self::settle_profile_session_graph`].
     #[hotpath::measure(label = "daemon.session_registry.settle_project_graph", future = true)]
-    pub(crate) async fn settle_project_session_graph(&self, project_id: &ProjectId) -> Result<()> {
+    pub async fn settle_project_session_graph(&self, project_id: &ProjectId) -> Result<()> {
         self.project_owners.wait_for_session_graph(project_id).await
     }
 
-    pub(crate) fn install_session_sync_service(
+    pub fn install_session_sync_service(
         &self,
         service: &Arc<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>,
     ) -> Result<()> {
-        let service = Arc::downgrade(service);
+        let service = Arc::clone(service);
         if let Some(retained) = self.session_sync_service.get() {
-            return if Weak::ptr_eq(retained, &service) {
+            return if Arc::ptr_eq(retained, &service) {
                 Ok(())
             } else {
                 Err(TraceDecayError::Config {
@@ -2962,7 +3012,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 if self
                     .session_sync_service
                     .get()
-                    .is_some_and(|retained| Weak::ptr_eq(retained, &service)) =>
+                    .is_some_and(|retained| Arc::ptr_eq(retained, &service)) =>
             {
                 Ok(())
             }
@@ -2972,15 +3022,12 @@ impl DaemonSessionRuntimeRegistryV1 {
         }
     }
 
-    pub(in crate::daemon) fn install_remote_recovery_project_lifecycle(
+    pub fn install_remote_recovery_project_lifecycle(
         &self,
-        lifecycle: &Arc<
-            crate::daemon::branch_admin::remote_recovery_lifecycle::RemoteRecoveryProjectLifecycleV1,
-        >,
+        lifecycle: Arc<dyn RemoteRecoveryProjectLifecycle>,
     ) -> Result<()> {
-        let lifecycle = Arc::downgrade(lifecycle);
         if let Some(retained) = self.remote_recovery_project_lifecycle.get() {
-            return if Weak::ptr_eq(retained, &lifecycle) {
+            return if Arc::ptr_eq(retained, &lifecycle) {
                 Ok(())
             } else {
                 Err(TraceDecayError::Config {
@@ -2994,7 +3041,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 if self
                     .remote_recovery_project_lifecycle
                     .get()
-                    .is_some_and(|retained| Weak::ptr_eq(retained, &lifecycle)) =>
+                    .is_some_and(|retained| Arc::ptr_eq(retained, &lifecycle)) =>
             {
                 Ok(())
             }
@@ -3007,7 +3054,7 @@ impl DaemonSessionRuntimeRegistryV1 {
 
     fn session_sync_service(
         &self,
-    ) -> Arc<OnceLock<Weak<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>>> {
+    ) -> Arc<OnceLock<Arc<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>>> {
         Arc::clone(&self.session_sync_service)
     }
 
@@ -3015,15 +3062,12 @@ impl DaemonSessionRuntimeRegistryV1 {
         &self,
         operation: &'static str,
     ) -> Result<Arc<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>> {
-        self.session_sync_service
-            .get()
-            .and_then(Weak::upgrade)
-            .ok_or_else(|| {
-                session_registry_error(
-                    operation,
-                    "project session sync authority is unavailable".to_owned(),
-                )
-            })
+        self.session_sync_service.get().cloned().ok_or_else(|| {
+            session_registry_error(
+                operation,
+                "project session sync authority is unavailable".to_owned(),
+            )
+        })
     }
 
     async fn retire_project_session_sync(&self, project_id: &ProjectId) -> Result<()> {
@@ -3048,13 +3092,11 @@ impl DaemonSessionRuntimeRegistryV1 {
 
     fn remote_recovery_project_lifecycle(
         &self,
-    ) -> Arc<
-        OnceLock<Weak<crate::daemon::branch_admin::remote_recovery_lifecycle::RemoteRecoveryProjectLifecycleV1>>,
-    >{
+    ) -> Arc<OnceLock<Arc<dyn RemoteRecoveryProjectLifecycle>>> {
         Arc::clone(&self.remote_recovery_project_lifecycle)
     }
 
-    pub(crate) fn retain_hook_task<F, Fut>(
+    pub fn retain_hook_task<F, Fut>(
         &self,
         provider: &str,
         session_id: &str,
@@ -3109,7 +3151,7 @@ fn runtime_incarnation(identity: &LocalProfileIdentityAuthorityV1) -> Result<Sto
         .map_err(|error| session_registry_error("create store incarnation", error.to_string()))
 }
 
-fn process_runtime_generation(process_run_id: &str) -> Option<u64> {
+pub fn process_runtime_generation(process_run_id: &str) -> Option<u64> {
     let raw = process_run_id
         .get(..16)
         .and_then(|prefix| u64::from_str_radix(prefix, 16).ok())
@@ -3270,7 +3312,7 @@ async fn open_runtime_with_presence(
     }
 }
 
-fn registry_open_error(
+pub fn registry_open_error(
     operation: &'static str,
     failure: StoreRuntimeRegistryFailure,
 ) -> TraceDecayError {
@@ -3375,6 +3417,3 @@ mod graph_shutdown_contract_tests;
 
 #[cfg(test)]
 mod project_memory_relation_graph_contract_tests;
-
-#[cfg(test)]
-mod tests;

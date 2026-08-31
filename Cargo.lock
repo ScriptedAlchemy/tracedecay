@@ -5946,6 +5946,7 @@ dependencies = [
  "tracedecay-sessions",
  "tracedecay-source-edit",
  "tracedecay-store",
+ "tracedecay-store-runtime",
  "tracedecay-temporal-query",
  "tracedecay-tool-catalog",
  "tracedecay-usecases",
@@ -7025,6 +7026,39 @@ dependencies = [
  "thiserror 2.0.19",
  "tracedecay-domain",
  "tracedecay-temporal-query",
+]
+
+[[package]]
+name = "tracedecay-store-runtime"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "hotpath",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracedecay-application",
+ "tracedecay-automation-runtime",
+ "tracedecay-code-index",
+ "tracedecay-code-index-retention",
+ "tracedecay-code-index-runtime",
+ "tracedecay-daemon-identity",
+ "tracedecay-domain",
+ "tracedecay-global-db",
+ "tracedecay-graph-db",
+ "tracedecay-private-fs",
+ "tracedecay-runtime-core",
+ "tracedecay-rusqlite-runtime",
+ "tracedecay-session-memory",
+ "tracedecay-session-runtime",
+ "tracedecay-session-temporal-store",
+ "tracedecay-store",
+ "tracedecay-usecases",
+ "tracing",
 ]
 
 [[package]]

@@ -878,7 +878,7 @@ async fn production_project_server_inner(
             // enrollment, spool, replay, backup, and failover state through
             // this one provider; typed `Unavailable` remains only when the
             // remote plane is genuinely unreadable.
-            let remote_operational_status: crate::daemon::remote_protocol::RemoteOperationalStatusProviderV1 = {
+            let remote_operational_status: tracedecay_store_runtime::RemoteOperationalStatusProviderV1 = {
                 let remote_credentials = graph_runtime.remote_credential_authority();
                 Arc::new(move || remote_credentials.operational_status())
             };

@@ -18,7 +18,7 @@ use tracedecay_store::{
 
 use super::super::{DaemonSessionRuntimeRegistryV1, Result, session_registry_error};
 
-pub(in crate::daemon::store_runtime::session_registry) fn inline_graph_publication_input_digest(
+pub fn inline_graph_publication_input_digest(
     publication_key: &GraphPublicationKeyV1,
     manifest: &GraphGenerationManifest,
 ) -> std::result::Result<GraphPublicationInputDigestV1, GraphDbError> {
@@ -32,7 +32,7 @@ pub(in crate::daemon::store_runtime::session_registry) fn inline_graph_publicati
         .map_err(|error| GraphDbError::invalid(error.to_string()))
 }
 
-pub(in crate::daemon::store_runtime::session_registry) fn schedule_bound_memory_graph_reconciliation(
+pub fn schedule_bound_memory_graph_reconciliation(
     database: &tracedecay_runtime_core::db::Database,
 ) -> Result<()> {
     match schedule_project_memory_graph_reconciliation(database.clone()) {
@@ -55,7 +55,7 @@ pub(in crate::daemon::store_runtime::session_registry) fn schedule_bound_memory_
 use super::RetainedVerifiedGraphRuntimeV1;
 
 impl RetainedVerifiedGraphRuntimeV1 {
-    pub(crate) fn reconcile_verified_manifest(
+    pub fn reconcile_verified_manifest(
         &self,
         manifest: &GraphGenerationManifest,
         idempotency_key: GraphIdempotencyKey,
@@ -116,7 +116,7 @@ impl tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1
 
 impl DaemonSessionRuntimeRegistryV1 {
     #[cfg(test)]
-    pub(crate) async fn retain_memory_graph_runtime(
+    pub async fn retain_memory_graph_runtime(
         &self,
         shard_id: StoreShardIdV1,
         database: tracedecay_runtime_core::db::DatabaseOwnerV1,
@@ -135,7 +135,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         .map_err(|failure| failure.error)
     }
 
-    pub(crate) async fn retain_memory_graph_runtime_for_task(
+    pub async fn retain_memory_graph_runtime_for_task(
         identity: super::super::LocalProfileIdentityAuthorityV1,
         registry: tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRegistry,
         graph_registry: tracedecay_graph_db::GraphDbRegistry,

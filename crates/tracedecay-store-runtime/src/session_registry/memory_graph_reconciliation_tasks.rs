@@ -44,7 +44,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         owners
     }
 
-    pub(crate) fn cancel_memory_graph_reconciliation_tasks(&self) {
+    pub fn cancel_memory_graph_reconciliation_tasks(&self) {
         for owner in self.memory_graph_reconciliation_owners() {
             if let Err(error) = owner.cancel() {
                 tracing::debug!(
@@ -55,7 +55,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         }
     }
 
-    pub(crate) async fn shutdown_memory_graph_reconciliation_tasks(
+    pub async fn shutdown_memory_graph_reconciliation_tasks(
         &self,
     ) -> std::result::Result<(), String> {
         let mut failures = Vec::new();
@@ -86,7 +86,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         }
     }
 
-    pub(crate) async fn retire_memory_graph_reconciliation_task(
+    pub async fn retire_memory_graph_reconciliation_task(
         &self,
         shard_id: &StoreShardIdV1,
     ) -> Result<()> {

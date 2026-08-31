@@ -1,10 +1,11 @@
 use std::path::{Path, PathBuf};
 
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use tracedecay_runtime_core::storage::PrivateStoreIo;
 
 use super::{RestorePublicationV1, Result, session_registry_error};
-use crate::daemon::store_runtime::session_registry::ProjectSessionTerminalVacancyAuthorityV1;
+use crate::session_registry::ProjectSessionTerminalVacancyAuthorityV1;
 use tracedecay_runtime_core::db::DatabaseAuthority;
 
 const REMOTE_RESTORE_QUARANTINE_VERSION: &str = "tracedecay.remote-restore.v3";
@@ -289,7 +290,7 @@ pub(super) fn activate_remote_restore_quarantine(
     write(destination, &quarantine)
 }
 
-pub(in crate::daemon::store_runtime::session_registry) fn remote_restore_activated_open_identity(
+pub fn remote_restore_activated_open_identity(
     destination: &Path,
 ) -> Result<Option<u64>> {
     let Some(quarantine) = read_remote_restore_quarantine(destination)? else {
@@ -436,7 +437,7 @@ mod tests {
     fn restart_after_terminal_fence_before_maintenance_retains_exact_vacancy() {
         let temporary = tempfile::tempdir().expect("temporary restore directory");
         let destination = temporary.path().join("sessions.sqlite");
-        rusqlite::Connection::open(&destination)
+        Connection::open(&destination)
             .expect("create rollback destination")
             .execute_batch("CREATE TABLE retained_before_maintenance (id INTEGER PRIMARY KEY);")
             .expect("seed rollback destination");
@@ -481,7 +482,7 @@ mod tests {
     fn durable_activation_before_ready_survives_restart_without_remounting_terminal_owner() {
         let temporary = tempfile::tempdir().expect("temporary restore directory");
         let destination = temporary.path().join("sessions.sqlite");
-        rusqlite::Connection::open(&destination)
+        Connection::open(&destination)
             .expect("create restored destination")
             .execute_batch("CREATE TABLE activated_before_ready (id INTEGER PRIMARY KEY);")
             .expect("seed restored destination");
@@ -520,7 +521,7 @@ mod tests {
     fn restart_after_ready_before_durable_activation_finishes_only_the_journal() {
         let temporary = tempfile::tempdir().expect("temporary restore directory");
         let destination = temporary.path().join("sessions.sqlite");
-        rusqlite::Connection::open(&destination)
+        Connection::open(&destination)
             .expect("create restored destination")
             .execute_batch("CREATE TABLE ready_before_activation (id INTEGER PRIMARY KEY);")
             .expect("seed restored destination");

@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{Arc, OnceLock, Weak, mpsc};
+use std::sync::{Arc, OnceLock, mpsc};
 use std::time::Duration;
 
 use tracedecay_application::RequestId;
@@ -37,7 +37,7 @@ mod publication;
 mod support;
 
 use publication::RestorePublicationV1;
-pub(in crate::daemon::store_runtime::session_registry) use publication::remote_restore_activated_open_identity;
+pub(crate) use publication::remote_restore_activated_open_identity;
 
 use artifacts::{
     BackupSnapshotV1, RemoteBackupManifestV1, classify_runtime_error, converge_interrupted_restore,
@@ -59,16 +59,10 @@ pub(super) struct RemoteRecoveryPublicationContextV1 {
     graph_lifecycle_cancelled: Arc<AtomicBool>,
     profile_pin: ProfileAuthorityPin,
     project_owners: ProjectRuntimeOwnerRegistryV1,
-    replay: Arc<crate::daemon::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1>,
+    replay: Arc<crate::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1>,
     session_sync_service:
-        Arc<OnceLock<Weak<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>>>,
-    project_lifecycle: Arc<
-        OnceLock<
-            Weak<
-                crate::daemon::branch_admin::remote_recovery_lifecycle::RemoteRecoveryProjectLifecycleV1,
-            >,
-        >,
-    >,
+        Arc<OnceLock<Arc<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>>>,
+    project_lifecycle: Arc<OnceLock<Arc<dyn super::RemoteRecoveryProjectLifecycle>>>,
 }
 
 impl RemoteRecoveryPublicationContextV1 {
@@ -83,18 +77,12 @@ impl RemoteRecoveryPublicationContextV1 {
         profile_pin: ProfileAuthorityPin,
         project_owners: ProjectRuntimeOwnerRegistryV1,
         replay: Arc<
-            crate::daemon::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1,
+            crate::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1,
         >,
         session_sync_service: Arc<
-            OnceLock<Weak<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>>,
+            OnceLock<Arc<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>>,
         >,
-        project_lifecycle: Arc<
-            OnceLock<
-                Weak<
-                    crate::daemon::branch_admin::remote_recovery_lifecycle::RemoteRecoveryProjectLifecycleV1,
-                >,
-            >,
-        >,
+        project_lifecycle: Arc<OnceLock<Arc<dyn super::RemoteRecoveryProjectLifecycle>>>,
     ) -> Self {
         Self {
             identity,
@@ -115,30 +103,21 @@ impl RemoteRecoveryPublicationContextV1 {
         &self,
         operation: &'static str,
     ) -> Result<Arc<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>> {
-        self.session_sync_service
-            .get()
-            .and_then(std::sync::Weak::upgrade)
-            .ok_or_else(|| {
-                session_registry_error(
-                    operation,
-                    "session sync lifecycle authority is unavailable".to_owned(),
-                )
-            })
+        self.session_sync_service.get().cloned().ok_or_else(|| {
+            session_registry_error(
+                operation,
+                "session sync lifecycle authority is unavailable".to_owned(),
+            )
+        })
     }
 
-    fn project_lifecycle(
-        &self,
-    ) -> Result<Arc<crate::daemon::branch_admin::remote_recovery_lifecycle::RemoteRecoveryProjectLifecycleV1>>
-    {
-        self.project_lifecycle
-            .get()
-            .and_then(std::sync::Weak::upgrade)
-            .ok_or_else(|| {
-                session_registry_error(
-                    "authorize remote project recovery",
-                    "remote recovery project lifecycle is unavailable".to_owned(),
-                )
-            })
+    fn project_lifecycle(&self) -> Result<Arc<dyn super::RemoteRecoveryProjectLifecycle>> {
+        self.project_lifecycle.get().cloned().ok_or_else(|| {
+            session_registry_error(
+                "authorize remote project recovery",
+                "remote recovery project lifecycle is unavailable".to_owned(),
+            )
+        })
     }
 
     async fn retire_project_session_sync(&self, project_id: &ProjectId) -> Result<()> {
@@ -168,7 +147,7 @@ impl RemoteRecoveryPublicationContextV1 {
     async fn authorize_project_recovery(
         &self,
         project_id: &ProjectId,
-    ) -> Result<crate::daemon::store_writer_gate::WriterAdmissionGuard> {
+    ) -> Result<super::RemoteRecoveryAdmission> {
         self.project_lifecycle()?
             .authorize_project_recovery(project_id)
             .await
@@ -179,7 +158,7 @@ impl RemoteRecoveryPublicationContextV1 {
 pub(super) struct DaemonRemoteRecoveryPhysicalEffectsV1 {
     storage: RemoteSqliteStorageV1,
     backup_root: PathBuf,
-    replay: Arc<crate::daemon::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1>,
+    replay: Arc<crate::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1>,
     publication: RemoteRecoveryPublicationContextV1,
     runtime: tokio::runtime::Handle,
 }
@@ -189,7 +168,7 @@ impl DaemonRemoteRecoveryPhysicalEffectsV1 {
         storage: RemoteSqliteStorageV1,
         backup_root: PathBuf,
         replay: Arc<
-            crate::daemon::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1,
+            crate::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1,
         >,
         publication: RemoteRecoveryPublicationContextV1,
         runtime: tokio::runtime::Handle,

@@ -318,7 +318,7 @@ pub(super) struct SessionRuntimeRegistryEntryV1 {
     pub(super) identity: profile_identity::LocalProfileIdentityAuthorityV1,
     pub(super) registry: Arc<
         tokio::sync::OnceCell<
-            Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>,
+            Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
         >,
     >,
 }
@@ -331,7 +331,7 @@ struct ProfileHostAdmissionBootstrapContext {
     profile_identity: profile_identity::LocalProfileIdentityAuthorityV1,
     session_runtime_registry: Arc<
         tokio::sync::OnceCell<
-            Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>,
+            Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
         >,
     >,
     host_admission_brokers: HostAdmissionBrokers,
@@ -345,7 +345,7 @@ impl ProfileHostAdmissionBootstrapContext {
         let session_runtime_registry = self
             .session_runtime_registry
             .get_or_try_init(|| async move {
-                crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+                tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
                     profile_identity,
                 )
                 .await

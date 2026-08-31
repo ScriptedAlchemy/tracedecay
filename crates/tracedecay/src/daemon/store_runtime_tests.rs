@@ -1,19 +1,27 @@
+//! Composition-root integration tests for the store-runtime crate.
+//!
+//! These tests reach `remote_protocol_tests` and `crate::config`, which compose
+//! root daemon fixtures and therefore cannot live in
+//! `tracedecay-store-runtime` itself.
+
 use std::path::PathBuf;
 use std::sync::{Arc, atomic::AtomicBool};
 
+use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV1;
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::{
     BrainNodeId, Confidence, FactCategoryV1, FactCurationActionV1, FactLineageEventKindV1,
     FactOwnerV1, FactRelationKindV1,
 };
+use tracedecay_runtime_core::db::{DatabaseAccessMode, DatabaseAuthority};
+use tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRegistryFailure;
 use tracedecay_rusqlite_runtime::remote::{
     RemoteSpoolKeyV1, RemoteSpoolKeyringV1, RemoteSqliteStorageErrorV1,
 };
-
-use super::maintenance::RegisteredSchemaConvergenceStatus;
-use super::{
-    DaemonSessionRuntimeRegistryV1, DatabaseAccessMode, DatabaseAuthority,
-    LocalProfileIdentityAuthorityV1, ProjectId, StoreRuntimeRegistryFailure, StoreShardIdV1,
-    TraceDecayError, process_runtime_generation, registry_open_error,
+use tracedecay_store::{ProjectId, StoreShardIdV1};
+use tracedecay_store_runtime::{
+    DaemonSessionRuntimeRegistryV1, RegisteredSchemaConvergenceStatus, process_runtime_generation,
+    register_registered_schema_installer, registry_open_error,
 };
 use tracedecay_graph_db::{
     GraphDbError, GraphGenerationId, GraphGenerationManifest, GraphIdempotencyKey, GraphNamespace,
@@ -110,7 +118,8 @@ async fn project_sessions_convergence_fixture(
     .join(tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME);
     std::fs::create_dir_all(sessions_path.parent().expect("session database parent"))
         .expect("session database directory");
-    crate::daemon::store_runtime::register_registered_schema_installer();
+    register_registered_schema_installer();
+    crate::register_runtime_ports().expect("runtime port registration");
     let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
         &sessions_path,
         "seed project sessions registered schema fixture",
@@ -301,7 +310,7 @@ async fn daemon_restart_fences_the_previous_session_runtime_binding() {
     assert!(current.incarnation > stale.incarnation);
     assert!(matches!(
         second_registry.registry.lookup(&stale),
-        super::super::registry::StoreRuntimeLookup::WrongIncarnation {
+        tracedecay_runtime_core::store_runtime::registry::StoreRuntimeLookup::WrongIncarnation {
             expected,
             actual,
         } if *expected == stale && actual.as_ref() == &current

@@ -448,7 +448,7 @@ pub(crate) struct MemoryGraphOperationRetirementReservationV1<'a> {
 }
 
 impl RetainedVerifiedGraphRuntimeV1 {
-    pub(crate) fn issue_database_lease(
+    pub fn issue_database_lease(
         &self,
     ) -> std::result::Result<tracedecay_runtime_core::db::Database, GraphDbError> {
         self.require_operation_admission()?;
@@ -459,7 +459,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
         })
     }
 
-    pub(crate) fn take_store_graph_retirement_target(
+    pub fn take_store_graph_retirement_target(
         &self,
     ) -> std::result::Result<CanonicalGraphStoreOwnerRetirementTargetV1, GraphDbError> {
         self.store_target
@@ -471,7 +471,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
             .ok_or(GraphDbError::Conflict)
     }
 
-    pub(crate) fn restore_store_graph_retirement_target(
+    pub fn restore_store_graph_retirement_target(
         &self,
         target: CanonicalGraphStoreOwnerRetirementTargetV1,
     ) -> std::result::Result<(), GraphDbError> {
@@ -485,11 +485,11 @@ impl RetainedVerifiedGraphRuntimeV1 {
         Ok(())
     }
 
-    pub(crate) fn graph_retirement_target(&self) -> tracedecay_graph_db::GraphDbRetirementTarget {
+    pub fn graph_retirement_target(&self) -> tracedecay_graph_db::GraphDbRetirementTarget {
         self.graph.retirement_target()
     }
 
-    pub(crate) fn reserve_database_retirement(
+    pub fn reserve_database_retirement(
         &self,
     ) -> std::result::Result<
         tracedecay_runtime_core::db::DatabaseOwnerRetirementReservationV1,
@@ -511,7 +511,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
         }
     }
 
-    pub(crate) fn reserve_operation_retirement(
+    pub fn reserve_operation_retirement(
         &self,
     ) -> std::result::Result<MemoryGraphOperationRetirementReservationV1<'_>, GraphDbError> {
         let mut admission = self.operation_admission.lock().map_err(|_| {
@@ -528,7 +528,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
     }
 
     #[hotpath::measure(label = "daemon.session_registry.publish_manifest")]
-    pub(crate) fn publish_verified_manifest(
+    pub fn publish_verified_manifest(
         &self,
         manifest: &GraphGenerationManifest,
         idempotency_key: GraphIdempotencyKey,
@@ -770,7 +770,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
         Ok(publication.snapshot)
     }
 
-    pub(crate) fn verified_snapshot(
+    pub fn verified_snapshot(
         &self,
         projection: &GraphProjectionIdentity,
         read_control: FactReadControl,
@@ -854,7 +854,7 @@ impl MemoryGraphOperationRetirementReservationV1<'_> {
     /// Keeps operation admission closed after reconciliation cancellation has
     /// crossed its irreversible boundary. Graph registry retirement remains
     /// the sole graph-close authority.
-    pub(crate) fn commit(mut self) {
+    pub fn commit(mut self) {
         self.armed = false;
     }
 }
@@ -906,14 +906,14 @@ struct PreparedSealedPublicationV1 {
 }
 
 impl RetainedCodeGraphRuntimeV1 {
-    pub(crate) fn authority(&self) -> Arc<CanonicalCodeGraphStoreLeaseV1> {
+    pub fn authority(&self) -> Arc<CanonicalCodeGraphStoreLeaseV1> {
         Arc::clone(&self.authority)
     }
 
     /// Drops aborted catalog/manifest staging files for this sealed digest.
     /// A retry must not inherit another attempt's `.read-bundle-*.tmp` scratch.
     #[hotpath::measure(label = "daemon.session_registry.sweep_read_bundle_temporaries")]
-    pub(crate) fn sweep_aborted_read_bundle_temporaries(
+    pub fn sweep_aborted_read_bundle_temporaries(
         &self,
     ) -> std::result::Result<(), GraphDbError> {
         tracedecay_graph_db::sweep_aborted_sealed_read_bundle_temporaries(
@@ -922,7 +922,7 @@ impl RetainedCodeGraphRuntimeV1 {
         )
     }
 
-    pub(crate) fn semantic_vector_identity(
+    pub fn semantic_vector_identity(
         &self,
     ) -> std::result::Result<
         (
@@ -960,14 +960,14 @@ impl RetainedCodeGraphRuntimeV1 {
         ))
     }
 
-    pub(crate) fn semantic_vector_staging_binding(
+    pub fn semantic_vector_staging_binding(
         &self,
     ) -> (&StoreShardIdV1, &tracedecay_store::StoreRuntimeBindingV1) {
         (&self.code_shard, self.authority.binding())
     }
 
     #[hotpath::measure(label = "daemon.session_registry.publish_snapshot")]
-    pub(crate) fn publish_verified_snapshot(
+    pub fn publish_verified_snapshot(
         &self,
         generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
         request_cancelled: Arc<AtomicBool>,
@@ -1519,7 +1519,7 @@ impl RetainedCodeGraphRuntimeV1 {
     /// against the generation identity through the sealed read bundle
     /// envelope. `Absent` and `Stale` are typed states the caller must log
     /// before falling back to open-time re-derivation.
-    pub(crate) fn load_sealed_read_bundle_catalog(
+    pub fn load_sealed_read_bundle_catalog(
         &self,
         request_cancelled: &Arc<AtomicBool>,
     ) -> std::result::Result<tracedecay_graph_db::SealedReadBundleArtifactStateV1, GraphDbError>
@@ -1633,7 +1633,7 @@ impl RetainedCodeGraphRuntimeV1 {
         }
     }
 
-    pub(crate) fn recover_semantic_vector_projection(
+    pub fn recover_semantic_vector_projection(
         &self,
         projection: &GraphProjectionIdentity,
         cancellation: Arc<dyn GraphCancellation>,
@@ -1669,7 +1669,7 @@ impl RetainedCodeGraphRuntimeV1 {
         )
     }
 
-    pub(crate) fn recover_semantic_vector_generation(
+    pub fn recover_semantic_vector_generation(
         &self,
         publication: &GraphPublicationKeyV1,
         cancellation: Arc<dyn GraphCancellation>,
@@ -1878,7 +1878,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         label = "daemon.session_registry.retain_code_graph_runtime",
         future = true
     )]
-    pub(crate) async fn retain_code_graph_runtime(
+    pub async fn retain_code_graph_runtime(
         &self,
         project_id: ProjectId,
         repository_id: RepositoryId,
@@ -1995,7 +1995,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         label = "daemon.session_registry.reconcile_graph_replays",
         future = true
     )]
-    pub(crate) async fn reconcile_deleted_code_generation_graph_replays(
+    pub async fn reconcile_deleted_code_generation_graph_replays(
         &self,
         project_id: ProjectId,
         project_database: &tracedecay_runtime_core::db::Database,
@@ -2351,7 +2351,7 @@ impl DaemonSessionRuntimeRegistryV1 {
     ///
     /// `Arc::clone` keeps the concrete type; this is the unsized coercion
     /// `mount_worktree_with_graph_runtime` needs.
-    pub(crate) fn code_graph_seat_port(self: &Arc<Self>) -> Arc<dyn CodeGraphSeatRuntimePortV1> {
+    pub fn code_graph_seat_port(self: &Arc<Self>) -> Arc<dyn CodeGraphSeatRuntimePortV1> {
         Arc::clone(self) as Arc<dyn CodeGraphSeatRuntimePortV1>
     }
 }

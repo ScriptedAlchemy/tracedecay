@@ -1082,7 +1082,7 @@ async fn authenticated_remote_node_provisioning_creates_and_registers_first_stor
     .expect("daemon database scope");
     let identity = daemon_authority.profile_identity().clone();
     let runtime = Arc::new(
-        super::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
             identity.clone(),
         )
         .await
@@ -1145,13 +1145,13 @@ async fn authenticated_remote_node_provisioning_creates_and_registers_first_stor
 async fn remote_protocol_mount_authenticates_before_json_and_outside_local_admission() {
     let registry = DaemonHttpApplicationRegistry::default();
     let credentials = Arc::new(
-        super::remote_protocol::DaemonRemoteCredentialAuthorityV1::new(
+        tracedecay_store_runtime::DaemonRemoteCredentialAuthorityV1::new(
             BrainId::new("brain.remote-http").expect("remote brain identity"),
             UserProfileId::new("profile.remote-http").expect("remote profile identity"),
         ),
     );
     let transaction = Arc::new(
-        super::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1::new(
+        tracedecay_store_runtime::DaemonRemoteReplayTransactionAuthorityV1::new(
             tokio::runtime::Handle::current(),
         )
         .expect("remote replay transaction authority"),
@@ -1225,7 +1225,7 @@ async fn local_remote_status_reads_the_mounted_runtime() {
     .expect("daemon database scope");
     let identity = daemon_authority.profile_identity().clone();
     let runtime = Arc::new(
-        super::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
             identity.clone(),
         )
         .await

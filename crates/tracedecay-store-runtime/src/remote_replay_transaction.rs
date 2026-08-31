@@ -63,14 +63,14 @@ enum ReplayCommandV1 {
     },
 }
 
-pub(crate) struct DaemonRemoteReplayTransactionAuthorityV1 {
+pub struct DaemonRemoteReplayTransactionAuthorityV1 {
     targets: Arc<RwLock<BTreeMap<ProjectId, ReplayTargetV1>>>,
     accepting: Arc<AtomicBool>,
     sender: mpsc::SyncSender<ReplayCommandV1>,
 }
 
 impl DaemonRemoteReplayTransactionAuthorityV1 {
-    pub(crate) fn new(runtime: tokio::runtime::Handle) -> Result<Self, String> {
+    pub fn new(runtime: tokio::runtime::Handle) -> Result<Self, String> {
         let targets = Arc::new(RwLock::new(BTreeMap::new()));
         let accepting = Arc::new(AtomicBool::new(true));
         let (sender, receiver) = mpsc::sync_channel(CHANNEL_CAPACITY);
@@ -165,7 +165,7 @@ impl DaemonRemoteReplayTransactionAuthorityV1 {
         })
     }
 
-    pub(crate) fn register_target(
+    pub fn register_target(
         &self,
         project_id: ProjectId,
         issuer: RegisteredGlobalDbWeakLeaseIssuerV1,
@@ -203,7 +203,7 @@ impl DaemonRemoteReplayTransactionAuthorityV1 {
         Ok(())
     }
 
-    pub(crate) fn unregister_target(
+    pub fn unregister_target(
         &self,
         project_id: &ProjectId,
         expected_binding: &tracedecay_store::StoreRuntimeBindingV1,
@@ -222,7 +222,7 @@ impl DaemonRemoteReplayTransactionAuthorityV1 {
         Ok(())
     }
 
-    pub(crate) fn target_descriptor(
+    pub fn target_descriptor(
         &self,
         project_id: &ProjectId,
     ) -> Result<(tracedecay_store::StoreRuntimeBindingV1, std::path::PathBuf), String> {
@@ -236,7 +236,7 @@ impl DaemonRemoteReplayTransactionAuthorityV1 {
         Ok((target.binding.clone(), target.path.clone()))
     }
 
-    pub(crate) fn snapshot_target(
+    pub fn snapshot_target(
         &self,
         project_id: ProjectId,
         destination: std::path::PathBuf,
@@ -256,7 +256,7 @@ impl DaemonRemoteReplayTransactionAuthorityV1 {
             .map_err(|_| "remote backup worker ended before replying".to_owned())?
     }
 
-    pub(crate) fn install_writer_fence(
+    pub fn install_writer_fence(
         &self,
         project_id: ProjectId,
         install: RemoteWriterFenceInstallV1,
@@ -276,7 +276,7 @@ impl DaemonRemoteReplayTransactionAuthorityV1 {
             .map_err(|_| "remote promotion worker ended before replying".to_owned())?
     }
 
-    pub(crate) fn current_writer_fence(
+    pub fn current_writer_fence(
         &self,
         project_id: ProjectId,
         authority_key: ManifestDigest,
@@ -297,7 +297,7 @@ impl DaemonRemoteReplayTransactionAuthorityV1 {
     /// Returns the already-published canonical project runtime used by replay,
     /// backup, restore, and remote reads. Query callers receive no locator or
     /// physical attachment and cannot open a caller-selected store.
-    pub(crate) fn registered_query_target(
+    pub fn registered_query_target(
         &self,
         project_id: &ProjectId,
     ) -> Result<tracedecay_runtime_core::db::DatabaseRuntimeClientV1, String> {

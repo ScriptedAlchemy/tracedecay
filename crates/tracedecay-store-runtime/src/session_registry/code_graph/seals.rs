@@ -139,7 +139,7 @@ pub(super) fn stage_project_graph_replay_unlink(
             let staged = replay_root.join(format!(
                 ".generation-{digest}.unlink-{}-{}-{sequence}",
                 std::process::id(),
-                crate::tracedecay::current_timestamp()
+                tracedecay_runtime_core::tracedecay::current_timestamp()
             ));
             std::fs::rename(&path, &staged)
                 .map_err(|error| GraphDbError::unavailable(error.to_string()))?;

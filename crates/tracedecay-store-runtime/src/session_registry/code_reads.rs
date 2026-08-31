@@ -206,7 +206,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         label = "daemon.session_registry.destructive_maintenance",
         future = true
     )]
-    pub(crate) async fn begin_destructive_code_maintenance(
+    pub async fn begin_destructive_code_maintenance(
         &self,
         root: &Path,
         database_paths: impl IntoIterator<Item = PathBuf>,
@@ -244,7 +244,7 @@ impl DaemonSessionRuntimeRegistryV1 {
     /// Drops the daemon's retained project facades before a destructive store
     /// reservation closes the underlying physical runtimes. The reservation
     /// then proves that no stale handle can recreate the deleted shard.
-    pub(crate) async fn drop_project_runtime_caches(&self, project_id: &ProjectId) {
+    pub async fn drop_project_runtime_caches(&self, project_id: &ProjectId) {
         let mut owners = self
             .project_owners
             .lock()
@@ -275,7 +275,7 @@ impl DaemonSessionRuntimeRegistryV1 {
     }
 
     #[hotpath::measure(label = "daemon.session_registry.retire_relation_graph", future = true)]
-    pub(crate) async fn retire_project_session_relation_graph(
+    pub async fn retire_project_session_relation_graph(
         &self,
         project_id: &ProjectId,
     ) -> Result<()> {
@@ -448,7 +448,7 @@ impl DaemonSessionRuntimeRegistryV1 {
     }
 
     #[hotpath::measure(label = "daemon.session_registry.retire_memory_graph", future = true)]
-    pub(crate) async fn retire_project_memory_graph(&self, project_id: &ProjectId) -> Result<()> {
+    pub async fn retire_project_memory_graph(&self, project_id: &ProjectId) -> Result<()> {
         let Some(mut retirement) = self.reserve_project_runtime_retirement(project_id)? else {
             return Ok(());
         };
@@ -788,7 +788,7 @@ impl DaemonSessionRuntimeRegistryV1 {
 
     /// Mounts the project-wide mutable graph. The checkout path is exact route
     /// provenance; the canonical database locator is supplied by `StoreLayout`.
-    pub(crate) async fn project_graph(
+    pub async fn project_graph(
         &self,
         _project_root: &Path,
         project_id: ProjectId,
@@ -800,7 +800,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             .await
     }
 
-    pub(crate) async fn project_graph_registered(
+    pub async fn project_graph_registered(
         &self,
         project_id: ProjectId,
         database_path: PathBuf,

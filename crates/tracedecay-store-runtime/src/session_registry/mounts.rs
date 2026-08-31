@@ -7,7 +7,7 @@ use tokio::sync::Mutex;
 use tracedecay_application::remote::auth::RemoteEnrollmentAdmissionEvidenceV1;
 use tracedecay_domain::{BrainNodeId, EnrollmentGrantV1};
 use tracedecay_graph_db::{GraphDbRegistry, GraphDbRegistryConfig};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 use tracedecay_rusqlite_runtime::remote::RemoteRecoverySqliteAuthorityV1;
 use tracedecay_rusqlite_runtime::remote::{
     RemoteSpoolKeyV1, RemoteSpoolKeyringV1, RemoteSqliteStorageErrorV1, RemoteSqliteStorageV1,
@@ -28,9 +28,9 @@ use super::{
     Result, RetainedHookTasks, SessionGraphAttachmentStateV1, SessionGraphOwnerV1,
     StoreRuntimeClientLease, StoreRuntimeOpenRequest, StoreRuntimeOpenResult, StoreRuntimeRegistry,
     StoreRuntimeResolver, bind_ready_project_memory_graph, open_runtime,
-    open_runtime_with_presence, register_registered_schema_installer, registry_open_error,
-    runtime_incarnation, session_registry_error,
+    open_runtime_with_presence, registry_open_error, runtime_incarnation, session_registry_error,
 };
+use crate::register_registered_schema_installer;
 use tracedecay_domain::errors::TraceDecayError;
 
 struct UnavailableRemoteSpoolKeyringV1;
@@ -49,7 +49,7 @@ impl RemoteSpoolKeyringV1 for UnavailableRemoteSpoolKeyringV1 {
 }
 
 impl DaemonSessionRuntimeRegistryV1 {
-    pub(crate) async fn open(identity: LocalProfileIdentityAuthorityV1) -> Result<Self> {
+    pub async fn open(identity: LocalProfileIdentityAuthorityV1) -> Result<Self> {
         // `main` marks long-lived processes before any registry opens, so the
         // process mode is a construction-time fact, not a mutable runtime flag.
         let long_lived =
@@ -60,18 +60,18 @@ impl DaemonSessionRuntimeRegistryV1 {
     /// Constructor with an explicit session-maintenance policy. Production
     /// enters through [`Self::open`]; tests exercising convergence pass
     /// `true` directly so the same gate runs without a mutable side channel.
-    pub(crate) async fn open_with_session_maintenance(
+    pub async fn open_with_session_maintenance(
         identity: LocalProfileIdentityAuthorityV1,
         long_lived_session_maintenance: bool,
     ) -> Result<Self> {
         let remote_credential_authority = Arc::new(
-            crate::daemon::remote_protocol::DaemonRemoteCredentialAuthorityV1::new(
+            crate::DaemonRemoteCredentialAuthorityV1::new(
                 identity.brain_id().clone(),
                 identity.profile_id().clone(),
             ),
         );
         let remote_replay_transaction = Arc::new(
-            crate::daemon::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1::new(
+            crate::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1::new(
                 tokio::runtime::Handle::current(),
             )
             .map_err(|error| {
@@ -84,10 +84,6 @@ impl DaemonSessionRuntimeRegistryV1 {
         // This is the sole constructor of the production registry, so it is the
         // one place that must supply the installer.
         register_registered_schema_installer();
-        // `main` registers these for every real invocation; this constructor
-        // is also reached by embedded and integration-test runtimes that never
-        // pass through it, and transcript ingest starts here. Idempotent.
-        crate::register_runtime_ports()?;
         let incarnation = runtime_incarnation(&identity)?;
         let resolver = Arc::new(LocalStoreRuntimeResolverV1::new(
             LocalProfileStoreAuthorityV1::new(
@@ -310,7 +306,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         ))
     }
 
-    pub(crate) async fn profile_database(&self) -> Result<RegisteredGlobalDbLeaseV1> {
+    pub async fn profile_database(&self) -> Result<RegisteredGlobalDbLeaseV1> {
         let existing = {
             let mounted = self
                 .profile_database
@@ -387,7 +383,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         Ok(lease)
     }
 
-    pub(crate) async fn profile_sessions(&self) -> Result<RegisteredGlobalDbLeaseV1> {
+    pub async fn profile_sessions(&self) -> Result<RegisteredGlobalDbLeaseV1> {
         let existing = {
             let mounted = self
                 .profile_sessions
@@ -597,7 +593,7 @@ impl DaemonSessionRuntimeRegistryV1 {
     /// Mounts the distinct profile-memory shard through this daemon's pinned
     /// profile registry. `ProfileMemory` never aliases the profile/global
     /// shard, and publication never reopens a filesystem path.
-    pub(crate) async fn profile_memory(&self) -> Result<Arc<Database>> {
+    pub async fn profile_memory(&self) -> Result<Arc<Database>> {
         let existing = {
             let mounted = self
                 .profile_memory
@@ -648,7 +644,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         Ok(database)
     }
 
-    pub(crate) async fn remote_node_storage(
+    pub async fn remote_node_storage(
         &self,
         node_id: BrainNodeId,
         keyring: Arc<dyn RemoteSpoolKeyringV1>,
@@ -657,7 +653,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             .await
     }
 
-    pub(crate) async fn provision_remote_node(
+    pub async fn provision_remote_node(
         &self,
         grant: EnrollmentGrantV1,
         admission: RemoteEnrollmentAdmissionEvidenceV1,
@@ -842,30 +838,30 @@ impl DaemonSessionRuntimeRegistryV1 {
         Ok(storage)
     }
 
-    pub(crate) fn remote_credential_authority(
+    pub fn remote_credential_authority(
         &self,
-    ) -> Arc<crate::daemon::remote_protocol::DaemonRemoteCredentialAuthorityV1> {
+    ) -> Arc<crate::DaemonRemoteCredentialAuthorityV1> {
         Arc::clone(&self.remote_credential_authority)
     }
 
     /// Canonical Remote Brain operational read for every operator surface
     /// (Doctor, CLI, MCP, dashboard), composed from the mounted remote
     /// authorities.
-    pub(crate) fn remote_operational_status(
+    pub fn remote_operational_status(
         &self,
     ) -> tracedecay_application::remote::status::RemoteOperationalStatusReadV1 {
         self.remote_credential_authority.operational_status()
     }
 
-    pub(crate) fn remote_replay_transaction(
+    pub fn remote_replay_transaction(
         &self,
-    ) -> Arc<crate::daemon::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1>
+    ) -> Arc<crate::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1>
     {
         Arc::clone(&self.remote_replay_transaction)
     }
 
-    #[cfg(test)]
-    pub(crate) async fn remote_recovery_authority(
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub async fn remote_recovery_authority(
         &self,
         node_id: &BrainNodeId,
     ) -> Option<Arc<RemoteRecoverySqliteAuthorityV1>> {
@@ -876,7 +872,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             .cloned()
     }
 
-    pub(crate) async fn mounted_session_databases(&self) -> Vec<RegisteredGlobalDbLeaseV1> {
+    pub async fn mounted_session_databases(&self) -> Vec<RegisteredGlobalDbLeaseV1> {
         let mut databases = Vec::new();
         if let Some(database) = self
             .profile_sessions
@@ -922,7 +918,7 @@ impl DaemonSessionRuntimeRegistryV1 {
     /// without a structural Conflict. Callers must have joined the
     /// reconciliation workers first; a graph client lease still held by a
     /// live consumer surfaces as a typed Conflict, not a hang.
-    pub(crate) async fn close_retained_graph_runtimes_for_shutdown(&self) -> Result<()> {
+    pub async fn close_retained_graph_runtimes_for_shutdown(&self) -> Result<()> {
         let identities = self.drain_retained_graph_owners_for_shutdown()?;
         let mut first_error = None;
         for (binding, locator) in identities {
@@ -1080,7 +1076,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         Ok(identities)
     }
 
-    pub(crate) async fn mounted_project_sessions(
+    pub async fn mounted_project_sessions(
         &self,
         project_id: &ProjectId,
     ) -> Option<RegisteredGlobalDbLeaseV1> {
@@ -1099,7 +1095,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         .ok()
     }
 
-    pub(crate) async fn project_sessions(
+    pub async fn project_sessions(
         &self,
         project_id: ProjectId,
         enrollment_roots: impl IntoIterator<Item = PathBuf>,
@@ -1115,7 +1111,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         self.mount_registered_project_sessions(project_id).await
     }
 
-    pub(crate) async fn mount_registered_project_sessions(
+    pub async fn mount_registered_project_sessions(
         &self,
         project_id: ProjectId,
     ) -> Result<RegisteredGlobalDbLeaseV1> {
@@ -1281,7 +1277,7 @@ impl DaemonSessionRuntimeRegistryV1 {
     /// returned database remains cached so migration and live use share one
     /// writer authority.
     #[cfg(any(test, feature = "test-helpers"))]
-    pub(crate) async fn project_memory(
+    pub async fn project_memory(
         &self,
         project_id: ProjectId,
         enrollment_roots: impl IntoIterator<Item = PathBuf>,
@@ -1394,7 +1390,7 @@ impl DaemonSessionRuntimeRegistryV1 {
 
     /// Mounts an existing project-memory shard without initializing it or
     /// verifying its schema, and exposes only a read-only database facade.
-    pub(crate) async fn project_memory_read_only(
+    pub async fn project_memory_read_only(
         &self,
         project_id: ProjectId,
         enrollment_roots: impl IntoIterator<Item = PathBuf>,

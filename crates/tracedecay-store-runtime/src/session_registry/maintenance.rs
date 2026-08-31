@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 use tokio::sync::{Notify, Semaphore};
 use tokio::task::JoinHandle;
 use tracedecay_store::StoreShardIdV1;
@@ -14,7 +14,7 @@ use super::{
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum RegisteredSchemaConvergenceStatus {
+pub enum RegisteredSchemaConvergenceStatus {
     Pending,
     Complete,
     Degraded { message: String },
@@ -29,7 +29,7 @@ fn lock_registered_schema_convergence_statuses(
     match statuses.lock() {
         Ok(statuses) => statuses,
         Err(poisoned) => {
-            crate::daemon::log_daemon_event(
+            crate::session_registry::log_store_runtime_event(
                 "registered_schema_convergence_state",
                 &[
                     ("outcome", "degraded".to_owned()),
@@ -51,9 +51,9 @@ pub(super) struct RegisteredSchemaConvergenceMaintenance {
     foreground_project_opens: Arc<ForegroundProjectOpenState>,
     statuses: Arc<StdMutex<RegisteredSchemaConvergenceStatuses>>,
     tasks: StdMutex<BTreeMap<StoreShardIdV1, JoinHandle<()>>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     schedule_count: std::sync::atomic::AtomicUsize,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     gate: StdMutex<Option<Arc<RegisteredSchemaConvergenceTestGateState>>>,
 }
 
@@ -63,7 +63,7 @@ struct ForegroundProjectOpenState {
     settled: tokio::sync::Notify,
 }
 
-pub(crate) struct ForegroundProjectOpenAdmission {
+pub struct ForegroundProjectOpenAdmission {
     state: Arc<ForegroundProjectOpenState>,
 }
 
@@ -110,9 +110,9 @@ impl RegisteredSchemaConvergenceMaintenance {
             foreground_project_opens: Arc::new(ForegroundProjectOpenState::default()),
             statuses: Arc::new(StdMutex::new(BTreeMap::new())),
             tasks: StdMutex::new(BTreeMap::new()),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-helpers"))]
             schedule_count: std::sync::atomic::AtomicUsize::new(0),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-helpers"))]
             gate: StdMutex::new(None),
         }
     }
@@ -121,7 +121,7 @@ impl RegisteredSchemaConvergenceMaintenance {
         self.foreground_project_opens.admit()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     pub(super) fn status(
         &self,
         shard_id: &StoreShardIdV1,
@@ -131,7 +131,7 @@ impl RegisteredSchemaConvergenceMaintenance {
             .cloned()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     pub(super) fn defer(&self, shard_id: StoreShardIdV1) {
         lock_registered_schema_convergence_statuses(&self.statuses)
             .entry(shard_id)
@@ -158,9 +158,9 @@ impl RegisteredSchemaConvergenceMaintenance {
             }
             statuses.insert(shard_id.clone(), RegisteredSchemaConvergenceStatus::Pending);
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-helpers"))]
         self.schedule_count.fetch_add(1, Ordering::Relaxed);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-helpers"))]
         let gate = self
             .gate
             .lock()
@@ -172,7 +172,7 @@ impl RegisteredSchemaConvergenceMaintenance {
         let task = tokio::spawn(hotpath::future!(
             async move {
                 foreground_project_opens.wait_until_settled().await;
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-helpers"))]
                 if let Some(gate) = gate {
                     gate.block().await;
                 }
@@ -181,7 +181,7 @@ impl RegisteredSchemaConvergenceMaintenance {
                     None => Ok(()),
                 };
                 if let Err(error) = database.release_connection_memory().await {
-                    crate::daemon::log_daemon_event(
+                    crate::session_registry::log_store_runtime_event(
                         "registered_schema_convergence_memory_release",
                         &[
                             ("outcome", "degraded".to_owned()),
@@ -194,7 +194,7 @@ impl RegisteredSchemaConvergenceMaintenance {
                 release_process_allocator_memory();
                 let status = match result {
                     Ok(()) => {
-                        crate::daemon::log_daemon_event(
+                        crate::session_registry::log_store_runtime_event(
                             "registered_schema_convergence",
                             &[
                                 ("outcome", "complete".to_owned()),
@@ -206,7 +206,7 @@ impl RegisteredSchemaConvergenceMaintenance {
                     }
                     Err(error) => {
                         let message = error.to_string();
-                        crate::daemon::log_daemon_event(
+                        crate::session_registry::log_store_runtime_event(
                             "registered_schema_convergence",
                             &[
                                 ("outcome", "degraded".to_owned()),
@@ -267,7 +267,7 @@ impl RegisteredSchemaConvergenceMaintenance {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     pub(super) fn install_gate(&self) -> RegisteredSchemaConvergenceTestGate {
         let state = Arc::new(RegisteredSchemaConvergenceTestGateState {
             started: AtomicBool::new(false),
@@ -296,14 +296,14 @@ impl Drop for RegisteredSchemaConvergenceMaintenance {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 pub(super) struct RegisteredSchemaConvergenceTestGateState {
     started: AtomicBool,
     started_notify: Notify,
     release: Semaphore,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 impl RegisteredSchemaConvergenceTestGateState {
     async fn block(&self) {
         self.started.store(true, Ordering::Release);
@@ -316,20 +316,20 @@ impl RegisteredSchemaConvergenceTestGateState {
     }
 }
 
-#[cfg(test)]
-pub(crate) struct RegisteredSchemaConvergenceTestGate {
+#[cfg(any(test, feature = "test-helpers"))]
+pub struct RegisteredSchemaConvergenceTestGate {
     state: Arc<RegisteredSchemaConvergenceTestGateState>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 impl RegisteredSchemaConvergenceTestGate {
-    pub(crate) async fn wait_until_blocked(&self) {
+    pub async fn wait_until_blocked(&self) {
         while !self.state.started.load(Ordering::Acquire) {
             self.state.started_notify.notified().await;
         }
     }
 
-    pub(crate) fn release(&self) {
+    pub fn release(&self) {
         self.state.release.add_permits(1);
     }
 }
@@ -370,28 +370,28 @@ impl DaemonSessionRuntimeRegistryV1 {
         Ok(database)
     }
 
-    pub(crate) fn begin_foreground_project_open(&self) -> Result<ForegroundProjectOpenAdmission> {
+    pub fn begin_foreground_project_open(&self) -> Result<ForegroundProjectOpenAdmission> {
         self.registered_schema_convergence
             .begin_foreground_project_open()
     }
 
-    #[cfg(test)]
-    pub(crate) fn registered_schema_convergence_status(
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn registered_schema_convergence_status(
         &self,
         shard_id: &StoreShardIdV1,
     ) -> Option<RegisteredSchemaConvergenceStatus> {
         self.registered_schema_convergence.status(shard_id)
     }
 
-    #[cfg(test)]
-    pub(crate) fn block_registered_schema_convergence_for_test(
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn block_registered_schema_convergence_for_test(
         &self,
     ) -> RegisteredSchemaConvergenceTestGate {
         self.registered_schema_convergence.install_gate()
     }
 
-    #[cfg(test)]
-    pub(super) fn registered_schema_convergence_schedule_count_for_test(&self) -> usize {
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn registered_schema_convergence_schedule_count_for_test(&self) -> usize {
         self.registered_schema_convergence
             .schedule_count
             .load(Ordering::Relaxed)

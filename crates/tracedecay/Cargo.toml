@@ -121,6 +121,7 @@ hotpath = [
     "tracedecay-semantic/hotpath",
     "tracedecay-session-memory/hotpath",
     "tracedecay-session-runtime/hotpath",
+    "tracedecay-store-runtime/hotpath",
     "tracedecay-session-temporal-store/hotpath",
     "tracedecay-lcm/hotpath",
     "tracedecay-sessions/hotpath",
@@ -165,6 +166,7 @@ hotpath-alloc = [
     "tracedecay-semantic/hotpath-alloc",
     "tracedecay-session-memory/hotpath-alloc",
     "tracedecay-session-runtime/hotpath-alloc",
+    "tracedecay-store-runtime/hotpath-alloc",
     "tracedecay-session-temporal-store/hotpath-alloc",
     "tracedecay-lcm/hotpath-alloc",
     "tracedecay-sessions/hotpath-alloc",
@@ -209,6 +211,7 @@ hotpath-cpu = [
     "tracedecay-semantic/hotpath-cpu",
     "tracedecay-session-memory/hotpath-cpu",
     "tracedecay-session-runtime/hotpath-cpu",
+    "tracedecay-store-runtime/hotpath-cpu",
     "tracedecay-session-temporal-store/hotpath-cpu",
     "tracedecay-lcm/hotpath-cpu",
     "tracedecay-sessions/hotpath-cpu",
@@ -316,6 +319,7 @@ test-helpers = [
     "tracedecay-host-admission/test-helpers",
     "tracedecay-maintenance/test-helpers",
     "tracedecay-session-runtime/test-helpers",
+    "tracedecay-store-runtime/test-helpers",
 ]
 
 test-transport = [
@@ -428,6 +432,7 @@ tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0" }
 tracedecay-semantic-contracts.workspace = true
 tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
 tracedecay-session-runtime = { path = "../tracedecay-session-runtime", version = "0.1.0" }
+tracedecay-store-runtime = { path = "../tracedecay-store-runtime", version = "0.1.0" }
 tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
 tracedecay-lcm = { path = "../tracedecay-lcm", version = "0.1.0" }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
@@ -531,6 +536,9 @@ tracedecay-daemon-service = { path = "../tracedecay-daemon-service", version = "
 # Root host-admission integration tests drive session-runtime worker pass
 # internals; the fixture surface stays off the CLI lane.
 tracedecay-session-runtime = { path = "../tracedecay-session-runtime", version = "0.1.0", features = ["test-helpers"] }
+# Root store-runtime integration tests drive schema-convergence gates that
+# stay off the CLI lane.
+tracedecay-store-runtime = { path = "../tracedecay-store-runtime", version = "0.1.0", features = ["test-helpers"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fault_harness)"] }

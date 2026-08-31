@@ -1,7 +1,7 @@
 use super::*;
 
 impl RetainedCodeGraphRuntimeV1 {
-    pub(crate) fn reserve_one_semantic_vector_generation(
+    pub fn reserve_one_semantic_vector_generation(
         &self,
         after: Option<tracedecay_store::SemanticVectorStageCensusCursor>,
         cancellation: Arc<dyn GraphCancellation>,
@@ -31,7 +31,7 @@ impl RetainedCodeGraphRuntimeV1 {
         )
     }
 
-    pub(crate) fn finalize_reserved_semantic_vector_generation(
+    pub fn finalize_reserved_semantic_vector_generation(
         &self,
         reservation: tracedecay_graph_db::SemanticVectorRetirementReservation,
         authorization: &tracedecay_usecases::semantic_runtime::SemanticVectorRetentionAuthorizationV1,
@@ -72,7 +72,7 @@ impl RetainedCodeGraphRuntimeV1 {
         )
     }
 
-    pub(crate) fn release_reserved_semantic_vector_generation(
+    pub fn release_reserved_semantic_vector_generation(
         &self,
         reservation: tracedecay_graph_db::SemanticVectorRetirementReservation,
     ) -> std::result::Result<(), GraphDbError> {
@@ -80,7 +80,7 @@ impl RetainedCodeGraphRuntimeV1 {
             .release_semantic_vector_retirement(reservation)
     }
 
-    pub(crate) fn semantic_vector_source_generation_is_live(
+    pub fn semantic_vector_source_generation_is_live(
         &self,
         generation: &tracedecay_store::SemanticVectorSourceGenerationId,
         expected_revision: tracedecay_store::SemanticVectorStageCensusRevision,
@@ -109,7 +109,7 @@ impl RetainedCodeGraphRuntimeV1 {
         )
     }
 
-    pub(crate) fn semantic_vector_source_scope_is_live(
+    pub fn semantic_vector_source_scope_is_live(
         &self,
         source_scope: &tracedecay_store::StoreShardIdV1,
         expected_revision: tracedecay_store::SemanticVectorStageCensusRevision,
@@ -138,7 +138,7 @@ impl RetainedCodeGraphRuntimeV1 {
         )
     }
 
-    pub(crate) fn semantic_vector_published_generation_dependency(
+    pub fn semantic_vector_published_generation_dependency(
         &self,
         generation: &tracedecay_domain::VectorGenerationIdV1,
         expected_revision: tracedecay_store::SemanticVectorStageCensusRevision,
@@ -170,7 +170,7 @@ impl RetainedCodeGraphRuntimeV1 {
         )
     }
 
-    pub(crate) fn validate_semantic_vector_project_census_revision(
+    pub fn validate_semantic_vector_project_census_revision(
         &self,
         expected_revision: tracedecay_store::SemanticVectorStageCensusRevision,
         cancellation: Arc<dyn GraphCancellation>,
@@ -193,7 +193,7 @@ impl RetainedCodeGraphRuntimeV1 {
         )
     }
 
-    pub(crate) fn semantic_vector_source_scope_binding(
+    pub fn semantic_vector_source_scope_binding(
         &self,
         code_scope_hash: &tracedecay_store::SemanticVectorCodeScopeHash,
         expected_revision: tracedecay_store::SemanticVectorStageCensusRevision,
@@ -223,7 +223,7 @@ impl RetainedCodeGraphRuntimeV1 {
         )
     }
 
-    pub(crate) fn remove_semantic_vector_source_scope_binding(
+    pub fn remove_semantic_vector_source_scope_binding(
         &self,
         code_scope_hash: &tracedecay_store::SemanticVectorCodeScopeHash,
         source_scope: &tracedecay_store::StoreShardIdV1,
@@ -254,7 +254,7 @@ impl RetainedCodeGraphRuntimeV1 {
         )
     }
 
-    pub(crate) fn published_semantic_vector_generation(
+    pub fn published_semantic_vector_generation(
         &self,
         key: &tracedecay_store::SemanticVectorPublishedGenerationKey,
         cancellation: Arc<dyn GraphCancellation>,
@@ -280,7 +280,7 @@ impl RetainedCodeGraphRuntimeV1 {
         )
     }
 
-    pub(crate) fn semantic_vector_verified_head(
+    pub fn semantic_vector_verified_head(
         &self,
         projection: &GraphProjectionIdentity,
         cancellation: Arc<dyn GraphCancellation>,
@@ -298,7 +298,7 @@ impl RetainedCodeGraphRuntimeV1 {
         })
     }
 
-    pub(crate) fn begin_semantic_vector_stage(
+    pub fn begin_semantic_vector_stage(
         &self,
         plan: &SemanticVectorStagePlan,
         cancellation: Arc<dyn GraphCancellation>,
@@ -323,7 +323,7 @@ impl RetainedCodeGraphRuntimeV1 {
         )
     }
 
-    pub(crate) fn resume_semantic_vector_stage(
+    pub fn resume_semantic_vector_stage(
         &self,
         stage: &SemanticVectorStageKey,
         cancellation: Arc<dyn GraphCancellation>,
@@ -348,7 +348,7 @@ impl RetainedCodeGraphRuntimeV1 {
         )
     }
 
-    pub(crate) fn append_semantic_vector_stage_batch(
+    pub fn append_semantic_vector_stage_batch(
         &self,
         receipt: &SemanticVectorStageBatchReceipt,
         batch: GraphWriteBatch,
@@ -442,7 +442,7 @@ impl RetainedCodeGraphRuntimeV1 {
         })
     }
 
-    pub(crate) fn cancel_semantic_vector_stage(
+    pub fn cancel_semantic_vector_stage(
         &self,
         stage: &SemanticVectorStageKey,
         cancellation: Arc<dyn GraphCancellation>,
@@ -467,7 +467,7 @@ impl RetainedCodeGraphRuntimeV1 {
         )
     }
 
-    pub(crate) fn prepare_semantic_vector_publication_from_staged_native(
+    pub fn prepare_semantic_vector_publication_from_staged_native(
         &self,
         stage: &SemanticVectorStageKey,
         cancellation: Arc<dyn GraphCancellation>,
@@ -492,7 +492,7 @@ impl RetainedCodeGraphRuntimeV1 {
         )
     }
 
-    pub(crate) fn publish_ready_semantic_vector_stage(
+    pub fn publish_ready_semantic_vector_stage(
         &self,
         stage: &SemanticVectorStageKey,
         cancellation: Arc<dyn GraphCancellation>,
@@ -514,7 +514,7 @@ impl RetainedCodeGraphRuntimeV1 {
         )
     }
 
-    pub(crate) fn settle_published_semantic_vector_stage(
+    pub fn settle_published_semantic_vector_stage(
         &self,
         settlement: &SemanticVectorStagePublishSettlement,
         cancellation: Arc<dyn GraphCancellation>,

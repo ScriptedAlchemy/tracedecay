@@ -4,6 +4,7 @@ use std::sync::atomic::AtomicU8;
 
 use tracedecay_domain::ProjectId;
 use tracedecay_runtime_core::storage::PrivateStoreIo;
+use tracedecay_runtime_core::store_runtime::registry::DestructiveMaintenanceTarget;
 use tracedecay_session_temporal_store::relations::SessionRelationScope;
 use tracedecay_store::{StoreRuntimeBindingV1, StoreShardIdV1};
 
@@ -11,7 +12,7 @@ use super::super::open_runtime_during_remote_restore;
 use super::{
     RemoteRecoveryPublicationContextV1, Result, interruption_value, session_registry_error,
 };
-use crate::daemon::store_runtime::session_registry::{
+use crate::session_registry::{
     ProjectRuntimeOwnerStateV1, ProjectSessionNativeRetirementV1,
     ProjectSessionReplacementReservationV1, ProjectSessionReplacementVacancyV1,
     RegisteredSessionOwnerV1, SessionGraphOwnerV1,
@@ -21,7 +22,7 @@ use tracedecay_runtime_core::db::{Database, DatabaseAccessMode};
 
 mod quarantine;
 
-pub(in crate::daemon::store_runtime::session_registry) use quarantine::remote_restore_activated_open_identity;
+pub(crate) use quarantine::remote_restore_activated_open_identity;
 use quarantine::{
     activate_remote_restore_quarantine, complete_remote_restore_quarantine,
     install_remote_restore_quarantine, read_remote_restore_quarantine,
@@ -284,7 +285,7 @@ impl RemoteRecoveryPublicationContextV1 {
     ) -> Result<RegisteredSessionOwnerV1> {
         #[cfg(feature = "hotpath")]
         let _mount_observation =
-            crate::daemon::store_runtime::session_registry::StoreMountObservationV1::enter();
+            crate::session_registry::StoreMountObservationV1::enter();
         let shard_id = StoreShardIdV1::project_sessions(
             self.identity.brain_id().clone(),
             self.identity.profile_id().clone(),
@@ -374,7 +375,7 @@ impl RemoteRecoveryPublicationContextV1 {
     fn resume_terminal_vacancy(
         &self,
         project_id: &ProjectId,
-        terminal_vacancy: crate::daemon::store_runtime::session_registry::ProjectSessionTerminalVacancyAuthorityV1,
+        terminal_vacancy: crate::session_registry::ProjectSessionTerminalVacancyAuthorityV1,
     ) -> Result<(
         ProjectSessionReplacementVacancyV1,
         Option<RegisteredSessionOwnerV1>,
@@ -544,7 +545,7 @@ impl RemoteRecoveryPublicationContextV1 {
             }
             vacancy
         };
-        let target = super::super::super::registry::DestructiveMaintenanceTarget::new(
+        let target = DestructiveMaintenanceTarget::new(
             destination.parent().ok_or_else(|| {
                 session_registry_error(
                     "rollback published remote restore",
@@ -653,7 +654,7 @@ impl RemoteRecoveryPublicationContextV1 {
             expected_staging_identity,
             terminal_vacancy,
         )?;
-        let destructive = super::super::super::registry::DestructiveMaintenanceTarget::new(
+        let destructive = DestructiveMaintenanceTarget::new(
             destination.parent().ok_or_else(|| {
                 session_registry_error(
                     "publish remote restore",
@@ -722,7 +723,7 @@ mod tests {
     use tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRetirementResult;
 
     use super::*;
-    use crate::daemon::store_runtime::session_registry::{
+    use crate::session_registry::{
         DaemonSessionRuntimeRegistryV1, ProjectRuntimeOwnerStateV1,
         ProjectSessionNativeRetirementV1, ProjectSessionRecoveryPhaseV1,
     };
