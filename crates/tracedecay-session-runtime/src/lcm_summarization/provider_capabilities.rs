@@ -38,6 +38,7 @@ pub(super) struct NativeSummaryCandidate<'a> {
     pub(super) envelope: Option<&'a CanonicalObservationEnvelopeV1>,
 }
 
+#[hotpath::measure_all]
 impl<'a> NativeSummaryCandidate<'a> {
     /// The payload of this row's `Compaction` fact, when the row decoded as a
     /// canonical envelope that carries one.
@@ -179,6 +180,7 @@ const NATIVE_SUMMARY_RECOGNIZERS: &[(&str, &dyn NativeSummaryRecognizerV1)] = &[
 ];
 
 /// The recognizers registered for one provider, in evaluation order.
+#[hotpath::measure]
 pub(super) fn native_summary_recognizers(
     provider: &str,
 ) -> Vec<&'static dyn NativeSummaryRecognizerV1> {
@@ -333,6 +335,7 @@ const AUTHORITATIVE_SUMMARIZERS: &[(&str, &dyn AuthoritativeSummarizerV1)] = &[
 ];
 
 /// The summarizer registered for one provider, if any.
+#[hotpath::measure]
 pub(super) fn authoritative_summarizer(
     provider: &str,
 ) -> Option<&'static dyn AuthoritativeSummarizerV1> {

@@ -9,6 +9,7 @@ use tracedecay_session_memory::session::lcm::{
     LcmAuthorityResponse, LcmAuthorityUnavailableReason,
 };
 
+#[hotpath::measure]
 pub(super) fn unavailable(
     context: &RequestContext,
     operation: LcmAuthorityOperation,
@@ -27,6 +28,7 @@ pub(super) fn unavailable(
     )
 }
 
+#[hotpath::measure]
 pub(super) fn terminal_failure(
     context: &RequestContext,
     operation: LcmAuthorityOperation,
@@ -47,6 +49,7 @@ pub(super) fn terminal_failure(
     )
 }
 
+#[hotpath::measure]
 pub(super) fn terminal_interruption(
     context: &RequestContext,
     operation: LcmAuthorityOperation,
@@ -78,6 +81,7 @@ pub(super) fn terminal_interruption(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 pub(super) fn terminal(
     context: &RequestContext,
     operation: LcmAuthorityOperation,

@@ -49,6 +49,7 @@ struct RegisteredLcmDaemonStore {
     database: RegisteredGlobalDbLeaseV1,
 }
 
+#[hotpath::measure_all]
 impl RegisteredLcmDaemonStore {
     fn new(database: RegisteredGlobalDbLeaseV1) -> Self {
         Self { database }
@@ -107,6 +108,7 @@ impl LcmDaemonStore for RegisteredLcmDaemonStore {
 /// messages are never trusted for compaction, and the summary comes from the
 /// daemon's authoritative summarization route (native evidence or a provider
 /// auxiliary summarizer), never from caller-authored text.
+#[hotpath::measure]
 fn pressure_compression_request(preflight: LcmPreflightRequest) -> LcmCompressionRequest {
     compression_request_from_preflight(preflight, Vec::new(), LcmSummarizerMode::HermesAuxiliary)
 }
@@ -114,11 +116,13 @@ fn pressure_compression_request(preflight: LcmPreflightRequest) -> LcmCompressio
 /// Durable ingest of a host-completed turn: the canonical compression route
 /// upserts the session and protected raw messages, and the no-op summarizer
 /// guarantees ingest never mints summary state.
+#[hotpath::measure]
 fn turn_ingest_compression_request(mut preflight: LcmPreflightRequest) -> LcmCompressionRequest {
     let messages = std::mem::take(&mut preflight.messages);
     compression_request_from_preflight(preflight, messages, LcmSummarizerMode::Noop)
 }
 
+#[hotpath::measure]
 fn compression_request_from_preflight(
     preflight: LcmPreflightRequest,
     messages: Vec<serde_json::Value>,
@@ -158,6 +162,7 @@ pub(crate) struct DaemonLcmAuthority {
     store: Option<Arc<dyn LcmDaemonStore>>,
 }
 
+#[hotpath::measure_all]
 impl DaemonLcmAuthority {
     pub(crate) fn registered(database: RegisteredGlobalDbLeaseV1) -> Self {
         Self {
@@ -400,6 +405,7 @@ impl DaemonLcmAuthority {
         }
     }
 
+    #[hotpath::skip]
     async fn execute_retained_status(
         &self,
         context: &RequestContext,
@@ -428,6 +434,7 @@ impl DaemonLcmAuthority {
         }
     }
 
+    #[hotpath::skip]
     async fn execute_retained_doctor(
         &self,
         context: &RequestContext,
@@ -720,6 +727,7 @@ impl DaemonLcmAuthority {
     }
 }
 
+#[hotpath::measure]
 fn status_read_response(
     context: &RequestContext,
     started_at: UtcMicros,
@@ -745,6 +753,7 @@ fn status_read_response(
     }
 }
 
+#[hotpath::measure]
 fn doctor_read_response(
     context: &RequestContext,
     started_at: UtcMicros,

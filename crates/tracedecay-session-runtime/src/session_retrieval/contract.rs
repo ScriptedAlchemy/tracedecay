@@ -52,6 +52,7 @@ pub struct SessionRetrievalCommand {
     query: SessionTemporalQuery,
 }
 
+#[hotpath::measure_all]
 impl SessionRetrievalCommand {
     pub fn new(query: SessionTemporalQuery, filters: SessionRetrievalFilters, goals: bool) -> Self {
         let query = query
@@ -65,6 +66,7 @@ impl SessionRetrievalCommand {
     }
 }
 
+#[hotpath::measure]
 fn temporal_candidate_filter(
     filters: &SessionRetrievalFilters,
     goals: bool,
@@ -105,6 +107,7 @@ fn temporal_candidate_filter(
     }
 }
 
+#[hotpath::measure]
 fn compatibility_filter_digest(filters: &SessionRetrievalFilters, goals: bool) -> String {
     let mut roles = filters.roles.clone();
     roles.sort();
@@ -137,6 +140,7 @@ pub struct LcmDescribeServiceCommand {
     store_scope: SessionRetrievalStoreScope,
 }
 
+#[hotpath::measure_all]
 impl LcmDescribeServiceCommand {
     pub fn new(
         provider: impl Into<String>,
@@ -166,10 +170,12 @@ impl LcmDescribeServiceCommand {
         &self.target
     }
 
+    #[hotpath::skip]
     pub const fn grain(&self) -> RetrievalGrainV1 {
         self.grain
     }
 
+    #[hotpath::skip]
     pub const fn store_scope(&self) -> SessionRetrievalStoreScope {
         self.store_scope
     }
@@ -187,6 +193,7 @@ pub struct LcmExpandServiceCommand {
     store_scope: SessionRetrievalStoreScope,
 }
 
+#[hotpath::measure_all]
 impl LcmExpandServiceCommand {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -223,14 +230,17 @@ impl LcmExpandServiceCommand {
         &self.target
     }
 
+    #[hotpath::skip]
     pub const fn grain(&self) -> RetrievalGrainV1 {
         self.grain
     }
 
+    #[hotpath::skip]
     pub const fn content_slice(&self) -> LcmContentSlice {
         self.content_slice
     }
 
+    #[hotpath::skip]
     pub const fn source_limit(&self) -> Option<usize> {
         self.source_limit
     }
@@ -239,6 +249,7 @@ impl LcmExpandServiceCommand {
         self.cursor.as_deref()
     }
 
+    #[hotpath::skip]
     pub const fn store_scope(&self) -> SessionRetrievalStoreScope {
         self.store_scope
     }
@@ -332,7 +343,9 @@ pub struct SessionRetrievalUnavailable {
     pub worker: Option<SessionRetrievalWorkerStatusView>,
 }
 
+#[hotpath::measure_all]
 impl SessionRetrievalUnavailable {
+    #[hotpath::skip]
     pub const fn service_not_configured() -> Self {
         Self {
             reason: SessionRetrievalUnavailableReason::ServiceNotConfigured,
@@ -340,6 +353,7 @@ impl SessionRetrievalUnavailable {
         }
     }
 
+    #[hotpath::skip]
     pub const fn without_worker(reason: SessionRetrievalUnavailableReason) -> Self {
         Self {
             reason,

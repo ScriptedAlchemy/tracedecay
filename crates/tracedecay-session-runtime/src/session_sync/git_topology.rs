@@ -28,7 +28,9 @@ pub enum GitTopologySyncFailure {
     Unavailable,
 }
 
+#[hotpath::measure_all]
 impl GitTopologySyncFailure {
+    #[hotpath::skip]
     pub(super) const fn failure_code(self) -> &'static str {
         match self {
             Self::Stale => "git_topology_declared_state_stale",
@@ -43,6 +45,7 @@ pub(super) enum GitTopologySyncOutcome {
     Interrupted(SessionSyncInterruption),
 }
 
+#[hotpath::measure_all]
 impl SessionSyncProjectContext {
     pub(super) async fn publish_git_topology(
         &self,
@@ -111,6 +114,7 @@ impl GraphCancellation for GitTopologySyncCancellation {
     }
 }
 
+#[hotpath::measure]
 pub fn publish_native_topology(
     runtime: Arc<dyn VerifiedGraphRuntimePortV1>,
     project_root: PathBuf,
@@ -176,6 +180,7 @@ pub fn publish_native_topology(
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn validate_retained_declared_topology(
     repository: &RepositoryId,
     repository_root: &Path,
@@ -313,6 +318,7 @@ pub(super) fn validate_retained_declared_topology(
     Ok(())
 }
 
+#[hotpath::measure]
 fn topology_read_failure(error: GitTopologyProjectionError) -> GitTopologySyncFailure {
     match error {
         GitTopologyProjectionError::Stale { .. }
@@ -322,6 +328,7 @@ fn topology_read_failure(error: GitTopologyProjectionError) -> GitTopologySyncFa
     }
 }
 
+#[hotpath::measure]
 fn exact_scope_set(
     storage: &AuthorizedScopeSetSqliteStorage,
     id: &tracedecay_domain::ScopeSetId,
@@ -338,6 +345,7 @@ fn exact_scope_set(
     Ok(scope_set)
 }
 
+#[hotpath::measure]
 fn occupied_worktrees(
     scope_set: &AuthorizedScopeSet,
     project: &tracedecay_domain::ProjectId,
@@ -359,6 +367,7 @@ fn occupied_worktrees(
     Ok(occupied)
 }
 
+#[hotpath::measure]
 fn root_authority(
     root: &AuthorizedRoot,
     repository: &RepositoryId,
@@ -376,6 +385,7 @@ fn root_authority(
     Ok(authority)
 }
 
+#[hotpath::measure]
 fn head_occupancy_matches(
     authority: &GitRepositoryAuthority,
     reference: Option<&RefId>,

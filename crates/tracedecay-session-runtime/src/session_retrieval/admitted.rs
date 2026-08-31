@@ -36,6 +36,7 @@ use super::APPLICATION_RETRIEVAL_MAX_BYTES;
 const APPLICATION_RETRIEVAL_MAX_RESULTS: u64 = 100;
 const APPLICATION_RETRIEVAL_MAX_WORK_UNITS: u64 = 100_000;
 
+#[hotpath::measure_all]
 impl DaemonSessionRetrievalService {
     /// Mount the canonical profile-session retrieval service over the exact
     /// registered profile shard and retained session identity supplied by the
@@ -167,6 +168,7 @@ pub struct UnavailableSessionApplicationRetrievalV1 {
     scope: ResolvedScope,
 }
 
+#[hotpath::measure_all]
 impl UnavailableSessionApplicationRetrievalV1 {
     pub fn new(scope: ResolvedScope) -> Self {
         Self { scope }
@@ -195,6 +197,7 @@ impl SessionApplicationRetrievalPortV1 for UnavailableSessionApplicationRetrieva
 /// deadline, and panic exits can never leak the in-flight gauge.
 struct SessionRetrievalInFlightObservation;
 
+#[hotpath::measure_all]
 impl SessionRetrievalInFlightObservation {
     fn begin() -> Self {
         hotpath::gauge!("daemon.session_retrieval.in_flight").inc(1.0);
@@ -355,6 +358,7 @@ impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
     }
 }
 
+#[hotpath::measure]
 fn task_session_binding_outcome(
     outcome: SessionRetrievalServiceOutcome,
 ) -> TaskSessionRetrievalOutcomeV1 {
@@ -383,6 +387,7 @@ fn task_session_binding_outcome(
     }
 }
 
+#[hotpath::measure]
 fn describe_binding_outcome(outcome: SessionRetrievalServiceOutcome) -> LcmDescribeServiceOutcome {
     match outcome {
         SessionRetrievalServiceOutcome::WrongScope => LcmDescribeServiceOutcome::WrongScope,
@@ -412,6 +417,7 @@ fn describe_binding_outcome(outcome: SessionRetrievalServiceOutcome) -> LcmDescr
     }
 }
 
+#[hotpath::measure]
 fn expand_binding_outcome(outcome: SessionRetrievalServiceOutcome) -> LcmExpandServiceOutcome {
     match outcome {
         SessionRetrievalServiceOutcome::WrongScope => LcmExpandServiceOutcome::WrongScope,
@@ -445,6 +451,7 @@ fn expand_binding_outcome(outcome: SessionRetrievalServiceOutcome) -> LcmExpandS
 /// admitted retrieval, task-session, describe, and expand request crosses.
 /// The builder refuses with exactly two typed outcomes, so the reason set
 /// stays static and bounded.
+#[hotpath::measure]
 fn admitted_session_binding(
     root: &DaemonSessionRetrievalRoot,
     retrieval_configuration: SessionRetrievalConfiguration,
@@ -463,6 +470,7 @@ fn admitted_session_binding(
 /// budgets. LCM describe and expand verify content hashes over whole payloads
 /// before slicing, so their read budget is the LCM authority's — the response
 /// stays bounded by the query's context budget and the MCP response cap.
+#[hotpath::measure]
 fn admitted_lcm_session_binding(
     root: &DaemonSessionRetrievalRoot,
     retrieval_configuration: SessionRetrievalConfiguration,
@@ -477,6 +485,7 @@ fn admitted_lcm_session_binding(
     counted_admitted_session_binding(root, retrieval_configuration, context, budgets)
 }
 
+#[hotpath::measure]
 fn counted_admitted_session_binding(
     root: &DaemonSessionRetrievalRoot,
     retrieval_configuration: SessionRetrievalConfiguration,
@@ -500,6 +509,7 @@ fn counted_admitted_session_binding(
     binding
 }
 
+#[hotpath::measure]
 fn build_admitted_session_binding(
     root: &DaemonSessionRetrievalRoot,
     retrieval_configuration: SessionRetrievalConfiguration,
@@ -557,6 +567,7 @@ fn build_admitted_session_binding(
     ))
 }
 
+#[hotpath::measure]
 fn application_retrieval_digest(
     domain: &[u8],
     identity: &ResolvedSessionIdentity,
@@ -576,6 +587,7 @@ fn application_retrieval_digest(
     digest.finalize().into()
 }
 
+#[hotpath::measure]
 fn temporal_store_unavailable() -> SessionRetrievalServiceOutcome {
     SessionRetrievalServiceOutcome::Unavailable(temporal_store_unavailable_value())
 }

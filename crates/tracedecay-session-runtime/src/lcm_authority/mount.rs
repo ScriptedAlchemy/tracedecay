@@ -139,6 +139,7 @@ impl MountedLcmAuthority {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn lcm_binding_digests(
     identity: &ResolvedSessionIdentity,
     capability: &CapabilityId,
@@ -167,6 +168,7 @@ pub(super) fn lcm_binding_digests(
     ))
 }
 
+#[hotpath::measure]
 pub(super) fn binding_matches_target(
     binding: &SessionRequestBinding,
     capability: &CapabilityId,
@@ -181,6 +183,7 @@ pub(super) fn binding_matches_target(
     )
 }
 
+#[hotpath::measure]
 fn lcm_binding_digest(
     domain: &[u8],
     identity: &ResolvedSessionIdentity,
@@ -240,6 +243,7 @@ impl MountedLcmAuthorityPort for MountedLcmAuthority {
     }
 }
 
+#[hotpath::measure]
 fn identity_matches_shard(identity: &ResolvedSessionIdentity, shard: &StoreShardIdV1) -> bool {
     if identity.profile_id().as_str() != shard.profile_id.as_str() {
         return false;
@@ -253,6 +257,7 @@ fn identity_matches_shard(identity: &ResolvedSessionIdentity, shard: &StoreShard
     }
 }
 
+#[hotpath::measure]
 pub fn mount_registered_lcm_authority(
     database: RegisteredGlobalDbLeaseV1,
     identity: ResolvedSessionIdentity,

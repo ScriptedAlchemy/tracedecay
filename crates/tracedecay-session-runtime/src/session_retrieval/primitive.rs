@@ -27,6 +27,7 @@ pub struct DaemonSessionLookupPrimitiveV1 {
     retrieval: Arc<dyn SessionApplicationRetrievalPortV1>,
 }
 
+#[hotpath::measure_all]
 impl DaemonSessionLookupPrimitiveV1 {
     pub fn new(retrieval: Arc<dyn SessionApplicationRetrievalPortV1>) -> Self {
         Self { retrieval }
@@ -74,6 +75,7 @@ impl TemporalRetrievalPort for DaemonSessionLookupPrimitiveV1 {
     }
 }
 
+#[hotpath::measure]
 fn map_outcome(
     outcome: SessionRetrievalServiceOutcome,
     request: &SessionLookupRequest,
@@ -141,6 +143,7 @@ fn map_outcome(
     }
 }
 
+#[hotpath::measure]
 fn complete_outcome(
     page: SessionRetrievalPageView,
     freshness: SessionDataFreshness,
@@ -172,6 +175,7 @@ fn complete_outcome(
     )?))
 }
 
+#[hotpath::measure]
 fn partial_outcome(
     page: SessionRetrievalPageView,
     freshness: SessionDataFreshness,
@@ -210,6 +214,7 @@ fn partial_outcome(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 fn page_evidence(
     payload: SessionLookupResult,
     request: &SessionLookupRequest,
@@ -264,6 +269,7 @@ fn page_evidence(
     })
 }
 
+#[hotpath::measure]
 fn terminal_evidence(
     request: &SessionLookupRequest,
     finished_at: UtcMicros,
@@ -313,6 +319,7 @@ fn terminal_evidence(
     })
 }
 
+#[hotpath::measure]
 fn temporal_state(
     request: &SessionLookupRequest,
     finished_at: UtcMicros,

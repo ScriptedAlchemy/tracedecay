@@ -45,6 +45,7 @@ pub struct SessionSyncTaskV1 {
     pub task: tokio::task::JoinHandle<()>,
 }
 
+#[hotpath::measure_all]
 impl SessionSyncProjectContext {
     pub fn project_sessions(&self) -> Result<RegisteredGlobalDbLeaseV1, String> {
         self.project_sessions
@@ -95,6 +96,7 @@ impl SessionSyncProjectContext {
     }
 }
 
+#[hotpath::measure_all]
 impl DaemonSessionSyncService {
     pub fn project_gate(&self, scope: &SessionSyncScopeV1) -> Arc<tokio::sync::Mutex<()>> {
         let key = session_sync_project_key(scope);
@@ -107,6 +109,7 @@ impl DaemonSessionSyncService {
         )
     }
 
+    #[hotpath::skip]
     async fn recover_project(
         &self,
         context: &Arc<SessionSyncProjectContext>,
@@ -277,6 +280,7 @@ impl DaemonSessionSyncService {
         Ok(recovered_import)
     }
 
+    #[hotpath::skip]
     pub async fn register_project(
         &self,
         config: DaemonSessionSyncConfig,
@@ -370,6 +374,7 @@ impl DaemonSessionSyncService {
         Ok(())
     }
 
+    #[hotpath::skip]
     async fn schedule_startup_import(
         &self,
         context: &Arc<SessionSyncProjectContext>,
@@ -473,6 +478,7 @@ impl DaemonSessionSyncService {
             .await
     }
 
+    #[hotpath::skip]
     pub async fn retire_project(
         &self,
         profile_id: &UserProfileId,
@@ -500,6 +506,7 @@ impl DaemonSessionSyncService {
         Ok(true)
     }
 
+    #[hotpath::skip]
     pub async fn rebind_project(
         &self,
         profile_id: &UserProfileId,
@@ -533,6 +540,7 @@ impl DaemonSessionSyncService {
         Ok(true)
     }
 
+    #[hotpath::skip]
     async fn drain_project_tasks(&self, scope: &SessionSyncScopeV1) -> Result<(), String> {
         let mut project_tasks = {
             let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
@@ -606,6 +614,7 @@ impl DaemonSessionSyncService {
         }
     }
 
+    #[hotpath::skip]
     async fn restore_previous_context(
         &self,
         scope: &SessionSyncScopeV1,
@@ -641,6 +650,7 @@ impl DaemonSessionSyncService {
     }
 }
 
+#[hotpath::measure]
 fn session_sync_project_key(scope: &SessionSyncScopeV1) -> String {
     let profile = scope.profile_id().as_str();
     let project = scope.project_id().as_str();

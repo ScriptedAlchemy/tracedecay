@@ -30,6 +30,7 @@ use super::{
     message_search_digest, temporal_kernel_deadline,
 };
 
+#[hotpath::measure_all]
 impl DaemonSessionRetrievalService {
     fn lcm_authorization_binding(&self, provider: &str) -> String {
         encode_tagged_lowercase_hex(
@@ -616,6 +617,7 @@ impl DaemonSessionRetrievalService {
     }
 }
 
+#[hotpath::measure]
 fn lcm_describe_target_key(target: &LcmDescribeTarget) -> String {
     match target {
         LcmDescribeTarget::Session => "session".to_string(),
@@ -636,6 +638,7 @@ const fn lcm_data_freshness(freshness: SessionDataFreshness) -> LcmDataFreshness
     }
 }
 
+#[hotpath::measure]
 fn hydration_state(
     result: &TemporalKernelResult,
     anchor_id: &RetrievalAnchorId,
@@ -647,6 +650,7 @@ fn hydration_state(
         .map(tracedecay_temporal_query::TemporalHydratedResult::state)
 }
 
+#[hotpath::measure]
 fn describe_hydration_state(state: HydrationStateV1) -> LcmDescribeServiceOutcome {
     match state {
         HydrationStateV1::Locked => LcmDescribeServiceOutcome::Locked,
@@ -665,6 +669,7 @@ fn describe_hydration_state(state: HydrationStateV1) -> LcmDescribeServiceOutcom
     }
 }
 
+#[hotpath::measure]
 fn expand_hydration_state(state: HydrationStateV1) -> LcmExpandServiceOutcome {
     match state {
         HydrationStateV1::Locked => LcmExpandServiceOutcome::Locked,
@@ -683,6 +688,7 @@ fn expand_hydration_state(state: HydrationStateV1) -> LcmExpandServiceOutcome {
     }
 }
 
+#[hotpath::measure]
 fn describe_execution_error(
     error: SessionTemporalExecutionError,
     temporal: SessionTemporalMetadataView,
@@ -720,6 +726,7 @@ fn describe_execution_error(
     }
 }
 
+#[hotpath::measure]
 fn expand_execution_error(
     error: SessionTemporalExecutionError,
     temporal: SessionTemporalMetadataView,
@@ -753,6 +760,7 @@ fn expand_execution_error(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn describe_retrieval_outcome(
     outcome: SessionRetrievalOutcome<TemporalKernelResult>,
     grain: RetrievalGrainV1,
@@ -807,6 +815,7 @@ pub(super) fn describe_retrieval_outcome(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn expand_retrieval_outcome(
     outcome: SessionRetrievalOutcome<TemporalKernelResult>,
     grain: RetrievalGrainV1,
