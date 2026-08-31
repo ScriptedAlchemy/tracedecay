@@ -310,7 +310,7 @@ async fn daemon_restart_fences_the_previous_session_runtime_binding() {
     assert_eq!(current.incarnation.get(), second_authority.record().epoch);
     assert!(current.incarnation > stale.incarnation);
     assert!(matches!(
-        second_registry.registry.lookup(&stale),
+        second_registry.lookup_store_runtime(&stale),
         tracedecay_runtime_core::store_runtime::registry::StoreRuntimeLookup::WrongIncarnation {
             expected,
             actual,
@@ -1250,9 +1250,11 @@ async fn linked_worktree_generations_share_the_project_graph_runtime() {
         "shared code graph",
     )
     .expect("daemon database scope");
-    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
-        .await
-        .expect("session runtime registry");
+    let registry = Arc::new(
+        DaemonSessionRuntimeRegistryV1::open(identity)
+            .await
+            .expect("session runtime registry"),
+    );
     let project_database = registry
         .project_memory(
             project_id.clone(),

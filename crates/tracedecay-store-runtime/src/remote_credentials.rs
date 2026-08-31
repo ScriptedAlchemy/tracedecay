@@ -91,6 +91,16 @@ impl DaemonRemoteCredentialLookupV1 {
 }
 
 impl DaemonRemoteCredentialAuthorityV1 {
+    /// Brain identity this authority admits against. Not credential material.
+    pub fn brain_id(&self) -> &BrainId {
+        &self.brain_id
+    }
+
+    /// Profile identity this authority admits against. Not credential material.
+    pub fn profile_id(&self) -> &UserProfileId {
+        &self.profile_id
+    }
+
     pub fn new(brain_id: BrainId, profile_id: UserProfileId) -> Self {
         Self::with_limits(
             brain_id,

@@ -53,8 +53,8 @@ use tracedecay_application::{
     ResultContractRef,
 };
 use tracedecay_domain::{
-    BrainId, CurrentRemoteAuthorityStateV1, EnrollmentCredentialRecordV1,
-    RemoteAuthorityUnavailableReasonV1, UserProfileId, UtcMicros, canonical_sha256,
+    CurrentRemoteAuthorityStateV1, EnrollmentCredentialRecordV1,
+    RemoteAuthorityUnavailableReasonV1, UtcMicros, canonical_sha256,
 };
 use tracedecay_rusqlite_runtime::remote::{
     CredentialDerivedSpoolKeyringV1, RemoteSpoolKeyringV1,
@@ -751,6 +751,7 @@ fn unavailable_response<T>(
 #[cfg(test)]
 mod recovery_control_tests {
     use super::*;
+    use tracedecay_domain::{BrainId, UserProfileId};
 
     fn before_deadline() -> UtcMicros {
         UtcMicros(10)

@@ -2937,6 +2937,14 @@ pub struct DaemonSessionRuntimeRegistryV1 {
 }
 
 impl DaemonSessionRuntimeRegistryV1 {
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn lookup_store_runtime(
+        &self,
+        expected: &tracedecay_store::StoreRuntimeBindingV1,
+    ) -> tracedecay_runtime_core::store_runtime::registry::StoreRuntimeLookup {
+        self.registry.lookup(expected)
+    }
+
     /// Whether the canonical graph registry can admit the code and session
     /// relation owners created by one previously unmounted project.
     pub fn has_project_graph_admission_capacity(&self) -> Result<bool> {
