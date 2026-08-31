@@ -7,8 +7,8 @@ use std::process::Command;
 use std::time::Duration;
 use tempfile::TempDir;
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
-use tracedecay_mcp::ToolResult;
 use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_mcp::ToolResult;
 
 struct GraphQueryFixture {
     production: ProductionCompositionFixture,
@@ -86,7 +86,7 @@ async fn shutdown_graph_fixture(fixture: GraphQueryFixture) {
 async fn call_production_tool(
     fixture: &GraphQueryFixture,
     tool_name: &str,
-    arguments: Value,
+    mut arguments: Value,
     _server_stats: Option<Value>,
     scope_prefix: Option<&str>,
 ) -> tracedecay_domain::errors::Result<ToolResult> {
@@ -96,6 +96,16 @@ async fn call_production_tool(
                 "graph-query production tests must express scope through public tool arguments"
                     .to_owned(),
         });
+    }
+    // The shared raw helper defaults every tool to `format: "json"`; tools
+    // whose production default is markdown must keep that default so these
+    // journeys assert the rendering agents actually receive.
+    if tracedecay_mcp::tool_defaults_to_markdown(tool_name)
+        && let Some(object) = arguments.as_object_mut()
+    {
+        object
+            .entry("format".to_owned())
+            .or_insert_with(|| json!("markdown"));
     }
     let server = fixture
         .production
@@ -168,9 +178,30 @@ async fn search_limit_above_retrieval_budget_serves_full_candidate_set() {
         payload["status"].is_null(),
         "high-limit search must not fail closed: {payload}"
     );
+    // A budget-bounded page over the shared fixture can exceed the transport's
+    // response budget; the truncation envelope hands back the canonical
+    // retrieve handle, and following it is the same journey an agent takes.
+    if payload["truncated"].as_bool() == Some(true) {
+        let handle = payload["handle"]
+            .as_str()
+            .unwrap_or_else(|| panic!("truncated search must mint a retrieve handle: {payload}"));
+        let retrieved = handle_real_server_tool_call(
+            &server,
+            "tracedecay_retrieve",
+            json!({ "handle": handle }),
+        )
+        .await;
+        let envelope: Value = serde_json::from_str(extract_real_server_text(&retrieved)).unwrap();
+        payload = serde_json::from_str(
+            envelope["content"]
+                .as_str()
+                .unwrap_or_else(|| panic!("retrieve must return the original text: {envelope}")),
+        )
+        .unwrap();
+    }
     let results = payload["results"]
         .as_array()
-        .expect("high-limit search results");
+        .unwrap_or_else(|| panic!("high-limit search results: {payload}"));
     assert!(
         !results.is_empty(),
         "high-limit search must return the fused candidates: {payload}"

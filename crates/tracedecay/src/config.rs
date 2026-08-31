@@ -882,6 +882,26 @@ pub(crate) fn materialize_root_runtime_configuration(
     Ok(root_runtime_configuration(configuration)?.config)
 }
 
+struct RootPinnedRuntimeConfigurationCache;
+
+impl tracedecay_usecases::config::PinnedRuntimeConfigurationCachePort
+    for RootPinnedRuntimeConfigurationCache
+{
+    fn publish(
+        &self,
+        configuration: tracedecay_usecases::config::PinnedRuntimeConfiguration,
+    ) -> Result<()> {
+        install_pinned_runtime_configuration(root_runtime_configuration(&configuration)?)
+    }
+
+    fn cached_for_root(
+        &self,
+        project_root: &Path,
+    ) -> Result<tracedecay_usecases::config::PinnedRuntimeConfiguration> {
+        usecase_runtime_configuration(cached_runtime_configuration(project_root)?)
+    }
+}
+
 struct RootRuntimeConfigurationAuthority;
 
 impl tracedecay_usecases::config::RuntimeConfigurationAuthorityPort
@@ -972,6 +992,10 @@ pub(crate) fn install_usecase_runtime_configuration_authority() -> Result<()> {
     static INSTALLATION: LazyLock<std::result::Result<(), String>> = LazyLock::new(|| {
         tracedecay_usecases::config::install_runtime_configuration_authority(Arc::new(
             RootRuntimeConfigurationAuthority,
+        ))
+        .map_err(|error| error.to_string())?;
+        tracedecay_usecases::config::install_pinned_runtime_configuration_cache(Arc::new(
+            RootPinnedRuntimeConfigurationCache,
         ))
         .map_err(|error| error.to_string())?;
         install_dashboard_configuration_read_port().map_err(|error| error.to_string())

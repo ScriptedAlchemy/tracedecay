@@ -2,80 +2,32 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tracedecay_global_db::{
     CodeProjectRecord, ProjectAliasRecord, ProjectRegistryContext, ProjectStoreContext,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ProjectRegistrySummary {
-    pub project_count: usize,
-    pub repo_count: usize,
-    pub truncated: bool,
-}
+pub use tracedecay_application::{
+    ProjectRegistryEntry, ProjectRegistrySummary, ProjectRegistryView, ProjectRepoGroup,
+    PublicCodeProject,
+};
 
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ProjectRepoGroup {
-    pub label: String,
-    pub git_common_dir: Option<String>,
-    pub project_count: usize,
-    pub branches: Vec<String>,
-    pub projects: Vec<ProjectRegistryEntry>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ProjectRegistryEntry {
-    pub project_id: String,
-    pub label: String,
-    pub project_root: String,
-    pub canonical_root: String,
-    pub kind: String,
-    pub default_branch: Option<String>,
-    pub branches: Vec<String>,
-    pub store_count: usize,
-    pub artifact_count: usize,
-    pub alias_count: usize,
-    pub last_seen_at: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub is_active: Option<bool>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct PublicCodeProject {
-    pub project_id: String,
-    pub label: String,
-    pub project_root: String,
-    pub display_root: String,
-    pub canonical_root: String,
-    pub git_common_dir: Option<String>,
-    pub default_branch: Option<String>,
-    pub created_at: i64,
-    pub last_seen_at: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub is_active: Option<bool>,
-}
-
-impl PublicCodeProject {
-    pub fn from_record(project: &CodeProjectRecord, active_project_id: Option<&str>) -> Self {
-        Self {
-            project_id: project.project_id.clone(),
-            label: path_label(&project.display_root),
-            project_root: project.display_root.clone(),
-            display_root: project.display_root.clone(),
-            canonical_root: project.canonical_root.clone(),
-            git_common_dir: project.git_common_dir.clone(),
-            default_branch: project.default_branch.clone(),
-            created_at: project.created_at,
-            last_seen_at: project.last_seen_at,
-            is_active: active_project_id.map(|id| id == project.project_id),
-        }
+pub fn public_code_project_from_record(
+    project: &CodeProjectRecord,
+    active_project_id: Option<&str>,
+) -> PublicCodeProject {
+    PublicCodeProject {
+        project_id: project.project_id.clone(),
+        label: path_label(&project.display_root),
+        project_root: project.display_root.clone(),
+        display_root: project.display_root.clone(),
+        canonical_root: project.canonical_root.clone(),
+        git_common_dir: project.git_common_dir.clone(),
+        default_branch: project.default_branch.clone(),
+        created_at: project.created_at,
+        last_seen_at: project.last_seen_at,
+        is_active: active_project_id.map(|id| id == project.project_id),
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ProjectRegistryView {
-    pub summary: ProjectRegistrySummary,
-    pub project_tree: Vec<ProjectRepoGroup>,
 }
 
 /// Serialized project-registry context for one project: the public project
@@ -90,7 +42,7 @@ pub struct PublicProjectRegistryContext<'a> {
 impl<'a> PublicProjectRegistryContext<'a> {
     pub fn new(context: &'a ProjectRegistryContext, active_project_id: Option<&str>) -> Self {
         Self {
-            project: PublicCodeProject::from_record(&context.project, active_project_id),
+            project: public_code_project_from_record(&context.project, active_project_id),
             aliases: &context.aliases,
             stores: &context.stores,
         }

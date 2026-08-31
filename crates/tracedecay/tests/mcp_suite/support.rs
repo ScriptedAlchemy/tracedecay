@@ -28,6 +28,8 @@ use tracedecay::host_admission::{HostAdmissionTestRuntimeV1, ProjectScopedTestRu
 use tracedecay::mcp::McpServer;
 use tracedecay::tracedecay::TraceDecay;
 #[cfg(feature = "test-transport")]
+use tracedecay_domain::errors::TraceDecayError;
+#[cfg(feature = "test-transport")]
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, ComponentVersion,
@@ -43,8 +45,6 @@ use tracedecay_domain::{
 #[cfg(feature = "test-transport")]
 use tracedecay_mcp::McpTransport;
 use tracedecay_mcp::ToolResult;
-#[cfg(feature = "test-transport")]
-use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::storage::PrivateStoreIo;
 #[cfg(feature = "test-transport")]
 use tracedecay_sessions::admission::HostAdmissionScope;
@@ -488,7 +488,11 @@ async fn handle_project_open_source_edit_tool_call(
 ) -> tracedecay_domain::errors::Result<ToolResult> {
     let graph = Box::pin(TraceDecay::open(cg.project_root())).await?;
     let server = Box::pin(McpServer::new(graph, None)).await;
-    server
+    // `false` means this direct server has no production code-graph
+    // projection port, so the source-edit authority cannot mount; the
+    // dispatch boundary below is still the production path, and an actual
+    // edit reports its typed executor-unavailable refusal.
+    let _authority_mounted = server
         .install_project_open_source_edit_authority_for_test()
         .await?;
 

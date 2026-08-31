@@ -10,13 +10,15 @@
 use serde_json::Value;
 use std::path::Path;
 
-use crate::mcp::tools::{
+use tracedecay_application::{
     ProjectRegistryContextCommand, ProjectRegistryContextFuture, ProjectRegistryContextOutcome,
     ProjectRegistryContextView, ProjectRegistryListingCommand, ProjectRegistryListingFuture,
     ProjectRegistryListingOutcome, ProjectRegistryListingScope, ProjectRegistryListingView,
     ProjectRegistryReadPort, ProjectRegistrySelector,
 };
-use tracedecay_dashboard_api::project_registry::{PublicCodeProject, build_project_registry_view};
+use tracedecay_dashboard_api::project_registry::{
+    build_project_registry_view, public_code_project_from_record,
+};
 use tracedecay_global_db::{CodeProjectRecord, ProjectRegistryContext, RegisteredGlobalDbLeaseV1};
 use tracedecay_domain::errors::Result;
 
@@ -58,7 +60,7 @@ impl DaemonProjectRegistryReadService {
         let view = build_project_registry_view(&contexts, active_id.as_deref(), truncated);
         let projects = projects
             .iter()
-            .map(|project| PublicCodeProject::from_record(project, active_id.as_deref()))
+            .map(|project| public_code_project_from_record(project, active_id.as_deref()))
             .collect::<Vec<_>>();
         Ok(ProjectRegistryListingView {
             registry_path: self.registry.db_path().to_path_buf(),
@@ -140,7 +142,7 @@ impl DaemonProjectRegistryReadService {
             ProjectRegistryContextView {
                 registry_path,
                 is_active,
-                project: PublicCodeProject::from_record(&context.project, active_id.as_deref()),
+                project: public_code_project_from_record(&context.project, active_id.as_deref()),
                 aliases: serialize_records(&context.aliases)?,
                 stores: serialize_records(&context.stores)?,
             },

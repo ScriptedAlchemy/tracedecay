@@ -1463,6 +1463,7 @@ async fn register_project_delivery_read_authority(
                 state.scope.clone(),
                 Arc::clone(state.graph.configuration_runtime()),
                 handle,
+                Arc::new(super::DaemonOwnedProjectSourceAccess),
             ),
         )
         .await

@@ -29,10 +29,7 @@ use tracedecay_application::git::{
     GitHubStackSignalExpandSurfaceRequest, NativeWorktreeSurfaceRequest,
 };
 use tracedecay_application::handlers::CanonicalApplicationDispatcher;
-use tracedecay_application::retrieval::{
-    GraphRelationRequest, HealthDeltaRequest, ImplementationsRequest, PrimitiveRequest,
-    SignatureSearchRequest, TypeHierarchyRequest,
-};
+use tracedecay_application::retrieval::{HealthDeltaRequest, PrimitiveRequest};
 use tracedecay_application::{
     APPLICATION_DEFAULT_PROFILE_ID, ApplicationContractError, ApplicationEnvelope,
     ApplicationOperation, ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind,
@@ -51,7 +48,7 @@ pub use tracedecay_daemon_protocol::{
     ContextScoutSurfaceRequest, GitReadSurfaceRequest,
 };
 use tracedecay_domain::{
-    ManifestDigest, ProjectId, QueryNormalizationRevision, SanitizerRevision, UtcMicros,
+    ManifestDigest, ProjectId, UtcMicros,
     canonical_sha256,
 };
 use tracedecay_tool_catalog::{
@@ -233,52 +230,6 @@ pub struct FeedbackImpactSurfaceRequest {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TestResultsSurfaceRequest {}
-
-pub(crate) fn primitive_code_into_primitive(
-    request: PrimitiveCodeSurfaceRequest,
-    sanitizer_revision: SanitizerRevision,
-    normalization_revision: QueryNormalizationRevision,
-    page: PageRequest,
-) -> Result<PrimitiveRequest, ApplicationContractError> {
-    Ok(match request {
-        PrimitiveCodeSurfaceRequest::SymbolSearch(request) => PrimitiveRequest::SymbolSearch(
-            request.into_primitive_request(sanitizer_revision, normalization_revision, page)?,
-        ),
-        PrimitiveCodeSurfaceRequest::SignatureSearch(request) => {
-            PrimitiveRequest::SignatureSearch(SignatureSearchRequest {
-                returns: request.returns,
-                params: request.params,
-                is_async: request.is_async,
-                scope: request.scope,
-                meta: request.meta.into_application(page),
-            })
-        }
-        PrimitiveCodeSurfaceRequest::Implementations(request) => {
-            PrimitiveRequest::Implementations(ImplementationsRequest {
-                selector: request.selector,
-                scope: request.scope,
-                meta: request.meta.into_application(page),
-            })
-        }
-        PrimitiveCodeSurfaceRequest::TypeHierarchy(request) => {
-            PrimitiveRequest::TypeHierarchy(TypeHierarchyRequest {
-                node_id: request.node_id,
-                maximum_depth: request.maximum_depth,
-                scope: request.scope,
-                meta: request.meta.into_application(page),
-            })
-        }
-        PrimitiveCodeSurfaceRequest::Callers(request) => {
-            PrimitiveRequest::Callers(GraphRelationRequest {
-                node_id: request.node_id,
-                maximum_depth: request.maximum_depth,
-                resolve_trait_dispatch: request.resolve_trait_dispatch,
-                scope: request.scope,
-                meta: request.meta.into_application(page),
-            })
-        }
-    })
-}
 
 pub(crate) const fn native_integration_operation(
     request: &NativeIntegrationSurfaceRequest,

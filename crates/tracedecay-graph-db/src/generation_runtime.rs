@@ -1261,6 +1261,31 @@ impl GraphDb {
         Ok(state.known.get(locator).and_then(std::sync::Weak::upgrade))
     }
 
+    /// The verified-generation cache as seen by a publisher that can re-prove
+    /// the generation from its canonical replay inputs.
+    ///
+    /// A quarantined locator answers `None` instead of the typed refusal:
+    /// the quarantine records that the stored rows failed their last digest
+    /// proof, which is exactly the state a full republication heals — the
+    /// publish path re-projects the rows, re-proves the recovered digest,
+    /// and `remember`/`install` clear the marker with the fresh proof.
+    /// Read-side recovery keeps the strict [`Self::verified_generation`]
+    /// refusal because it can only re-run the proof over the same rows.
+    pub(crate) fn republishable_verified_generation(
+        &self,
+        locator: &GenerationLocator,
+    ) -> Result<Option<std::sync::Arc<VerifiedGenerationLease>>, GraphDbError> {
+        {
+            let state = self.inner.verified_generations.read().map_err(|_| {
+                GraphDbError::unavailable("verified graph generation state lock is poisoned")
+            })?;
+            if state.quarantined.contains(locator) {
+                return Ok(None);
+            }
+        }
+        self.verified_generation(locator)
+    }
+
     fn require_exact_dependencies(
         &self,
         identity: &GraphGenerationManifestIdentity,

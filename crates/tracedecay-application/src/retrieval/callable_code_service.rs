@@ -5,6 +5,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use tracedecay_domain::{CodeGenerationId, TemporalModeV1, UtcMicros};
 use tracedecay_policy::authorization::SourceAuthorizationEvaluator;
@@ -198,6 +199,30 @@ pub trait CallableCodeAuthorizationPort: Send + Sync {
         admission: &'a CallableCodeAuthorizationAdmission,
         observed_at: UtcMicros,
     ) -> CallableCodeAuthorizationFuture<'a, Result<AuthorityReceipt, ApplicationProblem>>;
+}
+
+impl CallableCodeAuthorizationPort for Arc<dyn CallableCodeAuthorizationPort> {
+    fn admit<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        operation: &'a ApplicationOperation,
+        observed_at: UtcMicros,
+    ) -> CallableCodeAuthorizationFuture<
+        'a,
+        Result<CallableCodeAuthorizationAdmission, ApplicationProblem>,
+    > {
+        (**self).admit(context, operation, observed_at)
+    }
+
+    fn recheck_publication<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        operation: &'a ApplicationOperation,
+        admission: &'a CallableCodeAuthorizationAdmission,
+        observed_at: UtcMicros,
+    ) -> CallableCodeAuthorizationFuture<'a, Result<AuthorityReceipt, ApplicationProblem>> {
+        (**self).recheck_publication(context, operation, admission, observed_at)
+    }
 }
 
 impl<P, E> CallableCodeAuthorizationPort for AuthorizationService<P, E>

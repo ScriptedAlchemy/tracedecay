@@ -5036,6 +5036,36 @@ impl CodeIndexSchedulerRegistryV1 {
             .await
     }
 
+    /// Resolve one exact scope and report whether its mounted scheduler has
+    /// verified the live source and that verified source publishes no code
+    /// generation at all (no extractable files). This is the typed
+    /// generation-empty state a caller awaiting first publication must accept
+    /// instead of timing out against a generation that can never exist.
+    pub async fn reconciled_without_generation_for_scope(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> bool {
+        let scheduler = {
+            let Ok(mounted) = self.mounted.try_lock() else {
+                return false;
+            };
+            let Some((_, worktree)) = unique_mounted_for_scope(&mounted, scope).unique() else {
+                return false;
+            };
+            Arc::clone(&worktree.scheduler)
+        };
+        tokio::task::spawn_blocking(move || {
+            let scheduler = match scheduler.try_lock() {
+                Ok(scheduler) => scheduler,
+                Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => return false,
+            };
+            scheduler.reconciled_without_generation()
+        })
+        .await
+        .unwrap_or(false)
+    }
+
     /// [`Self::latest_complete_ready_for_scope`] restricted to an
     /// already-decoded generation.
     ///

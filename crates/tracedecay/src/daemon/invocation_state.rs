@@ -85,6 +85,12 @@ impl DaemonInvocationState {
         self.service.clone()
     }
 
+    pub(in crate::daemon) fn github_stack_coordinator(
+        &self,
+    ) -> Arc<tracedecay_usecases::stack_coordinator::DaemonGitHubStackCoordinatorV1> {
+        self.service.github_stack_coordinator()
+    }
+
     /// Mount the profile-owned background-worker plan before any projectless
     /// session or host-admission work can start. The exact `ProfileSessions`
     /// shard is the persisted user-profile authority; project configuration

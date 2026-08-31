@@ -19,7 +19,7 @@ use tracedecay_usecases::session::lcm::{
 
 use super::super::SessionAuthorities;
 
-use super::errors::{
+use tracedecay_mcp::{
     hook_admission_error, map_claude_observation_ingest_error, map_transcript_ingest_error,
 };
 use super::required_str;

@@ -38,12 +38,13 @@ use super::{
 use tracedecay_application::request_identity::{PreviewIdentityDomain, derive_preview_identity};
 
 const SOURCE_EDIT_PRIVACY_KEY_EPOCH_V1: u64 = 1;
+use crate::daemon::callable_code_authorization::DaemonCallableCodeAuthorizationSource;
 use crate::daemon::service::invocation::DaemonNativeIntegrationRuntimeRegistrar;
 use crate::mcp::McpServer;
 use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_lsp::analyzer::broker::AdmittedLspProvider;
 use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
-use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_usecases::lsp_runtime::DaemonLspSessionFactory;
 use tracedecay_usecases::primitives::{admitted_root_uri_for_project, locator_digest_for_project};
 use tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot;
@@ -78,9 +79,9 @@ const DAEMON_BINDING: &str = "binding.tracedecay-daemon.project-open";
 const GRANT_HORIZON: Duration = Duration::from_hours(24);
 const POLICY_REVISION_V1: u64 = 1;
 const LSP_DIAGNOSTICS_QUIET: Duration = Duration::from_secs(2);
-pub(super) const LSP_WORKSPACE_CAPABILITY_ID_V1: &str =
-    "capability.application.lsp.workspace-folders";
-pub(super) const LSP_WORKSPACE_USE_CASE_ID_V1: &str = "use-case.application.lsp.workspace-folders";
+pub(super) use crate::daemon::service::invocation::{
+    LSP_WORKSPACE_CAPABILITY_ID_V1, LSP_WORKSPACE_USE_CASE_ID_V1,
+};
 
 #[derive(Clone)]
 struct ProjectOpenSourceEditAuthorizationV1 {
@@ -529,12 +530,11 @@ pub(crate) async fn install_project_open_source_edit_preview_owner(
             message: "project-open source edit preview requires authoritative project identity"
                 .to_owned(),
         })?;
-    let scope = tracedecay_code_index_runtime::resolved_scope_for_project(project_root, &project_id)
-        .map_err(|error| {
-        TraceDecayError::Config {
-            message: format!("project-open source edit preview scope denied: {error}"),
-        }
-    })?;
+    let scope =
+        tracedecay_code_index_runtime::resolved_scope_for_project(project_root, &project_id)
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("project-open source edit preview scope denied: {error}"),
+            })?;
     let authorization = ProjectOpenSourceEditAuthorizationV1 {
         project_root: project_root.to_path_buf(),
         scope,
@@ -554,28 +554,28 @@ pub(crate) async fn install_project_open_source_edit_preview_owner(
 #[cfg(feature = "test-transport")]
 pub(crate) async fn install_project_open_source_edit_owners_for_test(
     server: &McpServer,
-) -> Result<()> {
+) -> Result<bool> {
     let graph = server.cg().await;
-    let code_graph =
-        server
-            .code_graph_projection_read_port()
-            .ok_or_else(|| TraceDecayError::Config {
-                message:
-                    "test source-edit owner requires the production code-graph projection port"
-                        .to_owned(),
-            })?;
+    let Some(code_graph) = server.code_graph_projection_read_port() else {
+        // A directly constructed test server carries no production code-graph
+        // projection port, so the daemon-owned source-edit authority cannot
+        // mount. Report that typed state instead of failing: the dispatch
+        // boundary (selector rejection, argument validation) is still the
+        // production path, and an actual edit then reports its typed
+        // executor-unavailable refusal rather than dying here before dispatch.
+        return Ok(false);
+    };
     let project_root = graph.project_root().to_path_buf();
     let project_id = graph
         .configuration_runtime()
         .configuration_target()
         .project_id
         .clone();
-    let scope = tracedecay_code_index_runtime::resolved_scope_for_project(&project_root, &project_id)
-        .map_err(|error| {
-        TraceDecayError::Config {
-            message: format!("test project-open resolved scope denied: {error}"),
-        }
-    })?;
+    let scope =
+        tracedecay_code_index_runtime::resolved_scope_for_project(&project_root, &project_id)
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("test project-open resolved scope denied: {error}"),
+            })?;
     let authorization = ProjectOpenSourceEditAuthorizationV1 {
         project_root,
         scope,
@@ -587,7 +587,8 @@ pub(crate) async fn install_project_open_source_edit_owners_for_test(
         code_graph,
         authorization,
         SourceEditMutationGate::ready(),
-    )
+    )?;
+    Ok(true)
 }
 
 /// Registers code-index-independent owners for one newly inserted project.
@@ -630,12 +631,11 @@ pub(super) async fn register_project_open_production_owners(
             message: "project-open owners require the daemon-owned project session database"
                 .to_owned(),
         })?;
-    let scope = tracedecay_code_index_runtime::resolved_scope_for_project(project_root, &project_id)
-        .map_err(|error| {
-        TraceDecayError::Config {
-            message: format!("project-open resolved scope denied: {error}"),
-        }
-    })?;
+    let scope =
+        tracedecay_code_index_runtime::resolved_scope_for_project(project_root, &project_id)
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("project-open resolved scope denied: {error}"),
+            })?;
     tracing::info!(
         event = "project_open_owner_phase",
         project = %project_root.display(),
@@ -964,7 +964,11 @@ pub(super) async fn register_project_open_production_owners(
             project_root.to_path_buf(),
             scope.clone(),
             access.clone(),
-            Arc::clone(graph.configuration_runtime()),
+            Arc::new(DaemonCallableCodeAuthorizationSource::production(
+                project_root.to_path_buf(),
+                scope.clone(),
+                Arc::clone(graph.configuration_runtime()),
+            )),
         ),
         label = "daemon.project.open.owners.feedback"
     )
@@ -1676,6 +1680,20 @@ pub(super) fn daemon_owned_project_source_access_at(
                 .saturating_add(i64::try_from(GRANT_HORIZON.as_micros()).unwrap_or(i64::MAX)),
         ),
     })
+}
+
+pub(crate) struct DaemonOwnedProjectSourceAccess;
+
+impl tracedecay_usecases::ProjectSourceAccessSnapshotPort for DaemonOwnedProjectSourceAccess {
+    fn source_access_at(
+        &self,
+        scope: &ResolvedScope,
+        project_root: &Path,
+        configuration: &tracedecay_usecases::config::PinnedRuntimeConfiguration,
+        observed_at: UtcMicros,
+    ) -> std::result::Result<ProjectSourceAccessSnapshot, ApplicationContractError> {
+        daemon_owned_project_source_access_at(scope, project_root, configuration, observed_at)
+    }
 }
 
 fn project_open_work_grant(

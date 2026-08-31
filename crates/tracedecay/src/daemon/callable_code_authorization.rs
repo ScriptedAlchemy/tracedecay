@@ -10,7 +10,10 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{ComponentVersion, UtcMicros};
 
-use tracedecay_usecases::ProjectSourceAccessSnapshot;
+use tracedecay_usecases::{
+    CallableCodeAuthorizationSourcePort, CurrentCallableCodeAccessFuture,
+    ProjectSourceAccessSnapshot,
+};
 use tracedecay_usecases::configuration::{
     ConfigurationControlStore, ConfigurationError, ProjectConfigurationRuntime,
 };
@@ -91,6 +94,22 @@ impl DaemonCallableCodeAuthorizationSource {
             source: self.clone(),
             admitted_access,
         }
+    }
+}
+
+impl CallableCodeAuthorizationSourcePort for DaemonCallableCodeAuthorizationSource {
+    fn current(&self, observed_at: UtcMicros) -> CurrentCallableCodeAccessFuture<'_> {
+        Box::pin(async move { self.access.current_access(observed_at).await })
+    }
+
+    fn authorize(
+        &self,
+        admitted_access: ProjectSourceAccessSnapshot,
+    ) -> Arc<dyn CallableCodeAuthorizationPort> {
+        Arc::new(DaemonCallableCodeAuthorizationSource::authorize(
+            self,
+            admitted_access,
+        ))
     }
 }
 
@@ -380,7 +399,10 @@ fn concealed() -> ApplicationProblem {
 /// shape stays concealed so a probing caller learns nothing about identity.
 fn configuration_current_problem(error: ConfigurationError) -> ApplicationProblem {
     match error {
-        ConfigurationError::Unavailable => concealed(),
+        ConfigurationError::Unavailable => ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "configuration_authority_unavailable".to_owned(),
+            message: "The project configuration authority is temporarily unavailable.".to_owned(),
+        }),
         ConfigurationError::TargetUnavailable
         | ConfigurationError::AuthorizedTargetAmbiguous
         | ConfigurationError::RevisionConflict

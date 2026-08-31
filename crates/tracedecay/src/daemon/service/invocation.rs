@@ -27,6 +27,7 @@ use tracedecay_application::{
     ApplicationOperation, ApplicationOutcome, ApplicationProblem, ApplicationProblemKind,
     ApplicationResult, AuthorityReceipt, AuthorizedScopeSet, AuthorizedScopeSetAuthority,
     CallableCodeAuthorizationPort, CallableCodeOperationKind, CallableCodeQueryService,
+    WorkEvidenceRetrievalPortV1,
     CancellationContext, CancellationState, CapabilityGrantId, CapabilityGrantSnapshot,
     CoverageCompleteness, CoverageDomainState, Deadline, DiagnosticProviderIdentity,
     DisclosureClass, EffectId, EffectReceipt, EffectResult, EffectTermination, EvidenceAuthority,
@@ -85,13 +86,13 @@ use tracedecay_agent_hosts::agents::context_scout_ports::{
 };
 use tracedecay_application::git::{GitApplySurfaceRequest, GitPreviewSurfaceRequest};
 use tracedecay_daemon_protocol::{ContextScoutSurfaceRequest, GitReadSurfaceRequest};
-use crate::daemon::callable_code_authorization::DaemonCallableCodeAuthorizationSource;
 use tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationOwner;
 use tracedecay_application::ConfigurationWireRequestV1;
 use tracedecay_code_index_runtime::git_transactions::{
     DaemonGitAuthorityStateV1, DaemonGitInvocationOwner, DaemonProjectGitIndexTransactionService,
     capture_exact_snapshot,
 };
+use tracedecay_usecases::CallableCodeAuthorizationSourcePort;
 use tracedecay_usecases::ProjectSourceAccessSnapshot;
 use tracedecay_usecases::configuration::{
     AuthorizedActor, ConfigurationAuditQuery, ConfigurationError, ConfigurationMutationAuthority,
@@ -250,6 +251,7 @@ pub(crate) use registrars::{
     DaemonLspOwnerRegistrar, DaemonNativeIntegrationRuntimeRegistrar,
     DaemonRetainedRuntimeRegistrar, DaemonWorkRuntimeRegistrar,
 };
+pub(in crate::daemon) use lsp::{LSP_WORKSPACE_CAPABILITY_ID_V1, LSP_WORKSPACE_USE_CASE_ID_V1};
 pub(in crate::daemon::service) use types::{
     RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime, RegisteredFeedbackRuntime,
     RegisteredRetainedRuntime, RegisteredWorkRuntime, SwitchableFeedbackCycleRuntimeV1,
@@ -443,13 +445,5 @@ impl DaemonInvocationService {
         for database in databases {
             mounted.insert(database.db_path().to_path_buf(), database);
         }
-    }
-}
-
-impl crate::daemon::DaemonInvocationState {
-    pub(in crate::daemon) fn github_stack_coordinator(
-        &self,
-    ) -> Arc<tracedecay_usecases::stack_coordinator::DaemonGitHubStackCoordinatorV1> {
-        self.service.github_stack_coordinator()
     }
 }

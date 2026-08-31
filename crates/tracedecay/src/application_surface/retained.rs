@@ -233,7 +233,9 @@ pub(crate) fn decode_request(
 ) -> Result<RetainedSurfaceRequestV1, serde_json::Error> {
     macro_rules! decode {
         ($request:ty, $variant:ident) => {
-            serde_json::from_value::<$request>(body).map(RetainedSurfaceRequestV1::$variant)
+            serde_path_to_error::deserialize::<_, $request>(body)
+                .map(RetainedSurfaceRequestV1::$variant)
+                .map_err(named_argument_error)
         };
     }
     match operation {
@@ -305,10 +307,24 @@ fn decode_session_refresh(
     body: serde_json::Value,
     action: SessionRefreshActionV1,
 ) -> Result<RetainedSurfaceRequestV1, serde_json::Error> {
-    let request = serde_json::from_value::<SessionRefreshActionRequestV1>(body)?;
+    let request = serde_path_to_error::deserialize::<_, SessionRefreshActionRequestV1>(body)
+        .map_err(named_argument_error)?;
     Ok(RetainedSurfaceRequestV1::SessionRefresh(
         SessionRefreshRequestV1::with_action(action, request),
     ))
+}
+
+/// Prefix the serde diagnostic with the offending argument path, so the
+/// corrective message names the argument even for wrong-type errors, which
+/// serde alone reports without the field.
+fn named_argument_error(error: serde_path_to_error::Error<serde_json::Error>) -> serde_json::Error {
+    let path = error.path().to_string();
+    let inner = error.into_inner();
+    if path == "." {
+        inner
+    } else {
+        serde::de::Error::custom(format!("{path}: {inner}"))
+    }
 }
 
 pub(crate) fn result_value(
@@ -449,5 +465,19 @@ mod tests {
                 "decode rejection must name `{admitted}`: {message}"
             );
         }
+    }
+
+    #[test]
+    fn decode_rejection_names_wrong_type_argument() {
+        let error = decode_request(
+            RetainedSurfaceOperation::FactStoreAdd,
+            json!({ "content": 17, "category": "general" }),
+        )
+        .expect_err("non-string content must be rejected");
+        let message = error.to_string();
+        assert!(
+            message.contains("content"),
+            "wrong-type rejection must name the offending argument: {message}"
+        );
     }
 }

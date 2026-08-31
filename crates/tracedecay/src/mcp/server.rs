@@ -18,21 +18,21 @@ use crate::mcp::tool_analytics::{
 use crate::tracedecay::TraceDecay;
 use tracedecay_application::request_identity::McpConnectionIdentityAuthority;
 use tracedecay_daemon_protocol::wire::is_wire_oversized_io_error;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_host_admission::TerminalReason;
 use tracedecay_mcp::response_handles::{
     cleanup_expired_response_handles, response_handle_stats_json,
 };
-use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_sessions::admission::{HostAdmissionOutcome, HostAdmissionStatus};
 use tracedecay_sessions::runtime::git_correlation::{
     self as git_correlation, DEFAULT_SPAN_MERGE_GAP_SECS, DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS,
     SpanObservation, SpanSource,
 };
 
-use super::tools::{
-    ProjectRegistryReadPort, SessionRefreshServicePort, default_catalog_discovery_authority,
-};
+use super::tools::default_catalog_discovery_authority;
+use tracedecay_application::ProjectRegistryReadPort;
+use tracedecay_mcp::SessionRefreshServicePort;
 use tracedecay_mcp::hook_events::{self, HookAgent, HookEventPlan};
 use tracedecay_mcp::{
     ErrorCode, JsonRpcRequest, JsonRpcResponse, ToolRegistryMode, explore_call_budget,
@@ -601,10 +601,8 @@ impl McpServer {
                 tracedecay_host_admission::HostAdmissionRuntime::open_for_database(&database_path)
             })
             .await
-            .map_err(|error| {
-                tracedecay_domain::errors::TraceDecayError::Config {
-                    message: format!("test server host-admission task failed: {error}"),
-                }
+            .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!("test server host-admission task failed: {error}"),
             })?;
             let (admission_runtime, _) = admission_runtime?;
             context.host_admission_broker = Some(Arc::new(
@@ -634,12 +632,9 @@ impl McpServer {
         context
             .host_admission_test_runtime
             .as_ref()
-            .ok_or_else(
-                || tracedecay_domain::errors::TraceDecayError::Config {
-                    message: "registered test context is missing its host-admission runtime"
-                        .to_owned(),
-                },
-            )?;
+            .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+                message: "registered test context is missing its host-admission runtime".to_owned(),
+            })?;
         let retained_root = context.cg.project_root().to_path_buf();
         // The daemon always has the active project mounted, so its resolver can
         // serve it like any other registered project. Mirror that here through
@@ -687,13 +682,11 @@ impl McpServer {
                         return Ok(matches.pop());
                     }
                     if !matches.is_empty() {
-                        return Err(
-                            tracedecay_domain::errors::TraceDecayError::project_route(
-                                "project_route_ambiguous",
-                                false,
-                                "multiple retained test servers match one registered project route",
-                            ),
-                        );
+                        return Err(tracedecay_domain::errors::TraceDecayError::project_route(
+                            "project_route_ambiguous",
+                            false,
+                            "multiple retained test servers match one registered project route",
+                        ));
                     }
                     let active = resolver_slot.get().and_then(std::sync::Weak::upgrade);
                     let Some(active) = active else {
@@ -1195,9 +1188,15 @@ impl McpServer {
 
     #[cfg(feature = "test-transport")]
     #[doc(hidden)]
+    /// Mounts the daemon-owned source-edit authority on a test server.
+    ///
+    /// Returns `Ok(false)` when this server was constructed without the
+    /// production code-graph projection port (a direct test server), so the
+    /// authority cannot mount; dispatch-boundary behavior is unaffected and
+    /// actual edits then report their typed executor-unavailable refusal.
     pub async fn install_project_open_source_edit_authority_for_test(
         &self,
-    ) -> tracedecay_domain::errors::Result<()> {
+    ) -> tracedecay_domain::errors::Result<bool> {
         crate::daemon::project_open_owners::install_project_open_source_edit_owners_for_test(self)
             .await
     }

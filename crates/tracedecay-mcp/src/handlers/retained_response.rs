@@ -1,15 +1,37 @@
 use tracedecay_application::{
-    ApplicationEnvelope, ApplicationProblem, ApplicationResult, RequestId, ResultContractRef,
-    RetryDirective,
+    ApplicationEnvelope, ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult,
+    RequestId, ResultContractRef, RetryDirective, SafeDiagnostic,
 };
 
 use tracedecay_daemon_protocol::{DaemonInvocationOutcome, DaemonInvocationProblem};
-use tracedecay_domain::errors::Result;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
-use super::{retained_problem_envelope, retained_safe_diagnostic};
+fn retained_contract_error(
+    context: &'static str,
+    error: tracedecay_application::ApplicationContractError,
+) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!("{context}: {error}"),
+    }
+}
+
+pub fn retained_safe_diagnostic(code: &'static str, message: &'static str) -> Result<SafeDiagnostic> {
+    SafeDiagnostic::new(code, message)
+        .map_err(|error| retained_contract_error("invalid retained application diagnostic", error))
+}
+
+pub fn retained_problem_envelope(
+    contract: ResultContractRef,
+    request_id: RequestId,
+    problem: ApplicationProblem,
+) -> Result<ApplicationProblemEnvelope> {
+    ApplicationProblemEnvelope::new(contract, request_id, problem).map_err(|error| {
+        retained_contract_error("invalid retained application problem envelope", error)
+    })
+}
 
 #[hotpath::measure(label = "mcp.retained.response_validate")]
-pub(super) fn validated_retained_response(
+pub fn validated_retained_response(
     outcome: DaemonInvocationOutcome,
     operation: tracedecay_application::RetainedSurfaceOperation,
     request_id: &RequestId,

@@ -22,6 +22,7 @@ mod schema;
 mod sealed_store;
 pub mod semantic_vector_native;
 mod state;
+mod store_quarantine;
 mod traversal;
 mod vector;
 mod verified_marker;

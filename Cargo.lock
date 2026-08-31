@@ -5896,6 +5896,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "sha2 0.11.0",
  "sysinfo",
  "tempfile",
@@ -6374,6 +6375,7 @@ name = "tracedecay-graph-db"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "fs2",
  "grafeo-adapters",
  "grafeo-common",
  "grafeo-core",
@@ -6498,6 +6500,7 @@ name = "tracedecay-mcp"
 version = "0.1.0"
 dependencies = [
  "hotpath",
+ "libc",
  "schemars",
  "serde",
  "serde_json",
@@ -6511,6 +6514,7 @@ dependencies = [
  "tracedecay-hooks",
  "tracedecay-runtime-core",
  "tracedecay-sessions",
+ "tracedecay-store",
  "tracedecay-tool-catalog",
  "tracedecay-usecases",
  "tracing",

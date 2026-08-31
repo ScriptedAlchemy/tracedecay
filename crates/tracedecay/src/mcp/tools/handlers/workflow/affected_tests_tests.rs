@@ -2,6 +2,7 @@ use super::*;
 
 use std::collections::BTreeSet;
 use std::fmt::Debug;
+use std::future::ready;
 use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
@@ -311,7 +312,7 @@ async fn directly_changed_test_file_dispatches_each_full_test_identity() {
     let expected_root = project.to_path_buf();
     let result = handle_run_affected_tests_with_runner(
         &cg,
-        &graph,
+        ready(Ok(graph)),
         json!({
             "changed_paths": ["tests/edited_only.rs"],
             "timeout_secs": 60,
@@ -430,7 +431,7 @@ async fn nested_source_module_dispatches_the_crate_relative_test_identity() {
     const EXPECTED: &str = "auth::login::tests::successful_login_creates_session";
     let result = handle_run_affected_tests_with_runner(
         &cg,
-        &graph,
+        ready(Ok(graph)),
         json!({
             "changed_paths": ["src/auth/login.rs"],
             "timeout_secs": 60,
@@ -494,7 +495,7 @@ async fn non_string_changed_paths_are_rejected_before_test_selection() {
     }]);
     let result = handle_run_affected_tests_with_runner(
         &cg,
-        &graph,
+        ready(Ok(graph)),
         json!({
             "changed_paths": ["tests/valid.rs", 7],
             "format": "json"
@@ -606,7 +607,7 @@ async fn timed_out_test_runner_returns_a_terminal_receipt() {
     }]);
     let result = handle_run_affected_tests_with_runner(
         &cg,
-        &graph,
+        ready(Ok(graph)),
         json!({"changed_paths": ["tests/edited.rs"], "format": "json"}),
         None,
         None,
@@ -682,7 +683,7 @@ async fn cancellation_retains_results_completed_before_the_later_test() {
     ]);
     let result = handle_run_affected_tests_with_runner(
         &cg,
-        &graph,
+        ready(Ok(graph)),
         json!({"changed_paths": ["tests/edited.rs"], "format": "json"}),
         None,
         None,
@@ -755,7 +756,7 @@ async fn vacuous_or_nonzero_test_output_is_a_failed_terminal() {
     }]);
     let vacuous = handle_run_affected_tests_with_runner(
         &cg,
-        &graph,
+        ready(Ok(graph)),
         json!({"changed_paths": ["tests/edited.rs"], "format": "json"}),
         None,
         None,
@@ -772,9 +773,14 @@ async fn vacuous_or_nonzero_test_output_is_a_failed_terminal() {
     .unwrap();
     assert_failed_terminal(tool_result_body(vacuous));
 
+    let graph = verified_graph(&[FixtureSymbol {
+        path: "tests/edited.rs",
+        qualified_name: "selected_target",
+        annotated_test: false,
+    }]);
     let nonzero = handle_run_affected_tests_with_runner(
         &cg,
-        &graph,
+        ready(Ok(graph)),
         json!({"changed_paths": ["tests/edited.rs"], "format": "json"}),
         None,
         None,
@@ -844,7 +850,7 @@ async fn reported_passing_and_failing_tests_complete_with_observed_results() {
     ]);
     let result = handle_run_affected_tests_with_runner(
         &cg,
-        &graph,
+        ready(Ok(graph)),
         json!({"changed_paths": ["tests/edited.rs"], "format": "json"}),
         None,
         None,
@@ -937,7 +943,9 @@ fn scoped_read_fixture() -> crate::tracedecay::queries::graph::VerifiedGraphQuer
             annotated_test: false,
         },
     ];
-    let bulk_paths: Vec<String> = (0..12).map(|index| format!("src/bulk_{index}.rs")).collect();
+    let bulk_paths: Vec<String> = (0..12)
+        .map(|index| format!("src/bulk_{index}.rs"))
+        .collect();
     for path in &bulk_paths {
         fixture_symbols.push(FixtureSymbol {
             path,
@@ -960,7 +968,9 @@ fn scoped_test_annotation_lookup_needs_only_a_file_scale_budget() {
         .expect("a two-file question must not require a corpus-scale symbol budget");
     assert_eq!(
         annotated,
-        ["src/hot.rs".to_owned()].into_iter().collect::<HashSet<_>>(),
+        ["src/hot.rs".to_owned()]
+            .into_iter()
+            .collect::<HashSet<_>>(),
         "only the file whose function carries a test marker is reported"
     );
 

@@ -46,9 +46,8 @@ use tracedecay_usecases::context::markdown_sections::{
 };
 
 use crate::tracedecay::{BranchDiagnostics, TraceDecay};
-use tracedecay_dashboard_api::project_registry::{
-    ProjectRegistryView, render_project_registry_view,
-};
+use tracedecay_application::ProjectRegistryView;
+use tracedecay_dashboard_api::project_registry::render_project_registry_view;
 use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_global_db::{RegisteredGlobalDb, SessionIngestHealth};
 use tracedecay_mcp::path_tree::format_compact_annotated_path_list;
@@ -64,7 +63,7 @@ use self::verified::{
     required_file_path, required_metadata, required_symbol_parts, symbols_in_dir,
 };
 
-use super::project_registry::{
+use tracedecay_application::{
     ProjectRegistryContextCommand, ProjectRegistryContextOutcome, ProjectRegistryListingCommand,
     ProjectRegistryListingOutcome, ProjectRegistryListingScope, ProjectRegistryReadPort,
     ProjectRegistrySelector, list_registered_projects, read_registered_project_context,
