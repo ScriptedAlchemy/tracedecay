@@ -469,11 +469,11 @@ impl CodeIndexSchedulerRegistryV1 {
             )
         };
         refuse_if_interrupted(control, &shutting_down)?;
-        let _publication =
-            acquire_publication_gate(publication_gate.as_ref(), control, &shutting_down).await?;
         let _daemon_admission =
             acquire_daemon_admission(background_reconcile_admission, control, &shutting_down)
                 .await?;
+        let _publication =
+            acquire_publication_gate(publication_gate.as_ref(), control, &shutting_down).await?;
         let _build_publication =
             acquire_publication_gate(build_publication_lock.as_ref(), control, &shutting_down)
                 .await?;

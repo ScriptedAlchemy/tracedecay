@@ -123,6 +123,14 @@ const SUPERSEDED_RECONCILE_RETRY_BACKOFF: Duration = Duration::from_millis(75);
 /// reconciliation re-checks gix truth before serving. Git-mediated changes are
 /// caught immediately by the tier-1 metadata check regardless of this bound.
 const DEFAULT_STALENESS_THRESHOLD: Duration = Duration::from_secs(30);
+/// Positive busy-read stat proofs may be reused only within this bound.
+/// Git metadata drift and scheduler epoch advances invalidate immediately;
+/// raw out-of-band writes are therefore stale for at most this interval.
+const BUSY_WITNESS_MEMO_INTERVAL: Duration = if cfg!(any(test, feature = "test-helpers")) {
+    Duration::from_millis(50)
+} else {
+    Duration::from_secs(1)
+};
 const MAX_DURABLE_PUBLICATION_POINTER_BYTES: u64 = 512 * 1024;
 const DURABLE_GENERATION_IO_CHUNK_BYTES_V1: usize = 64 * 1024;
 /// Page bounds for streaming one sealed generation into the durable lexical
@@ -4370,38 +4378,180 @@ impl Drop for ReconcilePassGuard {
     }
 }
 
-/// Direct evidence that one seated generation was proven current against the
-/// exact source, carried outside the scheduler mutex so verified reads can
-/// re-prove currency while a background reconcile owns the scheduler for its
-/// whole pass. The witness records the git-metadata fingerprint and stat
-/// signature the proving reconcile or probe established, plus the ignored
-/// admissions that signature was computed over; a busy read recomputes both
-/// against the live checkout, so drift after the proof refuses instead of
-/// serving a stale claim.
+/// Binds the independently maintained source-freshness proof to one seated
+/// generation. The freshness fence owns source proof and invalidation; this
+/// witness prevents an unproven replacement seat from inheriting that proof.
 #[derive(Clone, Debug)]
 pub(crate) struct ServingSourceWitnessV1 {
     pub(crate) generation_id: CodeGenerationId,
-    git_fingerprint: identity::GitMetadataFingerprintV1,
-    stat_signature: String,
+}
+
+#[derive(Clone)]
+pub(crate) struct SourceFreshnessFenceV1 {
+    state: Arc<Mutex<SourceFreshnessFenceStateV1>>,
+    last_reconciled_at_micros: Arc<AtomicI64>,
+    source_epoch: Arc<AtomicU64>,
+}
+
+#[derive(Clone)]
+struct SourceFreshnessFenceStateV1 {
+    git_metadata: identity::GitMetadataFingerprintV1,
+    last_reconciled_at: Instant,
+    last_stat_signature: Option<String>,
     ignored_source_admissions: Vec<CodeIndexIgnoredSourceAdmissionV1>,
+    staleness_threshold: Duration,
+    verified_against_source: bool,
+    freshness_unknown: bool,
+    reconciled_without_generation: bool,
+    reconciled_source_epoch: u64,
+    busy_witness_memo: Option<BusyWitnessMemoV1>,
+}
+
+#[derive(Clone)]
+struct BusyWitnessMemoV1 {
+    checked_at: Instant,
+    verdict: bool,
 }
 
 #[hotpath::measure_all]
-impl ServingSourceWitnessV1 {
-    /// Re-run the exact-source fences against the live checkout without the
-    /// scheduler mutex: the git-metadata fingerprint and the stat-level
-    /// signature must both still match what the proving pass established.
-    pub(crate) fn proves_current(&self, project_root: &Path) -> bool {
-        if identity::GitMetadataFingerprintV1::capture(project_root)
-            .differs_from(&self.git_fingerprint)
+impl SourceFreshnessFenceV1 {
+    fn unverified(staleness_threshold: Duration, source_epoch: Arc<AtomicU64>) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(SourceFreshnessFenceStateV1 {
+                git_metadata: identity::GitMetadataFingerprintV1::default(),
+                last_reconciled_at: Instant::now(),
+                last_stat_signature: None,
+                ignored_source_admissions: Vec::new(),
+                staleness_threshold,
+                verified_against_source: false,
+                freshness_unknown: true,
+                reconciled_without_generation: false,
+                reconciled_source_epoch: 0,
+                busy_witness_memo: None,
+            })),
+            last_reconciled_at_micros: Arc::new(AtomicI64::new(0)),
+            source_epoch,
+        }
+    }
+
+    fn snapshot(&self) -> SourceFreshnessFenceStateV1 {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn mark_reconciled(
+        &self,
+        git_metadata: identity::GitMetadataFingerprintV1,
+        stat_signature: Option<String>,
+        ignored_source_admissions: &[CodeIndexIgnoredSourceAdmissionV1],
+        reconciled_without_generation: bool,
+    ) {
+        let micros = now_micros().0;
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.git_metadata = git_metadata;
+        state.last_stat_signature = stat_signature;
+        state.ignored_source_admissions = ignored_source_admissions.to_vec();
+        state.freshness_unknown = false;
+        state.last_reconciled_at = Instant::now();
+        state.verified_against_source = true;
+        state.reconciled_without_generation = reconciled_without_generation;
+        state.reconciled_source_epoch = self.source_epoch.load(Ordering::Acquire);
+        state.busy_witness_memo = None;
+        self.last_reconciled_at_micros
+            .store(micros, Ordering::Release);
+    }
+
+    fn refresh_monotonic_clock(&self, project_wall_clock: bool) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.last_reconciled_at = Instant::now();
+        if project_wall_clock {
+            self.last_reconciled_at_micros
+                .store(now_micros().0, Ordering::Release);
+        }
+    }
+
+    fn last_reconciled_at_micros(&self) -> Option<i64> {
+        match self.last_reconciled_at_micros.load(Ordering::Acquire) {
+            0 => None,
+            micros => Some(micros),
+        }
+    }
+
+    fn reconciled_without_generation(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .reconciled_without_generation
+    }
+
+    fn ready_without_stat(&self, project_root: &Path, shutting_down: &AtomicBool) -> bool {
+        if shutting_down.load(Ordering::Acquire) {
+            return false;
+        }
+        let state = self.snapshot();
+        state.verified_against_source
+            && self.source_epoch.load(Ordering::Acquire) == state.reconciled_source_epoch
+            && !identity::GitMetadataFingerprintV1::capture(project_root)
+                .differs_from(&state.git_metadata)
+            && state.last_reconciled_at.elapsed() < state.staleness_threshold
+    }
+
+    fn exact_source_is_ready(&self, project_root: &Path, shutting_down: &AtomicBool) -> bool {
+        if shutting_down.load(Ordering::Acquire) {
+            return false;
+        }
+        let state = self.snapshot();
+        if state.freshness_unknown
+            || self.source_epoch.load(Ordering::Acquire) != state.reconciled_source_epoch
+            || identity::GitMetadataFingerprintV1::capture(project_root)
+                .differs_from(&state.git_metadata)
         {
             return false;
         }
-        freshness_witness::worktree_stat_signature_for(
+        if let Some(memo) = state.busy_witness_memo
+            && memo.checked_at.elapsed() < BUSY_WITNESS_MEMO_INTERVAL
+        {
+            return memo.verdict;
+        }
+        let matches = freshness_witness::worktree_stat_signature_for(
             project_root,
-            &self.ignored_source_admissions,
+            &state.ignored_source_admissions,
         )
-        .is_ok_and(|live| live == self.stat_signature)
+        .is_ok_and(|signature| state.last_stat_signature.as_ref() == Some(&signature));
+        let source_still_matches = self.source_epoch.load(Ordering::Acquire)
+            == state.reconciled_source_epoch
+            && !identity::GitMetadataFingerprintV1::capture(project_root)
+                .differs_from(&state.git_metadata);
+        let mut current = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if source_still_matches
+            && current.reconciled_source_epoch == state.reconciled_source_epoch
+            && current.git_metadata == state.git_metadata
+        {
+            current.busy_witness_memo = Some(BusyWitnessMemoV1 {
+                checked_at: Instant::now(),
+                verdict: matches,
+            });
+        }
+        drop(current);
+        if matches && source_still_matches {
+            self.refresh_monotonic_clock(false);
+        }
+        matches && source_still_matches
+    }
+
+    fn source_currency_witness_for(
+        &self,
+        generation_id: &CodeGenerationId,
+    ) -> Option<ServingSourceWitnessV1> {
+        let state = self.snapshot();
+        if !state.verified_against_source || state.last_stat_signature.is_none() {
+            return None;
+        }
+        Some(ServingSourceWitnessV1 {
+            generation_id: generation_id.clone(),
+        })
     }
 }
 
@@ -4419,28 +4569,9 @@ pub struct CodeIndexWorktreeSchedulerV1 {
     repository_id: RepositoryId,
     worktree_id: WorktreeId,
     policy: CodeIndexHintPolicyV1,
-    /// Tier-1 cheap staleness signal: `.git` metadata mtimes at last reconcile.
-    git_metadata: identity::GitMetadataFingerprintV1,
-    /// Tier-2 bounded-staleness clock: when truth was last reconciled.
-    last_reconciled_at: Instant,
-    /// Wall-clock companion to `last_reconciled_at` for read-model projection.
-    /// `None` until the first verified reconcile after open/restore.
-    last_reconciled_at_micros: Option<i64>,
-    /// Lock-free mount companion for `last_reconciled_at_micros`. `0` means
-    /// none; dashboard freshness reads this when the scheduler mutex is busy.
-    last_reconciled_at_micros_slot: Arc<AtomicI64>,
-    /// Tier-2 cheap prefilter: stat-level (path, mtime, size) signature of the
-    /// present source candidates at last reconcile. A quiet repository whose
-    /// signature is unchanged resets the staleness clock without paying the
-    /// O(repo) read+hash capture.
-    last_stat_signature: Option<String>,
-    /// Whether `git_metadata` / staleness clocks were established by a completed
-    /// reconcile against gix truth. Open/restore alone must not claim freshness.
-    verified_against_source: bool,
-    /// A restored generation has not yet been reconciled against the current
-    /// worktree bytes. It may remain available for rollback/history, but
-    /// request admission must fail closed and schedule background truth.
-    freshness_unknown: bool,
+    /// Independent source-freshness authority. Ready/status probes clone this
+    /// handle from the mounted map and never wait for scheduler build state.
+    freshness_fence: SourceFreshnessFenceV1,
     byte_pool: Arc<SharedCodeIndexBytePoolV1>,
     /// Keeps the current snapshot's interned bytes alive in the shared pool.
     retained_snapshot_bytes: Vec<Arc<[u8]>>,
@@ -4575,6 +4706,23 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
             .sealed_replay_binding(generation_id)
             .map_err(|error| CodeIndexProductionErrorV1::Publication(error).into())
     }
+
+    fn active_publication_covers(
+        &self,
+        generation: &CodeIndexPublishedGenerationV1,
+    ) -> Result<bool, CodeIndexSchedulerErrorV1> {
+        if self
+            .publication
+            .active_pointer_matches_generation(generation)
+            .map_err(CodeIndexProductionErrorV1::Publication)?
+        {
+            return Ok(true);
+        }
+        self.publication
+            .active_pointer_covers_snapshot_content(&generation.snapshot().content_identity)
+            .map_err(CodeIndexProductionErrorV1::Publication)
+            .map_err(Into::into)
+    }
 }
 
 #[hotpath::measure_all]
@@ -4611,7 +4759,6 @@ impl CodeIndexWorktreeSchedulerV1 {
         // Cold open establishes structural identity only. Repository-wide
         // freshness probes and sealed-generation decoding belong to the
         // retained background owner after the route is mounted.
-        let git_metadata = identity::GitMetadataFingerprintV1::default();
         let sanitizer_revision = id::<SanitizerRevision>(CODE_SOURCE_SANITIZER_VERSION_V1)?;
         let publication = DaemonCodeIndexPublicationStoreV1::new(
             &store_root,
@@ -4639,14 +4786,12 @@ impl CodeIndexWorktreeSchedulerV1 {
         )
         .map_err(|error| CodeIndexSchedulerErrorV1::ProductionOpen(error.to_string()))?
         .with_physical_artifact_pool(byte_pool.physical_artifacts.clone());
-        let verified_against_source = false;
-        let freshness_unknown = true;
-        let last_reconciled_at_micros = None;
-        let last_reconciled_at_micros_slot = Arc::new(AtomicI64::new(0));
         let latest_content_identity = None;
         let hints = Arc::new(Mutex::new(PendingHintsV1::default()));
         let wake = Arc::new(tokio::sync::Notify::new());
         let epoch = Arc::new(AtomicU64::new(0));
+        let freshness_fence =
+            SourceFreshnessFenceV1::unverified(policy.staleness_threshold, Arc::clone(&epoch));
         // Nothing is decoded or served until the retained owner proves the
         // durable generation belongs to this exact identity and its freshness
         // frontier still matches the worktree.
@@ -4658,13 +4803,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             repository_id,
             worktree_id,
             policy,
-            git_metadata,
-            last_reconciled_at: Instant::now(),
-            last_reconciled_at_micros,
-            last_reconciled_at_micros_slot,
-            last_stat_signature: None,
-            verified_against_source,
-            freshness_unknown,
+            freshness_fence,
             byte_pool,
             retained_snapshot_bytes: Vec::new(),
             _retained_snapshot_memory: Vec::new(),
@@ -4730,7 +4869,11 @@ impl CodeIndexWorktreeSchedulerV1 {
     }
 
     pub fn last_reconciled_at_micros_slot(&self) -> Arc<AtomicI64> {
-        Arc::clone(&self.last_reconciled_at_micros_slot)
+        Arc::clone(&self.freshness_fence.last_reconciled_at_micros)
+    }
+
+    pub(crate) fn freshness_fence(&self) -> SourceFreshnessFenceV1 {
+        self.freshness_fence.clone()
     }
 
     pub fn historical_generation_owner(&self) -> HistoricalCodeIndexGenerationOwnerV1 {
@@ -6014,12 +6157,16 @@ impl CodeIndexWorktreeSchedulerV1 {
         metadata: identity::GitMetadataFingerprintV1,
         signature: Option<String>,
     ) {
-        self.git_metadata = metadata;
-        self.last_stat_signature = signature;
-        self.freshness_unknown = false;
-        self.last_reconciled_at = Instant::now();
-        self.store_last_reconciled_at_micros(now_micros().0);
-        self.verified_against_source = true;
+        let reconciled_without_generation = self
+            .publication
+            .load_active_shared()
+            .is_ok_and(|generation| generation.is_none());
+        self.freshness_fence.mark_reconciled(
+            metadata,
+            signature,
+            &self.ignored_source_admissions,
+            reconciled_without_generation,
+        );
     }
 
     /// Record the restore-time freshness witness for the current active
@@ -6030,7 +6177,8 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// when either is absent the optimization simply defers to the next
     /// reconcile, and a write failure is non-fatal.
     fn persist_freshness_witness(&self) {
-        let Some(stat_signature) = self.last_stat_signature.clone() else {
+        let freshness = self.freshness_fence.snapshot();
+        let Some(stat_signature) = freshness.last_stat_signature else {
             return;
         };
         let Some(latest) = self.latest_complete() else {
@@ -6048,7 +6196,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 .generation_id
                 .as_str()
                 .to_owned(),
-            git_metadata_signature: self.git_metadata.stable_signature(),
+            git_metadata_signature: freshness.git_metadata.stable_signature(),
             stat_signature,
             repository_parse_identity_digest: repository_parse_identity_digest.as_str().to_owned(),
             ignored_source_admissions_digest: latest
@@ -6088,10 +6236,11 @@ impl CodeIndexWorktreeSchedulerV1 {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(cancelled_code_index_reconcile());
         }
-        if !self.verified_against_source
+        let freshness = self.freshness_fence.snapshot();
+        if !freshness.verified_against_source
             || identity::GitMetadataFingerprintV1::capture(&self.project_root)
-                .differs_from(&self.git_metadata)
-            || self.last_reconciled_at.elapsed() >= self.policy.staleness_threshold
+                .differs_from(&freshness.git_metadata)
+            || freshness.last_reconciled_at.elapsed() >= self.policy.staleness_threshold
         {
             self.request_background_reconcile();
             return Ok(None);
@@ -6106,20 +6255,21 @@ impl CodeIndexWorktreeSchedulerV1 {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(cancelled_code_index_reconcile());
         }
-        if self.freshness_unknown
+        let freshness = self.freshness_fence.snapshot();
+        if freshness.freshness_unknown
             || identity::GitMetadataFingerprintV1::capture(&self.project_root)
-                .differs_from(&self.git_metadata)
+                .differs_from(&freshness.git_metadata)
         {
             self.request_background_reconcile();
             return Ok(false);
         }
         match self.worktree_stat_signature() {
-            Ok(signature) if self.last_stat_signature.as_ref() == Some(&signature) => {
+            Ok(signature) if freshness.last_stat_signature.as_ref() == Some(&signature) => {
                 // The exact-source stat fence is stronger than the elapsed
                 // tier-2 arm. Refresh only the monotonic admission clock: no
                 // reconcile receipt or wall timestamp is fabricated, and a
                 // clean status census cannot turn into a full capture loop.
-                self.last_reconciled_at = Instant::now();
+                self.freshness_fence.refresh_monotonic_clock(false);
                 Ok(true)
             }
             _ => {
@@ -6127,45 +6277,6 @@ impl CodeIndexWorktreeSchedulerV1 {
                 Ok(false)
             }
         }
-    }
-
-    /// Admit the already-decoded serving generation under the exact source
-    /// and durable-publication fences. Currency is measured against source
-    /// content, not pointer position: a same-content successor that has
-    /// published but not yet seated does not stale the seat. This is
-    /// intentionally independent of the publication decoder cache: the
-    /// serving slot itself owns the decoded generation and its activated
-    /// graph authority.
-    fn serving_generation_ready_for_exact_source(
-        &mut self,
-        serving: &LatestCompleteCodeIndexV1,
-    ) -> Result<bool, CodeIndexSchedulerErrorV1> {
-        if !self.exact_source_is_ready()? {
-            return Ok(false);
-        }
-        if self
-            .publication
-            .active_pointer_matches_generation(serving.generation())
-            .map_err(CodeIndexProductionErrorV1::Publication)
-            .map_err(CodeIndexSchedulerErrorV1::from)?
-        {
-            return Ok(true);
-        }
-        // The durable pointer names a successor. When that successor sealed
-        // exactly the same source content — a convergence or repair
-        // republication, not an edit — the seat still describes the bytes on
-        // disk: the stat fence above proved the live tree unchanged since the
-        // reconcile that published it. The seat keeps serving through the
-        // successor's O(store) decode and native activation, which on a
-        // production-scale corpus take minutes per generation. A successor
-        // sealed from different content means the seat lags the reconciled
-        // truth and stays refused.
-        self.publication
-            .active_pointer_covers_snapshot_content(
-                &serving.generation().snapshot().content_identity,
-            )
-            .map_err(CodeIndexProductionErrorV1::Publication)
-            .map_err(Into::into)
     }
 
     /// Mint the exact-source currency witness for one generation from the
@@ -6176,16 +6287,8 @@ impl CodeIndexWorktreeSchedulerV1 {
         &self,
         generation_id: &CodeGenerationId,
     ) -> Option<ServingSourceWitnessV1> {
-        if !self.verified_against_source {
-            return None;
-        }
-        let stat_signature = self.last_stat_signature.clone()?;
-        Some(ServingSourceWitnessV1 {
-            generation_id: generation_id.clone(),
-            git_fingerprint: self.git_metadata.clone(),
-            stat_signature,
-            ignored_source_admissions: self.ignored_source_admissions.clone(),
-        })
+        self.freshness_fence
+            .source_currency_witness_for(generation_id)
     }
 
     /// A cheap stat-level (path, mtime, size) signature of the present source
@@ -6234,28 +6337,28 @@ impl CodeIndexWorktreeSchedulerV1 {
     pub fn ensure_fresh_for_query(
         &mut self,
     ) -> Result<Option<CodeIndexReconcileOutcomeV1>, CodeIndexSchedulerErrorV1> {
-        if !self.verified_against_source {
+        let freshness = self.freshness_fence.snapshot();
+        if !freshness.verified_against_source {
             // Open/restore sampled git metadata without verifying the sealed
             // generation against gix truth. Serving that generation is allowed;
             // suppressing cadence on open-time clocks is not.
             return Ok(Some(self.reconcile_now()?));
         }
         let git_changed = identity::GitMetadataFingerprintV1::capture(&self.project_root)
-            .differs_from(&self.git_metadata);
+            .differs_from(&freshness.git_metadata);
         if git_changed {
             // Tier 1: a git-mediated mutation is authoritative evidence; reconcile.
             return Ok(Some(self.reconcile_now()?));
         }
-        if self.last_reconciled_at.elapsed() < self.policy.staleness_threshold {
+        if freshness.last_reconciled_at.elapsed() < self.policy.staleness_threshold {
             return Ok(None);
         }
         // Tier 2: the bounded-staleness window elapsed. Gate the O(repo)
         // read+hash capture behind a cheap stat-level signature so a quiet
         // repository just resets its clock instead of re-reading every file.
         match self.worktree_stat_signature() {
-            Ok(signature) if self.last_stat_signature.as_ref() == Some(&signature) => {
-                self.last_reconciled_at = Instant::now();
-                self.store_last_reconciled_at_micros(now_micros().0);
+            Ok(signature) if freshness.last_stat_signature.as_ref() == Some(&signature) => {
+                self.freshness_fence.refresh_monotonic_clock(true);
                 Ok(None)
             }
             _ => Ok(Some(self.reconcile_now()?)),
@@ -6298,21 +6401,21 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// cadence authority use this split form so they can record the arrival
     /// before making the worker runnable.
     pub fn freshness_probe_requires_reconcile(&mut self) -> bool {
-        if !self.verified_against_source
+        let freshness = self.freshness_fence.snapshot();
+        if !freshness.verified_against_source
             || identity::GitMetadataFingerprintV1::capture(&self.project_root)
-                .differs_from(&self.git_metadata)
+                .differs_from(&freshness.git_metadata)
         {
             return true;
         }
-        if self.last_reconciled_at.elapsed() < self.policy.staleness_threshold {
+        if freshness.last_reconciled_at.elapsed() < self.policy.staleness_threshold {
             return false;
         }
         if self
             .worktree_stat_signature()
-            .is_ok_and(|signature| self.last_stat_signature.as_ref() == Some(&signature))
+            .is_ok_and(|signature| freshness.last_stat_signature.as_ref() == Some(&signature))
         {
-            self.last_reconciled_at = Instant::now();
-            self.store_last_reconciled_at_micros(now_micros().0);
+            self.freshness_fence.refresh_monotonic_clock(true);
             return false;
         }
         true
@@ -6332,19 +6435,13 @@ impl CodeIndexWorktreeSchedulerV1 {
     }
 
     #[hotpath::skip]
-    pub const fn last_reconciled_at_micros(&self) -> Option<i64> {
-        self.last_reconciled_at_micros
-    }
-
-    fn store_last_reconciled_at_micros(&mut self, micros: i64) {
-        self.last_reconciled_at_micros = Some(micros);
-        self.last_reconciled_at_micros_slot
-            .store(micros, Ordering::Release);
+    pub fn last_reconciled_at_micros(&self) -> Option<i64> {
+        self.freshness_fence.last_reconciled_at_micros()
     }
 
     #[hotpath::skip]
-    pub const fn verified_against_source(&self) -> bool {
-        self.verified_against_source
+    pub fn verified_against_source(&self) -> bool {
+        self.freshness_fence.snapshot().verified_against_source
     }
 
     /// True when reconciliation has verified the live worktree against source
@@ -6354,13 +6451,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// verification has not run yet, and from a publish failure, which leaves
     /// `verified_against_source` untouched by returning an error instead.
     pub fn reconciled_without_generation(&self) -> bool {
-        self.verified_against_source
-            && self
-                .publication
-                .load_active_shared()
-                .ok()
-                .flatten()
-                .is_none()
+        self.freshness_fence.reconciled_without_generation()
     }
 
     pub fn pending_hint_count(&self) -> Option<u64> {

@@ -56,8 +56,9 @@ use super::registry::{
 };
 use super::{
     CodeIndexBuildProgressStateV1, CodeIndexCadenceOutcomeV1, CodeIndexCadenceTriggerV1,
-    CodeIndexCommittedProgressSampleV1, CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1,
-    CodeIndexWorktreeSchedulerV1, GenerationDecodeAdmissionV1, SharedCodeIndexBytePoolV1,
+    CodeIndexCommittedProgressSampleV1, CodeIndexIgnoredDependencyRequestV1,
+    CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1,
+    GenerationDecodeAdmissionV1, SharedCodeIndexBytePoolV1,
 };
 use crate::code_index::production::{CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1};
 use crate::semantic_code::rerank_adapter::GenerationBoundCodeRerankViewsV1;
@@ -1704,6 +1705,13 @@ async fn scheduler_notifications_remain_nonblocking_while_reconcile_is_busy() {
         .expect("scheduler notification must not wait for the reconcile lock")
         .expect("notification task");
     assert!(notified);
+    assert!(
+        registry
+            .latest_complete_ready(fixture.path())
+            .await
+            .is_none(),
+        "a hook epoch invalidates the memoized freshness proof before reconcile"
+    );
 
     let registry_read = tokio::time::timeout(
         Duration::from_millis(100),
@@ -2665,21 +2673,35 @@ fn one_symbol_unrelated_work_skip() {
     )]);
     let store = TempDir::new().expect("store root");
     let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
-    let mut scheduler = scheduler(&fixture, store.path().to_path_buf(), bytes);
-    published(scheduler.reconcile_now().expect("baseline"));
+    let mut incremental = scheduler(
+        &fixture,
+        store.path().join("incremental"),
+        Arc::clone(&bytes),
+    );
+    published(incremental.reconcile_now().expect("baseline"));
 
     fixture.edit(
         "src/lib.rs",
         "pub fn alpha() -> u32 { 2 }\n\npub fn unrelated() -> u32 { 99 }\n",
     );
-    scheduler.notify_path(fixture.path().join("src/lib.rs"));
-    let changed = published(scheduler.reconcile_now().expect("one-symbol publish"));
+    incremental.notify_path(fixture.path().join("src/lib.rs"));
+    let changed = published(incremental.reconcile_now().expect("one-symbol publish"));
 
     assert_eq!(changed.reextracted_files, 1);
     assert!(changed.changed_chunks > 0);
     assert!(
         changed.reused_chunks > 0,
         "unrelated symbol chunks must skip projection work"
+    );
+    let mut clean = scheduler(&fixture, store.path().join("clean"), bytes);
+    let rebuilt = published(clean.reconcile_now().expect("clean rebuild"));
+    assert_eq!(
+        changed.snapshot_content_identity, rebuilt.snapshot_content_identity,
+        "one-file incremental capture must equal a clean capture of the same source"
+    );
+    assert_eq!(
+        changed.lane_digest, rebuilt.lane_digest,
+        "one-file incremental projection must equal a clean projection"
     );
 }
 
@@ -5784,9 +5806,224 @@ async fn busy_scheduler_still_refuses_a_seated_generation_without_a_currency_wit
     registry.shutdown().await;
 }
 
-/// A quiet probe that disproves currency (worktree drift) must refuse the read
-/// and withdraw the busy-read witness, so later busy reads cannot keep serving
-/// the disproved seat.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn verified_empty_source_remains_observable_while_scheduler_is_busy() {
+    let fixture = GitFixture::new(&[("assets/blob.bin", "not source\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount worktree");
+    let identity = super::identity::IndexingIdentityV1::resolve(fixture.path())
+        .expect("mounted worktree identity");
+    let scope = ResolvedScope::new(
+        test_project_id(),
+        identity.repository_id().clone(),
+        identity.worktree_id().clone(),
+        identity.head_ref().cloned(),
+    )
+    .expect("resolved scope");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !registry
+            .reconciled_without_generation_for_scope(&scope)
+            .await
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("empty source becomes verified");
+
+    let scheduler = registry
+        .scheduler_handle(fixture.path())
+        .await
+        .expect("scheduler handle");
+    let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let _guard = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = locked_tx.send(());
+        let _ = release_rx.recv();
+    });
+    locked_rx.await.expect("scheduler lock held");
+
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            registry.reconciled_without_generation_for_scope(&scope),
+        )
+        .await
+        .expect("freshness probe does not wait for scheduler metadata"),
+        "verified empty source is not reclassified as warming during a build"
+    );
+
+    release_tx.send(()).expect("release scheduler lock");
+    holder.join().expect("scheduler holder joins");
+    registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mounted_map_contention_cannot_hide_query_authority() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+    let held = registry.mounted.lock().await;
+    let lookup_registry = registry.clone();
+    let lookup_scope = scope.clone();
+    let lookup = tokio::spawn(async move {
+        lookup_registry
+            .query_authority_for_scope(&lookup_scope)
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    assert!(
+        !lookup.is_finished(),
+        "map contention waits for the micro-held map authority instead of fabricating unavailability"
+    );
+
+    drop(held);
+    assert!(
+        lookup
+            .await
+            .expect("query-authority lookup joins")
+            .is_some(),
+        "the mounted query authority remains visible after map contention"
+    );
+    registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn background_worker_waits_for_global_admission_before_publication_gate() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 0);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount worktree");
+    let publication_gate = {
+        let mounted = registry.mounted.lock().await;
+        Arc::clone(
+            &mounted
+                .get(&fixture.path().canonicalize().expect("canonical root"))
+                .expect("mounted worktree")
+                .semantic_evaluation_publication_gate,
+        )
+    };
+
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    let publication = tokio::time::timeout(Duration::from_millis(100), publication_gate.lock())
+        .await
+        .expect("global admission wait must not hold the per-worktree publication gate");
+    drop(publication);
+    registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ignored_dependency_waits_for_global_admission_before_publication_gate() {
+    struct ActiveControl;
+
+    impl CodeIndexExecutionControlV1 for ActiveControl {
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+
+        fn is_deadline_exceeded(&self) -> bool {
+            false
+        }
+    }
+
+    let fixture = GitFixture::new(&[
+        (".gitignore", "node_modules/\n"),
+        (
+            "src/app.ts",
+            "import type { PublicWidget } from \"pkg\";\nexport const anchor = 1;\n",
+        ),
+    ]);
+    write(
+        fixture.path(),
+        "node_modules/pkg/index.d.ts",
+        "export interface PublicWidget { value: string }\n",
+    );
+    let store = TempDir::new().expect("store root");
+    let (registry, _) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
+    let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let generation = latest.generation();
+    let verified_import = generation
+        .imports()
+        .iter()
+        .find(|import| import.module_specifier == "pkg")
+        .expect("verified package import")
+        .clone();
+    let snapshot = generation.snapshot();
+    let scope = ResolvedScope::new(
+        generation.manifest().project_id.clone(),
+        snapshot.repository.clone(),
+        snapshot.worktree.clone().expect("worktree identity"),
+        snapshot.reference.clone(),
+    )
+    .expect("resolved scope");
+    let request = CodeIndexIgnoredDependencyRequestV1 {
+        scope: scope.clone(),
+        expected_generation: generation.manifest().generation_id.clone(),
+        verified_imports: vec![verified_import],
+    };
+    let publication_gate = {
+        let mounted = registry.mounted.lock().await;
+        Arc::clone(
+            &mounted
+                .get(&fixture.path().canonicalize().expect("canonical root"))
+                .expect("mounted worktree")
+                .semantic_evaluation_publication_gate,
+        )
+    };
+    let global_admission = registry.background_reconcile_admission();
+    registry.clear_pending_wake_for_scope(&scope).await;
+    let publication = publication_gate.lock().await;
+    assert_eq!(
+        global_admission.available_permits(),
+        1,
+        "test setup requires an idle global admission"
+    );
+
+    let request_registry = registry.clone();
+    let project_root = fixture.path().to_path_buf();
+    let request_task = tokio::spawn(async move {
+        request_registry
+            .index_verified_ignored_dependency(&project_root, request, Arc::new(ActiveControl))
+            .await
+    });
+    tokio::time::timeout(Duration::from_millis(100), async {
+        while global_admission.available_permits() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("ignored dependency must acquire global admission before waiting on publication");
+    drop(publication);
+    request_task
+        .await
+        .expect("ignored-dependency task joins")
+        .expect("ignored dependency publishes after admission");
+    registry.shutdown().await;
+}
+
+/// Busy-read stat proof reuse is explicitly bounded: an out-of-band write with
+/// no Git or scheduler hint may reuse the prior proof inside the memo window,
+/// but the first probe after that window must sweep and withdraw the witness.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_disproving_exact_source_probe_withdraws_the_busy_read_witness() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
@@ -5820,6 +6057,14 @@ async fn a_disproving_exact_source_probe_withdraws_the_busy_read_witness() {
     )
     .expect("drift the worktree");
 
+    assert!(
+        registry
+            .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+            .await
+            .is_some(),
+        "a raw unhinted write may reuse the proof only inside the explicit bounded interval"
+    );
+    tokio::time::sleep(Duration::from_millis(60)).await;
     assert!(
         registry
             .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)

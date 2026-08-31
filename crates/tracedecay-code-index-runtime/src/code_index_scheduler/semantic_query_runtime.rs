@@ -332,18 +332,25 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         scope: &ResolvedScope,
     ) -> Option<Arc<SemanticQueryAuthorityV1>> {
-        let mounted = self.mounted.try_lock().ok()?;
-        let (project_root, worktree) = unique_mounted_for_scope(&mounted, scope).unique()?;
+        let (project_root, scope_digest, authority) = {
+            let mounted = self.mounted.lock().await;
+            let (project_root, worktree) = unique_mounted_for_scope(&mounted, scope).unique()?;
+            let (scope_digest, authority) = worktree.semantic_query_authority.as_ref()?;
+            (
+                project_root.clone(),
+                scope_digest.clone(),
+                Arc::clone(authority),
+            )
+        };
         let activation =
-            tracedecay_usecases::semantic_runtime::project_semantic_activation_gate(project_root);
+            tracedecay_usecases::semantic_runtime::project_semantic_activation_gate(&project_root);
         let _activation = activation
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (scope_digest, authority) = worktree.semantic_query_authority.as_ref()?;
-        if scope_digest != &scope.scope_digest {
+        if scope_digest != scope.scope_digest {
             return None;
         }
-        Some(Arc::clone(authority))
+        Some(authority)
     }
 
     /// Run canonical query first, then attempt semantic influence against the
