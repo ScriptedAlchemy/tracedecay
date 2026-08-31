@@ -21,6 +21,7 @@ hotpath = [
     "tracedecay-automation/hotpath",
     "tracedecay-automation-runtime/hotpath",
     "tracedecay-daemon-protocol/hotpath",
+    "tracedecay-framing/hotpath",
     "tracedecay-global-db/hotpath",
     "tracedecay-hooks/hotpath",
     "tracedecay-host-integration/hotpath",
@@ -44,6 +45,7 @@ hotpath-alloc = [
     "tracedecay-automation/hotpath-alloc",
     "tracedecay-automation-runtime/hotpath-alloc",
     "tracedecay-daemon-protocol/hotpath-alloc",
+    "tracedecay-framing/hotpath-alloc",
     "tracedecay-global-db/hotpath-alloc",
     "tracedecay-hooks/hotpath-alloc",
     "tracedecay-host-integration/hotpath-alloc",
@@ -67,6 +69,7 @@ hotpath-cpu = [
     "tracedecay-automation/hotpath-cpu",
     "tracedecay-automation-runtime/hotpath-cpu",
     "tracedecay-daemon-protocol/hotpath-cpu",
+    "tracedecay-framing/hotpath-cpu",
     "tracedecay-global-db/hotpath-cpu",
     "tracedecay-hooks/hotpath-cpu",
     "tracedecay-host-integration/hotpath-cpu",
@@ -121,6 +124,7 @@ tracedecay-application = { path = "../tracedecay-application", version = "0.1.0"
 tracedecay-automation = { path = "../tracedecay-automation", version = "0.1.0" }
 tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", version = "0.1.0" }
 tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
+tracedecay-framing = { path = "../tracedecay-framing", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
 tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }

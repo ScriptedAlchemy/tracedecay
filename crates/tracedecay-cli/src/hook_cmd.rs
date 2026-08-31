@@ -10,11 +10,7 @@ pub(crate) async fn handle_hook_command(
 fn handle_hook_command_inner(
     command: Commands,
 ) -> std::pin::Pin<
-    Box<
-        dyn std::future::Future<Output = tracedecay_domain::errors::Result<i32>>
-            + Send
-            + 'static,
-    >,
+    Box<dyn std::future::Future<Output = tracedecay_domain::errors::Result<i32>> + Send + 'static>,
 > {
     // Erase the deeply nested hook-dispatch future before it reaches the
     // measured wrapper so every profiling feature can compute its layout.

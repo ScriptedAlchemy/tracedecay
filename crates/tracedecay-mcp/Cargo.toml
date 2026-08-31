@@ -22,6 +22,7 @@ hotpath = [
     "tracedecay-code-index?/hotpath",
     "tracedecay-daemon-protocol/hotpath",
     "tracedecay-domain/hotpath",
+    "tracedecay-framing/hotpath",
     "tracedecay-graph-query/hotpath",
     "tracedecay-hooks/hotpath",
     "tracedecay-runtime-core/hotpath",
@@ -38,6 +39,7 @@ hotpath-alloc = [
     "tracedecay-code-index?/hotpath-alloc",
     "tracedecay-daemon-protocol/hotpath-alloc",
     "tracedecay-domain/hotpath-alloc",
+    "tracedecay-framing/hotpath-alloc",
     "tracedecay-graph-query/hotpath-alloc",
     "tracedecay-hooks/hotpath-alloc",
     "tracedecay-runtime-core/hotpath-alloc",
@@ -54,6 +56,7 @@ hotpath-cpu = [
     "tracedecay-code-index?/hotpath-cpu",
     "tracedecay-daemon-protocol/hotpath-cpu",
     "tracedecay-domain/hotpath-cpu",
+    "tracedecay-framing/hotpath-cpu",
     "tracedecay-graph-query/hotpath-cpu",
     "tracedecay-hooks/hotpath-cpu",
     "tracedecay-runtime-core/hotpath-cpu",
@@ -92,6 +95,7 @@ tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version =
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false, optional = true }
 tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-framing = { path = "../tracedecay-framing", version = "0.1.0" }
 tracedecay-graph-query = { path = "../tracedecay-graph-query", version = "0.1.0" }
 tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
@@ -105,6 +109,7 @@ tree-sitter = { version = "0.26", optional = true }
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-framing = { path = "../tracedecay-framing", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }

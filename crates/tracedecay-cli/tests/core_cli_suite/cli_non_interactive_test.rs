@@ -1485,9 +1485,10 @@ fn wipe_all_is_schema_independent_and_removes_every_profile_database_root() {
     let config_path = profile.join("config.toml");
     let identity_path = profile.join("profile-identity.json");
     std::fs::create_dir_all(&profile).unwrap();
-    let config = toml::to_string_pretty(&tracedecay_session_memory::user_config::UserConfig::default())
-        .unwrap()
-        .into_bytes();
+    let config =
+        toml::to_string_pretty(&tracedecay_session_memory::user_config::UserConfig::default())
+            .unwrap()
+            .into_bytes();
     std::fs::write(&config_path, &config).unwrap();
     let identity = br#"{
   "schema_version": 1,

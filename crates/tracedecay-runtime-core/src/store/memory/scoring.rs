@@ -4,7 +4,9 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, LazyLock, Mutex};
 
-use crate::memory::encoding::{HolographicEncoder, HolographicEncodingError, HolographicQueryVector};
+use crate::memory::encoding::{
+    HolographicEncoder, HolographicEncodingError, HolographicQueryVector,
+};
 
 use tracedecay_domain::{FactAssertionId, FactId, FactOwnerV1, UtcMicros};
 use tracedecay_store::{
@@ -166,7 +168,11 @@ pub(super) fn project_memory_fact_vector(
     let mut cache = FACT_VECTOR_CACHE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if cache.vectors.insert(key.clone(), Arc::clone(&vector)).is_none() {
+    if cache
+        .vectors
+        .insert(key.clone(), Arc::clone(&vector))
+        .is_none()
+    {
         cache.order.push_back(key);
         while cache.order.len() > FACT_VECTOR_CACHE_CAPACITY {
             let Some(evicted) = cache.order.pop_front() else {
@@ -183,8 +189,8 @@ pub(super) fn project_memory_holographic_score(
     query: &HolographicQueryVector,
     fact: &ProjectMemoryFactV1,
 ) -> FactStoreResult<f64> {
-    let fact_vector = project_memory_fact_vector(encoder, fact)
-        .map_err(project_memory_holographic_error)?;
+    let fact_vector =
+        project_memory_fact_vector(encoder, fact).map_err(project_memory_holographic_error)?;
     Ok(project_memory_holographic_midpoint(
         encoder
             .query_similarity(query, &fact_vector)
