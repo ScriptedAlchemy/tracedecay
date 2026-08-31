@@ -711,13 +711,15 @@ async fn project_observation_in_transaction(
         return Err(ProjectionStoreError::NotQueued);
     }
 
-    write_effect_converging_collisions(
+    // Boxed: the collision-guarded write composes the whole apply subtree;
+    // inlining it into the drain future overflows the base-opt worker stack.
+    Box::pin(write_effect_converging_collisions(
         transaction,
         &CollisionGuardedWrite::Drain,
         sequence,
         &observation,
         &mut effect,
-    )
+    ))
     .await?;
     if !matches!(
         effect,

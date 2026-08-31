@@ -223,6 +223,23 @@ async fn install_production_composition_stores(
     #[cfg(not(test))]
     let _ = long_lived_session_maintenance_for_test;
     let invocation = DaemonInvocationState::default();
+    // The daemon bootstrap installs the Codex shared-JSONL preparation
+    // authority right after creating the invocation state; without it every
+    // transcript ingest refuses as background-resource unavailable. The
+    // authority is a process singleton (a daemon restart is a new process),
+    // so an in-process harness reopen must rejoin the memory authority the
+    // first open installed rather than install a fresh one.
+    static HARNESS_CODEX_PREPARATION_MEMORY: std::sync::OnceLock<
+        Arc<tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1>,
+    > = std::sync::OnceLock::new();
+    let preparation_memory = Arc::clone(HARNESS_CODEX_PREPARATION_MEMORY.get_or_init(|| {
+        invocation.code_index_schedulers.process_resident_memory()
+    }));
+    store_administration
+        .configure_codex_preparation_resources(preparation_memory)
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("failed to configure Codex preparation resources: {error}"),
+        })?;
     invocation.configure_github_read_only_credentials(&profile_identity);
     let http_application_registry = http_application::DaemonHttpApplicationRegistry::default();
     let project_open_gates = Arc::new(tokio::sync::Mutex::new(ProjectOpenGates::default()));

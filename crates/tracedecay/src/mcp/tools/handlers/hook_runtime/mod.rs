@@ -89,14 +89,17 @@ pub async fn handle_hook_runtime(
                     "user transcript ingest requires projectless daemon routing",
                 ));
             }
-            ingest_transcript(
+            // Boxed: transcript ingest composes the deepest session-runtime
+            // future in the handler tree; inlining it into the dispatch frame
+            // overflows the perf-profile worker stack.
+            Box::pin(ingest_transcript(
                 Some(cg),
                 &args,
                 None,
                 global_db,
                 accounting_db,
                 session_authorities,
-            )
+            ))
             .await?
         }
         "codex_stop" | "user_review" | "hermes_receipt" => {
