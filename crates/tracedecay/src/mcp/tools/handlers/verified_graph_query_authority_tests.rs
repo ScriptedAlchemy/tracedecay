@@ -78,6 +78,47 @@ fn lower_level_ports_without_query<'a>(cg: &'a TraceDecay) -> ToolCallRegistryOp
     options
 }
 
+/// Initializes the fixture project as a git repository with one commit, so
+/// handlers that validate git evidence before awaiting graph admission reach
+/// their graph wait instead of reporting the typed git refusal first.
+fn init_committed_git_fixture(root: &std::path::Path) {
+    for args in [
+        &["init", "--initial-branch=main"][..],
+        &["add", "."][..],
+        &["commit", "-m", "fixture"][..],
+    ] {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .env("GIT_AUTHOR_NAME", "TraceDecay Test")
+            .env("GIT_AUTHOR_EMAIL", "test@tracedecay.invalid")
+            .env("GIT_COMMITTER_NAME", "TraceDecay Test")
+            .env("GIT_COMMITTER_EMAIL", "test@tracedecay.invalid")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .output()
+            .expect("git command should run");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+/// The minimal arguments that carry each handler past its request-shape
+/// validation, which by contract precedes graph admission: `changelog` proves
+/// its git evidence first and `run_affected_tests` requires an explicit
+/// caller-scoped manifest, while every other awaiting handler reaches the
+/// graph wait with empty arguments.
+fn query_authority_probe_args(tool_name: &str) -> serde_json::Value {
+    match tool_name {
+        "tracedecay_changelog" => json!({ "from_ref": "HEAD", "to_ref": "HEAD" }),
+        "tracedecay_run_affected_tests" => json!({ "changed_paths": ["src/lib.rs"] }),
+        _ => json!({}),
+    }
+}
+
 #[tokio::test]
 async fn absent_query_port_fails_closed_for_every_awaiting_graph_handler() {
     let _env_lock = lock_user_data_dir_test_env();
@@ -86,6 +127,7 @@ async fn absent_query_port_fails_closed_for_every_awaiting_graph_handler() {
     let project = dir.path().join("query-port-absent");
     fs::create_dir_all(project.join("src")).expect("fixture sources");
     fs::write(project.join("src/lib.rs"), "pub fn widget() {}\n").expect("write fixture");
+    init_committed_git_fixture(&project);
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
         &project,
         "project.query-port-absent",
@@ -99,7 +141,7 @@ async fn absent_query_port_fails_closed_for_every_awaiting_graph_handler() {
         let error = handle_tool_call_with_registry_options(
             &cg,
             tool_name,
-            json!({}),
+            query_authority_probe_args(tool_name),
             None,
             None,
             options.clone(),
