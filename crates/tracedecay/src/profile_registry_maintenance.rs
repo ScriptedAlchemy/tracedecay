@@ -18,6 +18,7 @@ pub struct ProfileRegistryMaintenanceRuntime {
 
 impl ProfileRegistryMaintenanceRuntime {
     /// Opens an existing exact-final profile registry without creating one.
+    #[hotpath::measure(label = "daemon.profile_registry.open_existing", future = true)]
     pub async fn try_open_existing(
         profile_root: &Path,
     ) -> tracedecay_domain::errors::Result<Option<Self>> {
@@ -50,6 +51,7 @@ impl ProfileRegistryMaintenanceRuntime {
         Self::open(&profile_root).await.map(Some)
     }
 
+    #[hotpath::measure(label = "daemon.profile_registry.open", future = true)]
     pub async fn open(profile_root: &Path) -> tracedecay_domain::errors::Result<Self> {
         let identity = tracedecay_daemon_identity::profile_identity::load_existing(profile_root)?;
         let registry =
@@ -61,6 +63,7 @@ impl ProfileRegistryMaintenanceRuntime {
         Ok(Self { profile_database })
     }
 
+    #[hotpath::measure(label = "daemon.profile_registry.list_projects", future = true)]
     pub async fn registered_project_paths(
         &self,
     ) -> tracedecay_domain::errors::Result<Vec<PathBuf>> {
@@ -69,6 +72,7 @@ impl ProfileRegistryMaintenanceRuntime {
             .await
     }
 
+    #[hotpath::measure(label = "daemon.profile_registry.classify_storage", future = true)]
     pub async fn classify_project_storage(
         &self,
         project_root: &Path,
@@ -95,6 +99,7 @@ impl ProfileRegistryMaintenanceRuntime {
         RegisteredGlobalDb::canonical_project_key(project_root)
     }
 
+    #[hotpath::measure(label = "daemon.profile_registry.retire_paths", future = true)]
     pub async fn delete_project_paths(
         &self,
         project_paths: &[PathBuf],
@@ -106,6 +111,7 @@ impl ProfileRegistryMaintenanceRuntime {
         .await
     }
 
+    #[hotpath::measure(label = "daemon.profile_registry.apply_orphan_relink", future = true)]
     pub async fn apply_orphan_relink(
         &self,
         report: &RegistryOrphanRelinkReport,
@@ -117,6 +123,7 @@ impl ProfileRegistryMaintenanceRuntime {
         .await
     }
 
+    #[hotpath::measure(label = "daemon.profile_registry.gc", future = true)]
     pub async fn registry_gc(
         &self,
         profile_root: &Path,

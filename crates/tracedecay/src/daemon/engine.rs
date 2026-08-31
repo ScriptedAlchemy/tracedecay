@@ -215,6 +215,7 @@ impl DaemonEngine {
 
     /// A doctor-facing read of one project's watch coverage; `git_watcher` is
     /// module-private, so the core Doctor route reads through this accessor.
+    #[hotpath::measure(label = "daemon.engine.git_watcher_health", future = true)]
     pub(super) async fn git_watcher_health(
         &self,
         project_root: Option<&std::path::Path>,
@@ -303,6 +304,7 @@ impl DaemonEngine {
 
     /// Logs a `daemon_version_skew` event when this handshake's client runs a
     /// different binary version, deduped per distinct client version.
+    #[hotpath::measure(label = "daemon.engine.log_version_skew", future = true)]
     pub(super) async fn log_client_version_skew(&self, handshake: &DaemonHandshake) -> Result<()> {
         let Some(client_version) = self.client_version_skew_to_log(handshake).await? else {
             return Ok(());
@@ -334,6 +336,7 @@ impl DaemonEngine {
     /// exactly what arms its notification for the first request after warm-up
     /// completes; marking it would strand the provisional catalog for the rest
     /// of the daemon's life, because this set is never otherwise cleared.
+    #[hotpath::measure(label = "daemon.engine.claim_catalog_refresh", future = true)]
     pub(super) async fn claim_catalog_refresh(
         &self,
         handshake: &DaemonHandshake,
@@ -726,6 +729,7 @@ impl DaemonEngine {
         })
     }
 
+    #[hotpath::measure(label = "daemon.engine.cached_open_failure", future = true)]
     pub(super) async fn cached_project_open_failure(
         &self,
         handshake: &DaemonHandshake,
