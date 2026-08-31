@@ -424,7 +424,7 @@ pub struct DashboardState {
     pub retention_config: crate::config::RetentionConfig,
     /// Daemon-owned user-profile settings authority. Dashboard routes never
     /// load or mutate `config.toml` directly.
-    pub user_settings: Arc<dyn crate::application::configuration::UserSettingsDaemonClient>,
+    pub user_settings: Arc<dyn tracedecay_configuration::UserSettingsDaemonClient>,
     /// Root-injected ProfileSessions worker preference authority. It remains
     /// separate from `user_settings`, whose revision belongs to the ordinary
     /// profile settings resource.
@@ -2321,8 +2321,7 @@ mod authority_tests {
                 dashboard_root: layout.dashboard_root.clone(),
                 retention_config: crate::config::RetentionConfig::default(),
                 user_settings: Arc::new(
-                    crate::application::configuration::ProductionUserSettingsDaemonClient::default(
-                    ),
+                    tracedecay_configuration::ProductionUserSettingsDaemonClient::default(),
                 ),
                 profile_code_index_worker_settings: None,
                 token_counts: Arc::new(token_count::TokenCountCache::new()),
