@@ -91,8 +91,15 @@ pub enum RetainedOutputFormatV1 {
 }
 
 /// Exact registered-project selector shared by retained reads.
+///
+/// Inlined so every request schema advertises the closed selector contract
+/// (`required: ["project_id"]`, no additional properties) directly on its
+/// `project_selector` property instead of behind a `$defs` reference, matching
+/// the selector shape the MCP dispatch policy promises for selector-accepting
+/// tools.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[schemars(inline)]
 pub struct RetainedProjectSelectorV1 {
     pub project_id: ProjectId,
 }
