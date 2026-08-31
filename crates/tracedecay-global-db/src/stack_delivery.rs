@@ -5,10 +5,10 @@
 //! delivery state machine that lets a daemon hand work to a host without
 //! mistaking the coordinator's acknowledgement for the host's receipt.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params, params_from_iter};
 
 use crate::RegisteredGlobalDb;
 
@@ -328,45 +328,26 @@ async fn promote_deferred(executor: &impl Executor, project_id: &str) -> Result<
     }
     let limit = i64::try_from(capacity)
         .map_err(|_| "GitHub stack capacity exceeds SQLite range".to_owned())?;
-    let mut rows = executor
-        .query(
-            "SELECT r.signal_id, r.recipient
-             FROM github_stack_delivery_recipients AS r
-             JOIN github_stack_delivery_signals AS s
-               ON s.project_id = r.project_id AND s.signal_id = r.signal_id
-             WHERE r.project_id = ?1 AND r.state = 'deferred'
-             ORDER BY s.observed_at_micros ASC, r.signal_id ASC, r.recipient ASC
-             LIMIT ?2",
+    let promoted = executor
+        .execute(
+            "UPDATE github_stack_delivery_recipients
+             SET state = 'pending'
+             WHERE rowid IN (
+                 SELECT r.rowid
+                 FROM github_stack_delivery_recipients AS r
+                 JOIN github_stack_delivery_signals AS s
+                   ON s.project_id = r.project_id AND s.signal_id = r.signal_id
+                 WHERE r.project_id = ?1 AND r.state = 'deferred'
+                 ORDER BY s.observed_at_micros ASC, r.signal_id ASC, r.recipient ASC
+                 LIMIT ?2
+             )
+               AND state = 'deferred'",
             params![project_id, limit],
         )
         .await
-        .map_err(|error| format!("query deferred GitHub stack deliveries: {error}"))?;
-    let mut promoted = 0;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| format!("read deferred GitHub stack delivery: {error}"))?
-    {
-        let signal_id = row
-            .get::<String>(0)
-            .map_err(|error| format!("decode deferred GitHub stack signal id: {error}"))?;
-        let recipient = row
-            .get::<String>(1)
-            .map_err(|error| format!("decode deferred GitHub stack recipient: {error}"))?;
-        let changed = executor
-            .execute(
-                "UPDATE github_stack_delivery_recipients
-                 SET state = 'pending'
-                 WHERE project_id = ?1 AND signal_id = ?2 AND recipient = ?3
-                   AND state = 'deferred'",
-                params![project_id, signal_id, recipient],
-            )
-            .await
-            .map_err(|error| format!("promote deferred GitHub stack delivery: {error}"))?;
-        if changed == 1 {
-            promoted += 1;
-        }
-    }
+        .map_err(|error| format!("promote deferred GitHub stack deliveries: {error}"))?;
+    let promoted = usize::try_from(promoted)
+        .map_err(|_| "promoted GitHub stack delivery count exceeds usize".to_owned())?;
     hotpath::gauge!("global_db.stack_delivery.queue.promoted_rows").inc(promoted as u64);
     Ok(promoted)
 }
@@ -398,6 +379,139 @@ async fn lookup_signal(
         .map_err(|error| format!("read GitHub stack signal: {error}"))?
         .map(|row| decode_signal_row(&row))
         .transpose()
+}
+
+#[derive(Clone, Debug)]
+struct DeliveryBatchRow {
+    watermark_id: Option<String>,
+    state: Option<GitHubStackDeliveryStateV1>,
+}
+
+#[hotpath::measure(
+    future = true,
+    label = "global_db.stack_delivery.query.transition_batch"
+)]
+async fn read_delivery_batch(
+    executor: &impl QueryExecutor,
+    project_id: &str,
+    keys: &[GitHubStackDeliveryKeyV1],
+) -> Result<BTreeMap<GitHubStackDeliveryKeyV1, DeliveryBatchRow>, String> {
+    if keys.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let values = (0..keys.len())
+        .map(|index| format!("(?{}, ?{})", index * 2 + 1, index * 2 + 2))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let project_parameter = keys.len() * 2 + 1;
+    let mut parameters = Vec::with_capacity(project_parameter);
+    for key in keys {
+        parameters.push(key.signal_id.as_str());
+        parameters.push(key.recipient.as_str());
+    }
+    parameters.push(project_id);
+    let mut rows = executor
+        .query(
+            &format!(
+                "WITH requested(signal_id, recipient) AS (VALUES {values})
+                 SELECT requested.signal_id, requested.recipient, signal.watermark_id,
+                        binding.state
+                 FROM requested
+                 LEFT JOIN github_stack_delivery_signals AS signal
+                   ON signal.project_id = ?{project_parameter}
+                  AND signal.signal_id = requested.signal_id
+                 LEFT JOIN github_stack_delivery_recipients AS binding
+                   ON binding.project_id = ?{project_parameter}
+                  AND binding.signal_id = requested.signal_id
+                  AND binding.recipient = requested.recipient
+                 ORDER BY requested.signal_id, requested.recipient"
+            ),
+            params_from_iter(parameters),
+        )
+        .await
+        .map_err(|error| format!("query GitHub stack delivery batch: {error}"))?;
+    let mut batch = BTreeMap::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| format!("read GitHub stack delivery batch: {error}"))?
+    {
+        let key = GitHubStackDeliveryKeyV1 {
+            signal_id: row
+                .get::<String>(0)
+                .map_err(|error| format!("decode GitHub stack batch signal id: {error}"))?,
+            recipient: row
+                .get::<String>(1)
+                .map_err(|error| format!("decode GitHub stack batch recipient: {error}"))?,
+        };
+        let state = row
+            .get::<Option<String>>(3)
+            .map_err(|error| format!("decode GitHub stack batch state: {error}"))?
+            .map(GitHubStackDeliveryStateV1::parse)
+            .transpose()?;
+        let value = DeliveryBatchRow {
+            watermark_id: row
+                .get::<Option<String>>(2)
+                .map_err(|error| format!("decode GitHub stack batch watermark: {error}"))?,
+            state,
+        };
+        if batch.insert(key, value).is_some() {
+            return Err("GitHub stack delivery batch repeated a requested key".to_owned());
+        }
+    }
+    Ok(batch)
+}
+
+#[hotpath::measure(
+    future = true,
+    label = "global_db.stack_delivery.persist.transition_batch"
+)]
+async fn transition_pending_batch(
+    executor: &impl Executor,
+    project_id: &str,
+    keys: &[GitHubStackDeliveryKeyV1],
+) -> Result<(), String> {
+    if keys.is_empty() {
+        return Ok(());
+    }
+    let values = (0..keys.len())
+        .map(|index| format!("(?{}, ?{})", index * 2 + 1, index * 2 + 2))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let project_parameter = keys.len() * 2 + 1;
+    let mut parameters = Vec::with_capacity(project_parameter);
+    for key in keys {
+        parameters.push(key.signal_id.as_str());
+        parameters.push(key.recipient.as_str());
+    }
+    parameters.push(project_id);
+    let changed = executor
+        .execute(
+            &format!(
+                "WITH requested(signal_id, recipient) AS (VALUES {values})
+                 UPDATE github_stack_delivery_recipients
+                 SET state = 'host_pending'
+                 WHERE project_id = ?{project_parameter}
+                   AND state = 'pending'
+                   AND EXISTS (
+                       SELECT 1 FROM requested
+                       WHERE requested.signal_id =
+                                 github_stack_delivery_recipients.signal_id
+                         AND requested.recipient =
+                                 github_stack_delivery_recipients.recipient
+                   )"
+            ),
+            params_from_iter(parameters),
+        )
+        .await
+        .map_err(|error| format!("publish GitHub stack host delivery batch: {error}"))?;
+    if changed
+        != u64::try_from(keys.len())
+            .map_err(|_| "GitHub stack delivery batch exceeds SQLite range".to_owned())?
+    {
+        return Err("GitHub stack delivery batch changed unexpectedly".to_owned());
+    }
+    Ok(())
 }
 
 impl RegisteredGlobalDb {
@@ -607,47 +721,35 @@ impl RegisteredGlobalDb {
                 MAX_GITHUB_STACK_DELIVERY_BATCH_V1
             ));
         }
+        let keys = deliveries.iter().collect::<BTreeSet<_>>();
+        let keys = keys.into_iter().cloned().collect::<Vec<_>>();
+        for key in &keys {
+            validate_text(&key.signal_id, "signal id")?;
+            validate_recipient(&key.recipient)?;
+        }
         let transaction = self
             .begin_write_transaction()
             .await
             .map_err(|error| format!("begin GitHub stack host publication: {error}"))?;
-        let keys = deliveries.iter().collect::<BTreeSet<_>>();
-        for key in keys {
-            validate_text(&key.signal_id, "signal id")?;
-            validate_recipient(&key.recipient)?;
-            let signal = lookup_signal(&transaction, project_id, &key.signal_id)
-                .await?
+        let batch = read_delivery_batch(&transaction, project_id, &keys).await?;
+        let mut pending = Vec::with_capacity(keys.len());
+        for key in &keys {
+            let row = batch
+                .get(key)
+                .ok_or_else(|| "GitHub stack delivery batch is incomplete".to_owned())?;
+            let signal_watermark = row
+                .watermark_id
+                .as_deref()
                 .ok_or_else(|| "GitHub stack delivery signal is unavailable".to_owned())?;
-            if signal.watermark_id != watermark_id {
+            if signal_watermark != watermark_id {
                 return Err("GitHub stack delivery watermark mismatch".to_owned());
             }
-            let mut state_rows = transaction
-                .query(
-                    "SELECT state FROM github_stack_delivery_recipients
-                     WHERE project_id = ?1 AND signal_id = ?2 AND recipient = ?3",
-                    params![project_id, key.signal_id.as_str(), key.recipient.as_str()],
-                )
-                .await
-                .map_err(|error| format!("query GitHub stack delivery state: {error}"))?;
-            let state = state_rows
-                .next()
-                .await
-                .map_err(|error| format!("read GitHub stack delivery state: {error}"))?
-                .ok_or_else(|| "GitHub stack recipient binding is unavailable".to_owned())?
-                .get::<String>(0)
-                .map_err(|error| format!("decode GitHub stack delivery state: {error}"))?;
-            match GitHubStackDeliveryStateV1::parse(state)? {
+            let state = row
+                .state
+                .ok_or_else(|| "GitHub stack recipient binding is unavailable".to_owned())?;
+            match state {
                 GitHubStackDeliveryStateV1::Pending => {
-                    transaction
-                        .execute(
-                            "UPDATE github_stack_delivery_recipients
-                             SET state = 'host_pending'
-                             WHERE project_id = ?1 AND signal_id = ?2 AND recipient = ?3
-                               AND state = 'pending'",
-                            params![project_id, key.signal_id.as_str(), key.recipient.as_str()],
-                        )
-                        .await
-                        .map_err(|error| format!("publish GitHub stack host delivery: {error}"))?;
+                    pending.push(key.clone());
                 }
                 GitHubStackDeliveryStateV1::HostPending => {}
                 GitHubStackDeliveryStateV1::Deferred => {
@@ -659,6 +761,7 @@ impl RegisteredGlobalDb {
                 }
             }
         }
+        transition_pending_batch(&transaction, project_id, &pending).await?;
         promote_deferred(&transaction, project_id).await?;
         transaction
             .commit()
@@ -890,5 +993,81 @@ impl RegisteredGlobalDb {
                     .and_then(GitHubStackDeliveryStateV1::parse)
             })
             .transpose()
+    }
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tracedecay_runtime_core::db::engine::{IntoParams, QueryExecutor, Rows};
+
+    use super::{
+        GitHubStackDeliveryKeyV1, GitHubStackDeliveryStateV1, GitHubStackSignalRecordV1,
+        read_delivery_batch,
+    };
+    use crate::tests::harness::RegisteredGlobalDbHarness;
+
+    struct CountingQueryExecutor<'a, T> {
+        inner: &'a T,
+        queries: AtomicUsize,
+    }
+
+    impl<T: QueryExecutor> QueryExecutor for CountingQueryExecutor<'_, T> {
+        async fn query<P>(
+            &self,
+            sql: &str,
+            params: P,
+        ) -> tracedecay_runtime_core::db::engine::Result<Rows>
+        where
+            P: IntoParams,
+        {
+            self.queries.fetch_add(1, Ordering::Relaxed);
+            self.inner.query(sql, params).await
+        }
+    }
+
+    #[tokio::test]
+    async fn delivery_batch_reads_all_keys_in_one_query() {
+        let harness = RegisteredGlobalDbHarness::open("github-stack-delivery-batch-read").await;
+        let record = GitHubStackSignalRecordV1 {
+            project_id: "project.github-stack-batch".to_owned(),
+            signal_id: "signal.github-stack-batch".to_owned(),
+            scope_digest: "sha256:github-stack-batch-scope".to_owned(),
+            repository_id: "repository.github-stack-batch".to_owned(),
+            watermark_id: "watermark.github-stack-batch".to_owned(),
+            observed_at_micros: 10,
+            signal_json: "{}".to_owned(),
+        };
+        let recipients = vec!["actor.cursor".to_owned(), "actor.claude".to_owned()];
+        harness
+            .registered
+            .append_github_stack_signal(record.clone(), recipients.clone())
+            .await
+            .unwrap();
+        let keys = recipients
+            .into_iter()
+            .map(|recipient| GitHubStackDeliveryKeyV1 {
+                signal_id: record.signal_id.clone(),
+                recipient,
+            })
+            .collect::<Vec<_>>();
+        let snapshot = harness.registered.read_snapshot().await.unwrap();
+        let counted = CountingQueryExecutor {
+            inner: &snapshot,
+            queries: AtomicUsize::new(0),
+        };
+
+        let states = read_delivery_batch(&counted, &record.project_id, &keys)
+            .await
+            .unwrap();
+
+        assert_eq!(states.len(), keys.len());
+        assert!(
+            states
+                .values()
+                .all(|row| row.state == Some(GitHubStackDeliveryStateV1::Pending))
+        );
+        assert_eq!(counted.queries.load(Ordering::Relaxed), 1);
     }
 }

@@ -9,7 +9,7 @@ use super::definitions::{
     Table,
 };
 use super::pragma::{
-    ActualColumn, ActualForeignKey, ActualIndex, read_columns, read_foreign_keys, read_indexes,
+    ActualColumn, ActualForeignKey, ActualIndex, ActualTableMetadata, read_table_metadata,
 };
 use super::{normalize_trigger_sql, starts_with_ignore_ascii_case};
 
@@ -134,12 +134,11 @@ fn normalize_default(value: Option<&str>) -> Option<String> {
     })
 }
 
-async fn validate_table(
-    conn: &impl QueryExecutor,
+fn validate_table(
     contract: &Table,
+    actual: &ActualTableMetadata,
 ) -> tracedecay_domain::errors::Result<()> {
-    let actual = read_columns(conn, contract.name).await?;
-    if actual.len() != contract.columns.len() {
+    if actual.columns.len() != contract.columns.len() {
         return Err(global_db_operation_message(
             OPERATION,
             format!(
@@ -149,7 +148,7 @@ async fn validate_table(
         ));
     }
     for column in contract.columns {
-        let Some(actual) = actual.get(&column.name.to_ascii_lowercase()) else {
+        let Some(actual) = actual.columns.get(&column.name.to_ascii_lowercase()) else {
             return Err(global_db_operation_message(
                 OPERATION,
                 format!(
@@ -169,8 +168,7 @@ async fn validate_table(
         }
     }
 
-    let actual = read_foreign_keys(conn, contract.name).await?;
-    if !foreign_keys_match(&actual, contract) {
+    if !foreign_keys_match(&actual.foreign_keys, contract) {
         return Err(global_db_operation_message(
             OPERATION,
             format!("table '{}' has incompatible foreign keys", contract.name),
@@ -265,11 +263,10 @@ fn primary_key_index_matches(actual: &ActualIndex, expected_columns: &[&str]) ->
             })
 }
 
-async fn validate_indexes_for_table(
-    conn: &impl QueryExecutor,
+fn validate_indexes_for_table(
     table: &str,
+    actual: &[ActualIndex],
 ) -> tracedecay_domain::errors::Result<()> {
-    let actual = read_indexes(conn, table).await?;
     let expected = INDEXES
         .iter()
         .filter(|contract| contract.table.eq_ignore_ascii_case(table))
@@ -411,17 +408,15 @@ async fn validate_tables_and_indexes(
     conn: &impl QueryExecutor,
     tables: &[Table],
 ) -> tracedecay_domain::errors::Result<()> {
-    for contract in tables {
-        validate_table(conn, contract).await?;
-        validate_indexes_for_table(conn, contract.name).await?;
-    }
-    Ok(())
+    let contracts = tables.iter().collect::<Vec<_>>();
+    validate_contracts(conn, &contracts).await
 }
 
 async fn validate_named_tables_and_indexes(
     conn: &impl QueryExecutor,
     table_names: &[&str],
 ) -> tracedecay_domain::errors::Result<()> {
+    let mut contracts = Vec::with_capacity(table_names.len());
     for table_name in table_names {
         let contract = TABLES
             .iter()
@@ -432,8 +427,29 @@ async fn validate_named_tables_and_indexes(
                     format!("schema contract for table '{table_name}' is not defined"),
                 )
             })?;
-        validate_table(conn, contract).await?;
-        validate_indexes_for_table(conn, contract.name).await?;
+        contracts.push(contract);
+    }
+    validate_contracts(conn, &contracts).await
+}
+
+async fn validate_contracts(
+    conn: &impl QueryExecutor,
+    contracts: &[&Table],
+) -> tracedecay_domain::errors::Result<()> {
+    let table_names = contracts
+        .iter()
+        .map(|contract| contract.name)
+        .collect::<Vec<_>>();
+    let metadata = read_table_metadata(conn, &table_names).await?;
+    for contract in contracts {
+        let actual = metadata.get(contract.name).ok_or_else(|| {
+            global_db_operation_message(
+                OPERATION,
+                format!("table '{}' metadata is unavailable", contract.name),
+            )
+        })?;
+        validate_table(contract, actual)?;
+        validate_indexes_for_table(contract.name, &actual.indexes)?;
     }
     Ok(())
 }
@@ -448,8 +464,7 @@ pub async fn validate_session_temporal_schema_contract(
 pub async fn validate_released_v3_temporal_projection_receipt_contract(
     conn: &impl QueryExecutor,
 ) -> tracedecay_domain::errors::Result<()> {
-    validate_table(conn, &SESSION_TEMPORAL_PROJECTION_RECEIPTS_V3).await?;
-    validate_indexes_for_table(conn, SESSION_TEMPORAL_PROJECTION_RECEIPTS_V3.name).await
+    validate_contracts(conn, &[&SESSION_TEMPORAL_PROJECTION_RECEIPTS_V3]).await
 }
 
 pub async fn validate_session_graph_publication_schema_contract(
@@ -588,9 +603,49 @@ pub async fn validate_authority_schema_contract(
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_default, validate_registry_schema_contract};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::{
+        normalize_default, validate_registry_schema_contract, validate_tables_and_indexes,
+    };
+    use crate::schema_contract::definitions::TABLES;
     use crate::tests::harness::open_registered_test_database_fixture;
-    use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
+    use tracedecay_runtime_core::db::{
+        TestDatabaseRuntimeScope,
+        engine::{IntoParams, QueryExecutor, Rows},
+    };
+
+    struct CountingQueryExecutor<'a, T> {
+        inner: &'a T,
+        queries: AtomicUsize,
+    }
+
+    impl<'a, T> CountingQueryExecutor<'a, T> {
+        fn new(inner: &'a T) -> Self {
+            Self {
+                inner,
+                queries: AtomicUsize::new(0),
+            }
+        }
+
+        fn queries(&self) -> usize {
+            self.queries.load(Ordering::Relaxed)
+        }
+    }
+
+    impl<T: QueryExecutor> QueryExecutor for CountingQueryExecutor<'_, T> {
+        async fn query<P>(
+            &self,
+            sql: &str,
+            params: P,
+        ) -> tracedecay_runtime_core::db::engine::Result<Rows>
+        where
+            P: IntoParams,
+        {
+            self.queries.fetch_add(1, Ordering::Relaxed);
+            self.inner.query(sql, params).await
+        }
+    }
 
     #[test]
     fn default_normalization_only_strips_balanced_outer_parentheses() {
@@ -615,5 +670,26 @@ mod tests {
         validate_registry_schema_contract(&database.read_connection())
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn table_contract_metadata_is_read_in_a_constant_query_count() {
+        let directory = tempfile::tempdir().unwrap();
+        let (database, _owner) = open_registered_test_database_fixture(
+            &directory.path().join("global.db"),
+            TestDatabaseRuntimeScope::Profile,
+        )
+        .await
+        .unwrap();
+        let connection = database.read_connection();
+        let counted = CountingQueryExecutor::new(&connection);
+
+        validate_tables_and_indexes(&counted, TABLES).await.unwrap();
+
+        assert_eq!(
+            counted.queries(),
+            3,
+            "column, foreign-key, and complete index metadata each need one query"
+        );
     }
 }

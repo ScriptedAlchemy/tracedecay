@@ -129,3 +129,45 @@ async fn saturation_defers_but_retains_the_exact_overflow_recipient() {
         Some(GitHubStackDeliveryStateV1::Deferred)
     );
 }
+
+#[tokio::test]
+async fn publishing_a_batch_promotes_the_oldest_deferred_recipient() {
+    let harness = RegisteredGlobalDbHarness::open("github-stack-delivery-batch-promotion").await;
+    let capacity_signal = signal("signal.github-stack-capacity-promotion", 10);
+    let recipients = (0..MAX_GITHUB_STACK_ACTIVE_PENDING_V1)
+        .map(|index| format!("actor.cursor-composer.promotion.{index}"))
+        .collect::<Vec<_>>();
+    harness
+        .registered
+        .append_github_stack_signal(capacity_signal.clone(), recipients.clone())
+        .await
+        .expect("fill bounded pending capacity");
+    let overflow = signal("signal.github-stack-overflow-promotion", 11);
+    harness
+        .registered
+        .append_github_stack_signal(overflow.clone(), vec![RECIPIENT.to_owned()])
+        .await
+        .expect("retain deferred overflow");
+
+    harness
+        .registered
+        .publish_github_stack_deliveries(
+            PROJECT_ID,
+            &capacity_signal.watermark_id,
+            &[GitHubStackDeliveryKeyV1 {
+                signal_id: capacity_signal.signal_id,
+                recipient: recipients[0].clone(),
+            }],
+        )
+        .await
+        .expect("publish one pending recipient");
+
+    assert_eq!(
+        harness
+            .registered
+            .github_stack_recipient_state(PROJECT_ID, &overflow.signal_id, RECIPIENT)
+            .await
+            .expect("read promoted overflow binding"),
+        Some(GitHubStackDeliveryStateV1::Pending)
+    );
+}
