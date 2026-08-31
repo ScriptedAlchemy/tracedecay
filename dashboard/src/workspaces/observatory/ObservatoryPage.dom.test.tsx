@@ -762,6 +762,7 @@ function codeIndexWorktree() {
     sealed_at_micros: SAMPLE_CURRENT_MICROS - 214_000_000,
     last_reconcile_micros: SAMPLE_CURRENT_MICROS - 8_400_000,
     staleness_state: 'fresh',
+    rebuild_in_flight: false,
     hook_hint_count: 0,
     coverage: 'complete',
     parked: null,

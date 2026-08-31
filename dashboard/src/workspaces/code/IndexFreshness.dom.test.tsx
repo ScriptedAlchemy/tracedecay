@@ -479,6 +479,7 @@ function worktree() {
     sealed_at_micros: NOW_MICROS - 600_000_000,
     last_reconcile_micros: NOW_MICROS,
     staleness_state: 'fresh',
+    rebuild_in_flight: false,
     hook_hint_count: 0,
     coverage: 'complete',
     progress: null,

@@ -777,6 +777,7 @@ export const CodeIndexWorktreeFreshnessV1Schema = z.object({
   latest_generation_id: z.string().nullable(),
   parked: z.union([z.lazy(() => CodeIndexConvergenceParkedV1Schema), z.null()]),
   progress: z.union([z.lazy(() => CodeIndexBuildProgressV1Schema), z.null()]),
+  rebuild_in_flight: z.boolean(),
   repository_id: z.string().nullable(),
   sealed_at_micros: z.number().int().safe().nullable(),
   snapshot_content_identity: z.string().nullable(),
