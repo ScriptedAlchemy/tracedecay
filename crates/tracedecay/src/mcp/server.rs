@@ -641,6 +641,16 @@ impl McpServer {
                 },
             )?;
         let retained_root = context.cg.project_root().to_path_buf();
+        // The retained session port mounts only when the project refresh
+        // service exists, and that service requires a refresh wake. Test
+        // runtimes have no daemon refresh scheduler, so install the typed
+        // worker-absent wake — every gate treats it exactly like an absent
+        // wake, while the session read authorities still mount.
+        if context.project_session_refresh_wake.is_none() && context.session_db.is_some() {
+            context.project_session_refresh_wake = Some(Arc::new(
+                tracedecay_application::UnavailableSessionTemporalRefreshWake,
+            ));
+        }
         // The daemon mounts the project retained owner at project open, so
         // retained application tools (`tracedecay_lcm_*`, fact-store, session
         // and workflow reads) execute against the real in-process owner
@@ -731,9 +741,14 @@ impl McpServer {
         context = context.with_retained_project_server_resolver(resolver);
         let server = Self::new_with_context(context).await;
         if let Some(transport) = retained_owner_transport {
-            crate::daemon::retained_test_support::register_project_retained_owner_for_test(
-                &transport.service,
-                server.as_ref(),
+            // Boxed: this registration future is large and composes into an
+            // already-deep constructor future; inline it overflows the
+            // perf-profile test stack.
+            Box::pin(
+                crate::daemon::retained_test_support::register_project_retained_owner_for_test(
+                    &transport.service,
+                    server.as_ref(),
+                ),
             )
             .await?;
         }
