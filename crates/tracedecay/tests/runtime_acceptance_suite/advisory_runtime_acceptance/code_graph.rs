@@ -24,7 +24,7 @@ use tracedecay_domain::{
     SensitivityLevelV1, SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId,
 };
 use tracedecay_graph_db::NeverCancelled;
-use tracedecay_usecases::graph::{
+use tracedecay_graph_query::{
     CodeGraphProjectionReadPort, CodeGraphReadError, CodeGraphReadFuture, CodeGraphReadRequest,
     VerifiedCodeGraphRead,
 };

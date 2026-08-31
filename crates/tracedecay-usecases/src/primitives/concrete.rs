@@ -14,9 +14,9 @@ use tracedecay_application::{
 use tracedecay_domain::{CodeGenerationId, UtcMicros};
 
 use super::symbol_graph::{SymbolGraphCursorFuture, SymbolGraphCursorPort, SymbolGraphPageClaim};
-use crate::context::read_modes::{LineRange, ReadMode};
-use crate::context::source_read::{SourceReadRequest, read_source};
-use crate::tracedecay::SourceReadRuntime;
+use tracedecay_graph_query::context::read_modes::{LineRange, ReadMode};
+use tracedecay_graph_query::context::source_read::{SourceReadRequest, read_source};
+use tracedecay_graph_query::SourceReadRuntime;
 use tracedecay_temporal_query::cursor::{CursorError, StableSortKey, encode_cursor, verify_cursor};
 use tracedecay_temporal_query::ports::{SessionCursorAuthenticator, TemporalExecutionSnapshot};
 
@@ -28,14 +28,14 @@ use tracedecay_temporal_query::ports::{SessionCursorAuthenticator, TemporalExecu
 /// project/repository/worktree scope.
 pub struct SourceReadAdapter {
     graph: Arc<SourceReadRuntime>,
-    code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
+    code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
     scope: ResolvedScope,
 }
 
 impl SourceReadAdapter {
     pub fn new(
         graph: Arc<SourceReadRuntime>,
-        code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
+        code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
         scope: ResolvedScope,
     ) -> Result<Self, ApplicationContractError> {
         scope.validate()?;
@@ -89,10 +89,10 @@ impl SourceReadAdapter {
             ),
             SourceReadModeV1::Full | SourceReadModeV1::Map | SourceReadModeV1::Signatures => None,
         };
-        let cancellation = crate::graph::request_graph_cancellation(context.request);
+        let cancellation = tracedecay_graph_query::request_graph_cancellation(context.request);
         let verified = self
             .code_graph
-            .open(crate::graph::CodeGraphReadRequest::new(
+            .open(tracedecay_graph_query::CodeGraphReadRequest::new(
                 context.request,
                 context.observed_at,
                 Arc::clone(&cancellation),

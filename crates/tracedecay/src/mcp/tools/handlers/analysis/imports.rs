@@ -183,7 +183,7 @@ fn identifiers_in_line(line: &str) -> Vec<String> {
 #[hotpath::measure(future = true, label = "mcp.analysis.unused_imports.total")]
 pub(crate) async fn handle_unused_imports(
     cg: &TraceDecay,
-    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {

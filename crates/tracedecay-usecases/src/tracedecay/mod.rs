@@ -197,11 +197,6 @@ pub trait SourceEditRuntimePort: Send + Sync {
     ) -> GraphFuture<'a, ()>;
 }
 
-// TEMPORARY SEAM (delete in the graph-query cutover's final slice): the
-// source-read runtime port moved to `tracedecay-graph-query` with the
-// verified graph query that freezes it.
-pub use tracedecay_graph_query::{SourceReadRuntime, SourceReadRuntimePort};
-
 pub type SourceEditRuntime = dyn SourceEditRuntimePort;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

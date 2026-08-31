@@ -42,9 +42,9 @@ pub(crate) type DatabaseOwnerReconciler = Arc<
 >;
 
 pub(crate) type CodeGraphProjectionReadPort =
-    Arc<dyn tracedecay_usecases::graph::CodeGraphProjectionReadPort + 'static>;
+    Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort + 'static>;
 pub(crate) type CodeGraphReadAdmissionPort =
-    Arc<dyn tracedecay_usecases::graph::CodeGraphReadAdmissionPort + 'static>;
+    Arc<dyn tracedecay_graph_query::CodeGraphReadAdmissionPort + 'static>;
 pub(crate) type CodeIndexIgnoredDependencyAdmissionPort =
     Arc<dyn tracedecay_usecases::code_index::CodeIndexIgnoredDependencyAdmissionPortV1 + 'static>;
 
@@ -168,7 +168,7 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) code_graph_projection_read_port: Option<CodeGraphProjectionReadPort>,
     pub(crate) code_graph_read_admission_port: Option<CodeGraphReadAdmissionPort>,
     pub(crate) verified_graph_query_port:
-        Option<Arc<dyn tracedecay_usecases::graph::VerifiedGraphQueryPort + 'static>>,
+        Option<Arc<dyn tracedecay_graph_query::VerifiedGraphQueryPort + 'static>>,
     pub(crate) code_index_ignored_dependency_admission:
         Option<CodeIndexIgnoredDependencyAdmissionPort>,
     pub(crate) code_index_search_authority: Option<super::CodeIndexSearchAuthorityV1>,
@@ -534,7 +534,7 @@ impl McpServerConstructionContext {
 
     pub(crate) fn with_verified_graph_query_port(
         mut self,
-        port: Arc<dyn tracedecay_usecases::graph::VerifiedGraphQueryPort + 'static>,
+        port: Arc<dyn tracedecay_graph_query::VerifiedGraphQueryPort + 'static>,
     ) -> Self {
         self.verified_graph_query_port = Some(port);
         self

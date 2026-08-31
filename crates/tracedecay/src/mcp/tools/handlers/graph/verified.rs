@@ -16,7 +16,7 @@ use tracedecay_mcp::handlers::graph::{
     required_graph_metadata, single_graph_adjacency_batch, traverse_verified_neighbors,
 };
 use tracedecay_mcp::path_tree::format_compact_path_list;
-use tracedecay_usecases::graph::{CodeGraphSymbolSummaryV1, VerifiedGraphQuery};
+use tracedecay_graph_query::{CodeGraphSymbolSummaryV1, VerifiedGraphQuery};
 
 #[hotpath::measure(label = "mcp.graph.context_markdown")]
 pub(super) fn verified_context_markdown(

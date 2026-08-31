@@ -115,7 +115,7 @@ semantic-gpu-cuda = ["tracedecay-semantic/semantic-gpu-cuda"]
 # enabling in-process transports. Forwards to tracedecay-sessions so the
 # re-exported wire test helpers (read_bounded_line, line_outcome_to_io) resolve
 # when this crate is built standalone with the feature.
-test-helpers = ["tracedecay-graph-db/test-helpers", "tracedecay-graph-query/test-helpers", "tracedecay-session-temporal-store/test-helpers", "tracedecay-sessions/test-helpers"]
+test-helpers = ["tracedecay-graph-db/test-helpers", "tracedecay-session-temporal-store/test-helpers", "tracedecay-sessions/test-helpers"]
 # Mirrors the root crate's `test-transport`: enables the in-process transport
 # seams used by integration harnesses.
 test-transport = [

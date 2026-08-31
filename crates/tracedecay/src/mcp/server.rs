@@ -334,7 +334,7 @@ pub struct McpServer {
     code_graph_projection_read_port: Option<CodeGraphProjectionReadPort>,
     code_graph_read_admission_port: Option<CodeGraphReadAdmissionPort>,
     verified_graph_query_port:
-        Option<Arc<dyn tracedecay_usecases::graph::VerifiedGraphQueryPort + 'static>>,
+        Option<Arc<dyn tracedecay_graph_query::VerifiedGraphQueryPort + 'static>>,
     code_index_ignored_dependency_admission: Option<CodeIndexIgnoredDependencyAdmissionPort>,
     /// Exact-scope sealed-generation census authority. It is installed only
     /// by daemon project-open after the route identity has resolved.

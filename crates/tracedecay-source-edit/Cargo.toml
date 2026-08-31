@@ -16,6 +16,7 @@ hotpath = [
     "tracedecay-application/hotpath",
     "tracedecay-domain/hotpath",
     "tracedecay-graph-db/hotpath",
+    "tracedecay-graph-query/hotpath",
     "tracedecay-private-fs/hotpath",
     "tracedecay-runtime-core/hotpath",
     "tracedecay-tool-catalog/hotpath",
@@ -27,6 +28,7 @@ hotpath-alloc = [
     "tracedecay-application/hotpath-alloc",
     "tracedecay-domain/hotpath-alloc",
     "tracedecay-graph-db/hotpath-alloc",
+    "tracedecay-graph-query/hotpath-alloc",
     "tracedecay-private-fs/hotpath-alloc",
     "tracedecay-runtime-core/hotpath-alloc",
     "tracedecay-tool-catalog/hotpath-alloc",
@@ -38,6 +40,7 @@ hotpath-cpu = [
     "tracedecay-application/hotpath-cpu",
     "tracedecay-domain/hotpath-cpu",
     "tracedecay-graph-db/hotpath-cpu",
+    "tracedecay-graph-query/hotpath-cpu",
     "tracedecay-private-fs/hotpath-cpu",
     "tracedecay-runtime-core/hotpath-cpu",
     "tracedecay-tool-catalog/hotpath-cpu",
@@ -53,6 +56,7 @@ tracing = "0.1"
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
+tracedecay-graph-query = { path = "../tracedecay-graph-query", version = "0.1.0" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }

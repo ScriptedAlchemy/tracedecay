@@ -46,7 +46,7 @@ use crate::code_index::{
     CodeIndexIgnoredDependencyAdmissionErrorV1, CodeIndexIgnoredDependencyAdmissionFutureV1,
     CodeIndexIgnoredDependencyAdmissionPortV1, CodeIndexIgnoredDependencyAdmissionRequestV1,
 };
-use crate::graph::{
+use tracedecay_graph_query::{
     CodeGraphProjectionReadPort, CodeGraphReadError, CodeGraphReadFuture, CodeGraphReadRequest,
     VerifiedCodeGraphRead,
 };

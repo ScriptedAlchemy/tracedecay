@@ -8,7 +8,7 @@ use tracedecay_code_index::graph_projection::{
 };
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
 use tracedecay_graph_db::GraphCancellation;
-use tracedecay_usecases::graph::{
+use tracedecay_graph_query::{
     CodeGraphReadAdmissionRequest, CodeGraphReadError, CodeGraphReadRequest,
     application_graph_cancellation, map_projection_error,
 };

@@ -66,7 +66,7 @@ impl AdvisoryProductionAuthoritiesV1 {
 pub struct AdvisoryProductionOpenV1 {
     pub project_runtime_db: RegisteredGlobalDbLeaseV1,
     pub database: Database,
-    pub code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
+    pub code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
     pub code_index_identity:
         Arc<dyn crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1>,
     pub project_root: PathBuf,

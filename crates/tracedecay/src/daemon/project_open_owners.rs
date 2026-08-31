@@ -255,7 +255,7 @@ fn concealed_source_edit_problem() -> tracedecay_application::ApplicationProblem
 
 async fn invoke_project_open_source_edit(
     graph: Arc<crate::tracedecay::TraceDecay>,
-    code_graph: Arc<dyn tracedecay_usecases::graph::CodeGraphProjectionReadPort>,
+    code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
     authorization: ProjectOpenSourceEditAuthorizationV1,
     invocation: crate::mcp::server::SourceEditInvocationV1,
 ) -> Result<tracedecay_application::source_edit::SourceEditSurfaceResultV1> {
@@ -470,7 +470,7 @@ impl SourceEditMutationGate {
 fn install_project_open_source_edit_owners(
     server: &McpServer,
     graph: Arc<crate::tracedecay::TraceDecay>,
-    code_graph: Arc<dyn tracedecay_usecases::graph::CodeGraphProjectionReadPort>,
+    code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
     authorization: ProjectOpenSourceEditAuthorizationV1,
     mutation: Arc<SourceEditMutationGate>,
 ) -> Result<()> {
@@ -521,7 +521,7 @@ fn install_project_open_source_edit_owners(
 pub(crate) async fn install_project_open_source_edit_preview_owner(
     server: &McpServer,
     graph: Arc<crate::tracedecay::TraceDecay>,
-    code_graph: Arc<dyn tracedecay_usecases::graph::CodeGraphProjectionReadPort>,
+    code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
     project_root: &Path,
     project_id: &str,
 ) -> Result<Arc<SourceEditMutationGate>> {

@@ -222,7 +222,7 @@ fn authority_still_matches(
 #[hotpath::measure(label = "usecases.edit.execute", future = true)]
 pub(super) async fn execute_source_edit_inner<A>(
     graph: &SourceEditRuntime,
-    code_graph: &dyn tracedecay_usecases::graph::CodeGraphProjectionReadPort,
+    code_graph: &dyn tracedecay_graph_query::CodeGraphProjectionReadPort,
     operation: &ApplicationOperation,
     request: SourceEditEffectRequestV1,
     authorization: &A,
@@ -654,7 +654,7 @@ where
 #[hotpath::measure(label = "usecases.edit.preview", future = true)]
 pub(super) async fn resolve_source_edit_preview(
     graph: &SourceEditRuntime,
-    code_graph: &dyn tracedecay_usecases::graph::CodeGraphProjectionReadPort,
+    code_graph: &dyn tracedecay_graph_query::CodeGraphProjectionReadPort,
     context: &tracedecay_application::RequestContext,
     observed_at: tracedecay_domain::UtcMicros,
     cancellation: Arc<dyn GraphCancellation>,
@@ -729,7 +729,7 @@ fn source_edit_graph_cancellation(
     context: &tracedecay_application::RequestContext,
 ) -> Arc<dyn GraphCancellation> {
     control.map_or_else(
-        || tracedecay_usecases::graph::request_graph_cancellation(context),
+        || tracedecay_graph_query::request_graph_cancellation(context),
         SourceEditEffectControlV1::graph_cancellation,
     )
 }

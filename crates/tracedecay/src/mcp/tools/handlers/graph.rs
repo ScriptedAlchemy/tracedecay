@@ -213,7 +213,7 @@ pub(super) async fn handle_search<F>(
     cancellation: Option<tracedecay_application::CancellationSignal>,
 ) -> Result<ToolResult>
 where
-    F: Future<Output = Result<tracedecay_usecases::graph::VerifiedGraphQuery>>,
+    F: Future<Output = Result<tracedecay_graph_query::VerifiedGraphQuery>>,
 {
     let query =
         args.get("query")
@@ -555,7 +555,7 @@ fn context_search_matches(
 
 fn context_graph_projection(
     cg: &TraceDecay,
-    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
     complete: &crate::mcp::server::CodeIndexSearchCompletedV1,
     scope_prefix: Option<&str>,
     max_nodes: usize,
@@ -681,7 +681,7 @@ pub(super) async fn handle_context<F>(
     cancellation: Option<tracedecay_application::CancellationSignal>,
 ) -> Result<ToolResult>
 where
-    F: Future<Output = Result<tracedecay_usecases::graph::VerifiedGraphQuery>>,
+    F: Future<Output = Result<tracedecay_graph_query::VerifiedGraphQuery>>,
 {
     let request: ContextSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_context")?;
     let task = request.task.as_str();
@@ -894,7 +894,7 @@ where
 #[hotpath::measure(label = "mcp.graph.find_exact_symbol.total")]
 pub(super) async fn handle_find_exact_symbol(
     cg: &TraceDecay,
-    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
     ignored_dependency_admission: Option<
@@ -968,7 +968,7 @@ pub(super) async fn handle_find_exact_symbol(
 #[hotpath::measure(label = "mcp.graph.similar.total")]
 pub(super) async fn handle_similar(
     cg: &TraceDecay,
-    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     search_executor: Option<&crate::mcp::server::CodeIndexSearchExecutor>,
     search_authority: Option<&crate::mcp::server::CodeIndexSearchAuthorityV1>,
@@ -1148,7 +1148,7 @@ struct RenameReferenceSiteInput {
 #[hotpath::measure(label = "mcp.graph.rename_preview.total")]
 pub(super) async fn handle_rename_preview(
     cg: &TraceDecay,
-    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
 ) -> Result<ToolResult> {
     let request: RenamePreviewPrimitiveRequestV1 =

@@ -20,7 +20,7 @@ use tracedecay_mcp::tools::render::{self, Md};
 #[hotpath::measure(label = "mcp.health.redundancy.total")]
 pub(crate) async fn handle_redundancy(
     cg: &TraceDecay,
-    graph: &tracedecay_usecases::graph::VerifiedGraphQuery,
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {

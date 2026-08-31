@@ -555,7 +555,7 @@ async fn production_project_server_inner(
         crate::tracedecay::queries::graph::admitted_verified_graph_query_port_with_source(
             Arc::clone(&code_graph_read_admission_port),
             Arc::clone(&code_graph_projection_read_port),
-            Some(Arc::clone(&cg) as Arc<dyn tracedecay_usecases::tracedecay::SourceReadRuntimePort>),
+            Some(Arc::clone(&cg) as Arc<dyn tracedecay_graph_query::SourceReadRuntimePort>),
         ),
     )
     .with_code_index_search_authority(code_search_authority.clone())
@@ -954,7 +954,7 @@ async fn production_project_server_inner(
                 crate::tracedecay::queries::graph::admitted_verified_graph_query_port_with_source(
                     Arc::clone(&code_graph_read_admission_port),
                     Arc::clone(&code_graph_projection_read_port),
-                    Some(Arc::clone(&cg) as Arc<dyn tracedecay_usecases::tracedecay::SourceReadRuntimePort>),
+                    Some(Arc::clone(&cg) as Arc<dyn tracedecay_graph_query::SourceReadRuntimePort>),
                 ),
             )
             .with_code_index_search_authority(code_search_authority)
@@ -1318,7 +1318,7 @@ struct ProjectCodeIndexAuthorities {
     publication_identity: crate::mcp::server::CodeIndexPublicationIdentityResolver,
     project_id: tracedecay_domain::ProjectId,
     scope: tracedecay_application::ResolvedScope,
-    graph_projection_read_port: Arc<dyn tracedecay_usecases::graph::CodeGraphProjectionReadPort>,
+    graph_projection_read_port: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
     ignored_dependency_admission:
         Arc<dyn tracedecay_usecases::code_index::CodeIndexIgnoredDependencyAdmissionPortV1>,
     generation_census_reader: tracedecay_session_memory::runtime_telemetry::GenerationCensusReader,

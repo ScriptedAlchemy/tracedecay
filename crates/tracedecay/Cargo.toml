@@ -107,6 +107,7 @@ hotpath = [
     "tracedecay-daemon-service/hotpath",
     "tracedecay-global-db/hotpath",
     "tracedecay-graph-db/hotpath",
+    "tracedecay-graph-query/hotpath",
     "tracedecay-hooks/hotpath",
     "tracedecay-host-admission/hotpath",
     "tracedecay-lsp/hotpath",
@@ -147,6 +148,7 @@ hotpath-alloc = [
     "tracedecay-daemon-service/hotpath-alloc",
     "tracedecay-global-db/hotpath-alloc",
     "tracedecay-graph-db/hotpath-alloc",
+    "tracedecay-graph-query/hotpath-alloc",
     "tracedecay-hooks/hotpath-alloc",
     "tracedecay-host-admission/hotpath-alloc",
     "tracedecay-lsp/hotpath-alloc",
@@ -187,6 +189,7 @@ hotpath-cpu = [
     "tracedecay-daemon-service/hotpath-cpu",
     "tracedecay-global-db/hotpath-cpu",
     "tracedecay-graph-db/hotpath-cpu",
+    "tracedecay-graph-query/hotpath-cpu",
     "tracedecay-hooks/hotpath-cpu",
     "tracedecay-host-admission/hotpath-cpu",
     "tracedecay-lsp/hotpath-cpu",
@@ -317,6 +320,7 @@ test-transport = [
     "tracedecay-dashboard-api/test-transport",
     "tracedecay-host-admission/test-transport",
     "tracedecay-usecases/test-transport",
+    "tracedecay-graph-query/test-helpers",
     "tracedecay-mcp/test-transport",
     # The observation-seed fixture bridge (`dashboard::observation_seed`) is
     # test-transport-gated and drives the global-db session-temporal refresh
@@ -405,6 +409,7 @@ tracedecay-lsp = { path = "../tracedecay-lsp", version = "0.1.0" }
 tracedecay-maintenance = { path = "../tracedecay-maintenance", version = "0.1.0" }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
 tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
+tracedecay-graph-query = { path = "../tracedecay-graph-query", version = "0.1.0" }
 tracedecay-policy = { path = "../tracedecay-policy", version = "0.1.0" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
 tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
@@ -506,6 +511,7 @@ tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0", feat
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0", features = ["test-helpers"] }
 # Same policy for the extracted global-db harness the root test suite drives.
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-graph-query = { path = "../tracedecay-graph-query", version = "0.1.0", features = ["test-helpers"] }
 # The root's cfg(test) host-admission support composes the dashboard test
 # authority, which lives behind the dashboard-api test-transport feature.
 tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api", version = "0.1.0", features = ["test-transport"] }
