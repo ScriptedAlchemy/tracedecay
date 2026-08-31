@@ -515,6 +515,35 @@ mod tests {
         (graph, runtime)
     }
 
+    async fn isolated_sibling_graph(
+        runtime: &crate::host_admission::HostAdmissionTestRuntimeV1,
+        profile_root: &std::path::Path,
+        project_root: &std::path::Path,
+        project_id: &str,
+    ) -> (
+        crate::tracedecay::TraceDecay,
+        crate::host_admission::HostAdmissionTestRuntimeV1,
+    ) {
+        std::fs::create_dir_all(project_root).expect("isolated sibling project root");
+        let project_id =
+            tracedecay_domain::ProjectId::new(project_id.to_owned()).expect("typed project identity");
+        let sibling = runtime
+            .sibling_project(project_root, project_id)
+            .await
+            .expect("isolated sibling host-admission runtime");
+        let graph = sibling
+            .initialize_project_graph_for_test(
+                project_root,
+                crate::tracedecay::TraceDecayOpenOptions {
+                    profile_root: Some(profile_root.to_path_buf()),
+                    global_db_path: None,
+                },
+            )
+            .await
+            .expect("isolated sibling registered graph");
+        (graph, sibling)
+    }
+
     #[tokio::test]
     async fn timed_out_retirement_stays_owned_until_retry_observes_completion() {
         let administration = StoreAdministration::default();
@@ -815,14 +844,13 @@ mod tests {
     #[tokio::test]
     async fn cancellation_before_eviction_admission_preserves_owner_then_shutdown_joins_retirement()
     {
-        let homes = tempfile::tempdir().expect("isolated profile homes");
-        let idle_profile = homes.path().join("idle-profile");
-        let replacement_profile = homes.path().join("replacement-profile");
+        let homes = tempfile::tempdir().expect("isolated profile home");
+        let profile = homes.path().join("shared-profile");
         let projects = tempfile::tempdir().expect("project roots");
         let idle_project = projects.path().join("idle");
         let replacement_project = projects.path().join("replacement");
-        let (idle_graph, _idle_runtime) = isolated_registered_graph(
-            &idle_profile,
+        let (idle_graph, idle_runtime) = isolated_registered_graph(
+            &profile,
             &idle_project,
             "project.retirement-idle",
         )
@@ -830,8 +858,9 @@ mod tests {
         let idle_server = crate::mcp::McpServer::new(idle_graph, None).await;
         let idle_lifecycle = idle_server.project_server_response_lifecycle();
         let idle_witness = Arc::downgrade(&idle_server);
-        let (replacement_graph, _replacement_runtime) = isolated_registered_graph(
-            &replacement_profile,
+        let (replacement_graph, _replacement_runtime) = isolated_sibling_graph(
+            &idle_runtime,
+            &profile,
             &replacement_project,
             "project.retirement-replacement",
         )
@@ -839,7 +868,7 @@ mod tests {
         let replacement_server = crate::mcp::McpServer::new(replacement_graph, None).await;
         let administration = StoreAdministration::default();
         let idle_key = crate::daemon::ProjectServerKey {
-            owner: isolated_owner(&idle_profile, "project-idle"),
+            owner: isolated_owner(&profile, "project-idle"),
             project_root: idle_project.clone(),
             scope_prefix: None,
         };
@@ -851,8 +880,9 @@ mod tests {
         };
         {
             let mut servers = administration.project_servers().lock().await;
-            servers.insert_pending_route(idle_route.clone(), idle_key.clone(), idle_server);
-            assert!(servers.mark_ready(&idle_key));
+            // Bounded replacement evicts only RegisteredHostIngest owners in
+            // this route set. insert_route publishes that exact idle state.
+            servers.insert_route(idle_route.clone(), idle_key.clone(), idle_server);
         }
 
         let admission_blocker = administration
@@ -900,7 +930,7 @@ mod tests {
         drop(admission_blocker);
 
         let replacement_key = crate::daemon::ProjectServerKey {
-            owner: isolated_owner(&replacement_profile, "project-replacement"),
+            owner: isolated_owner(&profile, "project-replacement"),
             project_root: replacement_project.clone(),
             scope_prefix: None,
         };
