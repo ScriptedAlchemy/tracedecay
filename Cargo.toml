@@ -215,8 +215,8 @@ tree-sitter-rust = { git = "https://github.com/vanessa-rodrigues/tree-sitter-rus
 # resolves sibling crates by path, so every grafeo crate must come from the
 # same fork rev — a mixed registry/git graph would build two type-incompatible
 # instances of the unpatched crates.
-grafeo-adapters = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "be05c923ba719d9deb5277101e1b060f63e679cb" }
-grafeo-common = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "be05c923ba719d9deb5277101e1b060f63e679cb" }
-grafeo-core = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "be05c923ba719d9deb5277101e1b060f63e679cb" }
-grafeo-engine = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "be05c923ba719d9deb5277101e1b060f63e679cb" }
-grafeo-storage = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "be05c923ba719d9deb5277101e1b060f63e679cb" }
+grafeo-adapters = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "bdd5dbdf5b5122e26ef02b42e32e97722aa5b1cc" }
+grafeo-common = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "bdd5dbdf5b5122e26ef02b42e32e97722aa5b1cc" }
+grafeo-core = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "bdd5dbdf5b5122e26ef02b42e32e97722aa5b1cc" }
+grafeo-engine = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "bdd5dbdf5b5122e26ef02b42e32e97722aa5b1cc" }
+grafeo-storage = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "bdd5dbdf5b5122e26ef02b42e32e97722aa5b1cc" }
