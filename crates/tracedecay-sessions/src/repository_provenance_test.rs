@@ -27,11 +27,14 @@ impl GitFixture {
     }
 
     fn git(&self, args: &[&str]) -> Output {
-        let output = Command::new(tracedecay_runtime_core::git::git_program())
-            .args(args)
-            .current_dir(self.path())
-            .output()
-            .unwrap();
+        let output = Command::new(
+            tracedecay_runtime_core::git::try_git_program()
+                .expect("absolute git executable should resolve"),
+        )
+        .args(args)
+        .current_dir(self.path())
+        .output()
+        .unwrap();
         assert!(
             output.status.success(),
             "git {args:?} failed: {}",
@@ -158,11 +161,14 @@ fn conflicted_index_is_explicit_without_a_status_probe() {
     fixture.commit("side");
     fixture.git(&["checkout", "-q", "main"]);
     fixture.commit("main");
-    let merge = Command::new(tracedecay_runtime_core::git::git_program())
-        .args(["merge", "--no-edit", "side"])
-        .current_dir(fixture.path())
-        .output()
-        .unwrap();
+    let merge = Command::new(
+        tracedecay_runtime_core::git::try_git_program()
+            .expect("absolute git executable should resolve"),
+    )
+    .args(["merge", "--no-edit", "side"])
+    .current_dir(fixture.path())
+    .output()
+    .unwrap();
     assert!(!merge.status.success());
 
     let capture = fixture.capture();
@@ -285,11 +291,14 @@ fn remote_credentials_are_removed_before_identity_hashing() {
 #[test]
 fn bare_repository_is_typed_unsupported() {
     let root = TempDir::new().unwrap();
-    let output = Command::new(tracedecay_runtime_core::git::git_program())
-        .args(["init", "--bare", "-q"])
-        .current_dir(root.path())
-        .output()
-        .unwrap();
+    let output = Command::new(
+        tracedecay_runtime_core::git::try_git_program()
+            .expect("absolute git executable should resolve"),
+    )
+    .args(["init", "--bare", "-q"])
+    .current_dir(root.path())
+    .output()
+    .unwrap();
     assert!(output.status.success());
     let repository_id = RepositoryId::new("repository.bare-fixture").unwrap();
     let result = capture_repository_provenance(&RepositoryProvenanceProbeRequest::new(
@@ -662,11 +671,14 @@ fn defunct_checkout_capture_never_falls_back_to_an_ambient_parent_repository() {
     let child = parent.path().join("child");
     fs::create_dir_all(&child).unwrap();
     let git = |args: &[&str]| {
-        let output = Command::new(tracedecay_runtime_core::git::git_program())
-            .args(args)
-            .current_dir(&child)
-            .output()
-            .unwrap();
+        let output = Command::new(
+            tracedecay_runtime_core::git::try_git_program()
+                .expect("absolute git executable should resolve"),
+        )
+        .args(args)
+        .current_dir(&child)
+        .output()
+        .unwrap();
         assert!(
             output.status.success(),
             "git {args:?} failed: {}",

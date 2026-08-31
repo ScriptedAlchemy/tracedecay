@@ -51,11 +51,14 @@ impl GitFixture {
 }
 
 fn git(root: &Path, args: &[&str]) {
-    let status = Command::new(tracedecay_runtime_core::git::git_program())
-        .current_dir(root)
-        .args(args)
-        .status()
-        .expect("run git fixture command");
+    let status = Command::new(
+        tracedecay_runtime_core::git::try_git_program()
+            .expect("absolute git executable should resolve"),
+    )
+    .current_dir(root)
+    .args(args)
+    .status()
+    .expect("run git fixture command");
     assert!(status.success(), "git fixture command failed: {args:?}");
 }
 

@@ -5,14 +5,21 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use tracedecay_domain::errors::Result;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 /// Returns a map of `file_path` → `commit_count` for the last `days` days.
 /// Shells out to `git log --format= --name-only --since='{days} days ago'`.
-/// Returns an empty map if git is not available or not a repo.
+/// Returns a typed unavailable error if Git cannot be spawned and an empty map
+/// when the project is not a Git repository.
 #[hotpath::measure(label = "usecases.git_intelligence.file_churn", future = true)]
 pub async fn file_churn(project_root: &Path, days: u32) -> Result<HashMap<String, usize>> {
-    let output = tokio::process::Command::new(tracedecay_runtime_core::git::git_program())
+    let git = tracedecay_runtime_core::git::try_git_program().map_err(|_| {
+        TraceDecayError::HostCliUnavailable {
+            program: "git".to_string(),
+            lifecycle: "Git churn analysis".to_string(),
+        }
+    })?;
+    let output = tokio::process::Command::new(git)
         .args([
             "log",
             "--format=",
@@ -21,12 +28,17 @@ pub async fn file_churn(project_root: &Path, days: u32) -> Result<HashMap<String
         ])
         .current_dir(project_root)
         .output()
-        .await;
-
-    // git not found or other OS error → return empty map gracefully
-    let Ok(output) = output else {
-        return Ok(HashMap::new());
-    };
+        .await
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                TraceDecayError::HostCliUnavailable {
+                    program: "git".to_string(),
+                    lifecycle: "Git churn analysis".to_string(),
+                }
+            } else {
+                TraceDecayError::Io(error)
+            }
+        })?;
 
     if !output.status.success() {
         // Not a git repo, or another non-fatal git error

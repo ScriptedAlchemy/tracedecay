@@ -39,10 +39,13 @@ struct Fixture {
 
 impl Fixture {
     fn git_available() -> bool {
-        Command::new(tracedecay_runtime_core::git::git_program())
-            .arg("--version")
-            .output()
-            .is_ok_and(|output| output.status.success())
+        Command::new(
+            tracedecay_runtime_core::git::try_git_program()
+                .expect("absolute git executable should resolve"),
+        )
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
     }
 
     fn init() -> Option<Self> {
@@ -61,21 +64,24 @@ impl Fixture {
     }
 
     fn git_as(&self, name: &str, email: &str, args: &[&str]) -> Output {
-        Command::new(tracedecay_runtime_core::git::git_program())
-            .args([
-                "-c",
-                &format!("user.name={name}"),
-                "-c",
-                &format!("user.email={email}"),
-                "-c",
-                "commit.gpgsign=false",
-                "-c",
-                "merge.ff=false",
-            ])
-            .args(args)
-            .current_dir(self.path())
-            .output()
-            .expect("git spawn failed")
+        Command::new(
+            tracedecay_runtime_core::git::try_git_program()
+                .expect("absolute git executable should resolve"),
+        )
+        .args([
+            "-c",
+            &format!("user.name={name}"),
+            "-c",
+            &format!("user.email={email}"),
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "merge.ff=false",
+        ])
+        .args(args)
+        .current_dir(self.path())
+        .output()
+        .expect("git spawn failed")
     }
 
     fn git_ok_as(&self, name: &str, email: &str, args: &[&str]) -> String {

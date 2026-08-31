@@ -84,6 +84,7 @@ pub(crate) enum PersistentGraphStoreState {
     Existing,
 }
 
+#[hotpath::measure_all]
 impl GraphDbOpenOptions {
     pub(crate) fn validate(
         self,
@@ -152,6 +153,7 @@ impl GraphDbOpenOptions {
 /// default all-in-RAM LPG store and default buffer budget stay exactly as they
 /// were before `graph-disk-tier` existed.
 #[cfg(not(feature = "graph-disk-tier"))]
+#[hotpath::measure]
 fn apply_tiered_storage(config: Config, _path: &Path) -> Config {
     config
 }
@@ -196,6 +198,7 @@ const TIERED_MEMORY_FRACTION: f64 = 0.25;
 /// store closes. That cleanup is unwritten, because no section tracedecay
 /// registers today is spillable (see above).
 #[cfg(feature = "graph-disk-tier")]
+#[hotpath::measure]
 fn apply_tiered_storage(config: Config, path: &Path) -> Config {
     config
         .with_spill_path(tiered_spill_directory(path))
@@ -204,12 +207,14 @@ fn apply_tiered_storage(config: Config, path: &Path) -> Config {
 
 /// `/var/db/graph.grafeo` -> `/var/db/graph.spill`.
 #[cfg(feature = "graph-disk-tier")]
+#[hotpath::measure]
 fn tiered_spill_directory(path: &Path) -> PathBuf {
     // `validate_persistent_path` has already established a parent directory,
     // a UTF-8 file name, and a `.grafeo` extension by the time we get here.
     path.with_extension("spill")
 }
 
+#[hotpath::measure]
 fn validate_persistent_path(path: &Path) -> Result<(), GraphDbError> {
     let Some(parent) = path.parent() else {
         return Err(GraphDbError::invalid(

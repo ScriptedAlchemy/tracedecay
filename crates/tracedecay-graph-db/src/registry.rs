@@ -88,6 +88,7 @@ impl fmt::Debug for GraphDbRegistration {
     }
 }
 
+#[hotpath::measure_all]
 impl GraphDbRegistration {
     pub(crate) fn binding(&self) -> &StoreRuntimeBindingV1 {
         self.authority_lease.binding()
@@ -135,6 +136,7 @@ pub struct GraphDbRegistryCapacity {
     pub evictable: usize,
 }
 
+#[hotpath::measure_all]
 impl GraphDbRegistryCapacity {
     #[must_use]
     pub fn available_after_eviction(self) -> usize {
@@ -172,6 +174,7 @@ pub struct GraphDbRetirementCommit {
     outcomes: Vec<GraphDbRetirementOutcome>,
 }
 
+#[hotpath::measure_all]
 impl GraphDbRetirementCommit {
     #[must_use]
     pub fn outcomes(&self) -> &[GraphDbRetirementOutcome] {
@@ -191,6 +194,7 @@ pub struct GraphDbRetirementRefusal {
     targets: Vec<GraphDbRetirementTarget>,
 }
 
+#[hotpath::measure_all]
 impl GraphDbRetirementRefusal {
     fn new(error: GraphDbError, targets: Vec<GraphDbRetirementTarget>) -> Self {
         Self { error, targets }
@@ -356,6 +360,7 @@ enum OwnerCloseReservation {
     },
 }
 
+#[hotpath::measure_all]
 impl Eviction {
     fn owner_id(&self) -> GraphDbOwnerId {
         self.owner.owner_id()
@@ -447,6 +452,7 @@ pub struct GraphDbRetirementReservation {
     armed: bool,
 }
 
+#[hotpath::measure_all]
 impl GraphDbRetirementReservation {
     pub fn commit(
         &mut self,
@@ -586,6 +592,7 @@ impl Drop for GraphDbRetirementReservation {
     }
 }
 
+#[hotpath::measure_all]
 impl GraphDbRegistry {
     pub fn new(config: GraphDbRegistryConfig) -> Result<Self, GraphDbError> {
         Self::new_with_manifest_provider(
@@ -2053,6 +2060,7 @@ impl GraphDbRegistry {
     }
 }
 
+#[hotpath::measure]
 fn retirement_outcome(
     target: GraphDbRetirementTarget,
     result: Result<(), GraphDbError>,
@@ -2066,6 +2074,7 @@ fn retirement_outcome(
     }
 }
 
+#[hotpath::measure]
 fn post_close_terminal_error(
     close_result: &Result<(), GraphDbError>,
     terminalization_error: GraphDbError,
@@ -2085,6 +2094,7 @@ fn post_close_terminal_error(
     }
 }
 
+#[hotpath::measure]
 fn terminal_recording_error(
     close_result: &Result<(), GraphDbError>,
     terminalization_error: GraphDbError,
@@ -2099,6 +2109,7 @@ fn terminal_recording_error(
     post_close_terminal_error(close_result, terminalization_error)
 }
 
+#[hotpath::measure]
 fn rollback_retiring_under_lock(
     state: &mut RegistryState,
     pending: &mut Vec<Eviction>,
@@ -2129,6 +2140,7 @@ fn rollback_retiring_under_lock(
     Ok(())
 }
 
+#[hotpath::measure]
 fn reserve_capacity_eviction(
     state: &mut RegistryState,
     max_open: usize,
@@ -2222,6 +2234,7 @@ fn reserve_capacity_eviction(
     Ok(Some(eviction))
 }
 
+#[hotpath::measure]
 fn entry_consumes_capacity(entry: &RegistryEntry) -> bool {
     match entry {
         RegistryEntry::Opening { .. }
@@ -2238,6 +2251,7 @@ fn entry_consumes_capacity(entry: &RegistryEntry) -> bool {
     }
 }
 
+#[hotpath::measure]
 fn entry_is_capacity_evictable(entry: &RegistryEntry) -> bool {
     matches!(
         entry,

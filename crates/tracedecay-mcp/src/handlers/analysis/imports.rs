@@ -1,6 +1,16 @@
 //! `tracedecay_unused_imports` — `use`-statement identifiers weighed against identifier spans in the rest of the file.
 
-use super::*;
+use std::collections::HashMap;
+use std::path::Path;
+
+use serde_json::{Value, json};
+use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_graph_query::VerifiedGraphQuery;
+
+use super::{VerifiedAnalysisSymbol, verified_analysis_symbols};
+use crate::ToolResult;
+use crate::handlers::support::{rendered_tool_result, unique_file_paths};
+use crate::tools::render;
 
 /// Returns the identifiers a `use` statement brings into scope, parsing
 /// grouped and aliased forms. Examples:
@@ -181,9 +191,9 @@ fn identifiers_in_line(line: &str) -> Vec<String> {
 /// between one file's findings, so a page can exceed it by the last file's
 /// remainder and no finding is stranded behind the cursor.
 #[hotpath::measure(future = true, label = "mcp.analysis.unused_imports.total")]
-pub(crate) async fn handle_unused_imports(
-    cg: &TraceDecay,
-    graph: &tracedecay_graph_query::VerifiedGraphQuery,
+pub async fn handle_unused_imports(
+    project_root: &Path,
+    graph: &VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -212,7 +222,7 @@ pub(crate) async fn handle_unused_imports(
     });
     // Graph phase is done. Each candidate file is read and masked, so the
     // walk belongs on a blocking worker like the sibling analysis scans.
-    let project_root = cg.project_root().to_path_buf();
+    let scan_project_root = project_root.to_path_buf();
     let (unused, touched, scanned_files, last_scanned, mut partial_reason) = hotpath::future!(
         tokio::task::spawn_blocking(move || -> Result<_> {
             let mut unused: Vec<Value> = Vec::new();
@@ -237,7 +247,8 @@ pub(crate) async fn handle_unused_imports(
                 let use_symbols = use_symbols_by_file
                     .get(&file_path)
                     .map_or(&[][..], Vec::as_slice);
-                let file_unused = unused_imports_in_file(&project_root, &file_path, use_symbols)?;
+                let file_unused =
+                    unused_imports_in_file(&scan_project_root, &file_path, use_symbols)?;
                 if !file_unused.is_empty() {
                     touched.push(file_path.clone());
                 }
@@ -284,7 +295,7 @@ pub(crate) async fn handle_unused_imports(
     );
 
     Ok(rendered_tool_result(
-        Some(cg.project_root()),
+        Some(project_root),
         &args,
         &output,
         touched_files,

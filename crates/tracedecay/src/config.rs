@@ -26,13 +26,13 @@ use tracedecay_domain::configuration::{
     SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY, UserProfileId,
 };
 
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::configuration::{
     GlobalDbConfigurationControlStore, ProfileCodeIndexWorkerConfigurationStore,
     ProfileCodeIndexWorkerConfigurationV1,
 };
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_maintenance::retention::branch_compaction::CompactionThresholdConfig;
-use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_usecases::configuration::ConfigurationControlStore;
 
 pub use tracedecay_global_db::configuration::{registry, resolver};
@@ -1724,7 +1724,10 @@ fn is_ignored_by_git(project_path: &Path, git_config_global: Option<&Path>) -> O
             .and_then(|path| is_ignored_by_explicit_global_excludes(project_path, path))
     };
     let dir_name = active_data_dir_name(project_path);
-    let mut command = Command::new(tracedecay_runtime_core::git::git_program());
+    let Ok(git) = tracedecay_runtime_core::git::try_git_program() else {
+        return fallback_global_excludes();
+    };
+    let mut command = Command::new(git);
     command
         .arg("-C")
         .arg(project_path)

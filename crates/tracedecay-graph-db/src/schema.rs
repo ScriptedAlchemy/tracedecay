@@ -91,6 +91,7 @@ pub(crate) fn projection_key(namespace: &GraphNamespace, projection: &GraphProje
     stable_key(namespace, projection.as_str())
 }
 
+#[hotpath::measure]
 fn key_label(prefix: &str, key: &str) -> String {
     format!("{prefix}{}", hex::encode(key.as_bytes()))
 }
@@ -460,6 +461,7 @@ pub(crate) fn publication_properties(
     Ok(properties)
 }
 
+#[hotpath::measure]
 fn commit_properties(commit: &GraphCommit) -> Result<Vec<(String, Value)>, GraphDbError> {
     let sequence = i64::try_from(commit.sequence)
         .map_err(|_| GraphDbError::unavailable("graph commit sequence exceeds i64"))?;
@@ -617,6 +619,7 @@ pub(crate) fn decode_graph_properties(
     Ok(decoded)
 }
 
+#[hotpath::measure]
 fn encode_graph_property(name: &GraphPropertyName, property: &GraphProperty) -> (String, Value) {
     let encoded = hex::encode(name.as_str().as_bytes());
     match property {
@@ -660,6 +663,7 @@ pub(crate) fn vector_property_key(
     )
 }
 
+#[hotpath::measure]
 fn decode_vector_property(
     key: &str,
     value: Value,
@@ -699,6 +703,7 @@ fn decode_vector_property(
     Ok(Some((name, GraphProperty::Vector(vector))))
 }
 
+#[hotpath::measure]
 fn require_decoded_property_budget(
     decoded: &BTreeMap<GraphPropertyName, GraphProperty>,
     decoded_bytes: &mut usize,
@@ -844,6 +849,7 @@ pub(crate) fn required_i64(value: Option<&Value>, description: &str) -> Result<i
         })
 }
 
+#[hotpath::measure]
 fn decode_utf8(value: &str, description: &str) -> Result<String, GraphDbError> {
     let bytes = hex::decode(value).map_err(|error| GraphDbError::Corrupt {
         message: format!("native {description} encoding is invalid: {error}"),
@@ -853,6 +859,7 @@ fn decode_utf8(value: &str, description: &str) -> Result<String, GraphDbError> {
     })
 }
 
+#[hotpath::measure]
 fn persisted_validation_error(description: &str, error: GraphDbError) -> GraphDbError {
     GraphDbError::Corrupt {
         message: format!("invalid persisted {description}: {error}"),

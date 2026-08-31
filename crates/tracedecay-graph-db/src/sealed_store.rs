@@ -246,6 +246,7 @@ impl std::fmt::Debug for SealedGenerationStore {
     }
 }
 
+#[hotpath::measure_all]
 impl SealedGenerationStore {
     /// The read-only compacted database serving this generation's reads.
     pub(crate) fn database(&self) -> &Arc<GraphDb> {
@@ -269,6 +270,7 @@ impl SealedGenerationStore {
 ///
 /// Sealed stores are on by default: `TRACEDECAY_GRAPH_SEALED_STORE=off`
 /// (or `0`/`false`/`disabled`) is the operational kill-switch.
+#[hotpath::measure]
 fn sealed_store_disabled() -> bool {
     if cfg!(not(feature = "graph-sealed-store")) {
         return true;
@@ -283,10 +285,12 @@ fn sealed_store_disabled() -> bool {
 }
 
 /// `/var/db/graph.grafeo` -> `/var/db/graph.sealed`.
+#[hotpath::measure]
 fn sealed_store_root(database_path: &Path) -> PathBuf {
     database_path.with_extension("sealed")
 }
 
+#[hotpath::measure]
 fn sealed_generation_directory(root: &Path, physical_namespace: &GraphNamespace) -> PathBuf {
     // `generation:<64 hex>` -> `<64 hex>`: the digest is filesystem-safe.
     let name = physical_namespace
@@ -296,6 +300,7 @@ fn sealed_generation_directory(root: &Path, physical_namespace: &GraphNamespace)
     root.join(name)
 }
 
+#[hotpath::measure]
 fn remove_sealed_directory(directory: &Path) {
     match std::fs::remove_dir_all(directory) {
         Ok(()) => {}
@@ -308,6 +313,7 @@ fn remove_sealed_directory(directory: &Path) {
     }
 }
 
+#[hotpath::measure]
 fn sealed_database_options(path: PathBuf) -> GraphDbOpenOptions {
     GraphDbOpenOptions {
         location: GraphDbLocation::Persistent(path),
@@ -317,10 +323,12 @@ fn sealed_database_options(path: PathBuf) -> GraphDbOpenOptions {
     }
 }
 
+#[hotpath::measure]
 fn sealed_store_failure(context: &str, error: GraphDbError) -> GraphDbError {
     GraphDbError::unavailable(format!("sealed generation store {context}: {error}"))
 }
 
+#[hotpath::measure]
 fn sealed_store_io_failure(context: &str, error: std::io::Error) -> GraphDbError {
     GraphDbError::unavailable(format!("sealed generation store {context}: {error}"))
 }
@@ -336,6 +344,7 @@ struct SealedCopyPager {
     live_bytes: usize,
 }
 
+#[hotpath::measure_all]
 impl SealedCopyPager {
     fn new(
         namespace: GraphNamespace,
@@ -398,6 +407,7 @@ impl SealedCopyPager {
     }
 }
 
+#[hotpath::measure]
 fn properties_carry_bytes(
     properties: &std::collections::BTreeMap<crate::GraphPropertyName, crate::GraphProperty>,
 ) -> bool {
@@ -406,6 +416,7 @@ fn properties_carry_bytes(
         .any(|property| matches!(property, crate::GraphProperty::Bytes(_)))
 }
 
+#[hotpath::measure]
 fn entity_copy_live_bytes(entity: &GraphEntity) -> usize {
     let labels: usize = entity.labels.iter().map(|label| label.as_str().len()).sum();
     entity.identity.as_str().len()
@@ -413,6 +424,7 @@ fn entity_copy_live_bytes(entity: &GraphEntity) -> usize {
         + graph_properties_live_bytes(&entity.properties).unwrap_or(usize::MAX / 4)
 }
 
+#[hotpath::measure]
 fn relation_copy_live_bytes(relation: &GraphGenerationRelation) -> usize {
     relation.identity.as_str().len()
         + relation.from.identity.as_str().len()
@@ -421,6 +433,7 @@ fn relation_copy_live_bytes(relation: &GraphGenerationRelation) -> usize {
         + graph_properties_live_bytes(&relation.properties).unwrap_or(usize::MAX / 4)
 }
 
+#[hotpath::measure_all]
 impl GraphDb {
     /// The typed refusal every post-compact write against a sealed
     /// generation receives, when this handle holds a sealed store for it.
@@ -641,6 +654,7 @@ impl GraphDb {
     }
 }
 
+#[hotpath::measure_all]
 impl GraphDb {
     /// Bench/test-only: open a sealed artifact database directly by its
     /// directory, exactly as production adoption opens it (mmap-backed
@@ -743,6 +757,7 @@ fn build_or_open_sealed_store(
 /// `staging`, proves the recovered digest reproduces, compacts when the
 /// pinned engine can round-trip every value in the row set, and closes.
 /// Returns the copied `(entities, relations)` counts and the sealed form.
+#[hotpath::measure]
 fn copy_compact_and_close(
     source: &GraphDb,
     identity: &GraphGenerationManifestIdentity,
@@ -1058,6 +1073,7 @@ fn open_sealed_store(
 /// earlier proof ran over, by the full row-streaming proof otherwise. A full
 /// proof files the marker so the next open of unchanged bytes resolves by
 /// stat. Returns the canonical byte count the proof covers.
+#[hotpath::measure]
 fn sealed_copy_proof(
     database: &GraphDb,
     identity: &GraphGenerationManifestIdentity,

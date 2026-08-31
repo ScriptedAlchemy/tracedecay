@@ -60,6 +60,7 @@ pub(crate) struct ExistingBatchState {
     pub(crate) relations: BTreeMap<String, StoredRelation>,
 }
 
+#[hotpath::measure_all]
 impl ExistingBatchState {
     pub(crate) fn load(database: &GrafeoDB, batch: &GraphWriteBatch) -> Result<Self, GraphDbError> {
         if batch.cancellation.is_cancelled() {
@@ -145,6 +146,7 @@ pub(crate) struct FormatState {
     pub(crate) sequence: u64,
 }
 
+#[hotpath::measure_all]
 impl FormatState {
     pub(crate) fn load(database: &GrafeoDB) -> Result<Self, GraphDbError> {
         let store = database.graph_store();
@@ -187,6 +189,7 @@ pub(crate) struct EndpointIdentityCache {
     identities: HashMap<NodeId, (GraphNamespace, GraphEntityId)>,
 }
 
+#[hotpath::measure_all]
 impl EndpointIdentityCache {
     pub(crate) fn identity(
         &mut self,
@@ -204,6 +207,7 @@ impl EndpointIdentityCache {
 
 /// Identity + owner fields from one already-loaded node, without decoding
 /// labels or graph properties.
+#[hotpath::measure]
 fn entity_endpoint_identity(
     database: &GrafeoDB,
     node_id: NodeId,
@@ -227,6 +231,7 @@ fn entity_endpoint_identity(
     Ok((namespace, identity))
 }
 
+#[hotpath::measure]
 fn load_indexed_entity_node(
     database: &GrafeoDB,
     namespace: &GraphNamespace,
@@ -305,6 +310,7 @@ pub(crate) fn load_entity(
     }))
 }
 
+#[hotpath::measure]
 fn load_requested_entities(
     database: &GrafeoDB,
     namespace: &GraphNamespace,
@@ -323,6 +329,7 @@ fn load_requested_entities(
     Ok(loaded)
 }
 
+#[hotpath::measure]
 fn load_requested_entity_locators(
     database: &GrafeoDB,
     namespace: &GraphNamespace,
@@ -341,6 +348,7 @@ fn load_requested_entity_locators(
     Ok(loaded)
 }
 
+#[hotpath::measure]
 fn load_requested_relations(
     database: &GrafeoDB,
     namespace: &GraphNamespace,
@@ -434,6 +442,7 @@ pub(crate) fn load_relation_by_edge_cached(
     load_relation_by_locator_cached(database, locator, cache).map(Some)
 }
 
+#[hotpath::measure]
 fn load_relation_by_key(
     database: &GrafeoDB,
     namespace: &GraphNamespace,
@@ -519,6 +528,7 @@ pub(crate) struct RelationReference {
     pub(crate) to: GraphEntityId,
 }
 
+#[hotpath::measure]
 fn incident_edge_ids(
     database: &GrafeoDB,
     entity: NodeId,
@@ -570,6 +580,7 @@ pub(crate) fn relation_references_for_entity(
     .collect()
 }
 
+#[hotpath::measure]
 fn load_relation_projection_by_edge(
     database: &GrafeoDB,
     edge_id: EdgeId,
@@ -577,6 +588,7 @@ fn load_relation_projection_by_edge(
     Ok(load_relation_by_edge(database, edge_id)?.map(|stored| stored.projection))
 }
 
+#[hotpath::measure]
 fn load_relation_reference_by_edge(
     database: &GrafeoDB,
     edge_id: EdgeId,
@@ -790,6 +802,7 @@ pub(crate) fn projection_relation_deletion_page_checked(
     .collect()
 }
 
+#[hotpath::measure]
 fn projection_identity_deletion_page_checked(
     database: &GrafeoDB,
     owner_label: &str,
@@ -1049,6 +1062,7 @@ fn labeled_projection_nodes_checked(
     Ok(nodes)
 }
 
+#[hotpath::measure]
 fn required_arc_string(value: Option<&Value>, description: &str) -> Result<ArcStr, GraphDbError> {
     match value {
         Some(Value::String(value)) if value.len() <= MAX_GRAPH_IDENTIFIER_BYTES => {
@@ -1062,6 +1076,7 @@ fn required_arc_string(value: Option<&Value>, description: &str) -> Result<ArcSt
     }
 }
 
+#[hotpath::measure]
 fn decode_projection(
     database: &GrafeoDB,
     node: NodeId,
@@ -1091,6 +1106,7 @@ fn decode_projection(
     })
 }
 
+#[hotpath::measure]
 fn decode_commit(node: &grafeo_core::graph::lpg::Node) -> Result<GraphCommit, GraphDbError> {
     let sequence = u64::try_from(required_i64(
         node.get_property(COMMIT_SEQUENCE_PROPERTY),
@@ -1133,6 +1149,7 @@ fn decode_commit(node: &grafeo_core::graph::lpg::Node) -> Result<GraphCommit, Gr
     })
 }
 
+#[hotpath::measure]
 fn parse_namespace(
     node: &grafeo_core::graph::lpg::Node,
     description: &str,
@@ -1200,6 +1217,7 @@ fn unique_property_node(
     Ok(first)
 }
 
+#[hotpath::measure]
 fn persisted_validation_error(description: &str, error: GraphDbError) -> GraphDbError {
     GraphDbError::Corrupt {
         message: format!("invalid persisted {description}: {error}"),

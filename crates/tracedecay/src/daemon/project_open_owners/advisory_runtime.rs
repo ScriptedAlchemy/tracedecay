@@ -35,6 +35,7 @@ use tracedecay_lsp::{
     DiagnosticTrigger, FeedbackCycleRequest, FeedbackCycleRuntimePort, LspRuntimeFailure,
     LspRuntimeFuture,
 };
+use tracedecay_session_memory::context::MonotonicDeadline;
 use tracedecay_usecases::advisory::github_runtime::{
     ConfiguredGitHubSourceAccessAuthorityV1, GitHubDiscoveryControlV1,
     GitHubExactCommitDiscoveryOutcomeV1, GitHubProviderLifecycleV1, GitHubSourceAccessAuthorityV1,
@@ -53,7 +54,6 @@ use tracedecay_usecases::advisory::{
     discover_production_ci_failure_request_v1, github_anchor_authorities_arc_v1,
     register_advisory_hook_notice_queue, unregister_advisory_hook_notice_queue,
 };
-use tracedecay_session_memory::context::MonotonicDeadline;
 use tracedecay_usecases::delivery::{
     ProjectDeliveryProviderMountGateV1, ProjectDeliveryReadAuthorityOpenOutcomeV1,
     ProjectDeliveryReadOpenV1, ProjectDeliveryReviewBodySourceV1,
@@ -1821,7 +1821,8 @@ fn resolve_production_github_identity(
     if pull.target != *target || head != feedback_scope.head_commit_id {
         return None;
     }
-    let merge_base = Command::new(tracedecay_runtime_core::git::git_program())
+    let git = tracedecay_runtime_core::git::try_git_program().ok()?;
+    let merge_base = Command::new(git)
         .args([
             "-C",
             &project_root.to_string_lossy(),

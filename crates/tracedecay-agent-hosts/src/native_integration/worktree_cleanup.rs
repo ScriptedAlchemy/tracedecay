@@ -13,7 +13,7 @@ use tracedecay_domain::{
     NativeWorktreeCleanupCommandV1, NativeWorktreeCleanupOutcomeV1, NativeWorktreeCleanupPhaseV1,
     NativeWorktreeCleanupReceiptV1, NativeWorktreeCleanupTransactionV1, UtcMicros,
 };
-use tracedecay_runtime_core::git::{GitCommandBounds, bounded_command_output, git_program};
+use tracedecay_runtime_core::git::{GitCommandBounds, bounded_command_output, try_git_program};
 use tracedecay_store::{
     NativeIntegrationStore, NativeIntegrationStoreError, NativeWorktreeCleanupBeginResultV1,
 };
@@ -556,7 +556,7 @@ fn record_worktree_reconciliation_outcome(
 }
 
 fn run_worktree_remove(repository_root: &Path, worktree_root: &Path) -> Result<Output, ()> {
-    let mut command = Command::new(git_program());
+    let mut command = Command::new(try_git_program().map_err(|_| ())?);
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("GIT_") {
             command.env_remove(key);
