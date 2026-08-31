@@ -15,19 +15,19 @@ use tracedecay_graph_db::{
     SealedGraphStateDigest, SourceGeneration, take_graph_db_hydration_counters,
 };
 use tracedecay_store::{
-    GraphProjectionIdentityV1, GraphPublicationInputDigestV1, GraphPublicationKeyV1,
-    GraphPublicationOperationContextV1, GraphPublicationProjectionPageRequestV1,
-    GraphPublicationProjectionPageV1, GraphPublicationReplayLookupV1,
-    GraphPublicationReplayPageRequestV1, GraphPublicationReplayPageV1,
-    GraphPublicationReplayRecordV1, GraphPublicationReplayRetirementV1,
-    GraphPublicationReplayTombstoneV1, GraphPublicationReplayV1,
-    GraphPublicationRetiredCleanupPageRequestV1, GraphPublicationRetiredCleanupPageV1,
-    GraphPublicationSequenceV1, GraphPublicationStoreErrorV1, GraphPublicationStoreResultV1,
-    GraphPublicationStoreV1, GraphReplayAppendOutcomeV1, GraphReplayRetirementOutcomeV1,
-    GraphRetiredReplayCleanupFinalizeOutcomeV1, GraphVerifiedHeadCasOutcomeV1,
-    GraphVerifiedHeadCompareAndSwapV1, GraphVerifiedHeadV1, RuntimeCancellationIdV1,
-    RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1,
-    RuntimeRequestControlV1, RuntimeRequestProbeV1, StoreShardIdV1,
+    GraphPendingReplayDiscardOutcomeV1, GraphPendingReplayDiscardV1, GraphProjectionIdentityV1,
+    GraphPublicationInputDigestV1, GraphPublicationKeyV1, GraphPublicationOperationContextV1,
+    GraphPublicationProjectionPageRequestV1, GraphPublicationProjectionPageV1,
+    GraphPublicationReplayLookupV1, GraphPublicationReplayPageRequestV1,
+    GraphPublicationReplayPageV1, GraphPublicationReplayRecordV1,
+    GraphPublicationReplayRetirementV1, GraphPublicationReplayTombstoneV1,
+    GraphPublicationReplayV1, GraphPublicationRetiredCleanupPageRequestV1,
+    GraphPublicationRetiredCleanupPageV1, GraphPublicationSequenceV1, GraphPublicationStoreErrorV1,
+    GraphPublicationStoreResultV1, GraphPublicationStoreV1, GraphReplayAppendOutcomeV1,
+    GraphReplayRetirementOutcomeV1, GraphRetiredReplayCleanupFinalizeOutcomeV1,
+    GraphVerifiedHeadCasOutcomeV1, GraphVerifiedHeadCompareAndSwapV1, GraphVerifiedHeadV1,
+    RuntimeCancellationIdV1, RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1,
+    RuntimeInterruptionV1, RuntimeRequestControlV1, RuntimeRequestProbeV1, StoreShardIdV1,
 };
 
 #[path = "verified_generation_contract/metadata_replay.rs"]
@@ -275,6 +275,38 @@ impl GraphPublicationStoreV1 for RelationalAuthority {
             interruption.store(1, Ordering::SeqCst);
         }
         Ok(GraphReplayRetirementOutcomeV1::Retired(tombstone))
+    }
+
+    fn discard_pending_replay(
+        &mut self,
+        request: &GraphPendingReplayDiscardV1,
+        _context: &GraphPublicationOperationContextV1,
+    ) -> GraphPublicationStoreResultV1<GraphPendingReplayDiscardOutcomeV1> {
+        let Some(record) = self.records.get(&request.key).cloned() else {
+            return Ok(GraphPendingReplayDiscardOutcomeV1::Missing);
+        };
+        if record.sequence != request.sequence {
+            return Ok(GraphPendingReplayDiscardOutcomeV1::SequenceMismatch { actual: record });
+        }
+        if let Some(head) = self.heads.get(&request.key.projection) {
+            if head.sequence == record.sequence {
+                return Ok(GraphPendingReplayDiscardOutcomeV1::CurrentVerifiedHead {
+                    head: head.clone(),
+                });
+            }
+            if record.sequence < head.sequence {
+                return Ok(GraphPendingReplayDiscardOutcomeV1::Superseded { head: head.clone() });
+            }
+        }
+        self.records.remove(&request.key);
+        if self
+            .pending
+            .get(&request.key.projection)
+            .is_some_and(|pending| pending.publication.key == request.key)
+        {
+            self.pending.remove(&request.key.projection);
+        }
+        Ok(GraphPendingReplayDiscardOutcomeV1::Discarded(record))
     }
 
     fn replay_page(
@@ -599,7 +631,7 @@ fn sealed_code_generation_publishes_with_its_supplied_manifest() {
     );
     let (control, probe) = control_and_probe();
     let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
-    assert_eq!(
+    assert!(matches!(
         registered
             .registry
             .publish_verified(
@@ -610,8 +642,8 @@ fn sealed_code_generation_publishes_with_its_supplied_manifest() {
                 Some(Arc::new(foreign)),
             )
             .unwrap_err(),
-        GraphDbError::Conflict
-    );
+        GraphDbError::Conflict { .. }
+    ));
 
     let (control, probe) = control_and_probe();
     let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
@@ -634,6 +666,131 @@ fn sealed_code_generation_publishes_with_its_supplied_manifest() {
         )
         .unwrap();
     assert_eq!(snapshot.generation(), &sealed_manifest.generation);
+}
+
+/// A publication interrupted between its journal append and the verified
+/// head CAS leaves an orphan pending replay its dead publisher can never
+/// complete. Discarding the exact observed row reopens the journal position
+/// so a fresh publication of the same generation lands — instead of every
+/// later attempt refusing with the same deterministic Conflict forever
+/// (issue #765). The compare-and-swap shape refuses stale evidence.
+#[test]
+fn interrupted_publication_discard_reopens_the_generation_for_republish() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("namespace:interrupted-discard", "code");
+    let g1 = manifest(identity.clone(), "interrupted-g1", "g1", vec![], vec![]);
+    let g1_record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &g1,
+        "publish:interrupted-g1",
+        None,
+        '1',
+    );
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let g1_commit = registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &g1_record.publication.key,
+            None,
+        )
+        .unwrap();
+    // g2 journaled by a publisher that died mid-activation: the replay row
+    // exists but the verified head never advanced past g1.
+    let g2 = manifest(identity.clone(), "interrupted-g2", "g2", vec![], vec![]);
+    let g2_record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &g2,
+        "publish:interrupted-g2",
+        Some(g1_commit.head.clone()),
+        '2',
+    );
+    // Stale evidence refuses: a discard naming a sequence the journal does
+    // not hold returns the actual row and deletes nothing.
+    let stale = GraphPublicationReplayRecordV1::new(
+        GraphPublicationSequenceV1::new(g2_record.sequence.get() + 7).unwrap(),
+        g2_record.publication.clone(),
+    )
+    .unwrap();
+    match registered
+        .registry
+        .discard_interrupted_publication(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &stale,
+        )
+        .unwrap()
+    {
+        GraphPendingReplayDiscardOutcomeV1::SequenceMismatch { actual } => {
+            assert_eq!(actual, g2_record);
+        }
+        outcome => panic!("unexpected stale discard outcome: {outcome:?}"),
+    }
+    assert!(matches!(
+        authority
+            .replay(&g2_record.publication.key, &context)
+            .unwrap(),
+        GraphPublicationReplayLookupV1::Active(_)
+    ));
+    // The exact observed row discards; the journal position is open again.
+    match registered
+        .registry
+        .discard_interrupted_publication(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &g2_record,
+        )
+        .unwrap()
+    {
+        GraphPendingReplayDiscardOutcomeV1::Discarded(discarded) => {
+            assert_eq!(discarded, g2_record);
+        }
+        outcome => panic!("unexpected discard outcome: {outcome:?}"),
+    }
+    assert!(matches!(
+        authority
+            .replay(&g2_record.publication.key, &context)
+            .unwrap(),
+        GraphPublicationReplayLookupV1::Missing
+    ));
+    // The next attempt publishes the same generation fresh where the orphan
+    // wedged every predecessor completion before.
+    let fresh_record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &g2,
+        "publish:interrupted-g2-fresh",
+        Some(g1_commit.head),
+        '3',
+    );
+    let fresh_commit = registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &fresh_record.publication.key,
+            None,
+        )
+        .expect("a fresh publication must land after the orphan discard");
+    assert_eq!(fresh_commit.snapshot.generation(), &g2.generation);
+    let snapshot = registered
+        .registry
+        .verified_snapshot(
+            registration(registered.binding.clone(), temp.path()),
+            &identity,
+        )
+        .unwrap();
+    assert_eq!(snapshot.generation(), &g2.generation);
 }
 
 #[test]
@@ -720,7 +877,7 @@ fn retired_replay_survives_native_delete_failure_until_restart_cleanup_finalizes
 
     let (control, probe) = control_and_probe();
     let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
-    assert_eq!(
+    assert!(matches!(
         registered.registry.retire_one_code_generation_replay(
             registration(registered.binding.clone(), temp.path()),
             &mut authority,
@@ -728,8 +885,8 @@ fn retired_replay_survives_native_delete_failure_until_restart_cleanup_finalizes
             &sealed_generation,
             &wrong_sealed_digest,
         ),
-        Err(GraphDbError::Conflict)
-    );
+        Err(GraphDbError::Conflict { .. })
+    ));
 
     let cancellation = Arc::new(AtomicU8::new(0));
     authority.cancel_after_retire = Some(Arc::clone(&cancellation));
@@ -761,7 +918,7 @@ fn retired_replay_survives_native_delete_failure_until_restart_cleanup_finalizes
     let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
     let (control, probe) = control_and_probe();
     let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
-    assert_eq!(
+    assert!(matches!(
         registered.registry.retire_one_code_generation_replay(
             registration(registered.binding.clone(), temp.path()),
             &mut authority,
@@ -769,8 +926,8 @@ fn retired_replay_survives_native_delete_failure_until_restart_cleanup_finalizes
             &sealed_generation,
             &wrong_sealed_digest,
         ),
-        Err(GraphDbError::Conflict)
-    );
+        Err(GraphDbError::Conflict { .. })
+    ));
     let (control, probe) = control_and_probe();
     let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
     assert!(matches!(
@@ -780,7 +937,7 @@ fn retired_replay_survives_native_delete_failure_until_restart_cleanup_finalizes
             &context,
             &g1_record.publication.key,
         ),
-        Err(GraphDbError::Conflict)
+        Err(GraphDbError::Conflict { .. })
     ));
 
     let (control, probe) = control_and_probe();

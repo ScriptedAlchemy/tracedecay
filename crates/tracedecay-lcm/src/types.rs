@@ -211,10 +211,7 @@ pub struct LcmGrepRequest {
     /// Optional git-scope constraint (branch/worktree/commit). When set,
     /// hits are limited to sessions correlated with the git ref via EXISTS
     /// pushdown against the git-correlation tables. Defaults to `None`.
-    #[serde(
-        default,
-        skip_serializing_if = "crate::GitScopeFilter::is_empty"
-    )]
+    #[serde(default, skip_serializing_if = "crate::GitScopeFilter::is_empty")]
     pub git_filter: crate::GitScopeFilter,
 }
 
@@ -399,6 +396,16 @@ impl LcmStoreTokenCoverage {
             complete: true,
             scanned_messages,
             next_after_store_id: None,
+        }
+    }
+
+    /// Shallow status did not read message bodies. Resume from the start of
+    /// the scope if a caller wants a budgeted estimate.
+    pub const fn unscanned() -> Self {
+        Self {
+            complete: false,
+            scanned_messages: 0,
+            next_after_store_id: Some(0),
         }
     }
 }
