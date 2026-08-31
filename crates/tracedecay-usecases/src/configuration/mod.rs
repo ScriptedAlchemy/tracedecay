@@ -22,7 +22,10 @@ pub use ports::{
     ConfigurationMutationAuthorizationPort, ConfigurationOperationFuture, CredentialWritePort,
     CurrentConfigurationMutationAuthorizationV1, ScopeResolutionPort, ScopeRevalidationEvidenceV1,
 };
-pub use runtime::{ProductionConfigurationDaemonClient, ProjectConfigurationRuntime};
+pub use runtime::{
+    InstalledSemanticActivationCoordination, ProductionConfigurationDaemonClient,
+    ProjectConfigurationRuntime,
+};
 pub use types::{
     AuthorizedActor, CONFIGURATION_AUDIT_PAGE_LIMIT, ComponentConfigurationState,
     ConfigurationAuditPage, ConfigurationAuditQuery, ConfigurationError,
