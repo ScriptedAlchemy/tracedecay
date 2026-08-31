@@ -6333,7 +6333,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
- "tracedecay-api",
  "tracedecay-application",
  "tracedecay-domain",
  "tracedecay-private-fs",

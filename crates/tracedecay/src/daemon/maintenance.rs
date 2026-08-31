@@ -301,6 +301,29 @@ pub(super) struct StoreTelemetrySamplingRegistry {
     ports: Arc<std::sync::Mutex<HashMap<PathBuf, CachedStoreTelemetryPort>>>,
     semantic_vector_retention:
         Arc<std::sync::Mutex<HashMap<PathBuf, SemanticVectorRetentionProgressV1>>>,
+    graph_replay_release: Arc<std::sync::Mutex<HashMap<PathBuf, GraphReplayReleaseProgressV1>>>,
+}
+
+/// Longest run of short-cadence ticks a project's graph-replay release
+/// reconcile may be skipped after consecutive unhealthy attempts. At the
+/// one-minute retry cadence this bounds post-recovery release latency to
+/// roughly eight minutes while a wedged runtime is probed a handful of times
+/// per hour instead of once per tick.
+const GRAPH_REPLAY_RELEASE_BACKOFF_CAP_TICKS: u32 = 8;
+
+/// Per-project reconcile state for the graph-replay release queue.
+///
+/// Release evidence is durable on disk, so none of this state guards
+/// correctness: the cursor makes the queue walk incremental across ticks
+/// (retained entries stop blocking later pages), and the backoff window
+/// converts "retry a known-wedged graph runtime every tick" into a bounded
+/// re-probe. Losing the state (restart, project retirement) only means the
+/// next attempt starts from the front of the queue immediately.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct GraphReplayReleaseProgressV1 {
+    consecutive_unhealthy: u32,
+    skip_remaining: u32,
+    cursor: Option<String>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -451,6 +474,10 @@ impl StoreTelemetrySamplingRegistry {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(path);
+        self.graph_replay_release
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(path);
     }
 
     pub(super) fn release_retained_handles_for_shutdown(&self) {
@@ -459,6 +486,10 @@ impl StoreTelemetrySamplingRegistry {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
         self.semantic_vector_retention
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        self.graph_replay_release
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
@@ -475,11 +506,95 @@ impl StoreTelemetrySamplingRegistry {
             .and_then(|progress| progress.cursor.clone())
     }
 
-    fn retain_semantic_vector_projects(&self, active_projects: &BTreeSet<PathBuf>) {
+    fn retain_project_maintenance_state(&self, active_projects: &BTreeSet<PathBuf>) {
         self.semantic_vector_retention
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .retain(|project, _| active_projects.contains(project));
+        self.graph_replay_release
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|project, _| active_projects.contains(project));
+    }
+
+    /// Whether this tick may attempt the graph-replay release reconcile.
+    ///
+    /// Consecutive unhealthy attempts open a bounded skip window; each denied
+    /// tick burns one unit of it, so a wedged runtime is re-probed after at
+    /// most [`GRAPH_REPLAY_RELEASE_BACKOFF_CAP_TICKS`] short-cadence ticks
+    /// rather than being polled (and timing out) on every one.
+    pub(super) fn graph_replay_release_attempt_admitted(&self, project_root: &Path) -> bool {
+        let mut progress = self
+            .graph_replay_release
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(state) = progress.get_mut(project_root) else {
+            return true;
+        };
+        if state.skip_remaining == 0 {
+            return true;
+        }
+        state.skip_remaining -= 1;
+        false
+    }
+
+    /// Record a release attempt the graph runtime could not serve (deadline,
+    /// unavailability, or a held replay pool) and widen the skip window:
+    /// 1, 2, 4, then capped at [`GRAPH_REPLAY_RELEASE_BACKOFF_CAP_TICKS`].
+    pub(super) fn record_graph_replay_release_unhealthy(&self, project_root: &Path) {
+        let mut progress = self
+            .graph_replay_release
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = progress.entry(project_root.to_path_buf()).or_default();
+        state.consecutive_unhealthy = state.consecutive_unhealthy.saturating_add(1);
+        state.skip_remaining = GRAPH_REPLAY_RELEASE_BACKOFF_CAP_TICKS
+            .min(1_u32 << state.consecutive_unhealthy.saturating_sub(1).min(3));
+    }
+
+    /// Record a served release attempt: close the skip window and advance the
+    /// durable-queue cursor to `continuation` (`None` restarts from the front
+    /// of the queue on the next attempt).
+    pub(super) fn record_graph_replay_release_served(
+        &self,
+        project_root: &Path,
+        continuation: Option<String>,
+    ) {
+        let mut progress = self
+            .graph_replay_release
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match progress.entry(project_root.to_path_buf()) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                if continuation.is_none() {
+                    entry.remove();
+                } else {
+                    *entry.get_mut() = GraphReplayReleaseProgressV1 {
+                        consecutive_unhealthy: 0,
+                        skip_remaining: 0,
+                        cursor: continuation,
+                    };
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                if continuation.is_some() {
+                    entry.insert(GraphReplayReleaseProgressV1 {
+                        consecutive_unhealthy: 0,
+                        skip_remaining: 0,
+                        cursor: continuation,
+                    });
+                }
+            }
+        }
+    }
+
+    /// The release-queue cursor recorded by the last served attempt.
+    pub(super) fn graph_replay_release_cursor(&self, project_root: &Path) -> Option<String> {
+        self.graph_replay_release
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(project_root)
+            .and_then(|state| state.cursor.clone())
     }
 
     pub(super) fn record_semantic_vector_retention_failure(&self, project_root: &Path) {
@@ -701,6 +816,32 @@ pub(in crate::daemon) enum MaintenanceContinuation {
     /// project identifier is retained in maintenance state, so mounted graphs
     /// continue to receive the same bounded, round-robin service.
     SemanticVectorRetention,
+    /// Resume bounded code-generation retention over the normal graph window:
+    /// a superseded-generation backlog or a partially drained graph-replay
+    /// release queue keeps the short cadence until it converges, instead of
+    /// parking multi-GiB debris behind the full maintenance interval.
+    ///
+    /// A continuation tick for this phase still runs the bounded
+    /// semantic-vector page first, so semantic convergence never starves
+    /// behind a code-generation drain.
+    CodeGenerationRetention,
+}
+
+impl MaintenanceContinuation {
+    /// Two phases asking to continue collapse to the one whose continuation
+    /// tick still advances both: a code-generation continuation re-runs the
+    /// bounded semantic-vector page on every tick, while a semantic-only
+    /// continuation would starve a pending code-generation backlog.
+    fn combine(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::CodeGenerationRetention, _) | (_, Self::CodeGenerationRetention) => {
+                Self::CodeGenerationRetention
+            }
+            (Self::SemanticVectorRetention, Self::SemanticVectorRetention) => {
+                Self::SemanticVectorRetention
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -732,6 +873,9 @@ impl MaintenanceTickOutcome {
             Self::Continue(MaintenanceContinuation::SemanticVectorRetention) => {
                 "semantic_vector_progress"
             }
+            Self::Continue(MaintenanceContinuation::CodeGenerationRetention) => {
+                "code_generation_progress"
+            }
             Self::Retry => "retry",
         }
     }
@@ -743,9 +887,9 @@ impl MaintenanceTickOutcome {
     fn combine(self, other: Self) -> Self {
         match (self, other) {
             (Self::Retry, _) | (_, Self::Retry) => Self::Retry,
-            (Self::Continue(continuation), _) | (_, Self::Continue(continuation)) => {
-                Self::Continue(continuation)
-            }
+            (Self::Continue(left), Self::Continue(right)) => Self::Continue(left.combine(right)),
+            (Self::Continue(continuation), Self::Complete)
+            | (Self::Complete, Self::Continue(continuation)) => Self::Continue(continuation),
             (Self::Complete, Self::Complete) => Self::Complete,
         }
     }
@@ -817,6 +961,9 @@ impl MaintenanceLifecycleInstrumentation {
             MaintenanceTickOutcome::Continue(MaintenanceContinuation::SemanticVectorRetention) => {
                 hotpath::gauge!("daemon_maintenance_outcome_semantic_vector_progress").inc(1.0);
             }
+            MaintenanceTickOutcome::Continue(MaintenanceContinuation::CodeGenerationRetention) => {
+                hotpath::gauge!("daemon_maintenance_outcome_code_generation_progress").inc(1.0);
+            }
             MaintenanceTickOutcome::Retry => {
                 hotpath::gauge!("daemon_maintenance_outcome_retry").inc(1.0);
             }
@@ -850,6 +997,9 @@ impl MaintenancePhaseInstrumentation {
             Some(MaintenanceContinuation::SemanticVectorRetention) => {
                 hotpath::gauge!("daemon_maintenance_phase_semantic_vector_active").inc(1.0);
             }
+            Some(MaintenanceContinuation::CodeGenerationRetention) => {
+                hotpath::gauge!("daemon_maintenance_phase_code_generation_active").inc(1.0);
+            }
             None => {
                 hotpath::gauge!("daemon_maintenance_phase_full_tick_active").inc(1.0);
             }
@@ -863,6 +1013,9 @@ impl Drop for MaintenancePhaseInstrumentation {
         match self.continuation {
             Some(MaintenanceContinuation::SemanticVectorRetention) => {
                 hotpath::gauge!("daemon_maintenance_phase_semantic_vector_active").inc(-1.0);
+            }
+            Some(MaintenanceContinuation::CodeGenerationRetention) => {
+                hotpath::gauge!("daemon_maintenance_phase_code_generation_active").inc(-1.0);
             }
             None => {
                 hotpath::gauge!("daemon_maintenance_phase_full_tick_active").inc(-1.0);
@@ -1213,11 +1366,11 @@ impl MaintenanceCoordinator {
                 .map(|index| work[*index].1.database_path().to_path_buf()),
         );
         let maintenance_observations = administration.store_telemetry_sampling();
-        let active_semantic_vector_projects = project_graphs
+        let active_maintenance_projects = project_graphs
             .iter()
             .map(|graph| graph.project_root().to_path_buf())
             .collect::<BTreeSet<_>>();
-        maintenance_observations.retain_semantic_vector_projects(&active_semantic_vector_projects);
+        maintenance_observations.retain_project_maintenance_state(&active_maintenance_projects);
         let telemetry_sampling = if continuation.is_none() {
             maintenance_observations
                 .advance_registered(&active_telemetry_paths, &sampled_telemetry_paths)
@@ -1404,6 +1557,10 @@ impl MaintenanceCoordinator {
                 ("succeeded", outcome.succeeded().to_string()),
                 ("outcome", outcome.label().to_owned()),
                 ("processed_stores", metrics.processed_stores.to_string()),
+                // The lifetime total reads like a queue depth on a live tail
+                // (a busy writer makes it "climb every tick"); the per-tick
+                // count is the actual deferral pressure of this tick.
+                ("deferred_stores_tick", deferred.to_string()),
                 ("deferred_stores", metrics.deferred_stores.to_string()),
                 ("unavailable_stores", metrics.unavailable_stores.to_string()),
                 ("reclaimed_bytes", metrics.reclaimed_bytes.to_string()),
@@ -1784,6 +1941,116 @@ mod tests {
         assert_eq!(
             MaintenanceTickOutcome::Retry.combine(progress),
             MaintenanceTickOutcome::Retry
+        );
+    }
+
+    #[test]
+    fn code_generation_continuation_dominates_the_semantic_phase() {
+        // A code-generation continuation tick re-runs the bounded semantic
+        // page, so it must win when both phases report bounded progress; the
+        // reverse would starve the code-generation backlog.
+        let semantic =
+            MaintenanceTickOutcome::Continue(MaintenanceContinuation::SemanticVectorRetention);
+        let code_generation =
+            MaintenanceTickOutcome::Continue(MaintenanceContinuation::CodeGenerationRetention);
+
+        assert_eq!(semantic.combine(code_generation), code_generation);
+        assert_eq!(code_generation.combine(semantic), code_generation);
+        assert_eq!(
+            code_generation.combine(MaintenanceTickOutcome::Complete),
+            code_generation
+        );
+        assert_eq!(
+            MaintenanceTickOutcome::Complete.combine(code_generation),
+            code_generation
+        );
+        assert_eq!(
+            code_generation.combine(MaintenanceTickOutcome::Retry),
+            MaintenanceTickOutcome::Retry
+        );
+    }
+
+    #[test]
+    fn graph_replay_release_backoff_widens_and_recovers() {
+        let registry = StoreTelemetrySamplingRegistry::default();
+        let project = std::path::Path::new("/project");
+
+        // No recorded state admits every attempt.
+        assert!(registry.graph_replay_release_attempt_admitted(project));
+        assert!(registry.graph_replay_release_attempt_admitted(project));
+
+        // Consecutive unhealthy attempts widen the skip window 1, 2, 4, and
+        // cap at GRAPH_REPLAY_RELEASE_BACKOFF_CAP_TICKS denied ticks.
+        for expected_skips in [1_usize, 2, 4, 8, 8] {
+            registry.record_graph_replay_release_unhealthy(project);
+            let mut denied = 0_usize;
+            while !registry.graph_replay_release_attempt_admitted(project) {
+                denied += 1;
+                assert!(denied <= 16, "the skip window must stay bounded");
+            }
+            assert_eq!(
+                denied, expected_skips,
+                "the skip window must double per consecutive failure and cap"
+            );
+        }
+
+        // A served attempt closes the window entirely.
+        registry.record_graph_replay_release_served(project, None);
+        assert!(registry.graph_replay_release_attempt_admitted(project));
+        assert_eq!(registry.graph_replay_release_cursor(project), None);
+
+        // The next failure after recovery starts from the narrowest window.
+        registry.record_graph_replay_release_unhealthy(project);
+        assert!(!registry.graph_replay_release_attempt_admitted(project));
+        assert!(registry.graph_replay_release_attempt_admitted(project));
+    }
+
+    #[test]
+    fn graph_replay_release_cursor_survives_failures_and_resets_on_wrap() {
+        let registry = StoreTelemetrySamplingRegistry::default();
+        let project = std::path::Path::new("/project");
+
+        registry
+            .record_graph_replay_release_served(project, Some("release-000000ff.json".to_owned()));
+        assert_eq!(
+            registry.graph_replay_release_cursor(project).as_deref(),
+            Some("release-000000ff.json")
+        );
+
+        // An unhealthy attempt keeps the cursor: consumed events are durably
+        // removed, so resuming from the same position loses nothing.
+        registry.record_graph_replay_release_unhealthy(project);
+        assert_eq!(
+            registry.graph_replay_release_cursor(project).as_deref(),
+            Some("release-000000ff.json")
+        );
+
+        // Reaching the end of the queue clears state so the next attempt
+        // starts from the front.
+        registry.record_graph_replay_release_served(project, None);
+        assert_eq!(registry.graph_replay_release_cursor(project), None);
+        assert!(registry.graph_replay_release_attempt_admitted(project));
+    }
+
+    #[test]
+    fn project_maintenance_state_is_pruned_with_the_active_set() {
+        let registry = StoreTelemetrySamplingRegistry::default();
+        let retained = std::path::Path::new("/retained");
+        let retired = std::path::Path::new("/retired");
+        registry.record_graph_replay_release_unhealthy(retained);
+        registry.record_graph_replay_release_unhealthy(retired);
+
+        registry.retain_project_maintenance_state(&std::collections::BTreeSet::from([
+            retained.to_path_buf(),
+        ]));
+
+        assert!(
+            !registry.graph_replay_release_attempt_admitted(retained),
+            "the active project's backoff window must survive pruning"
+        );
+        assert!(
+            registry.graph_replay_release_attempt_admitted(retired),
+            "a retired project's backoff state must be dropped"
         );
     }
 

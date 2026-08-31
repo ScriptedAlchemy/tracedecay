@@ -6,6 +6,7 @@ use std::sync::{
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use super::dispatch_test_support::*;
 use super::*;
@@ -18,7 +19,7 @@ struct UnavailableEffectExecutor {
     application_surface_invocations: Mutex<Vec<(String, Value)>>,
     configuration_invocations: Mutex<
         Vec<(
-            crate::application_surface::ApplicationSurfaceOperation,
+            ApplicationSurfaceOperation,
             Value,
             tracedecay_daemon_protocol::InvocationCancellationPolicy,
         )>,

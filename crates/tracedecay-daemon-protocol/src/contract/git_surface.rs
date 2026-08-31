@@ -2,6 +2,7 @@
 
 use tracedecay_application::{CancellationContext, Deadline};
 use tracedecay_domain::UtcMicros;
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use crate::surface::GitReadSurfaceRequest;
 use tracedecay_application::git::GitHubStackSignalExpandSurfaceRequest;
@@ -15,7 +16,7 @@ use super::{
 impl DaemonInvocationRequest {
     pub fn git_read(
         request_id: impl Into<String>,
-        surface_operation: crate::surface::ApplicationSurfaceOperation,
+        surface_operation: ApplicationSurfaceOperation,
         request: GitReadSurfaceRequest,
         observed_at: UtcMicros,
         deadline: Deadline,

@@ -54,6 +54,7 @@ struct ConfiguredRerankAuthorityV1 {
     mounted: Option<ProductionCodeRerankAuthorityV1>,
 }
 
+#[hotpath::measure_all]
 impl SemanticQueryAuthorityV1 {
     pub fn from_committed(
         committed: CommittedRetrievalProfileStateV1,
@@ -217,6 +218,7 @@ pub enum QuerySemanticSearchExecutionErrorV1 {
     Semantic(#[from] SemanticQueryServiceError),
 }
 
+#[hotpath::measure]
 fn bind_semantic_execution_error(
     generation: &tracedecay_domain::CodeGenerationId,
     error: SemanticQueryServiceError,
@@ -279,6 +281,7 @@ pub async fn mount_current_semantic_query_authority_on_project_open(
         .await
 }
 
+#[hotpath::measure_all]
 impl CodeIndexSchedulerRegistryV1 {
     pub async fn mount_semantic_query_authority_from_committed(
         &self,
@@ -599,6 +602,7 @@ impl CodeIndexSchedulerRegistryV1 {
     }
 }
 
+#[hotpath::measure]
 fn semantic_cursor_matches_activation(
     cursor: Option<&tracedecay_domain::RetrievalCursor>,
     profile_id: &tracedecay_domain::FusionProfileId,
@@ -668,6 +672,7 @@ where
     }
 }
 
+#[hotpath::measure]
 fn paginate_semantic_composition(
     query_authority: &QueryAuthorityV1,
     request: &RetrievalRequest,
@@ -795,6 +800,7 @@ fn paginate_semantic_composition(
     Ok(cursor)
 }
 
+#[hotpath::measure]
 fn semantic_abstention(
     mode: SemanticQueryModeV1,
     abstention: SemanticAbstentionV1,
@@ -811,6 +817,7 @@ fn semantic_abstention(
     }
 }
 
+#[hotpath::measure]
 fn semantic_abstention_disposition(mode: SemanticQueryModeV1) -> SemanticAbstentionDispositionV1 {
     match mode {
         SemanticQueryModeV1::FallbackAllowed => SemanticAbstentionDispositionV1::UseFallback,

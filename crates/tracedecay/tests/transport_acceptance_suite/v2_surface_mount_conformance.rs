@@ -52,13 +52,15 @@ use tempfile::TempDir;
 use tracedecay::application_surface::resolve_catalog_tool_binding;
 use tracedecay::catalog_composition::build_application_catalog_snapshot;
 use tracedecay_api::{
-    HttpApplicationOperation, WorkOperation, WorkflowOperation, retained_application_route_path,
+    WorkOperation, WorkflowOperation, http_application_full_route_path,
+    is_http_application_operation_exposed, retained_application_route_path,
 };
 use tracedecay_application::retained_surfaces::RetainedSurfaceOperation;
-use tracedecay_tool_catalog::{
-    BindingSurface, CapabilityManifestV1, CatalogSnapshotV1, FeatureId, SurfaceOperationName,
-};
 use tracedecay_session_memory::event_lane::ActivityFamilyV1;
+use tracedecay_tool_catalog::{
+    ApplicationSurfaceOperation, BindingSurface, CapabilityManifestV1, CatalogSnapshotV1,
+    FeatureId, SurfaceOperationName,
+};
 
 /// Absences the plan set sanctions, as `(subject, plan citation)`.
 ///
@@ -99,21 +101,21 @@ const SANCTIONED_UNMOUNTED: &[(&str, &str)] = &[
 /// metadata. CLI, MCP, and HTTP must expose the same application operations.
 /// Restating the set here is deliberate: it is the reverse authority, so it
 /// must not be derived from the thing under test.
-const CALLABLE_CODE_OPERATIONS: [HttpApplicationOperation; 14] = [
-    HttpApplicationOperation::CodeExactOccurrence,
-    HttpApplicationOperation::CodePhraseSearch,
-    HttpApplicationOperation::CodeSymbolSearch,
-    HttpApplicationOperation::CodeSignatureSearch,
-    HttpApplicationOperation::CodeImplementations,
-    HttpApplicationOperation::CodeTypeHierarchy,
-    HttpApplicationOperation::CodeCallers,
-    HttpApplicationOperation::CodeCallees,
-    HttpApplicationOperation::CodeFacets,
-    HttpApplicationOperation::CodeTimeline,
-    HttpApplicationOperation::CodeDeclaration,
-    HttpApplicationOperation::CodeDefinition,
-    HttpApplicationOperation::CodeTypeDefinition,
-    HttpApplicationOperation::CodeReferences,
+const CALLABLE_CODE_OPERATIONS: [ApplicationSurfaceOperation; 14] = [
+    ApplicationSurfaceOperation::CodeExactOccurrence,
+    ApplicationSurfaceOperation::CodePhraseSearch,
+    ApplicationSurfaceOperation::CodeSymbolSearch,
+    ApplicationSurfaceOperation::CodeSignatureSearch,
+    ApplicationSurfaceOperation::CodeImplementations,
+    ApplicationSurfaceOperation::CodeTypeHierarchy,
+    ApplicationSurfaceOperation::CodeCallers,
+    ApplicationSurfaceOperation::CodeCallees,
+    ApplicationSurfaceOperation::CodeFacets,
+    ApplicationSurfaceOperation::CodeTimeline,
+    ApplicationSurfaceOperation::CodeDeclaration,
+    ApplicationSurfaceOperation::CodeDefinition,
+    ApplicationSurfaceOperation::CodeTypeDefinition,
+    ApplicationSurfaceOperation::CodeReferences,
 ];
 
 /// Tail no binding declares, used to prove the daemon really answers `404` for
@@ -576,29 +578,35 @@ fn every_catalog_binding_is_mounted_on_its_declared_surface() {
         }
 
         let mounted = match surface {
-            BindingSurface::Http => match HttpApplicationOperation::from_catalog_name(operation) {
-                Some(http) if http.is_http_exposed() => {
-                    http_route_is_mounted(&agent, &fixture, &http.application_route_path())
+            BindingSurface::Http => {
+                match ApplicationSurfaceOperation::from_catalog_name(operation) {
+                    Some(http) if is_http_application_operation_exposed(http) => {
+                        http_route_is_mounted(
+                            &agent,
+                            &fixture,
+                            &http_application_full_route_path(http),
+                        )
+                    }
+                    // An operation the router deliberately withholds from HTTP is
+                    // an absence like any other.
+                    Some(_) => false,
+                    // Retained memory/session/workflow operations are the second
+                    // HTTP route family, addressed exactly as production route
+                    // documentation addresses them (`http_route_documents`): the
+                    // callable retained operation's canonical route. A catalog
+                    // HTTP binding naming neither family is an absence.
+                    None => match RetainedSurfaceOperation::from_operation_name(operation)
+                        .filter(|retained| retained.is_callable())
+                    {
+                        Some(retained) => http_route_is_mounted(
+                            &agent,
+                            &fixture,
+                            &retained_application_route_path(retained),
+                        ),
+                        None => false,
+                    },
                 }
-                // An operation the router deliberately withholds from HTTP is
-                // an absence like any other.
-                Some(_) => false,
-                // Retained memory/session/workflow operations are the second
-                // HTTP route family, addressed exactly as production route
-                // documentation addresses them (`http_route_documents`): the
-                // callable retained operation's canonical route. A catalog
-                // HTTP binding naming neither family is an absence.
-                None => match RetainedSurfaceOperation::from_operation_name(operation)
-                    .filter(|retained| retained.is_callable())
-                {
-                    Some(retained) => http_route_is_mounted(
-                        &agent,
-                        &fixture,
-                        &retained_application_route_path(retained),
-                    ),
-                    None => false,
-                },
-            },
+            }
             BindingSurface::Mcp => mcp_tools.contains(&format!("tracedecay_{operation}")),
             BindingSurface::Cli => cli_tools.contains(operation.as_str()),
             // The LSP and dashboard adapters have no listing endpoint of their
@@ -764,12 +772,12 @@ fn every_declared_operation_is_mounted_or_sanctioned() {
     // catalog never declares is a surface the catalog cannot authorize and no
     // discovery answer will ever mention.
     assert!(
-        HttpApplicationOperation::ALL.len() >= 66,
+        ApplicationSurfaceOperation::ALL.len() >= 66,
         "the HTTP application operation set shrank to {}; a removed operation \
          must be deleted deliberately, not dropped out of this sweep",
-        HttpApplicationOperation::ALL.len()
+        ApplicationSurfaceOperation::ALL.len()
     );
-    for operation in HttpApplicationOperation::ALL {
+    for operation in ApplicationSurfaceOperation::ALL {
         graded += 1;
         let name = operation.as_str();
         let subject = format!("http:{name}");
@@ -782,7 +790,7 @@ fn every_declared_operation_is_mounted_or_sanctioned() {
         // be required to carry an HTTP catalog binding.
         // `is_http_exposed` is the single authority for that decision, so the
         // catalog requirement and the route requirement consult it alike.
-        if !operation.is_http_exposed() {
+        if !is_http_application_operation_exposed(operation) {
             continue;
         }
         if !catalog_http_operations.contains(name) {
@@ -793,11 +801,15 @@ fn every_declared_operation_is_mounted_or_sanctioned() {
             ));
             continue;
         }
-        if !http_route_is_mounted(&agent, &fixture, &operation.application_route_path()) {
+        if !http_route_is_mounted(
+            &agent,
+            &fixture,
+            &http_application_full_route_path(operation),
+        ) {
             failures.push(format!(
                 "{subject}: catalog-declared and HTTP-exposed, but the live \
                  daemon serves no route at {}",
-                operation.application_route_path()
+                http_application_full_route_path(operation)
             ));
         }
     }

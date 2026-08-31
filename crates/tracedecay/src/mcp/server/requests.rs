@@ -10,6 +10,7 @@ use tracedecay_mcp::{
     ToolResult, mark_semantic_tool_error, semantic_failure_reason, tool_error_response,
     tool_result_has_semantic_error,
 };
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 mod tool_dispatch;
 
@@ -132,7 +133,7 @@ struct ApplicationSurfaceDispatch<'a> {
 /// Canonical application and retained operations require the daemon invocation
 /// executor before the request is admitted to its typed owner.
 fn requires_application_invocation_executor(tool_name: &str) -> bool {
-    crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name).is_some()
+    ApplicationSurfaceOperation::from_tool_name(tool_name).is_some()
         || crate::mcp::tools::binding::work_operation_for_tool(tool_name).is_some()
         || tracedecay_application::RetainedSurfaceOperation::from_tool_name(tool_name).is_some()
 }
@@ -156,13 +157,13 @@ pub(super) fn is_source_edit_tool(tool_name: &str) -> bool {
 /// inherits the bound instead of silently running unbounded.
 pub(super) fn is_controlled_read_tool(tool_name: &str) -> bool {
     matches!(
-        crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name),
+        ApplicationSurfaceOperation::from_tool_name(tool_name),
         Some(
-            crate::application_surface::ApplicationSurfaceOperation::GitStatus
-                | crate::application_surface::ApplicationSurfaceOperation::GitDiff
-                | crate::application_surface::ApplicationSurfaceOperation::GitHistory
-                | crate::application_surface::ApplicationSurfaceOperation::GitBlame
-                | crate::application_surface::ApplicationSurfaceOperation::GitHunks
+            ApplicationSurfaceOperation::GitStatus
+                | ApplicationSurfaceOperation::GitDiff
+                | ApplicationSurfaceOperation::GitHistory
+                | ApplicationSurfaceOperation::GitBlame
+                | ApplicationSurfaceOperation::GitHunks
         )
     ) || crate::mcp::tools::handlers::tool_dispatches_git_reads(tool_name)
         || tool_name == "tracedecay_search"
@@ -1576,8 +1577,7 @@ mod git_read_control_tests {
             "tracedecay_git_hunks",
         ] {
             assert!(tool_supports_live_cancellation(tool_name));
-            let application_surface =
-                crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name);
+            let application_surface = ApplicationSurfaceOperation::from_tool_name(tool_name);
             assert!(
                 application_surface.is_some(),
                 "Git reads must enter the catalog-owned application surface",
@@ -1649,8 +1649,7 @@ mod git_read_control_tests {
             "tracedecay_branch_list",
         ] {
             assert!(
-                crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name)
-                    .is_none(),
+                ApplicationSurfaceOperation::from_tool_name(tool_name).is_none(),
                 "{tool_name} is not an application-surface operation, so only the \
                  git-dispatch predicate can bound it",
             );
@@ -1747,16 +1746,19 @@ mod activity_dispatch_tests {
         .expect("detached activity persistence must settle after writer release");
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                let observed =
-                    tracedecay_session_memory::event_lane::replay_after(activity_db, &project_id, None)
-                        .await
-                        .is_some_and(|replay| {
-                            replay.records.iter().any(|record| {
-                                record.pulse.family
-                                    == tracedecay_session_memory::event_lane::ActivityFamilyV1::ToolCall
-                                    && record.pulse.detail.is_none()
-                            })
-                        });
+                let observed = tracedecay_session_memory::event_lane::replay_after(
+                    activity_db,
+                    &project_id,
+                    None,
+                )
+                .await
+                .is_some_and(|replay| {
+                    replay.records.iter().any(|record| {
+                        record.pulse.family
+                            == tracedecay_session_memory::event_lane::ActivityFamilyV1::ToolCall
+                            && record.pulse.detail.is_none()
+                    })
+                });
                 if observed {
                     break;
                 }

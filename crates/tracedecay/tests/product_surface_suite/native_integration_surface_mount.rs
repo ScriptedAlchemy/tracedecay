@@ -20,9 +20,10 @@ use std::collections::BTreeSet;
 
 use serde_json::json;
 use tracedecay::application_surface::{
-    ApplicationSurfaceOperation, ApplicationSurfaceRequest, parse_application_surface_request,
+    ApplicationSurfaceRequest, parse_application_surface_request,
     resolve_application_surface_dispatch, resolve_catalog_tool_binding,
 };
+use tracedecay_api::is_http_application_operation_exposed;
 use tracedecay_application::{
     NativeIntegrationSurfaceResultV1, NativeIntegrationSurfaceUnavailableV1,
 };
@@ -32,7 +33,7 @@ use tracedecay_application::{
 };
 use tracedecay_daemon_protocol::RequestedOutputFormat;
 use tracedecay_mcp::get_tool_definitions;
-use tracedecay_tool_catalog::{BindingSurface, CatalogContributionV1};
+use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface, CatalogContributionV1};
 
 /// The transaction journey, restated here as the reverse authority. Deriving
 /// it from the module under test would let a dropped operation pass vacuously.
@@ -119,7 +120,7 @@ fn every_journey_operation_binds_to_cli_and_mcp_and_withholds_http() {
         // Apply is an authoritative native mutation and this journey has no
         // transport fallback, so HTTP stays deliberately unexposed.
         assert!(
-            !operation.is_http_exposed(),
+            !is_http_application_operation_exposed(operation),
             "{name} must not be exposed over HTTP"
         );
         assert!(
@@ -132,7 +133,7 @@ fn every_journey_operation_binds_to_cli_and_mcp_and_withholds_http() {
     for (operation, name) in WORKTREE_JOURNEY {
         assert_cli_and_mcp_bindings(&contribution, name);
         assert!(
-            operation.is_http_exposed(),
+            is_http_application_operation_exposed(operation),
             "{name} is the read/admin worktree journey and must stay on HTTP"
         );
         assert!(

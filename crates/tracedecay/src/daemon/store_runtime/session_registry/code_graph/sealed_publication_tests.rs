@@ -24,16 +24,13 @@ use tracedecay_store::{
     GraphGenerationIdV1, GraphProjectionIdV1, GraphProjectionIdentityV1,
     GraphPublicationIdempotencyKeyV1, GraphPublicationInputDigestV1, GraphPublicationKeyV1,
     GraphPublicationOperationContextV1, GraphPublicationReplayLookupV1, GraphPublicationStoreV1,
-    GraphReplayAppendOutcomeV1, GraphVerifiedHeadCasOutcomeV1, GraphVerifiedHeadCompareAndSwapV1,
-    RetainedGraphStoreLeaseV1, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1,
+    GraphReplayAppendOutcomeV1, RetainedGraphStoreLeaseV1, RuntimeCancellationIdV1,
+    RuntimeCancellationIdentityV1,
     RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeRequestControlV1,
 };
 
 use super::super::DaemonSessionRuntimeRegistryV1;
-use super::{
-    AtomicGraphCancellationV1, GraphPublicationProbeV1, RetainedCodeGraphRuntimeV1,
-    sealed_projection_requires_stage_boundary,
-};
+use super::{AtomicGraphCancellationV1, GraphPublicationProbeV1, RetainedCodeGraphRuntimeV1};
 use tracedecay_code_index_runtime::CodeGraphReplayBindingV1;
 use tracedecay_code_index_runtime::code_index_scheduler::{
     CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1, scoped_code_index_store_root,
@@ -212,50 +209,6 @@ fn journal_publication_without_head(
     });
 }
 
-fn advance_head_without_retiring_replay(
-    runtime: &RetainedCodeGraphRuntimeV1,
-    generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
-) {
-    let (_, key, _) = publication_replay(runtime, generation);
-    with_publication_context("advance-sealed-head-before-retirement", |context| {
-        let mut storage = runtime
-            .project_database
-            .graph_publication_storage()
-            .expect("graph publication storage");
-        let replay = match storage.replay(&key, context).expect("publication replay") {
-            GraphPublicationReplayLookupV1::Active(replay) => replay,
-            state => panic!("durably staged publication must remain active, got {state:?}"),
-        };
-        let outcome = storage
-            .compare_and_swap_verified_head(
-                &GraphVerifiedHeadCompareAndSwapV1 {
-                    publication_key: replay.publication.key.clone(),
-                    input_digest: replay.publication.input_digest.clone(),
-                    dependency_generation_closure_digest: replay
-                        .publication
-                        .dependency_generation_closure_digest
-                        .clone(),
-                    recovered_digest: replay.publication.expected_recovered_digest.clone(),
-                    expected_prior_head: replay.publication.expected_prior_head.clone(),
-                },
-                context,
-            )
-            .expect("advance verified head without retiring replay");
-        assert!(matches!(
-            outcome,
-            GraphVerifiedHeadCasOutcomeV1::Advanced(_)
-        ));
-    });
-}
-
-#[test]
-fn sealed_projection_boundary_uses_existing_floor_and_throughput_budget() {
-    const ONE_MIB: u64 = 1024 * 1024;
-
-    assert!(!sealed_projection_requires_stage_boundary(120 * ONE_MIB));
-    assert!(sealed_projection_requires_stage_boundary(120 * ONE_MIB + 1));
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sealed_generation_publishes_and_republishes_without_eager_replay_payload() {
     let temporary = tempfile::tempdir().expect("temporary fixture parent");
@@ -417,32 +370,15 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
     std::fs::write(&canonical_seal, &intact_seal)
         .expect("restore source before active replay completion");
 
-    const LARGE_PROJECTION_BYTES: u64 = 120 * 1024 * 1024 + 1;
-    assert!(sealed_projection_requires_stage_boundary(
-        LARGE_PROJECTION_BYTES
-    ));
-    assert!(matches!(
-        runtime.publish_verified_snapshot_with_stage_boundary(
-            latest.generation(),
-            Arc::new(AtomicBool::new(false)),
-            LARGE_PROJECTION_BYTES,
-            true,
-        ),
-        Err(GraphDbError::DeadlineExceeded)
-    ));
-    assert_unverified_publication_state(&runtime, latest.generation(), true);
-    // This is the crash window after the relational CAS and before replay
-    // retirement. The retry must use the historical-head arm while re-seating
-    // the exact durable native stage written by the first attempt.
-    advance_head_without_retiring_replay(&runtime, latest.generation());
+    // The issue-765 wedge shape: the journal above already carries this
+    // publication's active replay — the debris an interrupted publisher
+    // leaves behind. First activation must resume that journaled replay and
+    // publish in ONE call, regardless of sealed artifact size: no
+    // manufactured stage-boundary `DeadlineExceeded`, no scheduler retry
+    // pass, no conflict against its own journal.
     let snapshot = runtime
-        .publish_verified_snapshot_with_stage_boundary(
-            latest.generation(),
-            Arc::new(AtomicBool::new(false)),
-            LARGE_PROJECTION_BYTES,
-            true,
-        )
-        .expect("the historical-head retry must re-seat and publish the verified code graph");
+        .publish_verified_snapshot(latest.generation(), Arc::new(AtomicBool::new(false)))
+        .expect("first activation must resume the journaled replay and publish in one call");
     let expected_generation = tracedecay_code_index::graph_projection::code_graph_generation_id(
         &generation_id,
         &GraphProjectorRevision::try_from(
@@ -529,10 +465,8 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
         .sum::<u64>();
     assert_eq!(active_republish_payload_bytes, 0);
 
-    // A subsequent small generation follows the real computed selector and
-    // must stage, reopen, and advance its head in one call. The durable-stage
-    // retry boundary is reserved for projections whose byte-scaled pass is
-    // larger than the existing fixed deadline floor.
+    // A subsequent generation must equally stage, reopen, and advance its
+    // head in one call.
     drop(resumed);
     drop(retried);
     std::fs::write(
@@ -578,13 +512,6 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
         )
         .await
         .expect("retain next code graph runtime");
-    let next_sealed_bytes = next_runtime
-        .sealed_generation_bytes()
-        .expect("next sealed generation byte width");
-    assert!(
-        !sealed_projection_requires_stage_boundary(next_sealed_bytes),
-        "the fixture must exercise the computed one-attempt selector"
-    );
     let next_snapshot = next_runtime
         .publish_verified_snapshot(next.generation(), Arc::new(AtomicBool::new(false)))
         .expect("a fresh small projection must publish in one call");

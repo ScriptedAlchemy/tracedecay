@@ -21,8 +21,8 @@ use thiserror::Error;
 use tokio_stream::StreamExt;
 use tracedecay_api::{
     CanonicalInvocationResult, HandoffOperation, HttpApplicationControls,
-    HttpApplicationInvocationFuture, HttpApplicationOperation, HttpApplicationRequest,
-    WorkOperation, WorkflowOperation, application_problem_response, sse_response,
+    HttpApplicationInvocationFuture, HttpApplicationRequest, WorkOperation, WorkflowOperation,
+    application_problem_response, is_http_application_operation_exposed, sse_response,
 };
 pub use tracedecay_application::git::{GitApplySurfaceRequest, GitPreviewSurfaceRequest};
 use tracedecay_application::git::{
@@ -47,13 +47,11 @@ pub use tracedecay_daemon_protocol::{
     ContextScoutFeedbackSurfaceRequest, ContextScoutRecentSurfaceRequest,
     ContextScoutSurfaceRequest, GitReadSurfaceRequest,
 };
-use tracedecay_domain::{
-    ManifestDigest, ProjectId, UtcMicros,
-    canonical_sha256,
-};
+use tracedecay_domain::{ManifestDigest, ProjectId, UtcMicros, canonical_sha256};
 use tracedecay_tool_catalog::{
-    BindingSurface, CapabilityId, CatalogSnapshotV1, CatalogValidationError, FeatureId,
-    IdentifierError, ProfileId, RouteExposureV1, SchemaId, SurfaceOperationName, UseCaseId,
+    ApplicationSurfaceOperation, BindingSurface, CapabilityId, CatalogSnapshotV1,
+    CatalogValidationError, FeatureId, IdentifierError, ProfileId, RouteExposureV1, SchemaId,
+    SurfaceOperationName, UseCaseId,
 };
 
 use crate::catalog_composition::{
@@ -118,11 +116,6 @@ const DEFAULT_DEADLINE_MICROS: i64 = 30_000_000;
 const APPLICATION_PROTOCOL_REVISION: u32 = 1;
 const HTTP_DEADLINE_HEADER: &str = "x-tracedecay-deadline-micros";
 const MAX_REQUEST_HANDLE_BYTES: usize = 256;
-
-/// Canonical operation identity shared by HTTP, MCP, CLI, LSP, SSE, and
-/// dashboard adapters. The API crate owns the names and complete operation
-/// family; surface bindings decide which transports expose each operation.
-pub use tracedecay_api::HttpApplicationOperation as ApplicationSurfaceOperation;
 
 /// Transport keys every surface adapter accepts but no reviewed application
 /// request schema declares. `format` selects the rendered output and
@@ -324,14 +317,14 @@ fn application_invoker_for_surface(
     // it validates the authority's own list and ignores the caller's; every
     // other surface validates exactly the operations its caller declared.
     let operations: &[ApplicationSurfaceOperation] = if surface == BindingSurface::Http {
-        &HttpApplicationOperation::ALL
+        &ApplicationSurfaceOperation::ALL
     } else {
         required_operations
     };
     for &operation in operations {
         // Only the HTTP enumeration walks operations the mount is not meant to
         // publish; a caller-supplied list is required exactly as it was given.
-        if surface == BindingSurface::Http && !operation.is_http_exposed() {
+        if surface == BindingSurface::Http && !is_http_application_operation_exposed(operation) {
             continue;
         }
         let Some(binding) = resolve_application_binding(&resolver, surface, operation) else {
@@ -813,7 +806,7 @@ pub(crate) fn assemble_http_application_router(
         tracedecay_api::application_router(application_invoker_for_surface(
             executor,
             BindingSurface::Http,
-            &HttpApplicationOperation::ALL,
+            &ApplicationSurfaceOperation::ALL,
         )?)
         .merge(work_router)
         .merge(workflow_router)

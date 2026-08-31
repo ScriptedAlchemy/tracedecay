@@ -67,6 +67,7 @@ pub struct DaemonSemanticEvaluationControlV1 {
     phase: AtomicU8,
 }
 
+#[hotpath::measure_all]
 impl DaemonSemanticEvaluationControlV1 {
     fn new(cancellation: CancellationToken, deadline: tokio::time::Instant) -> Self {
         Self {
@@ -201,6 +202,7 @@ async fn await_semantic_task<Output>(
     result
 }
 
+#[hotpath::measure]
 fn coordination_error_from_runtime(
     error: SemanticRuntimeBackendErrorV1,
 ) -> SemanticActivationCoordinationErrorV1 {
@@ -415,6 +417,7 @@ pub fn semantic_publication_generation(
     }
 }
 
+#[hotpath::measure]
 fn daemon_semantic_evaluation_candidate(
     evaluated_profile_id: &str,
     code: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
@@ -533,6 +536,7 @@ fn daemon_semantic_evaluation_candidate(
     })
 }
 
+#[hotpath::measure]
 fn evaluated_semantic_calibration_profile_id(
     material: &crate::search_eval::DirectEvaluatedProfileMaterialV1,
 ) -> Result<CalibrationProfileId, SemanticActivationCoordinationErrorV1> {
@@ -576,6 +580,7 @@ pub struct DaemonSemanticEvaluationWorkerOwnerV1 {
 
 struct SemanticEvaluationActiveGaugeV1;
 
+#[hotpath::measure_all]
 impl SemanticEvaluationActiveGaugeV1 {
     fn enter() -> Self {
         hotpath::gauge!("search_eval_active_workers").inc(1.0);
@@ -589,6 +594,7 @@ impl Drop for SemanticEvaluationActiveGaugeV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl DaemonSemanticEvaluationWorkerOwnerV1 {
     #[hotpath::measure(label = "daemon.semantic.evaluation.execute", future = true)]
     pub async fn execute<Output, Work, WorkFuture>(
@@ -812,6 +818,7 @@ pub struct DaemonSemanticEvaluationSnapshotAuthorityV1 {
     >,
 }
 
+#[hotpath::measure_all]
 impl DaemonSemanticEvaluationSnapshotAuthorityV1 {
     pub fn new(
         project_root: PathBuf,
@@ -843,6 +850,7 @@ pub struct DaemonSemanticEvaluationPublicationAuthorityV1 {
     snapshot: DaemonSemanticEvaluationSnapshotAuthorityV1,
 }
 
+#[hotpath::measure_all]
 impl DaemonSemanticEvaluationPublicationAuthorityV1 {
     pub fn new(snapshot: DaemonSemanticEvaluationSnapshotAuthorityV1) -> Self {
         Self { snapshot }
@@ -1525,6 +1533,7 @@ struct LinuxProcessResourceWindowV1 {
     ticks_per_second: u64,
 }
 
+#[hotpath::measure_all]
 impl LinuxProcessResourceWindowV1 {
     #[cfg(target_os = "linux")]
     fn begin() -> Option<Self> {
@@ -1556,11 +1565,13 @@ impl LinuxProcessResourceWindowV1 {
 }
 
 #[cfg(not(target_os = "linux"))]
+#[hotpath::measure]
 fn read_linux_process_lifetime_peak_rss_bytes() -> Option<u64> {
     None
 }
 
 #[cfg(target_os = "linux")]
+#[hotpath::measure]
 fn read_linux_process_lifetime_peak_rss_bytes() -> Option<u64> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
     let kib = status
