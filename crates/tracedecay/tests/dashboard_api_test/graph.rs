@@ -45,12 +45,12 @@ use tracedecay_domain::{
     SymbolOccurrenceId, canonical_sha256,
 };
 use tracedecay_graph_db::NeverCancelled;
-use tracedecay_session_memory::context::RegisteredScopeResolver;
 use tracedecay_graph_query::{
     CodeGraphProjectionReadPort, CodeGraphReadAdmissionFuture, CodeGraphReadAdmissionPort,
     CodeGraphReadAdmissionRequest, CodeGraphReadError, CodeGraphReadFuture, CodeGraphReadRequest,
     VerifiedCodeGraphRead,
 };
+use tracedecay_session_memory::context::RegisteredScopeResolver;
 
 struct DashboardFixture {
     _tmp: TempDir,

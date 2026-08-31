@@ -34,6 +34,14 @@ pub enum HolographicEncodingError {
 #[derive(Clone, Debug, Default)]
 pub struct HolographicEncoder;
 
+/// A query vector already converted to its FHRR form.
+///
+/// Search scoring compares one query against every candidate fact; preparing
+/// the query once keeps the per-candidate similarity to a single fact-side
+/// conversion instead of re-converting the same 2048-dimension query vector
+/// for every candidate.
+pub struct HolographicQueryVector(Fhrr2048);
+
 impl HolographicEncoder {
     pub const DIMENSIONS: usize = 2048;
     pub const ROLE_CONTENT: &'static str = "__hrr_role_content__";
@@ -89,6 +97,21 @@ impl HolographicEncoder {
 
     pub fn similarity(&self, left: &[f64], right: &[f64]) -> Result<f64, HolographicEncodingError> {
         Ok(to_fhrr(left)?.similarity(&to_fhrr(right)?))
+    }
+
+    pub fn prepare_query(
+        &self,
+        coefficients: &[f64],
+    ) -> Result<HolographicQueryVector, HolographicEncodingError> {
+        Ok(HolographicQueryVector(to_fhrr(coefficients)?))
+    }
+
+    pub fn query_similarity(
+        &self,
+        query: &HolographicQueryVector,
+        fact_coefficients: &[f64],
+    ) -> Result<f64, HolographicEncodingError> {
+        Ok(query.0.similarity(&to_fhrr(fact_coefficients)?))
     }
 }
 

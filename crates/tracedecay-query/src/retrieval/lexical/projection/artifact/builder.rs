@@ -3547,10 +3547,21 @@ fn build_serving_index_step(
                 "CREATE INDEX exact_postings_by_document ON exact_postings(document_id, field, term)",
             )
         ),
+        // `cardinality` rides in the index purely so the statistics
+        // aggregation below is covered. Without it the index carries only the
+        // reordered WITHOUT ROWID key columns, and every `SUM(cardinality)`
+        // fetch through it is one random main-tree lookup per posting row —
+        // an N+1 access pattern over a tree dominated by `documents` blobs
+        // that collapses once the corpus outgrows the bounded page cache
+        // (measured on a 12M-row/2.9M-group synthetic at production pragmas:
+        // 121 s warm and 537 s cold non-covering, ~240 s as a sort-backed
+        // table scan, under 4 s covered in both regimes). Uniqueness of the
+        // (kind, ngram, page_ordinal) prefix is already guaranteed by the
+        // table primary key, so the wider UNIQUE declaration loses nothing.
         6 => hotpath::measure_block!(
             "query.artifact.finalization.index.ngram_postings_by_ngram",
             transaction.execute_batch(
-                "CREATE UNIQUE INDEX ngram_postings_by_ngram ON ngram_postings(kind, ngram, page_ordinal)",
+                "CREATE UNIQUE INDEX ngram_postings_by_ngram ON ngram_postings(kind, ngram, page_ordinal, cardinality)",
             )
         ),
         7 => hotpath::measure_block!(
@@ -5096,7 +5107,7 @@ mod tests {
             .expect("query serving-index columns")
             .collect::<Result<Vec<_>, _>>()
             .expect("collect serving-index columns");
-        assert_eq!(columns, ["kind", "ngram", "page_ordinal"]);
+        assert_eq!(columns, ["kind", "ngram", "page_ordinal", "cardinality"]);
 
         let query = "SELECT documents, cardinality FROM ngram_postings \
                      WHERE kind = ?1 AND ngram = ?2 ORDER BY page_ordinal";

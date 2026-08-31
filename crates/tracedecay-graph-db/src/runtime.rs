@@ -301,7 +301,9 @@ impl GraphDb {
                     )?
                     .map(|state| state.commit.watermark);
                     if current.as_ref() != expected {
-                        return Err(GraphDbError::Conflict);
+                        return Err(GraphDbError::conflict(
+                            "runtime.replace_projection_unverified_inner",
+                        ));
                     }
                 }
                 let retained: BTreeSet<_> = replacement
@@ -383,7 +385,7 @@ impl GraphDb {
             return if existing.digest == digests.publication {
                 Ok(existing.commit)
             } else {
-                Err(GraphDbError::Conflict)
+                Err(GraphDbError::conflict("runtime.publish_unverified"))
             };
         }
         let current = latest_projection(
@@ -393,7 +395,7 @@ impl GraphDb {
         )?
         .map(|state| state.commit.watermark);
         if current.as_ref() != publication_request.expected_watermark.as_ref() {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict("runtime.publish_unverified"));
         }
         let publication_record = (
             publication_request.idempotency_key,
