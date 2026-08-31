@@ -200,7 +200,10 @@ fn quarantine_replay_residency_probe() {
             let started = Instant::now();
             let released = db.release_apply_state(&|| Ok(())).unwrap();
             assert!(released, "a live staging store must release");
-            sample(&format!("released scope {scope} ({:.1?})", started.elapsed()));
+            sample(&format!(
+                "released scope {scope} ({:.1?})",
+                started.elapsed()
+            ));
         }
     }
     drop(db);

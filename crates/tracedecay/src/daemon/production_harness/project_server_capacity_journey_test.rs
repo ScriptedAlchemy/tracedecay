@@ -70,10 +70,13 @@ async fn open_project(
     let code_search_scope = {
         let graph = composition.server.cg().await;
         let target = graph.configuration_runtime().configuration_target();
-        tracedecay_code_index_runtime::resolved_scope_for_project(graph.project_root(), &target.project_id)
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("capacity-journey code-index scope is invalid: {error:?}"),
-            })?
+        tracedecay_code_index_runtime::resolved_scope_for_project(
+            graph.project_root(),
+            &target.project_id,
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("capacity-journey code-index scope is invalid: {error:?}"),
+        })?
     };
     let latest = super::wait_for_production_composition_code_index(
         &resources.invocation,

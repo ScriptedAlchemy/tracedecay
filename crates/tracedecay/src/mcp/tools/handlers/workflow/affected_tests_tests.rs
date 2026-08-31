@@ -943,7 +943,9 @@ fn scoped_read_fixture() -> crate::tracedecay::queries::graph::VerifiedGraphQuer
             annotated_test: false,
         },
     ];
-    let bulk_paths: Vec<String> = (0..12).map(|index| format!("src/bulk_{index}.rs")).collect();
+    let bulk_paths: Vec<String> = (0..12)
+        .map(|index| format!("src/bulk_{index}.rs"))
+        .collect();
     for path in &bulk_paths {
         fixture_symbols.push(FixtureSymbol {
             path,
@@ -966,7 +968,9 @@ fn scoped_test_annotation_lookup_needs_only_a_file_scale_budget() {
         .expect("a two-file question must not require a corpus-scale symbol budget");
     assert_eq!(
         annotated,
-        ["src/hot.rs".to_owned()].into_iter().collect::<HashSet<_>>(),
+        ["src/hot.rs".to_owned()]
+            .into_iter()
+            .collect::<HashSet<_>>(),
         "only the file whose function carries a test marker is reported"
     );
 

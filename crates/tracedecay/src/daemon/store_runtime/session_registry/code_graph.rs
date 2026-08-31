@@ -1349,12 +1349,8 @@ impl RetainedCodeGraphRuntimeV1 {
                 let _gate = self.hold_publication_gate();
                 hotpath::measure_block!(
                     "daemon.session_registry.publish_snapshot.gate_hold",
-                    self.graph_registry.complete_verified_publication(
-                        completion,
-                        storage,
-                        &context,
-                        *proven,
-                    )
+                    self.graph_registry
+                        .complete_verified_publication(completion, storage, &context, *proven,)
                 )
             })();
             // Post-attempt maintenance with every gate released, on success

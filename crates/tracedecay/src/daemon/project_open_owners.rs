@@ -42,9 +42,9 @@ use crate::daemon::callable_code_authorization::DaemonCallableCodeAuthorizationS
 use crate::daemon::service::invocation::DaemonNativeIntegrationRuntimeRegistrar;
 use crate::mcp::McpServer;
 use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_lsp::analyzer::broker::AdmittedLspProvider;
 use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
-use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_usecases::lsp_runtime::DaemonLspSessionFactory;
 use tracedecay_usecases::primitives::{admitted_root_uri_for_project, locator_digest_for_project};
 use tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot;
@@ -530,12 +530,11 @@ pub(crate) async fn install_project_open_source_edit_preview_owner(
             message: "project-open source edit preview requires authoritative project identity"
                 .to_owned(),
         })?;
-    let scope = tracedecay_code_index_runtime::resolved_scope_for_project(project_root, &project_id)
-        .map_err(|error| {
-        TraceDecayError::Config {
-            message: format!("project-open source edit preview scope denied: {error}"),
-        }
-    })?;
+    let scope =
+        tracedecay_code_index_runtime::resolved_scope_for_project(project_root, &project_id)
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("project-open source edit preview scope denied: {error}"),
+            })?;
     let authorization = ProjectOpenSourceEditAuthorizationV1 {
         project_root: project_root.to_path_buf(),
         scope,
@@ -572,12 +571,11 @@ pub(crate) async fn install_project_open_source_edit_owners_for_test(
         .configuration_target()
         .project_id
         .clone();
-    let scope = tracedecay_code_index_runtime::resolved_scope_for_project(&project_root, &project_id)
-        .map_err(|error| {
-        TraceDecayError::Config {
-            message: format!("test project-open resolved scope denied: {error}"),
-        }
-    })?;
+    let scope =
+        tracedecay_code_index_runtime::resolved_scope_for_project(&project_root, &project_id)
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("test project-open resolved scope denied: {error}"),
+            })?;
     let authorization = ProjectOpenSourceEditAuthorizationV1 {
         project_root,
         scope,
@@ -633,12 +631,11 @@ pub(super) async fn register_project_open_production_owners(
             message: "project-open owners require the daemon-owned project session database"
                 .to_owned(),
         })?;
-    let scope = tracedecay_code_index_runtime::resolved_scope_for_project(project_root, &project_id)
-        .map_err(|error| {
-        TraceDecayError::Config {
-            message: format!("project-open resolved scope denied: {error}"),
-        }
-    })?;
+    let scope =
+        tracedecay_code_index_runtime::resolved_scope_for_project(project_root, &project_id)
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("project-open resolved scope denied: {error}"),
+            })?;
     tracing::info!(
         event = "project_open_owner_phase",
         project = %project_root.display(),

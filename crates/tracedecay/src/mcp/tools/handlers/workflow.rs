@@ -39,12 +39,12 @@ use tracedecay_mcp::tools::render;
 
 mod affected_test_failure;
 
+#[cfg(test)]
+use tracedecay_mcp::{MAX_TEST_TIMEOUT_SECS, cargo_test_args};
 use tracedecay_mcp::{
     RunAffectedArgs, TestProfile, TestRunControl, TestRunFailure, TestRunOutput, libtest_identity,
     parse_libtest_output, run_cargo_tests,
 };
-#[cfg(test)]
-use tracedecay_mcp::{MAX_TEST_TIMEOUT_SECS, cargo_test_args};
 
 /// Maximum near-duplicate matches attached per diagnostic.
 const NEAR_DUP_MAX: usize = 3;
@@ -577,8 +577,8 @@ where
         return Ok(empty_result(&args, "no changed files detected"));
     }
 
-    let graph = &hotpath::future!(graph, label = "mcp.workflow.affected_tests.graph_admission")
-        .await?;
+    let graph =
+        &hotpath::future!(graph, label = "mcp.workflow.affected_tests.graph_admission").await?;
     let test_targets = hotpath::measure_block!(
         "mcp.workflow.affected_tests.graph",
         collect_affected_test_targets(graph, &changed_paths)

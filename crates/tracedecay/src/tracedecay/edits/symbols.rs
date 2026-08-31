@@ -63,9 +63,7 @@ impl EditSymbolV1 {
         }
         let attested_end = attested_start
             .checked_add(self.line_span as usize - 1)
-            .ok_or_else(|| {
-                symbol_evidence_unavailable("symbol line extent exceeds this host")
-            })?;
+            .ok_or_else(|| symbol_evidence_unavailable("symbol line extent exceeds this host"))?;
         if start_line > attested_start || end_inclusive != attested_end {
             return Err(symbol_evidence_unavailable(
                 "symbol source span disagrees with its extraction-attested line bounds",

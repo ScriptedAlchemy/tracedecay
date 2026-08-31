@@ -5996,7 +5996,9 @@ impl CodeIndexWorktreeSchedulerV1 {
         // sealed from different content means the seat lags the reconciled
         // truth and stays refused.
         self.publication
-            .active_pointer_covers_snapshot_content(&serving.generation().snapshot().content_identity)
+            .active_pointer_covers_snapshot_content(
+                &serving.generation().snapshot().content_identity,
+            )
             .map_err(CodeIndexProductionErrorV1::Publication)
             .map_err(Into::into)
     }

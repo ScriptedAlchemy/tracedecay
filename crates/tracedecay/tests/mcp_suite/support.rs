@@ -28,6 +28,8 @@ use tracedecay::host_admission::{HostAdmissionTestRuntimeV1, ProjectScopedTestRu
 use tracedecay::mcp::McpServer;
 use tracedecay::tracedecay::TraceDecay;
 #[cfg(feature = "test-transport")]
+use tracedecay_domain::errors::TraceDecayError;
+#[cfg(feature = "test-transport")]
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, ComponentVersion,
@@ -43,8 +45,6 @@ use tracedecay_domain::{
 #[cfg(feature = "test-transport")]
 use tracedecay_mcp::McpTransport;
 use tracedecay_mcp::ToolResult;
-#[cfg(feature = "test-transport")]
-use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::storage::PrivateStoreIo;
 #[cfg(feature = "test-transport")]
 use tracedecay_sessions::admission::HostAdmissionScope;

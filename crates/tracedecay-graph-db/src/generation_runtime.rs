@@ -957,7 +957,10 @@ impl GraphDb {
     /// apply-state). The GC prunes only versions below the minimum active
     /// transaction epoch, so concurrent readers keep every version they can
     /// still observe.
-    #[hotpath::measure(label = "graph_db.generation.release_apply_state", impl_type = "GraphDb")]
+    #[hotpath::measure(
+        label = "graph_db.generation.release_apply_state",
+        impl_type = "GraphDb"
+    )]
     pub fn release_apply_state(
         &self,
         check: &dyn Fn() -> Result<(), GraphDbError>,
