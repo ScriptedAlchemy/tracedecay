@@ -12,6 +12,8 @@ use std::ffi::OsStr;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+#[cfg(feature = "hotpath")]
+use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "hotpath-alloc")]
 #[global_allocator]
@@ -441,6 +443,42 @@ fn hotpath_guard() -> hotpath::HotpathGuard {
         .build()
 }
 
+#[cfg(feature = "hotpath")]
+struct ProcessHotpathGuard {
+    guard: Arc<Mutex<Option<hotpath::HotpathGuard>>>,
+}
+
+#[cfg(feature = "hotpath")]
+impl ProcessHotpathGuard {
+    #[hotpath::measure(label = "cli.hotpath.install_shutdown_finalizer")]
+    fn install(guard: hotpath::HotpathGuard) -> Result<Self, String> {
+        let guard = Arc::new(Mutex::new(Some(guard)));
+        let watchdog_guard = Arc::clone(&guard);
+        if !tracedecay::daemon::install_hotpath_shutdown_finalizer(move || {
+            let guard = watchdog_guard
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            drop(guard);
+        }) {
+            return Err("Hotpath shutdown finalizer is already installed".to_owned());
+        }
+        Ok(Self { guard })
+    }
+}
+
+#[cfg(feature = "hotpath")]
+impl Drop for ProcessHotpathGuard {
+    fn drop(&mut self) {
+        let guard = self
+            .guard
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        drop(guard);
+    }
+}
+
 fn main() -> ExitCode {
     let args = std::env::args_os().collect::<Vec<_>>();
     #[cfg(feature = "hotpath")]
@@ -449,7 +487,13 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     #[cfg(feature = "hotpath")]
-    let _hotpath = hotpath_guard();
+    let _hotpath = match ProcessHotpathGuard::install(hotpath_guard()) {
+        Ok(guard) => guard,
+        Err(message) => {
+            eprintln!("Error: {message}");
+            return ExitCode::FAILURE;
+        }
+    };
     // The guard belongs to the real process boundary rather than the async
     // command body. Native capture hooks intentionally bypass the ordinary
     // composition root, and Clap can terminate before a Tokio runtime exists;
@@ -898,6 +942,25 @@ fn validate_host_bundle_options(
         }
         return Ok(());
     }
+    // `projects forget` destroys one registered project's rows and stores, so
+    // it REQUIRES `--yes` (its handler refuses to run without it) and takes
+    // the global `--dry-run` as its preview. It owns no host component.
+    if matches!(
+        command,
+        Commands::Projects {
+            action: ProjectsAction::Forget { .. },
+        }
+    ) {
+        if host_bundle.component.is_some() || host_bundle.adopt {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: "projects forget accepts --yes to confirm and --dry-run to preview; \
+                          --component and --adopt are only valid with install, update-plugin, \
+                          reinstall, or uninstall"
+                    .to_string(),
+            });
+        }
+        return Ok(());
+    }
     // The scoped storage resets destroy refused store state, so they REQUIRE
     // the same `--yes` confirmation (their handlers refuse to run without it).
     // Like `wipe`, they own no host component and have no preview.
@@ -975,7 +1038,7 @@ async fn dispatch_command(
     validate_host_bundle_options(&command, family, &host_bundle)?;
     match family {
         CommandFamily::Project => {
-            dispatch_project_command(command, host_bundle.yes).await?;
+            dispatch_project_command(command, host_bundle.yes, host_bundle.dry_run).await?;
             Ok(CommandOutcome::Success)
         }
         CommandFamily::Runtime => {
@@ -1009,6 +1072,7 @@ async fn dispatch_command(
 async fn dispatch_project_command(
     command: Commands,
     assume_yes: bool,
+    dry_run: bool,
 ) -> tracedecay_domain::errors::Result<()> {
     match command {
         Commands::Init {
@@ -1053,7 +1117,7 @@ async fn dispatch_project_command(
                 .await?;
         }
         Commands::Projects { action } => {
-            project_cmd::handle_projects_action(action).await?;
+            project_cmd::handle_projects_action(action, assume_yes, dry_run).await?;
         }
         Commands::Branch { action } => {
             commands::handle_branch_action(action).await?;

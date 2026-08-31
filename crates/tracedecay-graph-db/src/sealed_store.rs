@@ -160,38 +160,7 @@ const SEALED_STORE_DATABASE_FILE: &str = "generation.grafeo";
 const SEALED_STORE_RECEIPT_FILE: &str = "sealed.json";
 const SEALED_STORE_DISABLE_ENV: &str = "TRACEDECAY_GRAPH_SEALED_STORE";
 
-const SEALED_STORE_FORM_COMPACT: &str = "compact";
 const SEALED_STORE_FORM_REPLAY: &str = "replay";
-
-/// Whether Bytes-carrying generations may seal in compact columnar form on
-/// the pinned grafeo revision.
-///
-/// The original blocker — the columnar Dict codec restoring every `Bytes`
-/// entry as `Value::String` — is fixed at the pinned rev (`adb623efec`
-/// carries `tracedecay/0.5.42-compact-bytes-roundtrip`: marked hex dictionary
-/// entries with a legacy-section escape, decoded back to `Value::Bytes`), and
-/// the byte-exact round-trip contract passes with this constant flipped.
-///
-/// Flipping it is now blocked by a different, scale-shaped defect: a real
-/// code generation (measured at 431 files / ~45k chunk and symbol entities
-/// with serialized-record Bytes payloads) fails its post-reopen
-/// recovered-digest proof in compact form with "relation scalar endpoints do
-/// not match native topology", the discarded artifact leaves the generation
-/// permanently unseated behind `code_index_graph_activation_retry_scheduled`
-/// retries, and the graph never activates — while the same corpus seals,
-/// proves, and serves in replay form. The toy-scale contract fixtures
-/// (single-digit rows) compact and read exactly, so the defect is invisible
-/// to this suite; do not flip this constant on their evidence alone. Flip it
-/// only with a generation-scale compact seal proven end to end (the
-/// `sealed_artifact_open_probe` harness scaled up, or a sandbox index of a
-/// real corpus with graph activation seated).
-///
-/// Vector-carrying generations never compact regardless of this constant
-/// (`saw_vector_property` in [`seal_generation_store`]): the sealed lane
-/// never serves vector search, so the columnar base buys them nothing, and
-/// mixed-dimension vector columns fall back to the dictionary codec's
-/// `Display` encoding, which does not round-trip.
-const COMPACT_ROUND_TRIPS_BYTES: bool = false;
 
 /// Receipt binding a sealed store directory to the exact generation and
 /// recovered digest it was built from. Written after the compacted database
@@ -200,9 +169,10 @@ const COMPACT_ROUND_TRIPS_BYTES: bool = false;
 #[derive(Debug, Deserialize, Serialize)]
 struct SealedStoreReceiptV1 {
     version: u32,
-    /// `"compact"` when the store serves from a columnar `CompactStore`
-    /// base, `"replay"` when it stayed in LPG replay form (see
-    /// [`COMPACT_ROUND_TRIPS_BYTES`]).
+    /// The durable form the rows were sealed in. New artifacts always seal
+    /// in `"replay"` (LPG replay) form; `"compact"` survives only in
+    /// receipts written before compaction was retired (see the form note in
+    /// [`seal_generation_store`]) and is verified by the same digest proof.
     form: String,
     namespace: String,
     projection: String,
@@ -413,24 +383,6 @@ impl SealedCopyPager {
         sealed.apply_sealed_copy_batch(batch, &endpoint_namespaces, None, check)?;
         Ok(())
     }
-}
-
-#[hotpath::measure]
-fn properties_carry_bytes(
-    properties: &std::collections::BTreeMap<crate::GraphPropertyName, crate::GraphProperty>,
-) -> bool {
-    properties
-        .values()
-        .any(|property| matches!(property, crate::GraphProperty::Bytes(_)))
-}
-
-#[hotpath::measure]
-fn properties_carry_vectors(
-    properties: &std::collections::BTreeMap<crate::GraphPropertyName, crate::GraphProperty>,
-) -> bool {
-    properties
-        .values()
-        .any(|property| matches!(property, crate::GraphProperty::Vector(_)))
 }
 
 #[hotpath::measure]
@@ -885,12 +837,6 @@ fn copy_compact_and_close(
     drop(endpoint_cache);
     let entity_count = entity_nodes.len();
     let relation_count = relation_rows.len();
-    let mut saw_bytes_property = relation_rows
-        .iter()
-        .any(|relation| properties_carry_bytes(&relation.properties));
-    let mut saw_vector_property = relation_rows
-        .iter()
-        .any(|relation| properties_carry_vectors(&relation.properties));
 
     // 1. Dependency endpoint copies, so cross-generation edges resolve.
     for (projection, copies) in dependency_endpoints {
@@ -903,8 +849,6 @@ fn copy_compact_and_close(
         let mut pager = SealedCopyPager::new(namespace, projection.projection.clone(), identity);
         for (_, entity) in copies {
             check()?;
-            saw_bytes_property |= properties_carry_bytes(&entity.properties);
-            saw_vector_property |= properties_carry_vectors(&entity.properties);
             let live_bytes = entity_copy_live_bytes(&entity);
             pager.push(
                 &sealed,
@@ -942,8 +886,6 @@ fn copy_compact_and_close(
             }
         }
         for entity in loaded {
-            saw_bytes_property |= properties_carry_bytes(&entity.properties);
-            saw_vector_property |= properties_carry_vectors(&entity.properties);
             let live_bytes = entity_copy_live_bytes(&entity);
             pager.push(
                 &sealed,
@@ -1016,28 +958,24 @@ fn copy_compact_and_close(
         check,
     )?;
 
-    // Compact only when the pinned engine round-trips every scalar the rows
-    // carry; otherwise the artifact stays in replay form, still isolated per
-    // generation. Vector-carrying generations always stay in replay form: on
-    // the pinned engine a compacted vector generation fails its post-reopen
-    // recovered-digest proof (relation endpoints no longer resolve to their
-    // native topology), and the sealed lane never serves vector search, so
-    // the columnar base buys those generations nothing. The post-reopen
-    // digest proof checks the exact durable form before installation, so
-    // copy, compaction, or persistence corruption all surface as typed
-    // refusal rather than silently wrong reads.
-    let form = if saw_vector_property || (saw_bytes_property && !COMPACT_ROUND_TRIPS_BYTES) {
-        SEALED_STORE_FORM_REPLAY
-    } else {
-        sealed
-            .compact_for_seal()
-            .map_err(|error| sealed_store_failure("compact failed", error))?;
-        SEALED_STORE_FORM_COMPACT
-    };
+    // Every artifact seals in replay (LPG) form. The pinned engine's
+    // compacted columnar form fails its post-reopen recovered-digest proof
+    // with "relation scalar endpoints do not match native topology": first
+    // observed scale-shaped on real code generations (~45k Bytes-carrying
+    // entities, while toy code fixtures passed), and then shape-shaped on
+    // project-memory relation graphs, which corrupt at single-digit row
+    // counts and wedge memory reconciliation permanently behind the failing
+    // proof. Vector columns additionally fall back to the dictionary codec's
+    // `Display` encoding in compact form, which does not round-trip. Replay
+    // form seals, proves, and serves every shape; re-introduce compaction
+    // only with a generation-scale compact seal and a project-memory seal
+    // proven end to end. The post-reopen digest proof stays either way, so
+    // copy or persistence corruption surfaces as typed refusal rather than
+    // silently wrong reads.
     sealed
         .close()
         .map_err(|error| sealed_store_failure("durable close failed", error))?;
-    Ok((entity_count, relation_count, form))
+    Ok((entity_count, relation_count, SEALED_STORE_FORM_REPLAY))
 }
 
 /// Opens the artifact under `directory` and proves it against `expected`.
@@ -1323,9 +1261,23 @@ mod cost_probe {
         bytes as f64 / (1024.0 * 1024.0 * 1024.0) / seconds
     }
 
+    fn seconds_per_gib(bytes: u64, seconds: f64) -> f64 {
+        let gib = bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+        if gib <= 0.0 {
+            return 0.0;
+        }
+        seconds / gib
+    }
+
     #[test]
     #[ignore = "measurement harness; see module doc"]
     fn sealed_verification_cost_probe() {
+        #[cfg(feature = "hotpath")]
+        let _hotpath = hotpath::HotpathGuardBuilder::new("sealed_verification_cost_probe")
+            .functions_limit(0)
+            .report("functions-timing")
+            .build();
+
         let entities = env_usize("TRACEDECAY_VERIFY_PROBE_ROWS", 50_000);
         let relations = entities.saturating_mul(8) / 7;
         let payload = env_usize("TRACEDECAY_VERIFY_PROBE_PAYLOAD", 700);
@@ -1359,6 +1311,9 @@ mod cost_probe {
             .apply_generation_unverified_with_digest(Arc::new(manifest), &expected, check)
             .unwrap();
         let stage_s = started.elapsed().as_secs_f64();
+        // Capture the whole disposable store directory here, before the
+        // sealed artifact exists, so Grafeo sidecars/WAL bytes are included.
+        let staging_bytes = directory_bytes(temp.path());
 
         // The serial full proof, exactly as every open before the parallel
         // pipeline streamed it.
@@ -1424,9 +1379,6 @@ mod cost_probe {
         let _ = marker_hit.database().close();
         drop(marker_hit);
 
-        let staging_bytes = std::fs::metadata(&database_path)
-            .map(|meta| meta.len())
-            .unwrap_or(0);
         let artifact_bytes = directory_bytes(&directory);
         let receipt = std::fs::read_to_string(directory.join("sealed.json")).unwrap();
         let form = receipt
@@ -1476,8 +1428,20 @@ mod cost_probe {
         );
         println!("reopen via marker       : {marker_reopen_s:.3}s");
         println!(
-            "seconds per canonical GiB (staging proof): {:.1}",
+            "seconds/canonical GiB (parallel staging proof): {:.1}",
             staging_proof_s / (canonical_bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+        );
+        println!(
+            "seconds/physical GiB  (serial staging proof): {:.1}",
+            seconds_per_gib(staging_bytes, serial_proof_s)
+        );
+        println!(
+            "seconds/physical GiB  (parallel staging proof): {:.1}",
+            seconds_per_gib(staging_bytes, staging_proof_s)
+        );
+        println!(
+            "seconds/physical GiB  (sealed reopen proof): {:.1}",
+            seconds_per_gib(artifact_bytes, reopen_full_proof_s)
         );
     }
 }

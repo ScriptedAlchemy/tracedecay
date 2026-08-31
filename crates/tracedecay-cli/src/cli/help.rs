@@ -531,16 +531,25 @@ pub(crate) const PROJECTS_LONG_ABOUT: &str = "\
 Queries the global registry of every initialised tracedecay project on this \
 machine: list, search by id/path/alias/remote/branch, or resolve one \
 project's full context. Use it to find the right --project-id/--project-path \
-value for cross-project commands.";
+value for cross-project commands. `projects forget` deregisters exactly one \
+project — registry rows plus its profile store directories — without \
+touching other projects or any repo-local file, and completes even when the \
+project's runtime is wedged (the managed daemon service is stopped for the \
+removal and restored afterward).";
 
 pub(crate) const PROJECTS_AFTER_HELP: &str = "\
 Examples:
   tracedecay projects list                       Registered projects
   tracedecay projects search my-repo --json      Find a project id
   tracedecay projects context proj_123           One project's registry context
+  tracedecay projects forget proj_123 --dry-run  Preview a single-project removal
+  tracedecay projects forget proj_123 --yes      Remove rows and store directories
+  tracedecay projects forget /old/repo --keep-store --yes
+                                                 Deregister, keep store bytes
 
 Related: tracedecay status --project-id, tracedecay list (path-relative
-view), tracedecay tool project_search (MCP twin).";
+view), tracedecay wipe (path-scoped removal), tracedecay tool project_search
+(MCP twin).";
 
 pub(crate) const BRANCH_LONG_ABOUT: &str = "\
 Manages per-branch code-graph databases so queries reflect the branch you \
@@ -612,7 +621,10 @@ profile-scoped database state, including global, user memory/session, project, \
 legacy, remote, Grafeo WAL, and host-admission stores. Profile identity, \
 configuration, and agent integration config remain untouched. \
 Destructive and unrecoverable; re-create indexes with `tracedecay init`. \
-Prompts for a `go!` confirmation unless `--yes` is passed.";
+Prompts for a `go!` confirmation unless `--yes` is passed. When the managed \
+daemon holds the profile (even wedged or hung), wipe stops the installed \
+service within the supervisor's bounded stop, runs offline, and restores the \
+previous service state afterward — it never waits indefinitely.";
 
 pub(crate) const WIPE_AFTER_HELP: &str = "\
 Examples:
