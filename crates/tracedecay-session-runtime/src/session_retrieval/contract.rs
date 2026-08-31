@@ -28,32 +28,32 @@ use tracedecay_session_memory::session::{SessionDataFreshness, SessionTemporalQu
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum SessionRetrievalStoreScope {
+pub enum SessionRetrievalStoreScope {
     Project,
     Profile,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SessionRetrievalFilters {
-    pub(crate) project_key: Option<String>,
-    pub(crate) parent_session_id: Option<String>,
-    pub(crate) source: Option<String>,
-    pub(crate) include_summaries: bool,
-    pub(crate) scope: SessionSearchScope,
-    pub(crate) message_type: SessionMessageType,
-    pub(crate) roles: Vec<String>,
-    pub(crate) time_range: SessionSearchTimeRange,
-    pub(crate) git_filter: GitScopeFilter,
-    pub(crate) workflow_scope: Option<WorkflowScopeFilter>,
+pub struct SessionRetrievalFilters {
+    pub project_key: Option<String>,
+    pub parent_session_id: Option<String>,
+    pub source: Option<String>,
+    pub include_summaries: bool,
+    pub scope: SessionSearchScope,
+    pub message_type: SessionMessageType,
+    pub roles: Vec<String>,
+    pub time_range: SessionSearchTimeRange,
+    pub git_filter: GitScopeFilter,
+    pub workflow_scope: Option<WorkflowScopeFilter>,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct SessionRetrievalCommand {
+pub struct SessionRetrievalCommand {
     query: SessionTemporalQuery,
 }
 
 impl SessionRetrievalCommand {
-    pub(crate) fn new(
+    pub fn new(
         query: SessionTemporalQuery,
         filters: SessionRetrievalFilters,
         goals: bool,
@@ -64,7 +64,7 @@ impl SessionRetrievalCommand {
         Self { query }
     }
 
-    pub(crate) fn into_query(self) -> SessionTemporalQuery {
+    pub fn into_query(self) -> SessionTemporalQuery {
         self.query
     }
 }
@@ -133,7 +133,7 @@ fn compatibility_filter_digest(filters: &SessionRetrievalFilters, goals: bool) -
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct LcmDescribeServiceCommand {
+pub struct LcmDescribeServiceCommand {
     provider: String,
     session_id: SessionId,
     target: LcmDescribeTarget,
@@ -142,7 +142,7 @@ pub(crate) struct LcmDescribeServiceCommand {
 }
 
 impl LcmDescribeServiceCommand {
-    pub(crate) fn new(
+    pub fn new(
         provider: impl Into<String>,
         session_id: SessionId,
         target: LcmDescribeTarget,
@@ -158,29 +158,29 @@ impl LcmDescribeServiceCommand {
         }
     }
 
-    pub(crate) fn provider(&self) -> &str {
+    pub fn provider(&self) -> &str {
         &self.provider
     }
 
-    pub(crate) fn session_id(&self) -> &SessionId {
+    pub fn session_id(&self) -> &SessionId {
         &self.session_id
     }
 
-    pub(crate) fn target(&self) -> &LcmDescribeTarget {
+    pub fn target(&self) -> &LcmDescribeTarget {
         &self.target
     }
 
-    pub(crate) const fn grain(&self) -> RetrievalGrainV1 {
+    pub const fn grain(&self) -> RetrievalGrainV1 {
         self.grain
     }
 
-    pub(crate) const fn store_scope(&self) -> SessionRetrievalStoreScope {
+    pub const fn store_scope(&self) -> SessionRetrievalStoreScope {
         self.store_scope
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct LcmExpandServiceCommand {
+pub struct LcmExpandServiceCommand {
     provider: String,
     session_id: SessionId,
     target: LcmExpandTarget,
@@ -193,7 +193,7 @@ pub(crate) struct LcmExpandServiceCommand {
 
 impl LcmExpandServiceCommand {
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
+    pub fn new(
         provider: impl Into<String>,
         session_id: SessionId,
         target: LcmExpandTarget,
@@ -215,82 +215,82 @@ impl LcmExpandServiceCommand {
         }
     }
 
-    pub(crate) fn provider(&self) -> &str {
+    pub fn provider(&self) -> &str {
         &self.provider
     }
 
-    pub(crate) fn session_id(&self) -> &SessionId {
+    pub fn session_id(&self) -> &SessionId {
         &self.session_id
     }
 
-    pub(crate) fn target(&self) -> &LcmExpandTarget {
+    pub fn target(&self) -> &LcmExpandTarget {
         &self.target
     }
 
-    pub(crate) const fn grain(&self) -> RetrievalGrainV1 {
+    pub const fn grain(&self) -> RetrievalGrainV1 {
         self.grain
     }
 
-    pub(crate) const fn content_slice(&self) -> LcmContentSlice {
+    pub const fn content_slice(&self) -> LcmContentSlice {
         self.content_slice
     }
 
-    pub(crate) const fn source_limit(&self) -> Option<usize> {
+    pub const fn source_limit(&self) -> Option<usize> {
         self.source_limit
     }
 
-    pub(crate) fn cursor(&self) -> Option<&str> {
+    pub fn cursor(&self) -> Option<&str> {
         self.cursor.as_deref()
     }
 
-    pub(crate) const fn store_scope(&self) -> SessionRetrievalStoreScope {
+    pub const fn store_scope(&self) -> SessionRetrievalStoreScope {
         self.store_scope
     }
 }
 
-pub(crate) type LcmDescribeServiceFuture<'a> =
+pub type LcmDescribeServiceFuture<'a> =
     Pin<Box<dyn Future<Output = LcmDescribeServiceOutcome> + Send + 'a>>;
-pub(crate) type LcmExpandServiceFuture<'a> =
+pub type LcmExpandServiceFuture<'a> =
     Pin<Box<dyn Future<Output = LcmExpandServiceOutcome> + Send + 'a>>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub(crate) struct SessionRetrievalExplanationView {
-    pub(crate) anchor: RetrievalAnchorId,
-    pub(crate) summary: String,
+pub struct SessionRetrievalExplanationView {
+    pub anchor: RetrievalAnchorId,
+    pub summary: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub(crate) struct SessionRetrievalOmissionView {
-    pub(crate) rank: u32,
-    pub(crate) anchor: RetrievalAnchorId,
-    pub(crate) reason: HydrationStateV1,
+pub struct SessionRetrievalOmissionView {
+    pub rank: u32,
+    pub anchor: RetrievalAnchorId,
+    pub reason: HydrationStateV1,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
-pub(crate) struct SessionTemporalWatermarksView {
-    pub(crate) generation: u64,
-    pub(crate) source: u64,
-    pub(crate) projection: u64,
-    pub(crate) index: u64,
-    pub(crate) summary: u64,
+pub struct SessionTemporalWatermarksView {
+    pub generation: u64,
+    pub source: u64,
+    pub projection: u64,
+    pub index: u64,
+    pub summary: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
-pub(crate) struct SessionTemporalMetadataView {
-    pub(crate) anchors: Vec<RetrievalAnchorId>,
-    pub(crate) watermarks: SessionTemporalWatermarksView,
-    pub(crate) coverage: TemporalCoverageCountsV1,
+pub struct SessionTemporalMetadataView {
+    pub anchors: Vec<RetrievalAnchorId>,
+    pub watermarks: SessionTemporalWatermarksView,
+    pub coverage: TemporalCoverageCountsV1,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) source_coverage: Vec<SessionSourceCoverageV1>,
-    pub(crate) cursor: Option<String>,
-    pub(crate) explanations: Vec<SessionRetrievalExplanationView>,
+    pub source_coverage: Vec<SessionSourceCoverageV1>,
+    pub cursor: Option<String>,
+    pub explanations: Vec<SessionRetrievalExplanationView>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) omissions: Vec<SessionRetrievalOmissionView>,
-    pub(crate) authorized_root: Option<String>,
+    pub omissions: Vec<SessionRetrievalOmissionView>,
+    pub authorized_root: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SessionRetrievalUnavailableReason {
+pub enum SessionRetrievalUnavailableReason {
     ServiceNotConfigured,
     RefreshWorkerMissing,
     RefreshWorkerRecovering,
@@ -305,7 +305,7 @@ pub(crate) enum SessionRetrievalUnavailableReason {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum SessionRetrievalWorkerBlocker {
+pub enum SessionRetrievalWorkerBlocker {
     WorkerMissing,
     WorkerPanicked,
     WorkerStopped,
@@ -316,35 +316,35 @@ pub(crate) enum SessionRetrievalWorkerBlocker {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum SessionRetrievalWorkerRetryClass {
+pub enum SessionRetrievalWorkerRetryClass {
     Storage,
     Projector,
     Deadline,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-pub(crate) struct SessionRetrievalWorkerStatusView {
-    pub(crate) last_progress_at_unix_micros: Option<i64>,
-    pub(crate) backlog: usize,
-    pub(crate) blocker: Option<SessionRetrievalWorkerBlocker>,
-    pub(crate) retry_class: Option<SessionRetrievalWorkerRetryClass>,
+pub struct SessionRetrievalWorkerStatusView {
+    pub last_progress_at_unix_micros: Option<i64>,
+    pub backlog: usize,
+    pub blocker: Option<SessionRetrievalWorkerBlocker>,
+    pub retry_class: Option<SessionRetrievalWorkerRetryClass>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct SessionRetrievalUnavailable {
-    pub(crate) reason: SessionRetrievalUnavailableReason,
-    pub(crate) worker: Option<SessionRetrievalWorkerStatusView>,
+pub struct SessionRetrievalUnavailable {
+    pub reason: SessionRetrievalUnavailableReason,
+    pub worker: Option<SessionRetrievalWorkerStatusView>,
 }
 
 impl SessionRetrievalUnavailable {
-    pub(crate) const fn service_not_configured() -> Self {
+    pub const fn service_not_configured() -> Self {
         Self {
             reason: SessionRetrievalUnavailableReason::ServiceNotConfigured,
             worker: None,
         }
     }
 
-    pub(crate) const fn without_worker(reason: SessionRetrievalUnavailableReason) -> Self {
+    pub const fn without_worker(reason: SessionRetrievalUnavailableReason) -> Self {
         Self {
             reason,
             worker: None,
@@ -354,7 +354,7 @@ impl SessionRetrievalUnavailable {
 
 #[derive(Clone, Debug, PartialEq)]
 #[allow(clippy::large_enum_variant)]
-pub(crate) enum LcmDescribeServiceOutcome {
+pub enum LcmDescribeServiceOutcome {
     Complete {
         description: LcmDescribeResponse,
         temporal: SessionTemporalMetadataView,
@@ -397,7 +397,7 @@ pub(crate) enum LcmDescribeServiceOutcome {
 
 #[derive(Clone, Debug, PartialEq)]
 #[allow(clippy::large_enum_variant)]
-pub(crate) enum LcmExpandServiceOutcome {
+pub enum LcmExpandServiceOutcome {
     Complete {
         expansion: LcmExpandResponse,
         temporal: SessionTemporalMetadataView,
@@ -437,13 +437,13 @@ pub(crate) enum LcmExpandServiceOutcome {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
-pub(crate) struct SessionRetrievalPageView {
-    pub(crate) results: Vec<SessionMessageSearchResult>,
-    pub(crate) temporal: SessionTemporalMetadataView,
+pub struct SessionRetrievalPageView {
+    pub results: Vec<SessionMessageSearchResult>,
+    pub temporal: SessionTemporalMetadataView,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum SessionRetrievalServiceOutcome {
+pub enum SessionRetrievalServiceOutcome {
     Complete {
         page: SessionRetrievalPageView,
         freshness: SessionDataFreshness,

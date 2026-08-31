@@ -31,7 +31,7 @@ pub(crate) struct ProfileRetainedAuthoritiesV1<'a> {
         Option<&'a crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>,
     pub(crate) session_identity: ResolvedSessionIdentity,
     pub(crate) configuration_digest: ManifestDigest,
-    pub(crate) lcm_authority: Option<&'a dyn crate::daemon::lcm_authority::MountedLcmAuthorityPort>,
+    pub(crate) lcm_authority: Option<&'a dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>,
 }
 
 const PROFILE_RETAINED_REQUEST_GRANT_REVISION_V1: u64 = 1;
@@ -676,7 +676,7 @@ mod tests {
             "retained scope beacon from project decoy",
         )
         .await;
-        let session_root = crate::daemon::session_retrieval::DaemonSessionRetrievalRoot::profile()
+        let session_root = tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalRoot::profile()
             .and_then(|root| root.with_profile_runtime_shard(&profile_identity))
             .expect("profile session retrieval root");
         let session_identity = session_root.identity().clone();
@@ -750,7 +750,7 @@ mod tests {
             )
             .await
             .expect("profile session runtime registry");
-        let session_root = crate::daemon::session_retrieval::DaemonSessionRetrievalRoot::profile()
+        let session_root = tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalRoot::profile()
             .and_then(|root| root.with_profile_runtime_shard(&profile_identity))
             .expect("profile session retrieval root");
         let session_identity = session_root.identity().clone();
@@ -810,7 +810,7 @@ mod tests {
             )
             .await
             .expect("profile session runtime registry");
-        let session_root = crate::daemon::session_retrieval::DaemonSessionRetrievalRoot::profile()
+        let session_root = tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalRoot::profile()
             .and_then(|root| root.with_profile_runtime_shard(&profile_identity))
             .expect("profile session retrieval root");
         let session_identity = session_root.identity().clone();

@@ -4,15 +4,15 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1;
+use tracedecay_application::ProfileIdentityReadPort;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_usecases::observation::ObservationCancellation;
 
-pub(in crate::daemon) type SessionHistoricalIngestPass<'a> =
+pub type SessionHistoricalIngestPass<'a> =
     Pin<Box<dyn Future<Output = SessionHistoricalIngestOutcome> + Send + 'a>>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::daemon) enum SessionHistoricalIngestOutcome {
+pub enum SessionHistoricalIngestOutcome {
     Complete,
     Pending {
         made_progress: bool,
@@ -28,11 +28,11 @@ pub(in crate::daemon) enum SessionHistoricalIngestOutcome {
 }
 
 impl SessionHistoricalIngestOutcome {
-    pub(super) const fn needs_another_pass(self) -> bool {
+    pub const fn needs_another_pass(self) -> bool {
         matches!(self, Self::Pending { .. } | Self::Retryable { .. })
     }
 
-    pub(super) const fn made_progress(self) -> bool {
+    pub const fn made_progress(self) -> bool {
         matches!(
             self,
             Self::Pending {
@@ -45,16 +45,16 @@ impl SessionHistoricalIngestOutcome {
     }
 }
 
-pub(in crate::daemon) trait SessionHistoricalIngestor: Send + Sync {
+pub trait SessionHistoricalIngestor: Send + Sync {
     fn run_pass(&self) -> SessionHistoricalIngestPass<'_>;
     fn cancel(&self);
 }
 
-pub(in crate::daemon) type SharedSessionHistoricalIngestor = Arc<dyn SessionHistoricalIngestor>;
+pub type SharedSessionHistoricalIngestor = Arc<dyn SessionHistoricalIngestor>;
 
-pub(in crate::daemon) struct ProjectSessionHistoricalIngestor {
+pub struct ProjectSessionHistoricalIngestor {
     database: RegisteredGlobalDbLeaseV1,
-    profile_identity: LocalProfileIdentityAuthorityV1,
+    profile_identity: Arc<dyn ProfileIdentityReadPort>,
     project_root: PathBuf,
     project_id: tracedecay_domain::ProjectId,
     transcript_source_home: Option<PathBuf>,
@@ -65,9 +65,9 @@ pub(in crate::daemon) struct ProjectSessionHistoricalIngestor {
 }
 
 impl ProjectSessionHistoricalIngestor {
-    pub(in crate::daemon) fn new(
+    pub fn new(
         database: RegisteredGlobalDbLeaseV1,
-        profile_identity: LocalProfileIdentityAuthorityV1,
+        profile_identity: Arc<dyn ProfileIdentityReadPort>,
         project_root: PathBuf,
         project_id: tracedecay_domain::ProjectId,
         transcript_source_home: Option<PathBuf>,
@@ -144,10 +144,10 @@ impl Drop for ProjectSessionHistoricalIngestor {
     }
 }
 
-pub(in crate::daemon) struct ProfileSessionHistoricalIngestor {
+pub struct ProfileSessionHistoricalIngestor {
     database: RegisteredGlobalDbLeaseV1,
     registry_database: RegisteredGlobalDbLeaseV1,
-    profile_identity: LocalProfileIdentityAuthorityV1,
+    profile_identity: Arc<dyn ProfileIdentityReadPort>,
     transcript_source_home: Option<PathBuf>,
     cancellation: ObservationCancellation,
     codex_discovery: Arc<tracedecay_sessions::runtime::codex::CodexDiscoveryHub>,
@@ -156,10 +156,10 @@ pub(in crate::daemon) struct ProfileSessionHistoricalIngestor {
 }
 
 impl ProfileSessionHistoricalIngestor {
-    pub(in crate::daemon) fn new(
+    pub fn new(
         database: RegisteredGlobalDbLeaseV1,
         registry_database: RegisteredGlobalDbLeaseV1,
-        profile_identity: LocalProfileIdentityAuthorityV1,
+        profile_identity: Arc<dyn ProfileIdentityReadPort>,
         transcript_source_home: Option<PathBuf>,
         codex_discovery: Arc<tracedecay_sessions::runtime::codex::CodexDiscoveryHub>,
     ) -> Self {

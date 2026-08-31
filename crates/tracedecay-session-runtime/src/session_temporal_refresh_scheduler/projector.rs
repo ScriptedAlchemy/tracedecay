@@ -12,10 +12,10 @@ use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_session_temporal_store::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
 
 #[derive(Clone, Copy, Debug)]
-pub(in crate::daemon) struct SessionTemporalRefreshPolicy {
-    pub(super) max_begin_requests_per_pass: usize,
-    pub(super) max_operations_per_pass: usize,
-    pub(super) operation_deadline: Duration,
+pub struct SessionTemporalRefreshPolicy {
+    pub max_begin_requests_per_pass: usize,
+    pub max_operations_per_pass: usize,
+    pub operation_deadline: Duration,
 }
 
 impl Default for SessionTemporalRefreshPolicy {
@@ -29,7 +29,7 @@ impl Default for SessionTemporalRefreshPolicy {
 }
 
 #[derive(Debug)]
-pub(in crate::daemon) enum SessionTemporalRefreshEffect {
+pub enum SessionTemporalRefreshEffect {
     Projection {
         progress: SessionRefreshProgressV1,
         batch: SessionTemporalProjectionBatchV1,
@@ -39,26 +39,26 @@ pub(in crate::daemon) enum SessionTemporalRefreshEffect {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::daemon) enum SessionTemporalRefreshProjectorErrorClass {
+pub enum SessionTemporalRefreshProjectorErrorClass {
     Retryable,
     Terminal,
 }
 
 #[derive(Debug)]
-pub(in crate::daemon) struct SessionTemporalRefreshProjectorError {
-    pub(super) class: SessionTemporalRefreshProjectorErrorClass,
-    pub(super) code: String,
+pub struct SessionTemporalRefreshProjectorError {
+    pub class: SessionTemporalRefreshProjectorErrorClass,
+    pub code: String,
 }
 
 impl SessionTemporalRefreshProjectorError {
-    pub(super) fn retryable(code: impl Into<String>) -> Self {
+    pub fn retryable(code: impl Into<String>) -> Self {
         Self {
             class: SessionTemporalRefreshProjectorErrorClass::Retryable,
             code: code.into(),
         }
     }
 
-    pub(super) fn terminal(code: impl Into<String>) -> Self {
+    pub fn terminal(code: impl Into<String>) -> Self {
         Self {
             class: SessionTemporalRefreshProjectorErrorClass::Terminal,
             code: code.into(),
@@ -66,7 +66,7 @@ impl SessionTemporalRefreshProjectorError {
     }
 }
 
-pub(in crate::daemon) type SessionTemporalRefreshProjectionFuture<'a> = Pin<
+pub type SessionTemporalRefreshProjectionFuture<'a> = Pin<
     Box<
         dyn Future<
                 Output = std::result::Result<
@@ -78,7 +78,7 @@ pub(in crate::daemon) type SessionTemporalRefreshProjectionFuture<'a> = Pin<
     >,
 >;
 
-pub(in crate::daemon) trait SessionTemporalRefreshProjector: Send + Sync {
+pub trait SessionTemporalRefreshProjector: Send + Sync {
     fn project<'a>(
         &'a self,
         database: &'a RegisteredGlobalDbLeaseV1,
@@ -86,10 +86,10 @@ pub(in crate::daemon) trait SessionTemporalRefreshProjector: Send + Sync {
     ) -> SessionTemporalRefreshProjectionFuture<'a>;
 }
 
-#[cfg(test)]
-pub(super) struct DeferredSessionTemporalProjector;
+#[cfg(any(test, feature = "test-helpers"))]
+pub struct DeferredSessionTemporalProjector;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 impl SessionTemporalRefreshProjector for DeferredSessionTemporalProjector {
     fn project<'a>(
         &'a self,
@@ -100,7 +100,7 @@ impl SessionTemporalRefreshProjector for DeferredSessionTemporalProjector {
     }
 }
 
-pub(super) struct CanonicalSessionTemporalProjector;
+pub struct CanonicalSessionTemporalProjector;
 
 impl SessionTemporalRefreshProjector for CanonicalSessionTemporalProjector {
     fn project<'a>(
@@ -142,7 +142,7 @@ fn refresh_clock_micros() -> UtcMicros {
     )
 }
 
-pub(super) fn zero_refresh_coverage() -> TemporalCoverageCountsV1 {
+pub fn zero_refresh_coverage() -> TemporalCoverageCountsV1 {
     TemporalCoverageCountsV1 {
         visible: 0,
         hidden: 0,
@@ -199,7 +199,7 @@ fn canonical_noop_complete_effect(
     Ok(SessionTemporalRefreshEffect::Projection { progress, batch })
 }
 
-pub(super) fn durable_projector_failure_code(code: &str) -> String {
+pub fn durable_projector_failure_code(code: &str) -> String {
     match SessionRefreshFailureCodeV1::new(code) {
         Ok(code) => code.as_str().to_string(),
         Err(_) => "projector_failed".to_string(),

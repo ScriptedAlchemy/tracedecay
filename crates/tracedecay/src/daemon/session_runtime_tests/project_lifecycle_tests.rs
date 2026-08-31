@@ -14,8 +14,11 @@ use tracedecay_application::{
 use tracedecay_domain::{ProjectId, UserProfileId, UtcMicros};
 use tracedecay_sessions::admission::SESSION_INGEST_DISABLED_REASON_V1;
 
-use super::project_lifecycle::SessionSyncTaskV1;
-use super::{DaemonSessionSyncConfig, DaemonSessionSyncService};
+use tracedecay_session_runtime::session_sync::{
+    DaemonSessionSyncConfig, DaemonSessionSyncService, SessionSyncTaskV1, journal_key,
+    journal_prefix,
+};
+use tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshWake;
 
 fn request(project_id: ProjectId, profile_id: UserProfileId) -> SessionSyncRequestV1 {
     SessionSyncRequestV1::new(
@@ -66,10 +69,8 @@ async fn register(
             user_sessions: profile_sessions.clone(),
             registry: profile_sessions,
             startup_import: false,
-            project_refresh:
-                crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake::unavailable(),
-            user_refresh:
-                crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake::unavailable(),
+            project_refresh: SessionTemporalRefreshWake::unavailable(),
+            user_refresh: SessionTemporalRefreshWake::unavailable(),
         })
         .await
         .unwrap();
@@ -357,7 +358,7 @@ async fn exact_project_retirement_drains_a_keeps_b_live_and_rebinds_a() {
         CancellationSignal::active("session-sync.rebind-recovery").unwrap(),
         SessionSyncCommandV1::ImportTranscripts(SessionTranscriptImportV1::all_hosts()),
     );
-    let recovery_key = super::journal_key(&scope_a, recovery_request.idempotency_key());
+    let recovery_key = journal_key(&scope_a, recovery_request.idempotency_key());
     let recovery_journal = SessionSyncJournalV1::queued(&recovery_request, UtcMicros(0));
     service
         .context_for(&scope_a)
@@ -458,7 +459,7 @@ async fn registration_recovery_fences_concurrent_execute() {
         SessionSyncCommandV1::ImportTranscripts(SessionTranscriptImportV1::all_hosts()),
     );
     let scope = request.scope().clone();
-    let key = super::journal_key(&scope, request.idempotency_key());
+    let key = journal_key(&scope, request.idempotency_key());
     profile_sessions
         .insert_session_sync_journal(
             &key,
@@ -483,10 +484,8 @@ async fn registration_recovery_fences_concurrent_execute() {
                 user_sessions: profile_sessions.clone(),
                 registry: profile_sessions,
                 startup_import: false,
-                project_refresh:
-                    crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake::unavailable(),
-                user_refresh:
-                    crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake::unavailable(),
+                project_refresh: SessionTemporalRefreshWake::unavailable(),
+                user_refresh: SessionTemporalRefreshWake::unavailable(),
             })
             .await
     });
@@ -570,11 +569,11 @@ async fn terminal_recovered_alias_does_not_suppress_startup_import() {
     );
     for (key, journal) in [
         (
-            super::journal_key(&scope, primary_request.idempotency_key()),
+            journal_key(&scope, primary_request.idempotency_key()),
             primary,
         ),
         (
-            super::journal_key(&scope, alias_request.idempotency_key()),
+            journal_key(&scope, alias_request.idempotency_key()),
             alias,
         ),
     ] {
@@ -595,16 +594,14 @@ async fn terminal_recovered_alias_does_not_suppress_startup_import() {
             user_sessions: profile_sessions.clone(),
             registry: profile_sessions.clone(),
             startup_import: true,
-            project_refresh:
-                crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake::unavailable(),
-            user_refresh:
-                crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake::unavailable(),
+            project_refresh: SessionTemporalRefreshWake::unavailable(),
+            user_refresh: SessionTemporalRefreshWake::unavailable(),
         })
         .await
         .unwrap();
 
     let journals = profile_sessions
-        .list_session_sync_journals(&super::journal_prefix(&scope))
+        .list_session_sync_journals(&journal_prefix(&scope))
         .await
         .unwrap();
     assert!(journals.iter().any(|(_, encoded)| {
@@ -669,7 +666,7 @@ async fn recovery_upgrades_a_journal_whose_frontiers_exceed_one_query() {
         .await
         .unwrap();
     let live_request = request(project_id.clone(), profile_id.clone());
-    let live_key = super::journal_key(&scope, live_request.idempotency_key());
+    let live_key = journal_key(&scope, live_request.idempotency_key());
     let live = SessionSyncJournalV1::queued(&live_request, UtcMicros(1));
     assert!(
         profile_sessions
@@ -690,10 +687,8 @@ async fn recovery_upgrades_a_journal_whose_frontiers_exceed_one_query() {
             user_sessions: profile_sessions.clone(),
             registry: profile_sessions.clone(),
             startup_import: false,
-            project_refresh:
-                crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake::unavailable(),
-            user_refresh:
-                crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake::unavailable(),
+            project_refresh: SessionTemporalRefreshWake::unavailable(),
+            user_refresh: SessionTemporalRefreshWake::unavailable(),
         })
         .await
         .expect("recovery over a store larger than one exact-SQL query must not degrade the mount");

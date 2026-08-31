@@ -5937,6 +5937,7 @@ dependencies = [
  "tracedecay-search-eval",
  "tracedecay-semantic",
  "tracedecay-session-memory",
+ "tracedecay-session-runtime",
  "tracedecay-session-temporal-store",
  "tracedecay-sessions",
  "tracedecay-source-edit",
@@ -6811,6 +6812,40 @@ dependencies = [
  "tracedecay-store",
  "tracedecay-temporal-query",
  "tracedecay-tool-catalog",
+]
+
+[[package]]
+name = "tracedecay-session-runtime"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "hex",
+ "hotpath",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "tokio",
+ "tracedecay-application",
+ "tracedecay-code-index",
+ "tracedecay-code-index-runtime",
+ "tracedecay-daemon-protocol",
+ "tracedecay-domain",
+ "tracedecay-global-db",
+ "tracedecay-graph-db",
+ "tracedecay-host-admission",
+ "tracedecay-lcm",
+ "tracedecay-query",
+ "tracedecay-runtime-core",
+ "tracedecay-rusqlite-runtime",
+ "tracedecay-session-memory",
+ "tracedecay-session-temporal-store",
+ "tracedecay-sessions",
+ "tracedecay-store",
+ "tracedecay-temporal-query",
+ "tracedecay-tool-catalog",
+ "tracedecay-usecases",
+ "tracing",
 ]
 
 [[package]]

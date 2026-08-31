@@ -3,6 +3,7 @@
 //! describe/expand execution, and result filtering for application-admitted
 //! retrieval.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use serde_json::json;
@@ -12,7 +13,7 @@ use tracedecay_domain::{
     ActorId, HydrationStateV1, ProjectId, RetrievalGrainV1, SessionId, TemporalCoverageCountsV1,
     TemporalModeV1,
 };
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 use tracedecay_domain::{RepositoryId, WorktreeId};
 use tracedecay_sessions::serving::SessionProjectionServingStatusPort;
 use tracedecay_store::StoreShardIdV1;
@@ -27,8 +28,7 @@ use tracedecay_session_memory::session::{
     SessionTemporalExecutionError, SessionTemporalQuery,
 };
 
-use crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake;
-use crate::tracedecay::TraceDecay;
+use crate::session_temporal_refresh_scheduler::SessionTemporalRefreshWake;
 use tracedecay_global_db::{ProjectRegistryContext, RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_session_temporal_store::{
     RegisteredGlobalDbSessionTemporalExecution, SessionPageReconstruction,
@@ -59,7 +59,7 @@ const MESSAGE_SEARCH_MAX_BYTES: u64 = 16 * 1024 * 1024;
 /// exceed the binding's budgets, so every query built for the admitted path
 /// must be sized against this constant rather than the multi-MiB
 /// `ExecutionLimits::default()` or [`MESSAGE_SEARCH_MAX_BYTES`].
-pub(crate) const APPLICATION_RETRIEVAL_MAX_BYTES: u64 = 64 * 1024;
+pub const APPLICATION_RETRIEVAL_MAX_BYTES: u64 = 64 * 1024;
 
 /// Execution limits an admitted application retrieval of `limit` items may ask
 /// for.
@@ -74,7 +74,7 @@ pub(crate) const APPLICATION_RETRIEVAL_MAX_BYTES: u64 = 64 * 1024;
 /// ranker draws from, not the page it returns: clamping them to `limit` would
 /// leave a ten-result search ranking ten candidates instead of the default
 /// 256, silently trading recall for a budget the binding never asked about.
-pub(crate) fn admitted_execution_limits(limit: usize) -> ExecutionLimits {
+pub fn admitted_execution_limits(limit: usize) -> ExecutionLimits {
     let bytes = usize::try_from(APPLICATION_RETRIEVAL_MAX_BYTES).unwrap_or(usize::MAX);
     let defaults = ExecutionLimits::default();
     ExecutionLimits {
@@ -86,7 +86,7 @@ pub(crate) fn admitted_execution_limits(limit: usize) -> ExecutionLimits {
     }
 }
 
-pub(super) fn temporal_kernel_deadline(error: &TemporalKernelError) -> bool {
+pub(crate) fn temporal_kernel_deadline(error: &TemporalKernelError) -> bool {
     matches!(
         error,
         TemporalKernelError::DeadlineExceeded
@@ -103,11 +103,11 @@ pub(super) fn temporal_kernel_deadline(error: &TemporalKernelError) -> bool {
 mod admitted;
 mod contract;
 mod primitive;
-pub(crate) use admitted::{
+pub use admitted::{
     SessionApplicationRetrievalFutureV1, SessionApplicationRetrievalPortV1,
     UnavailableSessionApplicationRetrievalV1,
 };
-pub(crate) use contract::{
+pub use contract::{
     LcmDescribeServiceCommand, LcmDescribeServiceFuture, LcmDescribeServiceOutcome,
     LcmExpandServiceCommand, LcmExpandServiceFuture, LcmExpandServiceOutcome,
     SessionRetrievalCommand, SessionRetrievalExplanationView, SessionRetrievalFilters,
@@ -115,10 +115,19 @@ pub(crate) use contract::{
     SessionRetrievalStoreScope, SessionRetrievalUnavailable, SessionRetrievalUnavailableReason,
     SessionTemporalMetadataView, SessionTemporalWatermarksView,
 };
-pub(crate) use primitive::DaemonSessionLookupPrimitiveV1;
+pub use primitive::DaemonSessionLookupPrimitiveV1;
+
+/// Serving identity of the store the daemon currently serves, extracted
+/// from the composition root's aggregate at the call site.
+#[derive(Clone, Copy)]
+pub struct SessionRetrievalServingIdentityV1<'a> {
+    pub project_id: Option<&'a str>,
+    pub serving_db: &'a Path,
+    pub project_root: &'a Path,
+}
 
 #[derive(Clone)]
-pub(crate) struct DaemonSessionRetrievalRoot {
+pub struct DaemonSessionRetrievalRoot {
     store_scope: SessionRetrievalStoreScope,
     identity: ResolvedSessionIdentity,
     project_id: Option<String>,
@@ -127,37 +136,39 @@ pub(crate) struct DaemonSessionRetrievalRoot {
 }
 
 impl DaemonSessionRetrievalRoot {
-    pub(crate) fn identity(&self) -> &ResolvedSessionIdentity {
+    pub fn identity(&self) -> &ResolvedSessionIdentity {
         &self.identity
     }
 
-    pub(crate) fn expected_runtime_shard(&self) -> Option<&StoreShardIdV1> {
+    pub fn expected_runtime_shard(&self) -> Option<&StoreShardIdV1> {
         self.expected_runtime_shard.as_ref()
     }
 
-    pub(crate) async fn project(cg: &TraceDecay, registry: &RegisteredGlobalDb) -> Option<Self> {
-        let project_id = cg.store_layout().identity.project_id.as_deref()?;
+    pub async fn project(
+        serving: SessionRetrievalServingIdentityV1<'_>,
+        registry: &RegisteredGlobalDb,
+    ) -> Option<Self> {
+        let project_id = serving.project_id?;
         let context = registry
             .project_registry_context_by_id(project_id)
             .await
             .ok()??;
-        Self::from_project_context(cg, registry, context)
+        Self::from_project_context(&serving, registry, context)
     }
 
     fn from_project_context(
-        cg: &TraceDecay,
+        serving: &SessionRetrievalServingIdentityV1<'_>,
         registry: &RegisteredGlobalDb,
         context: ProjectRegistryContext,
     ) -> Option<Self> {
         let profile_root = registry.db_path().parent()?;
-        let serving_db = cg.db_path();
         let mut selected = None;
         for store in &context.stores {
             for scope in &store.graph_scopes {
                 if scope.writable
                     && scope.project_id == context.project.project_id
                     && scope.store_id == store.store.store_id
-                    && profile_root.join(&scope.db_relpath) == serving_db
+                    && profile_root.join(&scope.db_relpath) == *serving.serving_db
                 {
                     if selected.is_some() {
                         return None;
@@ -175,12 +186,12 @@ impl DaemonSessionRetrievalRoot {
         let project_key = ProjectId::new(context.project.project_id.clone()).ok()?;
         let repository_id =
             tracedecay_code_index_runtime::code_index_scheduler::identity::repository_id_for(
-                cg.project_root(),
+                serving.project_root,
             )
             .ok()?;
         let worktree_id =
             tracedecay_code_index_runtime::code_index_scheduler::identity::worktree_id_for(
-                cg.project_root(),
+                serving.project_root,
             )
             .ok()?;
         let identity = ResolvedSessionIdentity::for_project(
@@ -199,10 +210,9 @@ impl DaemonSessionRetrievalRoot {
         })
     }
 
-    #[cfg(any(test, feature = "test-transport"))]
-    pub(crate) fn project_for_test(cg: &TraceDecay) -> Self {
-        let project_root = cg.project_root().to_path_buf();
-        let project_id = cg.store_layout().identity.project_id.clone();
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn project_for_test(project_root: &Path, project_id: Option<String>) -> Self {
+        let project_root = project_root.to_path_buf();
         let project_key_value = project_id
             .clone()
             .unwrap_or_else(|| project_root.display().to_string());
@@ -241,8 +251,8 @@ impl DaemonSessionRetrievalRoot {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn project_identity_for_test(
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn project_identity_for_test(
         project_id: ProjectId,
         repository_id: RepositoryId,
         worktree_id: WorktreeId,
@@ -272,7 +282,7 @@ impl DaemonSessionRetrievalRoot {
         }
     }
 
-    pub(crate) fn profile() -> Option<Self> {
+    pub fn profile() -> Option<Self> {
         Some(Self {
             store_scope: SessionRetrievalStoreScope::Profile,
             identity: ResolvedSessionIdentity::for_profile(
@@ -286,7 +296,7 @@ impl DaemonSessionRetrievalRoot {
         })
     }
 
-    pub(crate) fn with_project_runtime_shard(
+    pub fn with_project_runtime_shard(
         self,
         profile_identity: &dyn tracedecay_application::ProfileIdentityReadPort,
     ) -> Option<Self> {
@@ -321,7 +331,7 @@ impl DaemonSessionRetrievalRoot {
         Some(self)
     }
 
-    pub(crate) fn with_profile_runtime_shard(
+    pub fn with_profile_runtime_shard(
         self,
         profile_identity: &dyn tracedecay_application::ProfileIdentityReadPort,
     ) -> Option<Self> {
@@ -409,7 +419,7 @@ const fn requires_refresh_worker(freshness_policy: SessionFreshnessPolicy) -> bo
     matches!(freshness_policy, SessionFreshnessPolicy::RequireFresh)
 }
 
-pub(crate) struct DaemonSessionRetrievalService {
+pub struct DaemonSessionRetrievalService {
     database: RegisteredGlobalDbLeaseV1,
     root: DaemonSessionRetrievalRoot,
     configuration: SessionRetrievalConfiguration,
@@ -417,7 +427,7 @@ pub(crate) struct DaemonSessionRetrievalService {
 }
 
 impl DaemonSessionRetrievalService {
-    pub(crate) fn new(
+    pub fn new(
         database: RegisteredGlobalDbLeaseV1,
         root: DaemonSessionRetrievalRoot,
         refresh_status: Option<SessionTemporalRefreshWake>,
@@ -430,7 +440,7 @@ impl DaemonSessionRetrievalService {
         )
     }
 
-    pub(crate) fn new_with_serving_port(
+    pub fn new_with_serving_port(
         database: RegisteredGlobalDbLeaseV1,
         root: DaemonSessionRetrievalRoot,
         refresh_status: Option<Arc<dyn SessionProjectionServingStatusPort>>,
@@ -447,7 +457,7 @@ impl DaemonSessionRetrievalService {
         })
     }
 
-    pub(crate) fn new_registered_with_serving_port(
+    pub fn new_registered_with_serving_port(
         database: RegisteredGlobalDbLeaseV1,
         registered_database: RegisteredGlobalDbLeaseV1,
         root: DaemonSessionRetrievalRoot,

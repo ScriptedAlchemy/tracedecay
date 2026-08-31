@@ -4,13 +4,13 @@ use std::sync::PoisonError;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use super::super::StoreOwnerKey;
+use crate::StoreOwnerKey;
 use super::history::SharedSessionHistoricalIngestor;
 use super::projector::{
     CanonicalSessionTemporalProjector, SessionTemporalRefreshPolicy,
     SessionTemporalRefreshProjector,
 };
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 use super::wake::SessionTemporalRefreshWorkerStatus;
 use super::wake::{
     SessionTemporalRefreshBlocker, SessionTemporalRefreshRetryClass, SessionTemporalRefreshWake,
@@ -21,25 +21,25 @@ use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_sessions::admission::session_ingest_disabled;
 
 #[derive(Default, Debug, Eq, PartialEq)]
-pub(super) struct SessionTemporalRefreshPassReport {
-    pub(super) begun: usize,
-    pub(super) joined: usize,
-    pub(super) projected_batches: usize,
-    pub(super) completed: usize,
-    pub(super) failed: usize,
-    pub(super) cancelled: usize,
-    pub(super) deferred: usize,
-    pub(super) retryable_errors: usize,
-    pub(super) terminal_errors: usize,
-    pub(super) deadline_errors: usize,
-    pub(super) saturated: bool,
-    pub(super) backlog: Option<usize>,
-    pub(super) retry_class: Option<SessionTemporalRefreshRetryClass>,
-    pub(super) last_error: Option<String>,
+pub struct SessionTemporalRefreshPassReport {
+    pub begun: usize,
+    pub joined: usize,
+    pub projected_batches: usize,
+    pub completed: usize,
+    pub failed: usize,
+    pub cancelled: usize,
+    pub deferred: usize,
+    pub retryable_errors: usize,
+    pub terminal_errors: usize,
+    pub deadline_errors: usize,
+    pub saturated: bool,
+    pub backlog: Option<usize>,
+    pub retry_class: Option<SessionTemporalRefreshRetryClass>,
+    pub last_error: Option<String>,
 }
 
 impl SessionTemporalRefreshPassReport {
-    pub(super) fn observe_retry(&mut self, class: SessionTemporalRefreshRetryClass) {
+    pub fn observe_retry(&mut self, class: SessionTemporalRefreshRetryClass) {
         let rank = |candidate| match candidate {
             SessionTemporalRefreshRetryClass::Storage => 1,
             SessionTemporalRefreshRetryClass::Projector => 2,
@@ -88,7 +88,7 @@ impl SessionTemporalRefreshSchedulerEntry {
         }
         self.state.cancel();
         let mut task = self.task;
-        if tokio::time::timeout(super::super::DAEMON_CLIENT_DRAIN_DEADLINE, &mut task)
+        if tokio::time::timeout(crate::DAEMON_CLIENT_DRAIN_DEADLINE, &mut task)
             .await
             .is_err()
         {
@@ -98,11 +98,11 @@ impl SessionTemporalRefreshSchedulerEntry {
     }
 }
 
-pub(in crate::daemon) struct SessionTemporalRefreshSchedulerRegistry {
+pub struct SessionTemporalRefreshSchedulerRegistry {
     project: tokio::sync::Mutex<HashMap<StoreOwnerKey, SessionTemporalRefreshSchedulerEntry>>,
     profile: tokio::sync::Mutex<HashMap<std::path::PathBuf, SessionTemporalRefreshSchedulerEntry>>,
-    pub(super) projector: Arc<dyn SessionTemporalRefreshProjector>,
-    pub(super) policy: SessionTemporalRefreshPolicy,
+    pub projector: Arc<dyn SessionTemporalRefreshProjector>,
+    pub policy: SessionTemporalRefreshPolicy,
     shutting_down: AtomicBool,
     #[cfg_attr(not(unix), allow(dead_code))] // held by the unix-only daemon shutdown path
     shutdown_guard: tokio::sync::Mutex<()>,
@@ -162,14 +162,14 @@ impl Drop for SessionTemporalRefreshSchedulerRegistry {
 }
 
 impl SessionTemporalRefreshSchedulerRegistry {
-    pub(in crate::daemon) fn configure_codex_preparation_resources(
+    pub fn configure_codex_preparation_resources(
         &self,
         memory: Arc<tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1>,
     ) -> tracedecay_sessions::runtime::source::TranscriptIngestResult<()> {
         self.codex_discovery.configure_preparation_resources(memory)
     }
 
-    pub(in crate::daemon) fn codex_discovery(
+    pub fn codex_discovery(
         &self,
     ) -> Arc<tracedecay_sessions::runtime::codex::CodexDiscoveryHub> {
         Arc::clone(&self.codex_discovery)
@@ -268,7 +268,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
         }
     }
 
-    pub(in crate::daemon) async fn ensure_project(
+    pub async fn ensure_project(
         &self,
         owner: StoreOwnerKey,
         database: RegisteredGlobalDbLeaseV1,
@@ -321,7 +321,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
         wake
     }
 
-    pub(in crate::daemon) async fn ensure_profile(
+    pub async fn ensure_profile(
         &self,
         database_path: std::path::PathBuf,
         database: RegisteredGlobalDbLeaseV1,
@@ -367,7 +367,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
         wake
     }
 
-    pub(in crate::daemon) async fn ensure_project_with_history(
+    pub async fn ensure_project_with_history(
         &self,
         owner: StoreOwnerKey,
         database: RegisteredGlobalDbLeaseV1,
@@ -397,7 +397,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
         wake
     }
 
-    pub(in crate::daemon) async fn ensure_profile_with_history(
+    pub async fn ensure_profile_with_history(
         &self,
         database_path: std::path::PathBuf,
         database: RegisteredGlobalDbLeaseV1,
@@ -427,7 +427,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
         wake
     }
 
-    pub(in crate::daemon) async fn rekey_project(
+    pub async fn rekey_project(
         &self,
         old_owner: &StoreOwnerKey,
         new_owner: StoreOwnerKey,
@@ -484,14 +484,14 @@ impl SessionTemporalRefreshSchedulerRegistry {
         project.insert(new_owner, entry);
     }
 
-    pub(in crate::daemon) async fn retire_project(&self, owner: &StoreOwnerKey) {
+    pub async fn retire_project(&self, owner: &StoreOwnerKey) {
         let _lifecycle = self.project_lifecycle.lock().await;
         if let Some(entry) = self.project.lock().await.remove(owner) {
             entry.shutdown().await;
         }
     }
 
-    pub(in crate::daemon) async fn owns_project_database_paths(
+    pub async fn owns_project_database_paths(
         &self,
         database_paths: &HashSet<std::path::PathBuf>,
     ) -> bool {
@@ -502,7 +502,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
             .any(|owner| database_paths.contains(&owner.graph_db_path))
     }
 
-    pub(in crate::daemon) async fn cancel_historical_ingest(&self) {
+    pub async fn cancel_historical_ingest(&self) {
         let project = self.project.lock().await;
         let profile = self.profile.lock().await;
         for entry in project.values().chain(profile.values()) {
@@ -518,7 +518,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
     }
 
     #[cfg_attr(not(unix), allow(dead_code))] // invoked by the unix-only daemon shutdown path
-    pub(in crate::daemon) async fn shutdown(&self) {
+    pub async fn shutdown(&self) {
         self.shutting_down.store(true, Ordering::Release);
         let _guard = self.shutdown_guard.lock().await;
         let _project_lifecycle = self.project_lifecycle.lock().await;
@@ -543,8 +543,8 @@ impl SessionTemporalRefreshSchedulerRegistry {
         while retirements.join_next().await.is_some() {}
     }
 
-    #[cfg(test)]
-    pub(super) async fn project_state(
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub async fn project_state(
         &self,
         owner: &StoreOwnerKey,
     ) -> Option<Arc<SessionTemporalRefreshWakeState>> {
@@ -555,8 +555,8 @@ impl SessionTemporalRefreshSchedulerRegistry {
             .map(|entry| Arc::clone(&entry.state))
     }
 
-    #[cfg(test)]
-    pub(super) async fn profile_worker_status(
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub async fn profile_worker_status(
         &self,
         database_path: &std::path::Path,
     ) -> SessionTemporalRefreshWorkerStatus {
@@ -566,18 +566,18 @@ impl SessionTemporalRefreshSchedulerRegistry {
         )
     }
 
-    #[cfg(test)]
-    pub(super) async fn project_worker_count(&self) -> usize {
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub async fn project_worker_count(&self) -> usize {
         self.project.lock().await.len()
     }
 
-    #[cfg(test)]
-    pub(super) async fn profile_worker_count(&self) -> usize {
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub async fn profile_worker_count(&self) -> usize {
         self.profile.lock().await.len()
     }
 
-    #[cfg(test)]
-    pub(super) async fn profile_pass_count(&self, database_path: &std::path::Path) -> usize {
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub async fn profile_pass_count(&self, database_path: &std::path::Path) -> usize {
         self.profile
             .lock()
             .await
@@ -585,8 +585,8 @@ impl SessionTemporalRefreshSchedulerRegistry {
             .map_or(0, |entry| entry.state.pass_count.load(Ordering::Acquire))
     }
 
-    #[cfg(test)]
-    pub(super) async fn wait_profile_idle(
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub async fn wait_profile_idle(
         &self,
         database_path: &std::path::Path,
         timeout: Duration,
@@ -621,7 +621,7 @@ fn inert_session_temporal_refresh_wake() -> SessionTemporalRefreshWake {
     SessionTemporalRefreshWake::unavailable()
 }
 
-pub(super) fn session_refresh_retry_delay(
+pub fn session_refresh_retry_delay(
     class: SessionTemporalRefreshRetryClass,
     attempt: u32,
 ) -> Duration {

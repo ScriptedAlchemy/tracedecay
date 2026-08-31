@@ -40,7 +40,7 @@ impl DaemonSessionRetrievalService {
     /// Mount the canonical profile-session retrieval service over the exact
     /// registered profile shard and retained session identity supplied by the
     /// daemon composition root.
-    pub(crate) fn new_admitted_profile(
+    pub fn new_admitted_profile(
         database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         identity: ResolvedSessionIdentity,
     ) -> Option<Self> {
@@ -67,7 +67,7 @@ impl DaemonSessionRetrievalService {
     }
 }
 
-pub(crate) type SessionApplicationRetrievalFutureV1<'a> =
+pub type SessionApplicationRetrievalFutureV1<'a> =
     Pin<Box<dyn Future<Output = SessionRetrievalServiceOutcome> + Send + 'a>>;
 
 pub(crate) type TaskSessionApplicationRetrievalFutureV1<'a> =
@@ -78,7 +78,7 @@ pub(crate) type TaskSessionApplicationRetrievalFutureV1<'a> =
 /// The caller has already crossed its application admission boundary. This
 /// port therefore accepts the original immutable context and never routes
 /// through MCP command parsing or mints a replacement application identity.
-pub(crate) trait SessionApplicationRetrievalPortV1: Send + Sync {
+pub trait SessionApplicationRetrievalPortV1: Send + Sync {
     fn retrieve_admitted<'a>(
         &'a self,
         context: &'a RequestContext,
@@ -162,12 +162,12 @@ pub(crate) trait SessionApplicationRetrievalPortV1: Send + Sync {
 /// composition. It also must not fabricate an empty session store: requests
 /// for the admitted project receive the canonical typed unavailable outcome,
 /// while any other scope remains denied.
-pub(crate) struct UnavailableSessionApplicationRetrievalV1 {
+pub struct UnavailableSessionApplicationRetrievalV1 {
     scope: ResolvedScope,
 }
 
 impl UnavailableSessionApplicationRetrievalV1 {
-    pub(crate) fn new(scope: ResolvedScope) -> Self {
+    pub fn new(scope: ResolvedScope) -> Self {
         Self { scope }
     }
 }
@@ -468,9 +468,9 @@ fn admitted_lcm_session_binding(
     context: &RequestContext,
 ) -> Result<SessionRequestBinding, Box<SessionRetrievalServiceOutcome>> {
     let budgets = RequestBudgets::new(
-        crate::daemon::lcm_authority::LCM_MAX_RESULTS,
-        crate::daemon::lcm_authority::LCM_MAX_BYTES,
-        crate::daemon::lcm_authority::LCM_MAX_WORK_UNITS,
+        crate::lcm_authority::LCM_MAX_RESULTS,
+        crate::lcm_authority::LCM_MAX_BYTES,
+        crate::lcm_authority::LCM_MAX_WORK_UNITS,
     )
     .map_err(|_| Box::new(temporal_store_unavailable()))?;
     counted_admitted_session_binding(root, retrieval_configuration, context, budgets)

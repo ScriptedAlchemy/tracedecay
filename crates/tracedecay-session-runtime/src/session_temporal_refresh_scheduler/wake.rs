@@ -18,14 +18,14 @@ use tracedecay_sessions::serving::{
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SessionTemporalRefreshRetryClass {
+pub enum SessionTemporalRefreshRetryClass {
     Storage,
     Projector,
     Deadline,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SessionTemporalRefreshUnavailableReason {
+pub enum SessionTemporalRefreshUnavailableReason {
     Missing,
     Recovering,
     Stalled,
@@ -33,7 +33,7 @@ pub(crate) enum SessionTemporalRefreshUnavailableReason {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SessionTemporalRefreshBlocker {
+pub enum SessionTemporalRefreshBlocker {
     WorkerMissing,
     WorkerPanicked,
     WorkerStopped,
@@ -53,12 +53,12 @@ impl From<SessionTemporalRefreshRetryClass> for SessionTemporalRefreshBlocker {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct SessionTemporalRefreshWorkerStatus {
-    pub(crate) last_progress_at_unix_micros: Option<i64>,
-    pub(crate) backlog: usize,
-    pub(crate) blocker: Option<SessionTemporalRefreshBlocker>,
-    pub(crate) retry_class: Option<SessionTemporalRefreshRetryClass>,
-    pub(crate) unavailable_reason: Option<SessionTemporalRefreshUnavailableReason>,
+pub struct SessionTemporalRefreshWorkerStatus {
+    pub last_progress_at_unix_micros: Option<i64>,
+    pub backlog: usize,
+    pub blocker: Option<SessionTemporalRefreshBlocker>,
+    pub retry_class: Option<SessionTemporalRefreshRetryClass>,
+    pub unavailable_reason: Option<SessionTemporalRefreshUnavailableReason>,
 }
 
 impl SessionTemporalRefreshWorkerStatus {
@@ -72,8 +72,8 @@ impl SessionTemporalRefreshWorkerStatus {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) const fn is_available(self) -> bool {
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub const fn is_available(self) -> bool {
         self.unavailable_reason.is_none()
     }
 }
@@ -114,21 +114,21 @@ impl Default for SessionTemporalRefreshWorkerTelemetry {
     }
 }
 
-pub(super) struct SessionTemporalRefreshWakeState {
-    pub(super) dirty: AtomicBool,
+pub struct SessionTemporalRefreshWakeState {
+    pub dirty: AtomicBool,
     historical_dirty: AtomicBool,
-    pub(super) requests: std::sync::Mutex<VecDeque<SessionRefreshBeginOrJoinRequestV1>>,
+    pub requests: std::sync::Mutex<VecDeque<SessionRefreshBeginOrJoinRequestV1>>,
     projection_discovery_after: std::sync::Mutex<Option<SessionId>>,
     projection_discovery_active_turn: AtomicBool,
-    pub(super) terminal_attempts: std::sync::Mutex<HashSet<String>>,
-    pub(super) recovery_cycle_pending: std::sync::Mutex<VecDeque<String>>,
-    pub(super) busy: AtomicBool,
+    pub terminal_attempts: std::sync::Mutex<HashSet<String>>,
+    pub recovery_cycle_pending: std::sync::Mutex<VecDeque<String>>,
+    pub busy: AtomicBool,
     history_retry_pending: AtomicBool,
-    pub(super) pass_count: std::sync::atomic::AtomicUsize,
-    pub(super) wake: tokio::sync::Notify,
-    pub(super) idle: tokio::sync::Notify,
-    pub(super) cancelled: AtomicBool,
-    pub(super) cancellation: tokio::sync::Notify,
+    pub pass_count: std::sync::atomic::AtomicUsize,
+    pub wake: tokio::sync::Notify,
+    pub idle: tokio::sync::Notify,
+    pub cancelled: AtomicBool,
+    pub cancellation: tokio::sync::Notify,
     completion_control: ExecutionControl,
     telemetry: std::sync::Mutex<SessionTemporalRefreshWorkerTelemetry>,
 }
@@ -157,14 +157,14 @@ impl Default for SessionTemporalRefreshWakeState {
 }
 
 impl SessionTemporalRefreshWakeState {
-    pub(super) fn handle(self: &Arc<Self>) -> SessionTemporalRefreshWake {
+    pub fn handle(self: &Arc<Self>) -> SessionTemporalRefreshWake {
         let route = Arc::new(SessionTemporalRefreshWakeRoute {
             target: std::sync::RwLock::new(Arc::downgrade(self)),
         });
         SessionTemporalRefreshWake { route }
     }
 
-    pub(super) fn take_dirty(&self) -> bool {
+    pub fn take_dirty(&self) -> bool {
         let dirty = self.dirty.swap(false, Ordering::AcqRel);
         if dirty {
             hotpath::gauge!("session_temporal_refresh_projection_dirty").inc(-1.0);
@@ -172,7 +172,7 @@ impl SessionTemporalRefreshWakeState {
         dirty
     }
 
-    pub(super) fn take_historical_dirty(&self) -> bool {
+    pub fn take_historical_dirty(&self) -> bool {
         let dirty = self.historical_dirty.swap(false, Ordering::AcqRel);
         if dirty {
             hotpath::gauge!("session_temporal_refresh_history_dirty").inc(-1.0);
@@ -180,7 +180,7 @@ impl SessionTemporalRefreshWakeState {
         dirty
     }
 
-    pub(super) fn take_requests(&self, limit: usize) -> Vec<SessionRefreshBeginOrJoinRequestV1> {
+    pub fn take_requests(&self, limit: usize) -> Vec<SessionRefreshBeginOrJoinRequestV1> {
         let mut requests = self.requests.lock().unwrap_or_else(PoisonError::into_inner);
         let count = limit.min(requests.len());
         let drained = requests.drain(..count).collect();
@@ -190,14 +190,14 @@ impl SessionTemporalRefreshWakeState {
         drained
     }
 
-    pub(super) fn projection_discovery_after(&self) -> Option<SessionId> {
+    pub fn projection_discovery_after(&self) -> Option<SessionId> {
         self.projection_discovery_after
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
 
-    pub(super) fn projection_discovery_active_slots(&self, limit: usize) -> usize {
+    pub fn projection_discovery_active_slots(&self, limit: usize) -> usize {
         match limit {
             0 => 0,
             1 => usize::from(
@@ -208,7 +208,7 @@ impl SessionTemporalRefreshWakeState {
         }
     }
 
-    pub(super) fn update_projection_discovery_cursor(&self, active_after: Option<SessionId>) {
+    pub fn update_projection_discovery_cursor(&self, active_after: Option<SessionId>) {
         let mut cursor = self
             .projection_discovery_after
             .lock()
@@ -216,7 +216,7 @@ impl SessionTemporalRefreshWakeState {
         *cursor = active_after;
     }
 
-    pub(super) fn requeue_request(&self, request: SessionRefreshBeginOrJoinRequestV1) {
+    pub fn requeue_request(&self, request: SessionRefreshBeginOrJoinRequestV1) {
         let mut requests = self.requests.lock().unwrap_or_else(PoisonError::into_inner);
         if !requests
             .iter()
@@ -229,7 +229,7 @@ impl SessionTemporalRefreshWakeState {
         self.observe_queued_backlog(backlog);
     }
 
-    pub(super) fn transfer_requests_to(&self, target: &Self) {
+    pub fn transfer_requests_to(&self, target: &Self) {
         let requests = {
             let mut requests = self.requests.lock().unwrap_or_else(PoisonError::into_inner);
             requests.drain(..).collect::<Vec<_>>()
@@ -248,7 +248,7 @@ impl SessionTemporalRefreshWakeState {
         }
     }
 
-    pub(super) fn has_requests(&self) -> bool {
+    pub fn has_requests(&self) -> bool {
         !self
             .requests
             .lock()
@@ -256,70 +256,70 @@ impl SessionTemporalRefreshWakeState {
             .is_empty()
     }
 
-    pub(super) fn claim_terminal_attempt(&self, recovery: &SessionRefreshRecoveryV1) -> bool {
+    pub fn claim_terminal_attempt(&self, recovery: &SessionRefreshRecoveryV1) -> bool {
         self.terminal_attempts
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(recovery.operation_id().as_str().to_string())
     }
 
-    pub(super) fn release_terminal_attempt(&self, recovery: &SessionRefreshRecoveryV1) {
+    pub fn release_terminal_attempt(&self, recovery: &SessionRefreshRecoveryV1) {
         self.terminal_attempts
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(recovery.operation_id().as_str());
     }
 
-    pub(super) fn wake(&self) {
+    pub fn wake(&self) {
         self.requeue_projection();
         self.wake.notify_one();
     }
 
-    pub(super) fn requeue_projection(&self) {
+    pub fn requeue_projection(&self) {
         if !self.dirty.swap(true, Ordering::AcqRel) {
             hotpath::gauge!("session_temporal_refresh_projection_dirty").inc(1.0);
         }
     }
 
-    pub(super) fn wake_history(&self) {
+    pub fn wake_history(&self) {
         if !self.historical_dirty.swap(true, Ordering::AcqRel) {
             hotpath::gauge!("session_temporal_refresh_history_dirty").inc(1.0);
         }
         self.wake.notify_one();
     }
 
-    pub(super) fn has_pending_work(&self) -> bool {
+    pub fn has_pending_work(&self) -> bool {
         self.dirty.load(Ordering::Acquire) || self.historical_dirty.load(Ordering::Acquire)
     }
 
-    pub(super) fn mark_worker_busy(&self) {
+    pub fn mark_worker_busy(&self) {
         if !self.busy.swap(true, Ordering::AcqRel) {
             hotpath::gauge!("session_temporal_refresh_workers_busy").inc(1.0);
         }
     }
 
-    pub(super) fn mark_worker_idle(&self) {
+    pub fn mark_worker_idle(&self) {
         if self.busy.swap(false, Ordering::AcqRel) {
             hotpath::gauge!("session_temporal_refresh_workers_busy").inc(-1.0);
         }
     }
 
-    pub(super) fn clear_worker_instrumentation(&self) {
+    pub fn clear_worker_instrumentation(&self) {
         self.clear_worker_activity_instrumentation();
         self.take_dirty();
         self.take_historical_dirty();
     }
 
-    pub(super) fn clear_worker_activity_instrumentation(&self) {
+    pub fn clear_worker_activity_instrumentation(&self) {
         self.mark_worker_idle();
         self.update_history_retry_state(false);
     }
 
-    pub(super) fn history_retry_pending(&self) -> bool {
+    pub fn history_retry_pending(&self) -> bool {
         self.history_retry_pending.load(Ordering::Acquire)
     }
 
-    pub(super) fn update_history_retry_state(&self, pending: bool) {
+    pub fn update_history_retry_state(&self, pending: bool) {
         if self.history_retry_pending.swap(pending, Ordering::AcqRel) != pending {
             hotpath::gauge!("session_temporal_refresh_history_retrying").inc(if pending {
                 1.0
@@ -329,7 +329,7 @@ impl SessionTemporalRefreshWakeState {
         }
     }
 
-    pub(super) fn mark_running(&self) {
+    pub fn mark_running(&self) {
         let mut telemetry = self
             .telemetry
             .lock()
@@ -339,21 +339,21 @@ impl SessionTemporalRefreshWakeState {
         telemetry.unavailable_reason = None;
     }
 
-    pub(super) fn begin_pass(&self) {
+    pub fn begin_pass(&self) {
         self.telemetry
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .last_pass_made_progress = false;
     }
 
-    pub(super) fn mark_history_pending(&self) {
+    pub fn mark_history_pending(&self) {
         self.telemetry
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .historical_state = SessionHistoricalServingState::Pending;
     }
 
-    pub(super) fn record_history_outcome(&self, outcome: SessionHistoricalIngestOutcome) {
+    pub fn record_history_outcome(&self, outcome: SessionHistoricalIngestOutcome) {
         match outcome {
             SessionHistoricalIngestOutcome::Complete => {
                 hotpath::gauge!("session_temporal_refresh_history_complete").inc(1.0);
@@ -390,7 +390,7 @@ impl SessionTemporalRefreshWakeState {
             .historical_state = state;
     }
 
-    pub(super) fn recover_history_after_worker_panic(&self) {
+    pub fn recover_history_after_worker_panic(&self) {
         let should_retry = matches!(
             &self
                 .telemetry
@@ -404,7 +404,7 @@ impl SessionTemporalRefreshWakeState {
         }
     }
 
-    pub(super) fn mark_recovering(
+    pub fn mark_recovering(
         &self,
         blocker: SessionTemporalRefreshBlocker,
         retry_class: SessionTemporalRefreshRetryClass,
@@ -418,7 +418,7 @@ impl SessionTemporalRefreshWakeState {
         telemetry.unavailable_reason = Some(SessionTemporalRefreshUnavailableReason::Recovering);
     }
 
-    pub(super) fn mark_stopped(&self) {
+    pub fn mark_stopped(&self) {
         let mut telemetry = self
             .telemetry
             .lock()
@@ -428,7 +428,7 @@ impl SessionTemporalRefreshWakeState {
         telemetry.unavailable_reason = Some(SessionTemporalRefreshUnavailableReason::Stopped);
     }
 
-    pub(super) fn observe_durable_backlog(&self, backlog: usize) {
+    pub fn observe_durable_backlog(&self, backlog: usize) {
         let mut telemetry = self
             .telemetry
             .lock()
@@ -440,7 +440,7 @@ impl SessionTemporalRefreshWakeState {
         telemetry.durable_backlog = backlog;
     }
 
-    pub(super) fn record_pass(&self, durable_backlog: usize, made_progress: bool) {
+    pub fn record_pass(&self, durable_backlog: usize, made_progress: bool) {
         let mut telemetry = self
             .telemetry
             .lock()
@@ -578,7 +578,7 @@ impl SessionTemporalRefreshWakeState {
         }
     }
 
-    pub(super) fn cancel(&self) {
+    pub fn cancel(&self) {
         let _requests = self.requests.lock().unwrap_or_else(PoisonError::into_inner);
         if !self.cancelled.swap(true, Ordering::AcqRel) {
             self.completion_control.cancel();
@@ -605,11 +605,11 @@ impl SessionTemporalRefreshWakeState {
         telemetry.depths_published = false;
     }
 
-    pub(super) fn completion_control(&self) -> ExecutionControl {
+    pub fn completion_control(&self) -> ExecutionControl {
         self.completion_control.clone()
     }
 
-    pub(super) async fn wait_for_cancellation(&self) {
+    pub async fn wait_for_cancellation(&self) {
         loop {
             let notified = self.cancellation.notified();
             if self.cancelled.load(Ordering::Acquire) {
@@ -619,8 +619,8 @@ impl SessionTemporalRefreshWakeState {
         }
     }
 
-    #[cfg(test)]
-    pub(super) fn is_idle(&self) -> bool {
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn is_idle(&self) -> bool {
         !self.busy.load(Ordering::Acquire) && !self.has_pending_work()
     }
 }
@@ -636,14 +636,14 @@ fn bounded_depth(depth: usize) -> f64 {
     depth.min(u32::MAX as usize) as f64
 }
 
-pub(super) struct TerminalAttemptGuard<'a> {
+pub struct TerminalAttemptGuard<'a> {
     state: &'a SessionTemporalRefreshWakeState,
     recovery: &'a SessionRefreshRecoveryV1,
     retain: bool,
 }
 
 impl<'a> TerminalAttemptGuard<'a> {
-    pub(super) fn new(
+    pub fn new(
         state: &'a SessionTemporalRefreshWakeState,
         recovery: &'a SessionRefreshRecoveryV1,
     ) -> Self {
@@ -654,7 +654,7 @@ impl<'a> TerminalAttemptGuard<'a> {
         }
     }
 
-    pub(super) fn retain(&mut self) {
+    pub fn retain(&mut self) {
         self.retain = true;
     }
 }
@@ -667,13 +667,13 @@ impl Drop for TerminalAttemptGuard<'_> {
     }
 }
 
-pub(super) struct PendingBeginRequestGuard<'a> {
+pub struct PendingBeginRequestGuard<'a> {
     state: &'a SessionTemporalRefreshWakeState,
     request: Option<SessionRefreshBeginOrJoinRequestV1>,
 }
 
 impl<'a> PendingBeginRequestGuard<'a> {
-    pub(super) fn new(
+    pub fn new(
         state: &'a SessionTemporalRefreshWakeState,
         request: SessionRefreshBeginOrJoinRequestV1,
     ) -> Self {
@@ -685,11 +685,11 @@ impl<'a> PendingBeginRequestGuard<'a> {
 
     // Armed guards always hold a request; request() is only called before disarm().
     #[allow(clippy::expect_used)]
-    pub(super) fn request(&self) -> &SessionRefreshBeginOrJoinRequestV1 {
+    pub fn request(&self) -> &SessionRefreshBeginOrJoinRequestV1 {
         self.request.as_ref().expect("pending request disarmed")
     }
 
-    pub(super) fn disarm(&mut self) {
+    pub fn disarm(&mut self) {
         self.request = None;
     }
 }
@@ -702,20 +702,20 @@ impl Drop for PendingBeginRequestGuard<'_> {
     }
 }
 
-pub(super) struct RecoverySelectionGuard<'a> {
+pub struct RecoverySelectionGuard<'a> {
     state: &'a SessionTemporalRefreshWakeState,
     pending: VecDeque<String>,
 }
 
 impl<'a> RecoverySelectionGuard<'a> {
-    pub(super) fn new(state: &'a SessionTemporalRefreshWakeState, pending: Vec<String>) -> Self {
+    pub fn new(state: &'a SessionTemporalRefreshWakeState, pending: Vec<String>) -> Self {
         Self {
             state,
             pending: pending.into(),
         }
     }
 
-    pub(super) fn complete(&mut self, operation: &str) {
+    pub fn complete(&mut self, operation: &str) {
         // Resolve by identity so skipped/missing recoveries cannot desync the
         // local queue from the operations actually projected this pass.
         if let Some(index) = self.pending.iter().position(|item| item == operation) {
@@ -752,12 +752,12 @@ fn enabled_idle_notification(
 }
 
 #[derive(Clone)]
-pub(crate) struct SessionTemporalRefreshWake {
+pub struct SessionTemporalRefreshWake {
     route: Arc<SessionTemporalRefreshWakeRoute>,
 }
 
 impl SessionTemporalRefreshWake {
-    pub(crate) fn unavailable() -> Self {
+    pub fn unavailable() -> Self {
         Self {
             route: Arc::new(SessionTemporalRefreshWakeRoute {
                 target: std::sync::RwLock::new(std::sync::Weak::new()),
@@ -765,7 +765,7 @@ impl SessionTemporalRefreshWake {
         }
     }
 
-    pub(super) fn target(&self) -> Option<Arc<SessionTemporalRefreshWakeState>> {
+    pub fn target(&self) -> Option<Arc<SessionTemporalRefreshWakeState>> {
         self.route
             .target
             .read()
@@ -773,7 +773,7 @@ impl SessionTemporalRefreshWake {
             .upgrade()
     }
 
-    pub(super) fn bind(&self, state: &Arc<SessionTemporalRefreshWakeState>) {
+    pub fn bind(&self, state: &Arc<SessionTemporalRefreshWakeState>) {
         *self
             .route
             .target
@@ -781,8 +781,8 @@ impl SessionTemporalRefreshWake {
             .unwrap_or_else(PoisonError::into_inner) = Arc::downgrade(state);
     }
 
-    #[cfg(test)]
-    pub(super) fn same_route(&self, other: &Self) -> bool {
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn same_route(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.route, &other.route)
     }
 
@@ -791,7 +791,7 @@ impl SessionTemporalRefreshWake {
     /// `false` means the route has no live target (including a retired owner)
     /// or the target is already cancelled. Callers crossing a durable effect
     /// boundary must preserve that distinction for reconciliation.
-    pub(crate) fn wake(&self) -> bool {
+    pub fn wake(&self) -> bool {
         let Some(state) = self.target() else {
             return false;
         };
@@ -808,7 +808,7 @@ impl SessionTemporalRefreshWake {
     /// before the mutating tool returns so Hermes `sync_turn` → `lcm_grep`
     /// stays available on the same route without inventing stores or weakening
     /// empty/unavailable semantics.
-    pub(crate) async fn wake_and_wait_until_idle(&self, timeout: std::time::Duration) -> bool {
+    pub async fn wake_and_wait_until_idle(&self, timeout: std::time::Duration) -> bool {
         let Some(state) = self.target() else {
             return false;
         };
@@ -837,7 +837,7 @@ impl SessionTemporalRefreshWake {
         }
     }
 
-    pub(crate) fn status(&self) -> SessionTemporalRefreshWorkerStatus {
+    pub fn status(&self) -> SessionTemporalRefreshWorkerStatus {
         self.target()
             .map_or_else(SessionTemporalRefreshWorkerStatus::missing, |state| {
                 state.status()

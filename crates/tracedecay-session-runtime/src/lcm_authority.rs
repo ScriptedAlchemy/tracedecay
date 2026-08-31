@@ -30,7 +30,7 @@ use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
 mod mount;
 mod receipt;
-pub(crate) use mount::{
+pub use mount::{
     LCM_MAX_BYTES, LCM_MAX_RESULTS, LCM_MAX_WORK_UNITS, MountedLcmAuthorityPort,
     mount_registered_lcm_authority,
 };

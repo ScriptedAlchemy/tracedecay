@@ -49,9 +49,9 @@ pub(crate) struct ProductionRetainedAuthoritiesV1 {
     pub(crate) registered_session_db: Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
     pub(crate) project_refresh: Option<Arc<dyn session_refresh::RetainedSessionRefreshPortV1>>,
     pub(crate) project_retrieval:
-        Option<Arc<dyn crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1>>,
+        Option<Arc<dyn tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalPortV1>>,
     pub(crate) project_workflow_index: Option<Arc<dyn tracedecay_sessions::WorkflowIndexReadPort>>,
-    pub(crate) project_lcm: Option<Arc<dyn crate::daemon::lcm_authority::MountedLcmAuthorityPort>>,
+    pub(crate) project_lcm: Option<Arc<dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>>,
     pub(crate) configuration_digest: ManifestDigest,
     pub(crate) invocation_service: Option<DaemonInvocationService>,
 }
@@ -159,7 +159,7 @@ where
 /// One rendering of the typed session-retrieval unavailability reason shared
 /// by every retained family that consumes the retrieval service.
 pub(in crate::daemon) fn session_retrieval_unavailable_detail(
-    unavailable: &crate::daemon::session_retrieval::SessionRetrievalUnavailable,
+    unavailable: &tracedecay_session_runtime::session_retrieval::SessionRetrievalUnavailable,
 ) -> String {
     format!(
         "the session retrieval service is unavailable: {:?}",

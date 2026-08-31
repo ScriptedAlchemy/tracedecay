@@ -1,28 +1,32 @@
-mod history;
-mod projector;
-mod registry;
-#[cfg(test)]
+//! Composition-root integration tests for the session-runtime crate:
+//! temporal refresh scheduling, retained history ingest, and session sync
+//! exercised through the root host-admission fixtures, which compose the
+//! `TraceDecay` aggregate and therefore cannot live in
+//! `tracedecay-session-runtime` itself.
+
+use std::sync::Arc;
+
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_session_runtime::StoreOwnerKey;
+use tracedecay_session_runtime::session_temporal_refresh_scheduler::{
+    projector, registry, run_session_temporal_refresh_pass, wake,
+};
+
+mod project_lifecycle_tests;
 mod retained_history_tests;
-#[cfg(test)]
-mod tests;
-mod wake;
-mod worker;
+mod session_sync_tests;
+mod temporal_refresh_tests;
+mod worker_persistence_tests;
 
-pub(super) use history::{ProfileSessionHistoricalIngestor, ProjectSessionHistoricalIngestor};
-pub(super) use registry::SessionTemporalRefreshSchedulerRegistry;
-pub(crate) use wake::SessionTemporalRefreshWake;
-
-#[cfg(test)]
 pub(crate) struct SessionTemporalRefreshTestAuthority {
     _runtime: crate::host_admission::HostAdmissionTestRuntimeV1,
-    database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+    database: RegisteredGlobalDbLeaseV1,
 }
 
-#[cfg(test)]
 impl SessionTemporalRefreshTestAuthority {
     pub(crate) fn new(
         runtime: crate::host_admission::HostAdmissionTestRuntimeV1,
-        database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+        database: RegisteredGlobalDbLeaseV1,
     ) -> Self {
         Self {
             _runtime: runtime,
@@ -44,11 +48,11 @@ impl SessionTemporalRefreshTestAuthority {
 
     async fn run_pass(
         &self,
-        state: &std::sync::Arc<wake::SessionTemporalRefreshWakeState>,
+        state: &Arc<wake::SessionTemporalRefreshWakeState>,
         projector: &dyn projector::SessionTemporalRefreshProjector,
         policy: projector::SessionTemporalRefreshPolicy,
     ) -> registry::SessionTemporalRefreshPassReport {
-        worker::run_session_temporal_refresh_pass(&self.database, state, projector, policy).await
+        run_session_temporal_refresh_pass(&self.database, state, projector, policy).await
     }
 
     async fn ensure_profile(
@@ -63,7 +67,7 @@ impl SessionTemporalRefreshTestAuthority {
     async fn ensure_project(
         &self,
         registry: &registry::SessionTemporalRefreshSchedulerRegistry,
-        owner: super::StoreOwnerKey,
+        owner: StoreOwnerKey,
     ) -> wake::SessionTemporalRefreshWake {
         registry.ensure_project(owner, self.database.clone()).await
     }
@@ -71,8 +75,8 @@ impl SessionTemporalRefreshTestAuthority {
     async fn rekey_project(
         &self,
         registry: &registry::SessionTemporalRefreshSchedulerRegistry,
-        old_owner: &super::StoreOwnerKey,
-        new_owner: super::StoreOwnerKey,
+        old_owner: &StoreOwnerKey,
+        new_owner: StoreOwnerKey,
     ) {
         registry
             .rekey_project(old_owner, new_owner, self.database.clone())

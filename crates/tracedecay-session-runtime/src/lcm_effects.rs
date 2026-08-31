@@ -19,7 +19,7 @@ const LCM_EFFECT_WORK_LIMIT: usize = 4_096;
 /// call this service so a disconnect or deadline can still roll back the open
 /// transaction before its commit checkpoint.
 #[derive(Clone)]
-pub(crate) struct DaemonLcmEffectService {
+pub struct DaemonLcmEffectService {
     db: RegisteredGlobalDbLeaseV1,
     control: LcmEffectControl,
 }
@@ -88,7 +88,7 @@ impl LcmEffectControl {
 }
 
 impl DaemonLcmEffectService {
-    pub(crate) fn new(
+    pub fn new(
         db: RegisteredGlobalDbLeaseV1,
         deadline: Option<&Deadline>,
         cancellation: Option<&CancellationSignal>,
@@ -99,7 +99,7 @@ impl DaemonLcmEffectService {
         }
     }
 
-    pub(crate) async fn compress(
+    pub async fn compress(
         &self,
         request: LcmCompressionRequest,
     ) -> Result<LcmCompressionResponse, LcmError> {
@@ -189,7 +189,7 @@ impl DaemonLcmEffectService {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    pub(crate) async fn session_boundary(
+    pub async fn session_boundary(
         &self,
         request: LcmSessionBoundaryRequest,
     ) -> Result<LcmSessionBoundaryResponse, LcmError> {
@@ -336,6 +336,18 @@ mod tests {
             std::time::Instant::now() + std::time::Duration::from_secs(30),
         ))
         .with_work_limit(4_096)
+    }
+
+    /// Runs a future under the canonical user-data-dir env lock so provider
+    /// binary env overrides cannot race parallel tests.
+    fn run_with_test_env_lock<T>(future: impl std::future::Future<Output = T>) -> T {
+        let _lock = tracedecay_runtime_core::config::lock_user_data_dir_test_env();
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("build lcm effects test runtime")
+            .block_on(future)
     }
 
     #[tokio::test]
@@ -831,7 +843,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn codex_and_cursor_daemon_adapters_commit_exact_authoritative_summaries() {
-        crate::hooks::run_with_test_env_lock(async {
+        run_with_test_env_lock(async {
             let harness = RegisteredGlobalDbHarness::open("lcm-provider-summary-adapters").await;
             let db = harness.registered.clone();
             let temporary = tempfile::tempdir().unwrap();

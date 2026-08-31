@@ -32,15 +32,18 @@ use tracedecay_graph_db::{GraphCancellation, GraphProjectorRevision};
 use tracedecay_store::{FactReadControl, runtime::ScopeSetCasOutcomeV1};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-use super::git_topology::GitTopologySyncFailure;
-use super::work::{
+use tracedecay_session_runtime::session_sync::git_topology::{
+    GitTopologySyncFailure, publish_native_topology,
+};
+use tracedecay_session_runtime::session_sync::work::{
     SessionSyncInterruption, coalesced_alias_local_interruption, git_history_frontier_from_meta,
     git_history_source_frontier, git_sync_with_topology_result, git_sync_work_result,
 };
-use super::{
+use tracedecay_session_runtime::session_sync::{
     DaemonSessionSyncConfig, DaemonSessionSyncService, SessionSyncWorkResult,
     completed_profile_sweep_covers, completion_termination, decode_matching_journal, journal_key,
 };
+use tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshWake;
 
 struct NeverCancelled;
 
@@ -669,7 +672,7 @@ async fn persisted_declared_topology_survives_registry_restart_and_session_sync_
     let restarted_scope_storage = restarted_sessions
         .authorized_scope_set_storage()
         .expect("restarted scope-set storage");
-    super::git_topology::publish_native_topology(
+    publish_native_topology(
         Arc::new(restarted_runtime.clone()),
         roots[0].clone(),
         repository.clone(),
@@ -734,7 +737,7 @@ async fn persisted_declared_topology_survives_registry_restart_and_session_sync_
         Ok(ScopeSetCasOutcomeV1::Applied(_))
     ));
     assert_eq!(
-        super::git_topology::publish_native_topology(
+        publish_native_topology(
             Arc::new(restarted_runtime.clone()),
             roots[0].clone(),
             repository,
@@ -862,10 +865,8 @@ async fn cancel_in_alias_activation_gap_mirrors_primary_terminal_receipt() {
             user_sessions: profile_sessions.clone(),
             registry: profile_sessions.clone(),
             startup_import: false,
-            project_refresh:
-                crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake::unavailable(),
-            user_refresh:
-                crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake::unavailable(),
+            project_refresh: SessionTemporalRefreshWake::unavailable(),
+            user_refresh: SessionTemporalRefreshWake::unavailable(),
         })
         .await
         .unwrap();

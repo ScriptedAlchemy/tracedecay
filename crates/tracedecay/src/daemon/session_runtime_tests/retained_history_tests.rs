@@ -9,10 +9,11 @@ use std::time::Duration;
 use tempfile::TempDir;
 
 use super::SessionTemporalRefreshTestAuthority;
-use super::history::{
+use tracedecay_session_runtime::session_temporal_refresh_scheduler::history::{
     SessionHistoricalIngestOutcome, SessionHistoricalIngestPass, SessionHistoricalIngestor,
 };
-use super::registry::SessionTemporalRefreshSchedulerRegistry;
+use tracedecay_session_runtime::session_temporal_refresh_scheduler::registry::SessionTemporalRefreshSchedulerRegistry;
+
 use crate::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::serving::{

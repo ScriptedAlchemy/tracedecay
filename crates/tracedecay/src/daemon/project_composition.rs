@@ -7,6 +7,10 @@
 use super::*;
 use tracedecay_code_index_runtime::code_index_scheduler;
 use tracedecay_daemon_service::DaemonSemanticRuntimeRegistrationError;
+use tracedecay_session_runtime::session_sync::DaemonSessionSyncConfig;
+use tracedecay_session_runtime::session_temporal_refresh_scheduler::{
+    ProfileSessionHistoricalIngestor, ProjectSessionHistoricalIngestor,
+};
 
 mod code_index_activation;
 mod runtime;
@@ -802,18 +806,16 @@ async fn production_project_server_inner(
                     .ensure_project_with_history(
                     key.owner.clone(),
                     session_db.clone(),
-                    Arc::new(
-                        session_temporal_refresh_scheduler::ProjectSessionHistoricalIngestor::new(
-                            session_db.clone(),
-                            profile_identity.clone(),
-                            canonical_project_path.to_path_buf(),
-                            code_search_project_id.clone(),
-                            transcript_source_home.clone(),
-                            store_administration
-                                .session_temporal_refresh_schedulers()
-                                .codex_discovery(),
-                        ),
-                    ),
+                    Arc::new(ProjectSessionHistoricalIngestor::new(
+                        session_db.clone(),
+                        Arc::new(profile_identity.clone()),
+                        canonical_project_path.to_path_buf(),
+                        code_search_project_id.clone(),
+                        transcript_source_home.clone(),
+                        store_administration
+                            .session_temporal_refresh_schedulers()
+                            .codex_discovery(),
+                    )),
                 ),
             )
             .await;
@@ -823,23 +825,21 @@ async fn production_project_server_inner(
                     .ensure_profile_with_history(
                     user_session_db.db_path().to_path_buf(),
                     user_session_db.clone(),
-                    Arc::new(
-                        session_temporal_refresh_scheduler::ProfileSessionHistoricalIngestor::new(
-                            user_session_db.clone(),
-                            registry_db.clone(),
-                            profile_identity.clone(),
-                            transcript_source_home.clone(),
-                            store_administration
-                                .session_temporal_refresh_schedulers()
-                                .codex_discovery(),
-                        ),
-                    ),
+                    Arc::new(ProfileSessionHistoricalIngestor::new(
+                        user_session_db.clone(),
+                        registry_db.clone(),
+                        Arc::new(profile_identity.clone()),
+                        transcript_source_home.clone(),
+                        store_administration
+                            .session_temporal_refresh_schedulers()
+                            .codex_discovery(),
+                    )),
                 ),
             )
             .await;
             let session_sync_owner = store_administration.session_sync_service();
             Box::pin(session_sync_owner.register_project(
-                crate::daemon::session_sync::DaemonSessionSyncConfig {
+                DaemonSessionSyncConfig {
                     brain_id: profile_identity.brain_id().clone(),
                     profile_id: profile_identity.profile_id().clone(),
                     project_id: code_search_project_id.clone(),

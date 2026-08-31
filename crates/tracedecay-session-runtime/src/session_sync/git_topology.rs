@@ -22,7 +22,7 @@ use tracedecay_usecases::git_intelligence::{GIT_HISTORY_MAX_COUNT_LIMIT, NativeG
 use super::{DaemonSessionSyncService, SessionSyncProjectContext, work::SessionSyncInterruption};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum GitTopologySyncFailure {
+pub enum GitTopologySyncFailure {
     Stale,
     Denied,
     Unavailable,
@@ -111,7 +111,7 @@ impl GraphCancellation for GitTopologySyncCancellation {
     }
 }
 
-pub(super) fn publish_native_topology(
+pub fn publish_native_topology(
     runtime: Arc<dyn VerifiedGraphRuntimePortV1>,
     project_root: PathBuf,
     repository: RepositoryId,

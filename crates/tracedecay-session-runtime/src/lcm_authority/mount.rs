@@ -33,9 +33,9 @@ const LCM_REQUEST_TIMEOUT: Duration = Duration::from_secs(115);
 // whole payloads before slicing, so their byte budget covers verified read
 // I/O — not the response, which stays bounded by the context budget and the
 // MCP response cap. The admitted describe/expand bindings share these.
-pub(crate) const LCM_MAX_RESULTS: u64 = 4_096;
-pub(crate) const LCM_MAX_BYTES: u64 = 64 * 1024 * 1024;
-pub(crate) const LCM_MAX_WORK_UNITS: u64 = 1_000_000;
+pub const LCM_MAX_RESULTS: u64 = 4_096;
+pub const LCM_MAX_BYTES: u64 = 64 * 1024 * 1024;
+pub const LCM_MAX_WORK_UNITS: u64 = 1_000_000;
 
 pub(crate) type MountedLcmFuture<'a> =
     Pin<Box<dyn Future<Output = Option<LcmAuthorityResponse>> + Send + 'a>>;
@@ -45,7 +45,7 @@ pub(crate) type MountedAdmittedLcmFuture<'a> =
 /// Daemon-minted invocation boundary. Transport and host adapters can select
 /// an operation but cannot supply scope, grants, deadlines, cancellation
 /// identity, or a database handle.
-pub(crate) trait MountedLcmAuthorityPort: Send + Sync {
+pub trait MountedLcmAuthorityPort: Send + Sync {
     fn execute(&self, request: LcmAuthorityRequest) -> MountedLcmFuture<'_>;
 
     fn execute_admitted<'a>(
@@ -238,7 +238,7 @@ fn identity_matches_shard(identity: &ResolvedSessionIdentity, shard: &StoreShard
     }
 }
 
-pub(crate) fn mount_registered_lcm_authority(
+pub fn mount_registered_lcm_authority(
     database: RegisteredGlobalDbLeaseV1,
     identity: ResolvedSessionIdentity,
     expected_shard: &StoreShardIdV1,

@@ -9,7 +9,7 @@ impl HostAdmissionTestRuntimeV1 {
         tracedecay_lcm::LcmCompressionResponse,
         tracedecay_lcm::LcmError,
     > {
-        crate::daemon::lcm_effects::DaemonLcmEffectService::new(
+        tracedecay_session_runtime::lcm_effects::DaemonLcmEffectService::new(
             self.project_registered
                 .clone()
                 .unwrap_or_else(|| self.profile_registered.clone()),
@@ -213,7 +213,7 @@ impl HostAdmissionTestRuntimeV1 {
         tracedecay_lcm::LcmSessionBoundaryResponse,
         tracedecay_lcm::LcmError,
     > {
-        crate::daemon::lcm_effects::DaemonLcmEffectService::new(
+        tracedecay_session_runtime::lcm_effects::DaemonLcmEffectService::new(
             self.project_registered
                 .clone()
                 .unwrap_or_else(|| self.profile_registered.clone()),

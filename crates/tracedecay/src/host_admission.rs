@@ -542,9 +542,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub(crate) fn into_session_temporal_refresh_test_authority(
         self,
         scope: HostAdmissionScope,
-    ) -> Result<
-        crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshTestAuthority,
-    > {
+    ) -> Result<crate::daemon::session_runtime_tests::SessionTemporalRefreshTestAuthority> {
         let database =
             self.registered_database_arc(scope)
                 .ok_or_else(|| TraceDecayError::Database {
@@ -552,7 +550,7 @@ impl HostAdmissionTestRuntimeV1 {
                     message: "registered session database mount is unavailable".to_owned(),
                 })?;
         Ok(
-            crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshTestAuthority::new(
+            crate::daemon::session_runtime_tests::SessionTemporalRefreshTestAuthority::new(
                 self, database,
             ),
         )

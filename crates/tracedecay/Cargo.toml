@@ -120,6 +120,7 @@ hotpath = [
     "tracedecay-search-eval/hotpath",
     "tracedecay-semantic/hotpath",
     "tracedecay-session-memory/hotpath",
+    "tracedecay-session-runtime/hotpath",
     "tracedecay-session-temporal-store/hotpath",
     "tracedecay-lcm/hotpath",
     "tracedecay-sessions/hotpath",
@@ -160,6 +161,7 @@ hotpath-alloc = [
     "tracedecay-search-eval/hotpath-alloc",
     "tracedecay-semantic/hotpath-alloc",
     "tracedecay-session-memory/hotpath-alloc",
+    "tracedecay-session-runtime/hotpath-alloc",
     "tracedecay-session-temporal-store/hotpath-alloc",
     "tracedecay-lcm/hotpath-alloc",
     "tracedecay-sessions/hotpath-alloc",
@@ -200,6 +202,7 @@ hotpath-cpu = [
     "tracedecay-search-eval/hotpath-cpu",
     "tracedecay-semantic/hotpath-cpu",
     "tracedecay-session-memory/hotpath-cpu",
+    "tracedecay-session-runtime/hotpath-cpu",
     "tracedecay-session-temporal-store/hotpath-cpu",
     "tracedecay-lcm/hotpath-cpu",
     "tracedecay-sessions/hotpath-cpu",
@@ -306,6 +309,7 @@ test-helpers = [
     "tracedecay-daemon-service/test-helpers",
     "tracedecay-host-admission/test-helpers",
     "tracedecay-maintenance/test-helpers",
+    "tracedecay-session-runtime/test-helpers",
 ]
 
 test-transport = [
@@ -412,6 +416,7 @@ tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.
 tracedecay-search-eval = { path = "../tracedecay-search-eval", version = "0.1.0" }
 tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0" }
 tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
+tracedecay-session-runtime = { path = "../tracedecay-session-runtime", version = "0.1.0" }
 tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
 tracedecay-lcm = { path = "../tracedecay-lcm", version = "0.1.0" }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
@@ -523,6 +528,9 @@ tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", ver
 # Root lib tests call daemon-service fixture constructors (`invoke`,
 # publication gates). Feature unification keeps them off the CLI lane.
 tracedecay-daemon-service = { path = "../tracedecay-daemon-service", version = "0.1.0", features = ["test-helpers"] }
+# Root host-admission integration tests drive session-runtime worker pass
+# internals; the fixture surface stays off the CLI lane.
+tracedecay-session-runtime = { path = "../tracedecay-session-runtime", version = "0.1.0", features = ["test-helpers"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fault_harness)"] }

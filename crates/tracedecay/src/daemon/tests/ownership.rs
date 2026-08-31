@@ -468,7 +468,7 @@ fn store_owner_key_collapses_profile_and_store_aliases() {
     std::os::unix::fs::symlink(&profile, &profile_alias).expect("profile alias");
     std::os::unix::fs::symlink(&store, &store_alias).expect("store alias");
 
-    let direct = StoreOwnerKey::from_paths(
+    let direct = store_owner_key_from_paths(
         &profile,
         &profile.join("global.db"),
         Some("project-id".to_string()),
@@ -476,7 +476,7 @@ fn store_owner_key_collapses_profile_and_store_aliases() {
         &store.join("graph.db"),
     )
     .expect("direct owner");
-    let aliased = StoreOwnerKey::from_paths(
+    let aliased = store_owner_key_from_paths(
         &profile_alias,
         &profile_alias.join("global.db"),
         Some("project-id".to_string()),
@@ -503,7 +503,7 @@ fn parallel_client_instances_share_one_engine_but_scope_and_profile_do_not() {
     std::fs::create_dir_all(&other_profile).expect("other profile dir");
     std::fs::create_dir_all(&store).expect("store dir");
 
-    let owner = StoreOwnerKey::from_paths(
+    let owner = store_owner_key_from_paths(
         &profile,
         &profile.join("global.db"),
         Some("project-id".to_string()),
@@ -555,7 +555,7 @@ fn parallel_client_instances_share_one_engine_but_scope_and_profile_do_not() {
     let (_, inserted) = registry.bind_or_insert_route(scoped_route, scoped_key, Arc::new(u8::MAX));
     assert!(inserted, "distinct scope must retain an isolated engine");
 
-    let other_owner = StoreOwnerKey::from_paths(
+    let other_owner = store_owner_key_from_paths(
         &other_profile,
         &other_profile.join("global.db"),
         Some("project-id".to_string()),

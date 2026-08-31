@@ -18,15 +18,6 @@ pub(super) struct ProjectServerKey {
     pub(super) scope_prefix: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(super) struct StoreOwnerKey {
-    pub(super) profile_root: PathBuf,
-    pub(super) global_db_path: PathBuf,
-    pub(super) project_id: Option<String>,
-    pub(super) store_root: PathBuf,
-    pub(super) graph_db_path: PathBuf,
-}
-
 /// A client route known before any project database is opened. This is the
 /// cache/singleflight key; [`ProjectServerKey`] remains the post-open server
 /// key so filesystem aliases converge while distinct linked worktrees retain
@@ -1030,22 +1021,22 @@ impl ProjectServerPublication {
     }
 }
 
-impl StoreOwnerKey {
-    pub(super) fn from_paths(
-        profile_root: &Path,
-        global_db_path: &Path,
-        project_id: Option<String>,
-        store_root: &Path,
-        graph_db_path: &Path,
-    ) -> Result<Self> {
-        Ok(Self {
-            profile_root: authority::canonical_identity_path(profile_root)?,
-            global_db_path: authority::canonical_identity_path(global_db_path)?,
-            project_id,
-            store_root: authority::canonical_identity_path(store_root)?,
-            graph_db_path: authority::canonical_identity_path(graph_db_path)?,
-        })
-    }
+/// Builds a [`StoreOwnerKey`] from raw paths, canonicalizing each identity
+/// path so filesystem aliases converge on one owner.
+pub(super) fn store_owner_key_from_paths(
+    profile_root: &Path,
+    global_db_path: &Path,
+    project_id: Option<String>,
+    store_root: &Path,
+    graph_db_path: &Path,
+) -> Result<StoreOwnerKey> {
+    Ok(StoreOwnerKey {
+        profile_root: authority::canonical_identity_path(profile_root)?,
+        global_db_path: authority::canonical_identity_path(global_db_path)?,
+        project_id,
+        store_root: authority::canonical_identity_path(store_root)?,
+        graph_db_path: authority::canonical_identity_path(graph_db_path)?,
+    })
 }
 
 impl ProjectRouteKey {
@@ -1070,7 +1061,7 @@ impl ProjectServerKey {
     ) -> Result<Self> {
         let layout = cg.store_layout();
         Ok(Self {
-            owner: StoreOwnerKey::from_paths(
+            owner: store_owner_key_from_paths(
                 &handshake.client_identity.profile_root,
                 &handshake.client_identity.global_db_path,
                 layout.identity.project_id.clone(),

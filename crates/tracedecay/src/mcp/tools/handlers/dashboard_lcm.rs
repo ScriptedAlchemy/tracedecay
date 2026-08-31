@@ -20,7 +20,7 @@ use tracedecay_dashboard_api::{
 use tracedecay_lcm::{LcmDescribeResponse, LcmDescribeTarget};
 use tracedecay_sessions::runtime::SessionSearchTimeRange;
 
-use crate::daemon::session_retrieval::{
+use tracedecay_session_runtime::session_retrieval::{
     LcmDescribeServiceCommand, LcmDescribeServiceOutcome, SessionApplicationRetrievalPortV1,
     SessionRetrievalPageView, SessionRetrievalServiceOutcome, SessionRetrievalStoreScope,
     admitted_execution_limits,
@@ -904,7 +904,7 @@ mod tests {
             &'a self,
             _context: &'a RequestContext,
             _query: SessionTemporalQuery,
-        ) -> crate::daemon::session_retrieval::SessionApplicationRetrievalFutureV1<'a> {
+        ) -> tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalFutureV1<'a> {
             panic!("expired dashboard admission must not invoke retrieval")
         }
     }

@@ -9,7 +9,7 @@ use tracedecay_usecases::primitives::{
 };
 use tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot;
 
-use crate::daemon::session_retrieval::DaemonSessionLookupPrimitiveV1;
+use tracedecay_session_runtime::session_retrieval::DaemonSessionLookupPrimitiveV1;
 use crate::daemon::DaemonInvocationState;
 use tracedecay_daemon_service::DaemonPrimitiveRuntimeRegistrationError;
 use crate::mcp::McpServer;

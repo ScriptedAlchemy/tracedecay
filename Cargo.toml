@@ -33,6 +33,7 @@ members = [
     "crates/tracedecay-search-eval",
     "crates/tracedecay-semantic",
     "crates/tracedecay-session-memory",
+    "crates/tracedecay-session-runtime",
     "crates/tracedecay-sessions",
     "crates/tracedecay-session-temporal-store",
     "crates/tracedecay-source-edit",

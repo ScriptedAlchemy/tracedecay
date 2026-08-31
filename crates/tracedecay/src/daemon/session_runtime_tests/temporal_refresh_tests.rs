@@ -1,6 +1,11 @@
-use super::projector::*;
-use super::registry::*;
-use super::wake::*;
+use tracedecay_session_runtime::StoreOwnerKey;
+use tracedecay_session_runtime::session_temporal_refresh_scheduler::projector::*;
+use tracedecay_session_runtime::session_temporal_refresh_scheduler::registry::*;
+use tracedecay_session_runtime::session_temporal_refresh_scheduler::wake::*;
+use tracedecay_session_runtime::session_temporal_refresh_scheduler::{
+    begin_admitted_session_refreshes, process_refresh_begin_requests,
+};
+
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::PoisonError;
@@ -452,13 +457,13 @@ async fn retained_begin_retry_prevents_discovery_queue_growth_and_cursor_advance
 
     for _ in 0..2 {
         let mut report = SessionTemporalRefreshPassReport::default();
-        super::worker::process_refresh_begin_requests(&store, &state, 1, &mut report).await;
+        process_refresh_begin_requests(&store, &state, 1, &mut report).await;
         assert_eq!(report.retryable_errors, 1);
         assert_eq!(
             report.retry_class,
             Some(SessionTemporalRefreshRetryClass::Storage)
         );
-        super::worker::begin_admitted_session_refreshes(db, &store, &state, 1, &mut report).await;
+        begin_admitted_session_refreshes(db, &store, &state, 1, &mut report).await;
         assert_eq!(
             report.retryable_errors, 1,
             "queued retry must suppress a second begin/discovery attempt in the same pass"
@@ -495,7 +500,7 @@ async fn retained_begin_retry_prevents_discovery_queue_growth_and_cursor_advance
     transaction.commit().await.unwrap();
 
     let mut recovered = SessionTemporalRefreshPassReport::default();
-    super::worker::process_refresh_begin_requests(&store, &state, 1, &mut recovered).await;
+    process_refresh_begin_requests(&store, &state, 1, &mut recovered).await;
     assert_eq!(
         recovered.begun, 1,
         "the exact retained request must admit once"
@@ -1092,7 +1097,7 @@ async fn project_retirement_cancels_and_awaits_an_inflight_projector() {
     let temp = TempDir::new().unwrap();
     let authority =
         registered_test_database(&temp, "project-retirement", HostAdmissionScope::Project).await;
-    let owner = super::super::StoreOwnerKey {
+    let owner = StoreOwnerKey {
         profile_root: temp.path().to_path_buf(),
         global_db_path: temp.path().join("global.db"),
         project_id: Some("project.retire".to_string()),
@@ -1128,7 +1133,7 @@ async fn evicted_project_owner_releases_temporal_scheduler() {
     let temp = TempDir::new().unwrap();
     let authority =
         registered_test_database(&temp, "evict-owner", HostAdmissionScope::Project).await;
-    let owner = super::super::StoreOwnerKey {
+    let owner = StoreOwnerKey {
         profile_root: temp.path().to_path_buf(),
         global_db_path: temp.path().join("global.db"),
         project_id: Some("project.evict-owner".to_string()),
@@ -1477,14 +1482,14 @@ async fn project_rekey_retires_old_owner_before_rebinding_wake() {
         registered_test_database(&temp, "old-project", HostAdmissionScope::Project).await;
     let new_authority =
         registered_test_database(&temp, "new-project", HostAdmissionScope::Project).await;
-    let old_owner = super::super::StoreOwnerKey {
+    let old_owner = StoreOwnerKey {
         profile_root: temp.path().to_path_buf(),
         global_db_path: temp.path().join("global.db"),
         project_id: Some("project".to_string()),
         store_root: temp.path().join("old"),
         graph_db_path: temp.path().join("old/graph.db"),
     };
-    let new_owner = super::super::StoreOwnerKey {
+    let new_owner = StoreOwnerKey {
         store_root: temp.path().join("new"),
         graph_db_path: temp.path().join("new/graph.db"),
         ..old_owner.clone()

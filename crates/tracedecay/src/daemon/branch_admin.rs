@@ -20,7 +20,7 @@ use super::profile_host_admission_replay::{
 };
 #[cfg(unix)]
 use super::scheduler::{AutomationSchedulerHandle, MaintenanceTaskTermination};
-use super::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry;
+use tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry;
 use super::store_writer_gate::StoreWriterGates;
 pub(super) use super::store_writer_gate::{StoreWriterClass, WriterScope};
 use super::{DaemonHandshake, DatabaseOwnerRegistry, authority, write_json_rpc_response};
@@ -458,7 +458,7 @@ pub(super) struct StoreAdministration {
     host_admission_brokers: HostAdmissionBrokers,
     host_admission_broker_gate: Arc<ProfiledTokioMutex<()>>,
     profile_host_admission_replay: Arc<ProfileHostAdmissionReplayRegistry>,
-    session_sync_service: Arc<crate::daemon::session_sync::DaemonSessionSyncService>,
+    session_sync_service: Arc<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>,
     store_telemetry_sampling: super::maintenance::StoreTelemetrySamplingRegistry,
     #[cfg(unix)]
     automation_schedulers:
@@ -507,7 +507,7 @@ impl Default for StoreAdministration {
             )),
             profile_host_admission_replay: Arc::new(ProfileHostAdmissionReplayRegistry::default()),
             session_sync_service: Arc::new(
-                crate::daemon::session_sync::DaemonSessionSyncService::default(),
+                tracedecay_session_runtime::session_sync::DaemonSessionSyncService::default(),
             ),
             store_telemetry_sampling: super::maintenance::StoreTelemetrySamplingRegistry::default(),
             #[cfg(unix)]
@@ -1001,7 +1001,7 @@ impl StoreAdministration {
 
     pub(super) fn session_sync_service(
         &self,
-    ) -> Arc<crate::daemon::session_sync::DaemonSessionSyncService> {
+    ) -> Arc<tracedecay_session_runtime::session_sync::DaemonSessionSyncService> {
         Arc::clone(&self.session_sync_service)
     }
 

@@ -26,15 +26,15 @@ use tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutLifecycleAd
 
 struct DeniedWorkEvidenceRetrieval;
 
-impl crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1
+impl tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalPortV1
     for DeniedWorkEvidenceRetrieval
 {
     fn retrieve_admitted<'a>(
         &'a self,
         _context: &'a tracedecay_application::RequestContext,
         _query: tracedecay_session_memory::session::SessionTemporalQuery,
-    ) -> crate::daemon::session_retrieval::SessionApplicationRetrievalFutureV1<'a> {
-        Box::pin(async { crate::daemon::session_retrieval::SessionRetrievalServiceOutcome::Denied })
+    ) -> tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalFutureV1<'a> {
+        Box::pin(async { tracedecay_session_runtime::session_retrieval::SessionRetrievalServiceOutcome::Denied })
     }
 }
 

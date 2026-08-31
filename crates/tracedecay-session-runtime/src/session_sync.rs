@@ -28,11 +28,11 @@ const SESSION_SYNC_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(2);
 const SESSION_SYNC_SHUTDOWN_ABORT_GRACE: Duration = Duration::from_secs(1);
 
 #[derive(Clone)]
-pub(crate) struct DaemonSessionSyncService {
-    contexts: Arc<RwLock<BTreeMap<String, Arc<SessionSyncProjectContext>>>>,
+pub struct DaemonSessionSyncService {
+    pub contexts: Arc<RwLock<BTreeMap<String, Arc<SessionSyncProjectContext>>>>,
     active: Arc<Mutex<BTreeMap<String, CancellationSignal>>>,
-    tasks: Arc<Mutex<Vec<SessionSyncTaskV1>>>,
-    scan_slots: Arc<tokio::sync::Semaphore>,
+    pub tasks: Arc<Mutex<Vec<SessionSyncTaskV1>>>,
+    pub scan_slots: Arc<tokio::sync::Semaphore>,
     project_gates: Arc<Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     active_imports: Arc<Mutex<BTreeMap<String, ActiveSessionImport>>>,
     completed_profile_sweeps: Arc<Mutex<BTreeMap<String, UtcMicros>>>,
@@ -81,7 +81,7 @@ impl Drop for SessionSyncTaskShutdownV1 {
     }
 }
 
-pub(crate) struct DaemonSessionSyncConfig {
+pub struct DaemonSessionSyncConfig {
     pub brain_id: BrainId,
     pub profile_id: UserProfileId,
     pub project_id: ProjectId,
@@ -92,12 +92,11 @@ pub(crate) struct DaemonSessionSyncConfig {
     pub user_sessions: RegisteredGlobalDbLeaseV1,
     pub registry: RegisteredGlobalDbLeaseV1,
     pub startup_import: bool,
-    pub project_refresh:
-        crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
-    pub user_refresh: crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
+    pub project_refresh: crate::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
+    pub user_refresh: crate::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
 }
 
-enum SessionSyncWorkResult {
+pub enum SessionSyncWorkResult {
     Finished {
         interruption: Option<work::SessionSyncInterruption>,
         committed: bool,
@@ -377,7 +376,7 @@ impl DaemonSessionSyncService {
         SessionSyncOutcomeV1::Accepted(admission)
     }
 
-    fn active_contains(&self, key: &str) -> bool {
+    pub fn active_contains(&self, key: &str) -> bool {
         self.active
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -884,11 +883,11 @@ impl SessionSyncServicePort for DaemonSessionSyncService {
     }
 }
 
-mod git_topology;
+pub mod git_topology;
 mod project_lifecycle;
-mod work;
+pub mod work;
 
-use project_lifecycle::{SessionSyncProjectContext, SessionSyncTaskV1};
+pub use project_lifecycle::{SessionSyncProjectContext, SessionSyncTaskV1};
 
 impl DaemonSessionSyncService {
     fn observed_interruption(
@@ -915,7 +914,7 @@ impl DaemonSessionSyncService {
             .await
     }
 
-    async fn wait_for_interruption_parts(
+    pub async fn wait_for_interruption_parts(
         &self,
         cancellation: &CancellationSignal,
         deadline: &Deadline,
@@ -941,7 +940,7 @@ fn sleep_until_deadline(deadline: &tracedecay_application::Deadline) -> impl Fut
     tokio::time::sleep(Duration::from_micros(remaining))
 }
 
-fn journal_prefix(scope: &SessionSyncScopeV1) -> String {
+pub fn journal_prefix(scope: &SessionSyncScopeV1) -> String {
     let profile_id = scope.profile_id().as_str();
     let project_id = scope.project_id().as_str();
     format!(
@@ -961,7 +960,7 @@ fn import_scope_key(scope: &SessionSyncScopeV1) -> String {
     )
 }
 
-fn completed_profile_sweep_covers(
+pub fn completed_profile_sweep_covers(
     sweep_started_at: Option<&UtcMicros>,
     admitted_at: UtcMicros,
 ) -> bool {
@@ -993,11 +992,11 @@ fn source_coverage(
     }
 }
 
-fn journal_key(scope: &SessionSyncScopeV1, key: &IdempotencyKey) -> String {
+pub fn journal_key(scope: &SessionSyncScopeV1, key: &IdempotencyKey) -> String {
     format!("{}{}", journal_prefix(scope), key.as_str())
 }
 
-fn decode_matching_journal(
+pub fn decode_matching_journal(
     encoded: &str,
     request: &SessionSyncRequestV1,
 ) -> Result<SessionSyncJournalV1, &'static str> {
@@ -1012,7 +1011,7 @@ fn decode_matching_journal(
     Ok(journal)
 }
 
-fn completion_termination(
+pub fn completion_termination(
     requested: Option<OperationTermination>,
     committed: bool,
     stats: &SessionSyncStatsV1,
@@ -1063,11 +1062,3 @@ fn journal_encode_error(
         message: format!("session sync journal encode failed: {error}"),
     }
 }
-
-#[cfg(test)]
-#[path = "session_sync_tests.rs"]
-mod tests;
-
-#[cfg(test)]
-#[path = "session_sync/project_lifecycle_tests.rs"]
-mod project_lifecycle_tests;

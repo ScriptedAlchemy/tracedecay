@@ -3,14 +3,14 @@ use super::*;
 const GIT_SYNC_COMMAND_DEADLINE: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy)]
-pub(super) enum SessionSyncInterruption {
+pub enum SessionSyncInterruption {
     Cancelled,
     TimedOut,
     Shutdown,
 }
 
 impl SessionSyncInterruption {
-    pub(super) const fn termination(self) -> Option<OperationTermination> {
+    pub const fn termination(self) -> Option<OperationTermination> {
         match self {
             Self::Cancelled => Some(OperationTermination::Cancelled),
             Self::TimedOut => Some(OperationTermination::TimedOut),
@@ -731,7 +731,7 @@ impl SessionSyncProjectContext {
     }
 }
 
-pub(super) fn git_sync_with_topology_result(
+pub fn git_sync_with_topology_result(
     work: SessionSyncWorkResult,
     topology_result: Result<(), super::git_topology::GitTopologySyncFailure>,
 ) -> SessionSyncWorkResult {
@@ -768,7 +768,7 @@ pub(super) fn git_sync_with_topology_result(
     }
 }
 
-pub(super) fn git_sync_work_result(
+pub fn git_sync_work_result(
     project_id: &ProjectId,
     outcome: tracedecay_sessions::runtime::git_correlation::BoundedBackfillOutcome,
     requested_interruption: Option<SessionSyncInterruption>,
@@ -857,7 +857,7 @@ const fn git_history_interruption_reason(
     }
 }
 
-pub(super) fn git_history_frontier_from_meta(
+pub fn git_history_frontier_from_meta(
     activity_timestamp: Option<i64>,
     source_rowid: Option<i64>,
 ) -> Option<tracedecay_sessions::runtime::git_correlation::GitHistoryIndexFrontier> {
@@ -869,7 +869,7 @@ pub(super) fn git_history_frontier_from_meta(
     })
 }
 
-pub(super) fn git_history_source_frontier(
+pub fn git_history_source_frontier(
     project_id: &ProjectId,
     frontier: tracedecay_sessions::runtime::git_correlation::GitHistoryIndexFrontier,
 ) -> SessionSyncSourceFrontierV1 {
@@ -891,7 +891,7 @@ pub(super) fn git_history_source_frontier(
     }
 }
 
-pub(super) fn coalesced_alias_local_interruption(
+pub fn coalesced_alias_local_interruption(
     primary: &SessionSyncJournalV1,
     alias: &SessionSyncJournalV1,
     cancellation_is_requested: bool,

@@ -22,7 +22,7 @@ use super::{
 
 const SESSION_SYNC_STARTUP_DEADLINE_MICROS: i64 = 60_000_000;
 
-pub(super) struct SessionSyncProjectContext {
+pub struct SessionSyncProjectContext {
     pub(super) brain_id: BrainId,
     pub(super) profile_id: UserProfileId,
     pub(super) project_id: ProjectId,
@@ -32,22 +32,22 @@ pub(super) struct SessionSyncProjectContext {
     pub(super) project_sessions: RwLock<Option<RegisteredGlobalDbLeaseV1>>,
     project_sessions_locator: VerifiedStoreLocatorV1,
     pub(super) user_sessions: RegisteredGlobalDbLeaseV1,
-    pub(super) registry: RegisteredGlobalDbLeaseV1,
+    pub registry: RegisteredGlobalDbLeaseV1,
     pub(super) project_refresh:
-        crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
+        crate::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
     pub(super) user_refresh:
-        crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
+        crate::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
 }
 
-pub(super) struct SessionSyncTaskV1 {
-    pub(super) scope: SessionSyncScopeV1,
-    pub(super) key: String,
-    pub(super) cancellation: CancellationSignal,
-    pub(super) task: tokio::task::JoinHandle<()>,
+pub struct SessionSyncTaskV1 {
+    pub scope: SessionSyncScopeV1,
+    pub key: String,
+    pub cancellation: CancellationSignal,
+    pub task: tokio::task::JoinHandle<()>,
 }
 
 impl SessionSyncProjectContext {
-    pub(super) fn project_sessions(&self) -> Result<RegisteredGlobalDbLeaseV1, String> {
+    pub fn project_sessions(&self) -> Result<RegisteredGlobalDbLeaseV1, String> {
         self.project_sessions
             .read()
             .unwrap_or_else(PoisonError::into_inner)
@@ -97,7 +97,7 @@ impl SessionSyncProjectContext {
 }
 
 impl DaemonSessionSyncService {
-    pub(super) fn project_gate(&self, scope: &SessionSyncScopeV1) -> Arc<tokio::sync::Mutex<()>> {
+    pub fn project_gate(&self, scope: &SessionSyncScopeV1) -> Arc<tokio::sync::Mutex<()>> {
         let key = session_sync_project_key(scope);
         Arc::clone(
             self.project_gates
@@ -278,7 +278,7 @@ impl DaemonSessionSyncService {
         Ok(recovered_import)
     }
 
-    pub(crate) async fn register_project(
+    pub async fn register_project(
         &self,
         config: DaemonSessionSyncConfig,
     ) -> tracedecay_domain::errors::Result<()> {
@@ -420,7 +420,7 @@ impl DaemonSessionSyncService {
     /// neither seal nor seat a code generation.
     /// `TRACEDECAY_SESSION_INGEST_DISABLED` is only meant to stop transcript
     /// ingest, never to unmount indexing.
-    pub(super) fn classify_startup_import_outcome(
+    pub fn classify_startup_import_outcome(
         outcome: SessionSyncOutcomeV1,
     ) -> tracedecay_domain::errors::Result<()> {
         match outcome {
@@ -444,7 +444,7 @@ impl DaemonSessionSyncService {
         }
     }
 
-    pub(super) fn context_for(
+    pub fn context_for(
         &self,
         scope: &SessionSyncScopeV1,
     ) -> Option<Arc<SessionSyncProjectContext>> {
@@ -474,7 +474,7 @@ impl DaemonSessionSyncService {
             .await
     }
 
-    pub(crate) async fn retire_project(
+    pub async fn retire_project(
         &self,
         profile_id: &UserProfileId,
         project_id: &ProjectId,
@@ -501,7 +501,7 @@ impl DaemonSessionSyncService {
         Ok(true)
     }
 
-    pub(crate) async fn rebind_project(
+    pub async fn rebind_project(
         &self,
         profile_id: &UserProfileId,
         project_id: &ProjectId,

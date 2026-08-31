@@ -236,7 +236,7 @@ pub struct ToolCallRegistryOptions<'a> {
         Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
     pub(crate) registered_savings_db: Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
     pub(crate) dashboard_session_retrieval_service:
-        Option<Arc<dyn crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1>>,
+        Option<Arc<dyn tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalPortV1>>,
     pub(crate) dashboard_session_retrieval_identity:
         Option<tracedecay_session_memory::context::ResolvedSessionIdentity>,
     /// The canonical profile identity bound by the daemon handshake. A

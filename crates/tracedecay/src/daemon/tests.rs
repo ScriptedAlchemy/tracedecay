@@ -23,6 +23,7 @@ use super::{AutomationSchedulerHandle, DaemonEngine};
 use super::{
     DaemonClientIdentity, DaemonHandshake, DaemonLifecycle, DatabaseOwnerRegistry, ProjectRouteKey,
     ProjectServerKey, StoreAdministration, StoreOwnerKey, multi_root_family_allows,
+    store_owner_key_from_paths,
 };
 
 mod bootstrap;

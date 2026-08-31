@@ -43,7 +43,7 @@ use tracedecay_session_memory::session::{
     TaskSessionRetrievalOutcomeV1,
 };
 
-use crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1;
+use tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalPortV1;
 
 const WORK_EVIDENCE_CONTEXT_BYTES: u64 = 64 * 1024;
 const WORK_TASK_SESSION_SANITIZER_REVISION: &str = "sanitizer.work-task-session.v1";
@@ -931,7 +931,7 @@ pub(crate) mod tests {
         .expect("materialize provider session temporal projection");
 
         let root =
-            crate::daemon::session_retrieval::DaemonSessionRetrievalRoot::project_identity_for_test(
+            tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalRoot::project_identity_for_test(
                 project_id,
                 repository_id,
                 worktree_id,
@@ -941,7 +941,7 @@ pub(crate) mod tests {
             .identity()
             .session_request_scope()
             .expect("resolved Work scope");
-        let retrieval = crate::daemon::session_retrieval::DaemonSessionRetrievalService::new(
+        let retrieval = tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalService::new(
             database, root, None,
         )
         .expect("mounted project retrieval service");

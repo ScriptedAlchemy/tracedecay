@@ -23,12 +23,12 @@ use super::{
 const SESSION_LOOKUP_CONTEXT_BYTES: u64 = 64 * 1024;
 const SESSION_LOOKUP_SORT: &str = "sort.session.temporal.anchor.v1";
 
-pub(crate) struct DaemonSessionLookupPrimitiveV1 {
+pub struct DaemonSessionLookupPrimitiveV1 {
     retrieval: Arc<dyn SessionApplicationRetrievalPortV1>,
 }
 
 impl DaemonSessionLookupPrimitiveV1 {
-    pub(crate) fn new(retrieval: Arc<dyn SessionApplicationRetrievalPortV1>) -> Self {
+    pub fn new(retrieval: Arc<dyn SessionApplicationRetrievalPortV1>) -> Self {
         Self { retrieval }
     }
 }
@@ -341,7 +341,7 @@ mod tests {
     use tracedecay_domain::{RetrievalAnchorId, SessionId};
 
     use super::*;
-    use crate::daemon::session_retrieval::{
+    use crate::session_retrieval::{
         SessionRetrievalPageView, SessionRetrievalStoreScope, SessionRetrievalUnavailable,
         SessionRetrievalUnavailableReason, SessionTemporalMetadataView,
     };

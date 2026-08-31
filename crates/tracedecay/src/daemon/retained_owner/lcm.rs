@@ -31,8 +31,8 @@ use tracedecay_session_memory::session::lcm::{
 };
 
 use super::receipts::evidence_outcome;
-use crate::daemon::lcm_authority::MountedLcmAuthorityPort;
-use crate::daemon::session_retrieval::{
+use tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort;
+use tracedecay_session_runtime::session_retrieval::{
     DaemonSessionRetrievalService, LcmDescribeServiceCommand, LcmDescribeServiceFuture,
     LcmExpandServiceCommand, LcmExpandServiceFuture, SessionApplicationRetrievalFutureV1,
     SessionApplicationRetrievalPortV1, SessionRetrievalStoreScope,
@@ -335,7 +335,7 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
                 )
                 .await?;
                 let expected_shard = database.binding().shard_id.clone();
-                crate::daemon::lcm_authority::mount_registered_lcm_authority(
+                tracedecay_session_runtime::lcm_authority::mount_registered_lcm_authority(
                     database,
                     identity.clone(),
                     &expected_shard,
