@@ -1,5 +1,10 @@
-//! End-to-end wire allocation bounds for host stdin versus MCP/daemon
-//! JSON-RPC frames.
+//! Bounded wire-frame limits, readers, and oversized-frame errors.
+//!
+//! This crate is the single framing authority below `tracedecay-daemon-protocol`.
+//! It owns host-event and MCP/daemon JSON-RPC frame ceilings, the durable
+//! record-cap derivation, cancellation-safe bounded readers, and the
+//! oversized-frame error family. It does not own protocol envelopes,
+//! handshake identity, or transport endpoints.
 //!
 //! Host-event stdin and durable spool admission stay at
 //! [`MAX_WIRE_MESSAGE_BYTES`] (1 MiB). MCP/daemon JSON-RPC frames use the
@@ -20,6 +25,17 @@
 //! accumulator in the reader makes a dropped read future lossless: the next
 //! call resumes from exactly the bytes already consumed.
 
+#![deny(clippy::all)]
+#![warn(clippy::pedantic)]
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+#![cfg_attr(not(test), deny(clippy::expect_used))]
+#![allow(clippy::missing_errors_doc)]
+#![allow(clippy::missing_panics_doc)]
+#![allow(clippy::must_use_candidate)]
+#![allow(clippy::too_many_lines)]
+#![allow(clippy::items_after_statements)]
+#![forbid(unsafe_code)]
+
 use std::error::Error;
 use std::fmt;
 use std::io::{self, Read};
@@ -32,6 +48,12 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 /// newline-delimited wire records. Durable host-admission spool budgets
 /// derive their per-record cap from this constant.
 pub const MAX_WIRE_MESSAGE_BYTES: usize = 1024 * 1024;
+
+/// Durable host-admission / transcript-discovery per-record cap.
+///
+/// Derived from [`MAX_WIRE_MESSAGE_BYTES`] so a discovery sweep cannot queue
+/// more than one admission pass will accept.
+pub const MAX_WIRE_RECORD_BYTES: usize = MAX_WIRE_MESSAGE_BYTES;
 
 /// Bounded MCP/daemon JSON-RPC frame cap (16 MiB).
 ///
@@ -498,6 +520,7 @@ mod tests {
     #[test]
     fn host_event_wire_cap_stays_one_mib_and_mcp_frame_is_larger() {
         assert_eq!(MAX_WIRE_MESSAGE_BYTES, 1024 * 1024);
+        assert_eq!(MAX_WIRE_RECORD_BYTES, MAX_WIRE_MESSAGE_BYTES);
         assert_eq!(MAX_MCP_JSONRPC_FRAME_BYTES, 16 * 1024 * 1024);
         assert_eq!(MCP_OVERSIZE_ID_INSPECT_BYTES, 4096);
     }

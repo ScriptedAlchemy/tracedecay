@@ -11,14 +11,14 @@ use tracedecay_domain::{
     ObservabilityRetentionClassV1, ObservabilityTerminalResultV1, RetrievalQueryObservedV1,
     TelemetryDropObservedV1,
 };
+use tracedecay_session_memory::provider_usage::{
+    AggregatedProviderUsageCountersV1, ProviderUsageAggregateV1, ProviderUsageCoverageV1,
+};
 use tracedecay_usecases::observability::{
     BoundedObservabilityProducerV1, ObservabilityEmissionOutcomeV1,
     ObservabilityOwnerEmissionOutcomeV1, ObservabilityProducerDeadlinesV1,
     ObservabilityProducerIdentityV1, RegisteredAggregateShareExporterV1,
     RegisteredObservabilityPortV1, provider_latency_read_model,
-};
-use tracedecay_session_memory::provider_usage::{
-    AggregatedProviderUsageCountersV1, ProviderUsageAggregateV1, ProviderUsageCoverageV1,
 };
 
 fn identity(scope: &str, boot: &str) -> ObservabilityProducerIdentityV1 {

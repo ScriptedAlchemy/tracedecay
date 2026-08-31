@@ -357,6 +357,18 @@ fn begin_replay_retirement_commit(
     )
 }
 
+fn begin_pending_discard_commit(
+    context: &GraphPublicationOperationContextV1<'_>,
+) -> GraphPublicationStoreResultV1<()> {
+    if context.try_begin_pending_discard_commit() {
+        return Ok(());
+    }
+    context.interruption().map_or(
+        Err(GraphPublicationStoreErrorV1::Infrastructure),
+        |reason| Err(GraphPublicationStoreErrorV1::Interrupted(reason)),
+    )
+}
+
 fn begin_retired_cleanup_finalize_commit(
     context: &GraphPublicationOperationContextV1<'_>,
 ) -> GraphPublicationStoreResultV1<()> {

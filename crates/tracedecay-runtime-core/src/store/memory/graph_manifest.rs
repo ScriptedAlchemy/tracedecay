@@ -86,8 +86,7 @@ pub(super) fn build_manifest(
         );
     }
     ensure_source_read_active(read_control)?;
-    let generation = GraphGenerationId::new(format!("project-memory:{}", watermark.as_str()))
-        .map_err(|error| graph_error(owner, error))?;
+    let generation = generation_for_watermark(owner, &watermark)?;
     let source_generation = SourceGeneration::new(watermark.as_str().to_owned())
         .map_err(|error| graph_error(owner, error))?;
     let check = || {
@@ -111,6 +110,18 @@ pub(super) fn build_manifest(
         tracedecay_graph_db::GraphDbError::Cancelled => FactStoreError::ReadCancelled,
         error => graph_error(owner, error),
     })
+}
+
+/// The verified generation id is a pure function of the source watermark.
+/// Read paths that only need to compare a verified snapshot's generation
+/// against the canonical source derive it here instead of materializing the
+/// whole entity/relation manifest.
+pub(super) fn generation_for_watermark(
+    owner: &FactOwnerV1,
+    watermark: &GraphWatermark,
+) -> FactStoreResult<GraphGenerationId> {
+    GraphGenerationId::new(format!("project-memory:{}", watermark.as_str()))
+        .map_err(|error| graph_error(owner, error))
 }
 
 pub(super) fn source_watermark(

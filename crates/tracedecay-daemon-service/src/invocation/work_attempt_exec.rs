@@ -617,8 +617,9 @@ fn select_provider(
     project_root: &std::path::Path,
     attempt: &WorkAttemptV1,
 ) -> Result<ProviderSelection, ProviderDenial> {
-    let configuration = tracedecay_usecases::config::cached_pinned_runtime_configuration(project_root)
-        .map_err(|_| ProviderDenial::preferred(WorkProviderAvailabilityV1::Unavailable))?;
+    let configuration =
+        tracedecay_usecases::config::cached_pinned_runtime_configuration(project_root)
+            .map_err(|_| ProviderDenial::preferred(WorkProviderAvailabilityV1::Unavailable))?;
     let resolver = PinnedWorkExecutableBindingResolver::from_configuration(&configuration)
         .map_err(|error| ProviderDenial::preferred(availability_state(error)))?;
     select_with_resolver(&resolver, attempt)
@@ -1070,10 +1071,8 @@ async fn execute_app_server<S>(
                     }
                 })?,
             )
-            .map_err(|error| {
-                tracedecay_domain::errors::TraceDecayError::Config {
-                    message: format!("Codex app-server session identity is invalid: {error}"),
-                }
+            .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!("Codex app-server session identity is invalid: {error}"),
             })?;
             Ok(AppServerSessionOutput {
                 answer: summary.text,

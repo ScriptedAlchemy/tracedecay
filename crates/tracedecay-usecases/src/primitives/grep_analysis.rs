@@ -15,14 +15,14 @@ use tracedecay_application::retrieval::grep_analysis::{
     PrimitiveFutureV1, PrimitiveOutcomeV1, PrimitivePageV1, PrimitivePortContextV1,
 };
 
-use tracedecay_graph_query::health::{dependency_depth, depth_score};
-use tracedecay_graph_query::queries::GraphQueryManager;
-use tracedecay_graph_query::SourceReadRuntime;
 use tracedecay_code_index::ast_grep_search::search_tree_scoped_with_cancel;
 use tracedecay_code_index::graph_projection::{
     CodeGraphInteractiveReader, CodeGraphSymbolSummaryV1,
 };
 use tracedecay_graph_db::GraphCancellation;
+use tracedecay_graph_query::SourceReadRuntime;
+use tracedecay_graph_query::health::{dependency_depth, depth_score};
+use tracedecay_graph_query::queries::GraphQueryManager;
 
 pub struct TraceDecayAstGrepAuthorityV1 {
     source_runtime: Arc<SourceReadRuntime>,
@@ -103,7 +103,8 @@ impl AstGrepAuthorityV1 for TraceDecayAstGrepAuthorityV1 {
                     return PrimitiveOutcomeV1::Cancelled;
                 }
 
-                let graph_cancellation = tracedecay_graph_query::request_graph_cancellation(context.request);
+                let graph_cancellation =
+                    tracedecay_graph_query::request_graph_cancellation(context.request);
                 let verified = match self
                     .code_graph
                     .open(tracedecay_graph_query::CodeGraphReadRequest::new(
@@ -259,7 +260,8 @@ impl DependencyDepthAuthorityV1 for TraceDecayDependencyDepthAuthorityV1 {
                         Ok(path) => path,
                         Err(problem) => return PrimitiveOutcomeV1::Failed(problem),
                     };
-                let cancellation = tracedecay_graph_query::request_graph_cancellation(context.request);
+                let cancellation =
+                    tracedecay_graph_query::request_graph_cancellation(context.request);
                 let verified = match self
                     .code_graph
                     .open(tracedecay_graph_query::CodeGraphReadRequest::new(

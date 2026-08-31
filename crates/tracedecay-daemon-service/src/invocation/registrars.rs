@@ -387,20 +387,14 @@ impl DaemonFeedbackRuntimeRegistrar {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    pub fn with_publication_gate(
-        mut self,
-        gate: Arc<DaemonFeedbackPublicationTestGate>,
-    ) -> Self {
+    pub fn with_publication_gate(mut self, gate: Arc<DaemonFeedbackPublicationTestGate>) -> Self {
         self.publication_gate = Some(gate);
         self
     }
 
     /// Resolve the read store from the feedback runtime mounted for this exact
     /// project root. Doctor receives no provider runtime or write authority.
-    pub async fn doctor_read_store(
-        &self,
-        project_root: &Path,
-    ) -> Option<ProjectFeedbackStore> {
+    pub async fn doctor_read_store(&self, project_root: &Path) -> Option<ProjectFeedbackStore> {
         self.service
             .feedback_runtime(Some(project_root))
             .await
@@ -1198,4 +1192,3 @@ impl DaemonNativeIntegrationRuntimeRegistrar {
         self.registry.shutdown().await
     }
 }
-

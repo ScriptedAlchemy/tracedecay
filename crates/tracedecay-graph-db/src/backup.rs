@@ -130,7 +130,7 @@ impl GraphDb {
             .map_err(|error| unavailable_io("inspect backup destination", &destination, error))?
         {
             remove_backup_staging(&staging);
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict("backup.create_verified_backup"));
         }
         fs::rename(&staging, &destination).map_err(|error| {
             remove_backup_staging(&staging);
@@ -461,7 +461,7 @@ fn validate_new_directory(destination: &Path) -> Result<(PathBuf, String), Graph
         .try_exists()
         .map_err(|error| unavailable_io("inspect graph backup destination", destination, error))?
     {
-        return Err(GraphDbError::Conflict);
+        return Err(GraphDbError::conflict("backup.validate_new_directory"));
     }
     let parent = destination.parent().ok_or_else(|| {
         GraphDbError::invalid("graph backup destination must have a parent directory")
@@ -503,7 +503,7 @@ fn validate_destination(destination: &Path) -> Result<PathBuf, GraphDbError> {
         .try_exists()
         .map_err(|error| unavailable_io("inspect graph restore destination", &destination, error))?
     {
-        return Err(GraphDbError::Conflict);
+        return Err(GraphDbError::conflict("backup.validate_destination"));
     }
     Ok(destination)
 }
@@ -529,7 +529,7 @@ fn publish_file(staging: &Path, destination: &Path) -> Result<(), GraphDbError> 
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             remove_restore_staging(staging);
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict("backup.publish_file"));
         }
         Err(error) => {
             remove_restore_staging(staging);

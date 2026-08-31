@@ -23,12 +23,12 @@ use tracedecay_lcm::contracts::{
     LcmContentRange, LcmDataFreshness, LcmDescribeResponse, LcmExpandResponse, LcmRawMessage,
     LcmRawMessageMetadata, LcmRetrievalOutcome, LcmSourceRef, LcmStorageKind, LcmSummaryNode,
 };
-use tracedecay_sessions::runtime::SessionMessageSearchResult;
 use tracedecay_lcm::{
     LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT, LcmContentSlice, LcmExpandQueryBudget,
     LcmExpandQueryContextBlock, LcmExpandQueryMatch, LcmExpandQueryResponse,
     LcmExpandQuerySynthesisPrompt,
 };
+use tracedecay_sessions::runtime::SessionMessageSearchResult;
 use tracedecay_temporal_query::context::OrderedTextContextAssembler;
 
 use tracedecay_session_runtime::session_retrieval::SessionTemporalMetadataView;
@@ -534,9 +534,8 @@ pub(super) fn bound_expand_query_result_for_mcp(
     rebuild_synthesis_user_prompt(result);
     result.mcp_response_truncated = Some(true);
     result.contract_truncated = Some(true);
-    result.mcp_truncation_reason = Some(
-        "expand-query response compacted to preserve synthesis contract fields".to_owned(),
-    );
+    result.mcp_truncation_reason =
+        Some("expand-query response compacted to preserve synthesis contract fields".to_owned());
     if serialized_within_budget(result) {
         return;
     }

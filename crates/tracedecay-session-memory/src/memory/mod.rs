@@ -1,8 +1,8 @@
 //! Canonical memory use cases over the append-only fact authority.
 
 use tracedecay_domain::FactOwnerV1;
-use tracedecay_runtime_core::db::Database;
 use tracedecay_domain::errors::{Result as TraceDecayResult, TraceDecayError};
+use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 
 mod anchors;
