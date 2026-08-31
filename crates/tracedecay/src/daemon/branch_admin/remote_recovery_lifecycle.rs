@@ -1,9 +1,15 @@
 use std::collections::{BTreeSet, HashMap};
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 
 use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_store::StoreShardScopeV1;
+use tracedecay_store_runtime::{
+    RemoteRecoveryAdmission, RemoteRecoveryProjectLifecycle, RemoteRecoveryQuiescence,
+};
 
 use super::{
     DatabaseOwnerRegistry, StoreAdministration, StoreWriterClass, StoreWriterGates, WriterScope,
@@ -487,6 +493,30 @@ async fn retire_maintenance_tasks(
     }
     for (owner, task) in tasks {
         super::project_retirement::track_aborted_retirement_task(retirements, owner, task).await;
+    }
+}
+
+impl RemoteRecoveryProjectLifecycle for RemoteRecoveryProjectLifecycleV1 {
+    fn authorize_project_recovery<'a>(
+        &'a self,
+        project_id: &'a ProjectId,
+    ) -> Pin<Box<dyn Future<Output = Result<RemoteRecoveryAdmission>> + Send + 'a>> {
+        Box::pin(async move {
+            let guard = RemoteRecoveryProjectLifecycleV1::authorize_project_recovery(self, project_id)
+                .await?;
+            Ok(RemoteRecoveryAdmission::hold(guard))
+        })
+    }
+
+    fn quiesce<'a>(
+        &'a self,
+        project_id: &'a ProjectId,
+        database: &'a RegisteredGlobalDbLeaseV1,
+    ) -> Pin<Box<dyn Future<Output = Result<RemoteRecoveryQuiescence>> + Send + 'a>> {
+        Box::pin(async move {
+            let fence = RemoteRecoveryProjectLifecycleV1::quiesce(self, project_id, database).await?;
+            Ok(RemoteRecoveryQuiescence::hold(fence))
+        })
     }
 }
 

@@ -17,7 +17,7 @@ use tracedecay_code_index_runtime::code_index_scheduler::{
 };
 use tracedecay_domain::ProjectId;
 
-use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
+use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
 const ALPHA_LIB_V1: &[(&str, &str)] = &[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")];
 

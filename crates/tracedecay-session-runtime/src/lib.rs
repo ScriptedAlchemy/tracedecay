@@ -10,6 +10,7 @@ use std::time::Duration;
 pub mod lcm_authority;
 mod lcm_effects;
 mod lcm_summarization;
+pub mod session_queries;
 pub mod session_retrieval;
 pub mod session_sync;
 pub mod session_temporal_refresh_scheduler;

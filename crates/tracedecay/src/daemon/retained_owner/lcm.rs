@@ -31,7 +31,6 @@ use tracedecay_session_temporal_store::{
 use tracedecay_sessions::runtime::{SessionMessageType, SessionSearchScope};
 
 use super::receipts::evidence_outcome;
-use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use tracedecay_runtime_core::timeutil::SearchTimeBound;
 use tracedecay_session_memory::context::ResolvedSessionIdentity;
 use tracedecay_session_memory::session::SessionTemporalQuery;
@@ -41,6 +40,7 @@ use tracedecay_session_runtime::session_retrieval::{
     LcmExpandServiceCommand, LcmExpandServiceFuture, SessionApplicationRetrievalFutureV1,
     SessionApplicationRetrievalPortV1, SessionRetrievalStoreScope,
 };
+use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
 mod output;
 mod retrieval;

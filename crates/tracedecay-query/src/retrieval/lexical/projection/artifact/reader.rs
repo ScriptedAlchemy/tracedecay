@@ -44,9 +44,10 @@ use crate::retrieval::ports::{
 
 use super::super::{
     ECHO_SCORE_MILLIS, ExactMatchRowViewV1, FUZZY_SCORE_MILLIS, FuzzyExpansionsV1,
-    FuzzyQueryGroupV1, LexicalRowScoreV1, PHRASE_SCORE_MILLIS, add_score, bm25_score_micros,
-    collect_term_kinds, exact_matches, field_weight_millis, fuzzy_distance_bound,
-    normalize_lexical, retrieval_anchor, substring_count,
+    FuzzyQueryGroupV1, LexicalRowScoreV1, LiteralProofCacheV1, PHRASE_SCORE_MILLIS,
+    PreparedLexicalQueryV1, add_score, bm25_score_micros, collect_term_kinds, exact_matches,
+    field_weight_millis, fuzzy_distance_bound, normalize_lexical, retrieval_anchor,
+    substring_count,
 };
 use crate::retrieval::lexical::{
     LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneEvidence, LexicalLaneRequest,
@@ -157,7 +158,7 @@ impl CodeLexicalArtifactReaderV1 {
         checkpoint(control)?;
         verify_named_path_identity(path, &file)?;
         hotpath::measure_block!("query.artifact.open.head_schema_verify", {
-            configure_reader_window(&connection, cache_budget_bytes, 0)?;
+            configure_reader_window(&connection, cache_budget_bytes, 0, expected_file_size_bytes)?;
             connection
                 .pragma_update(None, "query_only", true)
                 .map_err(sqlite_error)?;
@@ -189,6 +190,7 @@ impl CodeLexicalArtifactReaderV1 {
                 connection,
                 &receipt,
                 cache_budget_bytes,
+                expected_file_size_bytes,
                 control,
                 ReaderIntegrityAuthorityV1::ContentAddressedPublisherProof,
             )
@@ -237,6 +239,7 @@ impl CodeLexicalArtifactReaderV1 {
                 connection,
                 expected,
                 cache_budget_bytes,
+                expected.file_size_bytes(),
                 control,
                 ReaderIntegrityAuthorityV1::ReceiptOnly,
             )
@@ -251,6 +254,7 @@ impl CodeLexicalArtifactReaderV1 {
         connection: Connection,
         expected: &VerifiedCodeLexicalArtifactV1,
         cache_budget_bytes: usize,
+        sealed_file_size_bytes: u64,
         control: &dyn CodeIndexExecutionControlV1,
         integrity_authority: ReaderIntegrityAuthorityV1,
     ) -> Result<Self, CodeLexicalArtifactErrorV1> {
@@ -282,17 +286,22 @@ impl CodeLexicalArtifactReaderV1 {
                         "lexical artifact metadata exhausts the reader cache budget".to_owned(),
                     ));
                 }
-                // Kernel SQLite window: no mmap grant, page cache clamped to
-                // [2, 64] MiB. The caller budget covers the retained metadata copy
-                // plus the cache actually granted; nothing else is claimed.
+                // Kernel SQLite window: page cache clamped to [2, 64] MiB.
+                // Sealed readers also mmap the immutable file (file-backed,
+                // not part of this heap claim) so n-gram serving does not
+                // re-pread the same posting pages on every tool call.
                 let sqlite_budget = cache_budget_bytes - stored_metadata_len;
                 if sqlite_budget < ARTIFACT_SQLITE_CACHE_FLOOR_BYTES {
                     return Err(CodeLexicalArtifactErrorV1::Unreserved(format!(
                         "lexical artifact reader budget leaves {sqlite_budget} bytes, under the {ARTIFACT_SQLITE_CACHE_FLOOR_BYTES}-byte kernel page-cache floor"
                     )));
                 }
-                let page_cache_bytes =
-                    configure_reader_window(&connection, cache_budget_bytes, stored_metadata_len)?;
+                let page_cache_bytes = configure_reader_window(
+                    &connection,
+                    cache_budget_bytes,
+                    stored_metadata_len,
+                    sealed_file_size_bytes,
+                )?;
                 let (stored_metadata_bytes, stored_metadata_digest): (Vec<u8>, String) = connection
                     .query_row(
                         "SELECT metadata, metadata_digest FROM artifact_state WHERE singleton = 1",
@@ -501,9 +510,16 @@ impl CodeLexicalArtifactReaderV1 {
         }
     }
 
+    /// Reader queries serialize on this one connection; the wait span makes
+    /// cross-query contention (concurrent searches, hydration reads during
+    /// staging) attributable instead of vanishing into lane wall time.
     fn lock_connection(&self) -> Result<StdMutexGuard<'_, Connection>, CodeLexicalArtifactErrorV1> {
-        self.connection.lock().map_err(|_| {
-            CodeLexicalArtifactErrorV1::Io("lexical artifact reader lock is poisoned".to_owned())
+        hotpath::measure_block!("query.artifact.reader.lock_wait", {
+            self.connection.lock().map_err(|_| {
+                CodeLexicalArtifactErrorV1::Io(
+                    "lexical artifact reader lock is poisoned".to_owned(),
+                )
+            })
         })
     }
 
@@ -901,14 +917,15 @@ fn visit_lexical_rows(
             let encoded_frequencies: String = row.get(2).map_err(map_query_sql_error)?;
             let encoded: Vec<(String, String, i64)> =
                 serde_json::from_str(&encoded_frequencies).map_err(contract_error)?;
-            let mut term_frequencies = LexicalTermFrequenciesV1::new();
+            let mut entries = Vec::with_capacity(encoded.len());
             for (field, term, frequency) in encoded {
-                term_frequencies
-                    .entry(decode_field(&field)?)
-                    .or_default()
-                    .insert(term, usize::try_from(frequency).map_err(contract_error)?);
+                entries.push((
+                    decode_field(&field)?,
+                    term,
+                    usize::try_from(frequency).map_err(contract_error)?,
+                ));
             }
-            visitor(document, bytes, term_frequencies)?;
+            visitor(document, bytes, LexicalTermFrequenciesV1(entries))?;
             visited = visited.saturating_add(1);
         }
         drop(rows);
@@ -1049,7 +1066,9 @@ fn ngram_bitmap_candidates(
     let mut remaining_encoded_bytes = ARTIFACT_NGRAM_QUERY_ENCODED_BYTES_V1;
     let mut selectivities = Vec::with_capacity(ngrams.len());
     let mut selectivity_statement = connection
-        .prepare("SELECT document_frequency FROM ngram_statistics WHERE kind = ?1 AND ngram = ?2")
+        .prepare_cached(
+            "SELECT document_frequency FROM ngram_statistics WHERE kind = ?1 AND ngram = ?2",
+        )
         .map_err(map_query_sql_error)?;
     for ngram in ngrams {
         let cardinality = selectivity_statement
@@ -1078,12 +1097,12 @@ fn ngram_bitmap_candidates(
     #[cfg(feature = "hotpath")]
     let mut observed_bytes = 0u64;
     let mut all_pages_statement = connection
-        .prepare(
+        .prepare_cached(
             "SELECT page_ordinal, documents, cardinality FROM ngram_postings INDEXED BY ngram_postings_by_ngram WHERE kind = ?1 AND ngram = ?2 ORDER BY page_ordinal",
         )
         .map_err(map_query_sql_error)?;
     let mut candidate_pages_statement = connection
-        .prepare(
+        .prepare_cached(
             "SELECT posting.page_ordinal, posting.documents, posting.cardinality \
              FROM json_each(?3) AS candidate_page \
              CROSS JOIN ngram_postings AS posting INDEXED BY ngram_postings_by_ngram \
@@ -1314,18 +1333,18 @@ impl<'a> ArtifactQueryV1<'a> {
         request: &LexicalLaneRequest<'_>,
     ) -> Result<RetrieverBatch<LexicalLaneEvidence>, RetrievalPortError> {
         let fuzzy = self.fuzzy_expansions(request)?;
-        let terms = lexical_terms(request, &fuzzy);
+        let prepared = PreparedLexicalQueryV1::new(request);
+        let terms = lexical_terms(&prepared, &fuzzy);
         let stats = self.lexical_stats(&terms)?;
         let mut phrase_queries = BTreeMap::new();
-        for phrase in &request.phrases {
-            let normalized = normalize_lexical(phrase);
+        for (_, normalized) in &prepared.phrases {
             let query = ngram_document_query(
                 self.connection,
                 NGRAM_NORMALIZED,
                 normalized.as_bytes(),
                 &self.metrics,
             )?;
-            phrase_queries.insert(normalized, query);
+            phrase_queries.insert(normalized.clone(), query);
         }
         let mut phrase_frequencies = phrase_queries
             .keys()
@@ -1365,7 +1384,7 @@ impl<'a> ArtifactQueryV1<'a> {
                 let row = decode_row(&bytes).map_err(map_query_artifact_error)?;
                 let score = self.score_row(
                     &row,
-                    request,
+                    &prepared,
                     &fuzzy,
                     &phrase_frequencies,
                     &stats,
@@ -1442,27 +1461,22 @@ impl<'a> ArtifactQueryV1<'a> {
         // matched literals are all denied is excluded, never selected, so a
         // denied best match can never displace an admitted candidate or
         // fail the batch. Retained state stays bounded: at most `cap`
-        // minted proofs alongside the ranking keys.
+        // ranking keys with matched-literal ordinals; proofs are admitted at
+        // most once per request literal and cloned only for winners.
         let cap = lane_candidate_cap(&request.budget, &request.base.budget);
         let mut excluded = self.document_count as u64;
         let mut eligible = 0u64;
         let mut ranked = BinaryHeap::new();
+        let mut proofs = LiteralProofCacheV1::new(request.literals.len());
         self.visit_documents(&documents, |document| {
             let row = self.row(document)?;
             let (matched_literals, matched_kinds) = exact_matches_artifact(&row, request);
             if matched_literals.is_empty() {
                 return Ok(());
             }
-            let proof = matched_literals
-                .iter()
-                .find_map(|literal| {
-                    authority
-                        .admit(literal.field, &literal.original_bytes, &request.base)
-                        .transpose()
-                })
-                .transpose()
-                .map_err(contract_error)?;
-            let Some(proof) = proof else {
+            let Some((admitted_ordinal, _)) =
+                proofs.first_admitted(&matched_literals, request, authority)?
+            else {
                 return Ok(());
             };
             eligible += 1;
@@ -1476,7 +1490,7 @@ impl<'a> ArtifactQueryV1<'a> {
                         row.id.as_str().to_owned(),
                         document,
                     ),
-                    proof,
+                    admitted_ordinal,
                     matched_literals,
                     matched_kinds,
                 },
@@ -1490,10 +1504,15 @@ impl<'a> ArtifactQueryV1<'a> {
         for (ordinal, entry) in selected.into_iter().enumerate() {
             let RankedExactEntryV1 {
                 key: (_, _, document),
-                proof,
+                admitted_ordinal,
                 matched_literals,
                 matched_kinds,
             } = entry;
+            let proof = proofs.admitted_proof(admitted_ordinal)?;
+            let matched_literals = matched_literals
+                .iter()
+                .map(|literal| request.literals[*literal].clone())
+                .collect::<Vec<_>>();
             let row = self.row(document)?;
             let mut candidate = candidate(
                 self.receipt,
@@ -1524,13 +1543,12 @@ impl<'a> ArtifactQueryV1<'a> {
 
     fn row(&self, document: u32) -> Result<ArtifactRowV1, RetrievalPortError> {
         self.metrics.probe();
-        let bytes: Vec<u8> = self
+        let mut statement = self
             .connection
-            .query_row(
-                "SELECT row FROM rows WHERE document_id = ?1",
-                [i64::from(document)],
-                |row| row.get(0),
-            )
+            .prepare_cached("SELECT row FROM rows WHERE document_id = ?1")
+            .map_err(map_query_sql_error)?;
+        let bytes: Vec<u8> = statement
+            .query_row([i64::from(document)], |row| row.get(0))
             .map_err(map_query_sql_error)?;
         decode_row(&bytes).map_err(map_query_artifact_error)
     }
@@ -1646,6 +1664,7 @@ impl<'a> ArtifactQueryV1<'a> {
         let maximum_distance = groups.iter().map(|group| group.bound).max().unwrap_or(0);
         let vocabulary = self.load_vocabulary()?;
         let mut selected = Vec::with_capacity(limit);
+        let mut scratch = EditDistanceScratchV1::default();
         'distance: for distance in 1..=maximum_distance {
             for (group_index, group) in groups.iter_mut().enumerate() {
                 let remaining = limit.saturating_sub(selected.len());
@@ -1655,14 +1674,14 @@ impl<'a> ArtifactQueryV1<'a> {
                 if distance > group.bound {
                     continue;
                 }
+                scratch.prepare_query(&group.normalized_query);
                 let mut added = 0usize;
                 for term in &vocabulary {
                     if added >= remaining {
                         break;
                     }
                     if term != &group.normalized_query
-                        && bounded_edit_distance(&group.normalized_query, term, distance)
-                            == Some(distance)
+                        && scratch.bounded_edit_distance(term, distance) == Some(distance)
                         && group.seen.insert(term.clone())
                     {
                         selected.push((group_index, term.clone()));
@@ -1685,6 +1704,7 @@ impl<'a> ArtifactQueryV1<'a> {
         Ok(FuzzyExpansionsV1 { by_query })
     }
 
+    #[hotpath::measure(label = "query.artifact.vocabulary.load")]
     fn load_vocabulary(&self) -> Result<Vec<String>, RetrievalPortError> {
         self.metrics.probe();
         let mut statement = self
@@ -1700,6 +1720,7 @@ impl<'a> ArtifactQueryV1<'a> {
         self.metrics.observe_statement(&statement)?;
         self.metrics
             .rows(u64::try_from(vocabulary.len()).map_err(contract_error)?);
+        hotpath::gauge!("query.lane.fuzzy.vocabulary_terms").set(vocabulary.len());
         Ok(vocabulary)
     }
 
@@ -1709,6 +1730,7 @@ impl<'a> ArtifactQueryV1<'a> {
     /// only on the artifact corpus and the query terms, so one upfront read
     /// replaces the two SQL probes each scored document would otherwise
     /// repeat per term.
+    #[hotpath::measure(label = "query.artifact.stats.read")]
     fn lexical_stats(
         &self,
         terms: &BTreeSet<String>,
@@ -1778,21 +1800,21 @@ impl<'a> ArtifactQueryV1<'a> {
     fn score_row(
         &self,
         row: &ArtifactRowV1,
-        request: &LexicalLaneRequest<'_>,
+        prepared: &PreparedLexicalQueryV1<'_>,
         fuzzy: &FuzzyExpansionsV1,
         phrase_frequencies: &BTreeMap<String, usize>,
         stats: &LexicalStatsCacheV1,
         frequencies: &LexicalTermFrequenciesV1,
     ) -> Result<LexicalRowScoreV1, RetrievalPortError> {
         crate::hotpath_metrics::measure_frequent("query.lane.lexical.score_row", || {
-            self.score_row_inner(row, request, fuzzy, phrase_frequencies, stats, frequencies)
+            self.score_row_inner(row, prepared, fuzzy, phrase_frequencies, stats, frequencies)
         })
     }
 
     fn score_row_inner(
         &self,
         row: &ArtifactRowV1,
-        request: &LexicalLaneRequest<'_>,
+        prepared: &PreparedLexicalQueryV1<'_>,
         fuzzy: &FuzzyExpansionsV1,
         phrase_frequencies: &BTreeMap<String, usize>,
         stats: &LexicalStatsCacheV1,
@@ -1806,19 +1828,18 @@ impl<'a> ArtifactQueryV1<'a> {
         let mut typo_recovery_applied = false;
         for field in row.field_lengths.keys() {
             if *field != LexicalFieldV1::Subtoken {
-                for query_term in &request.whole_terms {
-                    let normalized = normalize_lexical(query_term);
-                    let exact_tf = term_frequency(frequencies, *field, &normalized);
+                for (query_term, normalized) in &prepared.whole_terms {
+                    let exact_tf = term_frequency(frequencies, *field, normalized);
                     if exact_tf > 0 {
                         add_score(
                             &mut field_scores,
                             *field,
-                            self.term_score(*field, &normalized, exact_tf, row, stats),
+                            self.term_score(*field, normalized, exact_tf, row, stats),
                         );
-                        matched_whole_terms.insert(query_term.clone());
-                        collect_term_kinds(&row.exact_terms, &normalized, &mut matched_kinds);
+                        matched_whole_terms.insert((*query_term).to_owned());
+                        collect_term_kinds(&row.exact_terms, normalized, &mut matched_kinds);
                     }
-                    if let Some(expansions) = fuzzy.by_query.get(query_term) {
+                    if let Some(expansions) = fuzzy.by_query.get(*query_term) {
                         for expansion in expansions {
                             let tf = term_frequency(frequencies, *field, expansion);
                             if tf == 0 {
@@ -1829,30 +1850,28 @@ impl<'a> ArtifactQueryV1<'a> {
                                 .saturating_mul(FUZZY_SCORE_MILLIS)
                                 / 1_000;
                             add_score(&mut field_scores, *field, score);
-                            matched_whole_terms.insert(query_term.clone());
+                            matched_whole_terms.insert((*query_term).to_owned());
                             typo_recovery_applied = true;
                             collect_term_kinds(&row.exact_terms, expansion, &mut matched_kinds);
                         }
                     }
                 }
             } else {
-                for subtoken in &request.subtokens {
-                    let normalized = normalize_lexical(subtoken);
-                    let tf = term_frequency(frequencies, *field, &normalized);
+                for (subtoken, normalized) in &prepared.subtokens {
+                    let tf = term_frequency(frequencies, *field, normalized);
                     if tf > 0 {
                         add_score(
                             &mut field_scores,
                             *field,
-                            self.term_score(*field, &normalized, tf, row, stats),
+                            self.term_score(*field, normalized, tf, row, stats),
                         );
-                        matched_subtokens.insert(subtoken.clone());
+                        matched_subtokens.insert((*subtoken).to_owned());
                     }
                 }
             }
         }
-        for phrase in &request.phrases {
-            let normalized = normalize_lexical(phrase);
-            let tf = substring_count(&row.normalized_text, &normalized);
+        for (phrase, normalized) in &prepared.phrases {
+            let tf = substring_count(&row.normalized_text, normalized);
             if tf == 0 {
                 continue;
             }
@@ -1867,7 +1886,7 @@ impl<'a> ArtifactQueryV1<'a> {
                     tf,
                     row,
                     phrase_frequencies
-                        .get(&normalized)
+                        .get(normalized)
                         .copied()
                         .unwrap_or_default(),
                     stats,
@@ -1875,11 +1894,10 @@ impl<'a> ArtifactQueryV1<'a> {
                 .saturating_mul(PHRASE_SCORE_MILLIS)
                 / 1_000;
             add_score(&mut field_scores, field, score);
-            matched_phrases.insert(phrase.clone());
+            matched_phrases.insert((*phrase).to_owned());
         }
-        let normalized_query = normalize_lexical(request.query_view.as_str().trim_matches('"'));
         let echo_penalty_applied =
-            !normalized_query.is_empty() && normalized_query == row.normalized_text.trim();
+            !prepared.echo_query.is_empty() && prepared.echo_query == row.normalized_text.trim();
         if echo_penalty_applied {
             for score in field_scores.values_mut() {
                 *score = score.saturating_mul(ECHO_SCORE_MILLIS) / 1_000;
@@ -1935,26 +1953,31 @@ impl<'a> ArtifactQueryV1<'a> {
     }
 }
 
-/// Request-local corpus statistics for BM25 scoring. Absent entries mean the
-/// artifact holds no posting for that key and score as zero, exactly like the
-/// SQL probes they replace.
-type LexicalTermFrequenciesV1 = BTreeMap<LexicalFieldV1, BTreeMap<String, usize>>;
+/// Request-relevant per-row term frequencies decoded from one SQLite JSON
+/// aggregate. Absent entries mean the artifact holds no posting for that key
+/// and score as zero, exactly like the SQL probes they replace. One row
+/// carries at most the request's term count, so a linear scan of the decoded
+/// entries beats rebuilding two nested maps per visited row.
+struct LexicalTermFrequenciesV1(Vec<(LexicalFieldV1, String, usize)>);
 
 struct LexicalStatsCacheV1 {
     field_totals: BTreeMap<LexicalFieldV1, usize>,
     document_frequencies: BTreeMap<LexicalFieldV1, BTreeMap<String, usize>>,
 }
 
-fn lexical_terms(request: &LexicalLaneRequest<'_>, fuzzy: &FuzzyExpansionsV1) -> BTreeSet<String> {
+fn lexical_terms(
+    prepared: &PreparedLexicalQueryV1<'_>,
+    fuzzy: &FuzzyExpansionsV1,
+) -> BTreeSet<String> {
     let mut terms = BTreeSet::new();
-    for term in &request.whole_terms {
-        terms.insert(normalize_lexical(term));
+    for (_, normalized) in &prepared.whole_terms {
+        terms.insert(normalized.clone());
     }
     for expansions in fuzzy.by_query.values() {
         terms.extend(expansions.iter().cloned());
     }
-    for subtoken in &request.subtokens {
-        terms.insert(normalize_lexical(subtoken));
+    for (_, normalized) in &prepared.subtokens {
+        terms.insert(normalized.clone());
     }
     terms
 }
@@ -1965,9 +1988,11 @@ fn term_frequency(
     term: &str,
 ) -> usize {
     frequencies
-        .get(&field)
-        .and_then(|terms| terms.get(term))
-        .copied()
+        .0
+        .iter()
+        .find_map(|(entry_field, entry_term, frequency)| {
+            (*entry_field == field && entry_term == term).then_some(*frequency)
+        })
         .unwrap_or_default()
 }
 
@@ -2045,13 +2070,14 @@ fn binding(
 }
 
 /// One admitted exact candidate retained during bounded selection: the
-/// canonical ranking key plus the proof the central authority already
-/// minted for it, and the matches already computed during selection.
-/// Ordering is by key alone.
+/// canonical ranking key plus ordinals into the request literals — the
+/// admitting literal and every matched literal. Winner materialization
+/// resolves the proof from the per-request cache and clones the literals
+/// only then. Ordering is by key alone.
 struct RankedExactEntryV1 {
     key: (Reverse<usize>, String, u32),
-    proof: ExactAdmissionProof,
-    matched_literals: Vec<crate::retrieval::exact::ExactLiteralV1>,
+    admitted_ordinal: usize,
+    matched_literals: Vec<usize>,
     matched_kinds: Vec<ExactTechnicalTermKindV1>,
 }
 
@@ -2161,13 +2187,11 @@ fn capped_batch<E>(
     }
 }
 
+/// Matched literal ordinals into `request.literals` plus matched term kinds.
 fn exact_matches_artifact(
     row: &ArtifactRowV1,
     request: &ExactLaneRequest,
-) -> (
-    Vec<crate::retrieval::exact::ExactLiteralV1>,
-    Vec<ExactTechnicalTermKindV1>,
-) {
+) -> (Vec<usize>, Vec<ExactTechnicalTermKindV1>) {
     exact_matches(
         ExactMatchRowViewV1 {
             sanitized_text: row.sanitized_text.as_str(),
@@ -2178,29 +2202,76 @@ fn exact_matches_artifact(
     )
 }
 
-fn bounded_edit_distance(left: &str, right: &str, limit: usize) -> Option<usize> {
-    let left = left.chars().collect::<Vec<_>>();
-    let right = right.chars().collect::<Vec<_>>();
-    if left.len().abs_diff(right.len()) > limit {
-        return None;
-    }
-    let mut previous = (0..=right.len()).collect::<Vec<_>>();
-    let mut current = vec![0usize; right.len() + 1];
-    for (left_index, left_character) in left.iter().enumerate() {
-        current[0] = left_index + 1;
-        for (right_index, right_character) in right.iter().enumerate() {
-            current[right_index + 1] = (previous[right_index + 1] + 1)
-                .min(current[right_index] + 1)
-                .min(previous[right_index] + usize::from(left_character != right_character));
-        }
-        std::mem::swap(&mut previous, &mut current);
-    }
-    (previous[right.len()] <= limit).then_some(previous[right.len()])
+/// Reusable buffers for the vocabulary edit-distance sweep. One expansion
+/// pass compares the query against every vocabulary term per distance level;
+/// per-comparison `Vec` allocations dominated that sweep.
+#[derive(Default)]
+struct EditDistanceScratchV1 {
+    query_chars: Vec<char>,
+    term_chars: Vec<char>,
+    previous: Vec<usize>,
+    current: Vec<usize>,
 }
 
+impl EditDistanceScratchV1 {
+    fn prepare_query(&mut self, query: &str) {
+        self.query_chars.clear();
+        self.query_chars.extend(query.chars());
+    }
+
+    /// Levenshtein distance of the prepared query to `right` when it is at
+    /// most `limit`, without per-call allocation. Byte-length prechecks prune
+    /// most of the vocabulary before any character walk: one UTF-8 character
+    /// is one to four bytes, so a term shorter than `chars(query) - limit`
+    /// bytes or longer than `(chars(query) + limit) * 4` bytes cannot be
+    /// within `limit` edits.
+    fn bounded_edit_distance(&mut self, right: &str, limit: usize) -> Option<usize> {
+        let query_len = self.query_chars.len();
+        if right.len() < query_len.saturating_sub(limit)
+            || right.len() > query_len.saturating_add(limit).saturating_mul(4)
+        {
+            return None;
+        }
+        self.term_chars.clear();
+        self.term_chars.extend(right.chars());
+        if query_len.abs_diff(self.term_chars.len()) > limit {
+            return None;
+        }
+        let width = self.term_chars.len() + 1;
+        self.previous.clear();
+        self.previous.extend(0..width);
+        self.current.clear();
+        self.current.resize(width, 0);
+        for (left_index, left_character) in self.query_chars.iter().enumerate() {
+            self.current[0] = left_index + 1;
+            let mut row_minimum = self.current[0];
+            for (right_index, right_character) in self.term_chars.iter().enumerate() {
+                let value = (self.previous[right_index + 1] + 1)
+                    .min(self.current[right_index] + 1)
+                    .min(
+                        self.previous[right_index] + usize::from(left_character != right_character),
+                    );
+                self.current[right_index + 1] = value;
+                row_minimum = row_minimum.min(value);
+            }
+            // The minimum of a Levenshtein DP row never decreases in later
+            // rows, so a row already past the limit can never come back.
+            if row_minimum > limit {
+                return None;
+            }
+            std::mem::swap(&mut self.previous, &mut self.current);
+        }
+        (self.previous[width - 1] <= limit).then_some(self.previous[width - 1])
+    }
+}
+
+/// Decoded once per visited candidate row; sampled 1-in-16 like per-row
+/// scoring so the decode cost is attributable without per-row span overhead.
 fn decode_row(bytes: &[u8]) -> Result<ArtifactRowV1, CodeLexicalArtifactErrorV1> {
-    serde_json::from_slice(bytes)
-        .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))
+    crate::hotpath_metrics::measure_frequent("query.artifact.row_decode", || {
+        serde_json::from_slice(bytes)
+            .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))
+    })
 }
 
 fn decode_field(encoded: &str) -> Result<LexicalFieldV1, RetrievalPortError> {
@@ -2386,10 +2457,19 @@ fn verify_artifact_state_revision(
     checkpoint(control)
 }
 
+fn sealed_reader_mmap_bytes(file_size_bytes: u64) -> Result<i64, CodeLexicalArtifactErrorV1> {
+    i64::try_from(file_size_bytes).map_err(|error| {
+        CodeLexicalArtifactErrorV1::Contract(format!(
+            "sealed lexical artifact is larger than SQLite's mmap_size domain: {error}"
+        ))
+    })
+}
+
 fn configure_reader_window(
     connection: &Connection,
     cache_budget_bytes: usize,
     retained_metadata_bytes: usize,
+    sealed_file_size_bytes: u64,
 ) -> Result<usize, CodeLexicalArtifactErrorV1> {
     let available = cache_budget_bytes
         .checked_sub(retained_metadata_bytes)
@@ -2412,12 +2492,24 @@ fn configure_reader_window(
                 .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?,
         )
         .map_err(sqlite_error)?;
+    // Content-addressed readers are SQLITE_OPEN_READ_ONLY over an immutable
+    // file. The kernel SQLite window that disables mmap exists for writer /
+    // WAL coherence on graph and staging connections; applying it here forced
+    // sqlite3OsRead to re-pread ~174 MB of posting pages on every tool call
+    // against a multi-gigabyte artifact whose 64 MiB heap cache cannot retain
+    // the working set.
+    let mmap_bytes = sealed_reader_mmap_bytes(sealed_file_size_bytes)?;
     connection
-        .pragma_update(None, "mmap_size", 0i64)
+        .pragma_update(None, "mmap_size", mmap_bytes)
         .map_err(sqlite_error)?;
     connection
         .pragma_update(None, "temp_store", "FILE")
         .map_err(sqlite_error)?;
+    #[cfg(feature = "hotpath")]
+    {
+        hotpath::gauge!("query.artifact.mmap_bytes").set(sealed_file_size_bytes);
+        hotpath::gauge!("query.artifact.page_cache_bytes").set(page_cache_bytes);
+    }
     Ok(page_cache_bytes)
 }
 
@@ -2491,7 +2583,7 @@ mod tests {
 
     use roaring::RoaringBitmap;
     use rusqlite::hooks::{AuthAction, Authorization};
-    use rusqlite::{Connection, params};
+    use rusqlite::{Connection, OpenFlags, params};
     use sha2::{Digest, Sha256};
     use tracedecay_domain::ManifestDigest;
     use tracedecay_private_fs::open_private_file;
@@ -2501,12 +2593,14 @@ mod tests {
     use super::ArtifactConnectionMutex;
     use super::{
         ARTIFACT_NGRAM_INTERSECTION_SCRATCH_V1, ARTIFACT_NGRAM_MAX_CANDIDATES_V1,
-        ARTIFACT_SQLITE_MAX_BIND_PARAMETERS_V1, ARTIFACT_SQLITE_MAX_BOUND_VALUE_BYTES_V1,
-        ArtifactQueryMetricsV1, CodeLexicalArtifactErrorV1, CodeLexicalArtifactReaderV1,
-        DocumentQueryV1, NGRAM_NORMALIZED, charge_ngram_encoded_shard_bytes,
-        encode_ngram_candidate_json, ensure_ngram_candidate_cardinality, map_query_artifact_error,
-        ngram_bitmap_candidates, ngram_document_query, query_ngrams, retain_bounded,
-        union_document_queries, visit_document_ids, visit_lexical_rows,
+        ARTIFACT_SQLITE_CACHE_BYTES, ARTIFACT_SQLITE_MAX_BIND_PARAMETERS_V1,
+        ARTIFACT_SQLITE_MAX_BOUND_VALUE_BYTES_V1, ArtifactQueryMetricsV1,
+        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactErrorV1,
+        CodeLexicalArtifactReaderV1, DocumentQueryV1, NGRAM_NORMALIZED,
+        charge_ngram_encoded_shard_bytes, configure_reader_window, encode_ngram_candidate_json,
+        ensure_ngram_candidate_cardinality, map_query_artifact_error, ngram_bitmap_candidates,
+        ngram_document_query, query_ngrams, retain_bounded, term_frequency, union_document_queries,
+        visit_document_ids, visit_lexical_rows,
     };
     use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 
@@ -2520,6 +2614,40 @@ mod tests {
         fn is_deadline_exceeded(&self) -> bool {
             false
         }
+    }
+
+    #[test]
+    fn sealed_reader_window_mmaps_the_immutable_file() {
+        let directory = tempfile::tempdir().expect("artifact tempdir");
+        let path = directory.path().join("sealed.sqlite");
+        let seed = Connection::open(&path).expect("create sealed fixture");
+        seed.execute_batch("CREATE TABLE t(x INTEGER); INSERT INTO t VALUES (1);")
+            .expect("seed sealed fixture");
+        drop(seed);
+        let file_size = std::fs::metadata(&path).expect("stat sealed fixture").len();
+        let connection = Connection::open_with_flags(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .expect("open sealed reader");
+        let page_cache_bytes = configure_reader_window(
+            &connection,
+            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+            0,
+            file_size,
+        )
+        .expect("configure sealed reader window");
+        assert_eq!(page_cache_bytes, ARTIFACT_SQLITE_CACHE_BYTES);
+        let _: i64 = connection
+            .query_row("SELECT x FROM t", [], |row| row.get(0))
+            .expect("touch the mapped file");
+        let mmap: i64 = connection
+            .pragma_query_value(None, "mmap_size", |row| row.get(0))
+            .expect("read mmap pragma");
+        assert!(
+            mmap >= i64::try_from(file_size).expect("fixture fits mmap_size"),
+            "sealed readers must mmap the immutable file so serving does not re-pread it: mmap={mmap} file={file_size}"
+        );
     }
 
     #[test]
@@ -3242,22 +3370,17 @@ mod tests {
             |document, row, frequencies| {
                 assert_eq!(row, document.to_le_bytes());
                 assert_eq!(
-                    frequencies
-                        .get(&super::LexicalFieldV1::BodyText)
-                        .and_then(|terms| terms.get("alpha")),
-                    Some(&(usize::try_from(document).unwrap() % 3 + 1))
+                    term_frequency(&frequencies, super::LexicalFieldV1::BodyText, "alpha"),
+                    usize::try_from(document).unwrap() % 3 + 1
                 );
                 assert_eq!(
-                    frequencies
-                        .get(&super::LexicalFieldV1::BodyText)
-                        .and_then(|terms| terms.get("beta")),
-                    None,
+                    term_frequency(&frequencies, super::LexicalFieldV1::BodyText, "beta"),
+                    0,
                     "absent postings stay exact zeroes"
                 );
                 assert!(
-                    !frequencies
-                        .get(&super::LexicalFieldV1::BodyText)
-                        .is_some_and(|terms| terms.contains_key("irrelevant")),
+                    term_frequency(&frequencies, super::LexicalFieldV1::BodyText, "irrelevant")
+                        == 0,
                     "the batched probe must not hydrate unrelated terms"
                 );
                 visited += 1;

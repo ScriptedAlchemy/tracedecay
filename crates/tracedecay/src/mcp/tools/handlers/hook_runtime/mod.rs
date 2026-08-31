@@ -1,4 +1,4 @@
-use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
+use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 use crate::tracedecay::TraceDecay;
 use serde_json::{Value, json};
 use std::path::Path;

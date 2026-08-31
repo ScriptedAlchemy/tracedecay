@@ -14,7 +14,6 @@
 
 pub use tracedecay_application::request_identity;
 pub(crate) use tracedecay_graph_query as graph;
-pub use tracedecay_session_memory::user_config;
 pub use tracedecay_usecases as application;
 pub use tracedecay_usecases::git_query;
 pub mod tracedecay;
@@ -424,7 +423,7 @@ pub struct DashboardState {
     pub retention_config: crate::config::RetentionConfig,
     /// Daemon-owned user-profile settings authority. Dashboard routes never
     /// load or mutate `config.toml` directly.
-    pub user_settings: Arc<dyn crate::application::configuration::UserSettingsDaemonClient>,
+    pub user_settings: Arc<dyn tracedecay_configuration::UserSettingsDaemonClient>,
     /// Root-injected ProfileSessions worker preference authority. It remains
     /// separate from `user_settings`, whose revision belongs to the ordinary
     /// profile settings resource.
@@ -921,6 +920,7 @@ pub async fn run_until_shutdown_for_tests_with_host_admission<F>(
     project_graphs: DashboardTestProjectGraphsV1,
     host: &str,
     port: u16,
+    build_version: &'static str,
     spa_routes: Router,
     shutdown: F,
 ) -> Result<()>
@@ -933,6 +933,7 @@ where
         DashboardRunRequest {
             host,
             port,
+            build_version,
             spa_routes,
             test_authority: Some(&authority),
             test_project_graph_resolver: Some(project_graph_resolver),
@@ -947,6 +948,9 @@ where
 struct DashboardRunRequest<'a> {
     host: &'a str,
     port: u16,
+    /// The owning composition's build version; served surfaces must report the
+    /// caller's product runtime, never a crate-local substitute.
+    build_version: &'static str,
     spa_routes: Router,
     test_authority: Option<&'a DashboardHostAdmissionTestAuthorityV1>,
     test_project_graph_resolver: Option<crate::project_graph::RetainedProjectGraphResolver>,
@@ -965,6 +969,7 @@ where
     let DashboardRunRequest {
         host,
         port,
+        build_version,
         spa_routes,
         test_authority,
         test_project_graph_resolver,
@@ -988,7 +993,7 @@ where
         // token counts through its own composition.
         false,
         DashboardStateCompositionV1 {
-            build_version: "0.0.0-fixture+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            build_version,
             project_graph_resolver: test_project_graph_resolver,
             code_graph_read_admission: test_authority
                 .and_then(|authority| authority.code_graph_read_admission.clone()),
@@ -2321,8 +2326,7 @@ mod authority_tests {
                 dashboard_root: layout.dashboard_root.clone(),
                 retention_config: crate::config::RetentionConfig::default(),
                 user_settings: Arc::new(
-                    crate::application::configuration::ProductionUserSettingsDaemonClient::default(
-                    ),
+                    tracedecay_configuration::ProductionUserSettingsDaemonClient::default(),
                 ),
                 profile_code_index_worker_settings: None,
                 token_counts: Arc::new(token_count::TokenCountCache::new()),
@@ -2526,7 +2530,7 @@ mod authority_tests {
         fn apply_configuration_batch(
             &self,
             _request_id: tracedecay_application::RequestId,
-            _mutations: Vec<tracedecay_usecases::configuration::DirectConfigurationMutation>,
+            _mutations: Vec<tracedecay_configuration::DirectConfigurationMutation>,
             _expected_revision: tracedecay_domain::configuration::ConfigurationRevisionId,
             _idempotency_key: tracedecay_domain::configuration::ConfigurationIdempotencyKey,
         ) -> DashboardConfigurationApplyFuture<'_> {

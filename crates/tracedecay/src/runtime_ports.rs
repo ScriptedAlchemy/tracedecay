@@ -10,9 +10,11 @@
 //! Only the composition root can fill them, and it must do so before any
 //! transcript ingest, host installer, hook, or branch lock runs. That is what
 //! [`register_runtime_ports`] is: the single, idempotent, root-owned wiring
-//! call. Both process entry paths invoke it — `src/main.rs` for every CLI and
-//! daemon invocation, and the daemon session-registry constructor for embedded
-//! and integration-test runtimes that never pass through `main`.
+//! call. Process entry paths invoke it — `src/main.rs` for every CLI and
+//! daemon invocation, and the composition-root registry wrappers
+//! (`join_standalone_session_registry`, session-runtime shutdown, host
+//! admission) for embedded and integration-test runtimes that never pass
+//! through `main`. The extracted store-runtime crate never calls this.
 //!
 //! Every underlying `register` is `OnceLock::set`, so repeated calls are safe
 //! and the first registration wins.
