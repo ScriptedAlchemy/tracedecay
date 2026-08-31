@@ -762,6 +762,86 @@ mod activation_resource_tests {
     }
 }
 
+#[cfg(test)]
+mod pairwise_and_native_method_tests {
+    use super::{
+        DirectEvaluationStatusV1, DirectQueryEvaluationV1, DirectQueryQualityV1, DirectRatioMetricV1,
+        pairwise_query_pairs, semantic_distance_summary, validate_native_measurement_method,
+    };
+
+    fn diagnostic_query(query_id: &str, first_useful_rank: u32) -> DirectQueryEvaluationV1 {
+        let zero = DirectRatioMetricV1 {
+            numerator: 0,
+            denominator: 0,
+            ppm: 0,
+        };
+        DirectQueryEvaluationV1 {
+            query_id: query_id.to_owned(),
+            strata: vec!["natural_language".to_owned()],
+            protected: false,
+            first_useful_rank: Some(first_useful_rank),
+            returned_candidates: 2,
+            wrong_scope_hits: 0,
+            forbidden_hits: 0,
+            expected_no_result: false,
+            quality: DirectQueryQualityV1 {
+                recall_at_10: zero.clone(),
+                precision_at_10: zero.clone(),
+                reciprocal_rank_ppm: 0,
+                ndcg_at_10_ppm: 0,
+                duplicate_rate: zero,
+            },
+            status: DirectEvaluationStatusV1::Pass,
+        }
+    }
+
+    #[test]
+    fn pairwise_diagnostic_prioritizes_queries_with_improvement_headroom() {
+        let candidate = vec![
+            diagnostic_query("already-perfect", 1),
+            diagnostic_query("can-improve", 2),
+        ];
+        let baseline = candidate.clone();
+
+        let ordered = pairwise_query_pairs(&candidate, &baseline);
+
+        assert_eq!(ordered.len(), 2);
+        assert_eq!(ordered[0].0.query_id, "can-improve");
+        assert_eq!(ordered[1].0.query_id, "already-perfect");
+    }
+
+    #[test]
+    fn semantic_distance_summary_exposes_absolute_confidence_and_ambiguity() {
+        assert_eq!(
+            semantic_distance_summary([325_542_266, 325_542_266, 400_000_000]),
+            "semantic_candidates=3,top_distance=325542266,second_distance=325542266,top_margin=0"
+        );
+        assert_eq!(
+            semantic_distance_summary(std::iter::empty()),
+            "semantic_candidates=0,top_distance=none,second_distance=none,top_margin=none"
+        );
+    }
+
+    #[test]
+    fn native_activation_rejects_sqlite_vector_measurement_provenance() {
+        let stale = "linux-procfs-v1;projection=DatabaseVectorEvaluationStoreV1(SQLite-CAS)";
+        assert!(validate_native_measurement_method(stale).is_err());
+        assert!(
+            validate_native_measurement_method(
+                "linux-procfs-v1;projection=canonical-graph-prepared-generation-v1"
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_native_measurement_method(
+                "linux-procfs-v1;projection-cases=prepare_semantic_evaluation_projection\
+                 +GraphVectorGenerationStoreV1(isolated-in-memory-graph,watermark-CAS)"
+            )
+            .is_ok()
+        );
+    }
+}
+
 /// Fail-closed classification for the single reconstruction performed while
 /// accepting portable native qualification evidence. Aggregate mismatches and
 /// missing native evidence intentionally retain distinct package denials.

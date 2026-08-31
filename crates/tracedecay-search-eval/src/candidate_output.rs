@@ -83,19 +83,11 @@ use tracedecay_query::retrieval::lexical::{
 use tracedecay_query::retrieval::ports::CodeCandidateBindingV1;
 
 use tracedecay_query::search_quality::candidate_output::{
-    CandidateOutputError, CandidateWorkloadV1, CorpusDocumentV1,
-    DirectEvaluatedProfileMaterialV1, EVALUATION_CACHE_STATE, EVALUATION_MODEL_REVISION,
+    CorpusDocumentV1, EVALUATION_CACHE_STATE, EVALUATION_MODEL_REVISION,
     EVALUATION_PROJECTION_REVISION, EVALUATION_RUNTIME_REVISION, EVALUATION_SEED,
-    EvaluationExecutionContractV1, PRODUCTION_BOUNDARY, ProfileSpecV1,
-    ProductionCandidateNativeExecutionAuthorityV1, ProductionCandidateNativeQueryContextV1,
-    ProductionCandidateNativeQueryInputsV1, ProductionCandidateNativeResourceContextV1,
-    ProductionCandidateOutputV1, ProductionCandidateSemanticProjectionSourcesV1,
-    QueryCandidateRowV1, REQUIRED_CANCELLATION, REQUIRED_OFFLINE, RankedCandidateRowV1,
-    ResourceMeasurementStatusV1, ResourceSampleV1, WORKLOAD_RELATIVE, WorkloadQueryV1,
-    canonical_json_bytes, canonical_sha256, compute_corpus_digest, compute_profile_material_digest,
-    compute_workload_digest, direct_evaluated_profile_material, evaluated_diversity_policy,
-    evaluated_rerank_policy, fusion_profile, load_candidate_workload, retrieval_budget,
-    typed_id as id, validate_workload_for_tuning,
+    REQUIRED_CANCELLATION, REQUIRED_OFFLINE, canonical_json_bytes, canonical_sha256,
+    evaluated_diversity_policy, evaluated_rerank_policy, fusion_profile, retrieval_budget,
+    typed_id as id,
 };
 
 pub use tracedecay_query::search_quality::candidate_output::{
@@ -108,9 +100,9 @@ pub use tracedecay_query::search_quality::candidate_output::{
     ProductionCandidateNativeResourceContextV1, ProductionCandidateOutputV1,
     ProductionCandidateSemanticProjectionSourcesV1, QueryCandidateRowV1, RankedCandidateRowV1,
     ResourceMeasurementStatusV1, ResourceSampleV1, WORKLOAD_RELATIVE, WorkloadQueryV1,
-    compute_corpus_digest, compute_corpus_digest_from_embedded_bytes, compute_profile_material_digest,
-    compute_workload_digest, direct_evaluated_profile_material, load_candidate_workload,
-    load_direct_evaluated_profile_material, validate_workload_for_tuning,
+    compute_corpus_digest, compute_corpus_digest_from_embedded_bytes,
+    compute_profile_material_digest, compute_workload_digest, direct_evaluated_profile_material,
+    load_candidate_workload, load_direct_evaluated_profile_material, validate_workload_for_tuning,
 };
 
 
