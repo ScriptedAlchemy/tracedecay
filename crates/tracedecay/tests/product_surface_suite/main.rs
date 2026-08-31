@@ -6,12 +6,8 @@
 
 #![recursion_limit = "256"]
 
-#[path = "../../build-support/dashboard_manifest.rs"]
-mod dashboard_manifest;
-
 mod api_application_parity;
 mod catalog_composition_contract;
-mod dashboard_build_manifest;
 mod git_intelligence_regression;
 mod host_bundle_acceptance;
 mod native_integration_surface_mount;

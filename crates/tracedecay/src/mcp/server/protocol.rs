@@ -59,9 +59,12 @@ pub(crate) const SERVER_INSTRUCTIONS: &str = concat!(
     report the savings to the user (e.g. 'TraceDecay\\'d ~N tokens')."
 );
 
-/// The `initialize` result payload.
-pub(crate) fn initialize_result(instructions: &str) -> Value {
-    json!({
+/// The `initialize` result payload. Fallible because the advertised server
+/// version reads the registered product runtime.
+pub(crate) fn initialize_result(
+    instructions: &str,
+) -> Result<Value, crate::product_runtime::ProductRuntimeError> {
+    Ok(json!({
         "protocolVersion": "2024-11-05",
         "capabilities": {
             "tools": {
@@ -72,10 +75,10 @@ pub(crate) fn initialize_result(instructions: &str) -> Value {
         },
         "serverInfo": {
             "name": "tracedecay",
-            "version": crate::version::build_version()
+            "version": crate::version::build_version()?
         },
         "instructions": instructions,
-    })
+    }))
 }
 
 /// The `resources/list` result payload.

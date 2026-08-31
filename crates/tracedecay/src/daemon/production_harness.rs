@@ -332,7 +332,7 @@ async fn mount_one_production_composition_project(
     index: usize,
 ) -> Result<(PathBuf, Arc<crate::mcp::McpServer>, bool)> {
     let handshake = DaemonHandshake {
-        client_version: binary_version().to_owned(),
+        client_version: binary_version()?.to_owned(),
         client_instance_id: format!("production-composition-harness-{index}"),
         client_identity: client_identity.clone(),
         scope_prefix: scope_prefix.map(str::to_owned),

@@ -294,7 +294,7 @@ fn daemon_handshake_advertises_binary_version() {
 
     assert_eq!(
         value["client_version"],
-        serde_json::json!(crate::version::build_version())
+        serde_json::json!(crate::version::build_version().expect("fixture product runtime registered"))
     );
     assert_eq!(
         value["client_instance_id"],
@@ -532,19 +532,28 @@ async fn daemon_engine_logs_version_skew_once_per_client_version() {
     handshake.client_version = "0.0.0-skewed".to_string();
 
     assert_eq!(
-        engine.client_version_skew_to_log(&handshake).await,
+        engine
+            .client_version_skew_to_log(&handshake)
+            .await
+            .expect("fixture product runtime registered"),
         Some("0.0.0-skewed".to_string()),
         "first connection from a skewed client should be logged"
     );
     assert_eq!(
-        engine.client_version_skew_to_log(&handshake).await,
+        engine
+            .client_version_skew_to_log(&handshake)
+            .await
+            .expect("fixture product runtime registered"),
         None,
         "repeat connections from the same client version must not spam the log"
     );
 
     let matching = test_handshake_defaults();
     assert_eq!(
-        engine.client_version_skew_to_log(&matching).await,
+        engine
+            .client_version_skew_to_log(&matching)
+            .await
+            .expect("fixture product runtime registered"),
         None,
         "matching client versions are not skew"
     );
@@ -596,7 +605,9 @@ async fn catalog_refresh_claim_is_negotiated_and_once_per_generation() {
         "fresh initialize marks the generation current without notifying"
     );
     handshake.tool_list_changed_capable = true;
-    handshake.catalog_version = super::super::binary_version().to_string();
+    handshake.catalog_version = super::super::binary_version()
+        .expect("fixture product runtime registered")
+        .to_string();
     assert!(
         engine
             .claim_catalog_refresh(&handshake, &ping, false)
@@ -628,7 +639,9 @@ async fn catalog_refresh_claim_is_negotiated_and_once_per_generation() {
         "a new daemon generation must notify the same long-lived client once"
     );
 
-    handshake.catalog_version = super::super::binary_version().to_string();
+    handshake.catalog_version = super::super::binary_version()
+        .expect("fixture product runtime registered")
+        .to_string();
     let same_version_generation = super::super::DaemonEngine::default();
     assert!(
         same_version_generation
@@ -649,7 +662,9 @@ async fn warming_catalog_does_not_mark_a_client_current() {
     let engine = super::super::DaemonEngine::default();
     let mut handshake = test_handshake_defaults();
     handshake.tool_list_changed_capable = true;
-    handshake.catalog_version = super::super::binary_version().to_string();
+    handshake.catalog_version = super::super::binary_version()
+        .expect("fixture product runtime registered")
+        .to_string();
     handshake.client_instance_id = test_client_instance_id(7);
 
     let tools_list = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).to_string();
@@ -781,7 +796,10 @@ async fn daemon_refreshes_once_only_after_generation_change() {
     );
     super::super::apply_proxy_initialize_metadata(&mut handshake, metadata);
     assert!(handshake.tool_list_changed_capable);
-    assert_eq!(handshake.catalog_version, super::super::binary_version());
+    assert_eq!(
+        handshake.catalog_version,
+        super::super::binary_version().expect("fixture product runtime registered")
+    );
 
     let same_generation = daemon_round_trip(
         engine,

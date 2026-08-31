@@ -38,11 +38,14 @@ fn every_mcp_tool_is_listed_by_the_cli_discovery_command() {
     );
     let listing = String::from_utf8_lossy(&output.stdout);
     let definitions = get_tool_definitions().expect("tool definitions");
+    // The spawned CLI advertises its own registered build version
+    // (`<release>+<full sha>[.dirty]`), whose commit this fixture-registered
+    // test process cannot know; the count and release version stay exact.
     assert!(
         listing.starts_with(&format!(
-            "Available tools ({}; TraceDecay {})",
+            "Available tools ({}; TraceDecay {}",
             definitions.len(),
-            tracedecay::version::build_version()
+            tracedecay::version::PACKAGE_VERSION
         )),
         "the CLI catalog must expose its exact count and version so agents can detect a stale MCP"
     );

@@ -612,7 +612,10 @@ impl McpServer {
         if client_name.is_some() {
             *recover_lock(&self.client_name) = client_name;
         }
-        JsonRpcResponse::success(id, initialize_result(SERVER_INSTRUCTIONS))
+        match initialize_result(SERVER_INSTRUCTIONS) {
+            Ok(result) => JsonRpcResponse::success(id, result),
+            Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
+        }
     }
 
     /// The negotiated MCP client name recorded by the most recent

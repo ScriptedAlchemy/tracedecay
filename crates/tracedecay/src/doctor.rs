@@ -94,18 +94,12 @@ pub async fn run_doctor() -> tracedecay_domain::errors::Result<()> {
                 return Err(error);
             }
         };
-    debug_assert!(
-        !crate::version::build_version().is_empty(),
-        "the reported build version must not be empty"
-    );
+    let build_version = crate::version::build_version()?;
     let mut dc = DoctorCounters::new();
 
-    eprintln!(
-        "\n\x1b[1mtracedecay doctor v{}\x1b[0m\n",
-        crate::version::build_version()
-    );
+    eprintln!("\n\x1b[1mtracedecay doctor v{build_version}\x1b[0m\n");
 
-    check_binary(&mut dc);
+    check_binary(&mut dc, build_version);
     check_daemon_service(&mut dc);
 
     eprintln!("\n\x1b[1mCurrent project\x1b[0m");
@@ -542,14 +536,14 @@ fn daemon_service_doctor_verdict(
 }
 
 /// Check binary location and version.
-fn check_binary(dc: &mut DoctorCounters) {
+fn check_binary(dc: &mut DoctorCounters, build_version: &str) {
     eprintln!("\x1b[1mBinary\x1b[0m");
     if let Ok(exe) = std::env::current_exe() {
         dc.pass(&format!("Binary: {}", exe.display()));
     } else {
         dc.fail("Could not determine binary path");
     }
-    dc.pass(&format!("Version: {}", crate::version::build_version()));
+    dc.pass(&format!("Version: {build_version}"));
 }
 
 /// Reports git-metadata watcher health (design D3/D5).

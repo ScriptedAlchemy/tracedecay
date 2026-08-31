@@ -209,7 +209,7 @@ fn shuffle_flags(flags: &[String]) -> Vec<String> {
 
 /// Print the top title row: version (left) + country flags (right).
 fn print_version_flags_row(country_flags: &[String], inner_width: usize) {
-    let version = tracedecay::version::build_version();
+    let version = crate::product_runtime::PRODUCT_BUILD_VERSION;
     let title = format!("   TraceDecay v{version}");
     let title_display_width = title.len();
     let available = inner_width.saturating_sub(2);

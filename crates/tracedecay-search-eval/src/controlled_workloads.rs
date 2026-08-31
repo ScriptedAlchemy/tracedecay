@@ -657,7 +657,6 @@ mod tests {
             .current_dir(workspace_root())
             .env("CARGO_TARGET_DIR", target_dir)
             .env("CARGO_TERM_COLOR", "never")
-            .env("TRACEDECAY_SKIP_DASHBOARD_BUILD", "1")
             .args([
                 "run",
                 "-p",

@@ -250,6 +250,9 @@ pub(crate) struct RmcpConnectionAdapter {
     /// is what lets a tool call parked on a generation decode hand its admission
     /// slot back instead of starving tools that need no generation at all.
     admission: Option<Arc<crate::daemon::ParkableConnectionAdmission>>,
+    /// Resolved from the registered product runtime at construction, because
+    /// `ServerHandler::get_info` is infallible and must not fabricate one.
+    build_version: &'static str,
 }
 
 impl RmcpConnectionAdapter {
@@ -268,6 +271,7 @@ impl RmcpConnectionAdapter {
             selected_project_responses: RmcpSelectedProjectResponseAuthority::default(),
             initialize_response_decorator,
             admission: crate::daemon::current_connection_admission(),
+            build_version: crate::version::build_version()?,
         })
     }
 
@@ -411,10 +415,7 @@ impl ServerHandler for RmcpConnectionAdapter {
                 .enable_tools()
                 .build(),
         )
-        .with_server_info(Implementation::new(
-            "tracedecay",
-            crate::version::build_version(),
-        ))
+        .with_server_info(Implementation::new("tracedecay", self.build_version))
     }
 
     async fn initialize(
@@ -550,10 +551,12 @@ mod tests {
 
     #[test]
     fn adapter_accepts_the_legacy_initialize_response_shape() {
+        crate::product_runtime::register_fixture_product_runtime();
         let initialized: InitializeResult =
             RmcpConnectionAdapter::response_result(JsonRpcResponse::success(
                 json!(1),
-                crate::mcp::server::initialize_result("TraceDecay instructions"),
+                crate::mcp::server::initialize_result("TraceDecay instructions")
+                    .expect("fixture product runtime registered"),
             ))
             .expect("rmcp must preserve legacy MCP initialization compatibility");
 

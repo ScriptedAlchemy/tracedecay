@@ -109,21 +109,24 @@ async fn projectless_response(
 ) -> Option<tracedecay_mcp::JsonRpcResponse> {
     let id = request.id.clone()?;
     match request.method.as_str() {
-        "initialize" => Some(JsonRpcResponse::success(
-            id,
-            json!({
-                "protocolVersion": "2024-11-05",
-                "capabilities": {
-                    "tools": {
-                        "listChanged": true
+        "initialize" => Some(match crate::version::build_version() {
+            Ok(version) => JsonRpcResponse::success(
+                id,
+                json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {
+                        "tools": {
+                            "listChanged": true
+                        }
+                    },
+                    "serverInfo": {
+                        "name": "tracedecay",
+                        "version": version
                     }
-                },
-                "serverInfo": {
-                    "name": "tracedecay",
-                    "version": crate::version::build_version()
-                }
-            }),
-        )),
+                }),
+            ),
+            Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
+        }),
         "tools/call" => Some(
             boxed_projectless_phase(projectless_tools_call_response_with_connection(
                 id,
