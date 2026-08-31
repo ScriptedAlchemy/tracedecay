@@ -25,6 +25,7 @@ hotpath = [
     "tracedecay-automation/hotpath",
     "tracedecay-code-extraction/hotpath",
     "tracedecay-code-index/hotpath",
+    "tracedecay-configuration/hotpath",
     "tracedecay-global-db/hotpath",
     "tracedecay-graph-db/hotpath",
     "tracedecay-graph-query/hotpath",
@@ -36,7 +37,6 @@ hotpath = [
     "tracedecay-query/hotpath",
     "tracedecay-runtime-core/hotpath",
     "tracedecay-rusqlite-runtime/hotpath",
-    "tracedecay-search-eval/hotpath",
     "tracedecay-semantic/hotpath",
     "tracedecay-session-memory/hotpath",
     "tracedecay-session-temporal-store/hotpath",
@@ -54,6 +54,7 @@ hotpath-alloc = [
     "tracedecay-automation/hotpath-alloc",
     "tracedecay-code-extraction/hotpath-alloc",
     "tracedecay-code-index/hotpath-alloc",
+    "tracedecay-configuration/hotpath-alloc",
     "tracedecay-global-db/hotpath-alloc",
     "tracedecay-graph-db/hotpath-alloc",
     "tracedecay-graph-query/hotpath-alloc",
@@ -65,7 +66,6 @@ hotpath-alloc = [
     "tracedecay-query/hotpath-alloc",
     "tracedecay-runtime-core/hotpath-alloc",
     "tracedecay-rusqlite-runtime/hotpath-alloc",
-    "tracedecay-search-eval/hotpath-alloc",
     "tracedecay-semantic/hotpath-alloc",
     "tracedecay-session-memory/hotpath-alloc",
     "tracedecay-session-temporal-store/hotpath-alloc",
@@ -83,6 +83,7 @@ hotpath-cpu = [
     "tracedecay-automation/hotpath-cpu",
     "tracedecay-code-extraction/hotpath-cpu",
     "tracedecay-code-index/hotpath-cpu",
+    "tracedecay-configuration/hotpath-cpu",
     "tracedecay-global-db/hotpath-cpu",
     "tracedecay-graph-db/hotpath-cpu",
     "tracedecay-graph-query/hotpath-cpu",
@@ -94,7 +95,6 @@ hotpath-cpu = [
     "tracedecay-query/hotpath-cpu",
     "tracedecay-runtime-core/hotpath-cpu",
     "tracedecay-rusqlite-runtime/hotpath-cpu",
-    "tracedecay-search-eval/hotpath-cpu",
     "tracedecay-semantic/hotpath-cpu",
     "tracedecay-session-memory/hotpath-cpu",
     "tracedecay-session-temporal-store/hotpath-cpu",
@@ -156,6 +156,7 @@ tracedecay-automation = { path = "../tracedecay-automation", version = "0.1.0" }
 # tree-sitter bundle into this crate.
 tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false }
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
+tracedecay-configuration = { path = "../tracedecay-configuration", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
 tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
@@ -168,7 +169,6 @@ tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
 tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
-tracedecay-search-eval = { path = "../tracedecay-search-eval", version = "0.1.0" }
 tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0" }
 tracedecay-semantic-contracts.workspace = true
 tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }

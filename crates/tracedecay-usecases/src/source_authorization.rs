@@ -188,7 +188,7 @@ pub trait ProjectSourceAccessSnapshotPort: Send + Sync {
         &self,
         scope: &ResolvedScope,
         project_root: &Path,
-        configuration: &crate::config::PinnedRuntimeConfiguration,
+        configuration: &tracedecay_configuration::config::PinnedRuntimeConfiguration,
         observed_at: UtcMicros,
     ) -> Result<ProjectSourceAccessSnapshot, ApplicationContractError>;
 }

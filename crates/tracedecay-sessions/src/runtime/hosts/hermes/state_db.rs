@@ -13,6 +13,7 @@ use crate::runtime::ingest_byte_budget::IngestByteBudget;
 use crate::runtime::shared::{
     ProjectRootMatcher, SqliteReadConn, StoredCursor, TranscriptIngestStats,
 };
+use crate::runtime::source::run_blocking_transcript_section;
 
 use super::coverage::{
     admit_rows_with_admission, admit_rows_with_admission_and_cancellation, sqlite_incarnation,
@@ -354,7 +355,10 @@ async fn open_state_source(
 > {
     let state_db = &source.state_db;
     let conn = open_read_only_strict(state_db).await?;
-    let (generation, file_identity, resume_fingerprint) = sqlite_incarnation(state_db)?;
+    let (generation, file_identity, resume_fingerprint) = hotpath::measure_block!(
+        "sessions.hosts.hermes.incarnation_blocking",
+        run_blocking_transcript_section(|| sqlite_incarnation(state_db))
+    )?;
     let message_columns = message_columns(&conn).await?;
     let session_columns = table_columns(&conn, "sessions").await?;
     validate_required_columns(
@@ -413,7 +417,10 @@ where
             return Ok(stats);
         }
         let bounded = &new.items[..bounded_count];
-        let route = route_page(bounded);
+        let route = hotpath::measure_block!(
+            "sessions.hosts.hermes.route_page_blocking",
+            run_blocking_transcript_section(|| route_page(bounded))
+        );
         let admitted = admit_rows_with_admission_and_cancellation(
             admission,
             bounded,
@@ -499,10 +506,15 @@ pub(super) async fn try_ingest_state_db_for_projects(
             project_id: destination.project_id.clone(),
         })
         .collect::<Vec<_>>();
-    let destination_matchers = destinations
-        .par_iter()
-        .map(|destination| ProjectRootMatcher::new(destination.project_root))
-        .collect::<Vec<_>>();
+    let destination_matchers = hotpath::measure_block!(
+        "sessions.hosts.hermes.destination_matchers_blocking",
+        run_blocking_transcript_section(|| {
+            destinations
+                .par_iter()
+                .map(|destination| ProjectRootMatcher::new(destination.project_root))
+                .collect::<Vec<_>>()
+        })
+    );
     let mut read_cursor = StoredCursor::default();
     let mut stats = TranscriptIngestStats::default();
     loop {
@@ -522,11 +534,16 @@ pub(super) async fn try_ingest_state_db_for_projects(
         let bounded = &new.items[..bounded_count];
         // Per-page route cache: avoid unbounded growth across many SQLite pages.
         let mut destination_routes = HashMap::<PathBuf, Vec<usize>>::new();
-        let locations = turn_project_locations_for_destinations(
-            bounded,
-            &destination_matchers,
-            source,
-            &mut destination_routes,
+        let locations = hotpath::measure_block!(
+            "sessions.hosts.hermes.destination_routes_blocking",
+            run_blocking_transcript_section(|| {
+                turn_project_locations_for_destinations(
+                    bounded,
+                    &destination_matchers,
+                    source,
+                    &mut destination_routes,
+                )
+            })
         )
         .map_err(|_| {
             format!(

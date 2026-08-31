@@ -136,6 +136,7 @@ pub async fn ingest_for_projects(
 }
 
 /// Test seam for [`ingest_for_projects`].
+#[hotpath::measure(label = "sessions.hosts.hermes.ingest_projects", future = true)]
 pub async fn ingest_homes_for_projects(
     hermes_homes: &[PathBuf],
     destinations: &[ProjectIngestDestination<'_>],
@@ -151,13 +152,18 @@ pub async fn ingest_homes_for_projects(
             budget.defer();
             break;
         }
-        let eligible = destinations
-            .iter()
-            .filter(|destination| {
-                source_is_candidate_for_project(&source, destination.project_root)
+        let eligible = hotpath::measure_block!(
+            "sessions.hosts.hermes.scope_profiles_blocking",
+            run_blocking_transcript_section(|| {
+                destinations
+                    .iter()
+                    .filter(|destination| {
+                        source_is_candidate_for_project(&source, destination.project_root)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
             })
-            .cloned()
-            .collect::<Vec<_>>();
+        );
         if eligible.is_empty() {
             continue;
         }
@@ -232,6 +238,7 @@ pub async fn ingest_homes_capped_with_admission(
     .await
 }
 
+#[hotpath::measure(label = "sessions.hosts.hermes.ingest_project", future = true)]
 pub(super) async fn ingest_homes_capped_with_admission_and_cancellation(
     hermes_homes: &[PathBuf],
     project_root: &Path,
@@ -349,6 +356,7 @@ pub async fn ingest_user_homes_capped(
     .await
 }
 
+#[hotpath::measure(label = "sessions.hosts.hermes.ingest_user", future = true)]
 async fn ingest_user_homes_capped_with_admission(
     admission: &dyn HostAdmission,
     hermes_homes: &[PathBuf],
@@ -408,31 +416,41 @@ async fn ingest_user_homes_capped_with_admission(
 /// Strict one-time import for a legacy profile whose project pin was already
 /// resolved by the migration layer. Unlike the normal catch-up sweep, any
 /// open/query/write failure is returned so callers retain the pin and source.
+#[hotpath::measure(label = "sessions.hosts.hermes.ingest_legacy", future = true)]
 pub async fn ingest_legacy_pinned_profile(
     admission: &dyn HostAdmission,
     profile_dir: &Path,
     project_root: &Path,
     project_id: ProjectId,
 ) -> Result<TranscriptIngestStats, String> {
-    let state_db = profile_dir.join("state.db");
-    if !state_db.is_file() {
+    let source = hotpath::measure_block!(
+        "sessions.hosts.hermes.prepare_legacy_profile_blocking",
+        run_blocking_transcript_section(|| {
+            let state_db = profile_dir.join("state.db");
+            if !state_db.is_file() {
+                return Ok::<Option<HermesProfileSource>, String>(None);
+            }
+            let legacy_project_pin =
+                read_config_pinned_project_root(&profile_dir.join("config.yaml"))
+                    .map(PathBuf::from)
+                    .ok_or_else(|| {
+                        format!(
+                            "legacy Hermes state store '{}' has no project pin",
+                            state_db.display()
+                        )
+                    })?;
+            Ok(Some(HermesProfileSource {
+                state_db,
+                legacy_project_pin: Some(legacy_project_pin),
+                profile: profile_dir
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_string),
+            }))
+        })
+    )?;
+    let Some(source) = source else {
         return Ok(TranscriptIngestStats::default());
-    }
-    let legacy_project_pin = read_config_pinned_project_root(&profile_dir.join("config.yaml"))
-        .map(PathBuf::from)
-        .ok_or_else(|| {
-            format!(
-                "legacy Hermes state store '{}' has no project pin",
-                state_db.display()
-            )
-        })?;
-    let source = HermesProfileSource {
-        state_db,
-        legacy_project_pin: Some(legacy_project_pin),
-        profile: profile_dir
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(str::to_string),
     };
     let scope = ObservationScopeV1::Project {
         project_id: project_id.clone(),

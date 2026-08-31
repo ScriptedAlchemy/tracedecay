@@ -17,6 +17,26 @@ use std::process::ExitCode;
 #[global_allocator]
 static HOTPATH_ALLOCATOR: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
 
+// Opt-in allocator features (see Cargo.toml). Exactly one global allocator
+// may exist per binary, so overlapping selections resolve by fixed precedence
+// rather than a compile error: hotpath-alloc's counting allocator wins in
+// measurement builds, then jemalloc, then mimalloc. The default build keeps
+// the system allocator (glibc malloc on Linux), whose retained-arena behavior
+// the daemon compensates for with `malloc_trim` at maintenance boundaries and
+// `MALLOC_ARENA_MAX=2` in the installed service unit; neither compensation is
+// load-bearing under jemalloc or mimalloc.
+#[cfg(all(feature = "alloc-jemalloc", not(feature = "hotpath-alloc")))]
+#[global_allocator]
+static JEMALLOC_ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+#[cfg(all(
+    feature = "alloc-mimalloc",
+    not(feature = "alloc-jemalloc"),
+    not(feature = "hotpath-alloc")
+))]
+#[global_allocator]
+static MIMALLOC_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod agent_cmd;
 mod analytics_cmd;
 mod automation_cli;
