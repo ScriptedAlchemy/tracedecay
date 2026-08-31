@@ -3,6 +3,13 @@ use super::*;
 use tempfile::TempDir;
 
 async fn assert_compress_baseline_case(case: CompressBaselineCase) {
+    // Pin the cursor-agent adapter to a nonexistent binary so the daemon's
+    // registered summarizer refuses deterministically instead of invoking a
+    // live cursor-agent from the operator's PATH.
+    let _cursor_agent = common::EnvVarGuard::set(
+        "TRACEDECAY_CURSOR_AGENT_BIN",
+        "/nonexistent/tracedecay-test-cursor-agent",
+    );
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
     let session_id = format!("baseline-{}", case.name());
@@ -129,11 +136,11 @@ async fn assert_compress_baseline_case(case: CompressBaselineCase) {
                 .unwrap();
 
             assert_eq!(response.status, "needs_summary", "{case_name}");
-            // The daemon authority resolves auxiliary summaries itself; with
-            // no authoritative summarizer registered the pending summary is
-            // typed unavailable rather than delegated back to the host.
+            // The daemon authority resolves auxiliary summaries itself; when
+            // the registered cursor-agent summarizer cannot run the pending
+            // summary is typed unavailable rather than delegated to the host.
             assert_eq!(
-                response.reason, "authoritative_summarizer_unavailable",
+                response.reason, "cursor_agent_unavailable",
                 "{case_name}"
             );
             assert_eq!(response.summary_nodes_created, 0, "{case_name}");

@@ -301,7 +301,7 @@ pub enum SessionStoreError {
     },
     #[error("session-temporal contract validation failed")]
     Contract(#[from] SessionContractError),
-    #[error("session-temporal storage operation {operation} failed")]
+    #[error("session-temporal storage operation {operation} failed: {source}")]
     Storage {
         operation: &'static str,
         #[source]

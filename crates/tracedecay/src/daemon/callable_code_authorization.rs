@@ -7,7 +7,6 @@ use tracedecay_application::{
     ApplicationOperation, ApplicationProblem, ApplicationProblemKind, AuthorityReceipt,
     CallableCodeAuthorizationAdmission, CallableCodeAuthorizationFuture,
     CallableCodeAuthorizationPort, RequestAdmission, RequestContext, ResolvedScope, RetryDirective,
-    SafeDiagnostic,
 };
 use tracedecay_domain::{ComponentVersion, UtcMicros};
 
