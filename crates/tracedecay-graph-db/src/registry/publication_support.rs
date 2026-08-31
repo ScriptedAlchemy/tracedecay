@@ -33,6 +33,7 @@ pub(super) struct RegisteredGraphDbOperationV1 {
     request: Option<GraphDbRegistration>,
 }
 
+#[hotpath::measure_all]
 impl RegisteredGraphDbOperationV1 {
     pub(super) fn database(&self) -> &GraphDbLeaseV1 {
         &self.database
@@ -89,6 +90,7 @@ impl RegisteredGraphDbOperationV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl GraphDbRegistry {
     pub(super) fn registered_operation(
         &self,
@@ -491,6 +493,7 @@ pub(super) fn check_context(
     Ok(())
 }
 
+#[hotpath::measure]
 fn interruption_error(context: &GraphPublicationOperationContextV1<'_>) -> Option<GraphDbError> {
     context
         .interruption()

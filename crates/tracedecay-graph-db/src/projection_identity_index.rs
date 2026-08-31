@@ -71,6 +71,7 @@ pub(crate) struct ProjectionIdentityIndex {
     owner_node_count: usize,
 }
 
+#[hotpath::measure_all]
 impl ProjectionIdentityIndex {
     /// The `limit` smallest identities strictly greater than `after`.
     pub(crate) fn page(&self, after: Option<&str>, limit: usize) -> Vec<String> {
@@ -107,6 +108,7 @@ struct CacheEntries {
     indexes: HashMap<IdentityIndexKey, Arc<ProjectionIdentityIndex>>,
 }
 
+#[hotpath::measure_all]
 impl IdentityIndexCache {
     /// Marks every cached index stale. Called from each site that takes the
     /// database write lock.
@@ -240,6 +242,7 @@ fn build_identity_index(
     }))
 }
 
+#[hotpath::measure]
 fn check_cancelled(cancellation: &dyn GraphCancellation) -> Result<(), GraphDbError> {
     if cancellation.is_cancelled() {
         Err(GraphDbError::Cancelled)

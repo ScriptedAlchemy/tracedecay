@@ -146,6 +146,7 @@ pub(crate) fn recovered_generation_digest_from_database(
 /// included — just to extract two identity strings. The memo stores
 /// identity-sized refs only, never entity rows, so the verification memory
 /// posture is preserved while each distinct endpoint is read at most once.
+#[hotpath::measure]
 fn memoized_endpoint_ref(
     store: &dyn GraphStore,
     memo: &mut HashMap<NodeId, GraphEntityRef>,

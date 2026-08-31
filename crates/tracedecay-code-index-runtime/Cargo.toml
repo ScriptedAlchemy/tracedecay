@@ -85,7 +85,6 @@ hotpath-cpu = [
     "tracedecay-tool-catalog/hotpath-cpu",
     "tracedecay-usecases/hotpath-cpu",
 ]
-default = []
 lite = [
     "tracedecay-code-extraction/lite",
     "tracedecay-code-index/lite",
