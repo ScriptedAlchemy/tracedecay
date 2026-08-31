@@ -509,8 +509,8 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use super::*;
-    use crate::daemon::DAEMON_SHUTDOWN_DEADLINE;
     use tracedecay_domain::errors::TraceDecayError;
+    use tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE;
 
     /// A phase that never finishes used to spend the whole global deadline,
     /// so the phases behind it never ran: the project-server drain reported an

@@ -92,7 +92,7 @@ fn daemon_admission_preserves_reserved_health_capacity() {
     let shutdown_request = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 3,
-        "method": super::super::DAEMON_SHUTDOWN_METHOD,
+        "method": tracedecay_daemon_control::DAEMON_SHUTDOWN_METHOD,
     })
     .to_string();
     assert!(super::super::is_reserved_control_request(&status_request));
@@ -235,13 +235,13 @@ fn mcp_discovery_requests_are_reserved_control_traffic() {
 fn daemon_shutdown_requires_a_response_id() {
     let notification = serde_json::json!({
         "jsonrpc": "2.0",
-        "method": super::super::DAEMON_SHUTDOWN_METHOD,
+        "method": tracedecay_daemon_control::DAEMON_SHUTDOWN_METHOD,
     })
     .to_string();
     let request = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 17,
-        "method": super::super::DAEMON_SHUTDOWN_METHOD,
+        "method": tracedecay_daemon_control::DAEMON_SHUTDOWN_METHOD,
     })
     .to_string();
 
@@ -314,7 +314,7 @@ async fn authenticated_daemon_shutdown_acks_and_begins_draining() {
                 serde_json::json!({
                     "jsonrpc": "2.0",
                     "id": 23,
-                    "method": super::super::DAEMON_SHUTDOWN_METHOD,
+                    "method": tracedecay_daemon_control::DAEMON_SHUTDOWN_METHOD,
                 })
             )
             .as_bytes(),

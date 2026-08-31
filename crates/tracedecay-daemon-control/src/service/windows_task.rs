@@ -364,13 +364,14 @@ const HARD_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5)
 #[cfg(windows)]
 struct NativeDaemonControl {
     transport_hint: PathBuf,
+    expected_version: String,
     clock_origin: std::time::Instant,
 }
 
 #[cfg(windows)]
 impl DaemonControlApi for NativeDaemonControl {
     fn request_shutdown(&mut self) -> ShutdownRequestAttempt {
-        match super::probe::request_daemon_shutdown(&self.transport_hint) {
+        match super::probe::request_daemon_shutdown(&self.transport_hint, &self.expected_version) {
             Ok(super::probe::DaemonShutdownRequest::Acknowledged) => {
                 ShutdownRequestAttempt::Acknowledged
             }
@@ -382,8 +383,11 @@ impl DaemonControlApi for NativeDaemonControl {
     }
 
     fn readiness(&mut self, timeout: std::time::Duration) -> ControlObservation {
-        let protocol =
-            super::probe::daemon_protocol_state_with_timeout(&self.transport_hint, timeout);
+        let protocol = super::probe::daemon_protocol_state_with_timeout(
+            &self.transport_hint,
+            &self.expected_version,
+            timeout,
+        );
         ControlObservation {
             satisfied: matches!(protocol, super::probe::DaemonProtocolState::Ready),
             diagnostic: format!("protocol {protocol}"),
@@ -569,9 +573,7 @@ pub(super) fn profile_root_from_task_xml(xml: &str) -> Option<PathBuf> {
     None
 }
 
-pub(super) fn remote_tls_from_task_xml(
-    xml: &str,
-) -> Result<Option<super::super::RemoteBrainTlsConfig>> {
+pub(super) fn remote_tls_from_task_xml(xml: &str) -> Result<Option<crate::RemoteBrainTlsConfig>> {
     let Some(arguments) = xml_element_text(xml, "Arguments") else {
         return Ok(None);
     };
@@ -630,16 +632,13 @@ pub(super) fn remote_tls_from_task_xml(
             })
         })
         .transpose()?;
-    let remote_tls = super::super::RemoteBrainTlsConfig::from_optional_parts(
-        listen,
-        certificate_chain,
-        private_key,
-    )?;
+    let remote_tls =
+        crate::RemoteBrainTlsConfig::from_optional_parts(listen, certificate_chain, private_key)?;
     validate_task_remote_tls(remote_tls.as_ref())?;
     Ok(remote_tls)
 }
 
-fn validate_task_remote_tls(remote_tls: Option<&super::super::RemoteBrainTlsConfig>) -> Result<()> {
+fn validate_task_remote_tls(remote_tls: Option<&crate::RemoteBrainTlsConfig>) -> Result<()> {
     let Some(remote_tls) = remote_tls else {
         return Ok(());
     };
@@ -863,52 +862,57 @@ pub(super) fn registered_task_xml() -> Result<Option<String>> {
     with_platform_api(|api| api.registered_xml())
 }
 
-pub(super) fn apply_state(state: DaemonServiceState) -> Result<()> {
+pub(super) fn apply_state(state: DaemonServiceState, expected_version: &str) -> Result<()> {
     #[cfg(any(windows, test))]
     {
         if state == DaemonServiceState::Missing {
             return with_platform_api(delete_with);
         }
-        with_platform_control_api(|api, control| apply_managed_state_with(api, control, state))
+        with_platform_control_api(expected_version, |api, control| {
+            apply_managed_state_with(api, control, state)
+        })
     }
     #[cfg(not(any(windows, test)))]
     {
-        let _ = state;
+        let _ = (state, expected_version);
         control_api_unavailable()
     }
 }
 
-pub(super) fn start() -> Result<()> {
+pub(super) fn start(expected_version: &str) -> Result<()> {
     #[cfg(any(windows, test))]
     {
-        with_platform_control_api(start_managed_with)
+        with_platform_control_api(expected_version, start_managed_with)
     }
     #[cfg(not(any(windows, test)))]
     {
+        let _ = expected_version;
         control_api_unavailable()
     }
 }
 
-pub(super) fn stop() -> Result<()> {
+pub(super) fn stop(expected_version: &str) -> Result<()> {
     #[cfg(any(windows, test))]
     {
-        with_platform_control_api(stop_managed_with)
+        with_platform_control_api(expected_version, stop_managed_with)
     }
     #[cfg(not(any(windows, test)))]
     {
+        let _ = expected_version;
         control_api_unavailable()
     }
 }
 
-pub(super) fn deactivate() -> Result<()> {
+pub(super) fn deactivate(expected_version: &str) -> Result<()> {
     #[cfg(any(windows, test))]
     {
-        with_platform_control_api(|api, control| {
+        with_platform_control_api(expected_version, |api, control| {
             apply_managed_state_with(api, control, DaemonServiceState::StoppedDisabled)
         })
     }
     #[cfg(not(any(windows, test)))]
     {
+        let _ = expected_version;
         control_api_unavailable()
     }
 }
@@ -928,28 +932,44 @@ pub(super) fn rollback_new_registration() -> Result<()> {
     with_platform_api(|api| rollback_registration_with(api, None, None))
 }
 
-pub(super) fn prepare_scoop_package_service(package_id: &str, state_file: &Path) -> Result<()> {
+pub(super) fn prepare_scoop_package_service(
+    package_id: &str,
+    state_file: &Path,
+    expected_version: &str,
+) -> Result<()> {
     #[cfg(windows)]
     {
-        prepare_scoop_package_service_windows(WindowsPackageId::parse(package_id)?, state_file)
+        prepare_scoop_package_service_windows(
+            WindowsPackageId::parse(package_id)?,
+            state_file,
+            expected_version,
+        )
     }
     #[cfg(not(windows))]
     {
-        let _ = (package_id, state_file);
+        let _ = (package_id, state_file, expected_version);
         Err(TraceDecayError::Config {
             message: "Scoop service hooks are only available on Windows".to_string(),
         })
     }
 }
 
-pub(super) fn restore_scoop_package_service(package_id: &str, state_file: &Path) -> Result<()> {
+pub(super) fn restore_scoop_package_service(
+    package_id: &str,
+    state_file: &Path,
+    expected_version: &str,
+) -> Result<()> {
     #[cfg(windows)]
     {
-        restore_scoop_package_service_windows(WindowsPackageId::parse(package_id)?, state_file)
+        restore_scoop_package_service_windows(
+            WindowsPackageId::parse(package_id)?,
+            state_file,
+            expected_version,
+        )
     }
     #[cfg(not(windows))]
     {
-        let _ = (package_id, state_file);
+        let _ = (package_id, state_file, expected_version);
         Err(TraceDecayError::Config {
             message: "Scoop service hooks are only available on Windows".to_string(),
         })
@@ -960,6 +980,7 @@ pub(super) fn restore_scoop_package_service(package_id: &str, state_file: &Path)
 fn prepare_scoop_package_service_windows(
     package_id: WindowsPackageId,
     state_file: &Path,
+    expected_version: &str,
 ) -> Result<()> {
     let identity = current_package_identity(package_id)?;
     let layout = local_runtime_layout(package_id)?;
@@ -991,6 +1012,7 @@ fn prepare_scoop_package_service_windows(
 
         let mut control = NativeDaemonControl {
             transport_hint: state.profile_root.join("daemon.sock"),
+            expected_version: expected_version.to_owned(),
             clock_origin: std::time::Instant::now(),
         };
         stop_managed_with(api, &mut control)?;
@@ -1027,6 +1049,7 @@ fn prepare_scoop_package_service_windows(
 fn restore_scoop_package_service_windows(
     package_id: WindowsPackageId,
     state_file: &Path,
+    expected_version: &str,
 ) -> Result<()> {
     let identity = current_package_identity(package_id)?;
     let layout = local_runtime_layout(package_id)?;
@@ -1063,6 +1086,7 @@ fn restore_scoop_package_service_windows(
     with_platform_api_for_package(package_id, |api| {
         let mut control = NativeDaemonControl {
             transport_hint: state.profile_root.join("daemon.sock"),
+            expected_version: expected_version.to_owned(),
             clock_origin: std::time::Instant::now(),
         };
         match api.snapshot() {
@@ -2050,6 +2074,7 @@ fn with_platform_api_for_package<T>(
 
 #[cfg(any(windows, test))]
 fn with_platform_control_api<T>(
+    expected_version: &str,
     operation: impl FnOnce(&mut dyn TaskSchedulerApi, &mut dyn DaemonControlApi) -> Result<T>,
 ) -> Result<T> {
     #[cfg(windows)]
@@ -2066,6 +2091,7 @@ fn with_platform_control_api<T>(
                 })?;
             let mut control = NativeDaemonControl {
                 transport_hint: profile_root.join("daemon.sock"),
+                expected_version: expected_version.to_owned(),
                 clock_origin: std::time::Instant::now(),
             };
             operation(api, &mut control)
@@ -2073,7 +2099,7 @@ fn with_platform_control_api<T>(
     }
     #[cfg(not(windows))]
     {
-        let _ = operation;
+        let _ = (expected_version, operation);
         Err(TraceDecayError::Config {
             message: "Windows Task Scheduler is unavailable on this platform".to_string(),
         })
@@ -2721,7 +2747,7 @@ mod tests {
     #[test]
     fn task_xml_round_trips_remote_tls_listener_paths() {
         let identity = TaskIdentity::for_user_sid(TEST_SID).expect("task identity");
-        let remote_tls = super::super::super::RemoteBrainTlsConfig::from_optional_parts(
+        let remote_tls = crate::RemoteBrainTlsConfig::from_optional_parts(
             Some("192.0.2.10:7443".parse().expect("listener address")),
             Some(PathBuf::from(r"C:\TraceDecay TLS\server & chain.pem")),
             Some(PathBuf::from(r"C:\TraceDecay TLS\server % key.pem")),
@@ -2763,7 +2789,7 @@ mod tests {
     #[test]
     fn task_xml_rejects_remote_tls_path_control_characters() {
         let identity = TaskIdentity::for_user_sid(TEST_SID).expect("task identity");
-        let remote_tls = super::super::super::RemoteBrainTlsConfig::from_optional_parts(
+        let remote_tls = crate::RemoteBrainTlsConfig::from_optional_parts(
             Some("192.0.2.10:7443".parse().expect("listener address")),
             Some(PathBuf::from("C:\\TraceDecay TLS\\server.pem\nInjected")),
             Some(PathBuf::from(r"C:\TraceDecay TLS\server-key.pem")),
@@ -2783,7 +2809,7 @@ mod tests {
     #[test]
     fn task_xml_rejects_relative_remote_tls_paths() {
         let identity = TaskIdentity::for_user_sid(TEST_SID).expect("task identity");
-        let remote_tls = super::super::super::RemoteBrainTlsConfig::from_optional_parts(
+        let remote_tls = crate::RemoteBrainTlsConfig::from_optional_parts(
             Some("192.0.2.10:7443".parse().expect("listener address")),
             Some(PathBuf::from("server.pem")),
             Some(PathBuf::from("server-key.pem")),

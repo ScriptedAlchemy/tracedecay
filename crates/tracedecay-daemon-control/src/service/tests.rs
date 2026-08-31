@@ -18,6 +18,8 @@ use tracedecay_runtime_core::config::{
     USER_DATA_DIR_ENV, lock_user_data_dir_test_env, user_data_dir,
 };
 
+const TEST_BUILD_VERSION: &str = "0.1.0-test+service-probe";
+
 struct EnvVarGuard {
     key: &'static str,
     previous: Option<OsString>,
@@ -92,6 +94,7 @@ fn released_windows_replacement_lease_is_reacquired_shared_before_restore() {
     let mut guard = super::QuiescedDaemonLifecycle {
         previous_state: DaemonServiceState::RunningEnabled,
         lifecycle_lease: None,
+        expected_version: TEST_BUILD_VERSION.to_owned(),
         restored: false,
     };
 
@@ -257,9 +260,7 @@ fn unavailable_socket_advice_without_state_uses_unit_file_presence() {
         "absent unit keeps generic ensure-running text, got: {missing}"
     );
 
-    let service_path = config_home
-        .join("systemd/user")
-        .join(crate::daemon::SERVICE_NAME);
+    let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
     std::fs::write(
         &service_path,
@@ -362,14 +363,9 @@ fn daemon_protocol_probe_requires_current_tracedecay_identity() {
 
     let ready_socket = profile.path().join("ready.sock");
     let ready_listener = UnixListener::bind(&ready_socket).expect("bind ready socket");
-    let ready_server = serve_probe_response(
-        ready_listener,
-        "tracedecay",
-        crate::version::build_version(),
-        None,
-    );
+    let ready_server = serve_probe_response(ready_listener, "tracedecay", TEST_BUILD_VERSION, None);
     assert_eq!(
-        super::probe::daemon_protocol_state(&ready_socket),
+        super::probe::daemon_protocol_state(&ready_socket, TEST_BUILD_VERSION),
         super::probe::DaemonProtocolState::Ready
     );
     ready_server.join().expect("join ready server");
@@ -378,10 +374,11 @@ fn daemon_protocol_probe_requires_current_tracedecay_identity() {
     let stale_listener = UnixListener::bind(&stale_socket).expect("bind stale socket");
     let stale_server = serve_probe_response(stale_listener, "tracedecay", "0.0.0-stale", None);
     assert_eq!(
-        super::probe::daemon_protocol_state(&stale_socket),
+        super::probe::daemon_protocol_state(&stale_socket, TEST_BUILD_VERSION),
         super::probe::DaemonProtocolState::IdentityMismatch {
             name: Some("tracedecay".to_string()),
             version: Some("0.0.0-stale".to_string()),
+            expected_version: TEST_BUILD_VERSION.to_string(),
         }
     );
     stale_server.join().expect("join stale server");
@@ -405,12 +402,12 @@ fn daemon_protocol_probe_authenticates_to_managed_daemon() {
     let server = serve_probe_response(
         listener,
         "tracedecay",
-        crate::version::build_version(),
+        TEST_BUILD_VERSION,
         Some(authority.auth_token().to_string()),
     );
 
     assert_eq!(
-        super::probe::daemon_protocol_state(&socket_path),
+        super::probe::daemon_protocol_state(&socket_path, TEST_BUILD_VERSION),
         super::probe::DaemonProtocolState::Ready
     );
     server.join().expect("join authenticated probe server");
@@ -461,8 +458,8 @@ fn remote_tls_config(
     listen: &str,
     certificate_chain: impl Into<PathBuf>,
     private_key: impl Into<PathBuf>,
-) -> super::super::RemoteBrainTlsConfig {
-    super::super::RemoteBrainTlsConfig::from_optional_parts(
+) -> crate::RemoteBrainTlsConfig {
+    crate::RemoteBrainTlsConfig::from_optional_parts(
         Some(listen.parse().expect("listener address")),
         Some(certificate_chain.into()),
         Some(private_key.into()),
@@ -1055,8 +1052,7 @@ fn refresh_installed_service_skips_missing_unit() {
 
     let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
     let _home_guard = EnvVarGuard::set("HOME", &home);
-    let _data_guard =
-        EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
+    let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
     let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
     let spec = DaemonServiceSpec {
         tracedecay_bin: PathBuf::from("/opt/tracedecay/bin/tracedecay"),
@@ -1065,12 +1061,12 @@ fn refresh_installed_service_skips_missing_unit() {
         remote_tls: None,
     };
 
-    let service_path = config_home
-        .join("systemd/user")
-        .join(crate::daemon::SERVICE_NAME);
-    let outcome = super::with_quiesced_installed_service("daemon service refresh", |_| {
-        super::refresh_installed_service_with_state(&spec, None)
-    })
+    let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
+    let outcome = super::with_quiesced_installed_service(
+        "daemon service refresh",
+        TEST_BUILD_VERSION,
+        |_| super::refresh_installed_service_with_state(&spec, None, TEST_BUILD_VERSION),
+    )
     .expect("refresh service");
 
     assert_eq!(outcome, None);
@@ -1091,7 +1087,7 @@ fn post_update_rejects_reachable_unmanaged_daemon() {
     let socket_path = super::default_socket_path().expect("default socket");
     let _listener = std::os::unix::net::UnixListener::bind(&socket_path).expect("bind socket");
 
-    let error = super::quiesce_installed_service_before_lease()
+    let error = super::quiesce_installed_service_before_lease(TEST_BUILD_VERSION)
         .expect_err("unmanaged daemon must block post-update mutations");
 
     assert!(error.to_string().contains("unmanaged daemon"));
@@ -1122,15 +1118,12 @@ fn refresh_installed_service_preserves_existing_socket_path() {
 
     let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
     let _home_guard = EnvVarGuard::set("HOME", &home);
-    let _data_guard =
-        EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
+    let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
     let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
     let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
     let _stopped_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_STOPPED", &stopped);
 
-    let service_path = config_home
-        .join("systemd/user")
-        .join(crate::daemon::SERVICE_NAME);
+    let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
     std::fs::write(
         &service_path,
@@ -1149,14 +1142,16 @@ fn refresh_installed_service_preserves_existing_socket_path() {
         remote_tls: None,
     };
 
-    let previous_state =
-        super::quiesce_installed_service_before_lease().expect("quiesce installed service");
+    let previous_state = super::quiesce_installed_service_before_lease(TEST_BUILD_VERSION)
+        .expect("quiesce installed service");
     let outcome = super::refresh_installed_service_under_lease_with_state(
         &spec,
         DaemonServiceState::StoppedEnabled,
+        TEST_BUILD_VERSION,
     )
     .expect("refresh service");
-    super::restore_installed_service_after_update(previous_state).expect("restore service state");
+    super::restore_installed_service_after_update(previous_state, TEST_BUILD_VERSION)
+        .expect("restore service state");
 
     assert_eq!(outcome, Some(service_path.clone()));
     let unit = std::fs::read_to_string(service_path).expect("service unit");
@@ -1216,9 +1211,7 @@ fn refresh_installed_service_migrates_overlong_generated_socket_path() {
     let expected_socket = super::default_socket_path().expect("short default socket");
     assert_ne!(legacy_socket, expected_socket);
 
-    let service_path = config_home
-        .join("systemd/user")
-        .join(crate::daemon::SERVICE_NAME);
+    let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
     std::fs::write(
         &service_path,
@@ -1238,6 +1231,7 @@ fn refresh_installed_service_migrates_overlong_generated_socket_path() {
     let outcome = super::refresh_installed_service_under_lease_with_state(
         &spec,
         DaemonServiceState::StoppedEnabled,
+        TEST_BUILD_VERSION,
     )
     .expect("refresh service");
 
@@ -1270,20 +1264,20 @@ fn restore_quiesced_service_starts_existing_unit_without_rewriting_it() {
 
     let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
     let _home_guard = EnvVarGuard::set("HOME", &home);
-    let _data_guard =
-        EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
+    let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
     let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
     let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
-    let service_path = config_home
-        .join("systemd/user")
-        .join(crate::daemon::SERVICE_NAME);
+    let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
     let original_unit =
         "[Service]\nExecStart=/old/tracedecay daemon run --socket /custom/tracedecay.sock\n";
     std::fs::write(&service_path, original_unit).expect("existing service unit");
 
-    super::restore_installed_service_after_update(DaemonServiceState::RunningEnabled)
-        .expect("restore service");
+    super::restore_installed_service_after_update(
+        DaemonServiceState::RunningEnabled,
+        TEST_BUILD_VERSION,
+    )
+    .expect("restore service");
 
     assert_eq!(
         std::fs::read_to_string(service_path).expect("service unit"),
@@ -1326,20 +1320,20 @@ fn restore_after_update_starts_a_dead_installed_unit() {
 
     let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
     let _home_guard = EnvVarGuard::set("HOME", &home);
-    let _data_guard =
-        EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
+    let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
     let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
     let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
-    let service_path = config_home
-        .join("systemd/user")
-        .join(crate::daemon::SERVICE_NAME);
+    let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
     let original_unit =
         "[Service]\nExecStart=/old/tracedecay daemon run --socket /custom/tracedecay.sock\n";
     std::fs::write(&service_path, original_unit).expect("existing service unit");
 
-    super::restore_installed_service_after_update(DaemonServiceState::StoppedDisabled)
-        .expect("heal dead installed service");
+    super::restore_installed_service_after_update(
+        DaemonServiceState::StoppedDisabled,
+        TEST_BUILD_VERSION,
+    )
+    .expect("heal dead installed service");
 
     assert_eq!(
         std::fs::read_to_string(service_path).expect("service unit"),
@@ -1383,12 +1377,11 @@ fn restore_after_update_leaves_masked_and_missing_units_untouched() {
 
     let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
     let _home_guard = EnvVarGuard::set("HOME", &home);
-    let _data_guard =
-        EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
+    let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
     let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
     let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
 
-    super::restore_installed_service_after_update(DaemonServiceState::Missing)
+    super::restore_installed_service_after_update(DaemonServiceState::Missing, TEST_BUILD_VERSION)
         .expect("missing stays missing");
     assert!(
         !log.exists()
@@ -1398,9 +1391,7 @@ fn restore_after_update_leaves_masked_and_missing_units_untouched() {
         "missing must not invoke systemctl"
     );
 
-    let service_path = config_home
-        .join("systemd/user")
-        .join(crate::daemon::SERVICE_NAME);
+    let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
     std::fs::write(
         &service_path,
@@ -1408,7 +1399,7 @@ fn restore_after_update_leaves_masked_and_missing_units_untouched() {
     )
     .expect("masked unit");
 
-    super::restore_installed_service_after_update(DaemonServiceState::Masked)
+    super::restore_installed_service_after_update(DaemonServiceState::Masked, TEST_BUILD_VERSION)
         .expect("masked stays masked");
     assert!(
         !log.exists()
@@ -1440,13 +1431,10 @@ fn refresh_installed_service_preserves_stopped_state() {
         .expect("systemctl permissions");
     let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
     let _home_guard = EnvVarGuard::set("HOME", &home);
-    let _data_guard =
-        EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
+    let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
     let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
     let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
-    let service_path = config_home
-        .join("systemd/user")
-        .join(crate::daemon::SERVICE_NAME);
+    let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
     std::fs::write(
         &service_path,
@@ -1460,8 +1448,8 @@ fn refresh_installed_service_preserves_stopped_state() {
         remote_tls: None,
     };
 
-    super::with_quiesced_installed_service("daemon service refresh", |_| {
-        super::refresh_installed_service_with_state(&spec, None)
+    super::with_quiesced_installed_service("daemon service refresh", TEST_BUILD_VERSION, |_| {
+        super::refresh_installed_service_with_state(&spec, None, TEST_BUILD_VERSION)
     })
     .expect("refresh service");
 
@@ -1506,9 +1494,7 @@ fn refresh_preserves_persistent_systemd_mask_symlink() {
     std::fs::create_dir_all(&home).expect("home dir");
     let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
     let _home_guard = EnvVarGuard::set("HOME", &home);
-    let service_path = config_home
-        .join("systemd/user")
-        .join(crate::daemon::SERVICE_NAME);
+    let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
     std::os::unix::fs::symlink("/dev/null", &service_path).expect("mask service");
     let spec = DaemonServiceSpec {
@@ -1518,9 +1504,12 @@ fn refresh_preserves_persistent_systemd_mask_symlink() {
         remote_tls: None,
     };
 
-    let error =
-        super::refresh_installed_service_under_lease_with_state(&spec, DaemonServiceState::Masked)
-            .expect_err("persistent mask must not be overwritten");
+    let error = super::refresh_installed_service_under_lease_with_state(
+        &spec,
+        DaemonServiceState::Masked,
+        TEST_BUILD_VERSION,
+    )
+    .expect_err("persistent mask must not be overwritten");
 
     assert!(error.to_string().contains("persistently masked"));
     assert_eq!(
@@ -1537,13 +1526,8 @@ fn default_socket_path_is_profile_scoped_not_project_scoped() {
     let project_b = tempfile::TempDir::new().expect("project b temp dir");
     let override_socket = profile.path().join("override.sock");
     let _socket_guard = EnvVarGuard::unset(SOCKET_ENV);
-    let _data_dir_guard = EnvVarGuard::set(
-        USER_DATA_DIR_ENV,
-        profile.path().join(".tracedecay"),
-    );
-    let expected_socket = user_data_dir()
-        .expect("user data dir")
-        .join("daemon.sock");
+    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, profile.path().join(".tracedecay"));
+    let expected_socket = user_data_dir().expect("user data dir").join("daemon.sock");
 
     {
         let _cwd_guard = CurrentDirGuard::set(project_a.path());

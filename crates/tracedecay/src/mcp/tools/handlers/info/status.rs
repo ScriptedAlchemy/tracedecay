@@ -53,19 +53,66 @@ fn status_arg_flag(args: &Value, key: &str, default: bool) -> bool {
     args.get(key).and_then(Value::as_bool).unwrap_or(default)
 }
 
-fn attach_compact_branch_summary(cg: &TraceDecay, output: &mut Value) {
+/// Whether exact-scope code retrieval can serve at all, derived from the same
+/// sealed-generation census the retrieval lanes enforce.
+///
+/// `serving_branch` is store provenance, but readers take it as a serving
+/// claim — on a fresh daemon it named a branch seconds into enrollment while
+/// every retrieval lane truthfully refused `generation_rebuilding`. Status
+/// must report the same serving truth the lanes enforce: the branch claim is
+/// gated on a sealed complete generation existing, and the typed
+/// `retrieval_serving` field carries the lane-level answer either way.
+enum CodeIndexRetrievalServingV1 {
+    /// A sealed complete generation exists for the exact worktree.
+    Serving,
+    /// The daemon census answered and nothing is servable yet.
+    NotServing { reason: &'static str },
+    /// No census authority is attached (non-daemon server); status cannot
+    /// claim or deny lane-serving truth.
+    AuthorityUnattached,
+}
+
+impl CodeIndexRetrievalServingV1 {
+    fn attach(&self, output: &mut Value) -> bool {
+        match self {
+            Self::Serving => {
+                output["retrieval_serving"] = json!({"status": "serving"});
+                true
+            }
+            Self::NotServing { reason } => {
+                output["retrieval_serving"] = json!({
+                    "status": "unavailable",
+                    "reason": reason,
+                });
+                false
+            }
+            Self::AuthorityUnattached => true,
+        }
+    }
+}
+
+fn attach_compact_branch_summary(
+    cg: &TraceDecay,
+    output: &mut Value,
+    retrieval_serving: &CodeIndexRetrievalServingV1,
+) {
     // Avoid `branch_diagnostics()` — compact CLI status only needs the
     // already-resolved serving identity retained on TraceDecay.
     // Do not alias open/active into current/live: those are distinct under drift.
     if let Some(active) = cg.active_branch() {
         output["active_branch"] = json!(active);
     }
-    if let Some(serving) = cg.serving_branch() {
+    let branch_servable = retrieval_serving.attach(output);
+    if branch_servable && let Some(serving) = cg.serving_branch() {
         output["serving_branch"] = json!(serving);
     }
 }
 
-fn attach_full_branch_status(cg: &TraceDecay, output: &mut Value) {
+fn attach_full_branch_status(
+    cg: &TraceDecay,
+    output: &mut Value,
+    retrieval_serving: &CodeIndexRetrievalServingV1,
+) {
     let branch_diagnostics = cg.branch_diagnostics();
     if let Some(open_branch) = branch_diagnostics.open_active_branch.as_deref() {
         output["active_branch"] = json!(open_branch);
@@ -74,7 +121,8 @@ fn attach_full_branch_status(cg: &TraceDecay, output: &mut Value) {
         output["current_branch"] = json!(current_branch);
         output["live_branch"] = json!(current_branch);
     }
-    if let Some(serving_branch) = branch_diagnostics.serving_branch.as_deref() {
+    let branch_servable = retrieval_serving.attach(output);
+    if branch_servable && let Some(serving_branch) = branch_diagnostics.serving_branch.as_deref() {
         output["serving_branch"] = json!(serving_branch);
     }
     if let Some(parent) = branch_diagnostics
@@ -168,7 +216,7 @@ pub(crate) async fn handle_status(
         "project_root": cg.project_root(),
         "graph_statistics": graph_statistics,
     });
-    let code_index_freshness = match code_index_freshness_reader {
+    let (code_index_freshness, retrieval_serving) = match code_index_freshness_reader {
         Some(reader) => match hotpath::future!(
             reader(cg.project_root().to_path_buf()),
             label = "mcp.info.status.code_index_freshness"
@@ -180,20 +228,41 @@ pub(crate) async fn handle_status(
                 if let Some(warning) = warning {
                     output["code_index_freshness_warning"] = json!(warning);
                 }
-                json!({
-                    "status": status,
-                    "worktree": freshness,
-                })
+                // The lanes serve exactly when a sealed complete generation
+                // exists for the worktree; until the first seal every
+                // retrieval lane refuses `generation_rebuilding`.
+                let retrieval_serving = if freshness.latest_generation_id.is_some() {
+                    CodeIndexRetrievalServingV1::Serving
+                } else {
+                    CodeIndexRetrievalServingV1::NotServing {
+                        reason: "generation_rebuilding",
+                    }
+                };
+                (
+                    json!({
+                        "status": status,
+                        "worktree": freshness,
+                    }),
+                    retrieval_serving,
+                )
             }
-            None => json!({
-                "status": "unavailable",
-                "reason": "code_index_scheduler_not_mounted",
-            }),
+            None => (
+                json!({
+                    "status": "unavailable",
+                    "reason": "code_index_scheduler_not_mounted",
+                }),
+                CodeIndexRetrievalServingV1::NotServing {
+                    reason: "code_index_scheduler_not_mounted",
+                },
+            ),
         },
-        None => json!({
-            "status": "unavailable",
-            "reason": "code_index_scheduler_authority_not_attached",
-        }),
+        None => (
+            json!({
+                "status": "unavailable",
+                "reason": "code_index_scheduler_authority_not_attached",
+            }),
+            CodeIndexRetrievalServingV1::AuthorityUnattached,
+        ),
     };
     output["code_index_freshness"] = code_index_freshness;
     if include_storage_health {
@@ -217,9 +286,9 @@ pub(crate) async fn handle_status(
     }
 
     if include_branch_diagnostics {
-        attach_full_branch_status(cg, &mut output);
+        attach_full_branch_status(cg, &mut output, &retrieval_serving);
     } else {
-        attach_compact_branch_summary(cg, &mut output);
+        attach_compact_branch_summary(cg, &mut output, &retrieval_serving);
     }
 
     // Session-transcript ingest health (recall trust): last ingest time and

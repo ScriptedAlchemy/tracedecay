@@ -725,6 +725,7 @@ struct CurrentGenerationV1 {
     projection_node_count: usize,
 }
 
+#[hotpath::measure(label = "code_graph.projection.read_current_generation")]
 fn read_current_generation(
     snapshot: &VerifiedGraphSnapshot,
     projection: &GraphProjectionIdentity,

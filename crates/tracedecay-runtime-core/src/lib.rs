@@ -76,6 +76,9 @@
 #![allow(rustdoc::broken_intra_doc_links)]
 #![allow(rustdoc::private_intra_doc_links)]
 
+/// Upper bound for daemon-owned shutdown persistence work.
+pub const DAEMON_SHUTDOWN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(45);
+
 pub mod branch;
 pub mod branch_meta;
 pub mod cancellation;
