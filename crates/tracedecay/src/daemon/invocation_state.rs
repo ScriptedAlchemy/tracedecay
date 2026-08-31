@@ -443,7 +443,7 @@ impl DaemonInvocationState {
         semantic_resources: Option<SemanticResourceCeilings>,
         native_graph_activation: bool,
         graph_runtime: Arc<
-            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
+            tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1,
         >,
         graph_publication_database: Arc<tracedecay_runtime_core::db::Database>,
     ) -> Result<()> {

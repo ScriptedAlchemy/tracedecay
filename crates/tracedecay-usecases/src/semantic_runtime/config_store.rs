@@ -9,7 +9,6 @@ use crate::config::retrieval::{
     RetrievalProfileMutationCapabilityV1, RetrievalProfileStateSnapshotV1, RetrievalProfileStateV1,
     RetrievalRuntimeCompatibilityV1,
 };
-use crate::configuration::{ConfigurationMutationAuthority, DirectConfigurationMutation};
 use crate::semantic_runtime::{
     CommittedRetrievalProfileStateV1, SemanticActivationCommandV1, SemanticActivationReceiptV1,
     SemanticConfigurationBackendErrorV1, SemanticConfigurationPinV1,
@@ -17,6 +16,7 @@ use crate::semantic_runtime::{
     SemanticLinkedTransitionV1, SemanticRetrievalConfigurationPortV1, SemanticRollbackCommandV1,
     SemanticRuntimeFuture,
 };
+use tracedecay_configuration::{ConfigurationMutationAuthority, DirectConfigurationMutation};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 
@@ -187,28 +187,34 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
         .await
         .map_err(|error| {
             let outcome = match &error {
-                crate::configuration::ConfigurationError::TargetUnavailable => "target_unavailable",
-                crate::configuration::ConfigurationError::AuthorizedTargetAmbiguous => {
+                tracedecay_configuration::ConfigurationError::TargetUnavailable => {
+                    "target_unavailable"
+                }
+                tracedecay_configuration::ConfigurationError::AuthorizedTargetAmbiguous => {
                     "target_ambiguous"
                 }
-                crate::configuration::ConfigurationError::RevisionConflict => "revision_conflict",
-                crate::configuration::ConfigurationError::PlanExpired => "plan_expired",
-                crate::configuration::ConfigurationError::PlanStale => "plan_stale",
-                crate::configuration::ConfigurationError::PolicyWideningForbidden => {
+                tracedecay_configuration::ConfigurationError::RevisionConflict => {
+                    "revision_conflict"
+                }
+                tracedecay_configuration::ConfigurationError::PlanExpired => "plan_expired",
+                tracedecay_configuration::ConfigurationError::PlanStale => "plan_stale",
+                tracedecay_configuration::ConfigurationError::PolicyWideningForbidden => {
                     "policy_widening_forbidden"
                 }
-                crate::configuration::ConfigurationError::ProjectlessProfileRequired => {
+                tracedecay_configuration::ConfigurationError::ProjectlessProfileRequired => {
                     "projectless_profile_required"
                 }
-                crate::configuration::ConfigurationError::IdempotencyConflict => {
+                tracedecay_configuration::ConfigurationError::IdempotencyConflict => {
                     "idempotency_conflict"
                 }
-                crate::configuration::ConfigurationError::MutationAuthorityRejected => {
+                tracedecay_configuration::ConfigurationError::MutationAuthorityRejected => {
                     "mutation_authority_rejected"
                 }
-                crate::configuration::ConfigurationError::Validation(_) => "validation",
-                crate::configuration::ConfigurationError::ResetRequired { .. } => "reset_required",
-                crate::configuration::ConfigurationError::Unavailable => "unavailable",
+                tracedecay_configuration::ConfigurationError::Validation(_) => "validation",
+                tracedecay_configuration::ConfigurationError::ResetRequired { .. } => {
+                    "reset_required"
+                }
+                tracedecay_configuration::ConfigurationError::Unavailable => "unavailable",
             };
             tracing::warn!(
                 event = "semantic_configuration_preview_failure",
@@ -216,10 +222,10 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
                 "semantic configuration preview did not produce a commit"
             );
             match error {
-                crate::configuration::ConfigurationError::RevisionConflict => {
+                tracedecay_configuration::ConfigurationError::RevisionConflict => {
                     SemanticConfigurationBackendErrorV1::Conflict
                 }
-                crate::configuration::ConfigurationError::Unavailable => {
+                tracedecay_configuration::ConfigurationError::Unavailable => {
                     SemanticConfigurationBackendErrorV1::Unavailable
                 }
                 _ => SemanticConfigurationBackendErrorV1::Rejected,
@@ -545,10 +551,10 @@ impl SemanticRetrievalConfigurationPortV1 for ProductionSemanticRetrievalConfigu
             )
             .await
             .map_err(|error| match error {
-                crate::configuration::ConfigurationError::RevisionConflict => {
+                tracedecay_configuration::ConfigurationError::RevisionConflict => {
                     SemanticConfigurationBackendErrorV1::Conflict
                 }
-                crate::configuration::ConfigurationError::Unavailable => {
+                tracedecay_configuration::ConfigurationError::Unavailable => {
                     SemanticConfigurationBackendErrorV1::Unavailable
                 }
                 _ => SemanticConfigurationBackendErrorV1::Rejected,

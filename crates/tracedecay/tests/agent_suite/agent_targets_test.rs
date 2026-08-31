@@ -13,8 +13,17 @@ const EXPECTED_AGENT_IDS: &[&str] = &[
     "automation-auditor",
 ];
 
+fn ensure_host_io() {
+    // `install_codex_managed_agents` reads generated agent bytes through the
+    // automation-runtime host-io port; this integration binary does not go
+    // through `tracedecay::register_runtime_ports`, so bind the agent-hosts
+    // surface the same way skill_targets_test does.
+    tracedecay_agent_hosts::register_automation_host_io();
+}
+
 #[test]
 fn codex_managed_agents_export_to_user_agents_dir() {
+    ensure_host_io();
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path();
 
@@ -49,6 +58,7 @@ fn codex_managed_agents_export_to_user_agents_dir() {
 
 #[test]
 fn managed_agent_removal_uses_manifest_and_preserves_user_files() {
+    ensure_host_io();
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path();
     std::fs::create_dir_all(home.join(".codex/agents")).unwrap();

@@ -65,15 +65,15 @@ use tracedecay_query::retrieval::semantic::{
     SemanticRetrievalRequestV1, SemanticSearchKindV1, SemanticVectorReadPort,
     SemanticVectorReadRequestV1, SemanticVectorRecordV1, SemanticVectorScanSummaryV1,
 };
-use tracedecay_runtime_core::db::Database;
-use tracedecay_search_eval::candidate_output::ProductionCandidateSemanticProjectionSourcesV1;
-use tracedecay_search_eval::semantic_native::{
+use tracedecay_query::search_quality::candidate_output::ProductionCandidateSemanticProjectionSourcesV1;
+use tracedecay_query::search_quality::semantic_native::{
     SemanticProjectionCaseOutcomeV1, SemanticProjectionCaseSampleV1, SemanticProjectionCaseV1,
 };
-use tracedecay_search_eval::{
+use tracedecay_query::search_quality::{
     CandidateOutputError, ProductionCandidateNativeGenerationResourcesV1,
     ProductionCandidateNativeQueryContextV1, ProductionCandidateNativeQueryInputsV1,
 };
+use tracedecay_runtime_core::db::Database;
 use tracedecay_semantic::projector::PreparedVectorGenerationV1;
 use tracedecay_semantic::rerank_adapter::{
     GenerationBoundCodeRerankViewsV1, ProductionCodeRerankAuthorityV1,
@@ -2409,7 +2409,7 @@ impl PreparedSemanticEvaluationGenerationV1 {
             .rerank_policy
             .zip(rerank_authority)
             .map(|(policy, authority)| {
-                tracedecay_search_eval::semantic_native::SemanticNativeRerankInputV1 {
+                tracedecay_query::search_quality::semantic_native::SemanticNativeRerankInputV1 {
                     request: context.request,
                     policy,
                     views: &mut rerank_views as &mut _,
@@ -2451,7 +2451,7 @@ impl PreparedSemanticEvaluationGenerationV1 {
         let lane = SemanticCodeRetriever::new(&embedder, &scoped_vectors, &control);
         evaluate(ProductionCandidateNativeQueryInputsV1 {
             semantic: Some(
-                tracedecay_search_eval::semantic_native::SemanticNativeSemanticInputV1 {
+                tracedecay_query::search_quality::semantic_native::SemanticNativeSemanticInputV1 {
                     lane: &lane,
                     request: &request,
                 },

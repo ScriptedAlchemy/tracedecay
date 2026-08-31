@@ -44,8 +44,10 @@ pub use reader::{CodeExactLexicalArtifactReaderV1, CodeLexicalArtifactReaderV1};
 pub const CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1: usize = 1536 * 1024 * 1024;
 /// Maximum reader cache budget: the stored metadata copy plus the SQLite
 /// page-cache grant, which stays inside the kernel SQLite window ([2, 64]
-/// MiB page cache, mmap disabled). The reader's retained claim is the
-/// metadata copy plus the cache actually granted, never this whole bound.
+/// MiB page cache). Sealed read-only readers also mmap the immutable file
+/// itself; that mapping is file-backed and is not part of this heap claim.
+/// The reader's retained claim is the metadata copy plus the cache actually
+/// granted, never this whole bound.
 /// The same narrowed claim as the build budget applies: `cache_size` is a
 /// target, not a hard allocator bound.
 pub const CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1: usize = 256 * 1024 * 1024;
@@ -62,9 +64,10 @@ pub enum CodeLexicalArtifactBatchLimitV1 {
 
 /// Page-cache authority granted to artifact connections; charged in full
 /// against the memory ledgers because SQLite may use all of it. Sized to
-/// the top of the kernel SQLite window ([2, 64] MiB page cache, mmap
-/// disabled): artifact connections never grant an mmap window and never
-/// exceed this cache target.
+/// the top of the kernel SQLite window ([2, 64] MiB page cache). Staging
+/// builder connections never grant an mmap window (rollback-journal
+/// durability + WAL-coherence). Sealed read-only readers mmap the
+/// content-addressed file so serving does not re-pread the same pages.
 const ARTIFACT_SQLITE_CACHE_BYTES: usize = 64 * 1024 * 1024;
 /// The kernel SQLite window's page-cache floor.
 const ARTIFACT_SQLITE_CACHE_FLOOR_BYTES: usize = 2 * 1024 * 1024;
@@ -226,9 +229,10 @@ mod tests {
         ARTIFACT_SQLITE_CACHE_BYTES, open_builder_connection, with_builder_sorter_cpu_admission,
     };
 
-    /// Artifact connections stay inside the kernel SQLite window: no mmap
-    /// grant, page cache at most 64 MiB, and `synchronous = NORMAL` — never
-    /// a silent mmap/cache/sync override.
+    /// Staging builder connections stay inside the kernel SQLite window:
+    /// no mmap grant, page cache at most 64 MiB, and `synchronous = NORMAL`
+    /// — never a silent mmap/cache/sync override. Sealed readers mmap the
+    /// immutable file on purpose; that path is not this connection.
     #[test]
     fn builder_connections_stay_inside_the_kernel_sqlite_window() {
         let directory = tempfile::tempdir().expect("artifact tempdir");
@@ -239,7 +243,7 @@ mod tests {
             .expect("mmap pragma");
         assert_eq!(
             mmap, 0,
-            "artifact connections must not grant an mmap window"
+            "staging builder connections must not grant an mmap window"
         );
         let cache_kib: i64 = connection
             .pragma_query_value(None, "cache_size", |row| row.get(0))

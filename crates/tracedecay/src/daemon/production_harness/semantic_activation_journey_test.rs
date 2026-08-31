@@ -276,11 +276,11 @@ pub(super) async fn evaluate_native_profile(
             report,
             ..
         } => {
-            let report: tracedecay_search_eval::DirectEvaluationReportV1 =
+            let report: tracedecay_query::search_quality::DirectEvaluationReportV1 =
                 serde_json::from_value(report).expect("direct evaluation report wire");
             assert_eq!(
                 report.status,
-                tracedecay_search_eval::DirectEvaluationStatusV1::Pass,
+                tracedecay_query::search_quality::DirectEvaluationStatusV1::Pass,
                 "only a native evaluator PASS may enter activation"
             );
             let mut measured_projection_matrices = 0;
@@ -290,7 +290,7 @@ pub(super) async fn evaluate_native_profile(
                 .filter_map(|output| output.native_resources.as_ref())
             {
                 for result in evidence.samples.values() {
-                    let tracedecay_search_eval::semantic_native::SemanticNativeStageResultV1::Complete(
+                    let tracedecay_query::search_quality::semantic_native::SemanticNativeStageResultV1::Complete(
                         sample,
                     ) = result
                     else {
@@ -304,7 +304,7 @@ pub(super) async fn evaluate_native_profile(
                     let cancellation = sample
                         .projection_cases
                         .get(
-                            &tracedecay_search_eval::semantic_native::SemanticProjectionCaseV1::Cancellation,
+                            &tracedecay_query::search_quality::semantic_native::SemanticProjectionCaseV1::Cancellation,
                         )
                         .expect("cancellation case");
                     assert!(

@@ -61,7 +61,6 @@ pub mod lifecycle;
 pub mod path_tree;
 pub mod project_access;
 pub mod response_handles;
-pub mod session_refresh;
 pub mod tool_call_deadline;
 pub mod tool_errors;
 pub mod tools;
@@ -90,12 +89,6 @@ pub use hook_runtime::{
 pub use jsonrpc::{ErrorCode, JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpTransport};
 pub use lifecycle::{McpConnectionLifecyclePort, McpLifecycleDrainFuture, McpRequestActivity};
 pub use project_access::registered_project_reader_tool_names;
-pub use session_refresh::{
-    SessionRefreshAction, SessionRefreshCommand, SessionRefreshCoverageView,
-    SessionRefreshFrontierView, SessionRefreshProgressView, SessionRefreshReceiptView,
-    SessionRefreshServiceFuture, SessionRefreshServiceOutcome, SessionRefreshServicePort,
-    utc_micros_value,
-};
 pub use tool_call_deadline::{
     TOOL_CALL_DEADLINE_META_KEY, caller_tool_call_deadline, tool_call_deadline_meta,
 };

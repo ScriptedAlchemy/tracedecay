@@ -58,9 +58,18 @@ fn dashboard_root_serves_the_embedded_single_app_bundle() {
             .body_mut()
             .read_to_string()
             .expect("embedded dashboard entry script should be readable");
-        assert!(
-            script_body.len() > 704,
-            "production JavaScript must not regress to the historical 704-byte placeholder"
+        // The suite serves the fixture bundle byte-exact; production
+        // bundle-size and placeholder guards live with the CLI build script's
+        // manifest validation and the product-runtime provider validation.
+        let fixture_script = tracedecay::product_runtime::FIXTURE_DASHBOARD_ASSETS
+            .assets
+            .iter()
+            .find(|asset| asset.path == "static/js/index.fixture.js")
+            .unwrap_or_else(|| panic!("fixture bundle must carry its entry script"));
+        assert_eq!(
+            script_body.as_bytes(),
+            fixture_script.contents,
+            "entry script must serve the mounted bundle byte-exact"
         );
 
         let mut deep_link_response = agent

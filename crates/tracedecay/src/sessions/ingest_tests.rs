@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tracedecay_domain::{BrainId, ProjectId};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
-use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
+use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 use tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority;
 use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_sessions::runtime::ingest::test_support::{

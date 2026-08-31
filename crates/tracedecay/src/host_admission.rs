@@ -22,7 +22,7 @@ use tracedecay_sessions::admission::{
 };
 use tracedecay_sessions::runtime::codex::CodexDiscoveryHub;
 
-use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
+use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
@@ -273,6 +273,7 @@ impl HostAdmissionTestRuntimeV1 {
             match registries.get_live(&profile_key) {
                 Some(registry) => registry,
                 None => {
+                    crate::register_runtime_ports()?;
                     let registry =
                         Arc::new(DaemonSessionRuntimeRegistryV1::open(identity.clone()).await?);
                     registries.insert(profile_key, &registry);

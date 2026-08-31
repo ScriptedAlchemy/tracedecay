@@ -520,6 +520,55 @@ fn sync_codex_hook_trust_rejects_tampered_installed_command() {
 }
 
 #[test]
+fn sync_codex_hook_trust_all_skipped_is_ok_without_hollow_state() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let plugin_dir = install_codex_personal_bootstrap(home.path(), TEST_BIN).unwrap();
+    let hooks_path = plugin_dir.join("hooks/hooks.json");
+    let mut hooks = load_json_file_strict(&hooks_path).unwrap();
+    // Tamper every managed command so the safety valve skips the full set.
+    let events = hooks["hooks"].as_object_mut().unwrap();
+    for groups in events.values_mut() {
+        let Some(groups) = groups.as_array_mut() else {
+            continue;
+        };
+        for group in groups {
+            let Some(handlers) = group
+                .get_mut("hooks")
+                .and_then(|value| value.as_array_mut())
+            else {
+                continue;
+            };
+            for handler in handlers {
+                let Some(command) = handler.get("command").and_then(|value| value.as_str()) else {
+                    continue;
+                };
+                handler["command"] = json!(format!("{command} && /tmp/untrusted-payload"));
+            }
+        }
+    }
+    safe_write_json_file(&hooks_path, &hooks, None).unwrap();
+    let config_path = codex_config_path(home.path());
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &config_path,
+        "model = \"o4-mini\"\n\n[plugins.\"tracedecay@personal\"]\nenabled = true\n",
+    )
+    .unwrap();
+
+    let outcome = sync_codex_hook_trust(home.path(), TEST_BIN).unwrap();
+
+    assert_eq!(outcome.trusted, 0);
+    assert_eq!(outcome.skipped.len(), CODEX_MANAGED_HOOKS.len());
+    let config_text = std::fs::read_to_string(&config_path).unwrap();
+    assert!(
+        !config_text.contains("[hooks"),
+        "all-skip must not leave hollow [hooks]/[hooks.state] tables: {config_text}"
+    );
+    assert!(config_text.contains("model = \"o4-mini\""));
+    assert!(config_text.contains("[plugins.\"tracedecay@personal\"]"));
+}
+
+#[test]
 fn codex_hook_command_invokes_tracedecay_is_a_safety_valve() {
     // A hook that actually invokes the tracedecay binary is trustable. Build
     // the command through the same hook_command helper the generator uses so

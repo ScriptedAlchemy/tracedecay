@@ -2,6 +2,7 @@ mod hotpath_observe;
 pub mod lcm;
 mod ports;
 mod refresh;
+mod refresh_service;
 mod retrieval;
 #[cfg(test)]
 mod tests;
@@ -15,6 +16,12 @@ pub use refresh::{
     SessionRefreshConfiguration, SessionRefreshDigest, SessionRefreshHandle, SessionRefreshOutcome,
     SessionRefreshRequestError, SessionRefreshSchedulerError, SessionRefreshSchedulerPort,
     SessionRefreshService, SessionRefreshTarget,
+};
+pub use refresh_service::{
+    SessionRefreshAction, SessionRefreshCommand, SessionRefreshCoverageView,
+    SessionRefreshFrontierView, SessionRefreshProgressView, SessionRefreshReceiptView,
+    SessionRefreshServiceFuture, SessionRefreshServiceOutcome, SessionRefreshServicePort,
+    utc_micros_value,
 };
 pub use retrieval::{
     SessionRetrievalConfiguration, SessionRetrievalService, SessionTemporalQuery,

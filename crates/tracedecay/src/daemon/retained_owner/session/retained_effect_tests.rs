@@ -32,7 +32,7 @@ use crate::daemon::retained_owner::session_refresh::admitted_session_refresh_com
 use crate::host_admission::HostAdmissionTestRuntimeV1;
 use crate::mcp::server::{DaemonSessionRefreshService, DaemonWorkflowIndexReadService};
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
-use tracedecay_mcp::{SessionRefreshServiceOutcome, SessionRefreshServicePort};
+use tracedecay_session_memory::session::{SessionRefreshServiceOutcome, SessionRefreshServicePort};
 use tracedecay_session_runtime::session_retrieval::{
     DaemonSessionRetrievalRoot, DaemonSessionRetrievalService, SessionApplicationRetrievalPortV1,
 };

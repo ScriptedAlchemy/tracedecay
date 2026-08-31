@@ -895,7 +895,7 @@ mod runtime_configuration_cutover {
         runtime_configuration_for_layout,
     };
     use crate::host_admission::HostAdmissionTestRuntimeV1;
-    use tracedecay_usecases::configuration::{
+    use tracedecay_configuration::{
         ConfigurationControlStore, ConfigurationMutationAuthority, DirectConfigurationMutation,
         ProjectConfigurationRuntime,
     };
@@ -1050,7 +1050,7 @@ mod runtime_configuration_cutover {
         crate::config::install_usecase_runtime_configuration_authority()
             .expect("install the root runtime configuration authority");
         let opened =
-            tracedecay_usecases::config::open_runtime_configuration_for_registered_database(
+            tracedecay_configuration::config::open_runtime_configuration_for_registered_database(
                 root.path(),
                 &layout,
                 database,
@@ -1421,12 +1421,12 @@ mod runtime_configuration_cutover {
             "returning to the primary must not repair linked-worktree churn"
         );
         assert_eq!(
-            tracedecay_usecases::config::scope_control::daemon_owned_project_source_binding(
+            tracedecay_configuration::config::scope_control::daemon_owned_project_source_binding(
                 &project_id,
                 &primary,
             )
             .expect("primary binding"),
-            tracedecay_usecases::config::scope_control::daemon_owned_project_source_binding(
+            tracedecay_configuration::config::scope_control::daemon_owned_project_source_binding(
                 &project_id,
                 &linked,
             )
@@ -1531,13 +1531,13 @@ mod runtime_configuration_cutover {
         // matches this project's authority but carries a foreign binding id
         // and a drifted locator digest.
         let other_binding =
-            tracedecay_usecases::config::scope_control::daemon_owned_project_source_binding(
+            tracedecay_configuration::config::scope_control::daemon_owned_project_source_binding(
                 &other_project,
                 &checkout,
             )
             .expect("build other-project binding");
         let drifted =
-            tracedecay_usecases::config::scope_control::daemon_owned_project_source_binding(
+            tracedecay_configuration::config::scope_control::daemon_owned_project_source_binding(
                 &project_id,
                 &elsewhere,
             )

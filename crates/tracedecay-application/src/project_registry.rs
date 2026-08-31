@@ -9,6 +9,7 @@
 //! unreadable registry stays a failure instead of collapsing into a
 //! successful empty listing.
 
+use std::fmt::Write as _;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -70,6 +71,57 @@ pub struct PublicCodeProject {
 pub struct ProjectRegistryView {
     pub summary: ProjectRegistrySummary,
     pub project_tree: Vec<ProjectRepoGroup>,
+}
+
+/// Terminal/tool-output text for one registry view.
+///
+/// Shared by the MCP registry tools and `tracedecay project list`. Lives
+/// next to the presentation DTO so neither `tracedecay-mcp` nor
+/// `tracedecay-dashboard-api` owns a private copy.
+pub fn render_project_registry_view(title: &str, view: &ProjectRegistryView) -> String {
+    if view.summary.project_count == 0 {
+        return format!("No {title} found.");
+    }
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "Found {} {title} across {} repositories.\n\nRepositories:",
+        view.summary.project_count, view.summary.repo_count
+    );
+    for group in &view.project_tree {
+        let group_branches = if group.branches.is_empty() {
+            "-".to_string()
+        } else {
+            group.branches.join(", ")
+        };
+        let _ = writeln!(out, "- {} (branches: {})", group.label, group_branches);
+        for project in &group.projects {
+            let marker = if project.is_active == Some(true) {
+                " *"
+            } else {
+                ""
+            };
+            let branches = if project.branches.is_empty() {
+                "-".to_string()
+            } else {
+                project.branches.join(", ")
+            };
+            let _ = writeln!(
+                out,
+                "  - `{}`{} [{}] branches: {}; stores: {}; path: {}",
+                project.project_id,
+                marker,
+                project.kind,
+                branches,
+                project.store_count,
+                project.project_root
+            );
+        }
+    }
+    if view.summary.truncated {
+        out.push_str("\nResult truncated; increase limit for more projects.\n");
+    }
+    out
 }
 
 /// Which registered project a context read names.

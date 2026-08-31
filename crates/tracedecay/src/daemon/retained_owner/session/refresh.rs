@@ -8,7 +8,7 @@ use tracedecay_application::retained_surfaces::{
     TemporalCoverageV1,
 };
 
-use tracedecay_mcp::{
+use tracedecay_session_memory::session::{
     SessionRefreshCoverageView, SessionRefreshFrontierView, SessionRefreshProgressView,
     SessionRefreshReceiptView, SessionRefreshServiceOutcome,
 };

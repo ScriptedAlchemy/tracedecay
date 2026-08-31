@@ -31,6 +31,7 @@ use tracedecay_application::{
     ApplicationContractError, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
     Deadline, DisclosureClass, RequestContext, now_micros,
 };
+use tracedecay_usecases::semantic_runtime::ProjectSemanticActivationExt;
 
 use super::maintenance::GuardedStoreTelemetryPort;
 use tracedecay_daemon_service::DaemonFeedbackRuntimeRegistrar;
@@ -870,7 +871,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
     diagnostic_broker: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
     feedback_runtimes: DaemonFeedbackRuntimeRegistrar,
     store_telemetry_sampling: super::maintenance::StoreTelemetrySamplingRegistry,
-    configuration_runtime: Arc<tracedecay_usecases::configuration::ProjectConfigurationRuntime>,
+    configuration_runtime: Arc<tracedecay_configuration::ProjectConfigurationRuntime>,
 ) -> tracedecay_dashboard_api::DoctorReportReader {
     Arc::new(move || {
         let project_root = project_root.clone();

@@ -38,7 +38,7 @@ pub struct TraceDecay {
     profile_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     pub(crate) store_runtime_registry: crate::project_store_runtime::ProjectStoreRuntimeHandle,
     config: TraceDecayConfig,
-    configuration_runtime: Arc<tracedecay_usecases::configuration::ProjectConfigurationRuntime>,
+    configuration_runtime: Arc<tracedecay_configuration::ProjectConfigurationRuntime>,
     project_root: PathBuf,
     store_layout: StoreLayout,
     open_options: TraceDecayOpenOptions,
@@ -87,7 +87,7 @@ impl TraceDecay {
 
     pub(crate) fn configuration_runtime(
         &self,
-    ) -> &Arc<tracedecay_usecases::configuration::ProjectConfigurationRuntime> {
+    ) -> &Arc<tracedecay_configuration::ProjectConfigurationRuntime> {
         &self.configuration_runtime
     }
 
@@ -225,7 +225,7 @@ impl TraceDecay {
             .await
             .ok()
             .map(
-                |pinned| tracedecay_usecases::configuration::ConfigurationCurrentStateV1 {
+                |pinned| tracedecay_configuration::ConfigurationCurrentStateV1 {
                     revision_id: pinned.revision_id,
                     snapshot: pinned.snapshot,
                 },

@@ -8,6 +8,7 @@ use tracedecay_application::source_edit::{
     RenameSymbolBindingV1,
 };
 use tracedecay_automation_runtime::ports::project_runtime::{ProjectRuntime, RuntimeFuture};
+use tracedecay_configuration::UserSettingsDaemonClient;
 use tracedecay_dashboard_api::DashboardProjectRuntime;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{FactOwnerV1, ProjectId, UserProfileId};
@@ -15,7 +16,6 @@ use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_graph_query::SourceReadRuntimePort;
 use tracedecay_runtime_core::db::{Database, DatabaseStorageTelemetryHandle};
 use tracedecay_runtime_core::storage::StoreLayout;
-use tracedecay_usecases::configuration::UserSettingsDaemonClient;
 use tracedecay_usecases::tracedecay::{
     EditDiagnosticRecord, GraphFuture, PlannedSourceEditFile, SourceEditGraphReadV1,
     SourceEditRuntimePort,

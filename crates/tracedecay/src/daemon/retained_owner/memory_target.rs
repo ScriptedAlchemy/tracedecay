@@ -9,7 +9,7 @@ use tracedecay_domain::{FactOwnerV1, ProjectId};
 use tracedecay_store::StoreShardScopeV1;
 
 use super::map_execution_error;
-use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
+use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 use crate::tracedecay::TraceDecay;
 use tracedecay_application::RetainedSurfaceExecutionErrorV1;
 use tracedecay_runtime_core::db::Database;
@@ -127,7 +127,7 @@ pub(crate) async fn open_project_retained_memory_target<'a>(
 async fn open_profile_memory(
     registry: &DaemonSessionRuntimeRegistryV1,
 ) -> Result<Database, RetainedSurfaceExecutionErrorV1> {
-    crate::daemon::store_runtime::session_registry::open_user_memory_db(registry)
+    tracedecay_store_runtime::open_user_memory_db(registry)
         .await
         .map_err(map_execution_error)
 }

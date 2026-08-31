@@ -481,7 +481,7 @@ pub(super) async fn execute_context_scout(
         );
     };
     let current = match registered.runtime.client().current().await {
-        Ok(current) => tracedecay_usecases::configuration::ConfigurationCurrentStateV1 {
+        Ok(current) => tracedecay_configuration::ConfigurationCurrentStateV1 {
             revision_id: current.revision_id,
             snapshot: current.snapshot,
         },
@@ -742,7 +742,7 @@ async fn execute_context_scout_state_transition(
     registry: Arc<ProjectContextScoutAddressRegistryV1>,
     control: &ContextScoutControlSurfaceRequest,
     target: tracedecay_domain::configuration::ContextScoutConfigurationStateV1,
-    current: tracedecay_usecases::configuration::ConfigurationCurrentStateV1,
+    current: tracedecay_configuration::ConfigurationCurrentStateV1,
     observed_at: UtcMicros,
     deadline: Deadline,
     cancellation: CancellationContext,
@@ -891,7 +891,7 @@ async fn reconcile_context_scout_configuration(
         .current()
         .await
         .map_err(|_| ContextScoutActivationReconciliationError::ConfigurationUnavailable)?;
-    let current = tracedecay_usecases::configuration::ConfigurationCurrentStateV1 {
+    let current = tracedecay_configuration::ConfigurationCurrentStateV1 {
         revision_id: current.revision_id,
         snapshot: current.snapshot,
     };

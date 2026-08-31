@@ -15,11 +15,11 @@ use tracedecay_mcp::{JsonRpcResponse, McpTransport};
 
 use super::BrokerStream;
 use super::*;
+use tracedecay_daemon_protocol::{BrokerReadHalf, BrokerWriteHalf};
 use tracedecay_framing::{
     BoundedLineReader, MAX_MCP_JSONRPC_FRAME_BYTES, MCP_OVERSIZE_ID_INSPECT_BYTES,
     is_wire_oversized_io_error, wire_oversized_io_error_with_prefix,
 };
-use tracedecay_daemon_protocol::{BrokerReadHalf, BrokerWriteHalf};
 
 pub(super) struct BrokerStreamTransport {
     // Every daemon read of this transport races something else in a

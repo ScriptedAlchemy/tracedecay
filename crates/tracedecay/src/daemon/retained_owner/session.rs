@@ -41,7 +41,6 @@ use tracedecay_temporal_query::ranking::DiversityLimits;
 
 use super::receipts::{evidence_outcome, session_refresh_effect_outcome};
 use super::session_refresh::{RetainedSessionRefreshPortV1, admitted_session_refresh_command};
-use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::timeutil::{SearchTimeBound, parse_search_time_filter_bound};
@@ -49,6 +48,7 @@ use tracedecay_session_runtime::session_retrieval::{
     DaemonSessionRetrievalService, SessionApplicationRetrievalPortV1, SessionRetrievalPageView,
     SessionRetrievalServiceOutcome, SessionRetrievalStoreScope, SessionTemporalMetadataView,
 };
+use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
 mod refresh;
 #[cfg(test)]

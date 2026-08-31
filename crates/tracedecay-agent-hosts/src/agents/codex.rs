@@ -351,12 +351,38 @@ impl AgentIntegration for CodexIntegration {
         components: &[super::host_bundle_v2::HostBundleComponentV1],
         home: &Path,
     ) -> Vec<PathBuf> {
-        let _ = components;
-        self.host_registration_paths(home)
+        let mut paths = self.host_registration_paths(home);
+        // `~/.codex/agents` is Core registration surface: current exports plus
+        // the ownership manifest (and prior-manifest direct children) so a
+        // transaction that retires stale exports can still roll them back.
+        if components.contains(&super::host_bundle_v2::HostBundleComponentV1::Core) {
+            // `agent_targets` lives in automation-runtime and reads agent
+            // bytes through the host-io port this crate owns. Bind it before
+            // inventory so preview/backup see the same surface activate mutates
+            // (composition-root and in-crate tests that skip `main` both rely
+            // on this ensure — registration is idempotent).
+            crate::register_automation_host_io();
+            if let Ok(managed) = tracedecay_automation_runtime::automation::agent_targets::managed_agent_transaction_paths(
+                home,
+            ) {
+                paths.extend(managed);
+            }
+        }
+        paths
     }
 
     #[hotpath::measure(label = "hosts.agent.codex.plugin_activate")]
     fn activate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
+        // `~/.codex/agents` is registration surface, not deployed component
+        // assets: `host_component_registration_paths` declares every generated
+        // export plus the ownership manifest for Core. Activation must refresh
+        // current exports and retire previous-bundle stale ones — otherwise
+        // Core install through the receipt-backed lifecycle never writes them
+        // and never retires them (byte-for-byte rollback then fails).
+        crate::register_automation_host_io();
+        tracedecay_automation_runtime::automation::agent_targets::install_codex_managed_agents(
+            &ctx.home,
+        )?;
         if !codex_plugin_is_natively_active(&ctx.home, Some(&ctx.tracedecay_bin))? {
             let marketplace_name = codex_cached_marketplace_name(&ctx.home);
             let codex_cli = plugin_registry::require_codex_plugin_cli()?;
@@ -390,6 +416,17 @@ impl AgentIntegration for CodexIntegration {
             let codex_cli = plugin_registry::require_codex_plugin_cli()?;
             plugin_registry::codex_plugin_remove_with(&codex_cli, &ctx.home, &marketplace_name)?;
         }
+        // Managed agent exports are Core registration surface (not artifacts).
+        // Clear them here so uninstall verification can reach Missing and so
+        // a rolled-back deactivate restores the pre-op exports byte-for-byte.
+        crate::register_automation_host_io();
+        tracedecay_automation_runtime::automation::agent_targets::remove_managed_agents(
+            &ctx.home.join(".codex/agents"),
+        )?;
+        // TraceDecay stages the personal marketplace entry; Codex's
+        // `plugin remove` never clears it. Leaving it would hold post-uninstall
+        // registration at Repairable via [`codex_registration_residue`].
+        remove_codex_marketplace_entry_at(&codex_personal_marketplace_path(&ctx.home), "personal")?;
         // `codex plugin remove` deliberately never touches `[hooks.state]`,
         // so the managed trust records written at install/update time would
         // otherwise survive as registration residue and hold uninstall
@@ -487,6 +524,35 @@ fn codex_cached_marketplace_name(home: &Path) -> String {
 fn codex_plugin_current_cached_install_dir(home: &Path) -> PathBuf {
     codex_plugin_cached_root(home, &codex_cached_marketplace_name(home))
         .join(crate::PRODUCT_VERSION)
+}
+
+/// Attribute Codex CLI cache mutations to the active host-config write-intent
+/// scope so registration rollback can restore the pre-command surface.
+///
+/// `host_registration_paths` inventories every managed file under the versioned
+/// cache. `codex plugin add`/`remove` create or delete those files outside
+/// [`super::safe_write_text_file`], and without a recorded intent
+/// `restore_registration` treats the live cache as foreign drift (`StalePreview`)
+/// and aborts before restoring any other registration path — including the
+/// managed-agent ownership manifest that byte-for-byte rollback demands.
+fn record_codex_cached_plugin_registration_intents(home: &Path) -> Result<()> {
+    let cache_dir = codex_plugin_current_cached_install_dir(home);
+    for path in codex_plugin_managed_paths(&cache_dir) {
+        let contents = match std::fs::read(&path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "failed to read Codex plugin cache registration path {}: {error}",
+                        path.display()
+                    ),
+                });
+            }
+        };
+        super::record_host_config_observation_bytes(&path, contents.as_deref())?;
+    }
+    Ok(())
 }
 
 fn codex_exact_cache_manifest_path(home: &Path) -> Result<Option<PathBuf>> {
@@ -1263,16 +1329,31 @@ fn sync_codex_hook_trust(home: &Path, tracedecay_bin: &str) -> Result<CodexHookT
             trusted += 1;
         }
 
+        let outcome = CodexHookTrustSyncOutcome { trusted, skipped };
+        // A truthful all-skip (or empty hook payload) leaves no trust records.
+        // That is not a serializer failure — announce treats it as Ok + guidance.
+        // Drop hollow `[hooks.state]`/`[hooks]` tables the same way prune does.
+        if state.is_empty() {
+            if let Some(hooks) = table.get_mut("hooks").and_then(toml::Value::as_table_mut) {
+                hooks.remove("state");
+                if hooks.is_empty() {
+                    table.remove("hooks");
+                }
+            }
+            let contents = render_codex_config(&config_path, &config)?;
+            return Ok((outcome, TextFileMutation::Write(contents)));
+        }
+
         let contents = render_codex_config(&config_path, &config)?;
+        // Child trust records exist: Codex requires an explicit `[hooks.state]`
+        // parent. Missing child headers here means the serializer dropped
+        // entries we just inserted — a real contract breach.
         let Some(updated) = with_explicit_hooks_state_parent(&contents) else {
             return Err(TraceDecayError::Config {
                 message: "Codex hook trust state serialized without hook entries".to_string(),
             });
         };
-        Ok((
-            CodexHookTrustSyncOutcome { trusted, skipped },
-            TextFileMutation::Write(updated),
-        ))
+        Ok((outcome, TextFileMutation::Write(updated)))
     })?;
     eprintln!("\x1b[32m✔\x1b[0m Wrote {}", config_path.display());
     Ok(outcome)
@@ -1287,7 +1368,10 @@ fn render_codex_config(config_path: &Path, config: &toml::Value) -> Result<Strin
 /// Codex's hook loader requires the parent table to be explicit on disk. The
 /// `toml` serializer otherwise emits only `[hooks.state."..."]` child tables,
 /// which parses equivalently but still triggers Codex's hook-review prompt.
-/// Returns `None` when no hook trust records survive in the document.
+/// Returns `None` when no hook trust child tables are present — callers that
+/// just inserted records treat that as a serializer contract breach; callers
+/// that intentionally cleared state (prune / all-skip) fall back to the
+/// unshaped document.
 fn with_explicit_hooks_state_parent(contents: &str) -> Option<String> {
     let child_offset = contents.find("[hooks.state.\"")?;
     let mut updated = String::with_capacity(contents.len() + "[hooks.state]\n\n".len());

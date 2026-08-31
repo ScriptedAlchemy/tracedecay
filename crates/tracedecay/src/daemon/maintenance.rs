@@ -2221,7 +2221,7 @@ mod tests {
         let temporary = tempfile::tempdir().expect("telemetry registry fixture root");
         let database_path = temporary.path().join("project.db");
         let other_database_path = temporary.path().join("other.db");
-        crate::daemon::store_runtime::register_registered_schema_installer();
+        tracedecay_store_runtime::register_registered_schema_installer();
         let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
             &database_path,
             "maintenance telemetry shutdown fixture",

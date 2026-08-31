@@ -295,8 +295,8 @@ mod tests {
     use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationSnapshotV1};
 
     use super::*;
-    use crate::configuration::ConfigurationCurrentStateV1;
     use crate::semantic_runtime::SemanticRuntimeRouteV1;
+    use tracedecay_configuration::ConfigurationCurrentStateV1;
 
     fn pin() -> SemanticConfigurationPinV1 {
         SemanticConfigurationPinV1::from_current(&ConfigurationCurrentStateV1 {

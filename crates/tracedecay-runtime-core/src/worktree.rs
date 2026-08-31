@@ -20,6 +20,8 @@
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
+use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_domain::{ManifestDigest, canonical_sha256};
 
 /// A mismatch between the caller's git working tree and the resolved
 /// tracedecay index root.
@@ -63,6 +65,27 @@ pub fn git_common_dir(dir: &Path) -> Option<PathBuf> {
     crate::git_repository::GitRepositoryAuthority::discover(dir)
         .ok()
         .map(|repository| repository.common_dir().to_path_buf())
+}
+
+/// Stable repository locator digest for a registered project root.
+///
+/// Linked worktrees share one retained project/configuration authority, so
+/// this binds that authority to their canonical Git common directory.
+/// Independent clones retain distinct locators. Non-Git projects fall back
+/// to their canonical root.
+pub fn locator_digest_for_project(project_root: &Path) -> Result<ManifestDigest, TraceDecayError> {
+    let repository_locator = git_common_dir(project_root).unwrap_or_else(|| {
+        project_root
+            .canonicalize()
+            .unwrap_or_else(|_| project_root.to_path_buf())
+    });
+    canonical_sha256(&(
+        "tracedecay.project-open.repository-locator.v2",
+        repository_locator.to_string_lossy().as_ref(),
+    ))
+    .map_err(|_| TraceDecayError::Config {
+        message: "project locator digest is inconsistent".to_owned(),
+    })
 }
 
 /// Derives the primary checkout root for a linked worktree from its git
@@ -527,6 +550,53 @@ mod tests {
             None,
             "non-`.git` common dirs must not redirect registration"
         );
+    }
+
+    #[test]
+    fn linked_worktrees_share_repository_locator_but_independent_repositories_do_not() {
+        let temporary = tempdir().unwrap();
+        let primary = temporary.path().join("primary");
+        let linked = temporary.path().join("linked");
+        let independent = temporary.path().join("independent");
+        fs::create_dir_all(&primary).unwrap();
+        fs::create_dir_all(&independent).unwrap();
+
+        run_git(&primary, &["init", "-b", "main", "--quiet"]);
+        fs::write(primary.join("README.md"), "primary\n").unwrap();
+        run_git(&primary, &["add", "README.md"]);
+        run_git(
+            &primary,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--quiet",
+                "-m",
+                "fixture",
+            ],
+        );
+        run_git(
+            &primary,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature/linked",
+                linked.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        run_git(&independent, &["init", "-b", "main", "--quiet"]);
+
+        let primary_digest = locator_digest_for_project(&primary).expect("primary locator digest");
+        let linked_digest = locator_digest_for_project(&linked).expect("linked locator digest");
+        let independent_digest =
+            locator_digest_for_project(&independent).expect("independent locator digest");
+
+        assert_eq!(linked_digest, primary_digest);
+        assert_ne!(independent_digest, primary_digest);
     }
 
     #[test]

@@ -14,11 +14,11 @@ use tracedecay_application::{
     ApplicationContractError, ApplicationOutcome, ApplicationProblemEnvelope, AuthorizedScopeSet,
     NativeIntegrationSurfaceResultV1, RequestId,
 };
+use tracedecay_configuration::DirectConfigurationMutation;
 use tracedecay_domain::configuration::{
     ConfigurationIdempotencyKey, ConfigurationRevisionId, UserProfileId,
 };
 use tracedecay_domain::{NativeIntegrationTransactionId, ProjectId, ScopeSetId};
-use tracedecay_usecases::configuration::DirectConfigurationMutation;
 
 use crate::DashboardHttpRequestControlV1;
 

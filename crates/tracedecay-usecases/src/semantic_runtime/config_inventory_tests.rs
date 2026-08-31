@@ -7,7 +7,7 @@ use tracedecay_domain::{
     RetrievalBudget, RetrieverKind, VectorGenerationIdV1, WorktreeId,
 };
 use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
-use tracedecay_search_eval::{
+use tracedecay_query::search_quality::{
     DirectEvaluationReportV1, DirectEvaluationStatusV1, DirectProfileEvaluationV1,
     DirectQualityMetricsV1, DirectRatioMetricV1, EvaluationExecutionContractV1,
     OptionalStageMeasurementV1, OptionalStageMeasurementsV1,
@@ -84,7 +84,7 @@ fn passing_report(profile_id: &str) -> DirectEvaluationReportV1 {
             runtime_revision: "runtime.inventory-test.v1".to_owned(),
             cache_state: "empty".to_owned(),
             concurrency:
-                tracedecay_search_eval::candidate_output::EvaluationConcurrencyContractV1 {
+                tracedecay_query::search_quality::candidate_output::EvaluationConcurrencyContractV1 {
                     query_workers: 1,
                     projection_workers: 1,
                     query_execution: "serial".to_owned(),

@@ -39,7 +39,7 @@ use tracedecay_store::{
 };
 use tracedecay_tool_catalog::SortContractId;
 
-use super::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1;
+use tracedecay_store_runtime::DaemonRemoteReplayTransactionAuthorityV1;
 
 /// Query adapter over one authenticated `RemoteNode` store and the canonical
 /// project runtime registry shared with replay/recovery.
