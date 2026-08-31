@@ -16,7 +16,7 @@ use super::{
     write_json_rpc_response,
 };
 use tracedecay_application::{ApplicationProblem, LegalAction, RetryDirective, SafeDiagnostic};
-use tracedecay_daemon_control::DAEMON_SHUTDOWN_METHOD;
+use tracedecay_daemon_protocol::DAEMON_SHUTDOWN_METHOD;
 use tracedecay_mcp::ErrorCode;
 use tracedecay_runtime_core::weak_registry::WeakRegistry;
 

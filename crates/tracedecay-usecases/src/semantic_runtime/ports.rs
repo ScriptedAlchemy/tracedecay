@@ -9,6 +9,7 @@ use tracedecay_domain::{
     FusionProfileId, ManifestDigest, RetrievalAnchorId, UtcMicros, VectorGenerationIdV1,
     canonical_sha256,
 };
+use tracedecay_semantic_contracts::SemanticFallbackReasonV1;
 
 use crate::config::retrieval::{
     AcceptedRetrievalProfileV1, RetrievalProfileAuditEventV1, RetrievalProfileAuditOperationV1,
@@ -432,10 +433,6 @@ impl SemanticRollbackReceiptV1 {
         )
     }
 }
-
-/// Why the semantic lane is unavailable or degraded. Defined by the semantic
-/// runtime crate, which produces the reasons this projection reports.
-pub use tracedecay_semantic::SemanticFallbackReasonV1;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "state", rename_all = "snake_case")]

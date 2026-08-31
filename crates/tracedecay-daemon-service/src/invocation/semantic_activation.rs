@@ -17,8 +17,12 @@ use tracedecay_usecases::configuration::ConfigurationCurrentStateV1;
 use tracedecay_usecases::semantic_runtime::SemanticConfigurationPinV1;
 
 use tracedecay_domain::configuration::SEMANTIC_RUNTIME_SETTING_KEY;
-use tracedecay_global_db::configuration::semantic::{SemanticConfig, SemanticProfileSelection};
-use tracedecay_semantic::{SemanticModelLifecycleStateV1, SemanticModelLifecycleStatusV1};
+#[cfg(test)]
+use tracedecay_semantic_contracts::SemanticModelRemediationV1;
+use tracedecay_semantic_contracts::{
+    SemanticConfig, SemanticModelLifecycleStateV1, SemanticModelLifecycleStatusV1,
+    SemanticProfileSelection,
+};
 
 /// Installed-model material required to author a semantic profile selection.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -86,7 +90,10 @@ impl DaemonInvocationService {
         // evaluation so a missing model is a fast typed refusal, not a
         // late one.
         let material = match semantic_activation_material(
-            tracedecay_usecases::semantic_runtime::project_or_shared_lifecycle_status(&project_root_path).as_ref(),
+            tracedecay_usecases::semantic_runtime::project_or_shared_lifecycle_status(
+                &project_root_path,
+            )
+            .as_ref(),
         ) {
             Ok(material) => material,
             Err(problem) => return application_problem(request_id, problem),
@@ -215,11 +222,12 @@ impl DaemonInvocationService {
                 })
                 .ok()
             });
-        let runtime_state = tracedecay_usecases::semantic_runtime::resolve_project_semantic_runtime_status(
-            Some(&project_root_path),
-            pin,
-        )
-        .state;
+        let runtime_state =
+            tracedecay_usecases::semantic_runtime::resolve_project_semantic_runtime_status(
+                Some(&project_root_path),
+                pin,
+            )
+            .state;
         // The invocation wire carries the observed state as serialized JSON
         // (the protocol crate does not depend on the usecases state enum).
         let runtime_state = match serde_json::to_value(&runtime_state) {
@@ -384,7 +392,7 @@ mod tests {
                 artifact_digest: "a".repeat(64),
                 install_path: PathBuf::from("/models/jina"),
             }),
-            remediation: tracedecay_semantic::SemanticModelRemediationV1 {
+            remediation: SemanticModelRemediationV1 {
                 retry: false,
                 remove: false,
                 rollback: false,

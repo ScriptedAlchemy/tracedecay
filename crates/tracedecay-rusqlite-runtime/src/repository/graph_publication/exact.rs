@@ -31,11 +31,11 @@ use super::{
 mod support;
 use support::{
     begin, begin_read, commit, ensure_owner, ensure_shard_owner, execute,
-    has_active_inbound_dependencies, insert_verified_dependencies, next_retired_cleanup_metadata,
-    optional_text, read_by_sequence, read_conflicts, read_exact, read_exact_metadata,
-    read_exact_tombstone, read_first_conflict_sequence, read_head, read_pending,
-    read_pending_sequence, read_projection_page, read_replays_by_sequences,
-    read_tombstone_by_sequence, read_tombstone_conflicts, replay_metadata_page, rollback,
+    has_active_inbound_dependencies, insert_verified_dependencies, optional_text, read_by_sequence,
+    read_conflicts, read_exact, read_exact_metadata, read_exact_tombstone,
+    read_first_conflict_sequence, read_head, read_pending, read_pending_sequence,
+    read_projection_page, read_replays_by_sequences, read_tombstone_conflicts,
+    read_tombstones_by_sequences, replay_metadata_page, retired_cleanup_metadata_page, rollback,
     rollback_error, text,
 };
 
@@ -592,20 +592,29 @@ impl GraphPublicationStoreV1 for GraphPublicationExactSqlStorage {
         ensure_owner(&self.handle, &request.projection)?;
         let encoded = EncodedProjection::new(&request.projection)?;
         let snapshot = begin_read(&self.handle, context)?;
-        let mut after = request
+        let after = request
             .after
             .as_ref()
             .map_or(0, |cursor| cursor.sequence.get());
-        let mut records = Vec::with_capacity(usize::from(request.max_records));
+        // One keyset metadata page (limit + 1 signals a further page), then
+        // one batched materialization of the admitted records — the same
+        // page shape `replay_page` uses — instead of three reader round
+        // trips per tombstone. The snapshot keeps both reads consistent.
+        let metadata = retired_cleanup_metadata_page(
+            &snapshot,
+            &encoded,
+            after,
+            request.max_records.saturating_add(1),
+        )?;
+        let mut selected = Vec::with_capacity(usize::from(request.max_records));
         let mut payload_bytes = 0_usize;
-        let mut continuation = None;
-        while records.len() < usize::from(request.max_records) {
+        let mut has_more = false;
+        for (sequence, record_bytes) in metadata {
             ensure_not_interrupted(context)?;
-            let Some((sequence, record_bytes)) =
-                next_retired_cleanup_metadata(&snapshot, &encoded, after)?
-            else {
+            if selected.len() >= usize::from(request.max_records) {
+                has_more = true;
                 break;
-            };
+            }
             if record_bytes > MAX_GRAPH_REPLAY_SOURCE_BYTES_V1 {
                 return Err(GraphPublicationStoreErrorV1::Corrupt(
                     "retired cleanup payload exceeds its canonical storage bound".to_owned(),
@@ -616,48 +625,35 @@ impl GraphPublicationStoreV1 for GraphPublicationExactSqlStorage {
                     "retired cleanup page payload size overflowed".to_owned(),
                 )
             })?;
-            if !records.is_empty() && next_bytes > MAX_GRAPH_REPLAY_PAGE_SOURCE_BYTES_V1 {
-                continuation = records
-                    .last()
-                    .map(|record: &GraphPublicationReplayTombstoneV1| {
-                        GraphPublicationReplayCursorV1::new(
-                            request.projection.clone(),
-                            record.sequence,
-                        )
-                    })
-                    .transpose()?;
+            if !selected.is_empty() && next_bytes > MAX_GRAPH_REPLAY_PAGE_SOURCE_BYTES_V1 {
+                has_more = true;
                 break;
             }
-            let tombstone = read_tombstone_by_sequence(&snapshot, sequence_to_i64(sequence)?)?
-                .ok_or_else(|| {
-                    GraphPublicationStoreErrorV1::Corrupt(
-                        "enumerated retired cleanup replay disappeared in its read transaction"
-                            .to_owned(),
-                    )
-                })?;
+            payload_bytes = next_bytes;
+            selected.push(sequence);
+        }
+        let sequences = selected
+            .iter()
+            .map(|sequence| sequence_to_i64(*sequence))
+            .collect::<GraphPublicationStoreResultV1<Vec<_>>>()?;
+        let records = read_tombstones_by_sequences(&snapshot, &sequences)?;
+        for tombstone in &records {
             if tombstone.key.projection != request.projection {
                 return Err(GraphPublicationStoreErrorV1::Corrupt(
                     "enumerated retired cleanup replay escaped its projection".to_owned(),
                 ));
             }
-            payload_bytes = next_bytes;
-            after = sequence.get();
-            records.push(tombstone);
         }
-        if continuation.is_none() && !records.is_empty() {
-            ensure_not_interrupted(context)?;
-        }
-        if continuation.is_none()
-            && !records.is_empty()
-            && next_retired_cleanup_metadata(&snapshot, &encoded, after)?.is_some()
-        {
-            continuation = records
+        let continuation = if has_more {
+            records
                 .last()
-                .map(|record| {
+                .map(|record: &GraphPublicationReplayTombstoneV1| {
                     GraphPublicationReplayCursorV1::new(request.projection.clone(), record.sequence)
                 })
-                .transpose()?;
-        }
+                .transpose()?
+        } else {
+            None
+        };
         ensure_not_interrupted(context)?;
         GraphPublicationRetiredCleanupPageV1::new(records, continuation)
             .map_err(GraphPublicationStoreErrorV1::from)

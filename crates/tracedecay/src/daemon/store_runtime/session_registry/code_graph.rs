@@ -2043,175 +2043,191 @@ impl DaemonSessionRuntimeRegistryV1 {
             );
             self.ensure_code_graph_shard_attached(&bound_shard).await;
         }
-        let pool_deadline = Instant::now() + GRAPH_OPERATION_DEADLINE;
-        let pool_check = || {
-            if cancellation.is_cancelled() {
-                Err(GraphDbError::Cancelled)
-            } else if Instant::now() >= pool_deadline {
-                Err(GraphDbError::DeadlineExceeded)
-            } else {
-                Ok(())
-            }
-        };
-        let replay_pool_lock = lock_project_graph_replay_pool(&replay_root, &pool_check)?;
         let authority_lease: Arc<dyn RetainedGraphStoreLeaseV1> = authority;
         let mut storage = project_database
             .graph_publication_storage()
             .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
+        // Everything below is synchronous journal access: a blocking pool
+        // file lock, then retirement and cleanup sweeps whose store calls
+        // block on writer-actor and reader-worker round trips (with
+        // millisecond busy-retry sleeps inside `begin`/`begin_read`). Run
+        // the whole sweep on the blocking pool so a retention tick cannot
+        // stall the daemon's async runtime workers for its duration.
+        let graph_registry = self.graph_registry.clone();
+        let graph_lifecycle_cancelled = Arc::clone(&self.graph_lifecycle_cancelled);
+        let cancellation = cancellation.clone();
+        let generation = generation.clone();
+        tokio::task::spawn_blocking(move || {
+            let pool_deadline = Instant::now() + GRAPH_OPERATION_DEADLINE;
+            let pool_check = || {
+                if cancellation.is_cancelled() {
+                    Err(GraphDbError::Cancelled)
+                } else if Instant::now() >= pool_deadline {
+                    Err(GraphDbError::DeadlineExceeded)
+                } else {
+                    Ok(())
+                }
+            };
+            let replay_pool_lock = lock_project_graph_replay_pool(&replay_root, &pool_check)?;
 
-        let staged_unlink;
-        loop {
-            if cancellation.is_cancelled() {
-                return Err(GraphDbError::Cancelled);
-            }
-            let deadline_at = Instant::now() + GRAPH_OPERATION_DEADLINE;
-            let cancellation_identity = RuntimeCancellationIdentityV1 {
-                cancellation_id: RuntimeCancellationIdV1::new(format!(
-                    "graph-retire:{}",
-                    generation.as_str()
-                ))
-                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
-                generation: 1,
-            };
-            let deadline_identity = RuntimeDeadlineV1 {
-                deadline_id: RuntimeDeadlineIdV1::new(format!(
-                    "graph-retire-deadline:{}",
-                    generation.as_str()
-                ))
-                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
-            };
-            let request_cancellation: Arc<dyn GraphCancellation> =
-                Arc::new(MaintenanceGraphCancellationV1(cancellation.clone()));
-            let probe = GraphPublicationProbeV1 {
-                request_cancellation: Arc::clone(&request_cancellation),
-                lifecycle_cancellation: graph_lifecycle_cancellation(
-                    &self.graph_lifecycle_cancelled,
-                    None,
-                ),
-                deadline_at,
-                cancellation: cancellation_identity.clone(),
-                deadline: deadline_identity.clone(),
-                commit_started: AtomicBool::new(false),
-                deadline_warned: AtomicBool::new(false),
-            };
-            let control = RuntimeRequestControlV1 {
-                requested_at: tracedecay_application::clock::now_micros(),
-                deadline: deadline_identity,
-                cancellation: cancellation_identity,
-            };
-            let context = GraphPublicationOperationContextV1::new(&control, &probe)
-                .map_err(|error| GraphDbError::invalid(error.to_string()))?;
-            let registration = GraphDbRegistration {
-                authority_lease: Arc::clone(&authority_lease),
-                cancellation: Arc::clone(&request_cancellation),
-                lifecycle_cancellation: Arc::new(AtomicGraphCancellationV1::new(Arc::clone(
-                    &self.graph_lifecycle_cancelled,
-                ))),
-                deadline: deadline_at,
-            };
-            match self.graph_registry.retire_one_code_generation_replay(
-                registration,
-                &mut storage,
-                &context,
-                generation,
-                &sealed_digest,
-            )? {
-                GraphReplayCollectionOutcome::Retired(source) => {
-                    let tracedecay_graph_db::GraphGenerationReplaySource::SealedCodeGeneration(
-                        source,
-                    ) = *source
-                    else {
-                        return Err(GraphDbError::Corrupt {
-                            message: "code generation retirement selected an inline graph replay"
-                                .to_owned(),
-                        });
-                    };
-                    if source.generation != *generation
-                        || source.sealed_state_digest != sealed_digest
-                    {
-                        return Err(GraphDbError::Conflict);
-                    }
+            let staged_unlink;
+            loop {
+                if cancellation.is_cancelled() {
+                    return Err(GraphDbError::Cancelled);
                 }
-                GraphReplayCollectionOutcome::Retained => return Ok(false),
-                GraphReplayCollectionOutcome::Absent => {
-                    staged_unlink =
-                        stage_project_graph_replay_unlink(&replay_root, &sealed_digest)?;
-                    break;
-                }
-            }
-        }
-        drop(replay_pool_lock);
-        if let Some(staged_unlink) = staged_unlink {
-            finalize_project_graph_replay_unlink(
-                staged_unlink,
-                &replay_root,
-                &sealed_digest,
-                &pool_check,
-            )?;
-        }
-        let mut cleanup_sequence = 0_u64;
-        loop {
-            cleanup_sequence = cleanup_sequence.checked_add(1).ok_or_else(|| {
-                GraphDbError::budget_exhausted(GraphBudgetKind::Capacity, u64::MAX)
-            })?;
-            let deadline_at = Instant::now() + GRAPH_OPERATION_DEADLINE;
-            let cancellation_identity = RuntimeCancellationIdentityV1 {
-                cancellation_id: RuntimeCancellationIdV1::new(format!(
-                    "graph-cleanup:{}:{cleanup_sequence}",
-                    generation.as_str()
-                ))
-                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
-                generation: cleanup_sequence,
-            };
-            let deadline_identity = RuntimeDeadlineV1 {
-                deadline_id: RuntimeDeadlineIdV1::new(format!(
-                    "graph-cleanup-deadline:{}:{cleanup_sequence}",
-                    generation.as_str()
-                ))
-                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
-            };
-            let request_cancellation: Arc<dyn GraphCancellation> =
-                Arc::new(MaintenanceGraphCancellationV1(cancellation.clone()));
-            let probe = GraphPublicationProbeV1 {
-                request_cancellation: Arc::clone(&request_cancellation),
-                lifecycle_cancellation: graph_lifecycle_cancellation(
-                    &self.graph_lifecycle_cancelled,
-                    None,
-                ),
-                deadline_at,
-                cancellation: cancellation_identity.clone(),
-                deadline: deadline_identity.clone(),
-                commit_started: AtomicBool::new(false),
-                deadline_warned: AtomicBool::new(false),
-            };
-            let control = RuntimeRequestControlV1 {
-                requested_at: tracedecay_application::clock::now_micros(),
-                deadline: deadline_identity,
-                cancellation: cancellation_identity,
-            };
-            let context = GraphPublicationOperationContextV1::new(&control, &probe)
-                .map_err(|error| GraphDbError::invalid(error.to_string()))?;
-            let registration = GraphDbRegistration {
-                authority_lease: Arc::clone(&authority_lease),
-                cancellation: Arc::clone(&request_cancellation),
-                lifecycle_cancellation: Arc::new(AtomicGraphCancellationV1::new(Arc::clone(
-                    &self.graph_lifecycle_cancelled,
-                ))),
-                deadline: deadline_at,
-            };
-            if !self
-                .graph_registry
-                .finalize_one_code_generation_replay_cleanup(
+                let deadline_at = Instant::now() + GRAPH_OPERATION_DEADLINE;
+                let cancellation_identity = RuntimeCancellationIdentityV1 {
+                    cancellation_id: RuntimeCancellationIdV1::new(format!(
+                        "graph-retire:{}",
+                        generation.as_str()
+                    ))
+                    .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+                    generation: 1,
+                };
+                let deadline_identity = RuntimeDeadlineV1 {
+                    deadline_id: RuntimeDeadlineIdV1::new(format!(
+                        "graph-retire-deadline:{}",
+                        generation.as_str()
+                    ))
+                    .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+                };
+                let request_cancellation: Arc<dyn GraphCancellation> =
+                    Arc::new(MaintenanceGraphCancellationV1(cancellation.clone()));
+                let probe = GraphPublicationProbeV1 {
+                    request_cancellation: Arc::clone(&request_cancellation),
+                    lifecycle_cancellation: graph_lifecycle_cancellation(
+                        &graph_lifecycle_cancelled,
+                        None,
+                    ),
+                    deadline_at,
+                    cancellation: cancellation_identity.clone(),
+                    deadline: deadline_identity.clone(),
+                    commit_started: AtomicBool::new(false),
+                    deadline_warned: AtomicBool::new(false),
+                };
+                let control = RuntimeRequestControlV1 {
+                    requested_at: tracedecay_application::clock::now_micros(),
+                    deadline: deadline_identity,
+                    cancellation: cancellation_identity,
+                };
+                let context = GraphPublicationOperationContextV1::new(&control, &probe)
+                    .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+                let registration = GraphDbRegistration {
+                    authority_lease: Arc::clone(&authority_lease),
+                    cancellation: Arc::clone(&request_cancellation),
+                    lifecycle_cancellation: Arc::new(AtomicGraphCancellationV1::new(Arc::clone(
+                        &graph_lifecycle_cancelled,
+                    ))),
+                    deadline: deadline_at,
+                };
+                match graph_registry.retire_one_code_generation_replay(
                     registration,
                     &mut storage,
                     &context,
-                    generation,
+                    &generation,
                     &sealed_digest,
-                )?
-            {
-                return Ok(true);
+                )? {
+                    GraphReplayCollectionOutcome::Retired(source) => {
+                        let tracedecay_graph_db::GraphGenerationReplaySource::SealedCodeGeneration(
+                            source,
+                        ) = *source
+                        else {
+                            return Err(GraphDbError::Corrupt {
+                                message:
+                                    "code generation retirement selected an inline graph replay"
+                                        .to_owned(),
+                            });
+                        };
+                        if source.generation != generation
+                            || source.sealed_state_digest != sealed_digest
+                        {
+                            return Err(GraphDbError::Conflict);
+                        }
+                    }
+                    GraphReplayCollectionOutcome::Retained => return Ok(false),
+                    GraphReplayCollectionOutcome::Absent => {
+                        staged_unlink =
+                            stage_project_graph_replay_unlink(&replay_root, &sealed_digest)?;
+                        break;
+                    }
+                }
             }
-        }
+            drop(replay_pool_lock);
+            if let Some(staged_unlink) = staged_unlink {
+                finalize_project_graph_replay_unlink(
+                    staged_unlink,
+                    &replay_root,
+                    &sealed_digest,
+                    &pool_check,
+                )?;
+            }
+            let mut cleanup_sequence = 0_u64;
+            loop {
+                cleanup_sequence = cleanup_sequence.checked_add(1).ok_or_else(|| {
+                    GraphDbError::budget_exhausted(GraphBudgetKind::Capacity, u64::MAX)
+                })?;
+                let deadline_at = Instant::now() + GRAPH_OPERATION_DEADLINE;
+                let cancellation_identity = RuntimeCancellationIdentityV1 {
+                    cancellation_id: RuntimeCancellationIdV1::new(format!(
+                        "graph-cleanup:{}:{cleanup_sequence}",
+                        generation.as_str()
+                    ))
+                    .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+                    generation: cleanup_sequence,
+                };
+                let deadline_identity = RuntimeDeadlineV1 {
+                    deadline_id: RuntimeDeadlineIdV1::new(format!(
+                        "graph-cleanup-deadline:{}:{cleanup_sequence}",
+                        generation.as_str()
+                    ))
+                    .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+                };
+                let request_cancellation: Arc<dyn GraphCancellation> =
+                    Arc::new(MaintenanceGraphCancellationV1(cancellation.clone()));
+                let probe = GraphPublicationProbeV1 {
+                    request_cancellation: Arc::clone(&request_cancellation),
+                    lifecycle_cancellation: graph_lifecycle_cancellation(
+                        &graph_lifecycle_cancelled,
+                        None,
+                    ),
+                    deadline_at,
+                    cancellation: cancellation_identity.clone(),
+                    deadline: deadline_identity.clone(),
+                    commit_started: AtomicBool::new(false),
+                    deadline_warned: AtomicBool::new(false),
+                };
+                let control = RuntimeRequestControlV1 {
+                    requested_at: tracedecay_application::clock::now_micros(),
+                    deadline: deadline_identity,
+                    cancellation: cancellation_identity,
+                };
+                let context = GraphPublicationOperationContextV1::new(&control, &probe)
+                    .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+                let registration = GraphDbRegistration {
+                    authority_lease: Arc::clone(&authority_lease),
+                    cancellation: Arc::clone(&request_cancellation),
+                    lifecycle_cancellation: Arc::new(AtomicGraphCancellationV1::new(Arc::clone(
+                        &graph_lifecycle_cancelled,
+                    ))),
+                    deadline: deadline_at,
+                };
+                if !graph_registry.finalize_one_code_generation_replay_cleanup(
+                    registration,
+                    &mut storage,
+                    &context,
+                    &generation,
+                    &sealed_digest,
+                )? {
+                    return Ok(true);
+                }
+            }
+        })
+        .await
+        .map_err(|error| {
+            GraphDbError::unavailable(format!(
+                "graph replay reconcile blocking task failed: {error}"
+            ))
+        })?
     }
 }
 

@@ -13,9 +13,8 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use tracedecay_usecases::semantic_runtime::{
-    SemanticFallbackReasonV1, SemanticRuntimeStateV1, SemanticRuntimeStatusV1,
-};
+use tracedecay_semantic_contracts::SemanticFallbackReasonV1;
+use tracedecay_usecases::semantic_runtime::{SemanticRuntimeStateV1, SemanticRuntimeStatusV1};
 
 use super::{DashboardCoverageV1, ExplorerSourceIdV1, ExplorerSourceProgressV1};
 use crate::DashboardState;

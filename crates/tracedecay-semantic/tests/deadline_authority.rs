@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use tracedecay_semantic::{
     SemanticEvaluationCancellationV1, SemanticExecutionAuthority, SemanticExecutionInterruptionV1,
-    SemanticRuntimeScheduleCancellationV1, SemanticRuntimeScheduleFailureV1,
+    SemanticRuntimeScheduleCancellationV1,
 };
+use tracedecay_semantic_contracts::SemanticRuntimeScheduleFailureV1;
 
 struct ExpiredAuthority;
 

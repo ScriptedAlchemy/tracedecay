@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use tracedecay_semantic_contracts::DEFAULT_FASTEMBED_MODEL_ID;
 
 use super::journey_test_support::git;
 use super::semantic_activation_journey_test::{
@@ -111,7 +112,7 @@ async fn isolated_fixture_repo_embeds_and_indexes_without_activation() {
     let cache = model_cache_dir();
     let catalog = tracedecay_semantic::production_fastembed_catalog();
     let model = catalog
-        .get(tracedecay_semantic::DEFAULT_FASTEMBED_MODEL_ID)
+        .get(DEFAULT_FASTEMBED_MODEL_ID)
         .expect("production catalog contains the default model");
     if let Some(reason) = pending_reason(&cache, model) {
         eprintln!(
@@ -140,7 +141,7 @@ async fn isolated_fixture_repo_embeds_and_indexes_without_activation() {
         tracedecay_semantic::default_shared_lifecycle_owner().expect("production lifecycle owner");
     seed_distribution_fixture(&lifecycle_root, &cache, &lifecycle);
     lifecycle
-        .select_model(Some(tracedecay_semantic::DEFAULT_FASTEMBED_MODEL_ID), true)
+        .select_model(Some(DEFAULT_FASTEMBED_MODEL_ID), true)
         .expect("select the default semantic model");
     lifecycle
         .acquire_blocking_for_tests()

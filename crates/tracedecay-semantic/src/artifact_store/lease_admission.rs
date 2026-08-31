@@ -1,6 +1,8 @@
 //! Artifact lease acquisition/release and runtime admission for
 //! ModelArtifactStore.
 
+use tracedecay_semantic_contracts::{ModelArtifactManifestV1, Sha256DigestHex};
+
 use super::*;
 
 impl ModelArtifactStore {

@@ -2,17 +2,30 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
+use tracedecay_runtime_core::db::engine::{Value, params_from_iter};
+
+use super::scope::LcmScopeSql;
 use super::*;
 
 use crate::{LCM_SCAN_PAGE_MAX_BYTES, LCM_SCAN_PAGE_ROWS};
 
 /// Shallow payload census, covered by `idx_lcm_external_payloads_owner_bytes`
-/// so the status probe never reads payload metadata records.
-pub(super) const PAYLOAD_SUMMARY_SQL: &str = "SELECT COUNT(*),
-                    COALESCE(SUM(CASE WHEN byte_count > 0 THEN byte_count ELSE 0 END), 0)
-             FROM lcm_external_payloads
-             WHERE (?1 = 'all' OR provider = ?1)
-               AND (?2 IS NULL OR session_id = ?2)";
+/// so the status probe never reads payload metadata records. The unbounded
+/// scope omits the non-sargable `(?1 = 'all' OR …)` tautology.
+pub(super) fn payload_summary_query(
+    provider: &str,
+    session_id: Option<&str>,
+) -> (String, Vec<Value>) {
+    let scope = LcmScopeSql::new("provider", "session_id", provider, session_id);
+    let sql = format!(
+        "SELECT COUNT(*),
+                COALESCE(SUM(CASE WHEN byte_count > 0 THEN byte_count ELSE 0 END), 0)
+         FROM lcm_external_payloads
+         {scope}",
+        scope = scope.where_clause()
+    );
+    (sql, scope.into_values())
+}
 
 #[hotpath::measure(label = "sessions.lcm.status.payload_summary", future = true)]
 pub async fn payload_health_summary(
@@ -23,9 +36,8 @@ pub async fn payload_health_summary(
     gc_config: &LcmGcConfig,
 ) -> Result<PayloadHealthDetail, LcmError> {
     let gc_config = gc_config.clone().normalized();
-    let mut rows = conn
-        .query(PAYLOAD_SUMMARY_SQL, params![provider, session_id])
-        .await?;
+    let (sql, values) = payload_summary_query(provider, session_id);
+    let mut rows = conn.query(&sql, params_from_iter(values)).await?;
     let row = rows
         .next()
         .await?

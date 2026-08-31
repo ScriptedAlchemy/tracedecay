@@ -8,17 +8,32 @@ pub fn apply_source_commit(
     current: Option<&SourceStoreStateV1>,
     commit: SourceCommitV1,
 ) -> SourceStoreResult<SourceCommitApplyOutcomeV1> {
+    let outcome = reduce_source_commit(current.cloned(), commit);
+    crate::hotpath_observe::record_source_commit_outcome(&outcome);
+    outcome
+}
+
+/// Applies a commit while consuming the writer actor's verified state.
+///
+/// This preserves [`apply_source_commit`]'s validation and CAS semantics while
+/// allowing the current-object maps to advance in place.
+#[hotpath::measure(label = "store.external_source.apply_commit_owned")]
+pub fn apply_source_commit_owned(
+    current: Option<SourceStoreStateV1>,
+    commit: SourceCommitV1,
+) -> SourceStoreResult<SourceCommitApplyOutcomeV1> {
     let outcome = reduce_source_commit(current, commit);
     crate::hotpath_observe::record_source_commit_outcome(&outcome);
     outcome
 }
 
+#[hotpath::measure(label = "store.external_source.reduce_commit")]
 fn reduce_source_commit(
-    current: Option<&SourceStoreStateV1>,
+    current: Option<SourceStoreStateV1>,
     commit: SourceCommitV1,
 ) -> SourceStoreResult<SourceCommitApplyOutcomeV1> {
     commit.validate()?;
-    if let Some(current) = current {
+    if let Some(current) = current.as_ref() {
         current.validate()?;
         if &current.definition != commit.definition() {
             return Err(SourceStoreErrorV1::DefinitionConflict);
@@ -42,12 +57,35 @@ fn reduce_source_commit(
         return Err(SourceStoreErrorV1::FrontierConflict);
     }
 
-    let mut observed_objects =
-        current.map_or_else(BTreeMap::new, |state| state.observed_objects.clone());
-    let mut object_partitions =
-        current.map_or_else(BTreeMap::new, |state| state.object_partitions.clone());
-    let mut latest_mutations =
-        current.map_or_else(BTreeMap::new, |state| state.latest_mutations.clone());
+    let (
+        mut observed_objects,
+        projected_objects,
+        mut object_partitions,
+        mut latest_mutations,
+        projected_mutations,
+        projection,
+    ) = current.map_or_else(
+        || {
+            (
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                None,
+            )
+        },
+        |state| {
+            (
+                state.observed_objects,
+                state.projected_objects,
+                state.object_partitions,
+                state.latest_mutations,
+                state.projected_mutations,
+                state.projection,
+            )
+        },
+    );
     let mut mutations = commit.mutations().to_vec();
     mutations.sort_by(|left, right| {
         left.observation()
@@ -88,22 +126,21 @@ fn reduce_source_commit(
             definition: commit.definition().clone(),
             binding: commit.binding().clone(),
             source_frontier: commit.next_frontier().clone(),
-            projection: current.and_then(|state| state.projection.clone()),
+            projection,
             observed_objects,
-            projected_objects: current
-                .map_or_else(BTreeMap::new, |state| state.projected_objects.clone()),
+            projected_objects,
             object_partitions,
             latest_mutations,
-            projected_mutations: current
-                .map_or_else(BTreeMap::new, |state| state.projected_mutations.clone()),
+            projected_mutations,
             receipt,
             verified: ValidationMemoV1::default(),
         }
-        .validated()?,
+        .verified_successor(),
     )))
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure(label = "store.external_source.apply_object_mutation")]
 fn apply_object_mutation(
     commit: &SourceCommitV1,
     mutation: SourceObjectMutationV1,
@@ -144,6 +181,7 @@ fn apply_object_mutation(
     Ok(())
 }
 
+#[hotpath::measure(label = "store.external_source.validate_transition")]
 fn validate_transition(
     prior: Option<&SourceObjectObservationV1>,
     mutation: &SourceObjectMutationV1,
@@ -174,6 +212,7 @@ fn validate_transition(
     }
 }
 
+#[hotpath::measure(label = "store.external_source.absence_tombstone")]
 pub(super) fn absence_tombstone(
     binding: SourceBindingIdentityV1,
     completion: &SourceSnapshotCompletionV1,

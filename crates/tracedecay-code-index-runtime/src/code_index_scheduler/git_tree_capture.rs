@@ -1,6 +1,6 @@
 //! Immutable Git-tree capture for exact branch generation reads.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 #[cfg(feature = "hotpath")]
@@ -458,7 +458,6 @@ impl CodeIndexWorktreeSchedulerV1 {
                     }
                 }
             };
-            changed_paths.insert(logical_path);
             sanitization_receipts.insert(candidate.receipt_id);
             if let Some(reservation) = candidate.retained_reservation {
                 retained_reservations.push(reservation);
@@ -474,18 +473,47 @@ impl CodeIndexWorktreeSchedulerV1 {
         if files.is_empty() && !withheld_sources.is_empty() {
             return Err(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable);
         }
+        // The changed-path hint narrows downstream work and feeds reconcile
+        // evidence; content digests remain the reuse authority. Declaring the
+        // whole tree changed on every committed capture reported a corpus-sized
+        // re-extraction for provenance-only tip moves (a commit of content the
+        // index already serves), so the hint is the truthful digest diff
+        // against the active generation: added or content-changed captured
+        // paths, plus active paths absent from this tree (deletions flow as
+        // tombstone hints). Without an active generation everything is
+        // genuinely new.
         if let Some(active) = self
             .publication
             .load_active_shared()
             .map_err(DaemonCodeIndexPublicationStoreV1::exact_read_error)?
         {
+            let active_digests = active
+                .snapshot()
+                .files
+                .iter()
+                .filter(|file| file.disposition == SnapshotFileDispositionV1::Present)
+                .map(|file| (file.logical_path.as_str(), &file.content_digest))
+                .collect::<BTreeMap<_, _>>();
+            for file in &files {
+                match active_digests.get(file.logical_path.as_str()) {
+                    Some(digest) if **digest == file.content_digest => {}
+                    _ => {
+                        changed_paths.insert(file.logical_path.clone());
+                    }
+                }
+            }
+            let captured_paths = files
+                .iter()
+                .map(|file| file.logical_path.as_str())
+                .collect::<BTreeSet<_>>();
             changed_paths.extend(
-                active
-                    .snapshot()
-                    .files
-                    .iter()
-                    .map(|file| file.logical_path.clone()),
+                active_digests
+                    .keys()
+                    .filter(|logical_path| !captured_paths.contains(**logical_path))
+                    .map(|logical_path| (*logical_path).to_owned()),
             );
+        } else {
+            changed_paths.extend(files.iter().map(|file| file.logical_path.clone()));
         }
         files.sort_by(|left, right| {
             (&left.logical_path, &left.file_occurrence_id)

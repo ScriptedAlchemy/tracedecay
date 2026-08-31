@@ -3,15 +3,15 @@
 use std::collections::BTreeMap;
 
 use rusqlite::{OptionalExtension, Savepoint, Transaction, params};
-use tracedecay_domain::{SourceBindingIdentityV1, SourceBindingOwnerV1};
+use tracedecay_domain::{SourceBindingIdentityV1, SourceBindingOwnerV1, SourceDeletionSemanticsV1};
 use tracedecay_store::{
     ExternalSourceReadOperationV1, ExternalSourceReadResultV1, SourceAcquisitionQueueCasV1,
     SourceAcquisitionQueueStateV1, SourceAuthorityPublicationReceiptV1,
     SourceAuthorityPublicationV1, SourceCommitApplyOutcomeV1, SourceCommitReceiptV1,
     SourceCommitV1, SourceObjectMutationV1, SourcePendingProjectionV1,
     SourceProjectionApplyOutcomeV1, SourceProjectionCommitV1, SourceStoreStateV1,
-    apply_source_authority_publication, apply_source_commit, apply_source_projection,
-    build_source_projection,
+    apply_source_authority_publication_owned, apply_source_commit_owned,
+    apply_source_projection_owned, build_source_projection,
 };
 
 use super::support::{decode, encode, invalid};
@@ -155,9 +155,38 @@ CREATE INDEX IF NOT EXISTS idx_external_source_acquisition_ready_v1
     WHERE not_before_micros IS NOT NULL;
 ";
 
-#[derive(Clone, Default)]
-pub struct ExternalSourceExecutor;
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SourceStateMarker {
+    data_version: i64,
+    definition_revision: i64,
+    definition_digest: String,
+    binding_revision: i64,
+    binding_digest: String,
+    source_frontier_digest: String,
+    projection_frontier_digest: Option<String>,
+    latest_source_receipt_digest: String,
+    latest_projection_receipt_digest: Option<String>,
+}
 
+struct CachedSourceState {
+    marker: SourceStateMarker,
+    state: SourceStoreStateV1,
+}
+
+#[derive(Default)]
+pub struct ExternalSourceExecutor {
+    verified_states: BTreeMap<String, CachedSourceState>,
+}
+
+impl Clone for ExternalSourceExecutor {
+    /// Executor clones may be mounted on another SQLite connection. Verified
+    /// state is connection-local provenance and must reload there.
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+#[hotpath::measure_all]
 impl ExternalSourceExecutor {
     #[hotpath::measure(label = "rusqlite.external_source.execute_write")]
     pub fn execute_write(
@@ -178,16 +207,15 @@ impl ExternalSourceExecutor {
                 ))
             };
         }
-        let current = load_state(savepoint, &binding)?;
+        let current = self.take_verified_state(savepoint, &binding)?;
         let mutation_encodings = validate_revision_collisions(savepoint, &binding, commit)?;
-        match apply_source_commit(current.as_ref(), commit.clone()).map_err(invalid)? {
+        match apply_source_commit_owned(current, commit.clone()).map_err(invalid)? {
             SourceCommitApplyOutcomeV1::ExactDuplicate(_) => Ok(()),
-            SourceCommitApplyOutcomeV1::Committed(state) => persist_source_commit(
-                savepoint,
-                state.as_ref(),
-                state.receipt(),
-                mutation_encodings,
-            ),
+            SourceCommitApplyOutcomeV1::Committed(state) => {
+                let state = *state;
+                persist_source_commit(savepoint, &state, state.receipt(), mutation_encodings)?;
+                self.cache_verified_state(savepoint, state)
+            }
         }
     }
 
@@ -213,12 +241,15 @@ impl ExternalSourceExecutor {
                 ))
             };
         }
-        let current = load_state(savepoint, &binding)?
+        let current = self
+            .take_verified_state(savepoint, &binding)?
             .ok_or_else(|| invalid("external source authority publication has no source state"))?;
-        let outcome =
-            apply_source_authority_publication(&current, publication.clone()).map_err(invalid)?;
+        let outcome = apply_source_authority_publication_owned(current, publication.clone())
+            .map_err(invalid)?;
         let (revised, receipt) = outcome.into_parts();
-        persist_authority_publication(savepoint, revised.as_ref(), &receipt)
+        let revised = *revised;
+        persist_authority_publication(savepoint, &revised, &receipt)?;
+        self.cache_verified_state(savepoint, revised)
     }
 
     #[hotpath::measure(label = "rusqlite.external_source.execute_projection_write")]
@@ -238,9 +269,10 @@ impl ExternalSourceExecutor {
                 Err(invalid("external source projection digest collision"))
             };
         }
-        let current = load_state(savepoint, binding)?
+        let current = self
+            .take_verified_state(savepoint, binding)?
             .ok_or_else(|| invalid("external source projection has no committed source state"))?;
-        let pending = load_next_pending_projection(savepoint, &current)?.ok_or_else(|| {
+        let pending = load_next_pending_projection(savepoint, binding)?.ok_or_else(|| {
             invalid("external source projection has no exact pending predecessor")
         })?;
         let expected =
@@ -250,10 +282,14 @@ impl ExternalSourceExecutor {
                 "external source projection does not match the oldest pending receipt",
             ));
         }
-        match apply_source_projection(&current, &pending, projection.clone()).map_err(invalid)? {
+        match apply_source_projection_owned(current, &pending, projection.clone())
+            .map_err(invalid)?
+        {
             SourceProjectionApplyOutcomeV1::ExactDuplicate(_) => Ok(()),
             SourceProjectionApplyOutcomeV1::Projected(state) => {
-                persist_projection(savepoint, state.as_ref(), pending.receipt(), projection)
+                let state = *state;
+                persist_projection(savepoint, &state, pending.receipt(), projection)?;
+                self.cache_verified_state(savepoint, state)
             }
         }
     }
@@ -330,11 +366,7 @@ impl ExternalSourceExecutor {
                 let pending = match binding {
                     Some(binding) => {
                         binding.validate().map_err(invalid)?;
-                        load_state(snapshot, binding)?
-                            .as_ref()
-                            .map(|state| load_next_pending_projection(snapshot, state))
-                            .transpose()?
-                            .flatten()
+                        load_next_pending_projection(snapshot, binding)?
                     }
                     None => load_next_pending_projection_any(snapshot)?,
                 };
@@ -365,6 +397,35 @@ impl ExternalSourceExecutor {
                 })
                 .map(ExternalSourceReadResultV1::AcquisitionPendingCount),
         }
+    }
+
+    #[hotpath::measure(label = "rusqlite.external_source.cache.take_verified")]
+    fn take_verified_state(
+        &mut self,
+        connection: &rusqlite::Connection,
+        binding: &SourceBindingIdentityV1,
+    ) -> rusqlite::Result<Option<SourceStoreStateV1>> {
+        let marker = load_state_marker(connection, binding)?;
+        match self.verified_states.remove(binding.binding_id.as_str()) {
+            Some(cached) if marker.as_ref() == Some(&cached.marker) => Ok(Some(cached.state)),
+            Some(_) | None => load_state(connection, binding),
+        }
+    }
+
+    #[hotpath::measure(label = "rusqlite.external_source.cache.store_verified")]
+    fn cache_verified_state(
+        &mut self,
+        connection: &rusqlite::Connection,
+        state: SourceStoreStateV1,
+    ) -> rusqlite::Result<()> {
+        let binding = state.binding().immutable_identity().map_err(invalid)?;
+        let marker = load_state_marker(connection, &binding)?
+            .ok_or_else(|| invalid("external source persisted state marker is missing"))?;
+        self.verified_states.insert(
+            binding.binding_id.as_str().to_owned(),
+            CachedSourceState { marker, state },
+        );
+        Ok(())
     }
 }
 
@@ -421,6 +482,39 @@ fn load_next_ready_acquisition(
     Ok(state)
 }
 
+#[hotpath::measure(label = "rusqlite.external_source.load_state_marker")]
+fn load_state_marker(
+    connection: &rusqlite::Connection,
+    binding: &SourceBindingIdentityV1,
+) -> rusqlite::Result<Option<SourceStateMarker>> {
+    let data_version =
+        connection.query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))?;
+    connection
+        .prepare_cached(
+            "SELECT definition_revision, definition_digest,
+                    binding_revision, binding_digest,
+                    source_frontier_digest, projection_frontier_digest,
+                    latest_source_receipt_digest, latest_projection_receipt_digest
+             FROM external_source_states_v1
+             WHERE binding_id = ?1",
+        )?
+        .query_row(params![binding.binding_id.as_str()], |row| {
+            Ok(SourceStateMarker {
+                data_version,
+                definition_revision: row.get(0)?,
+                definition_digest: row.get(1)?,
+                binding_revision: row.get(2)?,
+                binding_digest: row.get(3)?,
+                source_frontier_digest: row.get(4)?,
+                projection_frontier_digest: row.get(5)?,
+                latest_source_receipt_digest: row.get(6)?,
+                latest_projection_receipt_digest: row.get(7)?,
+            })
+        })
+        .optional()
+}
+
+#[hotpath::measure(label = "rusqlite.external_source.load_state")]
 fn load_state(
     connection: &rusqlite::Connection,
     binding: &SourceBindingIdentityV1,
@@ -493,6 +587,7 @@ fn load_state(
     Ok(Some(state))
 }
 
+#[hotpath::measure(label = "rusqlite.external_source.load_definition")]
 fn load_definition(
     connection: &rusqlite::Connection,
     source_id: &str,
@@ -508,6 +603,7 @@ fn load_definition(
     decode(encoded)
 }
 
+#[hotpath::measure(label = "rusqlite.external_source.load_binding")]
 fn load_binding(
     connection: &rusqlite::Connection,
     binding_id: &str,
@@ -523,6 +619,7 @@ fn load_binding(
     decode(encoded)
 }
 
+#[hotpath::measure(label = "rusqlite.external_source.load_current_mutations")]
 fn load_current_mutations(
     connection: &rusqlite::Connection,
     table: &str,

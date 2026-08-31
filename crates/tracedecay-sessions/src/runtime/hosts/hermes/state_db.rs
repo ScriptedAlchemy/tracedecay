@@ -51,7 +51,7 @@ fn table_columns_sync(
     let mut out = std::collections::BTreeSet::new();
     let query = format!("SELECT name FROM pragma_table_info('{table}')");
     let mut statement = conn
-        .prepare(&query)
+        .prepare_cached(&query)
         .map_err(|_| "could not inspect Hermes SQLite schema".to_string())?;
     let mut rows = statement
         .query(())
@@ -650,6 +650,12 @@ pub(super) async fn read_new_rows_strict(
         .unwrap_or_else(|| Err("could not query legacy Hermes state rows".to_string()))
 }
 
+/// One byte-budgeted page over the legacy Hermes state rows. The loop is a
+/// deliberate one-row-per-query cursor — the remaining page budget is bound
+/// into each fetch — but the statement text never changes, so it goes
+/// through the connection's prepared-statement cache instead of re-parsing
+/// once per row.
+#[hotpath::measure(label = "sessions.hosts.hermes.read_new_rows_strict")]
 fn read_new_rows_strict_sync(
     conn: &rusqlite::Connection,
     select_sql: &str,
@@ -662,7 +668,7 @@ fn read_new_rows_strict_sync(
     while items.len() < CHUNK_ROWS {
         let remaining = MAX_HERMES_PAGE_BYTES.saturating_sub(page_bytes);
         let mut statement = conn
-            .prepare(select_sql)
+            .prepare_cached(select_sql)
             .map_err(|error| format!("could not query legacy Hermes state rows: {error}"))?;
         let mut rows = statement
             .query(rusqlite::params![max_rowid as i64, remaining as i64])

@@ -18,8 +18,9 @@ use crate::artifact_store::SemanticCapabilityDisabledV1;
 use crate::fastembed_adapter::EmbedError;
 #[cfg(any(feature = "hotpath", test))]
 use crate::fastembed_adapter::RuntimeFailureKindV1;
-use crate::model_lifecycle::{ModelLifecycleErrorV1, SemanticModelLifecycleStateV1};
+use crate::model_lifecycle::ModelLifecycleErrorV1;
 use crate::session_pool::SessionAcquireError;
+use tracedecay_semantic_contracts::SemanticModelLifecycleStateV1;
 
 // Gated to match `record_lifecycle_state`, its only caller, which is itself
 // compiled only when profiling is on.
@@ -95,6 +96,7 @@ pub(crate) fn session_acquire_error_class(error: &SessionAcquireError) -> &'stat
         SessionAcquireError::Cancelled => "cancelled",
         SessionAcquireError::DeadlineExceeded { .. } => "deadline_exceeded",
         SessionAcquireError::LoadDeadlineExceeded { .. } => "load_deadline_exceeded",
+        SessionAcquireError::ResidentCeilingExceeded { .. } => "resident_ceiling_exceeded",
         SessionAcquireError::Open(inner) => embed_error_class(inner),
         SessionAcquireError::Closed => "closed",
     }

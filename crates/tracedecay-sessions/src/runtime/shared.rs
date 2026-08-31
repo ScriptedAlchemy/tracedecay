@@ -100,7 +100,7 @@ fn read_new_rows_sync<T>(
     prev: StoredCursor,
     mut map_row: impl FnMut(i64, &rusqlite::Row<'_>) -> Option<T>,
 ) -> Option<NewRows<T>> {
-    let mut statement = match conn.prepare(select_sql) {
+    let mut statement = match conn.prepare_cached(select_sql) {
         Ok(statement) => statement,
         Err(error) => {
             tracing::debug!(

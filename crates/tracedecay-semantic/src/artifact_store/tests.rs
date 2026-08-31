@@ -1,6 +1,17 @@
 #[cfg(test)]
 mod tests {
-    use super::super::manifest::*;
+    use tracedecay_domain::{
+        EmbeddingDeviceClassV1 as DeviceClassV1, EmbeddingMetricV1 as SemanticMetricV1,
+        EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1,
+        EmbeddingTruncationSideV1 as TruncationSideV1,
+    };
+    use tracedecay_semantic_contracts::{
+        ArtifactMemberPinV1, ArtifactMemberRoleV1, ArtifactPackageMemberV1, ArtifactProfileKindV1,
+        MODEL_ARTIFACT_MANIFEST_SCHEMA_V1, ModelArtifactManifestPayloadV1, ModelArtifactManifestV1,
+        PlatformTargetV1, ResourceCeilingV1, RuntimeCompatibilityV1, Sha256DigestHex,
+        TruncationPolicyV1, UpstreamSourceV1,
+    };
+
     use super::*;
     use std::sync::{Arc, mpsc};
     use std::thread;

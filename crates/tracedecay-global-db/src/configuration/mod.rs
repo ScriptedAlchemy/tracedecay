@@ -4,7 +4,6 @@ pub mod contracts;
 pub mod registry;
 pub mod resolver;
 pub mod schema;
-pub mod semantic;
 pub mod store;
 
 #[cfg(test)]

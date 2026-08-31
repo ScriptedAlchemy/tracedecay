@@ -103,6 +103,10 @@ fn store_blob_message(bytes: &[u8]) -> Option<(String, Value)> {
     Some((role, content))
 }
 
+/// One length-gated blob fetch. This runs once per visited blob during a
+/// store walk, so the fixed statement goes through the connection's
+/// prepared-statement cache instead of re-parsing per call.
+#[hotpath::measure(label = "sessions.hosts.cursor.store_blob_fetch")]
 fn fetch_store_blob_bounded_sync(
     conn: &rusqlite::Connection,
     blob_id: &str,
@@ -110,7 +114,7 @@ fn fetch_store_blob_bounded_sync(
 ) -> BoundedSqliteValue<Vec<u8>> {
     let max_bytes = max_composer_record_bytes();
     let effective_cap = effective_sqlite_cap(max_bytes, remaining);
-    let Ok(mut stmt) = conn.prepare(
+    let Ok(mut stmt) = conn.prepare_cached(
         "SELECT length(CAST(data AS BLOB)) AS nbytes, \
          CASE WHEN length(CAST(data AS BLOB)) <= ?1 THEN data ELSE NULL END AS payload \
          FROM blobs WHERE id = ?2",
@@ -174,7 +178,7 @@ fn read_store_meta_bounded_sync(
 ) -> BoundedSqliteValue<StoreMeta> {
     let decoded_cap = effective_sqlite_cap(MAX_COMPOSER_STORE_META_BYTES, remaining);
     let encoded_cap = decoded_cap.saturating_mul(2);
-    let Ok(mut stmt) = conn.prepare(
+    let Ok(mut stmt) = conn.prepare_cached(
         "SELECT length(CAST(value AS BLOB)) AS nbytes, \
          CASE WHEN length(CAST(value AS BLOB)) <= ?1 THEN value ELSE NULL END AS payload \
          FROM meta WHERE key = '0'",
@@ -287,7 +291,7 @@ pub(super) async fn order_store_messages_bounded(
     // reproduces the original cursor semantics exactly.
     let ids = conn
         .with(|conn| {
-            let Ok(mut stmt) = conn.prepare(
+            let Ok(mut stmt) = conn.prepare_cached(
                 "SELECT id FROM blobs \
                  WHERE length(CAST(id AS BLOB)) <= ?1 \
                  ORDER BY id \

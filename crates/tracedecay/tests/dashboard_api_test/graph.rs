@@ -73,6 +73,7 @@ struct GraphFixtureSeedV1 {
 struct FixtureGraphProjectionV1 {
     scope: ResolvedScope,
     store: Arc<CodeGraphProjectionStore>,
+    freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
 }
 
 impl CodeGraphProjectionReadPort for FixtureGraphProjectionV1 {
@@ -85,13 +86,11 @@ impl CodeGraphProjectionReadPort for FixtureGraphProjectionV1 {
                 return Err(CodeGraphReadError::Denied);
             }
             match request.context.admission_at(request.observed_at) {
-                RequestAdmission::Admitted => {
-                    VerifiedCodeGraphRead::new(
-                        self.scope.clone(),
-                        Arc::clone(&self.store),
-                        tracedecay_graph_query::CodeGraphReadFreshnessV1::Current,
-                    )
-                }
+                RequestAdmission::Admitted => VerifiedCodeGraphRead::new(
+                    self.scope.clone(),
+                    Arc::clone(&self.store),
+                    self.freshness,
+                ),
                 RequestAdmission::Cancelled => Err(CodeGraphReadError::Cancelled),
                 RequestAdmission::TimedOut => Err(CodeGraphReadError::TimedOut),
             }
@@ -400,6 +399,7 @@ fn relation_kind(kind: &EdgeKind) -> RelationEdgeKindV1 {
 fn compose_graph_authority(
     cg: &TraceDecay,
     seed: GraphFixtureSeedV1,
+    freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
 ) -> (
     Arc<dyn CodeGraphReadAdmissionPort>,
     Arc<dyn CodeGraphProjectionReadPort>,
@@ -562,7 +562,11 @@ fn compose_graph_authority(
         Arc::new(FixtureGraphAdmissionV1 {
             scope: scope.clone(),
         }),
-        Arc::new(FixtureGraphProjectionV1 { scope, store }),
+        Arc::new(FixtureGraphProjectionV1 {
+            scope,
+            store,
+            freshness,
+        }),
     )
 }
 
@@ -570,10 +574,41 @@ async fn start_dashboard_fixture() -> DashboardFixture {
     start_dashboard_fixture_with(false, false, false).await
 }
 
+/// [`start_dashboard_fixture`] whose graph port serves the last complete
+/// generation typed stale, the rebuild-window shape the envelope freshness
+/// marker must expose.
+async fn start_stale_serving_dashboard_fixture() -> DashboardFixture {
+    start_dashboard_fixture_full(
+        false,
+        false,
+        false,
+        tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale {
+            sealed_at: tracedecay_domain::UtcMicros(1),
+            rebuild_in_flight: true,
+        },
+    )
+    .await
+}
+
 async fn start_dashboard_fixture_with(
     with_orphan: bool,
     with_structure_fixture: bool,
     with_neighbor_symmetry_fixture: bool,
+) -> DashboardFixture {
+    start_dashboard_fixture_full(
+        with_orphan,
+        with_structure_fixture,
+        with_neighbor_symmetry_fixture,
+        tracedecay_graph_query::CodeGraphReadFreshnessV1::Current,
+    )
+    .await
+}
+
+async fn start_dashboard_fixture_full(
+    with_orphan: bool,
+    with_structure_fixture: bool,
+    with_neighbor_symmetry_fixture: bool,
+    freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
 ) -> DashboardFixture {
     let tmp = tempdir_or_panic();
     let project_root = tmp.path().join("project");
@@ -592,7 +627,8 @@ async fn start_dashboard_fixture_with(
     if with_neighbor_symmetry_fixture {
         seed_neighbor_symmetry_fixture(&mut graph_seed);
     }
-    let (code_graph_admission, code_graph_projection) = compose_graph_authority(&cg, graph_seed);
+    let (code_graph_admission, code_graph_projection) =
+        compose_graph_authority(&cg, graph_seed, freshness);
 
     let port = pick_free_port();
     let base_url = format!("http://127.0.0.1:{port}");
@@ -777,6 +813,52 @@ fn graph_api_returns_seeded_overview_search_detail_and_subgraph() {
                 .iter()
                 .any(|node| node["id"] == "n-route" && node["degree"] == 3),
             "subgraph nodes should carry total degree counts (n-route has 3 edges)"
+        );
+    });
+}
+
+#[test]
+fn graph_api_marks_stale_served_reads_in_the_envelope_freshness() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_stale_serving_dashboard_fixture().await;
+        let agent = http_agent();
+
+        let (status, overview) = get_json(
+            &agent,
+            &format!("{}/api/plugins/graph/overview", fixture.base_url),
+        );
+        assert_eq!(status, 200);
+        assert_ready_verified_generation(&overview);
+        assert_eq!(
+            overview["freshness"]["state"], "stale",
+            "stale-served graph reads must carry the stale freshness marker: {overview}"
+        );
+
+        let (status, search) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/graph/search?q=dashboard&limit=10",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(
+            search["freshness"]["state"], "stale",
+            "stale-served graph search must carry the stale freshness marker: {search}"
+        );
+
+        let (status, node) = get_json(
+            &agent,
+            &format!("{}/api/plugins/graph/node/n-route", fixture.base_url),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(
+            node["freshness"]["state"], "stale",
+            "stale-served node detail must carry the stale freshness marker: {node}"
         );
     });
 }

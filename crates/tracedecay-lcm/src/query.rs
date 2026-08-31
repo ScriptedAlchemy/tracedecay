@@ -9,6 +9,7 @@ mod describe;
 mod expand;
 mod grep;
 mod payload_health;
+mod scope;
 mod session;
 mod status;
 

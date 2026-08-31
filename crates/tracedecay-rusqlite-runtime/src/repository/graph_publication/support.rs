@@ -763,13 +763,20 @@ pub(super) fn has_active_inbound_dependencies(
     Ok(integer_at(&row, 0)? != 0)
 }
 
-pub(super) fn next_retired_cleanup_metadata(
+/// One keyset page of retired-cleanup candidates: each tombstone past
+/// `after` that still has its replay source, with the payload bytes its
+/// cleanup would release. The single paged query replaces the former
+/// per-record `LIMIT 1` probe, which issued one reader round trip per
+/// enumerated tombstone.
+#[hotpath::measure(label = "rusqlite.graph_publication.retired_cleanup_metadata_page")]
+pub(super) fn retired_cleanup_metadata_page(
     transaction: &impl ExactQueryAuthority,
     encoded: &EncodedProjection,
     after: u64,
-) -> GraphPublicationStoreResultV1<Option<(tracedecay_store::GraphPublicationSequenceV1, usize)>> {
+    limit: u16,
+) -> GraphPublicationStoreResultV1<Vec<(tracedecay_store::GraphPublicationSequenceV1, usize)>> {
     let after = sqlite_sequence_from_u64(after)?;
-    let mut rows = query(
+    let rows = query(
         transaction,
         "SELECT retired.replay_sequence,
                 length(replay.canonical_replay_source)
@@ -780,48 +787,115 @@ pub(super) fn next_retired_cleanup_metadata(
          WHERE retired.shard_id = ?1 AND retired.namespace = ?2
            AND retired.projection = ?3 AND retired.replay_sequence > ?4
          ORDER BY retired.replay_sequence ASC
-         LIMIT 1"
+         LIMIT ?5"
             .to_owned(),
         vec![
             text(&encoded.shard_id),
             text(&encoded.namespace),
             text(&encoded.projection),
             ExactSqlValue::Integer(after),
+            ExactSqlValue::Integer(i64::from(limit)),
         ],
     )?;
-    if rows.len() > 1 {
-        return Err(GraphPublicationStoreErrorV1::Corrupt(
-            "retired cleanup metadata returned duplicate rows".to_owned(),
-        ));
-    }
-    let Some(row) = rows.pop() else {
-        return Ok(None);
-    };
-    let sequence = sequence_from_i64(integer_at(&row, 0)?)?;
-    let payload_bytes = usize::try_from(integer_at(&row, 1)?).map_err(|_| {
-        GraphPublicationStoreErrorV1::Corrupt(
-            "retired cleanup payload length is negative or exceeds usize".to_owned(),
-        )
-    })?;
-    Ok(Some((sequence, payload_bytes)))
+    rows.into_iter()
+        .map(|row| {
+            let sequence = sequence_from_i64(integer_at(&row, 0)?)?;
+            let payload_bytes = usize::try_from(integer_at(&row, 1)?).map_err(|_| {
+                GraphPublicationStoreErrorV1::Corrupt(
+                    "retired cleanup payload length is negative or exceeds usize".to_owned(),
+                )
+            })?;
+            Ok((sequence, payload_bytes))
+        })
+        .collect()
 }
 
-pub(super) fn read_tombstone_by_sequence(
+/// Batched tombstone materialization for one already-selected cleanup page:
+/// one `IN (...)` query for the tombstone rows, one for their retained
+/// replay sources, and the chunked dependency batch — instead of the former
+/// three queries per tombstone. The page's byte cap
+/// (`MAX_GRAPH_REPLAY_PAGE_SOURCE_BYTES_V1`, well under the exact-SQL
+/// transport's 64 MiB materialization bound) keeps the batched source fetch
+/// inside one query's budget, and `sequences` is bounded by the page record
+/// cap, far below the parameter limit.
+#[hotpath::measure(label = "rusqlite.graph_publication.read_tombstones_by_sequences")]
+pub(super) fn read_tombstones_by_sequences(
     transaction: &impl ExactQueryAuthority,
-    sequence: i64,
-) -> GraphPublicationStoreResultV1<Option<GraphPublicationReplayTombstoneV1>> {
-    one_tombstone(
+    sequences: &[i64],
+) -> GraphPublicationStoreResultV1<Vec<GraphPublicationReplayTombstoneV1>> {
+    if sequences.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = (1..=sequences.len())
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let rows = query(
         transaction,
-        query(
-            transaction,
-            format!(
-                "SELECT {TOMBSTONE_COLUMNS}
-                 FROM graph_publication_replay_tombstones_v1
-                 WHERE replay_sequence = ?1"
-            ),
-            vec![ExactSqlValue::Integer(sequence)],
-        )?,
-    )
+        format!(
+            "SELECT {TOMBSTONE_COLUMNS}
+             FROM graph_publication_replay_tombstones_v1
+             WHERE replay_sequence IN ({placeholders})
+             ORDER BY replay_sequence ASC"
+        ),
+        sequences
+            .iter()
+            .copied()
+            .map(ExactSqlValue::Integer)
+            .collect(),
+    )?;
+    if rows.len() != sequences.len() {
+        return Err(GraphPublicationStoreErrorV1::Corrupt(
+            "enumerated retired cleanup replay disappeared in its read transaction".to_owned(),
+        ));
+    }
+    let mut sources = read_retained_sources_batch(transaction, sequences)?;
+    let mut dependencies_by_owner = read_dependencies_batch(transaction, sequences, true)?;
+    rows.into_iter()
+        .map(|row| {
+            let sequence = integer_at(&row, 0)?;
+            decode_tombstone_row_with(
+                row,
+                sources.remove(&sequence),
+                dependencies_by_owner.remove(&sequence).unwrap_or_default(),
+            )
+        })
+        .collect()
+}
+
+/// Retained replay sources for a set of tombstone sequences in one query.
+/// A sequence whose replay row was already deleted by cleanup finalization
+/// is simply absent from the map, matching what the per-sequence
+/// [`read_retained_source`] would have returned as `None`.
+fn read_retained_sources_batch(
+    transaction: &impl ExactQueryAuthority,
+    sequences: &[i64],
+) -> GraphPublicationStoreResultV1<HashMap<i64, Vec<u8>>> {
+    let mut sources = HashMap::with_capacity(sequences.len());
+    if sequences.is_empty() {
+        return Ok(sources);
+    }
+    let placeholders = (1..=sequences.len())
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let rows = query(
+        transaction,
+        format!(
+            "SELECT sequence, canonical_replay_source
+             FROM graph_publication_replay_v1
+             WHERE sequence IN ({placeholders})"
+        ),
+        sequences
+            .iter()
+            .copied()
+            .map(ExactSqlValue::Integer)
+            .collect(),
+    )?;
+    for mut row in rows {
+        sources.insert(integer_at(&row, 0)?, blob_at(&mut row, 1)?);
+    }
+    Ok(sources)
 }
 
 fn sqlite_sequence_from_u64(value: u64) -> GraphPublicationStoreResultV1<i64> {
@@ -1074,7 +1148,24 @@ fn decode_row_with_dependencies(
 
 pub(super) fn decode_tombstone_row(
     transaction: &impl ExactQueryAuthority,
+    row: ExactSqlRow,
+) -> GraphPublicationStoreResultV1<GraphPublicationReplayTombstoneV1> {
+    let sequence = integer_at(&row, 0)?;
+    decode_tombstone_row_with(
+        row,
+        read_retained_source(transaction, sequence)?,
+        read_dependencies(transaction, sequence, true)?,
+    )
+}
+
+/// Same decode as [`decode_tombstone_row`], but takes an already-fetched
+/// retained source and dependency set instead of querying for them, so a
+/// batched page fetch (see [`read_tombstones_by_sequences`]) decodes each
+/// row without additional per-row queries.
+fn decode_tombstone_row_with(
     mut row: ExactSqlRow,
+    canonical_replay_source: Option<Vec<u8>>,
+    dependencies: Vec<GraphDependencyGenerationIdentityV1>,
 ) -> GraphPublicationStoreResultV1<GraphPublicationReplayTombstoneV1> {
     let sequence = integer_at(&row, 0)?;
     decode_tombstone(
@@ -1091,9 +1182,9 @@ pub(super) fn decode_tombstone_row(
             expected_prior_head: optional_text_at(&mut row, 9)?,
             expected_recovered_digest: text_at(&mut row, 10)?,
             canonical_replay_source_digest: text_at(&mut row, 11)?,
-            canonical_replay_source: read_retained_source(transaction, sequence)?,
+            canonical_replay_source,
         },
-        read_dependencies(transaction, sequence, true)?,
+        dependencies,
     )
 }
 
@@ -1230,12 +1321,14 @@ mod dependency_batch_tests {
     use tracedecay_domain::{BrainId, LocatorDigest, ProjectId, UserProfileId, UtcMicros};
     use tracedecay_store::{
         AdmissionConfigV1, GraphDependencyGenerationClosureDigestV1,
-        GraphPublicationIdempotencyKeyV1, GraphPublicationInputDigestV1, GraphPublicationReplayV1,
-        GraphPublicationStoreV1, GraphRecoveredGenerationDigestV1, GraphReplayAppendOutcomeV1,
-        GraphVerifiedHeadCasOutcomeV1, GraphVerifiedHeadCompareAndSwapV1, RepositoryWritePayloadV1,
-        RuntimeCancellationIdV1, RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1,
-        RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeRequestControlV1, RuntimeRequestProbeV1,
-        StoreIncarnationV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
+        GraphPublicationIdempotencyKeyV1, GraphPublicationInputDigestV1,
+        GraphPublicationReplayRetirementV1, GraphPublicationReplayV1, GraphPublicationStoreV1,
+        GraphRecoveredGenerationDigestV1, GraphReplayAppendOutcomeV1,
+        GraphReplayRetirementOutcomeV1, GraphVerifiedHeadCasOutcomeV1,
+        GraphVerifiedHeadCompareAndSwapV1, RepositoryWritePayloadV1, RuntimeCancellationIdV1,
+        RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1,
+        RuntimeInterruptionV1, RuntimeRequestControlV1, RuntimeRequestProbeV1, StoreIncarnationV1,
+        StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
     };
 
     use super::*;
@@ -1760,6 +1853,192 @@ mod dependency_batch_tests {
             assert_eq!(dependencies.len(), DEPENDENCY_TARGET_COUNT);
         }
         assert!(batched.is_empty());
+
+        transaction.rollback().unwrap();
+    }
+
+    /// Builds one publication in a projection's verified chain: append under
+    /// the supplied prior head, then CAS the verified head onto it.
+    fn publish_verified_head(
+        storage: &mut GraphPublicationExactSqlStorage,
+        name: &str,
+        generation: &str,
+        byte: char,
+        dependencies: Vec<GraphDependencyGenerationIdentityV1>,
+        prior: Option<tracedecay_store::GraphVerifiedHeadV1>,
+    ) -> (
+        GraphPublicationReplayV1,
+        tracedecay_store::GraphVerifiedHeadV1,
+    ) {
+        let publication = GraphPublicationReplayV1::new(
+            GraphPublicationKeyV1::new(
+                projection(name),
+                GraphGenerationIdV1::new(generation).unwrap(),
+                GraphPublicationIdempotencyKeyV1::new(format!("publish.{generation}")).unwrap(),
+            ),
+            GraphPublicationInputDigestV1::new(digest(byte)).unwrap(),
+            GraphDependencyGenerationClosureDigestV1::new(digest('d')).unwrap(),
+            dependencies,
+            prior.clone(),
+            GraphRecoveredGenerationDigestV1::new(digest(byte)).unwrap(),
+            generation.as_bytes().to_vec(),
+        )
+        .unwrap();
+        let append_context = context(&format!("{generation}.append"));
+        assert!(matches!(
+            storage
+                .append_replay(&publication, &append_context)
+                .unwrap(),
+            GraphReplayAppendOutcomeV1::Appended(_)
+        ));
+        let cas_context = context(&format!("{generation}.cas"));
+        let request = GraphVerifiedHeadCompareAndSwapV1 {
+            publication_key: publication.key.clone(),
+            input_digest: publication.input_digest.clone(),
+            dependency_generation_closure_digest: publication
+                .dependency_generation_closure_digest
+                .clone(),
+            recovered_digest: publication.expected_recovered_digest.clone(),
+            expected_prior_head: prior,
+        };
+        let head = match storage
+            .compare_and_swap_verified_head(&request, &cas_context)
+            .unwrap()
+        {
+            GraphVerifiedHeadCasOutcomeV1::Advanced(head) => head,
+            outcome => panic!("unexpected CAS outcome for {generation}: {outcome:?}"),
+        };
+        (publication, head)
+    }
+
+    fn retire_historical(
+        storage: &mut GraphPublicationExactSqlStorage,
+        publication: &GraphPublicationReplayV1,
+    ) -> GraphPublicationReplayTombstoneV1 {
+        let retirement = GraphPublicationReplayRetirementV1::new(
+            publication.key.clone(),
+            publication.input_digest.clone(),
+            publication.dependency_generation_closure_digest.clone(),
+            publication.direct_dependency_generations.clone(),
+            publication.expected_prior_head.clone(),
+            publication.expected_recovered_digest.clone(),
+            publication.canonical_replay_source_digest.clone(),
+        )
+        .unwrap();
+        let retire_context = context(&format!("{}.retire", publication.key.generation.as_str()));
+        match storage.retire_replay(&retirement, &retire_context).unwrap() {
+            GraphReplayRetirementOutcomeV1::Retired(tombstone) => tombstone,
+            outcome => panic!(
+                "unexpected retirement outcome for {}: {outcome:?}",
+                publication.key.generation.as_str()
+            ),
+        }
+    }
+
+    /// RED (pre-fix behaviour, reproduced explicitly below): materializing N
+    /// cleanup tombstones issued three queries per tombstone — the tombstone
+    /// row, its retained replay source, and its dependency rows.
+    ///
+    /// GREEN (this crate's current behaviour):
+    /// [`read_tombstones_by_sequences`] materializes the same set in three
+    /// queries total (tombstone rows, retained sources, one dependency
+    /// chunk) and returns exactly the tombstones the per-row reads decode.
+    #[test]
+    fn read_tombstones_by_sequences_matches_per_row_reads_in_three_queries() {
+        let fixture = Fixture::new();
+        let mut storage = fixture.storage();
+
+        // Verified dependency targets so one retired tombstone carries
+        // dependency rows through the retirement move.
+        let dep_a = append_and_verify(&mut storage, "cleanup-dep-a", "generation.cd-a", 'a');
+        let dep_b = append_and_verify(&mut storage, "cleanup-dep-b", "generation.cd-b", 'b');
+        let dependencies = vec![
+            GraphDependencyGenerationIdentityV1::new(
+                dep_a.key.projection.clone(),
+                dep_a.key.generation.clone(),
+            ),
+            GraphDependencyGenerationIdentityV1::new(
+                dep_b.key.projection.clone(),
+                dep_b.key.generation.clone(),
+            ),
+        ];
+
+        // A three-publication verified chain on one projection: the first
+        // two become historical once the third holds the head, so both are
+        // retire-able. The first carries dependencies, the second none —
+        // covering both decode shapes in one batched page.
+        let (first, first_head) = publish_verified_head(
+            &mut storage,
+            "cleanup-owner",
+            "generation.cleanup-1",
+            '1',
+            dependencies,
+            None,
+        );
+        let (second, second_head) = publish_verified_head(
+            &mut storage,
+            "cleanup-owner",
+            "generation.cleanup-2",
+            '2',
+            Vec::new(),
+            Some(first_head),
+        );
+        let (_third, _third_head) = publish_verified_head(
+            &mut storage,
+            "cleanup-owner",
+            "generation.cleanup-3",
+            '3',
+            Vec::new(),
+            Some(second_head),
+        );
+        let first_tombstone = retire_historical(&mut storage, &first);
+        let second_tombstone = retire_historical(&mut storage, &second);
+        let sequences = vec![
+            sequence_to_i64(first_tombstone.sequence).unwrap(),
+            sequence_to_i64(second_tombstone.sequence).unwrap(),
+        ];
+
+        let transaction = fixture.handle.begin_immediate().unwrap();
+
+        let batch_counter = QueryCounter::new(&transaction);
+        let batched = read_tombstones_by_sequences(&batch_counter, &sequences).unwrap();
+        assert_eq!(
+            batch_counter.hits(),
+            3,
+            "batched tombstone materialization must issue exactly one tombstone query, \
+             one retained-source query, and one dependency chunk for the whole page"
+        );
+
+        let loop_counter = QueryCounter::new(&transaction);
+        let looped = sequences
+            .iter()
+            .map(|sequence| {
+                one_tombstone(
+                    &loop_counter,
+                    query(
+                        &loop_counter,
+                        format!(
+                            "SELECT {TOMBSTONE_COLUMNS}
+                             FROM graph_publication_replay_tombstones_v1
+                             WHERE replay_sequence = ?1"
+                        ),
+                        vec![ExactSqlValue::Integer(*sequence)],
+                    )
+                    .unwrap(),
+                )
+                .unwrap()
+                .expect("retired tombstone must materialize per row")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            loop_counter.hits(),
+            3 * sequences.len(),
+            "per-row reads reproduce the pre-fix three-queries-per-tombstone shape \
+             this change removes"
+        );
+
+        assert_eq!(batched, looped);
+        assert_eq!(batched, vec![first_tombstone, second_tombstone]);
 
         transaction.rollback().unwrap();
     }

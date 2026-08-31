@@ -4,15 +4,16 @@
 //! the daemon's closed post-handshake invocation protocol. They are data: no
 //! socket, no admission decision, no runtime registry, no database.
 //!
-//! The contract lives outside `crate::daemon` on purpose. Its callers are the
-//! application surface and the invocation client, which have no business
-//! reaching into the daemon's service internals just to name a payload. Keeping
-//! the shapes here means a caller depends on the protocol, not on the server
-//! that happens to implement it.
+//! The contract lives here in `tracedecay-daemon-protocol`, outside the
+//! daemon's service crate, on purpose. Its callers are the application surface
+//! and the invocation client, which have no business reaching into the
+//! daemon's service internals just to name a payload. Keeping the shapes here
+//! means a caller depends on the protocol, not on the server that happens to
+//! implement it.
 //!
 //! Behavior stays with the daemon. Anything that interprets a request —
 //! authority minting, scope resolution, dispatch — remains in
-//! `crate::daemon::service::invocation`; only construction, validation, and the
+//! `tracedecay-daemon-service`; only construction, validation, and the
 //! application-DTO conversions travel with the types they belong to.
 
 mod git_surface;
@@ -101,6 +102,9 @@ fn valid_lsp_control(deadline: &Deadline, cancellation: &CancellationContext) ->
 pub const DAEMON_INVOCATION_PROTOCOL: &str = "tracedecay.daemon.invocation";
 /// Initial revision of the daemon-owned invocation wire shape.
 pub const DAEMON_INVOCATION_REVISION: u16 = 1;
+/// Request method a control client sends over the closed protocol to ask the
+/// daemon to shut down.
+pub const DAEMON_SHUTDOWN_METHOD: &str = "tracedecay/daemon/shutdown";
 const DAEMON_INVOCATION_CANCEL_OPERATION: &str = "invocation_cancel";
 const DAEMON_INVOCATION_DELIVERY_ACK_OPERATION: &str = "invocation_delivery_ack";
 

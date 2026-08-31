@@ -140,7 +140,7 @@ pub(super) async fn scan_composer_keys_page(
             ),
         };
         let mut stmt = conn
-            .prepare(sql)
+            .prepare_cached(sql)
             .map_err(|error| format!("could not prepare Cursor composer key scan: {error}"))?;
         let limit = i64::try_from(limit)
             .map_err(|_| "Cursor composer key scan limit is invalid".to_string())?;
@@ -167,6 +167,10 @@ pub(super) async fn scan_composer_keys_page(
     .unwrap_or_else(|| Err("Cursor composer key scan task failed".to_string()))
 }
 
+/// One length-gated KV fetch. This runs once per bubble/envelope during a
+/// composer sweep, so the fixed statement goes through the connection's
+/// prepared-statement cache instead of re-parsing per call.
+#[hotpath::measure(label = "sessions.hosts.cursor.kv_fetch")]
 fn fetch_kv_text_bounded_sync(
     conn: &rusqlite::Connection,
     key: &str,
@@ -174,7 +178,7 @@ fn fetch_kv_text_bounded_sync(
     remaining: Option<u64>,
 ) -> BoundedSqliteValue<String> {
     let effective_cap = effective_sqlite_cap(max_bytes, remaining);
-    let Ok(mut stmt) = conn.prepare(
+    let Ok(mut stmt) = conn.prepare_cached(
         "SELECT length(CAST(value AS BLOB)) AS nbytes, \
          CASE WHEN length(CAST(value AS BLOB)) <= ?1 THEN value ELSE NULL END AS payload \
          FROM cursorDiskKV WHERE key = ?2",

@@ -142,8 +142,8 @@ pub(super) fn verified_graph_options<'a>(
 }
 
 /// [`verified_graph_options`] whose projection open reports the last complete
-/// generation serving through a rebuild window, for pinning the typed
-/// freshness trailer at the dispatch boundary.
+/// generation serving through a rebuild window (a reconcile pass in flight),
+/// for pinning the typed freshness trailer at the dispatch boundary.
 pub(super) fn verified_graph_stale_options<'a>(
     cg: &TraceDecay,
     options: ToolCallRegistryOptions<'a>,
@@ -151,8 +151,36 @@ pub(super) fn verified_graph_stale_options<'a>(
     verified_graph_options_with_freshness(
         cg,
         options,
-        tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale,
+        tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale {
+            sealed_at: fixture_sealed_at(),
+            rebuild_in_flight: true,
+        },
     )
+}
+
+/// [`verified_graph_stale_options`] with no rebuild pass in flight: the seat
+/// is stale and nothing is progressing, the wedged-route shape the trailer
+/// must distinguish from a routine rebuild.
+pub(super) fn verified_graph_wedged_options<'a>(
+    cg: &TraceDecay,
+    options: ToolCallRegistryOptions<'a>,
+) -> ToolCallRegistryOptions<'a> {
+    verified_graph_options_with_freshness(
+        cg,
+        options,
+        tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale {
+            sealed_at: fixture_sealed_at(),
+            rebuild_in_flight: false,
+        },
+    )
+}
+
+fn fixture_sealed_at() -> tracedecay_domain::UtcMicros {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("graph fixture clock")
+        .as_micros() as i64;
+    tracedecay_domain::UtcMicros(now.saturating_sub(90_000_000))
 }
 
 fn verified_graph_options_with_freshness<'a>(

@@ -65,15 +65,14 @@ pub type SourceStoreResult<T> = Result<T, SourceStoreErrorV1>;
 /// Records that one in-memory value already passed its own integrity checks.
 ///
 /// External-source records are content-addressed and immutable: every field is
-/// private, no accessor hands out a mutable borrow, and the only in-module
-/// assembly path rebuilds a value and re-verifies it through
-/// [`SourceStoreStateV1::validated`]. Re-canonicalizing and re-hashing the same
-/// bytes therefore cannot change a verdict, and a single external-source write
-/// used to do exactly that four times over the whole store: the executor
-/// validates the loaded state, `apply_source_commit` validates it again, the
-/// assembled successor validates once, and the persist path validates it a
-/// fourth time — each sweep re-hashing every historical receipt, every stored
-/// mutation, and every projection.
+/// private and no accessor hands out a mutable borrow. Durable restoration
+/// always re-verifies the complete assembly through
+/// [`SourceStoreStateV1::validated`]; reducer successors can inherit the
+/// verdict only after validating the predecessor, transition command, new
+/// records, and exact frontier invariants. Re-canonicalizing and re-hashing
+/// unchanged bytes therefore cannot change a verdict, and a single
+/// external-source write used to do exactly that four times over the whole
+/// store.
 ///
 /// The memo keeps the fail-closed gate intact. It is never serialized, so a
 /// value decoded from durable bytes always starts unverified and is fully
@@ -998,18 +997,26 @@ pub struct SourceStoreStateV1 {
     verified: ValidationMemoV1,
 }
 
+#[hotpath::measure_all]
 impl SourceStoreStateV1 {
-    /// Verify a freshly assembled successor state.
+    /// Fully verifies state reconstructed from durable normalized rows.
     ///
-    /// The assembly paths start from a clone of an already-verified state and
-    /// then replace fields, so the inherited memo describes the predecessor,
-    /// not this value. Clearing it first makes this the successor's first
-    /// contact and forces the full sweep; the components it carries over keep
-    /// their own memos, so the sweep costs O(new records), not O(store).
+    /// No process-local provenance survives serialization or connection
+    /// reopen, so restoration always starts with a cleared memo and sweeps
+    /// every current record.
     fn validated(mut self) -> SourceStoreResult<Self> {
         self.verified.clear();
         self.validate()?;
         Ok(self)
+    }
+
+    /// Marks a successor assembled from a verified predecessor and fully
+    /// validated transition records. Only reducers in this module may use
+    /// this path: durable restoration must continue through [`Self::restore`]
+    /// and its complete sweep.
+    fn verified_successor(self) -> Self {
+        self.verified.mark_verified();
+        self
     }
 
     pub fn restore(
@@ -1212,6 +1219,7 @@ pub struct SourcePendingProjectionV1 {
     projected_mutations: BTreeMap<SourceNativeObjectIdV1, SourceObjectMutationV1>,
 }
 
+#[hotpath::measure_all]
 impl SourcePendingProjectionV1 {
     pub fn new(
         definition: SourceDefinitionV1,
@@ -1271,6 +1279,11 @@ impl SourcePendingProjectionV1 {
 
     pub fn projected_mutations(&self) -> &BTreeMap<SourceNativeObjectIdV1, SourceObjectMutationV1> {
         &self.projected_mutations
+    }
+
+    fn needs_projected_mutations(&self) -> bool {
+        self.definition.deletion_semantics == SourceDeletionSemanticsV1::CompleteSnapshotAbsence
+            && self.receipt.snapshot_completion().is_some()
     }
 
     pub fn validate(&self) -> SourceStoreResult<()> {
@@ -1387,13 +1400,29 @@ pub fn apply_source_projection(
     pending: &SourcePendingProjectionV1,
     projection: SourceProjectionCommitV1,
 ) -> SourceStoreResult<SourceProjectionApplyOutcomeV1> {
+    let outcome = reduce_source_projection(current.clone(), pending, projection);
+    crate::hotpath_observe::record_source_projection_outcome(&outcome);
+    outcome
+}
+
+/// Applies a projection while consuming the writer actor's verified state.
+///
+/// This is equivalent to [`apply_source_projection`] but avoids cloning every
+/// current-object map before applying one ordered successor.
+#[hotpath::measure(label = "store.external_source.apply_projection_owned")]
+pub fn apply_source_projection_owned(
+    current: SourceStoreStateV1,
+    pending: &SourcePendingProjectionV1,
+    projection: SourceProjectionCommitV1,
+) -> SourceStoreResult<SourceProjectionApplyOutcomeV1> {
     let outcome = reduce_source_projection(current, pending, projection);
     crate::hotpath_observe::record_source_projection_outcome(&outcome);
     outcome
 }
 
+#[hotpath::measure(label = "store.external_source.reduce_projection")]
 fn reduce_source_projection(
-    current: &SourceStoreStateV1,
+    mut current: SourceStoreStateV1,
     pending: &SourcePendingProjectionV1,
     projection: SourceProjectionCommitV1,
 ) -> SourceStoreResult<SourceProjectionApplyOutcomeV1> {
@@ -1414,7 +1443,8 @@ fn reduce_source_projection(
     if pending.binding_identity()? != current.binding.immutable_identity()?
         || pending.receipt().source_frontier() != projection.source_frontier()
         || frontier_is_ahead(projection.source_frontier(), current.source_frontier())
-        || current.projected_mutations != pending.projected_mutations
+        || (pending.needs_projected_mutations()
+            && current.projected_mutations != pending.projected_mutations)
     {
         return Err(SourceStoreErrorV1::FrontierConflict);
     }
@@ -1432,25 +1462,34 @@ fn reduce_source_projection(
     if expected != projection {
         return Err(SourceStoreErrorV1::RevisionConflict);
     }
-    let mut next = current.clone();
     for (mutation, effect) in projection.mutations().iter().zip(projection.effects()) {
-        next.projected_objects.insert(
+        current.projected_objects.insert(
             effect.observation().native_object().clone(),
             effect.observation().clone(),
         );
-        next.projected_mutations.insert(
+        current.projected_mutations.insert(
             mutation.observation().native_object().clone(),
             mutation.clone(),
         );
     }
-    next.projection = Some(projection);
+    current.projection = Some(projection);
     Ok(SourceProjectionApplyOutcomeV1::Projected(Box::new(
-        next.validated()?,
+        current.verified_successor(),
     )))
 }
 
+#[hotpath::measure(label = "store.external_source.apply_authority")]
 pub fn apply_source_authority_publication(
     current: &SourceStoreStateV1,
+    publication: SourceAuthorityPublicationV1,
+) -> SourceStoreResult<SourceAuthorityPublicationApplyOutcomeV1> {
+    apply_source_authority_publication_owned(current.clone(), publication)
+}
+
+/// Applies an authority revision while consuming verified writer state.
+#[hotpath::measure(label = "store.external_source.apply_authority_owned")]
+pub fn apply_source_authority_publication_owned(
+    mut current: SourceStoreStateV1,
     publication: SourceAuthorityPublicationV1,
 ) -> SourceStoreResult<SourceAuthorityPublicationApplyOutcomeV1> {
     current.validate()?;
@@ -1474,15 +1513,14 @@ pub fn apply_source_authority_publication(
         definition_digest: publication.definition.definition_digest.clone(),
         binding_digest: publication.binding.binding_digest.clone(),
     };
-    let mut next = current.clone();
-    next.definition = publication.definition;
-    next.binding = publication.binding;
+    current.definition = publication.definition;
+    current.binding = publication.binding;
     Ok(SourceAuthorityPublicationApplyOutcomeV1 {
-        state: Box::new(next.validated()?),
+        state: Box::new(current.verified_successor()),
         receipt,
     })
 }
 
 mod reducer;
 use reducer::absence_tombstone;
-pub use reducer::apply_source_commit;
+pub use reducer::{apply_source_commit, apply_source_commit_owned};
