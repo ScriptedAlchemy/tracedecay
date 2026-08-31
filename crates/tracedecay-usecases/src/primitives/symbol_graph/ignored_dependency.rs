@@ -175,7 +175,7 @@ pub(in crate::primitives) fn ignored_dependency_candidate_failure(
             "application.symbol-graph.ignored-dependency-candidate-read-corrupt",
             "ignored dependency candidate evidence is corrupt",
         ),
-        CodeGraphProjectionError::Conflict
+        CodeGraphProjectionError::Conflict { .. }
         | CodeGraphProjectionError::Unavailable(_)
         | CodeGraphProjectionError::DurabilityUncertain(_)
         | CodeGraphProjectionError::Closed => failure(

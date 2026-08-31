@@ -610,7 +610,9 @@ fn sealed_code_generation_publishes_with_its_supplied_manifest() {
                 Some(Arc::new(foreign)),
             )
             .unwrap_err(),
-        GraphDbError::Conflict
+        GraphDbError::conflict(
+            "verified_generation_contract.sealed_code_generation_publishes_with_its_supplied_manifest"
+        )
     );
 
     let (control, probe) = control_and_probe();
@@ -720,7 +722,7 @@ fn retired_replay_survives_native_delete_failure_until_restart_cleanup_finalizes
 
     let (control, probe) = control_and_probe();
     let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
-    assert_eq!(
+    assert!(matches!(
         registered.registry.retire_one_code_generation_replay(
             registration(registered.binding.clone(), temp.path()),
             &mut authority,
@@ -728,8 +730,8 @@ fn retired_replay_survives_native_delete_failure_until_restart_cleanup_finalizes
             &sealed_generation,
             &wrong_sealed_digest,
         ),
-        Err(GraphDbError::Conflict)
-    );
+        Err(GraphDbError::Conflict { .. })
+    ));
 
     let cancellation = Arc::new(AtomicU8::new(0));
     authority.cancel_after_retire = Some(Arc::clone(&cancellation));
@@ -761,7 +763,7 @@ fn retired_replay_survives_native_delete_failure_until_restart_cleanup_finalizes
     let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
     let (control, probe) = control_and_probe();
     let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
-    assert_eq!(
+    assert!(matches!(
         registered.registry.retire_one_code_generation_replay(
             registration(registered.binding.clone(), temp.path()),
             &mut authority,
@@ -769,8 +771,8 @@ fn retired_replay_survives_native_delete_failure_until_restart_cleanup_finalizes
             &sealed_generation,
             &wrong_sealed_digest,
         ),
-        Err(GraphDbError::Conflict)
-    );
+        Err(GraphDbError::Conflict { .. })
+    ));
     let (control, probe) = control_and_probe();
     let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
     assert!(matches!(
@@ -780,7 +782,7 @@ fn retired_replay_survives_native_delete_failure_until_restart_cleanup_finalizes
             &context,
             &g1_record.publication.key,
         ),
-        Err(GraphDbError::Conflict)
+        Err(GraphDbError::Conflict { .. })
     ));
 
     let (control, probe) = control_and_probe();

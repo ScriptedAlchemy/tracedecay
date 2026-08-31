@@ -6143,8 +6143,10 @@ fn graph_publication_conflict_re_arms_activation_instead_of_orphaning_serving() 
     use crate::code_index::graph_projection::CodeGraphProjectionError;
 
     assert!(
-        super::CodeIndexSchedulerErrorV1::GraphProjection(CodeGraphProjectionError::Conflict)
-            .is_retryable_activation(),
+        super::CodeIndexSchedulerErrorV1::GraphProjection(
+            tracedecay_graph_db::GraphDbError::conflict("test.publication_conflict").into()
+        )
+        .is_retryable_activation(),
         "a publication conflict leaves the sealed artifact intact and must retry with backoff"
     );
     assert!(

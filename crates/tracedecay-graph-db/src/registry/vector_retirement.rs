@@ -121,7 +121,9 @@ impl GraphDbRegistry {
         check_all(&registration, context, "vector.retirement")?;
         require_authority_binding(&registration, authority)?;
         if &writer_fence.binding != registration.binding() {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict(
+                "vector_retirement.reserve_one_semantic_vector_generation",
+            ));
         }
         let shard_id = &registration.binding().shard_id;
         let database = self.registered_database(&registration)?;
@@ -222,7 +224,9 @@ impl GraphDbRegistry {
             .and_then(|()| {
                 (&writer_fence.binding == registration.binding())
                     .then_some(())
-                    .ok_or(GraphDbError::Conflict)
+                    .ok_or(GraphDbError::conflict(
+                        "vector_retirement.finalize_semantic_vector_retirement",
+                    ))
             })
             .and_then(|()| {
                 authority
@@ -473,7 +477,9 @@ fn finish_reserved_cancelled(
     let record = reservation.record.clone();
     if record.state != SemanticVectorStageState::Cancelled {
         reservation.release()?;
-        return Err(GraphDbError::Conflict);
+        return Err(GraphDbError::conflict(
+            "vector_retirement.finish_reserved_cancelled",
+        ));
     }
     if let Err(error) = database.delete_cancelled_staged_generation(&record.plan, &|| {
         check_registration_request(registration, "vector.retirement.cleanup")
@@ -504,7 +510,9 @@ fn finish_reserved_cancelled(
         }
         Ok(SemanticVectorCancelledRetirementOutcome::NotCancelled(_)) => {
             reservation.release()?;
-            Err(GraphDbError::Conflict)
+            Err(GraphDbError::conflict(
+                "vector_retirement.finish_reserved_cancelled",
+            ))
         }
         Err(error) => {
             reservation.preserve_cleanup_fence();
@@ -525,14 +533,18 @@ fn finish_reserved_published(
     let record = reservation.record.clone();
     let SemanticVectorRetirementReservationKind::Published(replay) = &reservation.kind else {
         reservation.release()?;
-        return Err(GraphDbError::Conflict);
+        return Err(GraphDbError::conflict(
+            "vector_retirement.finish_reserved_published",
+        ));
     };
     let replay = (**replay).clone();
     let locator = reservation.locator.clone();
     {
         let state = database.wait_verified_generations_write()?;
         if !state.retiring.contains(&locator) {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict(
+                "vector_retirement.finish_reserved_published",
+            ));
         }
         let retained_by_head = state.heads.values().any(|head| {
             let mut retained = BTreeSet::new();
@@ -593,7 +605,9 @@ fn finish_reserved_published(
         SemanticVectorPublishedRetirementOutcome::Conflict
         | SemanticVectorPublishedRetirementOutcome::Missing => {
             reservation.release()?;
-            Err(GraphDbError::Conflict)
+            Err(GraphDbError::conflict(
+                "vector_retirement.finish_reserved_published",
+            ))
         }
     }
 }
@@ -638,7 +652,9 @@ fn converge_retired_cleanup(
             )))
         }
         GraphRetiredReplayCleanupFinalizeOutcomeV1::Conflict
-        | GraphRetiredReplayCleanupFinalizeOutcomeV1::Missing => Err(GraphDbError::Conflict),
+        | GraphRetiredReplayCleanupFinalizeOutcomeV1::Missing => Err(GraphDbError::conflict(
+            "vector_retirement.converge_retired_cleanup",
+        )),
     }
 }
 

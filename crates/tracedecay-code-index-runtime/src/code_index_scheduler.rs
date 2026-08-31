@@ -4260,7 +4260,7 @@ impl CodeIndexSchedulerErrorV1 {
                 CodeGraphProjectionError::Cancelled
                     | CodeGraphProjectionError::BudgetExhausted { .. }
                     | CodeGraphProjectionError::DeadlineExceeded
-                    | CodeGraphProjectionError::Conflict
+                    | CodeGraphProjectionError::Conflict { .. }
                     | CodeGraphProjectionError::Unavailable(_)
                     | CodeGraphProjectionError::Closed
             ),

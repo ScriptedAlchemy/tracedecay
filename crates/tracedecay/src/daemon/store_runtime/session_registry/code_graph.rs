@@ -92,7 +92,7 @@ fn observe_code_graph_publication<T>(
     result: std::result::Result<T, GraphDbError>,
 ) -> std::result::Result<T, GraphDbError> {
     result.map_err(|error| {
-        if matches!(error, GraphDbError::Conflict) {
+        if matches!(error, GraphDbError::Conflict { .. }) {
             let reason = stage.as_str();
             tracing::warn!(
                 event = "code_graph_publication_conflict",
@@ -468,7 +468,9 @@ impl RetainedVerifiedGraphRuntimeV1 {
                 GraphDbError::unavailable("memory graph retirement target lock is poisoned")
             })?
             .take()
-            .ok_or(GraphDbError::Conflict)
+            .ok_or(GraphDbError::conflict(
+                "code_graph.take_store_graph_retirement_target",
+            ))
     }
 
     pub(crate) fn restore_store_graph_retirement_target(
@@ -479,7 +481,9 @@ impl RetainedVerifiedGraphRuntimeV1 {
             GraphDbError::unavailable("memory graph retirement target lock is poisoned")
         })?;
         if retained.is_some() {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict(
+                "code_graph.restore_store_graph_retirement_target",
+            ));
         }
         *retained = Some(target);
         Ok(())
@@ -507,7 +511,9 @@ impl RetainedVerifiedGraphRuntimeV1 {
             GraphDbError::unavailable("memory graph operation admission lock is poisoned")
         })? {
             MemoryGraphOperationAdmissionV1::Ready => Ok(()),
-            MemoryGraphOperationAdmissionV1::Retiring => Err(GraphDbError::Conflict),
+            MemoryGraphOperationAdmissionV1::Retiring => Err(GraphDbError::conflict(
+                "code_graph.require_operation_admission",
+            )),
         }
     }
 
@@ -518,7 +524,9 @@ impl RetainedVerifiedGraphRuntimeV1 {
             GraphDbError::unavailable("memory graph operation admission lock is poisoned")
         })?;
         if matches!(*admission, MemoryGraphOperationAdmissionV1::Retiring) {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict(
+                "code_graph.reserve_operation_retirement.retiring",
+            ));
         }
         *admission = MemoryGraphOperationAdmissionV1::Retiring;
         Ok(MemoryGraphOperationRetirementReservationV1 {
@@ -685,7 +693,9 @@ impl RetainedVerifiedGraphRuntimeV1 {
                 if requested_replay(journaled.publication.expected_prior_head.clone())?
                     != journaled.publication
                 {
-                    return Err(GraphDbError::Conflict);
+                    return Err(GraphDbError::conflict(
+                        "code_graph.publish_verified_manifest",
+                    ));
                 }
                 let head = storage
                     .verified_head(&relational_projection, &context)
@@ -708,7 +718,9 @@ impl RetainedVerifiedGraphRuntimeV1 {
                     .as_ref()
                     .is_some_and(|head| head.sequence > journaled.sequence)
                 {
-                    return Err(GraphDbError::Conflict);
+                    return Err(GraphDbError::conflict(
+                        "code_graph.publish_verified_manifest",
+                    ));
                 }
                 // The replay is journaled but the verified head never advanced
                 // to it: an earlier publish was interrupted between the journal
@@ -721,7 +733,9 @@ impl RetainedVerifiedGraphRuntimeV1 {
                 return Ok(publication.snapshot);
             }
             GraphPublicationReplayLookupV1::Retired(_) => {
-                return Err(GraphDbError::Conflict);
+                return Err(GraphDbError::conflict(
+                    "code_graph.publish_verified_manifest",
+                ));
             }
             GraphPublicationReplayLookupV1::Missing => {}
         }
@@ -744,7 +758,9 @@ impl RetainedVerifiedGraphRuntimeV1 {
                 | GraphReplayAppendOutcomeV1::ExactVerifiedReplay { .. } => break,
                 GraphReplayAppendOutcomeV1::PendingReplayConflict { pending } => {
                     if completed_predecessors >= MAX_PENDING_REPLAY_COMPLETIONS_V1 {
-                        return Err(GraphDbError::Conflict);
+                        return Err(GraphDbError::conflict(
+                            "code_graph.publish_verified_manifest",
+                        ));
                     }
                     completed_predecessors += 1;
                     publish_journaled(&mut storage, &pending.publication.key)?;
@@ -755,14 +771,18 @@ impl RetainedVerifiedGraphRuntimeV1 {
                 }
                 GraphReplayAppendOutcomeV1::VerifiedHeadConflict { actual } => {
                     if completed_predecessors >= MAX_PENDING_REPLAY_COMPLETIONS_V1 {
-                        return Err(GraphDbError::Conflict);
+                        return Err(GraphDbError::conflict(
+                            "code_graph.publish_verified_manifest",
+                        ));
                     }
                     completed_predecessors += 1;
                     replay = requested_replay(actual)?;
                 }
                 GraphReplayAppendOutcomeV1::Conflict { .. }
                 | GraphReplayAppendOutcomeV1::RetiredReplayConflict { .. } => {
-                    return Err(GraphDbError::Conflict);
+                    return Err(GraphDbError::conflict(
+                        "code_graph.publish_verified_manifest",
+                    ));
                 }
             }
         }
@@ -973,7 +993,9 @@ impl RetainedCodeGraphRuntimeV1 {
         request_cancelled: Arc<AtomicBool>,
     ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError> {
         if generation.manifest().generation_id != self.generation_id {
-            return Err(GraphDbError::Conflict);
+            return Err(GraphDbError::conflict(
+                "code_graph.publish_verified_snapshot_with_stage_boundary",
+            ));
         }
         self.sweep_aborted_read_bundle_temporaries()?;
         // Everything up to `prepared` below is a pure function of the
@@ -1369,7 +1391,9 @@ impl RetainedCodeGraphRuntimeV1 {
             SealedPublicationClassificationV1::RetiredConflict => {
                 return observe_code_graph_publication(
                     CodeGraphPublicationConflictStageV1::RetiredReplay,
-                    Err(GraphDbError::Conflict),
+                    Err(GraphDbError::conflict(
+                        "code_graph.publish_prepared_sealed_generation",
+                    )),
                 );
             }
             SealedPublicationClassificationV1::ResumeJournaled => {
@@ -1462,7 +1486,9 @@ impl RetainedCodeGraphRuntimeV1 {
                     if completed_predecessors >= MAX_PENDING_REPLAY_COMPLETIONS_V1 {
                         return observe_code_graph_publication(
                             CodeGraphPublicationConflictStageV1::PendingCompletionLimit,
-                            Err(GraphDbError::Conflict),
+                            Err(GraphDbError::conflict(
+                                "code_graph.publish_prepared_sealed_generation",
+                            )),
                         );
                     }
                     completed_predecessors += 1;
@@ -1482,7 +1508,9 @@ impl RetainedCodeGraphRuntimeV1 {
                     if completed_predecessors >= MAX_PENDING_REPLAY_COMPLETIONS_V1 {
                         return observe_code_graph_publication(
                             CodeGraphPublicationConflictStageV1::VerifiedHeadRefreshLimit,
-                            Err(GraphDbError::Conflict),
+                            Err(GraphDbError::conflict(
+                                "code_graph.publish_prepared_sealed_generation",
+                            )),
                         );
                     }
                     completed_predecessors += 1;
@@ -1492,7 +1520,9 @@ impl RetainedCodeGraphRuntimeV1 {
                 | GraphReplayAppendOutcomeV1::RetiredReplayConflict { .. } => {
                     return observe_code_graph_publication(
                         CodeGraphPublicationConflictStageV1::ReplayAppend,
-                        Err(GraphDbError::Conflict),
+                        Err(GraphDbError::conflict(
+                            "code_graph.publish_prepared_sealed_generation",
+                        )),
                     );
                 }
             }
@@ -2141,7 +2171,9 @@ impl DaemonSessionRuntimeRegistryV1 {
                         if source.generation != generation
                             || source.sealed_state_digest != sealed_digest
                         {
-                            return Err(GraphDbError::Conflict);
+                            return Err(GraphDbError::conflict(
+                                "code_graph.reconcile_deleted_code_generation_graph_replays",
+                            ));
                         }
                     }
                     GraphReplayCollectionOutcome::Retained => return Ok(false),
@@ -2387,7 +2419,7 @@ fn map_code_graph_error(
             GraphDbError::budget_exhausted(kind, limit)
         }
         CodeGraphProjectionError::DeadlineExceeded => GraphDbError::DeadlineExceeded,
-        CodeGraphProjectionError::Conflict => GraphDbError::Conflict,
+        CodeGraphProjectionError::Conflict { context } => GraphDbError::Conflict { context },
         CodeGraphProjectionError::ProjectionMismatch {
             namespace,
             projection,

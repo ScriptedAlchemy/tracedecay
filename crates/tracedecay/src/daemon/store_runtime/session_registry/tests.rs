@@ -1185,7 +1185,7 @@ async fn project_graph_runtime_publishes_recovers_and_fails_closed() {
                 GraphIdempotencyKey::new("idempotency.generic-test.1").expect("stale idempotency"),
                 Arc::new(AtomicBool::new(false)),
             ),
-        Err(GraphDbError::Conflict)
+        Err(GraphDbError::Conflict { .. })
     ));
 
     let cancelled = FactReadControl::new(Arc::new(|| true));
