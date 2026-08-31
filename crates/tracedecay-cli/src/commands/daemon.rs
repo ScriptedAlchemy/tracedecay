@@ -53,6 +53,7 @@ fn client_handshake(
 /// consumer of a retained result payload unwraps through here so a problem
 /// envelope surfaces as its typed code and message and envelope drift
 /// surfaces as a decode error naming the tool.
+#[hotpath::measure(label = "cli.daemon.retained_payload")]
 pub(crate) fn retained_tool_payload<T: DeserializeOwned>(
     tool_name: &str,
     reply: Value,
