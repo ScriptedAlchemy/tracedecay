@@ -491,6 +491,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
     /// Each worker connection keeps its own SQLite cache. Dispatching
     /// `PRAGMA shrink_memory` through the writer actor would shrink the
     /// wrong connection (or fail when no writer is attached).
+    #[hotpath::measure(label = "rusqlite.reader_pool.release_memory")]
     pub(crate) fn release_connection_memory(&self) -> Result<MemoryReleaseOutcome, ExactSqlError> {
         let (lifecycle, clients) = {
             let state = self
@@ -906,6 +907,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
 
     /// Opportunistically retire burst workers. This method performs no sleep;
     /// tests and maintenance callers can supply a deterministic monotonic time.
+    #[hotpath::measure(label = "rusqlite.reader_pool.retire_idle")]
     pub fn retire_idle_at(&self, now: Instant) -> usize {
         let mut retired = Vec::new();
         {
@@ -944,6 +946,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
         retired.len()
     }
 
+    #[hotpath::measure(label = "rusqlite.reader_pool.add_worker")]
     fn add_idle_worker(&self, lane: ReaderLane) -> Result<(), ReaderStartError> {
         let spawned = worker::spawn(
             self.inner.locator.clone(),

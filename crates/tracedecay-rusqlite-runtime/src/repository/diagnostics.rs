@@ -26,6 +26,7 @@ const CLEARED: &str = DIAGNOSTIC_STATE_CLEARED;
 pub struct DiagnosticExecutor;
 
 impl DiagnosticExecutor {
+    #[hotpath::measure(label = "rusqlite.diagnostics.write")]
     pub fn execute_write(
         &mut self,
         savepoint: &Savepoint<'_>,
@@ -106,6 +107,7 @@ impl DiagnosticExecutor {
     /// lanes and must stay so: clearing marks records a newer clean generation
     /// replaced wholesale, while supersession preserves a walkable chain from
     /// a prior finding to its logical successor.
+    #[hotpath::measure(label = "rusqlite.diagnostics.supersede")]
     pub fn execute_supersession(
         &mut self,
         savepoint: &Savepoint<'_>,
@@ -129,6 +131,7 @@ impl DiagnosticExecutor {
         Ok(transitioned as u64)
     }
 
+    #[hotpath::measure(label = "rusqlite.diagnostics.read")]
     pub fn execute_read(
         &mut self,
         snapshot: &Transaction<'_>,
@@ -197,6 +200,7 @@ impl DiagnosticExecutor {
 /// The walk stops at a current, cleared, or missing successor. An anchor
 /// already visited also stops the walk, so a cyclic `state_generation` graph
 /// cannot spin here.
+#[hotpath::measure(label = "rusqlite.diagnostics.chain_walk")]
 fn read_supersession_chain(
     connection: &rusqlite::Connection,
     anchor: &RetrievalAnchorId,
@@ -266,6 +270,7 @@ fn read_logical_successor(
     Ok(records.pop())
 }
 
+#[hotpath::measure(label = "rusqlite.diagnostics.insert_record")]
 fn insert_record(
     savepoint: &Savepoint<'_>,
     record: &GenerationDiagnosticV1,
