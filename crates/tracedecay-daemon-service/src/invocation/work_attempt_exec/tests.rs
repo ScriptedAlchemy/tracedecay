@@ -31,7 +31,7 @@ use tracedecay_domain::configuration::{
 
 use tracedecay_global_db::configuration::registry::ConfigurationRegistry;
 use tracedecay_global_db::configuration::resolver::{ConfigurationLayerV1, resolve_configuration};
-use tracedecay_usecases::config::{PinnedRuntimeConfiguration, RuntimeConfigurationTarget};
+use tracedecay_configuration::config::{PinnedRuntimeConfiguration, RuntimeConfigurationTarget};
 
 use tracedecay_application::{
     CancelWorkAttemptCommand, CancellationContext, CapabilityGrantSnapshot, Deadline,

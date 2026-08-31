@@ -475,7 +475,7 @@ pub(super) async fn apply_configuration_or_semantic_transition(
     mutation: DirectConfigurationMutation,
     expected_revision: ConfigurationRevisionId,
     now: UtcMicros,
-) -> Result<tracedecay_usecases::configuration::ConfigurationMutationReceipt, ConfigurationError> {
+) -> Result<tracedecay_configuration::ConfigurationMutationReceipt, ConfigurationError> {
     let requested_semantic_profile = semantic_profile_transition(&mutation)?;
     let current = Box::pin(registered.runtime.client().current()).await?;
     let semantic_profile = requested_semantic_profile.filter(|requested| {

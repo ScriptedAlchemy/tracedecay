@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::PinnedRuntimeConfiguration;
+use tracedecay_usecases::semantic_runtime::ProjectSemanticActivationExt;
 use tracedecay_application::doctor::{
     AdvisoryFeedbackReadV1, CodeIndexMountReadV1, CodeIndexMountStateV1,
     ConfigurationAuthorityReadV1, ConfigurationDriftV1, DaemonRuntimeHealthSignalV1,
@@ -870,7 +871,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
     diagnostic_broker: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
     feedback_runtimes: DaemonFeedbackRuntimeRegistrar,
     store_telemetry_sampling: super::maintenance::StoreTelemetrySamplingRegistry,
-    configuration_runtime: Arc<tracedecay_usecases::configuration::ProjectConfigurationRuntime>,
+    configuration_runtime: Arc<tracedecay_configuration::ProjectConfigurationRuntime>,
 ) -> tracedecay_dashboard_api::DoctorReportReader {
     Arc::new(move || {
         let project_root = project_root.clone();

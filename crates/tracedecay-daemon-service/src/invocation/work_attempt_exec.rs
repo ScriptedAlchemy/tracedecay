@@ -75,7 +75,7 @@ use tracedecay_usecases::observability::{
     record_work_operation_resource,
 };
 
-use tracedecay_usecases::config::work_executable_binding::{
+use tracedecay_configuration::config::work_executable_binding::{
     PinnedWorkExecutableBindingResolver, WorkExecutableBindingError, WorkExecutableBindingResolver,
 };
 
@@ -618,7 +618,7 @@ fn select_provider(
     attempt: &WorkAttemptV1,
 ) -> Result<ProviderSelection, ProviderDenial> {
     let configuration =
-        tracedecay_usecases::config::cached_pinned_runtime_configuration(project_root)
+        tracedecay_configuration::config::cached_pinned_runtime_configuration(project_root)
             .map_err(|_| ProviderDenial::preferred(WorkProviderAvailabilityV1::Unavailable))?;
     let resolver = PinnedWorkExecutableBindingResolver::from_configuration(&configuration)
         .map_err(|error| ProviderDenial::preferred(availability_state(error)))?;

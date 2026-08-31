@@ -7,7 +7,7 @@ use tracedecay_daemon_service::*;
 use tracedecay_domain::configuration::{
     ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationRevisionId,
 };
-use tracedecay_usecases::configuration::{
+use tracedecay_configuration::{
     DirectConfigurationMutation, configuration_layer_scope_digest,
 };
 
