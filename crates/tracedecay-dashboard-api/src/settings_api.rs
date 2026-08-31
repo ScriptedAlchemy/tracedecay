@@ -27,7 +27,7 @@ use super::read_model::{
     DashboardCoverageV1, DashboardEnvelopeV1, DashboardLegalActionKindV1,
     DashboardLegalActionRefV1, scope_from_state,
 };
-use crate::application::configuration::{
+use tracedecay_configuration::{
     DirectConfigurationMutation, UserSettingsMutationV1, UserSettingsSnapshotV1,
     parse_duration_millis, plan_user_settings_mutation,
 };

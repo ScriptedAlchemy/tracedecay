@@ -11,15 +11,16 @@ use tracedecay_domain::{
 };
 
 use super::{
-    RegisteredSemanticAcceptedProfileAuthorityV1, SemanticAcceptedProfileAuthorityErrorV1,
-    SemanticAcceptedProfileAuthorityPortV1, SemanticActivationCoordinationErrorV1,
-    SemanticEvaluationLifecycleVerificationV1, SemanticRuntimeFuture,
+    ProjectSemanticActivationExt, RegisteredSemanticAcceptedProfileAuthorityV1,
+    SemanticAcceptedProfileAuthorityErrorV1, SemanticAcceptedProfileAuthorityPortV1,
+    SemanticActivationCoordinationErrorV1, SemanticEvaluationLifecycleVerificationV1,
+    SemanticRuntimeFuture,
 };
 use crate::config::retrieval::{
     AcceptedRetrievalProfileV1, PassingRetrievalEvaluationV1, RetrievalCompatibilityPinsV1,
     RetrievalProfileCasV1, RetrievalRuntimeCompatibilityV1, SemanticResourceRequirementV1,
 };
-use crate::configuration::{
+use tracedecay_configuration::{
     ConfigurationCurrentStateV1, ConfigurationMutationAuthority, ConfigurationMutationReceipt,
     DirectConfigurationMutation, ProjectConfigurationRuntime,
 };
@@ -1732,8 +1733,8 @@ mod tests {
         let database = database_runtime
             .project_database_arc()
             .expect("project database");
-        let configuration = crate::config::PinnedRuntimeConfiguration {
-            target: crate::config::RuntimeConfigurationTarget {
+        let configuration = tracedecay_configuration::config::PinnedRuntimeConfiguration {
+            target: tracedecay_configuration::config::RuntimeConfigurationTarget {
                 project_id,
                 project_root,
             },
@@ -1743,10 +1744,10 @@ mod tests {
             .expect("configuration revision"),
             snapshot: ConfigurationSnapshotV1::new(BTreeMap::new(), BTreeMap::new())
                 .expect("empty configuration snapshot"),
-            config: crate::config::TraceDecayConfig::default(),
+            config: tracedecay_configuration::config::TraceDecayConfig::default(),
         };
         let (configuration, _) = ProjectConfigurationRuntime::open(
-            crate::config::OpenedRuntimeConfiguration::new(configuration, database.clone()),
+            tracedecay_configuration::config::OpenedRuntimeConfiguration::new(configuration, database.clone()),
         )
         .expect("configuration runtime");
         ProductionSemanticConfigurationOperationV1::new(

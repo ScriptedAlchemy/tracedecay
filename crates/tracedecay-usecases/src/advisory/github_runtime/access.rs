@@ -8,7 +8,7 @@ use tracedecay_domain::{LocatorDigest, canonical_sha256};
 
 use super::{GitHubProviderLifecycleV1, GitHubSourceAccessAuthorityV1};
 use crate::advisory::ci_runtime::{CiSourceAccessAuthorityV1, CiSourceAccessOutcomeV1};
-use crate::configuration::ConfigurationControlStore;
+use tracedecay_configuration::ConfigurationControlStore;
 use crate::source_authorization::{
     ProjectSourceAccessOutcome, project_source_access_snapshot_for_request,
 };

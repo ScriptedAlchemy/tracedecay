@@ -26,7 +26,7 @@ use tracedecay_domain::feedback::{
     ProviderEvaluationStateV1, ProximityInclusionV1,
 };
 
-use crate::configuration::ConfigurationControlStore;
+use tracedecay_configuration::ConfigurationControlStore;
 use crate::feedback::concrete::{ConcreteFeedbackOwner, ProjectFeedbackStore};
 use crate::feedback::cycle_runtime::{CanonicalFeedbackResultV1, FeedbackCycleRuntime};
 use crate::feedback::observations::FeedbackObservationEmitterV1;

@@ -93,7 +93,7 @@ use tracedecay_code_index_runtime::git_transactions::{
 use tracedecay_daemon_protocol::{ContextScoutSurfaceRequest, GitReadSurfaceRequest};
 use tracedecay_usecases::CallableCodeAuthorizationSourcePort;
 use tracedecay_usecases::ProjectSourceAccessSnapshot;
-use tracedecay_usecases::configuration::{
+use tracedecay_configuration::{
     AuthorizedActor, ConfigurationAuditQuery, ConfigurationError, ConfigurationMutationAuthority,
     ConfigurationMutationGrantAuthority, ConfigurationMutationGrantAuthorityError,
     ConfigurationMutationGrantAuthorityFuture, ConfigurationRollbackRequest,

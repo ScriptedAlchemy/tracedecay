@@ -11,7 +11,8 @@
 //! only on `tracedecay-domain`, `tracedecay-policy`, and
 //! `tracedecay-tool-catalog`, and defines the traits (`WorkStoragePort`,
 //! `WorkflowDefinitionAuthorityPort`, `StoreSizeTelemetryPort`,
-//! `AuthorizedScopeSet`, …) that storage and runtime crates implement.
+//! `SemanticActivationCoordinationPort`, `AuthorizedScopeSet`, …) that
+//! storage and runtime crates implement.
 //! `tracedecay-usecases` is the **product use-case orchestration layer at the
 //! top of the stack** — it depends on this crate (never the reverse) plus
 //! `tracedecay-runtime-core`, `tracedecay-sessions`, `tracedecay-global-db`
@@ -60,6 +61,7 @@ pub mod retained_receipts;
 pub mod retained_surfaces;
 pub mod retrieval;
 pub mod sdk_catalog;
+pub mod semantic_activation;
 pub mod session_sync;
 pub mod settings_preview;
 pub mod source_edit;
@@ -323,6 +325,9 @@ pub use retrieval::{
     callable_code_request_schema, callable_code_result_schema,
 };
 pub use sdk_catalog::sdk_executable_binding_registry;
+pub use semantic_activation::{
+    SemanticActivationCoordinationErrorV1, SemanticActivationCoordinationPort,
+};
 pub use settings_preview::{
     MIN_AUTO_TRACK_PR_POLL_SECS_V1, ProjectSettingsPatchInputV1, SettingsValidationIssueV1,
     validate_project_settings_patch,
