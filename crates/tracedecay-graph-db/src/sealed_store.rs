@@ -1425,7 +1425,8 @@ mod cost_probe {
         let _ = marker_hit.database().close();
         drop(marker_hit);
 
-        let staging_bytes = directory_bytes(&database_path);
+        let staging_bytes = directory_bytes(&database_path)
+            + directory_bytes(&database_path.with_extension("grafeo.wal"));
         let artifact_bytes = directory_bytes(&directory);
         let receipt = std::fs::read_to_string(directory.join("sealed.json")).unwrap();
         let form = receipt
