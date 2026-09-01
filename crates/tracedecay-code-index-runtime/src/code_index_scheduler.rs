@@ -4717,6 +4717,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     }
 
     #[cfg(test)]
+    #[hotpath::skip]
     pub const fn progress_incarnations_for_test(&self) -> (u64, u64) {
         (
             self.progress_daemon_incarnation,
