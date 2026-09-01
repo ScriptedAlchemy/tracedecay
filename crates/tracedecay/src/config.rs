@@ -22,8 +22,9 @@ use tracedecay_domain::configuration::{
     SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY, SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY,
     SYNC_READ_COOLDOWN_SECS_SETTING_KEY, SYNC_READ_REFRESH_SETTING_KEY,
     SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY, SYNC_SESSION_START_SYNC_SETTING_KEY,
-    SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY, SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY,
-    SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY, UserProfileId,
+    SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY, SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
+    SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY, SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey,
+    TELEMETRY_TIMINGS_SETTING_KEY, UserProfileId,
 };
 
 use tracedecay_configuration::ConfigurationControlStore;
@@ -195,6 +196,10 @@ fn default_native_graph_activation() -> bool {
 
 #[hotpath::measure]
 fn default_sync_auto_watch() -> bool {
+    false
+}
+#[hotpath::measure]
+fn default_sync_watch_linked_worktrees() -> bool {
     false
 }
 #[hotpath::measure]
@@ -422,6 +427,10 @@ pub struct SyncConfig {
     /// Enable the daemon git-metadata watcher.
     #[serde(default = "default_sync_auto_watch")]
     pub auto_watch: bool,
+    /// Admit linked worktrees into the daemon watcher without an explicit
+    /// branch-indexing request.
+    #[serde(default = "default_sync_watch_linked_worktrees")]
+    pub watch_linked_worktrees: bool,
     /// Per-project quiet-period debounce before a watcher-triggered sync (ms).
     #[serde(default = "default_sync_watch_debounce_ms")]
     pub watch_debounce_ms: u64,
@@ -490,6 +499,7 @@ impl Default for SyncConfig {
     fn default() -> Self {
         Self {
             auto_watch: default_sync_auto_watch(),
+            watch_linked_worktrees: default_sync_watch_linked_worktrees(),
             watch_debounce_ms: default_sync_watch_debounce_ms(),
             watch_max_delay_ms: default_sync_watch_max_delay_ms(),
             watch_max_projects: default_sync_watch_max_projects(),
@@ -548,6 +558,9 @@ impl SyncConfig {
     pub fn with_env_overrides(mut self) -> Self {
         if let Some(value) = env_bool("SYNC_AUTO_WATCH") {
             self.auto_watch = value;
+        }
+        if let Some(value) = env_bool("SYNC_WATCH_LINKED_WORKTREES") {
+            self.watch_linked_worktrees = value;
         }
         if let Some(value) = env_parse("SYNC_WATCH_DEBOUNCE_MS") {
             self.watch_debounce_ms = value;
@@ -1475,6 +1488,10 @@ pub fn runtime_config_from_snapshot(
         semantic: semantic_config_from_snapshot(snapshot)?,
         sync: SyncConfig {
             auto_watch: required_bool(snapshot, SYNC_AUTO_WATCH_SETTING_KEY)?,
+            watch_linked_worktrees: required_bool(
+                snapshot,
+                SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
+            )?,
             watch_debounce_ms: required_unsigned(snapshot, SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY)?,
             watch_max_delay_ms: required_unsigned(snapshot, SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY)?,
             watch_max_projects: required_usize(snapshot, SYNC_WATCH_MAX_PROJECTS_SETTING_KEY)?,

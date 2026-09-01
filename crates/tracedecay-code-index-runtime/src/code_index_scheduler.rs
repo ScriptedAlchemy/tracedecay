@@ -1091,6 +1091,30 @@ impl DaemonCodeIndexPublicationStoreV1 {
         })
     }
 
+    #[hotpath::measure(label = "code_index.generation.validate_partitioned_manifest")]
+    fn partitioned_text_metadata(
+        &self,
+        identity: &DurableSealedCodeGenerationIdentityV1,
+    ) -> Result<Option<VerifiedSealedTextGenerationMetadataV1>, CodeIndexPublicationStoreErrorV1>
+    {
+        Self::validate_generation_file(&identity.locator)?;
+        let path = self.generations_root.join(&identity.locator);
+        let metadata = path.symlink_metadata().map_err(Self::unavailable)?;
+        if !metadata.file_type().is_file() || metadata.len() != identity.size_bytes {
+            return Err(Self::corruption(
+                "partitioned generation manifest identity is corrupt",
+            ));
+        }
+        let bytes = std::fs::read(path).map_err(Self::unavailable)?;
+        if Self::state_digest(&bytes) != identity.digest.as_str() {
+            return Err(Self::corruption(
+                "partitioned generation manifest digest does not verify",
+            ));
+        }
+        CodeIndexPublishedGenerationV1::partitioned_text_metadata(&bytes)
+            .map_err(|error| Self::corruption(error.to_string()))
+    }
+
     #[hotpath::measure(label = "code_index.generation.decode.bundle")]
     fn decode_generation_file(
         &self,
@@ -2318,6 +2342,7 @@ pub struct LatestCompleteCodeIndexV1 {
 #[derive(Clone)]
 pub struct LatestCodeTextGenerationV1 {
     metadata: Arc<VerifiedSealedTextGenerationMetadataV1>,
+    sealed_format_revision: u32,
     query_owners: Arc<OnceLock<Arc<ProductionCodeIndexQueryOwnersV1>>>,
     /// Native-graph readiness for this exact sealed text generation. Status
     /// reads this authority even while an older generation still owns the
@@ -3232,6 +3257,11 @@ impl LatestCodeTextGenerationV1 {
         &self.metadata
     }
 
+    pub fn uses_partitioned_manifest(&self) -> bool {
+        self.sealed_format_revision
+            == tracedecay_code_index::production::SEALED_GENERATION_FORMAT_REVISION_V1
+    }
+
     pub fn artifact_occurrence_by_chunk(
         &self,
         chunk: &tracedecay_domain::CodeSearchChunkId,
@@ -3371,12 +3401,11 @@ impl LatestCodeTextGenerationV1 {
 }
 
 #[hotpath::measure_all]
-impl LatestCompleteCodeIndexV1 {
+impl LatestCodeTextGenerationV1 {
     fn production_graph_serving(
         &self,
     ) -> Result<Arc<ProductionCodeGraphServingV1>, RetrievalPortError> {
         match &*self
-            .text
             .graph_activation
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -3393,7 +3422,10 @@ impl LatestCompleteCodeIndexV1 {
             )),
         }
     }
+}
 
+#[hotpath::measure_all]
+impl LatestCompleteCodeIndexV1 {
     /// Whether this generation's native graph has neither activated nor been
     /// refused.
     ///
@@ -3428,7 +3460,10 @@ impl LatestCompleteCodeIndexV1 {
     fn mark_graph_activation_unavailable(&self, reason: String) {
         self.text.mark_graph_activation_unavailable(reason);
     }
+}
 
+#[hotpath::measure_all]
+impl LatestCodeTextGenerationV1 {
     /// The retained verified-snapshot projection store for graph reads,
     /// present once persistent graph publication has completed.
     ///
@@ -4369,14 +4404,14 @@ impl LatestCodeTextGenerationV1 {
 }
 
 #[hotpath::measure_all]
-impl LatestCompleteCodeIndexV1 {
+impl LatestCodeTextGenerationV1 {
     fn install_graph_serving(
         &self,
         graph_reader: CodeGraphEvidenceReader,
         store: Option<Arc<CodeGraphProjectionStore>>,
         graph_authority: CodeGraphServingAuthorityV1,
     ) -> Result<(), RetrievalPortError> {
-        if graph_reader.generation() != &self.generation.manifest().generation_id {
+        if graph_reader.generation() != &self.metadata.manifest().generation_id {
             return Err(RetrievalPortError::Contract(
                 "code graph reader generation does not match sealed generation".to_owned(),
             ));
@@ -4387,7 +4422,6 @@ impl LatestCompleteCodeIndexV1 {
             _graph_authority: graph_authority,
         });
         *self
-            .text
             .graph_activation
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
@@ -4833,6 +4867,8 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
             generation,
             text: LatestCodeTextGenerationV1 {
                 metadata,
+                sealed_format_revision:
+                    tracedecay_code_index::production::SEALED_GENERATION_FORMAT_REVISION_V1,
                 query_owners: Arc::new(OnceLock::new()),
                 graph_activation: Arc::new(RwLock::new(CodeGraphActivationStateV1::Pending)),
                 text_projection_build: Arc::new(CodeTextProjectionStateV1::new()),
@@ -5996,59 +6032,81 @@ impl CodeIndexWorktreeSchedulerV1 {
         let progress_state = Arc::clone(&text_progress_state);
         let progress_daemon_incarnation = self.progress_daemon_incarnation;
         let progress_producer_incarnation = self.progress_producer_incarnation;
-        let source = text_artifact_store
-            .open_sealed_source_with_progress(
-                &sealed_identity,
-                &text_control,
-                move |scanned, total| {
-                    let elapsed_micros = progress_state
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .elapsed_micros();
-                    let snapshot = CodeIndexBuildProgressV1 {
-                        generation_id: progress_generation.as_str().to_owned(),
-                        daemon_incarnation: progress_daemon_incarnation,
-                        producer_incarnation: progress_producer_incarnation,
-                        progress_epoch: 0,
-                        sealed_source_digest: progress_digest.clone(),
-                        phase: CodeIndexBuildPhaseV1::SourceScan,
-                        committed_pages: 0,
-                        committed_chunks: 0,
-                        committed_imports: 0,
-                        committed_payload_bytes: 0,
-                        completed_files: 0,
-                        total_files: 0,
-                        completed_lexical_bytes: scanned,
-                        total_lexical_bytes: total,
-                        current_batch_pages: 0,
-                        current_batch_payload_bytes: 0,
-                        elapsed_micros,
-                        last_commit_latency_micros: None,
-                        files_per_second: None,
-                        lexical_bytes_per_second: None,
-                        estimated_remaining_seconds: None,
-                        last_progress_micros: now_micros().0,
-                        blocked_reason: None,
-                    };
-                    let _ = try_publish_build_progress(
-                        &progress_slot,
-                        &progress_generation,
-                        text_progress_owner_epoch,
-                        snapshot,
-                    );
-                },
-            )
-            .ok()?;
-        let mut source = source;
-        if let Ok(Some(published)) = self.publication.active_already_decoded()
-            && published.manifest().generation_id == generation_id
-        {
-            // Same-process successor: the builder still holds the decoded
-            // files. Re-decoding the sealed files array is how a 455 MiB
-            // cancel-batch successor spent the receipt wait in source_scan.
-            let _ = source.attach_published_files(&published);
-        }
-        let metadata = source.metadata();
+        let partitioned_metadata = text_artifact_store
+            .published_descriptor(&generation_id)
+            .ok()
+            .flatten()
+            .and_then(|_| {
+                self.publication
+                    .partitioned_text_metadata(&sealed_identity)
+                    .ok()
+                    .flatten()
+            });
+        let (metadata, sealed_format_revision, preopened_source) =
+            if let Some(metadata) = partitioned_metadata {
+                (
+                    metadata,
+                    tracedecay_code_index::production::SEALED_GENERATION_FORMAT_REVISION_V1,
+                    None,
+                )
+            } else {
+                let mut source = text_artifact_store
+                    .open_sealed_source_with_progress(
+                        &sealed_identity,
+                        &text_control,
+                        move |scanned, total| {
+                            let elapsed_micros = progress_state
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .elapsed_micros();
+                            let snapshot = CodeIndexBuildProgressV1 {
+                                generation_id: progress_generation.as_str().to_owned(),
+                                daemon_incarnation: progress_daemon_incarnation,
+                                producer_incarnation: progress_producer_incarnation,
+                                progress_epoch: 0,
+                                sealed_source_digest: progress_digest.clone(),
+                                phase: CodeIndexBuildPhaseV1::SourceScan,
+                                committed_pages: 0,
+                                committed_chunks: 0,
+                                committed_imports: 0,
+                                committed_payload_bytes: 0,
+                                completed_files: 0,
+                                total_files: 0,
+                                completed_lexical_bytes: scanned,
+                                total_lexical_bytes: total,
+                                current_batch_pages: 0,
+                                current_batch_payload_bytes: 0,
+                                elapsed_micros,
+                                last_commit_latency_micros: None,
+                                files_per_second: None,
+                                lexical_bytes_per_second: None,
+                                estimated_remaining_seconds: None,
+                                last_progress_micros: now_micros().0,
+                                blocked_reason: None,
+                            };
+                            let _ = try_publish_build_progress(
+                                &progress_slot,
+                                &progress_generation,
+                                text_progress_owner_epoch,
+                                snapshot,
+                            );
+                        },
+                    )
+                    .ok()?;
+                if let Ok(Some(published)) = self.publication.active_already_decoded()
+                    && published.manifest().generation_id == generation_id
+                {
+                    // Same-process successor: the builder still holds the decoded
+                    // files. Re-decoding the sealed files array is how a 455 MiB
+                    // cancel-batch successor spent the receipt wait in source_scan.
+                    let _ = source.attach_published_files(&published);
+                }
+                (
+                    source.metadata().clone(),
+                    source.format_revision(),
+                    Some(source),
+                )
+            };
         if metadata.manifest().project_id != self.project_id
             || metadata.manifest().generation_id != generation_id
             || metadata.snapshot().repository != self.repository_id
@@ -6069,9 +6127,10 @@ impl CodeIndexWorktreeSchedulerV1 {
             text_control.retire();
             return None;
         }
-        let metadata = Arc::new(source.metadata().clone());
+        let metadata = Arc::new(metadata);
         Some(LatestCodeTextGenerationV1 {
             metadata,
+            sealed_format_revision,
             query_owners: Arc::new(OnceLock::new()),
             graph_activation: Arc::new(RwLock::new(CodeGraphActivationStateV1::Pending)),
             text_projection_build: Arc::new(CodeTextProjectionStateV1::new()),
@@ -6084,7 +6143,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             text_progress_producer_incarnation: self.progress_producer_incarnation,
             text_artifact_store,
             preopened_source: Arc::new(hotpath::mutex!(
-                Mutex::new(Some(source)),
+                Mutex::new(preopened_source),
                 label = "query.artifact.preopened_retained_source"
             )),
             publication_binding: Some(Arc::new(DurableActiveSealedGenerationBindingV1 {
@@ -6837,6 +6896,8 @@ impl CodeIndexWorktreeSchedulerV1 {
             .cloned()
             .unwrap_or_else(|| LatestCodeTextGenerationV1 {
                 metadata,
+                sealed_format_revision:
+                    tracedecay_code_index::production::SEALED_GENERATION_FORMAT_REVISION_V1,
                 query_owners,
                 graph_activation: Arc::clone(&graph_activation),
                 text_projection_build,
@@ -7450,6 +7511,7 @@ pub mod semantic_vector_graph;
 pub use crate::code_graph_seat::CodeGraphReplayBindingV1;
 pub use activation::{
     CodeIndexActivationHintSinkV1, CodeIndexActivationMountV1, CodeIndexActivationV1,
+    CodeIndexAutomaticAdmissionV1,
 };
 #[cfg(test)]
 pub use cadence::CodeIndexCadenceReadModelV1;

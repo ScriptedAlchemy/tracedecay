@@ -271,6 +271,10 @@ fn sync_config_defaults_round_trip() {
         !parsed.sync.auto_watch,
         "filesystem metadata watching is an explicit opt-in fallback"
     );
+    assert!(
+        !parsed.sync.watch_linked_worktrees,
+        "linked worktree watching requires explicit project opt-in"
+    );
     assert_eq!(parsed.sync.watch_debounce_ms, 2000);
     assert_eq!(parsed.sync.full_sync_escalation_files, 500);
     assert_eq!(parsed.sync.max_concurrent_syncs, 2);
@@ -464,6 +468,7 @@ fn partial_sync_table_fills_missing_fields_with_defaults() {
     }"#;
     let parsed: TraceDecayConfig = serde_json::from_str(json).unwrap();
     assert!(!parsed.sync.auto_watch);
+    assert!(!parsed.sync.watch_linked_worktrees);
     assert_eq!(parsed.sync.backstop_interval_mins, 99);
     // Untouched fields keep their defaults.
     assert_eq!(parsed.sync.watch_debounce_ms, 2000);
@@ -542,12 +547,14 @@ fn pr_autotrack_env_overrides() {
 fn sync_config_env_overrides_bool_and_int() {
     let _lock = lock_user_data_dir_test_env();
     let _watch = EnvRestore::set("TRACEDECAY_SYNC_AUTO_WATCH", "false");
+    let _linked = EnvRestore::set("TRACEDECAY_SYNC_WATCH_LINKED_WORKTREES", "true");
     let _debounce = EnvRestore::set("TRACEDECAY_SYNC_WATCH_DEBOUNCE_MS", "5000");
     // Unparsable ints/bools are ignored (field keeps its base value).
     let _bad = EnvRestore::set("TRACEDECAY_SYNC_MAX_CONCURRENT_SYNCS", "not-a-number");
 
     let overridden = super::SyncConfig::default().with_env_overrides();
     assert!(!overridden.auto_watch);
+    assert!(overridden.watch_linked_worktrees);
     assert_eq!(overridden.watch_debounce_ms, 5000);
     assert_eq!(
         overridden.max_concurrent_syncs,

@@ -559,9 +559,21 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
             .shard_is_registered(&next_runtime.authority.binding().shard_id)
             .expect("cold staging registration state")
     );
+    let durable_sealed_digest = next_runtime.sealed_state_digest.clone();
+    next_runtime.sealed_state_digest =
+        tracedecay_graph_db::SealedGraphStateDigest::try_from(format!("sha256:{}", "f".repeat(64)))
+            .expect("mismatched manifest digest");
+    assert!(
+        matches!(
+            next_runtime.recover_verified_snapshot_from_head(Arc::new(AtomicBool::new(false))),
+            Err(GraphDbError::Conflict { .. })
+        ),
+        "a manifest whose sealed identity disagrees with the verified replay must fail closed"
+    );
+    next_runtime.sealed_state_digest = durable_sealed_digest;
     let cold_reopened = next_runtime
-        .publish_verified_snapshot(next.generation(), Arc::new(AtomicBool::new(false)))
-        .expect("cold activation must recover from the verified sealed artifact");
+        .recover_verified_snapshot_from_head(Arc::new(AtomicBool::new(false)))
+        .expect("cold activation must validate and recover the verified head without replay");
     assert_eq!(cold_reopened.generation(), &next_generation);
     assert_eq!(cold_reopened.verified_head(), &next_head);
     assert!(

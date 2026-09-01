@@ -270,6 +270,14 @@ struct SharedJsonlPreparationAuthority {
 static SHARED_JSONL_PREPARATION_AUTHORITY: OnceLock<SharedJsonlPreparationAuthority> =
     OnceLock::new();
 
+/// Mount the process-wide JSONL page-preparation authority.
+///
+/// The first successful install wins. Later calls — including concurrent
+/// `OnceLock::set` losers and fixtures that carry a distinct
+/// [`ProcessResidentMemoryV1`] Arc — are no-ops. `InvalidFrameState` is a
+/// frame-parse failure, not "another caller already mounted preparation".
+/// Treating a second installer as a frame error poisons every later
+/// host-admission fixture in the same process (the `mcp_suite` cascade).
 #[hotpath::measure]
 pub(crate) fn install_shared_jsonl_preparation_authority(
     memory: Arc<ProcessResidentMemoryV1>,
@@ -279,16 +287,8 @@ pub(crate) fn install_shared_jsonl_preparation_authority(
         component: ResidentMemoryComponentIdV1::new("sessions.codex.prepared-pages")
             .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: "codex" })?,
     };
-    if let Some(installed) = SHARED_JSONL_PREPARATION_AUTHORITY.get() {
-        return if Arc::ptr_eq(&installed.memory, &authority.memory) {
-            Ok(())
-        } else {
-            Err(TranscriptIngestError::InvalidFrameState { provider: "codex" })
-        };
-    }
-    SHARED_JSONL_PREPARATION_AUTHORITY
-        .set(authority)
-        .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: "codex" })
+    let _ = SHARED_JSONL_PREPARATION_AUTHORITY.set(authority);
+    Ok(())
 }
 
 #[hotpath::measure]

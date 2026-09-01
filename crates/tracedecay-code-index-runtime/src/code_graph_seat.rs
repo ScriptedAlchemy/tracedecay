@@ -57,6 +57,11 @@ pub trait CodeGraphSeatLeaseV1: Send {
         request_cancelled: Arc<AtomicBool>,
     ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError>;
 
+    fn recover_verified_snapshot_from_head(
+        &self,
+        request_cancelled: Arc<AtomicBool>,
+    ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError>;
+
     fn load_sealed_read_bundle_catalog(
         &self,
         request_cancelled: &Arc<AtomicBool>,

@@ -18,6 +18,8 @@ use std::process::Command;
 use std::sync::Arc;
 #[cfg(feature = "test-transport")]
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "test-transport")]
+use std::time::Duration;
 use tempfile::TempDir;
 use tokio::sync::{Mutex, MutexGuard};
 #[cfg(feature = "test-transport")]
@@ -232,6 +234,61 @@ pub(crate) async fn warm_code_index_search(server: &McpServer, query: &str) {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
     panic!("code-index search authority did not activate within the polling budget");
+}
+
+/// Poll `tracedecay_search` until it binds a `code_generation`. Authority
+/// activation (`warm_code_index_search`) can return on a warming lexical
+/// lane; ranked `search_matches` are not stable until a generation seats.
+#[cfg(feature = "test-transport")]
+pub(crate) async fn wait_for_code_index_generation(server: &McpServer, query: &str) {
+    let mut last = Value::Null;
+    for _ in 0..60 {
+        let result =
+            handle_real_server_tool_call(server, "tracedecay_search", json!({ "query": query }))
+                .await;
+        last =
+            serde_json::from_str(extract_real_server_text(&result)).expect("search payload JSON");
+        if last["reason"].as_str() == Some("authority_unavailable") {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            continue;
+        }
+        if last["code_generation"].as_str().is_some() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    panic!("code-index search did not bind a generation within the polling budget: {last}");
+}
+
+/// Poll `tracedecay_status` until `code_index_freshness.status` is `current`.
+/// Same publication contract as
+/// `mcp_handler_test::graph_analysis_test::graph_readiness::wait_for_current_graph`.
+#[cfg(feature = "test-transport")]
+pub(crate) async fn wait_for_current_graph(server: &McpServer) {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let status = handle_real_server_tool_call(
+                server,
+                "tracedecay_status",
+                json!({
+                    "include_branch_diagnostics": false,
+                    "include_storage_health": false,
+                    "include_session_ingest": false,
+                    "include_staleness": false,
+                }),
+            )
+            .await;
+            let status: Value = serde_json::from_str(extract_real_server_text(&status))
+                .expect("typed project status JSON");
+            match status["code_index_freshness"]["status"].as_str() {
+                Some("current") => break,
+                Some("warming") => tokio::time::sleep(Duration::from_millis(50)).await,
+                actual => panic!("graph readiness became {actual:?}: {status}"),
+            }
+        }
+    })
+    .await
+    .expect("graph did not become current within the publication budget");
 }
 
 #[cfg(feature = "test-transport")]

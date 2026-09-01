@@ -142,6 +142,7 @@ pub struct GitWatcher {
 pub enum GitWatcherAdmission {
     Ready,
     Disabled,
+    LinkedWorktreeDisabled,
     ShuttingDown,
     Capacity,
     NotRepository,

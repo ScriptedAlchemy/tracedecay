@@ -156,12 +156,12 @@ pub(super) async fn run_semantic_vector_generation_retention(
     observations: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
     cancellation: &tracedecay_session_memory::context::CancellationToken,
 ) -> crate::daemon::maintenance::MaintenanceTickOutcome {
+    let root = graph.project_root();
     if cancellation.is_cancelled() {
-        observations.record_semantic_vector_retention_failure(graph.project_root());
-        log_semantic_vector_retention_degraded("retention_cancelled");
+        observations.record_semantic_vector_retention_failure(root);
+        log_semantic_vector_retention_degraded(observations, root, "retention_cancelled");
         return crate::daemon::maintenance::MaintenanceTickOutcome::Retry;
     }
-    let root = graph.project_root();
     let Some(configuration) = graph
         .configuration_runtime()
         .semantic_configuration_inventory_authority()
@@ -187,12 +187,20 @@ pub(super) async fn run_semantic_vector_generation_retention(
             }
             Ok(_) => {
                 observations.record_semantic_vector_retention_failure(root);
-                log_semantic_vector_retention_degraded("configuration_inventory_unavailable");
+                log_semantic_vector_retention_degraded(
+                    observations,
+                    root,
+                    "configuration_inventory_unavailable",
+                );
                 crate::daemon::maintenance::MaintenanceTickOutcome::Retry
             }
             Err(_) => {
                 observations.record_semantic_vector_retention_failure(root);
-                log_semantic_vector_retention_degraded("runtime_configuration_unavailable");
+                log_semantic_vector_retention_degraded(
+                    observations,
+                    root,
+                    "runtime_configuration_unavailable",
+                );
                 crate::daemon::maintenance::MaintenanceTickOutcome::Retry
             }
         };
@@ -220,7 +228,7 @@ pub(super) async fn run_semantic_vector_generation_retention(
                 .record_semantic_vector_retention_census(root, &census)
                 .as_failure_label()
             {
-                log_semantic_vector_retention_degraded(failure);
+                log_semantic_vector_retention_degraded(observations, root, failure);
                 return crate::daemon::maintenance::MaintenanceTickOutcome::Retry;
             }
             if !matches!(
@@ -247,28 +255,36 @@ pub(super) async fn run_semantic_vector_generation_retention(
             reason,
         ) => {
             observations.record_semantic_vector_retention_failure(root);
-            log_semantic_vector_retention_degraded(&format!("reset_required:{reason}"));
+            log_semantic_vector_retention_degraded(
+                observations,
+                root,
+                &format!("reset_required:{reason}"),
+            );
             crate::daemon::maintenance::MaintenanceTickOutcome::Retry
         }
         tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorRetentionStep::Corrupt(
             reason,
         ) => {
             observations.record_semantic_vector_retention_failure(root);
-            log_semantic_vector_retention_degraded(&format!("corrupt:{reason}"));
+            log_semantic_vector_retention_degraded(observations, root, &format!("corrupt:{reason}"));
             crate::daemon::maintenance::MaintenanceTickOutcome::Retry
         }
         tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorRetentionStep::Unavailable(
             reason,
         ) => {
             observations.record_semantic_vector_retention_failure(root);
-            log_semantic_vector_retention_degraded(&format!("unavailable:{reason}"));
+            log_semantic_vector_retention_degraded(
+                observations,
+                root,
+                &format!("unavailable:{reason}"),
+            );
             crate::daemon::maintenance::MaintenanceTickOutcome::Retry
         }
         tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorRetentionStep::Denied(
             reason,
         ) => {
             observations.record_semantic_vector_retention_failure(root);
-            log_semantic_vector_retention_degraded(&format!("denied:{reason}"));
+            log_semantic_vector_retention_degraded(observations, root, &format!("denied:{reason}"));
             crate::daemon::maintenance::MaintenanceTickOutcome::Retry
         }
     }
@@ -284,14 +300,12 @@ fn semantic_retrieval_profiles_disabled(semantic: &SemanticConfig) -> bool {
 }
 
 #[hotpath::measure]
-fn log_semantic_vector_retention_degraded(failure: &str) {
-    log_daemon_event(
-        "retention_degraded",
-        &[
-            ("pass", "semantic_vector_generations".to_owned()),
-            ("failure", failure.to_owned()),
-        ],
-    );
+fn log_semantic_vector_retention_degraded(
+    observations: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
+    project_root: &Path,
+    failure: &str,
+) {
+    observations.emit_retention_degraded(project_root, "semantic_vector_generations", failure);
 }
 
 /// Vector protection inventory for one code-generation retention pass.
@@ -465,7 +479,11 @@ pub(in crate::daemon) async fn run_code_generation_retention(
     cancellation: &tracedecay_session_memory::context::CancellationToken,
 ) -> CodeGenerationRetentionOutcomeV1 {
     if cancellation.is_cancelled() {
-        log_code_generation_retention_degraded("retention_cancelled");
+        log_code_generation_retention_degraded(
+            observations,
+            graph.project_root(),
+            "retention_cancelled",
+        );
         return CodeGenerationRetentionOutcomeV1::Failed;
     }
     let layout = graph.hook_store_layout();
@@ -538,7 +556,7 @@ async fn apply_code_generation_retention(
     // the graph confirms it no longer needs them.
     let graph_replay_pool_root = graph.db().database_path().with_extension("graph-replay");
     if let Some(failure) = vector_inventory.degraded_reason() {
-        log_code_generation_retention_degraded(&failure);
+        log_code_generation_retention_degraded(observations, graph.project_root(), &failure);
     }
     // Published vectors live in the mounted code graph. When the graph is
     // resolvable, its inventory is the exact vector pin set. Without a seated
@@ -604,7 +622,7 @@ async fn apply_code_generation_retention(
         Ok(Err(
             tracedecay_code_index_retention::code_index_generations::CodeGenerationRetentionErrorV1::Cancelled,
         )) => {
-            log_code_generation_retention_degraded("retention_cancelled");
+            log_code_generation_retention_degraded(observations, graph.project_root(), "retention_cancelled");
             return CodeGenerationRetentionOutcomeV1::Failed;
         }
         Ok(Err(
@@ -616,6 +634,7 @@ async fn apply_code_generation_retention(
             // The bare label proved undiagnosable on a live profile: without
             // the typed error, a pointer CAS loss under rebuild churn is
             // indistinguishable from unrecognized-file or storage failures.
+            observations.mark_loud_retention_log();
             log_daemon_event(
                 "retention_degraded",
                 &[
@@ -627,7 +646,7 @@ async fn apply_code_generation_retention(
             return CodeGenerationRetentionOutcomeV1::Failed;
         }
         Err(_) => {
-            log_code_generation_retention_degraded("retention_task_panicked");
+            log_code_generation_retention_degraded(observations, graph.project_root(), "retention_task_panicked");
             return CodeGenerationRetentionOutcomeV1::Failed;
         }
     };
@@ -676,7 +695,11 @@ async fn apply_code_generation_retention(
         };
     }
     if cancellation.is_cancelled() {
-        log_code_generation_retention_degraded("retention_cancelled");
+        log_code_generation_retention_degraded(
+            observations,
+            graph.project_root(),
+            "retention_cancelled",
+        );
         return CodeGenerationRetentionOutcomeV1::Failed;
     }
 
@@ -696,7 +719,11 @@ async fn apply_code_generation_retention(
                 &layout.project_root,
             )
         else {
-            log_code_generation_retention_degraded("vector_writer_unavailable");
+            log_code_generation_retention_degraded(
+                observations,
+                graph.project_root(),
+                "vector_writer_unavailable",
+            );
             return CodeGenerationRetentionOutcomeV1::Failed;
         };
         let vector_writer_freeze = vector_runtime.freeze_vector_mutations().await;
@@ -716,7 +743,7 @@ async fn apply_code_generation_retention(
                 tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::ResetRequired(
                     reason,
                 ) => {
-                    log_code_generation_retention_degraded(&format!(
+                    log_code_generation_retention_degraded(observations, graph.project_root(), &format!(
                         "vector_inventory_reset_required:{reason}"
                     ));
                     return CodeGenerationRetentionOutcomeV1::Failed;
@@ -724,7 +751,7 @@ async fn apply_code_generation_retention(
                 tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Corrupt(
                     reason,
                 ) => {
-                    log_code_generation_retention_degraded(&format!(
+                    log_code_generation_retention_degraded(observations, graph.project_root(), &format!(
                         "vector_inventory_corrupt:{reason}"
                     ));
                     return CodeGenerationRetentionOutcomeV1::Failed;
@@ -732,7 +759,7 @@ async fn apply_code_generation_retention(
                 tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Unavailable(
                     reason,
                 ) => {
-                    log_code_generation_retention_degraded(&format!(
+                    log_code_generation_retention_degraded(observations, graph.project_root(), &format!(
                         "vector_inventory_unavailable:{reason}"
                     ));
                     return CodeGenerationRetentionOutcomeV1::Failed;
@@ -740,14 +767,18 @@ async fn apply_code_generation_retention(
                 tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Denied(
                     reason,
                 ) => {
-                    log_code_generation_retention_degraded(&format!(
+                    log_code_generation_retention_degraded(observations, graph.project_root(), &format!(
                         "vector_inventory_denied:{reason}"
                     ));
                     return CodeGenerationRetentionOutcomeV1::Failed;
                 }
             };
         if pinned_vector_sources != vector_readable_sources {
-            log_code_generation_retention_degraded("vector_inventory_changed");
+            log_code_generation_retention_degraded(
+                observations,
+                graph.project_root(),
+                "vector_inventory_changed",
+            );
             return CodeGenerationRetentionOutcomeV1::Failed;
         }
         tracedecay_usecases::semantic_runtime::retain_project_semantic_code_sources(
@@ -778,7 +809,7 @@ async fn apply_code_generation_retention(
                 tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::Unavailable(
                     reason,
                 ) => {
-                    log_code_generation_retention_degraded(&format!(
+                    log_code_generation_retention_degraded(observations, graph.project_root(), &format!(
                         "vector_source_liveness_unavailable:{reason}"
                     ));
                     return CodeGenerationRetentionOutcomeV1::Failed;
@@ -786,7 +817,7 @@ async fn apply_code_generation_retention(
                 tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::Denied(
                     reason,
                 ) => {
-                    log_code_generation_retention_degraded(&format!(
+                    log_code_generation_retention_degraded(observations, graph.project_root(), &format!(
                         "vector_source_liveness_denied:{reason}"
                     ));
                     return CodeGenerationRetentionOutcomeV1::Failed;
@@ -794,7 +825,7 @@ async fn apply_code_generation_retention(
                 tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::ResetRequired(
                     reason,
                 ) => {
-                    log_code_generation_retention_degraded(&format!(
+                    log_code_generation_retention_degraded(observations, graph.project_root(), &format!(
                         "vector_source_liveness_reset_required:{reason}"
                     ));
                     return CodeGenerationRetentionOutcomeV1::Failed;
@@ -802,7 +833,7 @@ async fn apply_code_generation_retention(
                 tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::Corrupt(
                     reason,
                 ) => {
-                    log_code_generation_retention_degraded(&format!(
+                    log_code_generation_retention_degraded(observations, graph.project_root(), &format!(
                         "vector_source_liveness_corrupt:{reason}"
                     ));
                     return CodeGenerationRetentionOutcomeV1::Failed;
@@ -814,7 +845,11 @@ async fn apply_code_generation_retention(
         None
     };
     if cancellation.is_cancelled() {
-        log_code_generation_retention_degraded("retention_cancelled");
+        log_code_generation_retention_degraded(
+            observations,
+            graph.project_root(),
+            "retention_cancelled",
+        );
         return CodeGenerationRetentionOutcomeV1::Failed;
     }
     // `current_timestamp()` counts seconds; wrapping it in `UtcMicros` stamped
@@ -920,7 +955,11 @@ async fn apply_code_generation_retention(
             }
         }
         Ok(Err(CodeGenerationRetentionErrorV1::Cancelled)) => {
-            log_code_generation_retention_degraded("retention_cancelled");
+            log_code_generation_retention_degraded(
+                observations,
+                graph.project_root(),
+                "retention_cancelled",
+            );
             CodeGenerationRetentionOutcomeV1::Failed
         }
         Ok(Err(CodeGenerationRetentionErrorV1::GraphReplayPoolBusy)) => {
@@ -930,6 +969,7 @@ async fn apply_code_generation_retention(
             // Same diagnosability contract as the plan failure above: the
             // apply step's typed error names the exact refusal (CAS loss,
             // unsafe state, storage) instead of a bare retry label.
+            observations.mark_loud_retention_log();
             log_daemon_event(
                 "retention_degraded",
                 &[
@@ -941,7 +981,11 @@ async fn apply_code_generation_retention(
             CodeGenerationRetentionOutcomeV1::Failed
         }
         Err(_) => {
-            log_code_generation_retention_degraded("retention_task_panicked");
+            log_code_generation_retention_degraded(
+                observations,
+                graph.project_root(),
+                "retention_task_panicked",
+            );
             CodeGenerationRetentionOutcomeV1::Failed
         }
     }
