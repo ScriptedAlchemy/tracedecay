@@ -22,6 +22,7 @@ use super::publication_support::{
 };
 use super::{GraphDbRegistration, GraphDbRegistry, check_registration_request};
 use crate::generation::{metadata_manifest_from_replay, validate_supplied_manifest_binding};
+use crate::generation_runtime::GenerationStageOutcome;
 use crate::lease::{
     GenerationLocator, VerifiedGenerationLease, VerifiedGraphSnapshot, generation_lease,
 };
@@ -951,24 +952,45 @@ impl GraphDbRegistry {
                 let (historical_commit, recovered_digest) =
                     match (apply_native, has_supplied_manifest) {
                         (true, _) => {
-                            // Staging consumes the manifest and drops its rows
-                            // once the last page commit is durable, so the
-                            // artifact proof below no longer overlaps them.
                             let staged = database
                                 .apply_generation_unverified_with_digest_observed(
                                     manifest,
                                     sealed_digest,
                                     &check,
                                 )?;
-                            let commit = staged.commit();
-                            let (_, recovered) = database.verify_generation_for_publication(
-                                &identity,
-                                sealed_digest,
-                                row_counts,
-                                true,
-                                &check,
-                            )?;
-                            (commit, recovered)
+                            match staged {
+                                GenerationStageOutcome::Applied(commit) => {
+                                    // A repair that wrote missing native rows is
+                                    // a new seal: build and prove its derived
+                                    // artifact before seating it.
+                                    let (_, recovered) =
+                                        database.verify_generation_for_publication(
+                                            &identity,
+                                            sealed_digest,
+                                            row_counts,
+                                            true,
+                                            &check,
+                                        )?;
+                                    (commit, recovered)
+                                }
+                                GenerationStageOutcome::Reseated(commit) => {
+                                    // An already-complete generation is an
+                                    // activation. Verify the staging authority
+                                    // and adopt an existing sealed artifact, but
+                                    // never construct a missing whole-generation
+                                    // copy before the rows can serve.
+                                    let recovered = database.verify_activated_generation(
+                                        &identity,
+                                        sealed_digest,
+                                        &check,
+                                    )?;
+                                    database.open_sealed_generation_store_if_present(
+                                        &identity,
+                                        sealed_digest,
+                                    )?;
+                                    (commit, recovered)
+                                }
+                            }
                         }
                         (false, true) => {
                             drop(manifest);

@@ -496,6 +496,58 @@ fn restart_recovery_adopts_or_discards_the_on_disk_artifact() {
     assert_snapshot_reads(&snapshot, &identity, "durable");
 }
 
+/// Replaying an already-linearized publication is activation, not a new seal:
+/// if an older installation has no derived sealed artifact, seating its
+/// verified staging rows must not copy and compact the whole generation before
+/// those rows can serve.
+#[test]
+fn historical_replay_does_not_rebuild_a_missing_sealed_artifact() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("sealed-store:historical-replay", "code");
+
+    let g1 = rich_manifest(identity.clone(), "historical-g1", "durable");
+    let record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &g1,
+        "publish:historical-g1",
+        None,
+        '7',
+    );
+    let commit = publish(
+        &registered,
+        temp.path(),
+        &mut authority,
+        &record.publication.key,
+    );
+    assert!(commit.snapshot.serves_from_sealed_store());
+    drop(commit);
+    assert!(registered.close().unwrap());
+    drop(registered);
+
+    std::fs::remove_dir_all(sealed_store_root(temp.path())).unwrap();
+    std::fs::remove_file(support::graph_path(temp.path()).with_extension("verified")).unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let replayed = publish(
+        &registered,
+        temp.path(),
+        &mut authority,
+        &record.publication.key,
+    );
+
+    assert!(
+        !replayed.snapshot.serves_from_sealed_store(),
+        "historical activation must serve verified staging rows without an eager sealed copy"
+    );
+    assert!(
+        receipt_for_generation(temp.path(), "historical-g1").is_none(),
+        "historical activation rebuilt the missing sealed artifact"
+    );
+    assert_snapshot_reads(&replayed.snapshot, &identity, "durable");
+}
+
 /// Retiring a sealed code generation deletes its artifact directory while the
 /// successor's artifact stays.
 #[test]
