@@ -1,6 +1,9 @@
 use std::path::Path;
 
-use super::{Connection, IntoParams, ReadConnection, ReadSnapshot, Result, Rows, Transaction};
+use super::{
+    Connection, Error, IntoParams, ReadConnection, ReadSnapshot, Result, Rows, Transaction,
+    WriteStatement,
+};
 
 #[allow(async_fn_in_trait)]
 pub trait QueryExecutor {
@@ -82,6 +85,24 @@ pub trait Executor: QueryExecutor {
     async fn execute<P>(&self, sql: &str, params: P) -> Result<u64>
     where
         P: IntoParams;
+    /// Executes owned parameterized writes in input order.
+    ///
+    /// Concrete engine connections and transactions override this with one
+    /// blocking submission. The default preserves compatibility for narrow
+    /// executor adapters while retaining exact failed-statement attribution.
+    #[hotpath::skip]
+    async fn execute_statements(&self, statements: Vec<WriteStatement>) -> Result<Vec<u64>> {
+        let mut results = Vec::with_capacity(statements.len());
+        for (index, statement) in statements.into_iter().enumerate() {
+            let (sql, params) = statement.into_parts();
+            results.push(
+                self.execute(&sql, params)
+                    .await
+                    .map_err(|error| Error::statement_batch(index, error))?,
+            );
+        }
+        Ok(results)
+    }
     #[hotpath::skip]
     async fn execute_batch(&self, sql: &str) -> Result<()>;
 }
@@ -93,6 +114,11 @@ impl Executor for Connection {
         P: IntoParams,
     {
         Connection::execute(self, sql, params).await
+    }
+
+    #[hotpath::skip]
+    async fn execute_statements(&self, statements: Vec<WriteStatement>) -> Result<Vec<u64>> {
+        Connection::execute_statements(self, statements).await
     }
 
     #[hotpath::skip]
@@ -108,6 +134,11 @@ impl Executor for Transaction {
         P: IntoParams,
     {
         Transaction::execute(self, sql, params).await
+    }
+
+    #[hotpath::skip]
+    async fn execute_statements(&self, statements: Vec<WriteStatement>) -> Result<Vec<u64>> {
+        Transaction::execute_statements(self, statements).await
     }
 
     #[hotpath::skip]

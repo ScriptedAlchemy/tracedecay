@@ -11,7 +11,9 @@ use tracedecay_store::{
     StoreIncarnationV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
 };
 
-use super::{Connection, Error, IntoParams, Row, Rows, Value, params, params_from_iter};
+use super::{
+    Connection, Error, IntoParams, Row, Rows, Value, WriteStatement, params, params_from_iter,
+};
 
 #[test]
 fn params_preserve_order_nulls_and_owned_values() {
@@ -321,4 +323,64 @@ async fn default_transaction_is_deferred_and_does_not_take_the_write_lock() {
 
     external_write.rollback().unwrap();
     deferred.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn transaction_statement_batch_reports_the_exact_failed_statement() {
+    let fixture = runtime_fixture();
+    fixture
+        .connection
+        .execute_batch(
+            "CREATE TABLE batch_items (
+                id INTEGER PRIMARY KEY,
+                label TEXT NOT NULL UNIQUE
+            );",
+        )
+        .await
+        .unwrap();
+    let transaction = fixture.connection.transaction().await.unwrap();
+
+    let error = transaction
+        .execute_statements(vec![
+            WriteStatement::new(
+                "INSERT INTO batch_items(id, label) VALUES (?1, ?2)",
+                params![1_i64, "first"],
+            )
+            .unwrap(),
+            WriteStatement::new(
+                "INSERT INTO batch_items(id, label) VALUES (?1, ?2)",
+                params![2_i64, "first"],
+            )
+            .unwrap(),
+            WriteStatement::new(
+                "INSERT INTO batch_items(id, label) VALUES (?1, ?2)",
+                params![3_i64, "unreached"],
+            )
+            .unwrap(),
+        ])
+        .await
+        .unwrap_err();
+
+    assert!(
+        error.sqlite_code().is_some(),
+        "batch attribution must preserve the underlying SQLite classification"
+    );
+    match error {
+        Error::StatementBatch { index, source } => {
+            assert_eq!(index, 1);
+            assert!(matches!(*source, Error::Sqlite { .. }));
+        }
+        other => panic!("expected indexed statement-batch failure, got {other}"),
+    }
+    transaction.rollback().await.unwrap();
+
+    let mut rows = fixture
+        .connection
+        .query("SELECT COUNT(*) FROM batch_items", ())
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+        0
+    );
 }

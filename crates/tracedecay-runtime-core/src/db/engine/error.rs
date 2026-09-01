@@ -24,6 +24,10 @@ pub enum Error {
     },
     Busy,
     InvalidOperation(String),
+    StatementBatch {
+        index: usize,
+        source: Box<Error>,
+    },
     TransactionClosed,
     TransactionExpired,
 }
@@ -54,13 +58,26 @@ impl fmt::Display for Error {
             } => write!(formatter, "SQLite {operation} failed: {message}"),
             Self::Busy => formatter.write_str("SQLite runtime is busy"),
             Self::InvalidOperation(message) => formatter.write_str(message),
+            Self::StatementBatch { index, source } => {
+                write!(
+                    formatter,
+                    "SQLite statement batch failed at index {index}: {source}"
+                )
+            }
             Self::TransactionClosed => formatter.write_str("SQLite transaction is closed"),
             Self::TransactionExpired => formatter.write_str("SQLite transaction lease expired"),
         }
     }
 }
 
-impl std::error::Error for Error {}
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::StatementBatch { source, .. } => Some(source.as_ref()),
+            _ => None,
+        }
+    }
+}
 
 impl From<tracedecay_rusqlite_runtime::exact_sql::ExactSqlError> for Error {
     fn from(error: tracedecay_rusqlite_runtime::exact_sql::ExactSqlError) -> Self {
@@ -102,10 +119,18 @@ impl Error {
         Self::InvalidOperation(message.into())
     }
 
+    pub(crate) fn statement_batch(index: usize, source: Self) -> Self {
+        Self::StatementBatch {
+            index,
+            source: Box::new(source),
+        }
+    }
+
     #[hotpath::skip]
     pub const fn sqlite_code(&self) -> Option<i32> {
         match self {
             Self::Sqlite { code, .. } => *code,
+            Self::StatementBatch { source, .. } => source.sqlite_code(),
             _ => None,
         }
     }
@@ -114,6 +139,7 @@ impl Error {
     pub const fn sqlite_extended_code(&self) -> Option<i32> {
         match self {
             Self::Sqlite { extended_code, .. } => *extended_code,
+            Self::StatementBatch { source, .. } => source.sqlite_extended_code(),
             _ => None,
         }
     }

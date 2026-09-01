@@ -10,12 +10,28 @@ pub use tracedecay_rusqlite_runtime::reader::{ReaderPoolSnapshot, ReaderPoolStat
 
 #[cfg(any(test, feature = "test-helpers"))]
 use super::Statement;
-use super::{IntoParams, ReadSnapshot, Result, Rows, Transaction, TransactionBehavior, Value};
+use super::{
+    Error, IntoParams, ReadSnapshot, Result, Rows, Transaction, TransactionBehavior, Value,
+    WriteStatement,
+};
 
 const READER_WAIT: Duration = Duration::from_secs(5);
 
 pub(super) trait Runtime: Send + Sync {
     fn execute(&self, statement: ExactSqlStatement) -> Result<ExactSqlExecuteResult>;
+    fn execute_statements(
+        &self,
+        statements: Vec<ExactSqlStatement>,
+    ) -> Result<Vec<ExactSqlExecuteResult>> {
+        let mut results = Vec::with_capacity(statements.len());
+        for (index, statement) in statements.into_iter().enumerate() {
+            results.push(
+                self.execute(statement)
+                    .map_err(|error| Error::statement_batch(index, error))?,
+            );
+        }
+        Ok(results)
+    }
     fn query(
         &self,
         statement: ExactSqlStatement,
@@ -218,6 +234,24 @@ impl Connection {
             .await
             .map_err(join_error)?
             .map(|result| result.changed_rows as u64)
+    }
+
+    #[hotpath::measure(label = "runtime_core.db.execute_statements", future = true)]
+    pub async fn execute_statements(&self, statements: Vec<WriteStatement>) -> Result<Vec<u64>> {
+        let statements = statements
+            .into_iter()
+            .map(WriteStatement::into_exact)
+            .collect();
+        let runtime = Arc::clone(&self.runtime);
+        tokio::task::spawn_blocking(move || runtime.execute_statements(statements))
+            .await
+            .map_err(join_error)?
+            .map(|results| {
+                results
+                    .into_iter()
+                    .map(|result| result.changed_rows as u64)
+                    .collect()
+            })
     }
 
     #[hotpath::skip]

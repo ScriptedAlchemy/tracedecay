@@ -10,7 +10,7 @@ use tracedecay_rusqlite_runtime::exact_sql::{
 use crate::profiled_lock::{ProfiledMutex, ProfiledMutexGuard};
 
 use super::{
-    IntoParams, Result, Rows, Value,
+    Error, IntoParams, Result, Rows, Value, WriteStatement,
     connection::{Runtime, statement},
 };
 
@@ -65,6 +65,33 @@ impl Transaction {
         .await
         .map_err(join_error)?
         .map(|result| result.changed_rows as u64)
+    }
+
+    #[hotpath::measure(
+        label = "runtime_core.db.transaction.execute_statements",
+        future = true
+    )]
+    pub async fn execute_statements(&self, statements: Vec<WriteStatement>) -> Result<Vec<u64>> {
+        let runtime = Arc::clone(&self.runtime);
+        let statements = statements
+            .into_iter()
+            .map(WriteStatement::into_exact)
+            .collect::<Vec<_>>();
+        tokio::task::spawn_blocking(move || {
+            let runtime = lock_runtime(&runtime)?;
+            let runtime = runtime.as_ref().ok_or(Error::TransactionClosed)?;
+            let mut results = Vec::with_capacity(statements.len());
+            for (index, statement) in statements.into_iter().enumerate() {
+                let result = runtime
+                    .execute(statement)
+                    .map_err(Error::from)
+                    .map_err(|error| Error::statement_batch(index, error))?;
+                results.push(result.changed_rows as u64);
+            }
+            Ok(results)
+        })
+        .await
+        .map_err(join_error)?
     }
 
     #[hotpath::skip]

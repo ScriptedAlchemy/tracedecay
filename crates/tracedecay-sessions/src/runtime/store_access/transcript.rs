@@ -1,4 +1,4 @@
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, WriteStatement, params};
 use tracedecay_store::{ParseOffset, SessionMessageRecord, SessionRecord};
 
 use tracedecay_lcm::payload::PayloadFileRollback;
@@ -13,6 +13,8 @@ enum TranscriptWritePolicy {
     Full { expected_offset: ParseOffset },
     ProjectionOnly,
 }
+
+const TRANSCRIPT_STATEMENT_WINDOW: usize = 64;
 
 /// Prepares every privacy-protected raw-message write before the transaction
 /// acquires SQLite's single-writer lease.
@@ -44,6 +46,25 @@ fn stage_full_transcript_messages(
         }
     }
     Ok(staged)
+}
+
+#[hotpath::measure(
+    label = "sessions.store.transcript.flush_statement_window",
+    future = true
+)]
+async fn flush_transcript_statement_window(
+    conn: &impl Executor,
+    statements: &mut Vec<WriteStatement>,
+) -> Result<(), TranscriptPersistenceError> {
+    if statements.is_empty() {
+        return Ok(());
+    }
+    conn.execute_statements(std::mem::take(statements))
+        .await
+        .map(|_| ())
+        .map_err(|error| {
+            TranscriptPersistenceError::storage("upsert session message projections", error)
+        })
 }
 
 pub async fn get_parse_offset(
@@ -344,7 +365,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         conn: &impl Executor,
         message: &SessionMessageRecord,
         staged: raw::StagedRawMessageIngest,
-    ) -> Result<(), TranscriptPersistenceError> {
+    ) -> Result<WriteStatement, TranscriptPersistenceError> {
         // Clone-on-normalize: message text can be hundreds of kilobytes, and
         // most providers already emit in-range timestamps, so the full-record
         // copy is paid only when the timestamp actually changes.
@@ -361,30 +382,20 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             .map_err(|error| {
                 TranscriptPersistenceError::storage("upsert LCM raw message", error)
             })?;
-        if !Self::upsert_session_message_projection(
-            conn,
+        Self::session_message_projection_statement(
             canonical_message.as_ref(),
             &raw.projection_text,
             raw.projection_metadata_json.as_deref(),
         )
-        .await
-        {
-            return Err(TranscriptPersistenceError::message(
-                "upsert session message projection",
-                "database write failed",
-            ));
-        }
-        Ok(())
     }
 
-    #[hotpath::skip]
-    async fn upsert_session_message_projection(
-        conn: &impl Executor,
+    #[hotpath::measure]
+    fn session_message_projection_statement(
         message: &SessionMessageRecord,
         text: &str,
         metadata_json: Option<&str>,
-    ) -> bool {
-        conn.execute(
+    ) -> Result<WriteStatement, TranscriptPersistenceError> {
+        WriteStatement::new(
             "INSERT INTO session_messages
                  (provider, message_id, session_id, role, timestamp, ordinal, text, kind, model,
                   tool_names, source_path, source_offset, metadata_json)
@@ -417,8 +428,9 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
                 metadata_json,
             ],
         )
-        .await
-        .is_ok()
+        .map_err(|error| {
+            TranscriptPersistenceError::storage("prepare session message projection", error)
+        })
     }
 
     /// Atomically upserts one transcript session + all parsed messages and then
@@ -527,6 +539,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         let transaction = self.begin_transcript_transaction().await?;
 
         let write_result: Result<(), TranscriptPersistenceError> = async {
+            let mut projection_statements = Vec::with_capacity(TRANSCRIPT_STATEMENT_WINDOW);
             if let TranscriptWritePolicy::Full { expected_offset } = policy {
                 // Full batches are one-winner compare-and-swap on the durable
                 // parse cursor. `actual == next_offset` is not a retry grant:
@@ -551,32 +564,31 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
                                     "staged transcript message count did not match the write batch",
                                 )
                             })?;
-                            self.upsert_session_message_in_existing_tx(
-                                &transaction,
-                                message,
-                                staged,
-                            )
-                            .await?;
+                            projection_statements.push(
+                                self.upsert_session_message_in_existing_tx(
+                                    &transaction,
+                                    message,
+                                    staged,
+                                )
+                                .await?,
+                            );
                         }
                         TranscriptWritePolicy::ProjectionOnly => {
                             let text = derived_text_for_index(&message.text);
-                            if !Self::upsert_session_message_projection(
-                                &transaction,
+                            projection_statements.push(Self::session_message_projection_statement(
                                 message,
                                 &text,
                                 message.metadata_json.as_deref(),
-                            )
-                            .await
-                            {
-                                return Err(TranscriptPersistenceError::message(
-                                    "upsert session message projection",
-                                    "database write failed",
-                                ));
-                            }
+                            )?);
                         }
+                    }
+                    if projection_statements.len() >= TRANSCRIPT_STATEMENT_WINDOW {
+                        flush_transcript_statement_window(&transaction, &mut projection_statements)
+                            .await?;
                     }
                 }
             }
+            flush_transcript_statement_window(&transaction, &mut projection_statements).await?;
             if matches!(policy, TranscriptWritePolicy::Full { .. })
                 && staged_messages.next().is_some()
             {
@@ -758,12 +770,63 @@ async fn require_expected_pair_offset(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tracedecay_runtime_core::db::engine::{
+        Executor, IntoParams, QueryExecutor, Rows, WriteStatement, params,
+    };
     use tracedecay_store::{SessionMessageRecord, SessionRecord};
 
     use super::{
         PayloadFileRollback, TranscriptBatch, TranscriptPersistenceError, decode_file_id_value,
-        encode_file_id, stage_full_transcript_messages,
+        encode_file_id, flush_transcript_statement_window, stage_full_transcript_messages,
     };
+
+    #[derive(Default)]
+    struct BatchCountingExecutor {
+        batch_submissions: AtomicUsize,
+    }
+
+    impl QueryExecutor for BatchCountingExecutor {
+        async fn query<P>(
+            &self,
+            _sql: &str,
+            _params: P,
+        ) -> tracedecay_runtime_core::db::engine::Result<Rows>
+        where
+            P: IntoParams,
+        {
+            panic!("statement-window test must not query")
+        }
+    }
+
+    impl Executor for BatchCountingExecutor {
+        async fn execute<P>(
+            &self,
+            _sql: &str,
+            _params: P,
+        ) -> tracedecay_runtime_core::db::engine::Result<u64>
+        where
+            P: IntoParams,
+        {
+            panic!("statement-window test must not submit scalar writes")
+        }
+
+        async fn execute_statements(
+            &self,
+            statements: Vec<WriteStatement>,
+        ) -> tracedecay_runtime_core::db::engine::Result<Vec<u64>> {
+            self.batch_submissions.fetch_add(1, Ordering::Relaxed);
+            Ok(vec![1; statements.len()])
+        }
+
+        async fn execute_batch(
+            &self,
+            _sql: &str,
+        ) -> tracedecay_runtime_core::db::engine::Result<()> {
+            panic!("statement-window test must not submit raw SQL batches")
+        }
+    }
 
     #[test]
     fn transcript_file_id_encoding_round_trips_the_full_u64_domain() {
@@ -832,5 +895,21 @@ mod tests {
             }
             other => panic!("expected attributed sanitization failure, got {other}"),
         }
+    }
+
+    #[tokio::test]
+    async fn transcript_statement_window_uses_one_batch_submission() {
+        let executor = BatchCountingExecutor::default();
+        let mut statements = vec![
+            WriteStatement::new("INSERT INTO example(value) VALUES (?1)", params![1_i64]).unwrap(),
+            WriteStatement::new("INSERT INTO example(value) VALUES (?1)", params![2_i64]).unwrap(),
+        ];
+
+        flush_transcript_statement_window(&executor, &mut statements)
+            .await
+            .unwrap();
+
+        assert!(statements.is_empty());
+        assert_eq!(executor.batch_submissions.load(Ordering::Relaxed), 1);
     }
 }
