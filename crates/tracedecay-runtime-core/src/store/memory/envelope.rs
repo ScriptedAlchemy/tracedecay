@@ -170,6 +170,7 @@ pub(super) fn project_memory_receipt_u64(
 
 #[hotpath::measure_all]
 impl DatabaseFactStore<'_> {
+    #[hotpath::skip]
     pub(super) async fn project_memory_read<T>(
         &self,
         work: impl for<'tx> FnOnce(

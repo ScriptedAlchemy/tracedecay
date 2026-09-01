@@ -220,6 +220,7 @@ pub struct CheckpointTicket {
 
 #[hotpath::measure_all]
 impl CheckpointTicket {
+    #[hotpath::skip]
     pub async fn wait(self) -> Result<CheckpointOutcome, CheckpointControlError> {
         let result = self
             .response

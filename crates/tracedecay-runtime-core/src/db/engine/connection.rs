@@ -127,6 +127,7 @@ pub struct ReadConnection {
 
 #[hotpath::measure_all]
 impl ReadConnection {
+    #[hotpath::skip]
     pub async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
     where
         P: IntoParams,

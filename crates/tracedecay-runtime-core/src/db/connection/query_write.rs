@@ -8,6 +8,7 @@ use super::{
 impl Database {
     /// Runs a bounded scalar inspection on the retained runtime, projecting the
     /// first column of the first row.
+    #[hotpath::skip]
     async fn query_scalar<T, P>(&self, operation: &str, sql: &str, params: P) -> Result<T>
     where
         T: crate::db::engine::FromValue,

@@ -24,6 +24,7 @@ impl RegisteredGitTopologyAnchorAuthorityV2 {
         Self { database }
     }
 
+    #[hotpath::skip]
     async fn publish_records(
         &self,
         publication: GitTopologyAnchorPublicationV2,

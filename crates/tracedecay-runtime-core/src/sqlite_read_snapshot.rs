@@ -206,11 +206,13 @@ pub struct SnapshotSet {
 #[hotpath::measure_all]
 impl SnapshotSet {
     #[cfg(any(test, feature = "test-helpers"))]
+    #[hotpath::skip]
     pub async fn capture(paths: &[PathBuf]) -> io::Result<Self> {
         let root = default_scratch_root(paths)?;
         Self::capture_in(paths, &root).await
     }
 
+    #[hotpath::skip]
     pub async fn capture_in(paths: &[PathBuf], root: &Path) -> io::Result<Self> {
         Self::capture_with_policy(
             paths,

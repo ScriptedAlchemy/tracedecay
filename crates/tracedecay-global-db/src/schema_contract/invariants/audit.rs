@@ -343,6 +343,7 @@ struct ProjectionAuthorityState {
 
 #[hotpath::measure_all]
 impl ProjectionAuthorityState {
+    #[hotpath::skip]
     async fn load(
         conn: &impl QueryExecutor,
         observation_id: &str,
@@ -427,6 +428,7 @@ struct ProjectionAliasRow {
 
 #[hotpath::measure_all]
 impl ProjectionAliasRow {
+    #[hotpath::skip]
     async fn load(
         conn: &impl QueryExecutor,
         observation_id: &str,
@@ -553,6 +555,7 @@ struct ProjectionDispositionRow {
 
 #[hotpath::measure_all]
 impl ProjectionDispositionRow {
+    #[hotpath::skip]
     async fn load(
         conn: &impl QueryExecutor,
         observation_id: &str,

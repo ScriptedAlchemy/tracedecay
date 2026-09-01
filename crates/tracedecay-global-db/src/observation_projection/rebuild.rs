@@ -1207,6 +1207,7 @@ enum CollisionGuardedWrite<'a> {
 
 #[hotpath::measure_all]
 impl CollisionGuardedWrite<'_> {
+    #[hotpath::skip]
     async fn run(
         &self,
         conn: &impl Executor,

@@ -9,10 +9,12 @@ pub(super) use tracedecay_sessions::runtime::store_access::{
 
 #[hotpath::measure_all]
 impl RegisteredGlobalDb {
+    #[hotpath::skip]
     pub async fn upsert_session(&self, session: &SessionRecord) -> bool {
         SessionStoreAccess::new(self).upsert_session(session).await
     }
 
+    #[hotpath::skip]
     pub async fn get_session(&self, provider: &str, session_id: &str) -> Option<SessionRecord> {
         SessionStoreAccess::new(self)
             .get_session(provider, session_id)

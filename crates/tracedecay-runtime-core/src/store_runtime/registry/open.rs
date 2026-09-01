@@ -38,6 +38,7 @@ type BuiltShardRuntimePublication = (
 
 #[hotpath::measure_all]
 impl StoreRuntimeOpenBegin {
+    #[hotpath::skip]
     pub async fn wait(self) -> StoreRuntimeOpenResult {
         match self {
             Self::Ready(handle) => StoreRuntimeOpenResult::Published(handle),
@@ -66,6 +67,7 @@ pub(crate) struct StoreRuntimeOpenJoin {
 
 #[hotpath::measure_all]
 impl StoreRuntimeOpenJoin {
+    #[hotpath::skip]
     pub(super) async fn wait(mut self) -> StoreRuntimeOpenResult {
         loop {
             let current = self.updates.borrow().clone();

@@ -5,6 +5,7 @@ use crate::RegisteredGlobalDb;
 
 #[hotpath::measure_all]
 impl RegisteredGlobalDb {
+    #[hotpath::skip]
     pub async fn list_session_sync_source_frontiers(
         &self,
     ) -> Result<Vec<(String, String, String)>, TraceDecayError> {

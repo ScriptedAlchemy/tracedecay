@@ -11,6 +11,7 @@ impl Database {
     }
 
     /// Applies the canonical retained runtime's bounded WAL checkpoint policy.
+    #[hotpath::skip]
     pub async fn checkpoint(&self) -> Result<()> {
         self.require_active_write_scope("checkpoint")?;
         let _writer = self.writer().await;

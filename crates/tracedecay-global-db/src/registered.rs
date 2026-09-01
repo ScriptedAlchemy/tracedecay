@@ -642,6 +642,7 @@ pub struct RegisteredGlobalDbWriterConnection<'a> {
 
 #[hotpath::measure_all]
 impl RegisteredGlobalDbWriterConnection<'_> {
+    #[hotpath::skip]
     pub async fn execute<P>(
         &self,
         sql: &str,
@@ -780,6 +781,7 @@ impl tracedecay_runtime_core::db::engine::DatabaseAttachmentExecutor
 
 #[hotpath::measure_all]
 impl RegisteredGlobalDbWriteTransaction<'_> {
+    #[hotpath::skip]
     pub async fn execute<P>(
         &self,
         sql: &str,

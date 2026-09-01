@@ -908,6 +908,7 @@ pub(in crate::store::memory) async fn get_retrieval_anchor_tx(
 
 #[hotpath::measure_all]
 impl DatabaseFactStore<'_> {
+    #[hotpath::skip]
     pub(in crate::store::memory) async fn commit_batch(
         &self,
         batch: &FactWriteBatch,

@@ -490,6 +490,7 @@ enum RetentionQueryExecutor<'reader, 'database> {
 
 #[hotpath::measure_all]
 impl RetentionQueryExecutor<'_, '_> {
+    #[hotpath::skip]
     async fn query(
         &self,
         sql: &str,

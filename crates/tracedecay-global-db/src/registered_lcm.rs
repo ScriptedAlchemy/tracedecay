@@ -34,6 +34,7 @@ fn check_execution(control: &ExecutionControl) -> Result<(), LcmError> {
 
 #[hotpath::measure_all]
 impl RegisteredGlobalDb {
+    #[hotpath::skip]
     pub(super) async fn lcm_read_snapshot(
         &self,
     ) -> Result<tracedecay_runtime_core::db::DatabaseEngineReadSnapshot, LcmError> {

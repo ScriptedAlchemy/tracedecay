@@ -110,6 +110,7 @@ pub enum MemoryTransaction {
 
 #[hotpath::measure_all]
 impl MemoryTransaction {
+    #[hotpath::skip]
     pub async fn execute<P>(&self, sql: &str, params: P) -> Result<u64>
     where
         P: IntoParams,

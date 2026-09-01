@@ -166,6 +166,7 @@ impl Drop for DestructiveMaintenanceReservation {
 
 #[hotpath::measure_all]
 impl StoreRuntimeRegistry {
+    #[hotpath::skip]
     pub async fn begin_destructive_maintenance(
         &self,
         target: DestructiveMaintenanceTarget,

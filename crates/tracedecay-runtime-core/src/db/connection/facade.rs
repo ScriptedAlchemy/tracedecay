@@ -53,6 +53,7 @@ impl DatabaseWriterConnection<'_> {
 
 #[hotpath::measure_all]
 impl DatabaseEngineWriteConnection {
+    #[hotpath::skip]
     pub async fn query<P>(
         &self,
         sql: &str,
@@ -178,6 +179,7 @@ impl crate::db::engine::QueryExecutor for DatabaseEngineReadConnection {
 
 #[hotpath::measure_all]
 impl DatabaseEngineReadSnapshot {
+    #[hotpath::skip]
     pub async fn query<P>(
         &self,
         sql: &str,
@@ -218,6 +220,7 @@ impl crate::db::engine::QueryExecutor for DatabaseEngineReadSnapshot {
 
 #[hotpath::measure_all]
 impl DatabaseEngineLongLeaseTransaction {
+    #[hotpath::skip]
     pub(crate) async fn execute_authority_revalidated_batch(
         &self,
         sql: &str,
@@ -400,6 +403,7 @@ impl crate::db::engine::DatabaseAttachmentExecutor for DatabaseMemoryTransaction
 
 #[hotpath::measure_all]
 impl DatabaseWriteTransaction<'_> {
+    #[hotpath::skip]
     pub async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
     where
         P: crate::db::engine::IntoParams,

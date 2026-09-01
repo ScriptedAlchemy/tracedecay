@@ -15,6 +15,7 @@ pub enum BoundedMetadataValue {
 #[hotpath::measure_all]
 impl Database {
     /// Reads a metadata value by key, returning `None` if not set.
+    #[hotpath::skip]
     pub async fn get_metadata(&self, key: &str) -> Result<Option<String>> {
         let mut rows = self
             .read_connection()

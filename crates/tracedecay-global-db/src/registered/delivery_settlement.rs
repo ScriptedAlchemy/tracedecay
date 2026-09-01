@@ -55,6 +55,7 @@ impl RegisteredGlobalDb {
     /// bound to `work_attempt`. The query is authorization-scoped by project,
     /// keyed by a canonical identity digest, and capped before any data leaves
     /// the reader. It never derives a Work identity from `owner_event_id`.
+    #[hotpath::skip]
     pub async fn work_attempt_delivery_censuses(
         &self,
         project_id: &str,

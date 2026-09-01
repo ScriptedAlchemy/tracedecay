@@ -16,6 +16,7 @@ const MAX_PROVIDER_USAGE_READ: usize = 1_000;
 impl RegisteredGlobalDb {
     /// Reads immutable provider usage observations without consulting
     /// conversational rows or the Claude-only accounting import.
+    #[hotpath::skip]
     pub async fn provider_usage_observations(
         &self,
         scope: &ObservationScopeV1,

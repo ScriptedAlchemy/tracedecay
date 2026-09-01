@@ -298,6 +298,7 @@ pub enum RemoteDeletionTombstoneTransitionOutcome {
 
 #[hotpath::measure_all]
 impl RegisteredGlobalDb {
+    #[hotpath::skip]
     pub async fn remote_deletion_tombstone(
         &self,
         profile_id: &str,

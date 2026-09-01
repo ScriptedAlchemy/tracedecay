@@ -771,6 +771,7 @@ impl MemoryGraphReconciliationTaskOwnerV1 {
 
 #[hotpath::measure_all]
 impl MemoryGraphReconciliationRetirementReceiptV1 {
+    #[hotpath::skip]
     pub(in crate::db) async fn wait(self) -> MemoryGraphReconciliationRetirementTerminalV1 {
         loop {
             let settled = self.shared.joined.notified();

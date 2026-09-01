@@ -224,6 +224,7 @@ impl StoreRuntimeRegistry {
     /// Retains one physical project graph store together with the exact code
     /// namespace selected by a linked worktree, ref, or immutable snapshot and
     /// code generation.
+    #[hotpath::skip]
     pub async fn retain_code_graph_store(
         &self,
         project_key: StoreRuntimeKey,

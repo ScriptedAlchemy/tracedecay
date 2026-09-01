@@ -103,12 +103,14 @@ impl GitMutationDatabase<'_> {
 
 #[hotpath::measure_all]
 impl GitMutationWriteTransaction<'_> {
+    #[hotpath::skip]
     pub(crate) async fn commit(self) -> tracedecay_runtime_core::db::engine::Result<()> {
         match self {
             Self::Registered(transaction) => transaction.commit().await,
         }
     }
 
+    #[hotpath::skip]
     pub(crate) async fn rollback(self) -> tracedecay_runtime_core::db::engine::Result<()> {
         match self {
             Self::Registered(transaction) => transaction.rollback().await,
