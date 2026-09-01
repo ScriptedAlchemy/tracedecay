@@ -148,7 +148,7 @@ use tracedecay_tool_catalog::{ProfileId, SurfaceOperationName};
 use super::LegacyToolCompatibilityOwner;
 use super::binding::{
     McpToolDispatchGroup, dispatch_group_for_tool, tool_accepts_registered_project_selector,
-    tool_is_selector_bound_effect,
+    tool_dispatches_registered_project_reader,
 };
 use crate::application_surface::resolve_catalog_tool_binding;
 use crate::tracedecay::TraceDecay;
@@ -493,17 +493,19 @@ pub fn handle_tool_call_with_registry_options<'a>(
                 }
             }
         }
-        if !tool_accepts_registered_project_selector(tool_name)
-            && rejected_tool_project_selector_present(tool_name, &args)
-        {
+        if tool_accepts_registered_project_selector(tool_name) {
+            support::validate_registered_project_selector_aliases(
+                &args,
+                crate::mcp::project_route::semantic_route_argument_fields(tool_name),
+            )?;
+        } else if rejected_tool_project_selector_present(tool_name, &args) {
             return Err(TraceDecayError::Config {
                 message: format!(
                     "{tool_name} is scoped to the active project and does not accept project selectors"
                 ),
             });
         }
-        if tool_accepts_registered_project_selector(tool_name)
-            && !tool_is_selector_bound_effect(tool_name)
+        if tool_dispatches_registered_project_reader(tool_name)
             && crate::mcp::project_route::arguments_have_project_selector(tool_name, &args)
             && options.resolved_project_route.is_none()
         {

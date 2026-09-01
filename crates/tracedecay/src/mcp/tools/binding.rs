@@ -368,6 +368,7 @@ pub(crate) fn tool_dispatches_registered_project_reader(tool_name: &str) -> bool
 /// Selector-bound effects accept a project selector but must not open the
 /// selected project's store. The calling session stays admitted; the retained
 /// owner denies a foreign selector as `NotFoundOrNotAuthorized`.
+#[cfg(test)]
 #[hotpath::measure]
 pub(super) fn tool_is_selector_bound_effect(tool_name: &str) -> bool {
     matches!(

@@ -614,7 +614,7 @@ required-features = ["test-helpers"]
 [[test]]
 name = "mcp_suite"
 path = "tests/mcp_suite/main.rs"
-required-features = ["test-helpers"]
+required-features = ["test-transport"]
 
 [[test]]
 name = "memory_suite"

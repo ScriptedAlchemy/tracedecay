@@ -186,11 +186,10 @@ fn invalid_registered_project_selector(detail: impl Into<String>) -> TraceDecayE
     TraceDecayError::project_route("project_route_invalid_selector", false, detail.into())
 }
 
-pub(super) async fn registered_project_context(
+pub(super) fn validate_registered_project_selector_aliases(
     args: &Value,
     semantic_top_level_fields: &[&str],
-    global_db: Option<&RegisteredGlobalDb>,
-) -> Result<Option<ProjectRegistryContext>> {
+) -> Result<()> {
     if let Some(alias) = ["project_id", "project_path", "project_root", "root"]
         .into_iter()
         .find(|key| !semantic_top_level_fields.contains(key) && args.get(*key).is_some())
@@ -199,6 +198,15 @@ pub(super) async fn registered_project_context(
             "top-level `{alias}` is not a registered-project selector; use project_selector.project_id"
         )));
     }
+    Ok(())
+}
+
+pub(super) async fn registered_project_context(
+    args: &Value,
+    semantic_top_level_fields: &[&str],
+    global_db: Option<&RegisteredGlobalDb>,
+) -> Result<Option<ProjectRegistryContext>> {
+    validate_registered_project_selector_aliases(args, semantic_top_level_fields)?;
     let Some(selector_value) = args.get("project_selector") else {
         return Ok(None);
     };
