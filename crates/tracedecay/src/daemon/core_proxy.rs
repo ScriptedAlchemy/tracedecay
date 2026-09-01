@@ -200,7 +200,9 @@ pub(crate) async fn proxy_transport_to_daemon_with_drain_bound(
 /// client that would have received the answer is gone.
 ///
 /// A line that is not a `tools/call` (initialize, tools/list, resources/*) has
-/// no tool of its own and takes the ordinary interactive ceiling.
+/// no tool of its own and takes the unnamed-tool default ceiling
+/// ([`tool_dispatch_ceiling`](crate::mcp::tools::handlers::tool_dispatch_ceiling)
+/// with an empty name), not a named catalog tool's possibly shorter deadline.
 #[cfg(unix)]
 #[hotpath::measure]
 fn disconnect_drain_bound(line: &str) -> Duration {
@@ -915,13 +917,19 @@ mod tests {
             );
         }
 
-        // A tool the daemon lets run longer drains for longer; a method with no
-        // tool of its own takes the ordinary interactive ceiling.
-        assert!(disconnect_drain_bound(&long) > disconnect_drain_bound(&interactive));
-        assert_eq!(
-            disconnect_drain_bound(&non_tool),
-            disconnect_drain_bound(&interactive)
-        );
+        // Unnamed methods resolve the unnamed-tool default
+        // (`tool_dispatch_ceiling("")`), not a named catalog tool such as
+        // `tracedecay_context`. The drain must outlive that resolved ceiling —
+        // the longest bound that actually applies to this request — rather
+        // than a hardcoded catalog value.
         assert_eq!(request_tool_name(&non_tool), None);
+        let unnamed_ceiling = crate::mcp::tools::handlers::tool_dispatch_ceiling("");
+        assert!(
+            disconnect_drain_bound(&non_tool) > unnamed_ceiling,
+            "tools/list must drain past the unnamed-tool default ceiling {unnamed_ceiling:?}"
+        );
+
+        // A tool the daemon lets run longer drains for longer.
+        assert!(disconnect_drain_bound(&long) > disconnect_drain_bound(&interactive));
     }
 }
