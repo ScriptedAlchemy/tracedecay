@@ -602,6 +602,7 @@ fn compute_tool_supports_live_cancellation(tool_name: &str) -> bool {
             tool_name,
             "tracedecay_admin_cli"
                 | "tracedecay_search"
+                | "tracedecay_grep"
                 | "tracedecay_run_affected_tests"
                 | "tracedecay_pr_context"
                 | "tracedecay_dead_code"

@@ -164,10 +164,12 @@ fn selected_blocked_request(id: u64, target_project_id: &str) -> Value {
         "id": id,
         "method": "tools/call",
         "params": {
-            "name": "tracedecay_source_outline",
+            "name": "tracedecay_fact_store_list",
             "arguments": {
-                "file": "src/lib.rs",
-                "project_selector": {"project_id": target_project_id}
+                "category": "project",
+                "min_trust": 0.0,
+                "project_selector": {"project_id": target_project_id},
+                "format": "json"
             }
         }
     })
@@ -630,9 +632,9 @@ fn response_text(response: &Value) -> &str {
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn selected_target_rmcp_flushes_response_and_full_disconnect_cancels_target() {
+async fn selected_target_rmcp_flushes_response_and_disconnect_cancels_selector_owner() {
     let fixture = rmcp_route_fixture("rmcp-selected-target-disconnect").await;
-    let (target_handshake, target_project_id, target_key, target_route) =
+    let (_target_handshake, target_project_id, target_key, _target_route) =
         mount_rmcp_target(&fixture).await;
     let target_server = {
         let owners = fixture
@@ -646,6 +648,45 @@ async fn selected_target_rmcp_flushes_response_and_full_disconnect_cancels_targe
             .cloned()
             .expect("mounted target server")
     };
+    let executor = Arc::new(ControlledCancellationExecutor::new());
+    let project_path = fixture
+        .handshake
+        .project_path
+        .as_deref()
+        .expect("fixture project");
+    let graph = super::super::open_project_for_handshake(
+        project_path,
+        &fixture.handshake,
+        &fixture.engine.store_administration,
+    )
+    .await
+    .expect("open controlled selector owner");
+    let controlled_key = ProjectServerKey::from_open_project(&graph, &fixture.handshake)
+        .expect("controlled selector-owner key");
+    let controlled_route = ProjectRouteKey::from_handshake(project_path, &fixture.handshake)
+        .expect("controlled selector-owner route");
+    let profile_identity = fixture
+        .engine
+        .store_administration
+        .profile_identity()
+        .expect("controlled selector-owner profile identity")
+        .clone();
+    let controlled = crate::mcp::McpServer::new_with_context(
+        crate::mcp::server::McpServerConstructionContext::direct(graph, None)
+            .with_direct_profile_identity(profile_identity)
+            .with_application_invocation_executor(executor.clone()),
+    )
+    .await;
+    {
+        let mut owners = fixture
+            .engine
+            .store_administration
+            .project_servers()
+            .lock()
+            .await;
+        owners.insert_route(controlled_route, controlled_key.clone(), controlled);
+        assert!(owners.mark_ready(&controlled_key));
+    }
 
     let (server_stream, client_stream) =
         tokio::net::UnixStream::pair().expect("selected target socket pair");
@@ -696,42 +737,6 @@ async fn selected_target_rmcp_flushes_response_and_full_disconnect_cancels_targe
         "selected project call was not accounted to the execution server"
     );
 
-    let executor = Arc::new(ControlledCancellationExecutor::new());
-    let graph = super::super::open_project_for_handshake(
-        target_handshake
-            .project_path
-            .as_deref()
-            .expect("target project path"),
-        &target_handshake,
-        &fixture.engine.store_administration,
-    )
-    .await
-    .expect("open controlled target project");
-    let profile_identity = fixture
-        .engine
-        .store_administration
-        .profile_identity()
-        .expect("controlled target profile identity")
-        .clone();
-    let controlled = crate::mcp::McpServer::new_with_context(
-        crate::mcp::server::McpServerConstructionContext::direct(graph, None)
-            .with_direct_profile_identity(profile_identity)
-            .with_application_invocation_executor(executor.clone()),
-    )
-    .await;
-    let controlled_key = target_key.clone();
-    {
-        let mut owners = fixture
-            .engine
-            .store_administration
-            .project_servers()
-            .lock()
-            .await;
-        owners.insert_route(target_route, target_key, controlled);
-        assert!(owners.mark_ready(&controlled_key));
-    }
-    drop(target_server);
-
     write_line(
         &mut writer,
         &selected_blocked_request(21, &target_project_id),
@@ -740,7 +745,7 @@ async fn selected_target_rmcp_flushes_response_and_full_disconnect_cancels_targe
     wait_for_count(
         &executor.started,
         1,
-        "selected request never reached target executor",
+        "selector-only request never reached the connection owner",
     )
     .await;
     writer
@@ -752,14 +757,14 @@ async fn selected_target_rmcp_flushes_response_and_full_disconnect_cancels_targe
     wait_for_count(
         &executor.cancellation_observed,
         1,
-        "full peer disconnect did not reach selected target cancellation",
+        "full peer disconnect did not reach selector-owner cancellation",
     )
     .await;
     executor.release_first.store(true, Ordering::SeqCst);
     wait_for_count(
         &executor.completed,
         1,
-        "selected target did not settle after disconnect cancellation",
+        "selector owner did not settle after disconnect cancellation",
     )
     .await;
     let served = tokio::time::timeout(PHASE_TIMEOUT, server_task)

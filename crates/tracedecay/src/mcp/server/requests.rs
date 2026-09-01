@@ -1592,6 +1592,7 @@ mod git_read_control_tests {
     #[test]
     fn controlled_operations_receive_live_registration_and_bounded_deadlines() {
         assert!(tool_supports_live_cancellation("tracedecay_search"));
+        assert!(tool_supports_live_cancellation("tracedecay_grep"));
         assert!(tool_supports_live_cancellation(
             "tracedecay_run_affected_tests"
         ));
