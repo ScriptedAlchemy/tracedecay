@@ -148,7 +148,7 @@ impl DaemonSessionSyncService {
         let key = journal_key(request.scope(), request.idempotency_key());
         match hotpath::future!(
             context.registry.read_session_sync_journal(&key),
-            label = "daemon.session_sync.journal.read"
+            label = "daemon.session_sync.journal.admission_read"
         )
         .await
         {
@@ -288,7 +288,7 @@ impl DaemonSessionSyncService {
             };
             match hotpath::future!(
                 context.registry.insert_session_sync_journal(&key, &encoded),
-                label = "daemon.session_sync.journal.write"
+                label = "daemon.session_sync.journal.coalesced_admission_write"
             )
             .await
             {
@@ -346,7 +346,7 @@ impl DaemonSessionSyncService {
         };
         match hotpath::future!(
             context.registry.insert_session_sync_journal(&key, &encoded),
-            label = "daemon.session_sync.journal.write"
+            label = "daemon.session_sync.journal.admission_write"
         )
         .await
         {
@@ -684,7 +684,7 @@ impl DaemonSessionSyncService {
         loop {
             let current = hotpath::future!(
                 context.registry.read_session_sync_journal(key),
-                label = "daemon.session_sync.journal.read"
+                label = "daemon.session_sync.journal.update_read"
             )
             .await
             .map_err(store_error)?
@@ -702,7 +702,7 @@ impl DaemonSessionSyncService {
                 context
                     .registry
                     .compare_and_swap_session_sync_journal(key, &current, &replacement),
-                label = "daemon.session_sync.journal.write"
+                label = "daemon.session_sync.journal.update_write"
             )
             .await
             .map_err(store_error)?

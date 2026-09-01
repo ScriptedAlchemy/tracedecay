@@ -569,7 +569,6 @@ pub fn clear_forced_indexing_workers_for_test() {
 
 /// Run one active work unit under the process background CPU authority.
 /// Standalone callers without an installed daemon plan run directly.
-#[hotpath::measure]
 pub fn with_background_cpu_permits<R>(requested_units: usize, operation: impl FnOnce() -> R) -> R {
     if let Some(authority) = process_background_cpu() {
         return authority.with_permits(requested_units, operation);
@@ -578,7 +577,6 @@ pub fn with_background_cpu_permits<R>(requested_units: usize, operation: impl Fn
 }
 
 /// One-unit convenience for ordinary index/session preparation work.
-#[hotpath::measure]
 pub fn with_background_cpu_permit<R>(operation: impl FnOnce() -> R) -> R {
     with_background_cpu_permits(1, operation)
 }

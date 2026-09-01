@@ -120,7 +120,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 true,
                 "mount profile authority store",
             ),
-            label = "daemon.store.profile_authority.open"
+            label = "daemon.store.profile_authority.bootstrap_open"
         )
         .await?;
         let profile_pin = match registry.profile_authority_pin(&profile_shard) {
@@ -368,7 +368,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 true,
                 "mount profile authority store",
             )),
-            label = "daemon.store.profile_authority.open"
+            label = "daemon.store.profile_authority.mount_open"
         )
         .await?;
         let database =

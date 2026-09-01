@@ -299,7 +299,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
                             tokio::select! {
                                 () = hotpath::future!(
                                     worker_state.wait_for_cancellation(),
-                                    label = "daemon.scheduler.session_temporal.cancellation_wait"
+                                    label = "daemon.scheduler.session_temporal.supervisor_retry_cancel"
                                 ) => return,
                                 () = hotpath::future!(
                                     tokio::time::sleep(session_refresh_retry_delay(

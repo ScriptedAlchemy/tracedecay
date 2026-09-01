@@ -116,7 +116,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                         biased;
                         () = hotpath::future!(
                             state.wait_for_cancellation(),
-                            label = "daemon.scheduler.session_temporal.cancellation_wait"
+                            label = "daemon.scheduler.session_temporal.projection_cancel"
                         ) => return,
                         report = &mut pass => report,
                     }
@@ -153,7 +153,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 tokio::select! {
                     () = hotpath::future!(
                         state.wait_for_cancellation(),
-                        label = "daemon.scheduler.session_temporal.cancellation_wait"
+                        label = "daemon.scheduler.session_temporal.retry_cancel"
                     ) => return,
                     () = hotpath::future!(
                         state.wake.notified(),
@@ -197,7 +197,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             tokio::select! {
                 () = hotpath::future!(
                     state.wait_for_cancellation(),
-                    label = "daemon.scheduler.session_temporal.cancellation_wait"
+                    label = "daemon.scheduler.session_temporal.history_retry_cancel"
                 ) => return,
                 () = wake => {}
                 () = hotpath::future!(
@@ -212,7 +212,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             tokio::select! {
                 () = hotpath::future!(
                     state.wait_for_cancellation(),
-                    label = "daemon.scheduler.session_temporal.cancellation_wait"
+                    label = "daemon.scheduler.session_temporal.idle_cancel"
                 ) => return,
                 () = wake => {}
                 () = hotpath::future!(
@@ -582,14 +582,14 @@ async fn project_running_refresh(
     tokio::pin!(projection);
     let deadline = hotpath::future!(
         tokio::time::sleep_until(deadline_at),
-        label = "daemon.scheduler.session_temporal.operation_deadline"
+        label = "daemon.scheduler.session_temporal.projector_deadline"
     );
     tokio::pin!(deadline);
     let effect = tokio::select! {
         biased;
         () = hotpath::future!(
             state.wait_for_cancellation(),
-            label = "daemon.scheduler.session_temporal.cancellation_wait"
+            label = "daemon.scheduler.session_temporal.projector_cancel"
         ) => return,
         () = &mut deadline => {
             report.deadline_errors += 1;
@@ -647,14 +647,14 @@ async fn project_running_refresh(
     }
     let deadline = hotpath::future!(
         tokio::time::sleep_until(deadline_at),
-        label = "daemon.scheduler.session_temporal.operation_deadline"
+        label = "daemon.scheduler.session_temporal.effect_apply_deadline"
     );
     tokio::pin!(deadline);
     tokio::select! {
         biased;
         () = hotpath::future!(
             state.wait_for_cancellation(),
-            label = "daemon.scheduler.session_temporal.cancellation_wait"
+            label = "daemon.scheduler.session_temporal.effect_apply_cancel"
         ) => {}
         () = &mut deadline => {
             report.deadline_errors += 1;

@@ -530,7 +530,7 @@ impl SessionSyncProjectContext {
                     project_stats.clone(),
                     project_coverage.clone(),
                 ),
-                label = "daemon.session_sync.frontier_persist"
+                label = "daemon.session_sync.project_frontier_persist"
             )
             .await;
             let project_progress_failed = project_progress.is_err();
@@ -610,7 +610,7 @@ impl SessionSyncProjectContext {
                     stats.clone(),
                     coverage.clone(),
                 ),
-                label = "daemon.session_sync.frontier_persist"
+                label = "daemon.session_sync.combined_frontier_persist"
             )
             .await;
             (

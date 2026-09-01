@@ -50,7 +50,6 @@ thread_local! {
 
 struct BackgroundCpuScopeV1;
 
-#[hotpath::measure_all]
 impl BackgroundCpuScopeV1 {
     fn enter() -> Self {
         BACKGROUND_CPU_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
@@ -84,7 +83,6 @@ impl Drop for BackgroundCpuScopeV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl ProcessBackgroundCpuV1 {
     fn new(width: NonZeroUsize) -> Self {
         Self {

@@ -718,11 +718,12 @@ impl DaemonCodeIndexPublicationStoreV1 {
     }
 
     fn write_durable(path: &Path, bytes: &[u8]) -> Result<(), CodeIndexPublicationStoreErrorV1> {
-        let mut file = std::fs::OpenOptions::new()
+        let file = std::fs::OpenOptions::new()
             .create_new(true)
             .write(true)
             .open(path)
             .map_err(Self::unavailable)?;
+        let mut file = hotpath::io!(file, label = "code_index.generation.sealing.io");
         file.write_all(bytes).map_err(Self::unavailable)?;
         file.sync_all().map_err(Self::unavailable)
     }
@@ -4839,7 +4840,7 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
                 text_control: GenerationTextControlV1::new(Arc::clone(&self.shutting_down)),
                 text_progress_state: Arc::new(hotpath::mutex!(
                     Mutex::new(CodeIndexBuildProgressStateV1::new()),
-                    label = "query.artifact.progress.state"
+                    label = "query.artifact.progress.historical_state"
                 )),
                 text_progress_slot: Arc::new(RwLock::new(progress_slot)),
                 text_progress_owner_epoch,
@@ -4854,7 +4855,7 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
                 ),
                 preopened_source: Arc::new(hotpath::mutex!(
                     Mutex::new(None),
-                    label = "query.artifact.preopened_source"
+                    label = "query.artifact.preopened_historical_source"
                 )),
                 publication_binding: None,
             },
@@ -5979,7 +5980,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         );
         let text_progress_state = Arc::new(hotpath::mutex!(
             Mutex::new(CodeIndexBuildProgressStateV1::new()),
-            label = "query.artifact.progress.state"
+            label = "query.artifact.progress.retained_state"
         ));
         let text_control = GenerationTextControlV1::new(Arc::clone(&self.shutting_down));
         let text_artifact_store = DaemonCodeTextArtifactStoreV1::bind(
@@ -6084,7 +6085,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             text_artifact_store,
             preopened_source: Arc::new(hotpath::mutex!(
                 Mutex::new(Some(source)),
-                label = "query.artifact.preopened_source"
+                label = "query.artifact.preopened_retained_source"
             )),
             publication_binding: Some(Arc::new(DurableActiveSealedGenerationBindingV1 {
                 generation_id,
@@ -6801,7 +6802,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                             GenerationTextControlV1::new(Arc::clone(&self.shutting_down)),
                             Arc::new(hotpath::mutex!(
                                 Mutex::new(CodeIndexBuildProgressStateV1::new()),
-                                label = "query.artifact.progress.state"
+                                label = "query.artifact.progress.published_state"
                             )),
                             progress_epoch,
                         )
@@ -6855,7 +6856,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 ),
                 preopened_source: Arc::new(hotpath::mutex!(
                     Mutex::new(None),
-                    label = "query.artifact.preopened_source"
+                    label = "query.artifact.preopened_published_source"
                 )),
                 publication_binding: None,
             });

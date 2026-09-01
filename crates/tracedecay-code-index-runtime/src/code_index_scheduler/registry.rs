@@ -3234,7 +3234,11 @@ impl CodeIndexSchedulerRegistryV1 {
                             scheduler.reconcile_now()
                         }
                     }),
-                    label = "daemon.code_index.reconcile"
+                    // Sealing moved inside this blocking reconcile pipeline.
+                    // Keep the outer future labeled so default reports retain
+                    // the end-to-end seal path even when short synchronous
+                    // inner spans fall below the functions-timing row limit.
+                    label = "daemon.code_index.reconcile_or_seal"
                 )
                 .await;
                 if worker_shutting_down.load(Ordering::Acquire) {

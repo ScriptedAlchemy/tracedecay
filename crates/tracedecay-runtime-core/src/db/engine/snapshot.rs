@@ -2,15 +2,15 @@ use std::sync::{Arc, Mutex};
 
 use tracedecay_rusqlite_runtime::exact_sql::ExactSqlReadSnapshot;
 
-use crate::profiled_lock::{ProfiledMutex, ProfiledMutexGuard};
-
 use super::{IntoParams, Result, Rows, Value, connection::statement};
 
 pub struct ReadSnapshot {
     /// Serializes every read issued against one snapshot. A snapshot handed to
     /// several concurrent readers funnels all of them through this one lock,
-    /// so a single slow statement stalls the rest.
-    runtime: Arc<ProfiledMutex<ExactSqlReadSnapshot>>,
+    /// so a single slow statement stalls the rest. Snapshots are created per
+    /// query, so per-instance lock profiling would retain two HDR histograms
+    /// for every read. The measured query path remains the stable boundary.
+    runtime: Arc<Mutex<ExactSqlReadSnapshot>>,
 }
 
 #[hotpath::measure_all]
@@ -18,10 +18,7 @@ impl ReadSnapshot {
     pub(super) fn from_runtime(runtime: ExactSqlReadSnapshot) -> Self {
         hotpath::gauge!("runtime_core.db.snapshots_active").inc(1.0);
         Self {
-            runtime: Arc::new(hotpath::mutex!(
-                Mutex::new(runtime),
-                label = "runtime_core.db.snapshot.lock"
-            )),
+            runtime: Arc::new(Mutex::new(runtime)),
         }
     }
 
@@ -58,7 +55,7 @@ impl Drop for ReadSnapshot {
 }
 
 #[hotpath::measure]
-fn lock_runtime<T>(runtime: &ProfiledMutex<T>) -> Result<ProfiledMutexGuard<'_, T>> {
+fn lock_runtime<T>(runtime: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>> {
     runtime
         .lock()
         .map_err(|_| super::Error::Runtime("exact SQL read snapshot lock poisoned".to_owned()))
@@ -77,7 +74,7 @@ mod tests {
 
     #[test]
     fn poisoned_snapshot_lock_returns_a_typed_error() {
-        let runtime = hotpath::mutex!(Mutex::new(()), label = "runtime_core.db.snapshot.lock");
+        let runtime = Mutex::new(());
         let _ = std::panic::catch_unwind(|| {
             let _guard = runtime.lock().unwrap();
             panic!("poison snapshot lock");
