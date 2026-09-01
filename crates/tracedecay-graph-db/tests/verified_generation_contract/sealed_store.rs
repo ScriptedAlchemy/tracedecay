@@ -227,11 +227,11 @@ fn seal_builds_compact_store_while_second_generation_stages_and_seals() {
     assert_snapshot_reads(&g1_commit.snapshot, &identity, "one");
 }
 
-/// Rows carrying Bytes properties seal in compact form and still read exactly.
-/// The pinned engine preserves both dictionary values and edge topology
-/// through the post-reopen recovered-digest proof.
+/// Small generations carrying Bytes properties stay in replay form and still
+/// read exactly. Eager compact construction is reserved for generations above
+/// the measured size threshold where its publication cost can be amortized.
 #[test]
-fn bytes_rows_seal_in_compact_form_and_read_exactly() {
+fn small_bytes_rows_seal_in_replay_form_and_read_exactly() {
     let temp = TempDir::new().unwrap();
     let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
     let mut authority = RelationalAuthority::default();
@@ -263,8 +263,8 @@ fn bytes_rows_seal_in_compact_form_and_read_exactly() {
     let receipt = receipt_for_generation(temp.path(), "bytes-g1")
         .expect("seal must write the artifact receipt");
     assert!(
-        receipt.contains("\"form\": \"compact\""),
-        "Bytes rows must seal in compact form after the scale proof: {receipt}"
+        receipt.contains("\"form\": \"replay\""),
+        "small Bytes generations must not pay eager compact construction: {receipt}"
     );
     assert_snapshot_reads(&commit.snapshot, &identity, "payload");
     let entity = commit

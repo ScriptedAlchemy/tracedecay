@@ -179,6 +179,15 @@ const SEALED_STORE_FORM_REPLAY: &str = "replay";
 /// `Display` encoding, which does not round-trip.
 const COMPACT_ROUND_TRIPS_BYTES: bool = true;
 
+/// Minimum code-generation row count that may pay eager compact construction.
+///
+/// The first production-shaped comparison (45,000 entities + 51,428
+/// relations) grew from 192.4 MiB in replay form to 204.5 MiB in compact form,
+/// while eager construction added 42% to seal-to-activation time. The next
+/// power of two keeps that measured no-win class on the replay path without
+/// disabling compact Bytes correctness or large-generation eligibility.
+const MIN_EAGER_COMPACT_BYTES_GENERATION_ROWS: usize = 128 * 1024;
+
 /// Receipt binding a sealed store directory to the exact generation and
 /// recovered digest it was built from. Written after the compacted database
 /// is durably closed; an open that finds a receipt for a different digest
@@ -1002,16 +1011,20 @@ fn copy_compact_and_close(
         check,
     )?;
 
-    // Compact only when the pinned engine round-trips every scalar the rows
-    // carry; otherwise the artifact stays in replay form, still isolated per
-    // generation. Vector-carrying generations always stay in replay form:
-    // the sealed lane never serves vector search, so the columnar base buys
-    // those generations nothing, and mixed-dimension vectors fall back to a
-    // lossy display dictionary. The post-reopen digest proof checks the exact
-    // durable form before installation, so copy, compaction, or persistence
-    // corruption all surface as typed refusal rather than silently wrong
-    // reads.
-    let form = if saw_vector_property || (saw_bytes_property && !COMPACT_ROUND_TRIPS_BYTES) {
+    // Compact only when the pinned engine round-trips every scalar and the
+    // measured form policy justifies paying eager construction. Small
+    // Bytes-carrying code generations stay in replay form because compacting
+    // the measured 96,428-row shape made the artifact larger and delayed
+    // activation. Vector-carrying generations always stay in replay form:
+    // mixed-dimension vectors still use a lossy display dictionary in compact
+    // form. The post-reopen digest proof checks whichever durable form was
+    // selected before installation.
+    let generation_rows = entity_count.saturating_add(relation_count);
+    let compact_bytes_generation = saw_bytes_property
+        && COMPACT_ROUND_TRIPS_BYTES
+        && generation_rows >= MIN_EAGER_COMPACT_BYTES_GENERATION_ROWS;
+    let should_compact = !saw_vector_property && (!saw_bytes_property || compact_bytes_generation);
+    let form = if !should_compact {
         SEALED_STORE_FORM_REPLAY
     } else {
         sealed
