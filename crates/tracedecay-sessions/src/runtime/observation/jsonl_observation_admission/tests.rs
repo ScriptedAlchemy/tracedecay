@@ -53,6 +53,20 @@ struct SeamSpyAdmission {
     cover_past_advances: Mutex<Vec<ObservationCursorAdvance>>,
 }
 
+#[test]
+fn install_shared_jsonl_preparation_authority_is_idempotent_across_memory_arcs() {
+    use std::num::NonZeroU64;
+    use tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1;
+
+    super::install_test_shared_jsonl_preparation_authority();
+    let other = std::sync::Arc::new(ProcessResidentMemoryV1::new(
+        NonZeroU64::new(64 * 1024 * 1024).expect("nonzero JSONL fixture budget"),
+    ));
+    super::install_shared_jsonl_preparation_authority(other).expect(
+        "a second installer with a distinct memory Arc must not poison the process-wide authority",
+    );
+}
+
 #[tokio::test]
 async fn shared_jsonl_page_reuses_one_bounded_scan() {
     super::install_test_shared_jsonl_preparation_authority();
