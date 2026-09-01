@@ -6229,6 +6229,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// staleness threshold abstain and schedule background work. They do not
     /// share [`Self::freshness_probe_requires_reconcile`]'s elapsed-threshold
     /// scan: that witness refresh belongs to the query/background ladder.
+    #[cfg(test)]
     fn latest_complete_ready_for_query_with(
         &mut self,
         admission: GenerationDecodeAdmissionV1,
@@ -6251,6 +6252,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// Run the exact-source freshness fence without resolving a generation.
     /// Callers that already own the immutable serving handle must not consult
     /// the publication decoder cache merely to prove that handle is current.
+    #[cfg(test)]
     fn exact_source_is_ready(&mut self) -> Result<bool, CodeIndexSchedulerErrorV1> {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(cancelled_code_index_reconcile());
