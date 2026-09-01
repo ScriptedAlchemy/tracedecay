@@ -215,7 +215,6 @@ where
 {
     #[allow(clippy::too_many_arguments)]
     #[hotpath::measure(label = "usecases.session.task_session")]
-    #[hotpath::skip]
     pub async fn execute_task_session(
         &self,
         context: &RequestContext,

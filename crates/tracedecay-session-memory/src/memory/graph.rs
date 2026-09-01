@@ -10,7 +10,6 @@ impl<A: ProjectMemoryGraphStore> MemoryApplication<A> {
     /// the canonical owner-bound fact authority. Graph nodes never carry fact
     /// content and cannot act as a raw-row fallback.
     #[hotpath::measure(label = "usecases.memory.graph", future = true)]
-    #[hotpath::skip]
     pub async fn project_memory_graph(
         &self,
         query: ProjectMemoryGraphQueryV1,

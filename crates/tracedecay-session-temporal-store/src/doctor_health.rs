@@ -687,7 +687,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     /// per-store lane and reuse a very short-lived result only while the exact
     /// database/WAL fingerprint remains unchanged.
     #[hotpath::measure(future = true, label = "session_temporal.doctor.query")]
-    #[hotpath::skip]
     pub async fn session_temporal_doctor_health(&self) -> SessionTemporalHealthReport {
         let database_path = self.db_path();
         if !permits_synchronous_session_temporal_health(database_path) {
@@ -1103,7 +1102,6 @@ mod cache_tests {
     }
 
     #[tokio::test]
-    #[hotpath::skip]
     async fn registered_doctor_reports_an_unbound_relation_graph_as_partial() {
         let harness =
             RegisteredGlobalDbHarness::open_without_relation_graph("doctor-unbound-relation-graph")
@@ -1121,7 +1119,6 @@ mod cache_tests {
     }
 
     #[tokio::test]
-    #[hotpath::skip]
     async fn registered_doctor_accepts_a_bound_clean_relation_graph() {
         let profile = tempfile::tempdir().expect("profile root");
         let runtime = RegisteredGlobalDbTestRuntime::profile(profile.path())

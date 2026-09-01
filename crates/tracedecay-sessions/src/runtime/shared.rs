@@ -47,7 +47,6 @@ impl SqliteReadConn {
     /// only if the blocking task itself fails (cancellation/panic), which
     /// callers degrade to the same outcome as any SQL error.
     #[hotpath::measure(label = "sessions.shared.sqlite_with", future = true)]
-    #[hotpath::skip]
     pub async fn with<T, F>(&self, body: F) -> Option<T>
     where
         T: Send + 'static,

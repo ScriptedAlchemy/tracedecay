@@ -68,7 +68,6 @@ impl<A: FactStore> MemoryApplication<A> {
     /// materializes the returned record in `FactWriteBatch::new_anchors`.
     /// The fact shard never performs a cross-database anchor lookup itself.
     #[hotpath::measure(label = "usecases.memory.anchor.resolve", future = true)]
-    #[hotpath::skip]
     pub async fn resolve_evidence_anchor<R: EvidenceAnchorResolver>(
         &self,
         resolver: &R,
@@ -97,7 +96,6 @@ impl<A: FactStore> MemoryApplication<A> {
     /// The same owner and identity checks as `resolve_evidence_anchor` apply:
     /// a report never silently switches owner or anchor identity.
     #[hotpath::measure(label = "usecases.memory.anchor.report", future = true)]
-    #[hotpath::skip]
     pub async fn resolve_evidence_anchor_report<R: EvidenceAnchorReportResolver>(
         &self,
         resolver: &R,

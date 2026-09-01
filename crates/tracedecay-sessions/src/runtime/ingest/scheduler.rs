@@ -360,7 +360,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[hotpath::skip]
     async fn profile_codex_frontier_converges_beyond_budget_and_survives_restart() {
         let temp = TempDir::new().expect("tempdir");
         let mut expected = BTreeSet::new();
@@ -446,7 +445,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[hotpath::skip]
     async fn profile_codex_frontier_read_error_performs_no_persistence() {
         let store = RestartableStore::default();
         store.fail_reads.store(true, Ordering::Relaxed);

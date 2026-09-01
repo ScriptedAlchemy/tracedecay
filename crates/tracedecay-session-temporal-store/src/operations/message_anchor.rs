@@ -410,7 +410,6 @@ mod tests {
         .expect("retrieval anchor")
     }
 
-    #[hotpath::skip]
     async fn seed_raw_source(conn: &impl crate::handle::SessionTemporalExec, timestamp_sql: &str) {
         conn.execute(
             "INSERT INTO sessions (provider, session_id, project_key, project_path)
@@ -435,7 +434,6 @@ mod tests {
         .expect("raw source");
     }
 
-    #[hotpath::skip]
     async fn seed_canonical_binding(
         conn: &impl crate::handle::SessionTemporalExec,
         observation_json: &str,
@@ -468,7 +466,6 @@ mod tests {
         .expect("observation anchor binding");
     }
 
-    #[hotpath::skip]
     async fn seed_canonical_observation(
         conn: &impl crate::handle::SessionTemporalExec,
         observation_json: &str,
@@ -576,7 +573,6 @@ mod tests {
         }
     }
 
-    #[hotpath::skip]
     async fn publish(
         conn: &impl crate::handle::SessionTemporalExec,
     ) -> Result<tracedecay_lcm::types::LcmSummaryPublicationReceipt, LcmError> {
@@ -588,7 +584,6 @@ mod tests {
         .await
     }
 
-    #[hotpath::skip]
     async fn legacy_anchor_count(conn: &impl crate::handle::SessionTemporalExec) -> i64 {
         let mut rows = conn
             .query(
@@ -607,7 +602,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[hotpath::skip]
     async fn malformed_canonical_observation_never_falls_back_to_a_legacy_anchor() {
         let directory = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -644,7 +638,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[hotpath::skip]
     async fn malformed_canonical_message_identity_is_not_hidden_by_candidate_filtering() {
         let directory = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -682,7 +675,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[hotpath::skip]
     async fn ownership_mismatched_canonical_binding_never_falls_back_to_a_legacy_anchor() {
         let directory = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -716,7 +708,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[hotpath::skip]
     async fn non_exact_canonical_binding_never_falls_back_to_a_legacy_anchor() {
         let directory = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -752,7 +743,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[hotpath::skip]
     async fn missing_canonical_anchor_binding_never_falls_back_to_a_legacy_anchor() {
         let directory = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -784,7 +774,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[hotpath::skip]
     async fn unavailable_session_owner_never_inserts_a_legacy_anchor() {
         let directory = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -814,7 +803,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[hotpath::skip]
     async fn malformed_raw_timestamp_never_inserts_a_zero_time_legacy_anchor() {
         let directory = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -838,7 +826,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[hotpath::skip]
     async fn malformed_summary_horizon_never_fabricates_a_zero_knowledge_time() {
         let directory = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())

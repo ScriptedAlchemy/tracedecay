@@ -512,7 +512,6 @@ fn canonical_projected_message(
 #[hotpath::measure_all]
 impl GlobalDbHydrationBackend<'_> {
     #[hotpath::measure(future = true, label = "session_temporal.hydrate.resolve")]
-    #[hotpath::skip]
     async fn resolve_current(
         &self,
         snapshot: &TemporalExecutionSnapshot,
@@ -533,7 +532,6 @@ impl GlobalDbHydrationBackend<'_> {
     }
 
     #[hotpath::measure(future = true, label = "session_temporal.hydrate.read")]
-    #[hotpath::skip]
     async fn read_bounded(
         &self,
         descriptor: &PayloadDescriptor,
@@ -1425,11 +1423,8 @@ mod tests {
     }
 
     trait HostAdmissionHydrationFixture {
-        #[hotpath::skip]
         async fn hydration_read_for_test(&self) -> RegisteredHydrationRead;
-        #[hotpath::skip]
         async fn activate_temporal_generation_for_hydration_test(&self, session_id: &str);
-        #[hotpath::skip]
         async fn seed_session_occurrence_for_test(
             &self,
             provider: &str,
@@ -1439,15 +1434,12 @@ mod tests {
             message_id: &str,
             canonical_payload: &str,
         );
-        #[hotpath::skip]
         async fn corrupt_hydration_occurrence_message_id_for_test(
             &self,
             session_id: &str,
             message_id: &str,
         );
-        #[hotpath::skip]
         async fn corrupt_hydration_observation_json_for_test(&self, observation_id: &str);
-        #[hotpath::skip]
         async fn seed_root_hydration_fixture_for_test(
             &self,
             provider: &str,
@@ -1456,13 +1448,11 @@ mod tests {
             canonical_payload: &str,
             legacy_projection_poison: &str,
         );
-        #[hotpath::skip]
         async fn move_hydration_session_outside_root_for_test(
             &self,
             provider: &str,
             session_id: &str,
         );
-        #[hotpath::skip]
         async fn seed_snapshot_hydration_fixture_for_test(
             &self,
             occurrence_observation: &DurableObservationV1,
@@ -1471,12 +1461,10 @@ mod tests {
             authority_anchor: &RetrievalAnchorRecord,
         );
         fn hydration_storage_fingerprint_for_test(&self) -> HydrationStorageFingerprint;
-        #[hotpath::skip]
         async fn drift_hydration_anchor_owner_for_test(&self, anchor_id: &RetrievalAnchorId);
     }
 
     impl HostAdmissionHydrationFixture for HostAdmissionTestRuntimeV1 {
-        #[hotpath::skip]
         async fn hydration_read_for_test(&self) -> RegisteredHydrationRead {
             let database = self
                 .registered_database(HostAdmissionScope::Profile)
@@ -1491,7 +1479,6 @@ mod tests {
             }
         }
 
-        #[hotpath::skip]
         async fn activate_temporal_generation_for_hydration_test(&self, session_id: &str) {
             let database = self
                 .registered_database(HostAdmissionScope::Profile)
@@ -1541,7 +1528,6 @@ mod tests {
         /// the caller, so a reproduction can key the row on the stable record id
         /// exactly as `derive_canonical_projection` does when the envelope omits
         /// `relations.message_id`.
-        #[hotpath::skip]
         async fn seed_session_occurrence_for_test(
             &self,
             provider: &str,
@@ -1599,7 +1585,6 @@ mod tests {
         /// corresponds to no projection output of its observation. Authorization
         /// trusts only immutable projected metadata; the post-authorization
         /// content read must reject the broken projection binding.
-        #[hotpath::skip]
         async fn corrupt_hydration_occurrence_message_id_for_test(
             &self,
             session_id: &str,
@@ -1621,7 +1606,6 @@ mod tests {
             .expect("corrupt occurrence message id");
         }
 
-        #[hotpath::skip]
         async fn corrupt_hydration_observation_json_for_test(&self, observation_id: &str) {
             let database = self
                 .registered_database(HostAdmissionScope::Profile)
@@ -1643,7 +1627,6 @@ mod tests {
             .expect("corrupt observation json");
         }
 
-        #[hotpath::skip]
         async fn seed_root_hydration_fixture_for_test(
             &self,
             provider: &str,
@@ -1714,7 +1697,6 @@ mod tests {
             .expect("occurrence");
         }
 
-        #[hotpath::skip]
         async fn move_hydration_session_outside_root_for_test(
             &self,
             provider: &str,
@@ -1736,7 +1718,6 @@ mod tests {
             .expect("move target session outside authorized root");
         }
 
-        #[hotpath::skip]
         async fn seed_snapshot_hydration_fixture_for_test(
             &self,
             occurrence_observation: &DurableObservationV1,
@@ -1975,7 +1956,6 @@ mod tests {
             }
         }
 
-        #[hotpath::skip]
         async fn drift_hydration_anchor_owner_for_test(&self, anchor_id: &RetrievalAnchorId) {
             let database = self
                 .registered_database(HostAdmissionScope::Profile)
@@ -2346,7 +2326,6 @@ mod tests {
         );
     }
 
-    #[hotpath::skip]
     async fn persist_anchor(
         runtime: &HostAdmissionTestRuntimeV1,
         ordinal: u64,
@@ -2354,7 +2333,6 @@ mod tests {
         Box::pin(persist_anchor_for_session(runtime, ordinal, "session-1")).await
     }
 
-    #[hotpath::skip]
     async fn persist_anchor_for_session(
         runtime: &HostAdmissionTestRuntimeV1,
         ordinal: u64,
@@ -2364,7 +2342,6 @@ mod tests {
         Box::pin(persist_observation(runtime, observation, ordinal)).await
     }
 
-    #[hotpath::skip]
     async fn persist_observation(
         runtime: &HostAdmissionTestRuntimeV1,
         observation: DurableObservationV1,
@@ -2418,7 +2395,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[hotpath::skip]
     async fn persist_anchor_appends_two_observations_without_cursor_conflict() {
         let dir = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
@@ -2497,7 +2473,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[hotpath::skip]
     async fn root_snapshot_hydrates_an_authorized_cross_session_occurrence() {
         let dir = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
@@ -2555,7 +2530,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[hotpath::skip]
     async fn tampered_raw_fallback_is_typed_unavailable_without_canary_leakage() {
         let dir = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
@@ -2620,7 +2594,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[hotpath::skip]
     async fn occurrence_authorization_does_not_parse_observation_content() {
         let dir = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
@@ -2664,7 +2637,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[hotpath::skip]
     async fn one_snapshot_hydrates_occurrence_and_summary_without_request_digest_binding() {
         let dir = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
@@ -2772,7 +2744,6 @@ mod tests {
     /// `lcm_grep`/`lcm_expand` matches into
     /// `omissions: reason=unverifiable_legacy`.
     #[tokio::test]
-    #[hotpath::skip]
     async fn occurrence_keyed_on_stable_record_id_resolves_when_relations_message_id_absent() {
         let dir = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())

@@ -143,7 +143,6 @@ impl ProjectMemoryFactMutationTarget {
 impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     /// Settles one already-canonical curation batch against its exact receipt.
     #[hotpath::measure(label = "usecases.memory.curation", future = true)]
-    #[hotpath::skip]
     pub async fn dashboard_curation(
         &self,
         request: ProjectMemoryFactCurationBatchV1,
@@ -225,7 +224,6 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     }
 
     #[hotpath::measure(label = "usecases.memory.curation.apply", future = true)]
-    #[hotpath::skip]
     pub async fn apply_project_memory_curation(
         &self,
         operations: Vec<ProjectMemoryCurationOperation>,
@@ -594,7 +592,6 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     }
 
     #[hotpath::measure(label = "usecases.memory.merge", future = true)]
-    #[hotpath::skip]
     pub async fn dashboard_merge_facts(
         &self,
         request: ProjectMemoryFactMergeCommandV1,

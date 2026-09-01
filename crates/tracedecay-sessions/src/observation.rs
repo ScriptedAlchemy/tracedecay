@@ -448,7 +448,6 @@ where
 
     /// Advances a validated non-durable frame cursor without exposing the store.
     #[hotpath::measure(label = "sessions.observation.advance_cursor", future = true)]
-    #[hotpath::skip]
     pub async fn advance_non_durable_source_cursor(
         &self,
         request: AdvanceNonDurableSourceCursorRequest,
@@ -572,7 +571,6 @@ where
     }
 
     #[hotpath::measure(label = "sessions.observation.readback", future = true)]
-    #[hotpath::skip]
     async fn persisted_outcome(
         &self,
         outcome: ObservationPersistOutcome,
@@ -676,7 +674,6 @@ where
     }
 
     #[hotpath::measure(label = "sessions.observation.get", future = true)]
-    #[hotpath::skip]
     pub async fn get_observation(
         &self,
         request: GetObservationRequest,
@@ -703,7 +700,6 @@ where
     }
 
     #[hotpath::measure(label = "sessions.observation.replay", future = true)]
-    #[hotpath::skip]
     pub async fn replay_observations(
         &self,
         request: ReplayObservationsRequest,
@@ -769,7 +765,6 @@ where
     S: ObservationStore + ObservationCaptureSink + ObservationCursorPort + ObservationAdmissionPort,
 {
     #[hotpath::measure(label = "sessions.observation.prepare_batch", future = true)]
-    #[hotpath::skip]
     async fn prepare_batch_captures(
         &self,
         requests: Vec<CaptureObservationRequest>,
@@ -840,7 +835,6 @@ where
     /// in the batch refuses before persistence so the stream owner can retry
     /// one request at a time and advance typed coverage between records.
     #[hotpath::measure(label = "sessions.observation.capture_batch", future = true)]
-    #[hotpath::skip]
     pub async fn capture_observations(
         &self,
         requests: Vec<CaptureObservationRequest>,

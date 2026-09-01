@@ -922,7 +922,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[hotpath::skip]
     async fn application_interruptible_observes_live_transport_cancellation() {
         let scope = project_identity().application_scope().unwrap();
         let application = application_context(

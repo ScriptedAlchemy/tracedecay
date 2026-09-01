@@ -753,7 +753,6 @@ mod detail_coverage_tests {
     use super::*;
 
     #[tokio::test]
-    #[hotpath::skip]
     async fn bounded_prefix_keeps_exact_last_agent_and_total_count_queryable() {
         let directory = tempfile::tempdir().expect("tempdir");
         let connection = tracedecay_runtime_core::db::engine::TestConnection::open(

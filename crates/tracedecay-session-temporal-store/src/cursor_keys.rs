@@ -196,7 +196,6 @@ pub(super) async fn ensure_active_session_cursor_key_in_transaction(
 
 #[hotpath::measure_all]
 impl GlobalDbCursorKeyProvider {
-    #[hotpath::skip]
     pub async fn from_registered_active(
         read: &DatabaseEngineReadSnapshot,
     ) -> Result<Self, GlobalDbCursorKeyProviderError> {

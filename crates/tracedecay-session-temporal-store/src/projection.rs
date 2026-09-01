@@ -77,7 +77,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     /// Discovers sessions that need temporal projection.
     ///
     #[hotpath::measure(future = true, label = "session_temporal.query.pending_refresh")]
-    #[hotpath::skip]
     pub async fn pending_session_temporal_refresh_page_result(
         &self,
         limit: usize,
@@ -267,7 +266,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     }
 
     #[hotpath::measure(future = true, label = "session_temporal.projection.materialize")]
-    #[hotpath::skip]
     pub async fn materialize_session_temporal_refresh_batch_result(
         &self,
         recovery: &SessionRefreshRecoveryV1,
@@ -344,7 +342,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     }
 
     #[hotpath::measure(future = true, label = "session_temporal.txn.persist_projection")]
-    #[hotpath::skip]
     pub async fn persist_session_temporal_projection_batch_result(
         &self,
         batch: SessionTemporalProjectionBatchV1,

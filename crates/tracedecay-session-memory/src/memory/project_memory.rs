@@ -40,7 +40,6 @@ pub use add::{
 #[hotpath::measure_all]
 impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     #[hotpath::measure(label = "usecases.memory.list", future = true)]
-    #[hotpath::skip]
     pub async fn list_project_memory_facts(
         &self,
         query: ProjectMemoryFactListQueryV1,
@@ -58,7 +57,6 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     }
 
     #[hotpath::measure(label = "usecases.memory.search", future = true)]
-    #[hotpath::skip]
     pub async fn search_project_memory_facts(
         &self,
         query: ProjectMemoryFactSearchQuery,
@@ -76,7 +74,6 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     }
 
     #[hotpath::measure(label = "usecases.memory.probe", future = true)]
-    #[hotpath::skip]
     pub async fn probe_project_memory_facts(
         &self,
         query: ProjectMemoryFactSearchQuery,
@@ -94,7 +91,6 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     }
 
     #[hotpath::measure(label = "usecases.memory.related", future = true)]
-    #[hotpath::skip]
     pub async fn related_project_memory_facts(
         &self,
         query: ProjectMemoryFactSearchQuery,
@@ -112,7 +108,6 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     }
 
     #[hotpath::measure(label = "usecases.memory.reason", future = true)]
-    #[hotpath::skip]
     pub async fn reason_project_memory_facts(
         &self,
         query: ProjectMemoryFactSearchQuery,
@@ -130,7 +125,6 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     }
 
     #[hotpath::measure(label = "usecases.memory.contradict", future = true)]
-    #[hotpath::skip]
     pub async fn find_project_memory_contradictions(
         &self,
         query: ProjectMemoryFactContradictionQueryV1,
@@ -157,7 +151,6 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     }
 
     #[hotpath::measure(label = "usecases.memory.get", future = true)]
-    #[hotpath::skip]
     pub async fn get_project_memory_fact(
         &self,
         target: ProjectMemoryFactIdV1,
@@ -178,7 +171,6 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     /// content is never forwarded to the authority: only its canonical SHA-256
     /// locator digest crosses this boundary.
     #[hotpath::measure(label = "usecases.memory.exact", future = true)]
-    #[hotpath::skip]
     pub async fn find_exact_fact_by_content(
         &self,
         content: &str,
@@ -212,7 +204,6 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     }
 
     #[hotpath::measure(label = "usecases.memory.history", future = true)]
-    #[hotpath::skip]
     pub async fn get_project_memory_history(
         &self,
         query: ProjectMemoryFactHistoryQueryV1,
@@ -248,7 +239,6 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
 
     /// Pure owner-bound feedback history snapshot.
     #[hotpath::measure(label = "usecases.memory.feedback.history", future = true)]
-    #[hotpath::skip]
     pub async fn get_project_memory_feedback_history(
         &self,
         query: ProjectMemoryFactFeedbackHistoryQueryV1,
@@ -270,7 +260,6 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
 
     /// Pure status snapshot over canonical counters and memory algebra.
     #[hotpath::measure(label = "usecases.memory.status", future = true)]
-    #[hotpath::skip]
     pub async fn project_memory_status(
         &self,
         read_control: &FactReadControl,
@@ -288,7 +277,6 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     }
 
     #[hotpath::measure(label = "usecases.memory.inspect", future = true)]
-    #[hotpath::skip]
     pub async fn inspect_project_memory_fact(
         &self,
         target: ProjectMemoryFactIdV1,
@@ -306,7 +294,6 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     }
 
     #[hotpath::measure(label = "usecases.memory.update", future = true)]
-    #[hotpath::skip]
     pub async fn update_project_memory_fact(
         &self,
         request: ProjectMemoryFactUpdateCommandV1,
@@ -335,7 +322,6 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     }
 
     #[hotpath::measure(label = "usecases.memory.remove", future = true)]
-    #[hotpath::skip]
     pub async fn remove_project_memory_fact(
         &self,
         request: ProjectMemoryFactRemoveCommandV1,
@@ -375,7 +361,6 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     }
 
     #[hotpath::measure(label = "usecases.memory.feedback", future = true)]
-    #[hotpath::skip]
     pub async fn record_project_memory_fact_feedback(
         &self,
         request: ProjectMemoryFactFeedbackCommandV1,
@@ -410,7 +395,6 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     }
 
     #[hotpath::measure(label = "usecases.memory.retrieval", future = true)]
-    #[hotpath::skip]
     pub async fn record_project_memory_fact_retrieval(
         &self,
         request: ProjectMemoryFactRetrievalCommandV1,
@@ -444,7 +428,6 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     }
 
     #[hotpath::measure(label = "usecases.memory.automatic.apply", future = true)]
-    #[hotpath::skip]
     pub async fn apply_project_memory_automatic_fact(
         &self,
         apply_id: ProvenanceId,
@@ -492,7 +475,6 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     }
 
     #[hotpath::measure(label = "usecases.memory.automatic.receipt", future = true)]
-    #[hotpath::skip]
     pub async fn get_project_memory_automatic_fact_receipt(
         &self,
         apply_id: ProvenanceId,
@@ -513,7 +495,6 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     }
 
     #[hotpath::measure(label = "usecases.memory.automatic.list", future = true)]
-    #[hotpath::skip]
     pub async fn list_project_memory_automatic_fact_receipts(
         &self,
         state: Option<ProjectMemoryAutomaticFactStateV1>,
@@ -541,7 +522,6 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     }
 
     #[hotpath::measure(label = "usecases.memory.automatic.receipts", future = true)]
-    #[hotpath::skip]
     pub async fn project_memory_automation_run_receipts(
         &self,
         run_id: RunId,
