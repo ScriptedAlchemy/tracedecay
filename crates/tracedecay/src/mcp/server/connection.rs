@@ -1877,14 +1877,12 @@ mod cancellable_queue_tests {
                     "id": "slow-read",
                     "method": "tools/call",
                     "params": {
-                        "name": "tracedecay_grep",
+                        "name": "tracedecay_source_outline",
                         "arguments": {
-                            "pattern": "route_fixture",
-                            "fixed_strings": true,
+                            "file": "src/lib.rs",
                             "project_selector": {
                                 "project_id": fixture.target_project_id.clone()
-                            },
-                            "format": "json"
+                            }
                         }
                     }
                 })
@@ -1952,14 +1950,12 @@ mod cancellable_queue_tests {
                     "id": 10,
                     "method": "tools/call",
                     "params": {
-                        "name": "tracedecay_grep",
+                        "name": "tracedecay_source_outline",
                         "arguments": {
-                            "pattern": "route_fixture",
-                            "fixed_strings": true,
+                            "file": "src/lib.rs",
                             "project_selector": {
                                 "project_id": fixture.target_project_id.clone()
-                            },
-                            "format": "json"
+                            }
                         }
                     }
                 })
@@ -2054,14 +2050,12 @@ mod cancellable_queue_tests {
                         "id": id,
                         "method": "tools/call",
                         "params": {
-                            "name": "tracedecay_grep",
+                            "name": "tracedecay_source_outline",
                             "arguments": {
-                                "pattern": "route_fixture",
-                                "fixed_strings": true,
+                                "file": "src/lib.rs",
                                 "project_selector": {
                                     "project_id": fixture.target_project_id.clone()
-                                },
-                                "format": "json"
+                                }
                             }
                         }
                     })
@@ -2124,14 +2118,12 @@ mod cancellable_queue_tests {
                     "id": 20,
                     "method": "tools/call",
                     "params": {
-                        "name": "tracedecay_grep",
+                        "name": "tracedecay_source_outline",
                         "arguments": {
-                            "pattern": "route_fixture",
-                            "fixed_strings": true,
+                            "file": "src/lib.rs",
                             "project_selector": {
                                 "project_id": fixture.target_project_id.clone()
-                            },
-                            "format": "json"
+                            }
                         }
                     }
                 })
@@ -2204,14 +2196,12 @@ mod cancellable_queue_tests {
                     "id": 30,
                     "method": "tools/call",
                     "params": {
-                        "name": "tracedecay_grep",
+                        "name": "tracedecay_source_outline",
                         "arguments": {
-                            "pattern": "route_fixture",
-                            "fixed_strings": true,
+                            "file": "src/lib.rs",
                             "project_selector": {
                                 "project_id": fixture.target_project_id.clone()
-                            },
-                            "format": "json"
+                            }
                         }
                     }
                 })
@@ -2376,12 +2366,10 @@ mod cancellable_queue_tests {
                     "id": 41,
                     "method": "tools/call",
                     "params": {
-                        "name": "tracedecay_grep",
+                        "name": "tracedecay_source_outline",
                         "arguments": {
-                            "pattern": "route_fixture",
-                            "fixed_strings": true,
-                            "project_selector": {"project_id": target_project_id},
-                            "format": "json"
+                            "file": "src/lib.rs",
+                            "project_selector": {"project_id": target_project_id}
                         }
                     }
                 })

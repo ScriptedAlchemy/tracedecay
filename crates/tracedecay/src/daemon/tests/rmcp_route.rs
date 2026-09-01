@@ -164,12 +164,10 @@ fn selected_blocked_request(id: u64, target_project_id: &str) -> Value {
         "id": id,
         "method": "tools/call",
         "params": {
-            "name": "tracedecay_grep",
+            "name": "tracedecay_source_outline",
             "arguments": {
-                "pattern": "RMCP_SELECTED_TARGET_MARKER",
-                "fixed_strings": true,
-                "project_selector": {"project_id": target_project_id},
-                "format": "json"
+                "file": "src/lib.rs",
+                "project_selector": {"project_id": target_project_id}
             }
         }
     })
