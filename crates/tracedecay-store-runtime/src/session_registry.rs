@@ -2649,9 +2649,55 @@ pub fn mark_process_long_lived_for_session_maintenance() {
     LONG_LIVED_SESSION_MAINTENANCE.store(true, Ordering::Relaxed);
 }
 
+/// Operator log for store-runtime schema and maintenance events.
+///
+/// Successful schema convergence (`outcome=complete`) is an ordinary
+/// completion and must not occupy the default WARN surface. WARN is reserved
+/// for degraded outcomes — a failed converge, a poisoned status lock, or a
+/// memory-release failure after the audit.
 #[hotpath::measure]
 pub fn log_store_runtime_event(event: &str, fields: &[(&str, String)]) {
-    tracing::warn!(event, ?fields, "store-runtime event");
+    if store_runtime_event_is_success(fields) {
+        tracing::info!(event, ?fields, "store-runtime event");
+    } else {
+        tracing::warn!(event, ?fields, "store-runtime event");
+    }
+}
+
+#[hotpath::measure]
+fn store_runtime_event_is_success(fields: &[(&str, String)]) -> bool {
+    fields
+        .iter()
+        .any(|(key, value)| *key == "outcome" && value == "complete")
+}
+
+#[cfg(test)]
+mod store_runtime_event_level_tests {
+    use super::store_runtime_event_is_success;
+
+    #[test]
+    fn successful_schema_convergence_is_not_an_anomaly() {
+        assert!(store_runtime_event_is_success(&[
+            ("outcome", "complete".to_owned()),
+            ("database", "/tmp/registry.db".to_owned()),
+        ]));
+    }
+
+    #[test]
+    fn degraded_schema_convergence_stays_an_anomaly() {
+        assert!(!store_runtime_event_is_success(&[
+            ("outcome", "degraded".to_owned()),
+            ("error", "authority invariant failed".to_owned()),
+        ]));
+    }
+
+    #[test]
+    fn events_without_a_complete_outcome_stay_loud() {
+        assert!(!store_runtime_event_is_success(&[(
+            "resource",
+            "statuses".to_owned()
+        ),]));
+    }
 }
 
 #[hotpath::measure]
