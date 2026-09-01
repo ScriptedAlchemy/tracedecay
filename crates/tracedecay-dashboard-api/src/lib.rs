@@ -72,7 +72,7 @@ pub use automation_run_service::{
 };
 mod automation_scheduler_api;
 mod automation_skills_api;
-mod cloud;
+pub mod cloud;
 mod code_diagnostics_api;
 pub mod code_index_freshness_api;
 pub mod config;

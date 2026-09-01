@@ -237,8 +237,12 @@ pub fn fetch_latest_beta_version() -> Option<String> {
 }
 
 /// Returns true if the current build is a beta/prerelease version.
+///
+/// `env!` is evaluated here, in the product crate whose package version is
+/// the workspace release version; the channel test itself is the shared
+/// dashboard-api helper so there is one prerelease-detection rule.
 pub fn is_beta() -> bool {
-    env!("CARGO_PKG_VERSION").contains('-')
+    tracedecay_dashboard_api::cloud::is_beta(env!("CARGO_PKG_VERSION"))
 }
 
 /// Returns true if `latest` is strictly newer than `current` using `SemVer`

@@ -629,7 +629,7 @@ async fn settings_envelope(
         },
         version: VersionSettingsPayloadV1 {
             version: state.build_version.to_owned(),
-            channel: if crate::cloud::is_beta() {
+            channel: if crate::cloud::is_beta(state.build_version) {
                 "beta".to_owned()
             } else {
                 "stable".to_owned()
