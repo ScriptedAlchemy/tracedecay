@@ -1822,7 +1822,7 @@ fn own_head_field_drift_on_retry_seats_the_linearized_publication() {
         .heads
         .get_mut(&projection_key)
         .expect("incumbent head");
-    drifted.input_digest = digest('z');
+    drifted.input_digest = digest('b');
     assert_ne!(drifted, &first_head);
 
     let retried = registered
