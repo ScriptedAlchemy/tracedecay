@@ -167,12 +167,16 @@ async fn rejected_lsp_open_does_not_initialize_analyzer_or_mint_session_access()
         )
         .await;
 
-    assert!(matches!(
-        response.outcome,
-        DaemonInvocationOutcome::Problem {
-            problem: DaemonInvocationProblem::NotFoundOrNotAuthorized
-        }
-    ));
+    assert!(
+        matches!(
+            response.outcome,
+            DaemonInvocationOutcome::Problem {
+                problem: DaemonInvocationProblem::InvalidRequest
+            }
+        ),
+        "oversized workspace-folder count is a front-door InvalidRequest, got {:?}",
+        response.outcome
+    );
     assert_eq!(
         initializations.load(Ordering::Relaxed),
         0,
