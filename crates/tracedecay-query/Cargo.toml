@@ -93,9 +93,14 @@ tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version =
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false, features = ["lite", "test-helpers"] }
 tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", features = ["test-helpers"] }
 
+# Profiling bench: built only under the opt-in `hotpath` feature so a
+# default `cargo bench` / `cargo test --all-targets` never compiles hotpath
+# instrumentation. Run with `cargo bench -p tracedecay-query
+# --features hotpath --bench code_lexical_catchup`.
 [[bench]]
 name = "code_lexical_catchup"
 harness = false
+required-features = ["hotpath"]
 
 [[bench]]
 name = "semantic_flat_scan"
