@@ -12,24 +12,65 @@ use tracedecay_store::{
     SemanticVectorStageBatchReceipt, SemanticVectorStageBatchReceiptLookup,
     SemanticVectorStageBeginOutcome, SemanticVectorStageCancelOutcome,
     SemanticVectorStageCensusPage, SemanticVectorStageCensusRequest,
-    SemanticVectorStageEffectState, SemanticVectorStageGraphBatchEffect,
-    SemanticVectorStageIncomplete, SemanticVectorStageKey, SemanticVectorStagePendingEffectPage,
-    SemanticVectorStagePendingEffectPageRequest, SemanticVectorStagePlan,
-    SemanticVectorStagePublicationPrepareOutcome, SemanticVectorStagePublicationPrepareRequest,
-    SemanticVectorStagePublishOutcome, SemanticVectorStagePublishSettlement,
-    SemanticVectorStageRecord, SemanticVectorStageSettlement, SemanticVectorStageSettlementOutcome,
-    SemanticVectorStageState, SemanticVectorStageWriterAdoption,
-    SemanticVectorStageWriterAdoptionOutcome, SemanticVectorStagingStore,
-    SemanticVectorStagingStoreError, SemanticVectorStagingStoreResult, SemanticVectorWriterFence,
+    SemanticVectorStageChunkReceipt, SemanticVectorStageEffectState,
+    SemanticVectorStageGraphBatchEffect, SemanticVectorStageIncomplete, SemanticVectorStageKey,
+    SemanticVectorStagePendingEffectPage, SemanticVectorStagePendingEffectPageRequest,
+    SemanticVectorStagePlan, SemanticVectorStagePublicationPrepareOutcome,
+    SemanticVectorStagePublicationPrepareRequest, SemanticVectorStagePublishOutcome,
+    SemanticVectorStagePublishSettlement, SemanticVectorStageRecord, SemanticVectorStageSettlement,
+    SemanticVectorStageSettlementOutcome, SemanticVectorStageState,
+    SemanticVectorStageWriterAdoption, SemanticVectorStageWriterAdoptionOutcome,
+    SemanticVectorStagingStore, SemanticVectorStagingStoreError, SemanticVectorStagingStoreResult,
+    SemanticVectorWriterFence,
 };
 
-use crate::exact_sql::{ExactSqlHandle, ExactSqlValue};
+use crate::exact_sql::{ExactSqlHandle, ExactSqlTransaction, ExactSqlValue};
 
 use super::super::graph_publication::GraphPublicationExactSqlStorage;
 use super::published::*;
 use super::support::*;
 
 const READ_WAIT: Duration = Duration::from_millis(10);
+
+#[hotpath::measure(label = "rusqlite.semantic_vector_staging.persist.chunk_receipts")]
+fn insert_chunk_receipts(
+    tx: &ExactSqlTransaction,
+    stage_id: i64,
+    batch_id: i64,
+    chunks: &[SemanticVectorStageChunkReceipt],
+) -> SemanticVectorStagingStoreResult<()> {
+    if chunks.is_empty() {
+        return Ok(());
+    }
+    let mut sql = String::from(
+        "INSERT INTO semantic_vector_stage_chunk_receipts (
+            stage_id,batch_id,effect_ordinal,chunk_id,chunk_digest,operation,output_digest
+         ) VALUES ",
+    );
+    let mut params = Vec::with_capacity(chunks.len().saturating_mul(7));
+    for (index, chunk) in chunks.iter().enumerate() {
+        if index != 0 {
+            sql.push(',');
+        }
+        sql.push_str("(?,?,?,?,?,?,?)");
+        params.extend([
+            ExactSqlValue::Integer(stage_id),
+            ExactSqlValue::Integer(batch_id),
+            ExactSqlValue::Integer(i64::from(chunk.effect_ordinal)),
+            text(chunk.chunk_id.as_str()),
+            text(chunk.chunk_digest.as_str()),
+            text(chunk.operation.as_str()),
+            optional_text(
+                chunk
+                    .output_digest
+                    .as_ref()
+                    .map(|digest| digest.as_str().to_owned()),
+            ),
+        ]);
+    }
+    execute(tx, &sql, params)?;
+    Ok(())
+}
 
 #[derive(Clone)]
 pub struct SemanticVectorStagingExactSqlStorage {
@@ -354,28 +395,7 @@ impl SemanticVectorStagingStore for SemanticVectorStagingExactSqlStorage {
             rollback(tx)?;
             return Err(corrupt("semantic vector batch rowid is not positive"));
         }
-        for chunk in &receipt.chunks {
-            execute(
-                &tx,
-                "INSERT INTO semantic_vector_stage_chunk_receipts (
-                    stage_id,batch_id,effect_ordinal,chunk_id,chunk_digest,operation,output_digest
-                 ) VALUES (?1,?2,?3,?4,?5,?6,?7)",
-                vec![
-                    ExactSqlValue::Integer(stage.id),
-                    ExactSqlValue::Integer(batch_id),
-                    ExactSqlValue::Integer(i64::from(chunk.effect_ordinal)),
-                    text(chunk.chunk_id.as_str()),
-                    text(chunk.chunk_digest.as_str()),
-                    text(chunk.operation.as_str()),
-                    optional_text(
-                        chunk
-                            .output_digest
-                            .as_ref()
-                            .map(|digest| digest.as_str().to_owned()),
-                    ),
-                ],
-            )?;
-        }
+        insert_chunk_receipts(&tx, stage.id, batch_id, &receipt.chunks)?;
         let effect_insert = execute(
             &tx,
             "INSERT INTO semantic_vector_stage_graph_effects (batch_id,state)

@@ -16,9 +16,10 @@ use tracedecay_store::{
     GraphPublicationInputDigestV1, GraphPublicationKeyV1, GraphPublicationOperationContextV1,
     GraphPublicationReplayRetirementV1, GraphPublicationReplayV1, GraphPublicationStoreErrorV1,
     GraphPublicationStoreV1, GraphRecoveredGenerationDigestV1, GraphVerifiedHeadCasOutcomeV1,
-    GraphVerifiedHeadCompareAndSwapV1, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1,
-    RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeRequestControlV1,
-    RuntimeRequestProbeV1, SemanticEmbeddingProjectionDigestV1, SemanticModelArtifactDigestV1,
+    GraphVerifiedHeadCompareAndSwapV1, MAX_SEMANTIC_VECTOR_STAGE_CHUNKS_PER_BATCH,
+    RuntimeCancellationIdV1, RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1,
+    RuntimeInterruptionV1, RuntimeRequestControlV1, RuntimeRequestProbeV1,
+    SemanticEmbeddingProjectionDigestV1, SemanticModelArtifactDigestV1,
     SemanticPrivacyDomainDigestV1, SemanticProjectionManifestDigestV1,
     SemanticVectorBatchInputDigest, SemanticVectorBatchOutputDigest, SemanticVectorBuildId,
     SemanticVectorCancelledRetirement, SemanticVectorCancelledRetirementOutcome,
@@ -30,12 +31,13 @@ use tracedecay_store::{
     SemanticVectorReconstructionRecipe, SemanticVectorSourceDependencyV1,
     SemanticVectorSourceGenerationId, SemanticVectorSourceManifestDigest,
     SemanticVectorStageAppendOutcome, SemanticVectorStageBatchKey, SemanticVectorStageBatchReceipt,
-    SemanticVectorStageBeginOutcome, SemanticVectorStageCensusRequest,
-    SemanticVectorStageChunkOperation, SemanticVectorStageChunkReceipt,
-    SemanticVectorStageEffectTerminal, SemanticVectorStageKey, SemanticVectorStagePlan,
-    SemanticVectorStagePublicationPrepareOutcome, SemanticVectorStagePublicationPrepareRequest,
-    SemanticVectorStagePublishOutcome, SemanticVectorStagePublishSettlement,
-    SemanticVectorStageSettlement, SemanticVectorStageSettlementOutcome, SemanticVectorStageState,
+    SemanticVectorStageBatchReceiptLookup, SemanticVectorStageBeginOutcome,
+    SemanticVectorStageCensusRequest, SemanticVectorStageChunkOperation,
+    SemanticVectorStageChunkReceipt, SemanticVectorStageEffectTerminal, SemanticVectorStageKey,
+    SemanticVectorStagePlan, SemanticVectorStagePublicationPrepareOutcome,
+    SemanticVectorStagePublicationPrepareRequest, SemanticVectorStagePublishOutcome,
+    SemanticVectorStagePublishSettlement, SemanticVectorStageSettlement,
+    SemanticVectorStageSettlementOutcome, SemanticVectorStageState,
     SemanticVectorStageWriterAdoption, SemanticVectorStageWriterAdoptionOutcome,
     SemanticVectorStagingStore, SemanticVectorStagingStoreError, SemanticVectorWriterFence,
     StoreAuthorityEpochV1, StoreIncarnationV1, StoreRuntimeBindingV1, StoreShardIdV1,
@@ -398,6 +400,67 @@ fn append_rejects_stale_progress_duplicate_chunks_and_reused_context() {
             .append_stage_batch(&third, &plan.writer_fence, &context),
         Err(SemanticVectorStagingStoreError::InvalidRequest(_))
     ));
+}
+
+#[test]
+fn append_persists_the_maximum_chunk_batch_without_gaps() {
+    let fixture = Fixture::new();
+    let chunks = (0..MAX_SEMANTIC_VECTOR_STAGE_CHUNKS_PER_BATCH)
+        .map(|ordinal| SemanticVectorStageChunkReceipt {
+            effect_ordinal: u32::try_from(ordinal).unwrap(),
+            chunk_id: SemanticVectorChunkId::new(format!("chunk.batch.{ordinal:03}")).unwrap(),
+            chunk_digest: digest::<SemanticVectorChunkDigest>('e'),
+            operation: SemanticVectorStageChunkOperation::Embed,
+            output_digest: Some(digest::<SemanticVectorOutputDigest>('f')),
+        })
+        .collect::<Vec<_>>();
+    let manifest = chunks
+        .iter()
+        .map(|chunk| SemanticVectorChunkManifestMember {
+            chunk_id: chunk.chunk_id.clone(),
+            chunk_digest: chunk.chunk_digest.clone(),
+            operation: chunk.operation,
+        })
+        .collect::<Vec<_>>();
+    let plan = plan_with_count(
+        &fixture,
+        "maximum-chunk-batch",
+        semantic_vector_chunk_manifest_digest(&manifest).unwrap(),
+        u64::try_from(chunks.len()).unwrap(),
+    );
+    let receipt = SemanticVectorStageBatchReceipt::new(
+        SemanticVectorStageBatchKey {
+            stage: plan.key.clone(),
+            ordinal: 0,
+        },
+        digest('9'),
+        digest::<SemanticVectorBatchInputDigest>('a'),
+        digest::<SemanticVectorBatchOutputDigest>('b'),
+        digest('d'),
+        chunks,
+    )
+    .unwrap();
+    let (control, probe) = operation("begin.maximum.chunk.batch");
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    fixture.storage().begin_stage(&plan, &context).unwrap();
+    let (control, probe) = operation("append.maximum.chunk.batch");
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    assert!(matches!(
+        fixture
+            .storage()
+            .append_stage_batch(&receipt, &plan.writer_fence, &context)
+            .unwrap(),
+        SemanticVectorStageAppendOutcome::Appended { .. }
+    ));
+    let (control, probe) = operation("read.maximum.chunk.batch");
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    assert_eq!(
+        fixture
+            .storage()
+            .batch_receipt(&receipt.key, &context)
+            .unwrap(),
+        SemanticVectorStageBatchReceiptLookup::Found(Box::new(receipt))
+    );
 }
 
 #[test]
