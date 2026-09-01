@@ -683,8 +683,8 @@ mod tests {
         SessionIngestHealth, SessionProviderCoverage, SessionProviderCoverageState,
     };
     use tracedecay_session_memory::runtime_telemetry::{
-        GenerationCensusReader, GenerationCensusSnapshot, GenerationCensusStatistics,
-        GenerationCensusUnavailableReason,
+        GenerationCensusReader, GenerationCensusServingFreshness, GenerationCensusSnapshot,
+        GenerationCensusStatistics, GenerationCensusUnavailableReason,
     };
 
     use super::{
@@ -710,6 +710,11 @@ mod tests {
         );
 
         let observed = GenerationCensusSnapshot::Observed {
+            generation_id: "generation.fixture".to_owned(),
+            freshness: GenerationCensusServingFreshness::LastCompleteStale {
+                sealed_at_micros: 42,
+                rebuild_in_flight: true,
+            },
             statistics: GenerationCensusStatistics {
                 source_total_bytes: 1_024,
                 symbol_count: 12,

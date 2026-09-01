@@ -12,6 +12,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tracedecay_application::{Deadline, ResolvedScope, now_micros};
+use tracedecay_code_index::graph_projection::CodeGraphProjectionStore;
+use tracedecay_code_index_runtime::code_index_scheduler::LatestCompleteCodeIndexV1;
 use tracedecay_graph_query::{CodeGraphReadError, CodeGraphReadRequest, VerifiedCodeGraphRead};
 
 #[hotpath::measure]
@@ -48,9 +50,71 @@ async fn sleep_until_deadline(deadline: &Deadline) {
 }
 
 struct ProjectCodeGraphProjectionReadPortV1 {
+    authority: ProjectCodeGraphServingAuthorityV1,
+}
+
+#[derive(Clone)]
+struct ProjectCodeGraphServingAuthorityV1 {
     schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     project_root: PathBuf,
     scope: ResolvedScope,
+}
+
+struct ProjectCodeGraphServingProjectionV1 {
+    latest: LatestCompleteCodeIndexV1,
+    store: Arc<CodeGraphProjectionStore>,
+    freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
+}
+
+#[hotpath::measure_all]
+impl ProjectCodeGraphServingAuthorityV1 {
+    async fn project(&self) -> Result<ProjectCodeGraphServingProjectionV1, CodeGraphReadError> {
+        let current = self
+            .schedulers
+            .latest_complete_ready_decoded_for_root_scope(&self.project_root, &self.scope)
+            .await;
+        let (latest, freshness) = match current {
+            Some(latest) => (
+                latest,
+                tracedecay_graph_query::CodeGraphReadFreshnessV1::Current,
+            ),
+            None => {
+                let Some(seated) = self
+                    .schedulers
+                    .latest_complete_serving_for_root_scope(&self.project_root, &self.scope)
+                    .await
+                else {
+                    return Err(CodeGraphReadError::Unavailable {
+                        detail: "the verified code graph is not ready for the exact project root"
+                            .to_owned(),
+                    });
+                };
+                let rebuild_in_flight = self
+                    .schedulers
+                    .rebuild_pass_in_flight_for_root_scope(&self.project_root, &self.scope)
+                    .await;
+                let sealed_at = seated.generation().manifest().seal.sealed_at;
+                (
+                    seated,
+                    tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale {
+                        sealed_at,
+                        rebuild_in_flight,
+                    },
+                )
+            }
+        };
+        let store =
+            latest
+                .interactive_graph_store()
+                .map_err(|error| CodeGraphReadError::Unavailable {
+                    detail: error.to_string(),
+                })?;
+        Ok(ProjectCodeGraphServingProjectionV1 {
+            latest,
+            store,
+            freshness,
+        })
+    }
 }
 
 impl tracedecay_graph_query::CodeGraphProjectionReadPort for ProjectCodeGraphProjectionReadPortV1 {
@@ -74,15 +138,13 @@ impl tracedecay_graph_query::CodeGraphProjectionReadPort for ProjectCodeGraphPro
             if !request
                 .context
                 .scope()
-                .identifies_same_checkout(&self.scope)
+                .identifies_same_checkout(&self.authority.scope)
             {
                 return Err(CodeGraphReadError::Denied);
             }
             refuse_projection_wait(&request)?;
-            let wait = self
-                .schedulers
-                .latest_complete_ready_decoded_for_root_scope(&self.project_root, &self.scope);
-            let latest = match (request.deadline.as_ref(), request.live_cancellation) {
+            let wait = self.authority.project();
+            let projection = match (request.deadline.as_ref(), request.live_cancellation) {
                 (None, None) => wait.await,
                 (deadline, live_cancellation) => {
                     tokio::select! {
@@ -101,64 +163,16 @@ impl tracedecay_graph_query::CodeGraphProjectionReadPort for ProjectCodeGraphPro
                                 std::future::pending::<()>().await;
                             }
                         } => return Err(CodeGraphReadError::TimedOut),
-                        latest = wait => latest,
+                        projection = wait => projection,
                     }
                 }
-            };
-            // Serve the last complete generation while the scheduler
-            // rebuilds: when the ready gate abstains (a background pass owns
-            // the scheduler, or a new tip commit disproved the currency
-            // witness), the seat still holds the last complete generation.
-            // Refusing it withdrew exact-scope retrieval for entire
-            // regeneration windows; instead it serves with typed staleness,
-            // exactly as the search lane's `served_stale` arm does. Only a
-            // route with no seated complete generation at all stays a typed
-            // unavailable refusal.
-            let (latest, freshness) = match latest {
-                Some(latest) => (
-                    latest,
-                    tracedecay_graph_query::CodeGraphReadFreshnessV1::Current,
-                ),
-                None => match self
-                    .schedulers
-                    .latest_complete_serving_for_root_scope(&self.project_root, &self.scope)
-                    .await
-                {
-                    Some(seated) => {
-                        // Capture the wedge-distinguishing evidence at open
-                        // time: a seat sealed days ago with no reconcile pass
-                        // or pending wake is a stalled route, not a routine
-                        // rebuild window, and the caveat must say which.
-                        let rebuild_in_flight = self
-                            .schedulers
-                            .rebuild_pass_in_flight_for_root_scope(&self.project_root, &self.scope)
-                            .await;
-                        let sealed_at = seated.generation().manifest().seal.sealed_at;
-                        (
-                            seated,
-                            tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale {
-                                sealed_at,
-                                rebuild_in_flight,
-                            },
-                        )
-                    }
-                    None => {
-                        return Err(CodeGraphReadError::Unavailable {
-                            detail:
-                                "the verified code graph is not ready for the exact project root"
-                                    .to_owned(),
-                        });
-                    }
-                },
-            };
+            }?;
             refuse_projection_wait(&request)?;
-            let store = latest.interactive_graph_store().map_err(|error| {
-                CodeGraphReadError::Unavailable {
-                    detail: error.to_string(),
-                }
-            })?;
-            refuse_projection_wait(&request)?;
-            VerifiedCodeGraphRead::new(self.scope.clone(), store, freshness)
+            VerifiedCodeGraphRead::new(
+                self.authority.scope.clone(),
+                projection.store,
+                projection.freshness,
+            )
         })
     }
 }
@@ -170,37 +184,56 @@ pub(crate) fn project_code_graph_projection_read_port(
     scope: ResolvedScope,
 ) -> Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort> {
     Arc::new(ProjectCodeGraphProjectionReadPortV1 {
-        schedulers,
-        project_root,
-        scope,
+        authority: ProjectCodeGraphServingAuthorityV1 {
+            schedulers,
+            project_root,
+            scope,
+        },
     })
 }
 
 /// Bind runtime generation telemetry to this daemon route's exact project
-/// root and resolved scope. A missing or unready sealed generation is an
-/// explicit unavailable census; it never falls back to the runtime database.
+/// root and resolved scope through the same serving projection that graph
+/// queries open. A missing graph seat is an explicit unavailable census; it
+/// never falls back to the runtime database.
 #[hotpath::measure]
 pub(crate) fn project_code_index_generation_census_reader(
     schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     project_root: PathBuf,
     scope: ResolvedScope,
 ) -> tracedecay_session_memory::runtime_telemetry::GenerationCensusReader {
+    let authority = ProjectCodeGraphServingAuthorityV1 {
+        schedulers,
+        project_root,
+        scope,
+    };
     Arc::new(move || {
-        let schedulers = schedulers.clone();
-        let project_root = project_root.clone();
-        let scope = scope.clone();
+        let authority = authority.clone();
         Box::pin(async move {
-            let Some(latest) = schedulers
-                .latest_complete_ready_decoded_for_root_scope(&project_root, &scope)
-                .await
-            else {
+            let Ok(projection) = authority.project().await else {
                 return tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot::Unavailable {
                     reason: tracedecay_session_memory::runtime_telemetry::GenerationCensusUnavailableReason::ExactScopeGenerationNotReady,
                 };
             };
-            match latest.generation().generation_statistics() {
+            match projection.latest.generation().generation_statistics() {
                 Ok(statistics) => {
+                    let freshness = match projection.freshness {
+                        tracedecay_graph_query::CodeGraphReadFreshnessV1::Current => {
+                            tracedecay_session_memory::runtime_telemetry::GenerationCensusServingFreshness::Current
+                        }
+                        tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale {
+                            sealed_at,
+                            rebuild_in_flight,
+                        } => {
+                            tracedecay_session_memory::runtime_telemetry::GenerationCensusServingFreshness::LastCompleteStale {
+                                sealed_at_micros: sealed_at.0,
+                                rebuild_in_flight,
+                            }
+                        }
+                    };
                     tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot::Observed {
+                        generation_id: projection.latest.generation().manifest().generation_id.as_str().to_owned(),
+                        freshness,
                         statistics:
                             tracedecay_session_memory::runtime_telemetry::GenerationCensusStatistics {
                                 source_total_bytes: statistics.source_total_bytes,

@@ -3,21 +3,33 @@
 //! These journeys used to live beside the scheduler. They open
 //! `DaemonSessionRuntimeRegistryV1`, so they compile in the composition root.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tempfile::TempDir;
-use tracedecay_application::ResolvedScope;
+use tracedecay_application::{
+    CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
+    RequestContext, RequestId, ResolvedScope, now_micros,
+};
 use tracedecay_code_index_runtime::code_index_scheduler::{
     CodeGraphActivationAuthorityV1, CodeGraphActivationPolicyV1, CodeIndexReconcileOutcomeV1,
     CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1,
     scoped_code_index_store_root,
 };
-use tracedecay_domain::ProjectId;
-
+use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, UtcMicros};
+use tracedecay_graph_query::{CodeGraphReadFreshnessV1, CodeGraphReadRequest};
+use tracedecay_session_memory::runtime_telemetry::{
+    GenerationCensusServingFreshness, GenerationCensusSnapshot, GenerationCensusUnavailableReason,
+};
 use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
+use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
+
+use crate::daemon::project_open_owners::{
+    project_code_graph_projection_read_port, project_code_index_generation_census_reader,
+};
 
 const ALPHA_LIB_V1: &[(&str, &str)] = &[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")];
 
@@ -343,4 +355,235 @@ async fn persistent_graph_activation_publishes_a_small_generation() {
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restart_status_tracks_immediate_settled_and_stale_graph_serving_states() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let scoped_store = scoped_code_index_store_root(
+        store.path(),
+        &fixture.path().canonicalize().expect("canonical fixture"),
+    );
+    let scope = {
+        let mut scheduler = scheduler(
+            &fixture,
+            scoped_store,
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(scheduler.reconcile_now().expect("seed generation"));
+        let latest = scheduler.latest_complete().expect("seeded generation");
+        let snapshot = latest.generation().snapshot();
+        ResolvedScope::new(
+            test_project_id(),
+            snapshot.repository.clone(),
+            snapshot.worktree.clone().expect("worktree identity"),
+            snapshot.reference.clone(),
+        )
+        .expect("resolved scope")
+    };
+
+    let profile = TempDir::new().expect("profile root");
+    let profile_root = profile.path().join("profile");
+    let project_id = test_project_id();
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+        fixture.path(),
+        project_id.as_str(),
+    )
+    .expect("project enrollment");
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+        .expect("profile identity");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        95,
+        "stale graph status projection",
+    )
+    .expect("daemon database scope");
+    let graph_runtime = Arc::new(
+        DaemonSessionRuntimeRegistryV1::open(identity)
+            .await
+            .expect("graph runtime registry"),
+    );
+    let project_database = graph_runtime
+        .project_memory(project_id.clone(), [fixture.path().to_path_buf()])
+        .await
+        .expect("writable project database");
+    crate::host_admission::await_bound_graph_runtime(
+        &project_database,
+        "bind stale graph status projection",
+    )
+    .await
+    .expect("bound project graph runtime");
+
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let activation_admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold restart activation");
+    registry
+        .mount_worktree_with_graph_runtime(
+            project_id,
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+            graph_runtime.code_graph_seat_port(),
+            project_database,
+            CodeGraphActivationPolicyV1::Enabled,
+        )
+        .await
+        .expect("mount persistent graph generation");
+    let port = project_code_graph_projection_read_port(
+        registry.clone(),
+        fixture.path().to_path_buf(),
+        scope.clone(),
+    );
+    let census = project_code_index_generation_census_reader(
+        registry.clone(),
+        fixture.path().to_path_buf(),
+        scope.clone(),
+    );
+    let immediate_context = graph_request_context(scope.clone(), "restart-immediate");
+    let immediate_read = port
+        .open(CodeGraphReadRequest::from_context(
+            &immediate_context,
+            now_micros(),
+        ))
+        .await;
+    assert!(
+        immediate_read.is_err(),
+        "status must not claim ready before the restart-restored graph authority can serve"
+    );
+    assert!(
+        matches!(
+            census().await,
+            GenerationCensusSnapshot::Unavailable {
+                reason: GenerationCensusUnavailableReason::ExactScopeGenerationNotReady,
+            }
+        ),
+        "restart status must remain unavailable while graph admission refuses"
+    );
+    drop(activation_admission);
+
+    let settled_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if registry
+            .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+            .await
+            .is_some_and(|latest| latest.interactive_graph_store().is_ok())
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= settled_deadline,
+            "persistent graph generation did not become query-serving"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let settled_context = graph_request_context(scope.clone(), "restart-settled");
+    let settled_read = port
+        .open(CodeGraphReadRequest::from_context(
+            &settled_context,
+            now_micros(),
+        ))
+        .await
+        .expect("settled restart graph read");
+    assert_eq!(settled_read.freshness(), CodeGraphReadFreshnessV1::Current);
+    assert!(matches!(
+        census().await,
+        GenerationCensusSnapshot::Observed {
+            freshness: GenerationCensusServingFreshness::Current,
+            ..
+        }
+    ));
+
+    let scheduler = registry
+        .scheduler_handle(fixture.path())
+        .await
+        .expect("mounted scheduler");
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let lock_thread = std::thread::spawn(move || {
+        let _guard = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held_tx.send(()).expect("signal scheduler lock held");
+        let _ = release_rx.recv();
+    });
+    held_rx.recv().expect("scheduler lock acquired");
+    std::fs::write(
+        fixture.path().join("src/lib.rs"),
+        "pub fn alpha() -> u32 { 2 }\n",
+    )
+    .expect("drift fixture source");
+    git(fixture.path(), &["add", "."]);
+    git(
+        fixture.path(),
+        &["commit", "-qm", "move tip while scheduler is held"],
+    );
+
+    let context = graph_request_context(scope, "restart-stale");
+    let graph_read = port
+        .open(CodeGraphReadRequest::from_context(&context, now_micros()))
+        .await;
+    let census_snapshot = census().await;
+
+    release_tx.send(()).expect("release scheduler lock");
+    lock_thread.join().expect("scheduler lock thread");
+    registry.shutdown().await;
+    graph_runtime
+        .shutdown_memory_graph_reconciliation_tasks()
+        .await
+        .expect("join graph reconciliation tasks");
+
+    let graph_read = graph_read.expect("the seated generation must keep serving while stale");
+    assert!(matches!(
+        graph_read.freshness(),
+        CodeGraphReadFreshnessV1::LastCompleteStale { .. }
+    ));
+    assert!(matches!(
+        census_snapshot,
+        GenerationCensusSnapshot::Observed {
+            freshness: GenerationCensusServingFreshness::LastCompleteStale { .. },
+            ..
+        }
+    ));
+}
+
+fn graph_request_context(scope: ResolvedScope, suffix: &str) -> RequestContext {
+    let capability =
+        CapabilityId::new("capability.code-graph-status-projection").expect("capability");
+    let use_case = UseCaseId::new("use-case.code-graph-status-projection").expect("use case");
+    let grant = CapabilityGrantSnapshot::new(
+        CapabilityGrantId::new(format!("grant.code-graph-status-{suffix}")).expect("grant"),
+        1,
+        digest::<ManifestDigest>('a'),
+        ActorId::new("actor.code-graph-status-issuer").expect("issuer"),
+        UtcMicros(1),
+        UtcMicros(i64::MAX),
+        scope.clone(),
+        BTreeSet::from([capability]),
+        BTreeSet::from([use_case]),
+        DisclosureClass::Evidence,
+    )
+    .expect("grant");
+    RequestContext::new(
+        ActorId::new("actor.code-graph-status-requester").expect("requester"),
+        scope,
+        grant,
+        RequestId::new(format!("request.code-graph-status-{suffix}")).expect("request id"),
+        Deadline::new(UtcMicros(i64::MAX)).expect("deadline"),
+        CancellationContext::active(format!("cancellation.code-graph-status-{suffix}"))
+            .expect("cancellation"),
+    )
+    .expect("request context")
+}
+
+fn digest<T>(byte: char) -> T
+where
+    T: TryFrom<String>,
+    <T as TryFrom<String>>::Error: std::fmt::Debug,
+{
+    T::try_from(format!("sha256:{}", byte.to_string().repeat(64))).expect("digest")
 }

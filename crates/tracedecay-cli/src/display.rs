@@ -148,7 +148,7 @@ pub fn print_status_table_with(table: StatusTable<'_>) {
 #[hotpath::measure]
 fn census_cells(census: &GenerationCensusSnapshot) -> Option<Vec<(&'static str, String)>> {
     match census {
-        GenerationCensusSnapshot::Observed { statistics } => Some(vec![
+        GenerationCensusSnapshot::Observed { statistics, .. } => Some(vec![
             ("Symbols", format_number(statistics.symbol_count)),
             ("Edges", format_number(statistics.edge_count)),
             ("Source", format_bytes(statistics.source_total_bytes)),

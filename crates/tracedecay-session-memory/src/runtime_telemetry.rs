@@ -79,11 +79,29 @@ pub struct GenerationCensusStatistics {
     pub edge_count: u64,
 }
 
+/// Freshness of the exact graph generation whose census is reported.
+///
+/// This mirrors graph-query admission without importing the graph-query crate
+/// across the telemetry boundary. Status therefore cannot present a stale
+/// seated generation as current or report readiness for a generation graph
+/// queries cannot open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum GenerationCensusServingFreshness {
+    Current,
+    LastCompleteStale {
+        sealed_at_micros: i64,
+        rebuild_in_flight: bool,
+    },
+}
+
 /// Runtime telemetry's truthful view of code-index census availability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum GenerationCensusSnapshot {
     Observed {
+        generation_id: String,
+        freshness: GenerationCensusServingFreshness,
         #[serde(flatten)]
         statistics: GenerationCensusStatistics,
     },
@@ -279,7 +297,9 @@ pub fn to_text_report(snap: &RuntimeSnapshot) -> String {
     let process_block = process_text_block(&snap.process);
     let d = &snap.database;
     let generation_census = match &d.generation_census {
-        GenerationCensusSnapshot::Observed { statistics } if statistics.source_total_bytes > 0 => {
+        GenerationCensusSnapshot::Observed { statistics, .. }
+            if statistics.source_total_bytes > 0 =>
+        {
             format!(
                 "{} source / {} symbols / {} edges; db/source {:.1}×",
                 bytes_human(statistics.source_total_bytes),
@@ -288,7 +308,7 @@ pub fn to_text_report(snap: &RuntimeSnapshot) -> String {
                 d.db_size_bytes as f64 / statistics.source_total_bytes as f64,
             )
         }
-        GenerationCensusSnapshot::Observed { statistics } => format!(
+        GenerationCensusSnapshot::Observed { statistics, .. } => format!(
             "{} source / {} symbols / {} edges; db/source unavailable",
             bytes_human(statistics.source_total_bytes),
             statistics.symbol_count,

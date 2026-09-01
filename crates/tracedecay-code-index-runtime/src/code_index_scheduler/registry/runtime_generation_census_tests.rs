@@ -20,7 +20,7 @@ use tracedecay_session_memory::runtime_telemetry::{
 };
 
 #[tokio::test]
-async fn runtime_mcp_reports_exact_counts_from_the_mounted_sealed_generation() {
+async fn runtime_mcp_refuses_counts_until_the_mounted_graph_can_serve_queries() {
     let _profile = PinnedUserDataDir::new();
     let dir = TempDir::new().expect("fixture root");
     let project = dir.path().join("runtime-generation-census-observed");
@@ -85,12 +85,10 @@ async fn runtime_mcp_reports_exact_counts_from_the_mounted_sealed_generation() {
     assert_eq!(
         payload["database"]["generation_census"],
         json!({
-            "state": "observed",
-            "source_total_bytes": 37,
-            "symbol_count": 2,
-            "edge_count": 1,
+            "state": "unavailable",
+            "reason": "exact_scope_generation_not_ready",
         }),
-        "the runtime census must describe the sealed generation, not a removed relational graph"
+        "a decoded seat without an interactive graph store must not claim query readiness"
     );
 
     let wrong_project_id =
