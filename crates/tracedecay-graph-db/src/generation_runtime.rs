@@ -4,6 +4,7 @@ use std::panic;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::thread;
+use std::vec::IntoIter;
 
 use grafeo_core::graph::Direction;
 use parking_lot::RwLockWriteGuard as ParkingRwLockWriteGuard;
@@ -35,8 +36,8 @@ use crate::verified_marker::GenerationVerification;
 use crate::{
     GraphBudgetKind, GraphCancellation, GraphCommit, GraphDb, GraphDbError, GraphEntityRef,
     GraphGenerationManifest, GraphGenerationManifestIdentity, GraphGenerationRelation,
-    GraphIdempotencyKey, GraphMutation, GraphNamespace, GraphRelationRef, GraphTraversalDirection,
-    GraphWriteBatch, TraversalRequest, mutation,
+    GraphIdempotencyKey, GraphMutation, GraphNamespace, GraphRelation, GraphRelationRef,
+    GraphTraversalDirection, GraphWriteBatch, TraversalRequest, mutation,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -87,6 +88,74 @@ struct PreparedGenerationStagePage {
     batch: GraphWriteBatch,
     endpoint_namespaces: mutation::RelationEndpointNamespaces,
     digest: String,
+}
+
+enum OwnedGenerationStagePage {
+    Entities(Vec<crate::GraphEntity>),
+    Relations(Vec<GraphGenerationRelation>),
+}
+
+struct OwnedGenerationStageRows {
+    entities: IntoIter<crate::GraphEntity>,
+    relations: IntoIter<GraphGenerationRelation>,
+    entity_offset: usize,
+    relation_offset: usize,
+}
+
+impl OwnedGenerationStageRows {
+    fn new(entities: Vec<crate::GraphEntity>, relations: Vec<GraphGenerationRelation>) -> Self {
+        Self {
+            entities: entities.into_iter(),
+            relations: relations.into_iter(),
+            entity_offset: 0,
+            relation_offset: 0,
+        }
+    }
+
+    fn take_page(
+        &mut self,
+        page: &GenerationStagePage,
+    ) -> Result<OwnedGenerationStagePage, GraphDbError> {
+        let count = page.mutation_count();
+        match page.kind {
+            GenerationStagePageKind::Entities => {
+                if page.range.start != self.entity_offset {
+                    return Err(GraphDbError::Conflict);
+                }
+                let rows = self.entities.by_ref().take(count).collect::<Vec<_>>();
+                if rows.len() != count {
+                    return Err(GraphDbError::Conflict);
+                }
+                self.entity_offset = self
+                    .entity_offset
+                    .checked_add(count)
+                    .ok_or(GraphDbError::Conflict)?;
+                Ok(OwnedGenerationStagePage::Entities(rows))
+            }
+            GenerationStagePageKind::Relations => {
+                if page.range.start != self.relation_offset {
+                    return Err(GraphDbError::Conflict);
+                }
+                let rows = self.relations.by_ref().take(count).collect::<Vec<_>>();
+                if rows.len() != count {
+                    return Err(GraphDbError::Conflict);
+                }
+                self.relation_offset = self
+                    .relation_offset
+                    .checked_add(count)
+                    .ok_or(GraphDbError::Conflict)?;
+                Ok(OwnedGenerationStagePage::Relations(rows))
+            }
+        }
+    }
+
+    fn finish(self) -> Result<(), GraphDbError> {
+        if self.entities.len() == 0 && self.relations.len() == 0 {
+            Ok(())
+        } else {
+            Err(GraphDbError::Conflict)
+        }
+    }
 }
 
 pub(crate) enum GenerationStageOutcome {
@@ -411,19 +480,39 @@ impl GraphDb {
                 crate::hotpath_observe::HydrationSource::Staged,
             );
         }
-        self.stage_generation_pages(
-            &manifest,
-            &identity,
-            expected,
-            &context,
-            &pages,
-            adopt_legacy_partial,
-            check,
-        )?;
-        // Every page is durable and receipted, so the rows are now recoverable
-        // from the database alone. Release them here rather than carrying them
-        // through finalization, reopen, and the recovered-digest proof.
-        drop(manifest);
+        match Arc::try_unwrap(manifest) {
+            Ok(mut manifest) => {
+                let entities = std::mem::take(&mut manifest.entities);
+                let relations = std::mem::take(&mut manifest.relations);
+                // Drop metadata and digest memo before staging. The separately
+                // owned identity carries every value later phases need.
+                drop(manifest);
+                self.stage_owned_generation_pages(
+                    entities,
+                    relations,
+                    &identity,
+                    expected,
+                    &context,
+                    &pages,
+                    adopt_legacy_partial,
+                    check,
+                )?;
+            }
+            Err(manifest) => {
+                self.stage_generation_pages(
+                    &manifest,
+                    &identity,
+                    expected,
+                    &context,
+                    &pages,
+                    adopt_legacy_partial,
+                    check,
+                )?;
+                // Shared supplied manifests cannot donate their rows, but the
+                // staging owner still releases its Arc at the exact boundary.
+                drop(manifest);
+            }
+        }
         self.finalize_staged_generation(&identity, expected, &context, pages.last(), check)
             .map(GenerationStageOutcome::Applied)
     }
@@ -518,7 +607,7 @@ impl GraphDb {
                             })
                         });
                 self.apply_prepared_generation_stage_page(
-                    manifest,
+                    Some(manifest),
                     identity,
                     expected,
                     context,
@@ -541,6 +630,105 @@ impl GraphDb {
             })?;
         }
         Ok(())
+    }
+
+    /// The sole-owned manifest path moves rows into each native page instead
+    /// of cloning them. Only the current prepared batch and one bounded
+    /// lookahead batch own row payloads; all later rows remain in the source
+    /// iterators and every committed page drops before its successor applies.
+    #[hotpath::measure(
+        label = "graph_db.generation.page_pipeline_owned",
+        impl_type = "GraphDb"
+    )]
+    #[allow(clippy::too_many_arguments)]
+    fn stage_owned_generation_pages(
+        &self,
+        entities: Vec<crate::GraphEntity>,
+        relations: Vec<GraphGenerationRelation>,
+        identity: &GraphGenerationManifestIdentity,
+        expected: &GraphRecoveredGenerationDigestV1,
+        context: &GenerationStageContext,
+        pages: &[GenerationStagePage],
+        adopt_legacy_partial: bool,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<(), GraphDbError> {
+        let mut rows = OwnedGenerationStageRows::new(entities, relations);
+        let Some(first_page) = pages.first() else {
+            return rows.finish();
+        };
+        let first_page_blocked = self.generation_stage_first_page_blocked_without_legacy(
+            identity,
+            context,
+            adopt_legacy_partial,
+        )?;
+        let first_rows = rows.take_page(first_page)?;
+        let mut current = if first_page_blocked
+            || self
+                .generation_stage_page_already_applied(identity, expected, context, first_page)?
+        {
+            drop(first_rows);
+            None
+        } else {
+            Some(construct_owned_generation_stage_page(
+                identity, context, first_page, first_rows, check,
+            )?)
+        };
+
+        for (index, page) in pages.iter().enumerate() {
+            check()?;
+            let successor = pages.get(index + 1);
+            let successor_rows = successor
+                .map(|next_page| rows.take_page(next_page))
+                .transpose()?;
+            let successor_needs_construct = match successor {
+                Some(next_page) if !first_page_blocked => !self
+                    .generation_stage_page_already_applied(
+                        identity, expected, context, next_page,
+                    )?,
+                Some(_) | None => false,
+            };
+            current = thread::scope(|scope| {
+                let successor_handle = match (successor, successor_rows) {
+                    (Some(next_page), Some(next_rows)) if successor_needs_construct => {
+                        Some(scope.spawn(move || {
+                            construct_owned_generation_stage_page(
+                                identity,
+                                context,
+                                next_page,
+                                next_rows,
+                                &|| Ok(()),
+                            )
+                        }))
+                    }
+                    (Some(_), Some(next_rows)) => {
+                        drop(next_rows);
+                        None
+                    }
+                    (None, None) => None,
+                    (Some(_), None) | (None, Some(_)) => return Err(GraphDbError::Conflict),
+                };
+                self.apply_prepared_generation_stage_page(
+                    None,
+                    identity,
+                    expected,
+                    context,
+                    index.checked_sub(1).and_then(|prior| pages.get(prior)),
+                    page,
+                    adopt_legacy_partial && index == 0,
+                    current.take(),
+                    check,
+                )?;
+                check()?;
+                successor_handle
+                    .map(|handle| {
+                        handle
+                            .join()
+                            .unwrap_or_else(|payload| panic::resume_unwind(payload))
+                    })
+                    .transpose()
+            })?;
+        }
+        rows.finish()
     }
 
     fn construct_generation_stage_page_if_needed(
@@ -625,7 +813,7 @@ impl GraphDb {
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<GraphCommit, GraphDbError> {
         self.apply_prepared_generation_stage_page(
-            manifest,
+            Some(manifest),
             identity,
             expected,
             context,
@@ -644,7 +832,7 @@ impl GraphDb {
     )]
     fn apply_prepared_generation_stage_page(
         &self,
-        manifest: &GraphGenerationManifest,
+        manifest: Option<&GraphGenerationManifest>,
         identity: &GraphGenerationManifestIdentity,
         expected: &GraphRecoveredGenerationDigestV1,
         context: &GenerationStageContext,
@@ -722,6 +910,11 @@ impl GraphDb {
                         prepared.digest,
                     ),
                     None => {
+                        let manifest = manifest.ok_or_else(|| {
+                            GraphDbError::unavailable(
+                                "owned generation stage page was not prepared",
+                            )
+                        })?;
                         let (batch, endpoint_namespaces) = prepare_generation_stage_batch(
                             manifest, identity, context, page, check,
                         )?;
@@ -1912,6 +2105,78 @@ fn construct_generation_stage_page(
     })
 }
 
+#[hotpath::measure(label = "graph_db.generation.page_construct_owned")]
+fn construct_owned_generation_stage_page(
+    identity: &GraphGenerationManifestIdentity,
+    context: &GenerationStageContext,
+    page: &GenerationStagePage,
+    rows: OwnedGenerationStagePage,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<PreparedGenerationStagePage, GraphDbError> {
+    if page.mutation_count() > MAX_NATIVE_GENERATION_STAGE_MUTATIONS
+        || page.live_bytes() > MAX_NATIVE_GENERATION_STAGE_LIVE_BYTES
+    {
+        return Err(GraphDbError::budget_exhausted_count(
+            GraphBudgetKind::Write,
+            MAX_NATIVE_GENERATION_STAGE_LIVE_BYTES,
+        ));
+    }
+    let mut endpoint_namespaces = mutation::RelationEndpointNamespaces::new();
+    let mutations = match rows {
+        OwnedGenerationStagePage::Entities(entities) => entities
+            .into_iter()
+            .map(|entity| {
+                check()?;
+                Ok(GraphMutation::UpsertEntity(entity))
+            })
+            .collect::<Result<Vec<_>, GraphDbError>>()?,
+        OwnedGenerationStagePage::Relations(relations) => relations
+            .into_iter()
+            .map(|relation| {
+                check()?;
+                endpoint_namespaces.insert(
+                    relation.identity.clone(),
+                    (
+                        endpoint_namespace(
+                            identity,
+                            &context.physical_namespace,
+                            &context.dependency_namespaces,
+                            &relation.from.projection,
+                        )?,
+                        endpoint_namespace(
+                            identity,
+                            &context.physical_namespace,
+                            &context.dependency_namespaces,
+                            &relation.to.projection,
+                        )?,
+                    ),
+                );
+                Ok(GraphMutation::UpsertRelation(GraphRelation::new(
+                    relation.identity,
+                    relation.from.identity,
+                    relation.to.identity,
+                    relation.kind,
+                    relation.properties,
+                )?))
+            })
+            .collect::<Result<Vec<_>, GraphDbError>>()?,
+    };
+    let batch = GraphWriteBatch::new_canonical_checked(
+        context.physical_namespace.clone(),
+        identity.projection.projection.clone(),
+        identity.source_generation.clone(),
+        identity.watermark.clone(),
+        mutations,
+        check,
+    )?;
+    let digest = batch.canonical_digest_checked(check)?;
+    Ok(PreparedGenerationStagePage {
+        batch,
+        endpoint_namespaces,
+        digest,
+    })
+}
+
 #[hotpath::measure]
 fn endpoint_namespace(
     identity: &GraphGenerationManifestIdentity,
@@ -1951,6 +2216,7 @@ mod tests {
 
     use std::cell::Cell;
     use std::collections::{BTreeMap, BTreeSet};
+    use std::hint::black_box;
     use std::sync::Arc;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
@@ -1972,10 +2238,11 @@ mod tests {
     use crate::{
         GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner, GraphDurability,
         GraphEntity, GraphEntityId, GraphFormatVersion, GraphGenerationDependency,
-        GraphGenerationId, GraphGenerationManifest, GraphIdempotencyKey, GraphNamespace,
-        GraphProjectionId, GraphProjectionIdentity, GraphProperty, GraphPropertyName, GraphVector,
-        GraphVectorIndexRequest, GraphVectorIndexStatus, GraphWatermark,
-        MAX_VERIFIED_GENERATION_BATCH_MUTATIONS, NeverCancelled, SourceGeneration, VectorMetric,
+        GraphGenerationId, GraphGenerationManifest, GraphIdempotencyKey, GraphLabel,
+        GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphProperty,
+        GraphPropertyName, GraphVector, GraphVectorIndexRequest, GraphVectorIndexStatus,
+        GraphWatermark, MAX_VERIFIED_GENERATION_BATCH_MUTATIONS, NeverCancelled, SourceGeneration,
+        VectorMetric,
     };
 
     use super::{GenerationLocator, GenerationStageOutcome, generation_stage_pages};
@@ -2594,6 +2861,85 @@ mod tests {
             "one native data page and one metadata bind must be committed"
         );
         owner.close().unwrap();
+    }
+
+    #[test]
+    #[ignore = "large synthetic staging timing/RSS harness; run explicitly in a fresh process"]
+    fn generation_stage_ownership_sandbox_probe() {
+        let rows = std::env::var("TRACEDECAY_STAGE_BENCH_ROWS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(250_000usize);
+        let mode =
+            std::env::var("TRACEDECAY_STAGE_BENCH_MODE").unwrap_or_else(|_| "owned".to_owned());
+        let payload = "staging-payload-".repeat(16);
+        let manifest = Arc::new(
+            GraphGenerationManifest::new(
+                GraphProjectionIdentity::new(
+                    GraphNamespace::new("stage-ownership-sandbox").unwrap(),
+                    GraphProjectionId::new("entities").unwrap(),
+                ),
+                GraphGenerationId::new("stage-ownership-sandbox-generation").unwrap(),
+                SourceGeneration::new("stage-ownership-sandbox-source").unwrap(),
+                GraphWatermark::new("stage-ownership-sandbox-watermark").unwrap(),
+                vec![],
+                (0..rows)
+                    .map(|index| {
+                        GraphEntity::new(
+                            GraphEntityId::new(format!("entity:{index:08}")).unwrap(),
+                            BTreeSet::from([GraphLabel::new("symbol").unwrap()]),
+                            BTreeMap::from([(
+                                GraphPropertyName::new("payload").unwrap(),
+                                GraphProperty::String(payload.clone()),
+                            )]),
+                        )
+                        .unwrap()
+                    })
+                    .collect(),
+                vec![],
+            )
+            .unwrap(),
+        );
+        let retained = match mode.as_str() {
+            "owned" => None,
+            "shared" => Some(Arc::clone(&manifest)),
+            other => panic!("unknown TRACEDECAY_STAGE_BENCH_MODE `{other}`"),
+        };
+        let expected = manifest.expected_recovered_digest(&|| Ok(())).unwrap();
+        let temp = TempDir::new().unwrap();
+        let (owner, database) = persistent_database(&temp);
+        let rss_before = proc_status_kib("VmRSS");
+        let hwm_before = proc_status_kib("VmHWM");
+        let started = Instant::now();
+        database
+            .apply_generation_unverified_with_digest(manifest, &expected, &|| Ok(()))
+            .unwrap();
+        let elapsed = started.elapsed();
+        black_box(&retained);
+        println!(
+            "generation_stage mode={mode} rows={rows} elapsed_ms={} rss_before_kib={} \
+             rss_after_kib={} hwm_before_kib={} hwm_after_kib={}",
+            elapsed.as_millis(),
+            rss_before,
+            proc_status_kib("VmRSS"),
+            hwm_before,
+            proc_status_kib("VmHWM"),
+        );
+        drop(retained);
+        owner.close().unwrap();
+    }
+
+    fn proc_status_kib(field: &str) -> u64 {
+        let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+            return 0;
+        };
+        let prefix = format!("{field}:");
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .and_then(|value| value.split_whitespace().next())
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0)
     }
 
     #[test]

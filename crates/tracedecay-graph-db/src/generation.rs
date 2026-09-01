@@ -1,7 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
 use std::io::{self, Write};
-use std::sync::OnceLock;
+use std::panic::{self, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc;
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use grafeo_engine::GrafeoDB;
 use serde::{Deserialize, Serialize};
@@ -26,6 +29,10 @@ use crate::{
 
 pub(super) const DIGEST_CHECK_INTERVAL_BYTES: u64 = 64 * 1024;
 const CHECKED_VEC_INITIAL_CAPACITY_BYTES: usize = 1_024;
+const MANIFEST_DIGEST_CHUNK_ROWS: usize = 512;
+const MANIFEST_DIGEST_WORKER_BYTES: usize = 8 * 1024 * 1024;
+const MANIFEST_DIGEST_MAX_IN_FLIGHT_BYTES: usize = 64 * 1024 * 1024;
+const MANIFEST_DIGEST_MAX_WORKERS: usize = 8;
 
 #[path = "generation/identity.rs"]
 mod identity;
@@ -696,11 +703,14 @@ impl GraphGenerationManifest {
                 ));
             }
         }
+        // The manifest owns every identity already. Keep only borrowed keys
+        // while validating uniqueness and local relation endpoints instead
+        // of cloning millions of identifier strings into a second owner.
         let mut entity_ids = HashSet::with_capacity(self.entities.len());
         for entity in &self.entities {
             check()?;
             entity.validate()?;
-            if !entity_ids.insert(entity.identity.clone()) {
+            if !entity_ids.insert(&entity.identity) {
                 return Err(GraphDbError::invalid(
                     "a graph generation repeats an entity identity",
                 ));
@@ -716,7 +726,7 @@ impl GraphGenerationManifest {
         for relation in &self.relations {
             check()?;
             relation.validate()?;
-            if !relation_ids.insert(relation.identity.clone()) {
+            if !relation_ids.insert(&relation.identity) {
                 return Err(GraphDbError::invalid(
                     "a graph generation repeats a relation identity",
                 ));
@@ -745,71 +755,59 @@ impl GraphGenerationManifest {
 
 #[hotpath::measure]
 fn checked_sorted_dependencies(
-    dependencies: Vec<GraphGenerationDependency>,
+    mut dependencies: Vec<GraphGenerationDependency>,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<Vec<GraphGenerationDependency>, GraphDbError> {
-    let mut sorted = BTreeSet::new();
-    for dependency in dependencies {
+    check()?;
+    dependencies.sort_unstable();
+    for pair in dependencies.windows(2) {
         check()?;
-        if !sorted.insert(dependency) {
+        if pair[0] == pair[1] {
             return Err(GraphDbError::invalid(
                 "a graph generation repeats a dependency",
             ));
         }
     }
     check()?;
-    collect_checked(sorted, check)
+    Ok(dependencies)
 }
 
 #[hotpath::measure]
 fn checked_sorted_entities(
-    entities: Vec<GraphEntity>,
+    mut entities: Vec<GraphEntity>,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<Vec<GraphEntity>, GraphDbError> {
-    let mut sorted = BTreeMap::new();
-    for entity in entities {
+    check()?;
+    entities.sort_unstable_by(|left, right| left.identity.cmp(&right.identity));
+    for pair in entities.windows(2) {
         check()?;
-        let identity = entity.identity.clone();
-        if sorted.insert(identity, entity).is_some() {
+        if pair[0].identity == pair[1].identity {
             return Err(GraphDbError::invalid(
                 "a graph generation repeats an entity identity",
             ));
         }
     }
     check()?;
-    collect_checked(sorted.into_values(), check)
+    Ok(entities)
 }
 
 #[hotpath::measure]
 fn checked_sorted_relations(
-    relations: Vec<GraphGenerationRelation>,
+    mut relations: Vec<GraphGenerationRelation>,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<Vec<GraphGenerationRelation>, GraphDbError> {
-    let mut sorted = BTreeMap::new();
-    for relation in relations {
+    check()?;
+    relations.sort_unstable_by(|left, right| left.identity.cmp(&right.identity));
+    for pair in relations.windows(2) {
         check()?;
-        let identity = relation.identity.clone();
-        if sorted.insert(identity, relation).is_some() {
+        if pair[0].identity == pair[1].identity {
             return Err(GraphDbError::invalid(
                 "a graph generation repeats a relation identity",
             ));
         }
     }
     check()?;
-    collect_checked(sorted.into_values(), check)
-}
-
-fn collect_checked<T>(
-    values: impl IntoIterator<Item = T>,
-    check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<Vec<T>, GraphDbError> {
-    let mut collected = Vec::new();
-    for value in values {
-        check()?;
-        collected.push(value);
-    }
-    check()?;
-    Ok(collected)
+    Ok(relations)
 }
 
 /// The dependency-closure digest, shared by the full manifest and its
@@ -1162,6 +1160,195 @@ fn recovered_generation_digest(
 ) -> Result<String, GraphDbError> {
     #[cfg(test)]
     MANIFEST_CANONICALIZATIONS.with(|count| count.set(count.get() + 1));
+    recovered_generation_digest_with_config(
+        manifest,
+        check,
+        ManifestDigestPipelineConfig::production(),
+    )
+}
+
+struct ManifestDigestPipelineConfig {
+    max_workers: usize,
+    chunk_rows: usize,
+    worker_bytes: usize,
+    max_in_flight_bytes: usize,
+    metrics: Arc<ManifestDigestPipelineMetrics>,
+}
+
+impl ManifestDigestPipelineConfig {
+    fn production() -> Self {
+        Self {
+            max_workers: MANIFEST_DIGEST_MAX_WORKERS,
+            chunk_rows: MANIFEST_DIGEST_CHUNK_ROWS,
+            worker_bytes: MANIFEST_DIGEST_WORKER_BYTES,
+            max_in_flight_bytes: MANIFEST_DIGEST_MAX_IN_FLIGHT_BYTES,
+            metrics: Arc::new(ManifestDigestPipelineMetrics::default()),
+        }
+    }
+
+    #[cfg(test)]
+    fn serial() -> Self {
+        Self {
+            max_workers: 1,
+            chunk_rows: usize::MAX,
+            worker_bytes: 1,
+            max_in_flight_bytes: 1,
+            metrics: Arc::new(ManifestDigestPipelineMetrics::default()),
+        }
+    }
+
+    #[cfg(test)]
+    fn testing(
+        max_workers: usize,
+        chunk_rows: usize,
+        worker_bytes: usize,
+        max_in_flight_bytes: usize,
+        metrics: Arc<ManifestDigestPipelineMetrics>,
+    ) -> Self {
+        Self {
+            max_workers,
+            chunk_rows,
+            worker_bytes,
+            max_in_flight_bytes,
+            metrics,
+        }
+    }
+
+    fn effective_workers(&self, chunk_count: usize) -> Result<usize, GraphDbError> {
+        if self.max_workers == 0
+            || self.chunk_rows == 0
+            || self.worker_bytes == 0
+            || self.max_in_flight_bytes < self.worker_bytes
+        {
+            return Err(GraphDbError::invalid(
+                "manifest digest pipeline limits must admit at least one worker",
+            ));
+        }
+        let byte_slots = self.max_in_flight_bytes / self.worker_bytes;
+        Ok(self.max_workers.min(byte_slots).min(chunk_count).max(1))
+    }
+}
+
+#[derive(Default)]
+struct ManifestDigestPipelineMetrics {
+    current_bytes: AtomicUsize,
+    peak_bytes: AtomicUsize,
+    reservation_gate: Mutex<()>,
+    reservation_released: Condvar,
+}
+
+impl ManifestDigestPipelineMetrics {
+    fn reserve(
+        self: &Arc<Self>,
+        bytes: usize,
+        maximum: usize,
+        abort: &AtomicBool,
+    ) -> Result<ManifestDigestReservation, GraphDbError> {
+        let mut gate = self.reservation_gate.lock().map_err(|_| {
+            GraphDbError::unavailable("manifest digest byte reservation lock is poisoned")
+        })?;
+        while self
+            .current_bytes
+            .load(Ordering::Acquire)
+            .checked_add(bytes)
+            .is_none_or(|current| current > maximum)
+        {
+            if abort.load(Ordering::Acquire) {
+                return Err(GraphDbError::Cancelled);
+            }
+            gate = self.reservation_released.wait(gate).map_err(|_| {
+                GraphDbError::unavailable("manifest digest byte reservation lock is poisoned")
+            })?;
+        }
+        let current = self.current_bytes.fetch_add(bytes, Ordering::AcqRel) + bytes;
+        self.peak_bytes.fetch_max(current, Ordering::AcqRel);
+        hotpath::gauge!("graph_db.generation.manifest_digest.in_flight_bytes").set(current as f64);
+        hotpath::gauge!("graph_db.generation.manifest_digest.peak_in_flight_bytes")
+            .set(self.peak_bytes.load(Ordering::Acquire) as f64);
+        drop(gate);
+        Ok(ManifestDigestReservation {
+            bytes,
+            metrics: Arc::clone(self),
+        })
+    }
+
+    fn cancel_waiters(&self) {
+        let _gate = match self.reservation_gate.lock() {
+            Ok(gate) => gate,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        self.reservation_released.notify_all();
+    }
+
+    #[cfg(test)]
+    fn current_bytes(&self) -> usize {
+        self.current_bytes.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    fn peak_bytes(&self) -> usize {
+        self.peak_bytes.load(Ordering::Acquire)
+    }
+}
+
+struct ManifestDigestReservation {
+    bytes: usize,
+    metrics: Arc<ManifestDigestPipelineMetrics>,
+}
+
+impl Drop for ManifestDigestReservation {
+    fn drop(&mut self) {
+        let _gate = match self.metrics.reservation_gate.lock() {
+            Ok(gate) => gate,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let prior = self
+            .metrics
+            .current_bytes
+            .fetch_sub(self.bytes, Ordering::AcqRel);
+        let remaining = prior.saturating_sub(self.bytes);
+        hotpath::gauge!("graph_db.generation.manifest_digest.in_flight_bytes")
+            .set(remaining as f64);
+        self.metrics.reservation_released.notify_all();
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ManifestDigestChunk<'a> {
+    Entities(&'a [GraphEntity]),
+    Relations(&'a [GraphGenerationRelation]),
+}
+
+impl ManifestDigestChunk<'_> {
+    fn row_count(self) -> usize {
+        match self {
+            Self::Entities(rows) => rows.len(),
+            Self::Relations(rows) => rows.len(),
+        }
+    }
+}
+
+struct EncodedManifestDigestChunk {
+    bytes: Vec<u8>,
+    frame_ends: Vec<usize>,
+}
+
+enum ManifestDigestChunkEncoding {
+    Encoded(EncodedManifestDigestChunk),
+    SerialFallback,
+}
+
+struct ReservedManifestDigestChunk {
+    encoding: ManifestDigestChunkEncoding,
+    _reservation: ManifestDigestReservation,
+}
+
+#[hotpath::measure(label = "graph_db.generation.manifest_digest")]
+fn recovered_generation_digest_with_config(
+    manifest: &GraphGenerationManifest,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+    config: ManifestDigestPipelineConfig,
+) -> Result<String, GraphDbError> {
     let GraphGenerationManifest {
         projection,
         generation,
@@ -1184,26 +1371,313 @@ fn recovered_generation_digest(
         watermark,
         dependencies,
     )?;
-    for entity in entities {
-        write_canonical_frame(
+
+    let chunks = entities
+        .chunks(config.chunk_rows)
+        .map(ManifestDigestChunk::Entities)
+        .chain(
+            relations
+                .chunks(config.chunk_rows)
+                .map(ManifestDigestChunk::Relations),
+        )
+        .collect::<Vec<_>>();
+    let workers = config.effective_workers(chunks.len())?;
+    hotpath::gauge!("graph_db.generation.manifest_digest.effective_workers").set(workers as f64);
+    hotpath::gauge!("graph_db.generation.manifest_digest.chunks").set(chunks.len() as f64);
+    if workers == 1 {
+        for chunk in chunks {
+            digest_manifest_chunk_serial(chunk, &mut writer, &mut canonical, check)?;
+        }
+    } else {
+        digest_manifest_chunks_parallel(
+            &chunks,
             &mut writer,
             &mut canonical,
-            "entity",
-            entity,
-            "recovered generation entity",
-        )?;
-    }
-    for relation in relations {
-        write_canonical_frame(
-            &mut writer,
-            &mut canonical,
-            "relation",
-            relation,
-            "recovered generation relation",
+            check,
+            &config,
+            workers,
         )?;
     }
     writer.finish()?;
     Ok(encode_lowercase_hex(&digest.finalize()))
+}
+
+#[hotpath::measure(label = "graph_db.generation.manifest_digest.parallel")]
+fn digest_manifest_chunks_parallel(
+    chunks: &[ManifestDigestChunk<'_>],
+    writer: &mut CheckedDigestWriter<'_>,
+    canonical: &mut CheckedVecWriter<'_>,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+    config: &ManifestDigestPipelineConfig,
+    workers: usize,
+) -> Result<(), GraphDbError> {
+    let abort = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let next_chunk = Arc::new(AtomicUsize::new(0));
+        let dispatch_gate = Arc::new(Mutex::new(()));
+        let (sender, receiver) =
+            mpsc::channel::<(usize, Result<ReservedManifestDigestChunk, GraphDbError>)>();
+        let mut handles = Vec::with_capacity(workers);
+        for _ in 0..workers {
+            let sender = sender.clone();
+            let abort = &abort;
+            let next_chunk = Arc::clone(&next_chunk);
+            let dispatch_gate = Arc::clone(&dispatch_gate);
+            let metrics = Arc::clone(&config.metrics);
+            handles.push(scope.spawn(move || {
+                loop {
+                    if abort.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let (chunk_index, chunk, reservation) = {
+                        // Reserve in canonical chunk order. Otherwise later chunks can
+                        // consume every byte slot while an earlier, descheduled worker
+                        // waits to reserve, leaving the ordered collector deadlocked.
+                        let _dispatch = match dispatch_gate.lock() {
+                            Ok(gate) => gate,
+                            Err(_) => {
+                                let _ = sender.send((
+                                    0,
+                                    Err(GraphDbError::unavailable(
+                                        "manifest digest dispatch lock is poisoned",
+                                    )),
+                                ));
+                                break;
+                            }
+                        };
+                        let chunk_index = next_chunk.fetch_add(1, Ordering::AcqRel);
+                        let Some(&chunk) = chunks.get(chunk_index) else {
+                            break;
+                        };
+                        let reservation =
+                            metrics.reserve(config.worker_bytes, config.max_in_flight_bytes, abort);
+                        (chunk_index, chunk, reservation)
+                    };
+                    let result = reservation.and_then(|reservation| {
+                        match panic::catch_unwind(AssertUnwindSafe(|| {
+                            encode_manifest_digest_chunk(chunk, config.worker_bytes, abort)
+                        })) {
+                            Ok(encoded) => encoded.map(|encoding| ReservedManifestDigestChunk {
+                                encoding,
+                                _reservation: reservation,
+                            }),
+                            Err(_) => {
+                                Err(GraphDbError::unavailable("manifest digest worker panicked"))
+                            }
+                        }
+                    });
+                    let failed = result.is_err();
+                    if sender.send((chunk_index, result)).is_err() || failed {
+                        break;
+                    }
+                }
+            }));
+        }
+        drop(sender);
+
+        let result = (|| -> Result<(), GraphDbError> {
+            let mut pending = BTreeMap::new();
+            let mut expected_chunk = 0usize;
+            while expected_chunk < chunks.len() {
+                let (chunk_index, encoded) = receiver.recv().map_err(|_| {
+                    GraphDbError::unavailable("manifest digest worker exited before its chunk")
+                })?;
+                if pending.insert(chunk_index, encoded).is_some() {
+                    return Err(GraphDbError::unavailable(
+                        "manifest digest worker repeated a chunk",
+                    ));
+                }
+                while let Some(reserved) = pending.remove(&expected_chunk) {
+                    let reserved = reserved?;
+                    let ReservedManifestDigestChunk {
+                        encoding,
+                        _reservation: reservation,
+                    } = reserved;
+                    match encoding {
+                        ManifestDigestChunkEncoding::Encoded(encoded) => {
+                            let mut start = 0usize;
+                            for &end in &encoded.frame_ends {
+                                check()?;
+                                write_digest_bytes(writer, &encoded.bytes[start..end])?;
+                                start = end;
+                            }
+                            drop(encoded);
+                            drop(reservation);
+                        }
+                        ManifestDigestChunkEncoding::SerialFallback => {
+                            hotpath::gauge!(
+                                "graph_db.generation.manifest_digest.serial_fallback_chunks"
+                            )
+                            .inc(1_u64);
+                            // The worker buffer is already gone; release its
+                            // reservation before the one-row serial buffer grows.
+                            drop(reservation);
+                            let chunk = chunks[expected_chunk];
+                            digest_manifest_chunk_serial(chunk, writer, canonical, check)?;
+                        }
+                    }
+                    expected_chunk += 1;
+                }
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            abort.store(true, Ordering::Release);
+            config.metrics.cancel_waiters();
+        }
+        for (_, encoded) in receiver {
+            drop(encoded);
+        }
+        let worker_panicked = handles.into_iter().any(|handle| handle.join().is_err());
+        if result.is_ok() && worker_panicked {
+            Err(GraphDbError::unavailable("manifest digest worker panicked"))
+        } else {
+            result
+        }
+    })
+}
+
+#[hotpath::measure(label = "graph_db.generation.manifest_digest.serial_chunk")]
+fn digest_manifest_chunk_serial(
+    chunk: ManifestDigestChunk<'_>,
+    writer: &mut CheckedDigestWriter<'_>,
+    canonical: &mut CheckedVecWriter<'_>,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<(), GraphDbError> {
+    match chunk {
+        ManifestDigestChunk::Entities(rows) => {
+            for entity in rows {
+                check()?;
+                write_canonical_frame(
+                    writer,
+                    canonical,
+                    "entity",
+                    entity,
+                    "recovered generation entity",
+                )?;
+            }
+        }
+        ManifestDigestChunk::Relations(rows) => {
+            for relation in rows {
+                check()?;
+                write_canonical_frame(
+                    writer,
+                    canonical,
+                    "relation",
+                    relation,
+                    "recovered generation relation",
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[hotpath::measure(label = "graph_db.generation.manifest_digest.encode_chunk")]
+fn encode_manifest_digest_chunk(
+    chunk: ManifestDigestChunk<'_>,
+    worker_bytes: usize,
+    abort: &AtomicBool,
+) -> Result<ManifestDigestChunkEncoding, GraphDbError> {
+    let row_buffer_bytes = (worker_bytes / 4).max(1);
+    let encoded_buffer_bytes = worker_bytes.saturating_sub(row_buffer_bytes);
+    let worker_check = || {
+        if abort.load(Ordering::Acquire) {
+            Err(GraphDbError::Cancelled)
+        } else {
+            Ok(())
+        }
+    };
+    let mut canonical = CheckedVecWriter::new(&worker_check, row_buffer_bytes)?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(encoded_buffer_bytes)
+        .map_err(|_| GraphDbError::budget_exhausted_count(GraphBudgetKind::Write, worker_bytes))?;
+    if bytes.capacity() > encoded_buffer_bytes {
+        return Err(GraphDbError::budget_exhausted_count(
+            GraphBudgetKind::Write,
+            worker_bytes,
+        ));
+    }
+    let mut encoded = EncodedManifestDigestChunk {
+        bytes,
+        frame_ends: Vec::with_capacity(chunk.row_count()),
+    };
+    match chunk {
+        ManifestDigestChunk::Entities(rows) => {
+            for entity in rows {
+                if !append_encoded_manifest_frame(
+                    &mut canonical,
+                    &mut encoded,
+                    encoded_buffer_bytes,
+                    "entity",
+                    entity,
+                    "recovered generation entity",
+                    &worker_check,
+                )? {
+                    return Ok(ManifestDigestChunkEncoding::SerialFallback);
+                }
+            }
+        }
+        ManifestDigestChunk::Relations(rows) => {
+            for relation in rows {
+                if !append_encoded_manifest_frame(
+                    &mut canonical,
+                    &mut encoded,
+                    encoded_buffer_bytes,
+                    "relation",
+                    relation,
+                    "recovered generation relation",
+                    &worker_check,
+                )? {
+                    return Ok(ManifestDigestChunkEncoding::SerialFallback);
+                }
+            }
+        }
+    }
+    Ok(ManifestDigestChunkEncoding::Encoded(encoded))
+}
+
+fn append_encoded_manifest_frame<T: Serialize + ?Sized>(
+    canonical: &mut CheckedVecWriter<'_>,
+    encoded: &mut EncodedManifestDigestChunk,
+    encoded_buffer_bytes: usize,
+    tag: &str,
+    value: &T,
+    subject: &str,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<bool, GraphDbError> {
+    check()?;
+    let bytes = match canonical.encode(value, subject) {
+        Ok(bytes) => bytes,
+        Err(GraphDbError::InvalidRequest { message })
+            if message.contains("canonical graph replay exceeds its payload bound") =>
+        {
+            return Ok(false);
+        }
+        Err(error) => return Err(error),
+    };
+    let (tag_len, byte_len) = frame_length_headers(tag, bytes)?;
+    let frame_bytes = tag_len
+        .len()
+        .checked_add(tag.len())
+        .and_then(|length| length.checked_add(byte_len.len()))
+        .and_then(|length| length.checked_add(bytes.len()))
+        .ok_or_else(|| GraphDbError::invalid("manifest digest frame size overflow"))?;
+    if encoded
+        .bytes
+        .len()
+        .checked_add(frame_bytes)
+        .is_none_or(|length| length > encoded_buffer_bytes)
+    {
+        return Ok(false);
+    }
+    encoded.bytes.extend_from_slice(&tag_len);
+    encoded.bytes.extend_from_slice(tag.as_bytes());
+    encoded.bytes.extend_from_slice(&byte_len);
+    encoded.bytes.extend_from_slice(bytes);
+    encoded.frame_ends.push(encoded.bytes.len());
+    Ok(true)
 }
 
 /// Writes the leading identity frames of the recovered-generation digest.
@@ -1535,19 +2009,27 @@ fn checked_canonical_bytes<T: Serialize + ?Sized>(
 
 #[cfg(test)]
 mod checked_vec_writer_tests {
+    use std::cell::Cell;
     use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use std::time::Instant;
 
     use sha2::{Digest, Sha256};
     use tracedecay_domain::canonical_text::encode_lowercase_hex;
 
     use super::{
-        CheckedVecWriter, GraphDbError, GraphGenerationManifest,
-        canonical_buffer_allocation_growths, checked_canonical_bytes, recovered_generation_digest,
-        reset_canonical_buffer_allocation_growths,
+        CheckedVecWriter, GraphDbError, GraphGenerationManifest, MANIFEST_DIGEST_CHUNK_ROWS,
+        MANIFEST_DIGEST_MAX_IN_FLIGHT_BYTES, MANIFEST_DIGEST_WORKER_BYTES, ManifestDigestChunk,
+        ManifestDigestChunkEncoding, ManifestDigestPipelineConfig, ManifestDigestPipelineMetrics,
+        canonical_buffer_allocation_growths, checked_canonical_bytes, checked_sorted_entities,
+        encode_manifest_digest_chunk, frame_length_headers, recovered_generation_digest,
+        recovered_generation_digest_with_config, reset_canonical_buffer_allocation_growths,
     };
     use crate::{
-        GraphEntity, GraphEntityId, GraphGenerationId, GraphNamespace, GraphProjectionId,
-        GraphProjectionIdentity, GraphWatermark, SourceGeneration,
+        GraphEntity, GraphEntityId, GraphEntityRef, GraphGenerationId, GraphGenerationRelation,
+        GraphLabel, GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphProperty,
+        GraphPropertyName, GraphRelationId, GraphRelationKind, GraphWatermark, SourceGeneration,
     };
 
     #[test]
@@ -1606,28 +2088,7 @@ mod checked_vec_writer_tests {
 
     #[test]
     fn recovered_digest_reuses_canonical_buffer_across_manifest_rows() {
-        let manifest = GraphGenerationManifest::new(
-            GraphProjectionIdentity::new(
-                GraphNamespace::new("allocation-probe").unwrap(),
-                GraphProjectionId::new("manifest").unwrap(),
-            ),
-            GraphGenerationId::new("generation-allocation-probe").unwrap(),
-            SourceGeneration::new("source-allocation-probe").unwrap(),
-            GraphWatermark::new("watermark-allocation-probe").unwrap(),
-            vec![],
-            (0..4_096)
-                .map(|index| {
-                    GraphEntity::new(
-                        GraphEntityId::new(format!("entity:{index:05}")).unwrap(),
-                        BTreeSet::new(),
-                        BTreeMap::new(),
-                    )
-                    .unwrap()
-                })
-                .collect(),
-            vec![],
-        )
-        .unwrap();
+        let manifest = manifest_with_entities(4_096);
 
         reset_canonical_buffer_allocation_growths();
         let digest = recovered_generation_digest(&manifest, &|| Ok(())).unwrap();
@@ -1641,6 +2102,297 @@ mod checked_vec_writer_tests {
             allocation_growths <= 8,
             "4,096 manifest rows caused {allocation_growths} canonical-buffer allocation growths"
         );
+    }
+
+    #[test]
+    fn manifest_digest_is_deterministic_across_worker_widths() {
+        let manifest = manifest_with_entities(16_384);
+        let serial = recovered_generation_digest_with_config(
+            &manifest,
+            &|| Ok(()),
+            ManifestDigestPipelineConfig::serial(),
+        )
+        .unwrap();
+
+        for workers in [2, 4, 8] {
+            let metrics = Arc::new(ManifestDigestPipelineMetrics::default());
+            let parallel = recovered_generation_digest_with_config(
+                &manifest,
+                &|| Ok(()),
+                ManifestDigestPipelineConfig::testing(
+                    workers,
+                    128,
+                    32 * 1024,
+                    128 * 1024,
+                    Arc::clone(&metrics),
+                ),
+            )
+            .unwrap();
+            assert_eq!(parallel, serial, "digest diverged at {workers} workers");
+            assert_eq!(metrics.current_bytes(), 0);
+        }
+    }
+
+    #[test]
+    fn parallel_manifest_frames_match_serial_canonical_bytes() {
+        let manifest = manifest_with_entities(16_384);
+        let encoded = encode_manifest_digest_chunk(
+            ManifestDigestChunk::Entities(&manifest.entities),
+            16 * 1024 * 1024,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let ManifestDigestChunkEncoding::Encoded(encoded) = encoded else {
+            panic!("fixture must fit one parallel encode chunk");
+        };
+        let mut serial = Vec::new();
+        for entity in &manifest.entities {
+            let bytes = serde_json::to_vec(entity).unwrap();
+            let (tag_len, byte_len) = frame_length_headers("entity", &bytes).unwrap();
+            serial.extend_from_slice(&tag_len);
+            serial.extend_from_slice(b"entity");
+            serial.extend_from_slice(&byte_len);
+            serial.extend_from_slice(&bytes);
+        }
+
+        assert_eq!(encoded.bytes, serial);
+        assert_eq!(encoded.frame_ends.last(), Some(&serial.len()));
+    }
+
+    #[test]
+    fn manifest_digest_caps_reserved_parallel_bytes() {
+        let manifest = manifest_with_entities(32_768);
+        let metrics = Arc::new(ManifestDigestPipelineMetrics::default());
+        let maximum_in_flight = 64 * 1024;
+        recovered_generation_digest_with_config(
+            &manifest,
+            &|| Ok(()),
+            ManifestDigestPipelineConfig::testing(
+                8,
+                128,
+                32 * 1024,
+                maximum_in_flight,
+                Arc::clone(&metrics),
+            ),
+        )
+        .unwrap();
+
+        assert!(metrics.peak_bytes() > 0);
+        assert!(
+            metrics.peak_bytes() <= maximum_in_flight,
+            "peak reservation {} exceeded {maximum_in_flight}",
+            metrics.peak_bytes()
+        );
+        assert_eq!(
+            metrics.current_bytes(),
+            0,
+            "all reservations must be released after collection"
+        );
+    }
+
+    #[test]
+    fn manifest_digest_releases_reservations_on_cancellation_and_error() {
+        let manifest = manifest_with_entities(32_768);
+        for failure in [
+            GraphDbError::Cancelled,
+            GraphDbError::unavailable("injected"),
+        ] {
+            let metrics = Arc::new(ManifestDigestPipelineMetrics::default());
+            let polls = Cell::new(0usize);
+            let check = || {
+                let next = polls.get() + 1;
+                polls.set(next);
+                if next >= 1_024 {
+                    Err(failure.clone())
+                } else {
+                    Ok(())
+                }
+            };
+            let result = recovered_generation_digest_with_config(
+                &manifest,
+                &check,
+                ManifestDigestPipelineConfig::testing(
+                    8,
+                    128,
+                    32 * 1024,
+                    128 * 1024,
+                    Arc::clone(&metrics),
+                ),
+            );
+
+            assert_eq!(result, Err(failure));
+            assert_eq!(
+                metrics.current_bytes(),
+                0,
+                "failed pipelines must release every byte reservation"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_entity_sort_reuses_manifest_row_storage() {
+        let mut entities = (0..4_096)
+            .rev()
+            .map(|index| {
+                GraphEntity::new(
+                    GraphEntityId::new(format!("entity:{index:05}")).unwrap(),
+                    BTreeSet::new(),
+                    BTreeMap::new(),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        entities.shrink_to_fit();
+        let allocation = entities.as_ptr();
+
+        let sorted = checked_sorted_entities(entities, &|| Ok(())).unwrap();
+
+        assert_eq!(
+            sorted.as_ptr(),
+            allocation,
+            "canonical sorting must not materialize a second full row vector"
+        );
+        assert!(
+            sorted
+                .windows(2)
+                .all(|rows| rows[0].identity < rows[1].identity)
+        );
+    }
+
+    #[test]
+    #[ignore = "large synthetic manifest timing/RSS harness; run explicitly in a fresh process"]
+    fn manifest_digest_sandbox_probe() {
+        let rows = std::env::var("TRACEDECAY_MANIFEST_BENCH_ROWS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(250_000usize);
+        let mode = std::env::var("TRACEDECAY_MANIFEST_BENCH_MODE")
+            .unwrap_or_else(|_| "parallel".to_owned());
+        let workers = std::env::var("TRACEDECAY_MANIFEST_BENCH_WORKERS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(8usize);
+        let projection = GraphProjectionIdentity::new(
+            GraphNamespace::new("manifest-sandbox").unwrap(),
+            GraphProjectionId::new("code").unwrap(),
+        );
+        let payload = "manifest-payload-".repeat(16);
+        let entities = (0..rows)
+            .map(|index| {
+                GraphEntity::new(
+                    GraphEntityId::new(format!("entity:{index:08}")).unwrap(),
+                    BTreeSet::from([GraphLabel::new("symbol").unwrap()]),
+                    BTreeMap::from([
+                        (
+                            GraphPropertyName::new("name").unwrap(),
+                            GraphProperty::String(format!("symbol_{index}")),
+                        ),
+                        (
+                            GraphPropertyName::new("payload").unwrap(),
+                            GraphProperty::String(payload.clone()),
+                        ),
+                    ]),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let relations = (0..rows.saturating_sub(1))
+            .map(|index| {
+                GraphGenerationRelation::new(
+                    GraphRelationId::new(format!("relation:{index:08}")).unwrap(),
+                    GraphEntityRef::new(
+                        projection.clone(),
+                        GraphEntityId::new(format!("entity:{index:08}")).unwrap(),
+                    ),
+                    GraphEntityRef::new(
+                        projection.clone(),
+                        GraphEntityId::new(format!("entity:{:08}", index + 1)).unwrap(),
+                    ),
+                    GraphRelationKind::new("calls").unwrap(),
+                    BTreeMap::new(),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let manifest = GraphGenerationManifest::new(
+            projection,
+            GraphGenerationId::new("manifest-sandbox-generation").unwrap(),
+            SourceGeneration::new("manifest-sandbox-source").unwrap(),
+            GraphWatermark::new("manifest-sandbox-watermark").unwrap(),
+            vec![],
+            entities,
+            relations,
+        )
+        .unwrap();
+        let rss_before = proc_status_kib("VmRSS");
+        let hwm_before = proc_status_kib("VmHWM");
+        let metrics = Arc::new(ManifestDigestPipelineMetrics::default());
+        let config = match mode.as_str() {
+            "serial" => ManifestDigestPipelineConfig::serial(),
+            "parallel" => ManifestDigestPipelineConfig::testing(
+                workers,
+                MANIFEST_DIGEST_CHUNK_ROWS,
+                MANIFEST_DIGEST_WORKER_BYTES,
+                MANIFEST_DIGEST_MAX_IN_FLIGHT_BYTES,
+                Arc::clone(&metrics),
+            ),
+            other => panic!("unknown TRACEDECAY_MANIFEST_BENCH_MODE `{other}`"),
+        };
+        let started = Instant::now();
+        let digest =
+            recovered_generation_digest_with_config(&manifest, &|| Ok(()), config).unwrap();
+        let elapsed = started.elapsed();
+        println!(
+            "manifest_digest mode={mode} workers={workers} entities={} relations={} \
+             elapsed_ms={} rss_before_kib={} rss_after_kib={} hwm_before_kib={} \
+             hwm_after_kib={} peak_in_flight_bytes={} digest={digest}",
+            manifest.entities.len(),
+            manifest.relations.len(),
+            elapsed.as_millis(),
+            rss_before,
+            proc_status_kib("VmRSS"),
+            hwm_before,
+            proc_status_kib("VmHWM"),
+            metrics.peak_bytes(),
+        );
+    }
+
+    fn proc_status_kib(field: &str) -> u64 {
+        let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+            return 0;
+        };
+        let prefix = format!("{field}:");
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .and_then(|value| value.split_whitespace().next())
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0)
+    }
+
+    fn manifest_with_entities(entity_count: usize) -> GraphGenerationManifest {
+        GraphGenerationManifest::new(
+            GraphProjectionIdentity::new(
+                GraphNamespace::new("allocation-probe").unwrap(),
+                GraphProjectionId::new("manifest").unwrap(),
+            ),
+            GraphGenerationId::new("generation-allocation-probe").unwrap(),
+            SourceGeneration::new("source-allocation-probe").unwrap(),
+            GraphWatermark::new("watermark-allocation-probe").unwrap(),
+            vec![],
+            (0..entity_count)
+                .map(|index| {
+                    GraphEntity::new(
+                        GraphEntityId::new(format!("entity:{index:05}")).unwrap(),
+                        BTreeSet::new(),
+                        BTreeMap::new(),
+                    )
+                    .unwrap()
+                })
+                .collect(),
+            vec![],
+        )
+        .unwrap()
     }
 }
 

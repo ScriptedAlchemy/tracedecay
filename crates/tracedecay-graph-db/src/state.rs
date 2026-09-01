@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 
 use grafeo_common::types::{ArcStr, EdgeId, NodeId, Value};
 use grafeo_core::graph::lpg::Node;
@@ -55,9 +55,9 @@ pub(crate) struct StoredPublication {
 }
 
 pub(crate) struct ExistingBatchState {
-    pub(crate) entities: BTreeMap<String, StoredEntity>,
-    pub(crate) entity_locators: BTreeMap<String, EntityLocator>,
-    pub(crate) relations: BTreeMap<String, StoredRelation>,
+    pub(crate) entities: HashMap<String, StoredEntity>,
+    pub(crate) entity_locators: HashMap<String, EntityLocator>,
+    pub(crate) relations: HashMap<String, StoredRelation>,
 }
 
 #[hotpath::measure_all]
@@ -67,35 +67,62 @@ impl ExistingBatchState {
             return Err(GraphDbError::Cancelled);
         }
         let encoded_namespace = encoded_namespace_key(&batch.namespace);
-        let mut entity_keys = BTreeMap::new();
-        let mut entity_locator_keys = BTreeMap::new();
-        let mut relation_keys = BTreeMap::new();
         let physical_generation =
             crate::generation::is_physical_generation_namespace(&batch.namespace);
+        let (entity_count, relation_count, relation_endpoint_count) =
+            batch
+                .mutations
+                .iter()
+                .fold((0usize, 0usize, 0usize), |counts, mutation| {
+                    let (entities, relations, endpoints) = counts;
+                    match mutation {
+                        GraphMutation::DeleteEntity(_) | GraphMutation::UpsertEntity(_) => {
+                            (entities.saturating_add(1), relations, endpoints)
+                        }
+                        GraphMutation::DeleteRelation(_) => {
+                            (entities, relations.saturating_add(1), endpoints)
+                        }
+                        GraphMutation::UpsertRelation(_) => (
+                            entities,
+                            relations.saturating_add(1),
+                            endpoints.saturating_add(2),
+                        ),
+                    }
+                });
+        let local_endpoint_count = (!physical_generation)
+            .then_some(relation_endpoint_count)
+            .unwrap_or(0);
+        let locator_count = physical_generation
+            .then_some(relation_endpoint_count)
+            .unwrap_or(0);
+        let mut entity_keys =
+            HashMap::with_capacity(entity_count.saturating_add(local_endpoint_count));
+        let mut entity_locator_keys = HashMap::with_capacity(locator_count);
+        let mut relation_keys = HashMap::with_capacity(relation_count);
         for mutation in &batch.mutations {
             match mutation {
                 GraphMutation::DeleteEntity(identity) => {
                     entity_keys.insert(
                         stable_key_from_encoded(&encoded_namespace, identity.as_str()),
-                        identity.clone(),
+                        identity,
                     );
                 }
                 GraphMutation::UpsertEntity(entity) => {
                     entity_keys.insert(
                         stable_key_from_encoded(&encoded_namespace, entity.identity.as_str()),
-                        entity.identity.clone(),
+                        &entity.identity,
                     );
                 }
                 GraphMutation::DeleteRelation(identity) => {
                     relation_keys.insert(
                         stable_key_from_encoded(&encoded_namespace, identity.as_str()),
-                        identity.clone(),
+                        identity,
                     );
                 }
                 GraphMutation::UpsertRelation(relation) => {
                     relation_keys.insert(
                         stable_key_from_encoded(&encoded_namespace, relation.identity.as_str()),
-                        relation.identity.clone(),
+                        &relation.identity,
                     );
                     let endpoint_keys = if physical_generation {
                         &mut entity_locator_keys
@@ -104,11 +131,11 @@ impl ExistingBatchState {
                     };
                     endpoint_keys.insert(
                         stable_key_from_encoded(&encoded_namespace, relation.from.as_str()),
-                        relation.from.clone(),
+                        &relation.from,
                     );
                     endpoint_keys.insert(
                         stable_key_from_encoded(&encoded_namespace, relation.to.as_str()),
-                        relation.to.clone(),
+                        &relation.to,
                     );
                 }
             }
@@ -316,15 +343,15 @@ pub(crate) fn load_entity(
 fn load_requested_entities(
     database: &GrafeoDB,
     namespace: &GraphNamespace,
-    requested: BTreeMap<String, GraphEntityId>,
+    requested: HashMap<String, &GraphEntityId>,
     batch: &GraphWriteBatch,
-) -> Result<BTreeMap<String, StoredEntity>, GraphDbError> {
-    let mut loaded = BTreeMap::new();
+) -> Result<HashMap<String, StoredEntity>, GraphDbError> {
+    let mut loaded = HashMap::with_capacity(requested.len());
     for (index, (key, identity)) in requested.into_iter().enumerate() {
         if index % 256 == 0 && batch.cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
         }
-        if let Some(entity) = load_entity(database, namespace, &identity)? {
+        if let Some(entity) = load_entity(database, namespace, identity)? {
             loaded.insert(key, entity);
         }
     }
@@ -335,15 +362,15 @@ fn load_requested_entities(
 fn load_requested_entity_locators(
     database: &GrafeoDB,
     namespace: &GraphNamespace,
-    requested: BTreeMap<String, GraphEntityId>,
+    requested: HashMap<String, &GraphEntityId>,
     batch: &GraphWriteBatch,
-) -> Result<BTreeMap<String, EntityLocator>, GraphDbError> {
-    let mut loaded = BTreeMap::new();
+) -> Result<HashMap<String, EntityLocator>, GraphDbError> {
+    let mut loaded = HashMap::with_capacity(requested.len());
     for (index, (key, identity)) in requested.into_iter().enumerate() {
         if index % 256 == 0 && batch.cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
         }
-        if let Some(entity) = load_entity_locator(database, namespace, &identity)? {
+        if let Some(entity) = load_entity_locator(database, namespace, identity)? {
             loaded.insert(key, entity);
         }
     }
@@ -354,17 +381,16 @@ fn load_requested_entity_locators(
 fn load_requested_relations(
     database: &GrafeoDB,
     namespace: &GraphNamespace,
-    requested: BTreeMap<String, GraphRelationId>,
+    requested: HashMap<String, &GraphRelationId>,
     batch: &GraphWriteBatch,
-) -> Result<BTreeMap<String, StoredRelation>, GraphDbError> {
-    let mut loaded = BTreeMap::new();
+) -> Result<HashMap<String, StoredRelation>, GraphDbError> {
+    let mut loaded = HashMap::with_capacity(requested.len());
     let mut endpoints = EndpointIdentityCache::default();
     for (index, (key, identity)) in requested.into_iter().enumerate() {
         if index % 256 == 0 && batch.cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
         }
-        if let Some(relation) =
-            load_relation_cached(database, namespace, &identity, &mut endpoints)?
+        if let Some(relation) = load_relation_cached(database, namespace, identity, &mut endpoints)?
         {
             loaded.insert(key, relation);
         }

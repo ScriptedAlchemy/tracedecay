@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use grafeo_common::types::Value;
@@ -131,6 +131,7 @@ pub(crate) fn apply(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 fn apply_in_transaction(
     session: &Session,
     state: &FormatState,
@@ -143,7 +144,26 @@ fn apply_in_transaction(
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<(), GraphDbError> {
     let encoded_namespace = encoded_namespace_key(&batch.namespace);
-    let mut entity_nodes = BTreeMap::<String, Option<grafeo_common::types::NodeId>>::new();
+    let tracks_relation_endpoints = batch
+        .mutations
+        .iter()
+        .any(|mutation| matches!(mutation, GraphMutation::UpsertRelation(_)));
+    let entity_capacity = tracks_relation_endpoints
+        .then(|| {
+            batch
+                .mutations
+                .iter()
+                .filter(|mutation| {
+                    matches!(
+                        mutation,
+                        GraphMutation::DeleteEntity(_) | GraphMutation::UpsertEntity(_)
+                    )
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    let mut entity_nodes =
+        HashMap::<&str, Option<grafeo_common::types::NodeId>>::with_capacity(entity_capacity);
     for mutation in &batch.mutations {
         check_cancelled(batch, check)?;
         match mutation {
@@ -158,7 +178,9 @@ fn apply_in_transaction(
                 if let Some(stored) = existing.entities.get(&key) {
                     delete_entity(session, stored, batch, check)?;
                 }
-                entity_nodes.insert(key, None);
+                if tracks_relation_endpoints {
+                    entity_nodes.insert(identity.as_str(), None);
+                }
             }
             GraphMutation::UpsertEntity(entity) => {
                 let key = stable_key_from_encoded(&encoded_namespace, entity.identity.as_str());
@@ -176,7 +198,9 @@ fn apply_in_transaction(
                 } else {
                     create_entity(session, entity, batch, check)?
                 };
-                entity_nodes.insert(key, Some(node));
+                if tracks_relation_endpoints {
+                    entity_nodes.insert(entity.identity.as_str(), Some(node));
+                }
             }
             GraphMutation::UpsertRelation(relation) => {
                 let relation_key =
@@ -208,20 +232,23 @@ fn apply_in_transaction(
                 }
                 let edge_properties =
                     edge_properties(&batch.namespace, &batch.projection, relation);
+                let (property_names, property_values): (Vec<_>, Vec<_>) =
+                    edge_properties.into_iter().unzip();
                 let edge = session
                     .create_edge_with_props(
                         from,
                         to,
                         &relation_type_for_kind(&relation.kind),
-                        edge_properties
+                        property_names
                             .iter()
-                            .map(|(name, value)| (name.as_str(), value.clone())),
+                            .map(String::as_str)
+                            .zip(property_values),
                     )
                     .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
                 let locator_properties =
                     relation_properties(&batch.namespace, &batch.projection, relation, edge)?;
                 let locator_labels = relation_locator_labels(&batch.namespace, &batch.projection);
-                tracked_create_node(session, &locator_labels, &locator_properties, batch, check)?;
+                tracked_create_node(session, &locator_labels, locator_properties, batch, check)?;
             }
         }
     }
@@ -240,7 +267,7 @@ fn apply_in_transaction(
             tracked_create_node(
                 session,
                 &[PROJECTION_LABEL.to_owned()],
-                &projection_properties,
+                projection_properties,
                 batch,
                 check,
             )?;
@@ -252,7 +279,7 @@ fn apply_in_transaction(
         tracked_create_node(
             session,
             &[PUBLICATION_LABEL.to_owned()],
-            &properties,
+            properties,
             batch,
             check,
         )?;
@@ -278,20 +305,20 @@ fn create_entity(
 ) -> Result<grafeo_common::types::NodeId, GraphDbError> {
     let labels = entity_labels(&batch.namespace, &batch.projection, &entity.labels);
     let properties = entity_properties(&batch.namespace, &batch.projection, entity);
-    tracked_create_node(session, &labels, &properties, batch, check)
+    tracked_create_node(session, &labels, properties, batch, check)
 }
 
 #[hotpath::measure]
 fn entity_node(
-    changes: &BTreeMap<String, Option<grafeo_common::types::NodeId>>,
+    changes: &HashMap<&str, Option<grafeo_common::types::NodeId>>,
     existing: &ExistingBatchState,
     encoded_namespace: &str,
     identity: &GraphEntityId,
 ) -> Option<grafeo_common::types::NodeId> {
-    let key = stable_key_from_encoded(encoded_namespace, identity.as_str());
-    if let Some(node) = changes.get(&key) {
+    if let Some(node) = changes.get(identity.as_str()) {
         return *node;
     }
+    let key = stable_key_from_encoded(encoded_namespace, identity.as_str());
     existing
         .entities
         .get(&key)
@@ -514,7 +541,7 @@ fn tracked_set_property(
 fn tracked_create_node(
     session: &Session,
     labels: &[String],
-    properties: &[(String, Value)],
+    properties: Vec<(String, Value)>,
     batch: &GraphWriteBatch,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<grafeo_common::types::NodeId, GraphDbError> {
@@ -533,12 +560,14 @@ fn tracked_create_node(
     }
     check_cancelled(batch, check)?;
     let labels = labels.iter().map(String::as_str).collect::<Vec<_>>();
+    let (property_names, property_values): (Vec<_>, Vec<_>) = properties.into_iter().unzip();
     let node = session
         .create_node_with_props(
             &labels,
-            properties
+            property_names
                 .iter()
-                .map(|(name, value)| (name.as_str(), value.clone())),
+                .map(String::as_str)
+                .zip(property_values),
         )
         .map_err(map_commit_error)?;
     check_cancelled(batch, check)?;
@@ -569,18 +598,28 @@ fn validate_references(
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<ResolvedRelationEndpoints, GraphDbError> {
     let encoded_namespace = encoded_namespace_key(&batch.namespace);
-    let mut entities = BTreeMap::<String, EntityChange>::new();
-    let mut relations = BTreeMap::<String, RelationChange>::new();
-    let mut mutation_keys = BTreeSet::new();
+    let entity_count = batch
+        .mutations
+        .iter()
+        .filter(|mutation| {
+            matches!(
+                mutation,
+                GraphMutation::DeleteEntity(_) | GraphMutation::UpsertEntity(_)
+            )
+        })
+        .count();
+    let relation_count = batch.mutations.len().saturating_sub(entity_count);
+    let mut entities = HashMap::<&str, EntityChange>::with_capacity(entity_count);
+    let mut relations = HashMap::<&str, RelationChange>::with_capacity(relation_count);
+    let mut mutation_keys = HashSet::with_capacity(batch.mutations.len());
     for mutation in &batch.mutations {
         check_cancelled(batch, check)?;
         let (kind, identity) = mutation.sort_key();
-        if !mutation_keys.insert((kind, identity.to_owned())) {
+        if !mutation_keys.insert((kind, identity)) {
             return Err(GraphDbError::invalid("batch repeats a graph mutation"));
         }
         match mutation {
             GraphMutation::DeleteRelation(identity) => {
-                let key = stable_key_from_encoded(&encoded_namespace, identity.as_str());
                 if let Some(owner) = relation_owner(
                     &relations,
                     &existing.relations,
@@ -590,29 +629,26 @@ fn validate_references(
                 {
                     return Err(GraphDbError::conflict("mutation.validate_references"));
                 }
-                relations.insert(key, None);
+                relations.insert(identity.as_str(), None);
             }
             GraphMutation::DeleteEntity(identity) => {
-                let key = stable_key_from_encoded(&encoded_namespace, identity.as_str());
                 if let Some(owner) = entity_owner(&entities, existing, &encoded_namespace, identity)
                     && owner != batch.projection
                 {
                     return Err(GraphDbError::conflict("mutation.validate_references"));
                 }
-                entities.insert(key, None);
+                entities.insert(identity.as_str(), None);
             }
             GraphMutation::UpsertEntity(entity) => {
-                let key = stable_key_from_encoded(&encoded_namespace, entity.identity.as_str());
                 if let Some(owner) =
                     entity_owner(&entities, existing, &encoded_namespace, &entity.identity)
                     && owner != batch.projection
                 {
                     return Err(GraphDbError::conflict("mutation.validate_references"));
                 }
-                entities.insert(key, Some(batch.projection.clone()));
+                entities.insert(entity.identity.as_str(), Some(batch.projection.clone()));
             }
             GraphMutation::UpsertRelation(relation) => {
-                let key = stable_key_from_encoded(&encoded_namespace, relation.identity.as_str());
                 if let Some(owner) = relation_owner(
                     &relations,
                     &existing.relations,
@@ -623,7 +659,7 @@ fn validate_references(
                     return Err(GraphDbError::conflict("mutation.validate_references"));
                 }
                 relations.insert(
-                    key,
+                    relation.identity.as_str(),
                     Some((
                         batch.projection.clone(),
                         relation.from.clone(),
@@ -687,25 +723,24 @@ fn validate_references(
         )?;
         external_endpoints.insert(relation.identity.clone(), (from, to));
     }
-    for (key, owner) in &entities {
-        if owner.is_some() {
+    for mutation in &batch.mutations {
+        let GraphMutation::DeleteEntity(identity) = mutation else {
+            continue;
+        };
+        if entities.get(identity.as_str()).is_some_and(Option::is_some) {
             continue;
         }
-        let identity = key_identity(key, "entity")?;
-        let identity = GraphEntityId::new(identity)?;
-        let Some(entity) = existing.entities.get(key) else {
+        let key = stable_key_from_encoded(&encoded_namespace, identity.as_str());
+        let Some(entity) = existing.entities.get(&key) else {
             continue;
         };
         for relation in relation_references_for_entity(database, entity.node)? {
-            let relation_key =
-                stable_key_from_encoded(&encoded_namespace, relation.identity.as_str());
-            let logical = relations.get(&relation_key).cloned().unwrap_or(Some((
-                relation.projection,
-                relation.from,
-                relation.to,
-            )));
+            let logical = relations
+                .get(relation.identity.as_str())
+                .cloned()
+                .unwrap_or(Some((relation.projection, relation.from, relation.to)));
             if let Some((_, from, to)) = logical
-                && (from == identity || to == identity)
+                && (from == *identity || to == *identity)
             {
                 return Err(GraphDbError::invalid(format!(
                     "entity `{identity}` remains referenced by relation `{}`",
@@ -723,7 +758,7 @@ fn resolve_generation_endpoint(
     candidate_namespace: &GraphNamespace,
     endpoint_namespace: &GraphNamespace,
     identity: &GraphEntityId,
-    changes: &BTreeMap<String, EntityChange>,
+    changes: &HashMap<&str, EntityChange>,
     existing: &ExistingBatchState,
     encoded_candidate_namespace: &str,
 ) -> Result<Option<grafeo_common::types::NodeId>, GraphDbError> {
@@ -747,15 +782,15 @@ fn resolve_generation_endpoint(
 
 #[hotpath::measure]
 fn entity_owner(
-    changes: &BTreeMap<String, EntityChange>,
+    changes: &HashMap<&str, EntityChange>,
     existing: &ExistingBatchState,
     encoded_namespace: &str,
     identity: &GraphEntityId,
 ) -> Option<GraphProjectionId> {
-    let key = stable_key_from_encoded(encoded_namespace, identity.as_str());
-    if let Some(owner) = changes.get(&key) {
+    if let Some(owner) = changes.get(identity.as_str()) {
         return owner.clone();
     }
+    let key = stable_key_from_encoded(encoded_namespace, identity.as_str());
     existing
         .entities
         .get(&key)
@@ -770,29 +805,16 @@ fn entity_owner(
 
 #[hotpath::measure]
 fn relation_owner(
-    changes: &BTreeMap<String, RelationChange>,
-    existing: &BTreeMap<String, StoredRelation>,
+    changes: &HashMap<&str, RelationChange>,
+    existing: &HashMap<String, StoredRelation>,
     encoded_namespace: &str,
     identity: &crate::GraphRelationId,
 ) -> Option<GraphProjectionId> {
-    let key = stable_key_from_encoded(encoded_namespace, identity.as_str());
-    if let Some(relation) = changes.get(&key) {
+    if let Some(relation) = changes.get(identity.as_str()) {
         return relation.as_ref().map(|(owner, _, _)| owner.clone());
     }
+    let key = stable_key_from_encoded(encoded_namespace, identity.as_str());
     existing.get(&key).map(|stored| stored.projection.clone())
-}
-
-#[hotpath::measure]
-fn key_identity(key: &str, description: &str) -> Result<String, GraphDbError> {
-    let (_, encoded) = key.split_once(':').ok_or_else(|| GraphDbError::Corrupt {
-        message: format!("native {description} key is malformed"),
-    })?;
-    let bytes = hex::decode(encoded).map_err(|error| GraphDbError::Corrupt {
-        message: format!("native {description} key is malformed: {error}"),
-    })?;
-    String::from_utf8(bytes).map_err(|error| GraphDbError::Corrupt {
-        message: format!("native {description} key is not UTF-8: {error}"),
-    })
 }
 
 #[hotpath::measure]
@@ -873,7 +895,7 @@ mod tests {
             tracked_create_node(
                 &session,
                 &["Broken".to_owned()],
-                &[("unindexed".to_owned(), Value::from("value"))],
+                vec![("unindexed".to_owned(), Value::from("value"))],
                 &batch,
                 &|| Ok(()),
             ),

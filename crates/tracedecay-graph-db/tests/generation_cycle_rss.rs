@@ -36,6 +36,10 @@ use tracedecay_graph_db::{
     SourceGeneration,
 };
 
+#[cfg(feature = "hotpath-alloc")]
+#[global_allocator]
+static HOTPATH_ALLOCATOR: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
+
 mod support;
 
 use support::RegisteredGraph;
@@ -182,6 +186,9 @@ fn retire_cycle(db: &GraphDbLeaseV1, cycle: usize, rows: usize) {
 #[test]
 #[ignore = "residency measurement harness; run one scenario per process, see module docs"]
 fn generation_cycle_residency_probe() {
+    #[cfg(feature = "hotpath")]
+    let _hotpath = hotpath::HotpathGuardBuilder::new("generation-cycle-residency").build();
+
     if status_kib("VmRSS").is_none() {
         println!("/proc/self/status unavailable on this platform; skipping");
         return;
