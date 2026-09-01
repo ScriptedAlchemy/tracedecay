@@ -200,6 +200,10 @@ struct ComparisonReport {
 }
 
 fn main() {
+    configure_hotpath();
+    // Dropped when `main` returns, so a requested profile observes both
+    // compared ingestion paths.
+    let _hotpath = hotpath::HotpathGuardBuilder::new("code-lexical-catchup-bench").build();
     let fixture = build_fixture();
     let one_page = run(&fixture, IngestionMode::OnePage);
     let bounded_batch = run(&fixture, IngestionMode::BoundedBatch);
@@ -227,6 +231,27 @@ fn main() {
         final_receipt_equal && artifact_digest_equal && source_cumulative_digest_equal,
         "the compared ingestion paths must produce the exact same final receipt and digests"
     );
+}
+
+/// Mirrors `tracedecay-index-bench`'s guard defaults: stdout here carries the
+/// machine-read comparison JSON, so the hotpath report goes to
+/// `HOTPATH_OUTPUT_PATH` when one is named and nowhere otherwise, and the
+/// localhost metrics server stays off. This runs as the first statement of
+/// `main`, before any other thread exists, which makes `set_var` sound.
+fn configure_hotpath() {
+    if std::env::var_os("HOTPATH_METRICS_SERVER_OFF").is_none() {
+        unsafe {
+            std::env::set_var("HOTPATH_METRICS_SERVER_OFF", "1");
+        }
+    }
+    let has_output_path = std::env::var_os("HOTPATH_OUTPUT_PATH")
+        .is_some_and(|path| path.to_str().is_some_and(|path| !path.is_empty()));
+    if !has_output_path {
+        unsafe {
+            std::env::set_var("HOTPATH_OUTPUT_FORMAT", "none");
+            std::env::remove_var("HOTPATH_OUTPUT_PATH");
+        }
+    }
 }
 
 fn build_fixture() -> Fixture {
