@@ -477,6 +477,7 @@ struct ControlledCancellationExecutor {
     started: AtomicUsize,
     cancellation_observed: AtomicUsize,
     completed: AtomicUsize,
+    pre_cancelled: AtomicUsize,
     release_first: AtomicBool,
 }
 
@@ -487,12 +488,16 @@ impl ControlledCancellationExecutor {
             started: AtomicUsize::new(0),
             cancellation_observed: AtomicUsize::new(0),
             completed: AtomicUsize::new(0),
+            pre_cancelled: AtomicUsize::new(0),
             release_first: AtomicBool::new(false),
         }
     }
 
     async fn await_cancellation(&self, cancellation: tracedecay_application::CancellationSignal) {
         let ordinal = self.started.fetch_add(1, Ordering::SeqCst);
+        if cancellation.is_cancelled() {
+            self.pre_cancelled.fetch_add(1, Ordering::SeqCst);
+        }
         while !cancellation.is_cancelled() {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
