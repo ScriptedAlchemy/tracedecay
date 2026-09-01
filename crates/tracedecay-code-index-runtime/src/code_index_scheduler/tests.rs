@@ -12412,11 +12412,21 @@ fn graph_off_stale_witness_reconciles_unchanged_source_without_full_decode() {
     .expect("advance only the git index mtime");
 
     let mut reopened = scheduler(&fixture, store.path().to_path_buf(), bytes);
+    assert_eq!(
+        reopened.sealed_decode_count(),
+        0,
+        "foreground reopen must remain decode-free"
+    );
     let metadata = reopened
         .servable_retained_text_generation()
         .expect("authenticated retained text generation")
         .metadata()
         .clone();
+    assert_eq!(
+        reopened.sealed_decode_count(),
+        0,
+        "partitioned text metadata must not enter the full-generation decoder"
+    );
     let outcome = reopened
         .reconcile_retained_text_generation_with(&metadata, true)
         .expect("graph-off retained reconcile")

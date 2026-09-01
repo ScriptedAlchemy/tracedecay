@@ -228,6 +228,8 @@ pub struct DurableGenerationIndexEntryV1 {
     pub snapshot_content_identity: String,
     pub sealed_at_micros: i64,
     pub size_bytes: u64,
+    #[serde(default)]
+    pub segment_bytes: u64,
     pub generation_file: String,
     pub state_digest: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -296,9 +298,11 @@ pub fn retain_bounded_generation_index_with_text_head(
 }
 
 fn durable_generation_index_bytes(entries: &[DurableGenerationIndexEntryV1]) -> u64 {
-    let generation_bytes = entries
-        .iter()
-        .fold(0_u64, |total, entry| total.saturating_add(entry.size_bytes));
+    let generation_bytes = entries.iter().fold(0_u64, |total, entry| {
+        total
+            .saturating_add(entry.size_bytes)
+            .saturating_add(entry.segment_bytes)
+    });
     let mut artifacts = BTreeSet::new();
     entries.iter().fold(generation_bytes, |total, entry| {
         let Some(artifact) = entry.text_artifact.as_ref() else {

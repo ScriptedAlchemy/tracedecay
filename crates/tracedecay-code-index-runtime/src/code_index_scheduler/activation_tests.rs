@@ -499,9 +499,9 @@ fn a_corrupt_sealed_generation_fails_closed_on_every_request() {
         let _ = publish(&mut scheduler);
     }
 
-    // Tamper with the sealed payload and restamp the durable pointer digest so
-    // the corruption is caught by the generation's own canonical state digest
-    // rather than by the pointer check in front of it.
+    // Tamper with one content-addressed component while leaving the manifest
+    // and pointer intact. The component digest — never a cached failure
+    // verdict — must reject every attempted activation.
     let generations_root = store.path().join("code-generations-v1");
     let sealed_path = fs::read_dir(&generations_root)
         .expect("read generations root")
@@ -513,37 +513,21 @@ fn a_corrupt_sealed_generation_fails_closed_on_every_request() {
                 .is_some_and(|name| name.starts_with("generation-") && name.ends_with(".json"))
         })
         .expect("sealed generation file");
-    let sealed = fs::read_to_string(&sealed_path).expect("read sealed generation");
-    let corrupted = sealed.replace("activation_revision", "activation_tampered");
-    assert_ne!(corrupted, sealed, "the fixture must actually be tampered");
-    fs::write(&sealed_path, &corrupted).expect("write corrupted generation");
-
-    let pointer_path = store.path().join("active-code-generation-v1.json");
-    let mut pointer: tracedecay_code_index_retention::code_index_generations::DurablePublicationPointerV1 =
-        serde_json::from_slice(&fs::read(&pointer_path).expect("read pointer"))
-            .expect("parse pointer");
-    let restamped_digest = format!("sha256:{}", super::sha256_hex(corrupted.as_bytes()));
-    pointer.state_digest = restamped_digest.clone();
-    // Restamp every durable digest that fronts the sealed bytes so the
-    // tampering is only detectable by the generation's own canonical state
-    // digest inside the real decode.
-    for entry in &mut pointer.generation_index {
-        if entry.generation_id == pointer.generation_id {
-            entry.state_digest = restamped_digest.clone();
-        }
-    }
-    pointer.generation_index_digest = Some(
-        tracedecay_code_index_retention::code_index_generations::durable_generation_index_digest(
-            &pointer.generation_index,
-            pointer.generation_index_truncated,
-        )
-        .expect("digest restamped publication index"),
-    );
-    fs::write(
-        &pointer_path,
-        serde_json::to_vec(&pointer).expect("encode pointer"),
-    )
-    .expect("write pointer");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&sealed_path).expect("read generation manifest"))
+            .expect("decode generation manifest");
+    let segment_digest = manifest["generation"]["file_segments"][0]["segment_digest"]
+        .as_str()
+        .and_then(|digest| digest.strip_prefix("sha256:"))
+        .expect("file segment digest");
+    let segment_path = store
+        .path()
+        .join("code-generation-segments-v1")
+        .join(format!("segment-{segment_digest}.json"));
+    let mut corrupted = fs::read(&segment_path).expect("read file segment");
+    let middle = corrupted.len() / 2;
+    corrupted[middle] ^= 1;
+    fs::write(segment_path, corrupted).expect("write corrupt file segment");
 
     let publication = publication_store(store.path());
     let first = publication.load_active_shared();

@@ -118,6 +118,7 @@ fn seed_sealed_generation_store(store_root: &Path, count: usize) {
         snapshot_content_identity: "snapshot.retention-fixture".to_owned(),
         sealed_at_micros: sealed_at,
         size_bytes,
+        segment_bytes: 0,
         generation_file: file.clone(),
         state_digest: state_digest.clone(),
         source_reference: None,

@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::{Read, Seek};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -9,7 +10,7 @@ use tracedecay_domain::{FileOccurrenceId, ManifestDigest, SymbolOccurrenceId};
 use super::sealed_codec::{
     PersistedFileGenerationArtifactsRefV1, PersistedFileGenerationArtifactsV1,
     SEALED_GENERATION_FORMAT_REVISION_V1, StreamingPersistedPublishedGenerationV1,
-    StreamingRestoredFilesV1, assemble_published_generation,
+    StreamingRestoredFilesV1, assemble_published_generation, restore_file_pages,
 };
 use super::*;
 
@@ -767,6 +768,45 @@ fn parse_partitioned_manifest(
         }
     }
     Ok(Some(generation))
+}
+
+#[hotpath::measure_all]
+impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
+    pub fn open_partitioned_sealed(
+        reader: R,
+        manifest_bytes: &[u8],
+        source_state_digest: ManifestDigest,
+        mut read_segment: impl FnMut(
+            &ManifestDigest,
+            u64,
+        ) -> Result<Vec<u8>, CodeIndexProductionErrorV1>,
+        maximum_page_chunks: usize,
+        maximum_page_bytes: usize,
+    ) -> Result<Option<Self>, CodeIndexProductionErrorV1> {
+        let Some(generation) = parse_partitioned_manifest(manifest_bytes)? else {
+            return Ok(None);
+        };
+        let mut files = Vec::with_capacity(generation.file_segments.len());
+        for descriptor in &generation.file_segments {
+            let bytes = read_segment(&descriptor.segment_digest, descriptor.segment_size_bytes)?;
+            files.push(decode_file_segment(
+                descriptor,
+                &generation.manifest.generation_id,
+                &bytes,
+            )?);
+        }
+        let files = restore_file_pages(files)?;
+        Self::open_partitioned_parts(
+            reader,
+            generation.manifest,
+            generation.snapshot,
+            files,
+            source_state_digest,
+            maximum_page_chunks,
+            maximum_page_bytes,
+        )
+        .map(Some)
+    }
 }
 
 #[hotpath::measure_all]

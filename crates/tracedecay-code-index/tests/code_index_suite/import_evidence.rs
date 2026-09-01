@@ -428,7 +428,7 @@ fn import_generation_pins_extractor_rows_and_chunker_revision_axes() {
 
 #[test]
 fn sealed_revision_six_import_generation_round_trips_to_identical_bytes() {
-    assert_eq!(SEALED_GENERATION_FORMAT_REVISION_V1, 6);
+    assert_eq!(SEALED_GENERATION_FORMAT_REVISION_V1, 7);
     let first = published_import_generation();
     let first_sealed = first.encode_sealed().expect("first generation seals");
     let second_sealed = published_import_generation()

@@ -18,6 +18,7 @@ fn indexed_generation(
         snapshot_content_identity: format!("sha256:{sequence:064x}"),
         sealed_at_micros,
         size_bytes,
+        segment_bytes: 0,
         generation_file: format!("generation-{sequence:064x}.json"),
         state_digest: format!("sha256:{sequence:064x}"),
         source_reference: exact.then(|| format!("refs/heads/branch-{sequence}")),
@@ -96,6 +97,8 @@ fn attach_fixture_text_artifact(
 fn durable_index_bounds_clean_and_dirty_history_by_ttl_bytes_and_count() {
     let now = MAX_DURABLE_GENERATION_INDEX_TTL_MICROS_V1 * 2;
     let active = indexed_generation(99, now, 32, true);
+    let mut segment_heavy = indexed_generation(1, now - 3, 1, true);
+    segment_heavy.segment_bytes = MAX_DURABLE_GENERATION_INDEX_BYTES_V1;
     let mut entries = vec![
         indexed_generation(
             0,
@@ -103,7 +106,7 @@ fn durable_index_bounds_clean_and_dirty_history_by_ttl_bytes_and_count() {
             1,
             false,
         ),
-        indexed_generation(1, now - 3, MAX_DURABLE_GENERATION_INDEX_BYTES_V1, true),
+        segment_heavy,
         indexed_generation(2, now - 2, 32, false),
         active.clone(),
     ];
@@ -121,7 +124,10 @@ fn durable_index_bounds_clean_and_dirty_history_by_ttl_bytes_and_count() {
     assert!(entries.iter().any(|entry| entry == &active));
     assert!(entries.len() <= MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1);
     assert!(
-        entries.iter().map(|entry| entry.size_bytes).sum::<u64>()
+        entries
+            .iter()
+            .map(|entry| entry.size_bytes.saturating_add(entry.segment_bytes))
+            .sum::<u64>()
             <= MAX_DURABLE_GENERATION_INDEX_BYTES_V1
     );
     assert!(
@@ -210,6 +216,7 @@ fn fixture_store(count: usize) -> (tempfile::TempDir, Vec<FixtureGeneration>) {
         snapshot_content_identity: "snapshot.fixture".to_owned(),
         sealed_at_micros: i64::try_from(count - 1).expect("fixture sequence fits i64"),
         size_bytes: active.size_bytes,
+        segment_bytes: 0,
         generation_file: active.file.clone(),
         state_digest: active.state_digest.clone(),
         source_reference: None,
@@ -294,6 +301,7 @@ fn verified_text_artifact_attachment_retires_history_before_enforcing_byte_bound
             snapshot_content_identity: "snapshot.prior".to_owned(),
             sealed_at_micros: 0,
             size_bytes: prior.size_bytes,
+            segment_bytes: 0,
             generation_file: prior.file.clone(),
             state_digest: prior.state_digest.clone(),
             source_reference: None,

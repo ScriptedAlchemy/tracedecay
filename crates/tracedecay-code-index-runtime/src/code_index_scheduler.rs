@@ -1726,6 +1726,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
             snapshot_content_identity: generation.snapshot().content_identity.as_str().to_owned(),
             sealed_at_micros: generation.manifest().seal.sealed_at.0,
             size_bytes: generation_size,
+            segment_bytes: referenced_segment_bytes,
             generation_file: generation_file.clone(),
             state_digest: state_digest.clone(),
             source_reference: exact_git_evidence
@@ -2920,25 +2921,34 @@ impl DaemonCodeTextArtifactStoreV1 {
             Err(CodeIndexProductionErrorV1::Contract(message))
                 if message.contains("format revision is incompatible") =>
             {
-                let mut manifest = File::open(&path).map_err(text_artifact_unavailable)?;
-                let generation = self
-                    .publication
-                    .decode_generation_file(&mut manifest, identity.size_bytes, &identity.digest)
-                    .map_err(map_sealed_page_source_error)?
-                    .ok_or_else(|| {
-                        RetrievalPortError::Contract(
-                            "partitioned sealed lexical source is incompatible".to_owned(),
-                        )
-                    })?;
+                let manifest_bytes = std::fs::read(&path).map_err(text_artifact_unavailable)?;
+                if DaemonCodeIndexPublicationStoreV1::state_digest(&manifest_bytes)
+                    != identity.digest.as_str()
+                {
+                    return Err(RetrievalPortError::Contract(
+                        "partitioned sealed lexical manifest digest does not verify".to_owned(),
+                    ));
+                }
                 let manifest = File::open(path).map_err(text_artifact_unavailable)?;
-                VerifiedSealedLexicalPageSourceV1::open_partitioned(
+                VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
                     manifest,
-                    &generation,
+                    &manifest_bytes,
                     identity.digest.clone(),
+                    |digest, expected_size| {
+                        self.publication
+                            .read_partitioned_segment(digest, expected_size)
+                    },
                     TEXT_ARTIFACT_PAGE_CHUNKS_V1,
                     TEXT_ARTIFACT_PAGE_BYTES_V1,
                 )
                 .map_err(map_sealed_page_source_error)
+                .and_then(|source| {
+                    source.ok_or_else(|| {
+                        RetrievalPortError::Contract(
+                            "partitioned sealed lexical source is incompatible".to_owned(),
+                        )
+                    })
+                })
             }
             Err(error) => Err(map_sealed_page_source_error(error)),
         }
@@ -2977,26 +2987,35 @@ impl DaemonCodeTextArtifactStoreV1 {
                 if message.contains("format revision is incompatible") =>
             {
                 progress(0, identity.size_bytes);
-                let mut manifest = File::open(&path).map_err(text_artifact_unavailable)?;
-                let generation = self
-                    .publication
-                    .decode_generation_file(&mut manifest, identity.size_bytes, &identity.digest)
-                    .map_err(map_sealed_page_source_error)?
-                    .ok_or_else(|| {
-                        RetrievalPortError::Contract(
-                            "partitioned sealed lexical source is incompatible".to_owned(),
-                        )
-                    })?;
+                let manifest_bytes = std::fs::read(&path).map_err(text_artifact_unavailable)?;
+                if DaemonCodeIndexPublicationStoreV1::state_digest(&manifest_bytes)
+                    != identity.digest.as_str()
+                {
+                    return Err(RetrievalPortError::Contract(
+                        "partitioned sealed lexical manifest digest does not verify".to_owned(),
+                    ));
+                }
                 progress(identity.size_bytes, identity.size_bytes);
                 let manifest = File::open(&path).map_err(text_artifact_unavailable)?;
-                VerifiedSealedLexicalPageSourceV1::open_partitioned(
+                VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
                     manifest,
-                    &generation,
+                    &manifest_bytes,
                     identity.digest.clone(),
+                    |digest, expected_size| {
+                        self.publication
+                            .read_partitioned_segment(digest, expected_size)
+                    },
                     TEXT_ARTIFACT_PAGE_CHUNKS_V1,
                     TEXT_ARTIFACT_PAGE_BYTES_V1,
                 )
                 .map_err(map_sealed_page_source_error)
+                .and_then(|source| {
+                    source.ok_or_else(|| {
+                        RetrievalPortError::Contract(
+                            "partitioned sealed lexical source is incompatible".to_owned(),
+                        )
+                    })
+                })
             }
             Err(error) => Err(map_sealed_page_source_error(error)),
         }
@@ -5680,7 +5699,10 @@ impl CodeIndexWorktreeSchedulerV1 {
         {
             let snapshot_content_identity = metadata.snapshot().content_identity.clone();
             self.latest_content_identity = Some(snapshot_content_identity.clone());
-            self.mark_reconciled_state(sampled_metadata, Some(sampled_signature));
+            self.mark_reconciled_retained_generation_state(
+                sampled_metadata,
+                Some(sampled_signature),
+            );
             return Ok(Some(CodeIndexReconcileOutcomeV1::Noop(
                 CodeIndexNoopEvidenceV1 {
                     snapshot_content_identity,
@@ -5783,7 +5805,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             self.latest_content_identity = Some(snapshot_content_identity);
             let metadata = identity::GitMetadataFingerprintV1::capture(&self.project_root);
             let signature = self.worktree_stat_signature().ok();
-            self.mark_reconciled_state(metadata.clone(), signature.clone());
+            self.mark_reconciled_retained_generation_state(metadata.clone(), signature.clone());
             let repository_parse_identity_digest =
                 canonical_sha256(generation.repository_parse_identity())
                     .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
@@ -5842,7 +5864,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.latest_content_identity = Some(snapshot_content_identity.clone());
         let metadata = identity::GitMetadataFingerprintV1::capture(&self.project_root);
         let signature = self.worktree_stat_signature().ok();
-        self.mark_reconciled_state(metadata.clone(), signature.clone());
+        self.mark_reconciled_retained_generation_state(metadata.clone(), signature.clone());
         if let (Some(witness), Some(stat_signature)) = (witness, signature) {
             RestoreFreshnessWitnessV1 {
                 generation_id: witness.generation_id,
@@ -6328,6 +6350,19 @@ impl CodeIndexWorktreeSchedulerV1 {
             signature,
             &self.ignored_source_admissions,
             reconciled_without_generation,
+        );
+    }
+
+    fn mark_reconciled_retained_generation_state(
+        &mut self,
+        metadata: identity::GitMetadataFingerprintV1,
+        signature: Option<String>,
+    ) {
+        self.freshness_fence.mark_reconciled(
+            metadata,
+            signature,
+            &self.ignored_source_admissions,
+            false,
         );
     }
 

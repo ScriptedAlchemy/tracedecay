@@ -201,7 +201,7 @@ enum CompatibleSealedMaterializationV1 {
 /// keeps the sequential failure semantics (lowest-index error) while the
 /// pages themselves move — the persist corpus is never copied.
 #[hotpath::measure]
-fn restore_file_pages(
+pub(super) fn restore_file_pages(
     pages: Vec<PersistedFileGenerationArtifactsV1>,
 ) -> Result<Vec<Arc<FileGenerationArtifactsV1>>, CodeIndexProductionErrorV1> {
     let authorities = collect_bounded_ordered(&pages, |page, _worker| {

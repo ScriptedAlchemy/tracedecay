@@ -921,12 +921,46 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         maximum_page_chunks: usize,
         maximum_page_bytes: usize,
     ) -> Result<Self, CodeIndexProductionErrorV1> {
+        Self::open_partitioned_parts(
+            reader,
+            generation.manifest.clone(),
+            generation.snapshot.clone(),
+            generation.files.clone(),
+            source_state_digest,
+            maximum_page_chunks,
+            maximum_page_bytes,
+        )
+    }
+
+    pub(super) fn open_partitioned_parts(
+        reader: R,
+        manifest: CodeGenerationManifestV1,
+        snapshot: SanitizedCodeSnapshotV1,
+        files: Vec<Arc<FileGenerationArtifactsV1>>,
+        source_state_digest: ManifestDigest,
+        maximum_page_chunks: usize,
+        maximum_page_bytes: usize,
+    ) -> Result<Self, CodeIndexProductionErrorV1> {
         if maximum_page_chunks == 0 || maximum_page_bytes == 0 {
             return Err(CodeIndexProductionErrorV1::Contract(
                 "sealed lexical page bounds must be non-zero".to_owned(),
             ));
         }
-        let file_count = u64::try_from(generation.files.len()).map_err(|_| {
+        snapshot
+            .validate()
+            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        let snapshot_digest = canonical_sha256(&(INTAKE_DIGEST_SEPARATOR, &snapshot))
+            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        if snapshot_digest != manifest.snapshot_digest
+            || expected_seal_digest(&manifest)
+                .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?
+                != manifest.seal.expected_digest
+        {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "partitioned sealed text metadata does not verify".to_owned(),
+            ));
+        }
+        let file_count = u64::try_from(files.len()).map_err(|_| {
             CodeIndexProductionErrorV1::Contract(
                 "partitioned sealed generation file count exceeds u64".to_owned(),
             )
@@ -945,12 +979,12 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             maximum_file_bytes: 1,
             source_state_digest,
             format_revision: SEALED_GENERATION_FORMAT_REVISION_V1,
-            metadata: VerifiedSealedTextGenerationMetadataV1::from_published_generation(generation),
+            metadata: VerifiedSealedTextGenerationMetadataV1 { manifest, snapshot },
             maximum_page_chunks,
             maximum_page_bytes,
             cursor,
             admitted_window: BTreeMap::new(),
-            memory_files: Some(generation.files.clone()),
+            memory_files: Some(files),
         })
     }
 
