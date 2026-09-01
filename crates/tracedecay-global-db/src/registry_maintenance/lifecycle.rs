@@ -301,6 +301,41 @@ pub(super) async fn delete_registry_gc_candidates_in_transaction(
     Ok((code_projects, storage_projects))
 }
 
+/// Rows removed by one `projects forget` registry retirement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ForgetRegistryProjectRows {
+    /// Deleted `code_projects` identity rows; aliases, store instances, graph
+    /// scopes, and store artifacts cascade with them.
+    pub code_projects_deleted: usize,
+    /// Deleted path-keyed `projects` token-ledger rows.
+    pub path_ledger_rows_deleted: usize,
+}
+
+/// Retires one registered project identity in a single transaction: the
+/// `code_projects` row (its aliases, store instances, graph scopes, and store
+/// artifacts cascade away with it) plus the path-keyed `projects` ledger rows
+/// for every root and alias the identity records. Sibling identities are
+/// untouched — this is the row authority behind `tracedecay projects forget`.
+pub async fn forget_registry_project(
+    db: &RegisteredGlobalDb,
+    project_id: &str,
+    project_paths: &[PathBuf],
+) -> tracedecay_domain::errors::Result<ForgetRegistryProjectRows> {
+    let transaction = db.begin_write_transaction().await?;
+    let (code_projects_deleted, path_ledger_rows_deleted) =
+        delete_registry_gc_candidates_in_transaction(
+            &transaction,
+            &[project_id.to_string()],
+            project_paths,
+        )
+        .await?;
+    transaction.commit().await?;
+    Ok(ForgetRegistryProjectRows {
+        code_projects_deleted,
+        path_ledger_rows_deleted,
+    })
+}
+
 /// Retires exact registry rows for project roots already removed by an
 /// explicit operator action.
 pub async fn retire_registry_project_paths(

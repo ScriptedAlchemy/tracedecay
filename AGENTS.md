@@ -140,7 +140,11 @@ compiles.
   and keep the limit. Change a budget only when the measured cost is genuinely
   irreducible, in its own commit, with the measurement attached. A temporary
   override that keeps an investigation moving is scaffolding: label it and
-  remove it before the work merges.
+  remove it before the work merges. Keep the observability layers distinct:
+  `tracing` events are the always-compiled operator log surface, Hotpath
+  macros the compile-to-no-op measurement surface (tracing bridges exist only
+  for third-party emitters like sqlx — see the skill), and `eprintln!`
+  scaffolds never merge.
 - Reuse canonical TraceDecay authorities and maintained libraries first.
   Custom parsers, cursors, caches, retries, transports, registries, schedulers,
   crypto/auth/policy stores, or filesystem durability layers require a concrete

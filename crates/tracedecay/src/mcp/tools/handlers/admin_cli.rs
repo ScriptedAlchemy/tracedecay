@@ -542,31 +542,10 @@ async fn registry_context(
     let Some(selector) = project_arg.or_else(|| cg.map(TraceDecay::project_root)) else {
         return Ok(json!({ "status": "invalid", "project": null }));
     };
-    let selector_text = selector.to_string_lossy();
-    let context = if RegisteredGlobalDb::is_explicit_project_path_selector(&selector_text) {
-        None
-    } else {
-        global_db
-            .project_registry_context_by_id(&selector_text)
-            .await?
-    };
-    let context = match context {
-        Some(context) => Some(context),
-        None => match global_db
-            .project_registry_context_by_alias(selector)
-            .await?
-        {
-            Some(context) => Some(context),
-            None if RegisteredGlobalDb::is_explicit_project_path_selector(&selector_text) => {
-                let git_common_dir = tracedecay_runtime_core::worktree::git_common_dir(selector);
-                global_db
-                    .project_registry_context_by_identity(selector, git_common_dir.as_deref())
-                    .await?
-            }
-            None => None,
-        },
-    };
-    let Some(context) = context else {
+    let Some(context) = global_db
+        .project_registry_context_by_selector(selector)
+        .await?
+    else {
         return Ok(json!({ "status": "not_found", "project": null }));
     };
     let active_id = match cg {

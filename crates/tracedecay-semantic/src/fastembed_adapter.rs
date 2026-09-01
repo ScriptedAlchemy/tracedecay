@@ -49,7 +49,13 @@ use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::Arc;
 #[cfg(test)]
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
+#[cfg(any(test, feature = "semantic-fastembed"))]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(any(test, feature = "semantic-fastembed"))]
+use std::thread;
+#[cfg(any(test, feature = "semantic-fastembed"))]
+use std::time::Duration;
 
 #[cfg(any(test, feature = "semantic-fastembed"))]
 use tracedecay_domain::canonical_text::sha256_hex;
@@ -937,6 +943,31 @@ fn check_execution_authority(authority: &dyn SemanticExecutionAuthority) -> Resu
     }
 }
 
+#[cfg(any(test, feature = "semantic-fastembed"))]
+const MODEL_LOAD_CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(2);
+
+/// Bridge the request's typed interruption authority to ORT's in-progress
+/// session-load canceler. The monitor is active only while the constructor is
+/// executing and returns the exact interruption that fired.
+#[cfg(any(test, feature = "semantic-fastembed"))]
+#[hotpath::measure(label = "semantic.model.load.cancel_monitor")]
+fn monitor_model_load(
+    load_finished: &AtomicBool,
+    authority: &dyn SemanticExecutionAuthority,
+    cancel: impl FnOnce() -> Result<(), EmbedError>,
+) -> Result<Option<SemanticExecutionInterruptionV1>, EmbedError> {
+    loop {
+        if load_finished.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        if let Some(interruption) = authority.interruption() {
+            cancel()?;
+            return Ok(Some(interruption));
+        }
+        thread::sleep(MODEL_LOAD_CANCELLATION_POLL_INTERVAL);
+    }
+}
+
 /// A manually flipped cancellation flag.
 #[cfg(test)]
 #[derive(Debug, Default)]
@@ -1218,19 +1249,59 @@ impl EmbeddingRuntime for FastEmbedEmbeddingRuntime {
             .with_execution_providers(crate::execution_provider::requested_execution_providers());
         // Last boundary before the ORT constructor: an abandoned load drops
         // the buffered member bytes here instead of parsing and optimizing a
-        // graph nobody will use. The constructor itself is the residual
-        // uncancellable window — ORT exposes no mid-build termination, so
-        // memory held inside it releases only when the runtime returns.
+        // graph nobody will use.
         check_execution_authority(interruption)?;
+        let load_finished = AtomicBool::new(false);
         let embedding = hotpath::measure_block!("semantic.model.load", {
-            TextEmbedding::try_new_from_user_defined(model, options).map_err(|error| {
-                let failure = fastembed_error(
-                    RuntimeFailureKindV1::LoadFailed,
-                    "FastEmbed could not initialize the verified artifact",
-                    &error,
+            thread::scope(|scope| {
+                let mut monitor = None;
+                let monitor_load_finished = &load_finished;
+                let monitor_interruption = interruption;
+                let embedding = TextEmbedding::try_new_from_user_defined_with_load_canceler(
+                    model,
+                    options,
+                    |canceler| {
+                        monitor = Some(scope.spawn(move || {
+                            monitor_model_load(monitor_load_finished, monitor_interruption, || {
+                                canceler.cancel().map_err(|error| {
+                                    fastembed_error(
+                                        RuntimeFailureKindV1::LoadFailed,
+                                        "ONNX Runtime refused model-load cancellation",
+                                        &error,
+                                    )
+                                })
+                            })
+                        }));
+                    },
                 );
-                crate::hotpath_observe::record_embed_error(&failure);
-                failure
+                load_finished.store(true, Ordering::Release);
+                let observed_interruption = match monitor {
+                    Some(monitor) => monitor.join().map_err(|_| {
+                        fastembed_failure(
+                            RuntimeFailureKindV1::LoadFailed,
+                            "the model-load cancellation monitor panicked",
+                        )
+                    })??,
+                    None => None,
+                };
+                match observed_interruption {
+                    Some(SemanticExecutionInterruptionV1::Cancelled) => {
+                        return Err(EmbedError::Cancelled);
+                    }
+                    Some(SemanticExecutionInterruptionV1::DeadlineExceeded) => {
+                        return Err(EmbedError::DeadlineExceeded);
+                    }
+                    None => {}
+                }
+                embedding.map_err(|error| {
+                    let failure = fastembed_error(
+                        RuntimeFailureKindV1::LoadFailed,
+                        "FastEmbed could not initialize the verified artifact",
+                        &error,
+                    );
+                    crate::hotpath_observe::record_embed_error(&failure);
+                    failure
+                })
             })
         })?;
         crate::hotpath_observe::record_model_state("ready");
@@ -2059,6 +2130,40 @@ mod tests {
                 Err(EmbedError::Cancelled)
             ),
             "the production adapter must abandon the open before buffering members"
+        );
+    }
+
+    #[test]
+    fn model_load_monitor_cancels_promptly_when_authority_fires() {
+        let cancellation = ManualCancellation::new();
+        let load_finished = AtomicBool::new(false);
+        let cancel_called = AtomicBool::new(false);
+        let started = std::time::Instant::now();
+
+        let interruption = std::thread::scope(|scope| {
+            let monitor = scope.spawn(|| {
+                monitor_model_load(&load_finished, &cancellation, || {
+                    cancel_called.store(true, Ordering::SeqCst);
+                    Ok(())
+                })
+            });
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            cancellation.cancel();
+            monitor.join().expect("model-load monitor must not panic")
+        })
+        .expect("the cancellation handle succeeds");
+
+        assert_eq!(
+            interruption,
+            Some(SemanticExecutionInterruptionV1::Cancelled)
+        );
+        assert!(
+            cancel_called.load(Ordering::SeqCst),
+            "token fire must reach the runtime load canceler"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "load cancellation must not wait for the constructor to finish"
         );
     }
 

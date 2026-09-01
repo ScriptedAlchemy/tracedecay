@@ -2,7 +2,8 @@ use super::{
     AnalyticsAction, Cli, CommandFamily, Commands, DAEMON_CPU_THREADS_ENV,
     DEFAULT_MAX_DAEMON_CPU_THREADS, DaemonAction, GitAction, GitProjectArgs, HostBundleCliOptions,
     HostBundleComponentArg, MAX_ASYNC_WORKER_THREADS, PackageHookAction, ProfileStorageAction,
-    RAYON_NUM_THREADS_ENV, ScoopPackageHookAction, StderrTracingDefault, async_worker_threads,
+    ProjectsAction, RAYON_NUM_THREADS_ENV, ScoopPackageHookAction, StderrTracingDefault,
+    async_worker_threads,
     command_profile_label, daemon_cpu_threads_from, hotpath_focus_is_valid,
     hotpath_output_format_is_none, hotpath_output_format_is_valid, hotpath_output_path_is_valid,
     hotpath_requires_protocol_safe_output, is_daemon_run, is_full_component_set_adoption,
@@ -199,6 +200,70 @@ fn storage_reset_project_store_parses_and_accepts_the_confirmation_flag() {
     ));
     validate_host_bundle_options(&command, CommandFamily::for_command(&command), &options)
         .expect("storage reset-project-store --yes must be accepted");
+}
+
+/// `projects forget` REQUIRES `--yes` (its handler refuses without it) and
+/// takes the global `--dry-run` as its preview, so the pre-dispatch validator
+/// must accept both exactly as documented.
+#[test]
+fn projects_forget_accepts_confirmation_and_preview_flags() {
+    for flags in [&["--yes"][..], &["--dry-run"][..]] {
+        let mut args = vec!["tracedecay", "projects", "forget", "proj_123"];
+        args.extend_from_slice(flags);
+        let cli = Cli::try_parse_from(args).expect("documented forget invocation must parse");
+        let options = HostBundleCliOptions {
+            component: cli.component,
+            dry_run: cli.dry_run,
+            yes: cli.yes,
+            adopt: cli.adopt,
+        };
+        let command = cli.command.expect("subcommand parsed");
+        assert!(matches!(
+            command,
+            Commands::Projects {
+                action: ProjectsAction::Forget { .. }
+            }
+        ));
+        validate_host_bundle_options(&command, CommandFamily::for_command(&command), &options)
+            .unwrap_or_else(|error| panic!("projects forget {flags:?} must be accepted: {error}"));
+    }
+}
+
+/// `projects forget` owns no host component, so the component/adopt lifecycle
+/// flags stay rejected on it; and read-only `projects` verbs still reject the
+/// confirmation flags entirely.
+#[test]
+fn projects_forget_rejects_component_and_projects_list_rejects_yes() {
+    let forget = Commands::Projects {
+        action: ProjectsAction::Forget {
+            selector: "proj_123".to_string(),
+            keep_store: false,
+        },
+    };
+    let component = HostBundleCliOptions {
+        component: Some(HostBundleComponentArg::Core),
+        dry_run: false,
+        yes: true,
+        adopt: false,
+    };
+    assert!(
+        validate_host_bundle_options(&forget, CommandFamily::for_command(&forget), &component)
+            .is_err()
+    );
+
+    let list = Commands::Projects {
+        action: ProjectsAction::List {
+            limit: 25,
+            json: false,
+        },
+    };
+    let yes = HostBundleCliOptions {
+        component: None,
+        dry_run: false,
+        yes: true,
+        adopt: false,
+    };
+    assert!(validate_host_bundle_options(&list, CommandFamily::for_command(&list), &yes).is_err());
 }
 
 /// `storage reset-authority` carries the same required `--yes` confirmation.

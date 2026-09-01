@@ -211,6 +211,11 @@ opt-level = 3
 # pinned to the PR head commit, until the fix lands upstream.
 [patch.crates-io]
 tree-sitter-rust = { git = "https://github.com/vanessa-rodrigues/tree-sitter-rust", rev = "877df9f82f320243ab23929589a940208faa9d15" }
+# FastEmbed's user-defined constructor owns the ORT SessionBuilder but did not
+# expose rc.12's load canceler. This reviewed fork publishes that existing
+# handle immediately before CreateSessionFromArray so TraceDecay can enforce
+# its typed cold-load deadline during graph construction.
+fastembed = { git = "https://github.com/ScriptedAlchemy/fastembed-rs.git", rev = "ad2af71090615b4e36bb106ce19207f84cbe38e0" }
 
 # Patched grafeo 0.5.42, consumed from our fork at the reviewed head of
 # ScriptedAlchemy/grafeo#1 (codex/checked-lpg-block-ranges): the accumulated

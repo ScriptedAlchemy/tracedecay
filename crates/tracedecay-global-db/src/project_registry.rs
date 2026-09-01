@@ -1584,6 +1584,39 @@ impl RegisteredGlobalDb {
         self.project_registry_context_by_id(&project_id).await
     }
 
+    /// Resolves one registered project context from an operator selector — a
+    /// project id, a registered alias path, or a repository root whose
+    /// identity marker or git common directory is registered. Path-shaped
+    /// selectors skip the id lookup; id-shaped selectors skip filesystem
+    /// identity probing. Shared by the daemon `registry_context` read and the
+    /// offline `projects forget` maintenance path so both surfaces resolve
+    /// the same selector to the same identity.
+    #[hotpath::measure(future = true, label = "global_db.registry.query.selector")]
+    pub async fn project_registry_context_by_selector(
+        &self,
+        selector: &Path,
+    ) -> tracedecay_domain::errors::Result<Option<ProjectRegistryContext>> {
+        let selector_text = selector.to_string_lossy();
+        let context = if Self::is_explicit_project_path_selector(&selector_text) {
+            None
+        } else {
+            self.project_registry_context_by_id(&selector_text).await?
+        };
+        match context {
+            Some(context) => Ok(Some(context)),
+            None => match self.project_registry_context_by_alias(selector).await? {
+                Some(context) => Ok(Some(context)),
+                None if Self::is_explicit_project_path_selector(&selector_text) => {
+                    let git_common_dir =
+                        tracedecay_runtime_core::worktree::git_common_dir(selector);
+                    self.project_registry_context_by_identity(selector, git_common_dir.as_deref())
+                        .await
+                }
+                None => Ok(None),
+            },
+        }
+    }
+
     pub async fn project_registry_context_by_identity(
         &self,
         project_root: &Path,

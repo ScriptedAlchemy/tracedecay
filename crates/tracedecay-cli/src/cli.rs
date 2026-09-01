@@ -800,6 +800,21 @@ pub enum ProjectsAction {
         #[arg(long)]
         json: bool,
     },
+    /// Forget one registered project: retire its registry rows and delete its
+    /// profile store directories. Requires the global `--yes` confirmation;
+    /// the global `--dry-run` previews the exact removal instead. Works even
+    /// when the project's runtime is wedged: the managed daemon service is
+    /// stopped for the removal (bounded) and restored afterward. Repo-local
+    /// files are never touched.
+    Forget {
+        /// Project id, root path, or registered alias
+        selector: String,
+        /// Keep the project's store directories on disk; retire only the
+        /// registry rows (the store becomes an orphan that `list --all`
+        /// reports as manifest-reconstructable)
+        #[arg(long)]
+        keep_store: bool,
+    },
 }
 
 #[derive(Args, Clone, Debug, PartialEq, Eq)]

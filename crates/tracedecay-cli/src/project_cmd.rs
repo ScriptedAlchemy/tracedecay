@@ -1,17 +1,25 @@
 use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
+use tracedecay::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime;
 use tracedecay_application::{ProjectRegistryView, render_project_registry_view};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 #[cfg(test)]
 use tracedecay_global_db::ProjectRegistryContext;
+use tracedecay_global_db::RegisteredGlobalDb;
 
 use crate::cli::ProjectsAction;
+use crate::commands::{ProfileOfflineAuthority, join_outcome_and_restore, take_profile_offline};
 
 const MAX_LIMIT: usize = 1_000;
 
 #[hotpath::measure(label = "cli.projects.dispatch", future = true)]
-pub(crate) async fn handle_projects_action(action: ProjectsAction) -> Result<()> {
+pub(crate) async fn handle_projects_action(
+    action: ProjectsAction,
+    assume_yes: bool,
+    dry_run: bool,
+) -> Result<()> {
     match action {
         ProjectsAction::List { limit, json } => {
             let limit = bounded_limit(limit);
@@ -52,8 +60,178 @@ pub(crate) async fn handle_projects_action(action: ProjectsAction) -> Result<()>
                 print!("{}", render_project_context_payload(&payload));
             }
         }
+        ProjectsAction::Forget {
+            selector,
+            keep_store,
+        } => {
+            handle_projects_forget(&selector, keep_store, assume_yes, dry_run).await?;
+        }
     }
     Ok(())
+}
+
+/// Forgets exactly one registered project (#730): retires its registry rows
+/// and deletes its profile store directories without touching any other
+/// project or any repo-local file.
+///
+/// The destructive path runs offline inside the bounded profile-offline
+/// window, so it completes even when the project's runtime is wedged in a
+/// terminal activation loop — the managed daemon service is stopped (the
+/// supervisor bounds the stop) and restored afterward. The preview runs
+/// through the daemon like every other read-only `projects` subcommand and
+/// never stops the service.
+#[hotpath::measure(label = "cli.projects.forget", future = true)]
+async fn handle_projects_forget(
+    selector: &str,
+    keep_store: bool,
+    assume_yes: bool,
+    dry_run: bool,
+) -> Result<()> {
+    let selector_arg = forget_selector_argument(selector)?;
+    if dry_run {
+        return preview_projects_forget(selector, &selector_arg, keep_store).await;
+    }
+    if !assume_yes {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "forgetting project '{selector}' retires its registry rows and deletes its \
+                 profile store directories; re-run with --yes to confirm, use --dry-run to \
+                 preview the exact removal, or add --keep-store to keep the store bytes"
+            ),
+        });
+    }
+    let profile_root = tracedecay_runtime_core::storage::default_profile_root()?;
+    let profile_offline = take_profile_offline(&profile_root, "projects forget")?;
+    let outcome = forget_under_profile_offline(
+        selector,
+        &selector_arg,
+        keep_store,
+        &profile_root,
+        &profile_offline,
+    )
+    .await;
+    let restore = profile_offline.finish();
+    join_outcome_and_restore("projects forget", outcome, restore)
+}
+
+/// The destructive forget body, run inside the profile-offline window. The
+/// maintenance scope and registry handles drop before the caller restores the
+/// daemon service.
+async fn forget_under_profile_offline(
+    selector: &str,
+    selector_arg: &Path,
+    keep_store: bool,
+    profile_root: &Path,
+    profile_offline: &ProfileOfflineAuthority,
+) -> Result<()> {
+    let _database_scope = tracedecay_runtime_core::db::enter_maintenance_database_scope(
+        profile_offline.lease()?,
+        profile_root,
+        "projects forget",
+    )?;
+    let Some(registry) = ProfileRegistryMaintenanceRuntime::try_open_existing(profile_root).await?
+    else {
+        return Err(TraceDecayError::Config {
+            message: "no profile registry exists; there is nothing to forget".to_string(),
+        });
+    };
+    let Some(context) = registry.resolve_registered_project(selector_arg).await? else {
+        return Err(forget_selector_not_found(selector));
+    };
+    let report = registry
+        .forget_project(profile_root, &context, keep_store)
+        .await?;
+    println!(
+        "Forgot project {} ({}).",
+        report.project_id, context.project.display_root
+    );
+    for store_dir in &report.removed_store_dirs {
+        println!("  removed store {}", store_dir.display());
+    }
+    for store_dir in &report.absent_store_dirs {
+        println!("  store was already absent: {}", store_dir.display());
+    }
+    for store_dir in &report.kept_store_dirs {
+        println!("  kept store {} (--keep-store)", store_dir.display());
+    }
+    println!(
+        "  retired {} registry identity row(s) and {} token-ledger row(s); aliases, store \
+         instances, graph scopes, and artifacts cascaded with the identity",
+        report.rows.code_projects_deleted, report.rows.path_ledger_rows_deleted
+    );
+    Ok(())
+}
+
+/// Read-only forget preview, brokered through the daemon registry like the
+/// other `projects` reads. Prints exactly what a confirmed run would remove.
+async fn preview_projects_forget(
+    selector: &str,
+    selector_arg: &Path,
+    keep_store: bool,
+) -> Result<()> {
+    let payload = call_registry_admin(json!({
+        "action": "registry_context",
+        "project_arg": selector_arg,
+    }))
+    .await?;
+    if payload["status"] != "ok" {
+        return Err(forget_selector_not_found(selector));
+    }
+    let profile_root = tracedecay_runtime_core::storage::default_profile_root()?;
+    let project = &payload["project"];
+    println!(
+        "Would forget project {} ({}).",
+        project["project_id"].as_str().unwrap_or("-"),
+        project["display_root"].as_str().unwrap_or("-")
+    );
+    let alias_count = payload["aliases"].as_array().map_or(0, Vec::len);
+    let stores = payload["stores"].as_array().cloned().unwrap_or_default();
+    println!(
+        "  would retire the registry identity row, {alias_count} alias(es), and {} store \
+         instance(s)",
+        stores.len()
+    );
+    for store in &stores {
+        let Some(relpath) = store["store"]["store_relpath"].as_str() else {
+            continue;
+        };
+        let data_root = profile_root.join(relpath);
+        if keep_store {
+            println!("  would keep store {} (--keep-store)", data_root.display());
+        } else {
+            println!("  would delete store {}", data_root.display());
+        }
+    }
+    println!("Re-run with --yes (without --dry-run) to apply.");
+    Ok(())
+}
+
+fn forget_selector_not_found(selector: &str) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!(
+            "no registered project matches '{selector}'; try `tracedecay projects search \
+             {selector}`"
+        ),
+    }
+}
+
+/// Path-shaped selectors are absolutized against the CLI's own working
+/// directory before reaching any resolver, so `.` names the operator's
+/// directory rather than the daemon's or the maintenance process's.
+fn forget_selector_argument(selector: &str) -> Result<PathBuf> {
+    let trimmed = selector.trim();
+    if trimmed.is_empty() {
+        return Err(TraceDecayError::Config {
+            message: "projects forget requires a project id or path selector".to_string(),
+        });
+    }
+    if RegisteredGlobalDb::is_explicit_project_path_selector(trimmed) {
+        std::path::absolute(trimmed).map_err(|error| TraceDecayError::Config {
+            message: format!("could not absolutize selector path '{trimmed}': {error}"),
+        })
+    } else {
+        Ok(PathBuf::from(trimmed))
+    }
 }
 
 fn bounded_limit(limit: usize) -> usize {

@@ -69,6 +69,22 @@ fn assert_namespace_absent(path: &Path, context: &str) {
     }
 }
 
+/// Guarantees a fixture project carries no repo-local `.tracedecay` marker
+/// directory. Repository identity moved into the git common dir, so the
+/// profile-sharded fixture no longer plants one — a fixture that must model
+/// the "registry-backed, no repo marker" shape treats an already-absent
+/// directory as exactly that shape rather than a setup failure.
+fn remove_repo_local_marker_dir_if_present(project: &Path) {
+    match std::fs::remove_dir_all(project.join(".tracedecay")) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!(
+            "could not clear the repo-local marker directory in {}: {error}",
+            project.display()
+        ),
+    }
+}
+
 fn tracedecay_command_without_daemon(home: &std::path::Path, project: &std::path::Path) -> Command {
     let home = canonical_temp_path(home);
     let profile_root = profile_root(&home);
@@ -1760,7 +1776,7 @@ async fn list_all_uses_registry_profile_shard_when_enrollment_marker_missing() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     write_profile_sharded_fixture(home.path(), project.path());
-    std::fs::remove_dir_all(project.path().join(".tracedecay")).unwrap();
+    remove_repo_local_marker_dir_if_present(project.path());
     let runtime = HostAdmissionTestRuntimeV1::profile(profile_root(home.path()))
         .await
         .unwrap();
@@ -1794,7 +1810,7 @@ async fn wipe_all_removes_registry_backed_profile_shard_without_enrollment_marke
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     write_profile_sharded_fixture(home.path(), project.path());
-    std::fs::remove_dir_all(project.path().join(".tracedecay")).unwrap();
+    remove_repo_local_marker_dir_if_present(project.path());
     let shard_root = profile_shard_root(home.path());
     let runtime = HostAdmissionTestRuntimeV1::profile(profile_root(home.path()))
         .await
@@ -1822,6 +1838,265 @@ async fn wipe_all_removes_registry_backed_profile_shard_without_enrollment_marke
     assert!(
         !shard_root.exists(),
         "wipe --all should remove registry-backed profile shard"
+    );
+}
+
+/// Durable debris in the shape of issue #765's wedge — a sealed code
+/// generation that can never seat plus its graph container and WAL. Wipe and
+/// forget must treat these as plain bytes: nothing in the escape hatches may
+/// open, replay, or await the graph runtime that would wedge on them.
+fn write_wedged_generation_debris(shard_root: &Path) {
+    let generations = shard_root.join("code-generations-v1");
+    std::fs::create_dir_all(generations.join("tracedecay.sealed")).unwrap();
+    std::fs::write(
+        generations.join("tracedecay.sealed").join("278bea7a-sealed"),
+        b"sealed generation that conflicts on every seat attempt",
+    )
+    .unwrap();
+    std::fs::write(shard_root.join("tracedecay.grafeo"), b"graph container").unwrap();
+    let wal = shard_root.join("tracedecay.grafeo.wal");
+    std::fs::create_dir_all(&wal).unwrap();
+    std::fs::write(wal.join("segment"), b"graph wal segment").unwrap();
+}
+
+/// Plants the repo-local enrollment marker that makes the profile shard a
+/// local wipe target, exactly as
+/// `wipe_local_returns_failure_when_a_selected_store_cannot_be_deleted` does.
+fn write_profile_sharded_enrollment_marker(project: &Path) {
+    let marker = EnrollmentMarker {
+        project_id: "proj_cli".to_string(),
+        storage_mode: StorageMode::ProfileSharded,
+    };
+    let marker_path = tracedecay_runtime_core::storage::legacy_enrollment_marker_path(project);
+    std::fs::create_dir_all(marker_path.parent().unwrap()).unwrap();
+    std::fs::write(&marker_path, serde_json::to_vec(&marker).unwrap()).unwrap();
+}
+
+/// The #765 operator journey: the managed daemon holds its lifetime shared
+/// lease and is wedged in a terminal activation retry loop, so it never
+/// exits. Without an installed service to stop, the holder never releases —
+/// wipe must refuse typed within its bound instead of advising an operator
+/// to wait forever ("retry after it finishes").
+#[test]
+fn wipe_refuses_within_bound_when_profile_lease_never_releases() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    write_profile_sharded_fixture(home.path(), project.path());
+    write_profile_sharded_enrollment_marker(project.path());
+    let shard_root = profile_shard_root(home.path());
+    write_wedged_generation_debris(&shard_root);
+    let profile = profile_root(home.path());
+    let hung_holder = tracedecay_runtime_core::lifecycle_lease::acquire_shared_for_profile(
+        &profile,
+        "daemon run",
+    )
+    .unwrap();
+
+    let mut command = tracedecay_command_without_daemon(home.path(), project.path());
+    command.args(["wipe", "--yes"]);
+    let started = Instant::now();
+    let output = run_with_timeout(command, cli_timeout());
+    let elapsed = started.elapsed();
+
+    drop(hung_holder);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "an unreleasable lease must be a typed refusal\nstderr:\n{stderr}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(60),
+        "wipe must refuse within its bound, took {elapsed:?}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("stopping the managed TraceDecay daemon service"),
+        "wipe must announce the daemon quiesce as typed progress\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("could not take the profile offline within"),
+        "the refusal must name the bound instead of advising an endless retry\nstderr:\n{stderr}"
+    );
+    assert!(
+        shard_root.exists(),
+        "a refused wipe must not delete anything"
+    );
+}
+
+/// Once the wedged holder is stopped (in production the supervisor's bounded
+/// service stop, SIGKILL at worst), the same wipe completes inside the lease
+/// bound and removes the wedge-shaped store without ever opening it.
+#[test]
+fn wipe_completes_within_bound_once_the_wedged_holder_stops() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    write_profile_sharded_fixture(home.path(), project.path());
+    write_profile_sharded_enrollment_marker(project.path());
+    let shard_root = profile_shard_root(home.path());
+    write_wedged_generation_debris(&shard_root);
+    let profile = profile_root(home.path());
+    let holder = tracedecay_runtime_core::lifecycle_lease::acquire_shared_for_profile(
+        &profile,
+        "daemon run",
+    )
+    .unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(2));
+        drop(holder);
+    });
+
+    let mut command = tracedecay_command_without_daemon(home.path(), project.path());
+    command.args(["wipe", "--yes"]);
+    let started = Instant::now();
+    let output = run_with_timeout(command, cli_timeout());
+    let elapsed = started.elapsed();
+    release.join().unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "wipe must complete once the holder releases within the bound\nstderr:\n{stderr}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(60),
+        "wipe must complete within its bound, took {elapsed:?}"
+    );
+    assert!(
+        stderr.contains("Wiped 1 project(s)"),
+        "wipe must report the removed project\nstderr:\n{stderr}"
+    );
+    assert_namespace_absent(
+        &shard_root,
+        "wipe left the wedge-shaped store",
+    );
+}
+
+/// `projects forget` is scoped-destructive, so it refuses without the global
+/// `--yes` confirmation and names both the preview and the keep-store escape.
+#[test]
+fn projects_forget_requires_the_yes_confirmation() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+
+    let mut command = tracedecay_command_without_daemon(home.path(), project.path());
+    command.args(["projects", "forget", "proj_anything"]);
+    let output = run_with_timeout(command, cli_timeout());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "forget without --yes must refuse\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("re-run with --yes"),
+        "the refusal must name the confirmation flag\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("--dry-run") && stderr.contains("--keep-store"),
+        "the refusal must name the preview and keep-store escapes\nstderr:\n{stderr}"
+    );
+}
+
+/// End-to-end #730 journey: two registered projects, forget one by id with no
+/// daemon running, and exactly that project's rows and store bytes are gone.
+#[tokio::test]
+async fn projects_forget_cli_removes_only_the_selected_project() {
+    let home = TempDir::new().unwrap();
+    let project_a = TempDir::new().unwrap();
+    let project_b = TempDir::new().unwrap();
+    let profile = profile_root(home.path());
+    let runtime = HostAdmissionTestRuntimeV1::profile(&profile).await.unwrap();
+    register_profile_sharded_store(&runtime, project_a.path(), "proj_forget_a").await;
+    register_profile_sharded_store(&runtime, project_b.path(), "proj_forget_b").await;
+    runtime.checkpoint_profile_database_for_test().await;
+    drop(runtime);
+    for project_id in ["proj_forget_a", "proj_forget_b"] {
+        let store = profile.join("projects").join(project_id);
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::write(store.join("tracedecay.db"), b"store bytes").unwrap();
+    }
+    write_wedged_generation_debris(&profile.join("projects").join("proj_forget_a"));
+
+    let mut command = tracedecay_command_without_daemon(home.path(), project_a.path());
+    command.args(["projects", "forget", "proj_forget_a", "--yes"]);
+    let output = run_with_timeout(command, cli_timeout());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "projects forget should succeed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("Forgot project proj_forget_a"),
+        "forget must report the retired identity\nstdout:\n{stdout}"
+    );
+    assert_namespace_absent(
+        &profile.join("projects").join("proj_forget_a"),
+        "forget left the selected project's store",
+    );
+    assert!(
+        profile
+            .join("projects")
+            .join("proj_forget_b")
+            .join("tracedecay.db")
+            .exists(),
+        "forget must not touch the sibling project's store"
+    );
+    let runtime = HostAdmissionTestRuntimeV1::profile(&profile).await.unwrap();
+    assert!(
+        runtime
+            .get_code_project("proj_forget_a")
+            .await
+            .unwrap()
+            .is_none(),
+        "the forgotten registry identity must be retired"
+    );
+    assert!(
+        runtime
+            .get_code_project("proj_forget_b")
+            .await
+            .unwrap()
+            .is_some(),
+        "the sibling registry identity must survive"
+    );
+    drop(runtime);
+}
+
+/// The preview is read-only and daemon-brokered like the other `projects`
+/// reads: it prints the exact removal plan and mutates nothing.
+#[tokio::test]
+async fn projects_forget_dry_run_previews_without_mutation() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    write_profile_sharded_fixture(home.path(), project.path());
+    let profile = profile_root(home.path());
+    let runtime = HostAdmissionTestRuntimeV1::profile(&profile).await.unwrap();
+    register_profile_sharded_store(&runtime, project.path(), "proj_cli").await;
+    runtime.checkpoint_profile_database_for_test().await;
+    drop(runtime);
+    let shard_root = profile_shard_root(home.path());
+
+    let mut command = tracedecay_command(home.path(), project.path());
+    command.args(["projects", "forget", "proj_cli", "--dry-run"]);
+    let output = run_with_timeout(command, cli_timeout());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "forget --dry-run should succeed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("Would forget project proj_cli"),
+        "the preview must name the resolved identity\nstdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("would delete store"),
+        "the preview must name the store directories\nstdout:\n{stdout}"
+    );
+    assert!(
+        shard_root.join("tracedecay.db").exists(),
+        "a dry run must not delete store bytes"
     );
 }
 

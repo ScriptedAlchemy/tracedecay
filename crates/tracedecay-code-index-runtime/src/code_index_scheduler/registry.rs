@@ -77,6 +77,19 @@ const ACTIVATION_RETRY_BACKOFF_CEILING: Duration = if cfg!(any(test, feature = "
     Duration::from_mins(10)
 };
 
+#[cfg_attr(
+    feature = "hotpath",
+    hotpath::measure(label = "code_index.graph_seat.noop_follow_up")
+)]
+pub(crate) fn retained_noop_requires_follow_up_wake(
+    serving_empty: bool,
+    activation_deferred: bool,
+    consumed_external_arrival: bool,
+    source_is_noop: bool,
+) -> bool {
+    serving_empty && !activation_deferred && consumed_external_arrival && source_is_noop
+}
+
 /// Whether this activation failure repeats the previous attempt's conflict
 /// verdict for the same sealed generation. A first Conflict can be a race
 /// with a concurrent publisher and retries like any transient failure, but
@@ -3205,14 +3218,19 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
                 // A retained-generation Noop on an empty serving slot consumed
                 // the mount wake, so the dirty-checkout successor rebuild never
-                // started. Follow-up notify starts that pass. Re-arm only for
-                // a consumed external arrival: a self-woken pass with no
-                // arrival reproduces the identical Noop, and re-notifying it
-                // spins a generation-less worktree forever.
-                if serving_empty
-                    && arrival.wake_micros().is_some()
-                    && matches!(&source_result, Ok(Ok(CodeIndexReconcileOutcomeV1::Noop(_))))
-                {
+                // started. Follow-up notify starts that pass, with two
+                // bounds. Not during graph-activation backoff: the scheduled
+                // retry is the only self-wake then, while external source
+                // hints still wake normally. And only for a consumed external
+                // arrival: a self-woken pass with no arrival reproduces the
+                // identical Noop, and re-notifying it spins a generation-less
+                // worktree forever.
+                if retained_noop_requires_follow_up_wake(
+                    serving_empty,
+                    graph_activation_deferred,
+                    arrival.wake_micros().is_some(),
+                    matches!(&source_result, Ok(Ok(CodeIndexReconcileOutcomeV1::Noop(_)))),
+                ) {
                     worker_wake.notify_one();
                 }
                 if let Ok(Ok(outcome)) = &source_result {

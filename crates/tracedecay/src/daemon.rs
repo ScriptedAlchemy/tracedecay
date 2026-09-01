@@ -219,6 +219,8 @@ pub(crate) mod retained_test_support;
 mod shutdown_coordination;
 mod shutdown_orchestration;
 mod shutdown_watchdog;
+#[cfg(feature = "hotpath")]
+pub use shutdown_watchdog::install_hotpath_shutdown_finalizer;
 mod store_shutdown;
 pub(crate) use core_admission::*;
 pub use core_client::*;
