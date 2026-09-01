@@ -13,7 +13,13 @@ use tracedecay_domain::{
 };
 
 use super::super::{CodeLexicalProjectionMetadataV1, LexicalFieldV1, ProjectedChunkV1};
+use super::schema::{LexicalArtifactLayoutV1, digest_domain_for_revision};
 use super::CodeLexicalArtifactErrorV1;
+
+pub(super) use super::schema::{
+    CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1, SERVING_INDEX_STEP_COUNT_V11,
+    STATISTICS_STEP_COUNT_V11,
+};
 
 /// Revision 2 adds durable finalization/integrity state. Revision 1 artifacts
 /// are branch-only staging files and must fail as incompatible rather than be
@@ -31,38 +37,10 @@ use super::CodeLexicalArtifactErrorV1;
 // graph-independent result hydration never needs the full sealed generation.
 // Revision 10 adds a finalized n-gram selectivity projection so phrase reads
 // can choose and page-prune by the rarest predicate without rescanning every
-// source-page shard.
-pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 10;
-const ARTIFACT_DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v10\0";
-const REQUIRED_ARTIFACT_INDEXES_V8: [(&str, &str, &[&str]); 7] = [
-    ("rows", "rows_by_chunk", &["chunk_id"]),
-    (
-        "term_postings",
-        "term_postings_by_term",
-        &["term", "field", "document_id"],
-    ),
-    (
-        "term_postings",
-        "term_postings_by_document",
-        &["document_id", "field", "term", "frequency"],
-    ),
-    (
-        "term_postings",
-        "term_postings_by_document_term",
-        &["document_id", "term", "field", "frequency"],
-    ),
-    ("term_stats", "term_stats_by_term", &["term", "field"]),
-    (
-        "exact_postings",
-        "exact_postings_by_document",
-        &["document_id", "field", "term"],
-    ),
-    (
-        "ngram_postings",
-        "ngram_postings_by_ngram",
-        &["kind", "ngram", "page_ordinal", "cardinality"],
-    ),
-];
+// source-page shard. Revision 11 interns terms to integer IDs, stores
+// integer field codes, drops serving indexes that EXPLAIN QUERY PLAN never
+// uses, and writes compact row payloads that omit identities already stored
+// as columns or generation metadata.
 pub(super) const RECEIPT_RESERVATION_BYTES: usize = 16 * 1024;
 pub(super) const SECTION_NAMES: [&str; 11] = [
     "source_pages",
@@ -323,8 +301,9 @@ fn validate_page_base_sections(
 
 pub(super) fn verify_required_artifact_indexes(
     connection: &Connection,
+    layout: LexicalArtifactLayoutV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    verify_artifact_table_layout(connection)?;
+    verify_artifact_table_layout(connection, layout)?;
     let mut statement = connection
         .prepare("SELECT name, desc, coll FROM pragma_index_xinfo(?1) WHERE key = 1 ORDER BY seqno")
         .map_err(|error| {
@@ -332,7 +311,7 @@ pub(super) fn verify_required_artifact_indexes(
                 "artifact index schema is unreadable: {error}"
             ))
         })?;
-    for (table, index, expected_columns) in REQUIRED_ARTIFACT_INDEXES_V8 {
+    for (table, index, expected_columns) in layout.required_indexes() {
         let partial: Option<i64> = connection
             .query_row(
                 "SELECT partial FROM pragma_index_list(?1) WHERE name = ?2",
@@ -373,7 +352,8 @@ pub(super) fn verify_required_artifact_indexes(
                 .eq(expected_columns.iter().map(|column| (*column, 0, "BINARY")))
         {
             return Err(CodeLexicalArtifactErrorV1::Incompatible(format!(
-                "artifact index {index} has columns {columns:?}; revision {CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1} requires {expected_columns:?}"
+                "artifact index {index} has columns {columns:?}; revision {} requires {expected_columns:?}",
+                layout.revision()
             )));
         }
     }
@@ -382,6 +362,7 @@ pub(super) fn verify_required_artifact_indexes(
 
 pub(super) fn verify_artifact_table_layout(
     connection: &Connection,
+    layout: LexicalArtifactLayoutV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     let source_columns = connection
         .prepare(
@@ -535,10 +516,95 @@ pub(super) fn verify_artifact_table_layout(
             .eq(expected_statistics)
     {
         return Err(CodeLexicalArtifactErrorV1::Incompatible(format!(
-            "artifact ngram statistics table has columns {statistics_columns:?} and without-rowid state {statistics_without_rowid:?}; revision {CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1} requires finalized selectivity statistics"
+            "artifact ngram statistics table has columns {statistics_columns:?} and without-rowid state {statistics_without_rowid:?}; revision {} requires finalized selectivity statistics",
+            layout.revision()
+        )));
+    }
+    if layout == LexicalArtifactLayoutV1::V11 {
+        verify_interned_term_layout(connection)?;
+    }
+    Ok(())
+}
+
+fn verify_interned_term_layout(
+    connection: &Connection,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let without_rowid: Option<i64> = connection
+        .query_row(
+            "SELECT wr FROM pragma_table_list WHERE schema = 'main' AND name = 'term_postings' AND type = 'table'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| {
+            CodeLexicalArtifactErrorV1::Incompatible(format!(
+                "artifact term posting schema is unreadable: {error}"
+            ))
+        })?;
+    let columns = table_columns(connection, "term_postings")?;
+    let expected = [
+        ("term_id", "INTEGER", 1, 1),
+        ("field", "INTEGER", 1, 2),
+        ("document_id", "INTEGER", 1, 3),
+        ("frequency", "INTEGER", 1, 0),
+    ];
+    if without_rowid != Some(1)
+        || !columns
+            .iter()
+            .map(|(name, column_type, not_null, primary_key)| {
+                (name.as_str(), column_type.as_str(), *not_null, *primary_key)
+            })
+            .eq(expected)
+    {
+        return Err(CodeLexicalArtifactErrorV1::Incompatible(format!(
+            "artifact term posting table has columns {columns:?}; revision 11 requires interned term identifiers"
+        )));
+    }
+    let vocabulary = table_columns(connection, "vocabulary")?;
+    let expected_vocabulary = [
+        ("term_id", "INTEGER", 0, 1),
+        ("term", "TEXT", 1, 0),
+        ("in_fuzzy", "INTEGER", 1, 0),
+    ];
+    if !vocabulary
+        .iter()
+        .map(|(name, column_type, not_null, primary_key)| {
+            (name.as_str(), column_type.as_str(), *not_null, *primary_key)
+        })
+        .eq(expected_vocabulary)
+    {
+        return Err(CodeLexicalArtifactErrorV1::Incompatible(format!(
+            "artifact vocabulary table has columns {vocabulary:?}; revision 11 requires interned terms"
         )));
     }
     Ok(())
+}
+
+fn table_columns(
+    connection: &Connection,
+    table: &str,
+) -> Result<Vec<(String, String, i64, i64)>, CodeLexicalArtifactErrorV1> {
+    connection
+        .prepare(&format!(
+            "SELECT name, type, [notnull], pk FROM pragma_table_xinfo('{table}') WHERE hidden = 0 ORDER BY cid"
+        ))
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(|error| {
+            CodeLexicalArtifactErrorV1::Incompatible(format!(
+                "artifact {table} columns are unreadable: {error}"
+            ))
+        })
 }
 
 pub(super) fn ngram_page_digest<'a>(
@@ -831,7 +897,7 @@ pub struct CodeLexicalImportMembershipWitnessV1 {
     pub evidence: CodeIndexImportEvidenceV1,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ArtifactRowV1 {
     pub id: CodeSearchChunkId,
@@ -902,9 +968,10 @@ pub(super) fn artifact_digest(
     import_dictionary_digest: &ManifestDigest,
     source_cumulative_digest: &ManifestDigest,
     sections: &[CodeLexicalArtifactSectionDigestV1],
+    format_revision: u32,
 ) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
     manifest_digest(
-        ARTIFACT_DIGEST_DOMAIN,
+        digest_domain_for_revision(format_revision)?,
         &(
             metadata_digest.as_str(),
             source_state_digest.as_str(),
@@ -917,7 +984,7 @@ pub(super) fn artifact_digest(
             import_dictionary_digest.as_str(),
             source_cumulative_digest.as_str(),
             sections,
-            CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1,
+            format_revision,
         ),
     )
 }

@@ -30,11 +30,14 @@ use tracedecay_private_fs::{create_private_file_retained, open_private_file};
 use super::format::{
     BASE_SECTION_NAMES, CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1,
     CodeLexicalArtifactSectionDigestV1, RECEIPT_RESERVATION_BYTES, SECTION_NAMES,
-    VerifiedCodeLexicalArtifactV1, absorb_page_base_sections_receipt, artifact_digest,
-    decode_padded_receipt, decode_padded_receipt_with_control, encode_field,
-    finish_base_section_receipt_fold, initial_base_section_receipt_fold, metadata_digest,
-    new_verified_receipt, padded_receipt, verify_artifact_table_layout,
-    verify_required_artifact_indexes,
+    SERVING_INDEX_STEP_COUNT_V11, STATISTICS_STEP_COUNT_V11, VerifiedCodeLexicalArtifactV1,
+    absorb_page_base_sections_receipt, artifact_digest, decode_padded_receipt,
+    decode_padded_receipt_with_control, finish_base_section_receipt_fold,
+    initial_base_section_receipt_fold, metadata_digest, new_verified_receipt, padded_receipt,
+    verify_artifact_table_layout, verify_required_artifact_indexes,
+};
+use super::schema::{
+    LexicalArtifactLayoutV1, field_code, field_code_from_encoded, intern_terms, stable_term_id,
 };
 use super::postings::document_ngram_scratch;
 use super::prepared::{
@@ -56,10 +59,11 @@ const PROGRESS_TAIL_QUERY: &str = "SELECT page_ordinal, import_dictionary_digest
      FROM source_pages ORDER BY page_ordinal DESC LIMIT 1";
 const FINALIZATION_PROGRESS_INTERVAL_OPS: i32 = 4_096;
 const FINALIZATION_CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(1);
-// A plan entry owns one document id and one posting reference. Three words
-// cover its portable 32-bit layout and conservatively exceed its 64-bit
-// layout; general allocator metadata remains outside the ledger contract.
-const TERM_INSERT_PLAN_BYTES_PER_REF: usize = 3 * std::mem::size_of::<usize>();
+// A plan entry owns document id, content-addressed term id, integer field
+// code, and one posting reference. Four words match the 64-bit layout and
+// cover the 32-bit pointer; general allocator metadata remains outside the
+// ledger contract.
+const TERM_INSERT_PLAN_BYTES_PER_REF: usize = 4 * std::mem::size_of::<usize>();
 const TERM_INSERT_CONTROL_INTERVAL: usize = 4_096;
 const TERM_INSERT_SORT_RUN_ROWS: usize = 4_096;
 // An exact-posting plan entry owns one document id plus a field/term BLOB
@@ -81,16 +85,14 @@ const BUILDER_MUTATION_APPEND: u8 = 1;
 #[derive(Clone, Copy)]
 struct PreparedTermInsertRefV1<'a> {
     document_id: i64,
+    term_id: i64,
+    field: i64,
     posting: &'a PreparedTermPostingV1,
 }
 
 impl PreparedTermInsertRefV1<'_> {
-    fn key(&self) -> (&str, &str, i64) {
-        (
-            self.posting.field.as_str(),
-            self.posting.term.as_str(),
-            self.document_id,
-        )
+    fn key(&self) -> (i64, i64, i64) {
+        (self.term_id, self.field, self.document_id)
     }
 }
 
@@ -435,7 +437,7 @@ impl FinalizationSectionV1 {
             }
             Self::Rows => "SELECT document_id, chunk_id, row FROM rows ORDER BY document_id",
             Self::TermPostings => {
-                "SELECT field, term, document_id, frequency FROM term_postings ORDER BY field, term, document_id"
+                "SELECT term_id, field, document_id, frequency FROM term_postings ORDER BY term_id, field, document_id"
             }
             Self::ExactPostings => {
                 "SELECT field, term, document_id FROM exact_postings ORDER BY field, term, document_id"
@@ -445,9 +447,9 @@ impl FinalizationSectionV1 {
             }
             Self::FieldStatistics => "SELECT field, total_length FROM field_stats ORDER BY field",
             Self::TermStatistics => {
-                "SELECT field, term, document_frequency FROM term_stats ORDER BY field, term"
+                "SELECT term_id, field, document_frequency FROM term_stats ORDER BY term_id, field"
             }
-            Self::Vocabulary => "SELECT term FROM vocabulary ORDER BY term",
+            Self::Vocabulary => "SELECT term_id, term, in_fuzzy FROM vocabulary ORDER BY term_id",
         }
     }
 
@@ -485,10 +487,10 @@ impl FinalizationSectionV1 {
                 "SELECT document_id, chunk_id, row FROM rows WHERE document_id > ?1 ORDER BY document_id LIMIT ?2"
             }
             (Self::TermPostings, false) => {
-                "SELECT field, term, document_id, frequency FROM term_postings ORDER BY field, term, document_id LIMIT ?1"
+                "SELECT term_id, field, document_id, frequency FROM term_postings ORDER BY term_id, field, document_id LIMIT ?1"
             }
             (Self::TermPostings, true) => {
-                "SELECT field, term, document_id, frequency FROM term_postings WHERE (field, term, document_id) > (?1, ?2, ?3) ORDER BY field, term, document_id LIMIT ?4"
+                "SELECT term_id, field, document_id, frequency FROM term_postings WHERE (term_id, field, document_id) > (?1, ?2, ?3) ORDER BY term_id, field, document_id LIMIT ?4"
             }
             (Self::ExactPostings, false) => {
                 "SELECT field, term, document_id FROM exact_postings ORDER BY field, term, document_id LIMIT ?1"
@@ -509,14 +511,16 @@ impl FinalizationSectionV1 {
                 "SELECT field, total_length FROM field_stats WHERE field > ?1 ORDER BY field LIMIT ?2"
             }
             (Self::TermStatistics, false) => {
-                "SELECT field, term, document_frequency FROM term_stats ORDER BY field, term LIMIT ?1"
+                "SELECT term_id, field, document_frequency FROM term_stats ORDER BY term_id, field LIMIT ?1"
             }
             (Self::TermStatistics, true) => {
-                "SELECT field, term, document_frequency FROM term_stats WHERE (field, term) > (?1, ?2) ORDER BY field, term LIMIT ?3"
+                "SELECT term_id, field, document_frequency FROM term_stats WHERE (term_id, field) > (?1, ?2) ORDER BY term_id, field LIMIT ?3"
             }
-            (Self::Vocabulary, false) => "SELECT term FROM vocabulary ORDER BY term LIMIT ?1",
+            (Self::Vocabulary, false) => {
+                "SELECT term_id, term, in_fuzzy FROM vocabulary ORDER BY term_id LIMIT ?1"
+            }
             (Self::Vocabulary, true) => {
-                "SELECT term FROM vocabulary WHERE term > ?1 ORDER BY term LIMIT ?2"
+                "SELECT term_id, term, in_fuzzy FROM vocabulary WHERE term_id > ?1 ORDER BY term_id LIMIT ?2"
             }
         }
     }
@@ -547,6 +551,10 @@ enum PersistedFinalizationKeyV1 {
         field: String,
         term: String,
     },
+    IntegerPair {
+        first: i64,
+        second: i64,
+    },
 }
 
 impl PersistedFinalizationKeyV1 {
@@ -562,18 +570,18 @@ impl PersistedFinalizationKeyV1 {
                 Self::Blob(_),
                 FinalizationSectionV1::ImportIntegrity | FinalizationSectionV1::ImportEvidence
             ) | (
-                Self::TextTextInteger { .. },
-                FinalizationSectionV1::TermPostings
+                Self::IntegerIntegerInteger { .. },
+                FinalizationSectionV1::TermPostings | FinalizationSectionV1::NgramPostings
             ) | (
                 Self::TextBlobInteger { .. },
                 FinalizationSectionV1::ExactPostings
             ) | (
-                Self::IntegerIntegerInteger { .. },
-                FinalizationSectionV1::NgramPostings
-            ) | (
-                Self::Text(_),
+                Self::Integer(_),
                 FinalizationSectionV1::FieldStatistics | FinalizationSectionV1::Vocabulary
-            ) | (Self::TextText { .. }, FinalizationSectionV1::TermStatistics)
+            ) | (
+                Self::IntegerPair { .. },
+                FinalizationSectionV1::TermStatistics
+            )
         )
     }
 }
@@ -837,6 +845,7 @@ impl PreparedCodeLexicalArtifactBatchV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl CodeLexicalArtifactBuilderV1 {
     pub fn create(
         path: impl AsRef<Path>,
@@ -922,7 +931,7 @@ impl CodeLexicalArtifactBuilderV1 {
         let mutation_gate = register_builder_mutation_gate(&connection)?;
         hotpath::measure_block!("query.artifact.open.schema_verify", {
             require_integrity(&connection, control)?;
-            verify_artifact_table_layout(&connection)?;
+            verify_artifact_table_layout(&connection, LexicalArtifactLayoutV1::V11)?;
             verify_builder_mutation_gate_schema(&connection)
         })?;
         let expected_digest = hotpath::measure_block!("query.artifact.open.metadata_restore", {
@@ -947,7 +956,7 @@ impl CodeLexicalArtifactBuilderV1 {
                 .as_ref()
                 .is_some_and(|state| state.phase == PersistedFinalizationPhaseV1::Digest)
         {
-            verify_required_artifact_indexes(&connection)?;
+            verify_required_artifact_indexes(&connection, LexicalArtifactLayoutV1::V11)?;
         }
         validate_contiguous_pages(&connection, control)?;
         checkpoint(control)?;
@@ -965,6 +974,7 @@ impl CodeLexicalArtifactBuilderV1 {
         })
     }
 
+    #[hotpath::skip]
     pub fn progress(
         &self,
     ) -> Result<CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactErrorV1> {
@@ -974,6 +984,7 @@ impl CodeLexicalArtifactBuilderV1 {
 
     /// The ledger bytes charged regardless of page content: the SQLite
     /// page-cache authority plus the builder-retained projection metadata.
+    #[hotpath::skip]
     pub fn fixed_ledger_charge_bytes(&self) -> usize {
         self.fixed_ledger_charge_bytes
     }
@@ -1588,6 +1599,7 @@ impl CodeLexicalArtifactBuilderV1 {
             source.import_dictionary_digest(),
             source.cumulative_digest(),
             &sections,
+            CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1,
         )?;
         let file_size_bytes = sqlite_file_size(&transaction)?;
         let receipt = new_verified_receipt(
@@ -2195,15 +2207,14 @@ fn prepare_term_insert_plan<'a>(
         checkpoint(control)?;
         for document in &page.documents {
             checkpoint(control)?;
-            entries.extend(
-                document
-                    .term_postings
-                    .iter()
-                    .map(|posting| PreparedTermInsertRefV1 {
-                        document_id: document.document_id,
-                        posting,
-                    }),
-            );
+            for posting in &document.term_postings {
+                entries.push(PreparedTermInsertRefV1 {
+                    document_id: document.document_id,
+                    term_id: stable_term_id(&posting.term),
+                    field: field_code_from_encoded(&posting.field)?,
+                    posting,
+                });
+            }
         }
     }
     for run in entries.chunks_mut(TERM_INSERT_SORT_RUN_ROWS) {
@@ -2902,9 +2913,10 @@ fn append_prepared_postings(
     exact_insert_plan: &mut PreparedExactInsertPlanV1<'_>,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let term_ids = intern_terms(transaction, pages, control)?;
     let mut term_statement = transaction
         .prepare_cached(
-            "INSERT INTO term_postings(field, term, document_id, frequency) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO term_postings(term_id, field, document_id, frequency) VALUES (?1, ?2, ?3, ?4)",
         )
         .map_err(sqlite_error)?;
     // Plain INSERT, not `INSERT OR IGNORE`: `exact_postings` is
@@ -2936,10 +2948,15 @@ fn append_prepared_postings(
         if inserted_term_rows.is_multiple_of(TERM_INSERT_CONTROL_INTERVAL) {
             checkpoint(control)?;
         }
+        if term_ids.get(entry.posting.term.as_str()) != Some(&entry.term_id) {
+            return Err(CodeLexicalArtifactErrorV1::Contract(
+                "lexical artifact term intern omitted a planned posting".to_owned(),
+            ));
+        }
         term_statement
             .execute(params![
-                entry.posting.field.as_str(),
-                entry.posting.term.as_str(),
+                entry.term_id,
+                entry.field,
                 entry.document_id,
                 entry.posting.frequency
             ])
@@ -3125,20 +3142,20 @@ fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactError
                 row BLOB NOT NULL
             );
             CREATE TABLE term_postings (
-                field TEXT NOT NULL,
-                term TEXT NOT NULL,
+                term_id INTEGER NOT NULL,
+                field INTEGER NOT NULL,
                 document_id INTEGER NOT NULL,
                 frequency INTEGER NOT NULL,
-                PRIMARY KEY(field, term, document_id)
+                PRIMARY KEY(term_id, field, document_id)
             ) WITHOUT ROWID;
             CREATE TABLE term_stats (
-                field TEXT NOT NULL,
-                term TEXT NOT NULL,
+                term_id INTEGER NOT NULL,
+                field INTEGER NOT NULL,
                 document_frequency INTEGER NOT NULL,
-                PRIMARY KEY(field, term)
+                PRIMARY KEY(term_id, field)
             ) WITHOUT ROWID;
             CREATE TABLE field_stats (
-                field TEXT PRIMARY KEY,
+                field INTEGER PRIMARY KEY,
                 total_length INTEGER NOT NULL
             ) WITHOUT ROWID;
             CREATE TABLE exact_postings (
@@ -3161,7 +3178,11 @@ fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactError
                 document_frequency INTEGER NOT NULL CHECK(document_frequency > 0),
                 PRIMARY KEY(kind, ngram)
             ) WITHOUT ROWID;
-            CREATE TABLE vocabulary (term TEXT PRIMARY KEY) WITHOUT ROWID;
+            CREATE TABLE vocabulary (
+                term_id INTEGER PRIMARY KEY,
+                term TEXT NOT NULL UNIQUE,
+                in_fuzzy INTEGER NOT NULL CHECK(in_fuzzy IN (0, 1))
+            );
             CREATE TRIGGER content_epoch_source_pages_insert AFTER INSERT ON source_pages BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
             CREATE TRIGGER content_epoch_document_integrity_insert AFTER INSERT ON document_integrity BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
             CREATE TRIGGER content_epoch_import_integrity_insert AFTER INSERT ON import_integrity BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
@@ -3316,7 +3337,7 @@ fn advance_pre_digest_work(
                     "lexical artifact statistics step overflowed".to_owned(),
                 )
             })?;
-            if state.section_ordinal == 3 {
+            if state.section_ordinal == STATISTICS_STEP_COUNT_V11 {
                 state.phase = PersistedFinalizationPhaseV1::Indexes;
                 state.section_ordinal = 0;
             }
@@ -3331,8 +3352,8 @@ fn advance_pre_digest_work(
                     "lexical artifact serving-index step overflowed".to_owned(),
                 )
             })?;
-            if state.section_ordinal == 8 {
-                verify_required_artifact_indexes(transaction)?;
+            if state.section_ordinal == SERVING_INDEX_STEP_COUNT_V11 {
+                verify_required_artifact_indexes(transaction, LexicalArtifactLayoutV1::V11)?;
                 state.phase = PersistedFinalizationPhaseV1::Digest;
                 state.section_ordinal = 0;
                 state.section_accumulator = initial_section_accumulator(SECTION_NAMES[0])?.to_vec();
@@ -3477,17 +3498,17 @@ fn derive_statistics_step(
         }),
         1 => hotpath::measure_block!("query.artifact.finalization.derive_term_stats", {
             transaction.execute_batch(
-                "INSERT INTO term_stats(field, term, document_frequency) SELECT field, term, COUNT(*) FROM term_postings GROUP BY field, term;
+                "INSERT INTO term_stats(term_id, field, document_frequency) SELECT term_id, field, COUNT(*) FROM term_postings GROUP BY term_id, field;
                  CREATE TRIGGER frozen_term_stats_insert BEFORE INSERT ON term_stats BEGIN SELECT RAISE(ABORT, 'frozen lexical term statistics'); END;
                  CREATE TRIGGER frozen_term_stats_update BEFORE UPDATE ON term_stats BEGIN SELECT RAISE(ABORT, 'frozen lexical term statistics'); END;
                  CREATE TRIGGER frozen_term_stats_delete BEFORE DELETE ON term_stats BEGIN SELECT RAISE(ABORT, 'frozen lexical term statistics'); END;",
             )
         }),
         2 => hotpath::measure_block!("query.artifact.finalization.derive_vocabulary", {
-            let subtoken = encode_field(LexicalFieldV1::Subtoken)?;
+            let subtoken = field_code(LexicalFieldV1::Subtoken);
             transaction
                 .execute(
-                    "INSERT INTO vocabulary(term) SELECT DISTINCT term FROM term_postings WHERE field != ?1",
+                    "UPDATE vocabulary SET in_fuzzy = 1 WHERE term_id IN (SELECT DISTINCT term_id FROM term_postings WHERE field != ?1)",
                     [subtoken],
                 )
                 .and_then(|_| {
@@ -3518,30 +3539,12 @@ fn build_serving_index_step(
             transaction.execute_batch("CREATE UNIQUE INDEX rows_by_chunk ON rows(chunk_id)")
         ),
         1 => hotpath::measure_block!(
-            "query.artifact.finalization.index.term_postings_by_term",
+            "query.artifact.finalization.index.term_postings_by_document",
             transaction.execute_batch(
-                "CREATE INDEX term_postings_by_term ON term_postings(term, field, document_id)",
+                "CREATE INDEX term_postings_by_document ON term_postings(document_id, term_id, field, frequency)",
             )
         ),
         2 => hotpath::measure_block!(
-            "query.artifact.finalization.index.term_postings_by_document",
-            transaction.execute_batch(
-                "CREATE INDEX term_postings_by_document ON term_postings(document_id, field, term, frequency)",
-            )
-        ),
-        3 => hotpath::measure_block!(
-            "query.artifact.finalization.index.term_postings_by_document_term",
-            transaction.execute_batch(
-                "CREATE INDEX term_postings_by_document_term ON term_postings(document_id, term, field, frequency)",
-            )
-        ),
-        4 => hotpath::measure_block!(
-            "query.artifact.finalization.index.term_stats_by_term",
-            transaction.execute_batch(
-                "CREATE INDEX term_stats_by_term ON term_stats(term, field)",
-            )
-        ),
-        5 => hotpath::measure_block!(
             "query.artifact.finalization.index.exact_postings_by_document",
             transaction.execute_batch(
                 "CREATE INDEX exact_postings_by_document ON exact_postings(document_id, field, term)",
@@ -3558,13 +3561,13 @@ fn build_serving_index_step(
         // table scan, under 4 s covered in both regimes). Uniqueness of the
         // (kind, ngram, page_ordinal) prefix is already guaranteed by the
         // table primary key, so the wider UNIQUE declaration loses nothing.
-        6 => hotpath::measure_block!(
+        3 => hotpath::measure_block!(
             "query.artifact.finalization.index.ngram_postings_by_ngram",
             transaction.execute_batch(
                 "CREATE UNIQUE INDEX ngram_postings_by_ngram ON ngram_postings(kind, ngram, page_ordinal, cardinality)",
             )
         ),
-        7 => hotpath::measure_block!(
+        4 => hotpath::measure_block!(
             "query.artifact.finalization.ngram_statistics",
             transaction.execute_batch(
                 "INSERT INTO ngram_statistics(kind, ngram, document_frequency)
@@ -3729,8 +3732,8 @@ fn validate_finalization_state(
         0
     };
     let maximum_ordinal = match state.phase {
-        PersistedFinalizationPhaseV1::Statistics => 3,
-        PersistedFinalizationPhaseV1::Indexes => 8,
+        PersistedFinalizationPhaseV1::Statistics => STATISTICS_STEP_COUNT_V11,
+        PersistedFinalizationPhaseV1::Indexes => SERVING_INDEX_STEP_COUNT_V11,
         PersistedFinalizationPhaseV1::Digest => section_count,
     };
     if state.section_ordinal > maximum_ordinal
@@ -3825,7 +3828,9 @@ fn advance_section_rows(
         (
             FinalizationSectionV1::SourcePages
             | FinalizationSectionV1::DocumentIntegrity
-            | FinalizationSectionV1::Rows,
+            | FinalizationSectionV1::Rows
+            | FinalizationSectionV1::FieldStatistics
+            | FinalizationSectionV1::Vocabulary,
             Some(PersistedFinalizationKeyV1::Integer(value)),
         ) => advance_native_section_rows(
             transaction,
@@ -3848,16 +3853,16 @@ fn advance_section_rows(
         ),
         (
             FinalizationSectionV1::TermPostings,
-            Some(PersistedFinalizationKeyV1::TextTextInteger {
-                field,
-                term,
-                document_id,
+            Some(PersistedFinalizationKeyV1::IntegerIntegerInteger {
+                page_ordinal,
+                kind,
+                ngram,
             }),
         ) => advance_native_section_rows(
             transaction,
             section,
             section.seek_query(true),
-            params![field, term, document_id, limit],
+            params![page_ordinal, kind, ngram, limit],
             state,
             control,
         ),
@@ -3892,24 +3897,13 @@ fn advance_section_rows(
             control,
         ),
         (
-            FinalizationSectionV1::FieldStatistics | FinalizationSectionV1::Vocabulary,
-            Some(PersistedFinalizationKeyV1::Text(value)),
-        ) => advance_native_section_rows(
-            transaction,
-            section,
-            section.seek_query(true),
-            params![value, limit],
-            state,
-            control,
-        ),
-        (
             FinalizationSectionV1::TermStatistics,
-            Some(PersistedFinalizationKeyV1::TextText { field, term }),
+            Some(PersistedFinalizationKeyV1::IntegerPair { first, second }),
         ) => advance_native_section_rows(
             transaction,
             section,
             section.seek_query(true),
-            params![field, term, limit],
+            params![first, second, limit],
             state,
             control,
         ),
@@ -3999,11 +3993,13 @@ fn native_row_key(
         FinalizationSectionV1::ImportIntegrity | FinalizationSectionV1::ImportEvidence => Ok(
             PersistedFinalizationKeyV1::Blob(row.get(0).map_err(sqlite_error)?),
         ),
-        FinalizationSectionV1::TermPostings => Ok(PersistedFinalizationKeyV1::TextTextInteger {
-            field: row.get(0).map_err(sqlite_error)?,
-            term: row.get(1).map_err(sqlite_error)?,
-            document_id: row.get(2).map_err(sqlite_error)?,
-        }),
+        FinalizationSectionV1::TermPostings => {
+            Ok(PersistedFinalizationKeyV1::IntegerIntegerInteger {
+                page_ordinal: row.get(0).map_err(sqlite_error)?,
+                kind: row.get(1).map_err(sqlite_error)?,
+                ngram: row.get(2).map_err(sqlite_error)?,
+            })
+        }
         FinalizationSectionV1::ExactPostings => Ok(PersistedFinalizationKeyV1::TextBlobInteger {
             field: row.get(0).map_err(sqlite_error)?,
             term: row.get(1).map_err(sqlite_error)?,
@@ -4017,11 +4013,11 @@ fn native_row_key(
             })
         }
         FinalizationSectionV1::FieldStatistics | FinalizationSectionV1::Vocabulary => Ok(
-            PersistedFinalizationKeyV1::Text(row.get(0).map_err(sqlite_error)?),
+            PersistedFinalizationKeyV1::Integer(row.get(0).map_err(sqlite_error)?),
         ),
-        FinalizationSectionV1::TermStatistics => Ok(PersistedFinalizationKeyV1::TextText {
-            field: row.get(0).map_err(sqlite_error)?,
-            term: row.get(1).map_err(sqlite_error)?,
+        FinalizationSectionV1::TermStatistics => Ok(PersistedFinalizationKeyV1::IntegerPair {
+            first: row.get(0).map_err(sqlite_error)?,
+            second: row.get(1).map_err(sqlite_error)?,
         }),
     }
 }
@@ -4800,6 +4796,7 @@ fn verify_finalized_artifact(
         receipt.import_dictionary_digest(),
         receipt.source_cumulative_digest(),
         &sections,
+        receipt.format_revision(),
     )?;
     if &digest != receipt.artifact_digest() {
         return Err(CodeLexicalArtifactErrorV1::Corrupt(
@@ -5083,8 +5080,8 @@ mod tests {
         let transaction = connection
             .transaction()
             .expect("start serving-index transaction");
-        build_serving_index_step(&transaction, 6).expect("build ngram serving index");
-        build_serving_index_step(&transaction, 7).expect("build ngram serving statistics");
+        build_serving_index_step(&transaction, 3).expect("build ngram serving index");
+        build_serving_index_step(&transaction, 4).expect("build ngram serving statistics");
         transaction.commit().expect("commit ngram serving index");
 
         let unique: i64 = connection
@@ -5226,10 +5223,17 @@ mod tests {
         let _mutation_authority = create_mutable_test_schema(&connection);
         let transaction = connection.transaction().expect("start seed transaction");
         for document_id in 0..2_048i64 {
+            let term = format!("term-{document_id:04}");
             transaction
                 .execute(
-                    "INSERT INTO term_postings(field, term, document_id, frequency) VALUES ('body', ?1, ?2, 1)",
-                    params![format!("term-{document_id:04}"), document_id],
+                    "INSERT INTO vocabulary(term_id, term, in_fuzzy) VALUES (?1, ?2, 0)",
+                    params![document_id + 1, term],
+                )
+                .expect("seed vocabulary term");
+            transaction
+                .execute(
+                    "INSERT INTO term_postings(term_id, field, document_id, frequency) VALUES (?1, 4, ?2, 1)",
+                    params![document_id + 1, document_id],
                 )
                 .expect("seed term posting");
             transaction
@@ -5243,14 +5247,14 @@ mod tests {
         let transaction = connection
             .transaction()
             .expect("start index-build transaction");
-        for ordinal in [2, 5] {
+        for ordinal in [1, 2] {
             build_serving_index_step(&transaction, ordinal)
                 .expect("build document integrity index");
         }
         transaction.commit().expect("commit integrity index");
 
         for query in [
-            "SELECT field, term, frequency FROM term_postings INDEXED BY term_postings_by_document WHERE document_id = ?1 ORDER BY field, term",
+            "SELECT field, term_id, frequency FROM term_postings INDEXED BY term_postings_by_document WHERE document_id = ?1 ORDER BY term_id, field",
             "SELECT field, term FROM exact_postings WHERE document_id = ?1 ORDER BY field, term",
         ] {
             let mut statement = connection.prepare(query).expect("prepare integrity query");
@@ -5308,7 +5312,7 @@ mod tests {
             .expect("seed row");
         connection
             .execute(
-                "INSERT INTO term_postings(field, term, document_id, frequency) VALUES ('field', 'term', 0, 1)",
+                "INSERT INTO term_postings(term_id, field, document_id, frequency) VALUES (1, 1, 0, 1)",
                 [],
             )
             .expect("seed term posting");
@@ -5328,23 +5332,26 @@ mod tests {
             .expect("seed ngram posting");
         connection
             .execute(
-                "INSERT INTO field_stats(field, total_length) VALUES ('field', 1)",
+                "INSERT INTO field_stats(field, total_length) VALUES (1, 1)",
                 [],
             )
             .expect("seed field statistic");
         connection
             .execute(
-                "INSERT INTO term_stats(field, term, document_frequency) VALUES ('field', 'term', 1)",
+                "INSERT INTO term_stats(term_id, field, document_frequency) VALUES (1, 1, 1)",
                 [],
             )
             .expect("seed term statistic");
         connection
-            .execute("INSERT INTO vocabulary(term) VALUES ('term')", [])
+            .execute(
+                "INSERT INTO vocabulary(term_id, term, in_fuzzy) VALUES (1, 'term', 1)",
+                [],
+            )
             .expect("seed vocabulary");
         let transaction = connection
             .unchecked_transaction()
             .expect("start ngram serving-index transaction");
-        build_serving_index_step(&transaction, 6)
+        build_serving_index_step(&transaction, 3)
             .expect("build ngram serving index before digest verification");
         transaction.commit().expect("commit ngram serving index");
 
@@ -5380,10 +5387,10 @@ mod tests {
                 statement.query(params![vec![0u8], 1i64])
             }
             FinalizationSectionV1::TermPostings => {
-                statement.query(params!["field", "term", 0i64, 1i64])
+                statement.query(params![0i64, 0i64, 0i64, 1i64])
             }
             FinalizationSectionV1::TermStatistics => {
-                statement.query(params!["field", "term", 1i64])
+                statement.query(params![0i64, 0i64, 1i64])
             }
             FinalizationSectionV1::ExactPostings => {
                 statement.query(params!["field", vec![0u8], 0i64, 1i64])
@@ -5392,7 +5399,7 @@ mod tests {
                 statement.query(params![0i64, 0i64, 0i64, 1i64])
             }
             FinalizationSectionV1::FieldStatistics | FinalizationSectionV1::Vocabulary => {
-                statement.query(params!["", 1i64])
+                statement.query(params![0i64, 1i64])
             }
         }
         .map_err(sqlite_error)?;

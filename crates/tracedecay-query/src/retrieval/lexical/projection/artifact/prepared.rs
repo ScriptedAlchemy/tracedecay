@@ -13,6 +13,8 @@ use super::format::{
     ArtifactRowV1, BASE_SECTION_NAMES, PageBaseSectionReceiptBuilderV1, encode_exact_field,
     encode_field, encode_ngram_bitmap, encode_page_base_sections_receipt, ngram_page_digest,
 };
+use super::row_codec::encode_artifact_row;
+use super::schema::LexicalArtifactLayoutV1;
 use super::postings::{NGRAM_NORMALIZED, NGRAM_RAW_OVERRIDE, document_ngrams};
 use super::{
     CodeLexicalArtifactErrorV1, NGRAM_AGGREGATION_BYTES_PER_LOGICAL_POSTING_V1, checkpoint,
@@ -440,8 +442,7 @@ fn prepare_document(
     }
     let artifact_row = ArtifactRowV1::from(row);
     let chunk_id = artifact_row.id.as_str().to_owned();
-    let row = serde_json::to_vec(&artifact_row)
-        .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+    let row = encode_artifact_row(LexicalArtifactLayoutV1::V11, &artifact_row)?;
     let exact_postings = exact_postings.into_iter().collect::<Vec<_>>();
     let integrity_digest = document_integrity_digest(
         document_id,
