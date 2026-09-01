@@ -39,7 +39,9 @@ use std::os::unix::fs::MetadataExt;
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
+use rayon::prelude::*;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -59,6 +61,11 @@ use crate::runtime::{SessionMessageRecord, SessionRecord};
 use tracedecay_framing::{WireReadOutcome, read_bounded_to_string};
 
 pub type TranscriptIngestResult<T> = Result<T, TranscriptIngestError>;
+
+/// Shared across the two daemon-wide admitted history passes, so one daemon
+/// runs at most four filesystem parsers regardless of mounted project count.
+const MAX_CONCURRENT_FILE_PREPARATIONS: usize = 4;
+static TRANSCRIPT_PARSE_POOL: OnceLock<Result<rayon::ThreadPool, String>> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum HostProviderCoverage {
@@ -541,40 +548,115 @@ pub async fn try_ingest_source_with_store<S: TranscriptIngestStore>(
                 .discover_transcript_paths(project_root, TranscriptDiscoveryBounds::default_walk())
         })
     );
+    let mut loaded = Vec::with_capacity(discovery.paths.len());
     for path in discovery.paths {
-        stats = stats.merge(ingest_one(store, source, &path, project_root, max_new_bytes).await?);
+        loaded.push(
+            load_transcript_cursor(store, source.cursor_key(&path))
+                .await
+                .map(|loaded| LoadedTranscriptFile {
+                    previous: loaded.checkpoint.clone(),
+                    path,
+                    loaded,
+                }),
+        );
+    }
+    let parse_pool = TRANSCRIPT_PARSE_POOL
+        .get_or_init(|| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(MAX_CONCURRENT_FILE_PREPARATIONS)
+                .thread_name(|index| format!("tracedecay-transcript-parse-{index}"))
+                .build()
+                .map_err(|error| error.to_string())
+        })
+        .as_ref()
+        .map_err(|_| TranscriptIngestError::BackgroundResourceUnavailable {
+            provider: source.provider(),
+            resource: "transcript_parse_pool",
+        })?;
+    let preparations = hotpath::measure_block!(
+        "sessions.ingest.parse_files_blocking",
+        run_blocking_transcript_section(|| {
+            parse_pool.install(|| {
+                loaded
+                    .into_par_iter()
+                    .map(|loaded| {
+                        loaded.and_then(|loaded| {
+                            prepare_loaded_transcript(source, loaded, project_root, max_new_bytes)
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+        })
+    );
+    for prepared in preparations {
+        stats = stats.merge(
+            persist_prepared_transcript(store, source.provider(), project_root, prepared?).await?,
+        );
     }
     Ok(stats)
 }
 
-/// Ingest one transcript file: load the prior durable cursor through the store
-/// contract, parse new content, and submit one atomic session/message/cursor
-/// batch. The root adapter commits that SQL batch first, then publishes its Git
-/// evidence to the project graph. A graph error remains a typed ingest failure;
-/// it never rewinds the truthful parse cursor or falls back to relational
-/// correlation tables.
-async fn ingest_one<S: TranscriptIngestStore>(
-    store: &S,
+enum PreparedTranscriptFile {
+    Empty,
+    Parsed {
+        path: PathBuf,
+        loaded: LoadedTranscriptCursor,
+        previous: TranscriptCursorCheckpoint,
+        parsed: ParsedTranscript,
+    },
+}
+
+struct LoadedTranscriptFile {
+    path: PathBuf,
+    loaded: LoadedTranscriptCursor,
+    previous: TranscriptCursorCheckpoint,
+}
+
+/// Parses one already-loaded source cursor without publishing writes.
+/// Ordered persistence begins only after this bounded concurrent stage.
+#[hotpath::measure(label = "sessions.ingest.prepare_file")]
+fn prepare_loaded_transcript(
     source: &dyn TranscriptSource,
-    path: &Path,
+    loaded_file: LoadedTranscriptFile,
     project_root: &Path,
     max_new_bytes: Option<u64>,
+) -> TranscriptIngestResult<PreparedTranscriptFile> {
+    let LoadedTranscriptFile {
+        path,
+        loaded,
+        previous,
+    } = loaded_file;
+    let Some(parsed) = source.try_parse_new(&path, previous.state, project_root, max_new_bytes)?
+    else {
+        return Ok(PreparedTranscriptFile::Empty);
+    };
+    Ok(PreparedTranscriptFile::Parsed {
+        path,
+        loaded,
+        previous,
+        parsed,
+    })
+}
+
+async fn persist_prepared_transcript<S: TranscriptIngestStore>(
+    store: &S,
+    provider: &'static str,
+    project_root: &Path,
+    prepared: PreparedTranscriptFile,
 ) -> TranscriptIngestResult<TranscriptIngestStats> {
-    let loaded = load_transcript_cursor(store, source.cursor_key(path)).await?;
-    let previous = loaded.checkpoint.clone();
-    let Some(parsed) = hotpath::measure_block!(
-        "sessions.ingest.parse_blocking",
-        run_blocking_transcript_section(|| {
-            source.try_parse_new(path, previous.state, project_root, max_new_bytes)
-        })
-    )?
+    let PreparedTranscriptFile::Parsed {
+        path,
+        loaded,
+        previous,
+        parsed,
+    } = prepared
     else {
         return Ok(TranscriptIngestStats::default());
     };
     persist_parsed_transcript(
         store,
-        source.provider(),
-        path,
+        provider,
+        &path,
         project_root,
         loaded,
         &previous,

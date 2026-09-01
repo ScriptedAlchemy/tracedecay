@@ -4,6 +4,8 @@ use super::*;
 use crate::runtime::shared::read_new_rows;
 use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 #[derive(Clone, Copy)]
 enum ReadFailure {
@@ -19,6 +21,22 @@ struct SinglePathSource;
 struct CountingStore(AtomicUsize);
 
 struct MixedPathSource;
+
+#[derive(Default)]
+struct ParseConcurrencyState {
+    active: usize,
+    observed_overlap: bool,
+}
+
+#[derive(Default)]
+struct ParseConcurrencyProbe {
+    state: Mutex<ParseConcurrencyState>,
+    changed: Condvar,
+}
+
+struct ConcurrentParseSource {
+    probe: Arc<ParseConcurrencyProbe>,
+}
 
 impl TranscriptSource for SinglePathSource {
     fn provider(&self) -> &'static str {
@@ -95,6 +113,65 @@ impl TranscriptSource for MixedPathSource {
                 file_id: 1,
             },
         }))
+    }
+}
+
+impl TranscriptSource for ConcurrentParseSource {
+    fn provider(&self) -> &'static str {
+        "concurrent"
+    }
+
+    fn transcript_paths(&self, _project_root: &Path) -> Vec<PathBuf> {
+        (0..4)
+            .map(|index| PathBuf::from(format!("concurrent-{index}.jsonl")))
+            .collect()
+    }
+
+    fn parse_new(
+        &self,
+        path: &Path,
+        _prev: StoredCursor,
+        _project_root: &Path,
+        _max_new_bytes: Option<u64>,
+    ) -> Option<ParsedTranscript> {
+        let mut state = self.probe.state.lock().unwrap();
+        state.active += 1;
+        self.probe.changed.notify_all();
+        if state.active < 2 {
+            let (next, _) = self
+                .probe
+                .changed
+                .wait_timeout_while(state, Duration::from_millis(200), |state| state.active < 2)
+                .unwrap();
+            state = next;
+        }
+        if state.active >= 2 {
+            state.observed_overlap = true;
+        }
+        state.active -= 1;
+        self.probe.changed.notify_all();
+        drop(state);
+
+        let session_id = path.to_string_lossy().into_owned();
+        Some(ParsedTranscript {
+            draft: SessionDraft {
+                session_id: session_id.clone(),
+                project_key: "concurrent-project".to_owned(),
+                project_path: "concurrent-project".to_owned(),
+                title: None,
+                metadata_json: None,
+                parent_session_id: None,
+                is_subagent: false,
+                agent_id: None,
+                parent_tool_use_id: None,
+            },
+            messages: Vec::new(),
+            new_cursor: StoredCursor {
+                position: 1,
+                mtime: 1,
+                file_id: 1,
+            },
+        })
     }
 }
 
@@ -203,6 +280,25 @@ async fn fail_fast_ingest_stops_at_first_bad_path_after_persisting_earlier_paths
         .is_err()
     );
     assert_eq!(fail_fast_store.0.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn source_prepares_multiple_transcript_files_concurrently() {
+    let probe = Arc::new(ParseConcurrencyProbe::default());
+    let source = ConcurrentParseSource {
+        probe: Arc::clone(&probe),
+    };
+    let store = CountingStore::default();
+
+    try_ingest_source_with_store(&store, &source, Path::new("concurrent-project"), None)
+        .await
+        .unwrap();
+
+    assert!(
+        probe.state.lock().unwrap().observed_overlap,
+        "at least two independent transcript files must parse concurrently"
+    );
+    assert_eq!(store.0.load(Ordering::Relaxed), 4);
 }
 
 #[test]
