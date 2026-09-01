@@ -261,7 +261,7 @@ fn sealed_restore_reads_legacy_revision_and_refuses_adjacent_revisions() {
         "a restored legacy generation must reseal to the identical V1 envelope"
     );
 
-    for incompatible_revision in [4, 7] {
+    for incompatible_revision in [4, 8] {
         let mut incompatible = envelope.clone();
         incompatible["generation"]["format_revision"] = Value::from(incompatible_revision);
         let incompatible =

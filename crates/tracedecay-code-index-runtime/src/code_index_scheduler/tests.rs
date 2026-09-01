@@ -357,6 +357,217 @@ fn remove_historical_pointer_entries(store_root: &Path) {
 }
 
 #[test]
+fn partitioned_publication_reuses_unchanged_file_segments() {
+    let unchanged = (0..256)
+        .map(|index| format!("pub fn unchanged_{index}() -> usize {{ {index} }}\n"))
+        .collect::<String>();
+    let fixture = GitFixture::new(&[
+        ("src/large.rs", unchanged.as_str()),
+        ("src/edited.rs", "pub fn edited() -> usize { 1 }\n"),
+    ]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+
+    published(
+        scheduler
+            .reconcile_now()
+            .expect("publish first segmented generation"),
+    );
+    let pointer_path = store.path().join("active-code-generation-v1.json");
+    let first_pointer: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&pointer_path).expect("read first pointer"))
+            .expect("decode first pointer");
+    let first_manifest_path = store.path().join("code-generations-v1").join(
+        first_pointer["generation_file"]
+            .as_str()
+            .expect("first generation manifest"),
+    );
+    let first_manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&first_manifest_path).expect("read first manifest"))
+            .expect("decode first manifest");
+    assert_eq!(first_manifest["generation"]["format_revision"], 7);
+    let first_segments = first_manifest["generation"]["file_segments"]
+        .as_array()
+        .expect("first generation file segments");
+    assert_eq!(first_segments.len(), 2);
+
+    fixture.edit("src/edited.rs", "pub fn edited() -> usize { 2 }\n");
+    scheduler.notify_hook_paths([PathBuf::from("src/edited.rs")]);
+    published(
+        scheduler
+            .reconcile_now()
+            .expect("publish one-line-edit generation"),
+    );
+    let second_pointer: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&pointer_path).expect("read second pointer"))
+            .expect("decode second pointer");
+    let second_manifest_path = store.path().join("code-generations-v1").join(
+        second_pointer["generation_file"]
+            .as_str()
+            .expect("second generation manifest"),
+    );
+    let second_manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(&second_manifest_path).expect("read second manifest"),
+    )
+    .expect("decode second manifest");
+    let second_segments = second_manifest["generation"]["file_segments"]
+        .as_array()
+        .expect("second generation file segments");
+    assert_eq!(second_segments.len(), 2);
+
+    let segment_digest = |segments: &[serde_json::Value], file_key: u64| {
+        segments
+            .iter()
+            .find(|segment| segment["file_key"].as_u64() == Some(file_key))
+            .and_then(|segment| segment["segment_digest"].as_str())
+            .expect("segment descriptor")
+            .to_owned()
+    };
+    let file_key = |manifest: &serde_json::Value, logical_path: &str| {
+        manifest["generation"]["snapshot"]["files"]
+            .as_array()
+            .expect("snapshot files")
+            .iter()
+            .position(|file| file["logical_path"].as_str() == Some(logical_path))
+            .and_then(|key| u64::try_from(key).ok())
+            .expect("snapshot file key")
+    };
+    let large_key = file_key(&first_manifest, "src/large.rs");
+    let edited_key = file_key(&first_manifest, "src/edited.rs");
+    let shared_segment = segment_digest(first_segments, large_key);
+    let retired_edited_segment = segment_digest(first_segments, edited_key);
+    let second_shared_segment = segment_digest(second_segments, large_key);
+    assert_eq!(
+        shared_segment, second_shared_segment,
+        "the unchanged large file must reuse the exact segment content address"
+    );
+    assert_ne!(
+        retired_edited_segment,
+        segment_digest(second_segments, edited_key),
+        "the one-line edit must publish exactly one replacement segment"
+    );
+
+    let segment_root = store.path().join("code-generation-segments-v1");
+    let component_sizes = |manifest: &serde_json::Value| {
+        let mut components = manifest["generation"]["file_segments"]
+            .as_array()
+            .expect("file segment descriptors")
+            .iter()
+            .map(|segment| {
+                (
+                    segment["segment_digest"]
+                        .as_str()
+                        .expect("file segment digest")
+                        .to_owned(),
+                    segment["segment_size_bytes"]
+                        .as_u64()
+                        .expect("file segment size"),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        components.insert(
+            manifest["generation"]["generation_evidence"]["segment_digest"]
+                .as_str()
+                .expect("evidence segment digest")
+                .to_owned(),
+            manifest["generation"]["generation_evidence"]["segment_size_bytes"]
+                .as_u64()
+                .expect("evidence segment size"),
+        );
+        components
+    };
+    let first_components = component_sizes(&first_manifest);
+    let second_components = component_sizes(&second_manifest);
+    let second_generation_growth = std::fs::metadata(&second_manifest_path)
+        .expect("second manifest metadata")
+        .len()
+        .saturating_add(
+            second_components
+                .iter()
+                .filter(|(digest, _)| !first_components.contains_key(*digest))
+                .map(|(_, size)| *size)
+                .sum::<u64>(),
+        );
+    let monolithic_second_bytes = scheduler
+        .latest_complete_already_decoded()
+        .expect("second generation remains decoded")
+        .generation
+        .encode_sealed()
+        .expect("encode monolithic comparison")
+        .len() as u64;
+    assert!(
+        second_generation_growth.saturating_mul(2) < monolithic_second_bytes,
+        "one-line edit added {second_generation_growth} physical bytes versus a \
+         {monolithic_second_bytes}-byte monolithic rewrite"
+    );
+    let segment_sizes = std::fs::read_dir(&segment_root)
+        .expect("list content-addressed segments")
+        .map(|entry| {
+            entry
+                .expect("segment entry")
+                .metadata()
+                .expect("segment metadata")
+                .len()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        segment_sizes.len(),
+        5,
+        "three shared/edited file segments plus one evidence segment per generation"
+    );
+    let first_generation_segment_bytes = first_segments
+        .iter()
+        .map(|segment| {
+            segment["segment_size_bytes"]
+                .as_u64()
+                .expect("segment size")
+        })
+        .sum::<u64>();
+    let second_generation_new_bytes = second_segments
+        .iter()
+        .find(|segment| segment["file_key"].as_u64() == Some(edited_key))
+        .and_then(|segment| segment["segment_size_bytes"].as_u64())
+        .expect("edited segment size");
+    assert!(
+        second_generation_new_bytes.saturating_mul(8) < first_generation_segment_bytes,
+        "one-line edit rewrote {second_generation_new_bytes} bytes from a \
+         {first_generation_segment_bytes}-byte first generation"
+    );
+
+    remove_historical_pointer_entries(store.path());
+    let report = tracedecay_code_index_retention::code_index_generations::run_code_generation_retention(
+        store.path(),
+        &BTreeSet::new(),
+        tracedecay_code_index_retention::code_index_generations::DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        tracedecay_code_index_retention::code_index_generations::CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(9_000_000),
+        None,
+    )
+    .expect("collect retired partitioned generation");
+    assert_eq!(report.deleted_generations.len(), 1);
+    let segment_path = |digest: &str| {
+        segment_root.join(format!(
+            "segment-{}.json",
+            digest
+                .strip_prefix("sha256:")
+                .expect("tagged segment digest")
+        ))
+    };
+    assert!(
+        segment_path(&shared_segment).is_file(),
+        "retention must preserve a segment referenced by the active generation"
+    );
+    assert!(
+        !segment_path(&retired_edited_segment).exists(),
+        "retention must collect a segment referenced only by the retired generation"
+    );
+}
+
+#[test]
 fn code_generation_retention_preserves_every_pointer_addressable_generation() {
     use tracedecay_code_index_retention::code_index_generations::{
         CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
@@ -7542,7 +7753,64 @@ fn restart_rejects_corrupt_sealed_generation() {
 }
 
 #[test]
-fn durable_publication_streams_canonical_bytes_and_reuses_immutable_target() {
+fn restart_rejects_corrupt_partitioned_file_segment() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    {
+        let mut scheduler = scheduler(
+            &fixture,
+            store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(scheduler.reconcile_now().expect("initial publish"));
+    }
+    let pointer: super::DurablePublicationPointerV1 = serde_json::from_slice(
+        &std::fs::read(store.path().join("active-code-generation-v1.json"))
+            .expect("read active pointer"),
+    )
+    .expect("decode active pointer");
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            store
+                .path()
+                .join("code-generations-v1")
+                .join(pointer.generation_file),
+        )
+        .expect("read generation manifest"),
+    )
+    .expect("decode generation manifest");
+    let segment_digest = manifest["generation"]["file_segments"][0]["segment_digest"]
+        .as_str()
+        .and_then(|digest| digest.strip_prefix("sha256:"))
+        .expect("file segment digest");
+    let segment_path = store
+        .path()
+        .join("code-generation-segments-v1")
+        .join(format!("segment-{segment_digest}.json"));
+    let mut bytes = std::fs::read(&segment_path).expect("read file segment");
+    let middle = bytes.len() / 2;
+    bytes[middle] ^= 0x01;
+    std::fs::write(&segment_path, bytes).expect("corrupt file segment");
+
+    let mut reopened = CodeIndexWorktreeSchedulerV1::open(
+        test_project_id(),
+        fixture.path(),
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    )
+    .expect("foreground open defers segment validation");
+    assert!(
+        reopened.activate_or_reconcile().is_err(),
+        "retained activation must reject a corrupt file segment"
+    );
+    assert!(
+        reopened.latest_complete_already_decoded().is_none(),
+        "a generation with a corrupt segment never becomes serving state"
+    );
+}
+
+#[test]
+fn durable_publication_writes_partitioned_manifest_and_reuses_immutable_targets() {
     let fixture =
         GitFixture::new(&[("src/lib.rs", "pub fn streamed_publication() -> u32 { 1 }\n")]);
     let store = TempDir::new().expect("store root");
@@ -7563,15 +7831,23 @@ fn durable_publication_streams_canonical_bytes_and_reuses_immutable_target() {
         .path()
         .join("code-generations-v1")
         .join(&pointer.generation_file);
-    let streamed = std::fs::read(&generation_path).expect("read streamed generation");
-    let canonical = latest
-        .generation
-        .encode_sealed()
-        .expect("encode canonical reference");
+    let canonical = std::fs::read(&generation_path).expect("read generation manifest");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&canonical).expect("decode generation manifest");
     assert_eq!(
-        streamed, canonical,
-        "streaming must preserve exact v6 bytes"
+        manifest["generation"]["format_revision"], 7,
+        "durable publication must emit the partitioned format"
     );
+    assert_eq!(
+        manifest["generation"]["file_segments"]
+            .as_array()
+            .expect("partitioned file segments")
+            .len(),
+        1
+    );
+    let segment_count = std::fs::read_dir(store.path().join("code-generation-segments-v1"))
+        .expect("read segment directory")
+        .count();
 
     let active_generation = latest.generation.manifest().generation_id.clone();
     let mut reopened = super::DaemonCodeIndexPublicationStoreV1::new(
@@ -7592,7 +7868,14 @@ fn durable_publication_streams_canonical_bytes_and_reuses_immutable_target() {
     assert_eq!(
         std::fs::read(&generation_path).expect("read republished generation"),
         canonical,
-        "an existing content-addressed target must remain byte exact"
+        "an existing content-addressed manifest must remain byte exact"
+    );
+    assert_eq!(
+        std::fs::read_dir(store.path().join("code-generation-segments-v1"))
+            .expect("read segment directory")
+            .count(),
+        segment_count,
+        "identical republication must not duplicate content-addressed segments"
     );
     assert!(
         std::fs::read_dir(store.path().join("code-generations-v1"))

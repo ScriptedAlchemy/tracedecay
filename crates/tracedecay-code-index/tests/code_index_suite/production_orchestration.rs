@@ -1280,10 +1280,7 @@ fn verified_sealed_lexical_pages_are_bounded_exact_and_resumable_after_cancellat
     assert_eq!(receipt.page_count(), expected.len() as u64);
     assert_eq!(receipt.cumulative_digest(), &final_page_digest);
     assert_eq!(receipt.source_state_digest(), &expected_state_digest);
-    assert_eq!(
-        receipt.format_revision(),
-        SEALED_GENERATION_FORMAT_REVISION_V1
-    );
+    assert_eq!(receipt.format_revision(), 6);
 }
 
 #[test]

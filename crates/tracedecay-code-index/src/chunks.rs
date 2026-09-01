@@ -2106,7 +2106,7 @@ fn edge_abstention(
 }
 
 #[hotpath::measure]
-fn canonical_edge_key(
+pub(crate) fn canonical_edge_key(
     edge: &CanonicalRelationEdgeV1,
 ) -> (
     &SymbolOccurrenceId,

@@ -6,7 +6,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs::File,
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     num::NonZeroU64,
     panic::{AssertUnwindSafe, catch_unwind},
     path::{Path, PathBuf},
@@ -614,6 +614,7 @@ pub struct DaemonCodeIndexPublicationStoreV1 {
     active_encoded_bytes: Arc<AtomicU64>,
     active_path: PathBuf,
     generations_root: PathBuf,
+    segments_root: PathBuf,
     project_root: PathBuf,
     expected_sanitizer_revision: SanitizerRevision,
     disposition: CodeIndexPublicationDispositionV1,
@@ -667,11 +668,14 @@ impl DaemonCodeIndexPublicationStoreV1 {
     ) -> Result<Self, CodeIndexSchedulerErrorV1> {
         let generations_root = store_root.join("code-generations-v1");
         std::fs::create_dir_all(&generations_root)?;
+        let segments_root = store_root.join("code-generation-segments-v1");
+        std::fs::create_dir_all(&segments_root)?;
         Ok(Self {
             cache: Arc::new(DecodedGenerationCacheV1::default()),
             active_encoded_bytes: Arc::new(AtomicU64::new(0)),
             active_path: store_root.join("active-code-generation-v1.json"),
             generations_root,
+            segments_root,
             project_root: project_root.to_path_buf(),
             expected_sanitizer_revision,
             disposition: CodeIndexPublicationDispositionV1::Active,
@@ -723,27 +727,58 @@ impl DaemonCodeIndexPublicationStoreV1 {
         file.sync_all().map_err(Self::unavailable)
     }
 
-    fn write_sealed_durable(
-        path: &Path,
-        generation: &CodeIndexPublishedGenerationV1,
-    ) -> Result<u64, CodeIndexPublicationStoreErrorV1> {
-        let mut file = std::fs::OpenOptions::new()
-            .create_new(true)
-            .read(true)
-            .write(true)
-            .open(path)
-            .map_err(Self::unavailable)?;
-        let written = generation
-            .write_sealed(&mut file)
-            .map_err(Self::unavailable)?;
-        file.sync_all().map_err(Self::unavailable)?;
-        let actual = file.metadata().map_err(Self::unavailable)?.len();
-        if actual != written {
-            return Err(Self::unavailable(
-                "sealed code-generation byte size changed during durable write",
+    #[hotpath::measure(label = "code_index.generation.publish.segment")]
+    fn publish_segment_durable(
+        segments_root: &Path,
+        digest: &ManifestDigest,
+        bytes: &[u8],
+    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        let digest_hex = digest
+            .as_str()
+            .strip_prefix("sha256:")
+            .ok_or_else(|| Self::unavailable("sealed segment digest is not sha256"))?;
+        let expected_digest = digest.as_str();
+        if Self::state_digest(bytes) != expected_digest {
+            return Err(Self::corruption(
+                "sealed segment bytes do not match their content address",
             ));
         }
-        Ok(written)
+        let final_path = segments_root.join(format!("segment-{digest_hex}.json"));
+        match final_path.symlink_metadata() {
+            Ok(metadata) => {
+                if !metadata.file_type().is_file()
+                    || metadata.len() != u64::try_from(bytes.len()).map_err(Self::unavailable)?
+                    || Self::state_digest_file(&final_path)? != expected_digest
+                {
+                    return Err(Self::corruption(
+                        "existing sealed segment does not match its content address",
+                    ));
+                }
+                return Ok(());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(Self::unavailable(error)),
+        }
+        let temporary_path = segments_root.join(format!(
+            ".segment-publication.{}.{}.tmp",
+            std::process::id(),
+            digest_hex
+        ));
+        match temporary_path.symlink_metadata() {
+            Ok(metadata) if metadata.file_type().is_file() => {
+                std::fs::remove_file(&temporary_path).map_err(Self::unavailable)?;
+            }
+            Ok(_) => {
+                return Err(Self::unavailable(
+                    "sealed segment temporary path is not a regular file",
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(Self::unavailable(error)),
+        }
+        Self::write_durable(&temporary_path, bytes)?;
+        std::fs::rename(&temporary_path, &final_path).map_err(Self::unavailable)?;
+        Self::sync_directory(segments_root)
     }
 
     fn state_digest_file(path: &Path) -> Result<String, CodeIndexPublicationStoreErrorV1> {
@@ -1026,6 +1061,73 @@ impl DaemonCodeIndexPublicationStoreV1 {
         });
     }
 
+    #[hotpath::measure(label = "code_index.generation.decode.segment")]
+    fn read_partitioned_segment(
+        &self,
+        digest: &ManifestDigest,
+        expected_size: u64,
+    ) -> Result<Vec<u8>, CodeIndexProductionErrorV1> {
+        let digest_hex = digest.as_str().strip_prefix("sha256:").ok_or_else(|| {
+            CodeIndexProductionErrorV1::Contract("sealed segment digest is not sha256".to_owned())
+        })?;
+        let path = self
+            .segments_root
+            .join(format!("segment-{digest_hex}.json"));
+        let metadata = path.symlink_metadata().map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed generation segment is unavailable: {error}"
+            ))
+        })?;
+        if !metadata.file_type().is_file() || metadata.len() != expected_size {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed generation segment identity does not match its manifest".to_owned(),
+            ));
+        }
+        std::fs::read(path).map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed generation segment read failed: {error}"
+            ))
+        })
+    }
+
+    #[hotpath::measure(label = "code_index.generation.decode.bundle")]
+    fn decode_generation_file(
+        &self,
+        file: &mut File,
+        admitted_len: u64,
+        expected_file_digest: &ManifestDigest,
+    ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexProductionErrorV1> {
+        let monolithic = CodeIndexPublishedGenerationV1::decode_sealed_seek_reader(
+            &mut *file,
+            admitted_len,
+            Some(expected_file_digest),
+            &UninterruptibleCodeIndexControlV1,
+        )?;
+        if monolithic.is_some() {
+            return Ok(monolithic);
+        }
+        file.seek(SeekFrom::Start(0)).map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed generation manifest seek failed: {error}"
+            ))
+        })?;
+        let mut manifest = Vec::new();
+        file.read_to_end(&mut manifest).map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed generation manifest read failed: {error}"
+            ))
+        })?;
+        if Self::state_digest(&manifest) != expected_file_digest.as_str() {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed generation manifest filename digest does not match its bytes".to_owned(),
+            ));
+        }
+        CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+            &manifest,
+            |digest, expected_size| self.read_partitioned_segment(digest, expected_size),
+        )
+    }
+
     /// Serve one sealed generation by identity, decoding it at most once.
     ///
     /// The active generation answers from its pinned slot. Any other generation
@@ -1171,12 +1273,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         hotpath::gauge!("code_index.generation.decode.bytes_total").inc(entry.size_bytes);
         let decoded = hotpath::measure_block!(
             "code_index.generation.decode.file_read",
-            CodeIndexPublishedGenerationV1::decode_sealed_seek_reader(
-                &mut file,
-                entry.size_bytes,
-                Some(&expected_digest),
-                &UninterruptibleCodeIndexControlV1,
-            )
+            self.decode_generation_file(&mut file, entry.size_bytes, &expected_digest,)
         );
         // A failing decode still swept the sealed bytes, and fail-closed
         // serving depends on that sweep re-running per request; count it
@@ -1404,12 +1501,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         hotpath::gauge!("code_index.generation.decode.bytes_total").inc(metadata.len());
         let decoded = hotpath::measure_block!(
             "code_index.generation.decode.file_read",
-            CodeIndexPublishedGenerationV1::decode_sealed_seek_reader(
-                &mut file,
-                metadata.len(),
-                Some(&expected_digest),
-                &UninterruptibleCodeIndexControlV1,
-            )
+            self.decode_generation_file(&mut file, metadata.len(), &expected_digest,)
         );
         // A failing decode still swept the sealed bytes, and fail-closed
         // serving depends on that sweep re-running per request; count it
@@ -1552,10 +1644,27 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
             Err(error) => return Err(Self::unavailable(error)),
         }
         let mut temporary = TemporaryGenerationFileV1::new(temporary_path);
-        let generation_size = hotpath::measure_block!(
-            "code_index.generation.publish.seal_fsync",
-            Self::write_sealed_durable(&temporary.path, &generation)
-        )?;
+        let mut referenced_segment_bytes = 0_u64;
+        let manifest_bytes = hotpath::measure_block!(
+            "code_index.generation.publish.segment_encode",
+            generation.encode_partitioned_sealed(|digest, bytes| {
+                let segment_size = u64::try_from(bytes.len()).map_err(|_| {
+                    CodeIndexProductionErrorV1::Contract(
+                        "sealed segment length exceeds u64".to_owned(),
+                    )
+                })?;
+                Self::publish_segment_durable(&self.segments_root, digest, bytes)
+                    .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+                referenced_segment_bytes = referenced_segment_bytes.saturating_add(segment_size);
+                Ok(())
+            })
+        )
+        .map_err(Self::unavailable)?;
+        hotpath::measure_block!("code_index.generation.publish.seal_fsync", {
+            Self::write_durable(&temporary.path, &manifest_bytes)?;
+            Ok::<(), CodeIndexPublicationStoreErrorV1>(())
+        })?;
+        let generation_size = u64::try_from(manifest_bytes.len()).map_err(Self::unavailable)?;
         if generation_size > MAX_DURABLE_GENERATION_INDEX_BYTES_V1 {
             return Err(Self::unavailable(
                 "sealed code generation exceeds the durable history byte bound",
@@ -1566,7 +1675,8 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
             Self::state_digest_file(&temporary.path)
         )?;
         #[cfg(feature = "hotpath")]
-        hotpath::gauge!("code_index.generation.publish.digest_bytes").set(generation_size);
+        hotpath::gauge!("code_index.generation.publish.digest_bytes")
+            .set(generation_size.saturating_add(referenced_segment_bytes));
         let generation_file = format!(
             "generation-{}.json",
             state_digest
@@ -2798,22 +2908,47 @@ impl DaemonCodeTextArtifactStoreV1 {
                 text_artifact_unavailable(error)
             }
         })?;
-        VerifiedSealedLexicalPageSourceV1::open_content_addressed(
+        match VerifiedSealedLexicalPageSourceV1::open_content_addressed(
             file,
             identity.size_bytes,
             identity.digest.clone(),
             TEXT_ARTIFACT_PAGE_CHUNKS_V1,
             TEXT_ARTIFACT_PAGE_BYTES_V1,
             control,
-        )
-        .map_err(map_sealed_page_source_error)
+        ) {
+            Ok(source) => Ok(source),
+            Err(CodeIndexProductionErrorV1::Contract(message))
+                if message.contains("format revision is incompatible") =>
+            {
+                let mut manifest = File::open(&path).map_err(text_artifact_unavailable)?;
+                let generation = self
+                    .publication
+                    .decode_generation_file(&mut manifest, identity.size_bytes, &identity.digest)
+                    .map_err(map_sealed_page_source_error)?
+                    .ok_or_else(|| {
+                        RetrievalPortError::Contract(
+                            "partitioned sealed lexical source is incompatible".to_owned(),
+                        )
+                    })?;
+                let manifest = File::open(path).map_err(text_artifact_unavailable)?;
+                VerifiedSealedLexicalPageSourceV1::open_partitioned(
+                    manifest,
+                    &generation,
+                    identity.digest.clone(),
+                    TEXT_ARTIFACT_PAGE_CHUNKS_V1,
+                    TEXT_ARTIFACT_PAGE_BYTES_V1,
+                )
+                .map_err(map_sealed_page_source_error)
+            }
+            Err(error) => Err(map_sealed_page_source_error(error)),
+        }
     }
 
     fn open_sealed_source_with_progress<F>(
         &self,
         identity: &DurableSealedCodeGenerationIdentityV1,
         control: &dyn CodeIndexExecutionControlV1,
-        progress: F,
+        mut progress: F,
     ) -> Result<VerifiedSealedLexicalPageSourceV1<File>, RetrievalPortError>
     where
         F: FnMut(u64, u64),
@@ -2827,17 +2962,44 @@ impl DaemonCodeTextArtifactStoreV1 {
                 "durable sealed lexical source identity is corrupt".to_owned(),
             ));
         }
-        let file = File::open(path).map_err(text_artifact_unavailable)?;
-        VerifiedSealedLexicalPageSourceV1::open_content_addressed_with_progress(
+        let file = File::open(&path).map_err(text_artifact_unavailable)?;
+        match VerifiedSealedLexicalPageSourceV1::open_content_addressed_with_progress(
             file,
             identity.size_bytes,
             identity.digest.clone(),
             TEXT_ARTIFACT_PAGE_CHUNKS_V1,
             TEXT_ARTIFACT_PAGE_BYTES_V1,
             control,
-            progress,
-        )
-        .map_err(map_sealed_page_source_error)
+            &mut progress,
+        ) {
+            Ok(source) => Ok(source),
+            Err(CodeIndexProductionErrorV1::Contract(message))
+                if message.contains("format revision is incompatible") =>
+            {
+                progress(0, identity.size_bytes);
+                let mut manifest = File::open(&path).map_err(text_artifact_unavailable)?;
+                let generation = self
+                    .publication
+                    .decode_generation_file(&mut manifest, identity.size_bytes, &identity.digest)
+                    .map_err(map_sealed_page_source_error)?
+                    .ok_or_else(|| {
+                        RetrievalPortError::Contract(
+                            "partitioned sealed lexical source is incompatible".to_owned(),
+                        )
+                    })?;
+                progress(identity.size_bytes, identity.size_bytes);
+                let manifest = File::open(&path).map_err(text_artifact_unavailable)?;
+                VerifiedSealedLexicalPageSourceV1::open_partitioned(
+                    manifest,
+                    &generation,
+                    identity.digest.clone(),
+                    TEXT_ARTIFACT_PAGE_CHUNKS_V1,
+                    TEXT_ARTIFACT_PAGE_BYTES_V1,
+                )
+                .map_err(map_sealed_page_source_error)
+            }
+            Err(error) => Err(map_sealed_page_source_error(error)),
+        }
     }
 
     /// Durably publish one finalized staging artifact: content-address it,

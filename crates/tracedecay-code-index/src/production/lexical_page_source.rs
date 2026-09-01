@@ -11,7 +11,8 @@ use tracedecay_domain::ExactTechnicalTermV1;
 use crate::{capabilities::expected_seal_digest, intake::INTAKE_DIGEST_SEPARATOR};
 
 use super::sealed_codec::{
-    LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION, PersistedFileGenerationArtifactsV1,
+    LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION,
+    MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION, PersistedFileGenerationArtifactsV1,
 };
 use super::{FileGenerationArtifactsV1, *};
 
@@ -907,6 +908,52 @@ impl VerifiedSealedTextGenerationMetadataV1 {
 
 #[hotpath::measure_all]
 impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
+    /// Open a partitioned generation from its already digest-verified,
+    /// fully validated in-memory representation. Partitioned file segments
+    /// have no offsets in the tiny generation manifest, so cursors use stable
+    /// file ordinals as their opaque positions while page admission consumes
+    /// the generation-owned file artifacts directly.
+    #[hotpath::measure(label = "code_index.restore.open_partitioned")]
+    pub fn open_partitioned(
+        reader: R,
+        generation: &CodeIndexPublishedGenerationV1,
+        source_state_digest: ManifestDigest,
+        maximum_page_chunks: usize,
+        maximum_page_bytes: usize,
+    ) -> Result<Self, CodeIndexProductionErrorV1> {
+        if maximum_page_chunks == 0 || maximum_page_bytes == 0 {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed lexical page bounds must be non-zero".to_owned(),
+            ));
+        }
+        let file_count = u64::try_from(generation.files.len()).map_err(|_| {
+            CodeIndexProductionErrorV1::Contract(
+                "partitioned sealed generation file count exceeds u64".to_owned(),
+            )
+        })?;
+        let file_ranges = (0..file_count)
+            .map(|file| (file, file.saturating_add(1)))
+            .collect::<Vec<_>>();
+        let cursor = VerifiedSealedLexicalCursorV1::initial(source_state_digest.clone(), 0)?;
+        Ok(Self {
+            reader,
+            file_count,
+            first_file_offset: 0,
+            files_end_offset: file_count,
+            file_ranges,
+            total_lexical_bytes: file_count,
+            maximum_file_bytes: 1,
+            source_state_digest,
+            format_revision: SEALED_GENERATION_FORMAT_REVISION_V1,
+            metadata: VerifiedSealedTextGenerationMetadataV1::from_published_generation(generation),
+            maximum_page_chunks,
+            maximum_page_bytes,
+            cursor,
+            admitted_window: BTreeMap::new(),
+            memory_files: Some(generation.files.clone()),
+        })
+    }
+
     #[hotpath::measure(label = "code_index.restore.open")]
     pub fn open(
         mut reader: R,
@@ -2402,7 +2449,7 @@ impl LayoutScanner {
         if !matches!(
             format_revision,
             LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION
-                | SEALED_GENERATION_FORMAT_REVISION_V1
+                | MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION
         ) {
             return Err(CodeIndexProductionErrorV1::Contract(
                 "sealed generation format revision is incompatible".to_owned(),
