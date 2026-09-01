@@ -236,12 +236,12 @@ fastembed = { git = "https://github.com/ScriptedAlchemy/fastembed-rs.git", rev =
 # The published crates carry a tiered-storage arena whose `HotVersionRef` can
 # only address a single 1 MiB chunk, which caps an epoch near 32 Ki node
 # records and then panics; the fork spans epochs across chunks and types the
-# exhaustion errors. Only common and core carry edits, but the git workspace
-# resolves sibling crates by path, so every grafeo crate must come from the
-# same fork rev — a mixed registry/git graph would build two type-incompatible
-# instances of the unpatched crates.
-grafeo-adapters = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "0c4f93a584e9c0ffa59e5605ce46c19d83c0eb90" }
-grafeo-common = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "0c4f93a584e9c0ffa59e5605ce46c19d83c0eb90" }
-grafeo-core = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "0c4f93a584e9c0ffa59e5605ce46c19d83c0eb90" }
-grafeo-engine = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "0c4f93a584e9c0ffa59e5605ce46c19d83c0eb90" }
-grafeo-storage = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "0c4f93a584e9c0ffa59e5605ce46c19d83c0eb90" }
+# exhaustion errors. The fork also carries graph correctness and bounded WAL
+# group-write fixes. Its workspace resolves sibling crates by path, so every
+# grafeo crate must come from the same revision — a mixed registry/git graph
+# would build type-incompatible instances of the patched crates.
+grafeo-adapters = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "38654a67ec9e8c4fdab43c00b41f04aa696b52ed" }
+grafeo-common = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "38654a67ec9e8c4fdab43c00b41f04aa696b52ed" }
+grafeo-core = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "38654a67ec9e8c4fdab43c00b41f04aa696b52ed" }
+grafeo-engine = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "38654a67ec9e8c4fdab43c00b41f04aa696b52ed" }
+grafeo-storage = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "38654a67ec9e8c4fdab43c00b41f04aa696b52ed" }
