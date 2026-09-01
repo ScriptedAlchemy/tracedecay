@@ -214,7 +214,7 @@ async fn await_dispatch_with_cancellation<F, C, N>(
     handling: F,
     cancellation: N,
     mut cancel_registered_request: C,
-) -> F::Output
+) -> Option<F::Output>
 where
     F: std::future::Future,
     C: FnMut() -> bool,
@@ -223,15 +223,13 @@ where
     tokio::pin!(handling);
     tokio::pin!(cancellation);
     tokio::select! {
-        response = &mut handling => response,
+        response = &mut handling => Some(response),
         () = &mut cancellation => {
-            while !cancel_registered_request() {
-                tokio::select! {
-                    response = &mut handling => return response,
-                    () = tokio::task::yield_now() => {}
-                }
+            if cancel_registered_request() {
+                Some(handling.await)
+            } else {
+                None
             }
-            handling.await
         }
     }
 }
@@ -386,9 +384,11 @@ impl RmcpConnectionAdapter {
     ) -> Result<JsonRpcResponse, ErrorData> {
         let pre_cancelled = request_cancellation.is_cancelled();
         let response = if pre_cancelled {
-            self.server
-                .handle_request_for_connection(&request, self.timings_enabled, connection, true)
-                .await
+            Some(
+                self.server
+                    .handle_request_for_connection(&request, self.timings_enabled, connection, true)
+                    .await,
+            )
         } else {
             await_dispatch_with_cancellation(
                 self.server.handle_request_for_connection(
@@ -405,6 +405,13 @@ impl RmcpConnectionAdapter {
             )
             .await
         }
+        .ok_or_else(|| {
+            ErrorData::new(
+                ErrorCode(-32800),
+                "MCP request cancelled",
+                Some(json!({"reason_code": "request_cancelled"})),
+            )
+        })?
         .ok_or_else(|| ErrorData::internal_error("MCP request did not produce a response", None))?;
         let selected_response_lease = connection.take_selected_response_lease();
         if selected_response_lease
@@ -582,7 +589,6 @@ mod tests {
 
     use rmcp::model::{CallToolResponse, CallToolResult};
     use serde_json::json;
-    use tokio::sync::Notify;
 
     use super::*;
 
@@ -637,35 +643,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancellation_retries_until_the_live_request_registers() {
+    async fn cancellation_stops_dispatch_before_live_request_registration() {
         let attempts = Arc::new(AtomicUsize::new(0));
-        let registered = Arc::new(Notify::new());
-        let handling_registered = Arc::clone(&registered);
         let cancel_attempts = Arc::clone(&attempts);
-        let cancel_registered = Arc::clone(&registered);
 
         let result = await_dispatch_with_cancellation(
-            async move {
-                handling_registered.notified().await;
-                "cancelled"
-            },
+            std::future::pending::<()>(),
             std::future::ready(()),
             move || {
-                if cancel_attempts.fetch_add(1, Ordering::SeqCst) == 2 {
-                    cancel_registered.notify_one();
-                    true
-                } else {
-                    false
-                }
+                cancel_attempts.fetch_add(1, Ordering::SeqCst);
+                false
             },
         )
         .await;
 
-        assert_eq!(result, "cancelled");
+        assert_eq!(result, None);
         assert_eq!(
             attempts.load(Ordering::SeqCst),
-            3,
-            "cancellation must retry until the request registration is visible"
+            1,
+            "an unregistered request has no admitted work to poll for cancellation"
         );
     }
 }

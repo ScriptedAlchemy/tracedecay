@@ -222,6 +222,7 @@ async fn assert_initialized_route_is_rmcp<R, W>(
     handshake: &DaemonHandshake,
     server: &Arc<crate::mcp::McpServer>,
     server_task: tokio::task::JoinHandle<tracedecay_domain::errors::Result<()>>,
+    lifecycle: Option<&DaemonLifecycle>,
 ) where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
@@ -260,20 +261,28 @@ async fn assert_initialized_route_is_rmcp<R, W>(
         .shutdown()
         .await
         .expect("shutdown initialized client");
-    let (remaining, served) = tokio::time::timeout(PHASE_TIMEOUT, async {
-        tokio::join!(read_to_eof(&mut reader), server_task)
-    })
-    .await
-    .expect("cancelled RMCP route did not terminate while the response gate remained held");
-    served
-        .expect("join production RMCP connection")
-        .expect("serve production RMCP connection");
+    let cancellation = read_value(
+        &mut reader,
+        "cancelled RMCP route did not emit its terminal response",
+    )
+    .await;
     assert_delivered_cancellation(
-        &remaining,
+        &[cancellation],
         2,
         "response-gate cancellation before request registration",
     );
     drop(gate);
+    drop(writer);
+    drop(reader);
+    if let Some(lifecycle) = lifecycle {
+        lifecycle.begin_draining();
+    }
+    let served = tokio::time::timeout(PHASE_TIMEOUT, server_task)
+    .await
+        .expect("cancelled RMCP route did not terminate after the response gate was released");
+    served
+        .expect("join production RMCP connection")
+        .expect("serve production RMCP connection");
 }
 
 #[cfg(unix)]
@@ -294,6 +303,7 @@ async fn unix_production_route_selects_rmcp_only_after_initialize() {
         &fixture.handshake,
         &fixture.server,
         initialized_task,
+        None,
     )
     .await;
 
@@ -352,13 +362,14 @@ async fn portable_production_route_selects_rmcp_after_initialize() {
     .await
     .expect("portable route listener");
     let lifecycle = DaemonLifecycle::default();
+    let server_lifecycle = lifecycle.clone();
     let store_administration = fixture.store_administration.clone();
     let server_task = tokio::spawn(async move {
         let stream = listener.accept().await.expect("accept portable client");
         Box::pin(super::super::serve_windows_broker_client(
             stream,
             AUTH_TOKEN,
-            &lifecycle,
+            &server_lifecycle,
             store_administration,
             Arc::new(tokio::sync::Mutex::new(
                 super::super::ProjectOpenGates::default(),
@@ -385,6 +396,7 @@ async fn portable_production_route_selects_rmcp_after_initialize() {
         &fixture.handshake,
         &fixture.server,
         server_task,
+        Some(&lifecycle),
     )
     .await;
 
@@ -555,13 +567,17 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for ControlledCancella
 
 #[cfg(unix)]
 async fn wait_for_count(counter: &AtomicUsize, expected: usize, message: &str) {
-    tokio::time::timeout(PHASE_TIMEOUT, async {
+    let result = tokio::time::timeout(PHASE_TIMEOUT, async {
         while counter.load(Ordering::SeqCst) < expected {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
     })
-    .await
-    .expect(message);
+    .await;
+    assert!(
+        result.is_ok(),
+        "{message}: expected {expected}, observed {}",
+        counter.load(Ordering::SeqCst)
+    );
 }
 
 #[cfg(unix)]
@@ -845,8 +861,8 @@ async fn production_rmcp_cancels_concurrent_requests_before_or_after_registratio
     executor.release_first.store(true, Ordering::SeqCst);
     wait_for_count(
         &executor.completed,
-        2,
-        "cancelled RMCP requests did not terminate",
+        1,
+        "registered RMCP request did not terminate",
     )
     .await;
 
@@ -854,14 +870,27 @@ async fn production_rmcp_cancels_concurrent_requests_before_or_after_registratio
         .shutdown()
         .await
         .expect("shutdown cancellation client");
-    let (responses, served) = tokio::time::timeout(PHASE_TIMEOUT, async {
-        tokio::join!(read_to_eof(&mut reader), server_task)
-    })
-    .await
-    .expect("RMCP connection did not close after both cancellation responses were delivered");
+    let responses = vec![
+        read_value(&mut reader, "first RMCP cancellation response").await,
+        read_value(&mut reader, "second RMCP cancellation response").await,
+    ];
+    assert_delivered_cancellation(&responses, 10, "registered in-flight cancellation");
+    assert_delivered_cancellation(&responses, 11, "pre-registration cancellation");
+    drop(writer);
+    drop(reader);
+    let served = tokio::time::timeout(PHASE_TIMEOUT, server_task)
+        .await
+        .expect("RMCP connection did not close after both cancellation responses were delivered");
     served
         .expect("join cancelled RMCP task")
         .expect("serve cancelled RMCP task");
-    assert_delivered_cancellation(&responses, 10, "registered in-flight cancellation");
-    assert_delivered_cancellation(&responses, 11, "pre-registration cancellation");
+    let started = executor.started.load(Ordering::SeqCst);
+    let cancellation_observed = executor.cancellation_observed.load(Ordering::SeqCst);
+    let completed = executor.completed.load(Ordering::SeqCst);
+    assert!(
+        (1..=2).contains(&started),
+        "cancellation must reach the registered request, with the raced request either cancelled before admission or started pre-cancelled"
+    );
+    assert_eq!(cancellation_observed, started);
+    assert_eq!(completed, started);
 }
