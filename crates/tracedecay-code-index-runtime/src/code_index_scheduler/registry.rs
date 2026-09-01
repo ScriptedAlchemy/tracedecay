@@ -2884,6 +2884,13 @@ impl CodeIndexSchedulerRegistryV1 {
             // the identical warming Noop on every pass, and restoring the
             // same arrival again would spin this worker forever.
             let mut warming_restore_arrival: Option<i64> = None;
+            // Whether the optional graph prepare already yielded to a pending
+            // arrival since it last actually ran. One yield lets a landed
+            // arrival's exact/lexical pass go first; a second consecutive
+            // yield would make "no arrival pending" a seat precondition, which
+            // on a busy checkout is the quiet-tree starvation the seat gate
+            // rework removed.
+            let mut graph_prepare_yielded_to_arrival = false;
             loop {
                 hotpath::future!(
                     worker_wake.notified(),
@@ -3403,17 +3410,26 @@ impl CodeIndexSchedulerRegistryV1 {
                         .as_ref()
                         .is_some_and(LatestCodeTextGenerationV1::text_serving_is_ready),
                 );
-                // An arrival that landed during this pass is exact/lexical
-                // work waiting for the worker. The optional graph prepare
-                // parks this worker on an O(store) sealed decode — tens of
-                // seconds on a cold large repository — and serving that
-                // arrival must never queue behind it. The arrival's own
-                // notify re-runs this worker, and the follow-up pass re-gates
-                // Prepare from its own terminal outcome, so seating is
-                // deferred one pass, never lost.
+                // An arrival that landed during this retained pass is
+                // exact/lexical work waiting for the worker. The optional
+                // graph prepare parks this worker on an O(store) sealed
+                // decode — tens of seconds on a cold large repository — and
+                // serving that arrival must never queue behind it. The
+                // arrival's own notify re-runs this worker and the follow-up
+                // pass re-gates Prepare from its own terminal outcome, so
+                // seating is deferred, never lost. Two bounds keep this a
+                // deferral rather than a quiet-wake seat precondition: a
+                // published pass never yields (its seat is the pass's own
+                // product, and a continuously edited tree has an arrival
+                // pending on nearly every pass), and a retained pass yields at
+                // most once per prepare so an arrival storm cannot starve
+                // seating indefinitely.
                 let arrival_pending_before_graph_prepare = gate == GraphSeatGateV1::Prepare
+                    && !published_pass
+                    && !graph_prepare_yielded_to_arrival
                     && worker_pending_wake.has_pending_arrival();
                 if arrival_pending_before_graph_prepare {
+                    graph_prepare_yielded_to_arrival = true;
                     tracing::debug!(
                         event = "code_index_graph_seat_skipped",
                         reason = "arrival_pending",
@@ -3423,6 +3439,9 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
                 let prepare_graph =
                     gate == GraphSeatGateV1::Prepare && !arrival_pending_before_graph_prepare;
+                if prepare_graph {
+                    graph_prepare_yielded_to_arrival = false;
+                }
                 if gate == GraphSeatGateV1::RetainedTextOwnerWarming && !published_pass {
                     let text_empty = worker_text_generation
                         .read()
