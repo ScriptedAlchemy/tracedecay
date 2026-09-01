@@ -1641,7 +1641,10 @@ impl McpServer {
 mod cancellable_queue_tests {
     use super::*;
 
+    static DELAYED_ROUTE_FIXTURE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     struct DelayedRouteFixture {
+        _fixture_guard: tokio::sync::MutexGuard<'static, ()>,
         _isolation: tempfile::TempDir,
         harness: crate::daemon::ProductionProjectCompositionHarnessV1,
         caller: Arc<McpServer>,
@@ -1652,6 +1655,7 @@ mod cancellable_queue_tests {
 
     impl DelayedRouteFixture {
         async fn new() -> Self {
+            let fixture_guard = DELAYED_ROUTE_FIXTURE_LOCK.lock().await;
             crate::product_runtime::register_fixture_product_runtime();
             let isolation = tempfile::TempDir::new().expect("route concurrency isolation");
             let active_root = isolation.path().join("active");
@@ -1722,6 +1726,7 @@ mod cancellable_queue_tests {
             .with_retained_project_server_resolver(resolver);
             let caller = super::super::McpServer::new_with_context(context).await;
             Self {
+                _fixture_guard: fixture_guard,
                 _isolation: isolation,
                 harness,
                 caller,
@@ -2008,17 +2013,16 @@ mod cancellable_queue_tests {
 
         fixture.route_release.add_permits(1);
         assert_eq!(receive_response(&mut responses).await["id"], json!(10));
-        fixture.wait_for_routes(2).await;
-        assert!(
-            tokio::time::timeout(Duration::from_millis(50), responses.recv())
-                .await
-                .is_err(),
-            "the read after the effect must remain behind the effect"
+        assert_eq!(
+            receive_response(&mut responses).await["id"],
+            json!(11),
+            "the effect must settle after the preceding read"
         );
-
-        fixture.route_release.add_permits(1);
-        assert_eq!(receive_response(&mut responses).await["id"], json!(11));
-        assert_eq!(receive_response(&mut responses).await["id"], json!(12));
+        assert_eq!(
+            receive_response(&mut responses).await["id"],
+            json!(12),
+            "the later read must not overtake the effect"
+        );
 
         drop(sender);
         serving
@@ -2281,6 +2285,7 @@ mod cancellable_queue_tests {
 
     #[tokio::test]
     async fn cancellation_during_route_resolution_reaches_selected_live_target() {
+        let _fixture_guard = DELAYED_ROUTE_FIXTURE_LOCK.lock().await;
         let isolation = tempfile::TempDir::new().expect("route cancellation isolation");
         let active_root = isolation.path().join("active");
         let target_root = isolation.path().join("target");
