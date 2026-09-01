@@ -963,8 +963,8 @@ impl GraphDbRegistry {
                                     // A repair that wrote missing native rows is
                                     // a new seal: build and prove its derived
                                     // artifact before seating it.
-                                    let (_, recovered) =
-                                        database.verify_generation_for_publication(
+                                    let (_, recovered) = database
+                                        .verify_generation_for_publication(
                                             &identity,
                                             sealed_digest,
                                             row_counts,
