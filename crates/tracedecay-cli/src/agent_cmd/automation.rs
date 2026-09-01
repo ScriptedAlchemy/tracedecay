@@ -8,6 +8,7 @@ use tracedecay_automation_runtime::automation::config::{
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CodexAutomationInstall;
 
+#[hotpath::measure]
 pub(super) fn validate_codex_automation_flags(
     agent: Option<&str>,
     automation: Option<CodexAutomationInstall>,
@@ -23,6 +24,7 @@ pub(super) fn validate_codex_automation_flags(
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn validate_codex_automation_project_path() -> tracedecay_domain::errors::Result<PathBuf>
 {
     let project_path = std::env::current_dir().map_err(|e| {
@@ -112,6 +114,7 @@ where
     complete(project_path)
 }
 
+#[hotpath::measure]
 fn codex_daemon_interval_task(interval_secs: u64) -> AutomationTaskPatch {
     AutomationTaskPatch {
         enabled: Some(true),

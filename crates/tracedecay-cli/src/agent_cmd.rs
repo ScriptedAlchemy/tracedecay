@@ -43,6 +43,7 @@ pub(crate) enum AgentReinstallOutcome {
 /// A ready host skips this path entirely and enters the catalog component
 /// transaction without an out-of-band artifact write. A deferred host receives
 /// its verified source and a truthful error, but no lifecycle receipt.
+#[hotpath::measure]
 fn prepare_native_activation_if_needed(
     integration: &dyn tracedecay::agents::AgentIntegration,
     context: &tracedecay::agents::InstallContext,
@@ -158,6 +159,7 @@ pub(crate) async fn handle_host_bundle_component_command(
 
 /// Truthful reason a host component set is unavailable, so a skipped or
 /// refused agent never reads as an empty success.
+#[hotpath::measure]
 fn unsupported_host_component_set_message(agent: &str) -> String {
     match host_kind_for_agent(agent)
         .ok()
@@ -170,6 +172,7 @@ fn unsupported_host_component_set_message(agent: &str) -> String {
     }
 }
 
+#[hotpath::measure]
 fn canonical_host_component_set(
     agent: &str,
     component: Option<crate::cli::HostBundleComponentArg>,
@@ -182,6 +185,7 @@ fn canonical_host_component_set(
     canonical_host_component_set_with_tracedecay_bin(agent, component, now_unix, &tracedecay_bin)
 }
 
+#[hotpath::measure]
 fn canonical_host_component_set_with_tracedecay_bin(
     agent: &str,
     component: Option<crate::cli::HostBundleComponentArg>,
@@ -216,6 +220,7 @@ fn canonical_host_component_set_with_tracedecay_bin(
     })
 }
 
+#[hotpath::measure]
 fn ensure_artifact_only_restore_boundary(
     agent_id: &str,
     component_set: &tracedecay::agents::host_bundle_registry::VerifiedEmbeddedHostComponentSetV1,
@@ -374,6 +379,7 @@ pub(crate) async fn handle_host_bundle_artifact_command(
     Ok(())
 }
 
+#[hotpath::measure]
 fn lifecycle_operation(
     operation: HostBundleCliOperation,
 ) -> tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1 {
@@ -393,6 +399,7 @@ fn lifecycle_operation(
     }
 }
 
+#[hotpath::measure]
 fn component_set_request(
     component_set: &tracedecay::agents::host_bundle_registry::VerifiedEmbeddedHostComponentSetV1,
     operation: HostBundleCliOperation,
@@ -430,6 +437,7 @@ fn component_set_request(
     )
 }
 
+#[hotpath::measure]
 fn dry_run_canonical_component_set(
     agent_id: &str,
     operation: HostBundleCliOperation,
@@ -496,6 +504,7 @@ fn dry_run_canonical_component_set(
 /// Deploy paths the durable receipt for this component already claims. A path
 /// missing from this set is one no receipt records, so replacing an existing
 /// file there is an adoption rather than an ordinary refresh.
+#[hotpath::measure]
 fn receipt_owned_paths(
     lifecycle_root: &Path,
     host: tracedecay::agents::host_bundle_v2::HostKindV1,
@@ -521,6 +530,7 @@ fn receipt_owned_paths(
 /// Per-path disposition for the dry run. A foreign claim never reaches here:
 /// the planner refuses the whole preview with a typed ownership conflict, so
 /// `refuse-foreign` surfaces as that error rather than as a plan entry.
+#[hotpath::measure]
 fn artifact_disposition(
     action: &tracedecay::agents::host_bundle_v2::HostArtifactActionV1,
     receipt_owned: &std::collections::BTreeSet<String>,
@@ -538,6 +548,7 @@ fn artifact_disposition(
     }
 }
 
+#[hotpath::measure]
 fn preview_canonical_component_set(
     agent_id: &str,
     operation: HostBundleCliOperation,
@@ -591,6 +602,7 @@ fn preview_canonical_component_set(
 /// hand. Recovery is bound to the *journal's* own operation, exactly like the
 /// recover command, because the registration backup only validates against the
 /// operation that wrote it.
+#[hotpath::measure]
 fn recover_pending_component_set_journal(
     agent_id: &str,
     host: tracedecay::agents::host_bundle_v2::HostKindV1,
@@ -629,6 +641,7 @@ struct ComponentSetApplyContext {
     dashboard: bool,
 }
 
+#[hotpath::measure_all]
 impl ComponentSetApplyContext {
     /// The production context: the resolved installed binary, dashboard on.
     fn resolved() -> Self {
@@ -787,6 +800,7 @@ fn apply_canonical_component_set(
 /// Apply the agent's default component set. `dashboard` decides whether the
 /// dashboard component is registered with it; uninstall paths pass `true`
 /// because removal must cover everything an install could have written.
+#[hotpath::measure]
 fn apply_default_canonical_component_set(
     agent_id: &str,
     operation: HostBundleCliOperation,
@@ -827,6 +841,7 @@ fn apply_default_canonical_component_set(
     Ok(())
 }
 
+#[hotpath::measure]
 fn load_host_lifecycle_user_config() -> tracedecay_domain::errors::Result<UserConfig> {
     UserConfig::load_strict().map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
         message: format!("failed to load host lifecycle policy: {error}"),
@@ -840,6 +855,7 @@ pub(crate) async fn handle_project_local_lifecycle_command(
     Err(project_local_host_lifecycle_unavailable())
 }
 
+#[hotpath::measure]
 fn project_local_host_lifecycle_unavailable() -> tracedecay_domain::errors::TraceDecayError {
     tracedecay_domain::errors::TraceDecayError::Config {
         message: "project-local host lifecycle is unavailable; install the canonical user-level host component set instead"
@@ -929,6 +945,7 @@ struct FeedbackArtifactPermissionStateV4 {
     permissions: FeedbackFilePermissionsV2,
 }
 
+#[hotpath::measure_all]
 impl FeedbackRollbackIdentityV2 {
     fn current(
         integration_id: &str,
@@ -965,6 +982,7 @@ impl FeedbackRollbackIdentityV2 {
     }
 }
 
+#[hotpath::measure]
 fn canonical_feedback_path(label: &str, path: &Path) -> tracedecay_domain::errors::Result<PathBuf> {
     fs::canonicalize(path).map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
         message: format!(
@@ -1039,6 +1057,7 @@ pub(crate) async fn handle_feedback_rollback_command(
     }
 }
 
+#[hotpath::measure]
 fn feedback_rollback_inputs(
     agent_id: &str,
 ) -> tracedecay_domain::errors::Result<(
@@ -1112,6 +1131,7 @@ fn feedback_rollback_inputs(
     Ok((home, lifecycle_root, previous, target))
 }
 
+#[hotpath::measure]
 fn feedback_pair_verifier(
     previous: &tracedecay::agents::host_bundle_v2::HostBundleManifestV1,
     target: &tracedecay::agents::host_bundle_v2::HostBundleManifestV1,
@@ -1124,6 +1144,7 @@ fn feedback_pair_verifier(
     })
 }
 
+#[hotpath::measure]
 fn feedback_request(
     manifest: &tracedecay::agents::host_bundle_v2::HostBundleManifestV1,
     operation: tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1,
@@ -1156,6 +1177,7 @@ fn feedback_request(
     )
 }
 
+#[hotpath::measure]
 fn feedback_observed(
     home: &Path,
     target: &tracedecay::agents::host_bundle_v2::HostBundleManifestV1,
@@ -1233,6 +1255,7 @@ fn feedback_observed(
     Ok((manifest_observed, orphan_observed))
 }
 
+#[hotpath::measure]
 fn read_feedback_contents(
     home: &Path,
     manifest: &tracedecay::agents::host_bundle_v2::HostBundleManifestV1,
@@ -1275,6 +1298,7 @@ fn read_feedback_contents(
         .collect()
 }
 
+#[hotpath::measure]
 fn read_feedback_repair_contents(
     home: &Path,
     manifest: &tracedecay::agents::host_bundle_v2::HostBundleManifestV1,
@@ -1308,6 +1332,7 @@ fn read_feedback_repair_contents(
         .collect()
 }
 
+#[hotpath::measure]
 fn snapshot_feedback_registration(
     home: &Path,
     integration: &dyn tracedecay::agents::AgentIntegration,
@@ -1360,6 +1385,7 @@ fn snapshot_feedback_registration(
 
 /// Re-resolves the registration inventory and pins it to a recorded snapshot.
 /// `inventory_changed` carries the caller's own wording for a stale inventory.
+#[hotpath::measure]
 fn feedback_registration_paths_for_state(
     home: &Path,
     integration: &dyn tracedecay::agents::AgentIntegration,
@@ -1377,6 +1403,7 @@ fn feedback_registration_paths_for_state(
     }
 }
 
+#[hotpath::measure]
 fn feedback_registration_path<'a>(
     paths: &'a [PathBuf],
     file: &FeedbackRegistrationFileState,
@@ -1389,6 +1416,7 @@ fn feedback_registration_path<'a>(
         })
 }
 
+#[hotpath::measure]
 fn capture_feedback_applied_registration(
     home: &Path,
     integration: &dyn tracedecay::agents::AgentIntegration,
@@ -1414,6 +1442,7 @@ fn capture_feedback_applied_registration(
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_feedback_registration_snapshot(
     home: &Path,
     integration: &dyn tracedecay::agents::AgentIntegration,
@@ -1447,6 +1476,7 @@ fn validate_feedback_registration_snapshot(
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_feedback_registration_restore(
     home: &Path,
     integration: &dyn tracedecay::agents::AgentIntegration,
@@ -1533,6 +1563,7 @@ fn validate_feedback_registration_restore(
     Ok(paths)
 }
 
+#[hotpath::measure]
 fn restore_feedback_registration(
     home: &Path,
     integration: &dyn tracedecay::agents::AgentIntegration,
@@ -1593,6 +1624,7 @@ fn restore_feedback_registration(
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_feedback_applied_artifacts(
     home: &Path,
     target_manifest: &tracedecay::agents::host_bundle_v2::HostBundleManifestV1,
@@ -1638,6 +1670,7 @@ fn validate_feedback_applied_artifacts(
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_feedback_active_receipts(
     lifecycle_root: &Path,
     switch_receipt: &tracedecay::agents::host_bundle_v2::FeedbackPathRollbackReceiptV1,
@@ -1679,6 +1712,7 @@ fn validate_feedback_active_receipts(
     Ok(())
 }
 
+#[hotpath::measure]
 fn snapshot_feedback_artifact_permissions(
     home: &Path,
     manifest: &tracedecay::agents::host_bundle_v2::HostBundleManifestV1,
@@ -1709,6 +1743,7 @@ fn snapshot_feedback_artifact_permissions(
         .collect()
 }
 
+#[hotpath::measure]
 fn restore_feedback_artifact_permissions(
     home: &Path,
     permissions: &[FeedbackArtifactPermissionStateV4],
@@ -1722,6 +1757,7 @@ fn restore_feedback_artifact_permissions(
     Ok(())
 }
 
+#[hotpath::measure]
 fn feedback_registration_paths(
     home: &Path,
     integration: &dyn tracedecay::agents::AgentIntegration,
@@ -1742,6 +1778,7 @@ fn feedback_registration_paths(
     Ok(paths)
 }
 
+#[hotpath::measure]
 fn feedback_path_digest(path: &Path) -> tracedecay_domain::errors::Result<[u8; 32]> {
     let bytes = serde_json::to_vec(path).map_err(|error| {
         tracedecay_domain::errors::TraceDecayError::Config {
@@ -1751,6 +1788,7 @@ fn feedback_path_digest(path: &Path) -> tracedecay_domain::errors::Result<[u8; 3
     Ok(Sha256::digest(bytes).into())
 }
 
+#[hotpath::measure]
 fn feedback_file_observed_state(
     path: &Path,
 ) -> tracedecay_domain::errors::Result<FeedbackFileObservedStateV2> {
@@ -1785,6 +1823,7 @@ fn feedback_file_observed_state(
     }
 }
 
+#[hotpath::measure]
 fn feedback_observed_state_for_contents(
     contents: Option<&[u8]>,
     metadata: Option<tracedecay::agents::HostFileMetadataIdentityV1>,
@@ -1803,6 +1842,7 @@ fn feedback_observed_state_for_contents(
     )
 }
 
+#[hotpath::measure]
 fn feedback_file_permissions(permissions: &fs::Permissions) -> FeedbackFilePermissionsV2 {
     #[cfg(unix)]
     let unix_mode = Some(permissions.mode());
@@ -1814,6 +1854,7 @@ fn feedback_file_permissions(permissions: &fs::Permissions) -> FeedbackFilePermi
     }
 }
 
+#[hotpath::measure]
 fn restore_feedback_file_permissions(
     path: &Path,
     state: &FeedbackFilePermissionsV2,
@@ -1851,6 +1892,7 @@ fn restore_feedback_file_permissions(
         })
 }
 
+#[hotpath::measure]
 fn write_feedback_state(
     path: &Path,
     state: &FeedbackRollbackCliState,
@@ -1877,12 +1919,14 @@ fn write_feedback_state(
     })
 }
 
+#[hotpath::measure]
 fn feedback_doctor_state_path(lifecycle_root: &Path, agent_id: &str) -> PathBuf {
     lifecycle_root
         .join(".tracedecay-host-bundle-v1")
         .join(format!("feedback-rollback.{agent_id}.v1.json"))
 }
 
+#[hotpath::measure]
 fn persist_feedback_state(
     state_path: &Path,
     lifecycle_root: &Path,
@@ -1919,6 +1963,7 @@ fn persist_feedback_state(
     })
 }
 
+#[hotpath::measure]
 fn feedback_rollback_dry_run(agent_id: &str) -> tracedecay_domain::errors::Result<()> {
     let (home, _lifecycle_root, aggregate, target) = feedback_rollback_inputs(agent_id)?;
     let (previous, previous_receipt) = live_feedback_receipt(&home, &aggregate)?;
@@ -2433,6 +2478,7 @@ fn feedback_rollback_restore(state_path: &Path) -> tracedecay_domain::errors::Re
     Ok(())
 }
 
+#[hotpath::measure]
 fn host_bundle_component(
     component: crate::cli::HostBundleComponentArg,
 ) -> tracedecay::agents::host_bundle_v2::HostBundleComponentV1 {
@@ -2466,6 +2512,7 @@ pub(crate) async fn handle_host_bundle_recovery_command(
     handle_host_bundle_recovery_command_inner(action, dry_run, yes).await
 }
 
+#[hotpath::measure]
 fn handle_host_bundle_recovery_command_inner(
     action: crate::cli::HostBundleAction,
     dry_run: bool,
@@ -2585,6 +2632,7 @@ fn handle_host_bundle_recovery_command_inner(
 /// That mapping is many-to-one, so the alias hosts that share an id with a
 /// canonical one are skipped: `cursor` resolves to the desktop host and `cline`
 /// to the single Cline host rather than the family.
+#[hotpath::measure]
 fn host_kind_for_agent(
     agent: &str,
 ) -> tracedecay_domain::errors::Result<tracedecay::agents::host_bundle_v2::HostKindV1> {
@@ -2601,6 +2649,7 @@ fn host_kind_for_agent(
         })
 }
 
+#[hotpath::measure]
 fn host_bundle_error(
     error: tracedecay::agents::host_bundle_v2::HostBundleError,
 ) -> tracedecay_domain::errors::TraceDecayError {
@@ -2609,6 +2658,7 @@ fn host_bundle_error(
     }
 }
 
+#[hotpath::measure]
 fn host_bundle_error_for_agent(
     agent_id: &str,
     error: tracedecay::agents::host_bundle_v2::HostBundleError,
@@ -2988,6 +3038,7 @@ pub(crate) fn handle_reinstall_preflight_command() -> tracedecay_domain::errors:
     })
 }
 
+#[hotpath::measure]
 fn preflight_agent_integration(
     agent_id: &str,
     integration: &dyn tracedecay::agents::AgentIntegration,
@@ -3054,6 +3105,7 @@ fn preflight_agent_integration(
     ))
 }
 
+#[hotpath::measure]
 fn registration_state_label(
     state: tracedecay::agents::host_bundle_v2::HostBundleRegistrationStateV1,
 ) -> &'static str {

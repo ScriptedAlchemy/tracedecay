@@ -211,6 +211,7 @@ pub(crate) async fn recover_truncated_mcp_result(
     Ok(recovered_result)
 }
 
+#[hotpath::measure]
 pub(crate) fn is_truncation_envelope(value: &Value) -> bool {
     value.get("truncated").and_then(Value::as_bool) == Some(true)
         && value
@@ -220,6 +221,7 @@ pub(crate) fn is_truncation_envelope(value: &Value) -> bool {
         && value.get("preview").and_then(Value::as_str).is_some()
 }
 
+#[hotpath::measure]
 pub(crate) fn reject_truncation_envelope(
     value: &Value,
     tool_name: &str,

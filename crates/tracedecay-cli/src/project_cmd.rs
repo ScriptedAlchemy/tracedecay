@@ -206,6 +206,7 @@ async fn preview_projects_forget(
     Ok(())
 }
 
+#[hotpath::measure]
 fn forget_selector_not_found(selector: &str) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!(
@@ -218,6 +219,7 @@ fn forget_selector_not_found(selector: &str) -> TraceDecayError {
 /// Path-shaped selectors are absolutized against the CLI's own working
 /// directory before reaching any resolver, so `.` names the operator's
 /// directory rather than the daemon's or the maintenance process's.
+#[hotpath::measure]
 fn forget_selector_argument(selector: &str) -> Result<PathBuf> {
     let trimmed = selector.trim();
     if trimmed.is_empty() {
@@ -234,6 +236,7 @@ fn forget_selector_argument(selector: &str) -> Result<PathBuf> {
     }
 }
 
+#[hotpath::measure]
 fn bounded_limit(limit: usize) -> usize {
     limit.clamp(1, MAX_LIMIT)
 }
@@ -252,6 +255,7 @@ fn print_registry_list(payload: &Value, label: &str, json_output: bool) -> Resul
     Ok(())
 }
 
+#[hotpath::measure]
 fn render_project_context_payload(payload: &Value) -> String {
     let mut out = String::new();
     let project = &payload["project"];
