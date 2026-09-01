@@ -128,6 +128,7 @@ impl Default for DaemonSessionSyncService {
 
 #[hotpath::measure_all]
 impl DaemonSessionSyncService {
+    #[hotpath::skip]
     async fn execute_request_admitted(
         &self,
         request: SessionSyncRequestV1,

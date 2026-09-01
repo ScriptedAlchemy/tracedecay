@@ -63,6 +63,7 @@ pub const SESSION_MESSAGES_AFTER_SQL: &str = "SELECT timestamp, ordinal, kind, t
 
 #[hotpath::measure_all]
 impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
+    #[hotpath::skip]
     pub async fn cursor_session_ingest_health(&self) -> Result<SessionIngestHealth, String> {
         self.session_ingest_health_for_provider(Some("cursor"))
             .await

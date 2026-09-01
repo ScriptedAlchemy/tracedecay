@@ -18,6 +18,7 @@ use super::super::registered_db::{SessionRegisteredDb, SessionStoreAccess, Sessi
 
 #[hotpath::measure_all]
 impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
+    #[hotpath::skip]
     pub async fn lcm_read_snapshot(&self) -> Result<DatabaseEngineReadSnapshot, LcmError> {
         self.read_snapshot()
             .await

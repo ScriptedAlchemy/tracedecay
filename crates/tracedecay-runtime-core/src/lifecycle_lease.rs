@@ -167,6 +167,7 @@ pub fn acquire_exclusive_for_profile(
 
 /// Attempts the exclusive profile lease without blocking, reporting
 /// contention as [`ExclusiveLeaseAttempt::Busy`] instead of a refusal error.
+#[hotpath::measure]
 pub fn try_acquire_exclusive_for_profile(
     profile_root: &Path,
     operation: &str,

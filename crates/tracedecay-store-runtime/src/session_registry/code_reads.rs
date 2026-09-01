@@ -9,7 +9,9 @@ use super::{
 };
 use tracedecay_domain::errors::TraceDecayError;
 
+#[hotpath::measure_all]
 impl DaemonSessionRuntimeRegistryV1 {
+    #[hotpath::skip]
     async fn project_graph_database(
         &self,
         project_id: ProjectId,
@@ -244,6 +246,7 @@ impl DaemonSessionRuntimeRegistryV1 {
     /// Drops the daemon's retained project facades before a destructive store
     /// reservation closes the underlying physical runtimes. The reservation
     /// then proves that no stale handle can recreate the deleted shard.
+    #[hotpath::skip]
     pub async fn drop_project_runtime_caches(&self, project_id: &ProjectId) {
         let mut owners = self
             .project_owners
@@ -258,6 +261,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         }
     }
 
+    #[hotpath::skip]
     async fn restore_replaced_project_session_ready(
         &self,
         project_id: &ProjectId,
@@ -788,6 +792,7 @@ impl DaemonSessionRuntimeRegistryV1 {
 
     /// Mounts the project-wide mutable graph. The checkout path is exact route
     /// provenance; the canonical database locator is supplied by `StoreLayout`.
+    #[hotpath::skip]
     pub async fn project_graph(
         &self,
         _project_root: &Path,
@@ -800,6 +805,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             .await
     }
 
+    #[hotpath::skip]
     pub async fn project_graph_registered(
         &self,
         project_id: ProjectId,

@@ -36,6 +36,7 @@ impl Query for ExactSqlReadSnapshot {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn stage_by_key(
     authority: &impl Query,
     key: &SemanticVectorStageKey,
@@ -55,6 +56,7 @@ pub(super) fn stage_by_key(
     )
 }
 
+#[hotpath::measure]
 pub(super) fn pending_stage_for(
     authority: &impl Query,
     projection: &GraphProjectionIdentityV1,
@@ -68,6 +70,7 @@ pub(super) fn pending_stage_for(
     )
 }
 
+#[hotpath::measure]
 pub(super) fn stage_query(
     authority: &impl Query,
     predicate: &str,
@@ -94,6 +97,7 @@ pub(super) fn stage_query(
     rows.rows.first().map(decode_stage).transpose()
 }
 
+#[hotpath::measure]
 pub(super) fn decode_stage(row: &ExactSqlRow) -> SemanticVectorStagingStoreResult<Stage> {
     let plan: SemanticVectorStagePlan = decode_json(text_at(row, 1)?)?;
     plan.validate()
@@ -148,6 +152,7 @@ pub(super) fn decode_stage(row: &ExactSqlRow) -> SemanticVectorStagingStoreResul
     })
 }
 
+#[hotpath::measure]
 pub(super) fn receipt_by_ordinal(
     authority: &impl Query,
     stage_id: i64,
@@ -176,6 +181,7 @@ pub(super) fn receipt_by_ordinal(
         .transpose()
 }
 
+#[hotpath::measure]
 fn validate_stage_columns(
     row: &ExactSqlRow,
     plan: &SemanticVectorStagePlan,
@@ -243,6 +249,7 @@ fn validate_stage_columns(
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_stage_record(
     record: &SemanticVectorStageRecord,
 ) -> SemanticVectorStagingStoreResult<()> {
@@ -273,6 +280,7 @@ fn validate_stage_record(
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_receipt_columns(
     row: &ExactSqlRow,
     receipt: &SemanticVectorStageBatchReceipt,
@@ -292,6 +300,7 @@ fn validate_receipt_columns(
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_receipt_chunks(
     authority: &impl Query,
     stage_id: i64,
@@ -325,6 +334,7 @@ fn validate_receipt_chunks(
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn effect_by_batch(
     authority: &impl Query,
     batch_id: i64,
@@ -355,6 +365,7 @@ pub(super) fn effect_by_batch(
     })
 }
 
+#[hotpath::measure]
 pub(super) fn validate_stage_history(
     authority: &impl Query,
     stage: &Stage,
@@ -522,6 +533,7 @@ pub(super) fn validate_stage_history(
     Ok(())
 }
 
+#[hotpath::measure]
 fn decode_effect_state(
     value: &str,
 ) -> SemanticVectorStagingStoreResult<SemanticVectorStageEffectState> {
@@ -535,6 +547,7 @@ fn decode_effect_state(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 fn finalize_history_batch(
     stage: &Stage,
     receipt: &SemanticVectorStageBatchReceipt,
@@ -585,6 +598,7 @@ fn finalize_history_batch(
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn ensure_binding(
     handle: &ExactSqlHandle,
     fence: &SemanticVectorWriterFence,
@@ -599,6 +613,7 @@ pub(super) fn ensure_binding(
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn ensure_projection_binding(
     handle: &ExactSqlHandle,
     projection: &GraphProjectionIdentityV1,
@@ -613,6 +628,7 @@ pub(super) fn ensure_projection_binding(
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn ensure_live(
     context: &GraphPublicationOperationContextV1<'_>,
 ) -> SemanticVectorStagingStoreResult<()> {
@@ -621,6 +637,7 @@ pub(super) fn ensure_live(
     })
 }
 
+#[hotpath::measure]
 pub(super) fn begin_read_snapshot(
     handle: &ExactSqlHandle,
     context: &GraphPublicationOperationContextV1<'_>,
@@ -637,6 +654,7 @@ pub(super) fn begin_read_snapshot(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn begin_commit(
     context: &GraphPublicationOperationContextV1<'_>,
 ) -> SemanticVectorStagingStoreResult<()> {
@@ -649,20 +667,24 @@ pub(super) fn begin_commit(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn begin(
     handle: &ExactSqlHandle,
 ) -> SemanticVectorStagingStoreResult<ExactSqlTransaction> {
     handle.begin_immediate().map_err(map_exact)
 }
 
+#[hotpath::measure]
 pub(super) fn commit(tx: ExactSqlTransaction) -> SemanticVectorStagingStoreResult<()> {
     tx.commit().map(|_| ()).map_err(map_exact)
 }
 
+#[hotpath::measure]
 pub(super) fn rollback(tx: ExactSqlTransaction) -> SemanticVectorStagingStoreResult<()> {
     tx.rollback().map(|_| ()).map_err(map_exact)
 }
 
+#[hotpath::measure]
 pub(super) fn execute(
     tx: &ExactSqlTransaction,
     sql: &str,
@@ -671,6 +693,7 @@ pub(super) fn execute(
     tx.execute(statement(sql, params)?).map_err(map_exact)
 }
 
+#[hotpath::measure]
 pub(super) fn query(
     authority: &impl Query,
     sql: &str,
@@ -679,6 +702,7 @@ pub(super) fn query(
     authority.run(statement(sql, params)?).map_err(map_exact)
 }
 
+#[hotpath::measure]
 fn statement(
     sql: &str,
     params: Vec<ExactSqlValue>,
@@ -687,6 +711,7 @@ fn statement(
         .map_err(|_| SemanticVectorStagingStoreError::Infrastructure)
 }
 
+#[hotpath::measure]
 pub(super) fn projection_parts(
     projection: &GraphProjectionIdentityV1,
 ) -> SemanticVectorStagingStoreResult<(String, String, String)> {
@@ -697,32 +722,38 @@ pub(super) fn projection_parts(
     ))
 }
 
+#[hotpath::measure]
 pub(super) fn json<T: serde::Serialize + ?Sized>(
     value: &T,
 ) -> SemanticVectorStagingStoreResult<String> {
     serde_json::to_string(value).map_err(|error| corrupt(error.to_string()))
 }
 
+#[hotpath::measure]
 pub(super) fn decode_json<T: serde::de::DeserializeOwned>(
     value: &str,
 ) -> SemanticVectorStagingStoreResult<T> {
     serde_json::from_str(value).map_err(|error| corrupt(error.to_string()))
 }
 
+#[hotpath::measure]
 pub(super) fn text(value: impl Into<String>) -> ExactSqlValue {
     ExactSqlValue::Text(value.into())
 }
 
+#[hotpath::measure]
 pub(super) fn optional_text(value: Option<String>) -> ExactSqlValue {
     value.map_or(ExactSqlValue::Null, ExactSqlValue::Text)
 }
 
+#[hotpath::measure]
 pub(super) fn integer(value: u64) -> SemanticVectorStagingStoreResult<ExactSqlValue> {
     i64::try_from(value)
         .map(ExactSqlValue::Integer)
         .map_err(|_| invalid("semantic vector integer exceeds SQLite range"))
 }
 
+#[hotpath::measure]
 pub(super) fn text_at(row: &ExactSqlRow, index: usize) -> SemanticVectorStagingStoreResult<&str> {
     match row.values.get(index) {
         Some(ExactSqlValue::Text(value)) => Ok(value),
@@ -732,6 +763,7 @@ pub(super) fn text_at(row: &ExactSqlRow, index: usize) -> SemanticVectorStagingS
     }
 }
 
+#[hotpath::measure]
 pub(super) fn optional_text_at(
     row: &ExactSqlRow,
     index: usize,
@@ -745,6 +777,7 @@ pub(super) fn optional_text_at(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn integer_at(row: &ExactSqlRow, index: usize) -> SemanticVectorStagingStoreResult<i64> {
     match row.values.get(index) {
         Some(ExactSqlValue::Integer(value)) if *value >= 0 => Ok(*value),
@@ -752,6 +785,7 @@ pub(super) fn integer_at(row: &ExactSqlRow, index: usize) -> SemanticVectorStagi
     }
 }
 
+#[hotpath::measure]
 fn signed_integer_at(row: &ExactSqlRow, index: usize) -> SemanticVectorStagingStoreResult<i64> {
     match row.values.get(index) {
         Some(ExactSqlValue::Integer(value)) => Ok(*value),
@@ -761,6 +795,7 @@ fn signed_integer_at(row: &ExactSqlRow, index: usize) -> SemanticVectorStagingSt
     }
 }
 
+#[hotpath::measure]
 fn optional_integer_at(
     row: &ExactSqlRow,
     index: usize,
@@ -774,11 +809,13 @@ fn optional_integer_at(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn u64_at(row: &ExactSqlRow, index: usize) -> SemanticVectorStagingStoreResult<u64> {
     u64::try_from(integer_at(row, index)?)
         .map_err(|_| corrupt("semantic vector integer exceeds u64"))
 }
 
+#[hotpath::measure]
 pub(super) fn checked_u64(
     value: i64,
     field: &'static str,
@@ -786,6 +823,7 @@ pub(super) fn checked_u64(
     u64::try_from(value).map_err(|_| corrupt(format!("{field} is negative")))
 }
 
+#[hotpath::measure]
 fn optional_u64_at(
     row: &ExactSqlRow,
     index: usize,
@@ -796,6 +834,7 @@ fn optional_u64_at(
         .map_err(|_| corrupt("semantic vector optional integer exceeds u64"))
 }
 
+#[hotpath::measure]
 pub(super) fn terminal(
     terminal: &SemanticVectorStageEffectTerminal,
 ) -> (SemanticVectorStageEffectState, &str) {
@@ -811,6 +850,7 @@ pub(super) fn terminal(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn effect_state(state: SemanticVectorStageEffectState) -> &'static str {
     match state {
         SemanticVectorStageEffectState::Pending => "pending",
@@ -820,14 +860,17 @@ pub(super) fn effect_state(state: SemanticVectorStageEffectState) -> &'static st
     }
 }
 
+#[hotpath::measure]
 pub(super) fn invalid(message: &'static str) -> SemanticVectorStagingStoreError {
     SemanticVectorStagingStoreError::Corrupt(message.to_owned())
 }
 
+#[hotpath::measure]
 pub(super) fn corrupt(message: impl Into<String>) -> SemanticVectorStagingStoreError {
     SemanticVectorStagingStoreError::Corrupt(message.into())
 }
 
+#[hotpath::measure]
 pub(super) fn map_exact(error: ExactSqlError) -> SemanticVectorStagingStoreError {
     match &error {
         ExactSqlError::Sqlite {
@@ -852,6 +895,7 @@ pub(super) fn map_exact(error: ExactSqlError) -> SemanticVectorStagingStoreError
     }
 }
 
+#[hotpath::measure]
 fn exact_sql_error_kind(error: &ExactSqlError) -> &'static str {
     match error {
         ExactSqlError::AuthorityMismatch => "authority_mismatch",
@@ -870,6 +914,7 @@ fn exact_sql_error_kind(error: &ExactSqlError) -> &'static str {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn map_graph(
     error: tracedecay_store::GraphPublicationStoreErrorV1,
 ) -> SemanticVectorStagingStoreError {
@@ -889,6 +934,7 @@ pub(super) fn map_graph(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn duplicate_chunk(
     authority: &impl Query,
     stage_id: i64,
@@ -923,6 +969,7 @@ pub(super) fn duplicate_chunk(
         .map(|chunk| chunk.chunk_id.clone()))
 }
 
+#[hotpath::measure]
 pub(super) fn chunk_manifest_digest(
     authority: &impl Query,
     stage_id: i64,
@@ -963,6 +1010,7 @@ pub(super) fn chunk_manifest_digest(
     accumulator.finish().map_err(Into::into)
 }
 
+#[hotpath::measure]
 pub(super) fn authoritative_verified_head(
     authority: &ExactSqlTransaction,
     projection_identity: &GraphProjectionIdentityV1,
@@ -974,6 +1022,7 @@ pub(super) fn authoritative_verified_head(
     .map_err(map_graph)
 }
 
+#[hotpath::measure]
 pub(super) fn publication_replay_conflict(
     authority: &impl Query,
     plan: &SemanticVectorStagePlan,

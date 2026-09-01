@@ -336,6 +336,7 @@ fn cursor_after_receipt(
 
 /// Builds the admission request for one framed record, consuming the frame's
 /// parsed payload.
+#[hotpath::measure]
 fn build_claude_capture_request(
     frame: &mut ClaudeSourceFrame,
     expected_cursor: Option<ClaudeSourceCursorV1>,
@@ -1028,6 +1029,7 @@ where
 
 /// Folds windowed-phase committed stats into a replay failure so terminal
 /// errors keep reporting every durable effect of this source pass.
+#[hotpath::measure]
 fn merge_committed_into_error(
     committed: ClaudeObservationIngestStats,
     error: ClaudeObservationIngestError,

@@ -33,6 +33,7 @@ pub(super) struct RemoteRestoreQuarantineV1 {
     phase: RemoteRestoreQuarantinePhaseV1,
 }
 
+#[hotpath::measure_all]
 impl RemoteRestoreQuarantineV1 {
     pub(super) fn terminal_outcome(&self) -> Option<RestorePublicationV1> {
         match self.phase {
@@ -124,10 +125,12 @@ impl RemoteRestoreQuarantineV1 {
     }
 }
 
+#[hotpath::measure]
 fn fence_path(destination: &Path) -> PathBuf {
     super::super::super::remote_restore_quarantine_fence_path(destination)
 }
 
+#[hotpath::measure]
 fn write(destination: &Path, quarantine: &RemoteRestoreQuarantineV1) -> Result<()> {
     let payload = serde_json::to_vec(quarantine).map_err(|error| {
         session_registry_error("encode remote restore quarantine", error.to_string())
@@ -139,6 +142,7 @@ fn write(destination: &Path, quarantine: &RemoteRestoreQuarantineV1) -> Result<(
     })
 }
 
+#[hotpath::measure]
 pub(super) fn read_remote_restore_quarantine(
     destination: &Path,
 ) -> Result<Option<RemoteRestoreQuarantineV1>> {
@@ -163,6 +167,7 @@ pub(super) fn read_remote_restore_quarantine(
     Ok(Some(quarantine))
 }
 
+#[hotpath::measure]
 pub(super) fn install_remote_restore_quarantine(
     destination: &Path,
     staging: &Path,
@@ -191,6 +196,7 @@ pub(super) fn install_remote_restore_quarantine(
     )
 }
 
+#[hotpath::measure]
 pub(super) fn validate_completed_remote_restore(
     destination: &Path,
     quarantine: &RemoteRestoreQuarantineV1,
@@ -218,6 +224,7 @@ pub(super) fn validate_completed_remote_restore(
 /// reached the new file or remained/returned at the rollback file. An
 /// explicit rollback-required phase stays fenced rather than guessing a
 /// terminal outcome.
+#[hotpath::measure]
 pub(super) fn recover_remote_restore_quarantine_outcome(
     destination: &Path,
     quarantine: &RemoteRestoreQuarantineV1,
@@ -233,6 +240,7 @@ pub(super) fn recover_remote_restore_quarantine_outcome(
     Ok(outcome)
 }
 
+#[hotpath::measure]
 pub(super) fn complete_remote_restore_quarantine(
     destination: &Path,
     outcome: RestorePublicationV1,
@@ -267,6 +275,7 @@ pub(super) fn complete_remote_restore_quarantine(
     write(destination, &quarantine)
 }
 
+#[hotpath::measure]
 pub(super) fn activate_remote_restore_quarantine(
     destination: &Path,
     outcome: RestorePublicationV1,
@@ -290,6 +299,7 @@ pub(super) fn activate_remote_restore_quarantine(
     write(destination, &quarantine)
 }
 
+#[hotpath::measure]
 pub fn remote_restore_activated_open_identity(
     destination: &Path,
 ) -> Result<Option<u64>> {

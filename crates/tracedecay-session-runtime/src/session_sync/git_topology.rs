@@ -47,6 +47,7 @@ pub(super) enum GitTopologySyncOutcome {
 
 #[hotpath::measure_all]
 impl SessionSyncProjectContext {
+    #[hotpath::skip]
     pub(super) async fn publish_git_topology(
         &self,
         service: &DaemonSessionSyncService,

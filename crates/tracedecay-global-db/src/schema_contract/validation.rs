@@ -138,6 +138,7 @@ fn normalize_default(value: Option<&str>) -> Option<String> {
     })
 }
 
+#[hotpath::measure]
 fn validate_table(
     contract: &Table,
     actual: &ActualTableMetadata,
@@ -272,6 +273,7 @@ fn primary_key_index_matches(actual: &ActualIndex, expected_columns: &[&str]) ->
             })
 }
 
+#[hotpath::measure]
 fn validate_indexes_for_table(
     table: &str,
     actual: &[ActualIndex],

@@ -133,6 +133,7 @@ pub struct SessionRetrievalServingIdentityV1 {
 
 #[hotpath::measure_all]
 impl SessionRetrievalServingIdentityV1 {
+    #[hotpath::skip]
     pub async fn resolve_project(
         project_id: &str,
         serving_db: &Path,

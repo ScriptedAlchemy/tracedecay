@@ -211,6 +211,7 @@ impl DaemonSessionRuntimeRegistryV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl DaemonSessionRuntimeRegistryV1 {
     /// Mints one independently counted registered-session client and its
     /// matching graph client. The owner map retains neither issuance.
@@ -309,6 +310,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         ))
     }
 
+    #[hotpath::skip]
     pub async fn profile_database(&self) -> Result<RegisteredGlobalDbLeaseV1> {
         let existing = {
             let mounted = self
@@ -386,6 +388,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         Ok(lease)
     }
 
+    #[hotpath::skip]
     pub async fn profile_sessions(&self) -> Result<RegisteredGlobalDbLeaseV1> {
         let existing = {
             let mounted = self
@@ -457,6 +460,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         Ok(lease)
     }
 
+    #[hotpath::skip]
     pub(super) async fn publish_memory_owner(
         &self,
         shard_id: StoreShardIdV1,
@@ -596,6 +600,7 @@ impl DaemonSessionRuntimeRegistryV1 {
     /// Mounts the distinct profile-memory shard through this daemon's pinned
     /// profile registry. `ProfileMemory` never aliases the profile/global
     /// shard, and publication never reopens a filesystem path.
+    #[hotpath::skip]
     pub async fn profile_memory(&self) -> Result<Arc<Database>> {
         let existing = {
             let mounted = self
@@ -647,6 +652,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         Ok(database)
     }
 
+    #[hotpath::skip]
     pub async fn remote_node_storage(
         &self,
         node_id: BrainNodeId,
@@ -656,6 +662,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             .await
     }
 
+    #[hotpath::skip]
     pub async fn provision_remote_node(
         &self,
         grant: EnrollmentGrantV1,
@@ -689,6 +696,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             })
     }
 
+    #[hotpath::skip]
     async fn mount_remote_node_storage(
         &self,
         node_id: BrainNodeId,
@@ -864,6 +872,7 @@ impl DaemonSessionRuntimeRegistryV1 {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
+    #[hotpath::skip]
     pub async fn remote_recovery_authority(
         &self,
         node_id: &BrainNodeId,
@@ -875,6 +884,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             .cloned()
     }
 
+    #[hotpath::skip]
     pub async fn mounted_session_databases(&self) -> Vec<RegisteredGlobalDbLeaseV1> {
         let mut databases = Vec::new();
         if let Some(database) = self
@@ -921,6 +931,7 @@ impl DaemonSessionRuntimeRegistryV1 {
     /// without a structural Conflict. Callers must have joined the
     /// reconciliation workers first; a graph client lease still held by a
     /// live consumer surfaces as a typed Conflict, not a hang.
+    #[hotpath::skip]
     pub async fn close_retained_graph_runtimes_for_shutdown(&self) -> Result<()> {
         let identities = self.drain_retained_graph_owners_for_shutdown()?;
         let mut first_error = None;
@@ -1079,6 +1090,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         Ok(identities)
     }
 
+    #[hotpath::skip]
     pub async fn mounted_project_sessions(
         &self,
         project_id: &ProjectId,
@@ -1098,6 +1110,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         .ok()
     }
 
+    #[hotpath::skip]
     pub async fn project_sessions(
         &self,
         project_id: ProjectId,
@@ -1114,6 +1127,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         self.mount_registered_project_sessions(project_id).await
     }
 
+    #[hotpath::skip]
     pub async fn mount_registered_project_sessions(
         &self,
         project_id: ProjectId,
@@ -1280,6 +1294,7 @@ impl DaemonSessionRuntimeRegistryV1 {
     /// returned database remains cached so migration and live use share one
     /// writer authority.
     #[cfg(any(test, feature = "test-helpers"))]
+    #[hotpath::skip]
     pub async fn project_memory(
         &self,
         project_id: ProjectId,
@@ -1393,6 +1408,7 @@ impl DaemonSessionRuntimeRegistryV1 {
 
     /// Mounts an existing project-memory shard without initializing it or
     /// verifying its schema, and exposes only a read-only database facade.
+    #[hotpath::skip]
     pub async fn project_memory_read_only(
         &self,
         project_id: ProjectId,

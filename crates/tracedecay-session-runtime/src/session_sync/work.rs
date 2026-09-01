@@ -32,6 +32,7 @@ impl SessionSyncInterruption {
 
 #[hotpath::measure_all]
 impl DaemonSessionSyncService {
+    #[hotpath::skip]
     pub(super) async fn mirror_primary_terminal(
         &self,
         context: &SessionSyncProjectContext,
@@ -377,6 +378,7 @@ impl DaemonSessionSyncService {
 
 #[hotpath::measure_all]
 impl SessionSyncProjectContext {
+    #[hotpath::skip]
     pub(super) async fn source_frontiers_for(
         &self,
         project_sessions: &RegisteredGlobalDbLeaseV1,

@@ -42,12 +42,14 @@ use tracedecay_store::{
 pub const MAX_RETAINED_FACT_LIMIT: usize = 200;
 pub const MAX_RETAINED_FEEDBACK_HISTORY_LIMIT: usize = 1_000;
 
+#[hotpath::measure]
 pub fn read_scope(
     options: &FactReadOptionsV1,
 ) -> (Option<MemoryScopeV1>, Option<&RetainedProjectSelectorV1>) {
     (options.memory_scope, options.project_selector.as_ref())
 }
 
+#[hotpath::measure]
 pub fn validate_reason_entities(
     entities: &[String],
 ) -> Result<(), RetainedSurfaceExecutionErrorV1> {
@@ -57,6 +59,7 @@ pub fn validate_reason_entities(
     Ok(())
 }
 
+#[hotpath::measure]
 pub fn ensure_profile_request_scope(
     memory_scope: Option<MemoryScopeV1>,
     selector: Option<&RetainedProjectSelectorV1>,
@@ -67,6 +70,7 @@ pub fn ensure_profile_request_scope(
     Ok(())
 }
 
+#[hotpath::measure]
 pub fn add_request(
     request: &FactStoreAddRequestV1,
 ) -> Result<ProjectMemoryFactAddRequest, RetainedSurfaceExecutionErrorV1> {
@@ -88,6 +92,7 @@ pub fn add_request(
     })
 }
 
+#[hotpath::measure]
 pub fn update_patch(
     request: &FactStoreUpdateRequestV1,
 ) -> Result<ProjectMemoryFactUpdatePatchV1, RetainedSurfaceExecutionErrorV1> {
@@ -110,6 +115,7 @@ pub fn update_patch(
     .map_err(map_store_error)
 }
 
+#[hotpath::measure]
 pub fn update_logical_effect(
     owner: &FactOwnerV1,
     request: &FactStoreUpdateRequestV1,
@@ -137,6 +143,7 @@ pub fn update_logical_effect(
     })
 }
 
+#[hotpath::measure]
 pub fn remove_logical_effect(
     owner: &FactOwnerV1,
     request: &FactStoreRemoveRequestV1,
@@ -156,6 +163,7 @@ pub fn remove_logical_effect(
     })
 }
 
+#[hotpath::measure]
 pub fn feedback_logical_effect(
     owner: &FactOwnerV1,
     request: &FactFeedbackRequestV1,
@@ -178,6 +186,7 @@ pub fn feedback_logical_effect(
     })
 }
 
+#[hotpath::measure]
 pub fn search_logical_effect(
     owner: &FactOwnerV1,
     request: &FactStoreSearchRequestV1,
@@ -198,6 +207,7 @@ pub fn search_logical_effect(
     })
 }
 
+#[hotpath::measure]
 pub fn update_command(
     owner: FactOwnerV1,
     request: &FactStoreUpdateRequestV1,
@@ -216,6 +226,7 @@ pub fn update_command(
     .map_err(map_store_error)
 }
 
+#[hotpath::measure]
 pub fn remove_command(
     owner: FactOwnerV1,
     request: &FactStoreRemoveRequestV1,
@@ -233,6 +244,7 @@ pub fn remove_command(
     .map_err(map_store_error)
 }
 
+#[hotpath::measure]
 pub fn feedback_command(
     owner: FactOwnerV1,
     request: &FactFeedbackRequestV1,
@@ -253,6 +265,7 @@ pub fn feedback_command(
     .map_err(map_store_error)
 }
 
+#[hotpath::measure]
 pub fn search_query(
     owner: FactOwnerV1,
     kind: ProjectMemoryFactSearchKindV1,
@@ -287,6 +300,7 @@ pub fn search_query(
     .map_err(map_store_error)
 }
 
+#[hotpath::measure]
 pub fn fact_limit(limit: Option<u64>) -> Result<usize, RetainedSurfaceExecutionErrorV1> {
     let limit = limit
         .map(usize::try_from)
@@ -299,6 +313,7 @@ pub fn fact_limit(limit: Option<u64>) -> Result<usize, RetainedSurfaceExecutionE
     Ok(limit)
 }
 
+#[hotpath::measure]
 pub fn confidence(
     value: Option<f64>,
 ) -> Result<Option<Confidence>, RetainedSurfaceExecutionErrorV1> {
@@ -315,6 +330,7 @@ pub const fn feedback_action(action: FactFeedbackActionV1) -> ProjectMemoryFactF
     }
 }
 
+#[hotpath::measure]
 fn public_feedback_action(action: ProjectMemoryFactFeedbackActionV1) -> FactFeedbackActionV1 {
     match action {
         ProjectMemoryFactFeedbackActionV1::Helpful => FactFeedbackActionV1::Helpful,
@@ -322,6 +338,7 @@ fn public_feedback_action(action: ProjectMemoryFactFeedbackActionV1) -> FactFeed
     }
 }
 
+#[hotpath::measure]
 pub fn public_owner(owner: &FactOwnerV1) -> FactCommitOwnerV1 {
     match owner {
         FactOwnerV1::Profile => FactCommitOwnerV1::Profile,
@@ -331,6 +348,7 @@ pub fn public_owner(owner: &FactOwnerV1) -> FactCommitOwnerV1 {
     }
 }
 
+#[hotpath::measure]
 pub fn commit_receipt(receipt: &FactCommitReceipt, replayed: bool) -> FactCommitReceiptV1 {
     FactCommitReceiptV1 {
         disposition: if replayed {
@@ -346,6 +364,7 @@ pub fn commit_receipt(receipt: &FactCommitReceipt, replayed: bool) -> FactCommit
     }
 }
 
+#[hotpath::measure]
 pub fn projection(
     projection: &ProjectMemoryFactProjectionV1,
 ) -> Result<FactProjectionV1, RetainedSurfaceExecutionErrorV1> {
@@ -359,6 +378,7 @@ pub fn projection(
     }
 }
 
+#[hotpath::measure]
 pub fn available_fact(
     fact: &ProjectMemoryFactV1,
 ) -> Result<FactV1, RetainedSurfaceExecutionErrorV1> {
@@ -413,6 +433,7 @@ pub fn available_fact(
     })
 }
 
+#[hotpath::measure]
 fn unavailable_fact(
     fact: &ProjectMemoryFactUnavailableV1,
 ) -> Result<FactStatusV1, RetainedSurfaceExecutionErrorV1> {
@@ -438,6 +459,7 @@ fn unavailable_fact(
     })
 }
 
+#[hotpath::measure]
 pub fn search_page(
     page: &ProjectMemoryFactSearchPageV1,
 ) -> Result<MappedSearchPageV1, RetainedSurfaceExecutionErrorV1> {
@@ -460,6 +482,7 @@ pub struct MappedSearchPageV1 {
     pub graph_coverage: FactSearchGraphCoverageV1,
 }
 
+#[hotpath::measure]
 pub fn probe_result(page: MappedSearchPageV1) -> FactStoreProbeResultV1 {
     FactStoreProbeResultV1 {
         owner: page.owner,
@@ -469,6 +492,7 @@ pub fn probe_result(page: MappedSearchPageV1) -> FactStoreProbeResultV1 {
     }
 }
 
+#[hotpath::measure]
 pub fn related_result(page: MappedSearchPageV1) -> FactStoreRelatedResultV1 {
     FactStoreRelatedResultV1 {
         owner: page.owner,
@@ -478,6 +502,7 @@ pub fn related_result(page: MappedSearchPageV1) -> FactStoreRelatedResultV1 {
     }
 }
 
+#[hotpath::measure]
 pub fn reason_result(page: MappedSearchPageV1) -> FactStoreReasonResultV1 {
     FactStoreReasonResultV1 {
         owner: page.owner,
@@ -487,6 +512,7 @@ pub fn reason_result(page: MappedSearchPageV1) -> FactStoreReasonResultV1 {
     }
 }
 
+#[hotpath::measure]
 pub fn exact_search_result(
     page: MappedSearchPageV1,
     retrieval_telemetry: FactRetrievalTelemetryV1,
@@ -504,6 +530,7 @@ pub fn exact_search_result(
 /// result absorbs as a typed state instead of a refusal. Request-scoped
 /// terminals (cancellation, timeout, invalid request) and store-health
 /// signals (reset required) still fail the operation.
+#[hotpath::measure]
 pub fn retrieval_telemetry_degradation(
     error: &RetainedSurfaceExecutionErrorV1,
 ) -> Option<FactRetrievalTelemetryDegradationV1> {
@@ -518,6 +545,7 @@ pub fn retrieval_telemetry_degradation(
     }
 }
 
+#[hotpath::measure]
 pub fn semantic_search_result(
     operation: RetainedSurfaceOperation,
     page: MappedSearchPageV1,
@@ -536,6 +564,7 @@ pub fn semantic_search_result(
     }
 }
 
+#[hotpath::measure]
 pub fn refresh_search_hits(
     page: &mut MappedSearchPageV1,
     projections: &[ProjectMemoryFactProjectionV1],
@@ -559,6 +588,7 @@ pub fn refresh_search_hits(
     Ok(())
 }
 
+#[hotpath::measure]
 fn search_hit(
     hit: &ProjectMemoryFactSearchHitV1,
 ) -> Result<FactSearchHitV1, RetainedSurfaceExecutionErrorV1> {
@@ -576,6 +606,7 @@ fn search_hit(
     })
 }
 
+#[hotpath::measure]
 fn search_cursor(cursor: &tracedecay_store::ProjectMemoryFactSearchCursorV1) -> FactSearchCursorV1 {
     FactSearchCursorV1 {
         score_millionths: cursor.score_millionths(),
@@ -584,6 +615,7 @@ fn search_cursor(cursor: &tracedecay_store::ProjectMemoryFactSearchCursorV1) -> 
     }
 }
 
+#[hotpath::measure]
 fn graph_coverage(coverage: ProjectMemoryFactSearchGraphCoverageV1) -> FactSearchGraphCoverageV1 {
     match coverage {
         ProjectMemoryFactSearchGraphCoverageV1::NotApplicable => {
@@ -620,6 +652,7 @@ fn graph_coverage(coverage: ProjectMemoryFactSearchGraphCoverageV1) -> FactSearc
     }
 }
 
+#[hotpath::measure]
 pub fn contradiction_page(
     page: &ProjectMemoryFactContradictionPageV1,
 ) -> Result<FactStoreContradictResultV1, RetainedSurfaceExecutionErrorV1> {
@@ -640,6 +673,7 @@ pub fn contradiction_page(
     })
 }
 
+#[hotpath::measure]
 pub fn feedback_history(
     history: &ProjectMemoryFactFeedbackHistoryV1,
 ) -> Result<Vec<TrustHistoryEntryV1>, RetainedSurfaceExecutionErrorV1> {
@@ -672,6 +706,7 @@ pub fn feedback_history(
         .collect())
 }
 
+#[hotpath::measure]
 pub fn get_result(
     fact_projection: &ProjectMemoryFactProjectionV1,
     history: &ProjectMemoryFactFeedbackHistoryV1,
@@ -684,16 +719,19 @@ pub fn get_result(
     ))
 }
 
+#[hotpath::measure]
 pub fn status_result(status: &ProjectMemoryMemoryStatusV1) -> RetainedSurfaceResultV1 {
     RetainedSurfaceResultV1::MemoryStatus(memory_status_result(status))
 }
 
+#[hotpath::measure]
 pub fn memory_status_result(status: &ProjectMemoryMemoryStatusV1) -> MemoryStatusResultV1 {
     MemoryStatusResultV1 {
         memory: memory_status(status),
     }
 }
 
+#[hotpath::measure]
 pub fn list_page(
     page: &ProjectMemoryFactPageV1,
 ) -> Result<FactStoreListResultV1, RetainedSurfaceExecutionErrorV1> {
@@ -708,6 +746,7 @@ pub fn list_page(
     })
 }
 
+#[hotpath::measure]
 pub fn add_result(
     outcome: &ProjectMemoryFactAddRequestOutcome,
 ) -> Result<FactStoreAddResultV1, RetainedSurfaceExecutionErrorV1> {
@@ -760,18 +799,21 @@ pub fn add_result(
     Ok(FactStoreAddResultV1::Committed { result })
 }
 
+#[hotpath::measure]
 fn near_duplicate_missing_closest() -> RetainedSurfaceExecutionErrorV1 {
     RetainedSurfaceExecutionErrorV1::unavailable(
         "the near-duplicate fact outcome carried no closest fact id",
     )
 }
 
+#[hotpath::measure]
 fn near_duplicate_missing_similarity() -> RetainedSurfaceExecutionErrorV1 {
     RetainedSurfaceExecutionErrorV1::unavailable(
         "the near-duplicate fact outcome carried no similarity score",
     )
 }
 
+#[hotpath::measure]
 pub fn add_committed_state(
     outcome: &ProjectMemoryFactAddRequestOutcome,
 ) -> Result<Value, RetainedSurfaceExecutionErrorV1> {
@@ -810,6 +852,7 @@ pub fn add_committed_state(
     })
 }
 
+#[hotpath::measure]
 pub fn update_result(
     outcome: &ProjectMemoryFactUpdateOutcomeV1,
 ) -> Result<FactStoreUpdateResultV1, RetainedSurfaceExecutionErrorV1> {
@@ -820,6 +863,7 @@ pub fn update_result(
     })
 }
 
+#[hotpath::measure]
 pub fn remove_result(
     outcome: &ProjectMemoryFactRemoveOutcomeV1,
 ) -> Result<FactStoreRemoveResultV1, RetainedSurfaceExecutionErrorV1> {
@@ -850,6 +894,7 @@ pub fn remove_result(
     }
 }
 
+#[hotpath::measure]
 pub fn feedback_result(
     outcome: &tracedecay_store::ProjectMemoryFactFeedbackOutcomeV1,
     action: FactFeedbackActionV1,
@@ -875,6 +920,7 @@ pub fn feedback_result(
     )
 }
 
+#[hotpath::measure]
 pub fn memory_status(status: &ProjectMemoryMemoryStatusV1) -> MemoryStatusV1 {
     let algebra = status.algebra();
     let funnel = status.feedback_funnel();
@@ -905,6 +951,7 @@ pub fn memory_status(status: &ProjectMemoryMemoryStatusV1) -> MemoryStatusV1 {
     }
 }
 
+#[hotpath::measure]
 pub fn map_memory_error(error: MemoryApplicationError) -> RetainedSurfaceExecutionErrorV1 {
     match error {
         MemoryApplicationError::InvalidOwner(_) | MemoryApplicationError::InvalidInput { .. } => {
@@ -922,6 +969,7 @@ pub fn map_memory_error(error: MemoryApplicationError) -> RetainedSurfaceExecuti
     }
 }
 
+#[hotpath::measure]
 pub fn map_store_error(error: FactStoreError) -> RetainedSurfaceExecutionErrorV1 {
     match error {
         FactStoreError::InvalidQueryLimit { .. } | FactStoreError::Contract(_) => {
@@ -954,6 +1002,7 @@ pub fn map_store_error(error: FactStoreError) -> RetainedSurfaceExecutionErrorV1
     }
 }
 
+#[hotpath::measure]
 fn confidence_millionths(value: Confidence) -> u32 {
     (value.as_f64() * 1_000_000.0).round() as u32
 }

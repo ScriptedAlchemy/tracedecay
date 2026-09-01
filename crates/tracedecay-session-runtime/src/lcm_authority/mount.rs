@@ -63,6 +63,7 @@ struct MountedLcmAuthority {
     identity: ResolvedSessionIdentity,
 }
 
+#[hotpath::measure]
 fn lcm_operation_and_grant_expiries(
     observed_at: UtcMicros,
 ) -> Option<(UtcMicros, UtcMicros)> {

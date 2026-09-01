@@ -23,6 +23,7 @@ pub enum RegisteredSchemaConvergenceStatus {
 type RegisteredSchemaConvergenceStatuses =
     BTreeMap<StoreShardIdV1, RegisteredSchemaConvergenceStatus>;
 
+#[hotpath::measure]
 fn lock_registered_schema_convergence_statuses(
     statuses: &StdMutex<RegisteredSchemaConvergenceStatuses>,
 ) -> MutexGuard<'_, RegisteredSchemaConvergenceStatuses> {
@@ -75,6 +76,7 @@ impl Drop for ForegroundProjectOpenAdmission {
     }
 }
 
+#[hotpath::measure_all]
 impl ForegroundProjectOpenState {
     fn admit(self: &Arc<Self>) -> Result<ForegroundProjectOpenAdmission> {
         self.active
@@ -92,6 +94,7 @@ impl ForegroundProjectOpenState {
         })
     }
 
+    #[hotpath::skip]
     async fn wait_until_settled(&self) {
         loop {
             let settled = self.settled.notified();
@@ -103,6 +106,7 @@ impl ForegroundProjectOpenState {
     }
 }
 
+#[hotpath::measure_all]
 impl RegisteredSchemaConvergenceMaintenance {
     pub(super) fn new() -> Self {
         Self {
@@ -237,6 +241,7 @@ impl RegisteredSchemaConvergenceMaintenance {
         }
     }
 
+    #[hotpath::skip]
     pub(super) async fn shutdown(&self) -> std::result::Result<(), String> {
         self.accepting.store(false, Ordering::Release);
         let tasks = {
@@ -334,6 +339,7 @@ impl RegisteredSchemaConvergenceTestGate {
     }
 }
 
+#[hotpath::measure_all]
 impl DaemonSessionRuntimeRegistryV1 {
     fn long_lived_session_maintenance(&self) -> bool {
         self.long_lived_session_maintenance

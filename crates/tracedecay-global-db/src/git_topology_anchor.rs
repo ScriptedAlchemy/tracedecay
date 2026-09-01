@@ -200,6 +200,7 @@ async fn read_records(
     Ok(records)
 }
 
+#[hotpath::measure]
 fn decode_record(
     anchor_json: &str,
     owner_json: &str,

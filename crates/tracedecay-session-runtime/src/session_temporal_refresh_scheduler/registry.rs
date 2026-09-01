@@ -80,6 +80,7 @@ impl SessionTemporalRefreshPassReport {
 /// all of them.
 const MAX_CONCURRENT_HISTORICAL_INGEST_PASSES: usize = 2;
 
+#[hotpath::measure]
 fn bounded_historical_ingest_permits() -> usize {
     std::thread::available_parallelism().map_or(1, |cores| {
         cores.get().min(MAX_CONCURRENT_HISTORICAL_INGEST_PASSES)
