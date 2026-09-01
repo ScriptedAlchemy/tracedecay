@@ -517,6 +517,11 @@ async fn restart_status_tracks_immediate_settled_and_stale_graph_serving_states(
         "pub fn alpha() -> u32 { 2 }\n",
     )
     .expect("drift fixture source");
+    git(fixture.path(), &["add", "."]);
+    git(
+        fixture.path(),
+        &["commit", "-qm", "move tip while scheduler is held"],
+    );
 
     let context = graph_request_context(scope, "restart-stale");
     let graph_read = port
