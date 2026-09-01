@@ -339,6 +339,7 @@ struct ProfileHostAdmissionBootstrapContext {
     profile_host_admission_replay: Weak<ProfileHostAdmissionReplayRegistry>,
 }
 
+#[cfg_attr(feature = "hotpath", hotpath::measure_all)]
 impl ProfileHostAdmissionBootstrapContext {
     async fn ensure(&self) -> Result<()> {
         let profile_identity = self.profile_identity.clone();

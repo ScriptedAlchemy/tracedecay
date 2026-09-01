@@ -48,6 +48,7 @@ impl RemoteSpoolKeyringV1 for UnavailableRemoteSpoolKeyringV1 {
     }
 }
 
+#[cfg_attr(feature = "hotpath", hotpath::measure_all)]
 impl DaemonSessionRuntimeRegistryV1 {
     pub async fn open(identity: LocalProfileIdentityAuthorityV1) -> Result<Self> {
         // `main` marks long-lived processes before any registry opens, so the
@@ -208,7 +209,9 @@ impl DaemonSessionRuntimeRegistryV1 {
         }
         Ok(())
     }
+}
 
+impl DaemonSessionRuntimeRegistryV1 {
     /// Mints one independently counted registered-session client and its
     /// matching graph client. The owner map retains neither issuance.
     fn issue_session_owner_lease(

@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use tokio::task::JoinSet;
 
@@ -20,11 +21,21 @@ use super::*;
 pub(super) const DAEMON_SHUTDOWN_RECEIPT_LOG_RESERVE: tokio::time::Duration =
     tokio::time::Duration::from_millis(100);
 
+#[hotpath::measure(label = "daemon.bootstrap.catalog_prewarm")]
 fn prewarm_static_daemon_bootstrap_catalog() {
     if let Err(error) = prewarm_daemon_bootstrap_catalog() {
         tracing::warn!(
             %error,
             "static MCP bootstrap catalog prewarm failed; tools/list will return a typed error"
+        );
+    }
+}
+
+fn log_catalog_prewarm_task(result: std::result::Result<(), tokio::task::JoinError>) {
+    if let Err(error) = result {
+        tracing::warn!(
+            %error,
+            "static MCP bootstrap catalog prewarm task failed; tools/list will retry lazily"
         );
     }
 }
@@ -56,15 +67,18 @@ async fn run_foreground_loopback(
     _socket_path: PathBuf,
     remote_tls: Option<RemoteBrainTlsConfig>,
 ) -> Result<()> {
+    let bootstrap_started = Instant::now();
     let profile_root = crate::config::user_data_dir().ok_or_else(|| TraceDecayError::Config {
         message: "could not determine TraceDecay user data directory".to_string(),
     })?;
-    prewarm_static_daemon_bootstrap_catalog();
+    let catalog_prewarm = tokio::task::spawn_blocking(prewarm_static_daemon_bootstrap_catalog);
     let requested = default_loopback_endpoint();
-    let _lifecycle_lease = tracedecay_runtime_core::lifecycle_lease::acquire_shared_for_profile(
-        &profile_root,
-        "managed daemon database ownership",
-    )?;
+    let _lifecycle_lease = hotpath::measure_block!("daemon.bootstrap.lifecycle_lease", {
+        tracedecay_runtime_core::lifecycle_lease::acquire_shared_for_profile(
+            &profile_root,
+            "managed daemon database ownership",
+        )
+    })?;
     let mut authority =
         authority::DaemonAuthority::acquire(&profile_root, &requested, binary_version()?)?;
     let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
@@ -97,14 +111,24 @@ async fn run_foreground_loopback(
     if let remote_deletion::RemoteDeletionBootMode::DeletionOnly(receipt) =
         remote_deletion::resume_remote_account_deletion_for_boot(&deletion_owners).await?
     {
+        log_catalog_prewarm_task(catalog_prewarm.await);
         log_daemon_event(
             "remote_account_deletion_resume",
             &[("outcome", format!("{:?}", receipt.status))],
         );
         return Ok(());
     }
-    install_profile_worker_plan(&store_administration, &invocation).await?;
-    let (listener, endpoint) = BrokerListener::bind(authority.endpoint()).await?;
+    let (worker_plan, catalog_prewarm) = tokio::join!(
+        install_profile_worker_plan(&store_administration, &invocation),
+        catalog_prewarm
+    );
+    worker_plan?;
+    log_catalog_prewarm_task(catalog_prewarm);
+    let (listener, endpoint) = hotpath::future!(
+        BrokerListener::bind(authority.endpoint()),
+        label = "daemon.bootstrap.listener_bind"
+    )
+    .await?;
     authority.publish_endpoint(&endpoint)?;
     log_daemon_event("daemon_listening", &[("endpoint", endpoint.to_string())]);
 
@@ -121,13 +145,15 @@ async fn run_foreground_loopback(
         &invocation,
     )
     .await?;
-    let http_application_service =
+    let http_application_service = hotpath::future!(
         http_application::DaemonHttpApplicationService::bind_with_remote_tls(
             http_application_registry.clone(),
             authority.auth_token(),
             remote_tls.as_ref(),
-        )
-        .await?;
+        ),
+        label = "daemon.bootstrap.http_bind"
+    )
+    .await?;
     authority.publish_http_application_endpoint(http_application_service.endpoint())?;
     if let Some(endpoint) = http_application_service.remote_tls_endpoint() {
         authority.publish_remote_brain_tls_endpoint(endpoint)?;
@@ -162,6 +188,13 @@ async fn run_foreground_loopback(
     let admission = DaemonClientAdmission::new(MAX_CONCURRENT_DAEMON_CLIENTS);
     let per_client_admission = DaemonPerClientAdmission::default();
     let mut clients: JoinSet<Result<()>> = JoinSet::new();
+    log_daemon_event(
+        "daemon_ready",
+        &[(
+            "bootstrap_elapsed_ms",
+            bootstrap_started.elapsed().as_millis().to_string(),
+        )],
+    );
     loop {
         let stream = tokio::select! {
             accepted = listener.accept() => match accepted {
@@ -461,15 +494,18 @@ async fn run_foreground_unix(
     socket_path: PathBuf,
     remote_tls: Option<RemoteBrainTlsConfig>,
 ) -> Result<()> {
+    let bootstrap_started = Instant::now();
     let profile_root = crate::config::user_data_dir().ok_or_else(|| TraceDecayError::Config {
         message: "could not determine TraceDecay user data directory".to_string(),
     })?;
-    prewarm_static_daemon_bootstrap_catalog();
+    let catalog_prewarm = tokio::task::spawn_blocking(prewarm_static_daemon_bootstrap_catalog);
     let endpoint = DaemonEndpoint::Unix(socket_path);
-    let _lifecycle = tracedecay_runtime_core::lifecycle_lease::acquire_shared_for_profile(
-        &profile_root,
-        "managed daemon database ownership",
-    )?;
+    let _lifecycle = hotpath::measure_block!("daemon.bootstrap.lifecycle_lease", {
+        tracedecay_runtime_core::lifecycle_lease::acquire_shared_for_profile(
+            &profile_root,
+            "managed daemon database ownership",
+        )
+    })?;
     let mut authority =
         authority::DaemonAuthority::acquire(&profile_root, &endpoint, binary_version()?)?;
     let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
@@ -507,13 +543,19 @@ async fn run_foreground_unix(
     if let remote_deletion::RemoteDeletionBootMode::DeletionOnly(receipt) =
         remote_deletion::resume_remote_account_deletion_for_boot(&deletion_owners).await?
     {
+        log_catalog_prewarm_task(catalog_prewarm.await);
         log_daemon_event(
             "remote_account_deletion_resume",
             &[("outcome", format!("{:?}", receipt.status))],
         );
         return Ok(());
     }
-    install_profile_worker_plan(&engine.store_administration, &engine.invocation).await?;
+    let (worker_plan, catalog_prewarm) = tokio::join!(
+        install_profile_worker_plan(&engine.store_administration, &engine.invocation),
+        catalog_prewarm
+    );
+    worker_plan?;
+    log_catalog_prewarm_task(catalog_prewarm);
     let socket_path = match authority.endpoint() {
         DaemonEndpoint::Unix(path) => path.clone(),
         DaemonEndpoint::Loopback(_) => {
@@ -547,7 +589,11 @@ async fn run_foreground_unix(
     }
     prepare_socket_path(&authority).await?;
 
-    let (listener, bound_endpoint) = BrokerListener::bind(authority.endpoint()).await?;
+    let (listener, bound_endpoint) = hotpath::future!(
+        BrokerListener::bind(authority.endpoint()),
+        label = "daemon.bootstrap.listener_bind"
+    )
+    .await?;
     authority.publish_endpoint(&bound_endpoint)?;
     set_owner_only_permissions(&socket_path, 0o600)?;
     log_daemon_event(
@@ -566,13 +612,15 @@ async fn run_foreground_unix(
         &engine.invocation,
     )
     .await?;
-    let http_application_service =
+    let http_application_service = hotpath::future!(
         http_application::DaemonHttpApplicationService::bind_with_remote_tls(
             http_application_registry.clone(),
             authority.auth_token(),
             remote_tls.as_ref(),
-        )
-        .await?;
+        ),
+        label = "daemon.bootstrap.http_bind"
+    )
+    .await?;
     authority.publish_http_application_endpoint(http_application_service.endpoint())?;
     if let Some(endpoint) = http_application_service.remote_tls_endpoint() {
         authority.publish_remote_brain_tls_endpoint(endpoint)?;
@@ -639,6 +687,13 @@ async fn run_foreground_unix(
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let admission = DaemonClientAdmission::new(MAX_CONCURRENT_DAEMON_CLIENTS);
     let mut client_tasks: JoinSet<Result<()>> = JoinSet::new();
+    log_daemon_event(
+        "daemon_ready",
+        &[(
+            "bootstrap_elapsed_ms",
+            bootstrap_started.elapsed().as_millis().to_string(),
+        )],
+    );
 
     loop {
         let stream = tokio::select! {

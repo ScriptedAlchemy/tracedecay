@@ -4038,6 +4038,7 @@ function codeIndexFreshnessEnvelope(progress: Record<string, unknown> | null): R
         sealed_at_micros: active ? null : nowMicros - 214_000_000,
         last_reconcile_micros: nowMicros - 8_400_000,
         staleness_state: active ? 'indexing' : 'fresh',
+        rebuild_in_flight: active,
         hook_hint_count: 0,
         coverage: 'complete',
         progress,
