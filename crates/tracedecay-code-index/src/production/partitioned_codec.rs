@@ -932,6 +932,23 @@ impl CodeIndexPublishedGenerationV1 {
         .map(Some)
     }
 
+    /// Authenticate only the tiny revision-7 manifest and return the metadata
+    /// needed to bind already-published text and graph owners. Segment bytes
+    /// remain untouched; callers may use this only when those owners already
+    /// have their own verified durable artifacts.
+    pub fn partitioned_text_metadata(
+        bytes: &[u8],
+    ) -> Result<Option<VerifiedSealedTextGenerationMetadataV1>, CodeIndexProductionErrorV1> {
+        let Some(generation) = parse_partitioned_manifest(bytes)? else {
+            return Ok(None);
+        };
+        VerifiedSealedTextGenerationMetadataV1::from_partitioned_manifest(
+            generation.manifest,
+            generation.snapshot,
+        )
+        .map(Some)
+    }
+
     pub fn partitioned_segment_identities(
         bytes: &[u8],
     ) -> Result<Option<Vec<SealedGenerationSegmentIdentityV1>>, CodeIndexProductionErrorV1> {

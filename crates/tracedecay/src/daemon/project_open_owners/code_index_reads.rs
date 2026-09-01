@@ -13,7 +13,9 @@ use std::time::Duration;
 
 use tracedecay_application::{Deadline, ResolvedScope, now_micros};
 use tracedecay_code_index::graph_projection::CodeGraphProjectionStore;
-use tracedecay_code_index_runtime::code_index_scheduler::LatestCompleteCodeIndexV1;
+use tracedecay_code_index_runtime::code_index_scheduler::{
+    LatestCodeTextGenerationV1, LatestCompleteCodeIndexV1,
+};
 use tracedecay_graph_query::{CodeGraphReadError, CodeGraphReadRequest, VerifiedCodeGraphRead};
 
 #[hotpath::measure]
@@ -61,7 +63,8 @@ struct ProjectCodeGraphServingAuthorityV1 {
 }
 
 struct ProjectCodeGraphServingProjectionV1 {
-    latest: LatestCompleteCodeIndexV1,
+    generation_id: tracedecay_domain::CodeGenerationId,
+    statistics: Option<tracedecay_code_index::production::CodeIndexGenerationStatisticsV1>,
     store: Arc<CodeGraphProjectionStore>,
     freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
 }
@@ -69,40 +72,59 @@ struct ProjectCodeGraphServingProjectionV1 {
 #[hotpath::measure_all]
 impl ProjectCodeGraphServingAuthorityV1 {
     async fn project(&self) -> Result<ProjectCodeGraphServingProjectionV1, CodeGraphReadError> {
-        let current = self
+        if let Some(latest) = self
             .schedulers
             .latest_complete_ready_decoded_for_root_scope(&self.project_root, &self.scope)
-            .await;
-        let (latest, freshness) = match current {
-            Some(latest) => (
+            .await
+        {
+            return Self::complete_projection(
                 latest,
                 tracedecay_graph_query::CodeGraphReadFreshnessV1::Current,
-            ),
-            None => {
-                let Some(seated) = self
-                    .schedulers
-                    .latest_complete_serving_for_root_scope(&self.project_root, &self.scope)
-                    .await
-                else {
-                    return Err(CodeGraphReadError::Unavailable {
-                        detail: "the verified code graph is not ready for the exact project root"
-                            .to_owned(),
-                    });
-                };
-                let rebuild_in_flight = self
-                    .schedulers
-                    .rebuild_pass_in_flight_for_root_scope(&self.project_root, &self.scope)
-                    .await;
-                let sealed_at = seated.generation().manifest().seal.sealed_at;
-                (
-                    seated,
-                    tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale {
-                        sealed_at,
-                        rebuild_in_flight,
-                    },
-                )
-            }
+            );
+        }
+        if let Some((text, current)) = self
+            .schedulers
+            .latest_text_serving_freshness_for_scope(&self.scope)
+            .await
+            && text.interactive_graph_store().is_ok()
+        {
+            let freshness = if current {
+                tracedecay_graph_query::CodeGraphReadFreshnessV1::Current
+            } else {
+                tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale {
+                    sealed_at: text.metadata().manifest().seal.sealed_at,
+                    rebuild_in_flight: self
+                        .schedulers
+                        .rebuild_pass_in_flight_for_root_scope(&self.project_root, &self.scope)
+                        .await,
+                }
+            };
+            return Self::text_projection(text, freshness);
+        }
+        let Some(seated) = self
+            .schedulers
+            .latest_complete_serving_for_root_scope(&self.project_root, &self.scope)
+            .await
+        else {
+            return Err(CodeGraphReadError::Unavailable {
+                detail: "the verified code graph is not ready for the exact project root"
+                    .to_owned(),
+            });
         };
+        let freshness = tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale {
+            sealed_at: seated.generation().manifest().seal.sealed_at,
+            rebuild_in_flight: self
+                .schedulers
+                .rebuild_pass_in_flight_for_root_scope(&self.project_root, &self.scope)
+                .await,
+        };
+        Self::complete_projection(seated, freshness)
+    }
+
+    fn complete_projection(
+        latest: LatestCompleteCodeIndexV1,
+        freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
+    ) -> Result<ProjectCodeGraphServingProjectionV1, CodeGraphReadError> {
         let store =
             latest
                 .interactive_graph_store()
@@ -110,7 +132,26 @@ impl ProjectCodeGraphServingAuthorityV1 {
                     detail: error.to_string(),
                 })?;
         Ok(ProjectCodeGraphServingProjectionV1 {
-            latest,
+            generation_id: latest.generation().manifest().generation_id.clone(),
+            statistics: latest.generation().generation_statistics().ok(),
+            store,
+            freshness,
+        })
+    }
+
+    fn text_projection(
+        latest: LatestCodeTextGenerationV1,
+        freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
+    ) -> Result<ProjectCodeGraphServingProjectionV1, CodeGraphReadError> {
+        let store =
+            latest
+                .interactive_graph_store()
+                .map_err(|error| CodeGraphReadError::Unavailable {
+                    detail: error.to_string(),
+                })?;
+        Ok(ProjectCodeGraphServingProjectionV1 {
+            generation_id: latest.metadata().manifest().generation_id.clone(),
+            statistics: None,
             store,
             freshness,
         })
@@ -215,8 +256,8 @@ pub(crate) fn project_code_index_generation_census_reader(
                     reason: tracedecay_session_memory::runtime_telemetry::GenerationCensusUnavailableReason::ExactScopeGenerationNotReady,
                 };
             };
-            match projection.latest.generation().generation_statistics() {
-                Ok(statistics) => {
+            match projection.statistics {
+                Some(statistics) => {
                     let freshness = match projection.freshness {
                         tracedecay_graph_query::CodeGraphReadFreshnessV1::Current => {
                             tracedecay_session_memory::runtime_telemetry::GenerationCensusServingFreshness::Current
@@ -232,7 +273,7 @@ pub(crate) fn project_code_index_generation_census_reader(
                         }
                     };
                     tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot::Observed {
-                        generation_id: projection.latest.generation().manifest().generation_id.as_str().to_owned(),
+                        generation_id: projection.generation_id.as_str().to_owned(),
                         freshness,
                         statistics:
                             tracedecay_session_memory::runtime_telemetry::GenerationCensusStatistics {
@@ -242,7 +283,7 @@ pub(crate) fn project_code_index_generation_census_reader(
                             },
                     }
                 }
-                Err(_) => tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot::Unavailable {
+                None => tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot::Unavailable {
                     reason: tracedecay_session_memory::runtime_telemetry::GenerationCensusUnavailableReason::SealedGenerationCensusInvalid,
                 },
             }

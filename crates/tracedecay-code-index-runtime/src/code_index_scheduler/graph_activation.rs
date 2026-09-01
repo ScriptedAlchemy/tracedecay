@@ -9,7 +9,8 @@ use tracedecay_graph_db::{GraphCancellation, SealedGraphStateDigest};
 use super::{
     CodeGraphProjectionError, CodeGraphServingAuthorityV1, CodeIndexProductionErrorV1,
     CodeIndexPublicationStoreErrorV1, CodeIndexSchedulerErrorV1, CodeIndexWorktreeSchedulerV1,
-    DaemonCodeIndexPublicationStoreV1, DurablePublicationPointerV1, LatestCompleteCodeIndexV1,
+    DaemonCodeIndexPublicationStoreV1, DurablePublicationPointerV1, LatestCodeTextGenerationV1,
+    LatestCompleteCodeIndexV1,
 };
 use crate::code_graph_seat::{
     CodeGraphReplayBindingV1, CodeGraphSeatLeaseV1, CodeGraphSeatRuntimePortV1,
@@ -228,6 +229,76 @@ impl CodeGraphActivationAuthorityV1 {
 
     pub fn policy(&self) -> CodeGraphActivationPolicyV1 {
         CodeGraphActivationPolicyV1::from_enabled(self.policy_cell().load(Ordering::Acquire))
+    }
+
+    /// Validate and seat an already-published revision-7 graph directly from
+    /// its durable verified head. `Ok(false)` is an explicit abstention for
+    /// non-persistent or disabled authorities; every persistent mismatch is a
+    /// typed error so the scheduler can retain pending coverage and replay.
+    #[hotpath::measure(future = true, label = "code_graph.activation.recover_verified_head")]
+    pub async fn recover_verified_head(
+        &self,
+        project_id: &ProjectId,
+        repository_id: &RepositoryId,
+        worktree_id: &WorktreeId,
+        latest: LatestCodeTextGenerationV1,
+        replay_binding: CodeGraphReplayBindingV1,
+        cancellation: Arc<AtomicBool>,
+    ) -> Result<bool, CodeIndexSchedulerErrorV1> {
+        if self.policy() == CodeGraphActivationPolicyV1::RefusedByConfiguration {
+            return Ok(false);
+        }
+        match self {
+            Self::Persistent {
+                runtime,
+                project_database,
+                ..
+            } => {
+                let generation_id = latest.metadata().manifest().generation_id.clone();
+                let retained = hotpath::future!(
+                    runtime.retain_code_graph_runtime(
+                        project_id.clone(),
+                        repository_id.clone(),
+                        worktree_id.clone(),
+                        latest.metadata().snapshot().reference.clone(),
+                        generation_id,
+                        Arc::clone(project_database),
+                        replay_binding,
+                        None,
+                    ),
+                    label = "code_graph.activation.recover_head.retain_runtime"
+                )
+                .await
+                .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;
+                retained
+                    .sweep_aborted_read_bundle_temporaries()
+                    .map_err(|error| {
+                        CodeIndexSchedulerErrorV1::GraphActivation(error.to_string())
+                    })?;
+                let pending_catalog_warm = tokio::task::spawn_blocking(move || {
+                    latest.activate_persistent_graph_head(retained, cancellation)
+                })
+                .await
+                .map_err(|error| {
+                    CodeIndexSchedulerErrorV1::GraphActivation(format!(
+                        "verified graph head activation task failed: {error}"
+                    ))
+                })??;
+                if let Some(pending_catalog_warm) = pending_catalog_warm {
+                    drop(tokio::task::spawn_blocking(move || {
+                        if let Err(error) = pending_catalog_warm.run() {
+                            tracing::warn!(
+                                error = %error,
+                                "background recovered code graph catalog warm failed"
+                            );
+                        }
+                    }));
+                }
+                Ok(true)
+            }
+            #[cfg(any(test, feature = "test-helpers"))]
+            Self::Memory { .. } => Ok(false),
+        }
     }
 
     #[hotpath::measure(future = true, label = "code_graph.activation.total")]
@@ -461,6 +532,56 @@ impl PendingInteractiveCatalogWarmV1 {
         }
         self.store
             .warm_interactive_catalog_with_cancellation(self.cancellation)
+    }
+}
+
+#[hotpath::measure_all]
+impl LatestCodeTextGenerationV1 {
+    #[hotpath::measure(label = "code_graph.activation.persistent_head")]
+    fn activate_persistent_graph_head(
+        &self,
+        retained: Box<dyn CodeGraphSeatLeaseV1 + Send>,
+        cancellation: Arc<AtomicBool>,
+    ) -> Result<Option<PendingInteractiveCatalogWarmV1>, CodeIndexSchedulerErrorV1> {
+        let generation_id = self.metadata().manifest().generation_id.clone();
+        let snapshot = hotpath::measure_block!(
+            "code_graph.activation.validate_verified_head",
+            retained
+                .recover_verified_snapshot_from_head(Arc::clone(&cancellation))
+                .map_err(CodeGraphProjectionError::from)
+        )?;
+        let store = Arc::new(CodeGraphProjectionStore::from_verified_snapshot(
+            snapshot,
+            generation_id.clone(),
+        )?);
+        let graph_cancellation: Arc<dyn GraphCancellation> =
+            Arc::new(SchedulerGraphCancellation(Arc::clone(&cancellation)));
+        store.mark_interactive_catalog_warming()?;
+        let reader = hotpath::measure_block!("code_graph.activation.head_evidence_reader", {
+            store.evidence_reader_with_cancellation(
+                &generation_id,
+                Some(self.metadata().snapshot().repository.clone()),
+                self.source_freshness().map_err(|error| {
+                    CodeIndexSchedulerErrorV1::GraphActivation(error.to_string())
+                })?,
+                Arc::clone(&graph_cancellation),
+            )
+        })?;
+        self.install_graph_serving(
+            reader,
+            Some(Arc::clone(&store)),
+            CodeGraphServingAuthorityV1::Persistent {
+                _lease: retained.authority(),
+            },
+        )
+        .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;
+        Ok(Some(PendingInteractiveCatalogWarmV1 {
+            retained,
+            generation_id,
+            store,
+            request_cancelled: cancellation,
+            cancellation: graph_cancellation,
+        }))
     }
 }
 

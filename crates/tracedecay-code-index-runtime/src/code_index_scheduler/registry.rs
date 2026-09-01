@@ -3462,7 +3462,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         "an arrival is pending; the optional graph decode yields this pass"
                     );
                 }
-                let prepare_graph =
+                let mut prepare_graph =
                     gate == GraphSeatGateV1::Prepare && !arrival_pending_before_graph_prepare;
                 if prepare_graph {
                     graph_prepare_yielded_to_arrival = false;
@@ -3527,6 +3527,82 @@ impl CodeIndexSchedulerRegistryV1 {
                         warming_restore_arrival = arrival.wake_micros();
                         Self::restore_pending_arrival(&worker_pending_wake, arrival, trigger);
                         worker_wake.notify_one();
+                    }
+                }
+                if prepare_graph
+                    && graph_text
+                        .as_ref()
+                        .is_some_and(|retained| retained.interactive_graph_store().is_ok())
+                {
+                    prepare_graph = false;
+                }
+                if prepare_graph
+                    && !published_pass
+                    && let Some(retained) = graph_text
+                        .as_ref()
+                        .filter(|retained| retained.uses_partitioned_manifest())
+                        .cloned()
+                {
+                    let generation_id = retained.metadata().manifest().generation_id.clone();
+                    let replay_scheduler = Arc::clone(&worker_scheduler);
+                    let shutting_down = Arc::clone(&worker_shutting_down);
+                    let replay_binding = tokio::task::spawn_blocking(move || {
+                        Self::lock_scheduler_unless_shutting_down(
+                            &replay_scheduler,
+                            &shutting_down,
+                        )?
+                        .code_graph_replay_binding(&generation_id)
+                    })
+                    .await;
+                    match replay_binding {
+                        Ok(Ok(replay_binding)) => {
+                            match worker_graph_activation
+                                .recover_verified_head(
+                                    &worker_project_id,
+                                    &worker_repository_id,
+                                    &worker_worktree_id,
+                                    retained,
+                                    replay_binding,
+                                    Arc::clone(&worker_shutting_down),
+                                )
+                                .await
+                            {
+                                Ok(true) => {
+                                    prepare_graph = false;
+                                    tracing::info!(
+                                        event = "code_index_graph_head_recovered",
+                                        "revision-7 manifest matched the durable verified graph \
+                                         head; startup seated graph reads without replay"
+                                    );
+                                }
+                                Ok(false) => {}
+                                Err(error) => {
+                                    tracing::warn!(
+                                        event = "code_index_graph_head_recovery_degraded",
+                                        error = %error,
+                                        "verified graph head did not match the revision-7 \
+                                         manifest; graph coverage stays pending while the \
+                                         admitted worker replays canonical segments"
+                                    );
+                                }
+                            }
+                        }
+                        Ok(Err(error)) => {
+                            tracing::warn!(
+                                event = "code_index_graph_head_recovery_binding_unavailable",
+                                error = %error,
+                                "revision-7 replay binding is unavailable; graph coverage stays \
+                                 pending while the admitted worker repairs the generation"
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                event = "code_index_graph_head_recovery_task_failed",
+                                error = %error,
+                                "revision-7 replay binding task failed; graph coverage stays \
+                                 pending while the admitted worker repairs the generation"
+                            );
+                        }
                     }
                 }
                 let mut result = match source_result {
