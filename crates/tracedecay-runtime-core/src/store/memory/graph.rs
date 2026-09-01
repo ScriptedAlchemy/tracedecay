@@ -404,6 +404,11 @@ async fn reconcile_project_memory_graph_pass(db: &Database) -> FactStoreResult<(
     {
         Ok(snapshot) => snapshot,
         Err(error) => {
+            // The typed mapping below collapses the graph error into unit
+            // variants for wire states; record the full message first so a
+            // persistently failing reconciliation names its cause in
+            // operator logs instead of a bare kind.
+            tracing::warn!(%error, "memory graph verified-manifest publication failed");
             let mapped = graph_error(&owner, error);
             if matches!(mapped, FactStoreError::GraphConflict)
                 && verified_head_matches_expected(db, &projection, &expected_generation, &owner)
