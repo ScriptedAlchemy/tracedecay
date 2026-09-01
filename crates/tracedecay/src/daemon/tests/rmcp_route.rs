@@ -816,12 +816,32 @@ async fn production_rmcp_cancels_concurrent_requests_before_or_after_registratio
     write_line(&mut writer, &blocked_tool_request(11)).await;
     write_line(&mut writer, &cancellation(11)).await;
     write_line(&mut writer, &cancellation(10)).await;
+    // Both cancellations must reach the application executor. The registered
+    // request observes its signal while its worker stays owned, and the
+    // queued request — cancelled before it could register — is still admitted
+    // so the executor, not the MCP layer, records its settlement. Its
+    // cancellation was processed before the connection freed it, so it must
+    // arrive already cancelled.
     wait_for_count(
         &executor.cancellation_observed,
-        1,
-        "typed cancellation never reached live request",
+        2,
+        "typed cancellation never reached both requests",
     )
     .await;
+    assert_eq!(
+        executor.started.load(Ordering::SeqCst),
+        2,
+        "both cancelled requests must reach the application executor"
+    );
+    assert_eq!(
+        executor.pre_cancelled.load(Ordering::SeqCst),
+        1,
+        "queued request was not cancelled before entering the application executor"
+    );
+    assert!(
+        executor.completed.load(Ordering::SeqCst) <= 1,
+        "the registered request's worker must stay owned until its executor settles"
+    );
     executor.release_first.store(true, Ordering::SeqCst);
     wait_for_count(
         &executor.completed,
@@ -829,8 +849,6 @@ async fn production_rmcp_cancels_concurrent_requests_before_or_after_registratio
         "cancelled RMCP requests did not terminate",
     )
     .await;
-    assert_eq!(executor.started.load(Ordering::SeqCst), 2);
-    assert_eq!(executor.cancellation_observed.load(Ordering::SeqCst), 2);
 
     writer
         .shutdown()

@@ -197,6 +197,12 @@ fn test_store_administration_for_profile(profile_root: &std::path::Path) -> Stor
 
 #[cfg(unix)]
 fn test_daemon_engine_for_profile(profile_root: &std::path::Path) -> DaemonEngine {
+    // Every handshake refusal the served engine writes advertises
+    // `binary_version()`, which reads the registered product runtime; a test
+    // that drives the engine without ever building a handshake (for example
+    // the unparseable-handshake refusals) would otherwise depend on some other
+    // fixture in the same process registering it first.
+    crate::product_runtime::register_fixture_product_runtime();
     prepare_test_profile_root(profile_root);
     let profile_identity =
         tracedecay_daemon_identity::profile_identity::load_or_create(profile_root)
