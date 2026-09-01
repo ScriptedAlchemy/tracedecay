@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use grafeo_common::types::{ArcStr, EdgeId, NodeId, Value};
 use grafeo_core::graph::lpg::Node;
@@ -55,9 +55,9 @@ pub(crate) struct StoredPublication {
 }
 
 pub(crate) struct ExistingBatchState {
-    pub(crate) entities: HashMap<String, StoredEntity>,
-    pub(crate) entity_locators: HashMap<String, EntityLocator>,
-    pub(crate) relations: HashMap<String, StoredRelation>,
+    pub(crate) entities: BTreeMap<String, StoredEntity>,
+    pub(crate) entity_locators: BTreeMap<String, EntityLocator>,
+    pub(crate) relations: BTreeMap<String, StoredRelation>,
 }
 
 #[hotpath::measure_all]
@@ -345,8 +345,8 @@ fn load_requested_entities(
     namespace: &GraphNamespace,
     requested: HashMap<String, &GraphEntityId>,
     batch: &GraphWriteBatch,
-) -> Result<HashMap<String, StoredEntity>, GraphDbError> {
-    let mut loaded = HashMap::with_capacity(requested.len());
+) -> Result<BTreeMap<String, StoredEntity>, GraphDbError> {
+    let mut loaded = BTreeMap::new();
     for (index, (key, identity)) in requested.into_iter().enumerate() {
         if index % 256 == 0 && batch.cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
@@ -364,8 +364,8 @@ fn load_requested_entity_locators(
     namespace: &GraphNamespace,
     requested: HashMap<String, &GraphEntityId>,
     batch: &GraphWriteBatch,
-) -> Result<HashMap<String, EntityLocator>, GraphDbError> {
-    let mut loaded = HashMap::with_capacity(requested.len());
+) -> Result<BTreeMap<String, EntityLocator>, GraphDbError> {
+    let mut loaded = BTreeMap::new();
     for (index, (key, identity)) in requested.into_iter().enumerate() {
         if index % 256 == 0 && batch.cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
@@ -383,8 +383,8 @@ fn load_requested_relations(
     namespace: &GraphNamespace,
     requested: HashMap<String, &GraphRelationId>,
     batch: &GraphWriteBatch,
-) -> Result<HashMap<String, StoredRelation>, GraphDbError> {
-    let mut loaded = HashMap::with_capacity(requested.len());
+) -> Result<BTreeMap<String, StoredRelation>, GraphDbError> {
+    let mut loaded = BTreeMap::new();
     let mut endpoints = EndpointIdentityCache::default();
     for (index, (key, identity)) in requested.into_iter().enumerate() {
         if index % 256 == 0 && batch.cancellation.is_cancelled() {

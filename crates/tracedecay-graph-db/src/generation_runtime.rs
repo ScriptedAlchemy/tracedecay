@@ -120,30 +120,42 @@ impl OwnedGenerationStageRows {
         match page.kind {
             GenerationStagePageKind::Entities => {
                 if page.range.start != self.entity_offset {
-                    return Err(GraphDbError::Conflict);
+                    return Err(GraphDbError::conflict(
+                        "generation_runtime.owned_stage_rows",
+                    ));
                 }
                 let rows = self.entities.by_ref().take(count).collect::<Vec<_>>();
                 if rows.len() != count {
-                    return Err(GraphDbError::Conflict);
+                    return Err(GraphDbError::conflict(
+                        "generation_runtime.owned_stage_rows",
+                    ));
                 }
-                self.entity_offset = self
-                    .entity_offset
-                    .checked_add(count)
-                    .ok_or(GraphDbError::Conflict)?;
+                self.entity_offset =
+                    self.entity_offset
+                        .checked_add(count)
+                        .ok_or(GraphDbError::conflict(
+                            "generation_runtime.owned_stage_rows",
+                        ))?;
                 Ok(OwnedGenerationStagePage::Entities(rows))
             }
             GenerationStagePageKind::Relations => {
                 if page.range.start != self.relation_offset {
-                    return Err(GraphDbError::Conflict);
+                    return Err(GraphDbError::conflict(
+                        "generation_runtime.owned_stage_rows",
+                    ));
                 }
                 let rows = self.relations.by_ref().take(count).collect::<Vec<_>>();
                 if rows.len() != count {
-                    return Err(GraphDbError::Conflict);
+                    return Err(GraphDbError::conflict(
+                        "generation_runtime.owned_stage_rows",
+                    ));
                 }
-                self.relation_offset = self
-                    .relation_offset
-                    .checked_add(count)
-                    .ok_or(GraphDbError::Conflict)?;
+                self.relation_offset =
+                    self.relation_offset
+                        .checked_add(count)
+                        .ok_or(GraphDbError::conflict(
+                            "generation_runtime.owned_stage_rows",
+                        ))?;
                 Ok(OwnedGenerationStagePage::Relations(rows))
             }
         }
@@ -153,7 +165,9 @@ impl OwnedGenerationStageRows {
         if self.entities.len() == 0 && self.relations.len() == 0 {
             Ok(())
         } else {
-            Err(GraphDbError::Conflict)
+            Err(GraphDbError::conflict(
+                "generation_runtime.owned_stage_rows",
+            ))
         }
     }
 }
@@ -705,7 +719,11 @@ impl GraphDb {
                         None
                     }
                     (None, None) => None,
-                    (Some(_), None) | (None, Some(_)) => return Err(GraphDbError::Conflict),
+                    (Some(_), None) | (None, Some(_)) => {
+                        return Err(GraphDbError::conflict(
+                            "generation_runtime.stage_generation_pages_owned",
+                        ));
+                    }
                 };
                 self.apply_prepared_generation_stage_page(
                     None,

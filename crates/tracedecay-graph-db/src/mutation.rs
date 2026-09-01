@@ -806,7 +806,7 @@ fn entity_owner(
 #[hotpath::measure]
 fn relation_owner(
     changes: &HashMap<&str, RelationChange>,
-    existing: &HashMap<String, StoredRelation>,
+    existing: &BTreeMap<String, StoredRelation>,
     encoded_namespace: &str,
     identity: &crate::GraphRelationId,
 ) -> Option<GraphProjectionId> {
