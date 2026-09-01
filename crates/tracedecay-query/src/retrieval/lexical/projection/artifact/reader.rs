@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
-use std::sync::{Arc, Mutex as StdMutex, MutexGuard as StdMutexGuard};
+use std::sync::{Arc, Mutex as StdMutex, MutexGuard as StdMutexGuard, OnceLock};
 
 use roaring::RoaringBitmap;
 #[cfg(any(test, feature = "hotpath"))]
@@ -25,16 +25,15 @@ use tracedecay_private_fs::open_private_file;
 
 use super::builder::compute_section_digests;
 use super::format::{
-    ArtifactRowV1, CodeLexicalArtifactOccurrenceV1,
-    CodeLexicalImportMembershipWitnessV1, VerifiedCodeLexicalArtifactV1, artifact_digest,
-    decode_ngram_bitmap, decode_padded_receipt, encode_exact_field, encode_field, metadata_digest,
-    verify_required_artifact_indexes,
+    ArtifactRowV1, CodeLexicalArtifactOccurrenceV1, CodeLexicalImportMembershipWitnessV1,
+    VerifiedCodeLexicalArtifactV1, artifact_digest, decode_ngram_bitmap, decode_padded_receipt,
+    encode_exact_field, encode_field, metadata_digest, verify_required_artifact_indexes,
 };
+use super::postings::{NGRAM_NORMALIZED, NGRAM_RAW_OVERRIDE, query_ngrams};
 use super::row_codec::decode_artifact_row;
 use super::schema::{
     LexicalArtifactLayoutV1, field_code, field_from_code, lookup_term_id, lookup_term_ids,
 };
-use super::postings::{NGRAM_NORMALIZED, NGRAM_RAW_OVERRIDE, query_ngrams};
 use super::{
     ARTIFACT_SQLITE_CACHE_BYTES, ARTIFACT_SQLITE_CACHE_FLOOR_BYTES,
     CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactErrorV1, checkpoint,
@@ -65,6 +64,10 @@ pub struct CodeLexicalArtifactReaderV1 {
     receipt: VerifiedCodeLexicalArtifactV1,
     layout: LexicalArtifactLayoutV1,
     retained_owned_bytes: usize,
+    /// Fuzzy expansion walks every in-fuzzy term. Hash-ordered `term_id`
+    /// rows make a fresh `ORDER BY term` scan random I/O; share one load
+    /// across clones and later queries on this reader.
+    fuzzy_vocabulary: Arc<OnceLock<Arc<Vec<String>>>>,
 }
 
 type ArtifactConnectionMutex<T> = StdMutex<T>;
@@ -420,6 +423,7 @@ impl CodeLexicalArtifactReaderV1 {
             receipt: stored,
             layout,
             retained_owned_bytes,
+            fuzzy_vocabulary: Arc::new(OnceLock::new()),
         })
     }
 
@@ -572,6 +576,7 @@ impl LexicalPostingReadPort for CodeLexicalArtifactReaderV1 {
             &self.metadata,
             &self.receipt,
             self.layout,
+            &self.fuzzy_vocabulary,
         )?
         .lexical_batch(request)?;
         let outcome = RetrieverOutcome::Complete(batch);
@@ -614,14 +619,14 @@ where
             .reader
             .lock_connection()
             .map_err(map_query_artifact_error)?;
-        let outcome =
-            ArtifactQueryV1::new(
-                &connection,
-                &self.reader.metadata,
-                &self.reader.receipt,
-                self.reader.layout,
-            )?
-            .exact_batch(request, &self.authority)?;
+        let outcome = ArtifactQueryV1::new(
+            &connection,
+            &self.reader.metadata,
+            &self.reader.receipt,
+            self.reader.layout,
+            &self.reader.fuzzy_vocabulary,
+        )?
+        .exact_batch(request, &self.authority)?;
         crate::hotpath_metrics::record_lane(
             "query.lane.exact.candidates",
             "query.lane.exact.examined",
@@ -640,6 +645,7 @@ struct ArtifactQueryV1<'a> {
     layout: LexicalArtifactLayoutV1,
     document_count: usize,
     metrics: ArtifactQueryMetricsV1,
+    fuzzy_vocabulary: &'a OnceLock<Arc<Vec<String>>>,
 }
 
 #[derive(Default)]
@@ -924,7 +930,12 @@ fn visit_lexical_rows(
     terms: &BTreeSet<String>,
     metrics: &ArtifactQueryMetricsV1,
     layout: LexicalArtifactLayoutV1,
-    mut visitor: impl FnMut(u32, String, Vec<u8>, LexicalTermFrequenciesV1) -> Result<(), RetrievalPortError>,
+    mut visitor: impl FnMut(
+        u32,
+        String,
+        Vec<u8>,
+        LexicalTermFrequenciesV1,
+    ) -> Result<(), RetrievalPortError>,
 ) -> Result<(), RetrievalPortError> {
     hotpath::measure_block!("query.stream.visit_lexical_rows", {
         let Some(document_sql) = documents.sql.as_deref() else {
@@ -1027,12 +1038,7 @@ fn visit_lexical_rows(
                     }
                 }
             }
-            visitor(
-                document,
-                chunk_id,
-                bytes,
-                LexicalTermFrequenciesV1(entries),
-            )?;
+            visitor(document, chunk_id, bytes, LexicalTermFrequenciesV1(entries))?;
             visited = visited.saturating_add(1);
         }
         drop(rows);
@@ -1436,6 +1442,7 @@ impl<'a> ArtifactQueryV1<'a> {
         metadata: &'a super::super::CodeLexicalProjectionMetadataV1,
         receipt: &'a VerifiedCodeLexicalArtifactV1,
         layout: LexicalArtifactLayoutV1,
+        fuzzy_vocabulary: &'a OnceLock<Arc<Vec<String>>>,
     ) -> Result<Self, RetrievalPortError> {
         Ok(Self {
             connection,
@@ -1444,6 +1451,7 @@ impl<'a> ArtifactQueryV1<'a> {
             layout,
             document_count: usize::try_from(receipt.total_chunks()).map_err(contract_error)?,
             metrics: ArtifactQueryMetricsV1::default(),
+            fuzzy_vocabulary,
         })
     }
 
@@ -1478,13 +1486,9 @@ impl<'a> ArtifactQueryV1<'a> {
             &self.metrics,
             self.layout,
             |_, chunk_id, bytes, _| {
-                let row = decode_artifact_row(
-                    self.layout,
-                    self.receipt.generation(),
-                    &chunk_id,
-                    &bytes,
-                )
-                .map_err(map_query_artifact_error)?;
+                let row =
+                    decode_artifact_row(self.layout, self.receipt.generation(), &chunk_id, &bytes)
+                        .map_err(map_query_artifact_error)?;
                 for (phrase, frequency) in &mut phrase_frequencies {
                     if substring_count(&row.normalized_text, phrase) > 0 {
                         *frequency += 1;
@@ -1508,13 +1512,9 @@ impl<'a> ArtifactQueryV1<'a> {
             &self.metrics,
             self.layout,
             |document, chunk_id, bytes, frequencies| {
-                let row = decode_artifact_row(
-                    self.layout,
-                    self.receipt.generation(),
-                    &chunk_id,
-                    &bytes,
-                )
-                .map_err(map_query_artifact_error)?;
+                let row =
+                    decode_artifact_row(self.layout, self.receipt.generation(), &chunk_id, &bytes)
+                        .map_err(map_query_artifact_error)?;
                 let score = self.score_row(
                     &row,
                     &prepared,
@@ -1826,6 +1826,9 @@ impl<'a> ArtifactQueryV1<'a> {
                 });
             }
         }
+        if groups.is_empty() {
+            return Ok(FuzzyExpansionsV1::default());
+        }
         groups.sort_by_key(|group| group.first_ordinal);
         let maximum_distance = groups.iter().map(|group| group.bound).max().unwrap_or(0);
         let vocabulary = self.load_vocabulary()?;
@@ -1842,7 +1845,7 @@ impl<'a> ArtifactQueryV1<'a> {
                 }
                 scratch.prepare_query(&group.normalized_query);
                 let mut added = 0usize;
-                for term in &vocabulary {
+                for term in vocabulary.iter() {
                     if added >= remaining {
                         break;
                     }
@@ -1871,17 +1874,29 @@ impl<'a> ArtifactQueryV1<'a> {
     }
 
     #[hotpath::measure(label = "query.artifact.vocabulary.load")]
-    fn load_vocabulary(&self) -> Result<Vec<String>, RetrievalPortError> {
+    fn load_vocabulary(&self) -> Result<Arc<Vec<String>>, RetrievalPortError> {
+        if let Some(cached) = self.fuzzy_vocabulary.get() {
+            return Ok(Arc::clone(cached));
+        }
+        let loaded = self.load_vocabulary_from_sqlite()?;
+        Ok(Arc::clone(self.fuzzy_vocabulary.get_or_init(|| loaded)))
+    }
+
+    /// Edit-distance expansion does not need term order. `ORDER BY term`
+    /// against hash-keyed `term_id` rows forces the UNIQUE(term) index plus
+    /// one random primary-key lookup per vocabulary row.
+    fn vocabulary_sql(layout: LexicalArtifactLayoutV1) -> &'static str {
+        match layout {
+            LexicalArtifactLayoutV1::V10 => "SELECT term FROM vocabulary",
+            LexicalArtifactLayoutV1::V11 => "SELECT term FROM vocabulary WHERE in_fuzzy = 1",
+        }
+    }
+
+    fn load_vocabulary_from_sqlite(&self) -> Result<Arc<Vec<String>>, RetrievalPortError> {
         self.metrics.probe();
-        let sql = match self.layout {
-            LexicalArtifactLayoutV1::V10 => "SELECT term FROM vocabulary ORDER BY term",
-            LexicalArtifactLayoutV1::V11 => {
-                "SELECT term FROM vocabulary WHERE in_fuzzy = 1 ORDER BY term"
-            }
-        };
         let mut statement = self
             .connection
-            .prepare_cached(sql)
+            .prepare_cached(Self::vocabulary_sql(self.layout))
             .map_err(map_query_sql_error)?;
         let mut rows = statement.query([]).map_err(map_query_sql_error)?;
         let mut vocabulary = Vec::new();
@@ -1893,7 +1908,7 @@ impl<'a> ArtifactQueryV1<'a> {
         self.metrics
             .rows(u64::try_from(vocabulary.len()).map_err(contract_error)?);
         hotpath::gauge!("query.lane.fuzzy.vocabulary_terms").set(vocabulary.len());
-        Ok(vocabulary)
+        Ok(Arc::new(vocabulary))
     }
 
     /// Read the document-independent scoring statistics once per request.
@@ -1925,10 +1940,10 @@ impl<'a> ArtifactQueryV1<'a> {
                 LexicalArtifactLayoutV1::V10 => {
                     decode_field(&row.get::<_, String>(0).map_err(map_query_sql_error)?)?
                 }
-                LexicalArtifactLayoutV1::V11 => field_from_code(
-                    row.get::<_, i64>(0).map_err(map_query_sql_error)?,
-                )
-                .map_err(map_query_artifact_error)?,
+                LexicalArtifactLayoutV1::V11 => {
+                    field_from_code(row.get::<_, i64>(0).map_err(map_query_sql_error)?)
+                        .map_err(map_query_artifact_error)?
+                }
             };
             let total: i64 = row.get(1).map_err(map_query_sql_error)?;
             field_totals.insert(field, usize::try_from(total).map_err(contract_error)?);
@@ -1971,8 +1986,8 @@ impl<'a> ArtifactQueryV1<'a> {
                     self.metrics.rows(observed_rows);
                 }
                 LexicalArtifactLayoutV1::V11 => {
-                    let assigned =
-                        lookup_term_ids(self.connection, terms).map_err(map_query_artifact_error)?;
+                    let assigned = lookup_term_ids(self.connection, terms)
+                        .map_err(map_query_artifact_error)?;
                     let term_ids = assigned.values().copied().collect::<Vec<_>>();
                     if !term_ids.is_empty() {
                         let placeholders = std::iter::repeat_n("?", term_ids.len())
@@ -1995,10 +2010,9 @@ impl<'a> ArtifactQueryV1<'a> {
                             .map(|(term, id)| (*id, term.clone()))
                             .collect::<BTreeMap<_, _>>();
                         while let Some(row) = rows.next().map_err(map_query_sql_error)? {
-                            let field = field_from_code(
-                                row.get::<_, i64>(0).map_err(map_query_sql_error)?,
-                            )
-                            .map_err(map_query_artifact_error)?;
+                            let field =
+                                field_from_code(row.get::<_, i64>(0).map_err(map_query_sql_error)?)
+                                    .map_err(map_query_artifact_error)?;
                             let term_id: i64 = row.get(1).map_err(map_query_sql_error)?;
                             let Some(term) = id_to_term.get(&term_id) else {
                                 continue;
@@ -3875,6 +3889,42 @@ mod tests {
                 .iter()
                 .any(|detail| detail.contains("term_postings_by_document")),
             "frequency probe must use the document-leading index, got {frequency_plan:?}"
+        );
+    }
+
+    #[test]
+    fn fuzzy_vocabulary_sql_does_not_order_hash_keyed_rows() {
+        assert!(
+            !super::ArtifactQueryV1::vocabulary_sql(LexicalArtifactLayoutV1::V11)
+                .to_ascii_uppercase()
+                .contains("ORDER BY"),
+            "in-fuzzy vocabulary load must not sort hash-keyed term_id rows"
+        );
+        let v11 = Connection::open_in_memory().expect("v11 vocab plan db");
+        v11.execute_batch(
+            "CREATE TABLE vocabulary (
+                term_id INTEGER PRIMARY KEY,
+                term TEXT NOT NULL UNIQUE,
+                in_fuzzy INTEGER NOT NULL
+            );
+            INSERT INTO vocabulary(term_id, term, in_fuzzy) VALUES (1, 'alpha', 1), (2, 'beta', 0);",
+        )
+        .expect("seed vocabulary");
+        let sql = format!(
+            "EXPLAIN QUERY PLAN {}",
+            super::ArtifactQueryV1::vocabulary_sql(LexicalArtifactLayoutV1::V11)
+        );
+        let plan = v11
+            .prepare(&sql)
+            .expect("prepare vocab plan")
+            .query_map([], |row| row.get::<_, String>(3))
+            .expect("query vocab plan")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect vocab plan");
+        assert!(
+            plan.iter().any(|detail| detail.contains("SCAN vocabulary")
+                && !detail.contains("sqlite_autoindex_vocabulary_1")),
+            "in-fuzzy load must table-scan, not bounce through UNIQUE(term), got {plan:?}"
         );
     }
 }

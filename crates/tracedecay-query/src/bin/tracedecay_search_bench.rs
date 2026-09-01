@@ -29,7 +29,7 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -126,7 +126,10 @@ fn main() -> ExitCode {
         }
     };
 
-    match run(&options) {
+    match options.artifact.as_ref().map_or_else(
+        || run(&options),
+        |path| run_existing_artifact(&options, path),
+    ) {
         Ok(summary) => {
             println!("{summary}");
             ExitCode::SUCCESS
@@ -160,7 +163,7 @@ fn configure_hotpath() {
 
 const USAGE: &str = "\
 usage: tracedecay-search-bench [--corpus DIR] [--replicas N] [--iterations N]
-                               [--warmups N] [--fuzzy-budget N]
+                               [--warmups N] [--fuzzy-budget N] [--artifact FILE]
                                [--class NAME]... [--term CLASS=QUERY]...
 
   --corpus DIR       fixture corpus to index and query
@@ -171,6 +174,7 @@ usage: tracedecay-search-bench [--corpus DIR] [--replicas N] [--iterations N]
   --iterations N     timed query iterations per class (default: 40)
   --warmups N        untimed warmup iterations per class (default: 3)
   --fuzzy-budget N   lexical typo-recovery budget (default: production 64)
+  --artifact FILE    reopen an existing sealed lexical artifact and skip ingest
   --class NAME       run only the named classes (repeatable; default: all)
   --term CLASS=QUERY override one class's query text (repeatable)
   -h, --help         print this message
@@ -206,6 +210,7 @@ struct Options {
     iterations: usize,
     warmups: usize,
     fuzzy_budget: u32,
+    artifact: Option<PathBuf>,
     classes: Vec<(String, String)>,
 }
 
@@ -219,6 +224,7 @@ impl Options {
         let mut fuzzy_budget = MAX_FUZZY_TERM_EXPANSIONS_V1;
         let mut selected: Vec<String> = Vec::new();
         let mut overrides: Vec<(String, String)> = Vec::new();
+        let mut artifact = None;
         let mut arguments = arguments.peekable();
         while let Some(argument) = arguments.next() {
             match argument.as_str() {
@@ -259,6 +265,12 @@ impl Options {
                         .next()
                         .ok_or_else(|| "--class needs a name".to_owned())?;
                     selected.push(value);
+                }
+                "--artifact" => {
+                    let value = arguments
+                        .next()
+                        .ok_or_else(|| "--artifact needs a file".to_owned())?;
+                    artifact = Some(PathBuf::from(value));
                 }
                 "--term" => {
                     let value = arguments
@@ -306,6 +318,7 @@ impl Options {
             iterations,
             warmups,
             fuzzy_budget,
+            artifact,
             classes,
         }))
     }
@@ -696,6 +709,110 @@ fn run(options: &Options) -> Result<String, String> {
         "classes": class_reports,
     });
     serde_json::to_string_pretty(&report).map_err(|error| format!("serialize summary: {error}"))
+}
+
+/// Reopen a preserved sealed artifact and measure the same query classes
+/// without repeating ingest. Used to verify read-path fixes against a
+/// generation-scale file.
+fn run_existing_artifact(options: &Options, artifact_path: &Path) -> Result<String, String> {
+    let started = Instant::now();
+    let control = ActiveControl;
+
+    let open_started = Instant::now();
+    let (file_digest, file_size_bytes) = hash_file(artifact_path)?;
+    let reader = CodeLexicalArtifactReaderV1::open_content_addressed(
+        artifact_path,
+        &file_digest,
+        file_size_bytes,
+        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        &control,
+    )
+    .map_err(|error| format!("reopen lexical artifact: {error}"))?;
+    let open_wall = open_started.elapsed();
+
+    let authority = CentralExactAdmissionAuthorityV1::new(
+        ExactAdmissionRuleRevision::new(QUERY_EXACT_RULE_REVISION_V1)
+            .map_err(|error| format!("exact rule revision: {error}"))?,
+    );
+    let exact_lane = ExactLane::new(authority.clone(), reader.exact_adapter(authority.clone()));
+    let lexical_lane = LexicalLane::new(reader.clone());
+    let generation_id = reader.metadata().generation.clone();
+    let prototype = request_prototype_from_artifact(&reader)?;
+
+    let mut class_reports = Vec::with_capacity(options.classes.len());
+    for (class, query) in &options.classes {
+        let report = run_class(RunClassArguments {
+            class,
+            query,
+            options,
+            prototype: &prototype,
+            authority: &authority,
+            exact_lane: &exact_lane,
+            lexical_lane: &lexical_lane,
+            generation: &generation_id,
+        })?;
+        class_reports.push(report);
+    }
+
+    let verified = reader.verified_artifact();
+    let total_wall = started.elapsed();
+    let report = serde_json::json!({
+        "workload_revision": WORKLOAD_REVISION,
+        "reused_artifact": true,
+        "artifact_path": artifact_path.display().to_string(),
+        "chunks": verified.total_chunks(),
+        "artifact_bytes": file_size_bytes,
+        "artifact_digest": file_digest.as_str(),
+        "iterations": options.iterations,
+        "warmups": options.warmups,
+        "fuzzy_budget": options.fuzzy_budget,
+        "peak_rss_bytes": peak_rss_bytes(),
+        "build_wall_ms": {
+            "artifact_reopen_verified": millis(open_wall),
+            "total": millis(total_wall),
+        },
+        "classes": class_reports,
+    });
+    serde_json::to_string_pretty(&report).map_err(|error| format!("serialize summary: {error}"))
+}
+
+fn request_prototype_from_artifact(
+    reader: &CodeLexicalArtifactReaderV1,
+) -> Result<RequestPrototypeV1, String> {
+    let metadata = reader.metadata();
+    let verified = reader.verified_artifact();
+    let repository = metadata
+        .repository_id
+        .clone()
+        .or_else(|| verified.repository_id().cloned())
+        .unwrap_or_else(|| identity("repository.search-bench"));
+    Ok(RequestPrototypeV1 {
+        principal: identity::<PrincipalId>("principal.search-bench"),
+        scope: RetrievalScope {
+            privacy_domain: identity::<PrivacyDomainId>("privacy.search-bench"),
+            root: SingleRootScopeV1 {
+                repository,
+                worktree: None,
+                reference: None,
+            },
+        },
+        snapshot: RetrievalSnapshot {
+            watermarks: VectorWatermark::default(),
+            freshness_digest: FreshnessVectorDigest::new(verified.source_state_digest().as_str())
+                .map_err(|error| format!("freshness digest: {error}"))?,
+            authorization_revision: identity::<AuthorizationRevision>(
+                "authorization.search-bench.v1",
+            ),
+            captured_at: metadata.freshness.observed_at,
+        },
+        profile_id: identity::<FusionProfileId>("query-fallback"),
+        sanitizer_revision: identity::<SanitizerRevision>(QUERY_SANITIZER_REVISION_V1),
+        normalization_revision: identity::<QueryNormalizationRevision>(
+            QUERY_NORMALIZATION_REVISION_V1,
+        ),
+        lexical_profile_revision: identity::<ComponentRevision>(QUERY_LEXICAL_PROFILE_REVISION_V1),
+        lexical_score_domain: identity::<ScoreDomainId>(QUERY_LEXICAL_SCORE_DOMAIN_V1),
+    })
 }
 
 /// Query-independent request fields, cloned per iteration exactly as the
@@ -1135,10 +1252,25 @@ impl Scratch {
 fn hash_file(path: &Path) -> Result<(ManifestDigest, u64), String> {
     use sha2::Digest as _;
 
-    let bytes = std::fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
-    let digest = ManifestDigest::from_sha256_bytes(&sha2::Sha256::digest(&bytes))
+    let mut file =
+        std::fs::File::open(path).map_err(|error| format!("open {}: {error}", path.display()))?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    let mut file_size_bytes = 0_u64;
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| format!("read {}: {error}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        file_size_bytes +=
+            u64::try_from(read).map_err(|error| format!("artifact size overflow: {error}"))?;
+    }
+    let digest = ManifestDigest::from_sha256_bytes(&hasher.finalize())
         .map_err(|error| format!("artifact digest: {error}"))?;
-    Ok((digest, bytes.len() as u64))
+    Ok((digest, file_size_bytes))
 }
 
 #[hotpath::measure]
