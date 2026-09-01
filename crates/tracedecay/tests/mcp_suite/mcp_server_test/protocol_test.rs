@@ -739,10 +739,10 @@ async fn test_tools_call_status() {
         .as_str()
         .expect("status result text");
     let payload: Value = serde_json::from_str(text).expect("status result JSON");
-    assert_eq!(payload["graph_statistics"]["status"], "unavailable");
+    assert_eq!(payload["graph_statistics"]["state"], "unavailable");
     assert_eq!(
         payload["graph_statistics"]["reason"],
-        "sealed_generation_statistics_not_published"
+        "authority_unavailable"
     );
     assert_eq!(
         payload["code_index_freshness"]["reason"], "code_index_scheduler_authority_not_attached",
@@ -1594,10 +1594,10 @@ async fn test_resources_read_status() {
 
     let text = contents[0]["text"].as_str().unwrap();
     let payload: Value = serde_json::from_str(text).expect("status resource JSON");
-    assert_eq!(payload["graph_statistics"]["status"], "unavailable");
+    assert_eq!(payload["graph_statistics"]["state"], "unavailable");
     assert_eq!(
         payload["graph_statistics"]["reason"],
-        "sealed_generation_statistics_not_published"
+        "authority_unavailable"
     );
 }
 

@@ -7,10 +7,11 @@ use std::time::{Duration, Instant};
 use tracedecay_domain::{CodeGenerationId, RefId, RepositoryId, WorktreeId, canonical_sha256};
 use tracedecay_graph_db::{
     GraphBudgetKind, GraphCancellation, GraphDbError, GraphDbOwnerAttachmentV1,
-    GraphDbRegistration, GraphGenerationDependency, GraphGenerationManifest, GraphIdempotencyKey,
-    GraphProjectionIdentity, GraphProjectorRevision, GraphPublicationPreparationV1,
-    GraphReplayCollectionOutcome, GraphWriteBatch, SealedCodeGenerationReplay,
-    VerifiedGenerationBatchCommit, VerifiedGraphCommit, VerifiedGraphSnapshot,
+    GraphDbRegistration, GraphGenerationDependency, GraphGenerationManifest,
+    GraphGenerationReplaySource, GraphIdempotencyKey, GraphProjectionIdentity,
+    GraphProjectorRevision, GraphPublicationPreparationV1, GraphReplayCollectionOutcome,
+    GraphWriteBatch, SealedCodeGenerationReplay, VerifiedGenerationBatchCommit,
+    VerifiedGraphCommit, VerifiedGraphSnapshot,
 };
 use tracedecay_runtime_core::store_runtime::registry::{
     CanonicalCodeGraphStoreLeaseV1, CanonicalGraphStoreOwnerRetirementTargetV1, StoreRuntimeKey,
@@ -559,7 +560,6 @@ impl RetainedVerifiedGraphRuntimeV1 {
         })?;
         if request_cancelled.load(Ordering::Acquire)
             || self.lifecycle_cancelled.load(Ordering::Acquire)
-            || self.registry_lifecycle_cancelled.load(Ordering::Acquire)
         {
             return Err(GraphDbError::Cancelled);
         }
@@ -590,10 +590,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
         );
         let probe = GraphPublicationProbeV1 {
             request_cancellation: Arc::clone(&request_cancellation),
-            lifecycle_cancellation: graph_lifecycle_cancellation(
-                &self.lifecycle_cancelled,
-                Some(&self.registry_lifecycle_cancelled),
-            ),
+            lifecycle_cancellation: graph_lifecycle_cancellation(&self.lifecycle_cancelled, None),
             deadline_at,
             cancellation: cancellation_identity.clone(),
             deadline: deadline_identity.clone(),
@@ -837,10 +834,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
             Arc::new(FactReadGraphCancellationV1(read_control));
         let probe = GraphPublicationProbeV1 {
             request_cancellation: Arc::clone(&request_cancellation),
-            lifecycle_cancellation: graph_lifecycle_cancellation(
-                &self.lifecycle_cancelled,
-                Some(&self.registry_lifecycle_cancelled),
-            ),
+            lifecycle_cancellation: graph_lifecycle_cancellation(&self.lifecycle_cancelled, None),
             deadline_at,
             cancellation: cancellation_identity.clone(),
             deadline: deadline_identity.clone(),
@@ -1122,6 +1116,165 @@ impl RetainedCodeGraphRuntimeV1 {
         self.publish_prepared_sealed_generation(&prepared, &probe, &context)
     }
 
+    /// Seat the exact durable code-graph head without rebuilding its projection
+    /// manifest from partition segments.
+    ///
+    /// The relational head and active replay bind the Grafeo generation to the
+    /// immutable revision-7 manifest identity retained by this runtime. Every
+    /// mismatch fails before the returned snapshot becomes observable; callers
+    /// may then keep graph coverage pending while the scheduler replays the
+    /// canonical segments in the background.
+    #[hotpath::measure(label = "daemon.session_registry.recover_snapshot_from_head")]
+    pub fn recover_verified_snapshot_from_head(
+        &self,
+        request_cancelled: Arc<AtomicBool>,
+    ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError> {
+        if request_cancelled.load(Ordering::Acquire)
+            || self.lifecycle_cancelled.load(Ordering::Acquire)
+        {
+            return Err(GraphDbError::Cancelled);
+        }
+        let deadline_at = Instant::now() + GRAPH_OPERATION_DEADLINE;
+        let identity = self.generation_id.as_str();
+        let cancellation_identity = RuntimeCancellationIdentityV1 {
+            cancellation_id: RuntimeCancellationIdV1::new(format!("graph-head-recover:{identity}"))
+                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+            generation: 1,
+        };
+        let deadline_identity = RuntimeDeadlineV1 {
+            deadline_id: RuntimeDeadlineIdV1::new(format!(
+                "graph-head-recover-deadline:{identity}"
+            ))
+            .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+        };
+        let request_cancellation: Arc<dyn GraphCancellation> = Arc::new(
+            AtomicGraphCancellationV1::new(Arc::clone(&request_cancelled)),
+        );
+        let probe = GraphPublicationProbeV1 {
+            request_cancellation: Arc::clone(&request_cancellation),
+            lifecycle_cancellation: graph_lifecycle_cancellation(&self.lifecycle_cancelled, None),
+            deadline_at,
+            cancellation: cancellation_identity.clone(),
+            deadline: deadline_identity.clone(),
+            commit_started: AtomicBool::new(false),
+            deadline_warned: AtomicBool::new(false),
+        };
+        let control = RuntimeRequestControlV1 {
+            requested_at: tracedecay_application::clock::now_micros(),
+            deadline: deadline_identity,
+            cancellation: cancellation_identity,
+        };
+        let context = GraphPublicationOperationContextV1::new(&control, &probe)
+            .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+        let projector_revision = GraphProjectorRevision::try_from(
+            tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
+        )?;
+        let projection = tracedecay_code_index::graph_projection::code_graph_projection_identity(
+            self.authority.namespace().clone(),
+        )
+        .map_err(map_code_graph_error)?;
+        let graph_generation = tracedecay_code_index::graph_projection::code_graph_generation_id(
+            &self.generation_id,
+            &projector_revision,
+        )
+        .map_err(map_code_graph_error)?;
+        let idempotency_key = tracedecay_code_index::graph_projection::code_graph_idempotency_key(
+            &self.generation_id,
+            &projector_revision,
+        )
+        .map_err(map_code_graph_error)?;
+        let relational_projection = GraphProjectionIdentityV1 {
+            shard_id: self.authority.binding().shard_id.clone(),
+            namespace: tracedecay_store::GraphNamespaceV1::new(projection.namespace.as_str())
+                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+            projection: GraphProjectionIdV1::new(projection.projection.as_str())
+                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+        };
+        let expected_key = GraphPublicationKeyV1::new(
+            relational_projection.clone(),
+            GraphGenerationIdV1::new(graph_generation.as_str())
+                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+            GraphPublicationIdempotencyKeyV1::new(idempotency_key.as_str())
+                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+        );
+        let expected_source = SealedCodeGenerationReplay {
+            repository: self.repository_id.clone(),
+            generation: self.generation_id.clone(),
+            sealed_state_digest: self.sealed_state_digest.clone(),
+            projector_revision,
+        };
+        let mut storage = self
+            .project_database
+            .graph_publication_storage()
+            .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
+        let head = storage
+            .verified_head(&relational_projection, &context)
+            .map_err(map_publication_error)?
+            .ok_or_else(|| GraphDbError::unavailable("code graph has no verified head"))?;
+        if head.key != expected_key {
+            return Err(GraphDbError::conflict(
+                "code_graph.recover_verified_snapshot_from_head.generation",
+            ));
+        }
+        let replay = match storage
+            .replay(&expected_key, &context)
+            .map_err(map_publication_error)?
+        {
+            GraphPublicationReplayLookupV1::Active(replay) => replay,
+            GraphPublicationReplayLookupV1::Retired(_)
+            | GraphPublicationReplayLookupV1::Missing => {
+                return Err(GraphDbError::Corrupt {
+                    message: "verified code graph head has no active replay".to_owned(),
+                });
+            }
+        };
+        let replay_head = GraphVerifiedHeadV1::from_replay(
+            &replay,
+            replay.publication.expected_recovered_digest.clone(),
+        )
+        .map_err(|error| GraphDbError::Corrupt {
+            message: format!("verified code graph replay is invalid: {error}"),
+        })?;
+        if replay_head != head {
+            return Err(GraphDbError::Corrupt {
+                message: "verified code graph head does not match its active replay".to_owned(),
+            });
+        }
+        let replay_source: GraphGenerationReplaySource = serde_json::from_slice(
+            &replay.publication.canonical_replay_source,
+        )
+        .map_err(|error| GraphDbError::Corrupt {
+            message: format!("verified code graph replay source is corrupt: {error}"),
+        })?;
+        if !matches!(
+            replay_source,
+            GraphGenerationReplaySource::SealedCodeGeneration(source)
+                if source == expected_source
+        ) {
+            return Err(GraphDbError::conflict(
+                "code_graph.recover_verified_snapshot_from_head.manifest",
+            ));
+        }
+        let registration = GraphDbRegistration {
+            authority_lease: self.authority.clone(),
+            cancellation: request_cancellation,
+            lifecycle_cancellation: graph_lifecycle_cancellation(&self.lifecycle_cancelled, None),
+            deadline: deadline_at,
+        };
+        let snapshot = self.graph_registry.recover_verified_sealed_snapshot(
+            registration,
+            &mut storage,
+            &context,
+            &relational_projection,
+        )?;
+        if snapshot.verified_head() != &head || snapshot.generation() != &graph_generation {
+            return Err(GraphDbError::conflict(
+                "code_graph.recover_verified_snapshot_from_head.changed",
+            ));
+        }
+        Ok(snapshot)
+    }
+
     /// Discard one interrupted publication whose completion just refused with
     /// a deterministic conflict verdict: the journaled pending replay row and
     /// the partial store contents its dead publisher left behind. Every
@@ -1217,7 +1370,7 @@ impl RetainedCodeGraphRuntimeV1 {
             .replay(&prepared.publication_key, context)
             .map_err(map_publication_error)?
         {
-            GraphPublicationReplayLookupV1::Active(_) => {
+            GraphPublicationReplayLookupV1::Active(journaled) => {
                 let head = storage
                     .verified_head(&prepared.relational_projection, context)
                     .map_err(map_publication_error)?;
@@ -1225,6 +1378,23 @@ impl RetainedCodeGraphRuntimeV1 {
                     .as_ref()
                     .is_some_and(|head| head.key == prepared.publication_key)
                 {
+                    let source: GraphGenerationReplaySource =
+                        serde_json::from_slice(&journaled.publication.canonical_replay_source)
+                            .map_err(|error| GraphDbError::Corrupt {
+                                message: format!(
+                                    "verified code graph replay source is corrupt: {error}"
+                                ),
+                            })?;
+                    if !matches!(
+                        source,
+                        GraphGenerationReplaySource::SealedCodeGeneration(source)
+                            if source == prepared.source
+                    ) {
+                        return Err(GraphDbError::Corrupt {
+                            message: "verified code graph head names a different sealed manifest"
+                                .to_owned(),
+                        });
+                    }
                     Ok(SealedPublicationClassificationV1::RecoverPublished)
                 } else {
                     Ok(SealedPublicationClassificationV1::ResumeJournaled)
@@ -1441,14 +1611,58 @@ impl RetainedCodeGraphRuntimeV1 {
                 ) {
                     Ok(snapshot) => return Ok(snapshot),
                     Err(GraphDbError::Unavailable { .. }) => {}
+                    Err(
+                        error @ (GraphDbError::Corrupt { .. }
+                        | GraphDbError::ProjectionMismatch { .. }
+                        | GraphDbError::GenerationMismatch { .. }
+                        | GraphDbError::ResetRequired { .. }),
+                    ) => {
+                        tracing::warn!(
+                            event = "code_graph_verified_head_repair_started",
+                            generation = %prepared.publication_key.generation,
+                            error = %error,
+                            "verified head matched the revision-7 manifest but its derived \
+                             Grafeo state was invalid; replaying the canonical generation"
+                        );
+                        return publish(
+                            &mut storage,
+                            &prepared.publication_key,
+                            Some(Arc::clone(&prepared.manifest)),
+                        )
+                        .map(|publication| publication.snapshot);
+                    }
                     Err(error) => return Err(error),
                 }
-                return self.graph_registry.recover_verified_snapshot(
+                let recovered = self.graph_registry.recover_verified_snapshot(
                     registration(),
                     &mut storage,
                     context,
                     &prepared.relational_projection,
                 );
+                match recovered {
+                    Ok(snapshot) => return Ok(snapshot),
+                    Err(
+                        error @ (GraphDbError::Corrupt { .. }
+                        | GraphDbError::ProjectionMismatch { .. }
+                        | GraphDbError::GenerationMismatch { .. }
+                        | GraphDbError::ResetRequired { .. }),
+                    ) => {
+                        tracing::warn!(
+                            event = "code_graph_verified_head_repair_started",
+                            generation = %prepared.publication_key.generation,
+                            error = %error,
+                            "verified Grafeo staging state was invalid; replaying the \
+                             canonical revision-7 generation"
+                        );
+                        return publish(
+                            &mut storage,
+                            &prepared.publication_key,
+                            Some(Arc::clone(&prepared.manifest)),
+                        )
+                        .map(|publication| publication.snapshot);
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             SealedPublicationClassificationV1::RetiredConflict => {
                 return observe_code_graph_publication(
@@ -2398,6 +2612,16 @@ impl CodeGraphSeatLeaseV1 for RetainedCodeGraphRuntimeV1 {
         tracedecay_graph_db::GraphDbError,
     > {
         Self::publish_verified_snapshot(self, generation, request_cancelled)
+    }
+
+    fn recover_verified_snapshot_from_head(
+        &self,
+        request_cancelled: Arc<AtomicBool>,
+    ) -> std::result::Result<
+        tracedecay_graph_db::VerifiedGraphSnapshot,
+        tracedecay_graph_db::GraphDbError,
+    > {
+        Self::recover_verified_snapshot_from_head(self, request_cancelled)
     }
 
     fn load_sealed_read_bundle_catalog(

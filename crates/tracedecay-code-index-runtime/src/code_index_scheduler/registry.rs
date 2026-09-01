@@ -3176,6 +3176,9 @@ impl CodeIndexSchedulerRegistryV1 {
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .is_none();
+                let retained_text_uses_partitioned_manifest = retained_text
+                    .as_ref()
+                    .is_some_and(LatestCodeTextGenerationV1::uses_partitioned_manifest);
                 let retained_text_metadata =
                     retained_text.as_ref().map(|text| text.metadata().clone());
                 let shutting_down = Arc::clone(&worker_shutting_down);
@@ -3197,20 +3200,18 @@ impl CodeIndexSchedulerRegistryV1 {
                         {
                             return Ok(outcome);
                         }
-                        // A graph-enabled empty serving slot must publish the
-                        // retained complete generation before a dirty-tree
-                        // rebuild. Graph-off deliberately leaves this slot
-                        // empty and must instead settle through the retained
-                        // text reconcile below. During activation backoff the
-                        // slot stays empty until the scheduled retry, so this
-                        // short-circuit would reproduce the identical seat
-                        // Noop on every pass and starve the dirty-tree
-                        // successor the retained text reconcile must publish;
-                        // deferred passes fall through instead.
+                        // Legacy graph recovery requires a decoded complete
+                        // generation in the serving slot before a dirty-tree
+                        // rebuild. Revision 7 deliberately leaves that slot
+                        // empty: the retained manifest owner validates and
+                        // seats Grafeo below without opening partition bytes.
+                        // Graph-off and deferred passes also fall through to
+                        // retained text reconciliation.
                         if graph_activation_enabled
                             && !graph_activation_deferred
                             && serving_empty
                             && text_serving_ready
+                            && !retained_text_uses_partitioned_manifest
                             && let Some(outcome) =
                                 scheduler.seat_retained_generation_on_empty_serving()?
                         {
@@ -3462,7 +3463,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         "an arrival is pending; the optional graph decode yields this pass"
                     );
                 }
-                let prepare_graph =
+                let mut prepare_graph =
                     gate == GraphSeatGateV1::Prepare && !arrival_pending_before_graph_prepare;
                 if prepare_graph {
                     graph_prepare_yielded_to_arrival = false;
@@ -3527,6 +3528,82 @@ impl CodeIndexSchedulerRegistryV1 {
                         warming_restore_arrival = arrival.wake_micros();
                         Self::restore_pending_arrival(&worker_pending_wake, arrival, trigger);
                         worker_wake.notify_one();
+                    }
+                }
+                if prepare_graph
+                    && graph_text
+                        .as_ref()
+                        .is_some_and(|retained| retained.interactive_graph_store().is_ok())
+                {
+                    prepare_graph = false;
+                }
+                if prepare_graph
+                    && !published_pass
+                    && let Some(retained) = graph_text
+                        .as_ref()
+                        .filter(|retained| retained.uses_partitioned_manifest())
+                        .cloned()
+                {
+                    let generation_id = retained.metadata().manifest().generation_id.clone();
+                    let replay_scheduler = Arc::clone(&worker_scheduler);
+                    let shutting_down = Arc::clone(&worker_shutting_down);
+                    let replay_binding = tokio::task::spawn_blocking(move || {
+                        Self::lock_scheduler_unless_shutting_down(
+                            &replay_scheduler,
+                            &shutting_down,
+                        )?
+                        .code_graph_replay_binding(&generation_id)
+                    })
+                    .await;
+                    match replay_binding {
+                        Ok(Ok(replay_binding)) => {
+                            match worker_graph_activation
+                                .recover_verified_head(
+                                    &worker_project_id,
+                                    &worker_repository_id,
+                                    &worker_worktree_id,
+                                    retained,
+                                    replay_binding,
+                                    Arc::clone(&worker_shutting_down),
+                                )
+                                .await
+                            {
+                                Ok(true) => {
+                                    prepare_graph = false;
+                                    tracing::info!(
+                                        event = "code_index_graph_head_recovered",
+                                        "revision-7 manifest matched the durable verified graph \
+                                         head; startup seated graph reads without replay"
+                                    );
+                                }
+                                Ok(false) => {}
+                                Err(error) => {
+                                    tracing::warn!(
+                                        event = "code_index_graph_head_recovery_degraded",
+                                        error = %error,
+                                        "verified graph head did not match the revision-7 \
+                                         manifest; graph coverage stays pending while the \
+                                         admitted worker replays canonical segments"
+                                    );
+                                }
+                            }
+                        }
+                        Ok(Err(error)) => {
+                            tracing::warn!(
+                                event = "code_index_graph_head_recovery_binding_unavailable",
+                                error = %error,
+                                "revision-7 replay binding is unavailable; graph coverage stays \
+                                 pending while the admitted worker repairs the generation"
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                event = "code_index_graph_head_recovery_task_failed",
+                                error = %error,
+                                "revision-7 replay binding task failed; graph coverage stays \
+                                 pending while the admitted worker repairs the generation"
+                            );
+                        }
                     }
                 }
                 let mut result = match source_result {

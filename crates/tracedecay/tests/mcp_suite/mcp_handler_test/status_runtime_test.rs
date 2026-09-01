@@ -20,10 +20,10 @@ fn assert_sealed_graph_statistics_are_unavailable(text: &str) {
     assert_eq!(
         status["graph_statistics"],
         json!({
-            "status": "unavailable",
-            "reason": "sealed_generation_statistics_not_published",
+            "state": "unavailable",
+            "reason": "authority_unavailable",
         }),
-        "status must not fabricate graph counts without sealed-generation statistics"
+        "status must serialize GenerationCensusSnapshot when no census reader is attached"
     );
     assert!(
         status.get("node_count").is_none(),
