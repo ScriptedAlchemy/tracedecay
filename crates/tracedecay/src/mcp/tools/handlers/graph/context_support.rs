@@ -32,6 +32,7 @@ const CONTEXT_MEMORY_MATCH_LIMIT_MAX: usize = 10;
 const CONTEXT_LANE_TRUNCATED_NOTE: &str =
     "\n... lane truncated; retrieve the full response handle for omitted details.\n";
 
+#[hotpath::measure]
 pub(super) fn context_markdown_lane_preview(markdown: &str) -> String {
     let mut preview = String::with_capacity(markdown.len().min(24_000));
     let mut lane = String::new();
@@ -53,6 +54,7 @@ pub(super) fn context_markdown_lane_preview(markdown: &str) -> String {
     preview
 }
 
+#[hotpath::measure]
 fn context_lane_key(line: &str) -> Option<&str> {
     if line.starts_with("### ") || line.starts_with(CONTEXT_SEEN_NODE_IDS_LABEL) {
         Some(line.trim_end())
@@ -61,6 +63,7 @@ fn context_lane_key(line: &str) -> Option<&str> {
     }
 }
 
+#[hotpath::measure]
 fn push_context_lane_preview(preview: &mut String, lane_key: &str, lane: &str) {
     if lane.is_empty() {
         return;
@@ -78,6 +81,7 @@ fn push_context_lane_preview(preview: &mut String, lane_key: &str, lane: &str) {
     preview.push_str(CONTEXT_LANE_TRUNCATED_NOTE);
 }
 
+#[hotpath::measure]
 fn context_lane_budget(lane_key: &str) -> usize {
     if lane_key.starts_with(CONTEXT_SEEN_NODE_IDS_LABEL) {
         usize::MAX
@@ -100,6 +104,7 @@ fn context_lane_budget(lane_key: &str) -> usize {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn insert_context_memory_section(
     output: &mut String,
     memory_matches: &[FactSearchHitV1],
@@ -115,6 +120,7 @@ pub(super) fn insert_context_memory_section(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn context_memory_section(
     memory_matches: &[FactSearchHitV1],
     memory_matches_error: Option<&str>,
@@ -150,6 +156,7 @@ pub(super) fn context_memory_section(
     None
 }
 
+#[hotpath::measure]
 fn compact_memory_content(content: &str) -> String {
     content.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -171,6 +178,7 @@ pub(super) struct ContextMemoryOptions {
     min_trust: f64,
 }
 
+#[hotpath::measure]
 pub(super) fn context_memory_options(args: &Value) -> ContextMemoryOptions {
     let include_memory = args
         .get("include_memory")
@@ -193,10 +201,12 @@ pub(super) fn context_memory_options(args: &Value) -> ContextMemoryOptions {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn context_memory_enabled(options: &ContextMemoryOptions) -> bool {
     options.include_memory
 }
 
+#[hotpath::measure]
 pub(super) fn context_memory_read_control(
     options: &ContextMemoryOptions,
     deadline: Option<&Deadline>,
@@ -219,6 +229,7 @@ pub(super) fn context_memory_read_control(
     }))))
 }
 
+#[hotpath::measure]
 pub(super) fn context_memory_analytics_value(
     options: &ContextMemoryOptions,
     memory_matches: &[FactSearchHitV1],

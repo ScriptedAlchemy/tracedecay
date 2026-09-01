@@ -27,6 +27,7 @@ pub(crate) struct DoctorRuntimeRequest {
     doctor_report_requested: bool,
 }
 
+#[hotpath::measure_all]
 impl DoctorRuntimeRequest {
     pub(crate) fn doctor_report_requested(&self) -> bool {
         self.doctor_report_requested
@@ -37,6 +38,7 @@ impl DoctorRuntimeRequest {
     }
 }
 
+#[hotpath::measure]
 pub(crate) fn doctor_runtime_request(request_line: &str) -> Option<DoctorRuntimeRequest> {
     let request = serde_json::from_str::<JsonRpcRequest>(request_line.trim()).ok()?;
     if request.method != "tools/call" {
@@ -74,6 +76,7 @@ pub(crate) fn doctor_runtime_request(request_line: &str) -> Option<DoctorRuntime
     })
 }
 
+#[hotpath::measure]
 fn doctor_runtime_temporal_unavailable(reason: &str) -> serde_json::Value {
     json!({
         "status": if reason.ends_with("_locked") { "locked" } else { "unavailable" },
@@ -81,6 +84,7 @@ fn doctor_runtime_temporal_unavailable(reason: &str) -> serde_json::Value {
     })
 }
 
+#[hotpath::measure]
 fn doctor_runtime_temporal_report(
     report: tracedecay_session_temporal_store::SessionTemporalHealthReport,
 ) -> serde_json::Value {
@@ -89,6 +93,7 @@ fn doctor_runtime_temporal_report(
     })
 }
 
+#[hotpath::measure]
 fn doctor_runtime_unavailable(
     build_version: &str,
     project_path: Option<&Path>,
@@ -118,6 +123,7 @@ fn doctor_runtime_unavailable(
     })
 }
 
+#[hotpath::measure]
 pub(crate) fn doctor_runtime_tool_result(value: serde_json::Value) -> serde_json::Value {
     let text = serde_json::to_string(&value).unwrap_or_else(|_| {
         r#"{"doctor_runtime":{"status":"unavailable","reason":"serialization_failed","read_only":true}}"#
@@ -135,6 +141,7 @@ pub(crate) fn doctor_runtime_tool_result(value: serde_json::Value) -> serde_json
     })
 }
 
+#[hotpath::measure]
 fn doctor_runtime_store_layout(
     project_path: &Path,
     profile_root: &Path,
@@ -176,6 +183,7 @@ async fn doctor_literal_workspace_placeholder_paths(
     paths
 }
 
+#[hotpath::measure]
 fn doctor_runtime_coverage(startup_health_only: bool) -> Option<serde_json::Value> {
     startup_health_only.then(|| {
         json!({
@@ -473,6 +481,7 @@ async fn doctor_runtime_value_inner(
     value
 }
 
+#[hotpath::measure]
 fn doctor_semantic_runtime_status(
     project_path: Option<&Path>,
     configuration: Option<SemanticConfigurationPinV1>,

@@ -10,6 +10,7 @@ use tracedecay_mcp::handlers::graph::{
     graph_symbol_end_line, required_graph_file_path, required_graph_metadata,
 };
 
+#[hotpath::measure]
 pub(super) fn semantic_search_mode(
     mode: Option<PrimitiveSemanticModeV1>,
 ) -> crate::mcp::server::CodeIndexSearchModeV1 {
@@ -23,6 +24,7 @@ pub(super) fn semantic_search_mode(
     }
 }
 
+#[hotpath::measure]
 fn lane_status(status: &crate::mcp::server::CodeIndexLaneStatusV1) -> PrimitiveLaneStatusV1 {
     match status {
         crate::mcp::server::CodeIndexLaneStatusV1::Complete => {
@@ -52,6 +54,7 @@ fn lane_status(status: &crate::mcp::server::CodeIndexLaneStatusV1) -> PrimitiveL
     }
 }
 
+#[hotpath::measure]
 pub(super) fn search_coverage(
     coverage: &crate::mcp::server::CodeIndexSearchCoverageV1,
 ) -> PrimitiveSearchCoverageV1 {
@@ -68,6 +71,7 @@ pub(super) fn search_coverage(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn symbol_location(
     symbol: &CodeGraphSymbolSummaryV1,
 ) -> Result<PrimitiveSymbolLocationV1> {

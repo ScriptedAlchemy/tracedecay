@@ -29,6 +29,7 @@ pub(crate) struct AdmittedVerifiedGraphQueryPort {
     source_authority: Option<Arc<dyn CodeGraphSourceAuthorityPort>>,
 }
 
+#[hotpath::measure_all]
 impl AdmittedVerifiedGraphQueryPort {
     pub(crate) fn new(
         admission: Arc<dyn CodeGraphReadAdmissionPort>,

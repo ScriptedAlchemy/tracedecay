@@ -90,6 +90,7 @@ impl ProductionProjectCompositionRuntime {
         }
     }
 
+    #[hotpath::skip]
     pub(super) const fn semantic_auto_download(&self) -> bool {
         match self {
             #[cfg(unix)]
@@ -102,6 +103,7 @@ impl ProductionProjectCompositionRuntime {
         }
     }
 
+    #[hotpath::skip]
     pub(super) const fn startup_catch_up(&self) -> bool {
         match self {
             #[cfg(unix)]

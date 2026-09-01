@@ -51,6 +51,7 @@ struct ToolTokenAccounting {
     net_saved_tokens: u64,
 }
 
+#[hotpath::measure]
 pub(super) fn invocation_target_for_route(
     route: Option<&crate::mcp::project_route::ResolvedProjectRoute>,
 ) -> tracedecay_application::InvocationTarget {
@@ -60,6 +61,7 @@ pub(super) fn invocation_target_for_route(
     )
 }
 
+#[hotpath::measure]
 pub(super) fn accounting_project_root<'a>(
     active_root: &'a Path,
     selected_owner: Option<&'a tracedecay_global_db::ProjectRegistryContext>,
@@ -81,6 +83,7 @@ pub(super) fn accounting_project_root<'a>(
 /// snapshot (`mcp/tool_analytics.rs`, `server/live_transcript_refresh.rs`)
 /// reads only the scalar fields listed here, so copying just those preserves
 /// behavior without deep-copying the whole payload per call.
+#[hotpath::measure]
 fn analytics_arguments_snapshot(tool_name: &str, arguments: &Value) -> Value {
     const ANALYTICS_ARGUMENT_KEYS: &[&str] = &[
         "action",
@@ -116,6 +119,7 @@ fn analytics_arguments_snapshot(tool_name: &str, arguments: &Value) -> Value {
 /// drain hangs. None of the guarded state can be left torn by an unwind (each
 /// critical section is a single map or counter update), so recovering the
 /// value is the correct response.
+#[hotpath::measure]
 pub(super) fn recover_lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
@@ -132,6 +136,7 @@ struct ApplicationSurfaceDispatch<'a> {
 ///
 /// Canonical application and retained operations require the daemon invocation
 /// executor before the request is admitted to its typed owner.
+#[hotpath::measure]
 fn requires_application_invocation_executor(tool_name: &str) -> bool {
     ApplicationSurfaceOperation::from_tool_name(tool_name).is_some()
         || crate::mcp::tools::binding::work_operation_for_tool(tool_name).is_some()
@@ -140,10 +145,12 @@ fn requires_application_invocation_executor(tool_name: &str) -> bool {
 
 /// Retained name for this module's call sites; the saturating clamp is the one
 /// shared definition so MCP cannot stamp "now" differently from the daemon.
+#[hotpath::measure]
 pub(super) fn mcp_now_micros() -> tracedecay_domain::UtcMicros {
     tracedecay_application::clock::now_micros()
 }
 
+#[hotpath::measure]
 pub(super) fn is_source_edit_tool(tool_name: &str) -> bool {
     crate::mcp::tools::tool_dispatches_source_edit_effect(tool_name)
 }
@@ -155,6 +162,7 @@ pub(super) fn is_source_edit_tool(tool_name: &str) -> bool {
 /// other git-walking tool is recognised through the canonical MCP binding table
 /// rather than a second hand-maintained name list, so a newly bound git tool
 /// inherits the bound instead of silently running unbounded.
+#[hotpath::measure]
 pub(super) fn is_controlled_read_tool(tool_name: &str) -> bool {
     matches!(
         ApplicationSurfaceOperation::from_tool_name(tool_name),
@@ -169,10 +177,12 @@ pub(super) fn is_controlled_read_tool(tool_name: &str) -> bool {
         || tool_name == "tracedecay_search"
 }
 
+#[hotpath::measure]
 pub(super) fn tool_supports_live_cancellation(tool_name: &str) -> bool {
     crate::mcp::tools::tool_supports_live_cancellation(tool_name)
 }
 
+#[hotpath::measure]
 pub(super) fn dispatch_deadline_horizon_micros(bounded_operation: bool) -> Option<i64> {
     if !bounded_operation {
         return None;
@@ -285,6 +295,7 @@ LIMIT 20;
 - `derives_macro` edges record `#[derive(...)]` usage but generated impls are not in the graph.
 ";
 
+#[hotpath::measure_all]
 impl McpServer {
     pub(crate) fn cancel_application_surface_request(
         &self,
@@ -301,6 +312,7 @@ impl McpServer {
     }
 
     /// Returns `None` for notifications (requests without an `id`).
+    #[hotpath::skip]
     pub(crate) async fn handle_request(&self, request: &JsonRpcRequest) -> Option<JsonRpcResponse> {
         // The initialize-replay entry point builds its own per-connection
         // context so replay dispatches carry a real memory-request scope,
@@ -748,6 +760,7 @@ impl McpServer {
     /// graph. Until that resource-specific admission exists, exposing files
     /// from another store would make an unverified or stale inventory look
     /// authoritative.
+    #[hotpath::skip]
     pub(crate) async fn read_resource_files(&self, id: Value) -> JsonRpcResponse {
         Self::resource_contents(
             id,
@@ -758,6 +771,7 @@ impl McpServer {
     }
 
     /// Returns a high-level project overview as a text resource.
+    #[hotpath::skip]
     pub(crate) async fn read_resource_overview(&self, id: Value) -> JsonRpcResponse {
         let cg = self.cg_snapshot().await;
         let mut lines = Vec::new();
@@ -771,6 +785,7 @@ impl McpServer {
         Self::resource_contents(id, "tracedecay://overview", "text/plain", &text)
     }
 
+    #[hotpath::skip]
     pub(crate) async fn read_resource_branches(&self, id: Value) -> JsonRpcResponse {
         let cg = self.cg_snapshot().await;
         let tracedecay_dir = &cg.store_layout().data_root;
@@ -886,6 +901,7 @@ impl McpServer {
     /// Prepare the application-surface plumbing for a single dispatch. Returns
     /// the typed request id, deadline, cancellation, and daemon invocation
     /// executor, plus the RAII registration guard that must outlive the dispatch.
+    #[hotpath::skip]
     async fn prepare_application_surface_dispatch<'a>(
         &'a self,
         cg: &TraceDecay,
@@ -945,6 +961,7 @@ impl McpServer {
             })
     }
 
+    #[hotpath::skip]
     async fn apply_token_accounting(
         &self,
         cg: &TraceDecay,

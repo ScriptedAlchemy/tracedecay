@@ -252,6 +252,7 @@ pub async fn workflows(
     Ok(result)
 }
 
+#[hotpath::measure]
 fn sessions_unavailable(message: &str, problem_code: Option<&str>) -> SessionsForResultV1 {
     SessionsForResultV1 {
         count: 0,
@@ -271,6 +272,7 @@ fn sessions_unavailable(message: &str, problem_code: Option<&str>) -> SessionsFo
     }
 }
 
+#[hotpath::measure]
 fn map_git_error(error: GitCorrelationError) -> RetainedSurfaceExecutionErrorV1 {
     match error {
         GitCorrelationError::InvalidArgument(_) | GitCorrelationError::Contract(_) => {
@@ -289,6 +291,7 @@ fn map_git_error(error: GitCorrelationError) -> RetainedSurfaceExecutionErrorV1 
     }
 }
 
+#[hotpath::measure]
 fn limit(value: Option<u64>) -> Result<usize, RetainedSurfaceExecutionErrorV1> {
     let value = usize::try_from(value.unwrap_or(DEFAULT_LIMIT as u64))
         .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?;
@@ -298,6 +301,7 @@ fn limit(value: Option<u64>) -> Result<usize, RetainedSurfaceExecutionErrorV1> {
         .ok_or(RetainedSurfaceExecutionErrorV1::InvalidRequest)
 }
 
+#[hotpath::measure]
 fn time_filter(
     value: Option<&tracedecay_application::retained_surfaces::RetainedTimeFilterV1>,
     bound: SearchTimeBound,
@@ -321,6 +325,7 @@ fn time_filter(
     }
 }
 
+#[hotpath::measure]
 fn correlation_hit(hit: SessionGitCorrelationHit) -> SessionCorrelationHitV1 {
     SessionCorrelationHitV1 {
         provider: hit.provider,
@@ -455,6 +460,7 @@ async fn workflow_run_query(
     }
 }
 
+#[hotpath::measure]
 fn workflow_list(
     mode: WorkflowQueryModeV1,
     session_id: Option<String>,
@@ -470,6 +476,7 @@ fn workflow_list(
     result
 }
 
+#[hotpath::measure]
 fn workflow_not_found(run_id: &str) -> WorkflowsResultV1 {
     let mut result = empty_workflows(RetainedOutcomeStatusV1::Ok);
     result.mode = Some(WorkflowQueryModeV1::Run);
@@ -480,6 +487,7 @@ fn workflow_not_found(run_id: &str) -> WorkflowsResultV1 {
     result
 }
 
+#[hotpath::measure]
 fn workflow_unavailable(reason: WorkflowIndexState) -> WorkflowsResultV1 {
     let mut result = empty_workflows(RetainedOutcomeStatusV1::Unavailable);
     result.message = Some(reason.message().to_owned());
@@ -495,6 +503,7 @@ fn workflow_unavailable(reason: WorkflowIndexState) -> WorkflowsResultV1 {
     result
 }
 
+#[hotpath::measure]
 fn empty_workflows(status: RetainedOutcomeStatusV1) -> WorkflowsResultV1 {
     WorkflowsResultV1 {
         status,
@@ -520,6 +529,7 @@ fn empty_workflows(status: RetainedOutcomeStatusV1) -> WorkflowsResultV1 {
     }
 }
 
+#[hotpath::measure]
 fn workflow_run(run: WorkflowRun) -> WorkflowRunV1 {
     WorkflowRunV1 {
         run_id: run.run_id,
@@ -535,6 +545,7 @@ fn workflow_run(run: WorkflowRun) -> WorkflowRunV1 {
     }
 }
 
+#[hotpath::measure]
 fn workflow_agent(agent: WorkflowAgent) -> WorkflowAgentV1 {
     WorkflowAgentV1 {
         run_id: agent.run_id,

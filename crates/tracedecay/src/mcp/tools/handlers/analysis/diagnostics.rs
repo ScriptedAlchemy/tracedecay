@@ -26,6 +26,7 @@ use super::super::support::{generic_tool_result, unique_file_paths};
 
 const ANALYSIS_SYMBOL_BUDGET: usize = 500_000;
 
+#[hotpath::measure]
 fn diagnostics_scope_arg(args: &Value) -> Result<(&str, Scope)> {
     let scope_str = args
         .get("scope")
@@ -50,6 +51,7 @@ fn diagnostics_scope_arg(args: &Value) -> Result<(&str, Scope)> {
     Ok((scope_str, scope))
 }
 
+#[hotpath::measure]
 fn required_diagnostics_scope_value(args: &Value, scope: &str, name: &str) -> Result<String> {
     args.get(name)
         .and_then(|v| v.as_str())
@@ -59,6 +61,7 @@ fn required_diagnostics_scope_value(args: &Value, scope: &str, name: &str) -> Re
         .map(str::to_string)
 }
 
+#[hotpath::measure]
 fn enclosing_diagnostic_node(
     graph: &VerifiedGraphQuery,
     spans_by_file: &mut HashMap<String, Vec<NodeSpan>>,
@@ -101,12 +104,14 @@ fn enclosing_diagnostic_node(
 /// instead kicks a detached `cargo check` and returns a `warming` status
 /// immediately. Legacy environment precedence is resolved before the snapshot
 /// is published, never in this request path.
+#[hotpath::measure]
 fn diagnostics_prewarm_enabled(config_flag: bool) -> bool {
     config_flag
 }
 
 /// Build the early-return `warming` payload for a cold prewarm. Factored out so
 /// the warming path is unit-testable without spawning cargo.
+#[hotpath::measure]
 fn diagnostics_warming_result(project_root: &Path, args: &Value) -> ToolResult {
     let target_dir = rust_diagnostics_target_dir(project_root);
     let payload = json!({
@@ -330,6 +335,7 @@ async fn lsp_file_diagnostics(
     ))
 }
 
+#[hotpath::measure]
 fn lsp_diagnostic_to_compiler_diagnostic(diagnostic: CodeDiagnostic) -> Diagnostic {
     Diagnostic {
         file: diagnostic.file,

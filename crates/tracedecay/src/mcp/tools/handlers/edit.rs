@@ -20,18 +20,21 @@ use super::support::{generic_tool_result, rendered_tool_result};
 use tracedecay_mcp::ToolResult;
 use tracedecay_mcp::tools::render;
 
+#[hotpath::measure]
 fn missing_required_param(name: &str) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!("missing required parameter: {name}"),
     }
 }
 
+#[hotpath::measure]
 fn required_str<'a>(args: &'a Value, name: &str) -> Result<&'a str> {
     args.get(name)
         .and_then(Value::as_str)
         .ok_or_else(|| missing_required_param(name))
 }
 
+#[hotpath::measure]
 fn required_array<'a>(args: &'a Value, name: &str) -> Result<&'a [Value]> {
     args.get(name)
         .and_then(Value::as_array)
@@ -45,6 +48,7 @@ fn required_array<'a>(args: &'a Value, name: &str) -> Result<&'a [Value]> {
 /// MCP response rendering and is therefore removed before application input
 /// validation; every operation field remains subject to the DTO's strict
 /// shape.
+#[hotpath::measure]
 pub(super) fn deserialize_source_edit_surface<T>(args: &Value) -> Result<T>
 where
     T: serde::de::DeserializeOwned,
@@ -62,6 +66,7 @@ where
 /// Reads the shared `dry_run` edit flag (default `false`): when set, an edit
 /// primitive validates and computes the resulting content but writes nothing,
 /// returning a preview diff instead.
+#[hotpath::measure]
 fn dry_run_arg(args: &Value) -> bool {
     args.get("dry_run")
         .and_then(Value::as_bool)
@@ -72,6 +77,7 @@ fn dry_run_arg(args: &Value) -> bool {
 /// (non-dry-run) successful edit re-runs file-scoped diagnostics and attaches a
 /// compact verdict to the result. Off by default to keep edits fast; compound
 /// refactor tools are expected to default it on.
+#[hotpath::measure]
 fn verify_arg(args: &Value) -> bool {
     args.get("verify").and_then(Value::as_bool).unwrap_or(false)
 }
@@ -303,18 +309,21 @@ pub(super) async fn handle_source_edit_reconcile(
     }
 }
 
+#[hotpath::measure]
 fn source_edit_identity_error(error: impl std::fmt::Display) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!("invalid source edit effect identity: {error}"),
     }
 }
 
+#[hotpath::measure]
 fn source_edit_surface_value(
     result: &tracedecay_application::source_edit::SourceEditSurfaceResultV1,
 ) -> Result<Value> {
     Ok(serde_json::to_value(result)?)
 }
 
+#[hotpath::measure]
 fn optional_idempotency_key(args: &Value) -> Result<Option<IdempotencyKey>> {
     args.get("idempotency_key")
         .map(|value| {
@@ -330,6 +339,7 @@ fn optional_idempotency_key(args: &Value) -> Result<Option<IdempotencyKey>> {
         .transpose()
 }
 
+#[hotpath::measure]
 fn optional_expected_state(args: &Value) -> Result<Option<ManifestDigest>> {
     args.get("expected_state")
         .map(|value| {
@@ -555,6 +565,7 @@ pub(super) async fn handle_rename_symbol(
 
 /// Human-readable markdown for a move result: the outcome line, applied
 /// imports, the impact report (the centerpiece), and the preview diff.
+#[hotpath::measure]
 fn move_result_md(result: &tracedecay_application::source_edit::MoveResult) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();

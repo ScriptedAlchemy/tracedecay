@@ -42,6 +42,7 @@ pub(crate) use handlers::{
 /// application-catalog binding is resolved before this owner is entered.
 pub struct LegacyToolCompatibilityOwner;
 
+#[hotpath::measure_all]
 impl LegacyToolCompatibilityOwner {
     pub const OWNER: &'static str = "root MCP tool-dispatch migration";
     pub const REASON: &'static str =

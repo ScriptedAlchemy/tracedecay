@@ -14,6 +14,7 @@ use crate::daemon::automation_effect::AutomationEffectAdmission;
 use crate::tracedecay::TraceDecay;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
+#[hotpath::measure]
 pub(super) fn log_scheduler_pre_admission_problem(
     project_path: &Path,
     task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
@@ -36,6 +37,7 @@ pub(super) fn log_scheduler_pre_admission_problem(
     log_daemon_event("scheduler_task_application_pre_admission_problem", &fields);
 }
 
+#[hotpath::measure]
 pub(super) fn log_scheduler_admission_conflict(
     project_path: &Path,
     task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
@@ -54,6 +56,7 @@ pub(super) fn log_scheduler_admission_conflict(
     );
 }
 
+#[hotpath::measure]
 fn log_scheduler_schedule_skip(project_path: &Path, task: AgentTaskKind, reason: &'static str) {
     // Not-due/disabled tasks never reach durable admission; without this
     // counter a silent schedule skip is indistinguishable from a lost tick.
@@ -189,6 +192,7 @@ impl Drop for SchedulerCancellationBridge {
 /// to await, and the effect run control only sees them through the parent's
 /// opaque predicate, so this polls that predicate rather than bridging a
 /// channel.
+#[hotpath::measure]
 fn spawn_scheduler_cancellation_bridge<Interrupted>(
     interrupted: Interrupted,
     cancellation: tracedecay_application::CancellationSignal,
@@ -218,6 +222,7 @@ where
     SchedulerCancellationBridge { task: Some(task) }
 }
 
+#[hotpath::measure]
 fn scheduler_effect_run_control(
     run_control: &AutomationRunControl,
     cancellation: tracedecay_application::CancellationSignal,
@@ -243,6 +248,7 @@ fn scheduler_effect_run_control(
     }))
 }
 
+#[hotpath::measure]
 pub(super) fn synchronize_scheduler_effect_control(run_control: &AutomationRunControl) {
     run_control.read_control().interrupted();
 }
@@ -698,6 +704,7 @@ pub(in crate::daemon) async fn run_automation_scheduler_tick(
     }
 }
 
+#[hotpath::measure]
 pub(crate) fn scheduler_automation_request_id(
     requested_run_id: Option<&str>,
 ) -> Result<tracedecay_application::RequestId> {

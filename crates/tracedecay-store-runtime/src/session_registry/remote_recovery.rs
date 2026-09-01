@@ -65,6 +65,7 @@ pub(super) struct RemoteRecoveryPublicationContextV1 {
     project_lifecycle: Arc<OnceLock<Arc<dyn super::RemoteRecoveryProjectLifecycle>>>,
 }
 
+#[hotpath::measure_all]
 impl RemoteRecoveryPublicationContextV1 {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
@@ -120,6 +121,7 @@ impl RemoteRecoveryPublicationContextV1 {
         })
     }
 
+    #[hotpath::skip]
     async fn retire_project_session_sync(&self, project_id: &ProjectId) -> Result<()> {
         self.session_sync_service("retire remote recovery project session sync")?
             .retire_project(self.identity.profile_id(), project_id)
@@ -130,6 +132,7 @@ impl RemoteRecoveryPublicationContextV1 {
             })
     }
 
+    #[hotpath::skip]
     async fn rebind_project_session_sync(
         &self,
         project_id: &ProjectId,
@@ -144,6 +147,7 @@ impl RemoteRecoveryPublicationContextV1 {
             })
     }
 
+    #[hotpath::skip]
     async fn authorize_project_recovery(
         &self,
         project_id: &ProjectId,
@@ -163,6 +167,7 @@ pub(super) struct DaemonRemoteRecoveryPhysicalEffectsV1 {
     runtime: tokio::runtime::Handle,
 }
 
+#[hotpath::measure_all]
 impl DaemonRemoteRecoveryPhysicalEffectsV1 {
     pub(super) fn new(
         storage: RemoteSqliteStorageV1,
@@ -706,6 +711,7 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
     }
 }
 
+#[hotpath::measure]
 fn load_existing_backup(
     manifest_path: &Path,
     database_path: &Path,
@@ -743,6 +749,7 @@ fn load_existing_backup(
     })
 }
 
+#[hotpath::measure]
 fn validate_manifest(
     manifest: &RemoteBackupManifestV1,
     database_path: &Path,
@@ -766,6 +773,7 @@ fn validate_manifest(
     Ok(())
 }
 
+#[hotpath::measure]
 fn run_controlled<T: Send>(
     control: &dyn RemoteRecoveryControlPortV1,
     request_id: &RequestId,
@@ -796,6 +804,7 @@ fn run_controlled<T: Send>(
     })
 }
 
+#[hotpath::measure]
 fn observe_control(
     control: &dyn RemoteRecoveryControlPortV1,
     request_id: &RequestId,
@@ -819,6 +828,7 @@ fn observe_control(
     }
 }
 
+#[hotpath::measure]
 fn interruption_value(interruption: &Arc<AtomicU8>) -> Option<RemoteRecoveryInterruptionV1> {
     match interruption.load(Ordering::Acquire) {
         INTERRUPTION_CANCELLED => Some(RemoteRecoveryInterruptionV1::Cancelled),
@@ -827,6 +837,7 @@ fn interruption_value(interruption: &Arc<AtomicU8>) -> Option<RemoteRecoveryInte
     }
 }
 
+#[hotpath::measure]
 fn remote_fence(
     expected: &RecoveryAuthorityExpectationV1,
 ) -> std::result::Result<RemoteWriterFenceV1, RemoteRecoveryPhysicalEffectErrorV1> {
@@ -849,6 +860,7 @@ fn remote_fence(
     })
 }
 
+#[hotpath::measure]
 fn safe_suffix(value: &str) -> std::result::Result<&str, RemoteRecoveryPhysicalEffectErrorV1> {
     if value.is_empty()
         || value.len() > 160

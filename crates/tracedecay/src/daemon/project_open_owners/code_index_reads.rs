@@ -14,6 +14,7 @@ use std::time::Duration;
 use tracedecay_application::{Deadline, ResolvedScope, now_micros};
 use tracedecay_graph_query::{CodeGraphReadError, CodeGraphReadRequest, VerifiedCodeGraphRead};
 
+#[hotpath::measure]
 fn refuse_projection_wait(request: &CodeGraphReadRequest<'_>) -> Result<(), CodeGraphReadError> {
     if request.cancellation.is_cancelled()
         || request
@@ -162,6 +163,7 @@ impl tracedecay_graph_query::CodeGraphProjectionReadPort for ProjectCodeGraphPro
     }
 }
 
+#[hotpath::measure]
 pub(crate) fn project_code_graph_projection_read_port(
     schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     project_root: PathBuf,
@@ -177,6 +179,7 @@ pub(crate) fn project_code_graph_projection_read_port(
 /// Bind runtime generation telemetry to this daemon route's exact project
 /// root and resolved scope. A missing or unready sealed generation is an
 /// explicit unavailable census; it never falls back to the runtime database.
+#[hotpath::measure]
 pub(crate) fn project_code_index_generation_census_reader(
     schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     project_root: PathBuf,

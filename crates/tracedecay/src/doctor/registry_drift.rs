@@ -14,6 +14,7 @@ const DOCTOR_TEXT_LIMIT: usize = 512;
 /// Clamps a human coverage statement to the kernel's bounds: trimmed, free of
 /// control characters, and within the identifier byte ceiling, so construction
 /// never fails on an over-long store path.
+#[hotpath::measure]
 fn bounded_statement(statement: &str) -> String {
     let cleaned: String = statement
         .chars()
@@ -37,6 +38,7 @@ fn bounded_statement(statement: &str) -> String {
 /// both surface as [`DoctorStorageFindingKindV1::OrphanStore`], each carrying
 /// its observed disposition. Returns `None` when the store identity cannot form
 /// a valid evidence reference.
+#[hotpath::measure]
 pub(crate) fn orphan_store_doctor_finding(
     finding: &OrphanStoreFinding,
 ) -> Option<DoctorStorageFindingV1> {
@@ -101,6 +103,7 @@ pub(crate) fn orphan_store_doctor_finding(
 /// this class never had a registry row to begin with, rather than one whose
 /// root vanished. Returns `None` only when the identifier cannot form a valid
 /// evidence reference.
+#[hotpath::measure]
 pub(crate) fn unregistered_store_doctor_finding(
     finding: &UnregisteredStoreFinding,
 ) -> Option<DoctorStorageFindingV1> {

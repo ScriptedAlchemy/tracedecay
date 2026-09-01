@@ -71,6 +71,7 @@ enum ResolvedRetainedLcmAuthority<'a> {
     Owned(Arc<dyn MountedLcmAuthorityPort>),
 }
 
+#[hotpath::measure_all]
 impl ResolvedRetainedLcmAuthority<'_> {
     fn as_ref(&self) -> &dyn MountedLcmAuthorityPort {
         match self {
@@ -91,6 +92,7 @@ struct ScopedRetrieval<'a> {
     cancellation: &'a CancellationSignal,
 }
 
+#[hotpath::measure_all]
 impl<'a> ScopedRetrieval<'a> {
     fn new(
         inner: &'a dyn SessionApplicationRetrievalPortV1,
@@ -161,7 +163,9 @@ enum RetainedLcmRetrieval<'a> {
     },
 }
 
+#[hotpath::measure_all]
 impl RetainedLcmRetrieval<'_> {
+    #[hotpath::skip]
     async fn load_session(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -185,6 +189,7 @@ impl RetainedLcmRetrieval<'_> {
         }
     }
 
+    #[hotpath::skip]
     async fn grep(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -208,6 +213,7 @@ impl RetainedLcmRetrieval<'_> {
         }
     }
 
+    #[hotpath::skip]
     async fn describe(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -231,6 +237,7 @@ impl RetainedLcmRetrieval<'_> {
         }
     }
 
+    #[hotpath::skip]
     async fn expand(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -254,6 +261,7 @@ impl RetainedLcmRetrieval<'_> {
         }
     }
 
+    #[hotpath::skip]
     async fn expand_query(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -278,6 +286,7 @@ impl RetainedLcmRetrieval<'_> {
     }
 }
 
+#[hotpath::measure_all]
 impl<'a> DirectRetainedLcmPortV1<'a> {
     pub(super) fn profile(
         registry: &'a DaemonSessionRuntimeRegistryV1,
@@ -309,6 +318,7 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
         }
     }
 
+    #[hotpath::skip]
     async fn lcm_authority<'b>(
         &'b self,
         context: &'b RetainedSurfaceExecutionContextV1<'b>,
@@ -350,6 +360,7 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
         }
     }
 
+    #[hotpath::skip]
     async fn retrieval_service<'b>(
         &'b self,
         context: &'b RetainedSurfaceExecutionContextV1<'b>,
@@ -440,6 +451,7 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
         )
     }
 
+    #[hotpath::skip]
     async fn execute_lcm_inner(
         &self,
         context: RetainedSurfaceExecutionContextV1<'_>,
@@ -528,6 +540,7 @@ impl RetainedLcmExecutionPortV1 for DirectRetainedLcmPortV1<'_> {
     }
 }
 
+#[hotpath::measure]
 fn validate_receipt(
     context: &RetainedSurfaceExecutionContextV1<'_>,
     response: &LcmAuthorityResponse,
@@ -552,6 +565,7 @@ fn validate_receipt(
     Ok(())
 }
 
+#[hotpath::measure]
 fn execution_error(outcome: LcmAuthorityOutcome) -> RetainedSurfaceExecutionErrorV1 {
     match outcome {
         LcmAuthorityOutcome::Denied => {
@@ -600,6 +614,7 @@ const fn lcm_unavailable_reason(reason: LcmAuthorityUnavailableReason) -> &'stat
     }
 }
 
+#[hotpath::measure]
 fn lcm_authority_outcome(value: LcmAuthorityOutcome) -> LcmAuthorityOutcomeV1 {
     match value {
         LcmAuthorityOutcome::Ready => LcmAuthorityOutcomeV1::Ready,
@@ -613,6 +628,7 @@ fn lcm_authority_outcome(value: LcmAuthorityOutcome) -> LcmAuthorityOutcomeV1 {
     }
 }
 
+#[hotpath::measure]
 fn lcm_status(value: LcmStatus) -> LcmStatusV1 {
     LcmStatusV1 {
         schema_version: value.schema_version,
@@ -717,6 +733,7 @@ fn lcm_status(value: LcmStatus) -> LcmStatusV1 {
     }
 }
 
+#[hotpath::measure]
 fn lcm_doctor_health(value: SessionTemporalHealthReport) -> LcmDoctorHealthV1 {
     LcmDoctorHealthV1 {
         status: match value.status() {
@@ -788,6 +805,7 @@ const fn lcm_doctor_finding_kind(
     }
 }
 
+#[hotpath::measure]
 fn required(value: &str) -> Result<&str, RetainedSurfaceExecutionErrorV1> {
     let value = value.trim();
     if value.is_empty() {
@@ -797,10 +815,12 @@ fn required(value: &str) -> Result<&str, RetainedSurfaceExecutionErrorV1> {
     }
 }
 
+#[hotpath::measure]
 fn trimmed(value: Option<&str>) -> Result<Option<&str>, RetainedSurfaceExecutionErrorV1> {
     value.map(required).transpose()
 }
 
+#[hotpath::measure]
 fn specific_provider(value: &str) -> Result<&str, RetainedSurfaceExecutionErrorV1> {
     let value = required(value)?;
     if value == "all" {
@@ -810,6 +830,7 @@ fn specific_provider(value: &str) -> Result<&str, RetainedSurfaceExecutionErrorV
     }
 }
 
+#[hotpath::measure]
 fn optional_provider(value: Option<&str>) -> Result<Option<&str>, RetainedSurfaceExecutionErrorV1> {
     Ok(match trimmed(value)? {
         Some("all") | None => None,
@@ -817,14 +838,17 @@ fn optional_provider(value: Option<&str>) -> Result<Option<&str>, RetainedSurfac
     })
 }
 
+#[hotpath::measure]
 fn session_id(value: &str) -> Result<SessionId, RetainedSurfaceExecutionErrorV1> {
     SessionId::new(required(value)?).map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)
 }
 
+#[hotpath::measure]
 fn cursor(value: Option<&str>) -> Result<Option<String>, RetainedSurfaceExecutionErrorV1> {
     Ok(trimmed(value)?.map(str::to_owned))
 }
 
+#[hotpath::measure]
 fn optional_usize(value: Option<u64>) -> Result<Option<usize>, RetainedSurfaceExecutionErrorV1> {
     value
         .map(usize::try_from)
@@ -832,6 +856,7 @@ fn optional_usize(value: Option<u64>) -> Result<Option<usize>, RetainedSurfaceEx
         .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)
 }
 
+#[hotpath::measure]
 fn unsigned_i64(value: Option<u64>) -> Result<Option<i64>, RetainedSurfaceExecutionErrorV1> {
     value
         .map(i64::try_from)
@@ -839,6 +864,7 @@ fn unsigned_i64(value: Option<u64>) -> Result<Option<i64>, RetainedSurfaceExecut
         .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)
 }
 
+#[hotpath::measure]
 fn temporal_mode(
     mode: Option<LcmTemporalModeV1>,
     as_of: Option<u64>,
@@ -858,6 +884,7 @@ fn temporal_mode(
     }
 }
 
+#[hotpath::measure]
 fn relationship_scope(value: Option<MessageRelationshipScopeV1>) -> SessionSearchScope {
     match value.unwrap_or(MessageRelationshipScopeV1::All) {
         MessageRelationshipScopeV1::All => SessionSearchScope::All,
@@ -866,6 +893,7 @@ fn relationship_scope(value: Option<MessageRelationshipScopeV1>) -> SessionSearc
     }
 }
 
+#[hotpath::measure]
 fn message_type(value: Option<MessageTypeFilterV1>) -> SessionMessageType {
     match value.unwrap_or(MessageTypeFilterV1::All) {
         MessageTypeFilterV1::All => SessionMessageType::All,
@@ -884,6 +912,7 @@ const fn role_name(value: LcmRoleV1) -> &'static str {
     }
 }
 
+#[hotpath::measure]
 fn time_filter(
     value: Option<&RetainedTimeFilterV1>,
     bound: SearchTimeBound,

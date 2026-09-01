@@ -39,6 +39,7 @@ pub(super) struct ProjectHostAdmissionReplayWorker {
     idle: Notify,
 }
 
+#[hotpath::measure_all]
 impl ProjectHostAdmissionReplayTask {
     pub(super) fn start(broker: SharedHostAdmissionBroker, pass: PassFn) -> Self {
         let worker = Arc::new(ProjectHostAdmissionReplayWorker {
@@ -66,6 +67,7 @@ impl ProjectHostAdmissionReplayTask {
         &self.worker
     }
 
+    #[hotpath::skip]
     pub(super) async fn shutdown(mut self) {
         self.worker.cancel();
         if let Some(task) = self.task.take() {
@@ -93,6 +95,7 @@ impl Drop for ProjectHostAdmissionReplayTask {
     }
 }
 
+#[hotpath::measure_all]
 impl ProjectHostAdmissionReplayWorker {
     fn kick(&self) {
         self.dirty.store(true, Ordering::Release);
@@ -107,6 +110,7 @@ impl ProjectHostAdmissionReplayWorker {
     }
 
     #[cfg(test)]
+    #[hotpath::skip]
     pub(super) async fn wait_idle(&self, timeout: Duration) -> bool {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
@@ -141,6 +145,7 @@ impl ProjectHostAdmissionReplayWorker {
         self.backoff_count.load(Ordering::Acquire)
     }
 
+    #[hotpath::skip]
     async fn run(self: Arc<Self>) {
         let mut consecutive_retryable = 0u32;
         loop {
@@ -219,6 +224,7 @@ impl ProjectHostAdmissionReplayWorker {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn project_replay_backoff(attempt: u32) -> Duration {
     replay_backoff(attempt, REPLAY_BACKOFF_SHIFT_CAP)
 }

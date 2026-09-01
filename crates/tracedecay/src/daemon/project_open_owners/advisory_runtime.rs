@@ -179,6 +179,7 @@ impl Drop for ScoutHookRegistrationV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl ProjectOpenAdvisoryFeedbackCycleV1 {
     /// Resolves the cycle input from the current configuration revision and
     /// the current sealed code-index generation on every invocation. A
@@ -187,6 +188,7 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
     /// next cycle instead of rejecting every cycle as
     /// `feedback-cycle-configuration-drift` until the project is reopened, and
     /// files sealed by later generations stay eligible without a reopen.
+    #[hotpath::skip]
     async fn run_cycle(
         &self,
         request: FeedbackCycleRequest,
@@ -201,6 +203,7 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
             .await
     }
 
+    #[hotpath::skip]
     async fn run_cycle_with_lsp_input(
         &self,
         lsp_input: FeedbackCycleLspInput,
@@ -375,6 +378,7 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
 /// current hook configuration revision. `None` is the typed unbound state
 /// (expired or never-published bindings) under which no host could
 /// acknowledge a notice.
+#[hotpath::measure]
 fn advisory_hook_notice_dispatch(
     hook_config_root: &Path,
     now: UtcMicros,
@@ -486,12 +490,14 @@ impl ProductionFeedbackCycleAuthorizationPort for ProjectOpenFeedbackCycleAuthor
     }
 }
 
+#[hotpath::measure]
 fn unavailable_advisory_hook_notice(
     _notice: &AdvisoryHookLookupNoticeV1,
 ) -> tracedecay_hooks::HookFeedbackDeliveryOutcomeV1 {
     tracedecay_hooks::HookFeedbackDeliveryOutcomeV1::Unavailable
 }
 
+#[hotpath::measure]
 fn unavailable_advisory_hook_sink() -> Arc<AdvisoryHookNoticeSinkV1> {
     Arc::new(unavailable_advisory_hook_notice)
 }
@@ -839,6 +845,7 @@ async fn run_production_hook_cycle(
     }
 }
 
+#[hotpath::measure]
 fn observe_hook_feedback_cycle_terminal(
     observations: &Arc<dyn FeedbackObservationEmitterV1 + Send + Sync>,
     request: &HookOrchestrationRequestV1,
@@ -874,6 +881,7 @@ fn observe_hook_feedback_cycle_terminal(
     );
 }
 
+#[hotpath::measure]
 fn hook_feedback_document_uri_or_observe(
     project_root: &Path,
     indexed_files: &[String],
@@ -895,6 +903,7 @@ fn hook_feedback_document_uri_or_observe(
     document_uri
 }
 
+#[hotpath::measure]
 fn hook_feedback_document_uri(
     project_root: &Path,
     indexed_files: &[String],
@@ -921,6 +930,7 @@ fn hook_feedback_document_uri(
         .map(Into::into)
 }
 
+#[hotpath::measure]
 fn hash16(value: &[u8]) -> [u8; 16] {
     let digest = Sha256::digest(value);
     let mut value = [0_u8; 16];
@@ -1492,6 +1502,7 @@ struct ProductionGitHubProviderAccessV1 {
     http: GitHubHttpReadConfigV1,
 }
 
+#[hotpath::measure]
 fn resolve_production_github_provider_access(
     invocation: &DaemonInvocationState,
     project_root: &Path,
@@ -1707,6 +1718,7 @@ async fn resolve_github_stack_observability(
 /// Assembles the CI provider config for a credential that already proved
 /// Actions and Checks read permissions. `None` covers only the statically
 /// impossible identity-constant failures, never a permission decision.
+#[hotpath::measure]
 fn production_ci_provider_config(
     target: &GitHubCiRepositoryTargetV1,
     credential: &GitHubReadOnlyCredentialV1,
@@ -1726,6 +1738,7 @@ fn production_ci_provider_config(
     })
 }
 
+#[hotpath::measure]
 fn github_discovery_source_access_request(
     feedback_scope: &FeedbackScopeV1,
 ) -> Option<GitHubReviewReadRequestV1> {
@@ -1740,6 +1753,7 @@ fn github_discovery_source_access_request(
     })
 }
 
+#[hotpath::measure]
 fn github_discovery_authorization_context(
     access: &tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot,
     feedback_scope: &FeedbackScopeV1,
@@ -1811,6 +1825,7 @@ fn github_discovery_authorization_context(
     .ok()
 }
 
+#[hotpath::measure]
 fn resolve_production_github_identity(
     project_root: &Path,
     feedback_scope: &FeedbackScopeV1,

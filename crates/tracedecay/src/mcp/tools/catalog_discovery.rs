@@ -17,6 +17,7 @@ use super::dispatch::McpDispatchMetadataError;
 /// Build the live MCP discovery result from the application catalog rather
 /// than publishing the static compatibility registry as an unfiltered
 /// superset.
+#[hotpath::measure]
 pub fn get_catalog_filtered_tool_definitions_with_budget(
     node_count: u64,
     budget: u8,
@@ -60,6 +61,7 @@ pub fn get_catalog_filtered_tool_definitions_with_budget(
     Ok(definitions)
 }
 
+#[hotpath::measure]
 pub fn get_catalog_filtered_tool_definitions_with_warming_budget(
     budget: u8,
     profile_id: &ProfileId,
@@ -79,6 +81,7 @@ pub fn get_catalog_filtered_tool_definitions_with_warming_budget(
     Ok(definitions)
 }
 
+#[hotpath::measure]
 pub fn default_catalog_discovery_authority()
 -> Result<BTreeSet<CapabilityId>, crate::application_surface::ApplicationSurfaceAdapterError> {
     Ok(

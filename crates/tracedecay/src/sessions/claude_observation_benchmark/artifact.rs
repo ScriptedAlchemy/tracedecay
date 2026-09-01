@@ -50,6 +50,7 @@ struct ArtifactEnvelope {
     rest: Map<String, Value>,
 }
 
+#[hotpath::measure]
 pub(super) fn assert_repository_evidence() {
     let strict = tracedecay_global_db::env_flag("TRACEDECAY_BENCHMARK_REQUIRE_ACCEPTANCE");
     let directory = std::env::var_os("TRACEDECAY_BENCHMARK_EVIDENCE_DIR").map_or_else(
@@ -59,6 +60,7 @@ pub(super) fn assert_repository_evidence() {
     validate_evidence_directory(&directory, strict).expect("benchmark evidence directory contract");
 }
 
+#[hotpath::measure]
 pub(super) fn validate_evidence_directory(
     directory: &Path,
     require_acceptance: bool,
@@ -155,10 +157,12 @@ pub(super) fn validate_evidence_directory(
 
 /// Historical and retired artifacts keep the workload id they were sealed
 /// under; only live acceptance evidence must carry the current id.
+#[hotpath::measure]
 fn is_recognized_workload_id(workload_id: &str) -> bool {
     workload_id == WORKLOAD_ID || workload_id == RETIRED_WORKLOAD_ID
 }
 
+#[hotpath::measure]
 fn validate_historical_result(result: &ArtifactEnvelope) -> Result<(), String> {
     if result.schema_version == RESULT_SCHEMA_VERSION {
         return validate_retired_acceptance_result(result);
@@ -202,6 +206,7 @@ fn validate_historical_result(result: &ArtifactEnvelope) -> Result<(), String> {
     validate_aggregates(&result.rest, &pipeline, &no_op)
 }
 
+#[hotpath::measure]
 fn validate_retired_acceptance_result(result: &ArtifactEnvelope) -> Result<(), String> {
     let git_before = result
         .rest
@@ -226,6 +231,7 @@ fn validate_retired_acceptance_result(result: &ArtifactEnvelope) -> Result<(), S
     validate_aggregates(&result.rest, &pipeline, &no_op)
 }
 
+#[hotpath::measure]
 fn validate_acceptance_result(result: &BenchmarkResult) -> Result<(), String> {
     if result.schema_version != RESULT_SCHEMA_VERSION
         || result.evidence_status != EvidenceStatus::Acceptance
@@ -333,6 +339,7 @@ fn validate_acceptance_result(result: &BenchmarkResult) -> Result<(), String> {
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_provider_performance(
     suite: &ProviderBenchmarkSuiteResult,
     clock_ticks_per_second: u64,
@@ -452,6 +459,7 @@ fn validate_provider_performance(
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_provider_fairness(suite: &ProviderBenchmarkSuiteResult) -> Result<(), String> {
     let fairness = &suite.fairness;
     let providers = super::baseline::PROVIDERS;
@@ -474,6 +482,7 @@ fn validate_provider_fairness(suite: &ProviderBenchmarkSuiteResult) -> Result<()
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_provider_phase(
     phase: &ProviderPhaseResult,
     scope: &str,
@@ -540,6 +549,7 @@ fn validate_provider_phase(
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_aggregates(
     fields: &Map<String, Value>,
     pipeline_samples: &[RawPhaseSample],
@@ -577,6 +587,7 @@ fn validate_aggregates(
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_sample_sequence(
     samples: &[RawPhaseSample],
     replayed_observations: usize,
@@ -595,6 +606,7 @@ fn validate_sample_sequence(
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_distribution(
     fields: &Map<String, Value>,
     name: &str,
@@ -612,6 +624,7 @@ fn validate_distribution(
         .ok_or_else(|| format!("historical {name} mismatch"))
 }
 
+#[hotpath::measure]
 fn distribution_matches(expected: &Distribution, samples: &[RawPhaseSample]) -> bool {
     let actual = Distribution::from_samples(
         &samples
@@ -629,6 +642,7 @@ fn distribution_matches(expected: &Distribution, samples: &[RawPhaseSample]) -> 
         && float_close(actual.sample_stddev_ns, expected.sample_stddev_ns)
 }
 
+#[hotpath::measure]
 fn samples(fields: &Map<String, Value>, name: &str) -> Result<Vec<RawPhaseSample>, String> {
     serde_json::from_value(
         fields
@@ -639,6 +653,7 @@ fn samples(fields: &Map<String, Value>, name: &str) -> Result<Vec<RawPhaseSample
     .map_err(|error| format!("parse historical {name}: {error}"))
 }
 
+#[hotpath::measure]
 fn string<'a>(fields: &'a Map<String, Value>, name: &str) -> Result<&'a str, String> {
     fields
         .get(name)
@@ -646,6 +661,7 @@ fn string<'a>(fields: &'a Map<String, Value>, name: &str) -> Result<&'a str, Str
         .ok_or_else(|| format!("artifact lacks string {name}"))
 }
 
+#[hotpath::measure]
 fn unsigned(fields: &Map<String, Value>, name: &str) -> Result<u64, String> {
     fields
         .get(name)
@@ -653,6 +669,7 @@ fn unsigned(fields: &Map<String, Value>, name: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("artifact lacks unsigned {name}"))
 }
 
+#[hotpath::measure]
 fn boolean(fields: &Map<String, Value>, name: &str) -> Result<bool, String> {
     fields
         .get(name)
@@ -660,10 +677,12 @@ fn boolean(fields: &Map<String, Value>, name: &str) -> Result<bool, String> {
         .ok_or_else(|| format!("artifact lacks boolean {name}"))
 }
 
+#[hotpath::measure]
 fn float_close(left: f64, right: f64) -> bool {
     (left - right).abs() <= left.abs().max(right.abs()).max(1.0) * 1e-12
 }
 
+#[hotpath::measure]
 pub(super) fn is_lower_hex(value: &str, length: usize) -> bool {
     value.len() == length
         && value
@@ -671,6 +690,7 @@ pub(super) fn is_lower_hex(value: &str, length: usize) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+#[hotpath::measure]
 pub(super) fn sha256_file(path: &Path) -> std::io::Result<(String, u64)> {
     let mut file = fs::File::open(path)?;
     let mut digest = Sha256::new();
@@ -689,6 +709,7 @@ pub(super) fn sha256_file(path: &Path) -> std::io::Result<(String, u64)> {
     Ok((hex::encode(digest.finalize()), size))
 }
 
+#[hotpath::measure]
 pub(super) fn validate_release_profile(
     debug_assertions: bool,
     profile: Option<&str>,
@@ -702,6 +723,7 @@ pub(super) fn validate_release_profile(
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn attest_build(git: &GitSnapshot) -> AttestedBuild {
     validate_release_profile(cfg!(debug_assertions), BUILD_PROFILE)
         .expect("benchmark must use the release evidence runner");
@@ -755,6 +777,7 @@ pub(super) fn attest_build(git: &GitSnapshot) -> AttestedBuild {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn validate_git_snapshots(
     before: &GitSnapshot,
     after: &GitSnapshot,
@@ -771,6 +794,7 @@ pub(super) fn validate_git_snapshots(
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn workload_identity() -> WorkloadIdentity {
     let manifest_sha256 = sha256_hex(WORKLOAD_MANIFEST.as_bytes());
     let harness_sha256 = harness_sources_sha256(
@@ -845,6 +869,7 @@ pub(super) fn workload_identity() -> WorkloadIdentity {
     }
 }
 
+#[hotpath::measure]
 fn harness_sources_sha256<'a>(sources: impl IntoIterator<Item = (&'a str, &'a [u8])>) -> String {
     let mut digest = Sha256::new();
     for (path, source) in sources {
@@ -856,6 +881,7 @@ fn harness_sources_sha256<'a>(sources: impl IntoIterator<Item = (&'a str, &'a [u
     hex::encode(digest.finalize())
 }
 
+#[hotpath::measure]
 pub(super) fn command_output(command: &str, args: &[&str]) -> String {
     let output = Command::new(command)
         .args(args)
@@ -868,6 +894,7 @@ pub(super) fn command_output(command: &str, args: &[&str]) -> String {
         .to_string()
 }
 
+#[hotpath::measure]
 pub(super) fn git_snapshot() -> GitSnapshot {
     if BUILD_SOURCE_MODE == Some("git_archive_read_only_v1") {
         return validate_source_archive().0;
@@ -880,6 +907,7 @@ pub(super) fn git_snapshot() -> GitSnapshot {
     }
 }
 
+#[hotpath::measure]
 fn validate_source_archive() -> (GitSnapshot, usize) {
     assert_eq!(BUILD_SOURCE_MODE, Some("git_archive_read_only_v1"));
     let manifest_path = repository_root().join(".tracedecay-benchmark-source-manifest");
@@ -931,6 +959,7 @@ fn validate_source_archive() -> (GitSnapshot, usize) {
     )
 }
 
+#[hotpath::measure]
 fn worktree_is_dirty() -> bool {
     let output = Command::new("git")
         .args([
@@ -946,6 +975,7 @@ fn worktree_is_dirty() -> bool {
     status_output_is_dirty(&output.stdout)
 }
 
+#[hotpath::measure]
 pub(super) fn status_output_is_dirty(output: &[u8]) -> bool {
     !output.is_empty()
 }
@@ -953,10 +983,12 @@ pub(super) fn status_output_is_dirty(output: &[u8]) -> bool {
 /// The product package directory. `HARNESS_SOURCES` records paths relative to
 /// the package (`src/sessions/...`), which is a different anchor from the
 /// workspace-level fixtures and benchmark data below.
+#[hotpath::measure]
 pub(super) fn package_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
 }
 
+#[hotpath::measure]
 pub(super) fn repository_root() -> &'static Path {
     // The product package sits at `crates/tracedecay`; the fixtures, benchmark
     // data, and git metadata this module reads all live at the workspace root.
@@ -966,6 +998,7 @@ pub(super) fn repository_root() -> &'static Path {
         .expect("workspace root above crates/tracedecay")
 }
 
+#[hotpath::measure]
 fn git_output(args: &[&str]) -> String {
     let output = Command::new("git")
         .args(args)
@@ -979,6 +1012,7 @@ fn git_output(args: &[&str]) -> String {
         .to_string()
 }
 
+#[hotpath::measure]
 pub(super) fn verify_git_toplevel() {
     let expected = fs::canonicalize(repository_root()).expect("canonicalize manifest directory");
     let actual = fs::canonicalize(git_output(&["rev-parse", "--show-toplevel"]))

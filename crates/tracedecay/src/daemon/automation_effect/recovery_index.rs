@@ -179,6 +179,7 @@ pub(crate) async fn reconcile_reserved_automation_effects_for_project(
     Ok(report)
 }
 
+#[hotpath::measure]
 pub(super) fn reject_unbound_retirement_witness_if_index_empty(
     dashboard_root: &Path,
 ) -> Result<()> {
@@ -552,6 +553,7 @@ async fn persist_reserved_recovery(
     })
 }
 
+#[hotpath::measure]
 pub(super) fn special_recovery_defer_reason(
     admission: &DurableAutomationAdmission,
     committed_receipts_empty: bool,
@@ -565,6 +567,7 @@ pub(super) fn special_recovery_defer_reason(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn admission_has_exact_authority(
     admission: &DurableAutomationAdmission,
     operation: &tracedecay_application::ApplicationOperation,
@@ -610,6 +613,7 @@ struct EffectAuthorityDigestInput<'a> {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 pub(super) fn effect_authority_digest(
     schema_version: u32,
     operation: &ApplicationOperation,
@@ -648,6 +652,7 @@ pub(super) fn effect_authority_digest(
     })
 }
 
+#[hotpath::measure]
 pub(super) fn recovered_partial_terminal(
     admission: &DurableAutomationAdmission,
     committed: Vec<tracedecay_application::retained_surfaces::AutomationCommittedReceiptV1>,
@@ -687,6 +692,7 @@ pub(super) fn recovered_partial_terminal(
     ))
 }
 
+#[hotpath::measure]
 fn automation_journal_filename(run_id: &RunId) -> Result<String> {
     let key = digest(&("tracedecay.automation-run.terminal-key.v1", run_id))?;
     Ok(format!(
@@ -745,6 +751,7 @@ struct IndexedRetirementTransition {
     capture_expected: bool,
 }
 
+#[hotpath::measure]
 pub(super) fn add_pending_blocking(
     dashboard_root: &Path,
     journal_path: &Path,
@@ -777,6 +784,7 @@ pub(super) fn add_pending_blocking(
     })
 }
 
+#[hotpath::measure]
 pub(super) fn remove_pending_blocking(dashboard_root: &Path, journal_path: &Path) -> Result<()> {
     let journal_file = journal_filename(journal_path)?;
     mutate_index(dashboard_root, |index| {
@@ -787,6 +795,7 @@ pub(super) fn remove_pending_blocking(dashboard_root: &Path, journal_path: &Path
     })
 }
 
+#[hotpath::measure]
 pub(super) fn remove_pending_for_retirement_blocking(
     dashboard_root: &Path,
     journal_path: &Path,
@@ -802,6 +811,7 @@ pub(super) fn remove_pending_for_retirement_blocking(
     )
 }
 
+#[hotpath::measure]
 fn remove_pending_for_retirement_with_writer(
     dashboard_root: &Path,
     journal_path: &Path,
@@ -846,6 +856,7 @@ fn remove_pending_for_retirement_with_writer(
     })
 }
 
+#[hotpath::measure]
 fn publish_retirement_transition_with_writer(
     path: &Path,
     original: &PendingIndex,
@@ -895,6 +906,7 @@ fn publish_retirement_transition_with_writer(
     Ok(protected)
 }
 
+#[hotpath::measure]
 fn remove_pending_after_transition_with_writer(
     path: &Path,
     protected: &PendingIndex,
@@ -942,6 +954,7 @@ pub(super) fn finish_retirement_transition_blocking(
     })
 }
 
+#[hotpath::measure]
 fn finish_retirement_transition_with_writer(
     path: &Path,
     original: &PendingIndex,
@@ -970,6 +983,7 @@ fn finish_retirement_transition_with_writer(
     }
 }
 
+#[hotpath::measure]
 fn retirement_transition_for(
     entry: &PendingIndexEntry,
     admission: &DurableAutomationAdmission,
@@ -992,6 +1006,7 @@ fn retirement_transition_for(
     })
 }
 
+#[hotpath::measure]
 fn publish_index_state(
     path: &Path,
     expected: &PendingIndex,
@@ -1002,6 +1017,7 @@ fn publish_index_state(
     require_index_state(path, expected)
 }
 
+#[hotpath::measure]
 fn require_index_state(path: &Path, expected: &PendingIndex) -> Result<()> {
     if read_index(path)? == *expected {
         Ok(())
@@ -1012,6 +1028,7 @@ fn require_index_state(path: &Path, expected: &PendingIndex) -> Result<()> {
     }
 }
 
+#[hotpath::measure]
 fn encode_pending_index(index: &PendingIndex) -> Result<Vec<u8>> {
     let bytes = serde_json::to_vec_pretty(index).map_err(contract_error)?;
     if bytes.len() > MAX_INDEX_BYTES as usize {
@@ -1022,6 +1039,7 @@ fn encode_pending_index(index: &PendingIndex) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+#[hotpath::measure]
 pub(super) fn indexed_journals_blocking(
     dashboard_root: &Path,
     scope: &ResolvedScope,
@@ -1045,6 +1063,7 @@ pub(super) fn indexed_journals_blocking(
     })
 }
 
+#[hotpath::measure]
 fn indexed_retirement_transitions_blocking(
     dashboard_root: &Path,
 ) -> Result<Vec<IndexedRetirementTransition>> {
@@ -1066,6 +1085,7 @@ fn indexed_retirement_transitions_blocking(
     })
 }
 
+#[hotpath::measure]
 fn mutate_index(
     dashboard_root: &Path,
     mutate: impl FnOnce(&mut PendingIndex) -> Result<()>,
@@ -1073,6 +1093,7 @@ fn mutate_index(
     mutate_index_with_writer(dashboard_root, mutate, write_pending_index)
 }
 
+#[hotpath::measure]
 fn mutate_index_with_writer(
     dashboard_root: &Path,
     mutate: impl FnOnce(&mut PendingIndex) -> Result<()>,
@@ -1087,6 +1108,7 @@ fn mutate_index_with_writer(
     })
 }
 
+#[hotpath::measure]
 fn write_pending_index(path: &Path, bytes: &[u8]) -> Result<()> {
     write_pending_index_with_publisher(path, bytes, |temporary, destination| {
         journal::replace_automation_file_atomically(
@@ -1097,6 +1119,7 @@ fn write_pending_index(path: &Path, bytes: &[u8]) -> Result<()> {
     })
 }
 
+#[hotpath::measure]
 pub(super) fn write_pending_index_with_publisher(
     path: &Path,
     bytes: &[u8],
@@ -1119,6 +1142,7 @@ pub(super) fn write_pending_index_with_publisher(
     Ok(())
 }
 
+#[hotpath::measure]
 fn read_index(path: &Path) -> Result<PendingIndex> {
     tracedecay_runtime_core::storage::reject_symlink_components(path, "automation pending index")
         .map_err(|error| contract_error(format!("automation pending index path failed: {error}")))?;
@@ -1195,6 +1219,7 @@ fn read_index(path: &Path) -> Result<PendingIndex> {
     Ok(index)
 }
 
+#[hotpath::measure]
 fn validate_sha256_digest(digest: &str) -> Result<()> {
     let Some(body) = digest.strip_prefix("sha256:") else {
         return Err(contract_error(
@@ -1213,6 +1238,7 @@ fn validate_sha256_digest(digest: &str) -> Result<()> {
     Ok(())
 }
 
+#[hotpath::measure]
 fn entry_for(path: &Path, scope: &ResolvedScope) -> Result<PendingIndexEntry> {
     Ok(PendingIndexEntry {
         journal_file: journal_filename(path)?,
@@ -1221,6 +1247,7 @@ fn entry_for(path: &Path, scope: &ResolvedScope) -> Result<PendingIndexEntry> {
     })
 }
 
+#[hotpath::measure]
 fn journal_filename(path: &Path) -> Result<String> {
     let filename = path
         .file_name()
@@ -1231,6 +1258,7 @@ fn journal_filename(path: &Path) -> Result<String> {
     Ok(filename)
 }
 
+#[hotpath::measure]
 fn validate_journal_filename(filename: &str) -> Result<()> {
     let Some(stem) = filename.strip_suffix(".json") else {
         return Err(contract_error(
@@ -1249,14 +1277,17 @@ fn validate_journal_filename(filename: &str) -> Result<()> {
     Ok(())
 }
 
+#[hotpath::measure]
 fn automation_root(dashboard_root: &Path) -> PathBuf {
     dashboard_root.join("automation_effects")
 }
 
+#[hotpath::measure]
 fn index_path(dashboard_root: &Path) -> PathBuf {
     automation_root(dashboard_root).join(INDEX_FILENAME)
 }
 
+#[hotpath::measure]
 fn with_index_lock<T>(path: &Path, operation: impl FnOnce() -> Result<T>) -> Result<T> {
     let parent = path
         .parent()

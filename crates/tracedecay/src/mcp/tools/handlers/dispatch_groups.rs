@@ -30,6 +30,7 @@ use tracedecay_mcp::{
     retained_problem_envelope, retained_safe_diagnostic, validated_retained_response,
 };
 
+#[hotpath::measure]
 fn graph_read_unavailable(detail: &str) -> TraceDecayError {
     TraceDecayError::ProjectRoute {
         reason_code: "verified-code-graph-read-unavailable".to_owned(),
@@ -140,6 +141,7 @@ const LONG_RUNNING_DISPATCH_TOOLS: &[&str] = &[
 
 /// The ceiling that applies to `tool_name` in the absence of a shorter carried
 /// deadline.
+#[hotpath::measure]
 pub(crate) fn tool_dispatch_ceiling(tool_name: &str) -> std::time::Duration {
     if LONG_RUNNING_DISPATCH_TOOLS.contains(&tool_name) {
         LONG_RUNNING_TOOL_DISPATCH_CEILING
@@ -154,6 +156,7 @@ pub(crate) fn tool_dispatch_ceiling(tool_name: &str) -> std::time::Duration {
 /// `None` means the carried deadline has already elapsed, which must be
 /// rejected rather than dispatched — the same rule the git and memory wraps
 /// apply to a non-positive budget.
+#[hotpath::measure]
 pub(crate) fn tool_dispatch_budget(
     tool_name: &str,
     deadline: Option<&tracedecay_application::Deadline>,
@@ -176,6 +179,7 @@ pub(crate) fn tool_dispatch_budget(
 /// boundary surface a structured error instead of holding the transport open.
 /// Retry is safe: the ceiling is a
 /// backstop over work that was already admitted, never a commit signal.
+#[hotpath::measure]
 pub(crate) fn tool_dispatch_deadline_error(
     tool_name: &str,
     budget: std::time::Duration,
@@ -207,6 +211,7 @@ pub(super) async fn dispatch_graph_tools(
     dispatch_graph_tools_inner(tool_name, cg, args, selected_scope_prefix, options).await
 }
 
+#[hotpath::measure]
 fn dispatch_graph_tools_inner<'a>(
     tool_name: &'a str,
     cg: &'a TraceDecay,
@@ -373,6 +378,7 @@ pub(super) async fn dispatch_info_tools(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 fn dispatch_info_tools_inner<'a>(
     tool_name: &'a str,
     cg: &'a TraceDecay,
@@ -497,6 +503,7 @@ pub(super) async fn dispatch_admin_tools(
     dispatch_admin_tools_inner(tool_name, cg, args, options).await
 }
 
+#[hotpath::measure]
 fn dispatch_admin_tools_inner<'a>(
     tool_name: &'a str,
     cg: &'a TraceDecay,
@@ -569,6 +576,7 @@ pub(super) async fn dispatch_application_surface_tools(
     dispatch_application_surface_tools_inner(tool_name, cg, args, options).await
 }
 
+#[hotpath::measure]
 fn dispatch_application_surface_tools_inner<'a>(
     tool_name: &'a str,
     cg: &'a TraceDecay,
@@ -626,6 +634,7 @@ pub(super) async fn dispatch_analysis_tools(
     .await
 }
 
+#[hotpath::measure]
 fn dispatch_analysis_tools_inner<'a>(
     tool_name: &'a str,
     cg: &'a TraceDecay,
@@ -751,6 +760,7 @@ pub(super) async fn dispatch_git_tools(
     dispatch_git_tools_inner(tool_name, cg, args, options).await
 }
 
+#[hotpath::measure]
 fn dispatch_git_tools_inner<'a>(
     tool_name: &'a str,
     cg: &'a TraceDecay,
@@ -867,6 +877,7 @@ pub(super) async fn dispatch_edit_tools(
     dispatch_edit_tools_inner(tool_name, cg, args, options).await
 }
 
+#[hotpath::measure]
 fn dispatch_edit_tools_inner<'a>(
     tool_name: &'a str,
     cg: &'a TraceDecay,
@@ -940,6 +951,7 @@ pub(super) async fn dispatch_retained_application_tools(
     .await
 }
 
+#[hotpath::measure]
 fn dispatch_retained_application_tools_inner<'a>(
     tool_name: &'a str,
     cg: &'a TraceDecay,
@@ -1091,6 +1103,7 @@ pub(super) async fn dispatch_memory_tools(
     dispatch_memory_tools_inner(tool_name, cg, args, options).await
 }
 
+#[hotpath::measure]
 fn dispatch_memory_tools_inner<'a>(
     tool_name: &'a str,
     cg: &'a TraceDecay,
@@ -1133,6 +1146,7 @@ pub(super) async fn dispatch_session_workflow_tools(
     dispatch_session_workflow_tools_inner(tool_name, cg, args, options).await
 }
 
+#[hotpath::measure]
 fn dispatch_session_workflow_tools_inner<'a>(
     tool_name: &'a str,
     cg: &'a TraceDecay,

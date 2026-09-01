@@ -20,6 +20,7 @@ use tracedecay_domain::errors::Result;
 use tracedecay_global_db::{LcmPrivacyRescanOutcomeV1, RegisteredGlobalDbLeaseV1};
 
 /// Spawns the bounded background rescan for one adopted project store.
+#[hotpath::measure]
 pub(crate) fn spawn_at_rest_privacy_remediation(
     owner: &crate::mcp::McpServer,
     graph: Arc<TraceDecay>,
@@ -95,12 +96,14 @@ async fn run_project_memory_privacy_remediation(
         .map_err(tracedecay_session_memory::memory::memory_application_error)
 }
 
+#[hotpath::measure]
 fn remediation_read_control() -> FactReadControl {
     FactReadControl::new(Arc::new(|| false))
 }
 
 /// The owner bounds every commit to one read page; the control admits each
 /// canonical page receipt until that finite scan completes.
+#[hotpath::measure]
 fn remediation_write_control() -> FactWriteControl {
     FactWriteControl::new(Arc::new(|| false), Arc::new(|| true))
 }

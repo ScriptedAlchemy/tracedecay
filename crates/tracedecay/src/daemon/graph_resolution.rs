@@ -10,6 +10,7 @@
 use super::*;
 use tracedecay_daemon_identity::authority;
 
+#[hotpath::measure]
 fn sole_mounted_server_matching(
     servers: &[(
         Arc<crate::mcp::McpServer>,
@@ -29,6 +30,7 @@ fn sole_mounted_server_matching(
     Ok(Some(Arc::clone(server)))
 }
 
+#[hotpath::measure]
 pub(super) fn retained_project_server_resolver(
     administration: StoreAdministration,
 ) -> crate::mcp::server::RetainedProjectServerResolver {

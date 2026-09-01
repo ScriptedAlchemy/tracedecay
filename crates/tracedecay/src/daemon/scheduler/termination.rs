@@ -3,16 +3,19 @@ pub(in crate::daemon) struct MaintenanceTaskTermination {
     finished: tokio::sync::watch::Sender<bool>,
 }
 
+#[hotpath::measure_all]
 impl MaintenanceTaskTermination {
     pub(in crate::daemon) fn pending() -> Self {
         let (finished, _) = tokio::sync::watch::channel(false);
         Self { finished }
     }
 
+    #[hotpath::skip]
     pub(in crate::daemon) async fn wait(&self) {
         self.wait_for_finish(self.finished.subscribe()).await;
     }
 
+    #[hotpath::skip]
     async fn wait_for_finish(&self, mut finished: tokio::sync::watch::Receiver<bool>) {
         while !*finished.borrow_and_update() {
             if finished.changed().await.is_err() {

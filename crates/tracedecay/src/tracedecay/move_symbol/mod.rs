@@ -48,6 +48,7 @@ use use_parsing::{UseLeaf, body_identifiers, parse_use_statements, portable_depe
 const MAX_MOVE_SYMBOLS_PER_FILE: usize = 10_000;
 const MAX_MOVE_CALLERS: usize = 100_000;
 
+#[hotpath::measure_all]
 impl TraceDecay {
     /// Moves a resolved symbol from its current file to `dest_file`.
     ///
@@ -61,6 +62,7 @@ impl TraceDecay {
     ///
     /// `update_references` is reserved for a future version; in v1 caller
     /// references are never auto-edited — the exact change rides in the hints.
+    #[hotpath::skip]
     pub(crate) async fn move_symbol(
         &self,
         graph: SourceEditGraphReadV1,
@@ -427,6 +429,7 @@ impl TraceDecay {
     /// Dependency analysis for the moved body: same-file symbols and source
     /// `use`-imports the body references that will no longer resolve at the
     /// destination. Produces auto-insertable imports plus hints for the rest.
+    #[hotpath::skip]
     async fn analyze_dependencies(
         &self,
         target: &EditSymbolV1,
@@ -605,6 +608,7 @@ impl TraceDecay {
     /// whether the caller shared the source module (unqualified call — needs a
     /// `use` for the new module) or referenced it via another module (path/use
     /// now points at the old location).
+    #[hotpath::skip]
     async fn caller_hints(
         &self,
         graph: &SourceEditGraphReadV1,
@@ -694,6 +698,7 @@ impl TraceDecay {
 
     /// Hint when the destination file's module is not declared anywhere in the
     /// crate. Existing-but-unlinked files need the same hint as fresh files.
+    #[hotpath::skip]
     async fn module_missing_hint(&self, dest_rel: &str) -> Option<MoveHint> {
         let stem = module_stem(dest_rel)?;
         if self.module_declared(dest_rel, &stem) {

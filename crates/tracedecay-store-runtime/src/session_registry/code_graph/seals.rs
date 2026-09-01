@@ -33,6 +33,7 @@ struct StagedFileFingerprint {
     mode: u32,
 }
 
+#[hotpath::measure]
 pub(super) fn sealed_digest_from_generation_file(
     generation_file: &str,
 ) -> Result<SealedGraphStateDigest, GraphDbError> {
@@ -43,6 +44,7 @@ pub(super) fn sealed_digest_from_generation_file(
     SealedGraphStateDigest::try_from(format!("sha256:{digest}"))
 }
 
+#[hotpath::measure]
 fn staged_fingerprint(metadata: &std::fs::Metadata) -> Result<StagedFileFingerprint, GraphDbError> {
     #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
@@ -67,6 +69,7 @@ fn staged_fingerprint(metadata: &std::fs::Metadata) -> Result<StagedFileFingerpr
     })
 }
 
+#[hotpath::measure]
 fn staged_identity_matches(
     path: &Path,
     file: &File,
@@ -217,6 +220,7 @@ pub(super) fn lock_project_graph_replay_pool(
     lock_code_generation_store(replay_root, check)
 }
 
+#[hotpath::measure]
 fn lock_code_generation_store(
     root: &Path,
     check: &dyn Fn() -> Result<(), GraphDbError>,
@@ -235,6 +239,7 @@ fn lock_code_generation_store(
     }
 }
 
+#[hotpath::measure]
 fn digest_hex(sealed: &SealedGraphStateDigest) -> Result<&str, GraphDbError> {
     sealed
         .as_str()
@@ -242,6 +247,7 @@ fn digest_hex(sealed: &SealedGraphStateDigest) -> Result<&str, GraphDbError> {
         .ok_or_else(|| GraphDbError::invalid("code generation replay digest is not sha256"))
 }
 
+#[hotpath::measure]
 fn sync_replay_root(replay_root: &Path) -> Result<(), GraphDbError> {
     sync_directory(replay_root, DirectorySyncPolicy::Strict)
         .map_err(|error| GraphDbError::unavailable(error.to_string()))
@@ -270,6 +276,7 @@ enum SealDigestOutcome {
     Mismatch,
 }
 
+#[hotpath::measure]
 fn verify_seal_file_digest(
     file: &mut File,
     expected: &str,

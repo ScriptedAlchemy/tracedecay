@@ -24,6 +24,7 @@ pub(super) struct ShutdownTaskReceipt {
     pub(super) outcomes: Vec<ShutdownTaskOutcome>,
 }
 
+#[hotpath::measure_all]
 impl ShutdownTaskReceipt {
     pub(super) fn failed(owner: impl Into<String>, error: impl Into<String>) -> Self {
         Self {

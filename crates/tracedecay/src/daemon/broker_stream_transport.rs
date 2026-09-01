@@ -48,6 +48,7 @@ enum RmcpResponseWriteFailure {
     Transport(std::io::Error),
 }
 
+#[hotpath::measure_all]
 impl RmcpResponseWriteFailure {
     fn into_io_error(self) -> std::io::Error {
         match self {
@@ -60,6 +61,7 @@ impl RmcpResponseWriteFailure {
     }
 }
 
+#[hotpath::measure_all]
 impl BrokerStreamTransport {
     pub(super) fn new(stream: BrokerStream) -> Self {
         let (reader, writer) = stream.into_owned_split();
@@ -107,6 +109,7 @@ impl BrokerStreamTransport {
         self
     }
 
+    #[hotpath::skip]
     async fn write_all_and_flush(
         writer: Arc<tokio::sync::Mutex<Option<BrokerWriteHalf>>>,
         bytes: Vec<u8>,
@@ -189,6 +192,7 @@ impl BrokerStreamTransport {
         }
     }
 
+    #[hotpath::skip]
     async fn observe_incoming_message(&self, value: &serde_json::Value) {
         let Some(method) = value.get("method").and_then(serde_json::Value::as_str) else {
             return;
@@ -248,6 +252,7 @@ impl BrokerStreamTransport {
         }
     }
 
+    #[hotpath::skip]
     async fn wait_for_peer_full_close(writer: Arc<tokio::sync::Mutex<Option<BrokerWriteHalf>>>) {
         loop {
             let full_close = {
@@ -282,6 +287,7 @@ impl BrokerStreamTransport {
 }
 
 impl tracedecay_mcp::McpTransport for BrokerStreamTransport {
+    #[hotpath::skip]
     async fn read_line(&mut self) -> std::io::Result<Option<String>> {
         if let Some(line) = self.replay.pop_front() {
             return Ok(Some(line));
@@ -289,6 +295,7 @@ impl tracedecay_mcp::McpTransport for BrokerStreamTransport {
         self.reader.read_mcp_line().await
     }
 
+    #[hotpath::skip]
     async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
         let mut writer = self.writer.lock().await;
         let writer = writer.as_mut().ok_or_else(|| {
@@ -300,6 +307,7 @@ impl tracedecay_mcp::McpTransport for BrokerStreamTransport {
         writer.write_all(line.as_bytes()).await
     }
 
+    #[hotpath::skip]
     async fn flush(&mut self) -> std::io::Result<()> {
         let mut writer = self.writer.lock().await;
         let writer = writer.as_mut().ok_or_else(|| {
@@ -461,6 +469,7 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
         }
     }
 
+    #[hotpath::skip]
     async fn close(&mut self) -> std::result::Result<(), Self::Error> {
         self.writer.lock().await.take();
         Ok(())

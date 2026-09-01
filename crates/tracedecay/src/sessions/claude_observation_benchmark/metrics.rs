@@ -6,10 +6,12 @@ use super::MEASURED_REPETITIONS;
 use super::artifact::command_output;
 use super::model::{NoOpTotals, RawPhaseSample};
 
+#[hotpath::measure]
 pub(super) fn elapsed_ns(started: Instant) -> u64 {
     started.elapsed().as_nanos().try_into().unwrap_or(u64::MAX)
 }
 
+#[hotpath::measure]
 pub(super) fn ticks_to_ms(ticks: u64, ticks_per_second: u64) -> f64 {
     ticks as f64 * 1_000.0 / ticks_per_second as f64
 }
@@ -22,6 +24,7 @@ pub(super) struct PhaseAggregate {
     pub(super) peak_rss_kib: u64,
 }
 
+#[hotpath::measure]
 pub(super) fn aggregate_samples(samples: &[RawPhaseSample]) -> PhaseAggregate {
     samples.iter().fold(
         PhaseAggregate {
@@ -40,6 +43,7 @@ pub(super) fn aggregate_samples(samples: &[RawPhaseSample]) -> PhaseAggregate {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn validate_no_op_invariants(
     samples: &[RawPhaseSample],
     observation_count_delta: i64,
@@ -51,6 +55,7 @@ pub(super) fn validate_no_op_invariants(
     validate_no_op_samples(samples, observation_count_delta, 0)
 }
 
+#[hotpath::measure]
 pub(super) fn validate_no_op_samples(
     samples: &[RawPhaseSample],
     observation_count_delta: i64,
@@ -96,11 +101,13 @@ pub(super) fn validate_no_op_samples(
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn process_cpu_ticks() -> u64 {
     let stat = fs::read_to_string("/proc/self/stat").expect("read process CPU counters");
     parse_proc_stat_cpu_ticks(&stat).expect("parse process CPU counters")
 }
 
+#[hotpath::measure]
 pub(super) fn parse_proc_stat_cpu_ticks(stat: &str) -> Result<u64, String> {
     let after_name = stat
         .rfind(')')
@@ -121,27 +128,33 @@ pub(super) fn parse_proc_stat_cpu_ticks(stat: &str) -> Result<u64, String> {
         .ok_or_else(|| "process CPU tick total overflowed u64".to_string())
 }
 
+#[hotpath::measure]
 pub(super) fn process_write_bytes() -> u64 {
     proc_value("/proc/self/io", "write_bytes:")
 }
 
+#[hotpath::measure]
 pub(super) fn reset_peak_rss() {
     write_clear_refs().expect("reset process peak RSS");
 }
 
+#[hotpath::measure]
 pub(super) fn process_peak_rss_kib() -> u64 {
     proc_value("/proc/self/status", "VmHWM:")
 }
 
+#[hotpath::measure]
 pub(super) fn memory_total_kib() -> u64 {
     proc_value("/proc/meminfo", "MemTotal:")
 }
 
+#[hotpath::measure]
 fn proc_value(path: &str, key: &str) -> u64 {
     let contents = fs::read_to_string(path).unwrap_or_else(|error| panic!("read {path}: {error}"));
     parse_proc_value(&contents, key).unwrap_or_else(|error| panic!("parse {path}: {error}"))
 }
 
+#[hotpath::measure]
 pub(super) fn parse_proc_value(contents: &str, key: &str) -> Result<u64, String> {
     contents
         .lines()
@@ -155,12 +168,14 @@ pub(super) fn parse_proc_value(contents: &str, key: &str) -> Result<u64, String>
         .ok_or_else(|| format!("missing or invalid {key}"))
 }
 
+#[hotpath::measure]
 pub(super) fn cpu_identity() -> String {
     let cpuinfo = fs::read_to_string("/proc/cpuinfo").expect("read CPU identity");
     parse_cpu_identity(&cpuinfo)
         .unwrap_or_else(|| format!("unknown Linux CPU ({})", std::env::consts::ARCH))
 }
 
+#[hotpath::measure]
 pub(super) fn parse_cpu_identity(cpuinfo: &str) -> Option<String> {
     const KEYS: &[&str] = &[
         "model name",
@@ -180,6 +195,7 @@ pub(super) fn parse_cpu_identity(cpuinfo: &str) -> Option<String> {
     })
 }
 
+#[hotpath::measure]
 fn write_clear_refs() -> std::io::Result<()> {
     let mut clear_refs = OpenOptions::new()
         .write(true)
@@ -187,6 +203,7 @@ fn write_clear_refs() -> std::io::Result<()> {
     clear_refs.write_all(b"5\n")
 }
 
+#[hotpath::measure]
 pub(super) fn parse_clock_ticks_per_second(output: &str) -> Result<u64, String> {
     let ticks = output
         .trim()
@@ -198,6 +215,7 @@ pub(super) fn parse_clock_ticks_per_second(output: &str) -> Result<u64, String> 
     Ok(ticks)
 }
 
+#[hotpath::measure]
 pub(super) fn preflight_platform() -> u64 {
     assert_eq!(
         std::env::consts::OS,

@@ -29,6 +29,7 @@ fn build_http_application_router(project_id: &str, project_path: &Path) -> Resul
     })
 }
 
+#[hotpath::measure]
 pub(super) fn install_http_application_cold_resolver(
     registry: &http_application::DaemonHttpApplicationRegistry,
     store_administration: StoreAdministration,

@@ -10,12 +10,14 @@ use tracedecay_global_db::RegisteredGlobalDb;
 /// shutdown drains) indefinitely as the previous unbounded loop allowed.
 const LEDGER_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
 
+#[hotpath::measure]
 fn configuration_authority_unavailable(detail: impl std::fmt::Display) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!("configuration authority unavailable: {detail}"),
     }
 }
 
+#[hotpath::measure]
 fn upload_enabled_from_desired_configuration(
     desired: &tracedecay_domain::configuration::ConfigurationSnapshotV1,
 ) -> Result<bool> {
@@ -67,6 +69,7 @@ pub(crate) struct McpToolErrorAnalyticsRequest<'a> {
     pub(crate) connection_instance_id: Option<&'a str>,
 }
 
+#[hotpath::measure_all]
 impl McpServer {
     /// Resolves the ledger sink: the dedicated accounting database when the
     /// daemon mounted one, otherwise the registry handle it shares with, and
@@ -89,6 +92,7 @@ impl McpServer {
     /// Reads the upload policy from the daemon-retained desired configuration
     /// snapshot. There is deliberately no `config.toml` fallback: without the
     /// canonical authority, the upload decision is unavailable.
+    #[hotpath::skip]
     pub(super) async fn canonical_upload_enabled(&self) -> Result<bool> {
         let cg = self.cg_snapshot().await;
         let desired = cg
@@ -203,6 +207,7 @@ impl McpServer {
     /// (a stuck DB handle, a task that never resolves) can never hang the
     /// caller forever — the earlier unbounded loop made a wedged write
     /// manifest as an un-observable, indefinitely-hung integration test.
+    #[hotpath::skip]
     pub async fn ledger_writes_settled(&self) {
         self.ledger_writes_settled_within(LEDGER_SETTLE_TIMEOUT)
             .await;
@@ -213,6 +218,7 @@ impl McpServer {
     /// within the bound, `false` when the bound elapsed with writes still
     /// pending. A timeout is never silent: it logs a warning naming how many
     /// writes were still outstanding so a wedged recorder is diagnosable.
+    #[hotpath::skip]
     pub async fn ledger_writes_settled_within(&self, timeout: std::time::Duration) -> bool {
         let wait = async {
             loop {
@@ -259,6 +265,7 @@ impl McpServer {
 
     /// Flushes pending tokens to the worldwide counter if at least 30 seconds
     /// have elapsed since the last flush. Best-effort, never blocks for long.
+    #[hotpath::skip]
     pub(crate) async fn maybe_flush_worldwide(&self) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

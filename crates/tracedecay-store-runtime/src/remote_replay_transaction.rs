@@ -69,6 +69,7 @@ pub struct DaemonRemoteReplayTransactionAuthorityV1 {
     sender: mpsc::SyncSender<ReplayCommandV1>,
 }
 
+#[hotpath::measure_all]
 impl DaemonRemoteReplayTransactionAuthorityV1 {
     pub fn new(runtime: tokio::runtime::Handle) -> Result<Self, String> {
         let targets = Arc::new(RwLock::new(BTreeMap::new()));
@@ -344,6 +345,7 @@ impl Drop for DaemonRemoteReplayTransactionAuthorityV1 {
     }
 }
 
+#[hotpath::measure]
 fn issue_target_lease(
     target: &ReplayTargetV1,
 ) -> Result<tracedecay_global_db::RegisteredGlobalDbLeaseV1, String> {
@@ -369,6 +371,7 @@ fn issue_target_lease(
     Ok(lease)
 }
 
+#[hotpath::measure]
 fn execute_snapshot(
     tokio_runtime: &tokio::runtime::Handle,
     targets: &RwLock<BTreeMap<ProjectId, ReplayTargetV1>>,
@@ -388,6 +391,7 @@ fn execute_snapshot(
         .map_err(|error| format!("registered online backup failed: {error:?}"))
 }
 
+#[hotpath::measure]
 fn execute_fence_install(
     tokio_runtime: &tokio::runtime::Handle,
     targets: &RwLock<BTreeMap<ProjectId, ReplayTargetV1>>,
@@ -440,6 +444,7 @@ fn execute_fence_install(
     }
 }
 
+#[hotpath::measure]
 fn read_writer_fence(
     tokio_runtime: &tokio::runtime::Handle,
     targets: &RwLock<BTreeMap<ProjectId, ReplayTargetV1>>,
@@ -492,6 +497,7 @@ fn read_writer_fence(
     })
 }
 
+#[hotpath::measure]
 fn prepare_fence_request(
     target: &ReplayTargetV1,
     install: RemoteWriterFenceInstallV1,
@@ -622,6 +628,7 @@ struct PreparedReplayRequestV1 {
     admission_bytes: u64,
 }
 
+#[hotpath::measure]
 fn prepare_request(
     frame: &RemoteReplayFrameV1,
     current_writer: &RemoteWriterAuthorityV1,
@@ -772,6 +779,7 @@ fn prepare_request(
     })
 }
 
+#[hotpath::measure]
 fn digest_suffix(digest: &ManifestDigest) -> Result<&str, RemoteReplayTransactionErrorV1> {
     digest
         .as_str()
@@ -779,6 +787,7 @@ fn digest_suffix(digest: &ManifestDigest) -> Result<&str, RemoteReplayTransactio
         .ok_or(RemoteReplayTransactionErrorV1::CanonicalEffect)
 }
 
+#[hotpath::measure]
 fn map_submit_outcome(
     frame: &RemoteReplayFrameV1,
     current_writer: &RemoteWriterAuthorityV1,
@@ -824,6 +833,7 @@ fn map_submit_outcome(
     }
 }
 
+#[hotpath::measure]
 fn elapsed_micros(started_at: UtcMicros, committed_at: UtcMicros) -> u64 {
     match committed_at.0.checked_sub(started_at.0) {
         Some(elapsed) if elapsed >= 0 => elapsed as u64,

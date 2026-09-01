@@ -23,6 +23,7 @@ pub struct TrackedExplicitSearch {
     pub settled_after_expiry: bool,
 }
 
+#[hotpath::measure_all]
 impl TrackedExplicitSearch {
     pub fn committed_state(&self) -> Option<&ManifestDigest> {
         self.receipt

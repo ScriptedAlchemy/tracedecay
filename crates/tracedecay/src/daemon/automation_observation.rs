@@ -14,6 +14,7 @@ use tracedecay_usecases::observability::{
 use super::log_daemon_event;
 use tracedecay_daemon_service::DaemonInvocationService;
 
+#[hotpath::measure]
 pub(in crate::daemon) fn automation_funnel_observation_from_record(
     record: &AutomationRunLedgerRecord,
 ) -> Result<(AutomationFunnelObservedV1, UtcMicros), &'static str> {
@@ -76,6 +77,7 @@ pub(crate) async fn project_run_observation_producer(
     service.observability_producer(Some(project_path)).await
 }
 
+#[hotpath::measure]
 pub(crate) fn record_project_run(
     producer: &BoundedObservabilityProducerV1,
     project_path: &Path,

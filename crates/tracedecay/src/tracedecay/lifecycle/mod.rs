@@ -106,6 +106,7 @@ impl TraceDecay {
     }
 
     #[cfg(any(test, feature = "test-transport"))]
+    #[hotpath::skip]
     async fn standalone_test_runtime(
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,
@@ -175,10 +176,12 @@ impl TraceDecay {
     ///
     /// Initializes the graph and its durable configuration revision. It never
     /// creates or rewrites legacy `config.json`.
+    #[hotpath::skip]
     pub async fn init(project_root: &Path) -> Result<Self> {
         Self::init_with_options(project_root, TraceDecayOpenOptions::default()).await
     }
 
+    #[hotpath::skip]
     pub async fn init_with_options(
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
@@ -269,6 +272,7 @@ impl TraceDecay {
     }
 
     #[cfg(test)]
+    #[hotpath::skip]
     pub(crate) async fn init_test_fixture_with_registered_runtime(
         project_root: &Path,
         project_id: &str,
@@ -397,6 +401,7 @@ impl TraceDecay {
         &self.db
     }
 
+    #[hotpath::skip]
     async fn schema_version(db: &Database, operation: &str) -> Result<u32> {
         let connection = db.read_connection();
         let mut rows = connection
@@ -422,6 +427,7 @@ impl TraceDecay {
         }
     }
 
+    #[hotpath::skip]
     async fn ensure_database_schema_current(db: &Database) -> Result<()> {
         let current = Self::schema_version(db, "ensure_schema_current").await?;
         let supported = tracedecay_runtime_core::db::migrations::SCHEMA_VERSION;
@@ -453,10 +459,12 @@ impl TraceDecay {
     /// provenance. Registered open admits only the exact final relational
     /// schema; code-index activation and reconciliation happen after open
     /// through the daemon-owned scheduler.
+    #[hotpath::skip]
     pub async fn open(project_root: &Path) -> Result<Self> {
         Self::open_with_options(project_root, TraceDecayOpenOptions::default()).await
     }
 
+    #[hotpath::skip]
     pub async fn open_with_options(
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
@@ -662,10 +670,12 @@ impl TraceDecay {
     /// sentinels, clear markers, or rewrite corrupted DBs. It is intended for
     /// status/verification commands that must be able to inspect read-only
     /// stores without mutating them.
+    #[hotpath::skip]
     pub async fn open_read_only(project_root: &Path) -> Result<Self> {
         Self::open_read_only_with_options(project_root, TraceDecayOpenOptions::default()).await
     }
 
+    #[hotpath::skip]
     pub async fn open_read_only_with_options(
         project_root: &Path,
         open_options: TraceDecayOpenOptions,

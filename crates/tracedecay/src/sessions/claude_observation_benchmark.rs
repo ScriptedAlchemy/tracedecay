@@ -145,6 +145,7 @@ async fn production_observation_pipeline_baseline() {
 }
 
 #[test]
+#[hotpath::measure]
 fn evidence_directory_matches_index_contract() {
     artifact::assert_repository_evidence();
 }

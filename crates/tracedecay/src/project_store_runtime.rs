@@ -38,6 +38,7 @@ pub(crate) struct ProjectStoreRuntimeHandle {
     registry: Arc<DaemonSessionRuntimeRegistryV1>,
 }
 
+#[hotpath::measure_all]
 impl ProjectStoreRuntimeHandle {
     pub(crate) fn from_registry(registry: Arc<DaemonSessionRuntimeRegistryV1>) -> Self {
         Self { registry }
@@ -80,6 +81,7 @@ pub(crate) async fn open_project_store_runtime(
     )))
 }
 
+#[hotpath::measure_all]
 impl crate::tracedecay::TraceDecay {
     pub(crate) fn store_runtime_registry(&self) -> &Arc<DaemonSessionRuntimeRegistryV1> {
         &self.store_runtime_registry.registry

@@ -3,7 +3,9 @@ use tracedecay_domain::errors::Result;
 
 use super::super::{StoreAdministration, remote_recovery_lifecycle};
 
+#[hotpath::measure_all]
 impl StoreAdministration {
+    #[hotpath::skip]
     pub(super) async fn remote_deleted_project_roots(
         &self,
         database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
@@ -19,6 +21,7 @@ impl StoreAdministration {
         .await
     }
 
+    #[hotpath::skip]
     pub(super) async fn retire_remote_deleted_project_work(
         &self,
         profile_root: &Path,

@@ -23,6 +23,7 @@ where
     )
 }
 
+#[hotpath::measure]
 pub(super) fn log_session_database_admission(
     project: &Path,
     project_elapsed: Duration,

@@ -30,6 +30,7 @@ pub(super) struct RefreshedRootRelationFixture {
     pub(super) record_count: usize,
 }
 
+#[hotpath::measure]
 pub(super) fn session_ids(repetition: usize) -> BenchResult<Vec<SessionId>> {
     (0..ROOT_RELATION_PARTICIPANT_COUNT)
         .map(|ordinal| {
@@ -167,6 +168,7 @@ pub(super) async fn refresh_sessions(
     })
 }
 
+#[hotpath::measure]
 pub(super) fn root_relation_query(anchor_session: SessionId) -> BenchResult<SessionTemporalQuery> {
     SessionTemporalQuery::new(
         anchor_session,
@@ -187,6 +189,7 @@ pub(super) fn root_relation_query(anchor_session: SessionId) -> BenchResult<Sess
     .map_err(|error| format!("root relation query: {error}"))
 }
 
+#[hotpath::measure]
 pub(super) fn require_root_relation_hydration(
     outcome: SessionRetrievalOutcome<tracedecay_temporal_query::TemporalKernelResult>,
     expected_sessions: &[SessionId],

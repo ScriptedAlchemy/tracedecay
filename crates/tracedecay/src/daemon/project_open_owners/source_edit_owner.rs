@@ -11,6 +11,7 @@ use crate::mcp::McpServer;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot;
 
+#[hotpath::measure]
 pub(super) fn source_edit_request_context(
     access: &ProjectSourceAccessSnapshot,
     request_id: RequestId,
@@ -65,18 +66,21 @@ pub(super) fn source_edit_request_context(
     .map_err(source_edit_contract_error)
 }
 
+#[hotpath::measure]
 pub(super) fn source_edit_contract_error(error: impl std::fmt::Display) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!("source edit invocation contract is invalid: {error}"),
     }
 }
 
+#[hotpath::measure]
 pub(super) fn source_edit_authority_error() -> TraceDecayError {
     TraceDecayError::Config {
         message: "source edit was not found or is not authorized".to_owned(),
     }
 }
 
+#[hotpath::measure]
 pub(super) fn source_edit_surface_result(
     result: tracedecay_source_edit::SourceEditApplicationResult,
 ) -> Result<tracedecay_application::source_edit::SourceEditSurfaceResultV1> {
@@ -145,6 +149,7 @@ pub(super) async fn invoke_project_open_source_edit_rollback(
     .and_then(source_edit_surface_result)
 }
 
+#[hotpath::measure]
 pub(super) fn install_project_open_source_edit_rollback_owner(
     server: &McpServer,
     graph: Arc<crate::tracedecay::TraceDecay>,

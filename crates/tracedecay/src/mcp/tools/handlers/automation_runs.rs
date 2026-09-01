@@ -15,6 +15,7 @@ use tracedecay_mcp::tools::renderers;
 const DEFAULT_RUN_LIMIT: usize = 50;
 const MAX_RUN_LIMIT: usize = 200;
 
+#[hotpath::measure]
 fn ledger_unavailable(operation: &str, error: TraceDecayError) -> TraceDecayError {
     TraceDecayError::project_route(
         "automation_run_ledger_unavailable",
@@ -23,12 +24,14 @@ fn ledger_unavailable(operation: &str, error: TraceDecayError) -> TraceDecayErro
     )
 }
 
+#[hotpath::measure]
 fn run_not_found(run_id: &str) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!("automation run not found: {run_id}"),
     }
 }
 
+#[hotpath::measure]
 fn parse_limit(args: &Value) -> usize {
     args.get("limit")
         .and_then(Value::as_u64)
@@ -39,6 +42,7 @@ fn parse_limit(args: &Value) -> usize {
         })
 }
 
+#[hotpath::measure]
 fn required_run_id(args: &Value) -> Result<&str> {
     args.get("run_id")
         .and_then(Value::as_str)
@@ -48,6 +52,7 @@ fn required_run_id(args: &Value) -> Result<&str> {
         })
 }
 
+#[hotpath::measure]
 fn run_summary(record: &AutomationRunLedgerRecord) -> Value {
     json!({
         "run_id": record.run_id,

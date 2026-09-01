@@ -136,6 +136,7 @@ pub(super) struct UnavailableHookMeasurement {
     required_collection_step: String,
 }
 
+#[hotpath::measure]
 pub(super) fn expected() -> Vec<ProviderBaseline> {
     PROVIDERS
         .iter()
@@ -143,6 +144,7 @@ pub(super) fn expected() -> Vec<ProviderBaseline> {
         .collect()
 }
 
+#[hotpath::measure]
 pub(super) fn catalog() -> ProviderBaselineCatalog {
     ProviderBaselineCatalog {
         schema_version: PROVIDER_BASELINE_SCHEMA_VERSION,
@@ -152,6 +154,7 @@ pub(super) fn catalog() -> ProviderBaselineCatalog {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn validate(baselines: &[ProviderBaseline]) {
     assert_eq!(baselines, expected(), "provider baseline contract changed");
     for baseline in baselines {
@@ -198,10 +201,12 @@ pub(super) fn validate(baselines: &[ProviderBaseline]) {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn hook_telemetry_readiness() -> HookTelemetryReadiness {
     hook_telemetry_readiness_from_rows(&[])
 }
 
+#[hotpath::measure]
 pub(super) fn hook_telemetry_readiness_from_rows(rows: &[Value]) -> HookTelemetryReadiness {
     let canonical_contract = host_hook_telemetry_contract();
     let host_fixture_measurements = canonical_hook_hosts(&canonical_contract)
@@ -221,6 +226,7 @@ pub(super) fn hook_telemetry_readiness_from_rows(rows: &[Value]) -> HookTelemetr
     }
 }
 
+#[hotpath::measure]
 pub(super) fn validate_hook_telemetry_readiness() {
     let readiness = hook_telemetry_readiness();
     assert_eq!(
@@ -283,6 +289,7 @@ pub(super) fn validate_hook_telemetry_readiness() {
     );
 }
 
+#[hotpath::measure]
 fn canonical_hook_hosts(contract: &Value) -> Vec<&str> {
     contract["provider_coverage"]
         .as_array()
@@ -296,6 +303,7 @@ fn canonical_hook_hosts(contract: &Value) -> Vec<&str> {
         .collect()
 }
 
+#[hotpath::measure]
 fn baseline(provider: &str) -> ProviderBaseline {
     ProviderBaseline {
         provider: provider.to_string(),
@@ -323,6 +331,7 @@ fn baseline(provider: &str) -> ProviderBaseline {
     }
 }
 
+#[hotpath::measure]
 fn provider_fixture_paths(provider: &str) -> Vec<String> {
     let paths: &[&str] = match provider {
         "claude" => &["tests/fixtures/provider_normalization/claude/assistant_tool_use.input.json"],
@@ -344,6 +353,7 @@ fn provider_fixture_paths(provider: &str) -> Vec<String> {
     strings(paths)
 }
 
+#[hotpath::measure]
 fn fixture_measurement(host: &str) -> HookHostFixtureMeasurement {
     let relative = format!("tests/fixtures/host_events/{host}/baseline.json");
     let path = repository_path(&relative);
@@ -383,10 +393,12 @@ fn fixture_measurement(host: &str) -> HookHostFixtureMeasurement {
     }
 }
 
+#[hotpath::measure]
 fn repository_path(relative: &str) -> PathBuf {
     super::artifact::repository_root().join(relative)
 }
 
+#[hotpath::measure]
 fn canonical_json(value: &Value) -> Value {
     match value {
         Value::Array(values) => Value::Array(values.iter().map(canonical_json).collect()),
@@ -403,6 +415,7 @@ fn canonical_json(value: &Value) -> Value {
     }
 }
 
+#[hotpath::measure]
 fn unavailable(metric: &str, required_collection_step: &str) -> UnavailableHookMeasurement {
     UnavailableHookMeasurement {
         metric: metric.to_string(),
@@ -411,6 +424,7 @@ fn unavailable(metric: &str, required_collection_step: &str) -> UnavailableHookM
     }
 }
 
+#[hotpath::measure]
 fn strings(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).to_string()).collect()
 }

@@ -16,6 +16,7 @@ use super::TraceDecay;
 /// that type rather than a structurally identical twin.
 pub use tracedecay_usecases::tracedecay::{BranchDiagnostics, TrackedBranchDiagnostic};
 
+#[hotpath::measure_all]
 impl TraceDecay {
     pub(crate) fn dashboard_database_guard(&self) -> std::sync::Arc<Database> {
         std::sync::Arc::new(self.db.clone())
@@ -72,6 +73,7 @@ impl TraceDecay {
     /// Reopens this project for the live git branch, returning a fresh instance
     /// bound to the correct branch DB. Use after [`branch_drifted`](Self::branch_drifted)
     /// reports drift so subsequent reads and writes target the right DB.
+    #[hotpath::skip]
     pub async fn reopen_for_current_branch(&self) -> Result<Self> {
         Self::open_with_registered_configuration(
             &self.project_root,
@@ -124,6 +126,7 @@ impl TraceDecay {
         Ok(self.db.clone())
     }
 
+    #[hotpath::skip]
     pub async fn open_project_store_db(&self) -> Result<Database> {
         if self.read_only {
             return Err(TraceDecayError::Config {
@@ -134,6 +137,7 @@ impl TraceDecay {
         self.retained_project_store_db()
     }
 
+    #[hotpath::skip]
     pub async fn open_project_store_db_read_only(&self) -> Result<Database> {
         let database = self.retained_project_store_db()?;
         if database.is_writable() {

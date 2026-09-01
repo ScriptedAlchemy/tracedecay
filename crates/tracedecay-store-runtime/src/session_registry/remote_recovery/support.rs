@@ -19,6 +19,7 @@ use tracedecay_store::{
 use super::artifacts::safe_digest_suffix;
 use super::{interruption_value, safe_suffix};
 
+#[hotpath::measure]
 pub(super) fn validate_recovery_artifact_file(
     artifact_root: &Path,
     path: &Path,
@@ -38,6 +39,7 @@ pub(super) fn validate_recovery_artifact_file(
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn committed_restore(
     request: &StagedRestoreConfirmationV1,
     policy_digest: ManifestDigest,
@@ -68,6 +70,7 @@ pub(super) struct RecoveryRuntimeProbeV1 {
     commit_started: AtomicBool,
 }
 
+#[hotpath::measure_all]
 impl RecoveryRuntimeProbeV1 {
     pub(super) fn new(
         request_id: &RequestId,
@@ -123,6 +126,7 @@ impl RuntimeRequestProbeV1 for RecoveryRuntimeProbeV1 {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn authority_key(
     expected: &RecoveryAuthorityExpectationV1,
 ) -> Result<ManifestDigest, RemoteRecoveryPhysicalEffectErrorV1> {
@@ -135,6 +139,7 @@ pub(super) fn authority_key(
     .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)
 }
 
+#[hotpath::measure]
 pub(super) fn backup_id(
     operation_id: &str,
     expected: &RecoveryAuthorityExpectationV1,

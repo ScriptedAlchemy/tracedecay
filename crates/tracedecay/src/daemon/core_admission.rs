@@ -36,6 +36,7 @@ pub(crate) struct DaemonClientDeadline {
     deadline: Instant,
 }
 
+#[hotpath::measure_all]
 impl DaemonClientDeadline {
     pub(crate) fn until(deadline: Instant) -> Result<Self> {
         let started = Instant::now();
@@ -56,6 +57,7 @@ impl DaemonClientDeadline {
             })
     }
 
+    #[hotpath::skip]
     pub(crate) async fn run<F, T>(
         &self,
         stage: &'static str,
@@ -124,6 +126,7 @@ impl tracedecay_code_index_runtime::AdmissionParkLeaseV1 for ParkableConnectionA
     }
 }
 
+#[hotpath::measure_all]
 impl ParkableConnectionAdmission {
     fn new(
         permits: Arc<tokio::sync::Semaphore>,
@@ -154,6 +157,7 @@ impl ParkableConnectionAdmission {
     /// Tokio hands a released permit to a queued waiter before any newly arriving
     /// `try_acquire`, so a request resuming from a park is served ahead of a fresh
     /// connection rather than being starved by the load that made it park.
+    #[hotpath::skip]
     async fn reacquire(&self) {
         let Ok(permit) = Arc::clone(&self.permits).acquire_owned().await else {
             return;
@@ -227,6 +231,7 @@ where
 /// per request with [`in_connection_admission`]. Without that, every MCP
 /// `tools/call` — the daemon's main serving path — would park on a generation
 /// decode while still holding its admission slot.
+#[hotpath::measure]
 pub(crate) fn current_connection_admission() -> Option<Arc<ParkableConnectionAdmission>> {
     CONNECTION_ADMISSION.try_with(Arc::clone).ok()
 }
@@ -272,6 +277,7 @@ pub(crate) struct DaemonClientPermit {
     class: DaemonClientAdmissionClass,
 }
 
+#[hotpath::measure_all]
 impl DaemonClientPermit {
     pub(crate) fn class(&self) -> DaemonClientAdmissionClass {
         self.class
@@ -326,6 +332,7 @@ impl Default for DaemonPerClientAdmission {
     }
 }
 
+#[hotpath::measure_all]
 impl DaemonPerClientAdmission {
     pub(crate) fn new(capacity: usize) -> Self {
         Self {
@@ -391,6 +398,7 @@ pub(crate) fn valid_client_instance_id(client_instance_id: &str) -> bool {
         })
 }
 
+#[hotpath::measure_all]
 impl DaemonClientAdmission {
     pub(crate) fn new(capacity: usize) -> Self {
         let reserved = if capacity == 0 {
@@ -444,6 +452,7 @@ impl DaemonClientAdmission {
     }
 }
 
+#[hotpath::measure_all]
 impl DaemonClientSaturationResponse {
     pub(crate) fn into_json_rpc_with_id(self, id: serde_json::Value) -> JsonRpcResponse {
         let message = match self.kind {
@@ -464,6 +473,7 @@ impl DaemonClientSaturationResponse {
     }
 }
 
+#[hotpath::measure]
 fn invocation_saturation_response(
     request_line: &str,
     saturation: &DaemonClientSaturationResponse,
@@ -505,6 +515,7 @@ async fn write_invocation_response(
 ///
 /// These are the only requests whose rejection costs a client its entire tool
 /// registry rather than one call, so admission treats them as control traffic.
+#[hotpath::measure]
 pub(crate) fn is_mcp_discovery_method(method: &str) -> bool {
     matches!(
         classify_mcp_method(method),
@@ -512,6 +523,7 @@ pub(crate) fn is_mcp_discovery_method(method: &str) -> bool {
     )
 }
 
+#[hotpath::measure]
 pub(crate) fn is_reserved_control_request(request_line: &str) -> bool {
     if tracedecay_daemon_protocol::parse_daemon_invocation_cancellation_request(request_line)
         .is_some()
@@ -670,6 +682,7 @@ pub(crate) async fn reject_saturated_daemon_client(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn coordinated_dashboard_automation_writer(
     administration: StoreAdministration,
 ) -> tracedecay_dashboard_api::DashboardAutomationWriter {
@@ -679,6 +692,7 @@ pub(super) fn coordinated_dashboard_automation_writer(
     })
 }
 
+#[hotpath::measure]
 pub(super) fn coordinated_background_refresh_writer(
     administration: StoreAdministration,
 ) -> crate::mcp::server::BackgroundRefreshWriter {

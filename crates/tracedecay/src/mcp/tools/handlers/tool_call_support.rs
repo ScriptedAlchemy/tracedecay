@@ -18,14 +18,17 @@ use super::support::registered_project_context;
 use tracedecay_mcp::ToolResult;
 use tracedecay_mcp::tools::render;
 
+#[hotpath::measure]
 pub(in crate::mcp::tools) fn text_tool_result(text: &str) -> ToolResult {
     support::text_tool_result(text, Vec::new())
 }
 
+#[hotpath::measure]
 pub(in crate::mcp::tools) fn json_result(value: &Value) -> ToolResult {
     text_tool_result(&value.to_string())
 }
 
+#[hotpath::measure]
 pub(super) fn boxed_send<'a, T, F>(
     future: F,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>
@@ -43,6 +46,7 @@ pub(crate) const INTERNAL_DAEMON_TOOL_NAMES: &[&str] = &[
     "tracedecay_hook_runtime",
 ];
 
+#[hotpath::measure]
 pub(super) fn rejected_tool_project_selector_present(_tool_name: &str, args: &Value) -> bool {
     args.get("project_selector").is_some()
 }

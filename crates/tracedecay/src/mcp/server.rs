@@ -97,6 +97,7 @@ pub struct ServerStats {
     errors: AtomicU64,
 }
 
+#[hotpath::measure_all]
 impl ServerStats {
     fn new() -> Self {
         Self {
@@ -472,6 +473,7 @@ struct MountedProjectApplicationRetrievalV1 {
     service: Arc<dyn SessionApplicationRetrievalPortV1>,
 }
 
+#[hotpath::measure_all]
 impl MountedProjectApplicationRetrievalV1 {
     fn retrieval_for_scope(
         &self,
@@ -516,6 +518,7 @@ impl MountedProjectApplicationRetrievalV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl McpServer {
     pub(crate) fn doctor_report_ready(&self) -> bool {
         self.dashboard_doctor_report_reader.is_some()
@@ -542,11 +545,13 @@ impl McpServer {
     /// on large monorepos where nested ignored directories
     /// (`apps/*/node_modules`, `packages/*/target`) drove unbounded event
     /// traffic and `FileId` cache growth.
+    #[hotpath::skip]
     pub async fn new(cg: TraceDecay, scope_prefix: Option<String>) -> Arc<Self> {
         Self::new_with_context(McpServerConstructionContext::direct(cg, scope_prefix)).await
     }
 
     #[cfg(test)]
+    #[hotpath::skip]
     pub(crate) async fn new_with_dbs(
         cg: TraceDecay,
         scope_prefix: Option<String>,
@@ -573,6 +578,7 @@ impl McpServer {
 
     #[cfg(any(test, feature = "test-transport"))]
     #[doc(hidden)]
+    #[hotpath::skip]
     pub async fn new_with_host_admission_test_runtime_for_test(
         cg: TraceDecay,
         scope_prefix: Option<String>,
@@ -590,6 +596,7 @@ impl McpServer {
     /// one authority.
     #[cfg(any(test, feature = "test-transport"))]
     #[doc(hidden)]
+    #[hotpath::skip]
     pub async fn new_with_retained_test_servers_for_test(
         cg: TraceDecay,
         scope_prefix: Option<String>,
@@ -634,6 +641,7 @@ impl McpServer {
     #[cfg(any(test, feature = "test-transport"))]
     #[allow(clippy::expect_used)]
     #[doc(hidden)]
+    #[hotpath::skip]
     pub(crate) async fn new_with_registered_test_context(
         mut context: McpServerConstructionContext,
         retained_servers: Vec<Arc<McpServer>>,
@@ -770,6 +778,7 @@ impl McpServer {
     }
 
     #[cfg(test)]
+    #[hotpath::skip]
     async fn direct_context_with_dbs(
         cg: TraceDecay,
         scope_prefix: Option<String>,
@@ -785,6 +794,7 @@ impl McpServer {
         context
     }
 
+    #[hotpath::skip]
     pub(crate) async fn new_with_context(context: McpServerConstructionContext) -> Arc<Self> {
         let McpServerConstructionContext {
             cg,
@@ -1197,6 +1207,7 @@ impl McpServer {
         self.scope_prefix.as_deref()
     }
 
+    #[hotpath::skip]
     pub(crate) async fn reconcile_automation_scheduler(
         &self,
     ) -> tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome {
@@ -1231,6 +1242,7 @@ impl McpServer {
     /// bypassing the 30 s cooldown in
     /// [`maybe_sync_if_stale`](Self::maybe_sync_if_stale).
     #[doc(hidden)]
+    #[hotpath::skip]
     pub async fn cg(&self) -> Arc<TraceDecay> {
         self.cg_snapshot().await
     }
@@ -1255,6 +1267,7 @@ impl McpServer {
     /// production code-graph projection port (a direct test server), so the
     /// authority cannot mount; dispatch-boundary behavior is unaffected and
     /// actual edits then report their typed executor-unavailable refusal.
+    #[hotpath::skip]
     pub async fn install_project_open_source_edit_authority_for_test(
         &self,
     ) -> tracedecay_domain::errors::Result<bool> {
@@ -1344,10 +1357,12 @@ impl McpServer {
     }
     /// Clones out the currently served `TraceDecay` instance. The lock is
     /// held only for the clone, never across an await on the instance.
+    #[hotpath::skip]
     pub(crate) async fn cg_snapshot(&self) -> Arc<TraceDecay> {
         self.cg.read().await.clone()
     }
 
+    #[hotpath::skip]
     pub async fn server_stats_json(&self) -> Value {
         let uptime = self.stats.started_at.elapsed();
         let total_requests = self.stats.total_requests.load(Ordering::Relaxed);
@@ -1451,6 +1466,7 @@ impl McpServer {
     }
 }
 
+#[hotpath::measure]
 fn json_rpc_request_id_string(id: &Value) -> Option<String> {
     match id {
         Value::String(id) => Some(id.clone()),
@@ -1459,6 +1475,7 @@ fn json_rpc_request_id_string(id: &Value) -> Option<String> {
     }
 }
 
+#[hotpath::measure]
 fn application_surface_request_id(id: &Value, connection_scope: &str) -> Option<String> {
     tracedecay_application::request_identity::mcp_connection_request_id(id, connection_scope)
         .map(|request_id| request_id.as_str().to_owned())

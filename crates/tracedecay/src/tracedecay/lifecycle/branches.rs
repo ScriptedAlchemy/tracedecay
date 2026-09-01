@@ -19,6 +19,7 @@ use tracedecay_runtime_core::storage::StoreLayout;
 
 use super::{TraceDecay, TraceDecayOpenOptions};
 
+#[hotpath::measure_all]
 impl TraceDecay {
     /// Resolves the serving-branch provenance for a given live branch.
     ///
@@ -83,11 +84,13 @@ impl TraceDecay {
     ///
     /// Returns an error if the branch is not tracked or the project DB does
     /// not exist.
+    #[hotpath::skip]
     pub async fn open_branch(project_root: &Path, branch_name: &str) -> Result<Self> {
         Self::open_branch_with_options(project_root, branch_name, TraceDecayOpenOptions::default())
             .await
     }
 
+    #[hotpath::skip]
     pub async fn open_branch_with_options(
         project_root: &Path,
         branch_name: &str,
@@ -195,6 +198,7 @@ impl TraceDecay {
         .await
     }
 
+    #[hotpath::skip]
     async fn open_branch_with_registered_configuration_access(
         project_root: &Path,
         branch_name: &str,

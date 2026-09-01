@@ -27,6 +27,7 @@ pub async fn ensure_initialized_with_options(
     Err(direct_project_open_disabled(project_path))
 }
 
+#[hotpath::measure]
 fn direct_project_open_disabled(project_path: &Path) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!(
@@ -36,6 +37,7 @@ fn direct_project_open_disabled(project_path: &Path) -> TraceDecayError {
     }
 }
 
+#[hotpath::measure]
 pub(crate) fn local_path_from_mcp_root_uri(uri: &str) -> Option<std::path::PathBuf> {
     let path = if let Some(rest) = uri.strip_prefix("file://") {
         if let Some(localhost_path) = rest.strip_prefix("localhost/") {
@@ -55,6 +57,7 @@ pub(crate) fn local_path_from_mcp_root_uri(uri: &str) -> Option<std::path::PathB
         .map(std::path::PathBuf::from)
 }
 
+#[hotpath::measure]
 fn percent_decode_path(path: &str) -> Option<String> {
     let bytes = path.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
@@ -77,6 +80,7 @@ fn percent_decode_path(path: &str) -> Option<String> {
 /// leading slash before the drive letter must be dropped to form a usable
 /// local path. On other platforms the path is returned unchanged.
 #[cfg(windows)]
+#[hotpath::measure]
 fn strip_windows_drive_slash(path: String) -> String {
     let bytes = path.as_bytes();
     if bytes.len() >= 3 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b':' {
@@ -87,6 +91,7 @@ fn strip_windows_drive_slash(path: String) -> String {
 }
 
 #[cfg(not(windows))]
+#[hotpath::measure]
 fn strip_windows_drive_slash(path: String) -> String {
     path
 }

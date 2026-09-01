@@ -11,6 +11,7 @@ pub(in crate::daemon) struct SessionRuntimeMemoryGraphReconciliationShutdownV1 {
         Vec<Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>>,
 }
 
+#[hotpath::measure_all]
 impl SessionRuntimeMemoryGraphReconciliationShutdownV1 {
     pub(in crate::daemon) fn cancel(&self) {
         for registry in &self.registries {
@@ -39,8 +40,10 @@ impl SessionRuntimeMemoryGraphReconciliationShutdownV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl StoreAdministration {
     #[cfg(test)]
+    #[hotpath::skip]
     pub(in crate::daemon) async fn install_long_lived_session_runtime_registry_for_test(
         &self,
     ) -> Result<()> {
@@ -71,6 +74,7 @@ impl StoreAdministration {
         })
     }
 
+    #[hotpath::skip]
     pub(in crate::daemon) async fn session_runtime_registry(
         &self,
     ) -> Result<Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>>
@@ -125,6 +129,7 @@ impl StoreAdministration {
         Ok(registry)
     }
 
+    #[hotpath::skip]
     pub(in crate::daemon) async fn registered_runtime_registry(
         &self,
     ) -> Result<Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>>
@@ -161,6 +166,7 @@ impl StoreAdministration {
         }
     }
 
+    #[hotpath::skip]
     pub(in crate::daemon) async fn prepare_memory_graph_reconciliation_shutdown(
         &self,
     ) -> Result<SessionRuntimeMemoryGraphReconciliationShutdownV1> {
@@ -193,6 +199,7 @@ impl StoreAdministration {
     }
 }
 
+#[hotpath::measure]
 fn session_runtime_admission_closed() -> TraceDecayError {
     TraceDecayError::Config {
         message: "session runtime registry admission is closed for daemon shutdown".to_owned(),

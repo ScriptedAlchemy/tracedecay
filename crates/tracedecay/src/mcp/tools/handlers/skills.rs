@@ -32,22 +32,26 @@ use tracedecay_mcp::tools::renderers;
 const SKILL_ANALYTICS_IMPORT_LIMIT: usize = 10_000;
 const STALE_SKILL_AFTER_SECS: i64 = 60 * 60 * 24 * 90;
 
+#[hotpath::measure]
 fn config_error(message: impl Into<String>) -> TraceDecayError {
     TraceDecayError::Config {
         message: message.into(),
     }
 }
 
+#[hotpath::measure]
 fn optional_bool(args: &Value, key: &str, default: bool) -> bool {
     args.get(key).and_then(Value::as_bool).unwrap_or(default)
 }
 
+#[hotpath::measure]
 fn required_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     args.get(key)
         .and_then(Value::as_str)
         .ok_or_else(|| config_error(format!("missing required parameter: {key}")))
 }
 
+#[hotpath::measure]
 fn parse_state(args: &Value) -> Result<Option<ManagedSkillState>> {
     let Some(state) = args.get("state").and_then(Value::as_str) else {
         return Ok(None);
@@ -62,6 +66,7 @@ fn parse_state(args: &Value) -> Result<Option<ManagedSkillState>> {
     }
 }
 
+#[hotpath::measure]
 fn skill_summary(skill: &ManagedSkill, include_body: bool, usage_summary: &Value) -> Value {
     let mut summary = json!({
         "metadata": skill.metadata,
@@ -79,6 +84,7 @@ fn skill_summary(skill: &ManagedSkill, include_body: bool, usage_summary: &Value
     summary
 }
 
+#[hotpath::measure]
 fn json_by_skill<T: Serialize>(
     items: &[T],
     skill_id: impl Fn(&T) -> &str,

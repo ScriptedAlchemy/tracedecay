@@ -111,6 +111,7 @@ enum ConfigFormat {
     Json,
 }
 
+#[hotpath::measure]
 fn config_format(path: &str) -> Option<ConfigFormat> {
     let extension = Path::new(path).extension()?;
     if extension.eq_ignore_ascii_case("toml") {
@@ -122,6 +123,7 @@ fn config_format(path: &str) -> Option<ConfigFormat> {
     }
 }
 
+#[hotpath::measure]
 fn parse_config_value(path: &str, contents: &str) -> Option<std::result::Result<Value, String>> {
     let parsed = match config_format(path)? {
         ConfigFormat::Toml => toml::from_str::<toml::Value>(contents)
@@ -133,6 +135,7 @@ fn parse_config_value(path: &str, contents: &str) -> Option<std::result::Result<
     Some(parsed)
 }
 
+#[hotpath::measure]
 fn lookup_dotted(value: &Value, key: &str) -> Option<Value> {
     let mut cursor = value.clone();
     for segment in key.split('.') {
@@ -148,6 +151,7 @@ fn lookup_dotted(value: &Value, key: &str) -> Option<Value> {
     Some(cursor)
 }
 
+#[hotpath::measure]
 fn toml_to_json(v: &toml::Value) -> Value {
     match v {
         toml::Value::String(s) => Value::String(s.clone()),
@@ -168,6 +172,7 @@ fn toml_to_json(v: &toml::Value) -> Value {
     }
 }
 
+#[hotpath::measure]
 fn config_match_value(file: &str, key: &str, contents: &str, parsed: &Value) -> Value {
     match lookup_dotted(parsed, key) {
         Some(value) => json!({
@@ -185,6 +190,7 @@ fn config_match_value(file: &str, key: &str, contents: &str, parsed: &Value) -> 
     }
 }
 
+#[hotpath::measure]
 fn find_key_line(contents: &str, key: &str) -> Option<u32> {
     let last = key.rsplit('.').next()?;
     let prefixes = config_key_line_prefixes(last);
@@ -197,6 +203,7 @@ fn find_key_line(contents: &str, key: &str) -> Option<u32> {
     None
 }
 
+#[hotpath::measure]
 fn config_key_line_prefixes(key: &str) -> [String; 3] {
     [
         format!("{key} ="),

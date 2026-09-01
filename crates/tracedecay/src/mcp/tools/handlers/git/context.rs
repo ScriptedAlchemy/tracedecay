@@ -21,6 +21,7 @@ use tracedecay_graph_query::VerifiedGraphQuery;
 const VERIFIED_GRAPH_MAX_SYMBOLS: usize = 500_000;
 const VERIFIED_GRAPH_MAX_RELATIONS: usize = 2_000_000;
 
+#[hotpath::measure]
 fn symbol_path(symbol: &CodeGraphSymbolSummaryV1) -> Result<&str> {
     symbol
         .binding
@@ -38,6 +39,7 @@ fn symbol_path(symbol: &CodeGraphSymbolSummaryV1) -> Result<&str> {
         })
 }
 
+#[hotpath::measure]
 fn symbol_metadata(
     symbol: &CodeGraphSymbolSummaryV1,
 ) -> Result<&tracedecay_code_index::lineage::LineageSymbolRecordV1> {
@@ -53,6 +55,7 @@ fn symbol_metadata(
     })
 }
 
+#[hotpath::measure]
 fn symbol_value(symbol: &CodeGraphSymbolSummaryV1, include_signature: bool) -> Result<Value> {
     let metadata = symbol_metadata(symbol)?;
     let path = symbol_path(symbol)?;
@@ -69,6 +72,7 @@ fn symbol_value(symbol: &CodeGraphSymbolSummaryV1, include_signature: bool) -> R
     Ok(value)
 }
 
+#[hotpath::measure]
 fn all_symbols_in_files(
     graph: &VerifiedGraphQuery,
     files: &HashSet<String>,
@@ -138,6 +142,7 @@ struct BlockingGitWorkerState {
     exited: Arc<AtomicBool>,
 }
 
+#[hotpath::measure_all]
 impl BlockingGitWorkerState {
     fn new() -> Self {
         Self {
@@ -632,6 +637,7 @@ struct PrContextControls {
     cancellation: Option<tracedecay_application::CancellationSignal>,
 }
 
+#[hotpath::measure_all]
 impl PrContextControls {
     fn checkpoint(&self) -> Result<()> {
         if self
@@ -658,10 +664,12 @@ impl PrContextControls {
     }
 }
 
+#[hotpath::measure]
 fn elapsed_micros(started: std::time::Instant) -> u64 {
     u64::try_from(started.elapsed().as_micros()).map_or(u64::MAX, |value| value)
 }
 
+#[hotpath::measure]
 fn pr_context_impact_snapshot(
     graph: &VerifiedGraphQuery,
     seed_nodes: &[CodeGraphSymbolSummaryV1],
@@ -759,6 +767,7 @@ struct PrContextImpact {
     partial: bool,
 }
 
+#[hotpath::measure]
 fn pr_context_node_bytes(node: &CodeGraphSymbolSummaryV1) -> usize {
     node.occurrence
         .as_str()
@@ -778,6 +787,7 @@ fn pr_context_node_bytes(node: &CodeGraphSymbolSummaryV1) -> usize {
         )
 }
 
+#[hotpath::measure]
 fn pr_context_edge_bytes(
     edge: &tracedecay_code_index::graph_projection::CodeGraphSemanticEdgeV1,
 ) -> usize {
@@ -789,6 +799,7 @@ fn pr_context_edge_bytes(
         .saturating_add("calls".len())
 }
 
+#[hotpath::measure]
 fn graph_enrichment_is_transient(error: &TraceDecayError) -> bool {
     matches!(
         error.project_route_context(),

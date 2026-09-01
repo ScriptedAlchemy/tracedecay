@@ -51,6 +51,7 @@ impl tracedecay_application::MultiRootQueryPort<Value, Value> for PrecomputedMul
     }
 }
 
+#[hotpath::measure]
 pub(super) fn denied_root_generation(
     scope: &tracedecay_application::ResolvedScope,
 ) -> std::result::Result<
@@ -64,6 +65,7 @@ pub(super) fn denied_root_generation(
     .map_err(|_| DaemonInvocationProblem::InvalidRequest)
 }
 
+#[hotpath::measure]
 pub(super) fn unavailable_root_generation(
     scope: &tracedecay_application::ResolvedScope,
     reason: tracedecay_domain::ScopeUnavailableReasonV1,
@@ -78,6 +80,7 @@ pub(super) fn unavailable_root_generation(
     .map_err(|_| DaemonInvocationProblem::InvalidRequest)
 }
 
+#[hotpath::measure]
 pub(super) fn frozen_root_generation(
     scope: &tracedecay_application::ResolvedScope,
     scope_set_digest: &tracedecay_domain::ManifestDigest,
@@ -108,6 +111,7 @@ pub(super) fn frozen_root_generation(
     .map_err(|_| DaemonInvocationProblem::InvalidRequest)
 }
 
+#[hotpath::measure]
 pub(super) fn explicit_git_state(root: &Path) -> Option<String> {
     let output = std::process::Command::new("git")
         .args(["-C"])
@@ -128,6 +132,7 @@ pub(super) fn explicit_git_state(root: &Path) -> Option<String> {
     (!head.is_empty()).then(|| head.to_owned())
 }
 
+#[hotpath::measure]
 fn extract_application_payload<T: serde::Serialize>(
     outcome: &T,
 ) -> std::result::Result<Value, DaemonInvocationProblem> {
@@ -137,6 +142,7 @@ fn extract_application_payload<T: serde::Serialize>(
         .ok_or(DaemonInvocationProblem::Unavailable)
 }
 
+#[hotpath::measure]
 pub(super) fn extract_work_application_payload(
     outcome: &WorkApplicationOutcomeV1,
 ) -> std::result::Result<Value, DaemonInvocationProblem> {
@@ -146,6 +152,7 @@ pub(super) fn extract_work_application_payload(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn multi_root_family_allows(
     family: &tracedecay_application::MultiRootOperationV1,
     operation: ApplicationSurfaceOperation,
@@ -204,6 +211,7 @@ pub(super) struct InProcessDaemonInvocationExecutor {
     admitted_cancellation: Option<tracedecay_runtime_core::cancellation::CancellationToken>,
 }
 
+#[hotpath::measure_all]
 impl InProcessDaemonInvocationExecutor {
     pub(super) fn new(
         invocation: DaemonInvocationState,
@@ -239,6 +247,7 @@ impl InProcessDaemonInvocationExecutor {
         }
     }
 
+    #[hotpath::skip]
     async fn invoke_once(&self, request: DaemonInvocationRequest) -> DaemonInvocationResponse {
         if let Some(project_admission) = self.project_admission.as_ref() {
             let git_service = if invocation_is_git_operation(request.operation()) {
@@ -636,6 +645,7 @@ async fn settle_in_process_invocation(
     }
 }
 
+#[hotpath::measure]
 fn map_operation_event_invocation_error(
     error: tracedecay_usecases::operation_stream::OperationEventError,
 ) -> tracedecay_application::InvocationError {
@@ -756,6 +766,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for InProcessDaemonInv
     }
 }
 
+#[hotpath::measure]
 pub(super) fn invocation_is_git_operation(operation: DaemonInvocationOperation) -> bool {
     matches!(
         operation,
@@ -769,6 +780,7 @@ pub(super) fn invocation_is_git_operation(operation: DaemonInvocationOperation) 
     )
 }
 
+#[hotpath::measure]
 pub(super) fn invocation_is_native_integration_operation(
     operation: DaemonInvocationOperation,
 ) -> bool {

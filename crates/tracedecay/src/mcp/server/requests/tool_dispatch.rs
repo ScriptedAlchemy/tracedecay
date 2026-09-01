@@ -5,7 +5,9 @@ use crate::mcp::tools::{ToolCallRegistryOptions, handle_tool_call_with_registry_
 
 use super::super::read_coalescing::{ReadFlightClaim, tool_allows_identical_read_coalescing};
 
+#[hotpath::measure_all]
 impl McpServer {
+    #[hotpath::skip]
     pub(super) async fn route_tool_arguments(
         &self,
         id: &Value,
@@ -96,6 +98,7 @@ impl McpServer {
 
     #[cfg(feature = "test-transport")]
     #[doc(hidden)]
+    #[hotpath::skip]
     pub async fn call_tool_for_test(
         &self,
         tool_name: &str,
@@ -211,6 +214,7 @@ impl McpServer {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::skip]
     pub(super) async fn execute_tool_dispatch(
         &self,
         cg: &TraceDecay,
@@ -345,6 +349,7 @@ impl McpServer {
 }
 
 /// Keys [`registered_project_context`] reads when resolving a selected project.
+#[hotpath::measure]
 fn registered_project_selector_arguments(arguments: &Value) -> Value {
     const SELECTOR_KEYS: &[&str] = &[
         "project_selector",

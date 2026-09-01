@@ -144,6 +144,7 @@ pub async fn close_retained_for_shutdown(
     .map_err(|error| session_registry_error("close graph runtime for shutdown", error.to_string()))
 }
 
+#[hotpath::measure_all]
 impl super::RetainedVerifiedGraphRuntimeV1 {
     /// Exact store identity of the retained memory-graph runtime, captured
     /// for the shutdown close after this owner has been drained and dropped.
@@ -157,6 +158,7 @@ impl super::RetainedVerifiedGraphRuntimeV1 {
     }
 }
 
+#[hotpath::measure]
 fn registration(
     cancellation: Arc<dyn GraphCancellation>,
     lifecycle_cancellation: Arc<dyn GraphCancellation>,

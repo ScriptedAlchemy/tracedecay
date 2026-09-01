@@ -37,6 +37,7 @@ pub(crate) struct DoctorTestRuntime {
 
 #[cfg(test)]
 impl DoctorTestRuntime {
+    #[hotpath::skip]
     pub(crate) async fn open(profile_root: &Path, label: &str) -> Self {
         use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -166,10 +167,12 @@ pub async fn run_doctor() -> tracedecay_domain::errors::Result<()> {
     doctor_result(&dc, &storage_health)
 }
 
+#[hotpath::measure]
 fn should_run_host_healthcheck(agent: &dyn agents::AgentIntegration, home: &Path) -> bool {
     agent.reports_absence_to_doctor() || agent.has_tracedecay(home)
 }
 
+#[hotpath::measure]
 fn render_canonical_doctor_report(
     dc: &mut DoctorCounters,
     report: &tracedecay_application::doctor::DoctorReportV1,
@@ -181,6 +184,7 @@ fn render_canonical_doctor_report(
     dc.info(report.coverage().statement().statement());
 }
 
+#[hotpath::measure]
 fn render_doctor_finding(
     dc: &mut DoctorCounters,
     finding: &tracedecay_application::doctor::DoctorFindingV1,
@@ -210,6 +214,7 @@ fn render_doctor_finding(
     }
 }
 
+#[hotpath::measure]
 fn canonical_daemon_doctor_report(
     status: &serde_json::Value,
 ) -> tracedecay_domain::errors::Result<Option<tracedecay_application::doctor::DoctorReportV1>> {
@@ -251,6 +256,7 @@ fn canonical_daemon_doctor_report(
 /// non-healthy state is unknown evidence, and missing family evidence is also
 /// unknown. Multiple findings retain the strongest state:
 /// `Failed` > `Unknown` > `Healthy`.
+#[hotpath::measure]
 fn database_health_from_canonical_report(
     report: &tracedecay_application::doctor::DoctorReportV1,
 ) -> DatabaseHealth {
@@ -263,6 +269,7 @@ fn database_health_from_canonical_report(
     )
 }
 
+#[hotpath::measure]
 fn database_health_from_storage_runtime_findings<'a>(
     findings: impl IntoIterator<Item = &'a tracedecay_application::doctor::DoctorFindingV1>,
 ) -> DatabaseHealth {
@@ -300,6 +307,7 @@ fn database_health_from_storage_runtime_findings<'a>(
 /// Only an observed storage *failure* is fatal. `DatabaseHealth::Unknown` — a
 /// diagnostic that could not run — is reported to the user but never laundered
 /// into a healthy verdict nor turned into a hard failure.
+#[hotpath::measure]
 fn doctor_result(
     dc: &DoctorCounters,
     storage_health: &DatabaseHealth,
@@ -344,6 +352,7 @@ async fn daemon_project_status(
     daemon_runtime_status(&result)
 }
 
+#[hotpath::measure]
 fn daemon_doctor_runtime_args() -> serde_json::Value {
     serde_json::json!({
         "format": "json",
@@ -364,6 +373,7 @@ fn daemon_doctor_runtime_args() -> serde_json::Value {
 /// but malformed remains a terminal contract violation.
 const RUNTIME_TELEMETRY_PENDING: &str = "daemon runtime response omitted database telemetry";
 
+#[hotpath::measure]
 fn daemon_runtime_status(
     result: &serde_json::Value,
 ) -> tracedecay_domain::errors::Result<serde_json::Value> {
@@ -403,6 +413,7 @@ enum DatabaseHealth {
     Failed { reason: String },
 }
 
+#[hotpath::measure_all]
 impl DatabaseHealth {
     fn unknown(reason: impl Into<String>) -> Self {
         Self::Unknown {
@@ -427,6 +438,7 @@ impl DatabaseHealth {
     }
 }
 
+#[hotpath::measure]
 fn report_daemon_diagnostics_unavailable(
     dc: &mut DoctorCounters,
     db_path: Option<&Path>,
@@ -442,6 +454,7 @@ fn report_daemon_diagnostics_unavailable(
     }
 }
 
+#[hotpath::measure]
 fn fallback_database_path(project_path: &Path) -> Option<PathBuf> {
     if let Ok(Some(layout)) =
         tracedecay_runtime_core::storage::resolve_enrolled_layout_for_current_profile(project_path)
@@ -453,6 +466,7 @@ fn fallback_database_path(project_path: &Path) -> Option<PathBuf> {
     db_path.is_file().then_some(db_path)
 }
 
+#[hotpath::measure]
 fn database_recovery_guidance(db_path: &Path) -> String {
     let wal_path = db_path.with_extension("db-wal");
     let shm_path = db_path.with_extension("db-shm");
@@ -484,6 +498,7 @@ fn database_recovery_guidance(db_path: &Path) -> String {
     )
 }
 
+#[hotpath::measure]
 fn print_database_recovery_guidance(dc: &DoctorCounters, db_path: &Path) {
     for line in database_recovery_guidance(db_path).lines() {
         dc.info(line);
@@ -494,6 +509,7 @@ fn print_database_recovery_guidance(dc: &DoctorCounters, db_path: &Path) {
 ///
 /// A stopped or disabled installed unit is the outage shape that the generic
 /// "run install-service and ensure the service is running" text used to hide.
+#[hotpath::measure]
 fn check_daemon_service(dc: &mut DoctorCounters) {
     eprintln!("\n\x1b[1mDaemon service\x1b[0m");
     match tracedecay_daemon_control::installed_service_state() {
@@ -516,6 +532,7 @@ enum DaemonServiceDoctorVerdict {
     Fail,
 }
 
+#[hotpath::measure]
 fn daemon_service_doctor_verdict(
     state: tracedecay_daemon_control::DaemonServiceState,
 ) -> DaemonServiceDoctorVerdict {
@@ -534,6 +551,7 @@ fn daemon_service_doctor_verdict(
 }
 
 /// Check binary location and version.
+#[hotpath::measure]
 fn check_binary(dc: &mut DoctorCounters, build_version: &str) {
     eprintln!("\x1b[1mBinary\x1b[0m");
     if let Ok(exe) = std::env::current_exe() {
@@ -613,6 +631,7 @@ const DOMAIN_SYMBOL_RULES_FILENAME: &str = "domain-symbols.toml";
 /// check, authoring one is a silent no-op — no error, no warning, and no domain
 /// nodes — so Doctor is where the author finds out. `None` (the normal case)
 /// keeps Doctor silent about a file that is not there.
+#[hotpath::measure]
 fn domain_symbol_rules_warning(project_path: &Path) -> Option<String> {
     let rules = crate::config::get_tracedecay_dir(project_path).join(DOMAIN_SYMBOL_RULES_FILENAME);
     rules.is_file().then(|| {
@@ -626,6 +645,7 @@ fn domain_symbol_rules_warning(project_path: &Path) -> Option<String> {
 }
 
 /// Check for project configuration that `TraceDecay` does not act on.
+#[hotpath::measure]
 fn check_inert_project_config(dc: &mut DoctorCounters, project_path: &Path) {
     if let Some(warning) = domain_symbol_rules_warning(project_path) {
         dc.warn(&warning);
@@ -703,6 +723,7 @@ async fn configured_upload_enabled(project_path: &Path) -> tracedecay_domain::er
 }
 
 /// Check canonical user configuration and pending upload state.
+#[hotpath::measure]
 fn check_user_config(
     dc: &mut DoctorCounters,
     upload_enabled: Result<&bool, &tracedecay_domain::errors::TraceDecayError>,
@@ -764,6 +785,7 @@ fn check_external_tools(dc: &mut DoctorCounters) {
     dc.info("Install or update ast-grep to >= 0.44, then rerun `tracedecay install` or `tracedecay update-plugin` if your agent integration caches tool metadata.");
 }
 
+#[hotpath::measure]
 fn json_bool(value: &serde_json::Value, key: &str) -> bool {
     value
         .get(key)
@@ -802,6 +824,7 @@ fn check_network(
 }
 
 /// Print final summary.
+#[hotpath::measure]
 fn print_summary(dc: &DoctorCounters) {
     eprintln!();
     if dc.issues == 0 && dc.warnings == 0 {

@@ -13,6 +13,7 @@ pub(crate) enum ShutdownStatus {
     TimedOut,
 }
 
+#[hotpath::measure_all]
 impl ShutdownStatus {
     pub(crate) fn is_clean(&self) -> bool {
         matches!(self, Self::Clean)
@@ -25,6 +26,7 @@ pub(super) struct ShutdownOwner {
     join: ShutdownJoinFactory,
 }
 
+#[hotpath::measure_all]
 impl ShutdownOwner {
     pub(super) fn new<Cancel, Join>(name: &'static str, cancel: Cancel, join: Join) -> Self
     where
@@ -112,6 +114,7 @@ pub(super) struct ShutdownReceipt {
     unfinished: Vec<&'static str>,
 }
 
+#[hotpath::measure_all]
 impl ShutdownReceipt {
     pub(super) fn extend(&mut self, other: Self) {
         self.owners.extend(other.owners);
@@ -203,6 +206,7 @@ pub(super) struct DrainingGauge {
     key: &'static str,
 }
 
+#[hotpath::measure_all]
 impl DrainingGauge {
     pub(super) fn arm(key: &'static str) -> Self {
         hotpath::gauge!(key).inc(1_u64);
@@ -227,6 +231,7 @@ pub(super) struct PreparedShutdownOwners {
     phases: Vec<Vec<PreparedShutdownOwner>>,
 }
 
+#[hotpath::measure]
 pub(super) fn prepare_shutdown_owner_phases(
     phases: Vec<Vec<ShutdownOwner>>,
 ) -> PreparedShutdownOwners {
@@ -251,6 +256,7 @@ pub(super) fn prepare_shutdown_owner_phases(
     PreparedShutdownOwners { phases }
 }
 
+#[hotpath::measure_all]
 impl PreparedShutdownOwners {
     #[hotpath::measure(label = "daemon.shutdown.owners.join", future = true)]
     pub(super) async fn join(self, deadline: Instant) -> ShutdownReceipt {

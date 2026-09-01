@@ -116,6 +116,7 @@ pub async fn handle_ast_grep_search(
     ))
 }
 
+#[hotpath::measure]
 fn build_output_value(hits: &[AstGrepSearchMatch], truncated: bool, files_scanned: usize) -> Value {
     let items: Vec<Value> = hits
         .iter()
@@ -139,6 +140,7 @@ fn build_output_value(hits: &[AstGrepSearchMatch], truncated: bool, files_scanne
     })
 }
 
+#[hotpath::measure]
 fn render_md(hits: &[AstGrepSearchMatch], truncated: bool, files_scanned: usize) -> String {
     let mut md = Md::new();
     md.heading(2, "Structural Search Results");

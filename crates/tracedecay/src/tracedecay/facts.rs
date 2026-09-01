@@ -15,6 +15,7 @@ use tracedecay_session_memory::memory::memory_application_error;
 
 use super::TraceDecay;
 
+#[hotpath::measure]
 fn project_memory_owner_from_layout_id(project_id: Option<&str>) -> Result<FactOwnerV1> {
     let project_id = project_id.ok_or_else(|| TraceDecayError::Config {
         message: "active project has no authoritative project_id for memory".to_string(),
@@ -26,6 +27,7 @@ fn project_memory_owner_from_layout_id(project_id: Option<&str>) -> Result<FactO
     Ok(FactOwnerV1::Project { project_id })
 }
 
+#[hotpath::measure_all]
 impl TraceDecay {
     /// Returns the only project-memory owner accepted by core routes.
     ///
@@ -37,6 +39,7 @@ impl TraceDecay {
 
     /// Opens the sole project fact authority selected by the retained project
     /// layout. Code-index routing never changes this database identity.
+    #[hotpath::skip]
     pub(crate) async fn project_memory_db(&self) -> Result<ProjectMemoryDbHandle<'_>> {
         if self.db_path() == self.store_layout.graph_db_path {
             Ok(ProjectMemoryDbHandle::Active(&self.db))
@@ -53,6 +56,7 @@ impl TraceDecay {
     /// Resolves the project-memory owner and database into one owner-bound
     /// application over a fact store that owns its resolved handle. Every
     /// project-memory route builds its application through this accessor.
+    #[hotpath::skip]
     pub(crate) async fn project_memory_application(
         &self,
     ) -> Result<MemoryApplication<ProjectFactStore<'_>>> {

@@ -18,6 +18,7 @@ pub(super) enum RequestControlError {
     RegistryUnavailable,
 }
 
+#[hotpath::measure]
 pub(super) fn supplied_request_id(
     headers: &HeaderMap,
 ) -> Result<Option<RequestId>, RequestControlError> {
@@ -38,6 +39,7 @@ pub(super) fn supplied_request_id(
     ))
 }
 
+#[hotpath::measure]
 pub(super) fn accepts_supplied_request_id(path: &str) -> bool {
     path == tracedecay_api::retained_route_path(
         tracedecay_application::retained_surfaces::RetainedSurfaceOperation::FactStoreCurate,
@@ -50,6 +52,7 @@ pub(super) struct ActiveHttpRequest {
     armed: bool,
 }
 
+#[hotpath::measure_all]
 impl ActiveHttpRequest {
     pub(super) fn register(
         registry: HttpCancellationRegistry,

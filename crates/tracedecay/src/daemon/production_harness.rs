@@ -660,6 +660,7 @@ impl ProductionProjectCompositionHarnessV1 {
             })
     }
 
+    #[hotpath::skip]
     pub async fn project_data_root(&self, project_root: impl AsRef<Path>) -> Result<PathBuf> {
         Ok(self
             .server(project_root)?
@@ -674,6 +675,7 @@ impl ProductionProjectCompositionHarnessV1 {
     /// cross-project selector: tools reject a top-level `project_path`, so a
     /// caller routing to a second mounted project must pass
     /// `project_selector.project_id`.
+    #[hotpath::skip]
     pub async fn project_id(&self, project_root: impl AsRef<Path>) -> Result<String> {
         let project_root = project_root.as_ref().to_path_buf();
         self.server(&project_root)?
@@ -816,6 +818,7 @@ impl ProductionProjectCompositionHarnessV1 {
             })
     }
 
+    #[hotpath::skip]
     pub async fn shutdown(mut self) {
         if let Some(resources) = self.resources.take() {
             hotpath::future!(
@@ -980,6 +983,7 @@ mod code_index_activation_test {
     use super::*;
 
     #[tokio::test]
+    #[hotpath::skip]
     async fn fresh_profile_first_reconcile_makes_query_authority_ready_within_existing_bound() {
         let isolation = TempDir::new().expect("production harness isolation");
         let project = isolation.path().join("project");

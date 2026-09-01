@@ -15,7 +15,9 @@ pub(super) struct DirectRetainedAutomationPortV1 {
     invocation_service: DaemonInvocationService,
 }
 
+#[hotpath::measure_all]
 impl DirectRetainedAutomationPortV1 {
+    #[hotpath::skip]
     pub(super) const fn new(
         cg: Arc<tokio::sync::RwLock<Arc<TraceDecay>>>,
         invocation_service: DaemonInvocationService,

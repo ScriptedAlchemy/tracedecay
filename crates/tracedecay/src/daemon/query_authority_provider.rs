@@ -105,6 +105,7 @@ pub(crate) struct PreparedQueryActivationV1 {
     query_authority: Arc<QueryAuthorityV1>,
 }
 
+#[hotpath::measure_all]
 impl PreparedQueryActivationV1 {
     pub(crate) fn scope(&self) -> &ResolvedScope {
         &self.scope
@@ -141,6 +142,7 @@ pub(crate) struct DaemonQueryActivationRegistrarV1 {
     session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
 }
 
+#[hotpath::measure_all]
 impl DaemonQueryActivationRegistrarV1 {
     pub(crate) fn new(
         provider: DaemonQueryAuthorityProviderV1,
@@ -352,6 +354,7 @@ impl fmt::Debug for DaemonQueryAuthorityProviderV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl DaemonQueryAuthorityProviderV1 {
     fn profile_key(profile_id: &UserProfileId, scope: &ResolvedScope) -> QueryAuthorityKeyV1 {
         QueryAuthorityKeyV1 {
@@ -662,6 +665,7 @@ impl DaemonQueryAuthorityProviderV1 {
     }
 }
 
+#[hotpath::measure]
 fn validate_successful_activation_update(
     current: &BTreeMap<QueryAuthorityKeyV1, ActivatedQueryStateV1>,
     key: &QueryAuthorityKeyV1,
@@ -686,6 +690,7 @@ fn validate_successful_activation_update(
     Ok(())
 }
 
+#[hotpath::measure]
 fn query_material_for_activated(
     activated: &ActivatedQueryStateV1,
     privacy_domain: &PrivacyDomainId,
@@ -713,6 +718,7 @@ fn query_material_for_activated(
     })
 }
 
+#[hotpath::measure]
 fn status_for_activated(
     scope: &ResolvedScope,
     activated: &ActivatedQueryStateV1,
@@ -734,6 +740,7 @@ fn status_for_activated(
     }
 }
 
+#[hotpath::measure]
 fn map_unavailable_update_error(
     reason: QueryAuthorityUnavailableReasonV1,
 ) -> QueryAuthorityUpdateErrorV1 {
@@ -818,6 +825,7 @@ impl QueryAuthorityProviderV1 for DaemonProfileQueryAuthorityProviderV1 {
     }
 }
 
+#[hotpath::measure]
 fn current_transition(
     state: &RetrievalProfileStateV1,
 ) -> Option<&crate::config::retrieval::RetrievalProfileAuditEventV1> {
@@ -837,6 +845,7 @@ fn current_transition(
     Some(event)
 }
 
+#[hotpath::measure]
 fn has_current_query_authority(state: &RetrievalProfileStateV1) -> bool {
     current_transition(state).is_some()
         || (state.audit().is_empty()
@@ -844,12 +853,14 @@ fn has_current_query_authority(state: &RetrievalProfileStateV1) -> bool {
             && exact_query_profile(state).is_ok())
 }
 
+#[hotpath::measure]
 fn exact_query_profile(
     state: &RetrievalProfileStateV1,
 ) -> Result<&AcceptedRetrievalProfileV1, QueryAuthorityUnavailableReasonV1> {
     exact_query_profile_from_slots(state.active(), state.rollback_profile())
 }
 
+#[hotpath::measure]
 fn exact_query_profile_from_slots<'a>(
     active: &'a AcceptedRetrievalProfileV1,
     rollback: Option<&'a AcceptedRetrievalProfileV1>,
@@ -867,6 +878,7 @@ fn exact_query_profile_from_slots<'a>(
     Ok(profile)
 }
 
+#[hotpath::measure]
 fn is_exact_query_profile(active: &AcceptedRetrievalProfileV1) -> bool {
     let profile = active.profile();
     let expected = BTreeSet::from(RetrieverKind::QUERY_FALLBACK_LANES);
@@ -887,6 +899,7 @@ fn is_exact_query_profile(active: &AcceptedRetrievalProfileV1) -> bool {
         && active.compatibility().rerank.is_none()
 }
 
+#[hotpath::measure]
 fn is_federated_profile(active: &AcceptedRetrievalProfileV1) -> bool {
     let expected = BTreeSet::from(RetrieverKind::ALL_LANES);
     active
@@ -907,10 +920,12 @@ fn is_federated_profile(active: &AcceptedRetrievalProfileV1) -> bool {
         && active.compatibility().rerank.is_none()
 }
 
+#[hotpath::measure]
 fn unavailable(reason: QueryAuthorityUnavailableReasonV1) -> QueryAuthorityProviderStatusV1 {
     QueryAuthorityProviderStatusV1::Unavailable { reason }
 }
 
+#[hotpath::measure]
 fn map_update_observer_error(
     error: QueryAuthorityUpdateErrorV1,
 ) -> RetrievalProfileActivationObserverErrorV1 {

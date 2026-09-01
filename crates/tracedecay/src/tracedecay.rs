@@ -76,11 +76,13 @@ struct MountedContextScoutClaimAuthorityV1 {
     input_watermark: [u8; 32],
 }
 
+#[hotpath::measure_all]
 impl TraceDecay {
     pub(crate) fn storage_telemetry_handle(&self) -> Result<DatabaseStorageTelemetryHandle> {
         self.db.storage_telemetry_handle()
     }
 
+    #[hotpath::skip]
     pub(crate) async fn storage_page_counts(&self) -> Result<(u64, u64, u64)> {
         self.db.storage_page_counts().await
     }
@@ -125,6 +127,7 @@ impl TraceDecay {
     /// authority becomes claimable; a stale pin or a foreign address never
     /// mounts.
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::skip]
     pub(crate) async fn mount_current_context_scout_claim_authority(
         &self,
         registry: Arc<crate::agents::context_scout_ports::ProjectContextScoutAddressRegistryV1>,
@@ -174,6 +177,7 @@ impl TraceDecay {
     /// `None` when nothing was mounted, the Plan 20 configuration moved past
     /// the mounted pin, or the durable address registry no longer resolves
     /// the mounted address for this hook.
+    #[hotpath::skip]
     pub(crate) async fn resolve_current_context_scout_claim_authority(
         &self,
         hook: &crate::agents::context_scout_ports::AdmittedContextScoutHookV1,
@@ -215,6 +219,7 @@ impl TraceDecay {
         }
     }
 
+    #[hotpath::skip]
     async fn context_scout_configuration_is_current(
         &self,
         pin: &crate::agents::context_scout_ports::ContextScoutAuthorityPinV1,
@@ -240,6 +245,7 @@ pub struct TraceDecayOpenOptions {
     pub global_db_path: Option<PathBuf>,
 }
 
+#[hotpath::measure_all]
 impl TraceDecayOpenOptions {
     fn resolved_profile_root(&self) -> Result<PathBuf> {
         if let Some(profile_root) = &self.profile_root {

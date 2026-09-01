@@ -31,10 +31,12 @@ mod lexical;
 use graph_evidence::{RenameGraphEvidenceLoadV1, RenameGraphSiteV1, ensure_active, relation_kind};
 use lexical::{is_valid_identifier, string_literal_at};
 
+#[hotpath::measure]
 fn is_ident_byte(byte: u8) -> bool {
     byte == b'_' || byte == b'$' || byte.is_ascii_alphanumeric() || byte >= 0x80
 }
 
+#[hotpath::measure]
 fn identifier_ranges(haystack: &str, name: &str) -> Vec<(usize, usize)> {
     if name.is_empty() {
         return Vec::new();
@@ -55,6 +57,7 @@ fn identifier_ranges(haystack: &str, name: &str) -> Vec<(usize, usize)> {
     ranges
 }
 
+#[hotpath::measure]
 fn source_lines(source: &str) -> Vec<(usize, &str)> {
     source
         .split_inclusive('\n')
@@ -66,6 +69,7 @@ fn source_lines(source: &str) -> Vec<(usize, &str)> {
         .collect()
 }
 
+#[hotpath::measure]
 fn is_generated_path(path: &str) -> bool {
     Path::new(path).components().any(|component| {
         matches!(
@@ -75,6 +79,7 @@ fn is_generated_path(path: &str) -> bool {
     })
 }
 
+#[hotpath::measure]
 fn looks_like_test(path: &str, node_name: Option<&str>) -> bool {
     let path = path.to_ascii_lowercase();
     path.starts_with("tests/")
@@ -87,6 +92,7 @@ fn looks_like_test(path: &str, node_name: Option<&str>) -> bool {
         || node_name.is_some_and(|name| name.starts_with("test_") || name.ends_with("_test"))
 }
 
+#[hotpath::measure]
 fn macro_syntax_at(line: &str, start: usize) -> bool {
     line.contains("macro_rules!")
         || ["!(", "![", "!{"].into_iter().any(|marker| {
@@ -95,12 +101,14 @@ fn macro_syntax_at(line: &str, start: usize) -> bool {
         })
 }
 
+#[hotpath::measure]
 fn comment_at(line: &str, start: usize) -> bool {
     line.get(..start).is_some_and(|prefix| {
         prefix.contains("//") || prefix.contains("/*") || line.trim_start().starts_with('#')
     })
 }
 
+#[hotpath::measure]
 fn protected_category(line: &str) -> RenameProtectedValueCategoryV1 {
     let lower = line.to_ascii_lowercase();
     if lower.contains("serde") || lower.contains("rename") {
@@ -127,6 +135,7 @@ fn protected_category(line: &str) -> RenameProtectedValueCategoryV1 {
     }
 }
 
+#[hotpath::measure]
 fn site_id(file: &str, start: usize, end: usize, kind: RenameSiteKindV1) -> Result<String> {
     canonical_sha256(&("tracedecay.rename-site.v1", file, start, end, kind))
         .map(|digest| {
@@ -140,6 +149,7 @@ fn site_id(file: &str, start: usize, end: usize, kind: RenameSiteKindV1) -> Resu
         })
 }
 
+#[hotpath::measure]
 fn preview_id(binding: &RenameSymbolBindingV1, new_name: &str) -> Result<ManifestDigest> {
     canonical_sha256(&(
         "tracedecay.rename-preview-identity.v1",
@@ -155,6 +165,7 @@ fn preview_id(binding: &RenameSymbolBindingV1, new_name: &str) -> Result<Manifes
     })
 }
 
+#[hotpath::measure]
 fn repository_revision(project_root: &Path) -> Result<Option<String>> {
     if !project_root.join(".git").try_exists()? {
         return Ok(None);
@@ -170,6 +181,7 @@ fn repository_revision(project_root: &Path) -> Result<Option<String>> {
     Ok(Some(commit.id().to_hex().to_string()))
 }
 
+#[hotpath::measure]
 fn disposition_counts(sites: &[RenameSiteV1]) -> RenameDispositionCountsV1 {
     let mut counts = RenameDispositionCountsV1::default();
     for site in sites {
@@ -208,6 +220,7 @@ enum EvidenceResolution {
     Ambiguous,
 }
 
+#[hotpath::measure]
 fn resolve_graph_site(
     source: &str,
     old_name_ranges: &[(usize, usize)],
@@ -263,6 +276,7 @@ fn resolve_graph_site(
     })
 }
 
+#[hotpath::measure_all]
 impl TraceDecay {
     #[hotpath::measure(label = "edits.rename_symbol", future = true)]
     pub(crate) async fn rename_symbol(

@@ -26,6 +26,7 @@ use super::{ApplicationSurfaceAdapterError, RegisteredHttpOperation, invoke_regi
 use tracedecay_daemon_protocol::DaemonInvocationExecutor;
 use tracedecay_daemon_protocol::{DaemonInvocationOutcome, DaemonInvocationRequest};
 
+#[hotpath::measure]
 pub(super) fn router_with_executor(
     executor: Arc<dyn DaemonInvocationExecutor>,
 ) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
@@ -37,6 +38,7 @@ pub(super) fn router_with_executor(
 
 /// Refuse to mount multi-root unless the catalog advertises every operation at
 /// exactly the path this build answers on.
+#[hotpath::measure]
 pub(super) fn validate_catalog_bindings() -> Result<(), ApplicationSurfaceAdapterError> {
     let registry = multi_root_executable_binding_registry()
         .map_err(ApplicationSurfaceAdapterError::CatalogValidation)?;
@@ -197,6 +199,7 @@ async fn invoke_operation(
     }
 }
 
+#[hotpath::measure]
 fn invalid_request_response(request_id: RequestId) -> Response {
     let diagnostic = SafeDiagnostic {
         code: "multi_root.invalid_request".to_owned(),

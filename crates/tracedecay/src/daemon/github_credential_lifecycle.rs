@@ -71,6 +71,7 @@ struct GitHubProviderPermissionVerifierV1 {
     base_uri: String,
 }
 
+#[hotpath::measure_all]
 impl GitHubProviderPermissionVerifierV1 {
     fn production() -> Self {
         Self {
@@ -250,6 +251,7 @@ pub(super) struct DaemonGitHubReadOnlyCredentialLifecycleV1 {
     mounts: Arc<Mutex<BTreeSet<ProfileRepositoryCredentialKeyV1>>>,
 }
 
+#[hotpath::measure_all]
 impl DaemonGitHubReadOnlyCredentialLifecycleV1 {
     pub(super) fn mount(
         &self,
@@ -402,6 +404,7 @@ impl DaemonGitHubReadOnlyCredentialLifecycleV1 {
     }
 }
 
+#[hotpath::measure]
 fn load_configured_repositories(profile_root: &Path) -> ConfiguredGitHubRepositoriesV1 {
     let path = profile_root.join("config.toml");
     let Ok(contents) = std::fs::read_to_string(&path) else {
@@ -410,6 +413,7 @@ fn load_configured_repositories(profile_root: &Path) -> ConfiguredGitHubReposito
     tracedecay_session_memory::user_config::parse_or_warn_default(&path, &contents)
 }
 
+#[hotpath::measure]
 fn valid_locator(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 512

@@ -186,6 +186,7 @@ pub struct DashboardGraphTestRuntimeV1 {
 
 #[cfg(feature = "test-transport")]
 impl DashboardGraphTestRuntimeV1 {
+    #[hotpath::skip]
     pub async fn open(
         profile_root: impl AsRef<std::path::Path>,
     ) -> tracedecay_domain::errors::Result<Self> {
@@ -237,6 +238,7 @@ impl DashboardGraphTestRuntimeV1 {
         self.profile_sessions_database.clone()
     }
 
+    #[hotpath::skip]
     pub async fn project_sessions(
         &self,
         project_root: &std::path::Path,
@@ -272,6 +274,7 @@ impl DashboardGraphTestRuntimeV1 {
         Ok(registered)
     }
 
+    #[hotpath::skip]
     pub async fn initialize(
         &self,
         project_root: &std::path::Path,
@@ -316,6 +319,7 @@ impl DashboardGraphTestRuntimeV1 {
         .await
     }
 
+    #[hotpath::skip]
     pub async fn reopen(
         &self,
         project_root: &std::path::Path,

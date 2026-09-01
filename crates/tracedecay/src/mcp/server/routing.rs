@@ -21,6 +21,7 @@ pub(crate) struct SelectedProjectResponseLease {
 
 struct ResponseLeaseGaugeGuard;
 
+#[hotpath::measure_all]
 impl ResponseLeaseGaugeGuard {
     fn enter() -> Self {
         hotpath::gauge!("mcp.server.response_leases_active").inc(1_u64);
@@ -34,6 +35,7 @@ impl Drop for ResponseLeaseGaugeGuard {
     }
 }
 
+#[hotpath::measure_all]
 impl SelectedProjectResponseLease {
     pub(crate) fn new(
         guard: tokio::sync::OwnedRwLockReadGuard<()>,
@@ -72,6 +74,7 @@ pub(crate) struct ConnectionRouteState {
     selected_request_server: Option<std::sync::Arc<super::McpServer>>,
 }
 
+#[hotpath::measure_all]
 impl ConnectionRouteState {
     pub(crate) fn new(memory_request_scope: String, route_cache: HookProjectRouteCache) -> Self {
         Self {
@@ -83,6 +86,7 @@ impl ConnectionRouteState {
         }
     }
 
+    #[hotpath::skip]
     pub(crate) async fn observe_initialize(
         &mut self,
         params: Option<&Value>,
@@ -304,6 +308,7 @@ async fn resolve_initialize_root_project_path(
     select_initialize_project_path(&candidates)
 }
 
+#[hotpath::measure]
 pub(crate) fn initialize_root_paths(params: Option<&Value>) -> Vec<PathBuf> {
     params
         .and_then(|p| p.get("roots"))
@@ -317,6 +322,7 @@ pub(crate) fn initialize_root_paths(params: Option<&Value>) -> Vec<PathBuf> {
         .collect()
 }
 
+#[hotpath::measure]
 fn select_initialize_project_path(
     candidates: &[(PathBuf, String)],
 ) -> Result<Option<PathBuf>, InitializeRootResolutionError> {

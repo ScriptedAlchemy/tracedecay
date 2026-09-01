@@ -68,6 +68,7 @@ pub(crate) enum QueryMcpAdmissionUnavailableV1 {
 /// Tallies one admission refusal against its exact policy reason. The reason
 /// set is the closed [`QueryMcpAdmissionUnavailableV1`] enum, so every gauge
 /// key stays compile-time static.
+#[hotpath::measure]
 fn record_query_admission_refusal(reason: QueryMcpAdmissionUnavailableV1) {
     match reason {
         QueryMcpAdmissionUnavailableV1::Unauthenticated => {
@@ -94,6 +95,7 @@ fn record_query_admission_refusal(reason: QueryMcpAdmissionUnavailableV1) {
     }
 }
 
+#[hotpath::measure]
 pub(crate) fn admit_query_mcp_read(
     identity: Option<&LocalProfileIdentityAuthorityV1>,
     project_id: &ProjectId,
@@ -120,6 +122,7 @@ pub(crate) fn admit_query_mcp_read(
     admission
 }
 
+#[hotpath::measure_all]
 impl QueryMcpReadAdmissionProviderV1 {
     pub(crate) fn new(
         identity: LocalProfileIdentityAuthorityV1,
@@ -252,6 +255,7 @@ impl CodeIndexMcpReadAdmissionV1 for QueryMcpReadAdmissionProviderV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl QueryMcpReadAdmissionV1 {
     pub(crate) fn search_authority(&self) -> code_search::CodeIndexSearchAuthorityV1 {
         code_search::CodeIndexSearchAuthorityV1 {

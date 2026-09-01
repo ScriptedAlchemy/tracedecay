@@ -20,6 +20,7 @@ use super::{ApplicationSurfaceAdapterError, RegisteredHttpOperation, invoke_regi
 use tracedecay_daemon_protocol::DaemonInvocationExecutor;
 use tracedecay_daemon_protocol::{DaemonInvocationOutcome, DaemonInvocationRequest};
 
+#[hotpath::measure]
 pub(super) fn router_with_executor(
     executor: Arc<dyn DaemonInvocationExecutor>,
 ) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
@@ -29,6 +30,7 @@ pub(super) fn router_with_executor(
     ))
 }
 
+#[hotpath::measure]
 fn validate_catalog_bindings() -> Result<(), ApplicationSurfaceAdapterError> {
     let registry = tracedecay_application::retained_surface_executable_binding_registry()
         .map_err(ApplicationSurfaceAdapterError::Contract)?;
@@ -53,6 +55,7 @@ fn validate_catalog_bindings() -> Result<(), ApplicationSurfaceAdapterError> {
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn active_request_conflict_response(
     request_id: tracedecay_application::RequestId,
 ) -> Response {
@@ -62,6 +65,7 @@ pub(super) fn active_request_conflict_response(
     }
 }
 
+#[hotpath::measure]
 fn active_request_conflict(
     request_id: tracedecay_application::RequestId,
 ) -> Result<
@@ -303,6 +307,7 @@ pub(crate) fn decode_request(
     }
 }
 
+#[hotpath::measure]
 fn decode_session_refresh(
     body: serde_json::Value,
     action: SessionRefreshActionV1,
@@ -317,6 +322,7 @@ fn decode_session_refresh(
 /// Prefix the serde diagnostic with the offending argument path, so the
 /// corrective message names the argument even for wrong-type errors, which
 /// serde alone reports without the field.
+#[hotpath::measure]
 fn named_argument_error(error: serde_path_to_error::Error<serde_json::Error>) -> serde_json::Error {
     let path = error.path().to_string();
     let inner = error.into_inner();
@@ -327,6 +333,7 @@ fn named_argument_error(error: serde_path_to_error::Error<serde_json::Error>) ->
     }
 }
 
+#[hotpath::measure]
 pub(crate) fn result_value(
     result: tracedecay_application::ApplicationResult<RetainedSurfaceResultV1>,
 ) -> Result<
@@ -344,6 +351,7 @@ pub(crate) fn result_value(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn outcome_value(
     outcome: tracedecay_application::ApplicationOutcome<RetainedSurfaceResultV1>,
 ) -> Result<

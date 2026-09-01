@@ -33,6 +33,7 @@ impl<Server> Default for DatabaseOwnerRegistry<Server> {
     }
 }
 
+#[hotpath::measure_all]
 impl<Server> DatabaseOwnerRegistry<Server> {
     #[cfg(any(unix, test))]
     pub(super) fn get(&self, key: &ProjectServerKey) -> Option<&Server> {

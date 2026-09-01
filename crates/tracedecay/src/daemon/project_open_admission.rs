@@ -116,6 +116,7 @@ impl Drop for ProjectOpenTaskCompletionFinalizer {
 /// in-flight gauge with the future itself.
 struct ProjectOpenActiveObservationV1;
 
+#[hotpath::measure_all]
 impl ProjectOpenActiveObservationV1 {
     fn enter() -> Self {
         hotpath::gauge!("daemon.project.open.active").inc(1.0);
@@ -171,6 +172,7 @@ struct RefusedStoreFingerprintV1 {
     graph_dbs: BTreeMap<PathBuf, RefusedStoreFileIdentityV1>,
 }
 
+#[hotpath::measure]
 fn refused_store_file_identity(path: &Path) -> Option<RefusedStoreFileIdentityV1> {
     let metadata = std::fs::symlink_metadata(path).ok()?;
     if !metadata.is_file() {
@@ -190,6 +192,7 @@ fn refused_store_file_identity(path: &Path) -> Option<RefusedStoreFileIdentityV1
 /// persisted layout authority the open itself resolves. `None` when the route
 /// resolves no persisted store, in which case a recorded refusal keeps its
 /// plain time-based backoff.
+#[hotpath::measure]
 fn refused_store_fingerprint(route: &ProjectRouteKey) -> Option<RefusedStoreFingerprintV1> {
     let layout = tracedecay_runtime_core::storage::resolve_persisted_layout(
         &route.project_path,
@@ -247,6 +250,7 @@ pub(super) enum ProjectOpenWaitOutcome {
     TimedOut,
 }
 
+#[hotpath::measure]
 fn project_route_matches_identity(
     route: &ProjectRouteKey,
     profile_root: &Path,
@@ -266,6 +270,7 @@ fn project_route_matches_identity(
                 == Some(project_id))
 }
 
+#[hotpath::measure]
 fn project_routes_for_retirement(
     registry: &mut ProjectOpenTaskRegistry,
     identity: &ProjectOpenIdentityV1,
@@ -321,6 +326,7 @@ async fn wait_for_project_open_task(mut completion: tokio::sync::watch::Receiver
 ///
 /// These are the only failures under that audit whose answer can differ on the
 /// next open without anything being repaired.
+#[hotpath::measure]
 fn is_database_read_failure(message: &str) -> bool {
     const DRIVER_FAILURES: [&str; 5] = [
         "database is locked",
@@ -336,6 +342,7 @@ fn is_database_read_failure(message: &str) -> bool {
 
 /// How long a failed project-open route declines reopening, or `None` when the
 /// failure may clear on its own.
+#[hotpath::measure]
 pub(super) fn project_open_retry_backoff(error: &TraceDecayError) -> Option<Duration> {
     match error {
         TraceDecayError::Config { message } => (message.contains("identity cutover conflict")
@@ -386,6 +393,7 @@ pub(super) fn project_open_retry_backoff(error: &TraceDecayError) -> Option<Dura
     }
 }
 
+#[hotpath::measure_all]
 impl ProjectOpenFailure {
     /// An admission-side denial with no typed classification, no backoff, and
     /// no refused-store fingerprint.
@@ -494,6 +502,7 @@ impl ProjectOpenFailure {
     }
 }
 
+#[hotpath::measure_all]
 impl ProjectOpenTaskRegistry {
     fn prune(&mut self, now: Instant) {
         self.routes.retain(|_, entry| {
@@ -550,6 +559,7 @@ impl ProjectOpenTaskRegistry {
     }
 }
 
+#[hotpath::measure_all]
 impl ProjectOpenTasks {
     fn lock_registry(&self) -> StdMutexGuard<'_, ProjectOpenTaskRegistry> {
         self.registry
@@ -558,6 +568,7 @@ impl ProjectOpenTasks {
     }
 
     #[cfg(test)]
+    #[hotpath::skip]
     pub(super) async fn start<OpenFuture>(
         &self,
         route: ProjectRouteKey,
@@ -569,6 +580,7 @@ impl ProjectOpenTasks {
         self.start_cancellable(route, |_| open).await
     }
 
+    #[hotpath::skip]
     pub(super) async fn start_cancellable<OpenOperation, OpenFuture>(
         &self,
         route: ProjectRouteKey,
@@ -676,6 +688,7 @@ impl ProjectOpenTasks {
         ProjectOpenTaskClaim::InFlight(state)
     }
 
+    #[hotpath::skip]
     pub(super) async fn cached_failure(
         &self,
         route: &ProjectRouteKey,
@@ -764,6 +777,7 @@ impl ProjectOpenTasks {
     }
 
     #[cfg(test)]
+    #[hotpath::skip]
     pub(super) async fn wait_for_completion(
         mut state: tokio::sync::watch::Receiver<ProjectOpenTaskState>,
     ) -> Result<()> {
@@ -781,11 +795,13 @@ impl ProjectOpenTasks {
         }
     }
 
+    #[hotpath::skip]
     pub(super) async fn shutdown(&self) -> bool {
         self.shutdown_with_deadline(DAEMON_TASK_ABORT_DEADLINE, DAEMON_TASK_ABORT_DEADLINE)
             .await
     }
 
+    #[hotpath::skip]
     pub(super) async fn shutdown_project_identity(
         &self,
         profile_root: &Path,
@@ -927,6 +943,7 @@ impl ProjectOpenTasks {
             .await
     }
 
+    #[hotpath::skip]
     async fn drain_retiring_routes(&self, routes: Vec<ProjectRouteKey>, timeout: Duration) -> bool {
         let deadline = tokio::time::Instant::now() + timeout;
         let completions = {
@@ -956,6 +973,7 @@ impl ProjectOpenTasks {
     }
 
     #[cfg(test)]
+    #[hotpath::skip]
     pub(super) async fn tracked_task_count(&self) -> usize {
         let mut registry = self.lock_registry();
         registry.prune(Instant::now());
@@ -973,6 +991,7 @@ impl ProjectOpenTasks {
     }
 
     #[cfg(test)]
+    #[hotpath::skip]
     pub(super) async fn tracked_route_count(&self) -> usize {
         let mut registry = self.lock_registry();
         registry.prune(Instant::now());
@@ -986,6 +1005,7 @@ pub(super) enum ProjectServerRequirement {
     RegisteredHostIngest,
 }
 
+#[hotpath::measure]
 pub(super) fn project_server_requirement(request_line: &str) -> ProjectServerRequirement {
     let Ok(request) = serde_json::from_str::<JsonRpcRequest>(request_line.trim()) else {
         return ProjectServerRequirement::Core;
@@ -1013,6 +1033,7 @@ pub(super) enum ProjectServerPublication {
     RegisteredHostIngest,
 }
 
+#[hotpath::measure_all]
 impl ProjectServerPublication {
     pub(super) fn satisfies(self, requirement: ProjectServerRequirement) -> bool {
         match requirement {
@@ -1024,6 +1045,7 @@ impl ProjectServerPublication {
 
 /// Builds a [`StoreOwnerKey`] from raw paths, canonicalizing each identity
 /// path so filesystem aliases converge on one owner.
+#[hotpath::measure]
 pub(super) fn store_owner_key_from_paths(
     profile_root: &Path,
     global_db_path: &Path,
@@ -1040,6 +1062,7 @@ pub(super) fn store_owner_key_from_paths(
     })
 }
 
+#[hotpath::measure_all]
 impl ProjectRouteKey {
     pub(super) fn from_handshake(project_path: &Path, handshake: &DaemonHandshake) -> Result<Self> {
         Ok(Self {
@@ -1055,6 +1078,7 @@ impl ProjectRouteKey {
     }
 }
 
+#[hotpath::measure_all]
 impl ProjectServerKey {
     pub(super) fn from_open_project(
         cg: &crate::tracedecay::TraceDecay,

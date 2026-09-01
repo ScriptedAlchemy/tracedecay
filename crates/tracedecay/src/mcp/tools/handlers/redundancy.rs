@@ -49,6 +49,7 @@ pub(crate) async fn handle_redundancy(
     ))
 }
 
+#[hotpath::measure]
 fn redundancy_options<'a>(
     request: &'a RedundancySurfaceRequestV1,
     scope_prefix: Option<&'a str>,
@@ -69,6 +70,7 @@ fn redundancy_options<'a>(
 /// ranked pair views plus the scan counts and options), so the two formats
 /// cannot silently drift. Bounded and compact per the repo convention: no
 /// tables, the full ranked pair list, and the full member list per group.
+#[hotpath::measure]
 fn redundancy_md(options: &RedundancyOptions<'_>, scan: &RedundancyScanV1) -> String {
     let mut md = Md::new();
     md.heading(2, "Redundancy");
@@ -118,6 +120,7 @@ fn redundancy_md(options: &RedundancyOptions<'_>, scan: &RedundancyScanV1) -> St
     md.render()
 }
 
+#[hotpath::measure]
 fn append_pair_md(md: &mut Md, pair: &crate::graph::redundancy_scan::RedundancyPairViewV1) {
     let downranked = if pair.generic_helper_downranked {
         ", generic-helper downranked"
@@ -140,6 +143,7 @@ fn append_pair_md(md: &mut Md, pair: &crate::graph::redundancy_scan::RedundancyP
     ));
 }
 
+#[hotpath::measure]
 fn append_group_md(md: &mut Md, group: &[String]) {
     md.bullet(&format!("**Group of {}**", group.len()));
     for label in group {

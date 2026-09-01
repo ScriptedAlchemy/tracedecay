@@ -40,6 +40,7 @@ struct DaemonShutdownBudget {
     overall: tokio::time::Instant,
 }
 
+#[hotpath::measure_all]
 impl DaemonShutdownBudget {
     fn new(overall: tokio::time::Instant) -> Self {
         Self { overall }
@@ -100,6 +101,7 @@ pub(super) struct DaemonShutdownPlan {
     project_server_shutdown: ProjectServerShutdown,
 }
 
+#[hotpath::measure_all]
 impl DaemonShutdownPlan {
     pub(super) fn new<ProjectServers, ProjectServersFuture>(
         clients: JoinSet<Result<()>>,
@@ -137,6 +139,7 @@ pub(super) struct DaemonShutdownReceipt {
     pub(super) project_servers: ShutdownTaskReceipt,
 }
 
+#[hotpath::measure_all]
 impl DaemonShutdownReceipt {
     fn coordinator_failed(deadline: tokio::time::Instant, error: String) -> Self {
         // Coordinator-level failures never reach the per-phase counters, so
@@ -180,6 +183,7 @@ pub(super) struct DaemonShutdownFailures {
     project_servers: Vec<ShutdownTaskOutcome>,
 }
 
+#[hotpath::measure_all]
 impl DaemonShutdownFailures {
     fn record(&mut self, receipt: &DaemonShutdownReceipt) {
         record_status_failure(&mut self.in_flight, &receipt.in_flight);
@@ -209,6 +213,7 @@ impl DaemonShutdownFailures {
     }
 }
 
+#[hotpath::measure]
 fn record_status_failure(failures: &mut Vec<String>, status: &ShutdownStatus) {
     if let ShutdownStatus::Failed(error) = status
         && !failures.contains(error)
@@ -217,6 +222,7 @@ fn record_status_failure(failures: &mut Vec<String>, status: &ShutdownStatus) {
     }
 }
 
+#[hotpath::measure]
 fn retain_status_failures(status: &mut ShutdownStatus, failures: &[String]) {
     if matches!(status, ShutdownStatus::TimedOut) || failures.is_empty() {
         return;

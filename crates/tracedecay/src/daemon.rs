@@ -101,12 +101,14 @@ const DAEMON_READ_DEADLINE_MESSAGES: [&str; 3] = [
 ];
 
 /// True when a daemon error message carries the project warming hint.
+#[hotpath::measure]
 pub(crate) fn error_message_is_project_warming(message: &str) -> bool {
     message.contains(PROJECT_WARMING_RETRY_HINT)
 }
 
 /// True when a daemon error message describes a project open that has not
 /// finished yet: either the route's warming hint or a saturated open queue.
+#[hotpath::measure]
 pub(crate) fn error_message_is_project_open_retryable(message: &str) -> bool {
     error_message_is_project_warming(message)
         || PROJECT_OPEN_CAPACITY_MESSAGES
@@ -117,6 +119,7 @@ pub(crate) fn error_message_is_project_open_retryable(message: &str) -> bool {
 /// Response-side form of [`error_message_is_project_open_retryable`] for
 /// clients that still hold the JSON-RPC `error` member, where the capacity
 /// states also carry a typed `data.kind`.
+#[hotpath::measure]
 pub(crate) fn json_rpc_error_is_project_open_retryable(error: &serde_json::Value) -> bool {
     error
         .get("message")
@@ -129,6 +132,7 @@ pub(crate) fn json_rpc_error_is_project_open_retryable(error: &serde_json::Value
 }
 
 /// True when a daemon error message reports a missed read deadline.
+#[hotpath::measure]
 pub fn error_message_is_read_deadline(message: &str) -> bool {
     DAEMON_READ_DEADLINE_MESSAGES
         .iter()
@@ -137,6 +141,7 @@ pub fn error_message_is_read_deadline(message: &str) -> bool {
 
 /// True when a daemon client missed its read deadline, including the typed
 /// `daemon_response_stalled` reason code.
+#[hotpath::measure]
 pub fn error_is_read_deadline(error: &TraceDecayError) -> bool {
     matches!(
         error.project_route_context(),

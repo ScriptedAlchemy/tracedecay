@@ -23,6 +23,7 @@ pub(in crate::tracedecay) struct EditSymbolV1 {
     pub(in crate::tracedecay) visibility: Visibility,
 }
 
+#[hotpath::measure_all]
 impl EditSymbolV1 {
     pub(in crate::tracedecay) fn line_bounds(&self, source: &str) -> Result<(usize, usize)> {
         let start = usize::try_from(self.source_span.start_byte).map_err(|error| {
@@ -73,10 +74,12 @@ impl EditSymbolV1 {
     }
 }
 
+#[hotpath::measure]
 fn projection_error(error: CodeGraphProjectionError) -> TraceDecayError {
     map_code_graph_read_runtime_error(map_projection_error(error))
 }
 
+#[hotpath::measure]
 fn symbol_evidence_unavailable(detail: impl Into<String>) -> TraceDecayError {
     TraceDecayError::project_route(
         "source-edit-symbol-evidence-unavailable",
@@ -85,6 +88,7 @@ fn symbol_evidence_unavailable(detail: impl Into<String>) -> TraceDecayError {
     )
 }
 
+#[hotpath::measure]
 pub(in crate::tracedecay) fn edit_symbol_from_summary(
     summary: &CodeGraphSymbolSummaryV1,
 ) -> Result<EditSymbolV1> {
@@ -189,6 +193,7 @@ pub(in crate::tracedecay) fn resolve_symbol_for_edit(
 /// candidate's segment chain, where file-path segments expand into their
 /// path components with the source extension removed — `src/pricing.rs::t`
 /// and `pricing::t` describe the same chain tail.
+#[hotpath::measure]
 fn module_qualified_request_matches(requested: &str, candidate_qualified_name: &str) -> bool {
     let requested = requested.strip_prefix("crate::").unwrap_or(requested);
     let requested = qualified_segment_chain(requested);
@@ -196,6 +201,7 @@ fn module_qualified_request_matches(requested: &str, candidate_qualified_name: &
     !requested.is_empty() && candidate.ends_with(&requested)
 }
 
+#[hotpath::measure]
 fn qualified_segment_chain(value: &str) -> Vec<String> {
     let mut segments = Vec::new();
     for part in value.split("::") {
@@ -222,6 +228,7 @@ fn qualified_segment_chain(value: &str) -> Vec<String> {
     segments
 }
 
+#[hotpath::measure]
 fn narrow_symbol_for_edit(symbol: &str, symbols: Vec<EditSymbolV1>) -> Result<EditSymbolV1> {
     let mut iter = symbols.into_iter();
     let Some(first) = iter.next() else {
@@ -262,6 +269,7 @@ fn narrow_symbol_for_edit(symbol: &str, symbols: Vec<EditSymbolV1>) -> Result<Ed
     })
 }
 
+#[hotpath::measure]
 fn is_callable_edit_kind(kind: &NodeKind) -> bool {
     matches!(
         kind,

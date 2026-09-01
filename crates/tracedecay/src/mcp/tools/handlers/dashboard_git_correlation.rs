@@ -19,6 +19,7 @@ pub struct DashboardGitCorrelationReadAdapter {
     store: GlobalDbGitCorrelationStore<RegisteredGlobalDbLeaseV1>,
 }
 
+#[hotpath::measure_all]
 impl DashboardGitCorrelationReadAdapter {
     pub fn new(project_database: RegisteredGlobalDbLeaseV1) -> Self {
         Self {

@@ -19,6 +19,7 @@ type ProjectlessPhaseFutureV1<'a, T> =
     std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
 #[inline(never)]
+#[hotpath::measure]
 fn boxed_projectless_phase<'a, T>(
     future: impl std::future::Future<Output = T> + Send + 'a,
 ) -> ProjectlessPhaseFutureV1<'a, T>
@@ -35,6 +36,7 @@ struct ProjectlessConnectionStateV1 {
     profile_authority: crate::daemon::retained_owner::ProfileRetainedConnectionAuthorityV1,
 }
 
+#[hotpath::measure]
 fn admit_projectless_connection(
     client_identity: &DaemonClientIdentity,
     store_administration: &StoreAdministration,
@@ -498,6 +500,7 @@ async fn projectless_profile_retained_response(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn projectless_tool_call(
     params: Option<&serde_json::Value>,
 ) -> std::result::Result<(&str, serde_json::Value), &'static str> {
@@ -514,6 +517,7 @@ pub(super) fn projectless_tool_call(
     Ok((tool_name, arguments))
 }
 
+#[hotpath::measure]
 pub(super) fn projectless_user_session_request(request_line: &str) -> bool {
     let Ok(request) = serde_json::from_str::<JsonRpcRequest>(request_line.trim()) else {
         return false;

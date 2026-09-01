@@ -13,6 +13,7 @@ use tracedecay_domain::errors::Result;
 pub use tracedecay_daemon_protocol::{client_version_skew, version_skew_action};
 
 /// Handshake for this process's current client identity and binary version.
+#[hotpath::measure]
 pub fn handshake_for_current_client(
     project_path: Option<PathBuf>,
     scope_prefix: Option<String>,
@@ -28,6 +29,7 @@ pub fn handshake_for_current_client(
     )
 }
 
+#[hotpath::measure]
 pub fn handshake_open_options(
     handshake: &DaemonHandshake,
 ) -> crate::tracedecay::TraceDecayOpenOptions {
@@ -45,6 +47,7 @@ pub fn handshake_open_options(
 /// previous build is exactly the skew this comparison exists to catch. It is
 /// fallible because it reads the registered product runtime: a process whose
 /// entry point never registered one has no truthful version to advertise.
+#[hotpath::measure]
 pub(crate) fn binary_version()
 -> std::result::Result<&'static str, crate::product_runtime::ProductRuntimeError> {
     crate::version::build_version()

@@ -4,8 +4,10 @@ use serde_json::{Value, json};
 
 use super::{ErrorCode, JsonRpcResponse, McpServer};
 
+#[hotpath::measure_all]
 impl McpServer {
     /// Returns project identity and typed graph-statistics availability.
+    #[hotpath::skip]
     pub(crate) async fn read_resource_status(&self, id: Value) -> JsonRpcResponse {
         let cg = self.reopen_if_branch_drifted().await;
         let graph_statistics = match crate::mcp::tools::handlers::info::graph_statistics_value(

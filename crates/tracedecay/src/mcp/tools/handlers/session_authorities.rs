@@ -23,7 +23,9 @@ pub struct SessionAuthorities<'a> {
         Option<&'a dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>,
 }
 
+#[hotpath::measure_all]
 impl<'a> SessionAuthorities<'a> {
+    #[hotpath::skip]
     pub(crate) const fn new(
         project: Option<&'a RegisteredGlobalDbLeaseV1>,
         user: Option<&'a RegisteredGlobalDbLeaseV1>,
@@ -40,6 +42,7 @@ impl<'a> SessionAuthorities<'a> {
         }
     }
 
+    #[hotpath::skip]
     pub(crate) const fn with_registered_databases(
         mut self,
         project: Option<&'a RegisteredGlobalDbLeaseV1>,
@@ -58,6 +61,7 @@ impl<'a> SessionAuthorities<'a> {
         self
     }
 
+    #[hotpath::skip]
     pub(crate) const fn with_profile_retained_authority(
         mut self,
         authority: Option<&'a crate::daemon::retained_owner::ProfileRetainedConnectionAuthorityV1>,
@@ -66,6 +70,7 @@ impl<'a> SessionAuthorities<'a> {
         self
     }
 
+    #[hotpath::skip]
     pub(crate) const fn with_lcm_authorities(
         mut self,
         project: Option<&'a dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>,

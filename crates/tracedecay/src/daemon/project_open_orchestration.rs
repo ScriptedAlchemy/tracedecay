@@ -95,6 +95,7 @@ where
 }
 
 #[cfg_attr(not(unix), allow(dead_code))] // used by unix-only daemon serving paths
+#[hotpath::measure]
 pub(super) fn spawn_lifecycle_automation_scheduler_activation<ActivationFuture>(
     lifecycle: DaemonLifecycle,
     activation: ActivationFuture,
@@ -241,6 +242,7 @@ pub(super) async fn ensure_registered_project_route(
     Ok(())
 }
 
+#[hotpath::measure]
 fn remote_deleted_project_route_error(identity: &str) -> TraceDecayError {
     TraceDecayError::project_route(
         "remote_deleted",
@@ -269,6 +271,7 @@ fn remote_deleted_project_route_error(identity: &str) -> TraceDecayError {
 /// existing store is required to be present on disk, so an ambient directory
 /// (a bare `$HOME`, a checkout whose store really is gone) is still rejected
 /// and no path-derived authority is minted here.
+#[hotpath::measure]
 pub(super) fn durable_enrollment_resolves_existing_store(
     store_administration: &StoreAdministration,
     project_path: &Path,
@@ -290,6 +293,7 @@ pub(super) fn durable_enrollment_resolves_existing_store(
             .is_some_and(std::path::Path::is_file)
 }
 
+#[hotpath::measure]
 fn unenrolled_project_route_error(project_path: &Path) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!(

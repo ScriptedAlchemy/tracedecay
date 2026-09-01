@@ -96,6 +96,7 @@ pub(super) async fn handle_work(
     })
 }
 
+#[hotpath::measure]
 pub(super) fn work_operation_for_tool(tool_name: &str) -> Option<WorkOperation> {
     let key = tool_name.strip_prefix("tracedecay_work_")?;
     WorkOperation::ALL
@@ -103,12 +104,14 @@ pub(super) fn work_operation_for_tool(tool_name: &str) -> Option<WorkOperation> 
         .find(|operation| operation.operation_key() == key)
 }
 
+#[hotpath::measure]
 fn mint_request_id() -> Result<RequestId> {
     mint_global_request_id(GlobalRequestSurface::McpFallback).map_err(|_| TraceDecayError::Config {
         message: "could not allocate a Work request id".to_owned(),
     })
 }
 
+#[hotpath::measure]
 fn work_controls(
     operation: WorkOperation,
     request_id: &RequestId,

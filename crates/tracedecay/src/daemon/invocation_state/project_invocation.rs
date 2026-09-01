@@ -7,7 +7,9 @@ use tracedecay_daemon_service::{
 
 use super::*;
 
+#[hotpath::measure_all]
 impl DaemonInvocationState {
+    #[hotpath::skip]
     pub(in crate::daemon) async fn invoke_for_project(
         &self,
         store_administration: &StoreAdministration,

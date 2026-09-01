@@ -22,6 +22,7 @@ struct RemoteDeletionCleanupError {
     source: TraceDecayError,
 }
 
+#[hotpath::measure_all]
 impl RemoteDeletionCleanupError {
     fn with_receipt(self, receipt: RemoteDeletionReceipt) -> RemoteDeletionExecutionError {
         RemoteDeletionExecutionError::new(
@@ -34,6 +35,7 @@ impl RemoteDeletionCleanupError {
     }
 }
 
+#[hotpath::measure]
 fn cleanup_error(
     code: RemoteDeletionFailureCode,
     phase: RemoteDeletionPhase,
@@ -48,10 +50,12 @@ fn cleanup_error(
     }
 }
 
+#[hotpath::measure]
 fn validate_project_id(project_id: &str) -> std::result::Result<(), &'static str> {
     tracedecay_runtime_core::storage::validate_project_id(project_id)
 }
 
+#[hotpath::measure_all]
 impl StoreAdministration {
     /// Applies an authenticated remote account or project deletion through the
     /// profile's one registered authority. The durable tombstone is written
@@ -580,6 +584,7 @@ impl StoreAdministration {
         .await
     }
 
+    #[hotpath::skip]
     async fn remote_deletion_project_ids(
         &self,
         database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
@@ -647,6 +652,7 @@ impl StoreAdministration {
         Ok(project_ids)
     }
 
+    #[hotpath::skip]
     async fn remove_remote_deleted_project(
         &self,
         owners: &super::super::remote_deletion::RemoteDeletionRuntimeOwners,

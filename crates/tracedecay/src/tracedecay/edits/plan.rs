@@ -19,12 +19,14 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use super::super::TraceDecay;
 use super::file_authority::{SourceEditFileAuthority, read_source_edit_candidate};
 
+#[hotpath::measure_all]
 impl TraceDecay {
     /// Restore every retained preimage for a caller-requested rollback of an
     /// already-completed source edit. Unlike crash recovery this is a live
     /// operation, so the graph is resynchronized wholesale rather than
     /// reindexed file by file: a rollback may delete a file the edit created,
     /// and a deleted path has no bytes left to reindex.
+    #[hotpath::skip]
     pub(crate) async fn apply_source_edit_rollback(
         &self,
         files: &[PlannedSourceEditFile],
@@ -32,6 +34,7 @@ impl TraceDecay {
         rollback_planned_source_edit_files(&self.project_root, files)
     }
 
+    #[hotpath::skip]
     pub(crate) async fn recover_source_edit_preimages(
         &self,
         files: &[PlannedSourceEditFile],
@@ -114,6 +117,7 @@ pub(in crate::tracedecay) fn publish_planned_source_edit(
     publish_planned_source_edit_state(project_root, relative_path, expected, Some(intended))
 }
 
+#[hotpath::measure]
 pub(super) fn publish_planned_source_edit_state(
     project_root: &Path,
     relative_path: &str,
@@ -124,6 +128,7 @@ pub(super) fn publish_planned_source_edit_state(
     publish_source_edit_state(project_root, relative_path, expected, intended)
 }
 
+#[hotpath::measure]
 fn publish_source_edit_state(
     project_root: &Path,
     relative_path: &str,

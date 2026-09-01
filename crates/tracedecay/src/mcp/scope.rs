@@ -58,6 +58,7 @@ pub(crate) enum QueryScopeError {
     InconsistentScope(String),
 }
 
+#[hotpath::measure_all]
 impl QueryScopeError {
     /// Maps the failure onto the project-route taxonomy so callers report the
     /// same explicit route failures the transport already distinguishes.
@@ -139,6 +140,7 @@ impl From<ApplicationScopeError> for QueryScopeError {
 /// revalidates the resulting digest. Resolution fails closed rather than
 /// falling back to the CWD, another registered project, or a sibling
 /// repository.
+#[hotpath::measure]
 pub(crate) fn resolve_query_scope(
     owner: &ProjectRegistryContext,
     requested_root: &Path,

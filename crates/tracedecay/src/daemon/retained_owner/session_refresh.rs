@@ -69,6 +69,7 @@ pub(crate) fn admitted_session_refresh_command(
     admitted
 }
 
+#[hotpath::measure]
 fn session_refresh_command(
     request: &SessionRefreshRequestV1,
     context: &RequestContext,
@@ -182,6 +183,7 @@ fn session_refresh_command(
     })
 }
 
+#[hotpath::measure]
 fn admitted_action(
     action: SessionRefreshActionV1,
     handle: Option<&str>,
@@ -197,6 +199,7 @@ fn admitted_action(
     }
 }
 
+#[hotpath::measure]
 fn request_matches_mounted_project_scope(
     request: &SessionRefreshRequestV1,
     context: &RequestContext,
@@ -214,6 +217,7 @@ fn request_matches_mounted_project_scope(
         && branch_matches
 }
 
+#[hotpath::measure]
 fn admitted_identity(
     request: &SessionRefreshActionRequestV1,
 ) -> Result<ResolvedSessionIdentity, RetainedSurfaceExecutionErrorV1> {
@@ -240,6 +244,7 @@ fn admitted_identity(
     ))
 }
 
+#[hotpath::measure]
 fn admitted_target(
     request: &SessionRefreshActionRequestV1,
 ) -> Result<SessionRefreshTarget, RetainedSurfaceExecutionErrorV1> {
@@ -279,6 +284,7 @@ fn admitted_target(
     .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)
 }
 
+#[hotpath::measure]
 fn admitted_digest(domain: &[u8], material: &[u8]) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(domain);

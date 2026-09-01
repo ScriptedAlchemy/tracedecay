@@ -103,6 +103,7 @@ enum BenchmarkHostPolicy {
     Unsupported,
 }
 
+#[hotpath::measure_all]
 impl BenchmarkHostPolicy {
     fn for_target_os(target_os: &str) -> Self {
         match target_os {
@@ -112,10 +113,12 @@ impl BenchmarkHostPolicy {
         }
     }
 
+    #[hotpath::skip]
     const fn allows_diagnostic_measurement(self) -> bool {
         matches!(self, Self::Linux | Self::Macos)
     }
 
+    #[hotpath::skip]
     const fn allows_contract_refresh(self) -> bool {
         matches!(self, Self::Linux)
     }
@@ -129,6 +132,7 @@ pub enum Phase {
     LateHydrate,
 }
 
+#[hotpath::measure_all]
 impl Phase {
     pub const ALL: [Phase; 4] = [
         Phase::RebuildActivate,
@@ -137,6 +141,7 @@ impl Phase {
         Phase::LateHydrate,
     ];
 
+    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Phase::RebuildActivate => "rebuild_activate",
@@ -162,6 +167,7 @@ pub struct IsolatedBenchmarkEnv {
     restored: bool,
 }
 
+#[hotpath::measure_all]
 impl IsolatedBenchmarkEnv {
     pub fn enter(prefix: &str) -> BenchResult<Self> {
         let env_lock = crate::config::lock_user_data_dir_test_env();
@@ -223,6 +229,7 @@ impl Drop for IsolatedBenchmarkEnv {
     }
 }
 
+#[hotpath::measure]
 fn restore_env(key: &str, previous: Option<OsString>) {
     // SAFETY: restores process environment captured by IsolatedBenchmarkEnv.
     unsafe {
@@ -296,6 +303,7 @@ struct RepetitionMeasurement {
 ///
 /// Content identity is the git commit: every artifact and source path here is
 /// tracked, so the contract checks artifact shape and state, not file hashes.
+#[hotpath::measure]
 pub fn validate_contract() -> BenchResult<()> {
     let root = repository_root();
     let workload = read_json(&root.join(WORKLOAD_PATH))?;
@@ -402,6 +410,7 @@ pub fn validate_contract() -> BenchResult<()> {
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_historical_result(root: &Path) -> BenchResult<()> {
     let result = read_json(&root.join(HISTORICAL_RESULT_PATH))?;
     require_json_value(
@@ -440,6 +449,7 @@ fn validate_historical_result(root: &Path) -> BenchResult<()> {
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_current_result(root: &Path) -> BenchResult<()> {
     let result = read_json(&root.join(RESULT_PATH))?;
     require_json_value(
@@ -510,6 +520,7 @@ fn validate_current_result(root: &Path) -> BenchResult<()> {
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_refresh_inputs(root: &Path, workload: &Value) -> BenchResult<()> {
     require_json_value(
         &workload["schema_version"],
@@ -681,6 +692,7 @@ async fn capture_measurement() -> BenchResult<Value> {
     }))
 }
 
+#[hotpath::measure]
 fn measurement_result(source_identity: Value, measurement: Value) -> Value {
     json!({
         "schema_version": SCHEMA_VERSION,
@@ -718,6 +730,7 @@ fn measurement_result(source_identity: Value, measurement: Value) -> Value {
 /// memory handle fails closed), so this delegates to the same helper
 /// `HostAdmissionTestRuntimeV1` uses instead of racing it with a
 /// benchmark-private handle.
+#[hotpath::measure]
 fn ensure_admission_resource_authorities() {
     crate::host_admission::ensure_process_background_cpu_authority()
         .expect("install process capture authorities for the benchmark");
@@ -932,6 +945,7 @@ async fn run_one_repetition(repetition: usize) -> BenchResult<RepetitionMeasurem
     })
 }
 
+#[hotpath::measure]
 fn enroll_benchmark_project(project: &Path) -> BenchResult<ProjectId> {
     let status = Command::new("git")
         .args(["-C"])
@@ -953,6 +967,7 @@ fn enroll_benchmark_project(project: &Path) -> BenchResult<ProjectId> {
     ProjectId::new(marker.project_id).map_err(|error| error.to_string())
 }
 
+#[hotpath::measure]
 fn write_codex_rollout(home: &Path, project: &Path, session_id: &str) -> BenchResult<PathBuf> {
     let directory = home.join(".codex/sessions/2026/07/15");
     fs::create_dir_all(&directory)
@@ -992,6 +1007,7 @@ async fn count_observations(db: &RegisteredGlobalDb) -> BenchResult<u64> {
     u64::try_from(value).map_err(|error| format!("observation count: {error}"))
 }
 
+#[hotpath::measure]
 fn require_retrieval_success<T: std::fmt::Debug>(
     phase: &str,
     outcome: SessionRetrievalOutcome<T>,
@@ -1004,6 +1020,7 @@ fn require_retrieval_success<T: std::fmt::Debug>(
     }
 }
 
+#[hotpath::measure]
 fn request_context(
     request: &str,
     project_id: &ProjectId,
@@ -1072,6 +1089,7 @@ fn request_context(
 /// Identity of the source that produced a capture. The recorded commit is the
 /// content authority: every path named here is git-tracked at that commit, so
 /// no per-file hashing is repeated.
+#[hotpath::measure]
 fn source_identity(commit: &str) -> Value {
     json!({
         "commit": commit,
@@ -1084,6 +1102,7 @@ fn source_identity(commit: &str) -> Value {
     })
 }
 
+#[hotpath::measure]
 fn current_evidence_index() -> Value {
     json!({
         "schema_version": SCHEMA_VERSION,
@@ -1097,6 +1116,7 @@ fn current_evidence_index() -> Value {
 /// The receipt documents sanitization provenance for the independently
 /// sourced provider fixtures; the fixture bytes themselves are compiled into
 /// this harness via `include_str!`, so git and the compiler own their content.
+#[hotpath::measure]
 fn validate_sanitization_receipt(root: &Path) -> BenchResult<()> {
     let receipt = read_json(&root.join(SANITIZATION_RECEIPT_PATH))?;
     require_json_value(
@@ -1113,6 +1133,7 @@ fn validate_sanitization_receipt(root: &Path) -> BenchResult<()> {
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_bench_profile(root: &Path) -> BenchResult<()> {
     let manifest = fs::read_to_string(root.join("Cargo.toml"))
         .map_err(|error| format!("read Cargo.toml: {error}"))?;
@@ -1134,6 +1155,7 @@ fn validate_bench_profile(root: &Path) -> BenchResult<()> {
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_bench_profile_enforced() -> BenchResult<()> {
     if cfg!(debug_assertions) {
         return Err(
@@ -1144,16 +1166,19 @@ fn validate_bench_profile_enforced() -> BenchResult<()> {
     Ok(())
 }
 
+#[hotpath::measure]
 fn elapsed_ns(started: Instant) -> u64 {
     started.elapsed().as_nanos().try_into().unwrap_or(u64::MAX)
 }
 
+#[hotpath::measure]
 fn read_json(path: &Path) -> BenchResult<Value> {
     let contents =
         fs::read_to_string(path).map_err(|error| format!("read {}: {error}", path.display()))?;
     serde_json::from_str(&contents).map_err(|error| format!("parse {}: {error}", path.display()))
 }
 
+#[hotpath::measure]
 fn write_json_atomic(path: &Path, value: &Value) -> BenchResult<()> {
     let parent = path
         .parent()
@@ -1171,6 +1196,7 @@ fn write_json_atomic(path: &Path, value: &Value) -> BenchResult<()> {
     Ok(())
 }
 
+#[hotpath::measure]
 fn require_json_value(actual: &Value, expected: Value, label: &str) -> BenchResult<()> {
     if actual != &expected {
         return Err(format!(
@@ -1180,6 +1206,7 @@ fn require_json_value(actual: &Value, expected: Value, label: &str) -> BenchResu
     Ok(())
 }
 
+#[hotpath::measure]
 fn repository_root() -> PathBuf {
     // The product package sits at `crates/tracedecay`; this benchmark reads git
     // metadata and fixtures that live at the workspace root above it.
@@ -1190,6 +1217,7 @@ fn repository_root() -> PathBuf {
         .to_owned()
 }
 
+#[hotpath::measure]
 fn current_commit(root: &Path) -> BenchResult<String> {
     let output = Command::new("git")
         .current_dir(root)
@@ -1205,6 +1233,7 @@ fn current_commit(root: &Path) -> BenchResult<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
+#[hotpath::measure]
 fn clean_source_commit(root: &Path) -> BenchResult<String> {
     let status = Command::new("git")
         .current_dir(root)

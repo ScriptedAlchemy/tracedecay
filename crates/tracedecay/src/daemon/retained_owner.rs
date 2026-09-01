@@ -59,6 +59,7 @@ pub(crate) struct ProductionRetainedAuthoritiesV1 {
     pub(crate) invocation_service: Option<DaemonInvocationService>,
 }
 
+#[hotpath::measure]
 pub(crate) fn retained_surface_ports(
     authorities: ProductionRetainedAuthoritiesV1,
 ) -> Arc<RetainedSurfacePortsV1<'static>> {
@@ -161,6 +162,7 @@ where
 
 /// One rendering of the typed session-retrieval unavailability reason shared
 /// by every retained family that consumes the retrieval service.
+#[hotpath::measure]
 pub(in crate::daemon) fn session_retrieval_unavailable_detail(
     unavailable: &tracedecay_session_runtime::session_retrieval::SessionRetrievalUnavailable,
 ) -> String {
@@ -170,6 +172,7 @@ pub(in crate::daemon) fn session_retrieval_unavailable_detail(
     )
 }
 
+#[hotpath::measure]
 pub(super) fn map_execution_error(error: TraceDecayError) -> RetainedSurfaceExecutionErrorV1 {
     match error {
         TraceDecayError::Config { .. } => RetainedSurfaceExecutionErrorV1::InvalidRequest,

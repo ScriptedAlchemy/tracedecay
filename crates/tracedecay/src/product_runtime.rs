@@ -66,6 +66,7 @@ pub struct RegisteredProductRuntime {
     build_version: String,
 }
 
+#[hotpath::measure_all]
 impl RegisteredProductRuntime {
     pub fn provider(&self) -> &ProductRuntimeProvider {
         &self.provider
@@ -92,11 +93,13 @@ impl RegisteredProductRuntime {
 }
 
 /// Joins the released version with the build-metadata commit identity.
+#[hotpath::measure]
 fn compose_build_version(release_version: &str, full_sha: &str, dirty: bool) -> String {
     let dirty = if dirty { ".dirty" } else { "" };
     format!("{release_version}+{full_sha}{dirty}")
 }
 
+#[hotpath::measure]
 fn is_full_lowercase_hex_sha(sha: &str) -> bool {
     sha.len() == 40
         && sha
@@ -104,6 +107,7 @@ fn is_full_lowercase_hex_sha(sha: &str) -> bool {
             .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
+#[hotpath::measure]
 fn validated(
     provider: ProductRuntimeProvider,
 ) -> Result<RegisteredProductRuntime, ProductRuntimeError> {
@@ -158,6 +162,7 @@ fn validated(
 
 /// Slot-parameterized core of [`register_product_runtime`], so unit tests
 /// exercise registration against local slots with no global-state races.
+#[hotpath::measure]
 fn register_in(
     slot: &OnceLock<RegisteredProductRuntime>,
     provider: ProductRuntimeProvider,
@@ -168,6 +173,7 @@ fn register_in(
 }
 
 /// Slot-parameterized core of [`product_runtime`].
+#[hotpath::measure]
 fn runtime_in(
     slot: &OnceLock<RegisteredProductRuntime>,
 ) -> Result<&RegisteredProductRuntime, ProductRuntimeError> {
@@ -179,6 +185,7 @@ static PRODUCT_RUNTIME: OnceLock<RegisteredProductRuntime> = OnceLock::new();
 /// Registers the process's product runtime provider. Strictly set-once: a
 /// second registration attempt answers [`ProductRuntimeError::ConflictingProvider`]
 /// even when it carries an identical provider.
+#[hotpath::measure]
 pub fn register_product_runtime(
     provider: ProductRuntimeProvider,
 ) -> Result<(), ProductRuntimeError> {
@@ -187,6 +194,7 @@ pub fn register_product_runtime(
 
 /// The registered product runtime, or the typed missing state when the
 /// generating binary never registered one.
+#[hotpath::measure]
 pub fn product_runtime() -> Result<&'static RegisteredProductRuntime, ProductRuntimeError> {
     runtime_in(&PRODUCT_RUNTIME)
 }

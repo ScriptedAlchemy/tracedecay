@@ -73,6 +73,7 @@ struct TestTarget {
     covers_source_ids: Vec<String>,
 }
 
+#[hotpath::measure_all]
 impl TestTarget {
     /// The dispatched identity is the one Cargo's `--exact` filter matches:
     /// the module chain the file contributes to its test binary followed by
@@ -100,6 +101,7 @@ impl TestTarget {
     }
 }
 
+#[hotpath::measure]
 fn validate_test_identity(identity: &str) -> std::result::Result<(), String> {
     if identity.trim().is_empty() || identity.trim() != identity {
         return Err("test identity is empty".to_owned());
@@ -116,6 +118,7 @@ fn validate_test_identity(identity: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
+#[hotpath::measure]
 fn test_target_key(node: &GraphTestSymbol) -> String {
     if node.qualified_name.is_empty() {
         node.id.clone()
@@ -272,6 +275,7 @@ pub(super) async fn handle_diagnose(
 
 /// The graph-lookup form of one compiler-reported path: forward slashes,
 /// relative to the project root when the compiler reported it absolute.
+#[hotpath::measure]
 fn normalized_diagnostic_path(project_root: &Path, file: &str) -> String {
     let forward = file.replace('\\', "/");
     let path = Path::new(&forward);
@@ -283,6 +287,7 @@ fn normalized_diagnostic_path(project_root: &Path, file: &str) -> String {
     forward
 }
 
+#[hotpath::measure]
 fn diagnostic_symbol_at_location(
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     file: &str,
@@ -333,6 +338,7 @@ fn diagnostic_symbol_at_location(
     Ok(matched.into_iter().next())
 }
 
+#[hotpath::measure]
 fn diagnostic_symbol_json(symbol: &CodeGraphSymbolSummaryV1) -> Result<Value> {
     let metadata = symbol.metadata.as_ref().ok_or_else(|| {
         diagnostic_graph_problem("verified diagnostic symbol is missing extraction metadata")
@@ -364,6 +370,7 @@ fn diagnostic_symbol_json(symbol: &CodeGraphSymbolSummaryV1) -> Result<Value> {
     }))
 }
 
+#[hotpath::measure]
 fn diagnostic_graph_problem(detail: &str) -> TraceDecayError {
     TraceDecayError::project_route("verified-diagnostic-evidence-unavailable", false, detail)
 }
@@ -422,6 +429,7 @@ async fn publish_parsed_compiler_diagnostics(
 
 /// Renders the typed publication outcome for the diagnose response. Every
 /// refusal keeps its name so an empty Problems list is explainable.
+#[hotpath::measure]
 fn compiler_publication_report(
     outcome: &tracedecay_usecases::diagnostics_publication::CompilerDiagnosticPublicationOutcomeV1,
 ) -> Value {
@@ -481,6 +489,7 @@ async fn diagnose_redundancy_index(
     Ok(near_duplicate_index(&scan))
 }
 
+#[hotpath::measure]
 fn near_duplicate_index(scan: &RedundancyScanV1) -> HashMap<String, Vec<Value>> {
     let mut index: HashMap<String, Vec<Value>> = HashMap::new();
     for pair in &scan.pairs {
@@ -514,6 +523,7 @@ fn near_duplicate_index(scan: &RedundancyScanV1) -> HashMap<String, Vec<Value>> 
     index
 }
 
+#[hotpath::measure]
 fn severity_string(s: Severity) -> &'static str {
     match s {
         Severity::Error => "error",
@@ -862,6 +872,7 @@ async fn managed_test_document_content_digests(
     Ok(digests)
 }
 
+#[hotpath::measure]
 fn current_head_commit_id(root: &Path) -> Option<CommitId> {
     let repository = gix::open(root).ok()?;
     let commit = repository.head_commit().ok()?;
@@ -924,18 +935,21 @@ async fn finish_test_run(
     Ok(receipt)
 }
 
+#[hotpath::measure]
 fn test_run_event_error(error: OperationEventError) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!("managed test-run lifecycle failed: {error}"),
     }
 }
 
+#[hotpath::measure]
 fn test_run_contract_error(error: impl std::fmt::Display) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!("managed test-run contract failed: {error}"),
     }
 }
 
+#[hotpath::measure]
 fn resolve_changed_paths(
     args: &Value,
     explicit_paths: Option<Vec<String>>,
@@ -951,6 +965,7 @@ fn resolve_changed_paths(
     }
 }
 
+#[hotpath::measure]
 fn collect_affected_test_targets(
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     changed_paths: &[String],
@@ -972,6 +987,7 @@ fn collect_affected_test_targets(
     Ok(test_targets)
 }
 
+#[hotpath::measure]
 fn add_direct_test_targets(
     path: &str,
     nodes: &[GraphTestSymbol],
@@ -999,6 +1015,7 @@ fn add_direct_test_targets(
     }
 }
 
+#[hotpath::measure]
 fn add_indirect_test_targets(
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     nodes: &[GraphTestSymbol],
@@ -1054,6 +1071,7 @@ fn add_indirect_test_targets(
     Ok(())
 }
 
+#[hotpath::measure]
 fn affected_test_symbols_in_file(
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     path: &str,
@@ -1068,6 +1086,7 @@ fn affected_test_symbols_in_file(
     Ok(symbols)
 }
 
+#[hotpath::measure]
 fn graph_test_symbols(summaries: &[CodeGraphSymbolSummaryV1]) -> Result<Vec<GraphTestSymbol>> {
     summaries
         .iter()
@@ -1075,6 +1094,7 @@ fn graph_test_symbols(summaries: &[CodeGraphSymbolSummaryV1]) -> Result<Vec<Grap
         .collect()
 }
 
+#[hotpath::measure]
 fn graph_test_symbol(summary: &CodeGraphSymbolSummaryV1) -> Result<Option<GraphTestSymbol>> {
     let metadata = summary.metadata.as_ref().ok_or_else(|| {
         affected_test_graph_problem("verified affected-test symbol is missing extraction metadata")
@@ -1096,6 +1116,7 @@ fn graph_test_symbol(summary: &CodeGraphSymbolSummaryV1) -> Result<Option<GraphT
     }))
 }
 
+#[hotpath::measure]
 fn test_annotations_in_file<'a>(
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     path: &str,
@@ -1138,14 +1159,17 @@ fn test_annotations_in_file<'a>(
     })
 }
 
+#[hotpath::measure]
 fn affected_test_graph_problem(detail: &str) -> TraceDecayError {
     TraceDecayError::project_route("verified-affected-test-evidence-unavailable", false, detail)
 }
 
+#[hotpath::measure]
 fn is_callable(node: &GraphTestSymbol) -> bool {
     matches!(node.kind.as_str(), "function" | "method")
 }
 
+#[hotpath::measure]
 fn select_test_targets(
     test_targets: HashMap<String, TestTarget>,
     max_tests: usize,
@@ -1170,6 +1194,7 @@ fn select_test_targets(
     (selected_targets, test_names, truncated)
 }
 
+#[hotpath::measure]
 fn missing_requested_test<'a>(
     requested: &'a [String],
     results: &[(String, bool)],
@@ -1179,6 +1204,7 @@ fn missing_requested_test<'a>(
     })
 }
 
+#[hotpath::measure]
 fn run_affected_tests_body(
     exit_code: Option<i32>,
     results: &[(String, bool)],
@@ -1215,6 +1241,7 @@ fn run_affected_tests_body(
     })
 }
 
+#[hotpath::measure]
 fn managed_test_terminal(emitter: &OperationEmitter, receipt: &OperationReceipt) -> Value {
     json!({
         "operation_id": emitter.binding().operation_id().to_string(),
@@ -1223,6 +1250,7 @@ fn managed_test_terminal(emitter: &OperationEmitter, receipt: &OperationReceipt)
     })
 }
 
+#[hotpath::measure]
 fn covered_source_ids(name: &str, selected_targets: &[TestTarget]) -> Vec<String> {
     let mut covers = Vec::new();
     for target in selected_targets {
@@ -1238,6 +1266,7 @@ fn covered_source_ids(name: &str, selected_targets: &[TestTarget]) -> Vec<String
 }
 
 /// Wraps a short status message in a normal `ToolResult`.
+#[hotpath::measure]
 fn empty_result(args: &Value, message: &str) -> ToolResult {
     let value = json!({
         "passed": 0, "failed": 0, "results": [], "note": message
@@ -1245,6 +1274,7 @@ fn empty_result(args: &Value, message: &str) -> ToolResult {
     generic_tool_result(None, args, &value, vec![])
 }
 
+#[hotpath::measure]
 fn error_result(args: &Value, kind: &str, operation: &str, message: &str) -> ToolResult {
     let value = json!({
         "passed": 0,
@@ -1260,6 +1290,7 @@ fn error_result(args: &Value, kind: &str, operation: &str, message: &str) -> Too
 }
 
 /// Returns the last `n` characters of `s`, trimmed to a char boundary.
+#[hotpath::measure]
 fn tail(s: &str, n: usize) -> String {
     if s.len() <= n {
         return s.to_string();

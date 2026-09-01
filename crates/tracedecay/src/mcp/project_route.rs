@@ -22,6 +22,7 @@ pub(crate) struct ResolvedProjectRoute {
     pub(crate) scope: tracedecay_application::ResolvedScope,
 }
 
+#[hotpath::measure_all]
 impl ResolvedProjectRoute {
     pub(crate) fn retained_server(
         &self,
@@ -100,7 +101,9 @@ pub(crate) enum ProjectRouteFailureKind {
     Unavailable,
 }
 
+#[hotpath::measure_all]
 impl ProjectRouteFailureKind {
+    #[hotpath::skip]
     pub(crate) const fn reason_code(self) -> &'static str {
         match self {
             Self::NotFound => "project_route_not_found",
@@ -110,6 +113,7 @@ impl ProjectRouteFailureKind {
         }
     }
 
+    #[hotpath::skip]
     pub(crate) const fn retryable(self) -> bool {
         matches!(self, Self::Unavailable)
     }
@@ -121,6 +125,7 @@ pub(crate) struct ProjectRouteFailure {
     pub(crate) detail: String,
 }
 
+#[hotpath::measure_all]
 impl ProjectRouteFailure {
     pub(crate) fn into_error(self) -> tracedecay_domain::errors::TraceDecayError {
         tracedecay_domain::errors::TraceDecayError::project_route(
@@ -188,6 +193,7 @@ pub(crate) struct HookProjectRouteCache {
     shared_generation: Option<u64>,
 }
 
+#[hotpath::measure_all]
 impl HookProjectRouteCache {
     /// Evicts cached routes for a tombstoned project. The cached server lease
     /// is weak, but retaining the identity would make every later request fail
@@ -384,6 +390,7 @@ pub(crate) struct SharedHookProjectRouteCache {
     inner: Arc<Mutex<SharedHookProjectRouteCacheState>>,
 }
 
+#[hotpath::measure_all]
 impl SharedHookProjectRouteCache {
     fn unavailable(operation: &str) -> tracedecay_domain::errors::TraceDecayError {
         tracedecay_domain::errors::TraceDecayError::project_route(
@@ -450,14 +457,17 @@ impl SharedHookProjectRouteCache {
     }
 }
 
+#[hotpath::measure]
 pub(crate) fn mcp_analytics_session_id(arguments: &Value) -> Option<String> {
     route_identity_from_arguments(arguments, &["session_id", "sessionId"])
 }
 
+#[hotpath::measure]
 pub(crate) fn arguments_have_structural_route_identity(arguments: &Value) -> bool {
     mcp_route_thread_id(arguments).is_some() || mcp_analytics_session_id(arguments).is_some()
 }
 
+#[hotpath::measure]
 pub(crate) fn protect_tool_structural_ids(arguments: &mut Value) -> Result<(), ()> {
     const STRUCTURAL_ID_KEYS: &[&str] = &[
         "session_id",
@@ -508,10 +518,12 @@ pub(crate) fn protect_tool_structural_ids(arguments: &mut Value) -> Result<(), (
     Ok(())
 }
 
+#[hotpath::measure]
 fn mcp_route_thread_id(arguments: &Value) -> Option<String> {
     route_identity_from_arguments(arguments, &["thread_id", "threadId"])
 }
 
+#[hotpath::measure]
 fn route_identity_from_arguments(arguments: &Value, keys: &[&str]) -> Option<String> {
     fn string_field(value: &Value, key: &str) -> Option<String> {
         let value = value.get(key).and_then(Value::as_str)?;
@@ -531,6 +543,7 @@ fn route_identity_from_arguments(arguments: &Value, keys: &[&str]) -> Option<Str
 /// validated by the tool's own request schema — rather than registered-project
 /// route selectors, per tool. Route selection and its guards must skip these
 /// so a semantic field never masquerades as an unresolved route.
+#[hotpath::measure]
 pub(crate) fn semantic_route_argument_fields(tool_name: &str) -> &'static [&'static str] {
     match tool_name {
         "tracedecay_message_search" => &["project_path"],
@@ -538,6 +551,7 @@ pub(crate) fn semantic_route_argument_fields(tool_name: &str) -> &'static [&'sta
     }
 }
 
+#[hotpath::measure]
 pub(crate) fn arguments_have_project_selector(tool_name: &str, arguments: &Value) -> bool {
     let semantic = semantic_route_argument_fields(tool_name);
     [
@@ -551,6 +565,7 @@ pub(crate) fn arguments_have_project_selector(tool_name: &str, arguments: &Value
     .any(|key| !semantic.contains(&key) && arguments.get(key).is_some())
 }
 
+#[hotpath::measure]
 fn project_route_identity_matches(
     route_profile_id: &tracedecay_domain::UserProfileId,
     route_project_id: &str,

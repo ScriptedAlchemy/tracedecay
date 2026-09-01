@@ -51,7 +51,9 @@ impl Default for McpShutdownCompletion {
     }
 }
 
+#[hotpath::measure_all]
 impl McpShutdownCompletion {
+    #[hotpath::skip]
     async fn coordinate_until<Work>(
         &self,
         deadline: tokio::time::Instant,
@@ -126,6 +128,7 @@ impl McpShutdownCompletion {
         }
     }
 
+    #[hotpath::skip]
     async fn join_finished_coordinator(&self) {
         let result = {
             let mut coordinator_task = self.state.coordinator_task.lock().await;
@@ -146,6 +149,7 @@ impl McpShutdownCompletion {
         }
     }
 
+    #[hotpath::skip]
     async fn wait_for_finished_coordinator(&self) {
         loop {
             let notified = self.state.changed.notified();
@@ -173,6 +177,7 @@ impl McpShutdownCompletion {
             .clone()
     }
 
+    #[hotpath::skip]
     async fn wait_for_terminal_status_until(
         &self,
         deadline: tokio::time::Instant,
@@ -208,6 +213,7 @@ impl McpShutdownCompletion {
     }
 }
 
+#[hotpath::measure_all]
 impl McpShutdownState {
     fn finish(&self, status: crate::daemon::ShutdownStatus) {
         if status != crate::daemon::ShutdownStatus::TimedOut {
@@ -317,6 +323,7 @@ impl QueuedRequestLine {
     }
 }
 
+#[hotpath::measure]
 fn cancellable_queued_request_id(request: &JsonRpcRequest) -> Option<Value> {
     let cancellable = request.method == "tools/call"
         && request
@@ -331,6 +338,7 @@ fn cancellable_queued_request_id(request: &JsonRpcRequest) -> Option<Value> {
     request.id.clone()
 }
 
+#[hotpath::measure]
 fn queued_cancellable_request_key(
     pending_lines: &VecDeque<QueuedRequestLine>,
     request_id: &Value,
@@ -344,6 +352,7 @@ fn queued_cancellable_request_key(
         .then_some(expected)
 }
 
+#[hotpath::measure]
 fn current_cancellable_request_key(
     request: &JsonRpcRequest,
     request_id: &Value,
@@ -357,6 +366,7 @@ fn current_cancellable_request_key(
     (current == cancelled).then_some(current)
 }
 
+#[hotpath::measure_all]
 impl McpServer {
     #[hotpath::measure(label = "mcp.server.write", future = true)]
     async fn write_response_line_or_revoke(
@@ -635,6 +645,7 @@ impl McpServer {
     /// Runs the server, reading JSON-RPC requests from stdin and writing
     /// responses to stdout. Runs until stdin is closed or a shutdown signal
     /// (SIGINT/SIGTERM) is received, then performs graceful cleanup.
+    #[hotpath::skip]
     pub async fn run(
         self: &Arc<Self>,
         transport: &mut impl tracedecay_mcp::transport::McpTransport,
@@ -648,6 +659,7 @@ impl McpServer {
     /// [`Self::run_daemon_connection_with_timings`]; this is the in-process
     /// test-transport harness entry for the same connection loop.
     #[cfg(any(test, feature = "test-transport"))]
+    #[hotpath::skip]
     pub async fn run_connection(
         self: &Arc<Self>,
         transport: &mut impl tracedecay_mcp::transport::McpTransport,
@@ -656,6 +668,7 @@ impl McpServer {
             .await
     }
 
+    #[hotpath::skip]
     pub(crate) async fn run_daemon_connection_with_timings(
         self: &Arc<Self>,
         transport: &mut impl tracedecay_mcp::transport::McpTransport,
@@ -961,6 +974,7 @@ impl McpServer {
         Ok(())
     }
 
+    #[hotpath::skip]
     pub(crate) async fn shutdown_if(self: &Arc<Self>, enabled: bool) {
         if enabled {
             self.shutdown().await;
@@ -973,6 +987,7 @@ impl McpServer {
     /// Idempotent — safe to call multiple times. `run` invokes it once when
     /// its main loop exits; callers (e.g. `main.rs`, tests) may invoke it
     /// explicitly afterwards without re-running the persistence logic.
+    #[hotpath::skip]
     pub async fn shutdown(self: &Arc<Self>) {
         let deadline =
             tokio::time::Instant::now() + tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE;
@@ -992,6 +1007,7 @@ impl McpServer {
             .await
     }
 
+    #[hotpath::skip]
     async fn run_shutdown(
         self: Arc<Self>,
         deadline: tokio::time::Instant,
@@ -1080,6 +1096,7 @@ impl McpServer {
     }
 
     #[cfg(any(test, feature = "test-transport"))]
+    #[hotpath::skip]
     pub(crate) async fn shutdown_background_tasks(&self) {
         let failures = self
             .shutdown_background_tasks_until(
@@ -1094,6 +1111,7 @@ impl McpServer {
         }
     }
 
+    #[hotpath::skip]
     async fn shutdown_background_tasks_until(
         &self,
         _deadline: tokio::time::Instant,
@@ -1113,6 +1131,7 @@ impl McpServer {
         failures
     }
 
+    #[hotpath::skip]
     pub(crate) async fn replay_host_admission(
         &self,
         target_seq: Option<u64>,
@@ -1263,6 +1282,7 @@ impl McpServer {
     }
 
     #[cfg(test)]
+    #[hotpath::skip]
     pub(crate) async fn wait_project_host_admission_replay_idle(&self, timeout: Duration) -> bool {
         let worker = self
             .project_host_admission_replay
@@ -1277,6 +1297,7 @@ impl McpServer {
     }
 
     #[cfg(test)]
+    #[hotpath::skip]
     pub(crate) async fn project_host_admission_replay_pass_count(&self) -> usize {
         let guard = self.project_host_admission_replay.lock().await;
         guard.as_ref().map_or(
@@ -1286,6 +1307,7 @@ impl McpServer {
     }
 
     #[cfg(test)]
+    #[hotpath::skip]
     pub(crate) async fn project_host_admission_replay_backoff_count(&self) -> usize {
         let guard = self.project_host_admission_replay.lock().await;
         guard.as_ref().map_or(

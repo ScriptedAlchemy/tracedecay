@@ -21,6 +21,7 @@ use tracedecay_store::{GraphProjectionIdentityV1, StoreShardIdV1};
 
 const SEAL_READ_CHECK_BYTES: usize = 64 * 1024;
 
+#[hotpath::measure]
 fn validate_sealed_generation_metadata(metadata: &std::fs::Metadata) -> Result<u64, GraphDbError> {
     if !metadata.file_type().is_file() {
         return Err(GraphDbError::Corrupt {
@@ -35,6 +36,7 @@ fn validate_sealed_generation_metadata(metadata: &std::fs::Metadata) -> Result<u
     Ok(metadata.len())
 }
 
+#[hotpath::measure]
 fn same_file_identity(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
     #[cfg(unix)]
     {
@@ -69,6 +71,7 @@ fn same_file_identity(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bo
 /// the stable GetFileInformationByHandle authority instead of the unstable
 /// `windows_by_handle` metadata surface.
 #[cfg(windows)]
+#[hotpath::measure]
 fn same_windows_handle_identity(file: &File, path: &std::path::Path) -> Result<bool, GraphDbError> {
     let path_file =
         File::open(path).map_err(|error| GraphDbError::unavailable(error.to_string()))?;
@@ -90,6 +93,7 @@ struct CheckedSealReader<'a> {
     failure: Option<GraphDbError>,
 }
 
+#[hotpath::measure_all]
 impl CheckedSealReader<'_> {
     fn retain_failure(&mut self, error: GraphDbError) -> std::io::Error {
         self.failure = Some(error);
@@ -188,6 +192,7 @@ impl Read for CheckedSealReader<'_> {
     }
 }
 
+#[hotpath::measure]
 fn open_checked_seal_reader<'a>(
     path: &std::path::Path,
     check: &'a dyn Fn() -> Result<(), GraphDbError>,
@@ -237,6 +242,7 @@ fn open_checked_seal_reader<'a>(
 /// which makes recovery from either root equally trustworthy. Typed
 /// interruptions from the caller's probe are transport states and must
 /// surface immediately instead of triggering a second full read.
+#[hotpath::measure]
 fn with_verified_seal_from_roots<T>(
     canonical: &std::path::Path,
     pool: &std::path::Path,
@@ -273,6 +279,7 @@ fn with_verified_seal_from_roots<T>(
     read(pool, expected_digest, check)
 }
 
+#[hotpath::measure]
 fn decode_verified_seal_from_roots(
     canonical: &std::path::Path,
     pool: &std::path::Path,
@@ -393,6 +400,7 @@ fn verify_checked_seal(
 /// Proves that the durable source backing an already-decoded generation still
 /// exists under its canonical-or-retained authority with the exact digest.
 /// This reads and hashes the bounded source without decoding or projecting it.
+#[hotpath::measure]
 pub(super) fn verify_sealed_generation_source_from_roots(
     generations_root: &std::path::Path,
     replay_root: &std::path::Path,
@@ -445,6 +453,7 @@ struct DecodedSealedCodeGenerationV1 {
     source_total_bytes: u64,
 }
 
+#[hotpath::measure_all]
 impl DecodedSealedCodeGenerationV1 {
     /// Census the decode as it is retained, so the byte accounting a release
     /// reports is fixed at retention time rather than recomputed from a
@@ -484,6 +493,7 @@ struct ShardDecodedSealsV1 {
     hydrated: Option<DecodedSealedCodeGenerationV1>,
 }
 
+#[hotpath::measure_all]
 impl ShardDecodedSealsV1 {
     /// The decode for this exact replay identity held in either slot.
     fn matching(
@@ -530,6 +540,7 @@ pub(super) struct DecodedCodeGenerationOffersV1 {
     seals: RwLock<BTreeMap<StoreShardIdV1, ShardDecodedSealsV1>>,
 }
 
+#[hotpath::measure_all]
 impl DecodedCodeGenerationOffersV1 {
     /// Record the decode the activating code index offered for this shard.
     ///
@@ -690,6 +701,7 @@ impl Default for DaemonCodeGraphManifestProviderV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl DaemonCodeGraphManifestProviderV1 {
     /// Bind the offer store to a measured-RSS pressure cell.
     ///
@@ -721,6 +733,7 @@ impl DaemonCodeGraphManifestProviderV1 {
 /// they are pure accelerators over bytes that remain on disk.
 const DECODED_OFFER_PRESSURE_PRIORITY_V1: u32 = 10;
 
+#[hotpath::measure_all]
 impl DaemonCodeGraphManifestProviderV1 {
     pub(super) fn bind(
         &self,
@@ -955,6 +968,7 @@ impl GraphGenerationManifestProvider for DaemonCodeGraphManifestProviderV1 {
 /// evidence about the sealed payload. Classifying them as corruption would
 /// fault-retain the graph slot in the shared capacity-bounded registry and
 /// poison later retries of the same immutable artifact.
+#[hotpath::measure]
 fn classify_sealed_projection_build_error(error: CodeGraphProjectionError) -> GraphDbError {
     match error {
         CodeGraphProjectionError::Cancelled => GraphDbError::Cancelled,

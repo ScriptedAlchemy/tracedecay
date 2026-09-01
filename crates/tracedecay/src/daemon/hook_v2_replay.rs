@@ -49,7 +49,9 @@ pub(crate) enum HookReplayTombstoneReasonV1 {
     Expired,
 }
 
+#[hotpath::measure_all]
 impl HookReplayTombstoneReasonV1 {
+    #[hotpath::skip]
     pub(crate) const fn as_key(self) -> &'static str {
         match self {
             Self::BindingStale => "binding_stale",
@@ -69,10 +71,12 @@ pub(crate) struct HookReplayPassReportV1 {
     pub(crate) binding_unavailable: bool,
 }
 
+#[hotpath::measure]
 pub(crate) fn hook_v2_spool_root(data_root: &Path, host: HookHostV1) -> PathBuf {
     data_root.join("hook-v2-spool").join(host.hook_key())
 }
 
+#[hotpath::measure]
 fn current_binding(
     data_root: &Path,
     host: HookHostV1,
@@ -89,6 +93,7 @@ fn current_binding(
 
 /// Deterministic transport receipt so a re-acknowledgement after a crash is
 /// recognised as the same evidence rather than a conflicting one.
+#[hotpath::measure]
 fn replay_receipt_id(
     record: &HookSpoolRecordV1,
     disposition: HookSpoolAckDispositionV1,
@@ -107,6 +112,7 @@ fn replay_receipt_id(
     receipt
 }
 
+#[hotpath::measure]
 fn acknowledge(
     spool: &mut HookSpoolV1,
     record: &HookSpoolRecordV1,
@@ -313,6 +319,7 @@ where
     Some(pass)
 }
 
+#[hotpath::measure]
 fn log_tombstone(
     host: HookHostV1,
     record: &HookSpoolRecordV1,
@@ -403,6 +410,7 @@ async fn drain_hook_delivery_receipts(
 /// cannot leave a phantom in-flight sweep behind.
 struct HookReplaySweepObservation;
 
+#[hotpath::measure_all]
 impl HookReplaySweepObservation {
     fn begin() -> Self {
         hotpath::gauge!("daemon.hook_replay.sweeps_active").inc(1.0);
@@ -479,6 +487,7 @@ async fn drain_all_hosts(
     }
 }
 
+#[hotpath::measure]
 fn hook_replay_now() -> UtcMicros {
     UtcMicros(
         std::time::SystemTime::now()
@@ -496,6 +505,7 @@ struct RegisteredReplayConsumer {
     task: Option<tokio::task::JoinHandle<()>>,
 }
 
+#[hotpath::measure]
 fn registered_replay_roots() -> &'static StdMutex<BTreeMap<PathBuf, RegisteredReplayConsumer>> {
     static ROOTS: OnceLock<StdMutex<BTreeMap<PathBuf, RegisteredReplayConsumer>>> = OnceLock::new();
     ROOTS.get_or_init(|| StdMutex::new(BTreeMap::new()))
@@ -512,6 +522,7 @@ pub(crate) fn hook_v2_replay_consumer_registered(data_root: &Path) -> bool {
 
 /// Start the per-project replay consumer exactly once per hook data root.
 /// Returns `false` when one is already running for this root.
+#[hotpath::measure]
 pub(crate) fn register_hook_v2_replay_consumer(
     graph: Arc<crate::tracedecay::TraceDecay>,
     delivery_settlements: Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1>,

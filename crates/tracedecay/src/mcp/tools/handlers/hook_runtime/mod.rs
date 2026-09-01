@@ -43,6 +43,7 @@ use ingest::{
 use terminal::retain_codex_stop;
 use tracedecay_mcp::map_host_admission_outcome;
 
+#[hotpath::measure]
 fn required_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     args.get(key)
         .and_then(Value::as_str)
@@ -214,6 +215,7 @@ pub(crate) async fn handle_projectless_hook_runtime(
     Ok(tool_json(None, &args, &output))
 }
 
+#[hotpath::measure]
 fn projectless_action_allowed(action: &str, args: &Value) -> bool {
     matches!(
         action,
@@ -224,12 +226,14 @@ fn projectless_action_allowed(action: &str, args: &Value) -> bool {
             && args.get("user_scope").and_then(Value::as_bool) == Some(true))
 }
 
+#[hotpath::measure]
 fn required_value(args: &Value, key: &str) -> Result<Value> {
     args.get(key)
         .cloned()
         .ok_or_else(|| config_error(format!("missing required field `{key}`")))
 }
 
+#[hotpath::measure]
 fn required_project_db(authorities: SessionAuthorities<'_>) -> Result<&RegisteredGlobalDb> {
     authorities
         .project
@@ -237,6 +241,7 @@ fn required_project_db(authorities: SessionAuthorities<'_>) -> Result<&Registere
         .ok_or_else(|| config_error("daemon project session database is unavailable"))
 }
 
+#[hotpath::measure]
 fn required_user_db(authorities: SessionAuthorities<'_>) -> Result<&RegisteredGlobalDb> {
     authorities
         .user

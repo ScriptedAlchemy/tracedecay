@@ -17,6 +17,7 @@ type BrokerConnectionPhaseFutureV1<'a, T> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + Send + 'a>>;
 
 #[inline(never)]
+#[hotpath::measure]
 fn boxed_broker_connection_phase<'a, T>(
     future: impl std::future::Future<Output = Result<T>> + Send + 'a,
 ) -> BrokerConnectionPhaseFutureV1<'a, T>
@@ -26,6 +27,7 @@ where
     Box::pin(future)
 }
 
+#[hotpath::measure]
 fn report_profile_host_admission_bootstrap_status(
     status: Option<ProfileHostAdmissionBootstrapStatus>,
 ) {
@@ -119,6 +121,7 @@ pub(super) async fn serve_routed_rmcp_connection(
     .await
 }
 
+#[hotpath::measure]
 fn serve_routed_rmcp_connection_inner(
     server: Arc<crate::mcp::McpServer>,
     transport: BrokerStreamTransport,
@@ -170,6 +173,7 @@ fn serve_routed_rmcp_connection_inner(
     })
 }
 
+#[hotpath::measure]
 fn is_mcp_initialize_request(line: &str) -> bool {
     serde_json::from_str::<JsonRpcRequest>(line.trim())
         .is_ok_and(|request| request.method == "initialize")
@@ -261,6 +265,7 @@ enum DaemonWorkDeliveryKindV1 {
     ArtifactPage,
 }
 
+#[hotpath::measure_all]
 impl DaemonWorkDeliveryDescriptorV1 {
     fn from_request(
         request: &DaemonInvocationRequest,
@@ -379,6 +384,7 @@ impl DaemonWorkDeliveryDescriptorV1 {
         }
     }
 
+    #[hotpath::skip]
     async fn attempts(
         self,
         service: &DaemonInvocationService,
@@ -460,6 +466,7 @@ impl DaemonWorkDeliveryDescriptorV1 {
     }
 }
 
+#[hotpath::measure]
 fn application_outcome_payload<T>(
     outcome: &tracedecay_application::ApplicationOutcome<T>,
 ) -> Option<&T> {
@@ -470,6 +477,7 @@ fn application_outcome_payload<T>(
     }
 }
 
+#[hotpath::measure]
 fn offer_daemon_work_delivery(
     recorder: Option<&Arc<tracedecay_usecases::observability::BoundedDeliverySettlementRecorderV1>>,
     attempt: Option<tracedecay_domain::DeliverySettlementAttemptV1>,
@@ -515,6 +523,7 @@ fn offer_daemon_work_delivery(
 /// immutable identity even if the workflow owner changes in the meantime.
 /// `attempted_at` is response-write-adjacent; `settled_at` is stamped when
 /// this terminal ACK is observed by the daemon.
+#[hotpath::measure]
 fn settle_daemon_work_delivery(
     attempts: Option<&[tracedecay_domain::DeliverySettlementAttemptV1]>,
     recorder: Option<&Arc<tracedecay_usecases::observability::BoundedDeliverySettlementRecorderV1>>,
@@ -563,6 +572,7 @@ enum DaemonDeliveryAckWait {
     Draining,
 }
 
+#[hotpath::measure]
 fn classify_daemon_delivery_ack_wait(
     wait: DaemonDeliveryAckWait,
 ) -> std::result::Result<Option<String>, tracedecay_domain::DeliveryDropReasonV1> {
@@ -681,6 +691,7 @@ async fn serve_broker_socket_client(
 }
 
 #[cfg(unix)]
+#[hotpath::measure]
 fn serve_broker_socket_client_inner(
     stream: BrokerStream,
     engine: DaemonEngine,

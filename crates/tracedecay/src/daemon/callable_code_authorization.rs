@@ -66,6 +66,7 @@ pub(super) struct DaemonCallableCodeAuthorizationSource {
     access: Arc<dyn CurrentCallableCodeAccessPort>,
 }
 
+#[hotpath::measure_all]
 impl DaemonCallableCodeAuthorizationSource {
     pub(super) fn production(
         project_root: PathBuf,
@@ -81,6 +82,7 @@ impl DaemonCallableCodeAuthorizationSource {
         }
     }
 
+    #[hotpath::skip]
     pub(super) async fn current(
         &self,
         observed_at: UtcMicros,
@@ -121,6 +123,7 @@ pub(crate) struct DaemonCodeGraphReadAdmission {
     authorization: DaemonCallableCodeAuthorizationSource,
 }
 
+#[hotpath::measure_all]
 impl DaemonCodeGraphReadAdmission {
     pub(crate) fn production(
         project_root: PathBuf,
@@ -140,6 +143,7 @@ impl DaemonCodeGraphReadAdmission {
         }
     }
 
+    #[hotpath::skip]
     async fn admit_graph_read(
         &self,
         request: tracedecay_graph_query::CodeGraphReadAdmissionRequest<'_>,
@@ -190,6 +194,7 @@ impl tracedecay_graph_query::CodeGraphReadAdmissionPort for DaemonCodeGraphReadA
 /// Tallies one graph-read admission decision against its exact typed outcome.
 /// The reason set is the closed [`CodeGraphReadError`] enum, so every gauge
 /// key stays compile-time static.
+#[hotpath::measure]
 fn record_graph_read_admission<T>(admission: &Result<T, CodeGraphReadError>) {
     match admission {
         Ok(_) => {
@@ -228,6 +233,7 @@ fn record_graph_read_admission<T>(admission: &Result<T, CodeGraphReadError>) {
     }
 }
 
+#[hotpath::measure]
 fn map_graph_admission_problem(problem: ApplicationProblem) -> CodeGraphReadError {
     match problem.kind() {
         ApplicationProblemKind::InvalidRequest => CodeGraphReadError::InvalidRequest {
@@ -259,7 +265,9 @@ pub(super) struct DaemonCallableCodeAuthorization {
     admitted_access: ProjectSourceAccessSnapshot,
 }
 
+#[hotpath::measure_all]
 impl DaemonCallableCodeAuthorization {
+    #[hotpath::skip]
     async fn route_receipt(
         &self,
         context: &RequestContext,
@@ -351,7 +359,9 @@ impl CallableCodeAuthorizationPort for DaemonCallableCodeAuthorization {
     }
 }
 
+#[hotpath::measure_all]
 impl DaemonCallableCodeAuthorization {
+    #[hotpath::skip]
     async fn recheck_route(
         &self,
         context: &RequestContext,
@@ -376,6 +386,7 @@ impl DaemonCallableCodeAuthorization {
     }
 }
 
+#[hotpath::measure]
 fn same_authority(
     admitted: &ProjectSourceAccessSnapshot,
     current: &ProjectSourceAccessSnapshot,
@@ -389,6 +400,7 @@ fn same_authority(
         && admitted.effective_capabilities == current.effective_capabilities
 }
 
+#[hotpath::measure]
 fn concealed() -> ApplicationProblem {
     ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
 }
@@ -399,6 +411,7 @@ fn concealed() -> ApplicationProblem {
 /// would mint a permanent denial against the daemon's own project; it must
 /// surface as a retryable unavailable state instead. Every other failure
 /// shape stays concealed so a probing caller learns nothing about identity.
+#[hotpath::measure]
 fn configuration_current_problem(error: ConfigurationError) -> ApplicationProblem {
     match error {
         ConfigurationError::Unavailable => ApplicationProblem::unavailable(SafeDiagnostic {

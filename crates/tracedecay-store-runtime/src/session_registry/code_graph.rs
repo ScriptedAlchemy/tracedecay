@@ -77,7 +77,9 @@ enum CodeGraphPublicationConflictStageV1 {
     FinalPublish,
 }
 
+#[hotpath::measure_all]
 impl CodeGraphPublicationConflictStageV1 {
+    #[hotpath::skip]
     const fn as_str(self) -> &'static str {
         match self {
             Self::ActiveReplayPublish => "active_replay_publish",
@@ -91,6 +93,7 @@ impl CodeGraphPublicationConflictStageV1 {
     }
 }
 
+#[hotpath::measure]
 fn observe_code_graph_publication<T>(
     stage: CodeGraphPublicationConflictStageV1,
     result: std::result::Result<T, GraphDbError>,
@@ -135,6 +138,7 @@ impl GraphCancellation for FactReadGraphCancellationV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl AtomicGraphCancellationV1 {
     fn new(cancelled: Arc<AtomicBool>) -> Self {
         Self { cancelled }
@@ -222,6 +226,7 @@ impl GraphCancellation for CombinedAtomicGraphCancellationV1 {
     }
 }
 
+#[hotpath::measure]
 fn graph_lifecycle_cancellation(
     local: &Arc<AtomicBool>,
     registry: Option<&Arc<AtomicBool>>,
@@ -280,6 +285,7 @@ impl Drop for CodeGraphPublicationFlightClaimV1<'_> {
 /// instead of sleeping out a corpus-sized peer publish.
 const PUBLICATION_FLIGHT_INTERRUPTION_POLL: Duration = Duration::from_millis(250);
 
+#[hotpath::measure_all]
 impl CodeGraphPublicationFlightV1 {
     /// Claims `key`, waiting out a same-key publish already in flight.
     ///
@@ -351,6 +357,7 @@ pub(crate) struct CodeGraphShardPublicationLocksV1 {
 /// waiter answers its typed interruption.
 const PUBLICATION_BUILD_INTERRUPTION_POLL: Duration = Duration::from_millis(250);
 
+#[hotpath::measure_all]
 impl CodeGraphShardPublicationLocksV1 {
     /// Claims the shard-wide corpus build permit, observing `interruption`
     /// while parked behind a peer's corpus-sized publish.
@@ -451,6 +458,7 @@ pub(crate) struct MemoryGraphOperationRetirementReservationV1<'a> {
     armed: bool,
 }
 
+#[hotpath::measure_all]
 impl RetainedVerifiedGraphRuntimeV1 {
     pub fn issue_database_lease(
         &self,
@@ -874,6 +882,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl MemoryGraphOperationRetirementReservationV1<'_> {
     /// Keeps operation admission closed after reconciliation cancellation has
     /// crossed its irreversible boundary. Graph registry retirement remains
@@ -929,6 +938,7 @@ struct PreparedSealedPublicationV1 {
     request_cancelled: Arc<AtomicBool>,
 }
 
+#[hotpath::measure_all]
 impl RetainedCodeGraphRuntimeV1 {
     pub fn authority(&self) -> Arc<CanonicalCodeGraphStoreLeaseV1> {
         Arc::clone(&self.authority)
@@ -1933,6 +1943,7 @@ impl RetainedCodeGraphRuntimeV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl DaemonSessionRuntimeRegistryV1 {
     /// Self-heals the shared project shard's graph map-owner attachment when
     /// a prior owner was retired out from under this lease-only consumer.
@@ -2482,6 +2493,7 @@ impl CodeGraphSeatRuntimePortV1 for DaemonSessionRuntimeRegistryV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl DaemonSessionRuntimeRegistryV1 {
     /// Coerce this registry to the scheduler-facing seat port.
     ///
@@ -2492,6 +2504,7 @@ impl DaemonSessionRuntimeRegistryV1 {
     }
 }
 
+#[hotpath::measure]
 fn map_publication_error(error: GraphPublicationStoreErrorV1) -> GraphDbError {
     match error {
         GraphPublicationStoreErrorV1::InvalidRequest(error) => {
@@ -2510,6 +2523,7 @@ fn map_publication_error(error: GraphPublicationStoreErrorV1) -> GraphDbError {
     }
 }
 
+#[hotpath::measure]
 fn map_code_graph_error(
     error: tracedecay_code_index::graph_projection::CodeGraphProjectionError,
 ) -> GraphDbError {

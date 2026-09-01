@@ -13,6 +13,7 @@ use super::super::edits::{
 
 /// Removes `lines[start..=end]` and collapses the blank-line separator the
 /// removed item left behind so the source stays tidy.
+#[hotpath::measure]
 pub(super) fn remove_span_with_cleanup(lines: &[&str], start: usize, end: usize) -> Vec<String> {
     let mut out: Vec<String> = lines[..start].iter().map(|s| (*s).to_string()).collect();
     let before_blank = start > 0 && lines[start - 1].trim().is_empty();
@@ -34,6 +35,7 @@ pub(super) fn remove_span_with_cleanup(lines: &[&str], start: usize, end: usize)
 /// Builds the destination file content: leading imports (into an existing
 /// import region or at the top of a fresh file), then the moved block after a
 /// blank-line separator.
+#[hotpath::measure]
 pub(super) fn build_dest_content(
     dest_original: &str,
     imports: &[String],
@@ -57,6 +59,7 @@ pub(super) fn build_dest_content(
 
 /// Inserts `imports` into an existing Rust file after its leading module-doc /
 /// comment / existing-`use` region.
+#[hotpath::measure]
 pub(super) fn insert_imports(dest_source: &str, imports: &[String]) -> String {
     if imports.is_empty() {
         return dest_source.to_string();
@@ -84,6 +87,7 @@ pub(super) fn insert_imports(dest_source: &str, imports: &[String]) -> String {
 
 /// Drops imports already present verbatim in the destination and de-duplicates
 /// within the batch, preserving order.
+#[hotpath::measure]
 pub(super) fn dedup_preserve(
     imports: &[String],
     dest_original: &str,
@@ -119,6 +123,7 @@ pub(super) fn dedup_preserve(
 
 /// Removes each orphaned single-leaf `use` line (only the moved symbol needed
 /// it) from the residual source so the move does not leave dead imports.
+#[hotpath::measure]
 pub(super) fn strip_orphaned_imports(source_modified: &str, orphaned: &[String]) -> String {
     if orphaned.is_empty() {
         return source_modified.to_string();
@@ -146,6 +151,7 @@ pub(super) fn strip_orphaned_imports(source_modified: &str, orphaned: &[String])
 
 /// Builds a combined dry-run diff of the source removal and destination
 /// insertion.
+#[hotpath::measure]
 pub(super) fn combined_diff(
     source_rel: &str,
     source: &str,

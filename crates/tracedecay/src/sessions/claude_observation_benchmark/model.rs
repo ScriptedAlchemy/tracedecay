@@ -23,6 +23,7 @@ pub(super) struct Distribution {
     pub(super) sample_stddev_ns: f64,
 }
 
+#[hotpath::measure_all]
 impl Distribution {
     pub(super) fn from_samples(samples: &[u64]) -> Self {
         assert!(!samples.is_empty(), "benchmark requires samples");
@@ -65,6 +66,7 @@ pub(super) struct NoOpTotals {
     pub(super) deferred_sources: u64,
 }
 
+#[hotpath::measure_all]
 impl NoOpTotals {
     pub(super) fn add(&mut self, stats: ClaudeObservationIngestStats) {
         let ClaudeObservationIngestStats {

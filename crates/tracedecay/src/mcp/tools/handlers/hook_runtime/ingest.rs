@@ -37,6 +37,7 @@ use kernels::{
 /// status, reason code, and retryability all survive verbatim: rewriting any
 /// of the three here launders the admission verdict that downstream retry
 /// policy reads back.
+#[hotpath::measure]
 fn reject_unadmitted(
     admission: HostAdmissionOutcome,
     unavailable_detail: &'static str,
@@ -59,6 +60,7 @@ fn reject_unadmitted(
     }
 }
 
+#[hotpath::measure]
 fn host_admission_facade<'a>(
     cg: Option<&TraceDecay>,
     scope: HostAdmissionScope,
@@ -110,6 +112,7 @@ fn host_admission_facade<'a>(
     Ok(HostAdmissionFacade::new(authority))
 }
 
+#[hotpath::measure]
 fn project_observation_id(cg: &TraceDecay) -> Result<ProjectId> {
     let project_id = cg
         .store_layout()
@@ -404,6 +407,7 @@ pub(super) async fn cursor_compact(
     Ok(compaction_response_json("cursor_compact", &response))
 }
 
+#[hotpath::measure]
 fn compaction_authority_unavailable(action: &str) -> Value {
     json!({
         "action": action,
@@ -414,6 +418,7 @@ fn compaction_authority_unavailable(action: &str) -> Value {
     })
 }
 
+#[hotpath::measure]
 fn compaction_response_json(
     action: &str,
     response: &tracedecay_session_memory::session::lcm::LcmAuthorityResponse,
@@ -450,6 +455,7 @@ fn compaction_response_json(
     })
 }
 
+#[hotpath::measure]
 fn compaction_unavailable_reason(outcome: &LcmAuthorityOutcome) -> &'static str {
     if matches!(
         outcome,
@@ -463,6 +469,7 @@ fn compaction_unavailable_reason(outcome: &LcmAuthorityOutcome) -> &'static str 
     }
 }
 
+#[hotpath::measure]
 fn cursor_compact_skipped(reason: impl Into<String>) -> Value {
     json!({
         "status": "skipped",
@@ -473,6 +480,7 @@ fn cursor_compact_skipped(reason: impl Into<String>) -> Value {
     })
 }
 
+#[hotpath::measure]
 fn event_i64(value: &Value, keys: &[&str]) -> Option<i64> {
     keys.iter().find_map(|key| {
         let value = value.get(*key)?;
@@ -483,10 +491,12 @@ fn event_i64(value: &Value, keys: &[&str]) -> Option<i64> {
     })
 }
 
+#[hotpath::measure]
 fn event_usize(value: &Value, keys: &[&str]) -> Option<usize> {
     event_i64(value, keys).and_then(|value| usize::try_from(value).ok())
 }
 
+#[hotpath::measure]
 fn pressure_only_command(
     provider: &str,
     session_id: &str,
@@ -737,6 +747,7 @@ pub(crate) async fn ingest_transcript_with_cancellation(
     Ok(output)
 }
 
+#[hotpath::measure]
 pub(super) fn complete_ingest_admission(
     admission: HostAdmissionOutcome,
     authority_changed: bool,

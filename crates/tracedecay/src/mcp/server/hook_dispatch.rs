@@ -3,6 +3,7 @@
 
 use super::*;
 
+#[hotpath::measure_all]
 impl McpServer {
     /// Authorizes and admits one branch reconciliation without waiting for indexing.
     ///
@@ -10,6 +11,7 @@ impl McpServer {
     /// project root; both are revalidated here so admit-time membership is never
     /// reused. Everything that differs between the branch plans is carried by
     /// `policy` rather than by branching on the plan again.
+    #[hotpath::skip]
     async fn apply_branch_effect(
         &self,
         effect_root: &Path,
@@ -36,6 +38,7 @@ impl McpServer {
         }
     }
 
+    #[hotpath::skip]
     pub(crate) async fn update_hook_workspace_route(
         &self,
         event: &hook_events::HookEvent,
@@ -78,6 +81,7 @@ impl McpServer {
         })
     }
 
+    #[hotpath::skip]
     pub(crate) async fn run_hook_event_plan(
         &self,
         cg: Arc<TraceDecay>,
@@ -173,6 +177,7 @@ impl McpServer {
         }
     }
 
+    #[hotpath::skip]
     pub(crate) async fn run_hook_incremental_sync(
         &self,
         cg: Arc<TraceDecay>,
@@ -184,6 +189,7 @@ impl McpServer {
         }
     }
 
+    #[hotpath::skip]
     async fn accept_debounced_code_index_reconcile(
         &self,
         cg: &TraceDecay,

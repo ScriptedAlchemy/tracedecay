@@ -78,6 +78,7 @@ enum SessionRefreshHandleLookup {
     NotFound,
 }
 
+#[hotpath::measure_all]
 impl DaemonSessionRefreshService {
     pub(crate) fn new(
         database: RegisteredGlobalDbLeaseV1,
@@ -149,6 +150,7 @@ impl DaemonSessionRefreshService {
         token
     }
 
+    #[hotpath::skip]
     async fn execute_command(
         &self,
         command: SessionRefreshCommand,
@@ -259,12 +261,14 @@ impl DaemonSessionRefreshService {
     }
 }
 
+#[hotpath::measure]
 fn is_session_refresh_handle_token(token: &str) -> bool {
     token.strip_prefix("srh_").is_some_and(|digest| {
         digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
     })
 }
 
+#[hotpath::measure]
 fn missing_session_refresh_handle_lookup(token: &str) -> SessionRefreshHandleLookup {
     if is_session_refresh_handle_token(token) {
         SessionRefreshHandleLookup::Stale
@@ -306,6 +310,7 @@ impl SessionRefreshServicePort for DaemonSessionRefreshService {
     }
 }
 
+#[hotpath::measure]
 fn refresh_frontier_view(
     frontier: tracedecay_store::SessionRefreshFrontierV1,
 ) -> SessionRefreshFrontierView {
@@ -315,6 +320,7 @@ fn refresh_frontier_view(
     }
 }
 
+#[hotpath::measure]
 fn refresh_coverage_view(
     coverage: &tracedecay_domain::TemporalCoverageCountsV1,
 ) -> SessionRefreshCoverageView {
@@ -326,6 +332,7 @@ fn refresh_coverage_view(
     }
 }
 
+#[hotpath::measure]
 fn refresh_progress_view(
     progress: &tracedecay_store::SessionRefreshProgressV1,
 ) -> SessionRefreshProgressView {
@@ -344,6 +351,7 @@ fn refresh_progress_view(
     }
 }
 
+#[hotpath::measure]
 fn refresh_receipt_view(
     receipt: &tracedecay_store::SessionRefreshReceiptV1,
 ) -> SessionRefreshReceiptView {

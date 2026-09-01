@@ -25,6 +25,7 @@ pub(super) struct RetainedHookTasks {
     state: Arc<Mutex<RetainedHookTaskState>>,
 }
 
+#[hotpath::measure_all]
 impl RetainedHookTasks {
     pub(super) fn new() -> Self {
         Self {
@@ -92,6 +93,7 @@ impl RetainedHookTasks {
         }
     }
 
+    #[hotpath::skip]
     pub(super) async fn retire(&self, provider: &str, session_id: &str) -> Result<(), String> {
         let key = format!("{provider}\0{session_id}");
         let task = {
@@ -112,6 +114,7 @@ impl RetainedHookTasks {
         }
     }
 
+    #[hotpath::skip]
     pub(super) async fn shutdown(&self) -> Result<(), String> {
         let tasks = {
             let mut state = self
@@ -142,6 +145,7 @@ impl RetainedHookTasks {
     }
 }
 
+#[hotpath::measure]
 fn finish_retained_hook_task(
     state: Weak<Mutex<RetainedHookTaskState>>,
     key: &str,

@@ -27,6 +27,7 @@ pub(super) struct BranchAddRequest {
     branch: std::result::Result<String, String>,
 }
 
+#[hotpath::measure]
 pub(super) fn parse_branch_add_request(line: &str) -> Option<BranchAddRequest> {
     let request = serde_json::from_str::<JsonRpcRequest>(line.trim()).ok()?;
     if request.method != "tools/call" {
@@ -62,6 +63,7 @@ pub(super) async fn branch_add_response(
     branch_add_response_inner(administration, schedulers, handshake, request).await
 }
 
+#[hotpath::measure]
 fn branch_add_response_inner<'a>(
     administration: &'a StoreAdministration,
     schedulers: Option<&'a CodeIndexSchedulerRegistryV1>,
@@ -210,6 +212,7 @@ async fn activate_and_track_manual_branch_owned(
 }
 
 #[cfg(unix)]
+#[hotpath::measure]
 fn activate_and_track_manual_branch_owned_inner(
     project_root: std::path::PathBuf,
     graph: Arc<crate::tracedecay::TraceDecay>,
@@ -327,6 +330,7 @@ async fn track_exact_worktree_branch_with_lifecycle(
     .await
 }
 
+#[hotpath::measure]
 fn track_exact_worktree_branch_with_lifecycle_inner<'a>(
     graph: &'a Arc<crate::tracedecay::TraceDecay>,
     schedulers: &'a CodeIndexSchedulerRegistryV1,
@@ -574,6 +578,7 @@ pub(crate) async fn capture_exact_branch_source(
 }
 
 #[allow(clippy::type_complexity)]
+#[hotpath::measure]
 fn capture_exact_branch_source_inner<'a>(
     graph: &'a Arc<crate::tracedecay::TraceDecay>,
     schedulers: &'a CodeIndexSchedulerRegistryV1,
@@ -721,6 +726,7 @@ pub(crate) async fn await_exact_branch_generation(
 }
 
 #[allow(clippy::type_complexity)]
+#[hotpath::measure]
 fn await_exact_branch_generation_inner<'a>(
     schedulers: &'a CodeIndexSchedulerRegistryV1,
     canonical_worktree_root: &'a Path,
@@ -819,6 +825,7 @@ fn await_exact_branch_generation_inner<'a>(
     })
 }
 
+#[hotpath::measure]
 fn generation_matches_branch_source(
     generation: &crate::code_index::production::CodeIndexPublishedGenerationV1,
     source: &tracedecay_runtime_core::branch_meta::BranchGraphSourceDraftV1,
@@ -889,6 +896,7 @@ async fn rollback_failed_branch_tracking(
     Ok(())
 }
 
+#[hotpath::measure]
 fn graph_matches_project(
     graph: &crate::tracedecay::TraceDecay,
     canonical_root: &std::path::Path,
@@ -901,6 +909,7 @@ fn graph_matches_project(
             .is_some_and(|root| root == canonical_root)
 }
 
+#[hotpath::measure]
 pub(super) fn typed_project_route_error(
     id: serde_json::Value,
     reason_code: &str,
@@ -920,6 +929,7 @@ pub(super) fn typed_project_route_error(
     )
 }
 
+#[hotpath::measure]
 fn typed_tracking_error(id: serde_json::Value, error: &TraceDecayError) -> JsonRpcResponse {
     if let Some((reason_code, retryable, detail)) = error.project_route_context() {
         return typed_project_route_error(id, reason_code, retryable, detail);
@@ -927,6 +937,7 @@ fn typed_tracking_error(id: serde_json::Value, error: &TraceDecayError) -> JsonR
     typed_project_route_error(id, BRANCH_TRACKING_FAILED, true, &error.to_string())
 }
 
+#[hotpath::measure]
 fn branch_add_tool_result(outcome: &BranchAddOutcome) -> serde_json::Value {
     let name = branch_add_outcome_name(outcome);
     serde_json::json!({
@@ -937,6 +948,7 @@ fn branch_add_tool_result(outcome: &BranchAddOutcome) -> serde_json::Value {
     })
 }
 
+#[hotpath::measure]
 fn branch_add_outcome_name(outcome: &BranchAddOutcome) -> &'static str {
     match outcome {
         BranchAddOutcome::NotIndexed => "not_indexed",

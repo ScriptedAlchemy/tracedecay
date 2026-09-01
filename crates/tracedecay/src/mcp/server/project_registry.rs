@@ -27,7 +27,9 @@ pub(crate) struct DaemonProjectRegistryReadService {
     registry: RegisteredGlobalDbLeaseV1,
 }
 
+#[hotpath::measure_all]
 impl DaemonProjectRegistryReadService {
+    #[hotpath::skip]
     pub(crate) const fn new(registry: RegisteredGlobalDbLeaseV1) -> Self {
         Self { registry }
     }
@@ -44,6 +46,7 @@ impl DaemonProjectRegistryReadService {
             .map(|context| context.project.project_id))
     }
 
+    #[hotpath::skip]
     async fn listing(
         &self,
         active_project_root: &Path,
@@ -70,6 +73,7 @@ impl DaemonProjectRegistryReadService {
         })
     }
 
+    #[hotpath::skip]
     async fn execute_list(
         &self,
         command: ProjectRegistryListingCommand,
@@ -92,6 +96,7 @@ impl DaemonProjectRegistryReadService {
         ))
     }
 
+    #[hotpath::skip]
     async fn resolve_context(
         &self,
         selector: &ProjectRegistrySelector,
@@ -124,6 +129,7 @@ impl DaemonProjectRegistryReadService {
         }
     }
 
+    #[hotpath::skip]
     async fn execute_context(
         &self,
         command: ProjectRegistryContextCommand,
@@ -150,6 +156,7 @@ impl DaemonProjectRegistryReadService {
     }
 }
 
+#[hotpath::measure]
 fn serialize_records<T: serde::Serialize>(records: &[T]) -> Result<Vec<Value>> {
     records
         .iter()

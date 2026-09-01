@@ -7,6 +7,7 @@
 use super::*;
 use tracedecay_daemon_identity::{authority, profile_identity};
 
+#[hotpath::measure]
 pub(super) fn project_server_capacity_error() -> TraceDecayError {
     TraceDecayError::Config {
         message: format!(
@@ -15,6 +16,7 @@ pub(super) fn project_server_capacity_error() -> TraceDecayError {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn project_open_task_capacity_error() -> TraceDecayError {
     TraceDecayError::Config {
         message: format!(
@@ -23,12 +25,14 @@ pub(super) fn project_open_task_capacity_error() -> TraceDecayError {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn project_open_cancellation_error() -> TraceDecayError {
     TraceDecayError::Config {
         message: "daemon is draining during project warm-up".to_string(),
     }
 }
 
+#[hotpath::measure]
 pub(super) fn project_open_cancellation_checkpoint(cancellation: &CancellationToken) -> Result<()> {
     if cancellation.is_cancelled() {
         return Err(project_open_cancellation_error());
@@ -36,6 +40,7 @@ pub(super) fn project_open_cancellation_checkpoint(cancellation: &CancellationTo
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn project_warming_error(project_path: &Path) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!(
@@ -45,6 +50,7 @@ pub(super) fn project_warming_error(project_path: &Path) -> TraceDecayError {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn project_route_for_handshake(
     handshake: &DaemonHandshake,
 ) -> Result<(PathBuf, ProjectRouteKey)> {
@@ -300,6 +306,7 @@ pub(super) struct CatalogRefreshClientKey {
 }
 
 #[cfg(unix)]
+#[hotpath::measure_all]
 impl CatalogRefreshClientKey {
     pub(super) fn from_handshake(handshake: &DaemonHandshake) -> Self {
         Self {

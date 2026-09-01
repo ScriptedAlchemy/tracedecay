@@ -136,6 +136,7 @@ pub(super) async fn open_project_for_handshake(
 
 /// Whether `err` is the specific fail-closed error raised when identity
 /// resolution finds no enrollment marker or registry match for a project.
+#[hotpath::measure]
 fn is_unregistered_identity_error(err: &TraceDecayError) -> bool {
     matches!(
         err,
@@ -146,6 +147,7 @@ fn is_unregistered_identity_error(err: &TraceDecayError) -> bool {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn is_missing_index_error(err: &TraceDecayError) -> bool {
     matches!(
         err,
@@ -155,6 +157,7 @@ pub(super) fn is_missing_index_error(err: &TraceDecayError) -> bool {
     )
 }
 
+#[hotpath::measure]
 fn is_readonly_database_error(err: &TraceDecayError) -> bool {
     if !err.is_database_error() {
         return false;
@@ -190,6 +193,7 @@ pub(super) async fn write_project_open_error(
 /// when the refusal is the reset-required terminal, matching the canonical
 /// problem envelope CLI and HTTP callers receive for the same operation.
 /// Non-application tools and every other open failure keep the raw shape.
+#[hotpath::measure]
 fn tool_call_open_refusal_response(
     request: &JsonRpcRequest,
     connection_scope: &str,
@@ -220,6 +224,7 @@ fn tool_call_open_refusal_response(
     ))
 }
 
+#[hotpath::measure]
 pub(super) fn project_open_error_response(
     id: serde_json::Value,
     error: &TraceDecayError,

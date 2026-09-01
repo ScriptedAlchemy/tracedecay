@@ -48,6 +48,7 @@ impl From<McpCatalogError> for McpDispatchMetadataError {
     }
 }
 
+#[hotpath::measure]
 pub(crate) fn attach_dispatch_metadata(
     definitions: &mut [ToolDefinition],
 ) -> Result<(), McpDispatchMetadataError> {
@@ -195,6 +196,7 @@ pub async fn resolve_mcp_application_surface_with_controls_for_target(
     execute_application_surface(operation, dispatched, executor).await
 }
 
+#[hotpath::measure]
 pub fn resolve_mcp_application_surface_dispatch(
     operation: ApplicationSurfaceOperation,
     request_id: RequestId,

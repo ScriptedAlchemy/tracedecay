@@ -55,6 +55,7 @@ pub(super) async fn hook_v2_context_scout_lifecycle_for_session(
     .await
 }
 
+#[hotpath::measure]
 pub(super) fn hook_v2_native_context_scout_lifecycle(
     args: &Value,
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
@@ -201,11 +202,13 @@ const MAX_RETAINED_HOOK_V2_DELIVERY_CLAIMS: usize = 256;
 type HookV2DeliveryClaimKey = ([u8; 16], [u8; 16]);
 type HookV2DeliveryClaims = StdMutex<BTreeMap<HookV2DeliveryClaimKey, ContextScoutDurableClaimV1>>;
 
+#[hotpath::measure]
 fn retained_hook_v2_delivery_claims() -> &'static HookV2DeliveryClaims {
     static CLAIMS: OnceLock<HookV2DeliveryClaims> = OnceLock::new();
     CLAIMS.get_or_init(|| StdMutex::new(BTreeMap::new()))
 }
 
+#[hotpath::measure]
 pub(super) fn retain_hook_v2_delivery_claim(
     project_id: [u8; 16],
     claim: ContextScoutDurableClaimV1,
@@ -223,6 +226,7 @@ pub(super) fn retain_hook_v2_delivery_claim(
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn lookup_hook_v2_delivery_claim(
     project_id: [u8; 16],
     envelope_id: [u8; 16],
@@ -234,12 +238,14 @@ pub(super) fn lookup_hook_v2_delivery_claim(
         .cloned()
 }
 
+#[hotpath::measure]
 pub(super) fn remove_hook_v2_delivery_claim(project_id: [u8; 16], envelope_id: [u8; 16]) {
     if let Ok(mut claims) = retained_hook_v2_delivery_claims().lock() {
         claims.remove(&(project_id, envelope_id));
     }
 }
 
+#[hotpath::measure]
 fn release_hook_v2_delivery_claim(
     project_id: [u8; 16],
     envelope_id: [u8; 16],
@@ -279,6 +285,7 @@ pub(super) async fn hook_v2_scout_prepare(cg: &TraceDecay, args: &Value) -> Resu
     ))
 }
 
+#[hotpath::measure]
 fn orchestration_response(
     action: &str,
     outcome: tracedecay_daemon_service::HookOrchestrationAdmissionV1,
@@ -416,6 +423,7 @@ pub(super) enum ContextScoutReadSurfaceV1 {
     Budget,
 }
 
+#[hotpath::measure_all]
 impl ContextScoutReadSurfaceV1 {
     pub(super) fn from_action(action: &str) -> Option<Self> {
         match action {
@@ -498,6 +506,7 @@ pub(super) async fn hook_v2_scout_read(
     }
 }
 
+#[hotpath::measure]
 fn scout_store_outcome(outcome: ContextScoutDurableStoreOutcomeV1) -> &'static str {
     match outcome {
         ContextScoutDurableStoreOutcomeV1::Stored => "stored",

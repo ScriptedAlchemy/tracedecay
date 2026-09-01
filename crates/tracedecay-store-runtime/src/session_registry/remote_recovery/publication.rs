@@ -35,6 +35,7 @@ pub(super) enum RestorePublicationV1 {
     RolledBack,
 }
 
+#[hotpath::measure_all]
 impl RemoteRecoveryPublicationContextV1 {
     fn issue_session_lease(
         &self,
@@ -44,6 +45,7 @@ impl RemoteRecoveryPublicationContextV1 {
         owner.issue_lease(SessionRelationScope::project_sessions(project_id.clone()))
     }
 
+    #[hotpath::skip]
     async fn restore_replacement_ready(
         &self,
         project_id: &ProjectId,
@@ -62,6 +64,7 @@ impl RemoteRecoveryPublicationContextV1 {
         replacement.restore_old_ready()
     }
 
+    #[hotpath::skip]
     async fn recover_pre_native<T>(
         &self,
         project_id: &ProjectId,
@@ -94,6 +97,7 @@ impl RemoteRecoveryPublicationContextV1 {
         }
     }
 
+    #[hotpath::skip]
     async fn reserve_project_session_vacancy(
         &self,
         project_id: &ProjectId,
@@ -399,6 +403,7 @@ impl RemoteRecoveryPublicationContextV1 {
         }
     }
 
+    #[hotpath::skip]
     pub(super) async fn ensure_project_sessions_target_while_admitted(
         &self,
         project_id: ProjectId,
@@ -449,6 +454,7 @@ impl RemoteRecoveryPublicationContextV1 {
         Ok(())
     }
 
+    #[hotpath::skip]
     pub(super) async fn resume_quarantined_restore_while_admitted(
         &self,
         project_id: ProjectId,
@@ -493,6 +499,7 @@ impl RemoteRecoveryPublicationContextV1 {
         Ok(Some(outcome))
     }
 
+    #[hotpath::skip]
     pub(super) async fn resume_retained_rollback(
         &self,
         _project_id: ProjectId,
@@ -603,6 +610,7 @@ impl RemoteRecoveryPublicationContextV1 {
         .await
     }
 
+    #[hotpath::skip]
     pub(super) async fn publish_restore(
         &self,
         project_id: ProjectId,

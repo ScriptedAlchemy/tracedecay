@@ -202,6 +202,7 @@ pub(crate) async fn proxy_transport_to_daemon_with_drain_bound(
 /// A line that is not a `tools/call` (initialize, tools/list, resources/*) has
 /// no tool of its own and takes the ordinary interactive ceiling.
 #[cfg(unix)]
+#[hotpath::measure]
 fn disconnect_drain_bound(line: &str) -> Duration {
     let ceiling = request_tool_name(line)
         .and_then(|tool| crate::mcp::tools::binding::canonical_tool_dispatch_ceiling(&tool).ok())
@@ -211,6 +212,7 @@ fn disconnect_drain_bound(line: &str) -> Duration {
 
 /// The tool a `tools/call` line names, or `None` for any other method.
 #[cfg(unix)]
+#[hotpath::measure]
 fn request_tool_name(line: &str) -> Option<String> {
     let request = serde_json::from_str::<JsonRpcRequest>(line.trim()).ok()?;
     if request.method != "tools/call" {
@@ -360,6 +362,7 @@ async fn proxy_host_input_to_daemon(
 }
 
 #[cfg(unix)]
+#[hotpath::measure]
 pub(crate) fn apply_proxy_initialize_metadata(
     handshake: &mut DaemonHandshake,
     metadata: ProxyInitializeMetadata,
@@ -380,6 +383,7 @@ pub(crate) fn apply_proxy_initialize_metadata(
 }
 
 #[cfg(unix)]
+#[hotpath::measure]
 pub(crate) fn reset_proxy_handshake_for_initialize(
     base_handshake: &DaemonHandshake,
     handshake: &mut DaemonHandshake,
@@ -504,6 +508,7 @@ pub(super) async fn bounded_repository_identity(
 /// unresolved and the caller retries within its own budget, exactly like a
 /// warming project open. Spawn and probe failures are terminal because retrying
 /// them until the caller's budget expires only hides the actionable error.
+#[hotpath::measure]
 pub(super) fn repository_discovery_deferred(
     path: &Path,
     reason: tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown,
@@ -579,6 +584,7 @@ pub(crate) async fn send_daemon_request_line(
     .await
 }
 
+#[hotpath::measure]
 fn responses_are_project_open_retryable(responses: &[String]) -> bool {
     responses.len() == 1
         && serde_json::from_str::<serde_json::Value>(&responses[0])
@@ -713,6 +719,7 @@ pub(crate) async fn send_daemon_request_line_with_liveness_poll(
 /// freshly-updated client can still detect a stale daemon left running by a
 /// non-systemd setup or a plain `tracedecay upgrade`.
 #[cfg(unix)]
+#[hotpath::measure]
 pub(crate) fn proxy_initialize_metadata(
     request_line: &str,
     responses: &[String],
@@ -749,6 +756,7 @@ pub(crate) fn proxy_initialize_metadata(
 }
 
 #[cfg(unix)]
+#[hotpath::measure]
 fn daemon_version_from_initialize_response(
     request_line: &str,
     responses: &[String],
@@ -759,6 +767,7 @@ fn daemon_version_from_initialize_response(
 /// The warning to surface when the daemon behind an `initialize` response is
 /// running a different binary version than this client.
 #[cfg(unix)]
+#[hotpath::measure]
 pub(crate) fn daemon_version_skew_warning(
     request_line: &str,
     responses: &[String],
@@ -776,6 +785,7 @@ pub(crate) fn daemon_version_skew_warning(
 }
 
 #[cfg(unix)]
+#[hotpath::measure]
 fn daemon_proxy_error_response(line: &str, err: &TraceDecayError) -> Option<JsonRpcResponse> {
     let request = serde_json::from_str::<JsonRpcRequest>(line).ok()?;
     request.id.map(|id| {

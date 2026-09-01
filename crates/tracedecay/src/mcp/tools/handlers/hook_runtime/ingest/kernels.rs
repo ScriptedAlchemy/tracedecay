@@ -54,6 +54,7 @@ pub(super) enum TranscriptPayloadRouteV1 {
     InlineMessages,
 }
 
+#[hotpath::measure_all]
 impl TranscriptPayloadRouteV1 {
     pub(super) fn from_args(args: &Value) -> Self {
         if args.get("messages").is_some() {
@@ -78,6 +79,7 @@ pub(super) struct TranscriptCaptureContext<'a> {
     pub(super) cancellation: &'a ObservationCancellation,
 }
 
+#[hotpath::measure_all]
 impl<'a> TranscriptCaptureContext<'a> {
     fn profile_root(&self) -> Result<&'a Path> {
         self.profile_root
@@ -240,6 +242,7 @@ const TRANSCRIPT_CAPTURE_KERNELS: &[(
 ];
 
 /// Resolves the capture kernel registered for one transcript route, if any.
+#[hotpath::measure]
 pub(super) fn transcript_capture_kernel(
     provider: &str,
     user_scope: bool,
@@ -522,6 +525,7 @@ async fn capture_hermes_callback(
     })
 }
 
+#[hotpath::measure]
 fn lcm_authority_unavailable() -> TranscriptCaptureOutcome {
     TranscriptCaptureOutcome {
         route_admission: Some(HostAdmissionOutcome::retained_unavailable(

@@ -1,5 +1,6 @@
 //! Index-freshness admission for edit-shaped MCP tools.
 
+#[hotpath::measure]
 pub(crate) fn needs_lazy_sync_before_dispatch(tool_name: &str) -> bool {
     matches!(
         tool_name,

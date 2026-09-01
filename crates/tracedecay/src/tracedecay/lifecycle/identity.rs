@@ -10,6 +10,7 @@ use tracedecay_store::ProjectId;
 
 use super::{MovedStoreAdoption, TraceDecay, TraceDecayOpenOptions};
 
+#[hotpath::measure_all]
 impl TraceDecay {
     pub(in crate::tracedecay) fn registered_project_id(
         store_layout: &StoreLayout,
@@ -53,6 +54,7 @@ impl TraceDecay {
     /// This differs from [`Self::resolve_registered_configuration_layout`] only
     /// in that a project with no enrollment marker or registry match falls
     /// through to a default identity instead of failing closed.
+    #[hotpath::skip]
     pub(crate) async fn resolve_first_touch_configuration_layout(
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,
@@ -310,11 +312,13 @@ impl TraceDecay {
             || tracedecay_runtime_core::storage::has_repository_identity_marker(project_root)
     }
 
+    #[hotpath::skip]
     pub async fn has_initialized_store(project_root: &Path) -> bool {
         Self::has_initialized_store_with_options(project_root, &TraceDecayOpenOptions::default())
             .await
     }
 
+    #[hotpath::skip]
     pub async fn has_initialized_store_with_options(
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,
@@ -327,6 +331,7 @@ impl TraceDecay {
     /// Resolves the store layout for a project using the same registry/alias
     /// aware path as [`Self::has_initialized_store`], returning it only when
     /// the resolved store's graph database actually exists.
+    #[hotpath::skip]
     pub async fn initialized_store_layout_with_options(
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,
@@ -352,6 +357,7 @@ impl TraceDecay {
 
     /// Resolves the profile store layout for a local path using enrollment
     /// markers first, then the global registry aliases for the git identity.
+    #[hotpath::skip]
     pub async fn resolve_store_layout_for_identity(project_root: &Path) -> Result<StoreLayout> {
         Self::resolve_store_layout_for_identity_with_options(
             project_root,
@@ -360,6 +366,7 @@ impl TraceDecay {
         .await
     }
 
+    #[hotpath::skip]
     pub async fn resolve_store_layout_for_identity_with_options(
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,
@@ -367,6 +374,7 @@ impl TraceDecay {
         Self::resolve_store_layout_for_local_identity(project_root, open_options).await
     }
 
+    #[hotpath::skip]
     async fn resolve_store_layout_for_local_identity(
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,
@@ -424,6 +432,7 @@ impl TraceDecay {
     }
 }
 
+#[hotpath::measure]
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }

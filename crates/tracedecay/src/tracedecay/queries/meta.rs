@@ -4,6 +4,7 @@ use crate::config::TraceDecayConfig;
 use crate::tracedecay::TraceDecay;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
+#[hotpath::measure]
 fn parse_counter(key: &'static str, value: Option<String>) -> Result<u64> {
     let Some(value) = value else {
         return Ok(0);
@@ -16,13 +17,16 @@ fn parse_counter(key: &'static str, value: Option<String>) -> Result<u64> {
         })
 }
 
+#[hotpath::measure_all]
 impl TraceDecay {
     /// Returns the persisted tokens-saved counter.
+    #[hotpath::skip]
     pub async fn get_tokens_saved(&self) -> Result<u64> {
         parse_counter("tokens_saved", self.db.get_metadata("tokens_saved").await?)
     }
 
     /// Persists the tokens-saved counter to the database.
+    #[hotpath::skip]
     pub async fn set_tokens_saved(&self, value: u64) -> Result<()> {
         self.db
             .set_metadata("tokens_saved", &value.to_string())
@@ -33,6 +37,7 @@ impl TraceDecay {
     ///
     /// This is separate from the main `tokens_saved` counter and can be
     /// independently reset via [`Self::reset_local_counter`].
+    #[hotpath::skip]
     pub async fn get_local_counter(&self) -> Result<u64> {
         parse_counter(
             "local_counter",
@@ -41,11 +46,13 @@ impl TraceDecay {
     }
 
     /// Resets the project-local token counter to zero.
+    #[hotpath::skip]
     pub async fn reset_local_counter(&self) -> Result<()> {
         self.db.set_metadata("local_counter", "0").await
     }
 
     /// Increments the project-local token counter by the given amount.
+    #[hotpath::skip]
     pub async fn add_local_counter(&self, delta: u64) -> Result<()> {
         let transaction = self.db.begin_write_transaction("add local counter").await?;
         let current = self.get_local_counter().await?;
@@ -62,6 +69,7 @@ impl TraceDecay {
     }
 
     /// Checkpoints the WAL and closes the database connection.
+    #[hotpath::skip]
     pub async fn checkpoint(&self) -> Result<()> {
         self.db.checkpoint().await
     }
@@ -72,6 +80,7 @@ impl TraceDecay {
     }
 
     /// Run the quick integrity check and return the first problem row, if any.
+    #[hotpath::skip]
     pub(crate) async fn quick_check_report(&self) -> Result<Option<String>> {
         self.db.quick_check_report().await
     }

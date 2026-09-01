@@ -160,6 +160,7 @@ async fn exact_serving_generation(
         .then(|| generation.manifest().generation_id.clone())
 }
 
+#[hotpath::measure]
 pub(crate) fn project_code_index_ignored_dependency_admission_port(
     schedulers: CodeIndexSchedulerRegistryV1,
     project_root: PathBuf,

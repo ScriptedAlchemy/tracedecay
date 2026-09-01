@@ -19,12 +19,14 @@ use tracedecay_sessions::serving::SessionProjectionServingStatusPort;
 
 use super::hook_writes::{BackgroundRefreshWriter, direct_background_refresh_writer};
 
+#[hotpath::measure]
 fn wrap_profile_identity(
     identity: LocalProfileIdentityAuthorityV1,
 ) -> Arc<dyn ProfileIdentityReadPort> {
     Arc::new(identity)
 }
 
+#[hotpath::measure]
 fn wrap_refresh_wake(
     wake: tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
 ) -> (
@@ -80,6 +82,7 @@ where
 
 pub(crate) type RetainedProjectServerResolver = Arc<dyn McpProjectServerResolvePort>;
 
+#[hotpath::measure]
 pub(crate) fn install_retained_project_server_resolver(
     resolve: impl Fn(RetainedProjectGraphRequest) -> RetainedProjectServerFuture + Send + Sync + 'static,
 ) -> RetainedProjectServerResolver {
@@ -88,6 +91,7 @@ pub(crate) fn install_retained_project_server_resolver(
 
 /// Dashboard admission erases the concrete graph only at its consumer
 /// boundary.
+#[hotpath::measure]
 pub(crate) fn dashboard_retained_project_graph_resolver(
     resolver: RetainedProjectServerResolver,
     expected_profile_id: tracedecay_domain::UserProfileId,
@@ -231,6 +235,7 @@ pub(crate) struct McpServerDaemonCoreAuthority {
     pub(crate) writers: McpServerWriters,
 }
 
+#[hotpath::measure_all]
 impl McpServerWriters {
     pub(crate) fn daemon_owned(
         dashboard_automation: tracedecay_dashboard_api::DashboardAutomationWriter,
@@ -243,6 +248,7 @@ impl McpServerWriters {
     }
 }
 
+#[hotpath::measure_all]
 impl McpServerConstructionContext {
     #[hotpath::measure(label = "mcp.server.construction.direct")]
     pub(crate) fn direct(cg: impl Into<Arc<TraceDecay>>, scope_prefix: Option<String>) -> Self {

@@ -252,6 +252,7 @@ impl DaemonEngine {
     }
 
     #[cfg(test)]
+    #[hotpath::skip]
     pub(in crate::daemon) async fn shutdown_all(&self) -> Arc<DaemonShutdownReceipt> {
         let deadline = tokio::time::Instant::now() + DAEMON_SHUTDOWN_DEADLINE;
         let lifecycle = self.lifecycle.clone();

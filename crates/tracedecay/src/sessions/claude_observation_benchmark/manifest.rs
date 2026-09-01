@@ -33,6 +33,7 @@ pub(super) struct WorkloadManifest {
     evidence_runner: String,
 }
 
+#[hotpath::measure]
 pub(super) fn validate() {
     let manifest = serde_json::from_str::<WorkloadManifest>(WORKLOAD_MANIFEST)
         .expect("deserialize claude-observation benchmark workload manifest");
@@ -199,6 +200,7 @@ fn expected() -> WorkloadManifest {
     }
 }
 
+#[hotpath::measure]
 fn strings(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).to_string()).collect()
 }

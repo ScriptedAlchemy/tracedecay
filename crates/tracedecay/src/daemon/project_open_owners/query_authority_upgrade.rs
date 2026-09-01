@@ -40,6 +40,7 @@ pub(super) enum DeferredQueryAuthorityMountV1 {
 /// check usually misses. A later `Published` event wakes the waiter on a
 /// fresh build; a restart that restores the same sealed generation records
 /// `Noop` and never repeats that event, so the serving slot is polled too.
+#[hotpath::measure]
 pub(super) fn spawn_deferred_query_authority_mount(
     owner: &crate::mcp::McpServer,
     invocation: DaemonInvocationState,

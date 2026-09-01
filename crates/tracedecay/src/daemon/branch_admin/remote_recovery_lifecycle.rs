@@ -68,6 +68,7 @@ pub(super) type SharedRemoteRecoveryProjectLifecyclesV1 =
 pub(in crate::daemon) type RemoteRecoveryProjectQuiescenceV1 =
     Arc<super::project_retirement::ProjectRetirementFenceV1>;
 
+#[hotpath::measure_all]
 impl StoreAdministration {
     pub(in crate::daemon) fn install_remote_recovery_project_lifecycle(
         &self,
@@ -101,6 +102,7 @@ impl StoreAdministration {
     }
 }
 
+#[hotpath::measure]
 fn ensure_profile_lifecycle(
     administration: &StoreAdministration,
     lifecycles: &mut RemoteRecoveryProjectLifecyclesV1,
@@ -126,12 +128,14 @@ fn ensure_profile_lifecycle(
     Ok(lifecycle)
 }
 
+#[hotpath::measure]
 fn lifecycle_registry_unavailable() -> TraceDecayError {
     TraceDecayError::Config {
         message: "remote recovery project lifecycle registry is unavailable".to_owned(),
     }
 }
 
+#[hotpath::measure_all]
 impl RemoteRecoveryProjectLifecycleV1 {
     pub(super) fn new(
         administration: &super::StoreAdministration,
@@ -271,6 +275,7 @@ impl RemoteRecoveryProjectLifecycleV1 {
         Ok(fence)
     }
 
+    #[hotpath::skip]
     pub(in crate::daemon) async fn authorize_project_recovery(
         &self,
         project_id: &ProjectId,
@@ -288,6 +293,7 @@ impl RemoteRecoveryProjectLifecycleV1 {
         Ok(writer)
     }
 
+    #[hotpath::skip]
     async fn settle_retained_runtime_retirement(&self, project_id: &ProjectId) -> Result<()> {
         let deadline = tokio::time::Instant::now() + super::super::DAEMON_TASK_ABORT_DEADLINE;
         let receipt = super::project_retirement::settle_project_retirements(
@@ -311,6 +317,7 @@ impl RemoteRecoveryProjectLifecycleV1 {
         }
     }
 
+    #[hotpath::skip]
     async fn ensure_project_recovery_active(&self, project_id: &ProjectId) -> Result<()> {
         let registry = {
             let registries = self.session_runtime_registries.lock().await;
@@ -521,6 +528,7 @@ impl RemoteRecoveryProjectLifecycle for RemoteRecoveryProjectLifecycleV1 {
 }
 
 #[cfg(unix)]
+#[hotpath::measure]
 fn matching_scheduler_keys<T>(
     schedulers: &std::collections::HashMap<super::super::ProjectServerKey, T>,
     profile_root: &Path,

@@ -25,6 +25,7 @@ pub(crate) struct DaemonVerifiedSemanticVectorGraphRuntimeV1 {
     binding: StoreRuntimeBindingV1,
 }
 
+#[hotpath::measure_all]
 impl DaemonVerifiedSemanticVectorGraphRuntimeV1 {
     pub fn new(
         retained: Arc<RetainedCodeGraphRuntimeV1>,

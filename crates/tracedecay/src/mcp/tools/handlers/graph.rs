@@ -58,6 +58,7 @@ use tracedecay_mcp::handlers::graph::{
 };
 use verified::{append_verified_plan_context, verified_context_markdown};
 
+#[hotpath::measure]
 fn semantic_search_mode(args: &Value) -> Result<crate::mcp::server::CodeIndexSearchModeV1> {
     match args.get("semantic_mode").and_then(Value::as_str) {
         None | Some("fallback_allowed") => {
@@ -92,6 +93,7 @@ async fn execute_code_index_search(
     }
 }
 
+#[hotpath::measure]
 fn semantic_status_value(
     mode: crate::mcp::server::CodeIndexSearchModeV1,
     status: &crate::mcp::server::CodeIndexSemanticStatusV1,
@@ -117,6 +119,7 @@ fn semantic_status_value(
 /// answer from one produced while a lane was down. Emitted on every search
 /// response, including the successful ones, because "no matches" and "the
 /// matching lane was not running" are otherwise indistinguishable.
+#[hotpath::measure]
 fn coverage_value(coverage: &crate::mcp::server::CodeIndexSearchCoverageV1) -> Value {
     fn lane(status: &crate::mcp::server::CodeIndexLaneStatusV1) -> Value {
         match status {
@@ -145,10 +148,12 @@ fn coverage_value(coverage: &crate::mcp::server::CodeIndexSearchCoverageV1) -> V
     })
 }
 
+#[hotpath::measure]
 fn user_line(line: u32) -> u32 {
     line.saturating_add(1)
 }
 
+#[hotpath::measure]
 fn rendered_tool_result<F>(
     cg: &TraceDecay,
     args: &Value,
@@ -163,6 +168,7 @@ where
 }
 
 /// [`rendered_tool_result`] with the default [`render::generic_md`] body.
+#[hotpath::measure]
 fn generic_tool_result(
     cg: &TraceDecay,
     args: &Value,
@@ -172,6 +178,7 @@ fn generic_tool_result(
     support::generic_tool_result(Some(cg.project_root()), args, value, touched_files)
 }
 
+#[hotpath::measure]
 fn rendered_context_tool_result(
     cg: &TraceDecay,
     args: &Value,
@@ -385,6 +392,7 @@ where
 /// Warns, in the human-facing body, that a result list is short because a lane
 /// was missing. A degraded page is otherwise indistinguishable from a thorough
 /// one, which is exactly how a partial answer gets trusted as a complete one.
+#[hotpath::measure]
 fn append_coverage_md(md: &mut Md, value: &Value) {
     let Some(coverage) = value.get("coverage") else {
         return;
@@ -427,6 +435,7 @@ fn append_coverage_md(md: &mut Md, value: &Value) {
     }
 }
 
+#[hotpath::measure]
 fn render_search_md(value: &Value) -> String {
     let items = if value.is_array() {
         value.as_array()
@@ -520,6 +529,7 @@ struct ContextGraphProjection {
     touched_files: Vec<String>,
 }
 
+#[hotpath::measure]
 fn context_search_matches(
     complete: &crate::mcp::server::CodeIndexSearchCompletedV1,
     scope_prefix: Option<&str>,
@@ -553,6 +563,7 @@ fn context_search_matches(
         .collect()
 }
 
+#[hotpath::measure]
 fn context_graph_projection(
     cg: &TraceDecay,
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
@@ -638,6 +649,7 @@ fn context_graph_projection(
     })
 }
 
+#[hotpath::measure]
 fn append_context_search_matches(output: &mut String, matches: &[ContextSearchMatchV1]) {
     if matches.is_empty() {
         return;
@@ -656,6 +668,7 @@ fn append_context_search_matches(output: &mut String, matches: &[ContextSearchMa
     }
 }
 
+#[hotpath::measure]
 fn append_context_semantic_pending(output: &mut String, value: &Value) {
     let semantic = &value["coverage"]["semantic"];
     let reason = semantic.get("reason").and_then(Value::as_str);
@@ -1077,6 +1090,7 @@ fn cached_file_lines<'a>(
 }
 
 /// Trims and length-caps a source line for use as a preview snippet.
+#[hotpath::measure]
 fn snippet_text(line: &str) -> String {
     tracedecay_runtime_core::text::utf8_prefix_at_or_before(line.trim(), 160).to_string()
 }
@@ -1084,6 +1098,7 @@ fn snippet_text(line: &str) -> String {
 /// Picks a current-text snippet near `approx_line` (0-based; edge line bases are
 /// approximate, so neighbors are tried) that actually contains `name`, falling
 /// back to the line itself. `None` when no line is available.
+#[hotpath::measure]
 fn reference_line_snippet(
     lines: &[String],
     approx_line: Option<u32>,
@@ -1100,6 +1115,7 @@ fn reference_line_snippet(
 
 /// True for bytes that can appear inside an identifier. Non-ASCII bytes count so
 /// multi-byte unicode identifiers are not falsely split at a boundary.
+#[hotpath::measure]
 fn is_ident_byte(b: u8) -> bool {
     b == b'_' || b.is_ascii_alphanumeric() || b >= 0x80
 }
@@ -1107,6 +1123,7 @@ fn is_ident_byte(b: u8) -> bool {
 /// Counts occurrences of `name` in `haystack` bounded as a whole identifier
 /// (neither neighbouring byte is an identifier byte). Used to estimate the
 /// literal textual matches a rename would touch, independent of the graph.
+#[hotpath::measure]
 fn count_identifier_occurrences(haystack: &str, name: &str) -> usize {
     if name.is_empty() {
         return 0;

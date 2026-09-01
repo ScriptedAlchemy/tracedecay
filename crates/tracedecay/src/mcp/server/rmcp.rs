@@ -38,6 +38,7 @@ pub(crate) struct RmcpSelectedProjectResponseAuthority {
     >,
 }
 
+#[hotpath::measure_all]
 impl RmcpSelectedProjectResponseAuthority {
     fn request_key(id: &Value) -> tracedecay_domain::errors::Result<String> {
         if id.is_null() {
@@ -126,6 +127,7 @@ pub(crate) struct RmcpWorkDeliverySettlement {
     connection_scope: String,
 }
 
+#[hotpath::measure_all]
 impl RmcpWorkDeliverySettlement {
     pub(crate) fn new(
         recorder: Option<
@@ -255,6 +257,7 @@ pub(crate) struct RmcpConnectionAdapter {
     build_version: &'static str,
 }
 
+#[hotpath::measure_all]
 impl RmcpConnectionAdapter {
     pub(crate) fn new(
         server: Arc<McpServer>,
@@ -420,6 +423,7 @@ impl ServerHandler for RmcpConnectionAdapter {
         .with_server_info(Implementation::new("tracedecay", self.build_version))
     }
 
+    #[hotpath::skip]
     async fn initialize(
         &self,
         request: InitializeRequestParams,
@@ -434,6 +438,7 @@ impl ServerHandler for RmcpConnectionAdapter {
         Self::response_result(response)
     }
 
+    #[hotpath::skip]
     async fn list_tools(
         &self,
         _request: Option<rmcp::model::PaginatedRequestParams>,
@@ -442,6 +447,7 @@ impl ServerHandler for RmcpConnectionAdapter {
         Self::response_result(self.dispatch(context, "tools/list", None).await?)
     }
 
+    #[hotpath::skip]
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
@@ -455,6 +461,7 @@ impl ServerHandler for RmcpConnectionAdapter {
         .map(Into::into)
     }
 
+    #[hotpath::skip]
     async fn list_resources(
         &self,
         _request: Option<rmcp::model::PaginatedRequestParams>,
@@ -463,6 +470,7 @@ impl ServerHandler for RmcpConnectionAdapter {
         Self::response_result(self.dispatch(context, "resources/list", None).await?)
     }
 
+    #[hotpath::skip]
     async fn read_resource(
         &self,
         request: ReadResourceRequestParams,
@@ -477,6 +485,7 @@ impl ServerHandler for RmcpConnectionAdapter {
         .map(Into::into)
     }
 
+    #[hotpath::skip]
     async fn on_cancelled(
         &self,
         notification: rmcp::model::CancelledNotificationParam,
@@ -485,6 +494,7 @@ impl ServerHandler for RmcpConnectionAdapter {
         let _ = self.cancel_request(notification.request_id);
     }
 
+    #[hotpath::skip]
     async fn on_custom_notification(
         &self,
         notification: CustomNotification,
@@ -495,10 +505,12 @@ impl ServerHandler for RmcpConnectionAdapter {
     }
 }
 
+#[hotpath::measure]
 fn rmcp_error(error: JsonRpcError) -> ErrorData {
     ErrorData::new(ErrorCode(error.code), error.message, error.data)
 }
 
+#[hotpath::measure]
 fn project_server_retired_error() -> ErrorData {
     ErrorData::internal_error(
         "tool project route failed: project server was retired",

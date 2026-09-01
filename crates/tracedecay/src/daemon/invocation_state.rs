@@ -56,6 +56,7 @@ impl Default for DaemonInvocationState {
     }
 }
 
+#[hotpath::measure_all]
 impl DaemonInvocationState {
     /// Construct one daemon-generation invocation state whose dashboard
     /// progress is ordered by the existing durable daemon-authority epoch.
@@ -105,6 +106,7 @@ impl DaemonInvocationState {
     /// session or host-admission work can start. The exact `ProfileSessions`
     /// shard is the persisted user-profile authority; project configuration
     /// must never win this process-wide installation by opening first.
+    #[hotpath::skip]
     pub(crate) async fn install_profile_worker_plan(
         &self,
         database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
@@ -139,6 +141,7 @@ impl DaemonInvocationState {
         })
     }
 
+    #[hotpath::skip]
     pub(super) async fn retire_project_runtime_owners(
         &self,
         profile_id: &tracedecay_domain::configuration::UserProfileId,
@@ -150,6 +153,7 @@ impl DaemonInvocationState {
             .map(drop)
     }
 
+    #[hotpath::skip]
     pub(super) async fn quiesce_project_runtime_owners(
         &self,
         profile_id: &tracedecay_domain::configuration::UserProfileId,
@@ -332,6 +336,7 @@ impl DaemonInvocationState {
         DaemonLspOwnerRegistrar::new(&self.service)
     }
 
+    #[hotpath::skip]
     pub(super) async fn mount_query_authority_for_project(
         &self,
         project_root: &Path,
@@ -351,6 +356,7 @@ impl DaemonInvocationState {
         .await
     }
 
+    #[hotpath::skip]
     pub(super) async fn mount_core_query_authority_for_project(
         &self,
         project_root: &Path,
@@ -367,6 +373,7 @@ impl DaemonInvocationState {
         .await
     }
 
+    #[hotpath::skip]
     pub(super) async fn mount_core_query_authority_for_committed_fallback(
         &self,
         project_root: &Path,
@@ -923,6 +930,7 @@ impl DaemonInvocationState {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::skip]
     pub(super) async fn execute_one_multi_root_operation(
         &self,
         store_administration: &StoreAdministration,
@@ -1057,6 +1065,7 @@ pub(super) enum ParsedMultiRootOperationV1 {
     },
 }
 
+#[hotpath::measure]
 fn parse_multi_root_operation(
     operation: &tracedecay_application::MultiRootOperationV1,
 ) -> std::result::Result<ParsedMultiRootOperationV1, DaemonInvocationProblem> {

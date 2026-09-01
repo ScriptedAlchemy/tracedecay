@@ -1,6 +1,7 @@
 use super::*;
 use tracedecay_usecases::semantic_runtime::SemanticVectorRetentionAuthorizationV1;
 
+#[hotpath::measure_all]
 impl RetainedCodeGraphRuntimeV1 {
     pub fn reserve_one_semantic_vector_generation(
         &self,
@@ -546,6 +547,7 @@ impl RetainedCodeGraphRuntimeV1 {
     }
 }
 
+#[hotpath::measure]
 fn post_commit_batch_settlement_error(error: GraphDbError) -> GraphDbError {
     match error {
         GraphDbError::Cancelled | GraphDbError::DeadlineExceeded => {
@@ -574,6 +576,7 @@ mod settlement_tests {
     }
 }
 
+#[hotpath::measure]
 fn require_retriable_stage_effect(
     state: tracedecay_store::SemanticVectorStageEffectState,
 ) -> std::result::Result<(), GraphDbError> {
@@ -587,6 +590,7 @@ fn require_retriable_stage_effect(
     }
 }
 
+#[hotpath::measure]
 fn map_semantic_vector_staging_error(
     error: tracedecay_store::SemanticVectorStagingStoreError,
 ) -> GraphDbError {
