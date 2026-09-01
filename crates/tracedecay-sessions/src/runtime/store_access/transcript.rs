@@ -14,6 +14,38 @@ enum TranscriptWritePolicy {
     ProjectionOnly,
 }
 
+/// Prepares every privacy-protected raw-message write before the transaction
+/// acquires SQLite's single-writer lease.
+///
+/// The returned vector preserves batch/message order so the transactional
+/// phase can pair each staged payload with its canonical projection row.
+#[hotpath::measure(label = "sessions.store.transcript.stage_messages")]
+fn stage_full_transcript_messages(
+    storage_root: &std::path::Path,
+    batches: &[TranscriptBatch],
+    payload_rollback: &mut PayloadFileRollback,
+) -> Result<Vec<raw::StagedRawMessageIngest>, TranscriptPersistenceError> {
+    let message_count = batches.iter().fold(0_usize, |count, batch| {
+        count.saturating_add(batch.messages.len())
+    });
+    let mut staged = Vec::with_capacity(message_count);
+    for batch in batches {
+        for message in &batch.messages {
+            staged.push(
+                raw::stage_raw_message_with_payload_tracked(
+                    storage_root,
+                    message,
+                    payload_rollback,
+                )
+                .map_err(|error| {
+                    TranscriptPersistenceError::storage("upsert LCM raw message", error)
+                })?,
+            );
+        }
+    }
+    Ok(staged)
+}
+
 pub async fn get_parse_offset(
     conn: &impl QueryExecutor,
     path: &str,
@@ -311,7 +343,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         &self,
         conn: &impl Executor,
         message: &SessionMessageRecord,
-        payload_rollback: &mut PayloadFileRollback,
+        staged: raw::StagedRawMessageIngest,
     ) -> Result<(), TranscriptPersistenceError> {
         // Clone-on-normalize: message text can be hundreds of kilobytes, and
         // most providers already emit in-range timestamps, so the full-record
@@ -324,18 +356,11 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             owned.timestamp = normalized_timestamp;
             std::borrow::Cow::Owned(owned)
         };
-        let storage_root = self
-            .db_path()
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."));
-        let raw = raw::upsert_raw_message_with_payload_tracked(
-            conn,
-            storage_root,
-            canonical_message.as_ref(),
-            payload_rollback,
-        )
-        .await
-        .map_err(|error| TranscriptPersistenceError::storage("upsert LCM raw message", error))?;
+        let raw = raw::commit_staged_raw_message(conn, canonical_message.as_ref(), staged)
+            .await
+            .map_err(|error| {
+                TranscriptPersistenceError::storage("upsert LCM raw message", error)
+            })?;
         if !Self::upsert_session_message_projection(
             conn,
             canonical_message.as_ref(),
@@ -491,8 +516,15 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             .db_path()
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."));
-        let transaction = self.begin_transcript_transaction().await?;
         let mut payload_rollback = PayloadFileRollback::begin_cancellation_safe(storage_root);
+        let staged_messages = match policy {
+            TranscriptWritePolicy::Full { .. } => {
+                stage_full_transcript_messages(storage_root, batches, &mut payload_rollback)?
+            }
+            TranscriptWritePolicy::ProjectionOnly => Vec::new(),
+        };
+        let mut staged_messages = staged_messages.into_iter();
+        let transaction = self.begin_transcript_transaction().await?;
 
         let write_result: Result<(), TranscriptPersistenceError> = async {
             if let TranscriptWritePolicy::Full { expected_offset } = policy {
@@ -513,10 +545,16 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
                 for message in &batch.messages {
                     match policy {
                         TranscriptWritePolicy::Full { .. } => {
+                            let staged = staged_messages.next().ok_or_else(|| {
+                                TranscriptPersistenceError::message(
+                                    "upsert LCM raw message",
+                                    "staged transcript message count did not match the write batch",
+                                )
+                            })?;
                             self.upsert_session_message_in_existing_tx(
                                 &transaction,
                                 message,
-                                &mut payload_rollback,
+                                staged,
                             )
                             .await?;
                         }
@@ -538,6 +576,14 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
                         }
                     }
                 }
+            }
+            if matches!(policy, TranscriptWritePolicy::Full { .. })
+                && staged_messages.next().is_some()
+            {
+                return Err(TranscriptPersistenceError::message(
+                    "upsert LCM raw message",
+                    "staged transcript message count exceeded the write batch",
+                ));
             }
             if matches!(policy, TranscriptWritePolicy::Full { .. }) {
                 set_parse_offset(&transaction, parse_offset_path, parse_offset).await?;
@@ -712,12 +758,79 @@ async fn require_expected_pair_offset(
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_file_id_value, encode_file_id};
+    use tracedecay_store::{SessionMessageRecord, SessionRecord};
+
+    use super::{
+        PayloadFileRollback, TranscriptBatch, TranscriptPersistenceError, decode_file_id_value,
+        encode_file_id, stage_full_transcript_messages,
+    };
 
     #[test]
     fn transcript_file_id_encoding_round_trips_the_full_u64_domain() {
         for file_id in [0, i64::MAX as u64, (i64::MAX as u64) + 1, u64::MAX] {
             assert_eq!(decode_file_id_value(encode_file_id(file_id)), file_id);
+        }
+    }
+
+    #[test]
+    fn full_transcript_staging_preserves_sanitization_failure_attribution() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage_root = temp.path().join("store");
+        std::fs::create_dir(&storage_root).unwrap();
+        let batch = TranscriptBatch {
+            session: SessionRecord {
+                provider: "claude".to_owned(),
+                session_id: "session-1".to_owned(),
+                project_key: "/tmp/project".to_owned(),
+                project_path: "/tmp/project".to_owned(),
+                title: None,
+                started_at: None,
+                ended_at: None,
+                transcript_path: None,
+                metadata_json: None,
+                parent_session_id: None,
+                is_subagent: false,
+                agent_id: None,
+                parent_tool_use_id: None,
+            },
+            messages: vec![SessionMessageRecord {
+                provider: "claude".to_owned(),
+                message_id: "message-1".to_owned(),
+                session_id: "session-1".to_owned(),
+                role: "assistant".to_owned(),
+                timestamp: Some(1),
+                ordinal: 1,
+                text: "ordinary content".to_owned(),
+                kind: None,
+                model: None,
+                tool_names: None,
+                source_path: None,
+                source_offset: None,
+                metadata_json: Some("[]".to_owned()),
+            }],
+        };
+        let mut rollback = PayloadFileRollback::begin_cancellation_safe(&storage_root);
+
+        let error = match stage_full_transcript_messages(
+            &storage_root,
+            std::slice::from_ref(&batch),
+            &mut rollback,
+        ) {
+            Ok(_) => panic!("non-object metadata must be refused before transaction acquisition"),
+            Err(error) => error,
+        };
+
+        match error {
+            TranscriptPersistenceError::Storage { operation, source } => {
+                assert_eq!(operation, "upsert LCM raw message");
+                assert!(
+                    source
+                        .to_string()
+                        .contains("LCM metadata sanitization failed"),
+                    "sanitization cause was lost: {source}"
+                );
+            }
+            other => panic!("expected attributed sanitization failure, got {other}"),
         }
     }
 }
