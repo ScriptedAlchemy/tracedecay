@@ -3156,8 +3156,14 @@ impl CodeIndexSchedulerRegistryV1 {
                         // retained complete generation before a dirty-tree
                         // rebuild. Graph-off deliberately leaves this slot
                         // empty and must instead settle through the retained
-                        // text reconcile below.
+                        // text reconcile below. During activation backoff the
+                        // slot stays empty until the scheduled retry, so this
+                        // short-circuit would reproduce the identical seat
+                        // Noop on every pass and starve the dirty-tree
+                        // successor the retained text reconcile must publish;
+                        // deferred passes fall through instead.
                         if graph_activation_enabled
+                            && !graph_activation_deferred
                             && serving_empty
                             && text_serving_ready
                             && let Some(outcome) =
