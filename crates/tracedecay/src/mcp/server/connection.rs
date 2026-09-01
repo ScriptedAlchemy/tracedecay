@@ -1877,12 +1877,14 @@ mod cancellable_queue_tests {
                     "id": "slow-read",
                     "method": "tools/call",
                     "params": {
-                        "name": "tracedecay_fact_store_search",
+                        "name": "tracedecay_grep",
                         "arguments": {
-                            "query": "route concurrency",
+                            "pattern": "route_fixture",
+                            "fixed_strings": true,
                             "project_selector": {
                                 "project_id": fixture.target_project_id.clone()
-                            }
+                            },
+                            "format": "json"
                         }
                     }
                 })
@@ -1950,12 +1952,14 @@ mod cancellable_queue_tests {
                     "id": 10,
                     "method": "tools/call",
                     "params": {
-                        "name": "tracedecay_fact_store_search",
+                        "name": "tracedecay_grep",
                         "arguments": {
-                            "query": "before effect",
+                            "pattern": "route_fixture",
+                            "fixed_strings": true,
                             "project_selector": {
                                 "project_id": fixture.target_project_id.clone()
-                            }
+                            },
+                            "format": "json"
                         }
                     }
                 })
@@ -2050,12 +2054,14 @@ mod cancellable_queue_tests {
                         "id": id,
                         "method": "tools/call",
                         "params": {
-                            "name": "tracedecay_fact_store_search",
+                            "name": "tracedecay_grep",
                             "arguments": {
-                                "query": format!("bounded read {id}"),
+                                "pattern": "route_fixture",
+                                "fixed_strings": true,
                                 "project_selector": {
                                     "project_id": fixture.target_project_id.clone()
-                                }
+                                },
+                                "format": "json"
                             }
                         }
                     })
@@ -2118,12 +2124,14 @@ mod cancellable_queue_tests {
                     "id": 20,
                     "method": "tools/call",
                     "params": {
-                        "name": "tracedecay_fact_store_search",
+                        "name": "tracedecay_grep",
                         "arguments": {
-                            "query": "before notification",
+                            "pattern": "route_fixture",
+                            "fixed_strings": true,
                             "project_selector": {
                                 "project_id": fixture.target_project_id.clone()
-                            }
+                            },
+                            "format": "json"
                         }
                     }
                 })
@@ -2196,12 +2204,14 @@ mod cancellable_queue_tests {
                     "id": 30,
                     "method": "tools/call",
                     "params": {
-                        "name": "tracedecay_fact_store_search",
+                        "name": "tracedecay_grep",
                         "arguments": {
-                            "query": "shutdown drain",
+                            "pattern": "route_fixture",
+                            "fixed_strings": true,
                             "project_selector": {
                                 "project_id": fixture.target_project_id.clone()
-                            }
+                            },
+                            "format": "json"
                         }
                     }
                 })
@@ -2366,10 +2376,12 @@ mod cancellable_queue_tests {
                     "id": 41,
                     "method": "tools/call",
                     "params": {
-                        "name": "tracedecay_fact_store_search",
+                        "name": "tracedecay_grep",
                         "arguments": {
-                            "query": "route cancellation",
-                            "project_selector": {"project_id": target_project_id}
+                            "pattern": "route_fixture",
+                            "fixed_strings": true,
+                            "project_selector": {"project_id": target_project_id},
+                            "format": "json"
                         }
                     }
                 })
