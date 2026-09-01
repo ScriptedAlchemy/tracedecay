@@ -164,10 +164,10 @@ fn selected_blocked_request(id: u64, target_project_id: &str) -> Value {
         "id": id,
         "method": "tools/call",
         "params": {
-            "name": "tracedecay_fact_store_list",
+            "name": "tracedecay_grep",
             "arguments": {
-                "category": "project",
-                "min_trust": 0.0,
+                "pattern": "RMCP_SELECTED_TARGET_MARKER",
+                "fixed_strings": true,
                 "project_selector": {"project_id": target_project_id},
                 "format": "json"
             }
@@ -866,8 +866,8 @@ async fn production_rmcp_cancels_concurrent_requests_before_or_after_registratio
     executor.release_first.store(true, Ordering::SeqCst);
     wait_for_count(
         &executor.completed,
-        1,
-        "registered RMCP request did not terminate",
+        2,
+        "cancelled RMCP requests did not terminate",
     )
     .await;
 
