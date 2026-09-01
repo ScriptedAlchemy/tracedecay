@@ -1557,6 +1557,7 @@ struct LiteralProofCacheV1 {
     slots: Vec<Option<Option<tracedecay_domain::ExactAdmissionProof>>>,
 }
 
+#[hotpath::measure_all]
 impl LiteralProofCacheV1 {
     fn new(literal_count: usize) -> Self {
         Self {
@@ -1630,6 +1631,7 @@ struct PreparedLexicalQueryV1<'request> {
     echo_query: String,
 }
 
+#[hotpath::measure_all]
 impl<'request> PreparedLexicalQueryV1<'request> {
     fn new(request: &'request LexicalLaneRequest<'_>) -> Self {
         Self {

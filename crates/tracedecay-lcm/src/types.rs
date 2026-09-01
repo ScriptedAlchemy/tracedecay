@@ -403,6 +403,7 @@ impl LcmStoreTokenCoverage {
 
     /// Shallow status did not read message bodies. Resume from the start of
     /// the scope if a caller wants a budgeted estimate.
+    #[hotpath::skip]
     pub const fn unscanned() -> Self {
         Self {
             complete: false,

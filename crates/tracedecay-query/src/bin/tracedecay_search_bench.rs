@@ -103,6 +103,7 @@ const BUDGET: RetrievalBudget = RetrievalBudget {
     deadline_micros: None,
 };
 
+#[hotpath::measure]
 fn main() -> ExitCode {
     #[cfg(feature = "hotpath")]
     configure_hotpath();
@@ -140,6 +141,7 @@ fn main() -> ExitCode {
 /// Same two guard defaults `tracedecay-index-bench` overrides, for the same
 /// reasons: no socket ever, and no stdout report corrupting the summary.
 #[cfg(feature = "hotpath")]
+#[hotpath::measure]
 fn configure_hotpath() {
     if std::env::var_os("HOTPATH_METRICS_SERVER_OFF").is_none() {
         unsafe {
@@ -207,6 +209,7 @@ struct Options {
     classes: Vec<(String, String)>,
 }
 
+#[hotpath::measure_all]
 impl Options {
     fn parse(arguments: impl Iterator<Item = String>) -> Result<Option<Self>, String> {
         let mut corpus_root: Option<PathBuf> = None;
@@ -308,6 +311,7 @@ impl Options {
     }
 }
 
+#[hotpath::measure]
 fn parse_count(flag: &str, value: &str, minimum: usize) -> Result<usize, String> {
     let count = value
         .parse::<usize>()
@@ -318,6 +322,7 @@ fn parse_count(flag: &str, value: &str, minimum: usize) -> Result<usize, String>
     Ok(count)
 }
 
+#[hotpath::measure]
 fn default_corpus_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -334,6 +339,7 @@ struct CorpusFile {
     bytes: Vec<u8>,
 }
 
+#[hotpath::measure]
 fn load_corpus(root: &Path) -> Result<Vec<CorpusFile>, String> {
     let registry = StaticLanguageRegistry::new();
     let mut files = Vec::new();
@@ -348,6 +354,7 @@ fn load_corpus(root: &Path) -> Result<Vec<CorpusFile>, String> {
     Ok(files)
 }
 
+#[hotpath::measure]
 fn collect_corpus(
     root: &Path,
     directory: &Path,
@@ -403,6 +410,7 @@ struct AdmittedFile {
     bytes: Arc<[u8]>,
 }
 
+#[hotpath::measure]
 fn replicate(corpus: &[CorpusFile], replicas: usize) -> Vec<AdmittedFile> {
     let mut admitted = Vec::with_capacity(corpus.len().saturating_mul(replicas));
     for replica in 0..replicas {
@@ -554,6 +562,7 @@ impl CodeChunkProjectionSink for ApplyingProjectionSink {
 // Workload
 // ---------------------------------------------------------------------------
 
+#[hotpath::measure]
 fn run(options: &Options) -> Result<String, String> {
     let started = Instant::now();
     let control = ActiveControl;
@@ -702,6 +711,7 @@ struct RequestPrototypeV1 {
     lexical_score_domain: ScoreDomainId,
 }
 
+#[hotpath::measure_all]
 impl RequestPrototypeV1 {
     fn request(&self) -> RetrievalRequest {
         RetrievalRequest {
@@ -715,6 +725,7 @@ impl RequestPrototypeV1 {
     }
 }
 
+#[hotpath::measure]
 fn request_prototype(
     generation: &CodeIndexPublishedGenerationV1,
     repository: &RepositoryId,
@@ -767,6 +778,7 @@ struct IterationMicros {
     total: u64,
 }
 
+#[hotpath::measure]
 fn run_class<E, L>(arguments: RunClassArguments<'_, E, L>) -> Result<serde_json::Value, String>
 where
     E: ExactLaneRetriever,
@@ -855,6 +867,7 @@ where
     }))
 }
 
+#[hotpath::measure]
 fn outcome_facts<E>(outcome: &RetrieverOutcome<RetrieverBatch<E>>) -> serde_json::Value {
     match outcome {
         RetrieverOutcome::Complete(batch) => serde_json::json!({
@@ -882,6 +895,7 @@ fn outcome_facts<E>(outcome: &RetrieverOutcome<RetrieverBatch<E>>) -> serde_json
     }
 }
 
+#[hotpath::measure]
 fn phase_stats(
     samples: &[IterationMicros],
     phase: impl Fn(&IterationMicros) -> u64,
@@ -900,6 +914,7 @@ fn phase_stats(
     })
 }
 
+#[hotpath::measure]
 fn percentile(sorted: &[u64], percent: usize) -> u64 {
     if sorted.is_empty() {
         return 0;
@@ -908,6 +923,7 @@ fn percentile(sorted: &[u64], percent: usize) -> u64 {
     sorted[rank.saturating_sub(1).min(sorted.len() - 1)]
 }
 
+#[hotpath::measure]
 fn build_request(
     repository: &RepositoryId,
     sanitizer_revision: &SanitizerRevision,
@@ -967,6 +983,7 @@ fn build_request(
     }
 }
 
+#[hotpath::measure]
 fn sealed_state_digest(sealed: &[u8]) -> Result<ManifestDigest, String> {
     let envelope: serde_json::Value = serde_json::from_slice(sealed)
         .map_err(|error| format!("decode sealed generation envelope: {error}"))?;
@@ -978,6 +995,7 @@ fn sealed_state_digest(sealed: &[u8]) -> Result<ManifestDigest, String> {
         .map_err(|error| format!("sealed generation state digest: {error:?}"))
 }
 
+#[hotpath::measure]
 fn drain_pages(
     sealed: &[u8],
     sealed_len: u64,
@@ -1020,6 +1038,7 @@ fn drain_pages(
     }
 }
 
+#[hotpath::measure]
 fn projection_metadata(
     generation: &CodeIndexPublishedGenerationV1,
     repository: &RepositoryId,
@@ -1052,6 +1071,7 @@ fn projection_metadata(
     }
 }
 
+#[hotpath::measure]
 fn ingest_artifact(
     artifact_path: &Path,
     metadata: CodeLexicalProjectionMetadataV1,
@@ -1085,6 +1105,7 @@ struct Scratch {
     path: PathBuf,
 }
 
+#[hotpath::measure_all]
 impl Scratch {
     fn create() -> Result<Self, String> {
         let unique = std::time::SystemTime::now()
@@ -1110,6 +1131,7 @@ impl Scratch {
     }
 }
 
+#[hotpath::measure]
 fn hash_file(path: &Path) -> Result<(ManifestDigest, u64), String> {
     use sha2::Digest as _;
 
@@ -1119,6 +1141,7 @@ fn hash_file(path: &Path) -> Result<(ManifestDigest, u64), String> {
     Ok((digest, bytes.len() as u64))
 }
 
+#[hotpath::measure]
 fn peak_rss_bytes() -> Option<u64> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
     for line in status.lines() {
@@ -1131,14 +1154,17 @@ fn peak_rss_bytes() -> Option<u64> {
     None
 }
 
+#[hotpath::measure]
 fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
+#[hotpath::measure]
 fn micros(duration: Duration) -> u64 {
     u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
 }
 
+#[hotpath::measure]
 fn identity<T>(value: &str) -> T
 where
     T: TryFrom<String>,

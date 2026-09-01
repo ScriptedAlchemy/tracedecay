@@ -424,6 +424,7 @@ pub trait ProductionCandidateNativeExecutionAuthorityV1: Send + Sync {
 }
 
 /// Load the checked-in query/semantic direct-evaluation workload.
+#[hotpath::measure]
 pub fn load_candidate_workload(path: &Path) -> Result<CandidateWorkloadV1, CandidateOutputError> {
     let bytes = fs::read(path).map_err(|source| CandidateOutputError::Read {
         path: path.to_path_buf(),
@@ -438,12 +439,14 @@ pub fn load_candidate_workload(path: &Path) -> Result<CandidateWorkloadV1, Candi
     Ok(workload)
 }
 
+#[hotpath::measure]
 pub fn compute_workload_digest(
     workload: &CandidateWorkloadV1,
 ) -> Result<String, CandidateOutputError> {
     canonical_sha256(workload)
 }
 
+#[hotpath::measure]
 pub fn compute_profile_material_digest(
     profile: &ProfileSpecV1,
 ) -> Result<String, CandidateOutputError> {
@@ -454,6 +457,7 @@ pub fn compute_profile_material_digest(
 ///
 /// Including document metadata prevents ambiguous concatenation while each
 /// content digest binds the bytes actually read from `repo_root`.
+#[hotpath::measure]
 pub fn compute_corpus_digest(
     repo_root: &Path,
     workload: &CandidateWorkloadV1,
@@ -473,6 +477,7 @@ pub fn compute_corpus_digest(
 /// Compute the corpus identity from the package's embedded authoritative
 /// bytes. Unlike [`compute_corpus_digest`], this validates no filesystem or
 /// Git state and therefore cannot materialize the evaluator fixture.
+#[hotpath::measure]
 pub fn compute_corpus_digest_from_embedded_bytes(
     workload: &CandidateWorkloadV1,
     files: &[(&str, &[u8])],
@@ -491,6 +496,7 @@ pub fn compute_corpus_digest_from_embedded_bytes(
     })
 }
 
+#[hotpath::measure]
 fn compute_corpus_digest_from_document_bytes<'a>(
     workload: &CandidateWorkloadV1,
     mut document_bytes: impl FnMut(&CorpusDocumentV1) -> Result<Cow<'a, [u8]>, CandidateOutputError>,
@@ -523,6 +529,7 @@ fn compute_corpus_digest_from_document_bytes<'a>(
     canonical_sha256(&(CORPUS_DIGEST_DOMAIN, bindings))
 }
 
+#[hotpath::measure]
 fn validate_source_bindings(
     repo_root: &Path,
     workload: &CandidateWorkloadV1,
@@ -610,6 +617,7 @@ fn validate_source_bindings(
     Ok(())
 }
 
+#[hotpath::measure]
 pub fn validate_workload_for_tuning(
     workload: &CandidateWorkloadV1,
 ) -> Result<(), CandidateOutputError> {
@@ -837,6 +845,7 @@ pub fn validate_workload_for_tuning(
     Ok(())
 }
 
+#[hotpath::measure]
 pub fn load_direct_evaluated_profile_material(
     repo_root: &Path,
     workload_path: Option<&Path>,
@@ -849,6 +858,7 @@ pub fn load_direct_evaluated_profile_material(
     direct_evaluated_profile_material(&workload, profile_id)
 }
 
+#[hotpath::measure]
 pub fn direct_evaluated_profile_material(
     workload: &CandidateWorkloadV1,
     profile_id: &str,
@@ -868,6 +878,7 @@ pub fn direct_evaluated_profile_material(
     })
 }
 
+#[hotpath::measure]
 pub fn fusion_profile(
     profile: &ProfileSpecV1,
     include_semantic: bool,
@@ -962,6 +973,7 @@ pub fn fusion_profile(
     })
 }
 
+#[hotpath::measure]
 pub fn retrieval_budget() -> RetrievalBudget {
     RetrievalBudget {
         max_candidates_per_lane: 32,
@@ -972,6 +984,7 @@ pub fn retrieval_budget() -> RetrievalBudget {
     }
 }
 
+#[hotpath::measure]
 pub fn evaluated_diversity_policy() -> Result<DiversityPolicy, CandidateOutputError> {
     Ok(DiversityPolicy {
         policy_id: typed_id("diversity.candidate.v1")?,
@@ -986,6 +999,7 @@ pub fn evaluated_diversity_policy() -> Result<DiversityPolicy, CandidateOutputEr
     })
 }
 
+#[hotpath::measure]
 pub fn evaluated_rerank_policy(
     profile: &ProfileSpecV1,
 ) -> Result<Option<RerankPolicy>, CandidateOutputError> {
@@ -1009,6 +1023,7 @@ pub fn evaluated_rerank_policy(
         .transpose()
 }
 
+#[hotpath::measure]
 pub fn typed_id<T>(value: &str) -> Result<T, CandidateOutputError>
 where
     T: TryFrom<String>,
@@ -1017,6 +1032,7 @@ where
     T::try_from(value.to_owned()).map_err(|error| CandidateOutputError::Contract(error.to_string()))
 }
 
+#[hotpath::measure]
 pub fn canonical_sha256<T: Serialize>(value: &T) -> Result<String, CandidateOutputError> {
     let bytes = canonical_json_bytes(value)?;
     Ok(encode_tagged_lowercase_hex(
@@ -1025,6 +1041,7 @@ pub fn canonical_sha256<T: Serialize>(value: &T) -> Result<String, CandidateOutp
     ))
 }
 
+#[hotpath::measure]
 pub fn canonical_json_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, CandidateOutputError> {
     let mut bytes = serde_json::to_vec(value)
         .map_err(|error| CandidateOutputError::Contract(format!("serialize: {error}")))?;
@@ -1036,6 +1053,7 @@ pub fn canonical_json_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, Candidat
     Ok(bytes)
 }
 
+#[hotpath::measure]
 pub fn sort_value(value: serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::Object(map) => {

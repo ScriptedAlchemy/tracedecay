@@ -30,6 +30,7 @@ pub struct DirectQueryEvaluationV1 {
     pub status: DirectEvaluationStatusV1,
 }
 
+#[hotpath::measure]
 pub(crate) fn pairwise_query_pairs<'a>(
     candidate: &'a [DirectQueryEvaluationV1],
     baseline: &'a [DirectQueryEvaluationV1],
@@ -53,6 +54,7 @@ pub(crate) fn pairwise_query_pairs<'a>(
     pairs
 }
 
+#[hotpath::measure]
 pub(crate) fn semantic_distance_summary(distances: impl IntoIterator<Item = i64>) -> String {
     let mut distances = distances.into_iter().collect::<Vec<_>>();
     distances.sort_unstable();
@@ -173,6 +175,7 @@ pub struct DirectEvaluationReportV1 {
     pub profiles: Vec<DirectProfileEvaluationV1>,
 }
 
+#[hotpath::measure_all]
 impl DirectEvaluationReportV1 {
     /// Reconstruct every retained aggregate from the exact sanitized workload
     /// and raw candidate evidence. This is deliberately stricter than JSON
@@ -722,6 +725,7 @@ impl DirectEvaluationReportV1 {
     }
 }
 
+#[hotpath::measure]
 fn semantic_activation_resident_bytes(
     model_bytes: Option<u64>,
     tokenizer_bytes: Option<u64>,
@@ -857,6 +861,7 @@ enum NativeVectorGenerationEvidence {
     Redacted,
 }
 
+#[hotpath::measure_all]
 impl NativeVectorGenerationEvidence {
     fn accepts(self, value: Option<&str>) -> bool {
         match self {
@@ -866,6 +871,7 @@ impl NativeVectorGenerationEvidence {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn validate_native_measurement_method(
     measurement_method: &str,
 ) -> Result<(), SearchEvalError> {
@@ -879,6 +885,7 @@ pub(super) fn validate_native_measurement_method(
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_required_stage<T>(
     requested: bool,
     stage: &SemanticNativeStageResultV1<T>,
@@ -901,6 +908,7 @@ fn validate_required_stage<T>(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn profile_material_digests(
     outputs: &[ProductionCandidateOutputV1],
 ) -> Result<BTreeMap<String, String>, SearchEvalError> {
@@ -922,6 +930,7 @@ pub(super) fn profile_material_digests(
     Ok(digests)
 }
 
+#[hotpath::measure]
 pub(super) fn raw_output_digest(
     outputs: &[ProductionCandidateOutputV1],
 ) -> Result<String, SearchEvalError> {

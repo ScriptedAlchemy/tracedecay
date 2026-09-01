@@ -12,6 +12,7 @@ use crate::{LCM_SCAN_PAGE_MAX_BYTES, LCM_SCAN_PAGE_ROWS};
 /// Shallow payload census, covered by `idx_lcm_external_payloads_owner_bytes`
 /// so the status probe never reads payload metadata records. The unbounded
 /// scope omits the non-sargable `(?1 = 'all' OR …)` tautology.
+#[hotpath::measure]
 pub(super) fn payload_summary_query(
     provider: &str,
     session_id: Option<&str>,

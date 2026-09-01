@@ -21,6 +21,7 @@ pub(super) struct LcmScopeSql {
     values: Vec<Value>,
 }
 
+#[hotpath::measure_all]
 impl LcmScopeSql {
     pub(super) fn new(
         provider_column: &str,

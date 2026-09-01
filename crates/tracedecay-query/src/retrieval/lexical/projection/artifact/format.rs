@@ -536,6 +536,7 @@ pub(super) fn verify_artifact_table_layout(
     Ok(())
 }
 
+#[hotpath::measure]
 fn verify_interned_term_layout(
     connection: &Connection,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
@@ -590,6 +591,7 @@ fn verify_interned_term_layout(
     Ok(())
 }
 
+#[hotpath::measure]
 fn table_columns(
     connection: &Connection,
     table: &str,

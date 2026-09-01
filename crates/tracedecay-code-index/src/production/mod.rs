@@ -139,7 +139,9 @@ pub enum CodeIndexGenerationIncompatibilityV1 {
     PrivacyKeyEpoch,
 }
 
+#[hotpath::measure_all]
 impl CodeIndexGenerationIncompatibilityV1 {
+    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Project => "project",

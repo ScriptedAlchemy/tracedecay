@@ -92,6 +92,7 @@ pub(super) enum LexicalArtifactLayoutV1 {
     V11,
 }
 
+#[hotpath::measure_all]
 impl LexicalArtifactLayoutV1 {
     pub(super) fn from_revision(revision: u32) -> Result<Self, CodeLexicalArtifactErrorV1> {
         match revision {
@@ -125,12 +126,14 @@ impl LexicalArtifactLayoutV1 {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn digest_domain_for_revision(
     revision: u32,
 ) -> Result<&'static [u8], CodeLexicalArtifactErrorV1> {
     Ok(LexicalArtifactLayoutV1::from_revision(revision)?.digest_domain())
 }
 
+#[hotpath::measure]
 pub(super) fn field_code(field: LexicalFieldV1) -> i64 {
     match field {
         LexicalFieldV1::SymbolName => FIELD_SYMBOL_NAME,
@@ -143,6 +146,7 @@ pub(super) fn field_code(field: LexicalFieldV1) -> i64 {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn field_from_code(code: i64) -> Result<LexicalFieldV1, CodeLexicalArtifactErrorV1> {
     match code {
         FIELD_SYMBOL_NAME => Ok(LexicalFieldV1::SymbolName),
@@ -158,6 +162,7 @@ pub(super) fn field_from_code(code: i64) -> Result<LexicalFieldV1, CodeLexicalAr
     }
 }
 
+#[hotpath::measure]
 pub(super) fn field_code_from_encoded(
     encoded: &str,
 ) -> Result<i64, CodeLexicalArtifactErrorV1> {
@@ -169,6 +174,7 @@ pub(super) fn field_code_from_encoded(
 /// Content-addressed term primary key. Incrementing IDs follow first-seen
 /// batch order, so one-page and multi-page commits of the same source would
 /// disagree on `vocabulary` / `term_stats` section receipts.
+#[hotpath::measure]
 pub(super) fn stable_term_id(term: &str) -> i64 {
     let mut hasher = Sha256::new();
     hasher.update(b"tracedecay.code-lexical-artifact.term-id.v11\0");
@@ -179,6 +185,7 @@ pub(super) fn stable_term_id(term: &str) -> i64 {
     (u64::from_be_bytes(prefix) & i64::MAX as u64) as i64
 }
 
+#[hotpath::measure]
 pub(super) fn intern_terms<'a>(
     transaction: &Transaction<'_>,
     pages: &'a [PreparedCodeLexicalArtifactPageV1],
@@ -213,6 +220,7 @@ pub(super) fn intern_terms<'a>(
     Ok(assigned)
 }
 
+#[hotpath::measure]
 pub(super) fn lookup_term_id(
     connection: &Connection,
     term: &str,
@@ -227,6 +235,7 @@ pub(super) fn lookup_term_id(
         .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))
 }
 
+#[hotpath::measure]
 pub(super) fn lookup_term_ids(
     connection: &Connection,
     terms: &BTreeSet<String>,

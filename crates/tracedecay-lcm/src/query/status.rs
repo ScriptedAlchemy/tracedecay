@@ -184,6 +184,7 @@ async fn aggregate_provider_status_with_work(
 /// [`schema::LCM_STATUS_PERFORMANCE_INDEX_SQL`], because SQLite substitutes a
 /// partial index only when the query terms structurally imply its clause.
 /// `status_query_plans_never_scan_body_bearing_tables` holds this contract.
+#[hotpath::measure]
 fn status_counts_query(provider: &str, session_id: Option<&str>) -> (String, Vec<Value>) {
     let content = LcmScopeSql::new("provider", "session_id", provider, session_id);
     let lifecycle = LcmScopeSql::new("provider", "current_session_id", provider, session_id);
@@ -692,6 +693,7 @@ async fn store_status_within(
 /// Exact raw-message count for the scope. The `(provider, session_id,
 /// store_id)` index serves a scoped count without touching message text;
 /// the unbounded scope uses SQLite's bare `COUNT(*)` b-tree count.
+#[hotpath::measure]
 fn store_message_count_query(provider: &str, session_id: Option<&str>) -> (String, Vec<Value>) {
     let scope = LcmScopeSql::new("provider", "session_id", provider, session_id);
     let sql = format!(
@@ -719,6 +721,7 @@ async fn store_message_count(
 
 /// DAG depth rollup, covered by `idx_lcm_summary_nodes_depth_tokens` so the
 /// aggregate never reads `summary_text` records.
+#[hotpath::measure]
 fn dag_status_query(provider: &str, session_id: Option<&str>) -> (String, Vec<Value>) {
     let scope = LcmScopeSql::new("provider", "session_id", provider, session_id);
     let sql = format!(

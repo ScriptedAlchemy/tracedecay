@@ -2688,6 +2688,7 @@ fn verify_artifact_state_revision(
     Ok(layout)
 }
 
+#[hotpath::measure]
 fn sealed_reader_mmap_bytes(file_size_bytes: u64) -> Result<i64, CodeLexicalArtifactErrorV1> {
     i64::try_from(file_size_bytes).map_err(|error| {
         CodeLexicalArtifactErrorV1::Contract(format!(

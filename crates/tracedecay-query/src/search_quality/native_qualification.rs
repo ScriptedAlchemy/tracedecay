@@ -74,6 +74,7 @@ pub struct NativeQualificationEvaluatorKeyV1 {
     pub raw_output_digest: String,
 }
 
+#[hotpath::measure_all]
 impl NativeQualificationEvaluatorKeyV1 {
     pub fn from_report(report: &DirectEvaluationReportV1) -> Self {
         Self {
@@ -94,6 +95,7 @@ pub struct NativeQualificationPlatformV1 {
     pub architecture: String,
 }
 
+#[hotpath::measure_all]
 impl NativeQualificationPlatformV1 {
     pub fn current() -> Self {
         Self {
@@ -130,6 +132,7 @@ pub struct NativeQualificationModelKeyV1 {
     pub chunker_revision: ChunkerRevision,
 }
 
+#[hotpath::measure_all]
 impl NativeQualificationModelKeyV1 {
     pub fn from_admitted_projection(projection: &AdmittedEmbeddingProjectionKeyV1) -> Self {
         let projection = projection.embedding_key();
@@ -193,6 +196,7 @@ pub struct NativeQualificationExecutionResourceKeyV1 {
     pub load_deadline_ms: u64,
 }
 
+#[hotpath::measure_all]
 impl NativeQualificationExecutionResourceKeyV1 {
     fn is_valid(self) -> bool {
         self.model_bytes != 0
@@ -227,6 +231,7 @@ pub struct NativeQualificationKeyV1 {
     pub platform: NativeQualificationPlatformV1,
 }
 
+#[hotpath::measure_all]
 impl NativeQualificationKeyV1 {
     pub fn new(
         report: &DirectEvaluationReportV1,
@@ -261,6 +266,7 @@ pub struct NativeQualificationExpectationsV1 {
     pub platform: NativeQualificationPlatformV1,
 }
 
+#[hotpath::measure_all]
 impl NativeQualificationExpectationsV1 {
     /// Build the package-local evaluator authority without materializing its
     /// runtime-root fixture. The caller must supply a separately observed
@@ -341,6 +347,7 @@ pub struct PackagedNativeActivationCandidateV1 {
     evaluated_material: DirectEvaluatedProfileMaterialV1,
 }
 
+#[hotpath::measure_all]
 impl PackagedNativeActivationCandidateV1 {
     pub fn portable_evidence(&self) -> &PortableNativeQualificationEvidenceV1 {
         &self.portable_evidence
@@ -395,6 +402,7 @@ pub enum PackagedNativeQualificationErrorV1 {
 /// Encode opaque output returned by the genuine evaluator. There is no
 /// report-shaped encoder: a daemon must hold `DirectActivationEvaluationV1`
 /// in-process to create package bytes.
+#[hotpath::measure]
 pub fn encode_packaged_native_qualification(
     evaluation: DirectActivationEvaluationV1,
     mut qualification_key: NativeQualificationKeyV1,
@@ -421,6 +429,7 @@ pub fn encode_packaged_native_qualification(
     serde_json::to_vec(&qualification).map_err(|_| PackagedNativeQualificationErrorV1::CorruptBytes)
 }
 
+#[hotpath::measure]
 fn validate_evaluated_material_key(
     material: &DirectEvaluatedProfileMaterialV1,
     evaluated_profile_id: &str,
@@ -435,6 +444,7 @@ fn validate_evaluated_material_key(
     Ok(())
 }
 
+#[hotpath::measure]
 fn redact_genuine_vector_generations(
     mut report: DirectEvaluationReportV1,
 ) -> Result<PortableNativeQualificationEvidenceV1, PackagedNativeQualificationErrorV1> {
@@ -467,6 +477,7 @@ fn redact_genuine_vector_generations(
     })
 }
 
+#[hotpath::measure]
 fn validate_redacted_vector_generation_shape(
     report: &DirectEvaluationReportV1,
 ) -> Result<(), PackagedNativeQualificationErrorV1> {
@@ -488,6 +499,7 @@ fn validate_redacted_vector_generation_shape(
 
 /// Write canonical qualification bytes through the workspace's durable atomic
 /// writer. This writes only an artifact file and never publishes activation.
+#[hotpath::measure]
 pub fn write_packaged_native_qualification(
     output: &Path,
     bytes: &[u8],
@@ -526,6 +538,7 @@ pub fn write_packaged_native_qualification(
 /// expectations in the caller. The daemon has already validated those live
 /// authorities; this boundary revalidates the document shape and canonical
 /// bytes before publishing the file.
+#[hotpath::measure]
 pub fn write_daemon_native_qualification(
     output: &Path,
     bytes: &[u8],
@@ -564,6 +577,7 @@ pub fn write_daemon_native_qualification(
 /// Compress canonical qualification evidence for the bounded daemon response
 /// frame. The durable artifact written by the caller remains canonical JSON;
 /// compression is only the wire representation.
+#[hotpath::measure]
 pub fn encode_daemon_native_qualification_blob(
     canonical: &[u8],
 ) -> Result<Vec<u8>, PackagedNativeQualificationErrorV1> {
@@ -589,6 +603,7 @@ pub fn encode_daemon_native_qualification_blob(
     Ok(encoded)
 }
 
+#[hotpath::measure]
 fn decode_daemon_native_qualification_blob(
     encoded: &[u8],
 ) -> Result<Vec<u8>, PackagedNativeQualificationErrorV1> {
@@ -625,6 +640,7 @@ fn decode_daemon_native_qualification_blob(
 }
 
 /// Validate arbitrary package bytes without materializing evaluator assets.
+#[hotpath::measure]
 pub fn load_packaged_native_qualification_from_bytes(
     bytes: &[u8],
     expectations: &NativeQualificationExpectationsV1,
@@ -636,12 +652,14 @@ pub fn load_packaged_native_qualification_from_bytes(
 }
 
 /// Embedded qualification bytes. Empty means the package makes no claim.
+#[hotpath::measure]
 pub fn packaged_native_qualification_bytes() -> &'static [u8] {
     embedded_qualification_bytes().unwrap_or_default()
 }
 
 /// Load embedded bytes through one process-wide SHA-pinned structural parse,
 /// then validate them against the caller's independent current authorities.
+#[hotpath::measure]
 pub fn qualified_default_activation_candidate(
     expectations: &NativeQualificationExpectationsV1,
 ) -> Result<PackagedNativeActivationCandidateV1, PackagedNativeQualificationErrorV1> {
@@ -656,6 +674,7 @@ pub fn qualified_default_activation_candidate(
 /// in this build. This is the durable-authority counterpart to package loading:
 /// it never treats the mounted project as the evaluator fixture and never
 /// accepts project-local vector generation identifiers in portable evidence.
+#[hotpath::measure]
 pub fn validate_packaged_native_activation_report(
     report: &DirectEvaluationReportV1,
 ) -> Result<(), PackagedNativeQualificationErrorV1> {
@@ -675,6 +694,7 @@ pub fn validate_packaged_native_activation_report(
         })
 }
 
+#[hotpath::measure]
 fn load_embedded_qualification()
 -> Result<PackagedNativeQualificationV1, PackagedNativeQualificationErrorV1> {
     let canonical = embedded_qualification_bytes()?;
@@ -693,6 +713,7 @@ fn load_embedded_qualification()
     Ok(qualification)
 }
 
+#[hotpath::measure]
 fn embedded_qualification_bytes() -> Result<&'static [u8], PackagedNativeQualificationErrorV1> {
     PACKAGED_NATIVE_QUALIFICATION_CANONICAL
         .get_or_init(|| {
@@ -715,6 +736,7 @@ fn embedded_qualification_bytes() -> Result<&'static [u8], PackagedNativeQualifi
         .map_err(Clone::clone)
 }
 
+#[hotpath::measure]
 fn activation_candidate_from_qualification(
     qualification: PackagedNativeQualificationV1,
     expectations: &NativeQualificationExpectationsV1,
@@ -729,6 +751,7 @@ fn activation_candidate_from_qualification(
     })
 }
 
+#[hotpath::measure]
 fn validate_qualification(
     qualification: &PackagedNativeQualificationV1,
     expectations: &NativeQualificationExpectationsV1,
@@ -767,6 +790,7 @@ fn validate_qualification(
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_document_bindings(
     qualification: &PackagedNativeQualificationV1,
 ) -> Result<(), PackagedNativeQualificationErrorV1> {
@@ -803,6 +827,7 @@ fn validate_document_bindings(
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_expectations(
     expectations: &NativeQualificationExpectationsV1,
 ) -> Result<(), PackagedNativeQualificationErrorV1> {
@@ -825,6 +850,7 @@ fn validate_expectations(
     validate_runtime_key(&expectations.runtime)
 }
 
+#[hotpath::measure]
 fn validate_key(key: &NativeQualificationKeyV1) -> Result<(), PackagedNativeQualificationErrorV1> {
     if key.evaluated_profile_id.trim().is_empty()
         || key.evaluator.workload_digest.trim().is_empty()
@@ -838,6 +864,7 @@ fn validate_key(key: &NativeQualificationKeyV1) -> Result<(), PackagedNativeQual
     validate_runtime_key(&key.runtime)
 }
 
+#[hotpath::measure]
 fn validate_runtime_key(
     runtime: &NativeQualificationRuntimeKeyV1,
 ) -> Result<(), PackagedNativeQualificationErrorV1> {
@@ -853,6 +880,7 @@ fn validate_runtime_key(
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_expected_identities(
     qualification: &PackagedNativeQualificationV1,
     expectations: &NativeQualificationExpectationsV1,
@@ -888,6 +916,7 @@ fn validate_expected_identities(
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_expected_profile_materials(
     qualification: &PackagedNativeQualificationV1,
     expectations: &NativeQualificationExpectationsV1,
@@ -905,6 +934,7 @@ fn validate_expected_profile_materials(
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_execution_contract_pair(
     observed: &EvaluationExecutionContractV1,
     expected: &EvaluationExecutionContractV1,
@@ -921,6 +951,7 @@ fn validate_execution_contract_pair(
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_runtime_identity(
     observed: &NativeQualificationRuntimeKeyV1,
     expected: &NativeQualificationRuntimeKeyV1,
@@ -944,6 +975,7 @@ fn validate_runtime_identity(
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_required_profile_matrix(
     qualification: &PackagedNativeQualificationV1,
     expectations: &NativeQualificationExpectationsV1,
@@ -975,6 +1007,7 @@ fn validate_required_profile_matrix(
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_report_runtime_bindings(
     report: &DirectEvaluationReportV1,
     runtime: &NativeQualificationRuntimeKeyV1,
@@ -1028,6 +1061,7 @@ fn validate_report_runtime_bindings(
     Ok(())
 }
 
+#[hotpath::measure]
 fn canonical_sha256(bytes: &[u8]) -> String {
     encode_tagged_lowercase_hex("sha256:", &Sha256::digest(bytes))
 }
