@@ -1670,9 +1670,11 @@ async fn project_scoped_api_gateway(
             .into_response();
     }
     let application_read = selected_project_application_read(req.method(), &tail);
+    let event_delivery_ack = is_selected_project_event_delivery_ack(req.method(), &tail);
     if runtime.active_project_id() != Some(project_id.as_str())
         && !matches!(req.method(), &Method::GET | &Method::HEAD)
         && application_read.is_none()
+        && !event_delivery_ack
     {
         return (
             StatusCode::METHOD_NOT_ALLOWED,
@@ -1881,6 +1883,10 @@ fn selected_project_application_read(
                 .then_some(SelectedProjectApplicationRead::Work)
         }
     }
+}
+
+fn is_selected_project_event_delivery_ack(method: &Method, tail: &str) -> bool {
+    method == Method::POST && tail == "events/delivery-ack"
 }
 
 async fn forward_project_request(
@@ -3355,6 +3361,14 @@ mod authority_tests {
 
     #[test]
     fn a_selected_project_answers_feedback_and_work_reads_and_nothing_else_by_post() {
+        assert!(is_selected_project_event_delivery_ack(
+            &Method::POST,
+            "events/delivery-ack"
+        ));
+        assert!(!is_selected_project_event_delivery_ack(
+            &Method::GET,
+            "events/delivery-ack"
+        ));
         for tail in ["feedback/get", "feedback/expand", "feedback/list"] {
             assert_eq!(
                 selected_project_application_read(&Method::POST, tail),

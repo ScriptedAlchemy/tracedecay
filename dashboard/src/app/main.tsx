@@ -3,8 +3,8 @@ import { createRoot } from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { RouterProvider } from 'react-router';
 import '../theme/tailwind.css';
-import { router } from './routes';
-import { EventsProvider } from '../data/sse/useEvents.tsx';
+import { applyEmbeddedPublicPath, dashboardRouterBasename } from './embedBasename.ts';
+import { dashboardRouterForPath, ScopedEventsProvider } from './runtime.tsx';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -25,12 +25,16 @@ if (storedTheme === 'light' || storedTheme === 'dark') {
   document.documentElement.dataset['theme'] = storedTheme;
 }
 
+const embedBasename = dashboardRouterBasename(window.location.pathname);
+applyEmbeddedPublicPath(embedBasename);
+const router = dashboardRouterForPath(window.location.pathname);
+
 createRoot(rootEl).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
-      <EventsProvider>
+      <ScopedEventsProvider>
         <RouterProvider router={router} />
-      </EventsProvider>
+      </ScopedEventsProvider>
     </QueryClientProvider>
   </React.StrictMode>,
 );
