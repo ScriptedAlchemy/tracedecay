@@ -3176,6 +3176,9 @@ impl CodeIndexSchedulerRegistryV1 {
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .is_none();
+                let retained_text_uses_partitioned_manifest = retained_text
+                    .as_ref()
+                    .is_some_and(LatestCodeTextGenerationV1::uses_partitioned_manifest);
                 let retained_text_metadata =
                     retained_text.as_ref().map(|text| text.metadata().clone());
                 let shutting_down = Arc::clone(&worker_shutting_down);
@@ -3197,20 +3200,18 @@ impl CodeIndexSchedulerRegistryV1 {
                         {
                             return Ok(outcome);
                         }
-                        // A graph-enabled empty serving slot must publish the
-                        // retained complete generation before a dirty-tree
-                        // rebuild. Graph-off deliberately leaves this slot
-                        // empty and must instead settle through the retained
-                        // text reconcile below. During activation backoff the
-                        // slot stays empty until the scheduled retry, so this
-                        // short-circuit would reproduce the identical seat
-                        // Noop on every pass and starve the dirty-tree
-                        // successor the retained text reconcile must publish;
-                        // deferred passes fall through instead.
+                        // Legacy graph recovery requires a decoded complete
+                        // generation in the serving slot before a dirty-tree
+                        // rebuild. Revision 7 deliberately leaves that slot
+                        // empty: the retained manifest owner validates and
+                        // seats Grafeo below without opening partition bytes.
+                        // Graph-off and deferred passes also fall through to
+                        // retained text reconciliation.
                         if graph_activation_enabled
                             && !graph_activation_deferred
                             && serving_empty
                             && text_serving_ready
+                            && !retained_text_uses_partitioned_manifest
                             && let Some(outcome) =
                                 scheduler.seat_retained_generation_on_empty_serving()?
                         {

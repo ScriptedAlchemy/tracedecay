@@ -569,16 +569,23 @@ async fn restart_status_case(corrupt_graph: bool) {
 
     let settled_deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
-        if registry
+        let observed = registry
             .latest_text_serving_freshness_for_scope(&scope)
-            .await
-            .is_some_and(|(latest, current)| current && latest.interactive_graph_store().is_ok())
+            .await;
+        if observed
+            .as_ref()
+            .is_some_and(|(latest, current)| *current && latest.interactive_graph_store().is_ok())
         {
             break;
         }
         assert!(
             std::time::Instant::now() <= settled_deadline,
-            "persistent graph generation did not become query-serving"
+            "persistent graph generation did not become query-serving: {:?}",
+            observed.as_ref().map(|(latest, current)| (
+                current,
+                latest.code_graph_serving_readiness(),
+                latest.interactive_graph_store().err(),
+            ))
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -593,13 +600,22 @@ async fn restart_status_case(corrupt_graph: bool) {
         .expect("settled restart graph read");
     assert_eq!(settled_read.freshness(), CodeGraphReadFreshnessV1::Current);
     let settled_census = census().await;
-    assert!(matches!(
-        settled_census,
-        GenerationCensusSnapshot::Observed {
-            freshness: GenerationCensusServingFreshness::Current,
-            ..
-        }
-    ));
+    if corrupt_graph {
+        assert!(matches!(
+            settled_census,
+            GenerationCensusSnapshot::Observed {
+                freshness: GenerationCensusServingFreshness::Current,
+                ..
+            }
+        ));
+    } else {
+        assert!(matches!(
+            settled_census,
+            GenerationCensusSnapshot::Unavailable {
+                reason: GenerationCensusUnavailableReason::SealedGenerationCensusInvalid,
+            }
+        ));
+    }
 
     let scheduler = registry
         .scheduler_handle(fixture.path())
