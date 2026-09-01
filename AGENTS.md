@@ -20,8 +20,7 @@ compiles.
   suites are `crates/tracedecay/tests/`, and the ones that use the fixture
   surface in `tests/common/` declare `required-features = ["test-helpers"]`.
 - `crates/tracedecay-cli/` — the shipped `tracedecay` binary. Build it with
-  `kache cargo -- build -p tracedecay-cli --bin tracedecay`, never
-  `-p tracedecay`.
+  `cargo build -p tracedecay-cli --bin tracedecay`, never `-p tracedecay`.
 - `crates/` — the remaining workspace member crates (`tracedecay-api`,
   `-application`, `-domain`, `-store`, `-hooks`, `-policy`, `-tool-catalog`,
   rusqlite parity/runtime crates).
@@ -39,15 +38,22 @@ compiles.
 
 ## Build & test
 
-- Invoke Cargo as `kache cargo -- <args>` instead of bare `cargo`
-  (e.g. `kache cargo -- check -p tracedecay-store`). It execs the real Cargo
-  after collapsing the duplicate `$CARGO_HOME` rustflags source and isolating
-  the per-worktree build dir, so builds hit the shared compile cache;
-  commands other than `build`/`check` pass through verbatim. Edition 2024,
-  resolver 3. Scope checks to the smallest touched package/target during
-  development.
+- Run plain `cargo <subcommand>` (e.g. `cargo check -p tracedecay-store --lib`).
+  cargo-conductor brokers every invocation via a PATH shim; expect
+  `[cargo-conductor] ticket cc-N` lines on stderr. Do **not** prefix with
+  `kache` (bypasses the broker), wrap in `flock`, or set `CARGO_TARGET_DIR` /
+  isolate builds — the broker serializes per target dir, dedupes identical
+  runs, and batches compatible checks. Kache caching still applies
+  automatically via the workspace `rustc-wrapper`. Prefer scoped commands
+  (`cargo check -p <crate> --lib`); they coalesce and release early. Never
+  kill cargo processes; use `conductor status` (not ps/pgrep) for queue
+  visibility. If a backgrounded ticket's result will not retrieve, rerun the
+  command (dedup makes it cheap) — known issue cargo-conductor#16.
+  `daemon unreachable; running cargo directly` is fail-open: proceed and
+  mention it. `kache monitor` is a cache dashboard, not a cargo front-end.
+  Full policy: `docs/CARGO-CONTENTION-POLICY.md`. Edition 2024, resolver 3.
 - Before handoff, run a broader gate from the repo root, e.g.
-  `kache cargo -- check --all-features` or `kache cargo -- test-all` (alias
+  `cargo check --all-features` or `cargo test-all` (alias
   for `cargo nextest run --workspace --all-features --no-fail-fast
   --cargo-profile perf`).
 - Dashboard: `npm run build` (rsbuild), `npm run typecheck` (`tsc --noEmit`),
@@ -56,8 +62,8 @@ compiles.
   dev/test opt-level. The critical-path kernel `opt-level` overrides
   (code index, graph, sha2, …) live in the opt-in `perf` profile in the root
   `Cargo.toml`; run generation-scale suites with
-  `kache cargo -- test --profile perf` (or `kache cargo -- build
-  --profile perf`) when they need production-like speed.
+  `cargo test --profile perf` (or `cargo build --profile perf`) when they
+  need production-like speed.
 - libtest `--exact` requires the full module path and exits 0 when a filter
   matches nothing — a vacuous "0 passed" green. For name-filtered runs prefer
   the ad-hoc anti-vacuity helper `scripts/require-exact-test.sh`; it is not a
@@ -78,36 +84,33 @@ compiles.
   `git worktree remove` / `git branch -D` another lane's tree or any path
   you did not create, and never use name prefixes. A clean tree at the
   integration tip may be a FRESH lane, not garbage.
-- This machine shares one compile cache (kache, keyed on
-  profile × features × RUSTFLAGS × source); the `kache cargo -- <args>`
-  front-end above keeps that key stable, which is why bare `cargo` is
-  avoided. `CARGO_TARGET_DIR` and worktree
-  paths do not affect the key. Novel feature
-  permutations do: each one recompiles the workspace spine (~7 min for
-  `tracedecay`) instead of hitting the cache. Stick to the standard lanes —
-  default features (add `test-helpers` only when the suite requires it), plain
-  `--no-default-features` for lean lib iteration, `--all-features` for the
-  handoff gate, and the fixed hotpath profiling combos — rather than toggling
-  individual features (e.g. `semantic-fastembed`) per task.
-- The CLI build lane (`build -p tracedecay-cli --bin tracedecay`) and any test
-  compile of the root crate resolve different spine features: dev-dependency
-  unification activates `test-helpers`/`test-transport` on ~13 spine crates
-  (usecases, sessions, runtime-core, global-db, graph-db, query, semantic,
-  code-index, agent-hosts, dashboard-api, …) that a plain CLI build resolves
-  without. That is the typed test-feature design working as intended — the
-  fixture surfaces live in-crate and stay out of the shipped binary — and
-  Cargo keeps both feature variants side by side in one target dir, so
-  alternating the two standard build and test lanes does not recompile at
-  steady state (measured: no-ops in both directions once each lane has
-  populated; the first test compile after a plain build pays a one-time extra
-  spine compile). The recurring cost is per edit: a change in a flipped crate
-  compiles it and its dependents once per lane. What actually costs is a
-  novel feature combination (new cache key, full spine rebuild) or a
-  needless fresh `CARGO_TARGET_DIR` for a big crate. Do not "fix" the flip
-  by enabling test features in the build lane (that ships fixture surface in
-  the CLI), and do not invent a per-lane target dir — the variants coexist.
-  Pick one `CARGO_TARGET_DIR` for the task so you reuse the populated
-  artifacts.
+- This machine shares one compile cache (kache, keyed on profile × features
+  × RUSTFLAGS × source) through the workspace `rustc-wrapper`. Worktree paths
+  do not affect the key. Novel feature permutations do: each one recompiles
+  the workspace spine (~7 min for `tracedecay`) instead of hitting the cache.
+  Stick to the standard lanes — default features (add `test-helpers` only
+  when the suite requires it), plain `--no-default-features` for lean lib
+  iteration, `--all-features` for the handoff gate, and the fixed hotpath
+  profiling combos — rather than toggling individual features (e.g.
+  `semantic-fastembed`) per task.
+- The CLI build lane (`cargo build -p tracedecay-cli --bin tracedecay`) and
+  any test compile of the root crate resolve different spine features:
+  dev-dependency unification activates `test-helpers`/`test-transport` on
+  ~13 spine crates (usecases, sessions, runtime-core, global-db, graph-db,
+  query, semantic, code-index, agent-hosts, dashboard-api, …) that a plain
+  CLI build resolves without. That is the typed test-feature design working
+  as intended — the fixture surfaces live in-crate and stay out of the
+  shipped binary — and Cargo keeps both feature variants side by side in one
+  target dir, so alternating the two standard build and test lanes does not
+  recompile at steady state (measured: no-ops in both directions once each
+  lane has populated; the first test compile after a plain build pays a
+  one-time extra spine compile). The recurring cost is per edit: a change in
+  a flipped crate compiles it and its dependents once per lane. What
+  actually costs is a novel feature combination (new cache key, full spine
+  rebuild) or a needless fresh `CARGO_TARGET_DIR` for a big crate. Do not
+  "fix" the flip by enabling test features in the build lane (that ships
+  fixture surface in the CLI), and do not invent a per-lane target dir — the
+  variants coexist; the broker serializes that shared dir.
 - Start long cargo runs in the background and check back in minutes, not
   10–30s polls. Never run `--workspace` suites mid-task — those are handoff
   gates only. Never re-run tests that are known-red under another active
@@ -194,9 +197,9 @@ compiles.
 
 - In shared checkouts, honor active file ownership: re-read before editing,
   commit only self-consistent owned paths, and never sweep in peer work.
-- Before launching Cargo, check for an equivalent active run; reuse or wait,
-  batch narrow local checks, prefer CI for aggregate verification when the
-  shared target is contended, and never kill peer build processes.
+- Before launching Cargo, check `conductor status` for an equivalent ticket;
+  reuse or wait. Prefer scoped `-p` checks so they coalesce. Never kill
+  cargo processes.
 - Require measured, falsifiable verification and root-cause fixes; preserve
   byte-exact identity contracts, and never weaken assertions, raise timeouts,
   ignore tests, or mask gate failures.

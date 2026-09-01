@@ -10,7 +10,7 @@
 # This file is the single composition point. Source it before cargo:
 #
 #   source scripts/hotpath-rustflags.sh
-#   kache cargo -- build --profile perf ... --features production,hotpath
+#   cargo build --profile perf ... --features production,hotpath
 #
 # Or eval the printed export when a subshell cannot source:
 #

@@ -1690,7 +1690,7 @@ mod tests {
     /// present and with them dropped (the pre-index shape) on the same data.
     ///
     /// Run with e.g.
-    /// `LCM_STATUS_PERF_ROWS=400000 kache cargo -- test -p tracedecay-lcm \
+    /// `LCM_STATUS_PERF_ROWS=400000 cargo test -p tracedecay-lcm \
     ///  --profile perf -- --ignored measure_status_probe_cost --nocapture`.
     #[tokio::test]
     #[ignore = "manual perf harness; seeds a large store and prints timings"]

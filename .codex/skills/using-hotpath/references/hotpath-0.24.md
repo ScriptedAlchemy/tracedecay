@@ -4,11 +4,12 @@ TraceDecay pins `hotpath`, `hotpath-macros`, and `hotpath-meta` 0.24.0. Prefer t
 
 ## Build lanes
 
-Use a distinct process and target directory for each lane. Keep product/default builds free of profiling features.
+Run one lane at a time with plain `cargo` — cargo-conductor brokers it
+(see `AGENTS.md`). Do not set `CARGO_TARGET_DIR` or isolate builds. Keep
+product/default builds free of profiling features.
 
 ```bash
-CARGO_TARGET_DIR=target/hotpath-off \
-  cargo build --locked --profile perf -p tracedecay-cli --bin tracedecay \
+cargo build --locked --profile perf -p tracedecay-cli --bin tracedecay \
   --no-default-features --features production
 
 # Env RUSTFLAGS replaces cargo config rustflags. Source the composed set
@@ -16,20 +17,16 @@ CARGO_TARGET_DIR=target/hotpath-off \
 # `--cfg tokio_unstable` alone. See scripts/hotpath-rustflags.sh.
 source scripts/hotpath-rustflags.sh
 
-CARGO_TARGET_DIR=target/hotpath-timing \
-  cargo build --locked --profile perf -p tracedecay-cli --bin tracedecay \
+cargo build --locked --profile perf -p tracedecay-cli --bin tracedecay \
   --no-default-features --features production,hotpath,hotpath-mcp
 
-CARGO_TARGET_DIR=target/hotpath-alloc \
-  cargo build --locked --profile perf -p tracedecay-cli --bin tracedecay \
+cargo build --locked --profile perf -p tracedecay-cli --bin tracedecay \
   --no-default-features --features production,hotpath-alloc,hotpath-mcp
 
-CARGO_TARGET_DIR=target/hotpath-cpu \
-  cargo build --locked --profile perf -p tracedecay-cli --bin tracedecay \
+cargo build --locked --profile perf -p tracedecay-cli --bin tracedecay \
   --no-default-features --features production,hotpath-cpu,hotpath-mcp
 
-CARGO_TARGET_DIR=target/hotpath-all \
-  cargo build --locked --profile perf -p tracedecay-cli --bin tracedecay \
+cargo build --locked --profile perf -p tracedecay-cli --bin tracedecay \
   --no-default-features \
   --features production,hotpath,hotpath-alloc,hotpath-cpu,hotpath-mcp
 ```

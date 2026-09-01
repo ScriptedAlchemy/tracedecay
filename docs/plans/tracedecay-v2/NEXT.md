@@ -5,9 +5,10 @@ This file records outcomes only. Last reconciled: 2026-08-30.
 
 Branch: `codex/tracedecay-total-redesign-plan-reopened` (PR #707).
 Workspace: 38 crates under `crates/` (virtual root; counted from workspace
-`members` in the root `Cargo.toml`). Build via `kache cargo --`.
-Do not reclaim or wipe the machine kache store; do not treat sccache or
-per-worktree `CARGO_TARGET_DIR=/tmp/...` as the compile cache.
+`members` in the root `Cargo.toml`). Build via plain `cargo` (cargo-conductor
+brokers it; see `docs/CARGO-CONTENTION-POLICY.md`). Do not reclaim or wipe
+the machine kache store; do not treat sccache or a per-worktree
+`CARGO_TARGET_DIR=/tmp/...` as the compile cache.
 
 ## Outcomes since 2026-08-19
 

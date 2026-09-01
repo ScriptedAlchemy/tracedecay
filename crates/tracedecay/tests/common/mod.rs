@@ -735,7 +735,7 @@ pub fn search_eval_bin(name: &str) -> PathBuf {
         });
     assert!(
         binary.is_file(),
-        "search-eval binary `{name}` is missing at {}; build it with `kache cargo -- build -p tracedecay-search-eval --bin {name}` or set {override_env}",
+        "search-eval binary `{name}` is missing at {}; build it with `cargo build -p tracedecay-search-eval --bin {name}` or set {override_env}",
         binary.display()
     );
     binary

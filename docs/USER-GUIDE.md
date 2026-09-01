@@ -760,7 +760,7 @@ Lua, Zig, Objective-C, Perl, Batch/CMD, Fortran, COBOL, MS BASIC 2.0, GW-BASIC, 
 Source builds can cherry-pick individual languages without taking a full tier:
 
 ```bash
-kache cargo -- build -p tracedecay-cli --release --no-default-features --features lang-nix,lang-bash
+cargo build -p tracedecay-cli --release --no-default-features --features lang-nix,lang-bash
 ```
 
 ### What gets extracted

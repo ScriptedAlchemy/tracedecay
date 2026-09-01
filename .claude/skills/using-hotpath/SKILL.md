@@ -27,7 +27,7 @@ the real defects were projection throughput and writer contention.)
 ## Workflow
 
 1. Record the exact commit, build profile, feature set, corpus, cold/warm state, and workload.
-2. Check for an equivalent active Cargo run before building. Use a separate target directory for each profiling mode.
+2. Check `conductor status` before building. Run plain `cargo` (cargo-conductor brokers it; see `AGENTS.md`). Do not set `CARGO_TARGET_DIR` or isolate builds.
 3. Capture the OS baseline with `scripts/profile-hotpath-os-counters.sh`; this supplies elapsed time, CPU, RSS/swap, faults, and physical/logical I/O that Hotpath cannot infer.
 4. Source `scripts/hotpath-rustflags.sh` before any lane that needs
    `--cfg tokio_unstable`. Cargo's env `RUSTFLAGS` replaces config rustflags

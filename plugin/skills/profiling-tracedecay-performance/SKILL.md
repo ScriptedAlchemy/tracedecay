@@ -120,17 +120,16 @@ the pinned fixture, isolated HOME/XDG/data/global DB/socket, readiness polling,
 and JSON schema. It measures cold index, incremental sync, seal to activation,
 tool-call p50/p95, startup/restart, store size, and peak RSS.
 
-Serialize only the build; do not hold the Cargo lease during measurements:
+Build first; do not run cargo during measurements. Use plain `cargo` —
+cargo-conductor brokers it (see `AGENTS.md`). Do not prefix with `kache`, wrap
+in `flock`, or set `CARGO_TARGET_DIR`.
 
 ```bash
-: "${CARGO_TARGET_DIR:?export the per-worktree target dir printed by scripts/agent-worktree.sh}"
-export CARGO_TARGET_DIR
 PROFILE_ID="${PROFILE_ID:-$(date -u +%Y%m%dT%H%M%SZ)-${USER}-$$}"
-flock -w 7200 /tmp/tracedecay-cargo-heavy.lock bash -lc \
-  'CARGO_BUILD_JOBS=4 kache cargo -- build --locked --release -p tracedecay-cli --bin tracedecay'
+cargo build --locked --release -p tracedecay-cli --bin tracedecay
 
 scripts/efficiency-scorecard.py \
-  --binary "$CARGO_TARGET_DIR/release/tracedecay" \
+  --binary target/release/tracedecay \
   --label baseline \
   --output "target/efficiency-scorecard-$PROFILE_ID-baseline"
 ```
@@ -150,9 +149,8 @@ Build the shipped binary with timing spans; add `hotpath-mcp` only when live
 Hotpath MCP inspection is needed:
 
 ```bash
-flock -w 7200 /tmp/tracedecay-cargo-heavy.lock bash -lc \
-  'CARGO_BUILD_JOBS=4 kache cargo -- build --profile perf -p tracedecay-cli --bin tracedecay --features hotpath'
-export TRACEDECAY_BIN="$CARGO_TARGET_DIR/perf/tracedecay"
+cargo build --profile perf -p tracedecay-cli --bin tracedecay --features hotpath
+export TRACEDECAY_BIN="target/perf/tracedecay"
 ```
 
 Use `--features hotpath,hotpath-mcp` instead only for live Hotpath MCP
@@ -357,7 +355,10 @@ earn permanent diagnostic value.
 - Comparing different fixture digests, readiness conditions, or host load.
 - Treating `--quick`, one run, span duration, or syscall count as proof.
 - Recording process-wide `perf` before identifying hot threads.
-- Holding the shared Cargo lease while benchmarking.
-- Sharing a target directory or report path with another agent.
+- Running cargo during measurements (conductor serializes builds, but still
+  do not interleave a rebuild with a capture).
+- Inventing a private `CARGO_TARGET_DIR`, wrapping cargo in `flock`, or
+  prefixing `kache cargo`.
+- Sharing a report path with another agent.
 - Adding a second sandbox/scorecard wrapper instead of using the maintained
   `scripts/efficiency-scorecard.py`.

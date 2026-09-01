@@ -13,8 +13,9 @@ Create a linked Git worktree, lock it as an active agent lane, and seed
 dashboard/app-dist from the primary checkout. Symlink root and
 dashboard/node_modules when the primary has them. Prints the unlock+remove
 one-liner for the owning lane and the recommended env
-(CARGO_TARGET_DIR under /fast/tmp, TRACEDECAY_SKIP_DASHBOARD_BUILD=1 plus
-the seeded bundle's TRACEDECAY_DASHBOARD_BUNDLE_SHA256 digest).
+(TRACEDECAY_SKIP_DASHBOARD_BUILD=1 plus the seeded bundle's
+TRACEDECAY_DASHBOARD_BUNDLE_SHA256 digest). Do not export
+CARGO_TARGET_DIR — cargo-conductor serializes the default target dir.
 EOF
 }
 
@@ -126,8 +127,6 @@ fi
 
 git worktree lock "$worktree" --reason "active agent lane"
 
-target_dir="/fast/tmp/$(basename -- "$worktree")-target"
-
 echo "Worktree created and locked: $worktree"
 echo "Seeded dashboard/app-dist from $src_app_dist"
 if [[ "$linked_node_modules" -eq 1 ]]; then
@@ -152,4 +151,3 @@ echo
 echo "Recommended env:"
 echo "  export TRACEDECAY_SKIP_DASHBOARD_BUILD=1"
 echo "  export TRACEDECAY_DASHBOARD_BUNDLE_SHA256=$bundle_digest"
-echo "  export CARGO_TARGET_DIR=$target_dir"

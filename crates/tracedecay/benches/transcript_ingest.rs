@@ -6,10 +6,10 @@
 //! data. Fixture shapes mirror `crates/tracedecay/tests/transcript_ingest_suite`.
 //!
 //! Run (numbers):
-//!   kache cargo -- bench -p tracedecay --bench transcript_ingest \
+//!   cargo bench -p tracedecay --bench transcript_ingest \
 //!     --features test-helpers -- --run all
 //! Run (per-stage attribution):
-//!   kache cargo -- bench -p tracedecay --bench transcript_ingest \
+//!   cargo bench -p tracedecay --bench transcript_ingest \
 //!     --features test-helpers,hotpath -- --run claude
 //!
 //! Providers: `claude` and `codex` exercise the observation capture +
