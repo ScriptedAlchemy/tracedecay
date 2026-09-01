@@ -42,6 +42,7 @@ pub struct WorkAttemptCapacityV1 {
     concurrency: TopologyConcurrencyPolicyV1,
 }
 
+#[hotpath::measure_all]
 impl WorkAttemptCapacityV1 {
     pub fn new(
         global_active: u64,
@@ -57,18 +58,22 @@ impl WorkAttemptCapacityV1 {
         }
     }
 
+    #[hotpath::skip]
     pub const fn global_active(&self) -> u64 {
         self.global_active
     }
 
+    #[hotpath::skip]
     pub const fn repository_active(&self) -> u64 {
         self.repository_active
     }
 
+    #[hotpath::skip]
     pub const fn task_active(&self) -> u64 {
         self.task_active
     }
 
+    #[hotpath::skip]
     pub const fn concurrency(&self) -> &TopologyConcurrencyPolicyV1 {
         &self.concurrency
     }
@@ -165,6 +170,7 @@ where
     }
 }
 
+#[hotpath::measure]
 fn capacity_query_problem() -> ApplicationProblem {
     invalid_problem(
         "application.work-attempt.invalid-capacity-query",

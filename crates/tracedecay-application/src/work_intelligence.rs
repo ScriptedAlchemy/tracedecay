@@ -103,6 +103,7 @@ pub struct WorkCalibrationEvidenceV1 {
     pub provenance: WorkCalibrationProvenanceV1,
 }
 
+#[hotpath::measure]
 pub(crate) fn calibration_evidence(
     input: &WorkProposalPolicyInputV1,
     decision: &WorkProposalDecisionV1,
@@ -292,6 +293,7 @@ pub struct WorkExpertiseConsentSnapshotV1 {
     project: WorkExpertiseConsentV1,
 }
 
+#[hotpath::measure_all]
 impl WorkExpertiseConsentSnapshotV1 {
     pub fn from_configuration(
         revision_id: ConfigurationRevisionId,
@@ -427,6 +429,7 @@ where
     G: WorkGraphReadPortV1,
     A: WorkProductOwnerAuthorizationPortV1,
 {
+    #[hotpath::skip]
     pub const fn new(graph: G, owner_authority: A, binding: WorkProductBindingV1) -> Self {
         Self {
             graph,
@@ -764,6 +767,7 @@ where
     }
 }
 
+#[hotpath::measure]
 fn validate_experience_request(
     request: &WorkExperienceRequestV1,
 ) -> Result<(), WorkProductApplicationErrorV1> {
@@ -777,6 +781,7 @@ fn validate_experience_request(
     Ok(())
 }
 
+#[hotpath::measure]
 fn expertise_consent_value(
     snapshot: &ConfigurationSnapshotV1,
     key: &'static str,
@@ -794,6 +799,7 @@ fn expertise_consent_value(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 fn assess_consent(
     consent: &WorkExpertiseConsentV1,
     observed_at: UtcMicros,
@@ -826,6 +832,7 @@ fn assess_consent(
     }
 }
 
+#[hotpath::measure]
 fn evidence_difference(
     left: &[TaskEvidenceLinkV1],
     right: &[TaskEvidenceLinkV1],
@@ -851,6 +858,7 @@ fn evidence_difference(
         .collect()
 }
 
+#[hotpath::measure]
 fn proposal_runtime_coverage(
     runtime: &WorkRuntimeProjectionV1,
     task_id: &TaskId,
@@ -882,6 +890,7 @@ fn proposal_runtime_coverage(
     }
 }
 
+#[hotpath::measure]
 fn canonical_product_proposal(
     proposal_id: ProposalId,
     item: &WorkItemV1,
@@ -918,6 +927,7 @@ fn canonical_product_proposal(
     .map_err(|_| WorkProductApplicationErrorV1::ProposalAuthorityUnavailable)
 }
 
+#[hotpath::measure]
 fn canonical_route_decision(
     candidates: &[WorkRouteCandidateV1],
     decision: &WorkProposalDecisionV1,
@@ -952,6 +962,7 @@ fn canonical_route_decision(
         .map_err(|_| WorkProductApplicationErrorV1::ProposalAuthorityUnavailable)
 }
 
+#[hotpath::measure]
 fn product_route(
     candidates: &[WorkRouteCandidateV1],
     route_id: &str,
@@ -968,14 +979,17 @@ fn product_route(
         .map_err(|_| WorkProductApplicationErrorV1::ProposalAuthorityUnavailable)
 }
 
+#[hotpath::measure]
 fn bounded(value: usize) -> Result<u32, WorkProductApplicationErrorV1> {
     u32::try_from(value).map_err(|_| WorkProductApplicationErrorV1::GraphAuthorityUnavailable)
 }
 
+#[hotpath::measure]
 fn graph_error(error: WorkGraphReadPortErrorV1) -> WorkProductApplicationErrorV1 {
     error.into()
 }
 
+#[hotpath::measure]
 fn routing_error(error: WorkRoutingSnapshotErrorV1) -> WorkProductApplicationErrorV1 {
     match error {
         WorkRoutingSnapshotErrorV1::NotFoundOrNotAuthorized => {
@@ -987,6 +1001,7 @@ fn routing_error(error: WorkRoutingSnapshotErrorV1) -> WorkProductApplicationErr
     }
 }
 
+#[hotpath::measure]
 fn root_error(error: WorkEvidenceRootReadErrorV1) -> WorkProductApplicationErrorV1 {
     match error {
         WorkEvidenceRootReadErrorV1::NotFoundOrNotAuthorized => {

@@ -35,6 +35,7 @@ pub enum ProviderSourceIdentity {
     },
 }
 
+#[hotpath::measure_all]
 impl ProviderSourceIdentity {
     fn validate(&self) -> Result<(), ApplicationContractError> {
         match self {
@@ -58,6 +59,7 @@ impl ProviderSourceIdentity {
         Ok(())
     }
 
+    #[hotpath::skip]
     pub const fn is_overlay(&self) -> bool {
         matches!(self, Self::SessionOverlay { .. })
     }
@@ -79,6 +81,7 @@ pub struct ProviderDocumentIdentity {
     pub document_version: Option<u64>,
 }
 
+#[hotpath::measure_all]
 impl ProviderDocumentIdentity {
     fn validate(&self) -> Result<(), ApplicationContractError> {
         self.file.validate()?;
@@ -102,6 +105,7 @@ pub struct DiagnosticProviderDescriptor {
     pub language_descriptor_revision: LanguageDescriptorRevision,
 }
 
+#[hotpath::measure_all]
 impl DiagnosticProviderDescriptor {
     fn validate(&self) -> Result<(), ApplicationContractError> {
         self.provider.validate()?;
@@ -119,6 +123,7 @@ pub struct ProviderFreshness {
     pub observed_at: UtcMicros,
 }
 
+#[hotpath::measure_all]
 impl ProviderFreshness {
     pub fn current(observed_at: UtcMicros) -> Self {
         Self {
@@ -137,6 +142,7 @@ pub struct ProviderCoverage {
     pub completeness: CoverageCompleteness,
 }
 
+#[hotpath::measure_all]
 impl ProviderCoverage {
     pub fn complete(requested: u64, returned: u64) -> Self {
         Self {
@@ -174,6 +180,7 @@ pub struct ProviderProvenance {
     pub anchor: Option<RetrievalAnchorId>,
 }
 
+#[hotpath::measure_all]
 impl ProviderProvenance {
     fn validate(&self) -> Result<(), ApplicationContractError> {
         if let Some(anchor) = &self.anchor {
@@ -191,6 +198,7 @@ pub struct RevisionDigest {
     pub digest: ManifestDigest,
 }
 
+#[hotpath::measure_all]
 impl RevisionDigest {
     fn validate(&self) -> Result<(), ApplicationContractError> {
         self.revision.validate()?;
@@ -233,6 +241,7 @@ pub struct DiagnosticProviderIdentity {
     pub policy: PolicyDecisionRef,
 }
 
+#[hotpath::measure_all]
 impl DiagnosticProviderIdentity {
     pub fn new(parts: DiagnosticProviderIdentityParts) -> Result<Self, ApplicationContractError> {
         let identity = Self {
@@ -282,6 +291,7 @@ impl DiagnosticProviderIdentity {
         Ok(canonical_sha256(&(PROVIDER_IDENTITY_DIGEST_DOMAIN, self))?)
     }
 
+    #[hotpath::skip]
     pub const fn is_overlay(&self) -> bool {
         self.source.is_overlay()
     }
@@ -298,6 +308,7 @@ pub struct AnalyzerAdmittedDiagnosticProviderV1 {
     admission_snapshot: AnalyzerAdmissionSnapshotV1,
 }
 
+#[hotpath::measure_all]
 impl AnalyzerAdmittedDiagnosticProviderV1 {
     /// Evaluates the approved analyzer policy directly from the current,
     /// exact Plan-20 application snapshot.
@@ -447,9 +458,11 @@ pub enum DiagnosticProviderState {
     Unavailable,
 }
 
+#[hotpath::measure_all]
 impl DiagnosticProviderState {
     /// Feedback cycles consume the one canonical provider-state taxonomy
     /// rather than inventing a diagnostic-specific empty-result convention.
+    #[hotpath::skip]
     pub const fn feedback_state(self) -> ProviderEvaluationStateV1 {
         match self {
             Self::SupportedComplete => ProviderEvaluationStateV1::SupportedCompletedComplete,
@@ -474,6 +487,7 @@ pub struct DiagnosticProviderResult<T> {
     pub payload: Option<T>,
 }
 
+#[hotpath::measure_all]
 impl<T> DiagnosticProviderResult<T> {
     pub fn new(
         identity: DiagnosticProviderIdentity,
@@ -540,6 +554,7 @@ pub struct CurrentDiagnosticsRequest {
     pub identity: DiagnosticProviderIdentity,
 }
 
+#[hotpath::measure_all]
 impl CurrentDiagnosticsRequest {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         self.identity.validate()
@@ -558,6 +573,7 @@ pub struct GenerationDiagnosticHistoryRequest {
     pub file: FileOccurrenceId,
 }
 
+#[hotpath::measure_all]
 impl GenerationDiagnosticHistoryRequest {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         self.identity.validate()?;

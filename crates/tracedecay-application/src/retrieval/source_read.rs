@@ -23,7 +23,9 @@ pub enum SourceReadModeV1 {
     Signatures,
 }
 
+#[hotpath::measure_all]
 impl SourceReadModeV1 {
+    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Full => "full",
@@ -44,6 +46,7 @@ pub struct SourceReadPrimitiveRequest {
     pub meta: RetrievalRequestMeta,
 }
 
+#[hotpath::measure_all]
 impl SourceReadPrimitiveRequest {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         let file_is_valid = !self.file.is_empty()

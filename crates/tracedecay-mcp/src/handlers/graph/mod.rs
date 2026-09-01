@@ -21,10 +21,12 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use crate::{ToolResult, text_tool_result};
 
+#[hotpath::measure]
 pub(super) fn user_line(line: u32) -> u32 {
     line.saturating_add(1)
 }
 
+#[hotpath::measure]
 pub(super) fn require_positive_depth(max_depth: u32) -> Result<()> {
     if max_depth == 0 {
         return Err(TraceDecayError::Config {
@@ -34,6 +36,7 @@ pub(super) fn require_positive_depth(max_depth: u32) -> Result<()> {
     Ok(())
 }
 
+#[hotpath::measure]
 pub fn node_not_found(node_id: &str) -> Result<ToolResult> {
     let output = PrimitiveNotFoundV1 {
         status: "not_found".to_owned(),

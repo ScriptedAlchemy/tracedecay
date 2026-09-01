@@ -106,6 +106,7 @@ pub async fn handle_recursion(
     ))
 }
 
+#[hotpath::measure]
 fn cycle_path_for_scc(
     scc: &mut [String],
     adj: &HashMap<String, HashSet<String>>,
@@ -138,6 +139,7 @@ fn cycle_path_for_scc(
     None
 }
 
+#[hotpath::measure]
 fn dfs_cycle_path<'a>(
     current: &'a str,
     start: &'a str,

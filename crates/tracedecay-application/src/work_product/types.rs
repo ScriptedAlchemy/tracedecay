@@ -70,6 +70,7 @@ pub struct AuthorizedWorkProductScopeV1 {
     selection: WorkProductSelectionScopeV1,
 }
 
+#[hotpath::measure_all]
 impl AuthorizedWorkProductScopeV1 {
     pub fn new(
         owner_brain_id: BrainId,
@@ -92,14 +93,17 @@ impl AuthorizedWorkProductScopeV1 {
         })
     }
 
+    #[hotpath::skip]
     pub const fn owner_brain_id(&self) -> &BrainId {
         &self.owner_brain_id
     }
 
+    #[hotpath::skip]
     pub const fn owner_profile_id(&self) -> &UserProfileId {
         &self.owner_profile_id
     }
 
+    #[hotpath::skip]
     pub const fn selection(&self) -> &WorkProductSelectionScopeV1 {
         &self.selection
     }
@@ -147,7 +151,9 @@ pub struct WorkProductBindingV1 {
     use_case_id: UseCaseId,
 }
 
+#[hotpath::measure_all]
 impl WorkProductBindingV1 {
+    #[hotpath::skip]
     pub const fn new(capability_id: CapabilityId, use_case_id: UseCaseId) -> Self {
         Self {
             capability_id,
@@ -155,10 +161,12 @@ impl WorkProductBindingV1 {
         }
     }
 
+    #[hotpath::skip]
     pub const fn capability_id(&self) -> &CapabilityId {
         &self.capability_id
     }
 
+    #[hotpath::skip]
     pub const fn use_case_id(&self) -> &UseCaseId {
         &self.use_case_id
     }
@@ -174,6 +182,7 @@ pub struct VerifiedWorkGraphVersionV1 {
     recovered_graph_digest: ManifestDigest,
 }
 
+#[hotpath::measure_all]
 impl VerifiedWorkGraphVersionV1 {
     pub fn new(
         graph_version: WorkGraphVersionV1,
@@ -192,18 +201,22 @@ impl VerifiedWorkGraphVersionV1 {
         })
     }
 
+    #[hotpath::skip]
     pub const fn graph_version(&self) -> WorkGraphVersionV1 {
         self.graph_version
     }
 
+    #[hotpath::skip]
     pub const fn source_watermark(&self) -> &WorkProductSourceWatermarkV1 {
         &self.source_watermark
     }
 
+    #[hotpath::skip]
     pub const fn event_sequence(&self) -> WorkProductEventSequenceV1 {
         self.event_sequence
     }
 
+    #[hotpath::skip]
     pub const fn recovered_graph_digest(&self) -> &ManifestDigest {
         &self.recovered_graph_digest
     }
@@ -222,6 +235,7 @@ pub struct WorkProductPortContextV1 {
     observed_at: UtcMicros,
 }
 
+#[hotpath::measure_all]
 impl WorkProductPortContextV1 {
     pub(crate) fn from_request(
         context: &RequestContext,
@@ -238,26 +252,32 @@ impl WorkProductPortContextV1 {
         }
     }
 
+    #[hotpath::skip]
     pub const fn actor(&self) -> &ActorId {
         &self.actor
     }
 
+    #[hotpath::skip]
     pub const fn request_id(&self) -> &RequestId {
         &self.request_id
     }
 
+    #[hotpath::skip]
     pub const fn deadline(&self) -> &Deadline {
         &self.deadline
     }
 
+    #[hotpath::skip]
     pub const fn cancellation(&self) -> &CancellationContext {
         &self.cancellation
     }
 
+    #[hotpath::skip]
     pub const fn authorized_scope(&self) -> &AuthorizedWorkProductScopeV1 {
         &self.authorized_scope
     }
 
+    #[hotpath::skip]
     pub const fn observed_at(&self) -> UtcMicros {
         self.observed_at
     }

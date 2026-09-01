@@ -36,16 +36,19 @@ application_identifier!(
 #[serde(transparent)]
 pub struct StorageByteSizeV1(pub u64);
 
+#[hotpath::measure_all]
 impl StorageByteSizeV1 {
     pub const ZERO: Self = Self(0);
 
     #[must_use]
+    #[hotpath::skip]
     pub const fn get(self) -> u64 {
         self.0
     }
 
     /// Saturating difference, never underflowing below zero bytes.
     #[must_use]
+    #[hotpath::skip]
     pub const fn saturating_sub(self, other: Self) -> Self {
         Self(self.0.saturating_sub(other.0))
     }
@@ -60,6 +63,7 @@ impl StorageByteSizeV1 {
 #[serde(transparent)]
 pub struct FreePageRatioV1(f64);
 
+#[hotpath::measure_all]
 impl FreePageRatioV1 {
     /// Compute the ratio from a freelist-page count and a total page count. A
     /// zero page count yields a zero ratio (an empty store carries no bloat),
@@ -74,6 +78,7 @@ impl FreePageRatioV1 {
     }
 
     #[must_use]
+    #[hotpath::skip]
     pub const fn as_f64(self) -> f64 {
         self.0
     }

@@ -51,11 +51,13 @@ struct ResponseHandleTelemetry {
     last_cleanup_at: AtomicI64,
 }
 
+#[hotpath::measure]
 fn telemetry() -> &'static ResponseHandleTelemetry {
     static TELEMETRY: OnceLock<ResponseHandleTelemetry> = OnceLock::new();
     TELEMETRY.get_or_init(ResponseHandleTelemetry::default)
 }
 
+#[hotpath::measure]
 fn public_inventory_problem(error: &TraceDecayError) -> (&'static str, &'static str) {
     match error {
         TraceDecayError::File { message, .. }
@@ -85,6 +87,7 @@ fn public_inventory_problem(error: &TraceDecayError) -> (&'static str, &'static 
     }
 }
 
+#[hotpath::measure]
 pub fn public_retrieve_error(error: TraceDecayError) -> TraceDecayError {
     match error {
         TraceDecayError::Config { message } if message.starts_with("invalid response handle:") => {
@@ -119,6 +122,7 @@ pub fn public_retrieve_error(error: TraceDecayError) -> TraceDecayError {
     }
 }
 
+#[hotpath::measure]
 pub fn response_handle_stats_json(project_root: Option<&Path>) -> Value {
     let telemetry = telemetry();
     let counter = |value: &AtomicU64| value.load(Ordering::Relaxed);
@@ -178,6 +182,7 @@ pub fn response_handle_stats_json(project_root: Option<&Path>) -> Value {
 }
 
 #[track_caller]
+#[hotpath::measure]
 pub fn store_response_handle(
     project_root: &Path,
     content: &str,
@@ -336,6 +341,7 @@ pub fn cleanup_expired_response_handles(project_root: &Path, now: i64) -> Result
 }
 
 #[track_caller]
+#[hotpath::measure]
 pub fn observe_response_truncation(
     original_bytes: usize,
     emitted_bytes: usize,
@@ -379,20 +385,24 @@ pub fn observe_response_truncation(
     );
 }
 
+#[hotpath::measure]
 pub fn note_response_handle_store_skipped_no_project_root() {
     telemetry()
         .store_skipped_no_project_root
         .fetch_add(1, Ordering::Relaxed);
 }
 
+#[hotpath::measure]
 fn timestamp_json(value: i64) -> Value {
     if value > 0 { json!(value) } else { Value::Null }
 }
 
+#[hotpath::measure]
 fn duration_micros_u64(duration: Duration) -> u64 {
     duration.as_micros().min(u128::from(u64::MAX)) as u64
 }
 
+#[hotpath::measure]
 fn error_class(error: &TraceDecayError) -> &'static str {
     match error {
         TraceDecayError::ResetRequired { .. } => "reset_required",
@@ -411,6 +421,7 @@ fn error_class(error: &TraceDecayError) -> &'static str {
     }
 }
 
+#[hotpath::measure]
 fn clipped_handle_for_log(handle: &str) -> String {
     const MAX_LOG_HANDLE_CHARS: usize = 64;
     let mut chars = handle.chars();

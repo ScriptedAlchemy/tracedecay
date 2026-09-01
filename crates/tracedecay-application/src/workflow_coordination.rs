@@ -50,7 +50,9 @@ pub enum WorkflowDefinitionLifecycleState {
     Rejected,
 }
 
+#[hotpath::measure_all]
 impl WorkflowDefinitionLifecycleState {
+    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Candidate => "candidate",
@@ -73,6 +75,7 @@ impl WorkflowDefinitionLifecycleState {
     }
 
     /// Retire and reject are terminal dispositions: nothing transitions out.
+    #[hotpath::skip]
     pub const fn is_terminal(self) -> bool {
         matches!(self, Self::Retired | Self::Rejected)
     }
@@ -100,7 +103,9 @@ const RETIRE_FROM_ACTIVE: &[WorkflowDefinitionLifecycleState] =
 const REJECT_FROM_OPEN: &[WorkflowDefinitionLifecycleState] =
     &[WorkflowDefinitionLifecycleState::Rejected];
 
+#[hotpath::measure_all]
 impl WorkflowLifecycleOperation {
+    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Activate => "activate",
@@ -128,6 +133,7 @@ impl WorkflowLifecycleOperation {
     /// candidate records the intermediate `validated` disposition it had to
     /// clear, and every state it passes through gets its own immutable history
     /// entry. `None` names an illegal transition.
+    #[hotpath::skip]
     pub const fn path_from(
         self,
         current: WorkflowDefinitionLifecycleState,
@@ -393,6 +399,7 @@ impl<P> WorkflowDefinitionService<P>
 where
     P: WorkflowDefinitionAuthorityPort,
 {
+    #[hotpath::skip]
     pub const fn new(authority: P) -> Self {
         Self { authority }
     }
@@ -662,6 +669,7 @@ where
     }
 }
 
+#[hotpath::measure]
 pub fn prepare_workflow_definition_registration(
     context: &RequestContext,
     definition: WorkflowDefinition,
@@ -675,6 +683,7 @@ pub fn prepare_workflow_definition_registration(
     Ok(definition)
 }
 
+#[hotpath::measure]
 fn coordination_authority_error(
     error: WorkflowDefinitionAuthorityError,
 ) -> WorkflowCoordinationError {
@@ -695,6 +704,7 @@ pub struct TaskHandoffToken {
     secret: BearerTokenSecret,
 }
 
+#[hotpath::measure_all]
 impl TaskHandoffToken {
     pub fn new(secret: String) -> Result<Self, TaskHandoffError> {
         Ok(Self {
@@ -732,6 +742,7 @@ pub struct TaskHandoffScope {
     to_actor_id: ActorId,
 }
 
+#[hotpath::measure_all]
 impl TaskHandoffScope {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -868,6 +879,7 @@ pub struct TaskHandoffGrant {
     frontier_digest: ManifestDigest,
 }
 
+#[hotpath::measure_all]
 impl TaskHandoffGrant {
     pub fn new(
         scope: TaskHandoffScope,
@@ -1116,6 +1128,7 @@ impl<P> TaskHandoffService<P>
 where
     P: TaskHandoffAuthorityPort,
 {
+    #[hotpath::skip]
     pub const fn new(authority: P) -> Self {
         Self { authority }
     }
@@ -1194,6 +1207,7 @@ where
     }
 }
 
+#[hotpath::measure]
 pub fn prepare_task_handoff_issue(
     context: &RequestContext,
     scope: TaskHandoffScope,
@@ -1213,6 +1227,7 @@ pub fn prepare_task_handoff_issue(
     TaskHandoffGrant::new(scope, token.digest()?, issued_at, expires_at, frontier)
 }
 
+#[hotpath::measure]
 pub fn prepare_task_handoff_redeem(
     context: &RequestContext,
     token: &TaskHandoffToken,
@@ -1227,12 +1242,14 @@ pub fn prepare_task_handoff_redeem(
     token.digest()
 }
 
+#[hotpath::measure]
 fn handoff_scope_matches_context(context: &RequestContext, scope: &TaskHandoffScope) -> bool {
     scope.project_id() == &context.scope().project_id
         && scope.repository_id() == &context.scope().repository_id
         && scope.worktree_id() == &context.scope().worktree_id
 }
 
+#[hotpath::measure]
 fn handoff_authority_error(error: TaskHandoffAuthorityError) -> TaskHandoffError {
     match error {
         TaskHandoffAuthorityError::Conflict => TaskHandoffError::Conflict,

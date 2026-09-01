@@ -85,9 +85,11 @@ pub enum DoctorFamilyUnavailableReasonV1 {
     Corrupt,
 }
 
+#[hotpath::measure_all]
 impl DoctorFamilyUnavailableReasonV1 {
     /// The honest evidence state a synthesized placeholder finding carries for
     /// this unavailability reason.
+    #[hotpath::skip]
     const fn evidence_state(self) -> DoctorEvidenceStateV1 {
         match self {
             // An unwired family is not supported by this composition build.
@@ -102,6 +104,7 @@ impl DoctorFamilyUnavailableReasonV1 {
         }
     }
 
+    #[hotpath::skip]
     const fn slug(self) -> &'static str {
         match self {
             Self::Unwired => "unwired",
@@ -129,8 +132,10 @@ pub enum DoctorFamilyConsultationV1 {
     },
 }
 
+#[hotpath::measure_all]
 impl DoctorFamilyConsultationV1 {
     #[must_use]
+    #[hotpath::skip]
     const fn is_consulted(self) -> bool {
         matches!(self, Self::Consulted)
     }
@@ -141,6 +146,7 @@ impl DoctorFamilyConsultationV1 {
     /// A NAMED degradation outranks a bare `Unknown`: a source that explained
     /// why it is unavailable must not be masked by a peer that merely could not
     /// be determined. This is the single ranking the composer uses everywhere.
+    #[hotpath::skip]
     const fn rank(self) -> u8 {
         match self {
             Self::Consulted => 8,
@@ -179,6 +185,7 @@ pub struct DoctorFamilyCoverageV1 {
     consultation: DoctorFamilyConsultationV1,
 }
 
+#[hotpath::measure_all]
 impl DoctorFamilyCoverageV1 {
     /// The finding family this record describes.
     #[must_use]
@@ -202,6 +209,7 @@ pub struct DoctorReportCoverageV1 {
     statement: DoctorCoverageStatementV1,
 }
 
+#[hotpath::measure_all]
 impl DoctorReportCoverageV1 {
     /// Per-family consultation records, in stable family order.
     #[must_use]
@@ -232,6 +240,7 @@ pub struct DoctorReportEntryV1 {
     storage_kind: Option<DoctorStorageFindingKindV1>,
 }
 
+#[hotpath::measure_all]
 impl DoctorReportEntryV1 {
     /// Construct a report entry. A storage subclass may be attached only to a
     /// `Storage`-family finding; attaching one to any other family is a contract
@@ -279,6 +288,7 @@ pub struct DoctorReportV1 {
     coverage: DoctorReportCoverageV1,
 }
 
+#[hotpath::measure_all]
 impl DoctorReportV1 {
     /// All report entries, in stable family order (never merged or deduplicated).
     #[must_use]
@@ -415,6 +425,7 @@ pub struct DoctorReportComposerV1<'a> {
     storage: Option<&'a dyn StorageDoctorPort>,
 }
 
+#[hotpath::measure_all]
 impl<'a> DoctorReportComposerV1<'a> {
     /// A composer with no wired sources. Composing it yields a truthful report in
     /// which every family is unavailable (unwired).
@@ -521,6 +532,7 @@ impl<'a> DoctorReportComposerV1<'a> {
         })
     }
 
+    #[hotpath::skip]
     async fn compose_configuration(
         &self,
         context: &RequestContext,
@@ -549,6 +561,7 @@ impl<'a> DoctorReportComposerV1<'a> {
         Ok((vec![DoctorReportEntryV1::new(finding, None)?], consultation))
     }
 
+    #[hotpath::skip]
     async fn compose_runtime(
         &self,
         context: &RequestContext,
@@ -604,6 +617,7 @@ impl<'a> DoctorReportComposerV1<'a> {
         Ok((entries, strongest_consultation(consultations)?))
     }
 
+    #[hotpath::skip]
     async fn compose_host(
         &self,
         context: &RequestContext,
@@ -626,6 +640,7 @@ impl<'a> DoctorReportComposerV1<'a> {
         Ok((vec![DoctorReportEntryV1::new(finding, None)?], consultation))
     }
 
+    #[hotpath::skip]
     async fn compose_advisory(
         &self,
         context: &RequestContext,
@@ -666,6 +681,7 @@ impl<'a> DoctorReportComposerV1<'a> {
         Ok((entries, strongest_consultation(consultations)?))
     }
 
+    #[hotpath::skip]
     async fn compose_code_index(
         &self,
         context: &RequestContext,
@@ -692,6 +708,7 @@ impl<'a> DoctorReportComposerV1<'a> {
         Ok((vec![DoctorReportEntryV1::new(finding, None)?], consultation))
     }
 
+    #[hotpath::skip]
     async fn compose_language_server(
         &self,
         context: &RequestContext,
@@ -714,6 +731,7 @@ impl<'a> DoctorReportComposerV1<'a> {
         Ok((vec![DoctorReportEntryV1::new(finding, None)?], consultation))
     }
 
+    #[hotpath::skip]
     async fn compose_observability(
         &self,
         context: &RequestContext,
@@ -746,6 +764,7 @@ impl<'a> DoctorReportComposerV1<'a> {
         ))
     }
 
+    #[hotpath::skip]
     async fn compose_storage(
         &self,
         context: &RequestContext,
@@ -805,6 +824,7 @@ impl<'a> DoctorReportComposerV1<'a> {
     }
 }
 
+#[hotpath::measure]
 fn storage_entries(
     findings: Vec<DoctorStorageFindingV1>,
 ) -> Result<Vec<DoctorReportEntryV1>, ApplicationContractError> {
@@ -853,6 +873,7 @@ const fn unavailable(reason: DoctorFamilyUnavailableReasonV1) -> DoctorFamilyCon
     DoctorFamilyConsultationV1::Unavailable { reason }
 }
 
+#[hotpath::measure]
 fn strongest_consultation(
     consultations: Vec<DoctorFamilyConsultationV1>,
 ) -> Result<DoctorFamilyConsultationV1, ApplicationContractError> {
@@ -871,6 +892,7 @@ fn strongest_consultation(
 }
 
 /// Synthesize the single placeholder entry for a family with no wired source.
+#[hotpath::measure]
 fn unwired_family(
     family: DoctorFindingFamilyV1,
 ) -> Result<(Vec<DoctorReportEntryV1>, DoctorFamilyConsultationV1), ApplicationContractError> {
@@ -882,6 +904,7 @@ fn unwired_family(
 }
 
 /// Synthesize the single placeholder entry for an unavailable storage read.
+#[hotpath::measure]
 fn storage_unavailable(
     reason: DoctorFamilyUnavailableReasonV1,
     detail: Option<&str>,
@@ -898,6 +921,7 @@ fn storage_unavailable(
 /// The observed reason text a source reported, rendered safe for a coverage
 /// statement: control characters folded to spaces, trimmed, and bounded so the
 /// composed statement stays inside the statement contract.
+#[hotpath::measure]
 fn sanitized_detail(detail: &str) -> Option<String> {
     let folded: String = detail
         .chars()
@@ -928,6 +952,7 @@ const PLACEHOLDER_DETAIL_MAX_BYTES: usize = 320;
 /// When the source reported a reason, it is reproduced in the coverage
 /// statement: a named degradation that discards its reason is only marginally
 /// better than the bare `unknown` it replaced.
+#[hotpath::measure]
 fn placeholder_finding(
     family: DoctorFindingFamilyV1,
     reason: DoctorFamilyUnavailableReasonV1,
@@ -960,6 +985,7 @@ fn placeholder_finding(
 }
 
 /// Assemble the report-wide coverage statement from per-family records.
+#[hotpath::measure]
 fn build_coverage(
     families: Vec<DoctorFamilyCoverageV1>,
     entries: &[DoctorReportEntryV1],
@@ -991,6 +1017,7 @@ fn build_coverage(
 
 /// Build the bounded human-readable coverage statement enumerating unavailable
 /// families. Kept within the 512-byte coverage-statement budget.
+#[hotpath::measure]
 fn build_statement(families: &[DoctorFamilyCoverageV1], consulted: usize, total: usize) -> String {
     let mut unavailable_list = String::new();
     for record in families {

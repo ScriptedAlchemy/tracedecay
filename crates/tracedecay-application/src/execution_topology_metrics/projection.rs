@@ -119,6 +119,7 @@ pub(super) struct DuplicateRowV1 {
 /// references may themselves contain colons.
 pub(super) type DuplicateReceiptKeyV1 = String;
 
+#[hotpath::measure]
 pub(super) fn duplicate_receipt_key(
     adjudication_ref: &str,
     adjudication_revision: u64,
@@ -129,6 +130,7 @@ pub(super) fn duplicate_receipt_key(
     )
 }
 
+#[hotpath::measure]
 pub(super) fn duplicate_receipt_key_parts(key: &str) -> Option<(&str, u64)> {
     let (reference_length, remainder) = key.split_once(':')?;
     let reference_length = reference_length.parse::<usize>().ok()?;
@@ -222,6 +224,7 @@ pub(super) struct ExecutionTopologyEvidenceV1 {
     invalid_correction_keys: BTreeSet<(u8, String, u64)>,
 }
 
+#[hotpath::measure_all]
 impl ExecutionTopologyEvidenceV1 {
     pub(super) fn absorb(&mut self, envelope: &ObservabilityEnvelopeV1) {
         let trace_id = envelope.trace_id.as_str();
@@ -489,6 +492,7 @@ impl ExecutionTopologyEvidenceV1 {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn stack_drift_later(incoming: &StackDriftRowV1, current: &StackDriftRowV1) -> bool {
     match (current.state, incoming.state) {
         (IntervalStateV1::Closed, IntervalStateV1::Open) => return false,
@@ -508,6 +512,7 @@ pub(super) fn stack_drift_later(incoming: &StackDriftRowV1, current: &StackDrift
     )
 }
 
+#[hotpath::measure]
 pub(super) fn same_stack_drift_interval(
     incoming: &StackDriftRowV1,
     current: &StackDriftRowV1,

@@ -20,6 +20,7 @@ pub struct WorkflowProviderRegistration {
     priority: u32,
 }
 
+#[hotpath::measure_all]
 impl WorkflowProviderRegistration {
     pub fn new(
         route: WorkProviderRouteV1,
@@ -46,6 +47,7 @@ impl WorkflowProviderRegistration {
         &self.route
     }
 
+    #[hotpath::skip]
     pub const fn backend(&self) -> WorkProviderBackendV1 {
         self.backend
     }
@@ -54,6 +56,7 @@ impl WorkflowProviderRegistration {
         &self.model
     }
 
+    #[hotpath::skip]
     pub const fn priority(&self) -> u32 {
         self.priority
     }
@@ -66,6 +69,7 @@ pub struct WorkflowProviderRegistry {
     digest: ManifestDigest,
 }
 
+#[hotpath::measure_all]
 impl WorkflowProviderRegistry {
     pub fn new(
         configuration_digest: ManifestDigest,
@@ -148,7 +152,9 @@ pub struct WorkflowProviderPlacementService {
     registry: WorkflowProviderRegistry,
 }
 
+#[hotpath::measure_all]
 impl WorkflowProviderPlacementService {
+    #[hotpath::skip]
     pub const fn new(registry: WorkflowProviderRegistry) -> Self {
         Self { registry }
     }

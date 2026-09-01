@@ -171,6 +171,7 @@ pub enum CallableCodeAuthorizationAdmission {
     Routed(AuthorityReceipt),
 }
 
+#[hotpath::measure_all]
 impl CallableCodeAuthorizationAdmission {
     pub fn receipt(&self) -> &AuthorityReceipt {
         match self {
@@ -468,6 +469,7 @@ where
     );
 }
 
+#[hotpath::measure]
 fn validate_code_query_outcome<T>(
     outcome: &RetrievalPortOutcome<CodeQueryPage<T>>,
     requested_generation: &CodeGenerationId,
@@ -535,6 +537,7 @@ fn validate_code_query_outcome<T>(
     Ok(())
 }
 
+#[hotpath::measure]
 fn stale_code_query_problem() -> ApplicationProblem {
     ApplicationProblem::stale(
         SafeDiagnostic::new(
@@ -545,6 +548,7 @@ fn stale_code_query_problem() -> ApplicationProblem {
     )
 }
 
+#[hotpath::measure]
 fn invalid_code_query_outcome_problem() -> ApplicationProblem {
     ApplicationProblem::unavailable(
         SafeDiagnostic::new(
@@ -555,6 +559,7 @@ fn invalid_code_query_outcome_problem() -> ApplicationProblem {
     )
 }
 
+#[hotpath::measure]
 fn invalid_code_query_problem() -> ApplicationProblem {
     ApplicationProblem::InvalidRequest {
         diagnostic: SafeDiagnostic::new(

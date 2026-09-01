@@ -79,6 +79,7 @@ struct RiskEntry {
     churn: usize,
 }
 
+#[hotpath::measure_all]
 impl RiskEntry {
     fn has_test(&self) -> bool {
         self.attribution_method != TestAttributionMethod::None
@@ -109,6 +110,7 @@ enum TestAttributionMethod {
     Closure,
 }
 
+#[hotpath::measure_all]
 impl TestAttributionMethod {
     fn as_str(self) -> &'static str {
         match self {
@@ -389,6 +391,7 @@ pub(crate) fn verified_test_evidence(
     })
 }
 
+#[hotpath::measure]
 pub(crate) fn verified_test_symbol_parts(
     symbol: &CodeGraphSymbolSummaryV1,
 ) -> Result<(&tracedecay_code_index::lineage::LineageSymbolRecordV1, &str)> {
@@ -405,6 +408,7 @@ pub(crate) fn verified_test_symbol_parts(
     Ok((metadata, file))
 }
 
+#[hotpath::measure]
 fn test_risk_graph_problem(detail: &str) -> TraceDecayError {
     TraceDecayError::project_route("verified-test-evidence-unavailable", false, detail)
 }
@@ -464,6 +468,7 @@ fn build_test_attribution_depths(
     reached_depths
 }
 
+#[hotpath::measure]
 fn classify_test_attribution(depth: Option<usize>) -> TestAttributionMethod {
     match depth {
         Some(1) => TestAttributionMethod::DirectUnit,

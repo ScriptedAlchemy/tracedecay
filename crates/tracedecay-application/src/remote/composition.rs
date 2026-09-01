@@ -95,6 +95,7 @@ impl From<&QueryManifestBindingV1> for ExpectedRemoteShardV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl QueryManifestBindingV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         for (field, value) in [
@@ -176,6 +177,7 @@ pub struct ShardQueryContributionV1<T> {
     pub reason_code: Option<String>,
 }
 
+#[hotpath::measure_all]
 impl<T> ShardQueryContributionV1<T> {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         self.manifest.validate()?;
@@ -222,6 +224,7 @@ pub struct RemoteQueryCompositionV1<T> {
     pub coverage: ShardCoverageStateV1,
 }
 
+#[hotpath::measure_all]
 impl<T> RemoteQueryCompositionV1<T> {
     #[hotpath::measure(label = "application.remote.compose")]
     pub fn compose<P>(
@@ -286,6 +289,7 @@ impl<T> RemoteQueryCompositionV1<T> {
     }
 }
 
+#[hotpath::measure]
 fn aggregate_coverage<T>(
     contributions: &[ShardQueryContributionV1<T>],
     pending: &PendingLocalEvidenceV1,
@@ -323,6 +327,7 @@ fn aggregate_coverage<T>(
     ShardCoverageStateV1::Complete
 }
 
+#[hotpath::measure]
 fn remote_unavailable(code: &str, message: &str) -> ApplicationProblem {
     ApplicationProblem::Unavailable {
         classification: crate::ApplicationUnavailableClassV1::Authority,

@@ -5,6 +5,7 @@ use serde_json::json;
 use super::{def, def_rw};
 use crate::ToolDefinition;
 
+#[hotpath::measure]
 pub(super) fn def_test_map() -> ToolDefinition {
     def(
         "tracedecay_test_map",
@@ -30,6 +31,7 @@ pub(super) fn def_test_map() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_test_risk() -> ToolDefinition {
     def(
         "tracedecay_test_risk",
@@ -55,6 +57,7 @@ pub(super) fn def_test_risk() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_diagnose() -> ToolDefinition {
     def(
         "tracedecay_diagnose",
@@ -92,6 +95,7 @@ pub(super) fn def_diagnose() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_run_affected_tests() -> ToolDefinition {
     def_rw(
         "tracedecay_run_affected_tests",
@@ -128,6 +132,7 @@ pub(super) fn def_run_affected_tests() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_diagnostics() -> ToolDefinition {
     def(
         "tracedecay_diagnostics",

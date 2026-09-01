@@ -47,6 +47,7 @@ struct HandoffOperationIds {
     use_case: UseCaseId,
 }
 
+#[hotpath::measure_all]
 impl HandoffOperationIds {
     fn parse(capability: &'static str, use_case: &'static str) -> Option<Self> {
         Some(Self {
@@ -98,6 +99,7 @@ pub struct HandoffOpenToken {
     secret: BearerTokenSecret,
 }
 
+#[hotpath::measure_all]
 impl HandoffOpenToken {
     pub fn new(secret: String) -> Result<Self, HandoffOpenError> {
         Ok(Self {
@@ -135,6 +137,7 @@ pub struct HandoffAuthoritySnapshotV1 {
     policy_digest: ManifestDigest,
 }
 
+#[hotpath::measure_all]
 impl HandoffAuthoritySnapshotV1 {
     pub fn new(
         authority_digest: ManifestDigest,
@@ -172,6 +175,7 @@ pub struct HandoffOpenContextV1 {
     authority: HandoffAuthoritySnapshotV1,
 }
 
+#[hotpath::measure_all]
 impl HandoffOpenContextV1 {
     pub fn from_request(
         request: &RequestContext,
@@ -196,6 +200,7 @@ impl HandoffOpenContextV1 {
         })
     }
 
+    #[hotpath::skip]
     pub const fn kind(&self) -> HandoffOpenKindV1 {
         self.kind
     }
@@ -234,6 +239,7 @@ pub struct HandoffOpenExpectationV1 {
     recipient_actor_id: ActorId,
 }
 
+#[hotpath::measure_all]
 impl HandoffOpenExpectationV1 {
     pub fn from_request(
         request: &RequestContext,
@@ -273,7 +279,9 @@ pub enum HandoffOpenTargetV1 {
     },
 }
 
+#[hotpath::measure_all]
 impl HandoffOpenTargetV1 {
+    #[hotpath::skip]
     pub const fn kind(&self) -> HandoffOpenKindV1 {
         match self {
             Self::Investigation { .. } => HandoffOpenKindV1::Investigation,
@@ -303,6 +311,7 @@ pub struct HandoffOpenBindingV1 {
     target: HandoffOpenTargetV1,
 }
 
+#[hotpath::measure_all]
 impl HandoffOpenBindingV1 {
     pub fn investigation(
         request: &RequestContext,
@@ -374,6 +383,7 @@ impl HandoffOpenBindingV1 {
     }
 }
 
+#[hotpath::measure]
 pub fn investigation_owner_version_digest(
     finding: &FeedbackFindingReadV1,
 ) -> Result<ManifestDigest, ApplicationContractError> {
@@ -397,6 +407,7 @@ pub struct HandoffOpenGrantV1 {
     expires_at: UtcMicros,
 }
 
+#[hotpath::measure_all]
 impl HandoffOpenGrantV1 {
     pub fn new(
         binding: HandoffOpenBindingV1,
@@ -451,10 +462,12 @@ impl HandoffOpenGrantV1 {
             && self.issued_request_id == other.issued_request_id
     }
 
+    #[hotpath::skip]
     pub const fn issued_at(&self) -> &UtcMicros {
         &self.issued_at
     }
 
+    #[hotpath::skip]
     pub const fn expires_at(&self) -> &UtcMicros {
         &self.expires_at
     }
@@ -487,6 +500,7 @@ pub struct HandoffOpenConsumptionV1 {
     receipt_digest: ManifestDigest,
 }
 
+#[hotpath::measure_all]
 impl HandoffOpenConsumptionV1 {
     fn new(
         binding: HandoffOpenBindingV1,
@@ -529,6 +543,7 @@ impl HandoffOpenConsumptionV1 {
 
     /// When the single use was spent. Read by enumeration to tell a redeemed
     /// token apart from one that merely lapsed.
+    #[hotpath::skip]
     pub const fn consumed_at(&self) -> &UtcMicros {
         &self.consumed_at
     }
@@ -545,6 +560,7 @@ impl HandoffOpenConsumptionV1 {
     }
 }
 
+#[hotpath::measure]
 pub fn handoff_open_consumption_input_digest(
     kind: HandoffOpenKindV1,
     session_id: &HandoffSessionId,
@@ -567,6 +583,7 @@ pub fn handoff_open_consumption_input_digest(
     .map_err(Into::into)
 }
 
+#[hotpath::measure]
 pub fn handoff_open_receipt_digest(
     binding_digest: &ManifestDigest,
     token_digest: &ManifestDigest,
@@ -614,6 +631,7 @@ pub struct HandoffOpenListFilterV1 {
     recipient_actor_id: ActorId,
 }
 
+#[hotpath::measure_all]
 impl HandoffOpenListFilterV1 {
     pub fn from_request(
         request: &RequestContext,
@@ -813,6 +831,7 @@ pub struct ListedTaskHandoffV1 {
     pub consumed_at: Option<UtcMicros>,
 }
 
+#[hotpath::measure_all]
 impl ListedTaskHandoffV1 {
     pub fn from_listing(listing: &HandoffOpenListingV1, observed_at: UtcMicros) -> Self {
         let grant = &listing.grant;
@@ -853,6 +872,7 @@ pub struct ListTaskHandoffsResultV1 {
     pub truncated: bool,
 }
 
+#[hotpath::measure_all]
 impl ListTaskHandoffsResultV1 {
     pub fn from_listings(
         listings: &[HandoffOpenListingV1],
@@ -908,6 +928,7 @@ pub struct IssueTaskHandoffResultV1 {
     pub expires_at: UtcMicros,
 }
 
+#[hotpath::measure_all]
 impl IssueTaskHandoffResultV1 {
     pub fn from_grant(grant: &HandoffOpenGrantV1) -> Result<Self, HandoffOpenError> {
         let HandoffOpenTargetV1::Task {
@@ -1030,6 +1051,7 @@ where
     A: HandoffOpenAuthorityPort,
     T: HandoffOpenTargetPort,
 {
+    #[hotpath::skip]
     pub const fn new(authority: A, targets: T) -> Self {
         Self { authority, targets }
     }
@@ -1258,6 +1280,7 @@ where
     }
 }
 
+#[hotpath::measure]
 fn admit(
     context: &RequestContext,
     operation: &HandoffOperationIdsCell,
@@ -1277,6 +1300,7 @@ fn admit(
     Ok(())
 }
 
+#[hotpath::measure]
 fn authority_error(error: HandoffOpenAuthorityError) -> HandoffOpenError {
     match error {
         HandoffOpenAuthorityError::Conflict => HandoffOpenError::Conflict,

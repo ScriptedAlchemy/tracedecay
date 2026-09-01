@@ -45,6 +45,7 @@ pub struct RemoteReplayRequestV1 {
     pub event_id: String,
 }
 
+#[hotpath::measure_all]
 impl RemoteReplayRequestV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         if self.event_id.len() < 16
@@ -75,6 +76,7 @@ pub struct RemoteReplayFrameV1 {
     pub capture: AdmittedRemoteCaptureV1,
 }
 
+#[hotpath::measure_all]
 impl RemoteReplayFrameV1 {
     pub fn validate(&self) -> Result<(), RemoteReplayApplicationErrorV1> {
         if self.event_id.len() < 16
@@ -101,6 +103,7 @@ impl RemoteReplayFrameV1 {
 ///
 /// The domain tag is part of the persisted final shape and keeps remote
 /// capture identities distinct from every other canonical digest.
+#[hotpath::measure]
 pub fn canonical_remote_event_id_v1(
     capture: &AdmittedRemoteCaptureV1,
 ) -> Result<String, ApplicationContractError> {
@@ -140,6 +143,7 @@ pub struct RemoteReplayPolicyEvidenceV1 {
     pub revalidated_at: UtcMicros,
 }
 
+#[hotpath::measure_all]
 impl RemoteReplayPolicyEvidenceV1 {
     pub fn validate(&self) -> Result<(), RemoteReplayApplicationErrorV1> {
         self.repository_scope
@@ -212,7 +216,9 @@ pub enum RemoteReplayStateV1 {
     GarbageCollectionEligible,
 }
 
+#[hotpath::measure_all]
 impl RemoteReplayStateV1 {
+    #[hotpath::skip]
     pub const fn permits_transition_to(self, next: Self) -> bool {
         matches!(
             (self, next),
@@ -243,6 +249,7 @@ pub struct RemoteReplayCommitReceiptV1 {
     pub budget: OperationBudgetUsage,
 }
 
+#[hotpath::measure_all]
 impl RemoteReplayCommitReceiptV1 {
     pub fn validate_for(
         &self,
@@ -297,6 +304,7 @@ pub struct RemoteReplayTransitionReceiptV1 {
     pub budget: OperationBudgetUsage,
 }
 
+#[hotpath::measure_all]
 impl RemoteReplayTransitionReceiptV1 {
     pub fn validate_for(
         &self,
@@ -334,6 +342,7 @@ pub struct RemoteReplayOperationReceiptV1 {
     pub transaction: Option<RemoteReplayCommitReceiptV1>,
 }
 
+#[hotpath::measure_all]
 impl RemoteReplayOperationReceiptV1 {
     pub fn validate(&self) -> Result<(), RemoteReplayApplicationErrorV1> {
         if self.replay_attempt == 0
@@ -361,6 +370,7 @@ impl RemoteReplayOperationReceiptV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl RemoteReplayTransitionV1 {
     pub fn validate(&self) -> Result<(), RemoteReplayApplicationErrorV1> {
         if self.replay_attempt == 0 || !self.from.permits_transition_to(self.to) {
@@ -460,6 +470,7 @@ impl RemoteReplayClockPortV1 for SystemRemoteReplayClockV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl RemoteReplayServiceV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -633,6 +644,7 @@ pub struct RemoteReplayProtocolAdapterV1 {
     service: RemoteReplayServiceV1,
 }
 
+#[hotpath::measure_all]
 impl RemoteReplayProtocolAdapterV1 {
     pub fn new(service: RemoteReplayServiceV1) -> Self {
         Self { service }
@@ -704,6 +716,7 @@ impl RemoteProtocolPortV1<RemoteReplayRequestV1> for RemoteReplayProtocolAdapter
     }
 }
 
+#[hotpath::measure]
 fn replay_effect_envelope(
     request: RemoteProtocolRequestV1<RemoteReplayRequestV1>,
     outcome: RemoteReplayServiceOutcomeV1,
@@ -798,6 +811,7 @@ fn replay_effect_envelope(
     ))
 }
 
+#[hotpath::measure]
 fn replay_protocol_failure(error: RemoteReplayServiceErrorV1) -> RemoteProtocolFailureV1 {
     match error {
         RemoteReplayServiceErrorV1::UnsupportedVersion => {
@@ -914,6 +928,7 @@ pub enum RemoteReplayOutcomeV1 {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 pub fn replay_remote_capture(
     authentication: &dyn RemoteAuthorityAuthenticationPort,
     policy: &dyn RemoteReplayPolicyPortV1,
@@ -945,6 +960,7 @@ pub fn replay_remote_capture(
     })
 }
 
+#[hotpath::measure]
 fn with_replay_attempt<T>(
     spool: &dyn RemoteReplaySpoolPortV1,
     event_id: &str,
@@ -973,6 +989,7 @@ fn with_replay_attempt<T>(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 fn replay_remote_capture_attempt(
     authentication: &dyn RemoteAuthorityAuthenticationPort,
     policy: &dyn RemoteReplayPolicyPortV1,
@@ -1143,6 +1160,7 @@ fn replay_remote_capture_attempt(
     })
 }
 
+#[hotpath::measure]
 pub fn mark_remote_capture_gc_eligible(
     spool: &dyn RemoteReplaySpoolPortV1,
     frame: &RemoteReplayFrameV1,
@@ -1171,6 +1189,7 @@ pub fn mark_remote_capture_gc_eligible(
     })
 }
 
+#[hotpath::measure]
 fn validate_scope_and_fence(
     frame: &RemoteReplayFrameV1,
     current_writer: &RemoteWriterAuthorityV1,
@@ -1198,6 +1217,7 @@ fn validate_scope_and_fence(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 fn transition(
     spool: &dyn RemoteReplaySpoolPortV1,
     frame: &RemoteReplayFrameV1,
@@ -1223,6 +1243,7 @@ fn transition(
         .map_err(RemoteReplayApplicationErrorV1::Persistence)
 }
 
+#[hotpath::measure]
 fn acknowledge(
     spool: &dyn RemoteReplaySpoolPortV1,
     frame: &RemoteReplayFrameV1,
@@ -1243,6 +1264,7 @@ fn acknowledge(
     )
 }
 
+#[hotpath::measure]
 fn replay_operation_receipt(
     first: &RemoteReplayTransitionReceiptV1,
     terminal: &RemoteReplayTransitionReceiptV1,

@@ -363,6 +363,7 @@ pub async fn handle_inheritance_depth(
     ))
 }
 
+#[hotpath::measure]
 fn inheritance_depth(
     occurrence: &SymbolOccurrenceId,
     parents: &HashMap<SymbolOccurrenceId, Vec<SymbolOccurrenceId>>,

@@ -52,7 +52,9 @@ impl Default for ObservatoryReadRequestV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl ObservatoryReadRequestV1 {
+    #[hotpath::skip]
     pub const fn since_seconds(self) -> i64 {
         self.window_days as i64 * 24 * 60 * 60
     }
@@ -83,6 +85,7 @@ impl<P> ObservatoryReadServiceV1<P>
 where
     P: ObservatoryReadPortV1,
 {
+    #[hotpath::skip]
     pub const fn new(port: P) -> Self {
         Self { port }
     }
@@ -95,6 +98,7 @@ where
     }
 }
 
+#[hotpath::measure]
 pub fn observatory_read_catalog_contribution()
 -> Result<CatalogContributionV1, ApplicationContractError> {
     let capability_id = CapabilityId::new(CAPABILITY_ID)?;
@@ -165,6 +169,7 @@ pub fn observatory_read_catalog_contribution()
     Ok(contribution.with_executable_schemas(vec![executable_schema])?)
 }
 
+#[hotpath::measure]
 pub fn observatory_read_handler_descriptor()
 -> Result<ApplicationHandlerDescriptor, ApplicationContractError> {
     ApplicationHandlerDescriptor::new(
@@ -174,6 +179,7 @@ pub fn observatory_read_handler_descriptor()
     )
 }
 
+#[hotpath::measure]
 pub fn observatory_read_operation() -> Result<ApplicationOperation, ApplicationContractError> {
     Ok(ApplicationOperation::new(
         CapabilityId::new(CAPABILITY_ID)?,
@@ -183,6 +189,7 @@ pub fn observatory_read_operation() -> Result<ApplicationOperation, ApplicationC
     ))
 }
 
+#[hotpath::measure]
 pub fn observatory_read_request_schema() -> Result<SchemaRef, ApplicationContractError> {
     Ok(SchemaRef::new(
         SchemaId::new("schema.application.observatory-read.request")?,
@@ -190,6 +197,7 @@ pub fn observatory_read_request_schema() -> Result<SchemaRef, ApplicationContrac
     )?)
 }
 
+#[hotpath::measure]
 pub fn observatory_read_result_schema() -> Result<SchemaRef, ApplicationContractError> {
     Ok(SchemaRef::new(
         SchemaId::new("schema.application.observatory-read.result")?,
@@ -197,6 +205,7 @@ pub fn observatory_read_result_schema() -> Result<SchemaRef, ApplicationContract
     )?)
 }
 
+#[hotpath::measure]
 fn observatory_read_executable_schema(
     contribution: &CatalogContributionV1,
 ) -> Result<ExecutableSchemaAuthority, ApplicationContractError> {
@@ -222,6 +231,7 @@ const fn default_window_days() -> u16 {
     DEFAULT_WINDOW_DAYS
 }
 
+#[hotpath::measure]
 fn deserialize_window_days<'de, D>(deserializer: D) -> Result<u16, D::Error>
 where
     D: Deserializer<'de>,

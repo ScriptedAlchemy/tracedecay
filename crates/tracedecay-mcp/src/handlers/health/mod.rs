@@ -19,6 +19,7 @@ use tracedecay_graph_query::health::{
 };
 
 /// Coarse human label for a modularity score in [0,1].
+#[hotpath::measure]
 fn modularity_label(score: f64) -> &'static str {
     if score >= 0.75 {
         "high"

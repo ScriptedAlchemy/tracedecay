@@ -23,7 +23,9 @@ pub enum WorkflowEffectOperationV1 {
     HandoffRedeem,
 }
 
+#[hotpath::measure_all]
 impl WorkflowEffectOperationV1 {
+    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::RegisterDefinition => "register_definition",
@@ -50,6 +52,7 @@ pub struct WorkflowEffectIdentityV1 {
     receipt_context: WorkflowEffectReceiptContextV1,
 }
 
+#[hotpath::measure_all]
 impl WorkflowEffectIdentityV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -78,6 +81,7 @@ impl WorkflowEffectIdentityV1 {
         Ok(identity)
     }
 
+    #[hotpath::skip]
     pub const fn operation(&self) -> WorkflowEffectOperationV1 {
         self.operation
     }
@@ -102,6 +106,7 @@ impl WorkflowEffectIdentityV1 {
         &self.input_digest
     }
 
+    #[hotpath::skip]
     pub const fn started_at(&self) -> UtcMicros {
         self.started_at
     }
@@ -193,6 +198,7 @@ pub struct WorkflowEffectReceiptContextV1 {
     privacy_digest: ManifestDigest,
 }
 
+#[hotpath::measure_all]
 impl WorkflowEffectReceiptContextV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -289,6 +295,7 @@ pub enum WorkflowEffectMutationV1 {
     Problem(WorkflowEffectProblemV1),
 }
 
+#[hotpath::measure_all]
 impl WorkflowEffectPreparedV1 {
     pub fn register_definition(
         input_digest: ManifestDigest,
@@ -436,6 +443,7 @@ pub struct WorkflowEffectTerminalV1 {
     outcome: WorkflowEffectOutcomeV1,
 }
 
+#[hotpath::measure_all]
 impl WorkflowEffectTerminalV1 {
     pub fn new(
         identity: WorkflowEffectIdentityV1,
@@ -455,6 +463,7 @@ impl WorkflowEffectTerminalV1 {
         &self.identity
     }
 
+    #[hotpath::skip]
     pub const fn ended_at(&self) -> UtcMicros {
         self.ended_at
     }
@@ -507,7 +516,9 @@ pub enum WorkflowEffectJournalStateV1 {
     Reconciled,
 }
 
+#[hotpath::measure_all]
 impl WorkflowEffectJournalStateV1 {
+    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::BeforeEffect => "before_effect",
@@ -525,6 +536,7 @@ pub struct WorkflowEffectJournalRecordV1 {
     terminal: Option<WorkflowEffectTerminalV1>,
 }
 
+#[hotpath::measure_all]
 impl WorkflowEffectJournalRecordV1 {
     pub fn before_effect() -> Self {
         Self {
@@ -564,6 +576,7 @@ impl WorkflowEffectJournalRecordV1 {
         })
     }
 
+    #[hotpath::skip]
     pub const fn state(&self) -> WorkflowEffectJournalStateV1 {
         self.state
     }

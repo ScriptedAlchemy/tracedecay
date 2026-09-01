@@ -62,6 +62,7 @@ pub struct WorkflowProviderAdmission {
     pub effect_state: WorkEffectStateV1,
 }
 
+#[hotpath::measure_all]
 impl WorkflowProviderAdmission {
     pub fn placement(
         &self,
@@ -416,6 +417,7 @@ pub fn durable_workflow_fan_out_plan(
     })
 }
 
+#[hotpath::measure]
 fn command_id(operation: &str, suffix: &str) -> Result<WorkCommandId, WorkflowFanOutRuntimeError> {
     WorkCommandId::new(format!("workflow-child-{operation}:{suffix}"))
         .map_err(|_| WorkflowFanOutRuntimeError::InvalidPlan)

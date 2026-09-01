@@ -24,6 +24,7 @@ pub struct CanonicalHumanView {
     pub(crate) fields: Vec<HumanField>,
 }
 
+#[hotpath::measure_all]
 impl CanonicalHumanView {
     pub fn from_application_result(
         operation: &str,
@@ -270,6 +271,7 @@ impl CanonicalHumanView {
     }
 }
 
+#[hotpath::measure]
 fn scalar<T: Serialize>(value: &T) -> serde_json::Result<String> {
     Ok(match serde_json::to_value(value)? {
         Value::String(value) => value,
@@ -277,10 +279,12 @@ fn scalar<T: Serialize>(value: &T) -> serde_json::Result<String> {
     })
 }
 
+#[hotpath::measure]
 fn optional_count(value: Option<u64>) -> String {
     value.map_or_else(|| "unknown".to_owned(), |count| count.to_string())
 }
 
+#[hotpath::measure]
 fn list_or_none(values: Vec<String>) -> String {
     if values.is_empty() {
         "none".to_owned()
@@ -289,6 +293,7 @@ fn list_or_none(values: Vec<String>) -> String {
     }
 }
 
+#[hotpath::measure]
 fn payload_summary(payload: Option<&Value>) -> serde_json::Result<String> {
     let Some(payload) = payload else {
         return Ok("none".to_owned());

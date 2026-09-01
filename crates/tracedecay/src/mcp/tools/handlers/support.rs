@@ -15,12 +15,14 @@ use tracedecay_mcp::ToolResult;
 use tracedecay_mcp::tools::render;
 
 /// Builds a `Config` error from a message, for argument-validation failures.
+#[hotpath::measure]
 pub(super) fn argument_error(message: impl Into<String>) -> TraceDecayError {
     TraceDecayError::Config {
         message: message.into(),
     }
 }
 
+#[hotpath::measure]
 pub(super) fn retrieval_cursor(args: &Value) -> Result<Option<tracedecay_domain::RetrievalCursor>> {
     let Some(encoded) = args.get("cursor").and_then(Value::as_str) else {
         return Ok(None);
@@ -48,6 +50,7 @@ pub(super) const CONTEXT_MEMORY_ANALYTICS_KEY: &str = "context_memory_analytics"
 /// instead of inside the client payload, renders the default-format (markdown)
 /// body with `md`, and records `touched_files`. The `format:"json"` path is
 /// unaffected — [`render::finalize`] serializes `value` compactly there.
+#[hotpath::measure]
 pub(super) fn rendered_tool_result<F: FnOnce() -> String>(
     project_root: Option<&Path>,
     args: &Value,
@@ -69,15 +72,18 @@ pub(super) fn rendered_tool_result<F: FnOnce() -> String>(
     }
 }
 
+#[hotpath::measure]
 fn public_value_without_internal_context_memory_analytics(value: &Value) -> Option<Value> {
     let mut value = value.clone();
     take_internal_context_memory_analytics(&mut value).map(|_| value)
 }
 
+#[hotpath::measure]
 pub(super) fn take_internal_context_memory_analytics(value: &mut Value) -> Option<Value> {
     value.as_object_mut()?.remove(CONTEXT_MEMORY_ANALYTICS_KEY)
 }
 
+#[hotpath::measure]
 pub(super) fn text_tool_result(text: &str, touched_files: Vec<String>) -> ToolResult {
     ToolResult::new(
         json!({ "content": [{ "type": "text", "text": text }] }),
@@ -86,6 +92,7 @@ pub(super) fn text_tool_result(text: &str, touched_files: Vec<String>) -> ToolRe
 }
 
 /// [`rendered_tool_result`] for handlers that touch no files.
+#[hotpath::measure]
 pub(super) fn tool_json_with_md<F: FnOnce() -> String>(
     project_root: Option<&Path>,
     args: &Value,
@@ -97,6 +104,7 @@ pub(super) fn tool_json_with_md<F: FnOnce() -> String>(
 
 /// [`rendered_tool_result`] for handlers that don't need a custom markdown
 /// renderer — the default body is [`render::generic_md`] over the same value.
+#[hotpath::measure]
 pub(super) fn generic_tool_result(
     project_root: Option<&Path>,
     args: &Value,
@@ -109,6 +117,7 @@ pub(super) fn generic_tool_result(
 }
 
 /// [`generic_tool_result`] for handlers that touch no files.
+#[hotpath::measure]
 pub(super) fn tool_json(project_root: Option<&Path>, args: &Value, value: &Value) -> ToolResult {
     generic_tool_result(project_root, args, value, Vec::new())
 }
@@ -120,6 +129,7 @@ pub(super) fn tool_json(project_root: Option<&Path>, args: &Value, value: &Value
 /// or array is caller error, not a broken invariant — asserting it would
 /// panic the daemon's client task and the caller would see only a dropped
 /// connection.
+#[hotpath::measure]
 pub(crate) fn require_object_args(args: &Value, tool_name: &str) -> Result<()> {
     if args.is_object() {
         return Ok(());
@@ -131,6 +141,7 @@ pub(crate) fn require_object_args(args: &Value, tool_name: &str) -> Result<()> {
 
 /// Decode one catalog-owned primitive request after removing keys owned by
 /// the MCP transport rather than the application operation.
+#[hotpath::measure]
 pub(crate) fn decode_primitive_request<T: DeserializeOwned>(
     args: &Value,
     tool_name: &str,
@@ -150,6 +161,7 @@ pub(crate) fn decode_primitive_request<T: DeserializeOwned>(
 /// Returns the user-provided `path` argument, falling back to the scope
 /// prefix when the argument is absent. This makes listing tools
 /// automatically scoped to the subdirectory the server was launched from.
+#[hotpath::measure]
 pub(super) fn effective_path<'a>(
     args: &'a Value,
     scope_prefix: Option<&'a str>,
@@ -157,6 +169,7 @@ pub(super) fn effective_path<'a>(
     args.get("path").and_then(|v| v.as_str()).or(scope_prefix)
 }
 
+#[hotpath::measure]
 pub(super) fn unique_file_paths<'a>(paths: impl Iterator<Item = &'a str>) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut result = Vec::new();
@@ -168,6 +181,7 @@ pub(super) fn unique_file_paths<'a>(paths: impl Iterator<Item = &'a str>) -> Vec
     result
 }
 
+#[hotpath::measure]
 fn invalid_registered_project_selector(detail: impl Into<String>) -> TraceDecayError {
     TraceDecayError::project_route("project_route_invalid_selector", false, detail.into())
 }
@@ -231,6 +245,7 @@ pub(super) async fn registered_project_context(
 /// pure syntax: it decides whether a selector may fall back to Git identity,
 /// and never consults the registry. Delegates to the canonical
 /// [`RegisteredGlobalDb::is_explicit_project_path_selector`].
+#[hotpath::measure]
 pub(super) fn is_explicit_project_path_selector(selector: &str) -> bool {
     RegisteredGlobalDb::is_explicit_project_path_selector(selector)
 }

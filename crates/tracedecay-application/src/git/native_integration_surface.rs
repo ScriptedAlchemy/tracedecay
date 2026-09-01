@@ -86,7 +86,9 @@ pub struct NativeIntegrationStackSnapshotService<P> {
     port: P,
 }
 
+#[hotpath::measure_all]
 impl<P: NativeIntegrationStackResolutionPort> NativeIntegrationStackSnapshotService<P> {
+    #[hotpath::skip]
     pub const fn new(port: P) -> Self {
         Self { port }
     }
@@ -245,6 +247,7 @@ pub struct NativeIntegrationSnapshotProjectionV1 {
     pub frozen_at: UtcMicros,
 }
 
+#[hotpath::measure_all]
 impl NativeIntegrationSnapshotProjectionV1 {
     /// Project one frozen selection. Every field is read from the selection
     /// itself, so a caller cannot restate an epoch or capture time the
@@ -289,6 +292,7 @@ pub struct NativeIntegrationPreviewProjectionV1 {
     pub expires_at: UtcMicros,
 }
 
+#[hotpath::measure_all]
 impl NativeIntegrationPreviewProjectionV1 {
     pub fn project(preview: &NativeIntegrationPreviewV1) -> Result<Self, ApplicationContractError> {
         Ok(Self {
@@ -325,6 +329,7 @@ pub struct NativeIntegrationApprovalProjectionV1 {
     pub approval_digest: ManifestDigest,
 }
 
+#[hotpath::measure_all]
 impl NativeIntegrationApprovalProjectionV1 {
     pub fn project(approval: &NativeIntegrationApprovalV1) -> Self {
         Self {
@@ -388,6 +393,7 @@ pub struct NativeIntegrationReceiptProjectionV1 {
     pub receipt_digest: ManifestDigest,
 }
 
+#[hotpath::measure_all]
 impl NativeIntegrationReceiptProjectionV1 {
     pub fn project(receipt: &NativeIntegrationReceiptV1) -> Result<Self, ApplicationContractError> {
         let terminal_outcome =
@@ -434,13 +440,16 @@ pub enum NativeIntegrationSurfaceResultV1 {
     },
 }
 
+#[hotpath::measure_all]
 impl NativeIntegrationSurfaceResultV1 {
+    #[hotpath::skip]
     pub const fn unavailable(reason: NativeIntegrationSurfaceUnavailableV1) -> Self {
         Self::Unavailable { reason }
     }
 
     /// Whether this result advanced or proved durable state. Every other
     /// result is read-only evidence and never authorizes apply.
+    #[hotpath::skip]
     pub const fn is_advancing(&self) -> bool {
         matches!(
             self,
@@ -703,6 +712,7 @@ const NATIVE_INTEGRATION_SPECS: [NativeIntegrationSurfaceSpec; 11] = [
 ];
 
 /// Catalog contribution for the public native-integration journey.
+#[hotpath::measure]
 pub fn native_integration_surface_catalog_contribution()
 -> Result<CatalogContributionV1, ApplicationContractError> {
     let mut capabilities = Vec::with_capacity(NATIVE_INTEGRATION_SPECS.len());
@@ -738,6 +748,7 @@ pub fn native_integration_surface_catalog_contribution()
 /// Native integration stack mutation remains CLI/MCP-only. Only worktree
 /// operations whose canonical surface includes HTTP are projected here, so
 /// the API router and official SDKs consume the same catalog authority.
+#[hotpath::measure]
 pub fn native_worktree_executable_binding_registry()
 -> Result<ExecutableBindingRegistryV1, ApplicationContractError> {
     let contribution = native_integration_surface_catalog_contribution()?;
@@ -796,6 +807,7 @@ pub fn native_worktree_executable_binding_registry()
 /// Resolve one native-integration wire operation to its canonical application
 /// operation. Callers use this to bind the exact capability and use case an
 /// authorization grant must name; there is no generic forwarding path.
+#[hotpath::measure]
 pub fn native_integration_surface_operation(
     name: &str,
 ) -> Result<Option<ApplicationOperation>, ApplicationContractError> {
@@ -814,6 +826,7 @@ pub fn native_integration_surface_operation(
         .transpose()
 }
 
+#[hotpath::measure]
 pub fn native_integration_surface_handler_descriptors()
 -> Result<Vec<ApplicationHandlerDescriptor>, ApplicationContractError> {
     NATIVE_INTEGRATION_SPECS
@@ -822,6 +835,7 @@ pub fn native_integration_surface_handler_descriptors()
         .collect()
 }
 
+#[hotpath::measure]
 fn native_integration_executable_schemas(
     contribution: &CatalogContributionV1,
 ) -> Result<Vec<ExecutableSchemaAuthority>, ApplicationContractError> {
@@ -886,6 +900,7 @@ fn native_integration_executable_schemas(
     Ok(schemas)
 }
 
+#[hotpath::measure]
 fn executable_schema<Request, Response>(
     contribution: &CatalogContributionV1,
     operation: &str,
@@ -913,6 +928,7 @@ where
     )?)
 }
 
+#[hotpath::measure]
 fn spec_for(
     operation: &str,
 ) -> Result<&'static NativeIntegrationSurfaceSpec, ApplicationContractError> {
@@ -924,6 +940,7 @@ fn spec_for(
         })
 }
 
+#[hotpath::measure]
 fn capability(
     spec: &NativeIntegrationSurfaceSpec,
     capability_id: CapabilityId,
@@ -996,6 +1013,7 @@ fn capability(
     })?)
 }
 
+#[hotpath::measure]
 fn cancellation_points(effect: EffectClass) -> Vec<CancellationPoint> {
     if effect.is_effect() {
         vec![
@@ -1013,6 +1031,7 @@ fn cancellation_points(effect: EffectClass) -> Vec<CancellationPoint> {
     }
 }
 
+#[hotpath::measure]
 fn deadline_behavior(effect: EffectClass) -> DeadlineBehavior {
     if effect.is_effect() {
         DeadlineBehavior::ReturnEffectReceipt
@@ -1021,6 +1040,7 @@ fn deadline_behavior(effect: EffectClass) -> DeadlineBehavior {
     }
 }
 
+#[hotpath::measure]
 fn terminal_states(effect: EffectClass) -> Vec<TerminalState> {
     if effect.is_effect() {
         vec![
@@ -1042,6 +1062,7 @@ fn terminal_states(effect: EffectClass) -> Vec<TerminalState> {
     }
 }
 
+#[hotpath::measure]
 fn handler_descriptor(
     spec: &NativeIntegrationSurfaceSpec,
 ) -> Result<ApplicationHandlerDescriptor, ApplicationContractError> {
@@ -1058,6 +1079,7 @@ fn handler_descriptor(
     )
 }
 
+#[hotpath::measure]
 fn schema(id: &str) -> Result<SchemaRef, ApplicationContractError> {
     Ok(SchemaRef::new(SchemaId::new(id)?, 1)?)
 }

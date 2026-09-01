@@ -21,6 +21,7 @@ pub const CONTEXT_MEMORY_ANALYTICS_KEY: &str = "context_memory_analytics";
 /// instead of inside the client payload, renders the default-format (markdown)
 /// body with `md`, and records `touched_files`. The `format:"json"` path is
 /// unaffected — [`render::finalize`] serializes `value` compactly there.
+#[hotpath::measure]
 pub fn rendered_tool_result<F: FnOnce() -> String>(
     project_root: Option<&Path>,
     args: &Value,
@@ -42,15 +43,18 @@ pub fn rendered_tool_result<F: FnOnce() -> String>(
     }
 }
 
+#[hotpath::measure]
 fn public_value_without_internal_context_memory_analytics(value: &Value) -> Option<Value> {
     let mut value = value.clone();
     take_internal_context_memory_analytics(&mut value).map(|_| value)
 }
 
+#[hotpath::measure]
 pub fn take_internal_context_memory_analytics(value: &mut Value) -> Option<Value> {
     value.as_object_mut()?.remove(CONTEXT_MEMORY_ANALYTICS_KEY)
 }
 
+#[hotpath::measure]
 pub fn text_tool_result(text: &str, touched_files: Vec<String>) -> ToolResult {
     ToolResult::new(
         json!({ "content": [{ "type": "text", "text": text }] }),
@@ -59,6 +63,7 @@ pub fn text_tool_result(text: &str, touched_files: Vec<String>) -> ToolResult {
 }
 
 /// [`rendered_tool_result`] for handlers that touch no files.
+#[hotpath::measure]
 pub fn tool_json_with_md<F: FnOnce() -> String>(
     project_root: Option<&Path>,
     args: &Value,
@@ -70,6 +75,7 @@ pub fn tool_json_with_md<F: FnOnce() -> String>(
 
 /// [`rendered_tool_result`] for handlers that don't need a custom markdown
 /// renderer — the default body is [`render::generic_md`] over the same value.
+#[hotpath::measure]
 pub fn generic_tool_result(
     project_root: Option<&Path>,
     args: &Value,
@@ -82,11 +88,13 @@ pub fn generic_tool_result(
 }
 
 /// [`generic_tool_result`] for handlers that touch no files.
+#[hotpath::measure]
 pub fn tool_json(project_root: Option<&Path>, args: &Value, value: &Value) -> ToolResult {
     generic_tool_result(project_root, args, value, Vec::new())
 }
 
 /// Rejects tool arguments that are not a JSON object.
+#[hotpath::measure]
 pub fn require_object_args(args: &Value, tool_name: &str) -> Result<()> {
     if args.is_object() {
         return Ok(());
@@ -98,6 +106,7 @@ pub fn require_object_args(args: &Value, tool_name: &str) -> Result<()> {
 
 /// Decode one catalog-owned primitive request after removing keys owned by
 /// the MCP transport rather than the application operation.
+#[hotpath::measure]
 pub fn decode_primitive_request<T: DeserializeOwned>(args: &Value, tool_name: &str) -> Result<T> {
     require_object_args(args, tool_name)?;
     let mut request = args.clone();
@@ -112,6 +121,7 @@ pub fn decode_primitive_request<T: DeserializeOwned>(args: &Value, tool_name: &s
 }
 
 /// Rejects a zero result limit with a typed error.
+#[hotpath::measure]
 pub fn require_positive_limit(limit: usize, tool_name: &str) -> Result<()> {
     if limit == 0 {
         return Err(TraceDecayError::Config {
@@ -123,6 +133,7 @@ pub fn require_positive_limit(limit: usize, tool_name: &str) -> Result<()> {
 
 /// Extracts the `node_id` parameter from tool arguments, accepting `id` as a
 /// fallback alias.
+#[hotpath::measure]
 pub fn require_node_id(args: &Value) -> Result<&str> {
     let node_id = args
         .get("node_id")
@@ -141,10 +152,12 @@ pub fn require_node_id(args: &Value) -> Result<&str> {
 
 /// Returns the user-provided `path` argument, falling back to the scope
 /// prefix when the argument is absent.
+#[hotpath::measure]
 pub fn effective_path<'a>(args: &'a Value, scope_prefix: Option<&'a str>) -> Option<&'a str> {
     args.get("path").and_then(|v| v.as_str()).or(scope_prefix)
 }
 
+#[hotpath::measure]
 pub fn unique_file_paths<'a>(paths: impl Iterator<Item = &'a str>) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut result = Vec::new();

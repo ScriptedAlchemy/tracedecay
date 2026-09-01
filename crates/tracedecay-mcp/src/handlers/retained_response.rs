@@ -6,6 +6,7 @@ use tracedecay_application::{
 use tracedecay_daemon_protocol::{DaemonInvocationOutcome, DaemonInvocationProblem};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
+#[hotpath::measure]
 fn retained_contract_error(
     context: &'static str,
     error: tracedecay_application::ApplicationContractError,
@@ -15,6 +16,7 @@ fn retained_contract_error(
     }
 }
 
+#[hotpath::measure]
 pub fn retained_safe_diagnostic(
     code: &'static str,
     message: &'static str,
@@ -23,6 +25,7 @@ pub fn retained_safe_diagnostic(
         .map_err(|error| retained_contract_error("invalid retained application diagnostic", error))
 }
 
+#[hotpath::measure]
 pub fn retained_problem_envelope(
     contract: ResultContractRef,
     request_id: RequestId,
@@ -97,6 +100,7 @@ pub fn validated_retained_response(
     }
 }
 
+#[hotpath::measure]
 fn invocation_problem(problem: DaemonInvocationProblem) -> Result<ApplicationProblem> {
     Ok(match problem {
         DaemonInvocationProblem::InvalidRequest | DaemonInvocationProblem::UnsupportedRevision => {

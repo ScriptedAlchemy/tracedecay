@@ -129,12 +129,14 @@ pub(in crate::execution_topology_metrics) struct ExecutionTopologyLifecycleCarry
 pub(super) const MAX_EXECUTION_TOPOLOGY_LIFECYCLE_CARRY_V1: usize = 512;
 pub(super) const MAX_EXECUTION_TOPOLOGY_BLOCKED_UNION_SEGMENTS_V1: usize = 512;
 
+#[hotpath::measure]
 fn protected_key(domain: &str, value: &str) -> Result<String, ExecutionTopologyRollupStateErrorV1> {
     canonical_sha256(&(domain, value))
         .map(|digest| digest.as_str().to_owned())
         .map_err(|_| ExecutionTopologyRollupStateErrorV1::IncompatibleState)
 }
 
+#[hotpath::measure]
 fn carry_len(carry: &ExecutionTopologyLifecycleCarryV1) -> usize {
     carry
         .stack_drifts
@@ -143,6 +145,7 @@ fn carry_len(carry: &ExecutionTopologyLifecycleCarryV1) -> usize {
         .saturating_add(carry.leaks.len())
 }
 
+#[hotpath::measure]
 fn check_carry(
     carry: &ExecutionTopologyLifecycleCarryV1,
 ) -> Result<(), ExecutionTopologyRollupStateErrorV1> {
@@ -153,6 +156,7 @@ fn check_carry(
     }
 }
 
+#[hotpath::measure]
 fn merge_segments(
     target: &mut Vec<(i64, i64)>,
     source: &[(i64, i64)],
@@ -176,6 +180,7 @@ fn merge_segments(
     Ok(())
 }
 
+#[hotpath::measure]
 fn fold_interval(
     aggregate: &mut ExecutionTopologyLifecycleRollupV1,
     cause: ExecutionBlockedCauseV1,
@@ -188,6 +193,7 @@ fn fold_interval(
     )
 }
 
+#[hotpath::measure_all]
 impl ExecutionTopologyEvidenceV1 {
     pub(in crate::execution_topology_metrics) fn reduce_lifecycle_rollup(
         &self,
@@ -321,6 +327,7 @@ impl ExecutionTopologyEvidenceV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl ExecutionTopologyLifecycleRollupV1 {
     pub(in crate::execution_topology_metrics) fn validate(
         &self,
@@ -529,6 +536,7 @@ impl ExecutionTopologyLifecycleRollupV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl ExecutionTopologyLifecycleCarryV1 {
     pub(in crate::execution_topology_metrics) fn validate(
         &self,
@@ -624,6 +632,7 @@ impl ExecutionTopologyLifecycleCarryV1 {
     }
 }
 
+#[hotpath::measure]
 fn protected_key_is_valid(reference: &str) -> bool {
     reference.len() == 71
         && reference.starts_with("sha256:")
@@ -632,12 +641,14 @@ fn protected_key_is_valid(reference: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+#[hotpath::measure]
 fn valid_interval_union(intervals: &[(i64, i64)]) -> bool {
     intervals.len() <= MAX_EXECUTION_TOPOLOGY_BLOCKED_UNION_SEGMENTS_V1
         && intervals.iter().all(|(start, end)| end >= start)
         && intervals.windows(2).all(|rows| rows[0].1 < rows[1].0)
 }
 
+#[hotpath::measure]
 fn valid_stack_drift_row(row: &StackDriftRowV1) -> bool {
     let payload = WorkStackDriftObservedV1 {
         kind: row.kind,
@@ -682,6 +693,7 @@ const fn duration_bucket(micros: u64) -> DurationBucketV1 {
     }
 }
 
+#[hotpath::measure]
 fn merge_dimensions_match(rollup: &ExecutionTopologyLifecycleRollupV1) -> bool {
     rollup
         .merge_cells
@@ -709,6 +721,7 @@ fn merge_dimensions_match(rollup: &ExecutionTopologyLifecycleRollupV1) -> bool {
             })
 }
 
+#[hotpath::measure]
 fn rerun_dimensions_match(rollup: &ExecutionTopologyLifecycleRollupV1) -> bool {
     rollup
         .rerun_cells
@@ -728,6 +741,7 @@ fn rerun_dimensions_match(rollup: &ExecutionTopologyLifecycleRollupV1) -> bool {
             })
 }
 
+#[hotpath::measure]
 fn delivery_dimensions_match(rollup: &ExecutionTopologyLifecycleRollupV1) -> bool {
     let cells_are_complete = rollup
         .delivery_totals
@@ -752,6 +766,7 @@ fn delivery_dimensions_match(rollup: &ExecutionTopologyLifecycleRollupV1) -> boo
             == Some(rollup.delivery_unknown)
 }
 
+#[hotpath::measure]
 fn blocked_cause_unions_are_subsets(rollup: &ExecutionTopologyLifecycleRollupV1) -> bool {
     rollup
         .blocked_cause_unions
@@ -778,12 +793,14 @@ fn blocked_cause_unions_are_subsets(rollup: &ExecutionTopologyLifecycleRollupV1)
             })
 }
 
+#[hotpath::measure]
 fn checked_sum(values: impl IntoIterator<Item = u64>) -> Option<u64> {
     values
         .into_iter()
         .try_fold(0u64, |total, value| total.checked_add(value))
 }
 
+#[hotpath::measure]
 fn github_later(
     incoming: &GitHubStackCapabilityRowV1,
     current: &GitHubStackCapabilityRowV1,
@@ -801,6 +818,7 @@ fn github_later(
     )
 }
 
+#[hotpath::measure]
 pub(in crate::execution_topology_metrics) fn apply_carry_to_rollup(
     aggregate: &mut ExecutionTopologyLifecycleRollupV1,
     carry: &ExecutionTopologyLifecycleCarryV1,

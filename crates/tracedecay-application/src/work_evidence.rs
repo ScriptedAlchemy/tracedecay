@@ -519,6 +519,7 @@ where
     S: WorkTaskSessionPortV1,
     H: WorkAnchorHydrationPortV1,
 {
+    #[hotpath::skip]
     pub const fn new(
         roots: R,
         owner_authority: A,
@@ -852,6 +853,7 @@ where
     }
 }
 
+#[hotpath::measure]
 fn overall_coverage_state(
     omissions: &[WorkEvidenceOmissionV1],
     continuations: &[WorkEvidenceContinuationV1],
@@ -875,6 +877,7 @@ struct SelectedSources {
     omitted_by_limit: u32,
 }
 
+#[hotpath::measure]
 fn select_sources(
     root: &VerifiedWorkEvidenceRootV1,
     request: &WorkEvidenceRetrieveRequestV1,
@@ -927,6 +930,7 @@ fn select_sources(
     })
 }
 
+#[hotpath::measure]
 fn validate_request(
     request: &WorkEvidenceRetrieveRequestV1,
 ) -> Result<(), WorkProductApplicationErrorV1> {
@@ -958,6 +962,7 @@ fn validate_request(
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_root(
     request: &WorkEvidenceRetrieveRequestV1,
     root: &VerifiedWorkEvidenceRootV1,
@@ -990,6 +995,7 @@ fn validate_root(
     Ok(())
 }
 
+#[hotpath::measure]
 fn relation_touches_task(relation: &WorkProductRelationV1, task_id: &TaskId) -> bool {
     match relation {
         WorkProductRelationV1::MilestoneContainsTask { task_id: task, .. }
@@ -1012,6 +1018,7 @@ fn relation_touches_task(relation: &WorkProductRelationV1, task_id: &TaskId) -> 
     }
 }
 
+#[hotpath::measure]
 fn validate_task_session(
     request: &WorkEvidenceRetrieveRequestV1,
     receipt: &WorkAttemptReceiptV1,
@@ -1047,6 +1054,7 @@ fn validate_task_session(
     Ok(())
 }
 
+#[hotpath::measure]
 fn task_session_reauthorization_error(
     error: WorkProductApplicationErrorV1,
 ) -> WorkTaskSessionReauthorizationErrorV1 {
@@ -1078,6 +1086,7 @@ fn task_session_reauthorization_error(
     }
 }
 
+#[hotpath::measure]
 fn validate_anchor(
     link: &TaskEvidenceLinkV1,
     hydration: &WorkAnchorHydrationV1,
@@ -1093,6 +1102,7 @@ fn validate_anchor(
     Ok(())
 }
 
+#[hotpath::measure]
 fn task_session_continuation(
     request: &WorkEvidenceRetrieveRequestV1,
     identity: &WorkAttemptIdentityV1,
@@ -1107,6 +1117,7 @@ fn task_session_continuation(
     }
 }
 
+#[hotpath::measure]
 fn anchor_cursor(
     request: &WorkEvidenceRetrieveRequestV1,
     link_id: &TaskEvidenceLinkId,
@@ -1120,6 +1131,7 @@ fn anchor_cursor(
     }
 }
 
+#[hotpath::measure]
 fn merge_freshness(
     left: WorkEvidenceFreshnessV1,
     right: WorkEvidenceFreshnessV1,
@@ -1135,6 +1147,7 @@ fn merge_freshness(
     }
 }
 
+#[hotpath::measure]
 fn hydration_omission(
     relation: &str,
     error: WorkEvidenceHydrationErrorV1,
@@ -1158,6 +1171,7 @@ fn hydration_omission(
     }
 }
 
+#[hotpath::measure]
 fn root_error(error: WorkEvidenceRootReadErrorV1) -> WorkProductApplicationErrorV1 {
     match error {
         WorkEvidenceRootReadErrorV1::NotFoundOrNotAuthorized => {

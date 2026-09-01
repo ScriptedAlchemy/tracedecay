@@ -18,6 +18,7 @@ struct McpBackgroundTaskAdmission {
     tasks: tokio::task::JoinSet<()>,
 }
 
+#[hotpath::measure_all]
 impl McpBackgroundTaskOwner {
     fn spawn<Task>(&self, task: Task) -> bool
     where
@@ -110,7 +111,9 @@ pub(crate) enum StartupCatchUpStateV1 {
     Cancelled,
 }
 
+#[hotpath::measure_all]
 impl StartupCatchUpStateV1 {
+    #[hotpath::skip]
     const fn settled(&self) -> bool {
         !matches!(self, Self::Syncing { .. })
     }
@@ -150,6 +153,7 @@ impl Default for StartupCatchUpMachineV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl StartupCatchUpMachineV1 {
     fn state(&self) -> std::sync::MutexGuard<'_, StartupCatchUpStateV1> {
         self.state
@@ -279,6 +283,7 @@ impl Default for ProjectServerResponseLifecycle {
     }
 }
 
+#[hotpath::measure_all]
 impl ProjectServerResponseLifecycle {
     pub(crate) fn revoke(&self) {
         self.response_revoked.cancel();
@@ -324,6 +329,7 @@ impl ProjectServerResponseLifecycle {
 /// preserved as-is here rather than harmonized.
 struct CooldownGate;
 
+#[hotpath::measure_all]
 impl CooldownGate {
     /// Returns `true` iff at least `window_secs` have elapsed since
     /// `atomic`'s last stamp and this call won the race to advance it
@@ -340,6 +346,7 @@ impl CooldownGate {
     }
 }
 
+#[hotpath::measure_all]
 impl McpServer {
     pub(crate) fn spawn_background_task<Task>(&self, task: Task) -> bool
     where
@@ -356,12 +363,14 @@ impl McpServer {
         self.project_server_lifecycle.revoke();
     }
 
+    #[hotpath::skip]
     pub(crate) async fn revoke_project_server_responses_after_drain(&self) {
         self.project_server_lifecycle
             .revoke_after_request_drain()
             .await;
     }
 
+    #[hotpath::skip]
     pub(crate) async fn wait_for_project_server_request_drain(&self) {
         self.project_server_lifecycle.wait_for_request_drain().await;
     }
@@ -408,6 +417,7 @@ impl McpServer {
     /// If reopening fails the previous instance is kept — the effect-time
     /// branch identity check in the hook writer and
     /// [`Self::maybe_sync_if_stale`] still protect writes.
+    #[hotpath::skip]
     pub(crate) async fn reopen_if_branch_drifted(&self) -> Arc<TraceDecay> {
         self.reopen_if_branch_drifted_memoized().await.0
     }
@@ -416,6 +426,7 @@ impl McpServer {
     /// hands back this request's single branch resolution, so the rest of the
     /// request reads the live branch from the memo instead of re-opening the
     /// repository. The memo is request-scoped and never retained.
+    #[hotpath::skip]
     pub(crate) async fn reopen_if_branch_drifted_memoized(
         &self,
     ) -> (Arc<TraceDecay>, tracedecay_runtime_core::branch::BranchMemo) {
@@ -495,6 +506,7 @@ impl McpServer {
     /// Reopens do not block requests, so tests (and any caller that genuinely
     /// needs the post-swap state rather than an answer) observe completion here.
     #[doc(hidden)]
+    #[hotpath::skip]
     pub async fn wait_for_branch_reopen(&self, after: u64, timeout: std::time::Duration) -> bool {
         let deadline = tokio::time::Instant::now() + timeout;
         while self.branch_reopen_completions.load(Ordering::Acquire) <= after {
@@ -561,6 +573,7 @@ impl McpServer {
     }
 
     /// Polls until startup reconciliation admission settles or `timeout` elapses.
+    #[hotpath::skip]
     pub async fn wait_for_startup_catch_up(&self, timeout: std::time::Duration) -> bool {
         let deadline = tokio::time::Instant::now() + timeout;
         while !self.startup_catch_up_done() {
@@ -784,6 +797,7 @@ impl McpServer {
 /// whether this caller claimed the (single-flighted) background refresh. The
 /// warning always reflects the last completed check; an expired cache serves
 /// that stale answer rather than making the caller wait for a fetch.
+#[hotpath::measure]
 fn cached_version_warning(cache: &mut VersionCheckState, current: &str) -> (Option<String>, bool) {
     let fresh = cache
         .checked_at

@@ -4,6 +4,7 @@ use crate::{ApplicationProblem, LegalAction, RetryDirective, SafeDiagnostic};
 
 use super::WorkAttemptStorageError;
 
+#[hotpath::measure]
 pub(super) fn storage_problem(error: WorkAttemptStorageError) -> ApplicationProblem {
     match error {
         WorkAttemptStorageError::NotFoundOrNotAuthorized => not_found_problem(),
@@ -39,6 +40,7 @@ pub(super) fn storage_problem(error: WorkAttemptStorageError) -> ApplicationProb
     }
 }
 
+#[hotpath::measure]
 pub(super) fn contract_problem(_error: WorkRuntimeContractError) -> ApplicationProblem {
     invalid_problem(
         "application.work-attempt.invalid-transition",
@@ -46,10 +48,12 @@ pub(super) fn contract_problem(_error: WorkRuntimeContractError) -> ApplicationP
     )
 }
 
+#[hotpath::measure]
 pub(super) fn not_found_problem() -> ApplicationProblem {
     ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
 }
 
+#[hotpath::measure]
 pub(super) fn stale_cursor_problem() -> ApplicationProblem {
     ApplicationProblem::stale(SafeDiagnostic {
         code: "application.work-attempt.stale-cursor".to_owned(),
@@ -58,6 +62,7 @@ pub(super) fn stale_cursor_problem() -> ApplicationProblem {
     })
 }
 
+#[hotpath::measure]
 pub(super) fn list_page_contract_problem() -> ApplicationProblem {
     ApplicationProblem::unavailable(SafeDiagnostic {
         code: "application.work-attempt.list-page-inconsistent".to_owned(),
@@ -65,6 +70,7 @@ pub(super) fn list_page_contract_problem() -> ApplicationProblem {
     })
 }
 
+#[hotpath::measure]
 pub(super) fn denied_problem(code: &str, message: &str) -> ApplicationProblem {
     ApplicationProblem::InvalidRequest {
         diagnostic: SafeDiagnostic {
@@ -76,6 +82,7 @@ pub(super) fn denied_problem(code: &str, message: &str) -> ApplicationProblem {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn invalid_problem(code: &str, message: &str) -> ApplicationProblem {
     ApplicationProblem::InvalidRequest {
         diagnostic: SafeDiagnostic {
@@ -87,6 +94,7 @@ pub(super) fn invalid_problem(code: &str, message: &str) -> ApplicationProblem {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn conflict_problem(code: &str, message: &str) -> ApplicationProblem {
     ApplicationProblem::Conflict {
         diagnostic: SafeDiagnostic {

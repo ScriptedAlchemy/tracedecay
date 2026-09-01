@@ -220,7 +220,9 @@ pub struct FeedbackObservationDeliveryV1 {
     pub coverage: FeedbackCoverageV1,
 }
 
+#[hotpath::measure_all]
 impl FeedbackObservationDeliveryV1 {
+    #[hotpath::skip]
     pub const fn pending() -> Self {
         Self {
             emitted: 0,
@@ -230,6 +232,7 @@ impl FeedbackObservationDeliveryV1 {
         }
     }
 
+    #[hotpath::skip]
     pub const fn delivered(dropped: u64) -> Self {
         Self {
             emitted: 1,
@@ -455,7 +458,9 @@ pub enum FeedbackSourceEventV1 {
     },
 }
 
+#[hotpath::measure_all]
 impl FeedbackSourceEventV1 {
+    #[hotpath::skip]
     pub const fn event_kind(&self) -> &'static str {
         match self {
             Self::ArgumentRejected { .. } | Self::SurfaceArgumentRejected { .. } => {
@@ -525,6 +530,7 @@ impl FeedbackSourceEventV1 {
     }
 }
 
+#[hotpath::measure]
 pub fn rejected_argument_cell(
     event: &FeedbackSourceEventV1,
 ) -> Option<(
@@ -590,6 +596,7 @@ pub fn rejected_argument_cell(
     }
 }
 
+#[hotpath::measure]
 fn serde_variant_name<T: Serialize>(value: &T) -> String {
     match serde_json::to_value(value) {
         Ok(serde_json::Value::String(name)) => name,
@@ -620,6 +627,7 @@ pub struct FeedbackObservationEnvelopeV1 {
     pub delivery: FeedbackObservationDeliveryV1,
 }
 
+#[hotpath::measure_all]
 impl FeedbackObservationEnvelopeV1 {
     pub fn validate(&self) -> Option<()> {
         let persisted = match (&self.producer_boot_id, self.producer_sequence) {

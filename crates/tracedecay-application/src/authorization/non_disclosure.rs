@@ -16,6 +16,7 @@ pub enum ConcealedResourceCause {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NonDisclosureHooks;
 
+#[hotpath::measure_all]
 impl NonDisclosureHooks {
     pub fn resource_problem(
         &self,

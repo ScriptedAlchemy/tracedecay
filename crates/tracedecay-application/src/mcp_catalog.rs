@@ -18,6 +18,7 @@ use crate::{ApplicationContractError, application_catalog_contributions};
 /// A binding remains present when its capability is disabled or schema is
 /// unavailable so discovery and dispatch can distinguish unavailable execution
 /// from an operation that was never declared.
+#[hotpath::measure]
 pub fn mcp_executable_binding_registry()
 -> Result<ExecutableBindingRegistryV1, ApplicationContractError> {
     let mut bindings = Vec::new();
@@ -33,6 +34,7 @@ pub fn mcp_executable_binding_registry()
     Ok(ExecutableBindingRegistryV1::new(bindings)?)
 }
 
+#[hotpath::measure]
 fn project_mcp_availability(
     contribution: &CatalogContributionV1,
     surface: &SurfaceBindingV1,
@@ -70,6 +72,7 @@ fn project_mcp_availability(
     Ok(ExecutableBindingAvailabilityV1::available(executable))
 }
 
+#[hotpath::measure]
 fn service_id(surface: &SurfaceBindingV1) -> Result<ServiceId, ApplicationContractError> {
     let family = surface
         .capability_id()

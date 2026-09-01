@@ -23,6 +23,7 @@ pub enum HookEventKind {
     TurnIngested,
 }
 
+#[hotpath::measure_all]
 impl HookEventKind {
     fn from_wire(value: &str) -> Option<Self> {
         match value {
@@ -62,6 +63,7 @@ pub struct HookEvent {
     pub receipt: Option<tracedecay_hooks::core_events::HookTerminalReceipt>,
 }
 
+#[hotpath::measure_all]
 impl HookEvent {
     pub fn admission_source(&self) -> String {
         let mut identity = Vec::new();
@@ -128,6 +130,7 @@ impl HookEvent {
     }
 }
 
+#[hotpath::measure]
 fn push_admission_identity_part(buffer: &mut Vec<u8>, label: &str, value: &[u8]) {
     buffer.extend_from_slice(label.len().to_string().as_bytes());
     buffer.push(b':');
@@ -242,6 +245,7 @@ impl std::fmt::Display for DurableHookEventEncodeError {
 
 impl std::error::Error for DurableHookEventEncodeError {}
 
+#[hotpath::measure]
 fn durable_bound_optional_str(value: Option<&str>, max_bytes: usize) -> Result<Option<String>, ()> {
     match value {
         None | Some("") => Ok(None),
@@ -256,6 +260,7 @@ fn durable_bound_optional_str(value: Option<&str>, max_bytes: usize) -> Result<O
     }
 }
 
+#[hotpath::measure]
 fn durable_bound_required_str(value: &str, max_bytes: usize) -> Result<String, ()> {
     if value.is_empty()
         || value.len() > max_bytes
@@ -268,11 +273,13 @@ fn durable_bound_required_str(value: &str, max_bytes: usize) -> Result<String, (
     }
 }
 
+#[hotpath::measure]
 fn protect_optional_hook_structural_id(value: Option<&str>) -> Result<Option<String>, ()> {
     tracedecay_runtime_core::privacy::protect_optional_sensitive_structural_id(value)
         .map_err(|_| ())
 }
 
+#[hotpath::measure]
 fn protect_hook_route_structural_ids(
     route: &mut tracedecay_hooks::core_events::HookRouteMetadata,
 ) -> Result<(), ()> {
@@ -281,6 +288,7 @@ fn protect_hook_route_structural_ids(
     Ok(())
 }
 
+#[hotpath::measure]
 fn protect_hook_receipt_structural_ids(
     receipt: &mut tracedecay_hooks::core_events::HookTerminalReceipt,
 ) -> Result<(), ()> {
@@ -291,6 +299,7 @@ fn protect_hook_receipt_structural_ids(
     Ok(())
 }
 
+#[hotpath::measure]
 fn sanitize_durable_status(value: Option<&str>) -> Result<Option<String>, ()> {
     let Some(value) = durable_bound_optional_str(value, DURABLE_MAX_STATUS_BYTES)? else {
         return Ok(None);
@@ -308,6 +317,7 @@ fn sanitize_durable_status(value: Option<&str>) -> Result<Option<String>, ()> {
 /// so they are dropped. Structural ids use the same deterministic protection
 /// as transcript/LCM storage so receipt, analytics, span, and reopen joins
 /// preserve one identity.
+#[hotpath::measure]
 fn sanitize_durable_route(
     route: Option<&tracedecay_hooks::core_events::HookRouteMetadata>,
 ) -> Result<Option<tracedecay_hooks::core_events::HookRouteMetadata>, ()> {
@@ -331,6 +341,7 @@ fn sanitize_durable_route(
     Ok(Some(sanitized))
 }
 
+#[hotpath::measure]
 fn sanitize_durable_receipt(
     receipt: &tracedecay_hooks::core_events::HookTerminalReceipt,
 ) -> Result<tracedecay_hooks::core_events::HookTerminalReceipt, ()> {
@@ -356,10 +367,12 @@ fn sanitize_durable_receipt(
 
 /// Normalize an effect root for durable storage. Canonicalization and live
 /// project reauthorization happen at replay via [`authorize_add_branch_at_root`].
+#[hotpath::measure]
 fn normalize_durable_effect_root(root: &Path) -> Result<PathBuf, ()> {
     bound_absolute_add_branch_at_root(root).map_err(|_| ())
 }
 
+#[hotpath::measure]
 fn sanitize_durable_rel_paths(rel_paths: &[String]) -> Result<Vec<String>, ()> {
     let sanitized = safe_hook_rel_paths(rel_paths);
     if sanitized.len() != rel_paths.len() || sanitized.len() > DURABLE_MAX_REL_PATHS {
@@ -374,6 +387,7 @@ fn sanitize_durable_rel_paths(rel_paths: &[String]) -> Result<Vec<String>, ()> {
     Ok(sanitized)
 }
 
+#[hotpath::measure]
 fn durable_plan_from_runtime(plan: &HookEventPlan) -> Result<DurableHookEventPlan, ()> {
     Ok(match plan {
         HookEventPlan::SyncFiles(rel_paths) => DurableHookEventPlan::SyncFiles {
@@ -422,6 +436,7 @@ fn durable_plan_from_runtime(plan: &HookEventPlan) -> Result<DurableHookEventPla
     })
 }
 
+#[hotpath::measure]
 fn runtime_plan_from_durable(
     durable: DurableHookEventPlan,
 ) -> Result<HookEventPlan, DurableHookEventDecodeError> {
@@ -483,6 +498,7 @@ fn runtime_plan_from_durable(
     }
 }
 
+#[hotpath::measure]
 pub fn encode_durable_hook_event_plan(
     plan: &HookEventPlan,
 ) -> Result<Vec<u8>, DurableHookEventEncodeError> {
@@ -494,6 +510,7 @@ pub fn encode_durable_hook_event_plan(
     .map_err(|_| DurableHookEventEncodeError)
 }
 
+#[hotpath::measure]
 pub fn decode_durable_hook_event_plan(
     payload: &[u8],
 ) -> Result<HookEventPlan, DurableHookEventDecodeError> {
@@ -508,6 +525,7 @@ pub fn decode_durable_hook_event_plan(
     runtime_plan_from_durable(durable)
 }
 
+#[hotpath::measure]
 pub fn parse_hook_event(params: Option<&Value>) -> Option<HookEvent> {
     let mut event = tracedecay_hooks::core_events::DaemonHookEvent::deserialize(params?).ok()?;
     if let Some(route) = &mut event.route {
@@ -533,6 +551,7 @@ pub fn parse_hook_event(params: Option<&Value>) -> Option<HookEvent> {
     })
 }
 
+#[hotpath::measure]
 pub fn plan_hook_event(
     event: &HookEvent,
     project_root: &Path,
@@ -585,10 +604,12 @@ pub fn plan_hook_event(
     }
 }
 
+#[hotpath::measure]
 pub fn sync_marker_path(data_root: &Path, agent: HookAgent) -> PathBuf {
     data_root.join(agent.sync_marker_file())
 }
 
+#[hotpath::measure]
 pub fn should_run_sync(marker: &Path, now_secs: i64, debounce_secs: i64) -> bool {
     match read_marker_secs(marker) {
         Some(last) => now_secs - last >= debounce_secs,
@@ -596,10 +617,12 @@ pub fn should_run_sync(marker: &Path, now_secs: i64, debounce_secs: i64) -> bool
     }
 }
 
+#[hotpath::measure]
 pub fn write_sync_marker(marker: &Path, now_secs: i64) {
     let _ = std::fs::write(marker, now_secs.to_string());
 }
 
+#[hotpath::measure]
 fn safe_hook_rel_paths(paths: &[String]) -> Vec<String> {
     paths
         .iter()
@@ -631,6 +654,7 @@ fn safe_hook_rel_paths(paths: &[String]) -> Vec<String> {
 /// `add_hook_branch_tracking` returns `AlreadyTracked` cheaply and
 /// idempotently, so re-planning `AddBranchAt` for an already-tracked worktree
 /// branch is a no-op — we do not need branch-meta visibility here.
+#[hotpath::measure]
 fn plan_session_start_hook_event(
     event: &HookEvent,
     project_root: &Path,
@@ -652,6 +676,7 @@ fn plan_session_start_hook_event(
 /// When `cwd` resolves to a linked git worktree that belongs to `project_root`,
 /// returns an `AddBranchAt` plan for the worktree root and its current branch.
 /// Returns `None` for the main checkout, a non-git cwd, or an unrelated repo.
+#[hotpath::measure]
 fn plan_linked_worktree_branch_add(
     event: &HookEvent,
     cwd: &Path,
@@ -694,7 +719,9 @@ pub enum AddBranchAtRootAuthError {
     Unauthorized,
 }
 
+#[hotpath::measure_all]
 impl AddBranchAtRootAuthError {
+    #[hotpath::skip]
     pub const fn reason_code(self) -> &'static str {
         match self {
             Self::Empty
@@ -714,6 +741,7 @@ const MAX_ADD_BRANCH_AT_ROOT_COMPONENTS: usize = 64;
 ///
 /// Admit-time membership is never reused: removal, replacement, symlink/path
 /// swap, or common-dir drift fail closed instead of applying a stale write.
+#[hotpath::measure]
 pub fn authorize_add_branch_at_root(
     planned_root: &Path,
     project_root: &Path,
@@ -739,6 +767,7 @@ pub fn authorize_add_branch_at_root(
 
 /// Revalidate live root identity and current branch immediately before a
 /// durable branch-write effect. Admit-time root/branch are never reused.
+#[hotpath::measure]
 pub fn authorize_planned_branch_effect(
     planned_root: &Path,
     project_root: &Path,
@@ -751,6 +780,7 @@ pub fn authorize_planned_branch_effect(
     Ok(root)
 }
 
+#[hotpath::measure]
 fn bound_absolute_add_branch_at_root(path: &Path) -> Result<PathBuf, AddBranchAtRootAuthError> {
     let raw = path.as_os_str().as_encoded_bytes();
     if raw.is_empty() {
@@ -786,16 +816,19 @@ fn bound_absolute_add_branch_at_root(path: &Path) -> Result<PathBuf, AddBranchAt
     Ok(normalized)
 }
 
+#[hotpath::measure]
 fn root_belongs_to_project(root: &Path, project_root: &Path) -> bool {
     paths_same(root, project_root) || git_roots_share_common_dir(root, project_root)
 }
 
+#[hotpath::measure]
 fn path_is_inside(path: &Path, root: &Path) -> bool {
     let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     path.starts_with(root)
 }
 
+#[hotpath::measure]
 fn git_roots_share_common_dir(a: &Path, b: &Path) -> bool {
     let a_common = tracedecay_runtime_core::worktree::git_common_dir(a);
     let b_common = tracedecay_runtime_core::worktree::git_common_dir(b);
@@ -805,12 +838,14 @@ fn git_roots_share_common_dir(a: &Path, b: &Path) -> bool {
         .is_some_and(|(a_common, b_common)| paths_same(a_common, b_common))
 }
 
+#[hotpath::measure]
 fn paths_same(a: &Path, b: &Path) -> bool {
     let a = a.canonicalize().unwrap_or_else(|_| a.to_path_buf());
     let b = b.canonicalize().unwrap_or_else(|_| b.to_path_buf());
     a == b
 }
 
+#[hotpath::measure]
 fn read_marker_secs(path: &Path) -> Option<i64> {
     std::fs::read_to_string(path)
         .ok()?

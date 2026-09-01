@@ -94,6 +94,7 @@ pub struct RetainedSdkOperationContractV1 {
     pub result_semantics: SdkResultSemanticsV1,
 }
 
+#[hotpath::measure_all]
 impl RetainedSdkOperationContractV1 {
     pub const DEFAULT: Self = Self {
         request_id: SdkRequestIdControlV1::ServerMinted,
@@ -101,6 +102,7 @@ impl RetainedSdkOperationContractV1 {
     };
 }
 
+#[hotpath::measure_all]
 impl RetainedSurfaceOperation {
     /// Canonical catalog operations. The broad `session_refresh` translator is
     /// intentionally not a catalog operation.
@@ -142,11 +144,13 @@ impl RetainedSurfaceOperation {
     /// adapter. SDK clients invoke the operation-selected routes.
     pub const SDK_EXECUTABLE: [Self; 26] = Self::ALL;
 
+    #[hotpath::skip]
     pub const fn is_callable(self) -> bool {
         !matches!(self, Self::SessionRefresh)
     }
 
     /// Additional SDK controls that cannot live in the bounds-only operation body.
+    #[hotpath::skip]
     pub const fn sdk_operation_contract(self) -> RetainedSdkOperationContractV1 {
         match self {
             Self::FactStoreCurate => RetainedSdkOperationContractV1 {
@@ -157,6 +161,7 @@ impl RetainedSurfaceOperation {
         }
     }
 
+    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::FactStoreCurate => "fact_store_curate",
@@ -217,6 +222,7 @@ pub(super) struct RetainedSurfaceSpec {
     pub(super) surfaces: &'static [BindingSurface],
 }
 
+#[hotpath::measure]
 fn surface_specs() -> Vec<&'static RetainedSurfaceSpec> {
     automation::SPECS
         .iter()
@@ -235,6 +241,7 @@ pub(super) const CURRENT_SURFACES: &[BindingSurface] = &[
     BindingSurface::Cli,
     BindingSurface::Mcp,
 ];
+#[hotpath::measure]
 pub fn retained_surface_catalog_contribution()
 -> Result<CatalogContributionV1, ApplicationContractError> {
     let specs = surface_specs();
@@ -279,6 +286,7 @@ pub fn retained_surface_catalog_contribution()
 
 /// Daemon-owned public HTTP bindings for retained V2 operations with a
 /// project-opened execution port and exact raw-handler proof.
+#[hotpath::measure]
 pub fn retained_surface_executable_binding_registry()
 -> Result<ExecutableBindingRegistryV1, ApplicationContractError> {
     let contribution = retained_surface_catalog_contribution()?;
@@ -329,6 +337,7 @@ pub fn retained_surface_executable_binding_registry()
     Ok(ExecutableBindingRegistryV1::new(bindings)?)
 }
 
+#[hotpath::measure]
 fn retained_surface_executable_schemas(
     contribution: &CatalogContributionV1,
 ) -> Result<Vec<ExecutableSchemaAuthority>, ApplicationContractError> {
@@ -504,6 +513,7 @@ fn retained_surface_executable_schemas(
     ])
 }
 
+#[hotpath::measure]
 fn retained_surface_executable_schema<Request, Response>(
     contribution: &CatalogContributionV1,
     operation: RetainedSurfaceOperation,
@@ -530,6 +540,7 @@ where
     )?)
 }
 
+#[hotpath::measure]
 pub fn retained_surface_handler_descriptors()
 -> Result<Vec<ApplicationHandlerDescriptor>, ApplicationContractError> {
     surface_specs()
@@ -538,6 +549,7 @@ pub fn retained_surface_handler_descriptors()
         .collect()
 }
 
+#[hotpath::measure]
 pub fn retained_surface_application_operation(
     operation: RetainedSurfaceOperation,
 ) -> Result<ApplicationOperation, ApplicationContractError> {
@@ -552,6 +564,7 @@ pub fn retained_surface_application_operation(
 
 /// Verify that a successful retained terminal still belongs to the selected
 /// operation and authenticated HTTP envelope before an adapter serializes it.
+#[hotpath::measure]
 pub fn retained_surface_outcome_matches_terminal(
     operation: RetainedSurfaceOperation,
     request_id: &crate::RequestId,
@@ -588,6 +601,7 @@ pub fn retained_surface_outcome_matches_terminal(
 ///
 /// Partial effects require the independently authenticated retained scope that
 /// accompanied the daemon terminal; generic unscoped problems fail closed.
+#[hotpath::measure]
 pub fn retained_surface_problem_matches_terminal(
     operation: RetainedSurfaceOperation,
     request_id: &crate::RequestId,
@@ -620,6 +634,7 @@ pub fn retained_surface_problem_matches_terminal(
         && committed_receipt.scope == *scope
 }
 
+#[hotpath::measure]
 fn capability(
     spec: &RetainedSurfaceSpec,
     capability_id: CapabilityId,
@@ -727,6 +742,7 @@ fn capability(
     })?)
 }
 
+#[hotpath::measure]
 fn handler_descriptor(
     spec: &RetainedSurfaceSpec,
 ) -> Result<ApplicationHandlerDescriptor, ApplicationContractError> {
@@ -737,6 +753,7 @@ fn handler_descriptor(
     )
 }
 
+#[hotpath::measure]
 fn application_operation(
     spec: &RetainedSurfaceSpec,
 ) -> Result<ApplicationOperation, ApplicationContractError> {
@@ -749,6 +766,7 @@ fn application_operation(
     ))
 }
 
+#[hotpath::measure]
 fn schema(
     operation: RetainedSurfaceOperation,
     direction: &str,
@@ -762,6 +780,7 @@ fn schema(
     )?)
 }
 
+#[hotpath::measure]
 fn capability_id(operation: RetainedSurfaceOperation) -> String {
     format!(
         "capability.application.retained.{}",
@@ -769,6 +788,7 @@ fn capability_id(operation: RetainedSurfaceOperation) -> String {
     )
 }
 
+#[hotpath::measure]
 fn use_case_id(operation: RetainedSurfaceOperation) -> String {
     format!(
         "use-case.application.retained.{}",

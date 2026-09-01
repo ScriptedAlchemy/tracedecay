@@ -72,6 +72,7 @@ impl<P> WorkProjectionReadService<P>
 where
     P: WorkProjectionReadPort,
 {
+    #[hotpath::skip]
     pub const fn new(port: P) -> Self {
         Self { port }
     }
@@ -129,6 +130,7 @@ where
     }
 }
 
+#[hotpath::measure]
 fn validate_page_size(page_size: u32) -> Result<(), WorkProjectionApplicationError> {
     if page_size == 0 || page_size > MAX_WORK_PROJECTION_PAGE_SIZE {
         Err(WorkProjectionApplicationError::InvalidPageSize)

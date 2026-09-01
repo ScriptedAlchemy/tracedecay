@@ -25,18 +25,21 @@ use super::callable_code::{
 use super::catalog::APPLICATION_DEFAULT_PROFILE_ID;
 use super::symbol_graph::{SymbolPrimitiveRecord, SymbolRelationRecord};
 
+#[hotpath::measure]
 pub fn callable_code_request_schema(
     kind: CallableCodeOperationKind,
 ) -> Result<SchemaRef, ApplicationContractError> {
     code_query_schema(kind, "request")
 }
 
+#[hotpath::measure]
 pub fn callable_code_result_schema(
     kind: CallableCodeOperationKind,
 ) -> Result<SchemaRef, ApplicationContractError> {
     code_query_schema(kind, "result")
 }
 
+#[hotpath::measure]
 fn code_query_schema(
     kind: CallableCodeOperationKind,
     suffix: &str,
@@ -51,6 +54,7 @@ fn code_query_schema(
     )?)
 }
 
+#[hotpath::measure]
 pub fn callable_code_operation(
     kind: CallableCodeOperationKind,
 ) -> Result<ApplicationOperation, ApplicationContractError> {
@@ -64,6 +68,7 @@ pub fn callable_code_operation(
     ))
 }
 
+#[hotpath::measure]
 pub fn callable_code_operations() -> Result<CallableCodeOperations, ApplicationContractError> {
     CallableCodeOperations::new(
         CallableCodeOperationKind::ALL
@@ -73,6 +78,7 @@ pub fn callable_code_operations() -> Result<CallableCodeOperations, ApplicationC
     )
 }
 
+#[hotpath::measure]
 pub fn callable_code_handler_descriptors()
 -> Result<Vec<ApplicationHandlerDescriptor>, ApplicationContractError> {
     CallableCodeOperationKind::ALL
@@ -91,6 +97,7 @@ pub fn callable_code_handler_descriptors()
 /// Application contribution for the generation-bound query callable query
 /// family. Only operations with production-owned application dispatch are
 /// advertised on transport surfaces.
+#[hotpath::measure]
 pub fn callable_code_catalog_contribution()
 -> Result<CatalogContributionV1, ApplicationContractError> {
     let mut capabilities = Vec::with_capacity(CALLABLE_CODE_OPERATION_COUNT);
@@ -154,6 +161,7 @@ pub fn callable_code_catalog_contribution()
 /// produce. Only `code_phrase_search` differs, because its service request
 /// holds a non-serializable sanitized query view and its admitted wire form is
 /// [`PhraseSearchSurfaceRequest`].
+#[hotpath::measure]
 fn callable_code_executable_schemas(
     contribution: &CatalogContributionV1,
 ) -> Result<Vec<ExecutableSchemaAuthority>, ApplicationContractError> {
@@ -195,6 +203,7 @@ fn callable_code_executable_schemas(
     Ok(schemas)
 }
 
+#[hotpath::measure]
 fn callable_code_executable_schema<Request, Response>(
     contribution: &CatalogContributionV1,
     kind: CallableCodeOperationKind,
@@ -226,6 +235,7 @@ const CANONICAL_SURFACE_EQUIVALENT_COUNT: usize = 9;
 /// Existing canonical application surfaces own these semantics. Keeping the
 /// mapping here prevents the callable-code catalog from advertising a second
 /// capability, kernel, or transport operation for the same query.
+#[hotpath::measure]
 fn canonical_surface_equivalent(kind: CallableCodeOperationKind) -> Option<&'static str> {
     match kind {
         CallableCodeOperationKind::SymbolSearch => Some("code_symbol_search"),
@@ -249,6 +259,7 @@ fn canonical_surface_equivalent(kind: CallableCodeOperationKind) -> Option<&'sta
     }
 }
 
+#[hotpath::measure]
 fn reachable_surface_operation(kind: CallableCodeOperationKind) -> Option<&'static str> {
     match kind {
         CallableCodeOperationKind::ExactOccurrence => Some("code_exact_occurrence"),
@@ -272,6 +283,7 @@ fn reachable_surface_operation(kind: CallableCodeOperationKind) -> Option<&'stat
     }
 }
 
+#[hotpath::measure]
 fn lsp_methods(kind: CallableCodeOperationKind) -> &'static [&'static str] {
     match kind {
         CallableCodeOperationKind::ExactOccurrence => {
@@ -282,6 +294,7 @@ fn lsp_methods(kind: CallableCodeOperationKind) -> &'static [&'static str] {
     }
 }
 
+#[hotpath::measure]
 fn code_query_capability_id(
     kind: CallableCodeOperationKind,
 ) -> Result<CapabilityId, ApplicationContractError> {
@@ -291,6 +304,7 @@ fn code_query_capability_id(
     ))?)
 }
 
+#[hotpath::measure]
 fn code_query_capability(
     kind: CallableCodeOperationKind,
     binding_ids: Vec<BindingId>,
@@ -353,6 +367,7 @@ fn code_query_capability(
     })?)
 }
 
+#[hotpath::measure]
 fn code_query_scope() -> Result<ScopeRequirement, ApplicationContractError> {
     Ok(ScopeRequirement::new(vec![
         ScopeDimension::Project,

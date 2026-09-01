@@ -16,6 +16,7 @@ pub struct GitTopologyAnchorPublicationV2 {
     records: Vec<RetrievalAnchorRecordV2>,
 }
 
+#[hotpath::measure_all]
 impl GitTopologyAnchorPublicationV2 {
     pub fn new(
         owner: ObservationScopeV1,
@@ -78,6 +79,7 @@ pub struct GitTopologyAnchorResolutionV2 {
     pub anchor_id: RetrievalAnchorId,
 }
 
+#[hotpath::measure_all]
 impl GitTopologyAnchorResolutionV2 {
     pub fn new(
         owner: ObservationScopeV1,

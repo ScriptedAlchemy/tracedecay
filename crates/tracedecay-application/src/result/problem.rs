@@ -74,6 +74,7 @@ pub struct SafeDiagnostic {
     pub message: String,
 }
 
+#[hotpath::measure_all]
 impl SafeDiagnostic {
     pub fn new(
         code: impl Into<String>,
@@ -423,6 +424,7 @@ impl<'de> Deserialize<'de> for ApplicationProblem {
     }
 }
 
+#[hotpath::measure_all]
 impl ApplicationProblem {
     fn from_wire(wire: ApplicationProblemWire) -> Result<Self, ApplicationContractError> {
         let problem = match wire {
@@ -628,6 +630,7 @@ impl ApplicationProblem {
         Ok(())
     }
 
+    #[hotpath::skip]
     pub const fn kind(&self) -> ApplicationProblemKind {
         match self {
             Self::InvalidRequest { .. } => ApplicationProblemKind::InvalidRequest,
@@ -645,6 +648,7 @@ impl ApplicationProblem {
         }
     }
 
+    #[hotpath::skip]
     pub const fn terminality(&self) -> ProblemTerminality {
         match self {
             Self::PartialEffect { .. }
@@ -664,6 +668,7 @@ impl ApplicationProblem {
         }
     }
 
+    #[hotpath::skip]
     pub const fn is_admitted_terminal(&self) -> bool {
         matches!(self.terminality(), ProblemTerminality::AdmittedTerminal)
     }
@@ -711,6 +716,7 @@ impl ApplicationProblem {
         Ok(problem)
     }
 
+    #[hotpath::skip]
     pub const fn cancellation_stage(&self) -> Option<CancellationStage> {
         match self {
             Self::Cancelled { stage, .. } | Self::TimedOut { stage, .. } => Some(*stage),
@@ -718,6 +724,7 @@ impl ApplicationProblem {
         }
     }
 
+    #[hotpath::skip]
     pub const fn unavailable_classification(&self) -> Option<ApplicationUnavailableClassV1> {
         match self {
             Self::Unavailable { classification, .. } => Some(*classification),
@@ -725,6 +732,7 @@ impl ApplicationProblem {
         }
     }
 
+    #[hotpath::skip]
     pub const fn execution_failure_classification(
         &self,
     ) -> Option<ApplicationExecutionFailureClassV1> {
@@ -792,6 +800,7 @@ impl ApplicationProblem {
         }
     }
 
+    #[hotpath::skip]
     pub const fn retry(&self) -> RetryDirective {
         match self {
             Self::InvalidRequest { retry, .. }
@@ -843,6 +852,7 @@ impl ApplicationProblem {
         }
     }
 
+    #[hotpath::skip]
     pub const fn canonical_code(&self) -> &'static str {
         match self {
             Self::InvalidRequest { .. } => "invalid_request",

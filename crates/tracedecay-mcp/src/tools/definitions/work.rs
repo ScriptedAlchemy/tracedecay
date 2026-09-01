@@ -18,6 +18,7 @@ type DiscoveryResult<T> = Result<T, crate::McpCatalogError>;
 /// callable operation. Schema bodies come from the same registry the HTTP
 /// owner validates, so MCP cannot omit a required request field or admit one
 /// that typed Work decoding rejects.
+#[hotpath::measure]
 pub(super) fn work_definitions() -> DiscoveryResult<Vec<ToolDefinition>> {
     let registry = tracedecay_application::work_executable_binding_registry()
         .map_err(crate::McpCatalogError::CatalogValidation)?;
@@ -59,6 +60,7 @@ pub(super) fn work_definitions() -> DiscoveryResult<Vec<ToolDefinition>> {
         .collect()
 }
 
+#[hotpath::measure]
 fn invalid_work_discovery(field: &'static str, reason: &'static str) -> crate::McpCatalogError {
     CatalogValidationError::InvalidValue { field, reason }.into()
 }

@@ -84,6 +84,7 @@ pub struct WorkSynthesisSourceSetV1 {
     pub set_digest: ManifestDigest,
 }
 
+#[hotpath::measure_all]
 impl WorkSynthesisSourceSetV1 {
     /// Seals an ordered envelope list under the source-set domain.
     pub fn seal(sources: Vec<WorkSynthesisSourceEnvelopeV1>) -> Result<Self, ApplicationProblem> {
@@ -141,7 +142,9 @@ pub enum WorkSynthesisRefusalV1 {
     NoCitableSources,
 }
 
+#[hotpath::measure_all]
 impl WorkSynthesisRefusalV1 {
+    #[hotpath::skip]
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::NoCitableSources => "no_citable_sources",
@@ -303,6 +306,7 @@ where
 
 /// Captures one source attempt's contribution exactly as the authority
 /// recorded it.
+#[hotpath::measure]
 fn source_outcome(
     attempt: &WorkAttemptV1,
 ) -> Result<WorkSynthesisSourceOutcomeV1, ApplicationProblem> {
@@ -333,6 +337,7 @@ fn source_outcome(
     })
 }
 
+#[hotpath::measure]
 fn terminal_digest(terminal: &WorkTerminalEvidenceV1) -> ManifestDigest {
     match terminal {
         WorkTerminalEvidenceV1::Succeeded {
@@ -353,6 +358,7 @@ fn terminal_digest(terminal: &WorkTerminalEvidenceV1) -> ManifestDigest {
 /// Groups succeeded sources by the exact artifact digest list they produced,
 /// largest group first, ties broken by the digest list so the order is
 /// deterministic without pretending a tie has a majority.
+#[hotpath::measure]
 fn evidence_groups(sources: &[WorkSynthesisSourceEnvelopeV1]) -> Vec<WorkSynthesisEvidenceGroupV1> {
     let mut groups: Vec<WorkSynthesisEvidenceGroupV1> = Vec::new();
     for envelope in sources {
@@ -384,6 +390,7 @@ fn evidence_groups(sources: &[WorkSynthesisSourceEnvelopeV1]) -> Vec<WorkSynthes
     groups
 }
 
+#[hotpath::measure]
 fn invalid_problem(code: &str, message: &str) -> ApplicationProblem {
     ApplicationProblem::InvalidRequest {
         diagnostic: SafeDiagnostic {
@@ -395,6 +402,7 @@ fn invalid_problem(code: &str, message: &str) -> ApplicationProblem {
     }
 }
 
+#[hotpath::measure]
 fn contract_problem() -> ApplicationProblem {
     ApplicationProblem::unavailable(SafeDiagnostic {
         code: "application.work-synthesis.evidence-inconsistent".to_owned(),
@@ -402,6 +410,7 @@ fn contract_problem() -> ApplicationProblem {
     })
 }
 
+#[hotpath::measure]
 fn request_identity_problem() -> ApplicationProblem {
     ApplicationProblem::unavailable(SafeDiagnostic {
         code: "application.work-synthesis.request-identity-unavailable".to_owned(),

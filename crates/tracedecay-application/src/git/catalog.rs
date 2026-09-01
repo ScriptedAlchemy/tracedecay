@@ -50,6 +50,7 @@ const GIT_INDEX_SPECS: [GitIndexCatalogSpec; 3] = [
     },
 ];
 
+#[hotpath::measure]
 pub fn git_index_catalog_contribution() -> Result<CatalogContributionV1, ApplicationContractError> {
     let capabilities = GIT_INDEX_SPECS
         .iter()
@@ -64,11 +65,13 @@ pub fn git_index_catalog_contribution() -> Result<CatalogContributionV1, Applica
     })?)
 }
 
+#[hotpath::measure]
 pub fn git_index_handler_descriptors()
 -> Result<Vec<ApplicationHandlerDescriptor>, ApplicationContractError> {
     GIT_INDEX_SPECS.iter().map(handler_descriptor).collect()
 }
 
+#[hotpath::measure]
 fn capability(
     spec: &GitIndexCatalogSpec,
 ) -> Result<CapabilityManifestV1, ApplicationContractError> {
@@ -139,6 +142,7 @@ fn capability(
     })?)
 }
 
+#[hotpath::measure]
 fn handler_descriptor(
     spec: &GitIndexCatalogSpec,
 ) -> Result<ApplicationHandlerDescriptor, ApplicationContractError> {
@@ -156,14 +160,17 @@ fn handler_descriptor(
     )
 }
 
+#[hotpath::measure]
 fn request_schema(spec: &GitIndexCatalogSpec) -> Result<SchemaRef, ApplicationContractError> {
     Ok(SchemaRef::new(SchemaId::new(spec.request_schema)?, 1)?)
 }
 
+#[hotpath::measure]
 fn result_schema(spec: &GitIndexCatalogSpec) -> Result<SchemaRef, ApplicationContractError> {
     Ok(SchemaRef::new(SchemaId::new(spec.result_schema)?, 1)?)
 }
 
+#[hotpath::measure]
 fn git_index_scope() -> Result<ScopeRequirement, ApplicationContractError> {
     Ok(ScopeRequirement::new(vec![
         ScopeDimension::Project,

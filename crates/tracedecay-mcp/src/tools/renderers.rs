@@ -4,6 +4,7 @@ use serde_json::Value;
 
 use super::render::{self, Md};
 
+#[hotpath::measure]
 pub fn skill_list_md(value: &Value) -> String {
     let mut md = Md::new();
     md.heading(2, "Managed Skills");
@@ -28,6 +29,7 @@ pub fn skill_list_md(value: &Value) -> String {
     md.render()
 }
 
+#[hotpath::measure]
 pub fn skill_view_md(value: &Value) -> String {
     let mut md = Md::new();
     let skill = value.get("skill").unwrap_or(value);
@@ -83,6 +85,7 @@ pub fn skill_view_md(value: &Value) -> String {
     md.render()
 }
 
+#[hotpath::measure]
 pub fn automation_artifact_md(value: &Value) -> String {
     let mut md = Md::new();
     md.heading(2, "Automation Run Artifact");
@@ -105,6 +108,7 @@ pub fn automation_artifact_md(value: &Value) -> String {
     md.render()
 }
 
+#[hotpath::measure]
 pub fn automation_run_list_md(value: &Value) -> String {
     let mut md = Md::new();
     md.heading(2, "Automation Runs");
@@ -140,6 +144,7 @@ pub fn automation_run_list_md(value: &Value) -> String {
     md.render()
 }
 
+#[hotpath::measure]
 pub fn automation_run_view_md(value: &Value) -> String {
     let mut md = Md::new();
     let record = value.get("run").unwrap_or(&Value::Null);
@@ -185,14 +190,17 @@ pub fn automation_run_view_md(value: &Value) -> String {
     md.render()
 }
 
+#[hotpath::measure]
 fn value_str<'a>(value: &'a Value, pointer: &str) -> &'a str {
     value.pointer(pointer).and_then(Value::as_str).unwrap_or("")
 }
 
+#[hotpath::measure]
 fn value_i64(value: &Value, pointer: &str) -> Option<i64> {
     value.pointer(pointer).and_then(Value::as_i64)
 }
 
+#[hotpath::measure]
 fn string_array(value: Option<&Value>) -> String {
     value
         .and_then(Value::as_array)
@@ -206,6 +214,7 @@ fn string_array(value: Option<&Value>) -> String {
         .unwrap_or_default()
 }
 
+#[hotpath::measure]
 fn append_skill_item(md: &mut Md, skill: &Value) {
     let metadata = skill.get("metadata").unwrap_or(skill);
     let id = value_str(metadata, "/id");
@@ -254,6 +263,7 @@ fn append_skill_item(md: &mut Md, skill: &Value) {
     }
 }
 
+#[hotpath::measure]
 pub fn analytics_md(value: &Value) -> String {
     let mut md = Md::new();
     md.heading(2, "Usage Analytics");
@@ -297,6 +307,7 @@ pub fn analytics_md(value: &Value) -> String {
     md.render()
 }
 
+#[hotpath::measure]
 fn append_analytics_tools(md: &mut Md, tools: &Value) {
     if !tools
         .get("available")
@@ -360,6 +371,7 @@ fn append_analytics_tools(md: &mut Md, tools: &Value) {
     }
 }
 
+#[hotpath::measure]
 fn append_analytics_hints(md: &mut Md, hints: &Value) {
     if !hints
         .get("available")
@@ -397,6 +409,7 @@ fn append_analytics_hints(md: &mut Md, hints: &Value) {
     }
 }
 
+#[hotpath::measure]
 fn append_analytics_facts(md: &mut Md, facts: &Value) {
     if !facts
         .get("available")
@@ -434,6 +447,7 @@ fn append_analytics_facts(md: &mut Md, facts: &Value) {
     );
 }
 
+#[hotpath::measure]
 fn append_analytics_automation(md: &mut Md, automation: &Value) {
     if !automation
         .get("available")

@@ -30,6 +30,7 @@ pub enum IncidentDebrisKindV1 {
     RecoveryScratch,
 }
 
+#[hotpath::measure_all]
 impl IncidentDebrisKindV1 {
     /// Classify a store-sibling file name into a debris kind, or `None` if the
     /// name is not recognized incident debris.
@@ -72,6 +73,7 @@ pub struct IncidentDebrisArtifactV1 {
     pub observed_at: UtcMicros,
 }
 
+#[hotpath::measure_all]
 impl IncidentDebrisArtifactV1 {
     /// Build an artifact by classifying `path`'s file name. Returns `Ok(None)`
     /// when the name is not incident debris, so a directory scan can map over
@@ -109,6 +111,7 @@ pub struct QuarantineContractV1 {
     pub retention_window_micros: i64,
 }
 
+#[hotpath::measure_all]
 impl QuarantineContractV1 {
     /// Validate the contract. The retention window must be positive; a
     /// non-positive window would make every artifact instantly collectible,
@@ -154,6 +157,7 @@ pub struct QuarantinedArtifactV1 {
     pub collection_eligible_at: UtcMicros,
 }
 
+#[hotpath::measure_all]
 impl QuarantinedArtifactV1 {
     /// True when `now` has reached the collection-eligibility watermark.
     #[must_use]
@@ -177,6 +181,7 @@ pub struct IncidentDebrisScanV1 {
     pub listing_complete: bool,
 }
 
+#[hotpath::measure_all]
 impl IncidentDebrisScanV1 {
     #[must_use]
     pub fn is_empty(&self) -> bool {

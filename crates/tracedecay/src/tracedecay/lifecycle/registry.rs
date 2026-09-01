@@ -50,6 +50,7 @@ static LAST_REGISTERED_DIGEST: LazyLock<StdMutex<HashMap<String, RegistrationDig
 
 /// Pure equality check split out of the caching logic above so it can be
 /// unit tested against a synthetic cache without a real global database.
+#[hotpath::measure]
 fn registration_digest_matches(
     cache: &HashMap<String, RegistrationDigest>,
     project_id: &str,
@@ -86,10 +87,12 @@ async fn cached_registration_is_current(
         == Some(RegisteredGlobalDb::canonical_project_key(registration_root).as_str()))
 }
 
+#[hotpath::measure]
 fn artifact_mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).ok()?.modified().ok()
 }
 
+#[hotpath::measure_all]
 impl TraceDecay {
     #[hotpath::measure(label = "lifecycle.register_project_store", future = true)]
     pub(crate) async fn register_project_store_in_global_registry(&self) -> Result<()> {
@@ -334,20 +337,24 @@ impl TraceDecay {
     }
 }
 
+#[hotpath::measure]
 fn profile_relative(profile_root: &Path, path: &Path) -> Option<String> {
     path.strip_prefix(profile_root)
         .ok()
         .map(|rel| rel.to_string_lossy().replace('\\', "/"))
 }
 
+#[hotpath::measure]
 fn profile_root_for_layout(layout: &StoreLayout) -> Option<PathBuf> {
     layout.data_root.parent()?.parent().map(Path::to_path_buf)
 }
 
+#[hotpath::measure]
 fn profile_store_id(project_id: &str) -> String {
     format!("store:{project_id}:profile_sharded")
 }
 
+#[hotpath::measure]
 fn registry_registration_error(message: impl Into<String>) -> TraceDecayError {
     TraceDecayError::Database {
         operation: "register project store".to_string(),
@@ -355,6 +362,7 @@ fn registry_registration_error(message: impl Into<String>) -> TraceDecayError {
     }
 }
 
+#[hotpath::measure]
 pub(crate) fn git_remote_url(project_root: &Path) -> Option<String> {
     // gix reads the same config `git config --get` would (repo-local +
     // global) without a subprocess spawn.
@@ -375,10 +383,12 @@ pub(crate) fn git_remote_url(project_root: &Path) -> Option<String> {
     )
 }
 
+#[hotpath::measure]
 fn profile_graph_scope_id(store_id: &str, branch_name: &str) -> String {
     format!("{store_id}:branch:{branch_name}")
 }
 
+#[hotpath::measure]
 fn push_existing_store_artifact(
     artifacts: &mut Vec<StoreArtifactUpsert>,
     store_id: &str,

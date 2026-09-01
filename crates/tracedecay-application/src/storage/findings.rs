@@ -48,6 +48,7 @@ const fn kind_slug(kind: DoctorStorageFindingKindV1) -> &'static str {
 
 /// Build a single Storage-family evidence reference of the form
 /// `storage.<kind>.<store>.<detail>`, bounded to the evidence reference limit.
+#[hotpath::measure]
 fn evidence(
     kind: DoctorStorageFindingKindV1,
     store: &StoreKeyV1,
@@ -69,6 +70,7 @@ fn evidence(
 
 /// Truncate to at most `max` bytes, cutting at a char boundary so the result
 /// stays valid UTF-8 (and a truncated reference identifier stays well formed).
+#[hotpath::measure]
 pub(crate) fn truncate_at_char_boundary(value: &str, max: usize) -> String {
     if value.len() <= max {
         return value.to_string();
@@ -80,6 +82,7 @@ pub(crate) fn truncate_at_char_boundary(value: &str, max: usize) -> String {
     value[..end].to_string()
 }
 
+#[hotpath::measure]
 fn coverage(
     completeness: DoctorCoverageCompletenessV1,
     statement: &str,
@@ -88,6 +91,7 @@ fn coverage(
 }
 
 /// Map an observed retention/size problem into a non-healthy Storage finding.
+#[hotpath::measure]
 fn problem_finding(
     kind: DoctorStorageFindingKindV1,
     store: &StoreKeyV1,
@@ -106,6 +110,7 @@ fn problem_finding(
 
 /// Map an unobservable evidence source (unsupported/denied/unknown) into a
 /// Storage finding that carries the honest non-healthy state.
+#[hotpath::measure]
 fn unobservable_finding(
     kind: DoctorStorageFindingKindV1,
     store: &StoreKeyV1,
@@ -123,6 +128,7 @@ fn unobservable_finding(
 
 /// Map a clean observation into either a healthy finding (complete coverage) or
 /// an honest non-healthy `Partial` finding (incomplete coverage).
+#[hotpath::measure]
 fn clean_finding(
     kind: DoctorStorageFindingKindV1,
     store: &StoreKeyV1,
@@ -147,6 +153,7 @@ fn clean_finding(
 /// Wrap one prepared table-growth evidence item in the canonical typed Storage
 /// finding. Baseline and unavailable reads retain their exact non-healthy
 /// evidence state.
+#[hotpath::measure]
 pub fn table_growth_finding(
     evidence_item: &TableGrowthDoctorEvidenceV1,
 ) -> Result<DoctorStorageFindingV1, ApplicationContractError> {
@@ -243,6 +250,7 @@ pub fn table_growth_finding(
 /// silently ignored. Unobservable telemetry yields an honest
 /// unsupported/denied/unknown finding, and a within-budget store yields a
 /// healthy finding only when coverage is genuinely complete.
+#[hotpath::measure]
 pub fn over_budget_finding(
     budget: &StoreSizeBudgetV1,
     read: &StorageTelemetryReadV1,
@@ -327,6 +335,7 @@ pub fn over_budget_finding(
 }
 
 /// Produce the `OrphanStore` finding from an orphan inventory record.
+#[hotpath::measure]
 pub fn orphan_store_finding(
     record: &OrphanStoreRecordV1,
     completeness: DoctorCoverageCompletenessV1,
@@ -362,6 +371,7 @@ pub fn orphan_store_finding(
 ///
 /// Present debris is `Degraded`. An empty scan is healthy only when the sibling
 /// listing was exhaustive; a truncated listing can never assert a clean result.
+#[hotpath::measure]
 pub fn incident_debris_finding(
     scan: &IncidentDebrisScanV1,
 ) -> Result<DoctorStorageFindingV1, ApplicationContractError> {
@@ -411,6 +421,7 @@ pub fn incident_debris_finding(
 ///
 /// Backlog past the retention window is `Stale` — evidence held past its
 /// watermark — and references the retention-collection operation.
+#[hotpath::measure]
 pub fn retention_backlog_finding(
     record: &RetentionBacklogRecordV1,
     completeness: DoctorCoverageCompletenessV1,
@@ -444,6 +455,7 @@ pub fn retention_backlog_finding(
 
 /// Report semantic-vector lifecycle backlog without materializing generation
 /// identities. Maintenance supplies fixed-size counts from its bounded census.
+#[hotpath::measure]
 pub fn semantic_vector_retention_finding(
     record: &SemanticVectorRetentionRecordV1,
     completeness: DoctorCoverageCompletenessV1,
@@ -503,6 +515,7 @@ pub fn semantic_vector_retention_finding(
 /// generation census structurally cannot see a stranded sibling scope, and
 /// folding the two totals together would let a clean generation census hide
 /// gigabytes of unreachable directories.
+#[hotpath::measure]
 pub fn code_generation_retention_finding(
     record: &CodeGenerationRetentionRecordV1,
     completeness: DoctorCoverageCompletenessV1,

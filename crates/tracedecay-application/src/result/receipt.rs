@@ -76,6 +76,7 @@ pub struct OperationReceipt {
     pub termination: OperationTermination,
 }
 
+#[hotpath::measure_all]
 impl OperationReceipt {
     pub fn completed(
         started_at: UtcMicros,
@@ -180,6 +181,7 @@ pub struct PreviewResult<T> {
     pub payload: Option<T>,
 }
 
+#[hotpath::measure_all]
 impl<T> PreviewResult<T> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -233,6 +235,7 @@ pub struct EffectReceipt {
     pub external_proof: Option<RetrievalAnchorId>,
 }
 
+#[hotpath::measure_all]
 impl EffectReceipt {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         if !self.effect_class.is_effect() {
@@ -285,6 +288,7 @@ pub struct EffectResult<T> {
     pub payload: Option<T>,
 }
 
+#[hotpath::measure_all]
 impl<T> EffectResult<T> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(

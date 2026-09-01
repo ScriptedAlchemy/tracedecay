@@ -94,6 +94,7 @@ pub enum SourceEditSurfaceOutcomeV1 {
     DurableMetadata(SourceEditDurableEffectPayloadV1),
 }
 
+#[hotpath::measure_all]
 impl SourceEditSurfaceOutcomeV1 {
     pub fn success(&self) -> bool {
         match self {
@@ -191,6 +192,7 @@ impl SourceEditSurfaceOutcomeV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl SourceEditDurableEffectPayloadV1 {
     pub fn from_live(operation: &UseCaseId, outcome: &SourceEditSurfaceOutcomeV1) -> Self {
         let (change_count, line, before, import_count, finding_count) = match outcome {

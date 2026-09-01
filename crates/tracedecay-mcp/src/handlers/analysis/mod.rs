@@ -43,12 +43,14 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
 use tracedecay_graph_query::{CodeGraphSemanticEdgeV1, LineageSymbolRecordV1, VerifiedGraphQuery};
 
+#[hotpath::measure]
 fn path_is_rust(path: &str) -> bool {
     Path::new(path)
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("rs"))
 }
 
+#[hotpath::measure]
 fn path_matches_optional_scope(path: &str, scope_prefix: Option<&str>) -> bool {
     tracedecay_runtime_core::path_scope::path_matches_scope(path, scope_prefix)
 }
@@ -63,6 +65,7 @@ struct VerifiedAnalysisSymbol {
     metadata: LineageSymbolRecordV1,
 }
 
+#[hotpath::measure_all]
 impl VerifiedAnalysisSymbol {
     fn end_line(&self) -> u32 {
         self.metadata
@@ -71,6 +74,7 @@ impl VerifiedAnalysisSymbol {
     }
 }
 
+#[hotpath::measure]
 fn verified_analysis_symbols(
     graph: &VerifiedGraphQuery,
     scope_prefix: Option<&str>,
@@ -119,6 +123,7 @@ fn verified_analysis_symbols(
         .collect()
 }
 
+#[hotpath::measure]
 fn verified_analysis_edges(
     graph: &VerifiedGraphQuery,
     symbols: &[VerifiedAnalysisSymbol],
@@ -131,6 +136,7 @@ fn verified_analysis_edges(
     graph.edges_among(&occurrences, kinds, ANALYSIS_RELATION_BUDGET)
 }
 
+#[hotpath::measure]
 fn verified_analysis_unavailable(capability: &str, detail: &str) -> TraceDecayError {
     TraceDecayError::project_route(format!("verified-{capability}-unavailable"), false, detail)
 }

@@ -8,6 +8,7 @@ pub struct MarkdownView {
     text: String,
 }
 
+#[hotpath::measure_all]
 impl MarkdownView {
     pub fn new(text: impl Into<String>) -> Self {
         Self { text: text.into() }
@@ -37,6 +38,7 @@ pub fn render(view: CanonicalHumanView) -> MarkdownView {
     MarkdownView::new(text)
 }
 
+#[hotpath::measure]
 fn escape_text(value: &str) -> String {
     value
         .replace('\\', "\\\\")

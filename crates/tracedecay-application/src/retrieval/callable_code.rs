@@ -29,6 +29,7 @@ pub struct CodeQueryScope {
     pub path_prefix: Option<String>,
 }
 
+#[hotpath::measure_all]
 impl CodeQueryScope {
     pub fn new(
         generation: CodeGenerationId,
@@ -75,6 +76,7 @@ pub struct CodeQueryPage<T> {
     pub query_fallback: Option<QueryFallbackSubpayload>,
 }
 
+#[hotpath::measure_all]
 impl<T> CodeQueryPage<T> {
     pub fn new(
         generation: CodeGenerationId,
@@ -186,6 +188,7 @@ pub struct ExactOccurrenceRequest {
     pub meta: RetrievalRequestMeta,
 }
 
+#[hotpath::measure_all]
 impl ExactOccurrenceRequest {
     pub fn new(
         literal: impl Into<String>,
@@ -214,6 +217,7 @@ pub struct PhraseSearchRequest {
     pub meta: RetrievalRequestMeta,
 }
 
+#[hotpath::measure_all]
 impl PhraseSearchRequest {
     pub fn new(
         query: EphemeralSanitizedQueryViewV1,
@@ -377,6 +381,7 @@ pub struct CodeNavigationRequest {
     pub meta: RetrievalRequestMeta,
 }
 
+#[hotpath::measure_all]
 impl SourceMetadataRequest {
     pub fn new(
         files: Vec<FileOccurrenceId>,
@@ -539,6 +544,7 @@ impl ValidatedCodeQueryRequest for CodeNavigationRequest {
     }
 }
 
+#[hotpath::measure]
 fn validate_scope_meta(
     scope: &CodeQueryScope,
     meta: &RetrievalRequestMeta,
@@ -547,6 +553,7 @@ fn validate_scope_meta(
     super::validate_current_temporal_meta(meta, "code query temporal mode")
 }
 
+#[hotpath::measure]
 fn validate_filters(
     filters: &[String],
     field: &'static str,
@@ -560,6 +567,7 @@ fn validate_filters(
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_node_depth(node_id: &str, maximum_depth: u32) -> Result<(), ApplicationContractError> {
     super::validate_node_depth(
         node_id,
@@ -577,6 +585,7 @@ fn validate_node_depth(node_id: &str, maximum_depth: u32) -> Result<(), Applicat
 /// violation. No caller, SDK, or test pins `InvalidRange` for query length on
 /// this surface, so the code is now unified on `InvalidIdentifier` via
 /// `super::validate_bounded_text`.
+#[hotpath::measure]
 fn validate_query(value: &str, field: &'static str) -> Result<(), ApplicationContractError> {
     super::validate_bounded_text(value, field, MAX_CALLABLE_CODE_QUERY_BYTES)
 }
@@ -603,6 +612,7 @@ pub enum CallableCodeOperationKind {
     References,
 }
 
+#[hotpath::measure_all]
 impl CallableCodeOperationKind {
     pub const ALL: [Self; CALLABLE_CODE_OPERATION_COUNT] = [
         Self::ExactOccurrence,
@@ -625,6 +635,7 @@ impl CallableCodeOperationKind {
         Self::References,
     ];
 
+    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ExactOccurrence => "exact_occurrence",
@@ -654,6 +665,7 @@ pub struct CallableCodeOperations {
     operations: BTreeMap<CallableCodeOperationKind, ApplicationOperation>,
 }
 
+#[hotpath::measure_all]
 impl CallableCodeOperations {
     pub fn new(
         operations: impl IntoIterator<Item = (CallableCodeOperationKind, ApplicationOperation)>,

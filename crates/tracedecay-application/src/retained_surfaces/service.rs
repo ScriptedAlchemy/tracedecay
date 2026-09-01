@@ -164,6 +164,7 @@ pub struct RetainedSurfacePortsV1<'a> {
     lcm: Option<Arc<dyn RetainedLcmExecutionPortV1 + 'a>>,
 }
 
+#[hotpath::measure_all]
 impl<'a> RetainedSurfacePortsV1<'a> {
     pub fn with_automation(
         mut self,
@@ -195,7 +196,9 @@ pub struct RetainedSurfaceServiceV1<'a> {
     ports: RetainedSurfacePortsV1<'a>,
 }
 
+#[hotpath::measure_all]
 impl<'a> RetainedSurfaceServiceV1<'a> {
+    #[hotpath::skip]
     pub const fn new(ports: RetainedSurfacePortsV1<'a>) -> Self {
         Self { ports }
     }
@@ -289,6 +292,7 @@ enum RetainedSurfaceDispatch<'a> {
     Lcm(RetainedLcmRequestV1<'a>),
 }
 
+#[hotpath::measure]
 fn classify_retained_surface_request(
     request: &RetainedSurfaceRequestV1,
 ) -> RetainedSurfaceDispatch<'_> {
@@ -368,6 +372,7 @@ fn classify_retained_surface_request(
     }
 }
 
+#[hotpath::measure]
 fn ensure_post_execution_cancellation(
     operation: RetainedSurfaceOperation,
     cancellation: &CancellationSignal,
@@ -381,6 +386,7 @@ fn ensure_post_execution_cancellation(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn outcome_matches_operation(
     operation: RetainedSurfaceOperation,
     outcome: &ApplicationOutcome<RetainedSurfaceResultV1>,
@@ -496,6 +502,7 @@ pub const fn retained_surface_operation_is_effect(operation: RetainedSurfaceOper
     )
 }
 
+#[hotpath::measure]
 fn admit(context: &RequestContext, observed_at: UtcMicros) -> Result<(), ApplicationProblem> {
     match context.admission_at(observed_at) {
         RequestAdmission::Admitted => Ok(()),
@@ -505,6 +512,7 @@ fn admit(context: &RequestContext, observed_at: UtcMicros) -> Result<(), Applica
 }
 
 /// Canonical semantic problem projection for a retained runtime failure.
+#[hotpath::measure]
 pub fn retained_surface_execution_problem(
     error: RetainedSurfaceExecutionErrorV1,
 ) -> ApplicationProblem {
@@ -603,6 +611,7 @@ pub fn retained_surface_execution_problem(
     }
 }
 
+#[hotpath::measure]
 fn unavailable_problem(code: &'static str, message: &'static str) -> ApplicationProblem {
     ApplicationProblem::Unavailable {
         classification: crate::ApplicationUnavailableClassV1::Authority,
@@ -617,6 +626,7 @@ const UNAVAILABLE_AUTHORITY_MESSAGE: &str = "The retained operation authority is
 /// SafeDiagnostic validation refuses empty/untrimmed text, control characters,
 /// and messages over 512 bytes, so the threaded cause is normalized at this
 /// single projection choke point instead of at every producer.
+#[hotpath::measure]
 fn unavailable_authority_message(detail: &str) -> String {
     let sanitized = detail
         .chars()
@@ -644,6 +654,7 @@ fn unavailable_authority_message(detail: &str) -> String {
     )
 }
 
+#[hotpath::measure_all]
 impl RetainedSurfaceExecutionErrorV1 {
     /// Typed unavailability that names its cause. Producers must pass the
     /// underlying error text or an honest description of the absent
@@ -684,6 +695,7 @@ impl RetainedSurfaceExecutionErrorV1 {
     }
 }
 
+#[hotpath::measure]
 fn structural_refusal_problem(refusal: RetainedStructuralRefusalV1) -> ApplicationProblem {
     let diagnostic = match refusal {
         RetainedStructuralRefusalV1::SessionRetrievalBudget => diagnostic(
@@ -712,6 +724,7 @@ fn structural_refusal_problem(refusal: RetainedStructuralRefusalV1) -> Applicati
     }
 }
 
+#[hotpath::measure]
 fn diagnostic(code: &'static str, message: &'static str) -> SafeDiagnostic {
     SafeDiagnostic {
         code: code.to_owned(),

@@ -152,6 +152,7 @@ const SURFACE_SPECS: [SurfaceSpec; 8] = [
 ];
 
 /// Catalog contribution for public Git read and preview/apply bindings.
+#[hotpath::measure]
 pub fn git_surface_catalog_contribution() -> Result<CatalogContributionV1, ApplicationContractError>
 {
     let mut capabilities = Vec::with_capacity(SURFACE_SPECS.len());
@@ -182,6 +183,7 @@ pub fn git_surface_catalog_contribution() -> Result<CatalogContributionV1, Appli
 /// Daemon-owned public HTTP bindings for the independently callable Git
 /// reads and opaque GitHub stack-signal expansion. Preview and apply remain
 /// MCP/CLI-only because they require their separate mutation journeys.
+#[hotpath::measure]
 pub fn git_surface_executable_binding_registry()
 -> Result<ExecutableBindingRegistryV1, ApplicationContractError> {
     let contribution = git_surface_catalog_contribution()?;
@@ -233,6 +235,7 @@ pub fn git_surface_executable_binding_registry()
     ExecutableBindingRegistryV1::new(bindings).map_err(Into::into)
 }
 
+#[hotpath::measure]
 fn git_surface_http_route(operation: &str) -> Option<&'static str> {
     match operation {
         "git_status" => Some("git/status"),
@@ -250,6 +253,7 @@ fn git_surface_http_route(operation: &str) -> Option<&'static str> {
 /// The shared `public_wire` types are the single wire authority: root
 /// transport parsing admits them and SDK generation emits them, so neither
 /// can drift from the other.
+#[hotpath::measure]
 fn git_executable_schemas(
     contribution: &CatalogContributionV1,
 ) -> Result<Vec<ExecutableSchemaAuthority>, ApplicationContractError> {
@@ -302,6 +306,7 @@ fn git_executable_schemas(
     Ok(schemas)
 }
 
+#[hotpath::measure]
 fn git_executable_schema<Request, Response>(
     contribution: &CatalogContributionV1,
     operation: &str,
@@ -334,12 +339,14 @@ where
     )?)
 }
 
+#[hotpath::measure]
 pub fn git_surface_handler_descriptors()
 -> Result<Vec<ApplicationHandlerDescriptor>, ApplicationContractError> {
     SURFACE_SPECS.iter().map(handler_descriptor).collect()
 }
 /// Resolve one public Git-surface operation to the exact capability and use
 /// case a daemon-minted request grant must name.
+#[hotpath::measure]
 pub fn git_surface_operation(
     name: &str,
 ) -> Result<Option<ApplicationOperation>, ApplicationContractError> {
@@ -358,6 +365,7 @@ pub fn git_surface_operation(
         .transpose()
 }
 
+#[hotpath::measure]
 fn capability(
     spec: &SurfaceSpec,
     capability_id: CapabilityId,
@@ -425,6 +433,7 @@ fn capability(
     })?)
 }
 
+#[hotpath::measure]
 fn cancellation_points(effect: EffectClass) -> Vec<CancellationPoint> {
     if effect.is_effect() {
         vec![
@@ -442,6 +451,7 @@ fn cancellation_points(effect: EffectClass) -> Vec<CancellationPoint> {
     }
 }
 
+#[hotpath::measure]
 fn deadline_behavior(effect: EffectClass) -> DeadlineBehavior {
     if effect.is_effect() {
         DeadlineBehavior::ReturnEffectReceipt
@@ -450,6 +460,7 @@ fn deadline_behavior(effect: EffectClass) -> DeadlineBehavior {
     }
 }
 
+#[hotpath::measure]
 fn terminal_states(effect: EffectClass) -> Vec<TerminalState> {
     if effect.is_effect() {
         vec![
@@ -471,6 +482,7 @@ fn terminal_states(effect: EffectClass) -> Vec<TerminalState> {
     }
 }
 
+#[hotpath::measure]
 fn handler_descriptor(
     spec: &SurfaceSpec,
 ) -> Result<ApplicationHandlerDescriptor, ApplicationContractError> {
@@ -487,6 +499,7 @@ fn handler_descriptor(
     )
 }
 
+#[hotpath::measure]
 fn schema(id: &str) -> Result<SchemaRef, ApplicationContractError> {
     Ok(SchemaRef::new(SchemaId::new(id)?, 1)?)
 }

@@ -48,6 +48,7 @@ static REMOTE_EXACT_OBSERVATION_QUERY_RESULT_CONTRACT_V1: LazyLock<ResultContrac
         .expect("static exact observation query result contract is canonical")
     });
 
+#[hotpath::measure]
 pub fn remote_exact_observation_query_result_contract_v1() -> ResultContractRef {
     REMOTE_EXACT_OBSERVATION_QUERY_RESULT_CONTRACT_V1.clone()
 }
@@ -72,6 +73,7 @@ pub struct RemoteQueryRequestV1 {
     pub operation: RemoteQueryOperationV1,
 }
 
+#[hotpath::measure_all]
 impl RemoteQueryRequestV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         if self.schema_revision != REMOTE_QUERY_SCHEMA_REVISION_V1 {
@@ -157,6 +159,7 @@ pub struct RemoteQueryCompleteValueV1 {
     pub returned_observations: u8,
 }
 
+#[hotpath::measure_all]
 impl RemoteQueryCompleteValueV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         if self.returned_observations > 1 {
@@ -197,6 +200,7 @@ pub struct RemoteSanitizedObservationV1 {
     pub projection_queued: bool,
 }
 
+#[hotpath::measure_all]
 impl RemoteSanitizedObservationV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         self.retrieval_anchor
@@ -234,6 +238,7 @@ impl RemoteSanitizedObservationV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl RemoteQueryResultV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         for contribution in &self.composition.contributions {
@@ -268,6 +273,7 @@ pub struct RemoteExactObservationQueryBudgetV1 {
     pub maximum_elapsed_micros: u64,
 }
 
+#[hotpath::measure_all]
 impl RemoteExactObservationQueryBudgetV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         if self.maximum_units == 0 || self.maximum_bytes == 0 || self.maximum_elapsed_micros == 0 {
@@ -297,6 +303,7 @@ pub struct RemoteQueryPolicyRecordV1 {
     pub revalidated_at: UtcMicros,
 }
 
+#[hotpath::measure_all]
 impl RemoteQueryPolicyRecordV1 {
     pub fn validate(&self) -> Result<(), RemoteExactObservationQueryErrorV1> {
         self.repository_scope
@@ -330,6 +337,7 @@ pub struct RemoteQueryAuthorizationEvidenceV1 {
     pub revalidated_at: UtcMicros,
 }
 
+#[hotpath::measure_all]
 impl RemoteQueryAuthorizationEvidenceV1 {
     pub fn validate_for(
         &self,
@@ -421,6 +429,7 @@ pub struct RemoteExactObservationQueryServiceV1 {
     clock: Arc<dyn RemoteQueryClockPortV1>,
 }
 
+#[hotpath::measure_all]
 impl RemoteExactObservationQueryServiceV1 {
     pub fn new(
         credentials: Arc<dyn RemoteEnrollmentCredentialLookupPortV1>,
@@ -625,6 +634,7 @@ impl RemoteExactObservationQueryServiceV1 {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn validate_returned_provenance(
     repository_provenance: &EvidenceAvailabilityV1<GenerationBoundRepositoryProvenanceV1>,
     repository_anchor_generation: Option<&ProjectionGenerationId>,
@@ -649,6 +659,7 @@ pub(super) fn validate_returned_provenance(
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn validate_returned_authority(
     state: &CurrentRemoteAuthorityStateV1,
     expected: &RemoteWriterFenceV1,
@@ -669,6 +680,7 @@ pub(super) fn validate_returned_authority(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn validate_result_identity(
     contract: &ResultContractRef,
     actual_request_id: &RequestId,
@@ -685,6 +697,7 @@ pub(super) fn validate_result_identity(
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn validate_returned_observation_identity(
     actual_observation_id: &CanonicalObservationIdV1,
     actual_generation: &ProjectionGenerationId,
@@ -706,6 +719,7 @@ pub(super) fn validate_returned_observation_identity(
     Ok(())
 }
 
+#[hotpath::measure]
 pub(super) fn validate_protocol_authority_binding(
     request: &RemoteProtocolRequestV1<RemoteQueryRequestV1>,
 ) -> Result<(), RemoteExactObservationQueryErrorV1> {
@@ -715,6 +729,7 @@ pub(super) fn validate_protocol_authority_binding(
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_query_evidence(
     envelope: &ApplicationEnvelope<RemoteQueryResultV1>,
 ) -> Result<(), RemoteExactObservationQueryErrorV1> {
@@ -739,6 +754,7 @@ fn validate_query_evidence(
     Ok(())
 }
 
+#[hotpath::measure]
 fn resolved_scope_matches(resolved: &ResolvedScope, scope: &RemoteRepositoryScopeV1) -> bool {
     resolved.project_id == scope.project_id
         && resolved.repository_id == scope.repository_id
@@ -746,6 +762,7 @@ fn resolved_scope_matches(resolved: &ResolvedScope, scope: &RemoteRepositoryScop
         && resolved.reference == scope.reference
 }
 
+#[hotpath::measure]
 pub(super) fn validate_composition(
     result: &RemoteQueryResultV1,
     expected: &ExpectedRemoteShardV1,
@@ -766,6 +783,7 @@ pub(super) fn validate_composition(
     Ok(())
 }
 
+#[hotpath::measure]
 fn exact_observation_row(
     envelope: &ApplicationEnvelope<RemoteQueryResultV1>,
 ) -> Option<&RemoteSanitizedObservationV1> {
@@ -776,6 +794,7 @@ fn exact_observation_row(
     }
 }
 
+#[hotpath::measure]
 fn query_payload(
     envelope: &ApplicationEnvelope<RemoteQueryResultV1>,
 ) -> Option<&RemoteQueryResultV1> {
@@ -789,6 +808,7 @@ pub struct RemoteExactObservationQueryProtocolAdapterV1 {
     service: RemoteExactObservationQueryServiceV1,
 }
 
+#[hotpath::measure_all]
 impl RemoteExactObservationQueryProtocolAdapterV1 {
     pub fn new(service: RemoteExactObservationQueryServiceV1) -> Self {
         Self { service }
@@ -902,6 +922,7 @@ pub enum RemoteExactObservationQueryErrorV1 {
     ReceiptMismatch,
 }
 
+#[hotpath::measure]
 pub(super) fn query_protocol_failure(
     error: RemoteExactObservationQueryErrorV1,
 ) -> RemoteProtocolFailureV1 {

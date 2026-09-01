@@ -261,6 +261,7 @@ pub enum WorkRunControlReadingV1 {
     },
 }
 
+#[hotpath::measure_all]
 impl WorkRunControlReadingV1 {
     /// Whether a new attempt reservation may be admitted right now.
     pub fn admits_reservation(&self) -> bool {
@@ -280,6 +281,7 @@ impl<S> WorkRunControlService<S>
 where
     S: WorkRunControlStoragePort,
 {
+    #[hotpath::skip]
     pub const fn new(storage: S) -> Self {
         Self { storage }
     }
@@ -560,6 +562,7 @@ where
     }
 }
 
+#[hotpath::measure]
 fn expected_authority(
     value: Option<u64>,
 ) -> Result<Option<WorkRunControlAuthorityV1>, ApplicationProblem> {
@@ -570,6 +573,7 @@ fn expected_authority(
 
 /// Refuses a transition whose caller read a different authority version than
 /// the one durably published.
+#[hotpath::measure]
 fn check_expected(
     existing: Option<&WorkRunControlV1>,
     expected: Option<WorkRunControlAuthorityV1>,
@@ -581,6 +585,7 @@ fn check_expected(
     }
 }
 
+#[hotpath::measure]
 fn admit(context: &RequestContext, observed_at: UtcMicros) -> Result<(), ApplicationProblem> {
     match context.admission_at(observed_at) {
         RequestAdmission::Admitted => Ok(()),
@@ -589,6 +594,7 @@ fn admit(context: &RequestContext, observed_at: UtcMicros) -> Result<(), Applica
     }
 }
 
+#[hotpath::measure]
 fn storage_problem(error: WorkRunControlStorageError) -> ApplicationProblem {
     match error {
         WorkRunControlStorageError::NotFoundOrNotAuthorized => not_found_problem(),
@@ -602,6 +608,7 @@ fn storage_problem(error: WorkRunControlStorageError) -> ApplicationProblem {
     }
 }
 
+#[hotpath::measure]
 fn contract_problem(error: WorkRunControlContractError) -> ApplicationProblem {
     match error {
         WorkRunControlContractError::AlreadyPaused => conflict_problem(
@@ -635,6 +642,7 @@ fn contract_problem(error: WorkRunControlContractError) -> ApplicationProblem {
     }
 }
 
+#[hotpath::measure]
 fn invalid_pending_interval_limit_problem() -> ApplicationProblem {
     ApplicationProblem::InvalidRequest {
         diagnostic: SafeDiagnostic {
@@ -647,6 +655,7 @@ fn invalid_pending_interval_limit_problem() -> ApplicationProblem {
     }
 }
 
+#[hotpath::measure]
 fn workflow_steps_for_live_attempts(
     live_attempts: &[AttemptId],
     workflow_attempts: Vec<WorkRunLiveAttemptV1>,
@@ -670,6 +679,7 @@ fn workflow_steps_for_live_attempts(
         .collect()
 }
 
+#[hotpath::measure]
 fn invalid_open_interval_durable_problem() -> ApplicationProblem {
     ApplicationProblem::InvalidRequest {
         diagnostic: SafeDiagnostic {
@@ -682,6 +692,7 @@ fn invalid_open_interval_durable_problem() -> ApplicationProblem {
     }
 }
 
+#[hotpath::measure]
 fn authority_conflict_problem() -> ApplicationProblem {
     conflict_problem(
         "application.work-run-control.authority-conflict",
@@ -689,10 +700,12 @@ fn authority_conflict_problem() -> ApplicationProblem {
     )
 }
 
+#[hotpath::measure]
 fn not_found_problem() -> ApplicationProblem {
     ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
 }
 
+#[hotpath::measure]
 fn conflict_problem(code: &str, message: &str) -> ApplicationProblem {
     ApplicationProblem::Conflict {
         diagnostic: SafeDiagnostic {

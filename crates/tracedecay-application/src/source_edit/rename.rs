@@ -42,6 +42,7 @@ pub struct RenamePreviewAcceptanceV1 {
     pub graph_revision: ManifestDigest,
 }
 
+#[hotpath::measure_all]
 impl RenamePreviewAcceptanceV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         self.preview_id.validate()?;
@@ -238,6 +239,7 @@ pub struct RenameResult {
     pub message: String,
 }
 
+#[hotpath::measure_all]
 impl RenameResult {
     pub fn bind_preview_digest(&mut self, digest: ManifestDigest) {
         self.preview_digest = Some(digest);

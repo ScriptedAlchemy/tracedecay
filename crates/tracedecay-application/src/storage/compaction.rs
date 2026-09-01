@@ -40,6 +40,7 @@ pub struct CompactionTriggerPolicyV1 {
     pub minimum_reclaimable_bytes: StorageByteSizeV1,
 }
 
+#[hotpath::measure_all]
 impl CompactionTriggerPolicyV1 {
     /// Validate the policy. A zero threshold would schedule compaction for every
     /// store on every pass; it is rejected in favor of an explicit positive
@@ -98,8 +99,10 @@ pub enum CompactionDecisionV1 {
     },
 }
 
+#[hotpath::measure_all]
 impl CompactionDecisionV1 {
     #[must_use]
+    #[hotpath::skip]
     pub const fn is_scheduled(&self) -> bool {
         matches!(self, Self::ScheduleIncrementalVacuum { .. })
     }
@@ -107,6 +110,7 @@ impl CompactionDecisionV1 {
     /// The placement, if scheduled. Always the deferred background lane by
     /// construction — foreground placement is unrepresentable.
     #[must_use]
+    #[hotpath::skip]
     pub const fn placement(&self) -> Option<CompactionPlacementV1> {
         match self {
             Self::ScheduleIncrementalVacuum { placement, .. } => Some(*placement),

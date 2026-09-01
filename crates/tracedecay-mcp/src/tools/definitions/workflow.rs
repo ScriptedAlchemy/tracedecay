@@ -19,6 +19,7 @@ type DiscoveryResult<T> = Result<T, crate::McpCatalogError>;
 /// omitting a callable operation: a Workflow operation that no adapter
 /// publishes is invisible to every agent, which is exactly how all sixteen of
 /// them stayed off MCP while CLI and HTTP carried them.
+#[hotpath::measure]
 pub(super) fn workflow_definitions() -> DiscoveryResult<Vec<ToolDefinition>> {
     let registry = tracedecay_application::workflow_executable_binding_registry()
         .map_err(crate::McpCatalogError::CatalogValidation)?;
@@ -64,6 +65,7 @@ pub(super) fn workflow_definitions() -> DiscoveryResult<Vec<ToolDefinition>> {
         .collect()
 }
 
+#[hotpath::measure]
 fn invalid_workflow_discovery(field: &'static str, reason: &'static str) -> crate::McpCatalogError {
     CatalogValidationError::InvalidValue { field, reason }.into()
 }

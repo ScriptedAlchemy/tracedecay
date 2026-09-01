@@ -5,6 +5,7 @@ use serde_json::Value;
 use super::{def, def_rw};
 use crate::ToolDefinition;
 
+#[hotpath::measure]
 pub(super) fn def_fact_store_add(input_schema: Value) -> ToolDefinition {
     def_rw(
         "tracedecay_fact_store_add",
@@ -14,6 +15,7 @@ pub(super) fn def_fact_store_add(input_schema: Value) -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_fact_store_curate(input_schema: Value) -> ToolDefinition {
     def_rw(
         "tracedecay_fact_store_curate",
@@ -23,6 +25,7 @@ pub(super) fn def_fact_store_curate(input_schema: Value) -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_fact_store_search(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_fact_store_search",
@@ -32,6 +35,7 @@ pub(super) fn def_fact_store_search(input_schema: Value) -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_fact_store_probe(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_fact_store_probe",
@@ -41,6 +45,7 @@ pub(super) fn def_fact_store_probe(input_schema: Value) -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_fact_store_related(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_fact_store_related",
@@ -50,6 +55,7 @@ pub(super) fn def_fact_store_related(input_schema: Value) -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_fact_store_reason(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_fact_store_reason",
@@ -59,6 +65,7 @@ pub(super) fn def_fact_store_reason(input_schema: Value) -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_fact_store_contradict(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_fact_store_contradict",
@@ -68,6 +75,7 @@ pub(super) fn def_fact_store_contradict(input_schema: Value) -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_fact_store_get(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_fact_store_get",
@@ -77,6 +85,7 @@ pub(super) fn def_fact_store_get(input_schema: Value) -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_fact_store_update(input_schema: Value) -> ToolDefinition {
     def_rw(
         "tracedecay_fact_store_update",
@@ -86,6 +95,7 @@ pub(super) fn def_fact_store_update(input_schema: Value) -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_fact_store_remove(input_schema: Value) -> ToolDefinition {
     def_rw(
         "tracedecay_fact_store_remove",
@@ -95,6 +105,7 @@ pub(super) fn def_fact_store_remove(input_schema: Value) -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_fact_store_list(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_fact_store_list",
@@ -104,6 +115,7 @@ pub(super) fn def_fact_store_list(input_schema: Value) -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_fact_feedback(input_schema: Value) -> ToolDefinition {
     def_rw(
         "tracedecay_fact_feedback",
@@ -113,6 +125,7 @@ pub(super) fn def_fact_feedback(input_schema: Value) -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_memory_status(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_memory_status",

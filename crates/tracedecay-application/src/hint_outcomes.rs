@@ -20,7 +20,9 @@ pub enum HintOutcomePortOperation {
     AppendOutcomes,
 }
 
+#[hotpath::measure_all]
 impl HintOutcomePortOperation {
+    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::QueryResolvedHints => "query_resolved_hints",
@@ -38,6 +40,7 @@ pub struct HintOutcomePortError {
     detail: String,
 }
 
+#[hotpath::measure_all]
 impl HintOutcomePortError {
     pub fn new(operation: HintOutcomePortOperation, detail: impl Into<String>) -> Self {
         Self {
@@ -46,6 +49,7 @@ impl HintOutcomePortError {
         }
     }
 
+    #[hotpath::skip]
     pub const fn operation(&self) -> &'static str {
         self.operation
     }

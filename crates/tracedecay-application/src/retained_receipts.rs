@@ -19,6 +19,7 @@ use crate::{
     RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1, TemporalState, now_micros,
 };
 
+#[hotpath::measure]
 pub fn evidence_outcome(
     context: &RetainedSurfaceExecutionContextV1<'_>,
     operation: RetainedSurfaceOperation,
@@ -129,6 +130,7 @@ pub fn evidence_outcome(
     Ok(outcome)
 }
 
+#[hotpath::measure]
 pub fn effective_memory_deadline(context: &RetainedSurfaceExecutionContextV1<'_>) -> Deadline {
     Deadline {
         expires_at: context
@@ -149,6 +151,7 @@ pub struct PreparedRetainedEffect {
     receipt_template: EffectReceipt,
 }
 
+#[hotpath::measure]
 pub fn prepare_retained_effect<T: Serialize>(
     context: &RetainedSurfaceExecutionContextV1<'_>,
     operation: RetainedSurfaceOperation,
@@ -282,6 +285,7 @@ pub fn prepare_retained_effect<T: Serialize>(
     })
 }
 
+#[hotpath::measure_all]
 impl PreparedRetainedEffect {
     pub fn material_committed_state_digest<C: Serialize + ?Sized>(
         &self,
@@ -475,10 +479,12 @@ impl PreparedRetainedEffect {
     }
 }
 
+#[hotpath::measure]
 pub fn memory_expiry_partial(settled_after_expiry: bool) -> Option<(&'static str, &'static str)> {
     settled_after_expiry.then_some(memory_expiry_detail())
 }
 
+#[hotpath::measure]
 fn memory_expiry_detail() -> (&'static str, &'static str) {
     (
         "application.retained.memory-admission-expiry-after-commit",
@@ -486,6 +492,7 @@ fn memory_expiry_detail() -> (&'static str, &'static str) {
     )
 }
 
+#[hotpath::measure]
 pub fn retained_effect_outcome<T: Serialize, C: Serialize + ?Sized>(
     context: &RetainedSurfaceExecutionContextV1<'_>,
     operation: RetainedSurfaceOperation,
@@ -518,6 +525,7 @@ pub fn retained_effect_outcome<T: Serialize, C: Serialize + ?Sized>(
     )
 }
 
+#[hotpath::measure]
 pub fn session_refresh_effect_outcome<T: Serialize>(
     context: &RetainedSurfaceExecutionContextV1<'_>,
     operation: RetainedSurfaceOperation,
@@ -544,6 +552,7 @@ pub fn session_refresh_effect_outcome<T: Serialize>(
     )
 }
 
+#[hotpath::measure]
 fn map_evidence_terminal(
     terminal: RetainedSurfaceEvidenceTerminalV1,
 ) -> RetainedSurfaceExecutionErrorV1 {
@@ -579,6 +588,7 @@ fn map_evidence_terminal(
     }
 }
 
+#[hotpath::measure]
 fn evidence_temporal_state(
     facts: &RetainedSurfaceEvidenceFactsV1,
     requested_at: tracedecay_domain::UtcMicros,
@@ -610,6 +620,7 @@ fn evidence_temporal_state(
     })
 }
 
+#[hotpath::measure]
 fn temporal_request_mode(
     requests: &[RetainedSurfaceTemporalRequestV1],
 ) -> Result<TemporalModeV1, RetainedSurfaceExecutionErrorV1> {
@@ -646,6 +657,7 @@ impl std::io::Write for CountingSink {
     }
 }
 
+#[hotpath::measure]
 fn count_serialized_bytes<T: Serialize>(value: &T) -> Result<u64, RetainedSurfaceExecutionErrorV1> {
     let mut output = CountingSink { written: 0 };
     serde_json::to_writer(&mut output, value).map_err(|error| {
@@ -656,6 +668,7 @@ fn count_serialized_bytes<T: Serialize>(value: &T) -> Result<u64, RetainedSurfac
     Ok(output.written)
 }
 
+#[hotpath::measure]
 pub fn measured_budget<T: Serialize>(
     started_at: tracedecay_domain::UtcMicros,
     finished_at: tracedecay_domain::UtcMicros,
@@ -678,6 +691,7 @@ pub fn measured_budget<T: Serialize>(
     })
 }
 
+#[hotpath::measure]
 pub fn authority_receipt(
     context: &RetainedSurfaceExecutionContextV1<'_>,
     observed_at: tracedecay_domain::UtcMicros,

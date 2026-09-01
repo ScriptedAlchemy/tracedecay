@@ -71,6 +71,7 @@ pub async fn handle_circular(
     ))
 }
 
+#[hotpath::measure]
 fn circular_output(
     cycles: &[BoundedCycle],
     cycle_count: usize,
@@ -112,6 +113,7 @@ fn circular_output(
 /// Ties fall back to path order so repeated calls agree. Both the omitted cycle
 /// count and each component's true member count are returned rather than
 /// dropped: the caller always states what it left out.
+#[hotpath::measure]
 fn bound_cycles(
     mut cycles: Vec<Vec<String>>,
     limit: usize,
@@ -135,6 +137,7 @@ fn bound_cycles(
     (bounded, omitted)
 }
 
+#[hotpath::measure]
 fn render_circular_md(
     cycles: &[BoundedCycle],
     cycle_count: usize,

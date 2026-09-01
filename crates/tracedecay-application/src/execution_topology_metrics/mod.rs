@@ -493,11 +493,13 @@ pub enum ExecutionMetricUnavailableV1 {
     UnboundedInterval,
 }
 
+#[hotpath::measure_all]
 impl ExecutionMetricUnavailableV1 {
     /// Canonical wire spelling, reused verbatim as the landed
     /// [`MetricValueV1::unavailable_reason`] so a transport that only reads
     /// the generic metric envelope sees the same typed reason.
     #[must_use]
+    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::StoreUnavailable => "store_unavailable",
@@ -534,6 +536,7 @@ pub struct ExecutionTopologyMeasurementV1 {
     local_support: u64,
 }
 
+#[hotpath::measure_all]
 impl ExecutionTopologyMeasurementV1 {
     pub(in crate::execution_topology_metrics) fn with_local_support(
         mut self,
@@ -543,6 +546,7 @@ impl ExecutionTopologyMeasurementV1 {
         self
     }
 
+    #[hotpath::skip]
     pub(in crate::execution_topology_metrics) const fn local_support(&self) -> u64 {
         self.local_support
     }
@@ -628,7 +632,9 @@ pub struct ExecutionTopologyMetricsRequestV1 {
     pub max_events: u32,
 }
 
+#[hotpath::measure_all]
 impl ExecutionQuantityUnitV1 {
+    #[hotpath::skip]
     const fn wire_unit(self) -> &'static str {
         match self {
             Self::WallMicros => "microseconds",

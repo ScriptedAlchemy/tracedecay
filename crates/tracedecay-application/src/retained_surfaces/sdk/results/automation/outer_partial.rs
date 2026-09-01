@@ -14,6 +14,7 @@ use crate::{
     ApplicationProblemEnvelope, EffectReceipt, EffectTermination, IdempotencyKey, RequestId,
 };
 
+#[hotpath::measure]
 fn outer_delivery_partial(result: AutomationRunResultV1) -> Value {
     let request_id = RequestId::new("request.automation.outer-partial").expect("request");
     let scope = memory_scope();
@@ -69,6 +70,7 @@ fn outer_delivery_partial(result: AutomationRunResultV1) -> Value {
     serde_json::to_value(terminal).expect("wire")
 }
 
+#[hotpath::measure]
 fn assert_bound_outer_partial(result: AutomationRunResultV1) {
     let wire = outer_delivery_partial(result);
     assert!(serde_json::from_value::<AutomationRunProblemV1>(wire.clone()).is_ok());
@@ -82,12 +84,14 @@ fn assert_bound_outer_partial(result: AutomationRunResultV1) {
 }
 
 #[test]
+#[hotpath::measure]
 fn zero_inner_effect_outer_delivery_failure_is_a_bound_partial_terminal() {
     let result = serde_json::from_value(zero_terminal("completed")).expect("zero-effect result");
     assert_bound_outer_partial(result);
 }
 
 #[test]
+#[hotpath::measure]
 fn nonempty_inner_effect_outer_delivery_failure_is_a_bound_partial_terminal() {
     let result = serde_json::from_value(automatic_fact_terminal()).expect("nonempty result");
     assert_bound_outer_partial(result);

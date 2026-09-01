@@ -25,6 +25,7 @@ pub struct ConfigurationWireSchemaV1 {
     result: SchemaBodyAuthorityV1,
 }
 
+#[hotpath::measure_all]
 impl ConfigurationWireSchemaV1 {
     pub fn from_catalog(
         operation: &str,
@@ -64,6 +65,7 @@ impl ConfigurationWireSchemaV1 {
         &self.binding_id
     }
 
+    #[hotpath::skip]
     pub const fn surface(&self) -> BindingSurface {
         self.surface
     }
@@ -83,6 +85,7 @@ pub struct ConfigurationWireSchemaRegistryV1 {
     schemas: BTreeMap<BindingId, ConfigurationWireSchemaV1>,
 }
 
+#[hotpath::measure_all]
 impl ConfigurationWireSchemaRegistryV1 {
     pub fn new(schemas: Vec<ConfigurationWireSchemaV1>) -> Result<Self, CatalogValidationError> {
         let mut registry = BTreeMap::new();

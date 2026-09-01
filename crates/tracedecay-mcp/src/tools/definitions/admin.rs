@@ -5,6 +5,7 @@ use serde_json::json;
 use super::{def, def_always_load, def_rw, project_selector_object};
 use crate::ToolDefinition;
 
+#[hotpath::measure]
 pub(super) fn def_status() -> ToolDefinition {
     def_always_load(
         "tracedecay_status",
@@ -23,6 +24,7 @@ pub(super) fn def_status() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_active_project() -> ToolDefinition {
     def_always_load(
         "tracedecay_active_project",
@@ -35,6 +37,7 @@ pub(super) fn def_active_project() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_project_list() -> ToolDefinition {
     def(
         "tracedecay_project_list",
@@ -52,6 +55,7 @@ pub(super) fn def_project_list() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_project_search() -> ToolDefinition {
     def(
         "tracedecay_project_search",
@@ -74,6 +78,7 @@ pub(super) fn def_project_search() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_project_context() -> ToolDefinition {
     def(
         "tracedecay_project_context",
@@ -94,6 +99,7 @@ pub(super) fn def_project_context() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_runtime() -> ToolDefinition {
     def(
         "tracedecay_runtime",
@@ -123,6 +129,7 @@ pub(super) fn def_runtime() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_dashboard() -> ToolDefinition {
     def_rw(
         "tracedecay_dashboard",
@@ -149,6 +156,7 @@ pub(super) fn def_dashboard() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_analytics() -> ToolDefinition {
     def(
         "tracedecay_analytics",
@@ -179,6 +187,7 @@ pub(super) fn def_analytics() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_automation_run_artifact_view() -> ToolDefinition {
     def(
         "tracedecay_automation_run_artifact_view",
@@ -201,6 +210,7 @@ pub(super) fn def_automation_run_artifact_view() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_automation_run_list() -> ToolDefinition {
     def(
         "tracedecay_automation_run_list",
@@ -221,6 +231,7 @@ pub(super) fn def_automation_run_list() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_automation_run_view() -> ToolDefinition {
     def(
         "tracedecay_automation_run_view",

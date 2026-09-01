@@ -5,6 +5,7 @@ use serde_json::json;
 use super::def;
 use crate::ToolDefinition;
 
+#[hotpath::measure]
 pub(super) fn def_affected() -> ToolDefinition {
     def(
         "tracedecay_affected",
@@ -32,6 +33,7 @@ pub(super) fn def_affected() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_diff_context() -> ToolDefinition {
     def(
         "tracedecay_diff_context",
@@ -55,6 +57,7 @@ pub(super) fn def_diff_context() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_changelog() -> ToolDefinition {
     def(
         "tracedecay_changelog",
@@ -77,6 +80,7 @@ pub(super) fn def_changelog() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_commit_context() -> ToolDefinition {
     def(
         "tracedecay_commit_context",
@@ -94,6 +98,7 @@ pub(super) fn def_commit_context() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_pr_context() -> ToolDefinition {
     def(
         "tracedecay_pr_context",
@@ -125,6 +130,7 @@ pub(super) fn def_pr_context() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_branch_search() -> ToolDefinition {
     def(
         "tracedecay_branch_search",
@@ -155,6 +161,7 @@ pub(super) fn def_branch_search() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_branch_diff() -> ToolDefinition {
     def(
         "tracedecay_branch_diff",
@@ -192,6 +199,7 @@ pub(super) fn def_branch_diff() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_branch_list() -> ToolDefinition {
     def(
         "tracedecay_branch_list",

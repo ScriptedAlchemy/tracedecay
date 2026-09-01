@@ -5,6 +5,7 @@ use super::application_schema::closed_object_schema;
 use super::{def, def_always_load, def_rw, required_object_schema, string_property};
 use crate::ToolDefinition;
 
+#[hotpath::measure]
 fn page_request_schema() -> serde_json::Value {
     closed_object_schema(
         json!({
@@ -23,6 +24,7 @@ fn page_request_schema() -> serde_json::Value {
     )
 }
 
+#[hotpath::measure]
 fn temporal_mode_schema() -> serde_json::Value {
     json!({
         "oneOf": [
@@ -40,6 +42,7 @@ fn temporal_mode_schema() -> serde_json::Value {
     })
 }
 
+#[hotpath::measure]
 fn retrieval_meta_schema() -> serde_json::Value {
     closed_object_schema(
         json!({
@@ -63,6 +66,7 @@ fn retrieval_meta_schema() -> serde_json::Value {
     )
 }
 
+#[hotpath::measure]
 fn source_span_schema() -> serde_json::Value {
     closed_object_schema(
         json!({
@@ -73,6 +77,7 @@ fn source_span_schema() -> serde_json::Value {
     )
 }
 
+#[hotpath::measure]
 fn diagnostics_scope_schema() -> serde_json::Value {
     json!({
         "oneOf": [
@@ -86,6 +91,7 @@ fn diagnostics_scope_schema() -> serde_json::Value {
     })
 }
 
+#[hotpath::measure]
 fn git_read_bounds() -> serde_json::Value {
     json!({
         "max_entries": {
@@ -105,6 +111,7 @@ fn git_read_bounds() -> serde_json::Value {
     })
 }
 
+#[hotpath::measure]
 fn git_read_definition(
     operation: &str,
     title: &str,
@@ -125,6 +132,7 @@ fn git_read_definition(
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_git_status() -> ToolDefinition {
     git_read_definition(
         "status",
@@ -135,6 +143,7 @@ pub(super) fn def_git_status() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_git_diff() -> ToolDefinition {
     git_read_definition(
         "diff",
@@ -159,6 +168,7 @@ pub(super) fn def_git_diff() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_git_history() -> ToolDefinition {
     git_read_definition(
         "history",
@@ -182,6 +192,7 @@ pub(super) fn def_git_history() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_git_blame() -> ToolDefinition {
     git_read_definition(
         "blame",
@@ -195,6 +206,7 @@ pub(super) fn def_git_blame() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_git_hunks() -> ToolDefinition {
     git_read_definition(
         "hunks",
@@ -211,6 +223,7 @@ pub(super) fn def_git_hunks() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 fn feedback_surface_definition(
     name: &str,
     title: &str,
@@ -235,6 +248,7 @@ fn feedback_surface_definition(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn def_git_preview() -> ToolDefinition {
     def(
         "tracedecay_git_preview",
@@ -270,6 +284,7 @@ pub(super) fn def_git_preview() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_git_apply() -> ToolDefinition {
     def_rw(
         "tracedecay_git_apply",
@@ -290,6 +305,7 @@ pub(super) fn def_git_apply() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_feedback_diagnostics() -> ToolDefinition {
     feedback_surface_definition(
         "tracedecay_feedback_diagnostics",
@@ -299,6 +315,7 @@ pub(super) fn def_feedback_diagnostics() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_feedback_get() -> ToolDefinition {
     feedback_surface_definition(
         "tracedecay_feedback_get",
@@ -308,6 +325,7 @@ pub(super) fn def_feedback_get() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_feedback_expand() -> ToolDefinition {
     feedback_surface_definition(
         "tracedecay_feedback_expand",
@@ -317,6 +335,7 @@ pub(super) fn def_feedback_expand() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_feedback_list() -> ToolDefinition {
     feedback_surface_definition(
         "tracedecay_feedback_list",
@@ -326,6 +345,7 @@ pub(super) fn def_feedback_list() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_feedback_advisory_cycle() -> ToolDefinition {
     def(
         "tracedecay_feedback_advisory_cycle",
@@ -340,6 +360,7 @@ pub(super) fn def_feedback_advisory_cycle() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 fn context_scout_address_schema() -> serde_json::Value {
     json!({
         "type": "object",
@@ -362,6 +383,7 @@ fn context_scout_address_schema() -> serde_json::Value {
     })
 }
 
+#[hotpath::measure]
 fn context_scout_read_definition(name: &str, title: &str, description: &str) -> ToolDefinition {
     let mut properties = json!({"address": context_scout_address_schema()});
     if matches!(
@@ -383,6 +405,7 @@ fn context_scout_read_definition(name: &str, title: &str, description: &str) -> 
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_context_scout_status() -> ToolDefinition {
     context_scout_read_definition(
         "tracedecay_context_scout_status",
@@ -391,6 +414,7 @@ pub(super) fn def_context_scout_status() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_context_scout_recent() -> ToolDefinition {
     context_scout_read_definition(
         "tracedecay_context_scout_recent",
@@ -399,6 +423,7 @@ pub(super) fn def_context_scout_recent() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_context_scout_explain() -> ToolDefinition {
     context_scout_read_definition(
         "tracedecay_context_scout_explain",
@@ -407,6 +432,7 @@ pub(super) fn def_context_scout_explain() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_context_scout_capability() -> ToolDefinition {
     context_scout_read_definition(
         "tracedecay_context_scout_capability",
@@ -415,6 +441,7 @@ pub(super) fn def_context_scout_capability() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_context_scout_budget() -> ToolDefinition {
     context_scout_read_definition(
         "tracedecay_context_scout_budget",
@@ -423,6 +450,7 @@ pub(super) fn def_context_scout_budget() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 fn context_scout_control_definition(
     operation: &str,
     title: &str,
@@ -440,6 +468,7 @@ fn context_scout_control_definition(
     )
 }
 
+#[hotpath::measure]
 pub(super) fn context_scout_control_definitions() -> Vec<ToolDefinition> {
     vec![
         context_scout_control_definition(
@@ -493,6 +522,7 @@ pub(super) fn context_scout_control_definitions() -> Vec<ToolDefinition> {
     ]
 }
 
+#[hotpath::measure]
 pub(super) fn def_feedback_impact() -> ToolDefinition {
     feedback_surface_definition(
         "tracedecay_feedback_impact",
@@ -502,6 +532,7 @@ pub(super) fn def_feedback_impact() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_affected_tests() -> ToolDefinition {
     feedback_surface_definition(
         "tracedecay_affected_tests",
@@ -511,6 +542,7 @@ pub(super) fn def_affected_tests() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_test_results() -> ToolDefinition {
     def(
         "tracedecay_test_results",
@@ -520,6 +552,7 @@ pub(super) fn def_test_results() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 fn primitive_read_definition(
     operation: &str,
     title: &str,
@@ -534,6 +567,7 @@ fn primitive_read_definition(
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_session_lookup() -> ToolDefinition {
     primitive_read_definition(
         "session_lookup",
@@ -546,6 +580,7 @@ pub(super) fn def_session_lookup() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_qualified_name_read() -> ToolDefinition {
     primitive_read_definition(
         "qualified_name",
@@ -558,6 +593,7 @@ pub(super) fn def_qualified_name_read() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_call_chain_read() -> ToolDefinition {
     primitive_read_definition(
         "call_chain",
@@ -576,6 +612,7 @@ pub(super) fn def_call_chain_read() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_file_dependents_read() -> ToolDefinition {
     primitive_read_definition(
         "file_dependents",
@@ -585,6 +622,7 @@ pub(super) fn def_file_dependents_read() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_source_lines_read() -> ToolDefinition {
     primitive_read_definition(
         "source_lines",
@@ -598,6 +636,7 @@ pub(super) fn def_source_lines_read() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_source_body_read() -> ToolDefinition {
     primitive_read_definition(
         "source_body",
@@ -607,6 +646,7 @@ pub(super) fn def_source_body_read() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_source_outline_read() -> ToolDefinition {
     primitive_read_definition(
         "source_outline",
@@ -616,6 +656,7 @@ pub(super) fn def_source_outline_read() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_module_api_read() -> ToolDefinition {
     primitive_read_definition(
         "module_api",
@@ -625,6 +666,7 @@ pub(super) fn def_module_api_read() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_file_metadata_read() -> ToolDefinition {
     primitive_read_definition(
         "file_metadata",
@@ -641,6 +683,7 @@ pub(super) fn def_file_metadata_read() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_health_read() -> ToolDefinition {
     primitive_read_definition(
         "health_read",
@@ -650,6 +693,7 @@ pub(super) fn def_health_read() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_health_delta() -> ToolDefinition {
     primitive_read_definition(
         "health_delta",
@@ -671,6 +715,7 @@ pub(super) fn def_health_delta() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_storage_status_read() -> ToolDefinition {
     def_always_load(
         "tracedecay_storage_status",
@@ -689,6 +734,7 @@ pub(super) fn def_storage_status_read() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_remote_status_read() -> ToolDefinition {
     def(
         "tracedecay_remote_status",
@@ -698,6 +744,7 @@ pub(super) fn def_remote_status_read() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_diagnostics_read() -> ToolDefinition {
     primitive_read_definition(
         "diagnostics_read",
@@ -715,6 +762,7 @@ pub(super) fn def_diagnostics_read() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 fn callable_code_scope_schema() -> serde_json::Value {
     closed_object_schema(
         json!({
@@ -739,6 +787,7 @@ fn callable_code_scope_schema() -> serde_json::Value {
     )
 }
 
+#[hotpath::measure]
 fn callable_code_meta_schema() -> serde_json::Value {
     closed_object_schema(
         json!({
@@ -765,6 +814,7 @@ fn callable_code_meta_schema() -> serde_json::Value {
     )
 }
 
+#[hotpath::measure]
 fn callable_symbol_graph_scope_schema() -> serde_json::Value {
     closed_object_schema(
         json!({
@@ -779,6 +829,7 @@ fn callable_symbol_graph_scope_schema() -> serde_json::Value {
     )
 }
 
+#[hotpath::measure]
 fn callable_symbol_graph_definition(
     operation: &str,
     title: &str,
@@ -792,6 +843,7 @@ fn callable_symbol_graph_definition(
     primitive_read_definition(operation, title, properties, required)
 }
 
+#[hotpath::measure]
 fn callable_code_definition(
     operation: &str,
     title: &str,
@@ -811,6 +863,7 @@ fn callable_code_definition(
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_code_exact_occurrence() -> ToolDefinition {
     callable_code_definition(
         "code_exact_occurrence",
@@ -846,6 +899,7 @@ pub(super) fn def_code_exact_occurrence() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_code_phrase_search() -> ToolDefinition {
     callable_code_definition(
         "code_phrase_search",
@@ -912,6 +966,7 @@ pub(super) fn def_code_phrase_search() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_code_symbol_search() -> ToolDefinition {
     callable_symbol_graph_definition(
         "code_symbol_search",
@@ -930,6 +985,7 @@ pub(super) fn def_code_symbol_search() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_code_signature_search() -> ToolDefinition {
     callable_symbol_graph_definition(
         "code_signature_search",
@@ -957,6 +1013,7 @@ pub(super) fn def_code_signature_search() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_code_implementations() -> ToolDefinition {
     callable_symbol_graph_definition(
         "code_implementations",
@@ -997,6 +1054,7 @@ pub(super) fn def_code_implementations() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_code_type_hierarchy() -> ToolDefinition {
     callable_symbol_graph_definition(
         "code_type_hierarchy",
@@ -1017,6 +1075,7 @@ pub(super) fn def_code_type_hierarchy() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_code_callers() -> ToolDefinition {
     callable_symbol_graph_definition(
         "code_callers",
@@ -1046,6 +1105,7 @@ pub(super) fn def_code_callers() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_code_callees() -> ToolDefinition {
     callable_code_definition(
         "code_callees",
@@ -1078,6 +1138,7 @@ pub(super) fn def_code_callees() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_code_facets() -> ToolDefinition {
     callable_code_definition(
         "code_facets",
@@ -1093,6 +1154,7 @@ pub(super) fn def_code_facets() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_code_timeline() -> ToolDefinition {
     callable_code_definition(
         "code_timeline",
@@ -1103,6 +1165,7 @@ pub(super) fn def_code_timeline() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 fn callable_code_navigation_definition(operation: &str, title: &str) -> ToolDefinition {
     callable_code_definition(
         operation,
@@ -1119,14 +1182,17 @@ fn callable_code_navigation_definition(operation: &str, title: &str) -> ToolDefi
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_code_declaration() -> ToolDefinition {
     callable_code_navigation_definition("code_declaration", "Read callable code declaration")
 }
 
+#[hotpath::measure]
 pub(super) fn def_code_definition() -> ToolDefinition {
     callable_code_navigation_definition("code_definition", "Read callable code definition")
 }
 
+#[hotpath::measure]
 pub(super) fn def_code_type_definition() -> ToolDefinition {
     callable_code_navigation_definition(
         "code_type_definition",
@@ -1134,10 +1200,12 @@ pub(super) fn def_code_type_definition() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_code_references() -> ToolDefinition {
     callable_code_navigation_definition("code_references", "Read callable code references")
 }
 
+#[hotpath::measure]
 fn configuration_definition(
     operation: &str,
     title: &str,
@@ -1155,6 +1223,7 @@ fn configuration_definition(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn configuration_definitions() -> Vec<ToolDefinition> {
     let key = || string_property("Canonical typed configuration setting key.");
     let revision = || string_property("Exact expected configuration revision for CAS.");

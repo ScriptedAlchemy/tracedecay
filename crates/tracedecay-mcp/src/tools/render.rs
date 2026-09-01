@@ -21,15 +21,18 @@ pub use tracedecay_runtime_core::text::format_relative_time;
 
 const MARKDOWN_TRUNCATION_RESERVED_CHARS: usize = 2_048;
 
+#[hotpath::measure]
 fn parse_format(args: &Value) -> RequestedOutputFormat {
     requested_output_format(args)
 }
 
 /// True when the caller explicitly opted into JSON output via `format: "json"`.
+#[hotpath::measure]
 pub fn wants_json(args: &Value) -> bool {
     parse_format(args) == RequestedOutputFormat::Json
 }
 
+#[hotpath::measure]
 pub fn finalize<F>(project_root: Option<&Path>, args: &Value, value: &Value, md: F) -> String
 where
     F: FnOnce() -> String,
@@ -68,6 +71,7 @@ where
 /// If local handle storage is unavailable or fails, the envelope still carries
 /// a preview but also includes explicit recovery metadata so clients can tell
 /// why no handle was emitted and what to retry.
+#[hotpath::measure]
 pub fn truncated_json_envelope_with_handle(project_root: Option<&Path>, formatted: &str) -> String {
     if formatted.len() <= MAX_RESPONSE_CHARS {
         return formatted.to_string();
@@ -137,6 +141,7 @@ pub fn truncated_json_envelope_with_handle(project_root: Option<&Path>, formatte
     }
 }
 
+#[hotpath::measure]
 pub fn markdown_preview_with_handle(
     project_root: Option<&Path>,
     full_text: &str,
@@ -151,6 +156,7 @@ pub fn markdown_preview_with_handle(
     markdown_preview_truncation_with_handle(project_root, full_text, preview)
 }
 
+#[hotpath::measure]
 fn truncated_markdown_with_handle(project_root: Option<&Path>, text: &str) -> String {
     if text.len() <= MAX_RESPONSE_CHARS {
         return text.to_string();
@@ -170,6 +176,7 @@ fn truncated_markdown_with_handle(project_root: Option<&Path>, text: &str) -> St
     )
 }
 
+#[hotpath::measure]
 fn markdown_preview_truncation_with_handle(
     project_root: Option<&Path>,
     full_text: &str,
@@ -196,6 +203,7 @@ fn markdown_preview_truncation_with_handle(
     )
 }
 
+#[hotpath::measure]
 fn render_markdown_truncation_with_handle(
     project_root: Option<&Path>,
     full_text: &str,
@@ -225,6 +233,7 @@ fn render_markdown_truncation_with_handle(
     }
 }
 
+#[hotpath::measure]
 fn markdown_truncation_preview(text: &str, budget: usize) -> String {
     if text.len() <= budget {
         return text.to_string();
@@ -281,12 +290,14 @@ fn markdown_truncation_preview(text: &str, budget: usize) -> String {
     preview
 }
 
+#[hotpath::measure]
 fn markdown_prefix_preview(text: &str, budget: usize) -> String {
     let mut preview = utf8_prefix_at_or_before(text, budget).to_string();
     close_open_markdown_fence(&mut preview);
     preview
 }
 
+#[hotpath::measure]
 fn markdown_section_at(text: &str, start: usize) -> &str {
     let rest = &text[start..];
     let end = ["\n## ", "\n### "]
@@ -297,6 +308,7 @@ fn markdown_section_at(text: &str, start: usize) -> &str {
     &rest[..end]
 }
 
+#[hotpath::measure]
 fn close_open_markdown_fence(markdown: &mut String) {
     if has_open_markdown_fence(markdown) {
         if !markdown.ends_with('\n') {
@@ -306,6 +318,7 @@ fn close_open_markdown_fence(markdown: &mut String) {
     }
 }
 
+#[hotpath::measure]
 pub fn has_open_markdown_fence(markdown: &str) -> bool {
     markdown
         .lines()
@@ -320,6 +333,7 @@ struct TruncatedResponseHandle {
     unavailable: Option<Value>,
 }
 
+#[hotpath::measure]
 fn truncation_handle_status(
     project_root: Option<&Path>,
     handle: &TruncatedResponseHandle,
@@ -344,6 +358,7 @@ fn truncation_handle_status(
 /// plain threads) keeps the previous inline behavior. The remaining
 /// `block_in_place` panic case is a `LocalSet` on a multi-thread runtime,
 /// which this workspace does not use.
+#[hotpath::measure]
 fn run_blocking_handle_store<T>(work: impl FnOnce() -> T) -> T {
     match tokio::runtime::Handle::try_current() {
         Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
@@ -353,6 +368,7 @@ fn run_blocking_handle_store<T>(work: impl FnOnce() -> T) -> T {
     }
 }
 
+#[hotpath::measure]
 fn prepare_truncated_response_handle(
     project_root: Option<&Path>,
     text: &str,
@@ -392,6 +408,7 @@ fn prepare_truncated_response_handle(
     }
 }
 
+#[hotpath::measure]
 fn render_markdown_truncation(
     preview: &str,
     handle: &TruncatedResponseHandle,
@@ -421,10 +438,12 @@ fn render_markdown_truncation(
     rendered
 }
 
+#[hotpath::measure]
 pub fn field_str<'a>(v: &'a Value, key: &str) -> &'a str {
     v.get(key).and_then(Value::as_str).unwrap_or("")
 }
 
+#[hotpath::measure]
 pub fn field_i64(v: &Value, key: &str) -> i64 {
     v.get(key).and_then(Value::as_i64).unwrap_or(0)
 }
@@ -434,6 +453,7 @@ pub struct Md {
     buf: String,
 }
 
+#[hotpath::measure_all]
 impl Md {
     pub fn new() -> Self {
         Self::default()
@@ -487,6 +507,7 @@ impl Md {
 
 const GENERIC_MAX_DEPTH: u8 = 4;
 
+#[hotpath::measure]
 pub fn generic_md(value: &Value) -> String {
     let mut md = Md::new();
     render_value(&mut md, value, 2);
@@ -498,6 +519,7 @@ pub fn generic_md(value: &Value) -> String {
     }
 }
 
+#[hotpath::measure]
 pub fn diagnostics_md(value: &Value) -> String {
     let mut md = Md::new();
     md.heading(2, "Diagnostics");
@@ -548,6 +570,7 @@ pub fn diagnostics_md(value: &Value) -> String {
 /// Feeding it through `diagnostics_md` silently dropped every finding (the
 /// `diagnostics` key is absent, so it always printed "No diagnostics."), which
 /// is why the tool appeared to return nothing even when matches existed.
+#[hotpath::measure]
 pub fn risky_patterns_md(value: &Value) -> String {
     let mut md = Md::new();
     md.heading(2, "Risky Patterns");
@@ -613,6 +636,7 @@ pub fn risky_patterns_md(value: &Value) -> String {
 /// The generic renderer dumped the `imports` array as anonymous records; this
 /// spells each finding as `NAME unused in file:line` so agents (and tests) get
 /// a stable, greppable location — the same shape as [`risky_patterns_md`].
+#[hotpath::measure]
 pub fn unused_imports_md(value: &Value) -> String {
     let mut md = Md::new();
     md.heading(2, "Unused Imports");
@@ -686,6 +710,7 @@ pub fn unused_imports_md(value: &Value) -> String {
 /// it never had. When findings exist, each one leads with the repair (`add
 /// `mod foo;` to src/daemon.rs`) because the reader's next action is an edit,
 /// not further investigation.
+#[hotpath::measure]
 pub fn unmounted_files_md(value: &Value) -> String {
     let mut md = Md::new();
     md.heading(2, "Unmounted Files");
@@ -767,6 +792,7 @@ pub fn unmounted_files_md(value: &Value) -> String {
 }
 
 /// One ecosystem's line in the report, including what its verdict claims.
+#[hotpath::measure]
 fn render_ecosystem(md: &mut Md, ecosystem: &Value) {
     let name = ecosystem
         .get("ecosystem")
@@ -809,6 +835,7 @@ fn render_ecosystem(md: &mut Md, ecosystem: &Value) {
     }
 }
 
+#[hotpath::measure]
 fn render_diagnostic_record(md: &mut Md, diagnostic: &Value) {
     let level = diagnostic
         .get("level")
@@ -889,6 +916,7 @@ fn render_diagnostic_record(md: &mut Md, diagnostic: &Value) {
     }
 }
 
+#[hotpath::measure]
 fn diagnostic_location(diagnostic: &Value) -> String {
     let file = diagnostic
         .get("file")
@@ -906,6 +934,7 @@ fn diagnostic_location(diagnostic: &Value) -> String {
     }
 }
 
+#[hotpath::measure]
 fn title_label(key: &str) -> &str {
     match key {
         "diagnostics_parsed" => "Diagnostics parsed",
@@ -923,20 +952,24 @@ fn title_label(key: &str) -> &str {
     }
 }
 
+#[hotpath::measure]
 fn indent_multiline_value(value: &str) -> String {
     value.replace('\n', "\n    ")
 }
 
+#[hotpath::measure]
 fn is_id_key(k: &str) -> bool {
     matches!(k, "id" | "node_id" | "qualified_name" | "signature") || k.ends_with("_id")
 }
 
 /// True for keys that carry a UNIX epoch timestamp worth humanizing
 /// (e.g. `created_at`, `last_sync_time`, `expires_at`).
+#[hotpath::measure]
 fn is_timestamp_key(k: &str) -> bool {
     k.ends_with("_at") || k.ends_with("_time") || k == "timestamp"
 }
 
+#[hotpath::measure]
 fn is_scalar(v: &Value) -> bool {
     !v.is_array() && !v.is_object()
 }
@@ -944,6 +977,7 @@ fn is_scalar(v: &Value) -> bool {
 /// Rounds a float to at most two decimals, trimming trailing zeros so
 /// integers stay integer-looking. Fixes 16-digit score noise
 /// (`similar/branch_search`).
+#[hotpath::measure]
 fn format_score(f: f64) -> String {
     if f.is_finite() && f.fract() == 0.0 && f.abs() < 1e15 {
         return format!("{}", f as i64);
@@ -953,6 +987,7 @@ fn format_score(f: f64) -> String {
     trimmed.to_string()
 }
 
+#[hotpath::measure]
 fn scalar_str(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
@@ -973,6 +1008,7 @@ fn scalar_str(v: &Value) -> String {
 
 /// Key-aware scalar rendering: humanizes epoch timestamps for `*_at`/`*_time`
 /// keys and otherwise defers to [`scalar_str`] (which rounds floats).
+#[hotpath::measure]
 fn scalar_str_keyed(key: &str, v: &Value) -> String {
     if is_timestamp_key(key)
         && let Some(ts) = v.as_u64()
@@ -983,6 +1019,7 @@ fn scalar_str_keyed(key: &str, v: &Value) -> String {
     scalar_str(v)
 }
 
+#[hotpath::measure]
 fn nested_cell_str(v: &Value) -> String {
     const MAX_ITEMS: usize = 3;
 
@@ -1015,6 +1052,7 @@ fn nested_cell_str(v: &Value) -> String {
     }
 }
 
+#[hotpath::measure]
 fn summarize_object(obj: &serde_json::Map<String, Value>) -> String {
     let name = obj
         .get("name")
@@ -1041,6 +1079,7 @@ fn summarize_object(obj: &serde_json::Map<String, Value>) -> String {
     }
 }
 
+#[hotpath::measure]
 fn cell_str(key: &str, v: &Value) -> String {
     let s = if is_scalar(v) {
         scalar_str_keyed(key, v)
@@ -1054,6 +1093,7 @@ fn cell_str(key: &str, v: &Value) -> String {
     }
 }
 
+#[hotpath::measure]
 fn render_value(md: &mut Md, value: &Value, depth: u8) {
     match value {
         Value::Array(arr) => render_array(md, arr, depth),
@@ -1064,6 +1104,7 @@ fn render_value(md: &mut Md, value: &Value, depth: u8) {
     }
 }
 
+#[hotpath::measure]
 fn render_array(md: &mut Md, arr: &[Value], depth: u8) {
     if arr.is_empty() {
         md.empty_note("None.");
@@ -1091,6 +1132,7 @@ fn render_array(md: &mut Md, arr: &[Value], depth: u8) {
 /// sorts alphabetically after these.
 const PREFERRED_COLUMNS: &[&str] = &["name", "kind", "file", "line", "id", "signature"];
 
+#[hotpath::measure]
 fn column_rank(col: &str) -> (usize, &str) {
     match PREFERRED_COLUMNS.iter().position(|c| *c == col) {
         Some(i) => (i, col),
@@ -1098,6 +1140,7 @@ fn column_rank(col: &str) -> (usize, &str) {
     }
 }
 
+#[hotpath::measure]
 fn render_object_array_records(md: &mut Md, arr: &[Value]) {
     let mut cols: Vec<String> = Vec::new();
     for e in arr {
@@ -1183,6 +1226,7 @@ fn render_object_array_records(md: &mut Md, arr: &[Value]) {
     }
 }
 
+#[hotpath::measure]
 fn compact_path_array(arr: &[Value]) -> Option<String> {
     if arr.len() < 2 || !arr.iter().all(Value::is_string) {
         return None;
@@ -1204,6 +1248,7 @@ fn compact_path_array(arr: &[Value]) -> Option<String> {
     }
 }
 
+#[hotpath::measure]
 fn looks_like_path(value: &str) -> bool {
     let trimmed = value.trim();
     !trimmed.is_empty()
@@ -1212,10 +1257,12 @@ fn looks_like_path(value: &str) -> bool {
         && (trimmed.contains('/') || trimmed.contains('\\'))
 }
 
+#[hotpath::measure]
 fn is_empty_collection(v: &Value) -> bool {
     matches!(v, Value::Array(a) if a.is_empty()) || matches!(v, Value::Object(o) if o.is_empty())
 }
 
+#[hotpath::measure]
 fn render_object(md: &mut Md, map: &serde_json::Map<String, Value>, depth: u8) {
     for (k, v) in map {
         if is_scalar(v) {

@@ -107,9 +107,11 @@ pub enum DoctorEvidenceStateV1 {
     HealthyCompleteCoverage,
 }
 
+#[hotpath::measure_all]
 impl DoctorEvidenceStateV1 {
     /// True only for the single state that asserts complete healthy coverage.
     #[must_use]
+    #[hotpath::skip]
     pub const fn is_healthy_complete(self) -> bool {
         matches!(self, Self::HealthyCompleteCoverage)
     }
@@ -129,8 +131,10 @@ pub enum DoctorCoverageCompletenessV1 {
     Unknown,
 }
 
+#[hotpath::measure_all]
 impl DoctorCoverageCompletenessV1 {
     #[must_use]
+    #[hotpath::skip]
     const fn is_complete(self) -> bool {
         matches!(self, Self::Complete)
     }
@@ -158,6 +162,7 @@ pub struct DoctorEvidenceRefV1 {
     reference: DoctorEvidenceReferenceV1,
 }
 
+#[hotpath::measure_all]
 impl DoctorEvidenceRefV1 {
     /// Construct an evidence reference. The identity is already validated by
     /// [`DoctorEvidenceReferenceV1::new`], so this constructor is infallible.
@@ -200,6 +205,7 @@ impl<'de> Deserialize<'de> for DoctorCoverageStatementV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl DoctorCoverageStatementV1 {
     /// Validate and construct a coverage statement. The statement text must be
     /// non-empty, trimmed, bounded, and free of control characters.
@@ -234,6 +240,7 @@ impl DoctorCoverageStatementV1 {
     }
 
     #[must_use]
+    #[hotpath::skip]
     pub const fn is_complete(&self) -> bool {
         self.completeness.is_complete()
     }
@@ -253,6 +260,7 @@ pub struct DoctorFindingV1 {
     coverage: DoctorCoverageStatementV1,
 }
 
+#[hotpath::measure_all]
 impl DoctorFindingV1 {
     /// Validate and construct a Doctor finding.
     ///
@@ -350,6 +358,7 @@ pub struct DoctorStorageFindingV1 {
     finding: DoctorFindingV1,
 }
 
+#[hotpath::measure_all]
 impl DoctorStorageFindingV1 {
     /// Validate and construct a typed storage finding.
     ///

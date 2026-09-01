@@ -34,6 +34,7 @@ impl std::error::Error for ClockError {}
 /// Callers that already return a clock-unavailable outcome should use this
 /// instead of saturating. Stamp-now runtimes that must never fail closed use
 /// [`now_micros`].
+#[hotpath::measure]
 pub fn try_now_micros() -> Result<UtcMicros, ClockError> {
     let since_epoch = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -52,6 +53,7 @@ pub fn try_now_micros() -> Result<UtcMicros, ClockError> {
 /// two call sites previously used, wraps a far-future clock into a negative
 /// timestamp that then compares as older than every stored record.
 #[must_use]
+#[hotpath::measure]
 pub fn now_micros() -> UtcMicros {
     match try_now_micros() {
         Ok(now) => now,

@@ -723,11 +723,13 @@ pub async fn handle_implementations(
     ))
 }
 
+#[hotpath::measure]
 fn bound_source_file_len(graph: &VerifiedGraphQuery, file_path: &str) -> Result<u64> {
     let (absolute, _) = graph.resolve_indexed_source_file(file_path)?;
     Ok(std::fs::metadata(absolute)?.len())
 }
 
+#[hotpath::measure]
 fn collect_method_bodies(
     graph: &VerifiedGraphQuery,
     impl_node: &CodeGraphSymbolSummaryV1,

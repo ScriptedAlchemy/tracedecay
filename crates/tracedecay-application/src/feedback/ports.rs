@@ -31,6 +31,7 @@ pub enum FeedbackRouteAdmission {
     Routed(AuthorityReceipt),
 }
 
+#[hotpath::measure_all]
 impl FeedbackRouteAdmission {
     pub fn receipt(&self) -> &AuthorityReceipt {
         match self {
@@ -99,6 +100,7 @@ pub struct FeedbackRuntimeStateV1 {
     pub generation_id: Option<CodeGenerationId>,
 }
 
+#[hotpath::measure_all]
 impl FeedbackRuntimeStateV1 {
     pub fn new(
         authoritative: FeedbackAuthoritativeRuntimeStateV1,
@@ -193,6 +195,7 @@ pub struct FeedbackDiagnosticsRequest {
     pub providers: Vec<DiagnosticProviderIdentity>,
 }
 
+#[hotpath::measure_all]
 impl FeedbackDiagnosticsRequest {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         self.input.validate()?;
@@ -239,6 +242,7 @@ pub struct FeedbackImpactRequest {
     pub input: FeedbackEvaluationInputV1,
 }
 
+#[hotpath::measure_all]
 impl FeedbackImpactRequest {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         self.input.validate()?;
@@ -293,6 +297,7 @@ pub struct FeedbackCompletedPublicationV1 {
     pub authority: AuthorityReceipt,
 }
 
+#[hotpath::measure_all]
 impl FeedbackCompletedPublicationV1 {
     pub fn new(
         input: FeedbackEvaluationInputV1,

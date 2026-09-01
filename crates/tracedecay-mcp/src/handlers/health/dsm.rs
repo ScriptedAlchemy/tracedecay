@@ -95,6 +95,7 @@ pub async fn handle_dsm(
     ))
 }
 
+#[hotpath::measure]
 fn dsm_matrix(adj: &HashMap<String, HashSet<String>>, max_files: usize) -> Value {
     let mut file_edge_counts: Vec<(String, usize)> = adj
         .iter()
@@ -135,6 +136,7 @@ fn dsm_matrix(adj: &HashMap<String, HashSet<String>>, max_files: usize) -> Value
     })
 }
 
+#[hotpath::measure]
 fn render_dsm_md(value: &Value) -> String {
     let mut md = Md::new();
     md.heading(2, "Design Structure Matrix");

@@ -55,6 +55,7 @@ pub struct ReplayTransport<T: McpTransport + Send> {
     inner: T,
 }
 
+#[hotpath::measure_all]
 impl<T: McpTransport + Send> ReplayTransport<T> {
     pub fn new(inner: T) -> Self {
         Self {
@@ -139,6 +140,7 @@ impl Default for StdioTransport {
     }
 }
 
+#[hotpath::measure_all]
 impl StdioTransport {
     pub fn new() -> Self {
         Self::default()
@@ -326,6 +328,7 @@ pub async fn write_wire_oversized_rejection(
 ///
 /// Only examines at most [`tracedecay_framing::MCP_OVERSIZE_ID_INSPECT_BYTES`]
 /// bytes. Never materializes or parses the full oversized payload.
+#[hotpath::measure]
 pub fn peek_jsonrpc_request_id(prefix: &[u8]) -> Option<serde_json::Value> {
     use tracedecay_framing::MCP_OVERSIZE_ID_INSPECT_BYTES;
 
@@ -391,6 +394,7 @@ pub fn peek_jsonrpc_request_id(prefix: &[u8]) -> Option<serde_json::Value> {
     }
 }
 
+#[hotpath::measure]
 fn parse_prefix_value(input: &[u8]) -> Option<(serde_json::Value, usize)> {
     let mut values = serde_json::Deserializer::from_slice(input).into_iter();
     let value = values.next()?.ok()?;

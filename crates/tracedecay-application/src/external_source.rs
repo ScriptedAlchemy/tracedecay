@@ -65,6 +65,7 @@ pub struct SourceAuthorityContextV1 {
     provider_envelope_digest: ManifestDigest,
 }
 
+#[hotpath::measure_all]
 impl SourceAuthorityContextV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -154,6 +155,7 @@ pub struct SourceAdmissionAuthorityV1 {
     context: SourceAuthorityContextV1,
 }
 
+#[hotpath::measure_all]
 impl SourceAdmissionAuthorityV1 {
     /// Minted only by the application owner after its authorization rechecks.
     pub(crate) fn issue(context: SourceAuthorityContextV1) -> Self {
@@ -168,6 +170,7 @@ pub struct SourceSanitizationAuthorityV1 {
     observations_digest: ManifestDigest,
 }
 
+#[hotpath::measure_all]
 impl SourceSanitizationAuthorityV1 {
     /// Minted only by the capture owner after canonical sanitization.
     pub(crate) fn issue(
@@ -197,6 +200,7 @@ pub struct SourceCaptureApplicationV1 {
     admission_authority: SourceAdmissionAuthorityV1,
 }
 
+#[hotpath::measure_all]
 impl SourceCaptureApplicationV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn authorize(
@@ -269,6 +273,7 @@ pub struct SourceCanonicalRefetchAuthorityV1 {
     original_refresh_digest: ManifestDigest,
 }
 
+#[hotpath::measure_all]
 impl SourceCanonicalRefetchAuthorityV1 {
     fn matches(&self, refresh: &SourceRefreshReceiptV1) -> bool {
         self.binding == *refresh.binding()
@@ -300,6 +305,7 @@ pub struct SourceEventAdmissionV1 {
     schedules_refresh: bool,
 }
 
+#[hotpath::measure_all]
 impl SourceEventAdmissionV1 {
     pub fn admit(
         definition: &SourceDefinitionV1,
@@ -431,6 +437,7 @@ pub struct SourceCaptureAdmissionV1 {
     request_digest: ManifestDigest,
 }
 
+#[hotpath::measure_all]
 impl SourceCaptureAdmissionV1 {
     #[allow(clippy::too_many_arguments)]
     fn from_authorities(
@@ -627,6 +634,7 @@ impl SourceCaptureAdmissionV1 {
     }
 }
 
+#[hotpath::measure]
 fn validate_refresh(
     definition: &SourceDefinitionV1,
     binding: &SourceBindingIdentityV1,
@@ -648,6 +656,7 @@ fn validate_refresh(
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_provider_envelope(
     definition: &SourceDefinitionV1,
     refresh: &SourceRefreshReceiptV1,

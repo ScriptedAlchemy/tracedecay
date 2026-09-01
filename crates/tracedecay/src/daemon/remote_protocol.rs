@@ -144,6 +144,7 @@ impl RemoteEnrollmentProtocolPortV1 for DaemonRemoteEnrollmentProtocolPortV1 {
 /// Request-scoped spool keyring derived from the presented enrollment
 /// credential. Spool frames stay encrypted at rest; the key exists only while
 /// the authenticated request executes.
+#[hotpath::measure]
 fn presented_spool_keyring(
     credential: &OpaqueRemoteCredential,
     enrollment_revision: u64,
@@ -386,6 +387,7 @@ impl RemoteProtocolPortV1<RemoteFrameTransferRequestV1>
     }
 }
 
+#[hotpath::measure]
 fn frame_transfer_interrupted_response(
     request_id: RequestId,
     observed_at: UtcMicros,
@@ -403,6 +405,7 @@ fn frame_transfer_interrupted_response(
     RemoteProtocolResponseV1::new(request_id, authority, Err(problem))
 }
 
+#[hotpath::measure]
 fn frame_transfer_effect_envelope(
     request: &RemoteProtocolRequestV1<RemoteFrameTransferRequestV1>,
     session: &tracedecay_application::remote::credential_admission::RemoteAuthenticatedSessionV1,
@@ -722,6 +725,7 @@ impl_daemon_remote_recovery_protocol!(
     promotion_contract
 );
 
+#[hotpath::measure]
 fn remote_result_contract(schema_id: &str) -> Result<ResultContractRef> {
     let schema_id = SchemaId::new(schema_id).map_err(|error| TraceDecayError::Config {
         message: format!("remote protocol result schema identity is invalid: {error}"),
@@ -731,6 +735,7 @@ fn remote_result_contract(schema_id: &str) -> Result<ResultContractRef> {
     })
 }
 
+#[hotpath::measure]
 fn unavailable_response<T>(
     request_id: RequestId,
     observed_at: UtcMicros,

@@ -72,6 +72,7 @@ impl std::error::Error for WorkflowCatalogAdmissionError {}
 /// catalog digest and every step operation must resolve to an available
 /// executable binding. The first violation is a typed denial naming the
 /// offending step and operation.
+#[hotpath::measure]
 pub(crate) fn admit_workflow_definition_operations(
     definition: &WorkflowDefinition,
 ) -> Result<(), WorkflowCatalogAdmissionError> {

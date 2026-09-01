@@ -12,6 +12,7 @@ use tracedecay_code_index_runtime::{GitWatchSyncConfigV1, git_watch};
 use tracedecay_daemon_identity::profile_identity;
 
 #[cfg(unix)]
+#[hotpath::measure]
 fn git_watch_sync_config(config: &crate::config::SyncConfig) -> GitWatchSyncConfigV1 {
     GitWatchSyncConfigV1 {
         auto_watch: config.auto_watch,
@@ -116,6 +117,7 @@ pub(super) async fn ensure_git_index_transactions_for_mutation_owners(
     .await
 }
 
+#[hotpath::measure]
 fn ensure_git_index_transactions_for_mutation_owners_inner<'a>(
     store_administration: &'a StoreAdministration,
     session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
@@ -186,6 +188,7 @@ pub(super) fn ensure_context_scout_owner_before_advertising(
 }
 
 #[cfg(unix)]
+#[hotpath::measure_all]
 impl DaemonEngine {
     pub(super) fn with_progress_producer_incarnation(mut self, producer_incarnation: u64) -> Self {
         self.invocation =
@@ -215,6 +218,7 @@ impl DaemonEngine {
 
     /// A doctor-facing read of one project's watch coverage; `git_watcher` is
     /// module-private, so the core Doctor route reads through this accessor.
+    #[hotpath::skip]
     pub(super) async fn git_watcher_health(
         &self,
         project_root: Option<&std::path::Path>,
@@ -237,6 +241,7 @@ impl DaemonEngine {
         self
     }
 
+    #[hotpath::skip]
     pub(super) async fn with_pr_autotrack_task(
         self,
         task: crate::daemon::pr_autotrack::PrAutotrackTask,
@@ -245,6 +250,7 @@ impl DaemonEngine {
         self
     }
 
+    #[hotpath::skip]
     pub(super) async fn maintenance_transition_gate(
         &self,
         key: &ProjectServerKey,
@@ -290,6 +296,7 @@ impl DaemonEngine {
 
     /// Returns the client version to log for this handshake, once per distinct
     /// skewed version; repeat connections from the same client return `None`.
+    #[hotpath::skip]
     pub(super) async fn client_version_skew_to_log(
         &self,
         handshake: &DaemonHandshake,
@@ -303,6 +310,7 @@ impl DaemonEngine {
 
     /// Logs a `daemon_version_skew` event when this handshake's client runs a
     /// different binary version, deduped per distinct client version.
+    #[hotpath::skip]
     pub(super) async fn log_client_version_skew(&self, handshake: &DaemonHandshake) -> Result<()> {
         let Some(client_version) = self.client_version_skew_to_log(handshake).await? else {
             return Ok(());
@@ -334,6 +342,7 @@ impl DaemonEngine {
     /// exactly what arms its notification for the first request after warm-up
     /// completes; marking it would strand the provisional catalog for the rest
     /// of the daemon's life, because this set is never otherwise cleared.
+    #[hotpath::skip]
     pub(super) async fn claim_catalog_refresh(
         &self,
         handshake: &DaemonHandshake,
@@ -389,6 +398,7 @@ impl DaemonEngine {
         Some(key)
     }
 
+    #[hotpath::skip]
     pub(super) async fn release_catalog_refresh(&self, key: CatalogRefreshClientKey) {
         self.catalog_refresh_notified_clients
             .lock()
@@ -397,6 +407,7 @@ impl DaemonEngine {
     }
 
     #[cfg(test)]
+    #[hotpath::skip]
     pub(super) async fn project_server(
         &self,
         handshake: &DaemonHandshake,
@@ -439,6 +450,7 @@ impl DaemonEngine {
         })
     }
 
+    #[hotpath::skip]
     pub(super) async fn cached_project_server(
         &self,
         handshake: &DaemonHandshake,
@@ -587,6 +599,7 @@ impl DaemonEngine {
     /// work before session-store resolution eventually notices the missing
     /// enrollment. Registry alias and repository-identity lookups preserve
     /// linked-worktree routing without manufacturing path-derived authority.
+    #[hotpath::skip]
     pub(super) async fn ensure_registered_project_route(
         &self,
         project_path: &Path,
@@ -726,6 +739,7 @@ impl DaemonEngine {
         })
     }
 
+    #[hotpath::skip]
     pub(super) async fn cached_project_open_failure(
         &self,
         handshake: &DaemonHandshake,
@@ -736,6 +750,7 @@ impl DaemonEngine {
     }
 
     #[cfg(test)]
+    #[hotpath::skip]
     pub(super) async fn shutdown_project_open_tasks(&self) {
         project_open_tasks(&self.project_open_gates)
             .await
@@ -747,6 +762,7 @@ impl DaemonEngine {
     /// Watcher and scheduler activation happen only after this returns so those
     /// components can acquire the same coordinator without recursive locking.
     #[cfg(test)]
+    #[hotpath::skip]
     pub(super) async fn open_project_server(
         &self,
         handshake: &DaemonHandshake,

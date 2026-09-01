@@ -51,6 +51,7 @@ pub const APPLICATION_COMPACT_PROFILE_ID: &str = "profile.compact";
 pub const APPLICATION_ADMINISTRATIVE_PROFILE_ID: &str = "profile.administrative";
 pub const APPLICATION_HOST_LIMITED_PROFILE_ID: &str = "profile.host-limited";
 
+#[hotpath::measure]
 pub(crate) fn application_profile_ids(
     profile_ids: &[&str],
 ) -> Result<Vec<ProfileId>, ApplicationContractError> {
@@ -63,6 +64,7 @@ pub(crate) fn application_profile_ids(
 /// Closed set of catalog contributions for declared application use cases.
 /// Adding metadata here requires adding its typed handler descriptor to
 /// [`crate::application_handler_descriptors`].
+#[hotpath::measure]
 pub fn application_catalog_contributions()
 -> Result<Vec<CatalogContributionV1>, ApplicationContractError> {
     Ok(vec![
@@ -88,6 +90,7 @@ pub fn application_catalog_contributions()
 /// catalog contributions. This registry joins only current structured HTTP
 /// bindings and preserves the daemon owner for primitive-backed versus
 /// callable-code-backed queries.
+#[hotpath::measure]
 pub fn code_search_executable_binding_registry()
 -> Result<ExecutableBindingRegistryV1, ApplicationContractError> {
     let contributions = [
@@ -152,6 +155,7 @@ pub fn code_search_executable_binding_registry()
 /// Code queries have their own `/application/code` registry above. Session
 /// lookup is intentionally absent because its independently owned transport
 /// cutover is not part of this route family.
+#[hotpath::measure]
 pub fn primitive_http_executable_binding_registry()
 -> Result<ExecutableBindingRegistryV1, ApplicationContractError> {
     let contribution = primitive_read_contribution()?;
@@ -215,6 +219,7 @@ struct PrimitiveReadSpec {
     use_case: &'static str,
 }
 
+#[hotpath::measure]
 fn primitive_profile_ids(operation: &str) -> &'static [&'static str] {
     match operation {
         "source_lines" => &[
@@ -236,6 +241,7 @@ fn primitive_profile_ids(operation: &str) -> &'static [&'static str] {
     }
 }
 
+#[hotpath::measure]
 fn primitive_lsp_methods(operation: &str) -> &'static [&'static str] {
     match operation {
         "code_signature_search" => &["textDocument/signatureHelp"],
@@ -303,6 +309,7 @@ const DASHBOARD_PRIMITIVE_SURFACES: [BindingSurface; 4] = [
     BindingSurface::Dashboard,
 ];
 
+#[hotpath::measure]
 fn primitive_read_surfaces(spec: &PrimitiveReadSpec) -> &'static [BindingSurface] {
     match spec.operation {
         // These established tool handlers retain their current wire schemas
@@ -323,6 +330,7 @@ const fn primitive_spec(operation: &'static str) -> PrimitiveReadSpec {
     }
 }
 
+#[hotpath::measure]
 fn primitive_schema(operation: &str, suffix: &str) -> Result<SchemaRef, ApplicationContractError> {
     let operation = operation.replace('_', "-");
     Ok(SchemaRef::new(
@@ -331,6 +339,7 @@ fn primitive_schema(operation: &str, suffix: &str) -> Result<SchemaRef, Applicat
     )?)
 }
 
+#[hotpath::measure]
 fn primitive_operation(
     spec: &PrimitiveReadSpec,
 ) -> Result<ApplicationOperation, ApplicationContractError> {
@@ -348,6 +357,7 @@ fn primitive_operation(
     ))
 }
 
+#[hotpath::measure]
 pub fn primitive_read_operation(
     operation: &str,
 ) -> Result<Option<ApplicationOperation>, ApplicationContractError> {
@@ -361,6 +371,7 @@ pub fn primitive_read_operation(
         .transpose()
 }
 
+#[hotpath::measure]
 pub fn primitive_read_handler_descriptors()
 -> Result<Vec<ApplicationHandlerDescriptor>, ApplicationContractError> {
     PRIMITIVE_READ_SPECS
@@ -375,6 +386,7 @@ pub fn primitive_read_handler_descriptors()
         .collect()
 }
 
+#[hotpath::measure]
 pub fn primitive_read_contribution() -> Result<CatalogContributionV1, ApplicationContractError> {
     let mut capabilities = Vec::with_capacity(PRIMITIVE_READ_SPECS.len());
     let mut bindings = Vec::with_capacity(
@@ -483,6 +495,7 @@ pub fn primitive_read_contribution() -> Result<CatalogContributionV1, Applicatio
 /// request each [`crate::retrieval::SymbolGraphPrimitivePort`] method
 /// validates against the [`SymbolGraphPage`] payload it returns, so the
 /// generated SDKs cannot describe a shape the surface does not speak.
+#[hotpath::measure]
 fn primitive_executable_schemas(
     contribution: &CatalogContributionV1,
 ) -> Result<Vec<ExecutableSchemaAuthority>, ApplicationContractError> {
@@ -599,6 +612,7 @@ fn primitive_executable_schemas(
     Ok(schemas)
 }
 
+#[hotpath::measure]
 fn primitive_executable_schema<Request, Response>(
     contribution: &CatalogContributionV1,
     operation: &str,
@@ -628,6 +642,7 @@ where
     )?)
 }
 
+#[hotpath::measure]
 pub fn symbol_search_request_schema() -> Result<SchemaRef, ApplicationContractError> {
     Ok(SchemaRef::new(
         SchemaId::new("schema.application.symbol-search.request")?,
@@ -635,6 +650,7 @@ pub fn symbol_search_request_schema() -> Result<SchemaRef, ApplicationContractEr
     )?)
 }
 
+#[hotpath::measure]
 pub fn symbol_search_result_schema() -> Result<SchemaRef, ApplicationContractError> {
     Ok(SchemaRef::new(
         SchemaId::new("schema.application.symbol-search.result")?,
@@ -642,6 +658,7 @@ pub fn symbol_search_result_schema() -> Result<SchemaRef, ApplicationContractErr
     )?)
 }
 
+#[hotpath::measure]
 pub fn symbol_search_operation() -> Result<ApplicationOperation, ApplicationContractError> {
     let result_schema = symbol_search_result_schema()?;
     Ok(ApplicationOperation::new(
@@ -652,6 +669,7 @@ pub fn symbol_search_operation() -> Result<ApplicationOperation, ApplicationCont
     ))
 }
 
+#[hotpath::measure]
 pub fn symbol_search_handler_descriptor()
 -> Result<ApplicationHandlerDescriptor, ApplicationContractError> {
     ApplicationHandlerDescriptor::new(
@@ -665,6 +683,7 @@ pub fn symbol_search_handler_descriptor()
 ///
 /// Root composition remains outside this crate; the contribution declares
 /// transport bindings but has no dispatch, storage, or transport side effect.
+#[hotpath::measure]
 pub fn symbol_search_contribution() -> Result<CatalogContributionV1, ApplicationContractError> {
     let capability_id = CapabilityId::new(SYMBOL_SEARCH_CAPABILITY)?;
     let request_schema = symbol_search_request_schema()?;
@@ -801,6 +820,7 @@ pub fn symbol_search_contribution() -> Result<CatalogContributionV1, Application
     Ok(contribution.with_executable_schemas(schemas)?)
 }
 
+#[hotpath::measure]
 fn symbol_search_scope() -> Result<ScopeRequirement, ApplicationContractError> {
     Ok(ScopeRequirement::new(vec![
         ScopeDimension::Project,

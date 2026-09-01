@@ -36,6 +36,7 @@ pub struct AdjudicateWorkLeakCommandV1 {
     pub command_id: WorkCommandId,
 }
 
+#[hotpath::measure_all]
 impl AdjudicateWorkLeakCommandV1 {
     fn validate(&self) -> bool {
         canonical_label(&self.adjudication_id, 256)
@@ -62,6 +63,7 @@ pub struct VerifiedWorkLeakEvidenceV1 {
     pub evidence_refs: Vec<String>,
 }
 
+#[hotpath::measure_all]
 impl VerifiedWorkLeakEvidenceV1 {
     fn validate_for(
         &self,
@@ -95,6 +97,7 @@ impl VerifiedWorkLeakEvidenceV1 {
     }
 }
 
+#[hotpath::measure]
 fn verdict_matches_coverage(
     kind: WorkExecutionLeakKindV1,
     recovery: WorkExecutionLeakRecoveryV1,
@@ -149,6 +152,7 @@ pub struct WorkLeakAdjudicationReceiptV1 {
     pub canonical_input_digest: ManifestDigest,
 }
 
+#[hotpath::measure_all]
 impl WorkLeakAdjudicationReceiptV1 {
     /// Revalidates the complete public receipt before it crosses into an
     /// observability producer or another downstream authority.
@@ -206,7 +210,9 @@ pub enum WorkLeakAdjudicationOutcomeV1 {
     Replayed(WorkLeakAdjudicationReceiptV1),
 }
 
+#[hotpath::measure_all]
 impl WorkLeakAdjudicationOutcomeV1 {
+    #[hotpath::skip]
     pub const fn receipt(&self) -> &WorkLeakAdjudicationReceiptV1 {
         match self {
             Self::Appended(receipt) | Self::Replayed(receipt) => receipt,
@@ -255,6 +261,7 @@ where
     S: WorkLeakAdjudicationStoragePortV1,
     E: WorkLeakEvidencePortV1,
 {
+    #[hotpath::skip]
     pub const fn new(storage: S, evidence: E) -> Self {
         Self { storage, evidence }
     }
@@ -324,6 +331,7 @@ where
     }
 }
 
+#[hotpath::measure]
 fn canonical_label(value: &str, maximum: usize) -> bool {
     !value.is_empty()
         && value.len() <= maximum
@@ -332,6 +340,7 @@ fn canonical_label(value: &str, maximum: usize) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b':' | b'-' | b'_'))
 }
 
+#[hotpath::measure]
 fn admit(context: &RequestContext, observed_at: UtcMicros) -> Result<(), ApplicationProblem> {
     match context.admission_at(observed_at) {
         RequestAdmission::Admitted => Ok(()),
@@ -340,6 +349,7 @@ fn admit(context: &RequestContext, observed_at: UtcMicros) -> Result<(), Applica
     }
 }
 
+#[hotpath::measure]
 fn invalid_problem() -> ApplicationProblem {
     ApplicationProblem::InvalidRequest {
         diagnostic: SafeDiagnostic {
@@ -351,6 +361,7 @@ fn invalid_problem() -> ApplicationProblem {
     }
 }
 
+#[hotpath::measure]
 fn conflict_problem(code: &str, message: &str) -> ApplicationProblem {
     ApplicationProblem::Conflict {
         diagnostic: SafeDiagnostic {
@@ -362,6 +373,7 @@ fn conflict_problem(code: &str, message: &str) -> ApplicationProblem {
     }
 }
 
+#[hotpath::measure]
 fn evidence_problem(error: WorkLeakEvidenceErrorV1) -> ApplicationProblem {
     match error {
         WorkLeakEvidenceErrorV1::NotFoundOrNotAuthorized => {
@@ -383,6 +395,7 @@ fn evidence_problem(error: WorkLeakEvidenceErrorV1) -> ApplicationProblem {
     }
 }
 
+#[hotpath::measure]
 fn storage_problem(error: WorkLeakAdjudicationStorageErrorV1) -> ApplicationProblem {
     match error {
         WorkLeakAdjudicationStorageErrorV1::NotFoundOrNotAuthorized => {

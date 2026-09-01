@@ -33,6 +33,7 @@ struct WorkerResponse {
 }
 
 /// Creates a ureq agent with the given timeout.
+#[hotpath::measure]
 pub fn agent_with_timeout(timeout: Duration) -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_global(Some(timeout))
@@ -112,6 +113,7 @@ struct GitHubAsset {
 /// Returns the platform slug matching the CI release matrix. Must stay in
 /// sync with the `matrix.name` field in `.github/workflows/release.yml`
 /// and `release-beta.yml`.
+#[hotpath::measure]
 pub fn current_platform() -> &'static str {
     if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
         "aarch64-macos"
@@ -134,6 +136,7 @@ pub fn current_platform() -> &'static str {
 ///
 /// - Stable: `tracedecay-v{version}-{platform}.{ext}`
 /// - Beta:   `tracedecay-beta-v{version}-{platform}.{ext}`
+#[hotpath::measure]
 pub fn asset_name(version: &str, is_beta: bool) -> String {
     let prefix = if is_beta {
         "tracedecay-beta"
@@ -143,6 +146,7 @@ pub fn asset_name(version: &str, is_beta: bool) -> String {
     platform_asset_name(prefix, version)
 }
 
+#[hotpath::measure]
 fn platform_asset_name(prefix: &str, version: &str) -> String {
     let platform = current_platform();
     let ext = if cfg!(windows) { "zip" } else { "tar.gz" };
@@ -159,6 +163,7 @@ const PRE_RESET_EPOCH_MIN_MAJOR: u64 = 4;
 
 /// True when `tag_name` (e.g. `v6.1.3`) belongs to the pre-reset release
 /// epoch — see [`PRE_RESET_EPOCH_MIN_MAJOR`].
+#[hotpath::measure]
 fn release_is_pre_reset_epoch(tag_name: &str) -> bool {
     let version = tag_name.trim_start_matches('v');
     let major = version
@@ -173,6 +178,7 @@ fn release_is_pre_reset_epoch(tag_name: &str) -> bool {
 /// name for this platform and not belong to the pre-reset version epoch.
 /// Pre-reset `tracedecay-*` releases (4.x-6.x) must never be offered as the
 /// "latest" upgrade, even if old releases reappear.
+#[hotpath::measure]
 fn release_has_current_platform_asset(release: &GitHubRelease) -> bool {
     if release_is_pre_reset_epoch(&release.tag_name) {
         return false;
@@ -188,6 +194,7 @@ fn release_has_current_platform_asset(release: &GitHubRelease) -> bool {
 /// sees updates from its own channel. Releases whose CI hasn't yet
 /// uploaded the current-platform binary are skipped — see
 /// `release_has_current_platform_asset`.
+#[hotpath::measure]
 pub fn fetch_latest_version() -> Option<String> {
     if is_beta() {
         fetch_latest_beta_version()
@@ -241,6 +248,7 @@ pub fn fetch_latest_beta_version() -> Option<String> {
 /// `env!` is evaluated here, in the product crate whose package version is
 /// the workspace release version; the channel test itself is the shared
 /// dashboard-api helper so there is one prerelease-detection rule.
+#[hotpath::measure]
 pub fn is_beta() -> bool {
     tracedecay_dashboard_api::cloud::is_beta(env!("CARGO_PKG_VERSION"))
 }
@@ -250,6 +258,7 @@ pub fn is_beta() -> bool {
 /// ordering. Stable and beta remain separate channels: a prerelease never
 /// dominates a stable release (or the reverse), even when the numeric core is
 /// higher.
+#[hotpath::measure]
 pub fn is_newer_version(current: &str, latest: &str) -> bool {
     let Ok(current) = Version::parse(current) else {
         return false;
@@ -268,6 +277,7 @@ pub fn is_newer_version(current: &str, latest: &str) -> bool {
 /// difference is at least a minor version bump (patch-only bumps return false).
 ///
 /// Used by the CLI version warning to avoid nagging on patch releases.
+#[hotpath::measure]
 pub fn is_newer_minor_version(current: &str, latest: &str) -> bool {
     let Ok(current) = Version::parse(current) else {
         return false;
@@ -291,6 +301,7 @@ pub enum InstallMethod {
 }
 
 /// Detects how tracedecay was installed by inspecting the binary path.
+#[hotpath::measure]
 pub fn detect_install_method() -> InstallMethod {
     let Ok(exe) = std::env::current_exe() else {
         return InstallMethod::Unknown;

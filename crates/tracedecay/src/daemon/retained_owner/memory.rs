@@ -126,6 +126,7 @@ enum SemanticRead<'a> {
     Related(&'a FactStoreRelatedRequestV1),
     Reason(&'a FactStoreReasonRequestV1),
 }
+#[hotpath::measure_all]
 impl Read<'_> {
     fn scope(&self) -> (Option<MemoryScopeV1>, Option<&RetainedProjectSelectorV1>) {
         match self {
@@ -143,6 +144,7 @@ pub(super) struct DirectRetainedMemoryPortV1<'a> {
     authority: DirectRetainedMemoryAuthorityV1<'a>,
     configuration_digest: ManifestDigest,
 }
+#[hotpath::measure_all]
 impl DirectRetainedMemoryPortV1<'static> {
     pub(super) fn project(
         cg: Arc<tokio::sync::RwLock<Arc<TraceDecay>>>,
@@ -156,6 +158,7 @@ impl DirectRetainedMemoryPortV1<'static> {
     }
 }
 
+#[hotpath::measure_all]
 impl<'a> DirectRetainedMemoryPortV1<'a> {
     pub(super) fn profile(
         registry: &'a DaemonSessionRuntimeRegistryV1,
@@ -167,6 +170,7 @@ impl<'a> DirectRetainedMemoryPortV1<'a> {
         }
     }
 
+    #[hotpath::skip]
     async fn execute_add(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -182,6 +186,7 @@ impl<'a> DirectRetainedMemoryPortV1<'a> {
         )
     }
 
+    #[hotpath::skip]
     async fn execute_read(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -198,6 +203,7 @@ impl<'a> DirectRetainedMemoryPortV1<'a> {
         )
     }
 
+    #[hotpath::skip]
     async fn execute_status(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -213,6 +219,7 @@ impl<'a> DirectRetainedMemoryPortV1<'a> {
         )
     }
 
+    #[hotpath::skip]
     async fn execute_update(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -228,6 +235,7 @@ impl<'a> DirectRetainedMemoryPortV1<'a> {
         )
     }
 
+    #[hotpath::skip]
     async fn execute_remove(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -243,6 +251,7 @@ impl<'a> DirectRetainedMemoryPortV1<'a> {
         )
     }
 
+    #[hotpath::skip]
     async fn execute_feedback(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -951,6 +960,7 @@ async fn execute_status_on_db(
     evidence_outcome(context, RetainedSurfaceOperation::MemoryStatus, result)
 }
 
+#[hotpath::measure]
 fn memory_application(
     database: &Database,
     owner: FactOwnerV1,
@@ -959,6 +969,7 @@ fn memory_application(
         .map_err(memory_mapping::map_memory_error)
 }
 
+#[hotpath::measure]
 fn fact_read_control(context: &RetainedSurfaceExecutionContextV1<'_>) -> FactReadControl {
     let signal = context.cancellation_signal.clone();
     let expires_at = effective_expiry(context);
@@ -967,12 +978,14 @@ fn fact_read_control(context: &RetainedSurfaceExecutionContextV1<'_>) -> FactRea
     }))
 }
 
+#[hotpath::measure]
 fn effective_expiry(
     context: &RetainedSurfaceExecutionContextV1<'_>,
 ) -> tracedecay_domain::UtcMicros {
     effective_memory_deadline(context).expires_at
 }
 
+#[hotpath::measure]
 fn memory_operation_context<T: Serialize>(
     context: &RetainedSurfaceExecutionContextV1<'_>,
     owner: &FactOwnerV1,

@@ -4,12 +4,14 @@ use tracedecay_domain::feedback::{FeedbackCycleTerminationV1, ProviderEvaluation
 /// Project an application problem into the feedback cycle's terminal state.
 /// Admitted partial effects and reset-required states remain distinct from a
 /// daemon outage so their terminal evidence is not lost at the feedback seam.
+#[hotpath::measure]
 pub(super) fn terminal_for_problem(
     problem: &ApplicationProblem,
 ) -> (FeedbackCycleTerminationV1, Vec<ProviderEvaluationStateV1>) {
     terminal_for_problem_kind(problem.kind())
 }
 
+#[hotpath::measure]
 fn terminal_for_problem_kind(
     kind: ApplicationProblemKind,
 ) -> (FeedbackCycleTerminationV1, Vec<ProviderEvaluationStateV1>) {

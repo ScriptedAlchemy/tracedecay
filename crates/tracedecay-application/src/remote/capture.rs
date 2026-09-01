@@ -19,6 +19,7 @@ pub struct RemoteCaptureSequenceV1 {
     pub previous_event_id: Option<String>,
 }
 
+#[hotpath::measure_all]
 impl RemoteCaptureSequenceV1 {
     pub fn validate(&self) -> Result<(), RemoteCaptureApplicationErrorV1> {
         if self.sequence == 0
@@ -46,6 +47,7 @@ pub struct RemoteWriterAuthorityV1 {
     pub authority: CurrentRemoteAuthorityV1,
 }
 
+#[hotpath::measure_all]
 impl RemoteWriterAuthorityV1 {
     pub fn validate(&self) -> Result<(), RemoteCaptureApplicationErrorV1> {
         self.project_id
@@ -102,7 +104,9 @@ pub enum RemoteCaptureStateV1 {
     GarbageCollectionEligible,
 }
 
+#[hotpath::measure_all]
 impl RemoteCaptureStateV1 {
+    #[hotpath::skip]
     pub const fn permits_transition_to(self, next: Self) -> bool {
         matches!(
             (self, next),
@@ -128,6 +132,7 @@ pub struct RemoteCaptureReceiptV1 {
     pub disposition: RemoteCaptureDispositionV1,
 }
 
+#[hotpath::measure_all]
 impl RemoteCaptureReceiptV1 {
     pub fn validate_for(
         &self,
@@ -170,6 +175,7 @@ impl<P> RemoteCaptureServiceV1<P>
 where
     P: RemoteCapturePortV1,
 {
+    #[hotpath::skip]
     pub const fn new(port: P) -> Self {
         Self { port }
     }
@@ -188,6 +194,7 @@ where
     }
 }
 
+#[hotpath::measure]
 fn admit_capture(
     port: &dyn RemoteCapturePortV1,
     command: RemoteOfflineCaptureCommandV1,

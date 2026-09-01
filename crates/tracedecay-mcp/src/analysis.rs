@@ -8,17 +8,20 @@
 
 /// True for the bytes that may appear inside a Rust identifier. Used to give
 /// substring matches word boundaries so `read` does not match `spread`.
+#[hotpath::measure]
 pub fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
 /// The 1-based line number containing `byte`.
+#[hotpath::measure]
 pub fn line_number_at(source: &str, byte: usize) -> u32 {
     source[..byte].bytes().filter(|c| *c == b'\n').count() as u32 + 1
 }
 
 /// The first index at or after `from` that is not ASCII whitespace, or
 /// `bytes.len()` when the rest of the input is whitespace.
+#[hotpath::measure]
 pub fn skip_ascii_whitespace(bytes: &[u8], from: usize) -> usize {
     let mut probe = from;
     while let Some(b) = bytes.get(probe) {

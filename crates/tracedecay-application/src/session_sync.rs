@@ -19,6 +19,7 @@ pub struct SessionSyncScopeV1 {
     profile_id: UserProfileId,
 }
 
+#[hotpath::measure_all]
 impl SessionSyncScopeV1 {
     pub fn new(project_id: ProjectId, profile_id: UserProfileId) -> Self {
         Self {
@@ -40,7 +41,9 @@ impl SessionSyncScopeV1 {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionTranscriptImportV1;
 
+#[hotpath::measure_all]
 impl SessionTranscriptImportV1 {
+    #[hotpath::skip]
     pub const fn all_hosts() -> Self {
         Self
     }
@@ -54,6 +57,7 @@ pub struct SessionGitSyncV1 {
     dry_run: bool,
 }
 
+#[hotpath::measure_all]
 impl SessionGitSyncV1 {
     pub fn new(
         since_unix: i64,
@@ -77,14 +81,17 @@ impl SessionGitSyncV1 {
         })
     }
 
+    #[hotpath::skip]
     pub const fn since_unix(self) -> i64 {
         self.since_unix
     }
 
+    #[hotpath::skip]
     pub const fn max_sessions(self) -> usize {
         self.max_sessions
     }
 
+    #[hotpath::skip]
     pub const fn dry_run(self) -> bool {
         self.dry_run
     }
@@ -107,6 +114,7 @@ pub struct SessionSyncRequestV1 {
     command: SessionSyncCommandV1,
 }
 
+#[hotpath::measure_all]
 impl SessionSyncRequestV1 {
     pub fn new(
         operation_id: RequestId,
@@ -146,6 +154,7 @@ impl SessionSyncRequestV1 {
         &self.cancellation
     }
 
+    #[hotpath::skip]
     pub const fn command(&self) -> SessionSyncCommandV1 {
         self.command
     }
@@ -199,11 +208,14 @@ pub enum SessionSyncCoverageV1 {
     },
 }
 
+#[hotpath::measure_all]
 impl SessionSyncCoverageV1 {
+    #[hotpath::skip]
     pub const fn is_complete(&self) -> bool {
         matches!(self, Self::Complete)
     }
 
+    #[hotpath::skip]
     pub const fn remaining_work(&self) -> u64 {
         match self {
             Self::Complete => 0,
@@ -257,6 +269,7 @@ pub struct SessionSyncControlV1 {
     idempotency_key: IdempotencyKey,
 }
 
+#[hotpath::measure_all]
 impl SessionSyncControlV1 {
     pub fn new(scope: SessionSyncScopeV1, idempotency_key: IdempotencyKey) -> Self {
         Self {
@@ -299,6 +312,7 @@ pub struct SessionSyncJournalV1 {
     pub updated_at: UtcMicros,
 }
 
+#[hotpath::measure_all]
 impl SessionSyncJournalV1 {
     pub fn queued(request: &SessionSyncRequestV1, accepted_at: UtcMicros) -> Self {
         Self {

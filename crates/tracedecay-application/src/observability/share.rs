@@ -97,7 +97,9 @@ pub enum AggregateShareDimensionV1 {
     Coverage(CoverageStateV1),
 }
 
+#[hotpath::measure_all]
 impl AggregateShareDimensionV1 {
+    #[hotpath::skip]
     const fn discriminant(&self) -> u8 {
         match self {
             Self::Capability(_) => 0,
@@ -124,6 +126,7 @@ pub struct AggregateShareCellV1 {
     pub contribution_windows: u64,
 }
 
+#[hotpath::measure_all]
 impl AggregateShareCellV1 {
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.contribution_windows < AGGREGATE_SHARE_MIN_CONTRIBUTION_WINDOWS_V1 {
@@ -170,6 +173,7 @@ pub struct AggregateSharePacketV1 {
     pub capped_cell_count: u64,
 }
 
+#[hotpath::measure_all]
 impl AggregateSharePacketV1 {
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.schema_revision != 1
@@ -197,6 +201,7 @@ pub struct AggregateShareExportRequestV1 {
     pub max_cells: u16,
 }
 
+#[hotpath::measure_all]
 impl AggregateShareExportRequestV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         if self.mode != AnalyticsModeV1::AggregateShare {
@@ -241,6 +246,7 @@ impl<E> ObservabilityAggregateExportApplicationV1<E>
 where
     E: ObservabilityAggregateExportPort,
 {
+    #[hotpath::skip]
     pub const fn new(exporter: E) -> Self {
         Self { exporter }
     }

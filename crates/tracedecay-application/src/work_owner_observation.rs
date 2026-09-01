@@ -73,6 +73,7 @@ pub struct WorkOwnerObservationScanCursorV1 {
     pub authority: WorkAuthority,
 }
 
+#[hotpath::measure_all]
 impl PendingWorkOwnerObservationV1 {
     pub fn validate(&self) -> bool {
         if self.marker.receipt_revision == 0 || self.marker.receipt_digest.validate().is_err() {

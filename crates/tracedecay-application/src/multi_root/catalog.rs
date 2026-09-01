@@ -27,6 +27,7 @@ pub enum MultiRootApplicationOperation {
     Execute,
 }
 
+#[hotpath::measure_all]
 impl MultiRootApplicationOperation {
     pub const ALL: [Self; 3] = [
         Self::ScopeSetRead,
@@ -34,6 +35,7 @@ impl MultiRootApplicationOperation {
         Self::Execute,
     ];
 
+    #[hotpath::skip]
     pub const fn operation_key(self) -> &'static str {
         match self {
             Self::ScopeSetRead => "scope_set_read",
@@ -42,6 +44,7 @@ impl MultiRootApplicationOperation {
         }
     }
 
+    #[hotpath::skip]
     pub const fn operation_id(self) -> &'static str {
         match self {
             Self::ScopeSetRead => "operation.multi_root.scope_set_read",
@@ -50,6 +53,7 @@ impl MultiRootApplicationOperation {
         }
     }
 
+    #[hotpath::skip]
     pub const fn route_path(self) -> &'static str {
         match self {
             Self::ScopeSetRead => "/multi-root/scope-set/read",
@@ -58,6 +62,7 @@ impl MultiRootApplicationOperation {
         }
     }
 
+    #[hotpath::skip]
     pub const fn application_route_path(self) -> &'static str {
         match self {
             Self::ScopeSetRead => "/application/multi-root/scope-set/read",
@@ -66,6 +71,7 @@ impl MultiRootApplicationOperation {
         }
     }
 
+    #[hotpath::skip]
     const fn effect(self) -> EffectClass {
         match self {
             Self::ScopeSetCompareAndSwap => EffectClass::Administrative,
@@ -74,6 +80,7 @@ impl MultiRootApplicationOperation {
     }
 }
 
+#[hotpath::measure]
 pub fn multi_root_operation_authority(
     operation: MultiRootApplicationOperation,
 ) -> Result<(CapabilityId, UseCaseId), CatalogValidationError> {
@@ -88,12 +95,14 @@ pub fn multi_root_operation_authority(
 ///
 /// Surface adapters project this exact contract; they do not maintain local
 /// effect, cancellation, or pagination copies.
+#[hotpath::measure]
 pub fn multi_root_capability_manifest(
     operation: MultiRootApplicationOperation,
 ) -> Result<CapabilityManifestV1, CatalogValidationError> {
     manifest(operation)
 }
 
+#[hotpath::measure]
 pub fn multi_root_executable_binding_registry()
 -> Result<ExecutableBindingRegistryV1, CatalogValidationError> {
     ExecutableBindingRegistryV1::new(vec![
@@ -115,6 +124,7 @@ pub fn multi_root_executable_binding_registry()
     ])
 }
 
+#[hotpath::measure]
 fn available<Request, Output>(
     operation: MultiRootApplicationOperation,
     request_rust_type_path: &'static str,
@@ -148,6 +158,7 @@ where
     Ok(ExecutableBindingAvailabilityV1::available(binding))
 }
 
+#[hotpath::measure]
 fn manifest(
     operation: MultiRootApplicationOperation,
 ) -> Result<CapabilityManifestV1, CatalogValidationError> {
@@ -250,6 +261,7 @@ fn manifest(
     })
 }
 
+#[hotpath::measure]
 fn operation_id(
     operation: MultiRootApplicationOperation,
 ) -> Result<OperationId, CatalogValidationError> {
@@ -259,6 +271,7 @@ fn operation_id(
     )
 }
 
+#[hotpath::measure]
 fn service_id() -> Result<ServiceId, CatalogValidationError> {
     catalog_id(
         ServiceId::new(MULTI_ROOT_SERVICE_ID),
@@ -266,6 +279,7 @@ fn service_id() -> Result<ServiceId, CatalogValidationError> {
     )
 }
 
+#[hotpath::measure]
 fn codec_key(
     operation: MultiRootApplicationOperation,
 ) -> Result<CodecBindingKey, CatalogValidationError> {
@@ -278,6 +292,7 @@ fn codec_key(
     )
 }
 
+#[hotpath::measure]
 fn binding_id(
     operation: MultiRootApplicationOperation,
 ) -> Result<BindingId, CatalogValidationError> {
@@ -290,6 +305,7 @@ fn binding_id(
     )
 }
 
+#[hotpath::measure]
 fn schema_ref(
     operation: MultiRootApplicationOperation,
     direction: &'static str,
@@ -304,6 +320,7 @@ fn schema_ref(
     SchemaRef::new(id, 1)
 }
 
+#[hotpath::measure]
 fn terminal_states(read_only: bool) -> Vec<TerminalState> {
     let mut states = vec![
         TerminalState::Completed,
@@ -318,6 +335,7 @@ fn terminal_states(read_only: bool) -> Vec<TerminalState> {
     states
 }
 
+#[hotpath::measure]
 fn catalog_id<T>(
     result: Result<T, impl std::fmt::Display>,
     field: &'static str,

@@ -24,6 +24,7 @@ pub(crate) struct BearerTokenSecret {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct InvalidBearerToken;
 
+#[hotpath::measure_all]
 impl BearerTokenSecret {
     pub(crate) fn new(secret: String) -> Result<Self, InvalidBearerToken> {
         let byte_len = secret.len();

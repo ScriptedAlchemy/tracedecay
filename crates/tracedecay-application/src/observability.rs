@@ -66,6 +66,7 @@ where
     R: ObservabilityRecordPort,
     Q: ObservabilityQueryPort,
 {
+    #[hotpath::skip]
     pub const fn new(recorder: R, query: Q) -> Self {
         Self { recorder, query }
     }

@@ -115,6 +115,7 @@ pub async fn handle_signature_search(
     ))
 }
 
+#[hotpath::measure]
 fn returns_substring(signature: &str) -> &str {
     match signature.find("->") {
         Some(pos) => signature[pos + 2..].trim_start(),
@@ -122,6 +123,7 @@ fn returns_substring(signature: &str) -> &str {
     }
 }
 
+#[hotpath::measure]
 fn params_substring(signature: &str) -> &str {
     let bytes = signature.as_bytes();
     let Some(open) = signature.find('(') else {

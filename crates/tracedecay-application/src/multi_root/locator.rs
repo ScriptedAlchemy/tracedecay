@@ -20,6 +20,7 @@ pub struct SharedProfileStoreLocatorV1 {
     pub store_id: String,
 }
 
+#[hotpath::measure_all]
 impl SharedProfileStoreLocatorV1 {
     pub fn new(
         profile_id: UserProfileId,
@@ -53,6 +54,7 @@ pub struct RegisteredRootLocatorV1 {
     pub canonical_root: PathBuf,
 }
 
+#[hotpath::measure_all]
 impl RegisteredRootLocatorV1 {
     pub fn new(
         project_id: ProjectId,
@@ -86,6 +88,7 @@ pub struct RegisteredRootSelectorV1 {
     pub root: PathBuf,
 }
 
+#[hotpath::measure_all]
 impl RegisteredRootSelectorV1 {
     pub fn new(
         project_id: ProjectId,
@@ -119,6 +122,7 @@ pub struct AuthorizedRoot {
     pub(super) locator: Option<RegisteredRootLocatorV1>,
 }
 
+#[hotpath::measure_all]
 impl AuthorizedRoot {
     pub(super) fn resolved(scope: ResolvedScope) -> Result<Self, AuthorizedScopeSetError> {
         scope
@@ -170,6 +174,7 @@ pub struct AuthorizedRootAdmission {
     pub(super) locator: RegisteredRootLocatorV1,
 }
 
+#[hotpath::measure_all]
 impl AuthorizedRootAdmission {
     pub fn new(
         context: RequestContext,
@@ -180,6 +185,7 @@ impl AuthorizedRootAdmission {
     }
 }
 
+#[hotpath::measure]
 fn validate_locator_text(value: &str, field: &'static str) -> Result<(), MultiRootQueryError> {
     if value.is_empty()
         || value.trim() != value
@@ -193,6 +199,7 @@ fn validate_locator_text(value: &str, field: &'static str) -> Result<(), MultiRo
     Ok(())
 }
 
+#[hotpath::measure]
 fn validate_absolute_root(root: &Path) -> Result<(), MultiRootQueryError> {
     if !root.is_absolute()
         || root

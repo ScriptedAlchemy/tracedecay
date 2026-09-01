@@ -50,7 +50,9 @@ pub enum WorkRetryCauseV1 {
     RuntimeFailure,
 }
 
+#[hotpath::measure_all]
 impl WorkRetryCauseV1 {
+    #[hotpath::skip]
     const fn restart_reason(self) -> WorkRestartReasonV1 {
         match self {
             Self::RuntimeFailure => WorkRestartReasonV1::FailureObserved,
@@ -71,6 +73,7 @@ pub struct WorkRetryFailureSelectorV1 {
     pub evidence_ref: String,
 }
 
+#[hotpath::measure_all]
 impl WorkRetryFailureSelectorV1 {
     fn validate(&self) -> bool {
         self.source == WorkRetrySourceV1::Runtime
@@ -169,6 +172,7 @@ pub struct RetryWorkAttemptCommandV1 {
     pub command_id: WorkCommandId,
 }
 
+#[hotpath::measure_all]
 impl RetryWorkAttemptCommandV1 {
     fn validate(&self) -> bool {
         self.failure.validate() && &self.new_attempt_id != self.original_attempt.attempt_id()
@@ -189,6 +193,7 @@ pub struct WorkRetryReceiptV1 {
     pub owner_receipt_digest: ManifestDigest,
 }
 
+#[hotpath::measure_all]
 impl WorkRetryReceiptV1 {
     pub fn new(
         command: RetryWorkAttemptCommandV1,
@@ -248,6 +253,7 @@ impl WorkRetryReceiptV1 {
     }
 }
 
+#[hotpath::measure]
 fn retry_receipt_digest(
     command: &RetryWorkAttemptCommandV1,
     failure: &VerifiedWorkRetryFailureV1,
@@ -286,13 +292,16 @@ pub enum WorkRetryAttemptOutcomeV1 {
     },
 }
 
+#[hotpath::measure_all]
 impl WorkRetryAttemptOutcomeV1 {
+    #[hotpath::skip]
     pub const fn receipt(&self) -> &WorkRetryReceiptV1 {
         match self {
             Self::Created { receipt, .. } | Self::Replayed { receipt, .. } => receipt,
         }
     }
 
+    #[hotpath::skip]
     pub const fn attempt(&self) -> &WorkAttemptV1 {
         match self {
             Self::Created { attempt, .. } | Self::Replayed { attempt, .. } => attempt,
@@ -334,6 +343,7 @@ where
         + WorkProductAttemptAdmissionPortV1,
     E: WorkRetryEvidencePortV1,
 {
+    #[hotpath::skip]
     pub const fn new(storage: S, evidence: E) -> Self {
         Self { storage, evidence }
     }
@@ -470,6 +480,7 @@ where
     }
 }
 
+#[hotpath::measure]
 fn require_product_retry_admission(
     product: &CurrentWorkProductAttemptGraphV1,
     attempt: &WorkAttemptV1,
@@ -489,6 +500,7 @@ fn require_product_retry_admission(
     Ok(())
 }
 
+#[hotpath::measure]
 fn require_retry_effect_safe<S>(
     storage: &S,
     authority: &WorkAuthority,
@@ -517,6 +529,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 fn prepare_product_retry_attempt<S>(
     storage: &S,
     context: &RequestContext,
@@ -604,6 +617,7 @@ where
     .map_err(contract_problem)
 }
 
+#[hotpath::measure]
 fn validate_failure(
     command: &RetryWorkAttemptCommandV1,
     original: &WorkAttemptV1,
@@ -648,6 +662,7 @@ fn validate_failure(
     Ok(())
 }
 
+#[hotpath::measure]
 fn admit(context: &RequestContext, observed_at: UtcMicros) -> Result<(), ApplicationProblem> {
     match context.admission_at(observed_at) {
         RequestAdmission::Admitted => Ok(()),
@@ -656,6 +671,7 @@ fn admit(context: &RequestContext, observed_at: UtcMicros) -> Result<(), Applica
     }
 }
 
+#[hotpath::measure]
 fn invalid_problem() -> ApplicationProblem {
     ApplicationProblem::InvalidRequest {
         diagnostic: SafeDiagnostic {
@@ -667,6 +683,7 @@ fn invalid_problem() -> ApplicationProblem {
     }
 }
 
+#[hotpath::measure]
 fn retry_receipt_problem(_error: ApplicationContractError) -> ApplicationProblem {
     ApplicationProblem::unavailable(SafeDiagnostic {
         code: "application.work-retry.receipt-unavailable".to_owned(),
@@ -674,6 +691,7 @@ fn retry_receipt_problem(_error: ApplicationContractError) -> ApplicationProblem
     })
 }
 
+#[hotpath::measure]
 fn conflict_problem(code: &str, message: &str) -> ApplicationProblem {
     ApplicationProblem::Conflict {
         diagnostic: SafeDiagnostic {
@@ -685,10 +703,12 @@ fn conflict_problem(code: &str, message: &str) -> ApplicationProblem {
     }
 }
 
+#[hotpath::measure]
 fn not_found_problem() -> ApplicationProblem {
     ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
 }
 
+#[hotpath::measure]
 fn evidence_problem(error: WorkRetryEvidenceErrorV1) -> ApplicationProblem {
     match error {
         WorkRetryEvidenceErrorV1::NotFoundOrNotAuthorized => not_found_problem(),
@@ -703,6 +723,7 @@ fn evidence_problem(error: WorkRetryEvidenceErrorV1) -> ApplicationProblem {
     }
 }
 
+#[hotpath::measure]
 fn storage_problem(error: WorkAttemptStorageError) -> ApplicationProblem {
     match error {
         WorkAttemptStorageError::NotFoundOrNotAuthorized => not_found_problem(),
@@ -727,6 +748,7 @@ fn storage_problem(error: WorkAttemptStorageError) -> ApplicationProblem {
     }
 }
 
+#[hotpath::measure]
 fn effect_storage_problem(error: WorkAttemptEffectStorageErrorV1) -> ApplicationProblem {
     match error {
         WorkAttemptEffectStorageErrorV1::NotFoundOrNotAuthorized => {
@@ -745,6 +767,7 @@ fn effect_storage_problem(error: WorkAttemptEffectStorageErrorV1) -> Application
     }
 }
 
+#[hotpath::measure]
 fn contract_problem(_error: WorkRuntimeContractError) -> ApplicationProblem {
     invalid_problem()
 }

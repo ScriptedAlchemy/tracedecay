@@ -71,6 +71,7 @@ pub struct RetainedSurfaceEvidenceFactsV1 {
     pub temporal: Option<RetainedSurfaceTemporalFactsV1>,
 }
 
+#[hotpath::measure_all]
 impl RetainedSurfaceEvidenceFactsV1 {
     fn unknown(
         domain: EvidenceDomain,
@@ -294,6 +295,7 @@ impl RetainedSurfaceEvidenceFactsV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl RetainedSurfaceResultV1 {
     pub fn evidence_facts(
         &self,
@@ -418,12 +420,14 @@ impl RetainedSurfaceResultV1 {
     }
 }
 
+#[hotpath::measure]
 fn fact_collection(
     returned: usize,
 ) -> Result<RetainedSurfaceEvidenceFactsV1, RetainedSurfaceEvidenceTerminalV1> {
     RetainedSurfaceEvidenceFactsV1::unknown(EvidenceDomain::Operational, returned)
 }
 
+#[hotpath::measure]
 fn fact_search_collection(
     returned: usize,
     next_after: Option<&crate::memory::FactSearchCursorV1>,
@@ -435,6 +439,7 @@ fn fact_search_collection(
     Ok(facts)
 }
 
+#[hotpath::measure]
 fn fact_list_collection(
     returned: usize,
     next_after_fact_id: Option<&tracedecay_domain::FactId>,
@@ -446,6 +451,7 @@ fn fact_list_collection(
     Ok(facts)
 }
 
+#[hotpath::measure]
 fn opaque_page_cursor(
     cursor: Option<&str>,
 ) -> Result<Option<PageCursor>, RetainedSurfaceEvidenceTerminalV1> {
@@ -458,6 +464,7 @@ fn opaque_page_cursor(
         .transpose()
 }
 
+#[hotpath::measure]
 fn lcm_facts(
     status: RetainedOutcomeStatusV1,
     returned: usize,
@@ -478,6 +485,7 @@ fn lcm_facts(
     Ok(facts)
 }
 
+#[hotpath::measure]
 fn message_search_returned(
     value: &super::MessageSearchResultV1,
 ) -> Result<usize, RetainedSurfaceEvidenceTerminalV1> {
@@ -493,10 +501,12 @@ fn message_search_returned(
     }
 }
 
+#[hotpath::measure]
 fn count(value: usize) -> Result<u64, RetainedSurfaceEvidenceTerminalV1> {
     u64::try_from(value).map_err(|_| RetainedSurfaceEvidenceTerminalV1::InvalidOutput)
 }
 
+#[hotpath::measure]
 fn temporal_visited(
     coverage: &super::TemporalCoverageV1,
 ) -> Result<u64, RetainedSurfaceEvidenceTerminalV1> {
@@ -508,6 +518,7 @@ fn temporal_visited(
         .ok_or(RetainedSurfaceEvidenceTerminalV1::InvalidOutput)
 }
 
+#[hotpath::measure]
 fn temporal_facts(
     watermarks: &TemporalWatermarksV1,
     source_coverage: &[SessionSourceCoverageV1],

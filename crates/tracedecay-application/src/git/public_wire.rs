@@ -207,6 +207,7 @@ pub struct DaemonGitHunkPreviewBindingV1 {
     pub expires_at: UtcMicros,
 }
 
+#[hotpath::measure_all]
 impl GitReadRequestV1 {
     pub fn capability_id(&self) -> &'static str {
         match self {

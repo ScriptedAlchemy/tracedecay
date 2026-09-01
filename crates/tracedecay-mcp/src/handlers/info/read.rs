@@ -94,6 +94,7 @@ pub async fn handle_read(graph: &VerifiedGraphQuery, args: Value) -> Result<Tool
     ))
 }
 
+#[hotpath::measure]
 fn render_read_md(value: &Value) -> String {
     let mut md = Md::new();
     let file = render::field_str(value, "file");
@@ -124,6 +125,7 @@ fn render_read_md(value: &Value) -> String {
     md.render()
 }
 
+#[hotpath::measure]
 fn render_read_context_md(md: &mut Md, context: Option<&Value>) {
     let Some(context) = context else {
         return;

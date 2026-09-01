@@ -21,6 +21,7 @@ use crate::error::ApplicationContractError;
 /// `maximum_bytes`). Pass `usize::MAX` for fields that intentionally allow
 /// unbounded free text (e.g. a support-gap explanation) while still
 /// rejecting empty, untrimmed, or control-character input.
+#[hotpath::measure]
 fn validate_bounded_text(
     value: &str,
     field: &'static str,
@@ -33,6 +34,7 @@ fn validate_bounded_text(
 /// surfaces (symbol graph and callable code). `node_field`/`node_max_bytes`
 /// bound the node id text via [`validate_bounded_text`]; `depth_field`/
 /// `max_depth` bound the requested traversal depth.
+#[hotpath::measure]
 fn validate_node_depth(
     node_id: &str,
     node_field: &'static str,
@@ -51,6 +53,7 @@ fn validate_node_depth(
 /// Shared "current temporal mode + valid page request" check used by every
 /// retrieval request whose `meta` only supports
 /// [`tracedecay_domain::TemporalModeV1::Current`].
+#[hotpath::measure]
 fn validate_current_temporal_meta(
     meta: &RetrievalRequestMeta,
     field: &'static str,

@@ -7,6 +7,7 @@ use super::{
 };
 
 #[test]
+#[hotpath::measure]
 fn zero_effect_completion_and_skip_are_typed_without_partial_receipts() {
     for status in ["completed", "skipped"] {
         let result = serde_json::from_value::<AutomationRunResultV1>(zero_terminal(status))
@@ -16,6 +17,7 @@ fn zero_effect_completion_and_skip_are_typed_without_partial_receipts() {
 }
 
 #[test]
+#[hotpath::measure]
 fn unknown_skill_skip_reasons_fail_closed() {
     for reason in ["skill_writer_evidence_unavailable", "skill_writer_not_due"] {
         assert!(AutomationSkipReasonV1::from_ledger_reason(reason).is_none());
@@ -26,6 +28,7 @@ fn unknown_skill_skip_reasons_fail_closed() {
 }
 
 #[test]
+#[hotpath::measure]
 fn skipped_reason_must_belong_to_the_selected_task() {
     let mut terminal = zero_terminal("skipped");
     terminal["terminal"]["reason"] = json!("session_reflector_disabled");
@@ -37,6 +40,7 @@ fn skipped_reason_must_belong_to_the_selected_task() {
 }
 
 #[test]
+#[hotpath::measure]
 fn disabled_job_commands_are_a_user_job_skip_only() {
     let reason = AutomationSkipReasonV1::from_ledger_reason("job_commands_disabled")
         .expect("known user-job skip");
@@ -45,6 +49,7 @@ fn disabled_job_commands_are_a_user_job_skip_only() {
 }
 
 #[test]
+#[hotpath::measure]
 fn session_evidence_unavailability_skips_session_backed_writers() {
     let reason =
         AutomationSkipReasonV1::from_ledger_reason("session_evidence_retrieval_unavailable")
@@ -57,6 +62,7 @@ fn session_evidence_unavailability_skips_session_backed_writers() {
 }
 
 #[test]
+#[hotpath::measure]
 fn session_evidence_timeout_is_typed_for_only_session_backed_tasks() {
     let reason = AutomationSkipReasonV1::from_ledger_reason("session_evidence_timed_out")
         .expect("known session-evidence timeout skip");
@@ -74,6 +80,7 @@ fn session_evidence_timeout_is_typed_for_only_session_backed_tasks() {
 }
 
 #[test]
+#[hotpath::measure]
 fn budget_backoff_suppression_is_a_typed_session_evidence_skip() {
     assert_eq!(
         SESSION_EVIDENCE_BUDGET_SUPPRESSED,
@@ -93,6 +100,7 @@ fn budget_backoff_suppression_is_a_typed_session_evidence_skip() {
 }
 
 #[test]
+#[hotpath::measure]
 fn skill_writer_empty_evidence_is_a_typed_session_evidence_skip() {
     let reason = AutomationSkipReasonV1::from_ledger_reason("no_skill_writer_evidence")
         .expect("skill-writer empty evidence is a registered skip");
@@ -102,6 +110,7 @@ fn skill_writer_empty_evidence_is_a_typed_session_evidence_skip() {
 }
 
 #[test]
+#[hotpath::measure]
 fn external_effect_receipts_are_task_run_and_input_bound() {
     let receipt = |kind: &str, run_id: &str, task_key: &str| {
         json!({
@@ -204,6 +213,7 @@ fn external_effect_receipts_are_task_run_and_input_bound() {
 }
 
 #[test]
+#[hotpath::measure]
 fn zero_effect_result_is_bound_to_the_full_request() {
     let result = serde_json::from_value::<AutomationRunResultV1>(zero_terminal("completed"))
         .expect("zero-effect result");

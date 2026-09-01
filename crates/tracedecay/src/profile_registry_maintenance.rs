@@ -13,6 +13,7 @@ use tracedecay_global_db::{
     registry_maintenance::RegistryOrphanRelinkReport, registry_maintenance::forget_registry_project,
 };
 
+#[hotpath::measure]
 fn store_removal_error(
     operation: &str,
     path: &Path,
@@ -25,6 +26,7 @@ fn store_removal_error(
 
 /// Verifies a removed store path left no namespace entry behind (a dangling
 /// symlink still occupies the name and must be reported, not read as gone).
+#[hotpath::measure]
 pub fn verify_store_path_absent(path: &Path) -> tracedecay_domain::errors::Result<()> {
     match std::fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -84,6 +86,7 @@ pub fn remove_store_directory(path: &Path) -> tracedecay_domain::errors::Result<
 /// Resolves one registered store-instance relpath under the profile root,
 /// refusing anything but a plain relative path so a corrupted registry row
 /// can never direct a destructive command outside the profile.
+#[hotpath::measure]
 fn resolve_store_data_root(
     profile_root: &Path,
     store_relpath: &str,
@@ -121,8 +124,10 @@ pub struct ProfileRegistryMaintenanceRuntime {
     profile_database: RegisteredGlobalDbLeaseV1,
 }
 
+#[hotpath::measure_all]
 impl ProfileRegistryMaintenanceRuntime {
     /// Opens an existing exact-final profile registry without creating one.
+    #[hotpath::skip]
     pub async fn try_open_existing(
         profile_root: &Path,
     ) -> tracedecay_domain::errors::Result<Option<Self>> {
@@ -155,6 +160,7 @@ impl ProfileRegistryMaintenanceRuntime {
         Self::open(&profile_root).await.map(Some)
     }
 
+    #[hotpath::skip]
     pub async fn open(profile_root: &Path) -> tracedecay_domain::errors::Result<Self> {
         let identity = tracedecay_daemon_identity::profile_identity::load_existing(profile_root)?;
         let registry =
@@ -166,6 +172,7 @@ impl ProfileRegistryMaintenanceRuntime {
         Ok(Self { profile_database })
     }
 
+    #[hotpath::skip]
     pub async fn registered_project_paths(
         &self,
     ) -> tracedecay_domain::errors::Result<Vec<PathBuf>> {
@@ -174,6 +181,7 @@ impl ProfileRegistryMaintenanceRuntime {
             .await
     }
 
+    #[hotpath::skip]
     pub async fn classify_project_storage(
         &self,
         project_root: &Path,
@@ -200,6 +208,7 @@ impl ProfileRegistryMaintenanceRuntime {
         RegisteredGlobalDb::canonical_project_key(project_root)
     }
 
+    #[hotpath::skip]
     pub async fn delete_project_paths(
         &self,
         project_paths: &[PathBuf],
@@ -214,6 +223,7 @@ impl ProfileRegistryMaintenanceRuntime {
     /// Resolves one registered project from an operator selector (project id,
     /// registered alias path, or repository root). See
     /// [`RegisteredGlobalDb::project_registry_context_by_selector`].
+    #[hotpath::skip]
     pub async fn resolve_registered_project(
         &self,
         selector: &Path,
@@ -284,6 +294,7 @@ impl ProfileRegistryMaintenanceRuntime {
         })
     }
 
+    #[hotpath::skip]
     pub async fn apply_orphan_relink(
         &self,
         report: &RegistryOrphanRelinkReport,
@@ -295,6 +306,7 @@ impl ProfileRegistryMaintenanceRuntime {
         .await
     }
 
+    #[hotpath::skip]
     pub async fn registry_gc(
         &self,
         profile_root: &Path,

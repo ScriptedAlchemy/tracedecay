@@ -36,6 +36,7 @@ impl Default for FactStoreCurateRequestV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl FactStoreCurateRequestV1 {
     pub fn validate(&self) -> bool {
         (1..=MAX_AUTOMATION_REVIEW_LIMIT).contains(&self.fact_review_limit)
@@ -147,7 +148,9 @@ pub enum AutomationTaskRequestV1 {
     UserJob(UserJobRunInputV1),
 }
 
+#[hotpath::measure_all]
 impl AutomationTaskRequestV1 {
+    #[hotpath::skip]
     pub const fn task(&self) -> AutomationTaskV1 {
         match self {
             Self::MemoryCurator(_) => AutomationTaskV1::MemoryCurator,
@@ -195,7 +198,9 @@ pub struct AutomationRunRequestV1 {
     pub task: AutomationTaskRequestV1,
 }
 
+#[hotpath::measure_all]
 impl AutomationRunRequestV1 {
+    #[hotpath::skip]
     pub const fn task_kind(&self) -> AutomationTaskV1 {
         self.task.task()
     }
@@ -217,6 +222,7 @@ impl AutomationRunRequestV1 {
     }
 }
 
+#[hotpath::measure]
 fn valid_skill_writer_options(options: &SkillWriterRunInputV1) -> bool {
     valid_text(&options.provider)
         && valid_text(&options.query)
@@ -224,6 +230,7 @@ fn valid_skill_writer_options(options: &SkillWriterRunInputV1) -> bool {
         && (1..=MAX_AUTOMATION_RECENT_SESSION_LIMIT).contains(&options.recent_sessions_limit)
 }
 
+#[hotpath::measure]
 fn valid_reflector_options(options: &SessionReflectorRunInputV1) -> bool {
     valid_text(&options.provider)
         && valid_text(&options.query)
@@ -237,6 +244,7 @@ fn valid_reflector_options(options: &SessionReflectorRunInputV1) -> bool {
             .is_none_or(|(start, end)| start.0 <= end.0)
 }
 
+#[hotpath::measure]
 fn valid_text(value: &str) -> bool {
     let value = value.trim();
     !value.is_empty() && value.len() <= 4_096 && !value.chars().any(char::is_control)

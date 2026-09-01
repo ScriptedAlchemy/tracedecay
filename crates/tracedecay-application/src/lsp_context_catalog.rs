@@ -50,6 +50,7 @@ const LSP_CONTEXT_SPECS: [LspContextSpec; 2] = [
     },
 ];
 
+#[hotpath::measure]
 pub fn lsp_context_catalog_contribution() -> Result<CatalogContributionV1, ApplicationContractError>
 {
     let mut capabilities = Vec::with_capacity(LSP_CONTEXT_SPECS.len());
@@ -134,6 +135,7 @@ pub fn lsp_context_catalog_contribution() -> Result<CatalogContributionV1, Appli
     })?)
 }
 
+#[hotpath::measure]
 pub fn lsp_context_handler_descriptors()
 -> Result<Vec<ApplicationHandlerDescriptor>, ApplicationContractError> {
     LSP_CONTEXT_SPECS
@@ -154,6 +156,7 @@ pub fn lsp_context_handler_descriptors()
         .collect()
 }
 
+#[hotpath::measure]
 fn capability_id(spec: &LspContextSpec) -> Result<CapabilityId, ApplicationContractError> {
     Ok(CapabilityId::new(format!(
         "capability.application.lsp.{}",
@@ -161,6 +164,7 @@ fn capability_id(spec: &LspContextSpec) -> Result<CapabilityId, ApplicationContr
     ))?)
 }
 
+#[hotpath::measure]
 fn use_case_id(spec: &LspContextSpec) -> Result<UseCaseId, ApplicationContractError> {
     Ok(UseCaseId::new(format!(
         "use-case.application.lsp.{}",
@@ -168,6 +172,7 @@ fn use_case_id(spec: &LspContextSpec) -> Result<UseCaseId, ApplicationContractEr
     ))?)
 }
 
+#[hotpath::measure]
 fn schema(spec: &LspContextSpec, direction: &str) -> Result<SchemaRef, ApplicationContractError> {
     Ok(SchemaRef::new(
         SchemaId::new(format!(

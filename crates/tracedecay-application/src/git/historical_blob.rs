@@ -26,6 +26,7 @@ pub struct NativeHistoricalBlobReaderV1 {
     worktree: WorktreeId,
 }
 
+#[hotpath::measure_all]
 impl NativeHistoricalBlobReaderV1 {
     pub fn new(
         repo_root: impl Into<PathBuf>,

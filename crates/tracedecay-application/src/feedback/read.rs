@@ -55,6 +55,7 @@ pub struct FeedbackHandleRequestV1 {
     pub request_handle: String,
 }
 
+#[hotpath::measure_all]
 impl FeedbackHandleRequestV1 {
     pub fn new(request_handle: impl Into<String>) -> Result<Self, ApplicationContractError> {
         let request_handle = request_handle.into();
@@ -77,6 +78,7 @@ pub struct FeedbackDiagnosticsReadRequestV1 {
     pub head_commit_id: CommitId,
 }
 
+#[hotpath::measure_all]
 impl FeedbackDiagnosticsReadRequestV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         self.head_commit_id.validate()?;
@@ -90,6 +92,7 @@ pub struct FeedbackGetRequestV1 {
     pub finding_id: FeedbackFindingId,
 }
 
+#[hotpath::measure_all]
 impl FeedbackGetRequestV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         self.finding_id.validate()?;
@@ -104,6 +107,7 @@ pub struct FeedbackExpandRequestV1 {
     pub expansion: AnchorExpandRequest,
 }
 
+#[hotpath::measure_all]
 impl FeedbackExpandRequestV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         self.finding_id.validate()?;
@@ -123,6 +127,7 @@ pub struct FeedbackListRequestV1 {
     pub page: PageRequest,
 }
 
+#[hotpath::measure_all]
 impl FeedbackListRequestV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         if let Some(head) = &self.head_commit_id {
@@ -289,6 +294,7 @@ pub struct FeedbackReadOperationsV1 {
     list: ApplicationOperation,
 }
 
+#[hotpath::measure_all]
 impl FeedbackReadOperationsV1 {
     pub fn new(
         diagnostics: ApplicationOperation,
@@ -496,6 +502,7 @@ where
     }
 }
 
+#[hotpath::measure]
 fn valid_diagnostics(
     context: &RequestContext,
     request: &FeedbackDiagnosticsReadRequestV1,
@@ -506,6 +513,7 @@ fn valid_diagnostics(
         && result.cycle.scope.head_commit_id == request.head_commit_id
 }
 
+#[hotpath::measure]
 fn valid_get(
     context: &RequestContext,
     request: &FeedbackGetRequestV1,
@@ -515,6 +523,7 @@ fn valid_get(
         && valid_finding(context, &result.finding)
 }
 
+#[hotpath::measure]
 fn valid_expand(
     context: &RequestContext,
     request: &FeedbackExpandRequestV1,
@@ -541,6 +550,7 @@ fn valid_expand(
             .all(|anchor| anchor.validate().is_ok())
 }
 
+#[hotpath::measure]
 fn valid_list(
     context: &RequestContext,
     request: &FeedbackListRequestV1,
@@ -569,6 +579,7 @@ fn valid_list(
         && evidence.page.total.is_none_or(|total| count <= total)
 }
 
+#[hotpath::measure]
 fn valid_finding(context: &RequestContext, finding: &FeedbackFindingReadV1) -> bool {
     finding.result_id.validate().is_ok()
         && finding.cycle_id.validate().is_ok()
@@ -586,6 +597,7 @@ fn valid_finding(context: &RequestContext, finding: &FeedbackFindingReadV1) -> b
         }
 }
 
+#[hotpath::measure]
 fn scope_matches(context: &RequestContext, scope: &FeedbackScopeV1) -> bool {
     let authorized = context.scope();
     authorized.project_id == scope.project_id
@@ -598,6 +610,7 @@ fn scope_matches(context: &RequestContext, scope: &FeedbackScopeV1) -> bool {
             == Some(scope.branch_ref.as_str())
 }
 
+#[hotpath::measure]
 fn invalid_request<T>(
     context: &RequestContext,
     operation: &ApplicationOperation,
@@ -616,6 +629,7 @@ fn invalid_request<T>(
     )
 }
 
+#[hotpath::measure]
 fn invalid_port_evidence<T>(
     context: &RequestContext,
     operation: &ApplicationOperation,
@@ -630,6 +644,7 @@ fn invalid_port_evidence<T>(
     )
 }
 
+#[hotpath::measure]
 fn problem_envelope<T>(
     context: &RequestContext,
     operation: &ApplicationOperation,
@@ -642,6 +657,7 @@ fn problem_envelope<T>(
     )?))
 }
 
+#[hotpath::measure]
 fn evidence_envelope<T>(
     context: &RequestContext,
     operation: &ApplicationOperation,

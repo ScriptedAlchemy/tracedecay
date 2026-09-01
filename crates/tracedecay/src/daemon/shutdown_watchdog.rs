@@ -55,6 +55,7 @@ pub(crate) const DRAIN_BOUND_EXIT_CODE: i32 = 70;
 ///
 /// Must stay comfortably below the supervisor stop timeout (systemd default
 /// 90s) so a wedged drain exits with a typed receipt instead of a SIGKILL.
+#[hotpath::measure]
 pub(crate) fn shutdown_exit_bound() -> Duration {
     DAEMON_SHUTDOWN_DEADLINE + DRAIN_EXIT_RESERVE
 }
@@ -85,6 +86,7 @@ pub fn install_hotpath_shutdown_finalizer(finalizer: impl FnOnce() + Send + 'sta
 }
 
 #[cfg(feature = "hotpath")]
+#[hotpath::measure]
 fn finalize_hotpath_report_within(bound: Duration) {
     let finalizer = HOTPATH_SHUTDOWN_FINALIZER
         .lock()
@@ -105,6 +107,7 @@ fn finalize_hotpath_report_within(bound: Duration) {
     }
 }
 
+#[hotpath::measure]
 fn watchdog_fire_after() -> Duration {
     #[cfg(feature = "hotpath")]
     {
@@ -114,6 +117,7 @@ fn watchdog_fire_after() -> Duration {
     shutdown_exit_bound()
 }
 
+#[hotpath::measure]
 fn drain_bound_exceeded(bound: Duration) -> ! {
     log_daemon_event(
         "daemon_shutdown",

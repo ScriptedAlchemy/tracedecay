@@ -52,6 +52,7 @@ use super::types::{
 /// diagnostic-provider port convention (std `Future`, no runtime dependency).
 pub type DoctorSourceFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
+#[hotpath::measure]
 fn source_finding(
     family: DoctorFindingFamilyV1,
     state: DoctorEvidenceStateV1,
@@ -72,6 +73,7 @@ fn source_finding(
 /// bounded at 512 bytes on a character boundary, control characters replaced,
 /// surrounding whitespace trimmed. Truncation is marked so a shortened reason
 /// is never mistaken for the complete one.
+#[hotpath::measure]
 fn bounded_statement(statement: &str) -> String {
     const STATEMENT_LIMIT_BYTES: usize = 512;
     const TRUNCATION_MARK: &str = "…";
@@ -98,6 +100,7 @@ fn bounded_statement(statement: &str) -> String {
 }
 
 /// Build an honest non-healthy finding for an unobservable source read.
+#[hotpath::measure]
 fn unobservable_finding(
     family: DoctorFindingFamilyV1,
     state: DoctorEvidenceStateV1,
@@ -115,6 +118,7 @@ fn unobservable_finding(
 
 /// Map a clean observation into a healthy finding (complete coverage) or an
 /// honest `Partial` finding (incomplete coverage).
+#[hotpath::measure]
 fn clean_finding(
     family: DoctorFindingFamilyV1,
     reference: &str,
@@ -399,6 +403,7 @@ pub fn operational_audit_findings(
     ])
 }
 
+#[hotpath::measure]
 fn remote_operational_finding(
     read: &RemoteOperationalReadV1,
 ) -> Result<DoctorFindingV1, ApplicationContractError> {
@@ -469,6 +474,7 @@ fn remote_operational_finding(
     }
 }
 
+#[hotpath::measure]
 fn profile_authority_finding(
     read: &ProfileAuthorityReadV1,
 ) -> Result<DoctorFindingV1, ApplicationContractError> {
@@ -703,6 +709,7 @@ const fn feedback_provider_state_slug(state: ProviderEvaluationStateV1) -> &'sta
     }
 }
 
+#[hotpath::measure]
 fn feedback_counts_coverage(
     total: u64,
     returned: u64,
@@ -717,6 +724,7 @@ fn feedback_counts_coverage(
     }
 }
 
+#[hotpath::measure]
 fn feedback_evidence(
     reference: impl Into<String>,
 ) -> Result<DoctorEvidenceRefV1, ApplicationContractError> {
@@ -726,6 +734,7 @@ fn feedback_evidence(
     ))
 }
 
+#[hotpath::measure]
 fn feedback_identity_evidence(
     result_id: &FeedbackResultId,
     cycle_id: &FeedbackCycleId,
@@ -756,6 +765,7 @@ fn feedback_identity_evidence(
     ])
 }
 
+#[hotpath::measure]
 fn advisory_feedback_finding(
     read: &AdvisoryFeedbackFindingReadV1,
     summary: &AdvisoryFeedbackSummaryReadV1,
@@ -864,6 +874,7 @@ fn advisory_feedback_finding(
     )
 }
 
+#[hotpath::measure]
 fn advisory_feedback_summary_finding(
     read: &AdvisoryFeedbackSummaryReadV1,
 ) -> Result<DoctorFindingV1, ApplicationContractError> {
@@ -934,6 +945,7 @@ fn advisory_feedback_summary_finding(
     )
 }
 
+#[hotpath::measure]
 fn advisory_feedback_observation_is_consistent(
     summary: &AdvisoryFeedbackSummaryReadV1,
     findings: &[AdvisoryFeedbackFindingReadV1],

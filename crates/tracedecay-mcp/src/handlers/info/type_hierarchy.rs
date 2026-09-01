@@ -81,6 +81,7 @@ pub async fn handle_type_hierarchy(graph: &VerifiedGraphQuery, args: Value) -> R
     ))
 }
 
+#[hotpath::measure]
 fn render_type_hierarchy_md(root_display: &str, max_depth: usize, tree: &str) -> String {
     let mut md = Md::new();
     md.heading(2, "Type Hierarchy");
@@ -90,6 +91,7 @@ fn render_type_hierarchy_md(root_display: &str, max_depth: usize, tree: &str) ->
     md.render()
 }
 
+#[hotpath::measure]
 fn build_type_tree(
     graph: &VerifiedGraphQuery,
     node_id: &SymbolOccurrenceId,

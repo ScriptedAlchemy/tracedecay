@@ -82,6 +82,7 @@ pub enum MemoryAutomationFactDispositionV1 {
 #[serde(transparent)]
 pub struct MemoryAutomationFactInputDigestV1(String);
 
+#[hotpath::measure_all]
 impl MemoryAutomationFactInputDigestV1 {
     pub fn new(value: impl Into<String>) -> Result<Self, MemoryAutomationFactInputDigestError> {
         let value = value.into();
@@ -150,6 +151,7 @@ pub struct MemoryAutomationFactEvidenceSourceSpanV1 {
     pub node_id: Option<String>,
 }
 
+#[hotpath::measure_all]
 impl MemoryAutomationFactEvidenceSourceSpanV1 {
     fn matches_terminal(&self) -> bool {
         let raw_message = self
@@ -184,6 +186,7 @@ pub struct MemoryAutomationFactEvidenceItemV1 {
     pub reason: String,
 }
 
+#[hotpath::measure_all]
 impl MemoryAutomationFactEvidenceItemV1 {
     fn matches_terminal(&self) -> bool {
         valid_text(&self.content, 64 * 1_024)
@@ -206,6 +209,7 @@ pub enum MemoryAutomationFactEvidenceTrustV1 {
     Bucket(MemoryAutomationFactEvidenceTrustBucketV1),
 }
 
+#[hotpath::measure_all]
 impl MemoryAutomationFactEvidenceTrustV1 {
     fn matches_terminal(self) -> bool {
         match self {
@@ -231,6 +235,7 @@ pub struct MemoryAutomationFactNearestMatchV1 {
     pub category: FactCategoryV1,
 }
 
+#[hotpath::measure_all]
 impl MemoryAutomationFactNearestMatchV1 {
     fn matches_terminal(&self) -> bool {
         self.score.is_finite() && (0.0..=1.0).contains(&self.score)
@@ -256,6 +261,7 @@ pub struct MemoryAutomationFactDedupeValidationV1 {
     pub near_duplicate_threshold: f64,
 }
 
+#[hotpath::measure_all]
 impl MemoryAutomationFactDedupeValidationV1 {
     fn matches_terminal(&self) -> bool {
         self.near_duplicate_threshold.is_finite()
@@ -282,6 +288,7 @@ pub struct MemoryAutomationFactValidationV1 {
     pub conflict: MemoryAutomationFactConflictValidationV1,
 }
 
+#[hotpath::measure_all]
 impl MemoryAutomationFactValidationV1 {
     fn matches_terminal(&self) -> bool {
         self.dedupe.matches_terminal() && valid_text(&self.conflict.note, 4_096)
@@ -345,6 +352,7 @@ pub struct AutomationExternalEffectReceiptV1 {
     pub manifest_digest: ManifestDigest,
 }
 
+#[hotpath::measure_all]
 impl AutomationExternalEffectReceiptV1 {
     pub fn new(
         run_id: RunId,
@@ -386,6 +394,7 @@ pub enum AutomationCommittedReceiptV1 {
     UserJobDelivery(AutomationExternalEffectReceiptV1),
 }
 
+#[hotpath::measure_all]
 impl AutomationCommittedReceiptV1 {
     fn matches_terminal(&self, run_id: &RunId) -> bool {
         match self {
@@ -475,6 +484,7 @@ impl<'de> Deserialize<'de> for AutomationRunProblemV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl AutomationRunProblemV1 {
     pub fn new(
         request: &AutomationRunRequestV1,
@@ -622,6 +632,7 @@ impl AutomationRunProblemV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl AutomationRunResultV1 {
     /// Verifies the durable terminal against the exact admitted run and task.
     /// This closes the zero-effect case where no inner receipt can carry the
@@ -722,6 +733,7 @@ impl AutomationRunResultV1 {
     }
 }
 
+#[hotpath::measure]
 fn receipts_match_task_and_identity(
     task: AutomationTaskV1,
     run_id: &RunId,
@@ -789,6 +801,7 @@ fn receipts_match_task_and_identity(
     })
 }
 
+#[hotpath::measure]
 fn receipts_match_admission(
     task: &AutomationTaskRequestV1,
     receipts: &[AutomationCommittedReceiptV1],
@@ -804,6 +817,7 @@ fn receipts_match_admission(
     })
 }
 
+#[hotpath::measure]
 fn automatic_fact_receipt_matches(run_id: &RunId, receipt: &MemoryAutomationFactReceiptV1) -> bool {
     let state_matches_effect = matches!(
         (receipt.state, &receipt.effect),
@@ -873,6 +887,7 @@ fn automatic_fact_receipt_matches(run_id: &RunId, receipt: &MemoryAutomationFact
             .is_ok_and(|digest| digest == receipt.canonical_digest)
 }
 
+#[hotpath::measure_all]
 impl MemoryAutomationFactReceiptV1 {
     pub fn computed_canonical_digest(&self) -> Result<ManifestDigest, DomainError> {
         let disposition = match self.disposition {
@@ -930,6 +945,7 @@ impl MemoryAutomationFactReceiptV1 {
     }
 }
 
+#[hotpath::measure]
 fn valid_text(value: &str, max_bytes: usize) -> bool {
     let value = value.trim();
     !value.is_empty() && value.len() <= max_bytes && !value.chars().any(char::is_control)

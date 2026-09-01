@@ -28,6 +28,7 @@ pub(super) use super::support::{generic_tool_result, rendered_tool_result};
 pub(super) use tracedecay_mcp::ToolResult;
 pub(super) use tracedecay_mcp::tools::render::Md;
 
+#[hotpath::measure]
 fn display_path(path: &std::path::Path) -> String {
     path.display().to_string()
 }

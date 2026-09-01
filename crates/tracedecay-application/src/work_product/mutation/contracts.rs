@@ -88,6 +88,7 @@ pub enum WorkProductEventCommitOutcomeV1 {
     Replayed(WorkProductEventCommitV1),
 }
 
+#[hotpath::measure_all]
 impl WorkProductEventCommitOutcomeV1 {
     pub(super) fn into_parts(self) -> (WorkProductEventCommitV1, bool) {
         match self {
@@ -104,6 +105,7 @@ pub struct WorkProductEventCommitV1 {
     verified_graph_version: VerifiedWorkGraphVersionV1,
 }
 
+#[hotpath::measure_all]
 impl WorkProductEventCommitV1 {
     pub fn new(
         event: WorkProductEventV1,
@@ -117,10 +119,12 @@ impl WorkProductEventCommitV1 {
         Ok(commit)
     }
 
+    #[hotpath::skip]
     pub const fn event(&self) -> &WorkProductEventV1 {
         &self.event
     }
 
+    #[hotpath::skip]
     pub const fn verified_graph_version(&self) -> &VerifiedWorkGraphVersionV1 {
         &self.verified_graph_version
     }
@@ -214,15 +218,19 @@ impl<'de> Deserialize<'de> for WorkProductMutationReceiptV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl WorkProductMutationReceiptV1 {
+    #[hotpath::skip]
     pub const fn event(&self) -> &WorkProductEventV1 {
         &self.event
     }
 
+    #[hotpath::skip]
     pub const fn verified_graph_version(&self) -> &VerifiedWorkGraphVersionV1 {
         &self.verified_graph_version
     }
 
+    #[hotpath::skip]
     pub const fn replayed(&self) -> bool {
         self.replayed
     }
@@ -347,7 +355,9 @@ pub enum WorkProductMutationRequestV1 {
     RecordHandoff(RecordWorkHandoffRequestV1),
 }
 
+#[hotpath::measure_all]
 impl WorkProductMutationRequestV1 {
+    #[hotpath::skip]
     pub const fn mutation_identity(&self) -> &WorkProductMutationIdentityV1 {
         match self {
             Self::Create(request) => &request.mutation,

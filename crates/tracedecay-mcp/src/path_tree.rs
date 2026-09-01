@@ -8,6 +8,7 @@ struct PathNode {
     suffix: Option<String>,
 }
 
+#[hotpath::measure_all]
 impl PathNode {
     fn insert(&mut self, path: &str, suffix: &str) {
         let mut node = self;
@@ -25,6 +26,7 @@ impl PathNode {
     }
 }
 
+#[hotpath::measure]
 pub fn format_compact_path_list<'a>(
     paths: impl IntoIterator<Item = &'a str>,
     bullet_prefix: &str,
@@ -37,6 +39,7 @@ pub fn format_compact_path_list<'a>(
     )
 }
 
+#[hotpath::measure]
 pub fn format_compact_annotated_path_list<'a, S>(
     paths: impl IntoIterator<Item = (&'a str, S)>,
     bullet_prefix: &str,
@@ -62,12 +65,14 @@ where
     }
 }
 
+#[hotpath::measure]
 fn render_path_tree(root: &PathNode) -> String {
     let mut lines = Vec::new();
     render_children(&root.children, 0, &mut lines);
     lines.join("\n")
 }
 
+#[hotpath::measure]
 fn prefix_lines(text: &str, prefix: &str) -> String {
     if prefix.is_empty() {
         return text.to_string();
@@ -79,18 +84,21 @@ fn prefix_lines(text: &str, prefix: &str) -> String {
         .join("\n")
 }
 
+#[hotpath::measure]
 fn has_directory_shape(node: &PathNode) -> bool {
     node.children
         .values()
         .any(|child| !child.children.is_empty())
 }
 
+#[hotpath::measure]
 fn render_children(children: &BTreeMap<String, PathNode>, indent: usize, lines: &mut Vec<String>) {
     for (segment, child) in children {
         render_entry(segment, child, indent, lines);
     }
 }
 
+#[hotpath::measure]
 fn render_entry(segment: &str, node: &PathNode, indent: usize, lines: &mut Vec<String>) {
     let padding = " ".repeat(indent);
     if let Some(suffix) = &node.suffix {
@@ -106,6 +114,7 @@ fn render_entry(segment: &str, node: &PathNode, indent: usize, lines: &mut Vec<S
     render_children(&remainder.children, indent + 2, lines);
 }
 
+#[hotpath::measure]
 fn compact_directory_chain<'a>(segment: &str, mut node: &'a PathNode) -> (String, &'a PathNode) {
     let mut label = segment.to_string();
     while node.suffix.is_none() && node.children.len() == 1 {

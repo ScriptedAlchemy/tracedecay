@@ -30,6 +30,7 @@ pub(crate) const fn surface_name(surface: BindingSurface) -> &'static str {
 /// accumulate the bindings into the contribution while handing the ids to the
 /// capability manifest. Operations that need a non-default status or feature
 /// gate build their bindings directly instead.
+#[hotpath::measure]
 pub(crate) fn current_bindings(
     capability_id: &CapabilityId,
     operation: &str,
@@ -40,6 +41,7 @@ pub(crate) fn current_bindings(
 
 /// [`current_bindings`] for the operations whose binding-id slug differs from
 /// their wire operation name.
+#[hotpath::measure]
 pub(crate) fn current_bindings_with_slug(
     capability_id: &CapabilityId,
     operation: &str,

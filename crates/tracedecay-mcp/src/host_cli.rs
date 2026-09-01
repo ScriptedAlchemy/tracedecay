@@ -5,10 +5,12 @@ use std::process::Command;
 
 const AST_GREP_BIN_ENV: &str = "TRACEDECAY_AST_GREP_BIN";
 
+#[hotpath::measure]
 pub fn ast_grep_command() -> Command {
     Command::new(resolve_ast_grep_bin())
 }
 
+#[hotpath::measure]
 fn resolve_ast_grep_bin() -> PathBuf {
     if let Some(path) = std::env::var_os(AST_GREP_BIN_ENV).filter(|path| !path.is_empty()) {
         return PathBuf::from(path);
@@ -23,6 +25,7 @@ fn resolve_ast_grep_bin() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("ast-grep"))
 }
 
+#[hotpath::measure]
 fn find_on_path(tool: &str) -> Option<PathBuf> {
     let paths = std::env::var_os("PATH")?;
     std::env::split_paths(&paths)
@@ -30,6 +33,7 @@ fn find_on_path(tool: &str) -> Option<PathBuf> {
         .find(|path| is_executable_file(path))
 }
 
+#[hotpath::measure]
 fn common_tool_paths(tool: &str) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
 
@@ -53,6 +57,7 @@ fn common_tool_paths(tool: &str) -> Vec<PathBuf> {
     candidates
 }
 
+#[hotpath::measure]
 fn is_executable_file(path: &Path) -> bool {
     let Ok(metadata) = std::fs::metadata(path) else {
         return false;

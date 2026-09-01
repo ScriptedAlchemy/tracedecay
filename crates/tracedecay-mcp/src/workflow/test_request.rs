@@ -12,6 +12,7 @@ pub const MAX_TESTS_HARD_CAP: usize = 500;
 /// into an unbounded daemon job by selecting an arbitrarily distant deadline.
 pub const MAX_TEST_TIMEOUT_SECS: u64 = DEFAULT_TEST_TIMEOUT_SECS;
 
+#[hotpath::measure]
 fn error_result(args: &Value, kind: &str, operation: &str, message: &str) -> ToolResult {
     let value = json!({
         "passed": 0,
@@ -36,6 +37,7 @@ pub enum TestProfile {
     Release,
 }
 
+#[hotpath::measure_all]
 impl TestProfile {
     fn parse(args: &Value) -> std::result::Result<Self, ToolResult> {
         match args.get("profile") {
@@ -60,6 +62,7 @@ pub struct RunAffectedArgs {
     pub max_tests: usize,
 }
 
+#[hotpath::measure_all]
 impl RunAffectedArgs {
     #[hotpath::measure(label = "mcp.workflow.affected_tests.request_build")]
     pub fn parse(args: &Value) -> std::result::Result<Self, ToolResult> {
@@ -120,6 +123,7 @@ impl RunAffectedArgs {
     }
 }
 
+#[hotpath::measure]
 fn bounded_positive_u64(
     args: &Value,
     field: &str,

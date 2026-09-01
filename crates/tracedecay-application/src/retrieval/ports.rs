@@ -35,6 +35,7 @@ pub enum RetrievalPortOutcome<T> {
     Unavailable(RetrievalEvidence<T>),
 }
 
+#[hotpath::measure_all]
 impl<T> RetrievalPortOutcome<T> {
     pub fn evidence(&self) -> &RetrievalEvidence<T> {
         match self {

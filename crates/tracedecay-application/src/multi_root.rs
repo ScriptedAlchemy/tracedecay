@@ -42,6 +42,7 @@ pub struct MultiRootScopeSetReadRequestV1 {
     pub scope_set_id: ScopeSetId,
 }
 
+#[hotpath::measure_all]
 impl MultiRootScopeSetReadRequestV1 {
     pub fn new(scope_set_id: ScopeSetId) -> Result<Self, MultiRootQueryError> {
         scope_set_id
@@ -76,6 +77,7 @@ pub struct MultiRootScopeSetCasResultV1 {
     pub scope_set: Option<AuthorizedScopeSet>,
 }
 
+#[hotpath::measure_all]
 impl MultiRootScopeSetCasRequestV1 {
     pub fn new(
         scope_set_id: ScopeSetId,
@@ -145,6 +147,7 @@ pub struct MultiRootExecuteRequestV1 {
     pub continuation: Option<MultiRootContinuationV1>,
 }
 
+#[hotpath::measure_all]
 impl MultiRootExecuteRequestV1 {
     pub fn new(
         scope_set_id: ScopeSetId,
@@ -254,6 +257,7 @@ impl<'de> Deserialize<'de> for AuthorizedScopeSet {
     }
 }
 
+#[hotpath::measure_all]
 impl AuthorizedScopeSet {
     fn from_authorized_roots(
         scope_set_id: ScopeSetId,
@@ -346,6 +350,7 @@ impl AuthorizedScopeSet {
         &self.scope_set_id
     }
 
+    #[hotpath::skip]
     pub const fn revision(&self) -> ScopeSetRevision {
         self.revision
     }
@@ -394,6 +399,7 @@ impl AuthorizedScopeSet {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AuthorizedScopeSetAuthority;
 
+#[hotpath::measure_all]
 impl AuthorizedScopeSetAuthority {
     #[allow(clippy::too_many_arguments)]
     pub fn authorize(
@@ -541,6 +547,7 @@ impl<'de> Deserialize<'de> for MultiRootContinuationV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl MultiRootContinuationV1 {
     pub fn new(
         scope_set_digest: ManifestDigest,
@@ -604,6 +611,7 @@ impl MultiRootContinuationV1 {
         &self.root_generations
     }
 
+    #[hotpath::skip]
     pub const fn next_page(&self) -> u64 {
         self.next_page
     }
@@ -673,6 +681,7 @@ pub struct AuthorizedMultiRootQueryService<P> {
     port: P,
 }
 
+#[hotpath::measure_all]
 impl<P> AuthorizedMultiRootQueryService<P> {
     pub fn new(port: P) -> Self {
         Self { port }
@@ -763,6 +772,7 @@ impl<P> AuthorizedMultiRootQueryService<P> {
     }
 }
 
+#[hotpath::measure]
 fn validate_contexts<Q>(
     request: &MultiRootQueryRequestV1<Q>,
 ) -> Result<BTreeMap<ManifestDigest, &RequestContext>, MultiRootQueryError> {
@@ -814,6 +824,7 @@ fn validate_contexts<Q>(
     Ok(contexts)
 }
 
+#[hotpath::measure]
 fn validate_generations<Q>(
     request: &MultiRootQueryRequestV1<Q>,
 ) -> Result<BTreeMap<ManifestDigest, &RootScopeOutcomeV1<RootGenerationV1>>, MultiRootQueryError> {
@@ -843,6 +854,7 @@ fn validate_generations<Q>(
     Ok(generations)
 }
 
+#[hotpath::measure]
 fn validate_continuation<Q>(
     request: &MultiRootQueryRequestV1<Q>,
 ) -> Result<(), MultiRootQueryError> {
@@ -882,6 +894,7 @@ fn validate_continuation<Q>(
     Ok(())
 }
 
+#[hotpath::measure]
 fn aggregate_outcomes<T: Clone>(roots: &[RootScopeOutcomeV1<Vec<T>>]) -> ScopeOutcome<Vec<T>> {
     let mut values = Vec::new();
     let mut value_outcomes = 0_usize;

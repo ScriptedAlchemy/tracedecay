@@ -49,6 +49,7 @@ use tracedecay_runtime_core::tracedecay::current_timestamp;
 /// This is an enrichment of a surface that already answered: a file that cannot
 /// be read, or a container with no symbol array, leaves the payload exactly as
 /// it was rather than failing the outline or read that carries it.
+#[hotpath::measure]
 pub(super) fn enrich_markdown_sections(
     project_root: &Path,
     absolute_path: &Path,
@@ -77,6 +78,7 @@ pub(super) fn enrich_markdown_sections(
 /// The summary lines themselves are composed in
 /// `tracedecay-usecases::context::markdown_sections`; this adapter only owns
 /// the markdown builder and the two-space bullet continuation indent.
+#[hotpath::measure]
 pub(super) fn render_section_md(md: &mut Md, section: Option<&Value>) {
     let Some(section) = section else {
         return;

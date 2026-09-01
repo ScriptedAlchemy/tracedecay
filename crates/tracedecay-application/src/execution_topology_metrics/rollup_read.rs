@@ -225,6 +225,7 @@ where
     ))
 }
 
+#[hotpath::measure]
 fn validate_request(request: &ExecutionTopologyMetricsRequestV1) -> Result<(), ApplicationProblem> {
     if request.horizon.until_micros <= request.horizon.since_micros {
         return Err(invalid_problem(
@@ -241,6 +242,7 @@ fn validate_request(request: &ExecutionTopologyMetricsRequestV1) -> Result<(), A
     Ok(())
 }
 
+#[hotpath::measure]
 fn admit(context: &RequestContext, observed_at: UtcMicros) -> Result<(), ApplicationProblem> {
     match context.admission_at(observed_at) {
         RequestAdmission::Admitted => Ok(()),
@@ -249,6 +251,7 @@ fn admit(context: &RequestContext, observed_at: UtcMicros) -> Result<(), Applica
     }
 }
 
+#[hotpath::measure]
 fn authorize(context: &RequestContext) -> Result<(), ApplicationProblem> {
     let capability = CapabilityId::new(EXECUTION_TOPOLOGY_CAPABILITY_ID_V1).map_err(|_| {
         invalid_problem(
@@ -271,6 +274,7 @@ fn authorize(context: &RequestContext) -> Result<(), ApplicationProblem> {
     }
 }
 
+#[hotpath::measure]
 fn boundary_query(
     authorized_scope_ref: &str,
     horizon: ObservabilityHorizonV1,
@@ -289,6 +293,7 @@ fn boundary_query(
     }
 }
 
+#[hotpath::measure]
 fn deserialize_complete_interiors(
     horizon: &ObservabilityHorizonV1,
     page: ExecutionTopologyRollupFragmentPageV1,
@@ -347,7 +352,9 @@ struct InteriorFailureV1 {
     coverage: CoverageStateV1,
 }
 
+#[hotpath::measure_all]
 impl InteriorFailureV1 {
+    #[hotpath::skip]
     const fn partial() -> Self {
         Self {
             reason: ExecutionMetricUnavailableV1::StoreUnavailable,
@@ -355,6 +362,7 @@ impl InteriorFailureV1 {
         }
     }
 
+    #[hotpath::skip]
     const fn capped() -> Self {
         Self {
             reason: ExecutionMetricUnavailableV1::EventBudgetExceeded,
@@ -362,6 +370,7 @@ impl InteriorFailureV1 {
         }
     }
 
+    #[hotpath::skip]
     const fn unknown() -> Self {
         Self {
             reason: ExecutionMetricUnavailableV1::StoreUnavailable,
@@ -369,6 +378,7 @@ impl InteriorFailureV1 {
         }
     }
 
+    #[hotpath::skip]
     const fn from_coverage(coverage: CoverageStateV1) -> Self {
         Self {
             reason: match coverage {
@@ -385,6 +395,7 @@ struct HorizonSlicesV1 {
     full_days: Option<ObservabilityHorizonV1>,
 }
 
+#[hotpath::measure]
 fn exceeds_rollup_fragment_limit(
     full_days: Option<&ObservabilityHorizonV1>,
     boundary_count: usize,
@@ -398,6 +409,7 @@ fn exceeds_rollup_fragment_limit(
     })
 }
 
+#[hotpath::measure]
 fn split_horizon(horizon: &ObservabilityHorizonV1) -> HorizonSlicesV1 {
     let first_full_start = if horizon.since_micros.rem_euclid(UTC_DAY_MICROS_V1) == 0 {
         horizon.since_micros
@@ -451,12 +463,14 @@ fn split_horizon(horizon: &ObservabilityHorizonV1) -> HorizonSlicesV1 {
     }
 }
 
+#[hotpath::measure]
 fn day_start(micros: i64) -> i64 {
     micros
         .div_euclid(UTC_DAY_MICROS_V1)
         .saturating_mul(UTC_DAY_MICROS_V1)
 }
 
+#[hotpath::measure]
 fn unavailable(
     authorized_scope_ref: String,
     horizon: ObservabilityHorizonV1,
@@ -466,6 +480,7 @@ fn unavailable(
     unavailable_model(authorized_scope_ref, horizon, observed_at_micros, reason)
 }
 
+#[hotpath::measure]
 fn unavailable_with_state(
     authorized_scope_ref: String,
     horizon: ObservabilityHorizonV1,

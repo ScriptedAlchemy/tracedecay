@@ -39,6 +39,7 @@ pub struct RemoteFrameTransferRequestV1 {
     pub expires_at_micros: i64,
 }
 
+#[hotpath::measure_all]
 impl RemoteFrameTransferRequestV1 {
     pub fn validate(&self, now_micros: i64) -> Result<(), ApplicationContractError> {
         if self.event_id.len() < 16
@@ -108,6 +109,7 @@ pub struct RemoteFrameTransferReceiptV1 {
     pub disposition: RemoteFrameTransferDispositionV1,
 }
 
+#[hotpath::measure_all]
 impl RemoteFrameTransferReceiptV1 {
     pub fn validate_for(
         &self,
@@ -150,6 +152,7 @@ pub enum RemoteFrameTransferErrorV1 {
     Corruption,
 }
 
+#[hotpath::measure]
 pub fn remote_frame_transfer_result_contract_v1()
 -> Result<crate::ResultContractRef, ApplicationContractError> {
     let schema =

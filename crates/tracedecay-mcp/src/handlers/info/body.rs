@@ -17,6 +17,7 @@ use super::verified::{
 /// (0-based, inclusive) from `source`. Node line fields are stored as the
 /// raw tree-sitter row index, so the caller passes them through unchanged.
 /// Returns the empty string if the range is out of bounds.
+#[hotpath::measure]
 pub fn extract_lines(source: &str, start_line: u32, end_line: u32) -> String {
     let lines: Vec<&str> = source.lines().collect();
     let start = start_line as usize;
@@ -117,6 +118,7 @@ pub async fn handle_body(
 /// source into a table cell with newlines collapsed: each match gets a heading,
 /// a location line, an optional signature, a token count, and a fenced code
 /// block tagged with the file's language extension.
+#[hotpath::measure]
 fn render_body_md(value: &Value) -> String {
     let mut md = Md::new();
     let matches = value.get("matches").and_then(Value::as_array);
@@ -149,6 +151,7 @@ fn render_body_md(value: &Value) -> String {
     md.render()
 }
 
+#[hotpath::measure]
 fn body_candidates(
     graph: &VerifiedGraphQuery,
     symbol: &str,
@@ -180,6 +183,7 @@ fn body_candidates(
     Ok(candidates)
 }
 
+#[hotpath::measure]
 fn source_body_for_node(
     graph: &VerifiedGraphQuery,
     file_path: &str,
@@ -205,6 +209,7 @@ fn source_body_for_node(
 /// best because the user almost always asks for "show me the body of X"
 /// expecting a function or method; type definitions are next; fields,
 /// variants, use statements come last.
+#[hotpath::measure]
 fn body_kind_preference(kind: &NodeKind) -> u8 {
     match kind {
         NodeKind::Function

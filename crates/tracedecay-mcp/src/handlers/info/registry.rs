@@ -16,10 +16,12 @@ use crate::ToolResult;
 use crate::rendered_tool_result;
 use crate::tools::render;
 
+#[hotpath::measure]
 fn display_path(path: &Path) -> String {
     path.display().to_string()
 }
 
+#[hotpath::measure]
 fn bounded_limit(args: &Value, default: usize, max: usize) -> usize {
     args.get("limit")
         .and_then(Value::as_u64)
@@ -27,14 +29,17 @@ fn bounded_limit(args: &Value, default: usize, max: usize) -> usize {
         .map_or(default, |value| value.clamp(1, max))
 }
 
+#[hotpath::measure]
 fn project_registry_result(project_root: &Path, args: &Value, payload: &Value) -> ToolResult {
     render_registry_result(Some(project_root), args, payload)
 }
 
+#[hotpath::measure]
 fn registry_result(args: &Value, payload: &Value) -> ToolResult {
     render_registry_result(None, args, payload)
 }
 
+#[hotpath::measure]
 fn render_registry_result(root: Option<&Path>, args: &Value, payload: &Value) -> ToolResult {
     rendered_tool_result(root, args, payload, vec![], || {
         if payload.get("project_tree").is_some() {
@@ -54,6 +59,7 @@ fn render_registry_result(root: Option<&Path>, args: &Value, payload: &Value) ->
     })
 }
 
+#[hotpath::measure]
 fn registry_missing_payload() -> Value {
     json!({
         "status": "unavailable",
@@ -65,6 +71,7 @@ fn registry_missing_payload() -> Value {
 /// Zeroed summary/tree keys for the missing-registry branch, mirroring the
 /// ok-shape's `summary`/`project_tree` so callers get a stable payload shape
 /// regardless of whether the registry is present.
+#[hotpath::measure]
 fn empty_registry_view_payload(title: &str) -> (Value, Value, Value) {
     (
         json!(title),
@@ -81,6 +88,7 @@ fn empty_registry_view_payload(title: &str) -> (Value, Value, Value) {
 /// syntax: it decides whether a selector may fall back to Git identity.
 /// Must stay aligned with
 /// `RegisteredGlobalDb::is_explicit_project_path_selector`.
+#[hotpath::measure]
 fn is_explicit_project_path_selector(selector: &str) -> bool {
     let selector = selector.trim();
     !selector.is_empty()
@@ -158,6 +166,7 @@ pub async fn handle_project_search(
 
 /// Renders a listing outcome, keeping the missing-registry state a stable
 /// `unavailable` payload with the same summary/tree keys as the `ok` shape.
+#[hotpath::measure]
 fn registry_listing_result(
     args: &Value,
     title: &str,
@@ -198,6 +207,7 @@ fn registry_listing_result(
     }
 }
 
+#[hotpath::measure]
 fn project_context_selector(project_root: &Path, args: &Value) -> ProjectRegistrySelector {
     if let Some(project_id) = args
         .get("project_selector")

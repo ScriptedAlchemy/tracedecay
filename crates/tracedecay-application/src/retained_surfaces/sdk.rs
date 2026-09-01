@@ -530,7 +530,9 @@ pub struct SessionRefreshRequestV1 {
     pub request: SessionRefreshActionRequestV1,
 }
 
+#[hotpath::measure_all]
 impl SessionRefreshRequestV1 {
+    #[hotpath::skip]
     pub const fn with_action(
         action: SessionRefreshActionV1,
         request: SessionRefreshActionRequestV1,
@@ -538,6 +540,7 @@ impl SessionRefreshRequestV1 {
         Self { action, request }
     }
 
+    #[hotpath::skip]
     pub const fn operation(&self) -> RetainedSurfaceOperation {
         match self.action {
             SessionRefreshActionV1::Status => RetainedSurfaceOperation::SessionRefreshStatus,
@@ -665,7 +668,9 @@ pub enum RetainedSurfaceRequestV1 {
     LcmExpandQuery(LcmExpandQueryRequestV1),
 }
 
+#[hotpath::measure_all]
 impl RetainedSurfaceRequestV1 {
+    #[hotpath::skip]
     pub const fn operation(&self) -> RetainedSurfaceOperation {
         match self {
             Self::FactStoreCurate(_) => RetainedSurfaceOperation::FactStoreCurate,

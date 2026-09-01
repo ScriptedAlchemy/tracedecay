@@ -34,6 +34,7 @@ pub struct SourceAuthorizationSnapshot {
     source_visible: bool,
 }
 
+#[hotpath::measure_all]
 impl SourceAuthorizationSnapshot {
     pub fn new(input: SourceAuthorizationInputV1, source_visible: bool) -> Self {
         Self {
@@ -46,6 +47,7 @@ impl SourceAuthorizationSnapshot {
         &self.input
     }
 
+    #[hotpath::skip]
     pub const fn source_visible(&self) -> bool {
         self.source_visible
     }

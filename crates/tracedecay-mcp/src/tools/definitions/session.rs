@@ -3,6 +3,7 @@ use serde_json::{Value, json};
 use super::{def, def_rw, git_scope, project_selector_object};
 use crate::ToolDefinition;
 
+#[hotpath::measure]
 pub(super) fn def_session_refresh() -> ToolDefinition {
     def_rw(
         "tracedecay_session_refresh",
@@ -208,6 +209,7 @@ pub(super) fn def_session_refresh() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_session_refresh_begin(input_schema: Value) -> ToolDefinition {
     def_rw(
         "tracedecay_session_refresh_begin",
@@ -217,6 +219,7 @@ pub(super) fn def_session_refresh_begin(input_schema: Value) -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_session_refresh_status(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_session_refresh_status",
@@ -226,6 +229,7 @@ pub(super) fn def_session_refresh_status(input_schema: Value) -> ToolDefinition 
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_session_refresh_cancel(input_schema: Value) -> ToolDefinition {
     def_rw(
         "tracedecay_session_refresh_cancel",
@@ -235,6 +239,7 @@ pub(super) fn def_session_refresh_cancel(input_schema: Value) -> ToolDefinition 
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_message_search() -> ToolDefinition {
     def(
         "tracedecay_message_search",
@@ -336,6 +341,7 @@ pub(super) fn def_message_search() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_sessions_for() -> ToolDefinition {
     def(
         "tracedecay_sessions_for",
@@ -372,6 +378,7 @@ pub(super) fn def_sessions_for() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 pub(super) fn def_workflows() -> ToolDefinition {
     def(
         "tracedecay_workflows",
@@ -413,6 +420,7 @@ pub(super) fn def_workflows() -> ToolDefinition {
     )
 }
 
+#[hotpath::measure]
 fn time_filter_schema(description: &str) -> Value {
     json!({
         "oneOf": [
@@ -423,6 +431,7 @@ fn time_filter_schema(description: &str) -> Value {
     })
 }
 
+#[hotpath::measure]
 fn workflow_run_scope_schema() -> Value {
     json!({
         "type": "string",
@@ -430,6 +439,7 @@ fn workflow_run_scope_schema() -> Value {
     })
 }
 
+#[hotpath::measure]
 fn workflow_agent_scope_schema() -> Value {
     json!({
         "type": "string",

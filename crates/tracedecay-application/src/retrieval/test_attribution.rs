@@ -22,6 +22,7 @@ pub struct TestMapPrimitiveRequest {
     pub meta: RetrievalRequestMeta,
 }
 
+#[hotpath::measure_all]
 impl TestMapPrimitiveRequest {
     /// Exactly one of `file` / `node_id` selects the map root.
     pub fn validate(&self) -> bool {
@@ -38,6 +39,7 @@ pub struct AffectedFileTestsPrimitiveRequest {
     pub meta: RetrievalRequestMeta,
 }
 
+#[hotpath::measure_all]
 impl AffectedFileTestsPrimitiveRequest {
     pub fn validate(&self) -> bool {
         !self.files.is_empty()
