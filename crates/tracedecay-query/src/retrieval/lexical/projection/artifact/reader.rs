@@ -3780,10 +3780,7 @@ mod tests {
             |document, _, _, frequencies| {
                 v10_hits.push((
                     document,
-                    frequencies
-                        .get(&super::LexicalFieldV1::BodyText)
-                        .and_then(|terms| terms.get("alpha"))
-                        .copied(),
+                    term_frequency(&frequencies, super::LexicalFieldV1::BodyText, "alpha"),
                 ));
                 Ok(())
             },
@@ -3799,10 +3796,7 @@ mod tests {
             |document, _, _, frequencies| {
                 v11_hits.push((
                     document,
-                    frequencies
-                        .get(&super::LexicalFieldV1::BodyText)
-                        .and_then(|terms| terms.get("alpha"))
-                        .copied(),
+                    term_frequency(&frequencies, super::LexicalFieldV1::BodyText, "alpha"),
                 ));
                 Ok(())
             },
