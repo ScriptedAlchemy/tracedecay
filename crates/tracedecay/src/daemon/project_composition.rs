@@ -445,13 +445,24 @@ async fn production_project_server_inner(
         invocation.code_index_schedulers.clone(),
         canonical_project_path.to_path_buf(),
     );
-    let code_index_activation = Arc::new(code_index_scheduler::CodeIndexActivationV1::new(
-        canonical_project_path,
-        Arc::clone(&route_registered),
-        cancellation.clone(),
-        code_index_mount,
-        code_index_hint_sink,
-    ));
+    let code_index_automatic_admission =
+        if tracedecay_runtime_core::worktree::is_linked_worktree(canonical_project_path)
+            && !cg.get_config().sync.watch_linked_worktrees
+        {
+            code_index_scheduler::CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled
+        } else {
+            code_index_scheduler::CodeIndexAutomaticAdmissionV1::Admitted
+        };
+    let code_index_activation = Arc::new(
+        code_index_scheduler::CodeIndexActivationV1::new_with_admission(
+            canonical_project_path,
+            Arc::clone(&route_registered),
+            cancellation.clone(),
+            code_index_automatic_admission,
+            code_index_mount,
+            code_index_hint_sink,
+        ),
+    );
     let code_index_hook_sink = code_index_hook_sink(Arc::clone(&code_index_activation));
     let code_index_reconcile_sink = code_index_reconcile_sink(
         invocation.code_index_schedulers.clone(),
@@ -1140,21 +1151,34 @@ async fn production_project_server_inner(
             ))
             .await;
             full_candidate.publish_doctor_report();
-            let indexing_requested = code_index_activation.activate();
+            let code_index_status = match code_index_activation.automatic_admission() {
+                code_index_scheduler::CodeIndexAutomaticAdmissionV1::Admitted => {
+                    if code_index_activation.activate() {
+                        "warming"
+                    } else {
+                        "unavailable"
+                    }
+                }
+                code_index_scheduler::CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled => {
+                    log_daemon_event(
+                        "code_index_activation_skipped",
+                        &[
+                            (
+                                "project",
+                                canonical_project_path.display().to_string(),
+                            ),
+                            ("reason", "linked_worktree_disabled".to_owned()),
+                        ],
+                    );
+                    "linked_worktree_disabled"
+                }
+            };
             log_daemon_event(
                 "project_open_phase",
                 &[
                     ("project", canonical_project_path.display().to_string()),
                     ("phase", "full_published".to_owned()),
-                    (
-                        "code_index",
-                        if indexing_requested {
-                            "warming"
-                        } else {
-                            "unavailable"
-                        }
-                        .to_owned(),
-                    ),
+                    ("code_index", code_index_status.to_owned()),
                     (
                         "elapsed_ms",
                         project_open_started.elapsed().as_millis().to_string(),

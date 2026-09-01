@@ -111,6 +111,16 @@ impl GitWatcher {
             common_dir,
             git_dir,
         } = identity;
+        if git_dir != common_dir && !config.watch_linked_worktrees {
+            log_daemon_event(
+                "git_watch_skipped",
+                &[
+                    ("project", canonical_root.display().to_string()),
+                    ("reason", "linked_worktree_disabled".to_string()),
+                ],
+            );
+            return GitWatcherAdmission::LinkedWorktreeDisabled;
+        }
 
         loop {
             retire_missing_repository_owners(&self.inner).await;
@@ -254,6 +264,9 @@ fn record_admission_outcome(admission: GitWatcherAdmission) {
         }
         GitWatcherAdmission::Disabled => {
             hotpath::gauge!("daemon.git.watch.admission.disabled_total").inc(1_u64);
+        }
+        GitWatcherAdmission::LinkedWorktreeDisabled => {
+            hotpath::gauge!("daemon.git.watch.admission.linked_worktree_disabled_total").inc(1_u64);
         }
         GitWatcherAdmission::ShuttingDown => {
             hotpath::gauge!("daemon.git.watch.admission.shutting_down_total").inc(1_u64);

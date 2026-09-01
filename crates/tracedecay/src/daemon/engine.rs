@@ -16,6 +16,7 @@ use tracedecay_daemon_identity::profile_identity;
 fn git_watch_sync_config(config: &crate::config::SyncConfig) -> GitWatchSyncConfigV1 {
     GitWatchSyncConfigV1 {
         auto_watch: config.auto_watch,
+        watch_linked_worktrees: config.watch_linked_worktrees,
         watch_debounce_ms: config.watch_debounce_ms,
         watch_max_delay_ms: config.watch_max_delay_ms,
         watch_max_projects: config.watch_max_projects,
@@ -867,6 +868,12 @@ impl DaemonEngine {
             {
                 git_watch::GitWatcherAdmission::Ready
                 | git_watch::GitWatcherAdmission::Disabled => {}
+                git_watch::GitWatcherAdmission::LinkedWorktreeDisabled => {
+                    log_daemon_event(
+                        "git_watch_admission_rejected",
+                        &[("reason", "linked_worktree_disabled".to_string())],
+                    );
+                }
                 git_watch::GitWatcherAdmission::ShuttingDown => {
                     log_daemon_event(
                         "git_watch_admission_rejected",

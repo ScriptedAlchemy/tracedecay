@@ -31,6 +31,13 @@ pub type CodeIndexActivationHintFutureV1 = Pin<Box<dyn Future<Output = bool> + S
 pub type CodeIndexActivationHintSinkV1 =
     Arc<dyn Fn(CodeIndexActivationHookBatchV1) -> CodeIndexActivationHintFutureV1 + Send + Sync>;
 
+/// Policy decision for demand-driven indexing on one exact project route.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CodeIndexAutomaticAdmissionV1 {
+    Admitted,
+    LinkedWorktreeDisabled,
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct CodeIndexActivationHookBatchV1 {
     pub paths: Vec<String>,
@@ -110,6 +117,7 @@ pub struct CodeIndexActivationV1 {
     identity: Option<IndexingIdentityV1>,
     route_registered: Arc<AtomicBool>,
     cancellation: CancellationToken,
+    automatic_admission: CodeIndexAutomaticAdmissionV1,
     state: Arc<AtomicU8>,
     pending_hooks: Arc<Mutex<PendingHookPathsV1>>,
     mount: CodeIndexActivationMountV1,
@@ -127,6 +135,25 @@ impl CodeIndexActivationV1 {
         mount: CodeIndexActivationMountV1,
         hint_sink: CodeIndexActivationHintSinkV1,
     ) -> Self {
+        Self::new_with_admission(
+            project_root,
+            route_registered,
+            cancellation,
+            CodeIndexAutomaticAdmissionV1::Admitted,
+            mount,
+            hint_sink,
+        )
+    }
+
+    /// Creates a route activation with an explicit automatic-admission policy.
+    pub fn new_with_admission(
+        project_root: &Path,
+        route_registered: Arc<AtomicBool>,
+        cancellation: CancellationToken,
+        automatic_admission: CodeIndexAutomaticAdmissionV1,
+        mount: CodeIndexActivationMountV1,
+        hint_sink: CodeIndexActivationHintSinkV1,
+    ) -> Self {
         let project_root = project_root
             .canonicalize()
             .unwrap_or_else(|_| project_root.to_path_buf());
@@ -136,6 +163,7 @@ impl CodeIndexActivationV1 {
             identity,
             route_registered,
             cancellation,
+            automatic_admission,
             state: Arc::new(AtomicU8::new(ACTIVATION_IDLE)),
             pending_hooks: Arc::new(Mutex::new(PendingHookPathsV1::default())),
             mount,
@@ -144,6 +172,11 @@ impl CodeIndexActivationV1 {
             #[cfg(test)]
             activation_attempts: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
+    }
+
+    /// Returns the retained automatic-admission decision for this route.
+    pub fn automatic_admission(&self) -> CodeIndexAutomaticAdmissionV1 {
+        self.automatic_admission
     }
 
     fn route_is_live(&self) -> bool {
@@ -191,7 +224,9 @@ impl CodeIndexActivationV1 {
 
     #[hotpath::measure(label = "daemon.code_index.activation.activate")]
     pub fn activate(&self) -> bool {
-        if !self.route_is_live() {
+        if self.automatic_admission != CodeIndexAutomaticAdmissionV1::Admitted
+            || !self.route_is_live()
+        {
             return false;
         }
         let Some(expected_identity) = self.identity.clone() else {
@@ -554,6 +589,35 @@ mod tests {
         wait_until(|| linked_activation.is_mounted()).await;
         assert_eq!(primary_mounts.load(Ordering::SeqCst), 1);
         assert_eq!(linked_mounts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn linked_worktree_disabled_admission_never_mounts() {
+        let repository = repository();
+        let mount_attempts = Arc::new(AtomicUsize::new(0));
+        let attempts = Arc::clone(&mount_attempts);
+        let activation = CodeIndexActivationV1::new_with_admission(
+            repository.path(),
+            Arc::new(AtomicBool::new(true)),
+            CancellationToken::new(),
+            CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled,
+            Arc::new(move || {
+                let attempts = Arc::clone(&attempts);
+                Box::pin(async move {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            }),
+            Arc::new(|_| Box::pin(async { true })),
+        );
+
+        assert_eq!(
+            activation.automatic_admission(),
+            CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled
+        );
+        assert!(!activation.activate());
+        tokio::task::yield_now().await;
+        assert_eq!(mount_attempts.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

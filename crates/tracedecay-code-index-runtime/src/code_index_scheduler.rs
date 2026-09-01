@@ -7449,6 +7449,7 @@ pub mod semantic_vector_graph;
 pub use crate::code_graph_seat::CodeGraphReplayBindingV1;
 pub use activation::{
     CodeIndexActivationHintSinkV1, CodeIndexActivationMountV1, CodeIndexActivationV1,
+    CodeIndexAutomaticAdmissionV1,
 };
 #[cfg(test)]
 pub use cadence::CodeIndexCadenceReadModelV1;

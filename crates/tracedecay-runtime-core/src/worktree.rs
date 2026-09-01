@@ -153,8 +153,9 @@ pub fn repository_identity_root(dir: &Path) -> Option<PathBuf> {
     primary_checkout_root(&worktree_root, Some(&common_dir))
 }
 
+/// Returns whether `dir` resolves to a linked worktree root.
 #[hotpath::measure]
-pub(crate) fn is_linked_worktree(dir: &Path) -> bool {
+pub fn is_linked_worktree(dir: &Path) -> bool {
     git_worktree_root(dir).is_some_and(|root| root.join(".git").is_file())
 }
 
