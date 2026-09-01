@@ -51,11 +51,13 @@ resolve_clean_source_head() {
   if [[ -n $expected_sha && $source_git_sha != "$expected_sha" ]]; then
     die "source repository HEAD moved during distribution acceptance: captured $expected_sha, now $source_git_sha"
   fi
-  # Ignored build outputs are intentionally allowed. Tracked, staged, and
-  # untracked source drift cannot be stamped as the clean release-env commit.
+  # Ignored build outputs and the workflow-owned auxiliary checkout are not
+  # release source. All other tracked, staged, and untracked drift cannot be
+  # stamped as the clean release-env commit.
   if ! source_drift=$(git --no-optional-locks -C "$source_repo" status \
     --porcelain=v1 \
-    --untracked-files=all 2>/dev/null); then
+    --untracked-files=all \
+    -- . ':(exclude).release-automation' 2>/dev/null); then
     die "failed to verify source repository cleanliness: $source_repo"
   fi
   if [[ -n $source_drift ]]; then
@@ -428,10 +430,10 @@ declare -a staged_root_assets=(
   "scripts/run-session-temporal-benchmark.sh"
 )
 for asset in "${staged_root_assets[@]}"; do
-  [[ -e "$repo/$asset" ]] ||
-    die "product package asset is missing from the source tree: $asset"
+  [[ -e "$staged/$asset" ]] ||
+    die "product package asset is missing from the staged source tree: $asset"
   mkdir -p -- "$staged_product/$(dirname -- "$asset")"
-  cp -a -- "$repo/$asset" "$staged_product/$(dirname -- "$asset")/"
+  cp -a -- "$staged/$asset" "$staged_product/$(dirname -- "$asset")/"
 done
 
 # The CLI package carries the prebuilt dashboard bundle; its `include`
@@ -444,10 +446,10 @@ declare -a staged_cli_assets=(
   "dashboard/app-dist"
 )
 for asset in "${staged_cli_assets[@]}"; do
-  [[ -e "$repo/$asset" ]] ||
-    die "CLI package asset is missing from the source tree: $asset"
+  [[ -e "$staged/$asset" ]] ||
+    die "CLI package asset is missing from the staged source tree: $asset"
   mkdir -p -- "$staged_cli_crate/$(dirname -- "$asset")"
-  cp -a -- "$repo/$asset" "$staged_cli_crate/$(dirname -- "$asset")/"
+  cp -a -- "$staged/$asset" "$staged_cli_crate/$(dirname -- "$asset")/"
 done
 
 # The manifest reads its readme from the workspace root, which is outside the
@@ -470,17 +472,18 @@ if text.count(old) != 1:
 path.write_text(text.replace(old, new), encoding="utf-8")
 PY
 
-# Prove the staged assets are byte-identical to the source tree, so the archive
-# below ships what the repository actually holds.
+# Prove the package-local copies are byte-identical to the validated staged
+# snapshot, so no later live-checkout change can enter the archive.
 assert_staged_assets_identical() {
-  local staged_dir=$1
-  shift
-  python3 - "$repo" "$staged_dir" "$@" <<'PY'
+  local source_dir=$1
+  local staged_dir=$2
+  shift 2
+  python3 - "$source_dir" "$staged_dir" "$@" <<'PY'
 import hashlib
 import pathlib
 import sys
 
-repo = pathlib.Path(sys.argv[1])
+source_root = pathlib.Path(sys.argv[1])
 staged = pathlib.Path(sys.argv[2])
 
 
@@ -495,18 +498,18 @@ def digest(root: pathlib.Path) -> str:
 
 
 for asset in sys.argv[3:]:
-    source, copied = repo / asset, staged / asset
+    source, copied = source_root / asset, staged / asset
     if not copied.exists():
         raise SystemExit(f"distribution acceptance: staged asset is missing: {asset}")
     if digest(source) != digest(copied):
         raise SystemExit(
-            f"distribution acceptance: staged asset differs from its source: {asset}"
+            f"distribution acceptance: staged asset differs from its snapshot: {asset}"
         )
 print(f"distribution acceptance: staged {len(sys.argv) - 3} package asset entries")
 PY
 }
-assert_staged_assets_identical "$staged_product" "${staged_root_assets[@]}"
-assert_staged_assets_identical "$staged_cli_crate" "${staged_cli_assets[@]}"
+assert_staged_assets_identical "$staged" "$staged_product" "${staged_root_assets[@]}"
+assert_staged_assets_identical "$staged" "$staged_cli_crate" "${staged_cli_assets[@]}"
 
 echo "distribution acceptance: packaging every workspace crate"
 # Every workspace member is publish = false: releases ship GitHub-release
