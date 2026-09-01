@@ -1009,23 +1009,10 @@ impl GraphDbRegistry {
                 // was validated when it was loaded, so the verified lease is
                 // built directly from that proof. Re-loading the head
                 // through its replay would hydrate the manifest and stream
-                // the rows a second time without adding durability.
-                let physical_namespace = locator.physical_namespace()?;
-                match database.ensure_projection_readable(
-                    &physical_namespace,
-                    &identity.projection.projection,
-                ) {
-                    Ok(()) => {}
-                    Err(GraphDbError::ProjectionMismatch { message, .. }) => {
-                        return Err(GraphDbError::GenerationMismatch {
-                            namespace: identity.projection.namespace.to_string(),
-                            projection: identity.projection.projection.to_string(),
-                            generation: identity.generation.to_string(),
-                            message,
-                        });
-                    }
-                    Err(error) => return Err(error),
-                }
+                // the rows a second time without adding durability. Seating
+                // records this fresh proof and clears any prior quarantine;
+                // the read-side quarantine guard must remain closed until
+                // that proof-bearing lease is installed.
                 let lease = generation_lease(&identity, historical_head.clone(), dependencies);
                 return seat_historical_verified_lease(
                     database,
