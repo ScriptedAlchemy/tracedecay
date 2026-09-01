@@ -476,6 +476,19 @@ impl VerifiedGraphQuery {
             .map_err(graph_projection_error)
     }
 
+    #[hotpath::measure(label = "usecases.graph.verified.callers_truncated")]
+    pub fn callers_truncated(
+        &self,
+        seeds: &[SymbolOccurrenceId],
+        kinds: &[RelationEdgeKindV1],
+        max_relations: usize,
+    ) -> Result<Vec<Vec<CodeGraphSemanticEdgeV1>>> {
+        self.refuse_if_bound_closed()?;
+        self.reader
+            .callers_truncated(seeds, kinds, max_relations, Arc::clone(&self.cancellation))
+            .map_err(graph_projection_error)
+    }
+
     #[hotpath::measure(label = "usecases.graph.verified.callees")]
     pub fn callees(
         &self,
@@ -486,6 +499,19 @@ impl VerifiedGraphQuery {
         self.refuse_if_bound_closed()?;
         self.reader
             .callees(seeds, kinds, max_relations, Arc::clone(&self.cancellation))
+            .map_err(graph_projection_error)
+    }
+
+    #[hotpath::measure(label = "usecases.graph.verified.callees_truncated")]
+    pub fn callees_truncated(
+        &self,
+        seeds: &[SymbolOccurrenceId],
+        kinds: &[RelationEdgeKindV1],
+        max_relations: usize,
+    ) -> Result<Vec<Vec<CodeGraphSemanticEdgeV1>>> {
+        self.refuse_if_bound_closed()?;
+        self.reader
+            .callees_truncated(seeds, kinds, max_relations, Arc::clone(&self.cancellation))
             .map_err(graph_projection_error)
     }
 

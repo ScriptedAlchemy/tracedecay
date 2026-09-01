@@ -500,6 +500,30 @@ impl VerifiedGraphSnapshot {
         })
     }
 
+    /// Page-shaped outgoing fan-out: stops at `max_relations` instead of
+    /// refusing the batch.
+    #[hotpath::measure(
+        label = "graph_db.lease.outgoing_relations_truncated",
+        impl_type = "VerifiedGraphSnapshot"
+    )]
+    pub fn outgoing_relations_truncated(
+        &self,
+        starts: &[GraphEntityId],
+        relation_kinds: &BTreeSet<crate::GraphRelationKind>,
+        max_relations: usize,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
+        self.with_operation(|| {
+            self.database.outgoing_relations_truncated(
+                &self.head.locator.physical_namespace()?,
+                starts,
+                relation_kinds,
+                max_relations,
+                cancellation,
+            )
+        })
+    }
+
     #[hotpath::measure(
         label = "graph_db.lease.outgoing_relation_targets",
         impl_type = "VerifiedGraphSnapshot"
@@ -554,6 +578,30 @@ impl VerifiedGraphSnapshot {
     ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
         self.with_operation(|| {
             self.database.incoming_relations(
+                &self.head.locator.physical_namespace()?,
+                starts,
+                relation_kinds,
+                max_relations,
+                cancellation,
+            )
+        })
+    }
+
+    /// Page-shaped incoming fan-out: stops at `max_relations` instead of
+    /// refusing the batch.
+    #[hotpath::measure(
+        label = "graph_db.lease.incoming_relations_truncated",
+        impl_type = "VerifiedGraphSnapshot"
+    )]
+    pub fn incoming_relations_truncated(
+        &self,
+        starts: &[GraphEntityId],
+        relation_kinds: &BTreeSet<crate::GraphRelationKind>,
+        max_relations: usize,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
+        self.with_operation(|| {
+            self.database.incoming_relations_truncated(
                 &self.head.locator.physical_namespace()?,
                 starts,
                 relation_kinds,

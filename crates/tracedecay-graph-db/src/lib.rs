@@ -146,7 +146,8 @@ pub fn take_graph_db_verification_counters() -> GraphDbVerificationCounters {
     hotpath_observe::take_verification_counters()
 }
 pub use traversal::{
-    GraphRelationTarget, GraphTraversalDirection, TraversalRequest, TraversalResult, TraversalVisit,
+    GraphRelationTarget, GraphTraversalDirection, RelationFanoutOverflow, TraversalRequest,
+    TraversalResult, TraversalVisit,
 };
 pub use vector::{
     GraphVectorIndexRequest, GraphVectorIndexStatus, MAX_VECTOR_SEARCH_LIMIT, VectorMatch,

@@ -462,3 +462,77 @@ async fn tracedecay_context_returns_typed_pending_coverage_when_every_code_lane_
     assert_eq!(payload["memory_matches"].as_array().map(Vec::len), Some(0));
     cg.close();
 }
+
+fn stale_lexical_search() -> crate::mcp::server::CodeIndexSearchOutcomeV1 {
+    match completed_lexical_search() {
+        crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(mut complete) => {
+            complete.coverage = crate::mcp::server::CodeIndexSearchCoverageV1::fused_stale(
+                &complete.code_generation,
+                &complete.semantic,
+            );
+            crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(complete)
+        }
+        other => other,
+    }
+}
+
+#[tokio::test]
+async fn tracedecay_context_preserves_stale_lane_coverage_markers() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().expect("stale context isolation");
+    let _env = SelectorEnv::new(dir.path());
+    let project = dir.path().join("stale-context-coverage");
+    fs::create_dir_all(project.join("src")).expect("create stale context sources");
+    fs::write(project.join("src/lib.rs"), "pub fn LexicalWidget() {}\n")
+        .expect("write stale context fixture");
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        &project,
+        "project.stale-context-coverage",
+    )
+    .await
+    .expect("registered stale context fixture");
+
+    let executor: crate::mcp::server::CodeIndexSearchExecutor =
+        Arc::new(|_| Box::pin(async { stale_lexical_search() }));
+    let mut options = lexical_search_options(&cg);
+    options.code_index_search_executor = Some(executor);
+    options.verified_graph_query_port = None;
+    let result = handle_tool_call_with_registry_options(
+        &cg,
+        "tracedecay_context",
+        json!({
+            "task": "explain LexicalWidget",
+            "include_memory": false,
+            "format": "json",
+        }),
+        None,
+        None,
+        options,
+    )
+    .await
+    .expect("serve-stale context must still answer");
+    let payload: Value = serde_json::from_str(
+        result.value["content"][0]["text"]
+            .as_str()
+            .expect("stale context JSON text"),
+    )
+    .expect("stale context JSON payload");
+
+    assert_eq!(
+        payload["code_generation"],
+        "generation.search-degradation.1"
+    );
+    assert_eq!(payload["search_matches"].as_array().map(Vec::len), Some(1));
+    assert_eq!(payload["coverage"]["recall"], "partial");
+    for lane in ["exact", "lexical", "graph"] {
+        assert_eq!(
+            payload["coverage"][lane]["status"], "stale",
+            "context must keep serve-stale markers on {lane}: {payload}"
+        );
+        assert_eq!(
+            payload["coverage"][lane]["generation"], "generation.search-degradation.1",
+            "stale {lane} must name the served generation: {payload}"
+        );
+    }
+    cg.close();
+}

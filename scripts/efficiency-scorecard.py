@@ -30,8 +30,8 @@ binary. The operator's daemon, profile, and stores are never touched.
                          (wall), plus the daemon's own generation build
                          elapsed and the seal->activation span
     tool_calls           p50/p95/max of `tool` CLI round-trips: search, grep,
-                         status, fact_store_search (memory recall); N samples
-                         per tool after fixed warm-up
+                         context, status, fact_store_search (memory recall);
+                         N samples per tool after fixed warm-up
     incremental_sync     one-file edit + commit, `tracedecay sync` -> the NEW
                          generation is "current" (wall + seal->activation)
     daemon_restart       SIGTERM -> exit, respawn -> freshness "current"
@@ -108,6 +108,12 @@ TOUCH_APPEND = (
 
 # Pinned tool-call battery. Sample i of a tool uses queries[i % len(queries)].
 SEARCH_QUERIES = ("BeaconState010", "capsule_0", "WatermarkState021", "aperture_1")
+CONTEXT_TASKS = (
+    "Explain BeaconState010 and its callers",
+    "How does capsule_0 assemble its window",
+    "Trace WatermarkState021 through related symbols",
+    "What calls aperture_1 and what does it call",
+)
 GREP_PATTERNS = ("saturating_add", "Bounded accumulator over an ordered keyspace")
 RECALL_QUERIES = ("fixture corpus decision", "daemon socket policy")
 SEED_FACTS = (
@@ -587,6 +593,14 @@ def tool_battery(sandbox: Sandbox, samples: int) -> dict:
         if tool == "search":
             query = SEARCH_QUERIES[index % len(SEARCH_QUERIES)]
             return "search", {"query": query, "limit": 10, "format": "json"}
+        if tool == "context":
+            task = CONTEXT_TASKS[index % len(CONTEXT_TASKS)]
+            return "context", {
+                "task": task,
+                "max_nodes": 20,
+                "include_code": False,
+                "format": "json",
+            }
         if tool == "grep":
             pattern = GREP_PATTERNS[index % len(GREP_PATTERNS)]
             return "grep", {
@@ -600,7 +614,7 @@ def tool_battery(sandbox: Sandbox, samples: int) -> dict:
         query = RECALL_QUERIES[index % len(RECALL_QUERIES)]
         return "fact_store_search", {"query": query, "limit": 5, "format": "json"}
 
-    tools = ("search", "grep", "status", "memory_recall")
+    tools = ("search", "grep", "context", "status", "memory_recall")
     for warmup in range(2):
         for tool in tools:
             name, arguments = battery_arguments(tool, warmup)
@@ -817,7 +831,7 @@ def human_summary(scorecard: dict) -> str:
     row("incremental sync seal → activation", "incremental_sync.seal_to_activation_seconds")
     row("daemon restart → serving (populated store)", "daemon_restart.spawn_to_current_seconds")
     lines.append("| | |")
-    for tool in ("search", "grep", "status", "memory_recall"):
+    for tool in ("search", "grep", "context", "status", "memory_recall"):
         row(f"{tool} p50", f"tool_calls.{tool}.p50_ms", "ms")
         row(f"{tool} p95", f"tool_calls.{tool}.p95_ms", "ms")
     lines.append("| | |")
@@ -982,6 +996,7 @@ def main() -> int:
             "warmup_calls_per_tool": 2,
             "poll_interval_seconds": POLL_INTERVAL_SECONDS,
             "search_queries": list(SEARCH_QUERIES),
+            "context_tasks": list(CONTEXT_TASKS),
             "grep_patterns": list(GREP_PATTERNS),
             "recall_queries": list(RECALL_QUERIES),
             "touch_file": str(TOUCH_FILE),

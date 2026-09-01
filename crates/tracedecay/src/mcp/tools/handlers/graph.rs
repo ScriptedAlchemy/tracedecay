@@ -51,10 +51,9 @@ use search_evidence::{
 };
 
 use tracedecay_mcp::handlers::graph::{
-    GRAPH_RELATION_READ_LIMIT, canonical_relation_kind_name, graph_occurrence_id,
-    graph_symbol_end_line, graph_symbol_paths, graph_symbols_in_scope, line_for_byte_offset,
-    node_not_found as node_not_found_result, required_graph_file_path, required_graph_metadata,
-    single_graph_adjacency_batch,
+    canonical_relation_kind_name, graph_occurrence_id, graph_symbol_end_line, graph_symbol_paths,
+    graph_symbols_in_scope, line_for_byte_offset, node_not_found as node_not_found_result,
+    required_graph_file_path, required_graph_metadata, single_graph_adjacency_batch,
 };
 use verified::{append_verified_plan_context, verified_context_markdown};
 
@@ -521,6 +520,18 @@ fn render_search_md(value: &Value) -> String {
     md.render()
 }
 
+/// Related-symbol assembly is a page, not a complete fan-out. The callers
+/// tool uses a 50k refuse budget; context used to keep that budget, hydrate
+/// every edge, then discard all but `max_nodes`. That walk is CPU-bound and
+/// shows no warm benefit. Cap examination at a small multiple of the kept
+/// page. Semantic kind lives on the edge entity (not the physical
+/// SOURCE/TARGET relation type), so the page is all-kinds — the same
+/// neighborhood the previous complete walk returned, just a prefix.
+#[hotpath::measure]
+fn context_related_relation_budget(max_nodes: usize) -> usize {
+    max_nodes.saturating_mul(4).clamp(16, 64)
+}
+
 #[derive(Default)]
 struct ContextGraphProjection {
     selected: Vec<CodeGraphSymbolSummaryV1>,
@@ -600,9 +611,10 @@ fn context_graph_projection(
         .collect::<Vec<_>>();
     let mut related = Vec::new();
     if !seeds.is_empty() {
+        let related_budget = context_related_relation_budget(max_nodes);
         for batches in [
-            graph.callers(&seeds, &[], GRAPH_RELATION_READ_LIMIT)?,
-            graph.callees(&seeds, &[], GRAPH_RELATION_READ_LIMIT)?,
+            graph.callers_truncated(&seeds, &[], related_budget)?,
+            graph.callees_truncated(&seeds, &[], related_budget)?,
         ] {
             for edge in batches.into_iter().flatten() {
                 if !seeds.contains(&edge.neighbor.occurrence)
@@ -622,19 +634,33 @@ fn context_graph_projection(
     let touched_files = graph_symbol_paths(&all_symbols)?;
     let mut code_blocks = Vec::new();
     if include_code {
+        // Context snippets are filesystem windows, not the mmap'd sealed
+        // lexical artifact (that path serves n-gram search). Cache by path
+        // so five symbols in one file do not re-read the whole source.
+        let mut source_by_path = HashMap::<String, String>::new();
         for symbol in selected.iter().take(max_code_blocks) {
             let metadata = required_graph_metadata(symbol)?;
             let file_path = required_graph_file_path(symbol)?;
-            let source = tracedecay_runtime_core::sync::read_source_file(
-                &cg.project_root().join(file_path),
-            )?;
+            if !source_by_path.contains_key(file_path) {
+                source_by_path.insert(
+                    file_path.to_owned(),
+                    tracedecay_runtime_core::sync::read_source_file(
+                        &cg.project_root().join(file_path),
+                    )?,
+                );
+            }
+            let Some(source) = source_by_path.get(file_path) else {
+                return Err(TraceDecayError::Config {
+                    message: format!("context source window missing for '{file_path}'"),
+                });
+            };
             code_blocks.push(ContextCodeBlockV1 {
                 node_id: symbol.occurrence.as_str().to_owned(),
                 file: file_path.to_owned(),
                 start_line: user_line(metadata.start_line),
                 end_line: user_line(graph_symbol_end_line(metadata)?),
                 code: tracedecay_mcp::handlers::info::extract_lines(
-                    &source,
+                    source,
                     metadata.start_line,
                     graph_symbol_end_line(metadata)?,
                 ),
@@ -1378,6 +1404,17 @@ mod tests {
             "why": null
         }))
         .expect("canonical context memory hit")
+    }
+
+    #[test]
+    fn context_related_relation_budget_is_a_page_not_a_complete_walk() {
+        assert_eq!(context_related_relation_budget(1), 16);
+        assert_eq!(context_related_relation_budget(20), 64);
+        assert_eq!(context_related_relation_budget(200), 64);
+        assert!(
+            context_related_relation_budget(20) < 50_000,
+            "context must not reuse the callers complete-walk budget"
+        );
     }
 
     /// A warm response must render exactly as it did before coverage existed:
