@@ -21,10 +21,10 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use tempfile::TempDir;
 use tracedecay_domain::UtcMicros;
 use tracedecay_graph_db::{
-    GraphCancellation, GraphDbError, GraphEntity, GraphEntityId, GraphEntityRef,
-    GraphGenerationDependency, GraphGenerationId, GraphGenerationManifest, GraphGenerationRelation,
-    GraphIdempotencyKey, GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphProperty,
-    GraphPropertyName, GraphWatermark, SourceGeneration, VerifiedGraphSnapshot,
+    GraphDbError, GraphEntity, GraphEntityId, GraphEntityRef, GraphGenerationDependency,
+    GraphGenerationId, GraphGenerationManifest, GraphGenerationRelation, GraphIdempotencyKey,
+    GraphMutation, GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphProperty,
+    GraphPropertyName, GraphWatermark, GraphWriteBatch, SourceGeneration, VerifiedGraphSnapshot,
 };
 use tracedecay_store::{
     GraphProjectionIdentityV1, GraphPublicationInputDigestV1, GraphPublicationKeyV1,
@@ -1004,22 +1004,6 @@ fn copy_crash_image(from_root: &std::path::Path, to_root: &std::path::Path) {
     }
 }
 
-/// A cancellation that fires once the sidecar WAL carries staged history
-/// past `baseline_segment` — the durable stage-page boundary a process
-/// killed mid-rebuild leaves behind. Staging observes it at the first
-/// check after a durable page commit, before the close/reopen digest proof
-/// can collapse that history.
-struct StagedWalDebtCancellation {
-    sidecar: std::path::PathBuf,
-    baseline_segment: Option<u64>,
-}
-
-impl GraphCancellation for StagedWalDebtCancellation {
-    fn is_cancelled(&self) -> bool {
-        newest_wal_segment(&self.sidecar) > self.baseline_segment
-    }
-}
-
 /// Highest sequence among non-empty `wal_<sequence>.log` segments — the same
 /// replay-debt signal the open-time collapse gates on.
 fn newest_wal_segment(sidecar: &std::path::Path) -> Option<u64> {
@@ -1070,49 +1054,41 @@ fn reopen_collapses_replayed_wal_history_from_an_unclean_shutdown() {
             None,
         )
         .unwrap();
-    let g1_head = first.head.clone();
     drop(first);
     let projection_key = g1_record.publication.key.projection.clone();
 
-    // Stage g2 durably but kill the publisher at the durable page boundary,
-    // before the close/reopen digest proof: the sidecar WAL now carries g2's
-    // staged history with no checkpoint metadata covering it — exactly the
-    // debt an interrupted full rebuild leaves behind.
-    let g2 = manifest(identity.clone(), "g2", "g2");
-    let g2_record = stage_manifest(
-        &mut authority,
-        &registered.binding,
-        &g2,
-        "publish:g2",
-        Some(g1_head.clone()),
-        'b',
-    );
-    let live_sidecar = sidecar_wal_path(&graph_path(temp.path()));
-    let mut interrupted_registration = registration(registered.binding.clone(), temp.path());
-    interrupted_registration.cancellation = Arc::new(StagedWalDebtCancellation {
-        sidecar: live_sidecar.clone(),
-        baseline_segment: newest_wal_segment(&live_sidecar),
-    });
-    let interrupted = registered
+    // Commit one unverified mutation through the live store and snapshot the
+    // files before close. This is the exact engine-level state a process kill
+    // leaves behind: the row is durable only in the sidecar WAL, while the
+    // relational authority still names g1 as the sole verified generation.
+    let debt_namespace = GraphNamespace::new("crash-wal-debt").unwrap();
+    let debt_entity = GraphEntityId::new("entity:wal-debt").unwrap();
+    let live = registered
         .registry
-        .publish_verified(
-            interrupted_registration,
-            &mut authority,
-            &context,
-            &g2_record.publication.key,
-            None,
+        .resolve(registration(registered.binding.clone(), temp.path()))
+        .unwrap();
+    live.apply_unverified(
+        GraphWriteBatch::new(
+            debt_namespace.clone(),
+            GraphProjectionId::new("unclean-shutdown").unwrap(),
+            SourceGeneration::new("source:wal-debt").unwrap(),
+            GraphWatermark::new("watermark:wal-debt").unwrap(),
+            vec![GraphMutation::UpsertEntity(entity(
+                debt_entity.as_str(),
+                "wal-debt",
+            ))],
+            Arc::new(TestCancellation),
         )
-        .unwrap_err();
-    assert_eq!(
-        interrupted,
-        GraphDbError::Cancelled,
-        "the interruption must land after a durable staged page and before the proof"
-    );
+        .unwrap(),
+    )
+    .unwrap();
 
     // Copy the live store without closing it: the crash image of a process
     // killed mid-rebuild.
     let crash_root = TempDir::new().unwrap();
     copy_crash_image(temp.path(), crash_root.path());
+    drop(live);
+    assert!(registered.close().unwrap());
     let crash_path = graph_path(crash_root.path());
     let crash_sidecar = sidecar_wal_path(&crash_path);
     let debt_segment = newest_wal_segment(&crash_sidecar)
@@ -1150,6 +1126,21 @@ fn reopen_collapses_replayed_wal_history_from_an_unclean_shutdown() {
         "the collapse must flush the replayed rows into the container \
          ({container_before} -> {container_after} bytes)"
     );
+    let replayed = reopened
+        .registry
+        .resolve(registration(reopened.binding.clone(), crash_root.path()))
+        .unwrap();
+    let replayed_debt = replayed
+        .entity(&debt_namespace, &debt_entity, Arc::new(TestCancellation))
+        .unwrap()
+        .expect("the checkpointed container must retain the replayed WAL row");
+    assert_eq!(
+        replayed_debt
+            .properties
+            .get(&GraphPropertyName::new("marker").unwrap()),
+        Some(&GraphProperty::String("wal-debt".to_owned()))
+    );
+    drop(replayed);
 
     // The collapse changed durability bookkeeping only: the verified surface
     // still serves exactly g1.
