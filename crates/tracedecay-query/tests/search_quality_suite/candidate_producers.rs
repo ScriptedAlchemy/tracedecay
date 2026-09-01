@@ -1442,6 +1442,61 @@ fn reader_rejects_unsupported_open_revisions_and_accepts_current() {
     }
 }
 
+/// Historical revision-10 artifact sealed by the pre-interning writer
+/// (`tests/fixtures/lexical-artifact-v10.sqlite`). Readers must serve it;
+/// a raw `term_id` SQL error is not an upgrade path.
+#[test]
+fn reader_serves_historical_v10_writer_artifact() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let checked_in =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lexical-artifact-v10.sqlite");
+    let control = ArtifactControl { cancelled: false };
+    let on_disk_revision: i64 = rusqlite::Connection::open(&checked_in)
+        .expect("inspect v10 fixture")
+        .query_row(
+            "SELECT format_revision FROM artifact_state WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read v10 format revision");
+    assert_eq!(on_disk_revision, 10);
+
+    let directory = tempfile::tempdir().expect("private v10 reopen dir");
+    let artifact_path = directory.path().join("lexical-artifact-v10.sqlite");
+    std::fs::copy(&checked_in, &artifact_path).expect("copy historical v10 fixture");
+    std::fs::set_permissions(&artifact_path, std::fs::Permissions::from_mode(0o600))
+        .expect("restore private-file mode for content-addressed open");
+    let bytes = std::fs::read(&artifact_path).expect("read historical v10 fixture");
+    let file_size_bytes = u64::try_from(bytes.len()).expect("v10 fixture length");
+    let digest = ManifestDigest::new(format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(&bytes))
+    ))
+    .expect("v10 fixture digest");
+
+    let reader = CodeLexicalArtifactReaderV1::open_content_addressed(
+        &artifact_path,
+        &digest,
+        file_size_bytes,
+        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        &control,
+    )
+    .expect("readers accept sealed revision 10");
+    let mut request = lexical_request("widget", &["widget"], &[], &[], 0, 8);
+    request.generation = reader.metadata().generation.clone();
+    let RetrieverOutcome::Complete(batch) = reader
+        .read_lexical_postings(&request)
+        .expect("v10 lexical serving")
+    else {
+        panic!("v10 lexical read must complete, not stale or rebuild");
+    };
+    assert!(
+        batch.coverage.eligible > 0,
+        "served v10 artifact must return widget candidates"
+    );
+}
+
 #[test]
 fn sealed_v11_artifact_uses_interned_plans_and_reports_dbstat() {
     let (fixture, pages, source_receipt) = real_verified_pages();

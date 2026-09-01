@@ -428,35 +428,48 @@ impl FinalizationSectionV1 {
     }
 
     #[hotpath::skip]
-    const fn full_query(self) -> &'static str {
-        match self {
-            Self::SourcePages => {
+    const fn full_query(self, layout: LexicalArtifactLayoutV1) -> &'static str {
+        match (self, layout) {
+            (Self::SourcePages, _) => {
                 "SELECT page_ordinal, page_digest, cumulative_digest, chunk_count, payload_bytes, import_count, import_payload_bytes, import_dictionary_digest, ngram_digest, base_sections_receipt, next_cursor FROM source_pages ORDER BY page_ordinal"
             }
-            Self::DocumentIntegrity => {
+            (Self::DocumentIntegrity, _) => {
                 "SELECT document_id, chunk_id, digest FROM document_integrity ORDER BY document_id"
             }
-            Self::ImportIntegrity => {
+            (Self::ImportIntegrity, _) => {
                 "SELECT canonical, digest FROM import_integrity ORDER BY canonical"
             }
-            Self::ImportEvidence => {
+            (Self::ImportEvidence, _) => {
                 "SELECT canonical, evidence FROM import_evidence ORDER BY canonical"
             }
-            Self::Rows => "SELECT document_id, chunk_id, row FROM rows ORDER BY document_id",
-            Self::TermPostings => {
+            (Self::Rows, _) => "SELECT document_id, chunk_id, row FROM rows ORDER BY document_id",
+            (Self::TermPostings, LexicalArtifactLayoutV1::V10) => {
+                "SELECT field, term, document_id, frequency FROM term_postings ORDER BY field, term, document_id"
+            }
+            (Self::TermPostings, LexicalArtifactLayoutV1::V11) => {
                 "SELECT term_id, field, document_id, frequency FROM term_postings ORDER BY term_id, field, document_id"
             }
-            Self::ExactPostings => {
+            (Self::ExactPostings, _) => {
                 "SELECT field, term, document_id FROM exact_postings ORDER BY field, term, document_id"
             }
-            Self::NgramPostings => {
+            (Self::NgramPostings, _) => {
                 "SELECT page_ordinal, kind, ngram, documents, cardinality FROM ngram_postings ORDER BY page_ordinal, kind, ngram"
             }
-            Self::FieldStatistics => "SELECT field, total_length FROM field_stats ORDER BY field",
-            Self::TermStatistics => {
+            (Self::FieldStatistics, _) => {
+                "SELECT field, total_length FROM field_stats ORDER BY field"
+            }
+            (Self::TermStatistics, LexicalArtifactLayoutV1::V10) => {
+                "SELECT field, term, document_frequency FROM term_stats ORDER BY field, term"
+            }
+            (Self::TermStatistics, LexicalArtifactLayoutV1::V11) => {
                 "SELECT term_id, field, document_frequency FROM term_stats ORDER BY term_id, field"
             }
-            Self::Vocabulary => "SELECT term_id, term, in_fuzzy FROM vocabulary ORDER BY term_id",
+            (Self::Vocabulary, LexicalArtifactLayoutV1::V10) => {
+                "SELECT term FROM vocabulary ORDER BY term"
+            }
+            (Self::Vocabulary, LexicalArtifactLayoutV1::V11) => {
+                "SELECT term_id, term, in_fuzzy FROM vocabulary ORDER BY term_id"
+            }
         }
     }
 
@@ -4479,8 +4492,10 @@ fn decode_cursor(
 pub(super) fn compute_section_digests(
     connection: &Connection,
     control: &dyn CodeIndexExecutionControlV1,
+    layout: LexicalArtifactLayoutV1,
 ) -> Result<Vec<CodeLexicalArtifactSectionDigestV1>, CodeLexicalArtifactErrorV1> {
-    let (source_pages, base_sections) = digest_source_pages_and_base_receipts(connection, control)?;
+    let (source_pages, base_sections) =
+        digest_source_pages_and_base_receipts(connection, control, layout)?;
     let mut sections = Vec::with_capacity(SECTION_NAMES.len());
     sections.push(source_pages);
     sections.extend(base_sections);
@@ -4489,7 +4504,7 @@ pub(super) fn compute_section_digests(
         FinalizationSectionV1::TermStatistics,
         FinalizationSectionV1::Vocabulary,
     ] {
-        sections.push(digest_query(connection, section, control)?);
+        sections.push(digest_query(connection, section, control, layout)?);
     }
     Ok(sections)
 }
@@ -4498,6 +4513,7 @@ pub(super) fn compute_section_digests(
 fn digest_source_pages_and_base_receipts(
     connection: &Connection,
     control: &dyn CodeIndexExecutionControlV1,
+    layout: LexicalArtifactLayoutV1,
 ) -> Result<
     (
         CodeLexicalArtifactSectionDigestV1,
@@ -4510,8 +4526,8 @@ fn digest_source_pages_and_base_receipts(
     let mut accumulator = initial_section_accumulator(section.name())?.to_vec();
     let (mut base_row_counts, mut base_accumulators) = initial_base_section_receipt_fold()?;
     let mut statement = connection
-        .prepare(section.full_query())
-        .map_err(sqlite_error)?;
+        .prepare(section.full_query(layout))
+        .map_err(|error| map_section_digest_sql_error(layout, section.name(), error))?;
     let column_count = statement.column_count();
     let mut rows = statement.query([]).map_err(sqlite_error)?;
     while let Some(row) = rows.next().map_err(sqlite_error)? {
@@ -4553,12 +4569,13 @@ fn digest_query(
     connection: &Connection,
     section: FinalizationSectionV1,
     control: &dyn CodeIndexExecutionControlV1,
+    layout: LexicalArtifactLayoutV1,
 ) -> Result<CodeLexicalArtifactSectionDigestV1, CodeLexicalArtifactErrorV1> {
     let mut row_count = 0u64;
     let mut accumulator = initial_section_accumulator(section.name())?.to_vec();
     let mut statement = connection
-        .prepare(section.full_query())
-        .map_err(sqlite_error)?;
+        .prepare(section.full_query(layout))
+        .map_err(|error| map_section_digest_sql_error(layout, section.name(), error))?;
     let column_count = statement.column_count();
     let mut rows = statement.query([]).map_err(sqlite_error)?;
     while let Some(row) = rows.next().map_err(sqlite_error)? {
@@ -4579,6 +4596,22 @@ fn digest_query(
         })?;
     }
     finish_section(section.name(), row_count, &accumulator)
+}
+
+fn map_section_digest_sql_error(
+    layout: LexicalArtifactLayoutV1,
+    section: &str,
+    error: rusqlite::Error,
+) -> CodeLexicalArtifactErrorV1 {
+    let message = error.to_string();
+    if message.contains("no such column") || message.contains("no such table") {
+        CodeLexicalArtifactErrorV1::Incompatible(format!(
+            "lexical artifact revision {} cannot digest {section}: {message}",
+            layout.revision()
+        ))
+    } else {
+        sqlite_error(error)
+    }
 }
 
 #[hotpath::measure]
@@ -4900,7 +4933,11 @@ fn verify_finalized_artifact(
             "finalized lexical artifact metadata digest changed".to_owned(),
         ));
     }
-    let sections = compute_section_digests(connection, control)?;
+    let sections = compute_section_digests(
+        connection,
+        control,
+        LexicalArtifactLayoutV1::from_revision(receipt.format_revision())?,
+    )?;
     if sections != receipt.section_digests() {
         return Err(CodeLexicalArtifactErrorV1::Corrupt(
             "finalized lexical artifact section digests do not verify".to_owned(),
@@ -5093,14 +5130,43 @@ mod tests {
             ))
             .expect("deny exhaustive base-table verification reads");
 
-        let sections = compute_section_digests(&connection, &ActiveControl)
-            .expect("verify only source-page receipts and derived sections");
+        let sections =
+            compute_section_digests(&connection, &ActiveControl, LexicalArtifactLayoutV1::V11)
+                .expect("verify only source-page receipts and derived sections");
         assert_eq!(
             sections
                 .iter()
                 .map(|section| section.name.as_str())
                 .collect::<Vec<_>>(),
             SECTION_NAMES
+        );
+    }
+
+    #[test]
+    fn section_digest_sql_dispatches_on_recorded_layout() {
+        assert!(
+            !FinalizationSectionV1::Vocabulary
+                .full_query(LexicalArtifactLayoutV1::V10)
+                .contains("term_id")
+        );
+        assert!(
+            FinalizationSectionV1::Vocabulary
+                .full_query(LexicalArtifactLayoutV1::V11)
+                .contains("term_id")
+        );
+        assert!(
+            !FinalizationSectionV1::TermStatistics
+                .full_query(LexicalArtifactLayoutV1::V10)
+                .contains("term_id")
+        );
+        assert!(
+            FinalizationSectionV1::TermStatistics
+                .full_query(LexicalArtifactLayoutV1::V11)
+                .contains("term_id")
+        );
+        assert_eq!(
+            FinalizationSectionV1::Vocabulary.full_query(LexicalArtifactLayoutV1::V10),
+            "SELECT term FROM vocabulary ORDER BY term"
         );
     }
 

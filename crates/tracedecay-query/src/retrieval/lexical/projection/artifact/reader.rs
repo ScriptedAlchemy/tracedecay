@@ -382,7 +382,7 @@ impl CodeLexicalArtifactReaderV1 {
         }
         let sections = hotpath::measure_block!(
             "query.artifact.open.section_digest_verify",
-            compute_section_digests(&connection, control)
+            compute_section_digests(&connection, control, layout)
         )?;
         if sections != stored.section_digests() {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
