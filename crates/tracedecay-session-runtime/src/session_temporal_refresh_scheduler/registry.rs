@@ -95,6 +95,7 @@ struct SessionTemporalRefreshSchedulerEntry {
 
 struct SessionTemporalRefreshSupervisorInstrumentation;
 
+#[hotpath::measure_all]
 impl SessionTemporalRefreshSupervisorInstrumentation {
     fn new() -> Self {
         hotpath::gauge!("session_temporal_refresh_supervisors_active").inc(1.0);
@@ -108,7 +109,9 @@ impl Drop for SessionTemporalRefreshSupervisorInstrumentation {
     }
 }
 
+#[hotpath::measure_all]
 impl SessionTemporalRefreshSchedulerEntry {
+    #[hotpath::skip]
     async fn shutdown(self) {
         if let Some(history) = self
             .history
@@ -197,6 +200,7 @@ impl Drop for SessionTemporalRefreshSchedulerRegistry {
     }
 }
 
+#[hotpath::measure_all]
 impl SessionTemporalRefreshSchedulerRegistry {
     #[cfg(any(test, feature = "test-helpers"))]
     pub(crate) fn configure_for_test(
@@ -227,6 +231,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
         Arc::clone(&self.codex_discovery)
     }
 
+    #[hotpath::skip]
     fn spawn_entry(
         &self,
         database: RegisteredGlobalDbLeaseV1,
@@ -322,6 +327,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
         }
     }
 
+    #[hotpath::skip]
     pub async fn ensure_project(
         &self,
         owner: StoreOwnerKey,
@@ -375,6 +381,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
         wake
     }
 
+    #[hotpath::skip]
     pub async fn ensure_profile(
         &self,
         database_path: std::path::PathBuf,
@@ -421,6 +428,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
         wake
     }
 
+    #[hotpath::skip]
     pub async fn ensure_project_with_history(
         &self,
         owner: StoreOwnerKey,
@@ -449,6 +457,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
         wake
     }
 
+    #[hotpath::skip]
     pub async fn ensure_profile_with_history(
         &self,
         database_path: std::path::PathBuf,
@@ -477,6 +486,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
         wake
     }
 
+    #[hotpath::skip]
     pub async fn rekey_project(
         &self,
         old_owner: &StoreOwnerKey,
@@ -534,6 +544,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
         project.insert(new_owner, entry);
     }
 
+    #[hotpath::skip]
     pub async fn retire_project(&self, owner: &StoreOwnerKey) {
         let _lifecycle = self.project_lifecycle.lock().await;
         if let Some(entry) = self.project.lock().await.remove(owner) {
@@ -541,6 +552,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
         }
     }
 
+    #[hotpath::skip]
     pub async fn owns_project_database_paths(
         &self,
         database_paths: &HashSet<std::path::PathBuf>,
@@ -552,6 +564,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
             .any(|owner| database_paths.contains(&owner.graph_db_path))
     }
 
+    #[hotpath::skip]
     pub async fn cancel_historical_ingest(&self) {
         let project = self.project.lock().await;
         let profile = self.profile.lock().await;
@@ -568,6 +581,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
     }
 
     #[cfg_attr(not(unix), allow(dead_code))] // invoked by the unix-only daemon shutdown path
+    #[hotpath::skip]
     pub async fn shutdown(&self) {
         self.shutting_down.store(true, Ordering::Release);
         let _guard = self.shutdown_guard.lock().await;
@@ -594,6 +608,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
+    #[hotpath::skip]
     pub async fn project_state(
         &self,
         owner: &StoreOwnerKey,
@@ -606,6 +621,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
+    #[hotpath::skip]
     pub async fn profile_worker_status(
         &self,
         database_path: &std::path::Path,
@@ -617,16 +633,19 @@ impl SessionTemporalRefreshSchedulerRegistry {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
+    #[hotpath::skip]
     pub async fn project_worker_count(&self) -> usize {
         self.project.lock().await.len()
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
+    #[hotpath::skip]
     pub async fn profile_worker_count(&self) -> usize {
         self.profile.lock().await.len()
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
+    #[hotpath::skip]
     pub async fn profile_pass_count(&self, database_path: &std::path::Path) -> usize {
         self.profile
             .lock()
@@ -636,6 +655,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
+    #[hotpath::skip]
     pub async fn wait_profile_idle(
         &self,
         database_path: &std::path::Path,
@@ -667,10 +687,12 @@ impl SessionTemporalRefreshSchedulerRegistry {
     }
 }
 
+#[hotpath::measure]
 fn inert_session_temporal_refresh_wake() -> SessionTemporalRefreshWake {
     SessionTemporalRefreshWake::unavailable()
 }
 
+#[hotpath::measure]
 pub(crate) fn session_refresh_retry_delay(
     class: SessionTemporalRefreshRetryClass,
     attempt: u32,

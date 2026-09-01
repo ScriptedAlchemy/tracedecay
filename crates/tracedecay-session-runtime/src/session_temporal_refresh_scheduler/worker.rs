@@ -236,6 +236,7 @@ struct SessionTemporalRefreshWorkerInstrumentation<'a> {
     state: &'a SessionTemporalRefreshWakeState,
 }
 
+#[hotpath::measure_all]
 impl<'a> SessionTemporalRefreshWorkerInstrumentation<'a> {
     fn new(state: &'a SessionTemporalRefreshWakeState) -> Self {
         hotpath::gauge!("session_temporal_refresh_workers_active").inc(1.0);
@@ -250,6 +251,7 @@ impl Drop for SessionTemporalRefreshWorkerInstrumentation<'_> {
     }
 }
 
+#[hotpath::measure]
 fn stop_worker(state: &SessionTemporalRefreshWakeState) {
     state.clear_worker_activity_instrumentation();
 }
@@ -263,6 +265,7 @@ macro_rules! increment_outcome {
     }};
 }
 
+#[hotpath::measure]
 fn observe_pass_report(report: &SessionTemporalRefreshPassReport, no_progress_retry: bool) {
     hotpath::gauge!("session_temporal_refresh_passes").inc(1.0);
     if no_progress_retry {
@@ -292,6 +295,7 @@ fn observe_pass_report(report: &SessionTemporalRefreshPassReport, no_progress_re
     );
 }
 
+#[hotpath::measure]
 fn observe_retry(class: SessionTemporalRefreshRetryClass, attempt: u32) {
     match class {
         SessionTemporalRefreshRetryClass::Storage => {
@@ -347,6 +351,7 @@ async fn session_projection_refresh(
     run_session_temporal_refresh_pass(database, state, projector, policy).await
 }
 
+#[hotpath::measure]
 fn classify_store_error(error: &SessionStoreError) -> SessionTemporalRefreshRetryClass {
     if error.is_storage() {
         SessionTemporalRefreshRetryClass::Storage
@@ -489,6 +494,7 @@ async fn complete_ready_refresh(
     }
 }
 
+#[hotpath::measure]
 fn record_projector_error(
     error: SessionTemporalRefreshProjectorError,
     report: &mut SessionTemporalRefreshPassReport,
@@ -658,6 +664,7 @@ async fn project_running_refresh(
     }
 }
 
+#[hotpath::measure]
 fn recovery_key(recovery: &SessionRefreshRecoveryV1) -> String {
     format!(
         "{}\0{}",

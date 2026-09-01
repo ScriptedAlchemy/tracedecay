@@ -61,6 +61,7 @@ pub struct SessionTemporalRefreshWorkerStatus {
     pub unavailable_reason: Option<SessionTemporalRefreshUnavailableReason>,
 }
 
+#[hotpath::measure_all]
 impl SessionTemporalRefreshWorkerStatus {
     fn missing() -> Self {
         Self {
@@ -73,6 +74,7 @@ impl SessionTemporalRefreshWorkerStatus {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
+    #[hotpath::skip]
     pub const fn is_available(self) -> bool {
         self.unavailable_reason.is_none()
     }
@@ -165,6 +167,7 @@ impl Default for SessionTemporalRefreshWakeState {
     }
 }
 
+#[hotpath::measure_all]
 impl SessionTemporalRefreshWakeState {
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn queued_request_count(&self) -> usize {
@@ -641,6 +644,7 @@ impl SessionTemporalRefreshWakeState {
         self.completion_control.clone()
     }
 
+    #[hotpath::skip]
     pub async fn wait_for_cancellation(&self) {
         loop {
             let notified = self.cancellation.notified();
@@ -664,6 +668,7 @@ impl Drop for SessionTemporalRefreshWakeState {
     }
 }
 
+#[hotpath::measure]
 fn bounded_depth(depth: usize) -> f64 {
     depth.min(u32::MAX as usize) as f64
 }
@@ -674,6 +679,7 @@ pub(crate) struct TerminalAttemptGuard<'a> {
     retain: bool,
 }
 
+#[hotpath::measure_all]
 impl<'a> TerminalAttemptGuard<'a> {
     pub(crate) fn new(
         state: &'a SessionTemporalRefreshWakeState,
@@ -704,6 +710,7 @@ pub(crate) struct PendingBeginRequestGuard<'a> {
     request: Option<SessionRefreshBeginOrJoinRequestV1>,
 }
 
+#[hotpath::measure_all]
 impl<'a> PendingBeginRequestGuard<'a> {
     pub(crate) fn new(
         state: &'a SessionTemporalRefreshWakeState,
@@ -739,6 +746,7 @@ pub(crate) struct RecoverySelectionGuard<'a> {
     pending: VecDeque<String>,
 }
 
+#[hotpath::measure_all]
 impl<'a> RecoverySelectionGuard<'a> {
     pub(crate) fn new(state: &'a SessionTemporalRefreshWakeState, pending: Vec<String>) -> Self {
         Self {
@@ -775,6 +783,7 @@ struct SessionTemporalRefreshWakeRoute {
     target: std::sync::RwLock<std::sync::Weak<SessionTemporalRefreshWakeState>>,
 }
 
+#[hotpath::measure]
 fn enabled_idle_notification(
     state: &SessionTemporalRefreshWakeState,
 ) -> std::pin::Pin<Box<tokio::sync::futures::Notified<'_>>> {
@@ -788,6 +797,7 @@ pub struct SessionTemporalRefreshWake {
     route: Arc<SessionTemporalRefreshWakeRoute>,
 }
 
+#[hotpath::measure_all]
 impl SessionTemporalRefreshWake {
     pub fn unavailable() -> Self {
         Self {
@@ -840,6 +850,7 @@ impl SessionTemporalRefreshWake {
     /// before the mutating tool returns so Hermes `sync_turn` → `lcm_grep`
     /// stays available on the same route without inventing stores or weakening
     /// empty/unavailable semantics.
+    #[hotpath::skip]
     pub async fn wake_and_wait_until_idle(&self, timeout: std::time::Duration) -> bool {
         let Some(state) = self.target() else {
             return false;
