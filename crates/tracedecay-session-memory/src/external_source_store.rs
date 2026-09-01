@@ -371,6 +371,7 @@ impl RuntimeExternalSourceStore {
         Self { runtime }
     }
 
+    #[hotpath::skip]
     pub async fn capture_host_observations(
         &self,
         receipts: &[tracedecay_store::ObservationCommitReceipt],

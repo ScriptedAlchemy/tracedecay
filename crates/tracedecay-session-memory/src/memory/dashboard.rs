@@ -25,6 +25,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     /// Finite dashboard overview; the dashboard never opens a memory database
     /// or constructs an unbounded store query itself.
     #[hotpath::measure(label = "usecases.memory.dashboard.overview", future = true)]
+    #[hotpath::skip]
     pub async fn dashboard_overview(
         &self,
         fact_limit: usize,
@@ -67,6 +68,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     }
 
     #[hotpath::measure(label = "usecases.memory.dashboard.detail", future = true)]
+    #[hotpath::skip]
     pub async fn dashboard_fact_detail(
         &self,
         fact_id: FactId,
@@ -126,6 +128,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
 
     /// Capped vector inputs for dashboard-side PCA and similarity.
     #[hotpath::measure(label = "usecases.memory.dashboard.vectors", future = true)]
+    #[hotpath::skip]
     pub async fn dashboard_vector_points(
         &self,
         search: Option<String>,
@@ -152,6 +155,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     }
 
     #[hotpath::measure(label = "usecases.memory.dashboard.oplog", future = true)]
+    #[hotpath::skip]
     pub async fn dashboard_oplog(
         &self,
         limit: usize,

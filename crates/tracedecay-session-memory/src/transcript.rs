@@ -177,6 +177,7 @@ where
     D: Borrow<RegisteredGlobalDb> + Send + Sync,
 {
     #[hotpath::measure(label = "usecases.transcript_store.get_parse_offset", future = true)]
+    #[hotpath::skip]
     async fn get_parse_offset(&self, cursor_path: &Path) -> TranscriptStoreResult<ParseOffset> {
         let cursor_key = Self::path_text(cursor_path);
         self.db()
@@ -190,6 +191,7 @@ where
         label = "usecases.transcript_store.persist_transcript_batch",
         future = true
     )]
+    #[hotpath::skip]
     async fn persist_transcript_batch(
         &self,
         batch: TranscriptWriteBatch,
@@ -206,6 +208,7 @@ where
         label = "usecases.transcript_store.replace_parse_offset_pair",
         future = true
     )]
+    #[hotpath::skip]
     async fn replace_parse_offset_pair(
         &self,
         first: (&Path, ParseOffset, ParseOffset),
@@ -226,6 +229,7 @@ where
         label = "usecases.transcript_store.advance_parse_offset",
         future = true
     )]
+    #[hotpath::skip]
     async fn advance_parse_offset_monotonic(
         &self,
         cursor_path: &Path,
@@ -241,6 +245,7 @@ where
         label = "usecases.transcript_store.record_session_ingest_activity",
         future = true
     )]
+    #[hotpath::skip]
     async fn record_session_ingest_activity(
         &self,
         project_root: &Path,
@@ -259,6 +264,7 @@ where
     }
 
     #[hotpath::measure(label = "usecases.transcript_store.get_session", future = true)]
+    #[hotpath::skip]
     async fn get_session(
         &self,
         provider: &str,
@@ -283,6 +289,7 @@ where
         label = "usecases.transcript_store.persist_transcript_batch_git",
         future = true
     )]
+    #[hotpath::skip]
     async fn persist_transcript_batch_with_git_evidence(
         &self,
         batch: TranscriptWriteBatch,

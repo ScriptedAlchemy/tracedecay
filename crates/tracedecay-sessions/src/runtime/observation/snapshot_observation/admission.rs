@@ -749,6 +749,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[hotpath::skip]
     async fn pre_cancelled_snapshot_sweep_returns_control_error_before_admission() {
         let cancellation = ObservationCancellation::default();
         cancellation.cancel();
@@ -773,6 +774,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[hotpath::skip]
     async fn mid_sweep_cancellation_advances_no_coverage_and_retry_commits() {
         let admission = MemoryHostAdmission::default();
         let cancellation = ObservationCancellation::default();

@@ -34,6 +34,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     /// long-lived profile holds far more rows than the `SQLite` runtime
     /// materializes for a single exact-SQL query; an unbounded read here
     /// degraded every project full-upgrade on such profiles.
+    #[hotpath::skip]
     pub async fn list_session_sync_source_frontiers(
         &self,
     ) -> Result<Vec<(String, String, String)>, TraceDecayError> {
@@ -173,6 +174,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     }
 
     #[hotpath::measure(future = true, label = "global_db.registered.session_sync.insert")]
+    #[hotpath::skip]
     pub async fn insert_session_sync_journal(
         &self,
         key: &str,
@@ -193,6 +195,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     }
 
     #[hotpath::measure(future = true, label = "global_db.registered.session_sync.cas")]
+    #[hotpath::skip]
     pub async fn compare_and_swap_session_sync_journal(
         &self,
         key: &str,

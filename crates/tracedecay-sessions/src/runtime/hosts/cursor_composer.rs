@@ -72,6 +72,7 @@ pub const PROVIDER: &str = "cursor";
 impl CursorComposerSource {
     /// Ingest composer sessions belonging to `project_root`, bounded to
     /// `envelope_cap` newly changed sessions.
+    #[hotpath::skip]
     pub async fn ingest(
         &self,
         admission: &dyn crate::admission::HostAdmission,

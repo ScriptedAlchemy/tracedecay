@@ -163,6 +163,7 @@ impl SessionRefreshRecoveryV1 {
 #[hotpath::measure_all]
 impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     #[hotpath::measure(future = true, label = "session_temporal.txn.begin_refresh")]
+    #[hotpath::skip]
     pub async fn begin_or_join_session_refresh_result(
         &self,
         request: SessionRefreshBeginOrJoinRequestV1,
@@ -339,6 +340,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     }
 
     #[hotpath::measure(future = true, label = "session_temporal.persist.refresh_batch")]
+    #[hotpath::skip]
     pub async fn persist_session_refresh_projection_batch_controlled_result(
         &self,
         progress: SessionRefreshProgressV1,
@@ -437,6 +439,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     }
 
     #[hotpath::measure(future = true, label = "session_temporal.persist.refresh_progress")]
+    #[hotpath::skip]
     pub async fn persist_session_refresh_progress_result(
         &self,
         progress: SessionRefreshProgressV1,
@@ -519,6 +522,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     }
 
     #[hotpath::measure(future = true, label = "session_temporal.query.refresh_progress")]
+    #[hotpath::skip]
     pub async fn session_refresh_progress_result(
         &self,
         request: SessionRefreshProgressRequestV1,
@@ -531,6 +535,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     }
 
     #[hotpath::measure(future = true, label = "session_temporal.txn.complete_refresh")]
+    #[hotpath::skip]
     pub async fn complete_session_refresh_result(
         &self,
         request: SessionRefreshCompletionRequestV1,
@@ -682,6 +687,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     }
 
     #[hotpath::measure(future = true, label = "session_temporal.txn.fail_refresh")]
+    #[hotpath::skip]
     pub async fn fail_session_refresh_result(
         &self,
         request: SessionRefreshFailureRequestV1,
@@ -777,6 +783,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     }
 
     #[hotpath::measure(future = true, label = "session_temporal.txn.cancel_refresh")]
+    #[hotpath::skip]
     pub async fn cancel_session_refresh_result(
         &self,
         request: SessionRefreshCancellationRequestV1,
@@ -871,6 +878,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     }
 
     #[hotpath::measure(future = true, label = "session_temporal.query.refresh_receipt")]
+    #[hotpath::skip]
     pub async fn session_refresh_receipt_result(
         &self,
         request: SessionRefreshReceiptRequestV1,
@@ -883,6 +891,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     }
 
     #[hotpath::measure(future = true, label = "session_temporal.query.refresh_recovery")]
+    #[hotpath::skip]
     pub async fn session_refresh_recovery_result(
         &self,
         session_id: &SessionId,
@@ -896,6 +905,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     }
 
     #[hotpath::measure(future = true, label = "session_temporal.query.refresh_running")]
+    #[hotpath::skip]
     pub async fn running_session_refreshes_result(
         &self,
     ) -> SessionStoreResult<Vec<SessionRefreshRecoveryV1>> {

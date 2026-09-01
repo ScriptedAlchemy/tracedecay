@@ -258,6 +258,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     }
 
     #[hotpath::measure(label = "usecases.memory.add", future = true)]
+    #[hotpath::skip]
     pub async fn add_project_memory_fact(
         &self,
         request: ProjectMemoryFactAddCommandV1,
@@ -279,6 +280,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     /// no-write outcomes and committed authority failures retain their exact
     /// outcome for external partial-effect settlement.
     #[hotpath::measure(label = "usecases.memory.add.preflighted", future = true)]
+    #[hotpath::skip]
     pub async fn add_preflighted_project_memory_fact(
         &self,
         preflight: ProjectMemoryFactAddPreflight,

@@ -984,6 +984,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
     }
 
     #[hotpath::measure(future = true, label = "session_temporal.query.candidates")]
+    #[hotpath::skip]
     async fn produce_candidates(
         &self,
         scope: &TemporalRetrievalScope,
@@ -1152,6 +1153,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
     }
 
     #[hotpath::measure(future = true, label = "session_temporal.query.records")]
+    #[hotpath::skip]
     async fn produce_records(
         &self,
         scope: &TemporalRetrievalScope,

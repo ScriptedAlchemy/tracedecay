@@ -558,6 +558,7 @@ mod tests {
         )
     }
 
+    #[hotpath::skip]
     async fn seed_root_sessions(
         connection: &TestConnection,
         count: usize,
@@ -704,6 +705,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[hotpath::skip]
     async fn root_no_hit_over_256_sessions_is_truthful_zero_not_manifest_limit() {
         let directory = tempdir().expect("temporary directory");
         let database_path = directory.path().join("sessions.db");
@@ -731,6 +733,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[hotpath::skip]
     async fn root_no_hit_reports_aggregate_projection_staleness() {
         let directory = tempdir().expect("temporary directory");
         let database_path = directory.path().join("sessions.db");
@@ -757,6 +760,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[hotpath::skip]
     async fn root_rare_hit_over_256_sessions_freezes_only_the_admitted_participant() {
         let directory = tempdir().expect("temporary directory");
         let database_path = directory.path().join("sessions.db");
@@ -789,6 +793,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[hotpath::skip]
     async fn root_common_hit_over_256_sessions_reports_candidate_budget_not_manifest_limit() {
         let directory = tempdir().expect("temporary directory");
         let database_path = directory.path().join("sessions.db");
@@ -813,6 +818,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[hotpath::skip]
     async fn participant_freeze_rejects_an_active_generation_without_its_applied_graph_receipt() {
         let directory = tempdir().expect("temporary directory");
         let database_path = directory.path().join("sessions.db");

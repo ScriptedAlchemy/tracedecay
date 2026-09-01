@@ -63,12 +63,14 @@ pub const SESSION_MESSAGES_AFTER_SQL: &str = "SELECT timestamp, ordinal, kind, t
 
 #[hotpath::measure_all]
 impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
+    #[hotpath::skip]
     pub async fn cursor_session_ingest_health(&self) -> Result<SessionIngestHealth, String> {
         self.session_ingest_health_for_provider(Some("cursor"))
             .await
     }
 
     #[hotpath::measure(future = true, label = "global_db.registered_sessions.ingest_health")]
+    #[hotpath::skip]
     pub async fn session_ingest_health_for_provider(
         &self,
         provider: Option<&str>,
@@ -274,6 +276,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     }
 
     #[hotpath::measure(future = true, label = "global_db.registered_sessions.exists")]
+    #[hotpath::skip]
     pub async fn has_session_message(
         &self,
         provider: &str,
@@ -304,6 +307,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     }
 
     #[hotpath::measure(future = true, label = "global_db.registered_sessions.count")]
+    #[hotpath::skip]
     pub async fn session_message_count(&self) -> Result<i64, String> {
         let mut rows = self
             .read_connection()
@@ -320,6 +324,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     }
 
     #[hotpath::measure(future = true, label = "global_db.registered_sessions.count_project")]
+    #[hotpath::skip]
     pub async fn session_message_count_for_project(
         &self,
         project_key: &str,
@@ -345,6 +350,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     }
 
     #[hotpath::measure(future = true, label = "global_db.registered_sessions.after")]
+    #[hotpath::skip]
     pub async fn session_messages_after(
         &self,
         provider: &str,
@@ -407,6 +413,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     /// a failed query or an unreadable timestamp stays an error rather than
     /// masquerading as an idle store.
     #[hotpath::measure(future = true, label = "global_db.registered_sessions.activity")]
+    #[hotpath::skip]
     pub async fn latest_session_activity_secs(
         &self,
     ) -> tracedecay_domain::errors::Result<Option<i64>> {
@@ -456,6 +463,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     /// Reads one message by provider and id. `Ok(None)` is truthful absence;
     /// snapshot, query, and row-decode failures stay typed errors.
     #[hotpath::measure(future = true, label = "global_db.registered_sessions.get")]
+    #[hotpath::skip]
     pub async fn get_session_message(
         &self,
         provider: &str,
@@ -489,6 +497,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     /// `Ok(vec![])` is the truthful "nothing matched"; snapshot, query, and
     /// row-decode failures are typed errors instead of an empty result page.
     #[hotpath::measure(future = true, label = "global_db.registered_sessions.search")]
+    #[hotpath::skip]
     pub async fn search_session_messages(
         &self,
         provider: &str,
@@ -596,6 +605,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     /// Goals with no native timestamp rank after all timestamped goals
     /// instead of being assigned a fabricated epoch-zero time.
     #[hotpath::measure(future = true, label = "global_db.registered_sessions.goals")]
+    #[hotpath::skip]
     pub async fn recent_session_goals(
         &self,
         project_key: Option<&str>,
@@ -736,6 +746,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
 
     /// Reads the canonical workflow fact columns used by projection acceptance.
     #[hotpath::measure(future = true, label = "global_db.registered_sessions.workflow_facts")]
+    #[hotpath::skip]
     pub async fn workflow_fact_rows(
         &self,
     ) -> tracedecay_domain::errors::Result<Vec<(String, Option<String>, Option<String>)>> {

@@ -184,6 +184,7 @@ impl<'a> ProjectProviderRun<'a> {
     }
 
     #[hotpath::measure(label = "sessions.ingest.project.codex", future = true)]
+    #[hotpath::skip]
     async fn run_codex(self) -> ProviderRunOutcome {
         let Some(source) = codex::CodexSource::new() else {
             return ProviderRunOutcome::skipped();
@@ -369,6 +370,7 @@ impl<'a> ProjectProviderRun<'a> {
     }
 
     #[hotpath::measure(label = "sessions.ingest.project.kiro", future = true)]
+    #[hotpath::skip]
     async fn run_kiro(self) -> ProviderRunOutcome {
         let Some(source) = kiro::KiroSource::new() else {
             return ProviderRunOutcome::skipped();
@@ -406,6 +408,7 @@ impl<'a> ProjectProviderRun<'a> {
     }
 
     #[hotpath::measure(label = "sessions.ingest.project.kimi", future = true)]
+    #[hotpath::skip]
     async fn run_kimi(self) -> ProviderRunOutcome {
         let Some(source) = kimi::KimiSource::new() else {
             return ProviderRunOutcome::skipped();
@@ -466,6 +469,7 @@ impl<'a> ProjectProviderRun<'a> {
     }
 
     #[hotpath::measure(label = "sessions.ingest.project.opencode", future = true)]
+    #[hotpath::skip]
     async fn run_opencode(self) -> ProviderRunOutcome {
         let Some(source) = opencode::OpenCodeSource::new_for_project(self.project_root) else {
             return ProviderRunOutcome::skipped();
@@ -530,6 +534,7 @@ impl<'a> ProjectProviderRun<'a> {
     }
 
     #[hotpath::measure(label = "sessions.ingest.project.cline_like", future = true)]
+    #[hotpath::skip]
     async fn run_cline_like(self) -> ProviderRunOutcome {
         let source = match self.candidate {
             SessionProvider::Cline => cline_like::ClineLikeSource::cline(),
@@ -573,6 +578,7 @@ impl<'a> ProjectProviderRun<'a> {
     }
 
     #[hotpath::measure(label = "sessions.ingest.project.vibe", future = true)]
+    #[hotpath::skip]
     async fn run_vibe(self) -> ProviderRunOutcome {
         let Some(source) = vibe::VibeSource::new() else {
             return ProviderRunOutcome::skipped();
@@ -610,6 +616,7 @@ impl<'a> ProjectProviderRun<'a> {
     }
 
     #[hotpath::measure(label = "sessions.ingest.project.claude", future = true)]
+    #[hotpath::skip]
     async fn run_claude(self) -> ProjectProviderRunResult {
         match ingest_project_claude_observations(
             self.project_root,
@@ -666,6 +673,7 @@ impl<'a> ProjectProviderRun<'a> {
     }
 
     #[hotpath::measure(label = "sessions.ingest.project.cursor", future = true)]
+    #[hotpath::skip]
     async fn run_cursor(self) -> ProviderRunOutcome {
         let (composer, composer_error) =
             if let Some(source) = cursor_composer::CursorComposerSource::new() {
@@ -745,6 +753,7 @@ impl<'a> ProjectProviderRun<'a> {
     }
 
     #[hotpath::measure(label = "sessions.ingest.project.hermes", future = true)]
+    #[hotpath::skip]
     async fn run_hermes(self) -> ProviderRunOutcome {
         let Some(outcome) = hermes::ingest_for_project_capped_with_admission_and_cancellation(
             self.project_root,

@@ -155,6 +155,7 @@ pub async fn set_parse_offset(
 
 #[hotpath::measure_all]
 impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
+    #[hotpath::skip]
     pub(super) async fn begin_transcript_transaction(
         &self,
     ) -> Result<D::WriteTxn<'_>, TranscriptPersistenceError> {

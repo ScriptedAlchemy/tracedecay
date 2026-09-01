@@ -18,6 +18,7 @@ use super::super::registered_db::{SessionRegisteredDb, SessionStoreAccess, Sessi
 
 #[hotpath::measure_all]
 impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
+    #[hotpath::skip]
     pub async fn lcm_read_snapshot(&self) -> Result<DatabaseEngineReadSnapshot, LcmError> {
         self.read_snapshot()
             .await
@@ -51,6 +52,7 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
     }
 
     #[hotpath::measure(future = true, label = "global_db.registered.lcm.expand")]
+    #[hotpath::skip]
     pub async fn lcm_expand(
         &self,
         request: LcmExpandRequest,
@@ -100,6 +102,7 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
     }
 
     #[hotpath::measure(future = true, label = "global_db.registered.lcm.load")]
+    #[hotpath::skip]
     pub async fn lcm_load_session(
         &self,
         request: LcmLoadSessionRequest,
@@ -160,6 +163,7 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
     }
 
     #[hotpath::measure(future = true, label = "global_db.registered.lcm.status")]
+    #[hotpath::skip]
     pub async fn lcm_status_with_options(
         &self,
         provider: &str,
@@ -377,6 +381,7 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
     }
 
     #[hotpath::measure(future = true, label = "global_db.registered.lcm.ingest")]
+    #[hotpath::skip]
     pub async fn lcm_ingest_raw_message(
         &self,
         storage_root: &Path,

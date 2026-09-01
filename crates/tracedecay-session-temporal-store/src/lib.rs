@@ -143,6 +143,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     }
 
     #[hotpath::measure(future = true, label = "session_temporal.txn.ensure_cursor_key")]
+    #[hotpath::skip]
     pub async fn ensure_active_session_cursor_key_result(
         &self,
     ) -> tracedecay_store::SessionStoreResult<SignedCursorKeyRefV1> {
@@ -817,6 +818,7 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
     }
 
     #[hotpath::measure(future = true, label = "session_temporal.execution.freeze")]
+    #[hotpath::skip]
     async fn freeze(
         &self,
         request: &AuthorizedTemporalExecutionRequest,
@@ -917,6 +919,7 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
     }
 
     #[hotpath::measure(future = true, label = "session_temporal.execution.execute")]
+    #[hotpath::skip]
     async fn execute<E>(
         &self,
         request: AuthorizedTemporalExecutionRequest,

@@ -308,6 +308,7 @@ where
     E: VersionedTokenEstimator + Sync,
 {
     #[hotpath::measure(label = "usecases.session.retrieve")]
+    #[hotpath::skip]
     pub async fn retrieve(
         &self,
         context: &RequestContext,

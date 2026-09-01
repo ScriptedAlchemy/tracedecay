@@ -28,6 +28,7 @@ const MAX_REBUILD_RELATION_PROJECTION_ITEMS: usize = 100_000;
 #[hotpath::measure_all]
 impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     #[hotpath::measure(future = true, label = "session_temporal.txn.begin_rebuild")]
+    #[hotpath::skip]
     pub async fn begin_session_generation_rebuild_result(
         &self,
         request: SessionGenerationRebuildRequestV1,
@@ -103,6 +104,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     }
 
     #[hotpath::measure(future = true, label = "session_temporal.txn.activate_generation")]
+    #[hotpath::skip]
     pub async fn activate_session_temporal_generation_result(
         &self,
         request: SessionGenerationActivationRequestV1,

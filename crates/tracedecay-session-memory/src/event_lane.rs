@@ -534,6 +534,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[hotpath::skip]
     async fn registered_activity_replays_without_retaining_project_paths() {
         let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let project = tempfile::tempdir().expect("project");
@@ -585,6 +586,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[hotpath::skip]
     async fn mcp_dispatch_receipt_uses_the_bound_project_observability_authority() {
         let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let project = tempfile::tempdir().expect("project");

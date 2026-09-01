@@ -46,6 +46,7 @@ struct CanonicalOccurrence {
 
 #[hotpath::measure_all]
 impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
+    #[hotpath::skip]
     pub async fn active_session_summary_relations(
         &self,
         session_id: &SessionId,
@@ -71,6 +72,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     }
 
     #[hotpath::measure(future = true, label = "session_temporal.persist.relation_projection")]
+    #[hotpath::skip]
     pub async fn apply_active_session_relation_projection(
         &self,
         session_id: &SessionId,
@@ -136,6 +138,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     }
 
     #[hotpath::measure(future = true, label = "session_temporal.persist.recover_relations")]
+    #[hotpath::skip]
     pub async fn recover_pending_session_relation_projections(
         &self,
         limit: usize,

@@ -787,6 +787,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[hotpath::skip]
     async fn isolated_source_is_bounded_resumable_and_keeps_partial_prefix() {
         let (_temp, project, path, source) = fixture();
         let first = json!({"role": "user", "content": "first"}).to_string() + "\n";
@@ -843,6 +844,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[hotpath::skip]
     async fn compaction_summary_flows_through_canonical_redaction_authority() {
         let (_temp, project, path, source) = fixture();
         std::fs::write(
@@ -883,6 +885,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    #[hotpath::skip]
     async fn linked_work_dir_preserves_admitted_prefix_and_defers_coverage() {
         use std::os::unix::fs::symlink;
 
@@ -1013,6 +1016,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[hotpath::skip]
     async fn provider_partition_cannot_escape_the_kimi_sessions_root() {
         let (_temp, project, _path, source) = fixture();
         let hash = format!("{:x}", Md5::digest(project.to_string_lossy().as_bytes()));
@@ -1100,6 +1104,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[hotpath::skip]
     async fn durable_discovery_frontier_survives_restart_beyond_candidate_window() {
         let (_temp, project, first, source) = fixture();
         if first.exists() {
