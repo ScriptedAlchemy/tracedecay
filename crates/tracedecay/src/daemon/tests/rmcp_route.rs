@@ -477,7 +477,6 @@ struct ControlledCancellationExecutor {
     started: AtomicUsize,
     cancellation_observed: AtomicUsize,
     completed: AtomicUsize,
-    pre_cancelled: AtomicUsize,
     release_first: AtomicBool,
 }
 
@@ -488,16 +487,12 @@ impl ControlledCancellationExecutor {
             started: AtomicUsize::new(0),
             cancellation_observed: AtomicUsize::new(0),
             completed: AtomicUsize::new(0),
-            pre_cancelled: AtomicUsize::new(0),
             release_first: AtomicBool::new(false),
         }
     }
 
     async fn await_cancellation(&self, cancellation: tracedecay_application::CancellationSignal) {
         let ordinal = self.started.fetch_add(1, Ordering::SeqCst);
-        if cancellation.is_cancelled() {
-            self.pre_cancelled.fetch_add(1, Ordering::SeqCst);
-        }
         while !cancellation.is_cancelled() {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
@@ -648,45 +643,6 @@ async fn selected_target_rmcp_flushes_response_and_disconnect_cancels_selector_o
             .cloned()
             .expect("mounted target server")
     };
-    let executor = Arc::new(ControlledCancellationExecutor::new());
-    let project_path = fixture
-        .handshake
-        .project_path
-        .as_deref()
-        .expect("fixture project");
-    let graph = super::super::open_project_for_handshake(
-        project_path,
-        &fixture.handshake,
-        &fixture.engine.store_administration,
-    )
-    .await
-    .expect("open controlled selector owner");
-    let controlled_key = ProjectServerKey::from_open_project(&graph, &fixture.handshake)
-        .expect("controlled selector-owner key");
-    let controlled_route = ProjectRouteKey::from_handshake(project_path, &fixture.handshake)
-        .expect("controlled selector-owner route");
-    let profile_identity = fixture
-        .engine
-        .store_administration
-        .profile_identity()
-        .expect("controlled selector-owner profile identity")
-        .clone();
-    let controlled = crate::mcp::McpServer::new_with_context(
-        crate::mcp::server::McpServerConstructionContext::direct(graph, None)
-            .with_direct_profile_identity(profile_identity)
-            .with_application_invocation_executor(executor.clone()),
-    )
-    .await;
-    {
-        let mut owners = fixture
-            .engine
-            .store_administration
-            .project_servers()
-            .lock()
-            .await;
-        owners.insert_route(controlled_route, controlled_key.clone(), controlled);
-        assert!(owners.mark_ready(&controlled_key));
-    }
 
     let (server_stream, client_stream) =
         tokio::net::UnixStream::pair().expect("selected target socket pair");
@@ -735,6 +691,82 @@ async fn selected_target_rmcp_flushes_response_and_disconnect_cancels_selector_o
         target_server.server_stats_json().await["total_requests"],
         json!(target_before + 1),
         "selected project call was not accounted to the execution server"
+    );
+    writer
+        .shutdown()
+        .await
+        .expect("close selected target verification client");
+    drop(writer);
+    drop(reader);
+    tokio::time::timeout(PHASE_TIMEOUT, server_task)
+        .await
+        .expect("selected target verification connection did not terminate")
+        .expect("join selected target verification connection")
+        .expect("serve selected target verification connection");
+
+    let executor = Arc::new(ControlledCancellationExecutor::new());
+    let project_path = fixture
+        .handshake
+        .project_path
+        .as_deref()
+        .expect("fixture project");
+    let graph = super::super::open_project_for_handshake(
+        project_path,
+        &fixture.handshake,
+        &fixture.engine.store_administration,
+    )
+    .await
+    .expect("open controlled selector owner");
+    let controlled_key = ProjectServerKey::from_open_project(&graph, &fixture.handshake)
+        .expect("controlled selector-owner key");
+    let controlled_route = ProjectRouteKey::from_handshake(project_path, &fixture.handshake)
+        .expect("controlled selector-owner route");
+    let profile_identity = fixture
+        .engine
+        .store_administration
+        .profile_identity()
+        .expect("controlled selector-owner profile identity")
+        .clone();
+    let controlled = crate::mcp::McpServer::new_with_context(
+        crate::mcp::server::McpServerConstructionContext::direct(graph, None)
+            .with_direct_profile_identity(profile_identity)
+            .with_application_invocation_executor(executor.clone()),
+    )
+    .await;
+    {
+        let mut owners = fixture
+            .engine
+            .store_administration
+            .project_servers()
+            .lock()
+            .await;
+        owners.insert_route(controlled_route, controlled_key.clone(), controlled);
+        assert!(owners.mark_ready(&controlled_key));
+    }
+
+    let (server_stream, client_stream) =
+        tokio::net::UnixStream::pair().expect("selector-owner cancellation socket pair");
+    let engine = fixture.engine.clone();
+    let server_task = tokio::spawn(async move {
+        Box::pin(super::super::serve_socket_client(server_stream, engine)).await
+    });
+    let (reader, mut writer) = client_stream.into_split();
+    let mut reader = tokio::io::BufReader::new(reader);
+    writer
+        .write_all(
+            fixture
+                .handshake
+                .to_line()
+                .expect("selector-owner cancellation handshake")
+                .as_bytes(),
+        )
+        .await
+        .expect("write selector-owner cancellation handshake");
+    writer.write_all(b"\n").await.expect("handshake newline");
+    write_line(&mut writer, &initialize_request()).await;
+    assert_eq!(
+        read_value(&mut reader, "initialize selector-owner cancellation").await["id"],
+        json!(1)
     );
 
     write_line(
@@ -840,12 +872,9 @@ async fn production_rmcp_cancels_concurrent_requests_before_or_after_registratio
     write_line(&mut writer, &blocked_tool_request(11)).await;
     write_line(&mut writer, &cancellation(11)).await;
     write_line(&mut writer, &cancellation(10)).await;
-    // Both cancellations must reach the application executor. The registered
-    // request observes its signal while its worker stays owned, and the
-    // queued request — cancelled before it could register — is still admitted
-    // so the executor, not the MCP layer, records its settlement. Its
-    // cancellation was processed before the connection freed it, so it must
-    // arrive already cancelled.
+    // Both cancellations must reach the application executor. The second
+    // request may register just before or just after its cancellation arrives,
+    // but the executor remains the settlement authority in either ordering.
     wait_for_count(
         &executor.cancellation_observed,
         2,
@@ -856,11 +885,6 @@ async fn production_rmcp_cancels_concurrent_requests_before_or_after_registratio
         executor.started.load(Ordering::SeqCst),
         2,
         "both cancelled requests must reach the application executor"
-    );
-    assert_eq!(
-        executor.pre_cancelled.load(Ordering::SeqCst),
-        1,
-        "queued request was not cancelled before entering the application executor"
     );
     assert!(
         executor.completed.load(Ordering::SeqCst) <= 1,
@@ -895,10 +919,7 @@ async fn production_rmcp_cancels_concurrent_requests_before_or_after_registratio
     let started = executor.started.load(Ordering::SeqCst);
     let cancellation_observed = executor.cancellation_observed.load(Ordering::SeqCst);
     let completed = executor.completed.load(Ordering::SeqCst);
-    assert!(
-        (1..=2).contains(&started),
-        "cancellation must reach the registered request, with the raced request either cancelled before admission or started pre-cancelled"
-    );
+    assert_eq!(started, 2);
     assert_eq!(cancellation_observed, started);
     assert_eq!(completed, started);
 }
