@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
@@ -286,18 +286,26 @@ fn decode_verified_seal_from_roots(
     expected_digest: &str,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<tracedecay_code_index::production::CodeIndexPublishedGenerationV1, GraphDbError> {
+    let segments_root = canonical
+        .parent()
+        .and_then(std::path::Path::parent)
+        .ok_or_else(|| GraphDbError::invalid("canonical generation root has no store parent"))?
+        .join("code-generation-segments-v1");
     with_verified_seal_from_roots(
         canonical,
         pool,
         expected_digest,
         check,
-        decode_verified_seal,
+        |path, expected_digest, check| {
+            decode_verified_seal(path, &segments_root, expected_digest, check)
+        },
     )
 }
 
 #[hotpath::measure(label = "daemon.session_registry.seal.decode")]
 fn decode_verified_seal(
     path: &std::path::Path,
+    segments_root: &std::path::Path,
     expected_digest: &str,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<tracedecay_code_index::production::CodeIndexPublishedGenerationV1, GraphDbError> {
@@ -344,13 +352,73 @@ fn decode_verified_seal(
     );
     #[cfg(feature = "hotpath")]
     hotpath::gauge!("session_registry.seal.decode.bytes_total").inc(admitted_len);
-    let generation = decoded
+    let monolithic = decoded.map_err(|error| GraphDbError::Corrupt {
+        message: format!("sealed code generation replay is invalid: {error}"),
+    })?;
+    let generation = if let Some(generation) = monolithic {
+        generation
+    } else {
+        file.seek(SeekFrom::Start(0))
+            .map_err(|error| GraphDbError::Corrupt {
+                message: format!("sealed generation manifest seek failed: {error}"),
+            })?;
+        let mut manifest = Vec::new();
+        file.read_to_end(&mut manifest)
+            .map_err(|error| GraphDbError::Corrupt {
+                message: format!("sealed generation manifest read failed: {error}"),
+            })?;
+        if encode_lowercase_hex(&Sha256::digest(&manifest))
+            != expected_digest
+                .as_str()
+                .strip_prefix("sha256:")
+                .unwrap_or(expected_digest.as_str())
+        {
+            return Err(GraphDbError::Corrupt {
+                message: "sealed generation manifest filename digest does not match its bytes"
+                    .to_owned(),
+            });
+        }
+        tracedecay_code_index::production::CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+            &manifest,
+            |digest, expected_size| {
+                (check)().map_err(|error| {
+                    tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(
+                        error.to_string(),
+                    )
+                })?;
+                let digest_hex = digest.as_str().strip_prefix("sha256:").ok_or_else(|| {
+                    tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(
+                        "sealed segment digest is not sha256".to_owned(),
+                    )
+                })?;
+                let segment_path = segments_root.join(format!("segment-{digest_hex}.json"));
+                let metadata = segment_path.symlink_metadata().map_err(|error| {
+                    tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(
+                        format!("sealed generation segment is unavailable: {error}"),
+                    )
+                })?;
+                if !metadata.file_type().is_file() || metadata.len() != expected_size {
+                    return Err(
+                        tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(
+                            "sealed generation segment identity does not match its manifest"
+                                .to_owned(),
+                        ),
+                    );
+                }
+                std::fs::read(&segment_path).map_err(|error| {
+                    tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(
+                        format!("sealed generation segment read failed: {error}"),
+                    )
+                })
+            },
+        )
         .map_err(|error| GraphDbError::Corrupt {
             message: format!("sealed code generation replay is invalid: {error}"),
         })?
         .ok_or_else(|| GraphDbError::Corrupt {
             message: "sealed code generation format revision is incompatible".to_owned(),
-        })?;
+        })?
+    };
     (check)()?;
     let final_file_metadata = file.metadata().map_err(|error| GraphDbError::Corrupt {
         message: format!("sealed code generation metadata cannot be revalidated: {error}"),
@@ -397,6 +465,84 @@ fn verify_checked_seal(
     reader.finish(path, &opened_metadata, admitted_len, expected_digest)
 }
 
+#[hotpath::measure(label = "daemon.session_registry.seal.verify_bundle")]
+fn verify_checked_seal_bundle(
+    path: &std::path::Path,
+    segments_root: &std::path::Path,
+    expected_digest: &str,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<(), GraphDbError> {
+    verify_checked_seal(path, expected_digest, check)?;
+    let mut prefix = vec![0_u8; SEAL_READ_CHECK_BYTES];
+    let mut file = File::open(path).map_err(|error| GraphDbError::Corrupt {
+        message: format!("sealed generation manifest cannot be reopened: {error}"),
+    })?;
+    let read = file
+        .read(&mut prefix)
+        .map_err(|error| GraphDbError::Corrupt {
+            message: format!("sealed generation manifest prefix read failed: {error}"),
+        })?;
+    prefix.truncate(read);
+    let revision_key = b"\"format_revision\":";
+    let revision = prefix
+        .windows(revision_key.len())
+        .position(|window| window == revision_key)
+        .and_then(|start| {
+            let digits = &prefix[start + revision_key.len()..];
+            let end = digits
+                .iter()
+                .position(|byte| !byte.is_ascii_digit())
+                .unwrap_or(digits.len());
+            std::str::from_utf8(&digits[..end])
+                .ok()?
+                .parse::<u32>()
+                .ok()
+        });
+    if revision != Some(tracedecay_code_index::production::SEALED_GENERATION_FORMAT_REVISION_V1) {
+        return (check)();
+    }
+    let manifest = std::fs::read(path).map_err(|error| GraphDbError::Corrupt {
+        message: format!("sealed generation manifest read failed: {error}"),
+    })?;
+    tracedecay_code_index::production::CodeIndexPublishedGenerationV1::verify_partitioned_sealed(
+        &manifest,
+        |digest, expected_size| {
+            (check)().map_err(|error| {
+                tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(
+                    error.to_string(),
+                )
+            })?;
+            let digest_hex = digest.as_str().strip_prefix("sha256:").ok_or_else(|| {
+                tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(
+                    "sealed segment digest is not sha256".to_owned(),
+                )
+            })?;
+            let segment_path = segments_root.join(format!("segment-{digest_hex}.json"));
+            let metadata = segment_path.symlink_metadata().map_err(|error| {
+                tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(format!(
+                    "sealed generation segment is unavailable: {error}"
+                ))
+            })?;
+            if !metadata.file_type().is_file() || metadata.len() != expected_size {
+                return Err(
+                    tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(
+                        "sealed generation segment identity does not match its manifest".to_owned(),
+                    ),
+                );
+            }
+            std::fs::read(segment_path).map_err(|error| {
+                tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(format!(
+                    "sealed generation segment read failed: {error}"
+                ))
+            })
+        },
+    )
+    .map_err(|error| GraphDbError::Corrupt {
+        message: format!("sealed generation component verification failed: {error}"),
+    })?;
+    (check)()
+}
+
 /// Proves that the durable source backing an already-decoded generation still
 /// exists under its canonical-or-retained authority with the exact digest.
 /// This reads and hashes the bounded source without decoding or projecting it.
@@ -412,12 +558,18 @@ pub(super) fn verify_sealed_generation_source_from_roots(
         .strip_prefix("sha256:")
         .ok_or_else(|| GraphDbError::invalid("sealed state digest is not sha256"))?;
     let seal_file = format!("generation-{digest}.json");
+    let segments_root = generations_root
+        .parent()
+        .ok_or_else(|| GraphDbError::invalid("generation root has no store parent"))?
+        .join("code-generation-segments-v1");
     with_verified_seal_from_roots(
         &generations_root.join(&seal_file),
         &replay_root.join(&seal_file),
         digest,
         check,
-        verify_checked_seal,
+        |path, expected_digest, check| {
+            verify_checked_seal_bundle(path, &segments_root, expected_digest, check)
+        },
     )
 }
 

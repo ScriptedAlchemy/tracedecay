@@ -4,10 +4,10 @@ Status: ACTIVE (decided 2026-08-22). Supersedes the monolithic sealed-generation
 envelope as the long-term storage design; stages 0–1 land first as compatible
 fixes inside the current `format_revision`.
 
-Stage state (reconciled 2026-08-24 against the tree, not the commit log):
-stages 0a, 0b, and 0c are landed; stage 1 is landed; stages 2 and 3 are
-untouched. `format_revision` is still 6
-(`SEALED_GENERATION_FORMAT_REVISION_V1`), as stages 0–1 require. The
+Stage state (reconciled 2026-08-31 against the tree, not the commit log):
+stages 0a, 0b, and 0c are landed; stages 1 and 2 are landed; stage 3 is
+untouched. Partitioned writers emit `format_revision` 7 while readers retain
+explicit revision-5/6 monolithic compatibility. The
 §Problem measurements below describe the pre-stage-0 state and are retained
 as the original evidence, not as a description of the current tree.
 

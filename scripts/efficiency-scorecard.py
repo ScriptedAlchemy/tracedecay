@@ -503,8 +503,9 @@ def store_measurements(sandbox: Sandbox) -> dict:
 
     - `generation_payload_bytes`: files under `**/code-generations-v*/`
       grouped by the 64-hex generation digest embedded in the file name
-      (generation-<digest>.json, read-bundle-<digest>.*.bin) — the
-      store-size-per-generation signal.
+      (generation-<digest>.json) — the manifest-size-per-generation signal.
+    - `generation_segment_bytes`: physical bytes in the shared
+      `code-generation-segments-v*/` content-addressed pool.
     - `code_index_children_bytes`: one-level size breakdown under each
       `code-index-v1/<worktree-key>/` (generation payloads vs the
       content-addressed text-artifact pool vs everything else).
@@ -527,6 +528,11 @@ def store_measurements(sandbox: Sandbox) -> dict:
                     match = GENERATION_DIGEST.search(entry.name)
                     key = match.group(1)[:16] if match else "unattributed"
                     generations[key] = generations.get(key, 0) + entry.stat().st_size
+            generation_segment_bytes = sum(
+                tree_size_bytes(root)
+                for root in sorted(store.rglob("code-generation-segments-v*"))
+                if root.is_dir()
+            )
             code_index_children: dict[str, int] = {}
             for code_index_root in sorted(store.glob("code-index-v*")):
                 for worktree_dir in sorted(code_index_root.iterdir()):
@@ -558,6 +564,7 @@ def store_measurements(sandbox: Sandbox) -> dict:
                         [key for key in generations if key != "unattributed"]
                     ),
                     "generation_payload_bytes": generations,
+                    "generation_segment_bytes": generation_segment_bytes,
                     "code_index_children_bytes": code_index_children,
                     "top_level_bytes": {
                         child.name: (
@@ -850,6 +857,16 @@ def human_summary(scorecard: dict) -> str:
         "B",
     )
     row(
+        "shared generation segments after sync",
+        "incremental_sync.store.generation_segment_bytes",
+        "B",
+    )
+    row(
+        "physical generation growth for 1-file edit",
+        "incremental_sync.store.generation_physical_growth_bytes",
+        "B",
+    )
+    row(
         "text-artifact pool after sync",
         "incremental_sync.store.text_artifact_pool_bytes",
         "B",
@@ -886,9 +903,26 @@ def flatten_store_bytes(run: dict) -> None:
             run[section]["store"]["generation_payload_max_bytes"] = (
                 max(payloads.values()) if payloads else 0
             )
+            run[section]["store"]["generation_segment_bytes"] = stores[0][
+                "generation_segment_bytes"
+            ]
+            run[section]["store"]["generation_physical_bytes"] = (
+                run[section]["store"]["generation_payload_total_bytes"]
+                + run[section]["store"]["generation_segment_bytes"]
+            )
             run[section]["store"]["text_artifact_pool_bytes"] = stores[0][
                 "code_index_children_bytes"
             ].get("code-text-artifacts-v1", 0)
+    cold = ((run.get("cold_index") or {}).get("store") or {}).get(
+        "generation_physical_bytes"
+    )
+    incremental = ((run.get("incremental_sync") or {}).get("store") or {}).get(
+        "generation_physical_bytes"
+    )
+    if isinstance(cold, int) and isinstance(incremental, int):
+        run["incremental_sync"]["store"]["generation_physical_growth_bytes"] = max(
+            0, incremental - cold
+        )
 
 
 def build_binary() -> Path:

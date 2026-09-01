@@ -128,6 +128,7 @@ pub const GRAPH_REPLAY_POOL_ACQUIRE_POLL: Duration = Duration::from_millis(5);
 
 const ACTIVE_POINTER_FILE: &str = "active-code-generation-v1.json";
 const GENERATIONS_DIRECTORY: &str = "code-generations-v1";
+const GENERATION_SEGMENTS_DIRECTORY: &str = "code-generation-segments-v1";
 const RECEIPTS_DIRECTORY: &str = "code-generation-retention-receipts-v1";
 const QUARANTINE_DIRECTORY: &str = ".code-generation-retention-quarantine-v1";
 const STORE_LOCK_FILE: &str = ".code-generation-retention.lock";
@@ -916,6 +917,96 @@ fn generation_file_digest(file_name: &str) -> Option<&str> {
         .filter(|digest| is_lowercase_hex(digest, 64))
 }
 
+#[hotpath::measure(label = "usecases.retention.segment_mark_sweep")]
+fn collect_unreferenced_generation_segments(
+    store_root: &Path,
+    graph_replay_pool_root: Option<&Path>,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<u64, CodeGenerationRetentionErrorV1> {
+    let segments_root = store_root.join(GENERATION_SEGMENTS_DIRECTORY);
+    let entries = match std::fs::read_dir(&segments_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(storage(error)),
+    };
+    let mut live_segments = BTreeSet::new();
+    let mut mark_root = |root: &Path| -> Result<(), CodeGenerationRetentionErrorV1> {
+        let manifests = match std::fs::read_dir(root) {
+            Ok(manifests) => manifests,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(storage(error)),
+        };
+        for manifest in manifests {
+            if observe_cancel(is_cancelled) {
+                return Err(CodeGenerationRetentionErrorV1::Cancelled);
+            }
+            let manifest = manifest.map_err(storage)?;
+            let path = manifest.path();
+            if generation_file_name(&path).is_none() {
+                continue;
+            }
+            let bytes = std::fs::read(&path).map_err(storage)?;
+            let identities =
+                tracedecay_code_index::production::CodeIndexPublishedGenerationV1::partitioned_segment_identities(
+                    &bytes,
+                )
+                .map_err(|error| {
+                    CodeGenerationRetentionErrorV1::UnsafeState(format!(
+                        "generation manifest '{}' cannot mark its segments: {error}",
+                        path.display()
+                    ))
+                })?;
+            if let Some(identities) = identities {
+                live_segments.extend(
+                    identities
+                        .into_iter()
+                        .map(|identity| identity.digest.as_str().to_owned()),
+                );
+            }
+        }
+        Ok(())
+    };
+    mark_root(&store_root.join(GENERATIONS_DIRECTORY))?;
+    if let Some(pool_root) = graph_replay_pool_root {
+        mark_root(pool_root)?;
+    }
+
+    let mut reclaimed = 0_u64;
+    for entry in entries {
+        if observe_cancel(is_cancelled) {
+            return Err(CodeGenerationRetentionErrorV1::Cancelled);
+        }
+        let entry = entry.map_err(storage)?;
+        let path = entry.path();
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some(digest) = file_name
+            .strip_prefix("segment-")
+            .and_then(|name| name.strip_suffix(".json"))
+            .filter(|digest| is_lowercase_hex(digest, 64))
+        else {
+            continue;
+        };
+        if live_segments.contains(&format!("sha256:{digest}")) {
+            continue;
+        }
+        let metadata = path.symlink_metadata().map_err(storage)?;
+        if !metadata.file_type().is_file() {
+            return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+                "generation segment '{}' is not a regular file",
+                path.display()
+            )));
+        }
+        std::fs::remove_file(&path).map_err(storage)?;
+        reclaimed = reclaimed.saturating_add(metadata.len());
+    }
+    if reclaimed > 0 {
+        sync_directory(&segments_root)?;
+    }
+    Ok(reclaimed)
+}
+
 /// `graph_replay_pool_root` is the project graph's replay pool. When present,
 /// every retired generation survives retention as a hard-linked pool entry
 /// until the graph projection durably confirms it is no longer needed (the
@@ -1001,6 +1092,7 @@ pub fn execute_code_generation_retention_cancellable(
             "active generation changed after the retention mark phase".to_owned(),
         ));
     }
+    let mut reclaimed_segment_bytes = 0_u64;
     let (deleted_generations, receipt) = if plan.collectable_generations.is_empty() {
         (Vec::new(), None)
     } else {
@@ -1067,6 +1159,11 @@ pub fn execute_code_generation_retention_cancellable(
                 &vector_readable_sources,
                 graph_replay_pool_lock.as_ref(),
             )?;
+            reclaimed_segment_bytes = collect_unreferenced_generation_segments(
+                store_root,
+                graph_replay_pool_root,
+                is_cancelled,
+            )?;
             clear_transaction(store_root)
         })();
         if let Err(error) = result {
@@ -1101,7 +1198,8 @@ pub fn execute_code_generation_retention_cancellable(
                 .as_ref()
                 .map(|receipt| receipt.reclaimed_bytes)
                 .unwrap_or(0),
-        );
+        )
+        .saturating_add(reclaimed_segment_bytes);
     crate::hotpath_observe::retention_reclaimed(reclaimed_bytes);
     crate::hotpath_observe::retention_recovery_idle();
 
