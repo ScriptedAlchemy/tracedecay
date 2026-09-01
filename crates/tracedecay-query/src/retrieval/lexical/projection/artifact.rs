@@ -14,6 +14,8 @@ mod format;
 mod postings;
 mod prepared;
 mod reader;
+mod row_codec;
+mod schema;
 
 pub use builder::{
     CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactBuilderV1,
