@@ -565,6 +565,7 @@ async fn restart_status_case(corrupt_graph: bool) {
         ),
         "restart status must remain unavailable while graph admission refuses"
     );
+    let restart_started = std::time::Instant::now();
     drop(activation_admission);
 
     let settled_deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -589,6 +590,10 @@ async fn restart_status_case(corrupt_graph: bool) {
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    eprintln!(
+        "sandbox_restart_to_graph_serving_micros={} corrupt_graph={corrupt_graph}",
+        restart_started.elapsed().as_micros()
+    );
 
     let settled_context = graph_request_context(scope.clone(), "restart-settled");
     let settled_read = port
