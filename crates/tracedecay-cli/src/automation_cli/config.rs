@@ -1,6 +1,7 @@
 use crate::cli::{AutomationConfigAction, AutomationConfigScope};
 use crate::resolve_cli_project_root;
 
+#[hotpath::measure]
 pub(crate) fn project_automation_reconcile_args() -> serde_json::Value {
     serde_json::json!({
         "action": "automation_reconcile",
@@ -201,6 +202,7 @@ pub(crate) async fn apply_project_automation_patch(
     Ok(effective)
 }
 
+#[hotpath::measure]
 fn automation_task_patch(
     enabled: Option<bool>,
     schedule: Option<String>,
@@ -231,14 +233,17 @@ fn automation_task_patch(
     )
 }
 
+#[hotpath::measure]
 fn empty_string_or_none_clears(value: String) -> Option<String> {
     (!string_clears_optional(&value)).then_some(value)
 }
 
+#[hotpath::measure]
 fn string_clears_optional(value: &str) -> bool {
     value.is_empty() || value.eq_ignore_ascii_case("none")
 }
 
+#[hotpath::measure]
 fn parse_optional_u64(
     value: Option<String>,
     field: &str,
@@ -259,6 +264,7 @@ fn parse_optional_u64(
         })
 }
 
+#[hotpath::measure]
 fn print_automation_config(
     effective: &tracedecay_automation_runtime::automation::config::AutomationConfig,
     json: bool,
@@ -313,6 +319,7 @@ fn print_automation_config(
     Ok(())
 }
 
+#[hotpath::measure]
 fn parse_automation_backend(
     value: &str,
 ) -> tracedecay_domain::errors::Result<
@@ -328,6 +335,7 @@ fn parse_automation_backend(
     }
 }
 
+#[hotpath::measure]
 fn parse_automation_host_mode(
     value: &str,
 ) -> tracedecay_domain::errors::Result<
@@ -343,6 +351,7 @@ fn parse_automation_host_mode(
     }
 }
 
+#[hotpath::measure]
 fn config_error(message: impl Into<String>) -> tracedecay_domain::errors::TraceDecayError {
     tracedecay_domain::errors::TraceDecayError::Config {
         message: message.into(),

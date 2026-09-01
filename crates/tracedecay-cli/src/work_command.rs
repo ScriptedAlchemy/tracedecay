@@ -75,10 +75,12 @@ enum WorkOutputSettlement {
     Dropped(tracedecay_domain::DeliveryDropReasonV1),
 }
 
+#[hotpath::measure]
 fn write_work_output<W: Write>(writer: &mut W, rendered: &[u8]) -> std::io::Result<()> {
     writer.write_all(rendered).and_then(|()| writer.flush())
 }
 
+#[hotpath::measure]
 fn classify_work_output(result: &std::io::Result<()>) -> WorkOutputSettlement {
     if result.is_ok() {
         WorkOutputSettlement::Delivered
@@ -87,10 +89,12 @@ fn classify_work_output(result: &std::io::Result<()>) -> WorkOutputSettlement {
     }
 }
 
+#[hotpath::measure]
 fn work_json_line(outcome: &ApplicationResult<Value>) -> serde_json::Result<String> {
     crate::cli::output::json::json_line(outcome)
 }
 
+#[hotpath::measure]
 fn read_request(path: &std::path::Path) -> tracedecay_domain::errors::Result<Value> {
     let payload = if path == std::path::Path::new("-") {
         let mut payload = String::new();

@@ -46,6 +46,7 @@ pub(crate) async fn resolve_project_scope(
     scope_from_registry_payload(&project_path, &payload)
 }
 
+#[hotpath::measure]
 fn scope_from_registry_payload(
     requested: &Path,
     payload: &Value,
@@ -144,6 +145,7 @@ fn scope_from_registry_payload(
     })
 }
 
+#[hotpath::measure]
 fn required_project_str<'a>(
     project: &'a Value,
     field: &str,
@@ -161,6 +163,7 @@ fn required_project_str<'a>(
         })
 }
 
+#[hotpath::measure]
 fn canonicalize_absolute_root(
     root: &Path,
     role: &str,
@@ -182,6 +185,7 @@ fn canonicalize_absolute_root(
     })
 }
 
+#[hotpath::measure]
 fn config_error(message: String) -> tracedecay_domain::errors::TraceDecayError {
     tracedecay_domain::errors::TraceDecayError::Config { message }
 }

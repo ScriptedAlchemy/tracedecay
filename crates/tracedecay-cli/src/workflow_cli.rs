@@ -29,6 +29,7 @@ use tracedecay_daemon_protocol::{
 use tracedecay_daemon_protocol::{InvocationCancellationPolicy, invocation_now_micros};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
+#[hotpath::measure]
 fn workflow_cli_deadline(operation: WorkflowOperation, observed_at: UtcMicros) -> Result<Deadline> {
     let operation_id =
         OperationId::new(operation.operation_id_str().to_owned()).map_err(config_error)?;
@@ -51,6 +52,7 @@ fn workflow_cli_deadline(operation: WorkflowOperation, observed_at: UtcMicros) -
     Deadline::new(UtcMicros(observed_at.0.saturating_add(maximum_micros))).map_err(config_error)
 }
 
+#[hotpath::measure]
 fn workflow_result_contract(operation: WorkflowOperation) -> Result<ResultContractRef> {
     let operation_id =
         OperationId::new(operation.operation_id_str().to_owned()).map_err(config_error)?;
@@ -71,6 +73,7 @@ fn workflow_result_contract(operation: WorkflowOperation) -> Result<ResultContra
     ))
 }
 
+#[hotpath::measure]
 fn decode_workflow_invocation(
     operation: WorkflowOperation,
     body: Value,
@@ -120,6 +123,7 @@ fn decode_workflow_invocation(
     }
 }
 
+#[hotpath::measure]
 fn workflow_outcome_matches(
     operation: WorkflowOperation,
     outcome: &WorkflowApplicationOutcome,
@@ -261,6 +265,7 @@ pub async fn invoke_workflow_cli(
     }
 }
 
+#[hotpath::measure]
 fn erase_workflow_outcome(
     outcome: WorkflowApplicationOutcome,
 ) -> Result<ApplicationOutcome<Value>> {
@@ -285,6 +290,7 @@ fn erase_workflow_outcome(
     serde_json::from_value(outcome).map_err(Into::into)
 }
 
+#[hotpath::measure]
 fn workflow_problem(
     result_contract: ResultContractRef,
     request_id: tracedecay_application::RequestId,
@@ -293,6 +299,7 @@ fn workflow_problem(
     ApplicationProblemEnvelope::new(result_contract, request_id, problem).map_err(config_error)
 }
 
+#[hotpath::measure]
 fn invalid_workflow_request() -> ApplicationProblem {
     ApplicationProblem::InvalidRequest {
         diagnostic: SafeDiagnostic {
@@ -304,6 +311,7 @@ fn invalid_workflow_request() -> ApplicationProblem {
     }
 }
 
+#[hotpath::measure]
 fn daemon_application_problem(problem: DaemonInvocationProblem) -> ApplicationProblem {
     match problem {
         DaemonInvocationProblem::InvalidRequest => invalid_workflow_request(),
@@ -337,6 +345,7 @@ fn daemon_application_problem(problem: DaemonInvocationProblem) -> ApplicationPr
     }
 }
 
+#[hotpath::measure]
 fn decode<T>(body: Value) -> Result<T>
 where
     T: serde::de::DeserializeOwned,
@@ -371,6 +380,7 @@ mod reset_problem_tests {
     }
 }
 
+#[hotpath::measure]
 fn config_error(error: impl std::fmt::Display) -> TraceDecayError {
     TraceDecayError::Config {
         message: error.to_string(),

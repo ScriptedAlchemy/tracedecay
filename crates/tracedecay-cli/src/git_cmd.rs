@@ -94,6 +94,7 @@ async fn dispatch_git_read(
     dispatch_catalogued_cli_operation(operation, payload, Some(project), json).await
 }
 
+#[hotpath::measure]
 fn git_diff_payload(
     scope: GitDiffScopeArg,
     base: Option<String>,
@@ -114,6 +115,7 @@ fn git_diff_payload(
     }
 }
 
+#[hotpath::measure]
 fn git_hunk_scope(scope: GitDiffScopeArg) -> tracedecay_domain::errors::Result<&'static str> {
     match scope {
         GitDiffScopeArg::WorkingTree => Ok("working_tree"),
@@ -124,6 +126,7 @@ fn git_hunk_scope(scope: GitDiffScopeArg) -> tracedecay_domain::errors::Result<&
     }
 }
 
+#[hotpath::measure]
 fn git_history_payload(
     count: u32,
     path: Option<String>,
@@ -146,6 +149,7 @@ fn git_history_payload(
     Ok(payload)
 }
 
+#[hotpath::measure]
 fn no_range_payload(
     scope: &'static str,
     base: Option<String>,
@@ -159,6 +163,7 @@ fn no_range_payload(
     Ok(json!({ "scope": scope }))
 }
 
+#[hotpath::measure]
 fn required_commit_range_bound(
     name: &str,
     value: Option<String>,
@@ -168,6 +173,7 @@ fn required_commit_range_bound(
         .ok_or_else(|| config_error(&format!("--{name} is required with --scope commit-range")))
 }
 
+#[hotpath::measure]
 fn config_error(message: &str) -> tracedecay_domain::errors::TraceDecayError {
     tracedecay_domain::errors::TraceDecayError::Config {
         message: message.to_string(),

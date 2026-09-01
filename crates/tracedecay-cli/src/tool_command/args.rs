@@ -24,6 +24,7 @@ pub(crate) struct ParsedInvocation {
 /// form used by the MCP registry. Accepts aliases (e.g. `query` → `search`),
 /// strips a leading `tracedecay_` if present, and converts dashes to
 /// underscores so `dead-code` and `dead_code` both work.
+#[hotpath::measure]
 pub(crate) fn canonical_tool_name(raw: &str) -> String {
     let trimmed = raw.strip_prefix("tracedecay_").unwrap_or(raw);
     let normalized = trimmed.replace('-', "_");
@@ -36,6 +37,7 @@ pub(crate) fn canonical_tool_name(raw: &str) -> String {
 
 /// Parse CLI args against the tool's JSON Schema. Returns the JSON object to
 /// hand to the handler, plus side-effects from reserved flags.
+#[hotpath::measure]
 pub(crate) fn parse_invocation(def: &ToolDefinition, args: &[String]) -> Result<ParsedInvocation> {
     // stdin is a single-shot stream: memoize the first read so that referencing
     // it more than once in one invocation (e.g. `--field-a @- --field-b @-`)
@@ -57,6 +59,7 @@ pub(crate) fn parse_invocation(def: &ToolDefinition, args: &[String]) -> Result<
     })
 }
 
+#[hotpath::measure]
 pub(super) fn parse_invocation_with_stdin(
     def: &ToolDefinition,
     args: &[String],
@@ -217,6 +220,7 @@ const DISPATCH_ROUTING_KEYS: &[&str] = &["response_handle_project_root", "cwd"];
 ///
 /// Schemas without `properties` are treated as opaque (no validation) so
 /// dynamic or profile-scoped tools cannot be bricked by a stale walker.
+#[hotpath::measure]
 fn validate_tool_args(def: &ToolDefinition, args: &Map<String, Value>) -> Result<()> {
     let Some(props) = def
         .input_schema
@@ -310,10 +314,12 @@ fn validate_tool_args(def: &ToolDefinition, args: &Map<String, Value>) -> Result
     Ok(())
 }
 
+#[hotpath::measure]
 fn heredoc_hint(short: &str) -> String {
     format!("or the whole payload via stdin: tracedecay tool {short} --args - <<'JSON' {{…}} JSON")
 }
 
+#[hotpath::measure]
 fn check_array_elements(key: &str, short: &str, schema: &Value, value: &Value) -> Result<()> {
     if schema_primary_type(schema) != Some("array") {
         return Ok(());
@@ -344,6 +350,7 @@ fn check_array_elements(key: &str, short: &str, schema: &Value, value: &Value) -
     Ok(())
 }
 
+#[hotpath::measure]
 fn unknown_key_error(
     key: &str,
     short: &str,
@@ -378,6 +385,7 @@ fn unknown_key_error(
 /// (`"type": "boolean"`) and the nullable array form schemars emits for
 /// `Option<T>` (`"type": ["boolean", "null"]`). Returns `None` for unions of
 /// two or more non-null types, which have no single primary type.
+#[hotpath::measure]
 fn schema_primary_type(schema: &Value) -> Option<&str> {
     match schema.get("type")? {
         Value::String(ty) => Some(ty.as_str()),
@@ -401,6 +409,7 @@ fn schema_primary_type(schema: &Value) -> Option<&str> {
 
 /// True when the schema `type` is the nullable array form and includes
 /// `"null"`, so an explicit JSON `null` in an `--args` payload is valid.
+#[hotpath::measure]
 fn schema_allows_null(schema: &Value) -> bool {
     matches!(
         schema.get("type"),
@@ -411,6 +420,7 @@ fn schema_allows_null(schema: &Value) -> bool {
 /// True when a JSON value is acceptable for a schema `type` string. `number`
 /// accepts integers; `integer` requires a whole number. Unknown schema types
 /// validate as pass-through.
+#[hotpath::measure]
 fn value_matches_type(value: &Value, expected: &str) -> bool {
     match expected {
         "string" => value.is_string(),
@@ -423,6 +433,7 @@ fn value_matches_type(value: &Value, expected: &str) -> bool {
     }
 }
 
+#[hotpath::measure]
 fn json_type_name(value: &Value) -> &'static str {
     match value {
         Value::Null => "null",
@@ -434,6 +445,7 @@ fn json_type_name(value: &Value) -> &'static str {
     }
 }
 
+#[hotpath::measure]
 fn schema_required_keys(def: &ToolDefinition) -> Vec<String> {
     def.input_schema
         .get("required")
@@ -446,10 +458,12 @@ fn schema_required_keys(def: &ToolDefinition) -> Vec<String> {
         .unwrap_or_default()
 }
 
+#[hotpath::measure]
 fn max_typo_distance(name: &str) -> usize {
     if name.len() > 6 { 3 } else { 2 }
 }
 
+#[hotpath::measure]
 fn nearest_by_edit_distance(
     target: &str,
     candidates: impl IntoIterator<Item = String>,
@@ -464,11 +478,13 @@ fn nearest_by_edit_distance(
 }
 
 /// Nearest property name by edit distance, for did-you-mean suggestions.
+#[hotpath::measure]
 fn nearest_key(key: &str, props: &Map<String, Value>) -> Option<String> {
     nearest_by_edit_distance(key, props.keys().cloned())
 }
 
 /// Nearest tool name (short form) for unknown-tool suggestions.
+#[hotpath::measure]
 pub(crate) fn nearest_tool_name(canonical: &str, defs: &[ToolDefinition]) -> Option<String> {
     let target = short_tool_name(canonical);
     nearest_by_edit_distance(
@@ -480,6 +496,7 @@ pub(crate) fn nearest_tool_name(canonical: &str, defs: &[ToolDefinition]) -> Opt
 
 /// Classic two-row Levenshtein distance; property and tool names are short so
 /// the quadratic cost is irrelevant.
+#[hotpath::measure]
 pub(super) fn edit_distance(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
@@ -498,6 +515,7 @@ pub(super) fn edit_distance(a: &str, b: &str) -> usize {
 
 /// A `-flag` (single dash) token whose name matches a known property is a
 /// typo'd flag, not a positional. Returns the kebab-case flag name to suggest.
+#[hotpath::measure]
 fn single_dash_flag_typo(raw: &str, props: &Map<String, Value>) -> Option<String> {
     let name = raw.strip_prefix('-')?;
     if name.is_empty() || raw.starts_with("--") {
@@ -509,6 +527,7 @@ fn single_dash_flag_typo(raw: &str, props: &Map<String, Value>) -> Option<String
 
 /// Corrective error for a flag with no following value, stating the exact fix
 /// (booleans get the `true`/`false` example verbatim).
+#[hotpath::measure]
 fn missing_flag_value_error(flag: &str, prop_schema: Option<&Value>) -> TraceDecayError {
     let is_boolean = prop_schema.and_then(schema_primary_type) == Some("boolean");
     let message = if is_boolean {
@@ -519,6 +538,7 @@ fn missing_flag_value_error(flag: &str, prop_schema: Option<&Value>) -> TraceDec
     TraceDecayError::Config { message }
 }
 
+#[hotpath::measure]
 fn bind_positionals(
     def: &ToolDefinition,
     schema_properties: &Map<String, Value>,
@@ -560,6 +580,7 @@ fn bind_positionals(
 /// argument (the value IS the object): `-` reads stdin and any non-inline value
 /// is a file path, without the `@` sigil that per-key values need. Inline JSON
 /// (starting `{`/`[`) is returned verbatim; `@file` and `@-` are also accepted.
+#[hotpath::measure]
 fn resolve_args_payload(
     raw: &str,
     read_stdin: &mut impl FnMut() -> Result<String>,
@@ -583,6 +604,7 @@ fn resolve_args_payload(
 /// Coerce a CLI string value to the JSON type declared in the property schema.
 /// Falls back to a JSON string when the schema is absent or specifies an
 /// unknown type.
+#[hotpath::measure]
 fn coerce_value(key: &str, prop_schema: Option<&Value>, raw: &str) -> Result<Value> {
     let ty = prop_schema
         .and_then(schema_primary_type)
@@ -656,6 +678,7 @@ fn coerce_value(key: &str, prop_schema: Option<&Value>, raw: &str) -> Result<Val
 ///
 /// Called after [`coerce_value`], so the value is already the right JSON type
 /// (or a string we'll wrap in an array on first sight of a second occurrence).
+#[hotpath::measure]
 fn merge_value(map: &mut Map<String, Value>, key: &str, value: Value) {
     if let Some(existing) = map.get_mut(key) {
         match existing {
@@ -674,6 +697,7 @@ fn merge_value(map: &mut Map<String, Value>, key: &str, value: Value) {
 /// array: split on commas if the user passed `--keywords foo,bar`, or wrap a
 /// single-occurrence string in a one-element array. Runs after parsing so we
 /// can see whether the user passed the flag once or many times.
+#[hotpath::measure]
 pub(super) fn finalize_arrays(def: &ToolDefinition, map: &mut Map<String, Value>) {
     let Some(props) = def
         .input_schema
@@ -707,12 +731,14 @@ pub(super) fn finalize_arrays(def: &ToolDefinition, map: &mut Map<String, Value>
 }
 
 /// Consume the next argument as a flag value or return a `missing value` error.
+#[hotpath::measure]
 fn take_value(iter: &mut std::slice::Iter<'_, String>, flag: &str) -> Result<String> {
     iter.next().cloned().ok_or_else(|| TraceDecayError::Config {
         message: format!("flag `{flag}` requires a value"),
     })
 }
 
+#[hotpath::measure]
 fn take_flag_value(
     iter: &mut std::slice::Iter<'_, String>,
     flag: &str,
@@ -728,6 +754,7 @@ fn take_flag_value(
 /// stripped; the rest is treated as a path (relative to cwd). Plain values
 /// pass through unchanged. To pass a literal `@` as the first character, use
 /// `--args` instead.
+#[hotpath::measure]
 fn resolve_at_file(raw: &str, read_stdin: &mut impl FnMut() -> Result<String>) -> Result<String> {
     if let Some(path) = raw.strip_prefix('@') {
         if path == "-" {

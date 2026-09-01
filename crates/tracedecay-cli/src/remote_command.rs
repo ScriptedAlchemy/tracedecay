@@ -260,6 +260,7 @@ fn read_protocol_request<T: DeserializeOwned>(path: &Path) -> Result<RemoteProto
     })
 }
 
+#[hotpath::measure]
 fn emit_protocol_response<T: Serialize>(
     response: &RemoteProtocolResponseV1<T>,
     json: bool,
@@ -275,6 +276,7 @@ fn emit_protocol_response<T: Serialize>(
 /// Emits a query response with its coverage evidence, so a found/not-found
 /// answer is never read as complete while local captures have not replayed
 /// or the shard disclosed a degraded state.
+#[hotpath::measure]
 fn emit_query_response(
     response: &RemoteProtocolResponseV1<RemoteQueryResultV1>,
     local_spool: Option<&RemoteSpoolOperationalStatusV1>,
@@ -291,6 +293,7 @@ fn emit_query_response(
     protocol_exit_status(response)
 }
 
+#[hotpath::measure]
 fn protocol_exit_status<T>(response: &RemoteProtocolResponseV1<T>) -> Result<()> {
     match &response.result {
         Ok(_) => Ok(()),
@@ -308,6 +311,7 @@ fn protocol_exit_status<T>(response: &RemoteProtocolResponseV1<T>) -> Result<()>
 /// the local daemon's canonical operational status. Every other pending-local
 /// answer keeps the serving node's own evidence, and a local daemon that
 /// cannot answer leaves the wire's typed absence in place.
+#[hotpath::measure]
 fn caller_local_spool_evidence(
     response: &RemoteProtocolResponseV1<RemoteQueryResultV1>,
 ) -> Option<RemoteSpoolOperationalStatusV1> {
@@ -330,6 +334,7 @@ fn caller_local_spool_evidence(
     }
 }
 
+#[hotpath::measure]
 fn query_payload(
     response: &RemoteProtocolResponseV1<RemoteQueryResultV1>,
 ) -> Option<&RemoteQueryResultV1> {
@@ -342,6 +347,7 @@ fn query_payload(
     }
 }
 
+#[hotpath::measure]
 fn render_query_coverage(
     result: &RemoteQueryResultV1,
     local_spool: Option<&RemoteSpoolOperationalStatusV1>,
@@ -405,6 +411,7 @@ Local quarantined captures (local daemon spool): {}\n",
     rendered
 }
 
+#[hotpath::measure]
 fn coverage_label(coverage: ShardCoverageStateV1) -> &'static str {
     match coverage {
         ShardCoverageStateV1::Complete => "complete",
@@ -415,6 +422,7 @@ fn coverage_label(coverage: ShardCoverageStateV1) -> &'static str {
     }
 }
 
+#[hotpath::measure]
 fn pending_local_unavailable_label(reason: PendingLocalUnavailableReasonV1) -> &'static str {
     match reason {
         PendingLocalUnavailableReasonV1::RequestingNodeSpoolNotSupplied => {
@@ -424,22 +432,26 @@ fn pending_local_unavailable_label(reason: PendingLocalUnavailableReasonV1) -> &
     }
 }
 
+#[hotpath::measure]
 fn map_remote_client_error(error: RemoteClientError) -> TraceDecayError {
     TraceDecayError::Config {
         message: error.to_string(),
     }
 }
 
+#[hotpath::measure]
 fn canonical_json_line<T: Serialize>(value: &T) -> serde_json::Result<String> {
     let mut rendered = serde_json::to_string(value)?;
     rendered.push('\n');
     Ok(rendered)
 }
 
+#[hotpath::measure]
 fn status_json_line(status: &RemoteOperationalStatusReadV1) -> serde_json::Result<String> {
     canonical_json_line(status)
 }
 
+#[hotpath::measure]
 fn render_status_human(status: &RemoteOperationalStatusReadV1) -> String {
     match status {
         RemoteOperationalStatusReadV1::Observed {
@@ -450,6 +462,7 @@ fn render_status_human(status: &RemoteOperationalStatusReadV1) -> String {
     }
 }
 
+#[hotpath::measure]
 fn render_observed_status(
     listener: RemoteListenerReadV1,
     status: &RemoteOperationalStatusV1,
@@ -480,6 +493,7 @@ Recovery required: {}\n",
     )
 }
 
+#[hotpath::measure]
 fn render_protocol_response<T>(response: &RemoteProtocolResponseV1<T>) -> String {
     let outcome = match &response.result {
         Ok(_) => "ok".to_owned(),
@@ -493,6 +507,7 @@ fn render_protocol_response<T>(response: &RemoteProtocolResponseV1<T>) -> String
     )
 }
 
+#[hotpath::measure]
 fn readiness_label(readiness: RemoteOperationalReadinessV1) -> &'static str {
     match readiness {
         RemoteOperationalReadinessV1::Unconfigured => "unconfigured",
@@ -502,6 +517,7 @@ fn readiness_label(readiness: RemoteOperationalReadinessV1) -> &'static str {
     }
 }
 
+#[hotpath::measure]
 fn listener_label(listener: RemoteListenerReadV1) -> &'static str {
     match listener {
         RemoteListenerReadV1::Serving => "serving",
@@ -510,6 +526,7 @@ fn listener_label(listener: RemoteListenerReadV1) -> &'static str {
     }
 }
 
+#[hotpath::measure]
 fn authority_label(authority: &CurrentRemoteAuthorityStateV1) -> &'static str {
     match authority {
         CurrentRemoteAuthorityStateV1::Available(_) => "available",
@@ -518,6 +535,7 @@ fn authority_label(authority: &CurrentRemoteAuthorityStateV1) -> &'static str {
     }
 }
 
+#[hotpath::measure]
 fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
 }

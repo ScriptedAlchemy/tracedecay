@@ -123,6 +123,7 @@ pub(super) async fn handle_automation_skills_command(
     Ok(())
 }
 
+#[hotpath::measure]
 fn deploy_skills_to_current_project(
     profile_root: &std::path::Path,
 ) -> tracedecay_domain::errors::Result<
@@ -145,6 +146,7 @@ fn deploy_skills_to_current_project(
     )
 }
 
+#[hotpath::measure]
 fn print_managed_skill(
     skill: &tracedecay_automation_runtime::automation::managed_skills::ManagedSkill,
 ) {

@@ -34,10 +34,12 @@ pub(crate) async fn run(
     Ok(())
 }
 
+#[hotpath::measure]
 fn workflow_json_line(outcome: &ApplicationResult<Value>) -> serde_json::Result<String> {
     crate::cli::output::json::json_line(outcome)
 }
 
+#[hotpath::measure]
 fn read_request(path: &std::path::Path) -> tracedecay_domain::errors::Result<Value> {
     let payload = if path == std::path::Path::new("-") {
         let mut payload = String::new();

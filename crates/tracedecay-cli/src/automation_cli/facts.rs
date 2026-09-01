@@ -2,6 +2,7 @@ use super::daemon_automation_action;
 use crate::cli::AutomationFactsAction;
 use crate::resolve_cli_project_root;
 
+#[hotpath::measure]
 pub(super) fn automatic_fact_receipt_list_rpc_args(
     state: Option<&str>,
     limit: usize,
@@ -13,6 +14,7 @@ pub(super) fn automatic_fact_receipt_list_rpc_args(
     })
 }
 
+#[hotpath::measure]
 pub(super) fn automatic_fact_receipt_view_rpc_args(id: &str) -> serde_json::Value {
     serde_json::json!({ "action": "automatic_fact_receipt_view", "id": id })
 }

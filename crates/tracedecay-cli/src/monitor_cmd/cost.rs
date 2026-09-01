@@ -47,6 +47,7 @@ pub(super) struct CostCache {
     refresh: Option<Receiver<RefreshResult>>,
 }
 
+#[hotpath::measure_all]
 impl CostCache {
     pub(super) fn new() -> Self {
         Self {
@@ -140,6 +141,7 @@ struct TodayCostPayload {
     provider_usage: ProviderUsageCostSummaryV1,
 }
 
+#[hotpath::measure]
 fn map_cost_payloads(
     week: serde_json::Value,
     today: serde_json::Value,
@@ -211,6 +213,7 @@ fn map_cost_payloads(
     }))
 }
 
+#[hotpath::measure]
 fn global_cost_handshake() -> Result<DaemonHandshake> {
     let cwd = std::env::current_dir()?;
     let project_root = tracedecay_runtime_core::config::discover_project_root(&cwd);
@@ -244,6 +247,7 @@ async fn fetch_cost_snapshot() -> Result<Option<CostSnapshot>> {
         })?
 }
 
+#[hotpath::measure]
 fn fetch_cost_snapshot_blocking() -> RefreshResult {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -254,6 +258,7 @@ fn fetch_cost_snapshot_blocking() -> RefreshResult {
         .map_err(|error| error.to_string())
 }
 
+#[hotpath::measure]
 fn spawn_refresh_worker<F>(fetch: F) -> std::io::Result<Receiver<RefreshResult>>
 where
     F: FnOnce() -> RefreshResult + Send + 'static,

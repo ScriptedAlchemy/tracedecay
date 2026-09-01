@@ -13,6 +13,7 @@ use tracedecay_runtime_core::timeutil::format_yyyy_mm_dd;
 use tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot;
 
 /// Formats a single table cell with left-aligned label and right-aligned value.
+#[hotpath::measure]
 fn format_cell(label: &str, value: &str, width: usize) -> String {
     let content_len = label.len() + value.len();
     let pad = width.saturating_sub(2 + content_len);
@@ -20,6 +21,7 @@ fn format_cell(label: &str, value: &str, width: usize) -> String {
 }
 
 /// Builds a horizontal separator line (e.g. ├──┬──┤).
+#[hotpath::measure]
 fn table_separator(
     left: char,
     mid: char,
@@ -50,6 +52,7 @@ pub struct BranchInfo {
 }
 
 /// Prints only the header section of the status table (version, tokens, sync times).
+#[hotpath::measure]
 pub fn print_status_header(
     census: &GenerationCensusSnapshot,
     freshness: Option<&CodeIndexWorktreeFreshnessV1>,
@@ -96,6 +99,7 @@ pub struct StatusTable<'a> {
 }
 
 /// Prints the status output from named inputs.
+#[hotpath::measure]
 pub fn print_status_table_with(table: StatusTable<'_>) {
     let StatusTable {
         census,
@@ -141,6 +145,7 @@ pub fn print_status_table_with(table: StatusTable<'_>) {
 }
 
 /// The three census cells, or `None` when the census is a typed absence.
+#[hotpath::measure]
 fn census_cells(census: &GenerationCensusSnapshot) -> Option<Vec<(&'static str, String)>> {
     match census {
         GenerationCensusSnapshot::Observed { statistics } => Some(vec![
@@ -152,6 +157,7 @@ fn census_cells(census: &GenerationCensusSnapshot) -> Option<Vec<(&'static str, 
     }
 }
 
+#[hotpath::measure]
 fn census_absence_line(census: &GenerationCensusSnapshot) -> String {
     match census {
         GenerationCensusSnapshot::Observed { .. } => String::new(),
@@ -170,6 +176,7 @@ const MAX_CELL_WIDTH: usize = 32;
 const MAX_DISPLAY_FLAGS: usize = 25;
 
 /// Compute cell width from the widest census cell, capped at `MAX_CELL_WIDTH`.
+#[hotpath::measure]
 fn compute_cell_width(cells: &Option<Vec<(&'static str, String)>>) -> usize {
     let widest = cells
         .iter()
@@ -183,6 +190,7 @@ fn compute_cell_width(cells: &Option<Vec<(&'static str, String)>>) -> usize {
 /// Returns a shuffled copy of `flags` using xorshift64 seeded from time + PID.
 ///
 /// Avoids pulling in `rand` for what is purely a cosmetic per-render shuffle.
+#[hotpath::measure]
 fn shuffle_flags(flags: &[String]) -> Vec<String> {
     use std::time::{SystemTime, UNIX_EPOCH};
     let mut out = flags.to_vec();
@@ -208,6 +216,7 @@ fn shuffle_flags(flags: &[String]) -> Vec<String> {
 }
 
 /// Print the top title row: version (left) + country flags (right).
+#[hotpath::measure]
 fn print_version_flags_row(country_flags: &[String], inner_width: usize) {
     let version = crate::product_runtime::PRODUCT_BUILD_VERSION;
     let title = format!("   TraceDecay v{version}");
@@ -256,6 +265,7 @@ fn print_version_flags_row(country_flags: &[String], inner_width: usize) {
 }
 
 /// Print the second title row: token counts right-aligned in green.
+#[hotpath::measure]
 fn print_tokens_row(
     tokens_saved: u64,
     global_tokens_saved: Option<u64>,
@@ -288,6 +298,7 @@ fn print_tokens_row(
 
 /// Print the third title row: the scheduler's freshness view, right-aligned
 /// in dim. An absent reading names itself instead of rendering "never".
+#[hotpath::measure]
 fn print_freshness_row(freshness: Option<&CodeIndexWorktreeFreshnessV1>, inner_width: usize) {
     let sync_text = match freshness {
         Some(freshness) => {
@@ -321,10 +332,12 @@ fn print_freshness_row(freshness: Option<&CodeIndexWorktreeFreshnessV1>, inner_w
 }
 
 /// Whole seconds since the Unix epoch from a non-negative microsecond stamp.
+#[hotpath::measure]
 fn unix_seconds_from_micros(micros: i64) -> u64 {
     u64::try_from(micros / 1_000_000).unwrap_or(0)
 }
 
+#[hotpath::measure]
 fn print_branch_row(info: &BranchInfo, inner_width: usize) {
     let mut text = format!("Branch: {}", info.branch);
     if let Some(ref parent) = info.parent {
@@ -341,6 +354,7 @@ fn print_branch_row(info: &BranchInfo, inner_width: usize) {
 }
 
 /// Print the cost summary row: today's cost, 7-day cost, efficiency ratio.
+#[hotpath::measure]
 fn print_cost_row(cost_info: &CostRow, inner_width: usize) {
     let mut parts = Vec::new();
     if cost_info.today_cost >= 0.001 {
@@ -362,6 +376,7 @@ fn print_cost_row(cost_info: &CostRow, inner_width: usize) {
 }
 
 /// Print rows of label-value pairs in a bordered table.
+#[hotpath::measure]
 fn print_table_rows(rows: &[Vec<(&str, String)>], cell_width: usize, num_cols: usize) {
     for row in rows {
         print!("│");
@@ -376,6 +391,7 @@ fn print_table_rows(rows: &[Vec<(&str, String)>], cell_width: usize, num_cols: u
     }
 }
 
+#[hotpath::measure]
 pub fn print_gain_total(
     project: &str,
     range: &str,
@@ -395,6 +411,7 @@ pub fn print_gain_total(
     );
 }
 
+#[hotpath::measure]
 pub fn print_gain_history<F: Fn(u64) -> Option<f64>>(
     rows: &[tracedecay_global_db::SavingsDay],
     to_usd: F,

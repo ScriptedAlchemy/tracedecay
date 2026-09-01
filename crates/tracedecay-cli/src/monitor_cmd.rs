@@ -12,6 +12,7 @@ mod cost;
 use cost::{CostCache, CostCacheState};
 
 /// Run the monitor TUI. Blocks until Ctrl+C.
+#[hotpath::measure]
 pub fn run() -> std::io::Result<()> {
     use crossterm::{
         cursor, execute, terminal,
@@ -85,6 +86,7 @@ pub fn run() -> std::io::Result<()> {
     result
 }
 
+#[hotpath::measure]
 fn monitor_loop(
     reader: &mut MmapReader,
     entries: &mut Vec<MonitorEntry>,
@@ -315,6 +317,7 @@ fn monitor_loop(
     Ok(())
 }
 
+#[hotpath::measure]
 fn is_temp_dir_name(name: &str) -> bool {
     name.starts_with(".tmp") && name.len() > 4
 }
@@ -322,6 +325,7 @@ fn is_temp_dir_name(name: &str) -> bool {
 /// Push a (project, `tool_name`) pair onto the front of the recent-updates list.
 /// If the pair is already present, it is moved to the front (no duplicates).
 /// The list is truncated to the three most recent distinct pairs.
+#[hotpath::measure]
 fn push_recent_update(recent: &mut Vec<(String, String)>, project: &str, tool_name: &str) {
     recent.retain(|(p, t)| !(p == project && t == tool_name));
     recent.insert(0, (project.to_string(), tool_name.to_string()));
@@ -330,6 +334,7 @@ fn push_recent_update(recent: &mut Vec<(String, String)>, project: &str, tool_na
 
 /// Return the ANSI color prefix for a method line based on its recency.
 /// Latest = green, 2nd latest = orange, 3rd latest = yellow, else no color.
+#[hotpath::measure]
 fn update_color_for(recent: &[(String, String)], project: &str, tool_name: &str) -> &'static str {
     match recent
         .iter()

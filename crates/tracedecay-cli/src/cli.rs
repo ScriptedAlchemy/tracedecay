@@ -90,6 +90,7 @@ retryable conflict. Watch progress in another terminal with
 Related: tracedecay tool runtime (semantic runtime state), tracedecay tool
 configuration_get (the semantic.runtime.v1 setting).";
 
+#[hotpath::measure]
 fn agent_value_parser() -> PossibleValuesParser {
     PossibleValuesParser::new(tracedecay::agents::available_integrations())
 }

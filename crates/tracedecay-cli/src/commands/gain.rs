@@ -19,6 +19,7 @@ struct SavingsTotalPayload {
 /// for retrieval savings.
 ///
 /// Pure lookup against the deterministic bundled pricing authority.
+#[hotpath::measure]
 pub(crate) fn estimate_dollars_saved(saved_tokens: u64) -> Option<f64> {
     let table = tracedecay_session_memory::provider_pricing::load_table();
     let price = tracedecay_session_memory::provider_pricing::resolve_model_price(
@@ -39,6 +40,7 @@ pub async fn handle_gain(
     handle_gain_inner(all, history, range, json_output).await
 }
 
+#[hotpath::measure]
 fn handle_gain_inner(
     all: bool,
     history: bool,

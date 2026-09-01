@@ -44,6 +44,7 @@ pub(super) enum SessionSyncPollState {
     Completed,
 }
 
+#[hotpath::measure]
 pub(super) fn session_sync_poll_state(
     label: &str,
     outcome: &serde_json::Value,
@@ -150,6 +151,7 @@ pub(super) fn session_sync_poll_state(
     }
 }
 
+#[hotpath::measure]
 fn session_sync_remaining_work(outcome: &Value) -> Option<u64> {
     let coverage = outcome.get("coverage")?.as_array()?;
     if coverage.is_empty() {
@@ -209,6 +211,7 @@ pub(super) async fn await_session_sync_completion(
 
 /// Resolves the `--since` argument (ISO-8601 or unix seconds) to a unix-second
 /// lower bound, defaulting to 90 days before now when unset.
+#[hotpath::measure]
 fn resolve_git_sync_since(since: Option<&str>) -> tracedecay_domain::errors::Result<i64> {
     let Some(raw) = since.map(str::trim).filter(|value| !value.is_empty()) else {
         let now = std::time::SystemTime::now()

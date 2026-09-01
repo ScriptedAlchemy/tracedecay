@@ -8,6 +8,7 @@ use tracedecay::agents::host_bundle_v2::{
     HostComponentSetReceiptV1,
 };
 
+#[hotpath::measure]
 pub(super) fn selected_feedback_component(
     aggregate: &HostComponentSetReceiptV1,
 ) -> tracedecay_domain::errors::Result<HostBundleComponentV1> {
@@ -28,6 +29,7 @@ pub(super) fn selected_feedback_component(
     })
 }
 
+#[hotpath::measure]
 pub(super) fn live_feedback_receipt(
     home: &Path,
     aggregate: &HostComponentSetReceiptV1,
@@ -64,6 +66,7 @@ pub(super) fn live_feedback_receipt(
     Ok((manifest, receipt))
 }
 
+#[hotpath::measure]
 pub(super) fn companion_owned_live_paths(
     home: &Path,
     aggregate: &HostComponentSetReceiptV1,
@@ -85,6 +88,7 @@ pub(super) fn companion_owned_live_paths(
         .collect())
 }
 
+#[hotpath::measure]
 pub(super) fn aggregate_with_feedback_component(
     previous: &HostComponentSetReceiptV1,
     manifest: &HostBundleManifestV1,

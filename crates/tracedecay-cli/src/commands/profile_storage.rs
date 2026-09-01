@@ -39,6 +39,7 @@ pub(crate) async fn handle_profile_storage_action(
 /// next daemon open recreates the graph at the canonical schema and re-ingests
 /// from those durable inputs. A store already at the canonical schema is
 /// refused untouched — this command cannot be used to wipe a healthy store.
+#[hotpath::measure]
 fn handle_reset_project_store(
     project_root: Option<String>,
     project_id: Option<String>,
@@ -135,6 +136,7 @@ struct ResetGraphDb {
 /// per tracked branch under `branches/`. Session archives and transcripts
 /// share the store directory but are never graph databases, so they are never
 /// candidates. Ordering is deterministic (root first, branches sorted).
+#[hotpath::measure]
 fn project_store_graph_db_paths(
     data_root: &Path,
 ) -> tracedecay_domain::errors::Result<Vec<PathBuf>> {
@@ -176,6 +178,7 @@ fn project_store_graph_db_paths(
 /// Reads the SQLite `user_version` of one graph database after the same
 /// fail-closed header verification the daemon's refusal performs. A file that
 /// is not a SQLite database is a typed error, never a deletion candidate.
+#[hotpath::measure]
 fn verified_graph_db_schema_version(
     graph_db_path: &Path,
 ) -> tracedecay_domain::errors::Result<i64> {
@@ -223,6 +226,7 @@ fn verified_graph_db_schema_version(
 /// an unrecognized file aborts the reset without partial removal. Databases
 /// already at the canonical schema are preserved, and a store with nothing
 /// refused is a typed error — this cannot wipe a healthy store.
+#[hotpath::measure]
 fn reset_refused_project_graph_store(
     profile_root: &Path,
     project_id: &str,
@@ -293,6 +297,7 @@ fn reset_refused_project_graph_store(
 /// reset runs offline under the profile's exclusive maintenance lease; the
 /// next daemon open recreates the authority at the canonical schema and its
 /// content re-derives from the preserved transcripts.
+#[hotpath::measure]
 fn handle_reset_authority(
     authority: String,
     db: Option<String>,
@@ -414,6 +419,7 @@ async fn brokered_storage_report(
     Ok(report)
 }
 
+#[hotpath::measure]
 fn merge_storage_report_page(
     report: &mut tracedecay_maintenance::retention::storage_report::StorageReport,
     page: tracedecay_maintenance::retention::storage_report::StorageReport,
@@ -599,6 +605,7 @@ async fn handle_storage_report(
     Ok(())
 }
 
+#[hotpath::measure]
 fn handle_backup_profile(
     destination: String,
     backup_id: String,
@@ -637,6 +644,7 @@ fn handle_backup_profile(
     Ok(())
 }
 
+#[hotpath::measure]
 fn handle_rehearse_profile_backup(
     backup: String,
     restore: String,

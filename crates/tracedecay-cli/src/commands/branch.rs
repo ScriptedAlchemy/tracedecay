@@ -6,6 +6,7 @@ use crate::cli::BranchAction;
 
 use super::daemon::daemon_tool_json;
 
+#[hotpath::measure]
 fn branch_list_rpc_args() -> serde_json::Value {
     serde_json::json!({
         "format": "json",
@@ -324,6 +325,7 @@ fn handle_branch_action_inner(
     })
 }
 
+#[hotpath::measure]
 fn parse_daemon_branch_admin_report(
     response: &serde_json::Value,
 ) -> tracedecay_domain::errors::Result<tracedecay_runtime_core::branch::BranchAdminReport> {
@@ -334,6 +336,7 @@ fn parse_daemon_branch_admin_report(
     })
 }
 
+#[hotpath::measure]
 fn parse_daemon_branch_add_outcome(
     response: &serde_json::Value,
 ) -> tracedecay_domain::errors::Result<tracedecay_runtime_core::branch::BranchAddOutcome> {

@@ -4,6 +4,7 @@ use crate::current_unix_timestamp;
 
 pub(crate) use tracedecay_runtime_core::storage::{ProjectStorageLocation, ProjectStorageStatus};
 
+#[hotpath::measure]
 pub(crate) fn classify_project_storage(project_root: &Path) -> ProjectStorageLocation {
     tracedecay_runtime_core::storage::classify_project_storage(project_root)
 }
@@ -31,6 +32,7 @@ fn classify_registry_storage(
     store.classify_storage(project_root, profile_root)
 }
 
+#[hotpath::measure]
 pub(crate) fn classify_registry_storage_value(
     project_root: &Path,
     profile_root: &Path,
@@ -49,6 +51,7 @@ pub(crate) fn classify_registry_storage_value(
 /// manual edits, or state copied across machines. Clamp those cases to zero so
 /// cooldown/version-cache logic degrades gracefully instead of getting stuck on
 /// a negative delta.
+#[hotpath::measure]
 fn elapsed_since(now: i64, recorded_at: i64) -> i64 {
     if recorded_at >= now {
         0
@@ -64,6 +67,7 @@ fn elapsed_since(now: i64, recorded_at: i64) -> i64 {
 /// but it is never an authorization fallback for upload.
 /// `force` = true on status/sync commands (always attempt), false on others
 /// (only flush if stale > 30s).
+#[hotpath::measure]
 pub(crate) fn try_flush(
     config: &mut tracedecay_session_memory::user_config::UserConfig,
     force: bool,
@@ -99,6 +103,7 @@ pub(crate) fn try_flush(
 /// true, always fetches from GitHub (used during sync where the call runs in
 /// parallel). If `skip_suppression` is false, the warning is suppressed for 15
 /// minutes after it was last shown; if true it is always shown (used for status).
+#[hotpath::measure]
 pub(crate) fn check_for_update(
     config: &mut tracedecay_session_memory::user_config::UserConfig,
     skip_cache: bool,
@@ -147,6 +152,7 @@ pub(crate) fn check_for_update(
 }
 
 /// Returns the total size in bytes of every file under `dir`. Best-effort.
+#[hotpath::measure]
 pub(crate) fn tracedecay_dir_size(dir: &Path) -> u64 {
     fn walk(p: &Path, acc: &mut u64) {
         let Ok(entries) = std::fs::read_dir(p) else {
@@ -200,6 +206,7 @@ pub(crate) async fn gather_target_projects(
     }
 }
 
+#[hotpath::measure]
 fn registry_project_roots(
     payload: &serde_json::Value,
 ) -> tracedecay_domain::errors::Result<Vec<std::path::PathBuf>> {
@@ -245,6 +252,7 @@ async fn call_admin_cli(
 
 /// Returns project roots whose `.tracedecay` data dir lives in cwd, an
 /// ancestor, or a descendant.
+#[hotpath::measure]
 pub(crate) fn gather_local_projects(
     home_tracedecay: &Option<std::path::PathBuf>,
 ) -> Vec<std::path::PathBuf> {
@@ -257,6 +265,7 @@ pub(crate) fn gather_local_projects(
 /// Same as [`gather_local_projects`] but takes the starting directory explicitly.
 ///
 /// Pure (apart from filesystem reads) — easier to test than the cwd-driven wrapper.
+#[hotpath::measure]
 pub(crate) fn gather_local_projects_from(
     cwd: &Path,
     home_tracedecay: &Option<std::path::PathBuf>,
@@ -308,6 +317,7 @@ pub(crate) fn gather_local_projects_from(
 /// descends into a data dir once found. Tracks canonicalized directories
 /// to break symlink/junction cycles, and uses an explicit worklist instead of
 /// recursion so deep trees can't overflow the stack.
+#[hotpath::measure]
 pub(crate) fn find_descendant_tracedecay(
     start: &Path,
     canon_home_ts: &Option<std::path::PathBuf>,
@@ -381,6 +391,7 @@ pub(crate) fn find_descendant_tracedecay(
     }
 }
 
+#[hotpath::measure]
 fn local_project_marker_exists(project_root: &Path, data_dir: &Path) -> bool {
     if !data_dir.is_dir() {
         return false;
@@ -404,6 +415,7 @@ fn local_project_marker_exists(project_root: &Path, data_dir: &Path) -> bool {
 }
 
 /// Prints the big flashing warning shown before a wipe.
+#[hotpath::measure]
 pub(crate) fn print_flash_warning(all: bool, targets: &[ProjectStorageLocation]) {
     // Banner is `INNER_WIDTH` display columns wide. The colored title row is
     // padded with red-background spaces so the highlight reaches the same
