@@ -3385,7 +3385,26 @@ impl CodeIndexSchedulerRegistryV1 {
                         .as_ref()
                         .is_some_and(LatestCodeTextGenerationV1::text_serving_is_ready),
                 );
-                let prepare_graph = gate == GraphSeatGateV1::Prepare;
+                // An arrival that landed during this pass is exact/lexical
+                // work waiting for the worker. The optional graph prepare
+                // parks this worker on an O(store) sealed decode — tens of
+                // seconds on a cold large repository — and serving that
+                // arrival must never queue behind it. The arrival's own
+                // notify re-runs this worker, and the follow-up pass re-gates
+                // Prepare from its own terminal outcome, so seating is
+                // deferred one pass, never lost.
+                let arrival_pending_before_graph_prepare = gate == GraphSeatGateV1::Prepare
+                    && worker_pending_wake.has_pending_arrival();
+                if arrival_pending_before_graph_prepare {
+                    tracing::debug!(
+                        event = "code_index_graph_seat_skipped",
+                        reason = "arrival_pending",
+                        published_pass,
+                        "an arrival is pending; the optional graph decode yields this pass"
+                    );
+                }
+                let prepare_graph =
+                    gate == GraphSeatGateV1::Prepare && !arrival_pending_before_graph_prepare;
                 if gate == GraphSeatGateV1::RetainedTextOwnerWarming && !published_pass {
                     let text_empty = worker_text_generation
                         .read()
