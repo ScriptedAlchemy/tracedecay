@@ -451,6 +451,45 @@ impl SessionSyncProjectContext {
         )
     }
 
+    #[hotpath::measure(label = "daemon.session_sync.ingest.project", future = true)]
+    async fn ingest_project_transcripts(
+        &self,
+        authority: &GlobalDbSessionIngestAuthority<RegisteredGlobalDbLeaseV1>,
+        cancellation: &tracedecay_usecases::observation::ObservationCancellation,
+    ) -> tracedecay_sessions::runtime::TranscriptIngestOutcome {
+        let pass =
+            tracedecay_sessions::runtime::ingest_project_sources_for_provider_with_cancellation(
+                &self.brain_id,
+                &self.profile_id,
+                authority,
+                &self.project_root,
+                Some(self.project_id.clone()),
+                None,
+                true,
+                cancellation,
+            );
+        Box::pin(pass).await
+    }
+
+    #[hotpath::measure(label = "daemon.session_sync.ingest.profile", future = true)]
+    async fn ingest_profile_transcripts(
+        &self,
+        user_authority: &GlobalDbSessionIngestAuthority<RegisteredGlobalDbLeaseV1>,
+        registry_authority: &GlobalDbSessionIngestAuthority<RegisteredGlobalDbLeaseV1>,
+        cancellation: &tracedecay_usecases::observation::ObservationCancellation,
+    ) -> tracedecay_sessions::runtime::TranscriptIngestOutcome {
+        let pass = tracedecay_sessions::runtime::ingest_user_global_sources_for_provider_with_authorities_and_cancellation(
+            &self.brain_id,
+            &self.profile_id,
+            user_authority,
+            registry_authority,
+            &self.profile_root,
+            None,
+            cancellation,
+        );
+        Box::pin(pass).await
+    }
+
     pub(super) async fn import_transcripts(
         &self,
         service: &DaemonSessionSyncService,
@@ -463,20 +502,9 @@ impl SessionSyncProjectContext {
         let pass_cancellation = cancellation.clone();
         let pass = async {
             let project_authority = GlobalDbSessionIngestAuthority::new(project_sessions.clone());
-            let project = hotpath::future!(
-                tracedecay_sessions::runtime::ingest_project_sources_for_provider_with_cancellation(
-                    &self.brain_id,
-                    &self.profile_id,
-                    &project_authority,
-                    &self.project_root,
-                    Some(self.project_id.clone()),
-                    None,
-                    true,
-                    &pass_cancellation,
-                ),
-                label = "daemon.session_sync.ingest.project"
-            )
-            .await;
+            let project = self
+                .ingest_project_transcripts(&project_authority, &pass_cancellation)
+                .await;
             let project_stats = SessionSyncStatsV1 {
                 sessions_imported: project.stats.sessions_upserted,
                 messages_imported: project.stats.messages_upserted,
@@ -516,19 +544,13 @@ impl SessionSyncProjectContext {
                 let user_authority =
                     GlobalDbSessionIngestAuthority::new(self.user_sessions.clone());
                 let registry_authority = GlobalDbSessionIngestAuthority::new(self.registry.clone());
-                let user = hotpath::future!(
-                    tracedecay_sessions::runtime::ingest_user_global_sources_for_provider_with_authorities_and_cancellation(
-                        &self.brain_id,
-                        &self.profile_id,
+                let user = self
+                    .ingest_profile_transcripts(
                         &user_authority,
                         &registry_authority,
-                        &self.profile_root,
-                        None,
                         &pass_cancellation,
-                    ),
-                    label = "daemon.session_sync.ingest.profile"
-                )
-                .await;
+                    )
+                    .await;
                 (Some(user), Some(profile_sweep_started_at))
             };
             if let Some(user) = user.as_ref()

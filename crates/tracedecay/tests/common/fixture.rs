@@ -153,7 +153,7 @@ impl TestProfile {
 
     /// Registers, enrolls, and initializes `project_root` in this profile.
     pub async fn enroll(&self, project_root: &Path) -> RegisteredProject {
-        self.enroll_inner(project_root).await
+        Box::pin(self.enroll_inner(project_root)).await
     }
 
     async fn enroll_inner(&self, project_root: &Path) -> RegisteredProject {
@@ -175,15 +175,19 @@ impl TestProfile {
         // mounts this profile's registry database and project-session
         // authority. Both are what a bare direct context lacks.
         let registry = Arc::new(
-            HostAdmissionTestRuntimeV1::project(self.root(), &project_root, project_id)
-                .await
-                .unwrap_or_else(|err| {
-                    panic!(
-                        "failed to register fixture project '{}' in profile '{}': {err}",
-                        project_root.display(),
-                        self.root().display()
-                    )
-                }),
+            Box::pin(HostAdmissionTestRuntimeV1::project(
+                self.root(),
+                &project_root,
+                project_id,
+            ))
+            .await
+            .unwrap_or_else(|err| {
+                panic!(
+                    "failed to register fixture project '{}' in profile '{}': {err}",
+                    project_root.display(),
+                    self.root().display()
+                )
+            }),
         );
 
         // Initialize through that same runtime wherever the registered seam
@@ -192,11 +196,16 @@ impl TestProfile {
         // the seam; it resolves the same identity from the marker just written.
         let open_options = self.open_options();
         #[cfg(feature = "test-transport")]
-        let graph = registry
-            .initialize_project_graph_for_test(&project_root, open_options.clone())
-            .await;
+        let graph = Box::pin(
+            registry.initialize_project_graph_for_test(&project_root, open_options.clone()),
+        )
+        .await;
         #[cfg(not(feature = "test-transport"))]
-        let graph = TraceDecay::init_with_options(&project_root, open_options.clone()).await;
+        let graph = Box::pin(TraceDecay::init_with_options(
+            &project_root,
+            open_options.clone(),
+        ))
+        .await;
         let graph = graph.unwrap_or_else(|err| {
             panic!(
                 "failed to initialize fixture graph '{}': {err}",
@@ -218,22 +227,21 @@ impl TestProfile {
         // against the registry of the profile serving the call. The result was
         // previously dropped on the floor, so a fixture whose root the registry
         // refused produced tests that failed far away from the cause.
-        registry
-            .upsert_code_project(
-                &project_id_text,
-                &project_root,
-                tracedecay_runtime_core::worktree::git_common_dir(&project_root).as_deref(),
-                None,
-                tracedecay_runtime_core::branch::current_branch(&project_root).as_deref(),
+        Box::pin(registry.upsert_code_project(
+            &project_id_text,
+            &project_root,
+            tracedecay_runtime_core::worktree::git_common_dir(&project_root).as_deref(),
+            None,
+            tracedecay_runtime_core::branch::current_branch(&project_root).as_deref(),
+        ))
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "register fixture project '{}' at {}: {error}",
+                project_id_text,
+                project_root.display()
             )
-            .await
-            .unwrap_or_else(|error| {
-                panic!(
-                    "register fixture project '{}' at {}: {error}",
-                    project_id_text,
-                    project_root.display()
-                )
-            });
+        });
 
         RegisteredProject {
             profile: self.clone(),
@@ -334,26 +342,33 @@ impl RegisteredProject {
 
     /// Reopens the project graph in the same profile.
     pub async fn reopen(&self) -> TraceDecay {
-        TraceDecay::open_with_options(&self.root, self.open_options.clone())
-            .await
-            .unwrap_or_else(|err| {
-                panic!(
-                    "failed to reopen fixture graph '{}': {err}",
-                    self.root.display()
-                )
-            })
+        Box::pin(TraceDecay::open_with_options(
+            &self.root,
+            self.open_options.clone(),
+        ))
+        .await
+        .unwrap_or_else(|err| {
+            panic!(
+                "failed to reopen fixture graph '{}': {err}",
+                self.root.display()
+            )
+        })
     }
 
     /// Opens one tracked branch's graph in the same profile.
     pub async fn open_branch(&self, branch_name: &str) -> TraceDecay {
-        TraceDecay::open_branch_with_options(&self.root, branch_name, self.open_options.clone())
-            .await
-            .unwrap_or_else(|err| {
-                panic!(
-                    "failed to open fixture branch '{branch_name}' of '{}': {err}",
-                    self.root.display()
-                )
-            })
+        Box::pin(TraceDecay::open_branch_with_options(
+            &self.root,
+            branch_name,
+            self.open_options.clone(),
+        ))
+        .await
+        .unwrap_or_else(|err| {
+            panic!(
+                "failed to open fixture branch '{branch_name}' of '{}': {err}",
+                self.root.display()
+            )
+        })
     }
 
     /// Checkpoints and closes the retained graph while keeping profile
@@ -443,26 +458,33 @@ impl ClosedRegisteredProject {
 
     /// Reopens the project graph in the same profile.
     pub async fn reopen(&self) -> TraceDecay {
-        TraceDecay::open_with_options(&self.root, self.open_options.clone())
-            .await
-            .unwrap_or_else(|err| {
-                panic!(
-                    "failed to reopen fixture graph '{}': {err}",
-                    self.root.display()
-                )
-            })
+        Box::pin(TraceDecay::open_with_options(
+            &self.root,
+            self.open_options.clone(),
+        ))
+        .await
+        .unwrap_or_else(|err| {
+            panic!(
+                "failed to reopen fixture graph '{}': {err}",
+                self.root.display()
+            )
+        })
     }
 
     /// Opens one tracked branch's graph in the same profile.
     pub async fn open_branch(&self, branch_name: &str) -> TraceDecay {
-        TraceDecay::open_branch_with_options(&self.root, branch_name, self.open_options.clone())
-            .await
-            .unwrap_or_else(|err| {
-                panic!(
-                    "failed to open fixture branch '{branch_name}' of '{}': {err}",
-                    self.root.display()
-                )
-            })
+        Box::pin(TraceDecay::open_branch_with_options(
+            &self.root,
+            branch_name,
+            self.open_options.clone(),
+        ))
+        .await
+        .unwrap_or_else(|err| {
+            panic!(
+                "failed to open fixture branch '{branch_name}' of '{}': {err}",
+                self.root.display()
+            )
+        })
     }
 }
 

@@ -109,7 +109,7 @@ impl SessionHistoricalIngestor for ProjectSessionHistoricalIngestor {
         Box::pin(async move {
             let authority =
                 tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority::new(self.database.clone());
-            let pass =
+            let pass = Box::pin(
                 tracedecay_sessions::runtime::ingest_project_sources_for_provider_with_cancellation_and_codex_state(
                     self.profile_identity.brain_id(),
                     self.profile_identity.profile_id(),
@@ -121,7 +121,8 @@ impl SessionHistoricalIngestor for ProjectSessionHistoricalIngestor {
                     &self.cancellation,
                     self.codex_discovery.as_ref(),
                     &self.codex_consumer,
-                );
+                ),
+            );
             let outcome = match self.transcript_source_home.clone() {
                 Some(home) => {
                     tracedecay_sessions::runtime::with_transcript_source_home(home, pass).await
@@ -218,14 +219,16 @@ impl SessionHistoricalIngestor for ProfileSessionHistoricalIngestor {
                 tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority::new(self.database.clone());
             let registry_authority =
                 tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority::new(self.registry_database.clone());
-            let pass = tracedecay_sessions::runtime::ingest_user_global_sources_for_startup_with_db_and_codex_state(
-                self.profile_identity.brain_id(),
-                self.profile_identity.profile_id(),
-                &authority,
-                &registry_authority,
-                self.profile_identity.profile_root(),
-                &self.cancellation,
-                (self.codex_discovery.as_ref(), &self.codex_consumer),
+            let pass = Box::pin(
+                tracedecay_sessions::runtime::ingest_user_global_sources_for_startup_with_db_and_codex_state(
+                    self.profile_identity.brain_id(),
+                    self.profile_identity.profile_id(),
+                    &authority,
+                    &registry_authority,
+                    self.profile_identity.profile_root(),
+                    &self.cancellation,
+                    (self.codex_discovery.as_ref(), &self.codex_consumer),
+                ),
             );
             let outcome = match self.transcript_source_home.clone() {
                 Some(home) => {
