@@ -181,7 +181,6 @@ pub async fn prepare_temporal_candidate_cohort(
     TemporalPreparedCandidateCohort::new(candidates)
 }
 
-#[hotpath::measure]
 pub async fn pull_candidate_page(
     port: &impl TemporalReadPort,
     snapshot: &TemporalExecutionSnapshot,
@@ -228,7 +227,6 @@ pub async fn pull_candidate_page(
     commit_pulled_page(state, page, CANDIDATE_READ_BUDGET)
 }
 
-#[hotpath::measure]
 pub async fn pull_temporal_record_page(
     port: &impl TemporalReadPort,
     snapshot: &TemporalExecutionSnapshot,

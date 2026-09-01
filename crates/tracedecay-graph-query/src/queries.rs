@@ -335,6 +335,7 @@ impl<'a> GraphQueryManager<'a> {
             .collect())
     }
 
+    #[hotpath::skip]
     pub async fn build_file_adjacency_bounded(
         &self,
         max_files: usize,

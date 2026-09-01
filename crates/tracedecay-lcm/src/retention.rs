@@ -624,6 +624,7 @@ enum RetentionQueryExecutor<'query, 'store> {
 
 #[hotpath::measure_all]
 impl RetentionQueryExecutor<'_, '_> {
+    #[hotpath::skip]
     async fn query(
         &self,
         sql: &str,

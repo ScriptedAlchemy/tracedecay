@@ -400,7 +400,6 @@ mod tests {
         }
     }
 
-    #[hotpath::skip]
     const fn budget() -> RetrievalBudget {
         RetrievalBudget {
             max_candidates_per_lane: 64,

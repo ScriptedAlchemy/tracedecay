@@ -168,6 +168,7 @@ impl VerifiedGraphQuery {
         )
     }
 
+    #[hotpath::skip]
     async fn await_bound<T>(&self, future: impl Future<Output = Result<T>>) -> Result<T> {
         self.refuse_if_bound_closed()?;
         match run_deadline_signal_interruptible(
@@ -275,6 +276,7 @@ impl VerifiedGraphQuery {
         .await
     }
 
+    #[hotpath::skip]
     pub async fn read_source(&self, request: SourceReadRequest<'_>) -> Result<SourceReadOutput> {
         let source = self.bound_source()?;
         if request.project_id != source.project_id() {
@@ -715,7 +717,6 @@ pub async fn open_verified_graph_query(
     ))
 }
 
-#[hotpath::measure]
 async fn await_graph_port_wait<T>(
     deadline: &Deadline,
     cancellation: &CancellationSignal,

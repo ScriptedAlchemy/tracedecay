@@ -72,6 +72,7 @@ pub struct ReferencedClosureCache {
 
 #[hotpath::measure_all]
 impl ReferencedClosureCache {
+    #[hotpath::skip]
     async fn is_referenced(
         &mut self,
         conn: &(impl Executor + ?Sized),
