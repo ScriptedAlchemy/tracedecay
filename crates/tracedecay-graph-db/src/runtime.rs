@@ -568,6 +568,40 @@ impl GraphDb {
         Ok(batches)
     }
 
+    /// Same shape as [`Self::outgoing_relations`], but stops at `max_relations`
+    /// and returns the prefix instead of refusing the whole batch.
+    #[hotpath::measure(label = "graph_db.traversal.outgoing_truncated", impl_type = "GraphDb")]
+    pub fn outgoing_relations_truncated(
+        &self,
+        namespace: &GraphNamespace,
+        starts: &[GraphEntityId],
+        relation_kinds: &BTreeSet<GraphRelationKind>,
+        max_relations: usize,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
+        let guard = self.read_guard()?;
+        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        self.ensure_start_projections_readable(database, namespace, starts)?;
+        let batches = traversal::outgoing_relations_truncated(
+            database,
+            namespace,
+            starts,
+            relation_kinds,
+            max_relations,
+            cancellation.as_ref(),
+            &|namespace, projection| self.ensure_projection_readable(namespace, projection),
+        )?;
+        #[cfg(feature = "hotpath")]
+        {
+            let edges = batches.iter().map(Vec::len).sum();
+            crate::hotpath_observe::record_counts(starts.len(), edges, 0, 0);
+            crate::hotpath_observe::record_hydration_source(
+                crate::hotpath_observe::HydrationSource::Live,
+            );
+        }
+        Ok(batches)
+    }
+
     #[hotpath::measure(label = "graph_db.traversal.outgoing_targets", impl_type = "GraphDb")]
     pub fn outgoing_relation_targets(
         &self,
@@ -649,6 +683,40 @@ impl GraphDb {
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
         self.ensure_start_projections_readable(database, namespace, starts)?;
         let batches = traversal::incoming_relations(
+            database,
+            namespace,
+            starts,
+            relation_kinds,
+            max_relations,
+            cancellation.as_ref(),
+            &|namespace, projection| self.ensure_projection_readable(namespace, projection),
+        )?;
+        #[cfg(feature = "hotpath")]
+        {
+            let edges = batches.iter().map(Vec::len).sum();
+            crate::hotpath_observe::record_counts(starts.len(), edges, 0, 0);
+            crate::hotpath_observe::record_hydration_source(
+                crate::hotpath_observe::HydrationSource::Live,
+            );
+        }
+        Ok(batches)
+    }
+
+    /// Same shape as [`Self::incoming_relations`], but stops at `max_relations`
+    /// and returns the prefix instead of refusing the whole batch.
+    #[hotpath::measure(label = "graph_db.traversal.incoming_truncated", impl_type = "GraphDb")]
+    pub fn incoming_relations_truncated(
+        &self,
+        namespace: &GraphNamespace,
+        starts: &[GraphEntityId],
+        relation_kinds: &BTreeSet<GraphRelationKind>,
+        max_relations: usize,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
+        let guard = self.read_guard()?;
+        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        self.ensure_start_projections_readable(database, namespace, starts)?;
+        let batches = traversal::incoming_relations_truncated(
             database,
             namespace,
             starts,

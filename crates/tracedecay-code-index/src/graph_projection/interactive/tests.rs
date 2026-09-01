@@ -815,6 +815,28 @@ fn exhausted_fanout_budget_is_a_typed_refusal() {
 }
 
 #[test]
+fn callers_truncated_returns_a_prefix_instead_of_refusing() {
+    let reader = reader(&store_for(production_manifest()));
+    let beta = vec![id::<SymbolOccurrenceId>("sym.beta.run")];
+    let refused = reader
+        .callers(&beta, &[], 1, request())
+        .expect_err("two incoming edges exceed a unit refuse budget");
+    assert!(
+        matches!(refused, CodeGraphProjectionError::BudgetExhausted { .. }),
+        "refuse must stay typed: {refused:?}"
+    );
+    let truncated = reader
+        .callers_truncated(&beta, &[], 1, request())
+        .expect("page-shaped callers stop at the budget");
+    assert_eq!(truncated.len(), 1);
+    assert_eq!(
+        truncated[0].len(),
+        1,
+        "truncate must return the admitted prefix, not the full neighborhood"
+    );
+}
+
+#[test]
 fn retrieval_only_publication_serves_no_names_truthfully() {
     let projection =
         code_graph_projection_identity(GraphNamespace::new("code-graph").expect("namespace"))

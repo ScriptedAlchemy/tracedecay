@@ -655,10 +655,40 @@ fn batch_outgoing_reads_are_filtered_ordered_and_budgeted() {
         GraphDbError::budget_exhausted(GraphBudgetKind::Read, 0)
     );
     assert_eq!(
-        db.outgoing_relations(&namespace(), &starts, &kinds, 1, Arc::new(Cancelled),)
+        db.outgoing_relations(&namespace(), &starts, &kinds, 1, Arc::new(Cancelled))
             .unwrap_err(),
         GraphDbError::Cancelled
     );
+}
+
+#[test]
+fn wide_fanout_refuse_errors_and_truncate_returns_the_prefix() {
+    let db = memory_db();
+    let mut mutations = vec![GraphMutation::UpsertEntity(entity("hub"))];
+    for index in 0..32 {
+        let spoke = format!("spoke-{index:02}");
+        mutations.push(GraphMutation::UpsertEntity(entity(&spoke)));
+        mutations.push(GraphMutation::UpsertRelation(relation(
+            &format!("edge-{index:02}"),
+            "hub",
+            &spoke,
+            "calls",
+        )));
+    }
+    db.apply_unverified(batch("code", "g1", "w1", mutations))
+        .unwrap();
+    let starts = [entity_id("hub")];
+    let kinds = BTreeSet::from([GraphRelationKind::new("calls").unwrap()]);
+    assert_eq!(
+        db.outgoing_relations(&namespace(), &starts, &kinds, 8, live())
+            .unwrap_err(),
+        GraphDbError::budget_exhausted(GraphBudgetKind::Read, 8)
+    );
+    let truncated = db
+        .outgoing_relations_truncated(&namespace(), &starts, &kinds, 8, live())
+        .unwrap();
+    assert_eq!(truncated.len(), 1);
+    assert_eq!(truncated[0].len(), 8);
 }
 
 #[test]

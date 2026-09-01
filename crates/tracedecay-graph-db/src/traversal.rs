@@ -35,6 +35,17 @@ pub enum GraphTraversalDirection {
     Both,
 }
 
+/// How a bulk fan-out behaves when the next relation would exceed `max_relations`.
+///
+/// Complete-adjacency tools must [`Self::Refuse`] so a truncated page cannot be
+/// mistaken for the full neighborhood. Page-shaped consumers (context related
+/// symbols) use [`Self::Truncate`]: they already keep a small prefix.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RelationFanoutOverflow {
+    Refuse,
+    Truncate,
+}
+
 #[derive(Clone)]
 pub struct TraversalRequest {
     pub namespace: GraphNamespace,
@@ -232,6 +243,32 @@ pub(crate) fn outgoing_relations(
         Direction::Outgoing,
         cancellation,
         ensure_projection_readable,
+        RelationFanoutOverflow::Refuse,
+    )
+}
+
+pub(crate) fn outgoing_relations_truncated(
+    database: &GrafeoDB,
+    namespace: &GraphNamespace,
+    starts: &[GraphEntityId],
+    relation_kinds: &BTreeSet<GraphRelationKind>,
+    max_relations: usize,
+    cancellation: &dyn GraphCancellation,
+    ensure_projection_readable: &dyn Fn(
+        &GraphNamespace,
+        &GraphProjectionId,
+    ) -> Result<(), GraphDbError>,
+) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
+    directed_relations(
+        database,
+        namespace,
+        starts,
+        relation_kinds,
+        max_relations,
+        Direction::Outgoing,
+        cancellation,
+        ensure_projection_readable,
+        RelationFanoutOverflow::Truncate,
     )
 }
 
@@ -369,6 +406,32 @@ pub(crate) fn incoming_relations(
         Direction::Incoming,
         cancellation,
         ensure_projection_readable,
+        RelationFanoutOverflow::Refuse,
+    )
+}
+
+pub(crate) fn incoming_relations_truncated(
+    database: &GrafeoDB,
+    namespace: &GraphNamespace,
+    starts: &[GraphEntityId],
+    relation_kinds: &BTreeSet<GraphRelationKind>,
+    max_relations: usize,
+    cancellation: &dyn GraphCancellation,
+    ensure_projection_readable: &dyn Fn(
+        &GraphNamespace,
+        &GraphProjectionId,
+    ) -> Result<(), GraphDbError>,
+) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
+    directed_relations(
+        database,
+        namespace,
+        starts,
+        relation_kinds,
+        max_relations,
+        Direction::Incoming,
+        cancellation,
+        ensure_projection_readable,
+        RelationFanoutOverflow::Truncate,
     )
 }
 
@@ -377,9 +440,10 @@ pub(crate) fn incoming_relations(
 /// A start with no projected entity yields an empty batch rather than an
 /// error, matching the existing outgoing contract. The `max_relations` budget
 /// is charged across the whole batch — not per start — so a caller cannot
-/// exceed it by widening `starts`, and an over-budget read fails with
-/// [`GraphDbError::BudgetExhausted`] rather than returning a truncated batch
-/// that could be mistaken for a complete fan-out.
+/// exceed it by widening `starts`. [`RelationFanoutOverflow::Refuse`] fails
+/// with [`GraphDbError::BudgetExhausted`] the moment the next row would
+/// exceed the budget (without walking the remaining edges).
+/// [`RelationFanoutOverflow::Truncate`] stops and returns the prefix.
 #[allow(clippy::too_many_arguments)]
 #[hotpath::measure(label = "graph_db.compact.directed_relations")]
 fn directed_relations(
@@ -394,6 +458,7 @@ fn directed_relations(
         &GraphNamespace,
         &GraphProjectionId,
     ) -> Result<(), GraphDbError>,
+    overflow: RelationFanoutOverflow,
 ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
     check_batch_request(starts, cancellation)?;
     let store = database.graph_store();
@@ -401,9 +466,14 @@ fn directed_relations(
     let mut admitted = 0_usize;
     let mut results = Vec::with_capacity(starts.len());
     let mut entity_ids = HashMap::new();
+    let mut truncated = false;
     for start in starts {
         if cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
+        }
+        if truncated {
+            results.push(Vec::new());
+            continue;
         }
         let Some(node) = optional_node_for_entity(store.as_ref(), namespace, start)? else {
             results.push(Vec::new());
@@ -413,6 +483,15 @@ fn directed_relations(
         for (_, edge) in projected.edges_from(node, direction) {
             if cancellation.is_cancelled() {
                 return Err(GraphDbError::Cancelled);
+            }
+            if admitted.saturating_add(relations.len()).saturating_add(1) > max_relations {
+                match overflow {
+                    RelationFanoutOverflow::Refuse => return Err(read_budget(max_relations)),
+                    RelationFanoutOverflow::Truncate => {
+                        truncated = true;
+                        break;
+                    }
+                }
             }
             relations.push(relation_for_edge(
                 &projected,
@@ -427,9 +506,6 @@ fn directed_relations(
         admitted = admitted
             .checked_add(relations.len())
             .ok_or_else(|| read_budget(max_relations))?;
-        if admitted > max_relations {
-            return Err(read_budget(max_relations));
-        }
         results.push(relations);
     }
     Ok(results)
