@@ -21,10 +21,10 @@ use tracedecay_domain::{
 };
 use tracedecay_usecases::observability::BoundedObservabilityProducerV1;
 
-use tracedecay_store_runtime::DaemonRemoteCredentialAuthorityV1;
 use crate::daemon::remote_query::DaemonRemoteExactObservationQueryPortV1;
-use tracedecay_store_runtime::DaemonRemoteReplayTransactionAuthorityV1;
 use tracedecay_daemon_service::DaemonInvocationService;
+use tracedecay_store_runtime::DaemonRemoteCredentialAuthorityV1;
+use tracedecay_store_runtime::DaemonRemoteReplayTransactionAuthorityV1;
 
 pub(super) struct DaemonRemoteQueryProtocolPortV1 {
     credentials: Arc<DaemonRemoteCredentialAuthorityV1>,

@@ -1849,7 +1849,9 @@ fn write_wedged_generation_debris(shard_root: &Path) {
     let generations = shard_root.join("code-generations-v1");
     std::fs::create_dir_all(generations.join("tracedecay.sealed")).unwrap();
     std::fs::write(
-        generations.join("tracedecay.sealed").join("278bea7a-sealed"),
+        generations
+            .join("tracedecay.sealed")
+            .join("278bea7a-sealed"),
         b"sealed generation that conflicts on every seat attempt",
     )
     .unwrap();
@@ -1964,10 +1966,7 @@ fn wipe_completes_within_bound_once_the_wedged_holder_stops() {
         stderr.contains("Wiped 1 project(s)"),
         "wipe must report the removed project\nstderr:\n{stderr}"
     );
-    assert_namespace_absent(
-        &shard_root,
-        "wipe left the wedge-shaped store",
-    );
+    assert_namespace_absent(&shard_root, "wipe left the wedge-shaped store");
 }
 
 /// `projects forget` is scoped-destructive, so it refuses without the global

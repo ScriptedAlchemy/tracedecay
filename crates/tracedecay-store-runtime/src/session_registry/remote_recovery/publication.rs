@@ -288,8 +288,7 @@ impl RemoteRecoveryPublicationContextV1 {
         expected_opened_file_identity: u64,
     ) -> Result<RegisteredSessionOwnerV1> {
         #[cfg(feature = "hotpath")]
-        let _mount_observation =
-            crate::session_registry::StoreMountObservationV1::enter();
+        let _mount_observation = crate::session_registry::StoreMountObservationV1::enter();
         let shard_id = StoreShardIdV1::project_sessions(
             self.identity.brain_id().clone(),
             self.identity.profile_id().clone(),

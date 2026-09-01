@@ -148,9 +148,7 @@ pub async fn close_retained_for_shutdown(
 impl super::RetainedVerifiedGraphRuntimeV1 {
     /// Exact store identity of the retained memory-graph runtime, captured
     /// for the shutdown close after this owner has been drained and dropped.
-    pub fn graph_store_identity(
-        &self,
-    ) -> (StoreRuntimeBindingV1, VerifiedStoreLocatorV1) {
+    pub fn graph_store_identity(&self) -> (StoreRuntimeBindingV1, VerifiedStoreLocatorV1) {
         (
             self.graph.binding().clone(),
             self.graph.verified_locator().clone(),

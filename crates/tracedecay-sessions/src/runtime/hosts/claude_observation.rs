@@ -926,10 +926,9 @@ async fn apply_prepared_source_windowed<A: HostAdmission + ?Sized>(
                     )
                     .await
                     .map_err(|failure| match failure {
-                        ClaudeWindowedCaptureFailure::Error(error) => fail(
-                            std::mem::take(&mut stats),
-                            error,
-                        ),
+                        ClaudeWindowedCaptureFailure::Error(error) => {
+                            fail(std::mem::take(&mut stats), error)
+                        }
                         replay => replay,
                     })?;
                 }

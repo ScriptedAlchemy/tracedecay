@@ -89,8 +89,7 @@ impl HostAdmissionFacade<'_> {
                                 outcome.projected = outcome.projected.saturating_add(1);
                                 outcome.projected_outputs =
                                     outcome.projected_outputs.saturating_add(
-                                        u64::try_from(projected.output_count())
-                                            .unwrap_or(u64::MAX),
+                                        u64::try_from(projected.output_count()).unwrap_or(u64::MAX),
                                     );
                                 session_ids.insert(item.session_id);
                             }

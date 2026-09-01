@@ -57,10 +57,7 @@ impl DoctorTestRuntime {
         let scope =
             tracedecay_runtime_core::db::enter_daemon_database_scope(profile_root, nonce, label)
                 .expect("enter Doctor test database scope");
-        let registry =
-            tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
-                identity,
-            )
+        let registry = tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity)
             .await
             .expect("open Doctor test runtime registry");
         // Mount the profile SESSIONS store: every production caller of

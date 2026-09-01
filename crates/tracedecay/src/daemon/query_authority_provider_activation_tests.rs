@@ -40,10 +40,7 @@ async fn committed_query_routes_install_and_rollback_as_one_revision() {
         "query-semantic-activation",
     )
     .expect("database scope");
-    let session_registry =
-        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
-            identity,
-        )
+    let session_registry = tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity)
         .await
         .expect("session registry");
     let session_db = session_registry
@@ -553,10 +550,7 @@ async fn deferred_committed_restore_keeps_core_query_lanes_mountable() {
         "query-deferred-core-restore",
     )
     .expect("database scope");
-    let session_registry =
-        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
-            identity,
-        )
+    let session_registry = tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity)
         .await
         .expect("session registry");
     let session_db = session_registry
@@ -804,11 +798,9 @@ async fn project_cursor_authority_resumes_prepared_and_fusion_after_reopen() {
     )
     .expect("daemon database scope");
     let session_registry =
-        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
-            identity.clone(),
-        )
-        .await
-        .expect("session registry");
+        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity.clone())
+            .await
+            .expect("session registry");
     let database = session_registry
         .project_sessions(project_id.clone(), [project_root.clone()])
         .await
@@ -901,11 +893,9 @@ async fn project_cursor_authority_resumes_prepared_and_fusion_after_reopen() {
     drop(database);
     drop(session_registry);
     let reopened_registry =
-        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
-            identity,
-        )
-        .await
-        .expect("reopened session registry");
+        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity)
+            .await
+            .expect("reopened session registry");
     let reopened = reopened_registry
         .project_sessions(project_id.clone(), [project_root])
         .await

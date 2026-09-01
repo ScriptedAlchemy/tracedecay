@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tracedecay_domain::{BrainId, ProjectId};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
-use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 use tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority;
 use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_sessions::runtime::ingest::test_support::{
@@ -21,6 +20,7 @@ use tracedecay_sessions::runtime::ingest::{
 };
 use tracedecay_sessions::runtime::{TranscriptIngestOutcome, with_transcript_source_home};
 use tracedecay_sessions::{SessionProvider, TranscriptIngestStats};
+use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
 static INGEST_TEST_NONCE: AtomicU64 = AtomicU64::new(1);
 

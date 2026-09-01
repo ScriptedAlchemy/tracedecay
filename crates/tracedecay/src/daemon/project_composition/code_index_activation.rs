@@ -22,8 +22,7 @@ pub(super) struct CodeIndexActivationMountInputs {
     pub(super) scope: tracedecay_application::ResolvedScope,
     pub(super) route_registered: Arc<AtomicBool>,
     pub(super) cancellation: CancellationToken,
-    pub(super) graph_runtime:
-        Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
+    pub(super) graph_runtime: Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
     pub(super) graph_publication_database: Arc<tracedecay_runtime_core::db::Database>,
     pub(super) profile_id: tracedecay_domain::configuration::UserProfileId,
 }

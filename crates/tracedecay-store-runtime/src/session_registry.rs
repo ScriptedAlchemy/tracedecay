@@ -1,12 +1,12 @@
 //! Daemon-owned registry assembly for profile and project session shards.
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 #[cfg(feature = "hotpath")]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
@@ -18,16 +18,6 @@ use tracedecay_store::{
     AdmissionConfigV1, ProjectId, StoreIncarnationV1, StoreShardIdV1, StoreShardScopeV1,
 };
 
-use tracedecay_runtime_core::store_runtime::registry::{
-    DestructiveMaintenanceReservation, DestructiveMaintenanceTarget,
-    LifecycleShardRuntimePublisher, ProfileAuthorityPin, ProfileAuthorityPinResult,
-    StoreRuntimeClientLease, StoreRuntimeKey, StoreRuntimeOpenRequest, StoreRuntimeOpenResult,
-    StoreRuntimeRegistry, StoreRuntimeRegistryFailure, StoreRuntimeResolver,
-};
-use tracedecay_runtime_core::store_runtime::resolver::{
-    LocalProfileStoreAuthorityV1, LocalProjectEnrollmentAuthorityV1, LocalStoreLocatorResolutionV1,
-    LocalStoreRuntimeResolverV1,
-};
 use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1};
@@ -39,6 +29,16 @@ use tracedecay_runtime_core::db::{
 };
 use tracedecay_runtime_core::store_runtime::registry::{
     CanonicalGraphStoreOwnerRetirementTargetV1, StoreRuntimeRetirementCommit,
+};
+use tracedecay_runtime_core::store_runtime::registry::{
+    DestructiveMaintenanceReservation, DestructiveMaintenanceTarget,
+    LifecycleShardRuntimePublisher, ProfileAuthorityPin, ProfileAuthorityPinResult,
+    StoreRuntimeClientLease, StoreRuntimeKey, StoreRuntimeOpenRequest, StoreRuntimeOpenResult,
+    StoreRuntimeRegistry, StoreRuntimeRegistryFailure, StoreRuntimeResolver,
+};
+use tracedecay_runtime_core::store_runtime::resolver::{
+    LocalProfileStoreAuthorityV1, LocalProjectEnrollmentAuthorityV1, LocalStoreLocatorResolutionV1,
+    LocalStoreRuntimeResolverV1,
 };
 use tracedecay_session_temporal_store::relations::SessionRelationScope;
 
@@ -151,8 +151,7 @@ pub const MAX_RETAINED_GRAPH_DB_OWNERS: usize = PROFILE_WIDE_GRAPH_DB_OWNERS
 /// looser of the two the refusal lands on the later check and leaves a
 /// provisioned database behind, and startup remounts every discovered
 /// `remote.db`, turning the residue into a hard failure on the next start.
-const MAX_RETAINED_REMOTE_NODE_OWNERS: usize =
-    crate::MAX_REGISTERED_REMOTE_NODES;
+const MAX_RETAINED_REMOTE_NODE_OWNERS: usize = crate::MAX_REGISTERED_REMOTE_NODES;
 
 #[cfg(feature = "hotpath")]
 static SESSION_STORE_MOUNTS_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
@@ -993,8 +992,7 @@ impl ProjectSessionClosedRetirementProofV1 {
 /// a fresh candidate in the same terminal vacancy.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ProjectSessionTerminalVacancyAuthorityV1
-{
+pub(crate) struct ProjectSessionTerminalVacancyAuthorityV1 {
     binding: tracedecay_store::StoreRuntimeBindingV1,
     locator: tracedecay_store::VerifiedStoreLocatorV1,
 }
@@ -1847,9 +1845,7 @@ impl ProjectSessionReplacementVacancyV1 {
         }
     }
 
-    pub fn durable_terminal_authority(
-        &self,
-    ) -> Result<ProjectSessionTerminalVacancyAuthorityV1> {
+    pub fn durable_terminal_authority(&self) -> Result<ProjectSessionTerminalVacancyAuthorityV1> {
         self.require_verified_proof()?;
         self.proof
             .as_ref()
@@ -2932,8 +2928,7 @@ pub struct DaemonSessionRuntimeRegistryV1 {
     profile_sessions_mount: Mutex<()>,
     profile_sessions: StdMutex<Option<RegisteredSessionOwnerV1>>,
     remote_nodes: StdMutex<BTreeMap<BrainNodeId, RemoteNodeOwnerStateV1>>,
-    remote_credential_authority:
-        Arc<crate::DaemonRemoteCredentialAuthorityV1>,
+    remote_credential_authority: Arc<crate::DaemonRemoteCredentialAuthorityV1>,
     remote_replay_transaction:
         Arc<crate::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1>,
     remote_recovery_authorities: Mutex<
@@ -3096,7 +3091,8 @@ impl DaemonSessionRuntimeRegistryV1 {
 
     fn session_sync_service(
         &self,
-    ) -> Arc<OnceLock<Arc<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>>> {
+    ) -> Arc<OnceLock<Arc<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>>>
+    {
         Arc::clone(&self.session_sync_service)
     }
 
@@ -3140,16 +3136,9 @@ impl DaemonSessionRuntimeRegistryV1 {
         Arc::clone(&self.remote_recovery_project_lifecycle)
     }
 
-    pub fn retain_hook_task<F, Fut>(
-        &self,
-        provider: &str,
-        session_id: &str,
-        operation: F,
-    ) -> bool
+    pub fn retain_hook_task<F, Fut>(&self, provider: &str, session_id: &str, operation: F) -> bool
     where
-        F: FnOnce(ObservationCancellation) -> Fut
-            + Send
-            + 'static,
+        F: FnOnce(ObservationCancellation) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
         self.retained_hook_tasks

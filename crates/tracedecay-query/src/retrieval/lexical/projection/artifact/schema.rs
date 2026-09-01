@@ -118,7 +118,9 @@ impl LexicalArtifactLayoutV1 {
         }
     }
 
-    pub(super) fn required_indexes(self) -> &'static [(&'static str, &'static str, &'static [&'static str])] {
+    pub(super) fn required_indexes(
+        self,
+    ) -> &'static [(&'static str, &'static str, &'static [&'static str])] {
         match self {
             Self::V10 => &REQUIRED_ARTIFACT_INDEXES_V10,
             Self::V11 => &REQUIRED_ARTIFACT_INDEXES_V11,
@@ -163,9 +165,7 @@ pub(super) fn field_from_code(code: i64) -> Result<LexicalFieldV1, CodeLexicalAr
 }
 
 #[hotpath::measure]
-pub(super) fn field_code_from_encoded(
-    encoded: &str,
-) -> Result<i64, CodeLexicalArtifactErrorV1> {
+pub(super) fn field_code_from_encoded(encoded: &str) -> Result<i64, CodeLexicalArtifactErrorV1> {
     let field: LexicalFieldV1 = serde_json::from_str(encoded)
         .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
     Ok(field_code(field))
@@ -208,13 +208,11 @@ pub(super) fn intern_terms<'a>(
     for term in terms {
         checkpoint(control)?;
         let term_id = stable_term_id(term);
-        insert
-            .execute(params![term_id, term])
-            .map_err(|error| {
-                CodeLexicalArtifactErrorV1::Contract(format!(
-                    "lexical artifact term identifier collided or vocabulary insert failed: {error}"
-                ))
-            })?;
+        insert.execute(params![term_id, term]).map_err(|error| {
+            CodeLexicalArtifactErrorV1::Contract(format!(
+                "lexical artifact term identifier collided or vocabulary insert failed: {error}"
+            ))
+        })?;
         assigned.insert(term.to_owned(), term_id);
     }
     Ok(assigned)
@@ -313,8 +311,14 @@ mod tests {
 
     #[test]
     fn stable_term_ids_are_deterministic_and_content_addressed() {
-        assert_eq!(super::stable_term_id("return"), super::stable_term_id("return"));
-        assert_ne!(super::stable_term_id("return"), super::stable_term_id("value"));
+        assert_eq!(
+            super::stable_term_id("return"),
+            super::stable_term_id("return")
+        );
+        assert_ne!(
+            super::stable_term_id("return"),
+            super::stable_term_id("value")
+        );
         assert!(super::stable_term_id("return") >= 0);
     }
 }

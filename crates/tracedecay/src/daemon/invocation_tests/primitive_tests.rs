@@ -27,10 +27,7 @@ async fn expire_all_releases_session_holder_graph_lease_before_registry_shutdown
     .expect("daemon database scope");
     let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
         .expect("profile identity");
-    let registry =
-        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
-            identity,
-        )
+    let registry = tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity)
         .await
         .expect("session runtime registry");
     let session_database = registry

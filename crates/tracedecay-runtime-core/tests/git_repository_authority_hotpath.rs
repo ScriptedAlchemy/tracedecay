@@ -159,9 +159,7 @@ mod feature_off {
 
 #[cfg(feature = "hotpath")]
 mod feature_on {
-    use super::{
-        AUTHORITY_LABELS, assert_no_hotpath_listener, fixture, run_authority_workload,
-    };
+    use super::{AUTHORITY_LABELS, assert_no_hotpath_listener, fixture, run_authority_workload};
 
     /// The feature-on contract: one guard, metrics server off, CPU section
     /// excluded, and the exit report lands in the requested file carrying

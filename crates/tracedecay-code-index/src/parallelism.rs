@@ -613,11 +613,13 @@ fn standalone_pool() -> Result<&'static rayon::ThreadPool, CodeIndexParallelismE
     if let Some(pool) = STANDALONE_POOL.get() {
         return Ok(pool);
     }
-    let _installation = STANDALONE_POOL_INSTALL.lock().map_err(|_| {
-        CodeIndexParallelismErrorV1::PoolBuild {
-            message: "standalone code-index worker pool installation lock is poisoned".to_owned(),
-        }
-    })?;
+    let _installation =
+        STANDALONE_POOL_INSTALL
+            .lock()
+            .map_err(|_| CodeIndexParallelismErrorV1::PoolBuild {
+                message: "standalone code-index worker pool installation lock is poisoned"
+                    .to_owned(),
+            })?;
     if let Some(pool) = STANDALONE_POOL.get() {
         return Ok(pool);
     }

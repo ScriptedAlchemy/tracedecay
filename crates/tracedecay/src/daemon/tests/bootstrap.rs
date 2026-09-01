@@ -3845,10 +3845,7 @@ async fn production_composition_harness_shutdown_allows_immediate_profile_reopen
         "production-composition-reopen",
     )
     .expect("fresh daemon election");
-    let registry =
-        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
-            profile_identity,
-        )
+    let registry = tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(profile_identity)
         .await
         .expect("immediately reopen profile runtime");
     registry

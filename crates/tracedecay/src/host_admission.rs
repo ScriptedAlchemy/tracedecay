@@ -22,7 +22,6 @@ use tracedecay_sessions::admission::{
 };
 use tracedecay_sessions::runtime::codex::CodexDiscoveryHub;
 
-use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
@@ -32,6 +31,7 @@ use tracedecay_runtime_core::db::DaemonDatabaseScope;
 use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use tracedecay_runtime_core::weak_registry::WeakRegistry;
 use tracedecay_store::StoreShardScopeV1;
+use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
 #[path = "host_admission/accounting_test_support.rs"]
 mod accounting_test_support;

@@ -28,16 +28,16 @@ fn default_status_command_deadline() -> Duration {
 }
 
 #[hotpath::measure]
-fn status_command_deadline_from(
-    raw: Option<&str>,
-) -> tracedecay_domain::errors::Result<Duration> {
+fn status_command_deadline_from(raw: Option<&str>) -> tracedecay_domain::errors::Result<Duration> {
     let deadline = raw
         .and_then(|raw| raw.parse::<u64>().ok())
         .filter(|ms| *ms > 0)
         .map_or_else(default_status_command_deadline, Duration::from_millis);
     if deadline > MAX_STATUS_COMMAND_DEADLINE {
         return Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("{STATUS_DEADLINE_ENV} exceeds the supported monotonic deadline range"),
+            message: format!(
+                "{STATUS_DEADLINE_ENV} exceeds the supported monotonic deadline range"
+            ),
         });
     }
     Ok(deadline)

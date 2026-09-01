@@ -168,8 +168,7 @@ impl TraceDecay {
         let default_branch = meta.as_ref().map(|meta| meta.default_branch.as_str());
         let registration_root = primary_root.as_deref().unwrap_or(&self.project_root);
 
-        if cached_registration_is_current(global_db, project_id, &digest, registration_root)
-            .await?
+        if cached_registration_is_current(global_db, project_id, &digest, registration_root).await?
         {
             hotpath::gauge!("lifecycle.register_project_store.cached_total").inc(1u64);
             return Ok(());
@@ -178,8 +177,7 @@ impl TraceDecay {
         let _registry_write = REGISTRY_WRITE_LOCK.lock().await;
         // Re-check under the write lock: a concurrent writable open may have
         // just registered the same digest while we were computing ours.
-        if cached_registration_is_current(global_db, project_id, &digest, registration_root)
-            .await?
+        if cached_registration_is_current(global_db, project_id, &digest, registration_root).await?
         {
             hotpath::gauge!("lifecycle.register_project_store.cached_total").inc(1u64);
             return Ok(());

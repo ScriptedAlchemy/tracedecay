@@ -13,8 +13,8 @@ use tracedecay_domain::{
 };
 
 use super::super::{CodeLexicalProjectionMetadataV1, LexicalFieldV1, ProjectedChunkV1};
-use super::schema::{LexicalArtifactLayoutV1, digest_domain_for_revision};
 use super::CodeLexicalArtifactErrorV1;
+use super::schema::{LexicalArtifactLayoutV1, digest_domain_for_revision};
 
 pub(super) use super::schema::{
     CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1, SERVING_INDEX_STEP_COUNT_V11,
@@ -537,9 +537,7 @@ pub(super) fn verify_artifact_table_layout(
 }
 
 #[hotpath::measure]
-fn verify_interned_term_layout(
-    connection: &Connection,
-) -> Result<(), CodeLexicalArtifactErrorV1> {
+fn verify_interned_term_layout(connection: &Connection) -> Result<(), CodeLexicalArtifactErrorV1> {
     let without_rowid: Option<i64> = connection
         .query_row(
             "SELECT wr FROM pragma_table_list WHERE schema = 'main' AND name = 'term_postings' AND type = 'table'",

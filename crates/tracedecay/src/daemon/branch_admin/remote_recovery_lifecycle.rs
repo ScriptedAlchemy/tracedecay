@@ -509,8 +509,9 @@ impl RemoteRecoveryProjectLifecycle for RemoteRecoveryProjectLifecycleV1 {
         project_id: &'a ProjectId,
     ) -> Pin<Box<dyn Future<Output = Result<RemoteRecoveryAdmission>> + Send + 'a>> {
         Box::pin(async move {
-            let guard = RemoteRecoveryProjectLifecycleV1::authorize_project_recovery(self, project_id)
-                .await?;
+            let guard =
+                RemoteRecoveryProjectLifecycleV1::authorize_project_recovery(self, project_id)
+                    .await?;
             Ok(RemoteRecoveryAdmission::hold(guard))
         })
     }
@@ -521,7 +522,8 @@ impl RemoteRecoveryProjectLifecycle for RemoteRecoveryProjectLifecycleV1 {
         database: &'a RegisteredGlobalDbLeaseV1,
     ) -> Pin<Box<dyn Future<Output = Result<RemoteRecoveryQuiescence>> + Send + 'a>> {
         Box::pin(async move {
-            let fence = RemoteRecoveryProjectLifecycleV1::quiesce(self, project_id, database).await?;
+            let fence =
+                RemoteRecoveryProjectLifecycleV1::quiesce(self, project_id, database).await?;
             Ok(RemoteRecoveryQuiescence::hold(fence))
         })
     }

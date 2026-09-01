@@ -691,12 +691,11 @@ mod tests {
             "profile retained message search",
         )
         .expect("daemon database scope");
-        let runtime_registry =
-            tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
-                profile_identity.clone(),
-            )
-            .await
-            .expect("profile session runtime registry");
+        let runtime_registry = tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
+            profile_identity.clone(),
+        )
+        .await
+        .expect("profile session runtime registry");
         let profile_database = runtime_registry
             .profile_sessions()
             .await
@@ -796,12 +795,11 @@ mod tests {
             "profile retained project selection refusal",
         )
         .expect("daemon database scope");
-        let runtime_registry =
-            tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
-                profile_identity.clone(),
-            )
-            .await
-            .expect("profile session runtime registry");
+        let runtime_registry = tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
+            profile_identity.clone(),
+        )
+        .await
+        .expect("profile session runtime registry");
         let session_root = profile_retrieval_root(&profile_identity);
         let session_identity = session_root.identity().clone();
         let connection =
@@ -854,12 +852,11 @@ mod tests {
             "profile retained unsupported sessions-for",
         )
         .expect("daemon database scope");
-        let runtime_registry =
-            tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
-                profile_identity.clone(),
-            )
-            .await
-            .expect("profile session runtime registry");
+        let runtime_registry = tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
+            profile_identity.clone(),
+        )
+        .await
+        .expect("profile session runtime registry");
         let session_root = profile_retrieval_root(&profile_identity);
         let session_identity = session_root.identity().clone();
         let connection =

@@ -161,9 +161,8 @@ pub(crate) enum ProfileOfflineAuthority {
 impl ProfileOfflineAuthority {
     pub(crate) fn lease(
         &self,
-    ) -> tracedecay_domain::errors::Result<
-        &tracedecay_runtime_core::lifecycle_lease::LifecycleLease,
-    > {
+    ) -> tracedecay_domain::errors::Result<&tracedecay_runtime_core::lifecycle_lease::LifecycleLease>
+    {
         match self {
             Self::Lease(lease) => Ok(lease),
             Self::QuiescedDaemon(guard) => guard.lifecycle_lease(),

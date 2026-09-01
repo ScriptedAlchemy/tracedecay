@@ -178,9 +178,7 @@ pub struct DashboardGraphTestRuntimeV1 {
     profile_root: std::path::PathBuf,
     profile_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     profile_sessions_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-    registry: std::sync::Arc<
-        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1,
-    >,
+    registry: std::sync::Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
     _database_scope: tracedecay_runtime_core::db::DaemonDatabaseScope,
 }
 
@@ -204,9 +202,7 @@ impl DashboardGraphTestRuntimeV1 {
         )?;
         let registry = std::sync::Arc::new(
             hotpath::future!(
-                tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
-                    identity,
-                ),
+                tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity,),
                 label = "dashboard.graph.registry"
             )
             .await?,

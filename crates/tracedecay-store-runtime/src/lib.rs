@@ -24,19 +24,19 @@ mod schema;
 
 pub use remote_credentials::{
     DaemonRemoteCredentialAuthorityV1, DaemonRemoteCredentialLookupV1,
-    DaemonRemoteCredentialRegistryErrorV1, MAX_REGISTERED_REMOTE_NODES, RegisteredRemoteNodeStoreV1,
-    RemoteOperationalStatusProviderV1,
+    DaemonRemoteCredentialRegistryErrorV1, MAX_REGISTERED_REMOTE_NODES,
+    RegisteredRemoteNodeStoreV1, RemoteOperationalStatusProviderV1,
 };
 pub use remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1;
 pub use schema::register_registered_schema_installer;
-pub use session_registry::{
-    DaemonSessionRuntimeRegistryV1, MAX_RETAINED_GRAPH_DB_OWNERS, RemoteRecoveryAdmission,
-    RemoteRecoveryProjectLifecycle, RemoteRecoveryQuiescence, mark_process_long_lived_for_session_maintenance,
-    open_user_memory_db, process_runtime_generation, registry_open_error,
-    release_process_allocator_memory,
-};
+#[cfg(any(test, feature = "test-helpers"))]
+pub use session_registry::maintenance::RegisteredSchemaConvergenceTestGate;
 pub use session_registry::maintenance::{
     ForegroundProjectOpenAdmission, RegisteredSchemaConvergenceStatus,
 };
-#[cfg(any(test, feature = "test-helpers"))]
-pub use session_registry::maintenance::RegisteredSchemaConvergenceTestGate;
+pub use session_registry::{
+    DaemonSessionRuntimeRegistryV1, MAX_RETAINED_GRAPH_DB_OWNERS, RemoteRecoveryAdmission,
+    RemoteRecoveryProjectLifecycle, RemoteRecoveryQuiescence,
+    mark_process_long_lived_for_session_maintenance, open_user_memory_db,
+    process_runtime_generation, registry_open_error, release_process_allocator_memory,
+};

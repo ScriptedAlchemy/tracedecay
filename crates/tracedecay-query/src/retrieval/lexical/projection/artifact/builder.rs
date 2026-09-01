@@ -36,12 +36,12 @@ use super::format::{
     initial_base_section_receipt_fold, metadata_digest, new_verified_receipt, padded_receipt,
     verify_artifact_table_layout, verify_required_artifact_indexes,
 };
-use super::schema::{
-    LexicalArtifactLayoutV1, field_code, field_code_from_encoded, intern_terms, stable_term_id,
-};
 use super::postings::document_ngram_scratch;
 use super::prepared::{
     PreparedCodeLexicalArtifactPageV1, PreparedTermPostingV1, prepare_page as prepare_page_values,
+};
+use super::schema::{
+    LexicalArtifactLayoutV1, field_code, field_code_from_encoded, intern_terms, stable_term_id,
 };
 use super::{
     ARTIFACT_SQLITE_CACHE_BYTES, CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
@@ -5510,12 +5510,8 @@ mod tests {
             FinalizationSectionV1::ImportIntegrity | FinalizationSectionV1::ImportEvidence => {
                 statement.query(params![vec![0u8], 1i64])
             }
-            FinalizationSectionV1::TermPostings => {
-                statement.query(params![0i64, 0i64, 0i64, 1i64])
-            }
-            FinalizationSectionV1::TermStatistics => {
-                statement.query(params![0i64, 0i64, 1i64])
-            }
+            FinalizationSectionV1::TermPostings => statement.query(params![0i64, 0i64, 0i64, 1i64]),
+            FinalizationSectionV1::TermStatistics => statement.query(params![0i64, 0i64, 1i64]),
             FinalizationSectionV1::ExactPostings => {
                 statement.query(params!["field", vec![0u8], 0i64, 1i64])
             }

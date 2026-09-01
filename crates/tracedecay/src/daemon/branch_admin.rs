@@ -317,11 +317,8 @@ impl Drop for RetirementReaperRegistrationBarrier {
 #[derive(Clone)]
 pub(super) struct SessionRuntimeRegistryEntryV1 {
     pub(super) identity: profile_identity::LocalProfileIdentityAuthorityV1,
-    pub(super) registry: Arc<
-        tokio::sync::OnceCell<
-            Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
-        >,
-    >,
+    pub(super) registry:
+        Arc<tokio::sync::OnceCell<Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>>>,
 }
 type SessionRuntimeRegistries = HashMap<PathBuf, SessionRuntimeRegistryEntryV1>;
 pub(super) type SharedSessionRuntimeRegistries = Arc<ProfiledTokioMutex<SessionRuntimeRegistries>>;
@@ -330,11 +327,8 @@ pub(super) type SharedSessionRuntimeRegistries = Arc<ProfiledTokioMutex<SessionR
 struct ProfileHostAdmissionBootstrapContext {
     profile_root: PathBuf,
     profile_identity: profile_identity::LocalProfileIdentityAuthorityV1,
-    session_runtime_registry: Arc<
-        tokio::sync::OnceCell<
-            Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
-        >,
-    >,
+    session_runtime_registry:
+        Arc<tokio::sync::OnceCell<Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>>>,
     host_admission_brokers: HostAdmissionBrokers,
     host_admission_broker_gate: Arc<ProfiledTokioMutex<()>>,
     profile_host_admission_replay: Weak<ProfileHostAdmissionReplayRegistry>,
@@ -347,11 +341,9 @@ impl ProfileHostAdmissionBootstrapContext {
         let session_runtime_registry = self
             .session_runtime_registry
             .get_or_try_init(|| async move {
-                tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
-                    profile_identity,
-                )
-                .await
-                .map(Arc::new)
+                tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(profile_identity)
+                    .await
+                    .map(Arc::new)
             })
             .await
             .map(Arc::clone)

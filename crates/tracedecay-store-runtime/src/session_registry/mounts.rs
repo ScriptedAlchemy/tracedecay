@@ -65,12 +65,10 @@ impl DaemonSessionRuntimeRegistryV1 {
         identity: LocalProfileIdentityAuthorityV1,
         long_lived_session_maintenance: bool,
     ) -> Result<Self> {
-        let remote_credential_authority = Arc::new(
-            crate::DaemonRemoteCredentialAuthorityV1::new(
-                identity.brain_id().clone(),
-                identity.profile_id().clone(),
-            ),
-        );
+        let remote_credential_authority = Arc::new(crate::DaemonRemoteCredentialAuthorityV1::new(
+            identity.brain_id().clone(),
+            identity.profile_id().clone(),
+        ));
         let remote_replay_transaction = Arc::new(
             crate::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1::new(
                 tokio::runtime::Handle::current(),
@@ -849,9 +847,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         Ok(storage)
     }
 
-    pub fn remote_credential_authority(
-        &self,
-    ) -> Arc<crate::DaemonRemoteCredentialAuthorityV1> {
+    pub fn remote_credential_authority(&self) -> Arc<crate::DaemonRemoteCredentialAuthorityV1> {
         Arc::clone(&self.remote_credential_authority)
     }
 
@@ -866,8 +862,7 @@ impl DaemonSessionRuntimeRegistryV1 {
 
     pub fn remote_replay_transaction(
         &self,
-    ) -> Arc<crate::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1>
-    {
+    ) -> Arc<crate::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1> {
         Arc::clone(&self.remote_replay_transaction)
     }
 

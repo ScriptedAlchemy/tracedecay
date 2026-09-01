@@ -9,11 +9,11 @@ use tracedecay_domain::{FactOwnerV1, ProjectId};
 use tracedecay_store::StoreShardScopeV1;
 
 use super::map_execution_error;
-use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 use crate::tracedecay::TraceDecay;
 use tracedecay_application::RetainedSurfaceExecutionErrorV1;
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::store::memory::ProjectMemoryDbHandle;
+use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MemoryTargetAccessV1 {

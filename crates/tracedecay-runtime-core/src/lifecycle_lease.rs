@@ -47,7 +47,9 @@ pub enum ExclusiveLeaseAttempt {
     /// Another live process holds the lease. `owner_operation` is the
     /// recorded operation of an exclusive owner; shared holders (the managed
     /// daemon, doctor, hooks) record no owner metadata.
-    Busy { owner_operation: Option<String> },
+    Busy {
+        owner_operation: Option<String>,
+    },
 }
 
 #[hotpath::measure_all]

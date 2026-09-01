@@ -300,9 +300,7 @@ pub(super) fn activate_remote_restore_quarantine(
 }
 
 #[hotpath::measure]
-pub fn remote_restore_activated_open_identity(
-    destination: &Path,
-) -> Result<Option<u64>> {
+pub fn remote_restore_activated_open_identity(destination: &Path) -> Result<Option<u64>> {
     let Some(quarantine) = read_remote_restore_quarantine(destination)? else {
         return Ok(None);
     };

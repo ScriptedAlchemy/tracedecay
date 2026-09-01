@@ -688,11 +688,9 @@ mod tests {
         )
         .unwrap();
         let runtime_registry = Arc::new(
-            tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
-                identity,
-            )
-            .await
-            .unwrap(),
+            tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity)
+                .await
+                .unwrap(),
         );
         let profile_database = runtime_registry.profile_database().await.unwrap();
         let store_layout = TraceDecay::resolve_first_touch_configuration_layout(

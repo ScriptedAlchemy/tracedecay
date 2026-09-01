@@ -278,8 +278,7 @@ async fn next_ready_projection_head(
         .get::<String>(0)
         .map_err(|error| storage("decode projection queue head", error))?;
     Ok(Some(
-        CanonicalObservationIdV1::new(observation_id)
-            .map_err(ProjectionStoreError::Contract)?,
+        CanonicalObservationIdV1::new(observation_id).map_err(ProjectionStoreError::Contract)?,
     ))
 }
 

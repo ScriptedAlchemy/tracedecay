@@ -18,9 +18,7 @@ use super::required_str;
 pub(super) fn retain_codex_stop(
     args: &Value,
     profile_root: &Path,
-    session_runtime_registry: &Arc<
-        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1,
-    >,
+    session_runtime_registry: &Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
     session_authorities: SessionAuthorities<'_>,
 ) -> Result<Value> {
     let session_id = required_str(args, "session_id")?.to_owned();

@@ -13,9 +13,9 @@ use super::format::{
     ArtifactRowV1, BASE_SECTION_NAMES, PageBaseSectionReceiptBuilderV1, encode_exact_field,
     encode_field, encode_ngram_bitmap, encode_page_base_sections_receipt, ngram_page_digest,
 };
+use super::postings::{NGRAM_NORMALIZED, NGRAM_RAW_OVERRIDE, document_ngrams};
 use super::row_codec::encode_artifact_row;
 use super::schema::LexicalArtifactLayoutV1;
-use super::postings::{NGRAM_NORMALIZED, NGRAM_RAW_OVERRIDE, document_ngrams};
 use super::{
     CodeLexicalArtifactErrorV1, NGRAM_AGGREGATION_BYTES_PER_LOGICAL_POSTING_V1, checkpoint,
 };

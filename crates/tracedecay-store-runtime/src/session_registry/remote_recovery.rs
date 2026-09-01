@@ -77,9 +77,7 @@ impl RemoteRecoveryPublicationContextV1 {
         graph_lifecycle_cancelled: Arc<AtomicBool>,
         profile_pin: ProfileAuthorityPin,
         project_owners: ProjectRuntimeOwnerRegistryV1,
-        replay: Arc<
-            crate::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1,
-        >,
+        replay: Arc<crate::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1>,
         session_sync_service: Arc<
             OnceLock<Arc<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>>,
         >,
@@ -172,9 +170,7 @@ impl DaemonRemoteRecoveryPhysicalEffectsV1 {
     pub(super) fn new(
         storage: RemoteSqliteStorageV1,
         backup_root: PathBuf,
-        replay: Arc<
-            crate::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1,
-        >,
+        replay: Arc<crate::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1>,
         publication: RemoteRecoveryPublicationContextV1,
         runtime: tokio::runtime::Handle,
     ) -> Self {

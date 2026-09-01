@@ -205,9 +205,7 @@ impl DaemonHttpApplicationRegistry {
         &self,
         router: Router,
         credentials: Arc<tracedecay_store_runtime::DaemonRemoteCredentialAuthorityV1>,
-        runtime: Option<
-            Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
-        >,
+        runtime: Option<Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>>,
     ) -> Result<()> {
         let mut slot = self.remote.write().map_err(|_| TraceDecayError::Config {
             message: "daemon HTTP Remote Brain router lock is poisoned".to_owned(),

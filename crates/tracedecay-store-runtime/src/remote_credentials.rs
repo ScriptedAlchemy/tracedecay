@@ -405,7 +405,9 @@ impl DaemonRemoteCredentialAuthorityV1 {
         }
     }
 
-    pub fn ensure_accepting(&self) -> std::result::Result<(), DaemonRemoteCredentialRegistryErrorV1> {
+    pub fn ensure_accepting(
+        &self,
+    ) -> std::result::Result<(), DaemonRemoteCredentialRegistryErrorV1> {
         if self.accepting.load(Ordering::Acquire) {
             Ok(())
         } else {

@@ -7,28 +7,23 @@
 use std::path::PathBuf;
 use std::sync::{Arc, atomic::AtomicBool};
 
+use tracedecay_code_index_runtime::CodeGraphSeatRuntimePortV1;
 use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV1;
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::{
     BrainNodeId, Confidence, FactCategoryV1, FactCurationActionV1, FactLineageEventKindV1,
     FactOwnerV1, FactRelationKindV1,
 };
-use tracedecay_runtime_core::db::{DatabaseAccessMode, DatabaseAuthority};
-use tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRegistryFailure;
-use tracedecay_rusqlite_runtime::remote::{
-    RemoteSpoolKeyV1, RemoteSpoolKeyringV1, RemoteSqliteStorageErrorV1,
-};
-use tracedecay_code_index_runtime::CodeGraphSeatRuntimePortV1;
-use tracedecay_store::{ProjectId, StoreShardIdV1};
-use tracedecay_store_runtime::{
-    DaemonSessionRuntimeRegistryV1, RegisteredSchemaConvergenceStatus, process_runtime_generation,
-    register_registered_schema_installer, registry_open_error,
-};
 use tracedecay_graph_db::{
     GraphDbError, GraphGenerationId, GraphGenerationManifest, GraphIdempotencyKey, GraphNamespace,
     GraphProjectionId, GraphProjectionIdentity, GraphWatermark, SourceGeneration,
 };
 use tracedecay_runtime_core::db::engine::TestConnection;
+use tracedecay_runtime_core::db::{DatabaseAccessMode, DatabaseAuthority};
+use tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRegistryFailure;
+use tracedecay_rusqlite_runtime::remote::{
+    RemoteSpoolKeyV1, RemoteSpoolKeyringV1, RemoteSqliteStorageErrorV1,
+};
 use tracedecay_session_memory::memory::{
     MemoryOperationContext, ProjectMemoryCurationMutationTarget, ProjectMemoryCurationOperation,
     ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome, memory_application_for_db,
@@ -36,6 +31,11 @@ use tracedecay_session_memory::memory::{
 use tracedecay_store::{
     FactReadControl, FactWriteControl, ProjectMemoryFactHistoryQueryV1, ProjectMemoryFactIdV1,
     ProjectMemoryFactProjectionV1, RetainedGraphStoreLeaseV1,
+};
+use tracedecay_store::{ProjectId, StoreShardIdV1};
+use tracedecay_store_runtime::{
+    DaemonSessionRuntimeRegistryV1, RegisteredSchemaConvergenceStatus, process_runtime_generation,
+    register_registered_schema_installer, registry_open_error,
 };
 
 struct TestRemoteKeyring(Arc<RemoteSpoolKeyV1>);

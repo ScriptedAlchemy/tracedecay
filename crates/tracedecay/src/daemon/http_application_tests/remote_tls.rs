@@ -803,11 +803,9 @@ async fn remote_tls_listener_serves_only_remote_routes_and_isolates_credential_a
     .expect("daemon database scope");
     let identity = daemon_authority.profile_identity().clone();
     let runtime = Arc::new(
-        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
-            identity.clone(),
-        )
-        .await
-        .expect("session runtime registry"),
+        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity.clone())
+            .await
+            .expect("session runtime registry"),
     );
     let credential = *b"0123456789abcdef0123456789abcdef";
     let node_id = BrainNodeId::new("node.remote-tls").expect("node identity");
@@ -929,11 +927,9 @@ async fn remote_tls_listener_bounds_connections_and_expires_incomplete_headers()
     .expect("daemon database scope");
     let identity = daemon_authority.profile_identity().clone();
     let runtime = Arc::new(
-        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
-            identity.clone(),
-        )
-        .await
-        .expect("session runtime registry"),
+        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity.clone())
+            .await
+            .expect("session runtime registry"),
     );
     let credential = *b"fedcba9876543210fedcba9876543210";
     let grant = live_remote_grant(

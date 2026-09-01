@@ -34,10 +34,10 @@ use super::memory_tracking::{TrackedExplicitSearch, track_explicit_search};
 use super::receipts::{
     effective_memory_deadline, evidence_outcome, memory_expiry_partial, prepare_retained_effect,
 };
-use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 use crate::tracedecay::TraceDecay;
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
 macro_rules! execute_scoped_memory {
     (
@@ -79,9 +79,7 @@ macro_rules! execute_scoped_memory {
                 memory_mapping::ensure_profile_request_scope($memory_scope, $selector)?;
                 let (database, _) = bounded_memory_operation($context, async {
                     hotpath::future!(
-                        tracedecay_store_runtime::open_user_memory_db(
-                            registry
-                        ),
+                        tracedecay_store_runtime::open_user_memory_db(registry),
                         label = "daemon.retained.memory.open_profile"
                     )
                     .await

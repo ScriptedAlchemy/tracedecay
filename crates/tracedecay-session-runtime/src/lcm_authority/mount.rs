@@ -64,9 +64,7 @@ struct MountedLcmAuthority {
 }
 
 #[hotpath::measure]
-fn lcm_operation_and_grant_expiries(
-    observed_at: UtcMicros,
-) -> Option<(UtcMicros, UtcMicros)> {
+fn lcm_operation_and_grant_expiries(observed_at: UtcMicros) -> Option<(UtcMicros, UtcMicros)> {
     let operation_micros =
         i64::try_from(crate::lcm_effects::LCM_EFFECT_CEILING.as_micros()).ok()?;
     let operation_expires_at = UtcMicros(observed_at.0.checked_add(operation_micros)?);

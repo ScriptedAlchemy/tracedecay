@@ -1472,8 +1472,7 @@ fn sealed_v11_artifact_uses_interned_plans_and_reports_dbstat() {
     assert!(
         term_plan.iter().any(|detail| {
             detail.contains("PRIMARY KEY")
-                || detail.contains("term_postings")
-                    && !detail.contains("term_postings_by_term")
+                || detail.contains("term_postings") && !detail.contains("term_postings_by_term")
         }),
         "term equality must use the interned primary key, got {term_plan:?}"
     );
@@ -1502,7 +1501,10 @@ fn sealed_v11_artifact_uses_interned_plans_and_reports_dbstat() {
             |row| row.get(0),
         )
         .expect("count dropped indexes");
-    assert_eq!(missing_dropped, 0, "revision 11 must not keep redundant indexes");
+    assert_eq!(
+        missing_dropped, 0,
+        "revision 11 must not keep redundant indexes"
+    );
     let compact_rows: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM rows WHERE substr(row, 1, 7) = x'54444c52313100'",
@@ -1513,7 +1515,10 @@ fn sealed_v11_artifact_uses_interned_plans_and_reports_dbstat() {
     let total_rows: i64 = connection
         .query_row("SELECT COUNT(*) FROM rows", [], |row| row.get(0))
         .expect("count rows");
-    assert_eq!(compact_rows, total_rows, "every v11 row carries the compact tag");
+    assert_eq!(
+        compact_rows, total_rows,
+        "every v11 row carries the compact tag"
+    );
     {
         let dbstat = connection.prepare(
             "SELECT name, SUM(pgsize) FROM dbstat GROUP BY name ORDER BY SUM(pgsize) DESC",
@@ -1567,9 +1572,7 @@ fn sealed_v11_artifact_uses_interned_plans_and_reports_dbstat() {
     let mut latencies = Vec::new();
     for _ in 0..16 {
         let started = Instant::now();
-        let _ = lane
-            .retrieve_lexical(&request)
-            .expect("v11 lexical query");
+        let _ = lane.retrieve_lexical(&request).expect("v11 lexical query");
         latencies.push(started.elapsed().as_micros());
     }
     latencies.sort_unstable();

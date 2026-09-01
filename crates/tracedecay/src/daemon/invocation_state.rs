@@ -449,9 +449,7 @@ impl DaemonInvocationState {
         semantic_lifecycle: Option<Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1>>,
         semantic_resources: Option<SemanticResourceCeilings>,
         native_graph_activation: bool,
-        graph_runtime: Arc<
-            tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1,
-        >,
+        graph_runtime: Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
         graph_publication_database: Arc<tracedecay_runtime_core::db::Database>,
     ) -> Result<()> {
         // Code-index identity is anchored on the project root's own git

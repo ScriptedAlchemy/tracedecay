@@ -56,14 +56,12 @@ use tracedecay_domain::{
     CurrentRemoteAuthorityStateV1, EnrollmentCredentialRecordV1,
     RemoteAuthorityUnavailableReasonV1, UtcMicros, canonical_sha256,
 };
-use tracedecay_rusqlite_runtime::remote::{
-    CredentialDerivedSpoolKeyringV1, RemoteSpoolKeyringV1,
-};
+use tracedecay_rusqlite_runtime::remote::{CredentialDerivedSpoolKeyringV1, RemoteSpoolKeyringV1};
 use tracedecay_tool_catalog::SchemaId;
 
-use tracedecay_store_runtime::DaemonRemoteReplayTransactionAuthorityV1;
 use tracedecay_daemon_service::DaemonInvocationService;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_store_runtime::DaemonRemoteReplayTransactionAuthorityV1;
 
 mod observability;
 
@@ -82,10 +80,7 @@ pub(super) fn remote_query_result_observation(
     )
 }
 
-use tracedecay_store_runtime::{
-    DaemonRemoteCredentialAuthorityV1, DaemonRemoteCredentialLookupV1,
-};
-
+use tracedecay_store_runtime::{DaemonRemoteCredentialAuthorityV1, DaemonRemoteCredentialLookupV1};
 
 struct DaemonRemoteEnrollmentProtocolPortV1 {
     credentials: Arc<DaemonRemoteCredentialAuthorityV1>,

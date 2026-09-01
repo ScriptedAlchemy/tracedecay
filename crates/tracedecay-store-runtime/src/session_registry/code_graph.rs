@@ -947,9 +947,7 @@ impl RetainedCodeGraphRuntimeV1 {
     /// Drops aborted catalog/manifest staging files for this sealed digest.
     /// A retry must not inherit another attempt's `.read-bundle-*.tmp` scratch.
     #[hotpath::measure(label = "daemon.session_registry.sweep_read_bundle_temporaries")]
-    pub fn sweep_aborted_read_bundle_temporaries(
-        &self,
-    ) -> std::result::Result<(), GraphDbError> {
+    pub fn sweep_aborted_read_bundle_temporaries(&self) -> std::result::Result<(), GraphDbError> {
         tracedecay_graph_db::sweep_aborted_sealed_read_bundle_temporaries(
             &self.generations_root,
             &self.sealed_state_digest,

@@ -8,9 +8,9 @@ use tracedecay_domain::{
 };
 
 use super::super::LexicalFieldV1;
+use super::CodeLexicalArtifactErrorV1;
 use super::format::ArtifactRowV1;
 use super::schema::LexicalArtifactLayoutV1;
-use super::CodeLexicalArtifactErrorV1;
 
 const ROW_CODEC_V11_MAGIC: &[u8] = b"TDLR11\0";
 
@@ -143,9 +143,7 @@ fn decode_compact_v11(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ArtifactRowV1, encode_artifact_row, decode_artifact_row, LexicalArtifactLayoutV1,
-    };
+    use super::{ArtifactRowV1, LexicalArtifactLayoutV1, decode_artifact_row, encode_artifact_row};
     use crate::retrieval::lexical::LexicalFieldV1;
     use std::collections::BTreeMap;
     use tracedecay_domain::{
@@ -154,8 +152,8 @@ mod tests {
     };
 
     fn sample_row() -> ArtifactRowV1 {
-        let sanitized = BoundedSanitizedText::new("fn RenderWidget() { return; }")
-            .expect("bounded text");
+        let sanitized =
+            BoundedSanitizedText::new("fn RenderWidget() { return; }").expect("bounded text");
         ArtifactRowV1 {
             id: CodeSearchChunkId::new("chunk.sample").expect("chunk"),
             anchor: CodeSearchChunkAnchorV1 {

@@ -158,7 +158,10 @@ async fn forget_project_removes_exactly_one_registered_project() {
         store_dir_b.join("tracedecay.db").exists(),
         "sibling store bytes must survive byte-identical"
     );
-    assert_eq!(fs::read(store_dir_b.join("sessions.db")).unwrap(), b"session bytes");
+    assert_eq!(
+        fs::read(store_dir_b.join("sessions.db")).unwrap(),
+        b"session bytes"
+    );
 
     let db = HostAdmissionTestRuntimeV1::profile(profile.path())
         .await

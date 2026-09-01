@@ -460,11 +460,9 @@ async fn persisted_declared_topology_survives_registry_restart_and_session_sync_
     )
     .expect("daemon database scope");
     let first_registry =
-        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
-            identity.clone(),
-        )
-        .await
-        .expect("first session registry");
+        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity.clone())
+            .await
+            .expect("first session registry");
     let first_project_database = first_registry
         .project_memory(project.clone(), roots.clone())
         .await
@@ -656,11 +654,9 @@ async fn persisted_declared_topology_survives_registry_restart_and_session_sync_
     drop(first_registry);
 
     let restarted_registry =
-        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
-            identity.clone(),
-        )
-        .await
-        .expect("restarted session registry");
+        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity.clone())
+            .await
+            .expect("restarted session registry");
     let restarted_project_database = restarted_registry
         .project_memory(project.clone(), roots.clone())
         .await

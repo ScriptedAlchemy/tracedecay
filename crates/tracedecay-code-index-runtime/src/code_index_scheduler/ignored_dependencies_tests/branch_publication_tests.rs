@@ -290,11 +290,9 @@ export function GenerationAnchor(value: PublicWidget) { return value; }
     )
     .expect("daemon database scope");
     let graph_runtime = Arc::new(
-        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
-            identity,
-        )
-        .await
-        .expect("graph runtime registry"),
+        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity)
+            .await
+            .expect("graph runtime registry"),
     );
     let project_database = graph_runtime
         .project_memory(project_id(), [fixture.path().to_path_buf()])

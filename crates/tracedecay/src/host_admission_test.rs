@@ -122,10 +122,7 @@ async fn projectless_profile_capture_uses_the_daemon_profile_worker_plan() {
         "projectless-host-admission-worker-plan-test",
     )
     .unwrap();
-    let registry =
-        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
-            identity.clone(),
-        )
+    let registry = tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity.clone())
         .await
         .unwrap();
     let profile_registered = registry.profile_sessions().await.unwrap();
@@ -176,10 +173,7 @@ async fn host_ingress_binds_provenance_to_authoritative_project_and_replays_stab
         "host-provenance-authority-test",
     )
     .unwrap();
-    let registry =
-        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
-            identity.clone(),
-        )
+    let registry = tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity.clone())
         .await
         .unwrap();
     enroll_project(&repository_root, &project_id);
@@ -370,10 +364,7 @@ async fn registered_profile_runtime_is_required_and_mismatch_never_falls_back() 
         "host-admission-authority-test",
     )
     .unwrap();
-    let registry =
-        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
-            identity.clone(),
-        )
+    let registry = tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity.clone())
         .await
         .unwrap();
     let registered = registry.profile_sessions().await.unwrap();
@@ -489,10 +480,7 @@ async fn registered_project_runtime_is_exact_and_revocation_never_falls_back() {
         "host-admission-project-authority-test",
     )
     .unwrap();
-    let registry =
-        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
-            identity.clone(),
-        )
+    let registry = tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity.clone())
         .await
         .unwrap();
     let project_id = ProjectId::new("project.registered.exact").unwrap();

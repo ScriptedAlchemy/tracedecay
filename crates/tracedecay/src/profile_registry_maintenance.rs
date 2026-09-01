@@ -10,7 +10,8 @@ use tracedecay_global_db::{
     ProjectRegistryContext, RegisteredGlobalDb, RegisteredGlobalDbLeaseV1,
     registry_maintenance::ForgetRegistryProjectRows, registry_maintenance::RegistryGcReport,
     registry_maintenance::RegistryOrphanRelinkApplyReport,
-    registry_maintenance::RegistryOrphanRelinkReport, registry_maintenance::forget_registry_project,
+    registry_maintenance::RegistryOrphanRelinkReport,
+    registry_maintenance::forget_registry_project,
 };
 
 #[hotpath::measure]
@@ -67,8 +68,9 @@ pub fn remove_store_directory(path: &Path) -> tracedecay_domain::errors::Result<
                     message: format!("store removal target '{}' has no parent", path.display()),
                 }
             })?;
-            sync_directory(parent, DirectorySyncPolicy::Strict)
-                .map_err(|error| store_removal_error("sync store removal parent", parent, &error))?;
+            sync_directory(parent, DirectorySyncPolicy::Strict).map_err(|error| {
+                store_removal_error("sync store removal parent", parent, &error)
+            })?;
             verify_store_path_absent(path)?;
             Ok(true)
         }
@@ -79,7 +81,11 @@ pub fn remove_store_directory(path: &Path) -> tracedecay_domain::errors::Result<
             ),
         }),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(store_removal_error("inspect store removal target", path, &error)),
+        Err(error) => Err(store_removal_error(
+            "inspect store removal target",
+            path,
+            &error,
+        )),
     }
 }
 
@@ -164,10 +170,7 @@ impl ProfileRegistryMaintenanceRuntime {
     pub async fn open(profile_root: &Path) -> tracedecay_domain::errors::Result<Self> {
         let identity = tracedecay_daemon_identity::profile_identity::load_existing(profile_root)?;
         let registry =
-            tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
-                identity,
-            )
-            .await?;
+            tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity).await?;
         let profile_database = registry.profile_database().await?;
         Ok(Self { profile_database })
     }

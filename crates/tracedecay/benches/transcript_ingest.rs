@@ -549,16 +549,26 @@ fn main() {
     runtime.block_on(async {
         let mut outcomes = Vec::new();
         if matches!(target.as_str(), "claude" | "all") {
-            outcomes
-                .push(run_provider_bench(SessionProvider::Claude, "claude", config, write_claude_fixture).await);
+            outcomes.push(
+                run_provider_bench(
+                    SessionProvider::Claude,
+                    "claude",
+                    config,
+                    write_claude_fixture,
+                )
+                .await,
+            );
         }
         if matches!(target.as_str(), "codex" | "all") {
-            outcomes
-                .push(run_provider_bench(SessionProvider::Codex, "codex", config, write_codex_fixture).await);
+            outcomes.push(
+                run_provider_bench(SessionProvider::Codex, "codex", config, write_codex_fixture)
+                    .await,
+            );
         }
         if matches!(target.as_str(), "kiro" | "all") {
-            outcomes
-                .push(run_provider_bench(SessionProvider::Kiro, "kiro", config, write_kiro_fixture).await);
+            outcomes.push(
+                run_provider_bench(SessionProvider::Kiro, "kiro", config, write_kiro_fixture).await,
+            );
         }
         if matches!(target.as_str(), "store" | "all") {
             outcomes.push(run_store_bench(config).await);

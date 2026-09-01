@@ -1086,11 +1086,9 @@ async fn authenticated_remote_node_provisioning_creates_and_registers_first_stor
     .expect("daemon database scope");
     let identity = daemon_authority.profile_identity().clone();
     let runtime = Arc::new(
-        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
-            identity.clone(),
-        )
-        .await
-        .expect("session runtime registry"),
+        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity.clone())
+            .await
+            .expect("session runtime registry"),
     );
     let node_id = BrainNodeId::new("node.remote-http-provision").expect("node identity");
     let secret = [7_u8; 32];
@@ -1229,11 +1227,9 @@ async fn local_remote_status_reads_the_mounted_runtime() {
     .expect("daemon database scope");
     let identity = daemon_authority.profile_identity().clone();
     let runtime = Arc::new(
-        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(
-            identity.clone(),
-        )
-        .await
-        .expect("session runtime registry"),
+        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity.clone())
+            .await
+            .expect("session runtime registry"),
     );
     let credentials = runtime.remote_credential_authority();
     credentials.publish_listener_serving();
