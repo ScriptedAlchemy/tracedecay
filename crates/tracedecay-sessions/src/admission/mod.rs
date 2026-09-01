@@ -556,6 +556,8 @@ pub(crate) mod test_support {
         discovery_paths: Vec<(ObservationScopeV1, String, HostDiscoveryQueueEntry)>,
         next_discovery_sequence: u64,
         capture_failures_remaining: usize,
+        scalar_capture_calls: usize,
+        batch_capture_calls: usize,
         session_message_failures_remaining: usize,
         session_message_reads: usize,
     }
@@ -758,6 +760,11 @@ pub(crate) mod test_support {
             self.store.state().observations.clone()
         }
 
+        pub(crate) fn capture_call_counts(&self) -> (usize, usize) {
+            let state = self.store.state();
+            (state.scalar_capture_calls, state.batch_capture_calls)
+        }
+
         pub(crate) fn fail_next_capture(&self) {
             self.store.state().capture_failures_remaining = 1;
         }
@@ -838,6 +845,7 @@ pub(crate) mod test_support {
             Box::pin(async move {
                 {
                     let mut state = self.store.state();
+                    state.scalar_capture_calls = state.scalar_capture_calls.saturating_add(1);
                     if state.capture_failures_remaining > 0 {
                         state.capture_failures_remaining -= 1;
                         return Err(HostAdmissionOutcome::registered_authority_unavailable());
@@ -857,6 +865,7 @@ pub(crate) mod test_support {
             Box::pin(async move {
                 {
                     let mut state = self.store.state();
+                    state.batch_capture_calls = state.batch_capture_calls.saturating_add(1);
                     if state.capture_failures_remaining > 0 {
                         state.capture_failures_remaining -= 1;
                         return Err(HostAdmissionOutcome::registered_authority_unavailable());

@@ -22,6 +22,8 @@ use crate::runtime::source::{
 
 use super::{canonical_snapshot_envelope, host_admission_error};
 
+const SNAPSHOT_CAPTURE_WINDOW_RECORDS: usize = 32;
+
 #[derive(Clone, Debug, Default)]
 pub struct SnapshotCaptureOutcome {
     pub stats: TranscriptIngestStats,
@@ -246,108 +248,217 @@ impl SnapshotAdmissionRunner {
             pending.push((record, source_identity, range));
         }
 
-        for (record, source_identity, range) in pending {
-            let provider = record.provider();
-            ensure_snapshot_admission_active(provider, cancellation)?;
-            let expected_cursor = session_cursor(
-                facade,
-                &mut cursors,
-                provider,
-                record.session_id(),
-                &source_identity,
-                scope,
-                cancellation,
-            )
-            .await?;
-            ensure_snapshot_admission_active(provider, cancellation)?;
-            if snapshot_cursor_covers_range(expected_cursor.as_ref(), generation, range) {
-                continue;
-            }
-            ensure_snapshot_admission_active(provider, cancellation)?;
-            let request = record.capture_request(
-                scope.clone(),
-                generation,
-                expected_cursor.clone(),
-                cancellation.clone(),
-            )?;
-            ensure_snapshot_admission_active(provider, cancellation)?;
-            let outcome = match facade.capture_observation(request).await {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    if is_admission_cancellation(&error, cancellation) {
-                        return Err(TranscriptIngestError::Cancelled { provider });
-                    }
-                    if cancellation.is_cancelled() {
-                        return Err(host_admission_error(provider, error));
-                    }
-                    let committed = snapshot_range_was_committed(
-                        facade,
-                        &source_identity,
-                        scope,
+        for window in pending.chunks(SNAPSHOT_CAPTURE_WINDOW_RECORDS) {
+            ensure_snapshot_admission_active(self.provider, cancellation)?;
+            let mut chained_cursors = cursors.clone();
+            let mut requests = Vec::with_capacity(window.len());
+            for (record, source_identity, range) in window {
+                let provider = record.provider();
+                let expected_cursor = session_cursor(
+                    facade,
+                    &mut chained_cursors,
+                    provider,
+                    record.session_id(),
+                    source_identity,
+                    scope,
+                    cancellation,
+                )
+                .await?;
+                requests.push(record.capture_request(
+                    scope.clone(),
+                    generation,
+                    expected_cursor,
+                    cancellation.clone(),
+                )?);
+                chained_cursors.insert(
+                    record.session_id().to_owned(),
+                    Some(ObservationSourceCursorV1::for_ordering(
+                        source_identity.clone(),
+                        scope.clone(),
                         generation,
-                        range,
-                    )
-                    .await;
-                    if cancellation.is_cancelled() {
-                        return Err(host_admission_error(provider, error));
-                    }
-                    if committed {
-                        cursors.remove(record.session_id());
-                        continue;
-                    }
-                    return Err(host_admission_error(provider, error));
+                        ObservationOrderingDomainV1::SnapshotOrder,
+                        range.end(),
+                    )?),
+                );
+            }
+            let outcomes = facade.capture_observations(requests).await;
+            ensure_snapshot_admission_active(self.provider, cancellation)?;
+            let scalar_replay = match outcomes {
+                Ok(outcomes) if outcomes.len() != window.len() => {
+                    return Err(TranscriptIngestError::InvalidFrameState {
+                        provider: self.provider,
+                    });
                 }
-            };
-            ensure_snapshot_admission_active(provider, cancellation)?;
-            match outcome {
-                CaptureObservationOutcome::Persisted { outcome, .. }
-                | CaptureObservationOutcome::AcceptedForReplay { outcome, .. } => {
-                    if let ObservationPersistOutcome::Committed(receipt) = outcome.as_ref() {
-                        self.stats.messages_upserted =
-                            self.stats.messages_upserted.saturating_add(1);
+                Ok(outcomes)
+                    if outcomes.iter().any(|outcome| {
+                        matches!(
+                            outcome,
+                            CaptureObservationOutcome::Rejected { .. }
+                                | CaptureObservationOutcome::Quarantined { .. }
+                        )
+                    }) =>
+                {
+                    true
+                }
+                Ok(outcomes) => {
+                    for ((record, _, _), outcome) in window.iter().zip(outcomes) {
+                        let outcome = match outcome {
+                            CaptureObservationOutcome::Persisted { outcome, .. }
+                            | CaptureObservationOutcome::AcceptedForReplay { outcome, .. } => {
+                                outcome
+                            }
+                            CaptureObservationOutcome::Rejected { .. }
+                            | CaptureObservationOutcome::Quarantined { .. } => {
+                                return Err(TranscriptIngestError::InvalidFrameState {
+                                    provider: self.provider,
+                                });
+                            }
+                        };
+                        if matches!(outcome.as_ref(), ObservationPersistOutcome::Committed(_)) {
+                            self.stats.messages_upserted =
+                                self.stats.messages_upserted.saturating_add(1);
+                        }
                         cursors.insert(
                             record.session_id().to_owned(),
-                            Some(receipt.committed_cursor().clone()),
+                            Some(outcome.receipt().committed_cursor().clone()),
                         );
-                    } else {
-                        cursors.remove(record.session_id());
+                        self.sessions.insert(record.session_id().to_owned());
                     }
-                    self.sessions.insert(record.session_id().to_owned());
+                    false
                 }
-                CaptureObservationOutcome::Rejected { receipt, .. } => {
-                    ensure_snapshot_admission_active(provider, cancellation)?;
-                    advance_snapshot_coverage(
+                Err(error) if is_admission_cancellation(&error, cancellation) => {
+                    return Err(TranscriptIngestError::Cancelled {
+                        provider: self.provider,
+                    });
+                }
+                Err(error) if error.recovery.is_some() => true,
+                Err(error) => return Err(host_admission_error(self.provider, error)),
+            };
+            if scalar_replay {
+                // The default trait implementation can commit a prefix before
+                // surfacing a non-durable record. Re-read every affected
+                // source cursor before scalar replay so that prefix is
+                // classified as duplicate instead of violating the chain.
+                for (record, _, _) in window {
+                    cursors.remove(record.session_id());
+                }
+                for (record, source_identity, range) in window {
+                    self.capture_scalar_record(
                         facade,
-                        provider,
+                        record,
                         source_identity,
-                        range,
-                        expected_cursor,
-                        scope.clone(),
+                        *range,
+                        &mut cursors,
+                        scope,
                         generation,
-                        ObservationCoverageReason::SanitizerRejected,
-                        receipt,
                         cancellation,
                     )
                     .await?;
-                    cursors.remove(record.session_id());
                 }
-                CaptureObservationOutcome::Quarantined { receipt, .. } => {
-                    ensure_snapshot_admission_active(provider, cancellation)?;
-                    advance_snapshot_coverage(
-                        facade,
-                        provider,
-                        source_identity,
-                        range,
-                        expected_cursor,
-                        scope.clone(),
-                        generation,
-                        ObservationCoverageReason::SanitizerQuarantined,
-                        receipt,
-                        cancellation,
-                    )
-                    .await?;
-                    cursors.remove(record.session_id());
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn capture_scalar_record<R: SnapshotAdmissionRecord>(
+        &mut self,
+        facade: &dyn HostAdmission,
+        record: &R,
+        source_identity: &ObservationSourceIdentityV1,
+        range: ObservationSourceRangeV1,
+        cursors: &mut BTreeMap<String, Option<ObservationSourceCursorV1>>,
+        scope: &ObservationScopeV1,
+        generation: ObservationSourceGenerationV1,
+        cancellation: &ObservationCancellation,
+    ) -> TranscriptIngestResult<()> {
+        let provider = record.provider();
+        ensure_snapshot_admission_active(provider, cancellation)?;
+        let expected_cursor = session_cursor(
+            facade,
+            cursors,
+            provider,
+            record.session_id(),
+            source_identity,
+            scope,
+            cancellation,
+        )
+        .await?;
+        if snapshot_cursor_covers_range(expected_cursor.as_ref(), generation, range) {
+            return Ok(());
+        }
+        let request = record.capture_request(
+            scope.clone(),
+            generation,
+            expected_cursor.clone(),
+            cancellation.clone(),
+        )?;
+        let outcome = match facade.capture_observation(request).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if is_admission_cancellation(&error, cancellation) {
+                    return Err(TranscriptIngestError::Cancelled { provider });
                 }
+                if cancellation.is_cancelled() {
+                    return Err(host_admission_error(provider, error));
+                }
+                let committed =
+                    snapshot_range_was_committed(facade, source_identity, scope, generation, range)
+                        .await;
+                if cancellation.is_cancelled() {
+                    return Err(host_admission_error(provider, error));
+                }
+                if committed {
+                    cursors.remove(record.session_id());
+                    return Ok(());
+                }
+                return Err(host_admission_error(provider, error));
+            }
+        };
+        ensure_snapshot_admission_active(provider, cancellation)?;
+        match outcome {
+            CaptureObservationOutcome::Persisted { outcome, .. }
+            | CaptureObservationOutcome::AcceptedForReplay { outcome, .. } => {
+                if matches!(outcome.as_ref(), ObservationPersistOutcome::Committed(_)) {
+                    self.stats.messages_upserted = self.stats.messages_upserted.saturating_add(1);
+                }
+                cursors.insert(
+                    record.session_id().to_owned(),
+                    Some(outcome.receipt().committed_cursor().clone()),
+                );
+                self.sessions.insert(record.session_id().to_owned());
+            }
+            CaptureObservationOutcome::Rejected { receipt, .. } => {
+                advance_snapshot_coverage(
+                    facade,
+                    provider,
+                    source_identity.clone(),
+                    range,
+                    expected_cursor,
+                    scope.clone(),
+                    generation,
+                    ObservationCoverageReason::SanitizerRejected,
+                    receipt,
+                    cancellation,
+                )
+                .await?;
+                cursors.remove(record.session_id());
+            }
+            CaptureObservationOutcome::Quarantined { receipt, .. } => {
+                advance_snapshot_coverage(
+                    facade,
+                    provider,
+                    source_identity.clone(),
+                    range,
+                    expected_cursor,
+                    scope.clone(),
+                    generation,
+                    ObservationCoverageReason::SanitizerQuarantined,
+                    receipt,
+                    cancellation,
+                )
+                .await?;
+                cursors.remove(record.session_id());
             }
         }
         Ok(())
@@ -529,6 +640,7 @@ mod tests {
     struct TestSnapshotRecord {
         session_id: String,
         native_record_id: String,
+        order: u64,
         payload: Vec<u8>,
     }
 
@@ -546,7 +658,7 @@ mod tests {
         }
 
         fn order(&self) -> u64 {
-            0
+            self.order
         }
 
         fn payload(&self) -> &[u8] {
@@ -558,6 +670,7 @@ mod tests {
         TestSnapshotRecord {
             session_id: "session-1".to_owned(),
             native_record_id: "message-1".to_owned(),
+            order: 0,
             payload: br#"{
                 "provider": "test",
                 "session_id": "session-1",
@@ -567,6 +680,24 @@ mod tests {
                 "text": "retry me"
             }"#
             .to_vec(),
+        }
+    }
+
+    fn test_record_at(order: u64) -> TestSnapshotRecord {
+        let native_record_id = format!("message-{order}");
+        TestSnapshotRecord {
+            session_id: "session-window".to_owned(),
+            native_record_id: native_record_id.clone(),
+            order,
+            payload: serde_json::to_vec(&serde_json::json!({
+                "provider": "test",
+                "session_id": "session-window",
+                "message_id": native_record_id,
+                "role": if order % 2 == 0 { "user" } else { "assistant" },
+                "ordinal": order,
+                "text": format!("windowed snapshot record {order}")
+            }))
+            .unwrap(),
         }
     }
 
@@ -746,6 +877,38 @@ mod tests {
                 .expect("stored canonical payload bytes"),
             expected
         );
+    }
+
+    #[tokio::test]
+    async fn snapshot_records_capture_in_windows_with_chained_source_cursors() {
+        let admission = MemoryHostAdmission::default();
+        let generation = ObservationSourceGenerationV1::new(7).unwrap();
+        let records = (0..65).map(test_record_at).collect::<Vec<_>>();
+
+        let outcome = capture_snapshot_observations(
+            &admission,
+            "test",
+            ObservationScopeV1::Profile,
+            &ObservationCancellation::default(),
+            None,
+            || discovery(vec![PathBuf::from("session-window.snapshot")]),
+            |_| Ok(1),
+            |_| Ok(Some((generation, records.clone()))),
+        )
+        .await
+        .expect("windowed snapshot capture");
+
+        assert_eq!(outcome.stats.messages_upserted, 65);
+        assert_eq!(admission.capture_call_counts(), (0, 3));
+        assert_eq!(admission.observations().len(), 65);
+        let source = snapshot_source_identity("test", "session-window").unwrap();
+        let cursor = admission
+            .get_source_cursor(&source, &ObservationScopeV1::Profile)
+            .await
+            .unwrap()
+            .expect("windowed source cursor");
+        assert_eq!(cursor.generation(), generation);
+        assert_eq!(cursor.position(), 65);
     }
 
     #[tokio::test]
