@@ -23,9 +23,10 @@ use tracedecay_domain::configuration::{
     ConfigurationSnapshotV1, ConfigurationValueV1, CredentialKindV1, CredentialReferenceId,
     CredentialReferenceMetadataV1, INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY, ProtectedChange,
     ProtectedChangePlan, ProtectedChangeSnapshotError, RedactedConfigurationChangeV1,
-    RollbackModeV1, RuleEffect, SOURCE_BINDINGS_SETTING_KEY, ScopeControlOperationV1,
-    ScopeSourceBinding, SettingKey, SourceKindV1, USER_CODE_INDEX_WORKERS_SETTING_KEY,
-    UserProfileId, WORK_TOPOLOGY_POLICY_SETTING_KEY,
+    RollbackModeV1, RuleEffect, SOURCE_BINDINGS_SETTING_KEY,
+    SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY, ScopeControlOperationV1, ScopeSourceBinding, SettingKey,
+    SourceKindV1, USER_CODE_INDEX_WORKERS_SETTING_KEY, UserProfileId,
+    WORK_TOPOLOGY_POLICY_SETTING_KEY,
 };
 use tracedecay_domain::{AccessPolicyDigest, ActorId, ManifestDigest, UtcMicros, canonical_sha256};
 #[cfg(test)]
@@ -592,7 +593,10 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 return Err(ConfigurationError::RevisionConflict);
             }
             let registry = ConfigurationRegistry::core().map_err(ConfigurationError::validation)?;
-            let additive_keys = [INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY]
+            let additive_keys = [
+                INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
+                SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
+            ]
             .into_iter()
             .map(SettingKey::new)
             .collect::<Result<std::collections::BTreeSet<_>, _>>()
