@@ -3006,7 +3006,12 @@ impl LatestCompleteCodeIndexV1 {
     #[cfg(any(test, feature = "test-helpers"))]
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn warm_serving_caches(&self) {
-        let _ = self.activate_text_serving();
+        // Completion, not one bounded advance: the exact/lexical lane owners
+        // install only when the resumable text build finishes, so activation
+        // must drive the loop or the first request inherits a warming
+        // abstention instead of warm owners. Each advance inside stays
+        // bounded and cancellation-checkpointed.
+        let _ = self.production_query_owners();
         // Mirror the persistent-graph activation warm set: the record lookup
         // indices and the test-attribution join are pure functions of the
         // sealed generation and must exist before the first request, not be
@@ -3043,24 +3048,6 @@ impl LatestCodeTextGenerationV1 {
     ) -> Result<CodeLexicalArtifactOccurrenceV1, RetrievalPortError> {
         self.production_query_owners_with_budget(&queries::maximum_retrieval_budget())?
             .artifact_occurrence_by_chunk(chunk)
-    }
-
-    /// One bounded activation advance: start (or resume) the text-artifact
-    /// build and report typed warming when it is not yet servable.
-    ///
-    /// Deliberately not a completion loop. Activation callers (the graph
-    /// worker's cache warm, latency-sensitive admission) must stay bounded so
-    /// graph activation never waits on the text projection and oversized
-    /// hints abstain instead of scanning the worktree. Callers that need
-    /// finished owners drive the loop in [`Self::production_query_owners`].
-    #[cfg(any(test, feature = "test-helpers"))]
-    fn activate_text_serving(&self) -> Result<(), RetrievalPortError> {
-        if !self.advance_text_serving(TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1)? {
-            return Err(RetrievalPortError::AuthorityUnavailable(
-                "code-index text serving owners are warming".to_owned(),
-            ));
-        }
-        Ok(())
     }
 }
 
