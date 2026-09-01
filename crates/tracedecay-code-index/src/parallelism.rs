@@ -177,6 +177,8 @@ struct InstalledCodeIndexWorkerRuntimeV1 {
 
 static WORKER_RUNTIME: OnceLock<InstalledCodeIndexWorkerRuntimeV1> = OnceLock::new();
 static WORKER_RUNTIME_INSTALL: Mutex<()> = Mutex::new(());
+static STANDALONE_POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+static STANDALONE_POOL_INSTALL: Mutex<()> = Mutex::new(());
 
 /// Automatic CPU target: use every logical CPU through eight, then floor half.
 #[must_use]
@@ -563,7 +565,10 @@ pub fn with_background_cpu_permit<R>(operation: impl FnOnce() -> R) -> R {
 /// CPU admission happens inside each active parallel work unit through
 /// [`with_background_cpu_permit`] or [`with_background_cpu_permits`], allowing
 /// indexing, semantic inference, and session preparation to share idle width.
-/// A standalone caller without registration gets a scoped automatic pool.
+/// A standalone caller without registration shares one process-wide automatic
+/// pool. Building one all-core pool per request oversubscribes concurrent
+/// tests and profiling harnesses, which can turn bounded parser work into
+/// false timeout/unsupported-document results.
 #[hotpath::measure(label = "code_index.workers.install")]
 pub fn install<R, F>(operation: F) -> Result<R, CodeIndexParallelismErrorV1>
 where
@@ -576,6 +581,23 @@ where
             .ok_or(CodeIndexParallelismErrorV1::BackgroundCpuNotInstalled)?;
         return Ok(authority.with_yielded_permits(|| runtime.pool.install(operation)));
     }
+    let pool = standalone_pool()?;
+    Ok(pool.install(operation))
+}
+
+#[hotpath::measure(label = "code_index.workers.standalone_pool")]
+fn standalone_pool() -> Result<&'static rayon::ThreadPool, CodeIndexParallelismErrorV1> {
+    if let Some(pool) = STANDALONE_POOL.get() {
+        return Ok(pool);
+    }
+    let _installation = STANDALONE_POOL_INSTALL.lock().map_err(|_| {
+        CodeIndexParallelismErrorV1::PoolBuild {
+            message: "standalone code-index worker pool installation lock is poisoned".to_owned(),
+        }
+    })?;
+    if let Some(pool) = STANDALONE_POOL.get() {
+        return Ok(pool);
+    }
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(indexing_worker_target(detected_cores()))
         .thread_name(|index| format!("tracedecay-index-standalone-{index}"))
@@ -583,13 +605,30 @@ where
         .map_err(|error| CodeIndexParallelismErrorV1::PoolBuild {
             message: error.to_string(),
         })?;
-    Ok(pool.install(operation))
+    STANDALONE_POOL
+        .set(pool)
+        .map_err(|_| CodeIndexParallelismErrorV1::PoolBuild {
+            message: "standalone code-index worker pool installation raced".to_owned(),
+        })?;
+    STANDALONE_POOL
+        .get()
+        .ok_or_else(|| CodeIndexParallelismErrorV1::PoolBuild {
+            message: "standalone code-index worker pool installation did not settle".to_owned(),
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use tracedecay_domain::configuration::CodeIndexWorkerSelectionV1;
+
+    #[test]
+    fn standalone_install_reuses_one_process_pool() {
+        let first = standalone_pool().expect("first standalone pool");
+        let second = standalone_pool().expect("reused standalone pool");
+
+        assert!(std::ptr::eq(first, second));
+    }
 
     #[test]
     fn automatic_width_uses_small_hosts_and_half_of_large_hosts() {
