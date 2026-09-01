@@ -171,3 +171,61 @@ fn scheduler_record_log_preserves_skipped_status_and_reason() {
         "[tracedecay] event=scheduler_task project=/tmp/project task=memory_curator outcome=skipped run_id=run-123 reason=scheduler_interval_not_elapsed"
     );
 }
+
+#[test]
+fn query_authority_awaiting_generation_log_is_typed_not_degraded() {
+    let line = super::super::format_daemon_log_line(
+        "project_open_phase",
+        &[
+            ("project", "/tmp/project".to_string()),
+            ("phase", "code_index_query_authority".to_string()),
+            ("outcome", "awaiting_generation".to_string()),
+        ],
+    );
+
+    assert_eq!(
+        line,
+        "[tracedecay] event=project_open_phase project=/tmp/project phase=code_index_query_authority outcome=awaiting_generation"
+    );
+    assert!(
+        !line.contains("degraded"),
+        "the expected pre-seat gap must not reuse the degraded outcome"
+    );
+}
+
+#[test]
+fn retention_degraded_log_names_the_pass_and_failure() {
+    let line = super::super::format_daemon_log_line(
+        "retention_degraded",
+        &[
+            ("pass", "semantic_vector_generations".to_string()),
+            (
+                "failure",
+                "unavailable:semantic retrieval is not calibrated".to_string(),
+            ),
+        ],
+    );
+
+    assert_eq!(
+        line,
+        "[tracedecay] event=retention_degraded pass=semantic_vector_generations failure=\"unavailable:semantic retrieval is not calibrated\""
+    );
+}
+
+#[test]
+fn retention_maintenance_tick_retry_log_keeps_outcome_fields() {
+    let line = super::super::format_daemon_log_line(
+        "retention_maintenance_tick",
+        &[
+            ("succeeded", "false".to_string()),
+            ("outcome", "retry".to_string()),
+            ("processed_stores", "0".to_string()),
+            ("deferred_stores_tick", "0".to_string()),
+        ],
+    );
+
+    assert_eq!(
+        line,
+        "[tracedecay] event=retention_maintenance_tick succeeded=false outcome=retry processed_stores=0 deferred_stores_tick=0"
+    );
+}

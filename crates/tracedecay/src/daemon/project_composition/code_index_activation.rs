@@ -5,6 +5,7 @@
 //! reachable from the published MCP servers.
 
 use super::*;
+use tracedecay_code_index_runtime::code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1;
 use tracedecay_semantic_contracts::SemanticResourceCeilings;
 
 /// Inputs the deferred mount closure re-clones on every activation attempt.
@@ -221,21 +222,75 @@ fn spawn_query_authority_when_generation_ready(inputs: QueryAuthorityWaitInputs)
             {
                 return;
             }
-            let mut fields = vec![
-                ("project", authority_project.display().to_string()),
-                ("phase", "code_index_query_authority".to_owned()),
-            ];
-            match outcome {
-                Ok(()) => fields.push(("outcome", "mounted".to_owned())),
-                Err(error) => {
-                    fields.push(("outcome", "degraded".to_owned()));
-                    fields.push(("error", error.to_string()));
-                }
-            }
-            log_daemon_event("project_open_phase", &fields);
+            log_query_authority_activation_outcome(&authority_project, outcome);
         },
         label = "daemon.project.activate.query_authority"
     ));
+}
+
+/// Classify and emit the post-wait query-authority mount result.
+///
+/// `GenerationUnavailable` is the expected pre-seat gap: the waiter already
+/// saw a generation id, but the mount still needs a current complete
+/// generation. That is typed status, not a WARN. A real mount refusal stays
+/// WARN so a broken profile or key cannot hide as warmup.
+#[hotpath::measure]
+fn log_query_authority_activation_outcome(
+    project: &Path,
+    outcome: std::result::Result<(), QueryRuntimeMountErrorV1>,
+) {
+    match outcome {
+        Ok(()) => {
+            log_daemon_event(
+                "project_open_phase",
+                &[
+                    ("project", project.display().to_string()),
+                    ("phase", "code_index_query_authority".to_owned()),
+                    ("outcome", "mounted".to_owned()),
+                ],
+            );
+        }
+        Err(QueryRuntimeMountErrorV1::GenerationUnavailable) => {
+            tracing::info!(
+                event = "project_open_phase",
+                project = %project.display(),
+                phase = "code_index_query_authority",
+                outcome = "awaiting_generation",
+                "query authority is unseated until a current generation exists"
+            );
+        }
+        Err(error) => {
+            log_daemon_event(
+                "project_open_phase",
+                &[
+                    ("project", project.display().to_string()),
+                    ("phase", "code_index_query_authority".to_owned()),
+                    ("outcome", "degraded".to_owned()),
+                    ("error", error.to_string()),
+                ],
+            );
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::daemon) enum QueryAuthorityActivationLogV1 {
+    Mounted,
+    AwaitingGeneration,
+    Degraded,
+}
+
+#[hotpath::measure]
+pub(in crate::daemon) fn classify_query_authority_activation_outcome(
+    outcome: &std::result::Result<(), QueryRuntimeMountErrorV1>,
+) -> QueryAuthorityActivationLogV1 {
+    match outcome {
+        Ok(()) => QueryAuthorityActivationLogV1::Mounted,
+        Err(QueryRuntimeMountErrorV1::GenerationUnavailable) => {
+            QueryAuthorityActivationLogV1::AwaitingGeneration
+        }
+        Err(_) => QueryAuthorityActivationLogV1::Degraded,
+    }
 }
 
 /// Hint sink handed to the activation owner: it coalesces after-edit hook paths
@@ -323,8 +378,29 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     use tempfile::TempDir;
+    use tracedecay_code_index_runtime::code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1;
 
     use super::*;
+
+    #[test]
+    fn pre_seat_generation_gap_is_typed_status_not_degraded() {
+        assert_eq!(
+            classify_query_authority_activation_outcome(&Ok(())),
+            QueryAuthorityActivationLogV1::Mounted
+        );
+        assert_eq!(
+            classify_query_authority_activation_outcome(&Err(
+                QueryRuntimeMountErrorV1::GenerationUnavailable
+            )),
+            QueryAuthorityActivationLogV1::AwaitingGeneration
+        );
+        assert_eq!(
+            classify_query_authority_activation_outcome(&Err(
+                QueryRuntimeMountErrorV1::KeyUnavailable
+            )),
+            QueryAuthorityActivationLogV1::Degraded
+        );
+    }
 
     fn git(root: &Path, arguments: &[&str]) {
         let status = Command::new(
