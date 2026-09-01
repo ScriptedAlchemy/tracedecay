@@ -12,6 +12,7 @@ pub(super) enum ShutdownState {
     Failed,
 }
 
+#[hotpath::measure_all]
 impl ProjectRuntimeRegistryV1 {
     #[hotpath::measure(label = "daemon.service.project_runtime.retire_roots", future = true)]
     pub(crate) async fn retire_roots(&self, roots: &BTreeSet<PathBuf>) -> bool {
@@ -44,6 +45,7 @@ impl ProjectRuntimeRegistryV1 {
         })
     }
 
+    #[hotpath::skip]
     async fn drain_roots(&self, roots: &BTreeSet<PathBuf>) -> bool {
         let retired = tokio::time::timeout(crate::TASK_ABORT_DEADLINE, async {
             loop {
@@ -220,6 +222,7 @@ impl ProjectRuntimeRegistryV1 {
         shut_down_runtimes(runtimes);
     }
 
+    #[hotpath::skip]
     async fn join_shutdown_task(&self) {
         let result = {
             let mut retained = self.shutdown_task.lock().await;
@@ -274,6 +277,7 @@ impl ProjectRuntimeRegistryV1 {
         }
     }
 
+    #[hotpath::skip]
     async fn finish_drained_runtimes(
         &self,
         mut runtimes: BTreeMap<PathBuf, ProjectRuntime>,
@@ -384,6 +388,7 @@ async fn shut_down_observability(runtimes: &mut BTreeMap<PathBuf, ProjectRuntime
 /// Terminal teardown for a set of drained runtimes. Shared by full daemon
 /// shutdown and by targeted retirement (`retire_roots`), so a deletion cleanup
 /// tears a project's runtimes down exactly the way shutdown does.
+#[hotpath::measure]
 fn shut_down_runtimes(runtimes: BTreeMap<PathBuf, ProjectRuntime>) {
     for runtime in runtimes.values() {
         let (Some(router), Some(feedback)) = (&runtime.feedback_cycle_input, &runtime.feedback)

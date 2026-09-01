@@ -37,6 +37,7 @@ impl Drop for InvocationDispatchGaugeGuard {
 /// Counts a request the front door denied before any payload handler ran.
 /// The reason set is the closed [`DaemonInvocationProblem`] enum, so every
 /// key is static and bounded.
+#[hotpath::measure]
 fn observe_front_door_denial(problem: DaemonInvocationProblem) {
     match problem {
         DaemonInvocationProblem::InvalidRequest => {
@@ -60,6 +61,7 @@ fn observe_front_door_denial(problem: DaemonInvocationProblem) {
     }
 }
 
+#[hotpath::measure_all]
 impl DaemonInvocationService {
     pub fn operation_events(&self) -> OperationEventAuthority {
         self.operation_events.clone()
@@ -93,6 +95,7 @@ impl DaemonInvocationService {
     /// `lsp_workspace` is supplied only after the daemon has resolved every
     /// requested root through registered project ownership.
     #[cfg(any(test, feature = "test-helpers"))]
+    #[hotpath::skip]
     pub async fn invoke(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
@@ -117,6 +120,7 @@ impl DaemonInvocationService {
     /// Executes a request with a cancellation lease that was admitted before a
     /// route-local project-open wait. The ordinary `invoke` entry point keeps
     /// owning registration for callers that do not need a pre-admission wait.
+    #[hotpath::skip]
     pub async fn invoke_with_cancellation(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
@@ -140,6 +144,7 @@ impl DaemonInvocationService {
         .await
     }
 
+    #[hotpath::skip]
     pub async fn invoke_with_project_admission(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,

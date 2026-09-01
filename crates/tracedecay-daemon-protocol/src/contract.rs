@@ -78,6 +78,7 @@ use tracedecay_application::retrieval::PrimitiveRequest;
 /// Request-field character rules. The contract accepts opaque handles and ids
 /// only in a shape it can echo back safely, so validation travels with the
 /// wire types rather than with the server that reads them.
+#[hotpath::measure]
 fn valid_token(value: &str, max_len: usize) -> bool {
     !value.is_empty()
         && value.len() <= max_len
@@ -86,6 +87,7 @@ fn valid_token(value: &str, max_len: usize) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
 }
 
+#[hotpath::measure]
 fn valid_printable(value: &str, max_len: usize) -> bool {
     !value.is_empty()
         && value.len() <= max_len
@@ -94,6 +96,7 @@ fn valid_printable(value: &str, max_len: usize) -> bool {
             .all(|byte| byte.is_ascii_graphic() || byte == b' ')
 }
 
+#[hotpath::measure]
 fn valid_lsp_control(deadline: &Deadline, cancellation: &CancellationContext) -> bool {
     deadline.expires_at.0 > 0 && cancellation.token_id.as_str().len() <= MAX_OPAQUE_HANDLE_BYTES
 }
@@ -124,6 +127,7 @@ pub struct DaemonInvocationCancellationRequest {
     target_request_id: String,
 }
 
+#[hotpath::measure_all]
 impl DaemonInvocationCancellationRequest {
     pub fn new(target_request_id: impl Into<String>) -> Self {
         let target_request_id = target_request_id.into();
@@ -149,6 +153,7 @@ impl DaemonInvocationCancellationRequest {
     }
 }
 
+#[hotpath::measure]
 pub fn parse_daemon_invocation_cancellation_request(
     line: &str,
 ) -> Option<DaemonInvocationCancellationRequest> {
@@ -198,6 +203,7 @@ pub enum DaemonInvocationDeliveryAckResponseOutcome {
     },
 }
 
+#[hotpath::measure_all]
 impl DaemonInvocationDeliveryAckResponse {
     pub fn accepted(request_id: impl Into<String>) -> Self {
         Self::with_outcome(
@@ -244,6 +250,7 @@ impl DaemonInvocationDeliveryAckResponse {
     }
 }
 
+#[hotpath::measure_all]
 impl DaemonInvocationDeliveryAckRequest {
     pub fn delivered(target_request_id: impl Into<String>) -> Self {
         let target_request_id = target_request_id.into();
@@ -307,6 +314,7 @@ impl DaemonInvocationDeliveryAckRequest {
     }
 }
 
+#[hotpath::measure]
 pub fn parse_daemon_invocation_delivery_ack_request(
     line: &str,
 ) -> Option<DaemonInvocationDeliveryAckRequest> {
@@ -442,7 +450,9 @@ pub enum DaemonInvocationOperation {
     LspDetach,
 }
 
+#[hotpath::measure_all]
 impl DaemonInvocationOperation {
+    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::GitStatus => "git_status",
@@ -526,6 +536,7 @@ impl fmt::Debug for DaemonLspSessionAccess {
     }
 }
 
+#[hotpath::measure_all]
 impl DaemonLspSessionAccess {
     pub fn from_access(access: &LspSessionAccess) -> Self {
         Self {
@@ -586,7 +597,9 @@ pub enum WorkApplicationInvocationV1 {
     ReleasePlacement(ReleaseWorkPlacementCommand),
 }
 
+#[hotpath::measure_all]
 impl WorkApplicationInvocationV1 {
+    #[hotpath::skip]
     pub const fn operation_key(&self) -> &'static str {
         match self {
             Self::GenerateProposal(_) => "generate_proposal",
@@ -646,7 +659,9 @@ pub enum WorkflowApplicationInvocation {
     GetRun(tracedecay_application::WorkflowRunGetRequest),
 }
 
+#[hotpath::measure_all]
 impl WorkflowApplicationInvocation {
+    #[hotpath::skip]
     pub const fn operation_key(&self) -> &'static str {
         match self {
             Self::RegisterDefinition(_) => "register_definition",
@@ -678,7 +693,9 @@ pub enum HandoffApplicationInvocationV1 {
     OpenTaskHandoff(OpenTaskHandoffRequestV1),
 }
 
+#[hotpath::measure_all]
 impl HandoffApplicationInvocationV1 {
+    #[hotpath::skip]
     pub const fn operation_key(&self) -> &'static str {
         match self {
             Self::IssueTaskHandoff(_) => "issue_task_handoff",
@@ -954,6 +971,7 @@ pub enum DaemonInvocationPayload {
     },
 }
 
+#[hotpath::measure_all]
 impl DaemonInvocationRequest {
     /// One typed constructor for the whole Plan 36 native-integration journey.
     ///
@@ -2808,6 +2826,7 @@ enum DaemonGitEffectClass {
     IndexCommit,
 }
 
+#[hotpath::measure_all]
 impl DaemonGitEffectClass {
     fn from_application(effect: EffectClass) -> Result<Self, ApplicationContractError> {
         match effect {
@@ -2820,6 +2839,7 @@ impl DaemonGitEffectClass {
         }
     }
 
+    #[hotpath::skip]
     const fn into_application(self) -> EffectClass {
         match self {
             Self::IndexStage => EffectClass::GitIndexStage,
@@ -2840,7 +2860,9 @@ pub struct DaemonGitPreviewResult {
     payload: Option<GitIndexPreviewV1>,
 }
 
+#[hotpath::measure_all]
 impl DaemonGitPreviewResult {
+    #[hotpath::skip]
     pub const fn execution(&self) -> &OperationReceipt {
         &self.execution
     }
@@ -2923,6 +2945,7 @@ impl From<EffectReceipt> for DaemonEffectReceipt {
     }
 }
 
+#[hotpath::measure_all]
 impl DaemonEffectReceipt {
     fn into_application(self) -> EffectReceipt {
         EffectReceipt {
@@ -2958,7 +2981,9 @@ pub struct DaemonGitEffectResult {
     payload: Option<GitIndexTransactionReceiptV1>,
 }
 
+#[hotpath::measure_all]
 impl DaemonGitEffectResult {
+    #[hotpath::skip]
     pub const fn execution(&self) -> &OperationReceipt {
         &self.execution
     }
@@ -3015,13 +3040,16 @@ pub struct DaemonFeedbackResult {
     payload: Option<serde_json::Value>,
 }
 
+#[hotpath::measure_all]
 impl DaemonFeedbackResult {
     /// Read-only views for the daemon's operation accounting. The fields stay
     /// private so the envelope can only be built from an application packet.
+    #[hotpath::skip]
     pub const fn execution(&self) -> &OperationReceipt {
         &self.execution
     }
 
+    #[hotpath::skip]
     pub const fn page(&self) -> &PageState {
         &self.page
     }
@@ -3077,6 +3105,7 @@ pub enum CanonicalQualificationBlobError {
     NonCanonicalBase64,
 }
 
+#[hotpath::measure_all]
 impl CanonicalQualificationBlob {
     /// This is a bounded daemon response artifact, not an unbounded report
     /// transport. It matches the workspace's bounded artifact-payload scale.
@@ -3350,6 +3379,7 @@ pub enum HandoffApplicationOutcomeV1 {
     OpenTaskHandoff(ApplicationOutcome<OpenTaskHandoffResultV1>),
 }
 
+#[hotpath::measure_all]
 impl DaemonInvocationResponse {
     pub fn lsp_opened(
         request_id: String,

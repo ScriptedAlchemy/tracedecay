@@ -2,6 +2,7 @@
 
 use super::*;
 
+#[hotpath::measure]
 pub(super) fn invocation_observation_subject(
     request_id: &str,
     operation: DaemonInvocationOperation,
@@ -16,6 +17,7 @@ pub(super) fn invocation_observation_subject(
     .ok()
 }
 
+#[hotpath::measure]
 pub(super) fn is_observable_operation(operation: DaemonInvocationOperation) -> bool {
     matches!(
         operation,
@@ -33,6 +35,7 @@ pub(super) fn is_observable_operation(operation: DaemonInvocationOperation) -> b
     )
 }
 
+#[hotpath::measure]
 pub(super) fn feedback_observation_operation(
     operation: DaemonInvocationOperation,
 ) -> FeedbackOperationV1 {
@@ -105,6 +108,7 @@ pub(super) fn feedback_observation_operation(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn emit_invocation_observation(
     observations: Option<&Arc<dyn FeedbackObservationEmitterV1 + Send + Sync>>,
     subject: Option<&ManifestDigest>,
@@ -116,6 +120,7 @@ pub(super) fn emit_invocation_observation(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn invocation_response_outcome(
     response: &DaemonInvocationResponse,
 ) -> FeedbackOutcomeV1 {
@@ -201,6 +206,7 @@ pub(super) fn invocation_response_outcome(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn invocation_rejected_argument(
     response: &DaemonInvocationResponse,
 ) -> Option<(FeedbackRejectedArgumentV1, FeedbackArgumentRejectionClassV1)> {
@@ -240,6 +246,7 @@ pub(super) const fn invocation_problem_rejected_argument(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn observe_invocation_response(
     observations: Option<&Arc<dyn FeedbackObservationEmitterV1 + Send + Sync>>,
     subject: Option<&ManifestDigest>,

@@ -20,6 +20,7 @@ pub struct SemanticInvocationControlV1 {
     cancellation: CancellationContext,
 }
 
+#[hotpath::measure_all]
 impl SemanticInvocationControlV1 {
     pub fn new(
         observed_at: UtcMicros,
@@ -81,7 +82,9 @@ impl SemanticInvocationControlV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl DaemonInvocationService {
+    #[hotpath::skip]
     pub(super) async fn configuration_runtime(
         &self,
         project_root: Option<&Path>,
@@ -89,6 +92,7 @@ impl DaemonInvocationService {
         self.project_runtimes.get(project_root?).await
     }
 
+    #[hotpath::skip]
     pub(super) async fn execute_semantic_qualification(
         &self,
         project_root: Option<&Path>,
@@ -111,6 +115,7 @@ impl DaemonInvocationService {
         .await
     }
 
+    #[hotpath::skip]
     pub(super) async fn execute_semantic_evaluation(
         &self,
         project_root: Option<&Path>,
@@ -356,6 +361,7 @@ impl DaemonInvocationService {
     }
 }
 
+#[hotpath::measure]
 fn semantic_execution_interruption(
     control: &SemanticInvocationControlV1,
     request_cancellation: &CancellationToken,
@@ -370,6 +376,7 @@ fn semantic_execution_interruption(
         .or_else(|| control.interruption(current_micros()))
 }
 
+#[hotpath::measure]
 fn semantic_qualification_key(
     candidate: &tracedecay_usecases::semantic_runtime::SemanticEvaluationProfileCandidateV1,
     snapshot: &tracedecay_usecases::semantic_runtime::SemanticEvaluationPublicationSnapshotV1,
@@ -432,6 +439,7 @@ fn semantic_qualification_key(
     )
 }
 
+#[hotpath::measure]
 fn semantic_execution_response(
     request_id: String,
     execution: Result<
@@ -453,6 +461,7 @@ fn semantic_execution_response(
     }
 }
 
+#[hotpath::measure]
 fn semantic_evaluation_response(
     request_id: String,
     evaluation: Result<
@@ -531,6 +540,7 @@ fn semantic_evaluation_response(
     }
 }
 
+#[hotpath::measure]
 fn semantic_evaluation_rejection_problem(
     error: &SemanticActivationCoordinationErrorV1,
 ) -> ApplicationProblem {
@@ -544,6 +554,7 @@ fn semantic_evaluation_rejection_problem(
     }
 }
 
+#[hotpath::measure]
 fn semantic_evaluation_rejection_message(detail: &str) -> String {
     const MAX_MESSAGE_BYTES: usize = 512;
     let collected: String = detail.chars().filter(|ch| !ch.is_control()).collect();

@@ -14,6 +14,7 @@ pub(super) use workspace_diagnostics::PublishedCodeIndexWorkspaceDocuments;
 pub const LSP_WORKSPACE_CAPABILITY_ID_V1: &str = "capability.application.lsp.workspace-folders";
 pub const LSP_WORKSPACE_USE_CASE_ID_V1: &str = "use-case.application.lsp.workspace-folders";
 
+#[hotpath::measure]
 pub(super) fn admit_lsp_control(
     request_id: String,
     deadline: &Deadline,
@@ -34,6 +35,7 @@ pub(super) fn admit_lsp_control(
     Ok(())
 }
 
+#[hotpath::measure]
 pub fn canonicalize_lsp_roots(
     roots: &mut [(
         PathBuf,
@@ -55,6 +57,7 @@ pub(super) async fn runtime_lsp_actor(
     DaemonLspSessionFactory::open_federated_workspace_session(workspace, factories).await
 }
 
+#[hotpath::measure_all]
 impl DaemonInvocationService {
     /// The synchronous half of `begin_shutdown`: close every admission gate
     /// that does not need an await to close.
@@ -69,11 +72,13 @@ impl DaemonInvocationService {
         self.work_attempt_processes.begin_shutdown();
     }
 
+    #[hotpath::skip]
     pub async fn begin_shutdown(&self) {
         *self.lsp_admission_open.lock().await = false;
         self.cancel_admissions();
     }
 
+    #[hotpath::skip]
     pub async fn install_lsp_owner(
         &self,
         project_root: PathBuf,
@@ -83,6 +88,7 @@ impl DaemonInvocationService {
         self.project_runtimes.publish(project_root, owner).await
     }
 
+    #[hotpath::skip]
     pub async fn lsp_owner(&self, project_root: Option<&Path>) -> Option<DaemonLspInvocationOwner> {
         let project_root = project_root?;
         if let Some(owner) = self
@@ -96,6 +102,7 @@ impl DaemonInvocationService {
         self.project_runtimes.get(&canonical_root).await
     }
 
+    #[hotpath::skip]
     pub async fn lsp_owner_matches_scope(
         &self,
         project_root: &Path,
@@ -107,6 +114,7 @@ impl DaemonInvocationService {
             .is_some_and(|grant| grant.scope == *scope)
     }
 
+    #[hotpath::skip]
     pub async fn multi_root_query_context(
         &self,
         project_root: &Path,
@@ -132,6 +140,7 @@ impl DaemonInvocationService {
         Some((context, digest))
     }
 
+    #[hotpath::skip]
     pub async fn persisted_scope_set(
         &self,
         project_root: &Path,
@@ -146,6 +155,7 @@ impl DaemonInvocationService {
         (scope_set.actor_id() == &grant.issuer).then_some(scope_set)
     }
 
+    #[hotpath::skip]
     pub async fn compare_and_swap_scope_set(
         &self,
         active_project_root: &Path,
@@ -256,6 +266,7 @@ impl DaemonInvocationService {
         ))
     }
 
+    #[hotpath::skip]
     pub async fn multi_root_evidence<T>(
         &self,
         project_root: &Path,
@@ -367,10 +378,12 @@ impl DaemonInvocationService {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
+    #[hotpath::skip]
     pub async fn active_lsp_runtime_count(&self) -> usize {
         self.lsp_sessions.lock().await.len()
     }
 
+    #[hotpath::skip]
     async fn admit_lsp_workspace_holder(
         &self,
         workspace: &AuthorizedLspWorkspace,
@@ -566,6 +579,7 @@ impl DaemonInvocationService {
 
     /// The one fenced workspace-folder intent a session actor is holding for
     /// its daemon owner, if any.
+    #[hotpath::skip]
     pub async fn pending_lsp_workspace_folder_mutation(
         &self,
         session: &DaemonLspSessionAccess,
@@ -581,6 +595,7 @@ impl DaemonInvocationService {
     /// Answers a fenced workspace-folder intent: an authorized workspace
     /// applies it, `None` rejects it. A stale fence (the actor re-parsed a
     /// newer change or the scope set moved) settles as a no-op.
+    #[hotpath::skip]
     pub async fn settle_lsp_workspace_folder_mutation(
         &self,
         session: &DaemonLspSessionAccess,
@@ -956,6 +971,7 @@ impl DaemonInvocationService {
         }
     }
 
+    #[hotpath::skip]
     pub(super) async fn authenticate(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
@@ -989,6 +1005,7 @@ impl DaemonInvocationService {
         }
     }
 
+    #[hotpath::skip]
     pub(super) async fn expire_sessions(&self, now_ms: u64) {
         self.lsp_sessions
             .lock()

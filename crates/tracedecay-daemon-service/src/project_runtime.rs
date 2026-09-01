@@ -302,6 +302,7 @@ struct ProjectRuntimeReservation {
     slots: Vec<ReservedProjectRuntimeSlot>,
 }
 
+#[hotpath::measure_all]
 impl ProjectRuntimeReservation {
     fn reserve<C>(&mut self)
     where
@@ -472,6 +473,7 @@ pub(crate) struct RegisteredAdvisoryRuntimeV1 {
     hook_orchestrator: Arc<BoundedHookOrchestratorV1>,
 }
 
+#[hotpath::measure_all]
 impl RegisteredAdvisoryRuntimeV1 {
     pub(crate) fn new(
         owner: Arc<dyn Any + Send + Sync>,
@@ -483,6 +485,7 @@ impl RegisteredAdvisoryRuntimeV1 {
         }
     }
 
+    #[hotpath::skip]
     async fn shutdown(&self) -> bool {
         self.hook_orchestrator.shutdown().await
     }
@@ -502,6 +505,7 @@ pub struct RegisteredDeliveryReadAuthorityV1 {
     source_access: Arc<dyn tracedecay_usecases::ProjectSourceAccessSnapshotPort>,
 }
 
+#[hotpath::measure_all]
 impl RegisteredDeliveryReadAuthorityV1 {
     pub fn new(
         project_root: PathBuf,
@@ -531,6 +535,7 @@ impl RegisteredDeliveryReadAuthorityV1 {
         Arc::clone(&self.handle)
     }
 
+    #[hotpath::skip]
     pub async fn source_access_at(
         &self,
         observed_at: tracedecay_domain::UtcMicros,
@@ -573,6 +578,7 @@ struct ProjectRuntimeRootFencesV1 {
     request_leases: BTreeMap<PathBuf, usize>,
 }
 
+#[hotpath::measure_all]
 impl ProjectRuntimeRootFencesV1 {
     fn contains(&self, root: &Path) -> bool {
         self.retired.contains(root) || self.quiesced.contains(root)
@@ -652,6 +658,7 @@ impl Clone for ProjectRuntimeRequestLeaseV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl ProjectRuntimeRequestLeaseV1 {
     pub fn covers(&self, registry: &ProjectRuntimeRegistryV1, project_root: &Path) -> bool {
         Arc::ptr_eq(&self.inner.registry.root_fences, &registry.root_fences)
@@ -693,12 +700,15 @@ impl Drop for ProjectRuntimeRequestLeaseInnerV1 {
     }
 }
 
+#[hotpath::measure_all]
 impl ProjectRuntimeReservationLease {
+    #[hotpath::skip]
     async fn release(mut self) {
         self.release_inner().await;
         self.active = false;
     }
 
+    #[hotpath::skip]
     async fn commit(
         mut self,
         publication: ProjectRuntimePublication,
@@ -742,6 +752,7 @@ impl ProjectRuntimeReservationLease {
         result
     }
 
+    #[hotpath::skip]
     async fn release_inner(&self) {
         let mut runtimes = self.registry.lock_runtimes();
         Self::release_reservation(&mut runtimes, &self.project_root, &self.reservation);
@@ -782,6 +793,7 @@ impl Drop for ProjectRuntimeReservationLease {
     }
 }
 
+#[hotpath::measure_all]
 impl ProjectRuntimeRegistryV1 {
     fn lock_root_fences(&self) -> MutexGuard<'_, ProjectRuntimeRootFencesV1> {
         match self.root_fences.lock() {
@@ -808,6 +820,7 @@ impl ProjectRuntimeRegistryV1 {
             .send_modify(|version| *version = version.wrapping_add(1));
     }
 
+    #[hotpath::skip]
     async fn reserve(
         &self,
         project_root: PathBuf,
@@ -900,6 +913,7 @@ impl ProjectRuntimeRegistryV1 {
         }
     }
 
+    #[hotpath::skip]
     async fn publish_atomically_after_preflight<T, E, F, Fut>(
         &self,
         project_root: PathBuf,
@@ -934,6 +948,7 @@ impl ProjectRuntimeRegistryV1 {
     /// feedback runtime persists its producer boot. Construction runs without
     /// the registry lock, while the reservation prevents a racing writer from
     /// occupying any staged slot before the atomic commit.
+    #[hotpath::skip]
     pub(crate) async fn publish_feedback_atomically<T, E, F, Fut>(
         &self,
         project_root: PathBuf,
@@ -952,6 +967,7 @@ impl ProjectRuntimeRegistryV1 {
             .await
     }
 
+    #[hotpath::skip]
     pub(crate) async fn publish_feedback_cycle_atomically(
         &self,
         project_root: PathBuf,
@@ -994,6 +1010,7 @@ impl ProjectRuntimeRegistryV1 {
 
     /// Publishes the already-constructed advisory owner and redirects the
     /// existing feedback input under one project-runtime lock.
+    #[hotpath::skip]
     pub(crate) async fn publish_advisory_atomically(
         &self,
         project_root: &Path,
@@ -1041,6 +1058,7 @@ impl ProjectRuntimeRegistryV1 {
 
     /// Withdraw a component, returning it if it was there.
     #[cfg(test)]
+    #[hotpath::skip]
     pub(crate) async fn withdraw<C>(&self, project_root: &Path) -> Option<C>
     where
         C: ProjectRuntimeComponent,
@@ -1060,6 +1078,7 @@ impl ProjectRuntimeRegistryV1 {
         }
     }
 
+    #[hotpath::skip]
     pub async fn get<C>(&self, project_root: &Path) -> Option<C>
     where
         C: ProjectRuntimeComponent + Clone,
@@ -1068,6 +1087,7 @@ impl ProjectRuntimeRegistryV1 {
     }
 
     /// Read one component through a projection, under one lock.
+    #[hotpath::skip]
     pub async fn read<C, T, F>(&self, project_root: &Path, read: F) -> Option<T>
     where
         C: ProjectRuntimeComponent,
@@ -1114,6 +1134,7 @@ impl ProjectRuntimeRegistryV1 {
     /// connections is never constructed just to be dropped on the reconcile
     /// path. Splitting the check from the insert would let a second
     /// registration land in between.
+    #[hotpath::skip]
     pub(crate) async fn register_or_reconcile<C, E, R, B>(
         &self,
         project_root: PathBuf,
@@ -1171,6 +1192,7 @@ impl ProjectRuntimeRegistryV1 {
             .cloned()
     }
 
+    #[hotpath::skip]
     pub async fn holds<C>(&self, project_root: &Path) -> bool
     where
         C: ProjectRuntimeComponent,
@@ -1183,6 +1205,7 @@ impl ProjectRuntimeRegistryV1 {
     /// Answering with a component while several projects hold one would attach
     /// a request to whichever project happened to sort first.
     #[cfg(test)]
+    #[hotpath::skip]
     pub(crate) async fn sole<C>(&self) -> Option<C>
     where
         C: ProjectRuntimeComponent + Clone,
@@ -1194,6 +1217,7 @@ impl ProjectRuntimeRegistryV1 {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
+    #[hotpath::skip]
     pub async fn is_empty(&self) -> bool {
         self.lock_runtimes().is_empty()
     }
@@ -1204,6 +1228,7 @@ impl ProjectRuntimeRegistryV1 {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
+    #[hotpath::skip]
     pub async fn feedback_publication_state(&self, project_root: &Path) -> (bool, bool, bool) {
         let runtimes = self.lock_runtimes();
         let runtime = runtimes.get(project_root);

@@ -270,6 +270,7 @@ async fn read_leak_evidence(
     })
 }
 
+#[hotpath::measure]
 fn attempt_matches_authority(
     attempt: &tracedecay_domain::WorkAttemptV1,
     authority: &tracedecay_domain::WorkAuthority,
@@ -279,6 +280,7 @@ fn attempt_matches_authority(
         && attempt.execution().worktree_id() == authority.worktree_id()
 }
 
+#[hotpath::measure]
 fn placement_matches_attempt(
     placement: &tracedecay_application::WorkPlacementReadingV1,
     attempt: &tracedecay_domain::WorkAttemptIdentityV1,
@@ -292,6 +294,7 @@ fn placement_matches_attempt(
     }
 }
 
+#[hotpath::measure]
 fn missing_managed_worktree_binding(
     attempt: &tracedecay_domain::WorkAttemptV1,
     placement: &tracedecay_application::WorkPlacementReadingV1,
@@ -317,6 +320,7 @@ fn missing_managed_worktree_binding(
     }
 }
 
+#[hotpath::measure]
 fn unbounded_delivery(
     delivery: &tracedecay_global_db::WorkAttemptDeliveryCensusReadV1,
     attempt: &tracedecay_domain::WorkAttemptIdentityV1,
@@ -336,6 +340,7 @@ fn unbounded_delivery(
     }
 }
 
+#[hotpath::measure]
 fn delivery_is_unbound(delivery: &tracedecay_global_db::WorkAttemptDeliveryCensusReadV1) -> bool {
     matches!(
         delivery,
@@ -343,6 +348,7 @@ fn delivery_is_unbound(delivery: &tracedecay_global_db::WorkAttemptDeliveryCensu
     )
 }
 
+#[hotpath::measure]
 fn delivery_has_unsettled_observation(
     delivery: &tracedecay_global_db::WorkAttemptDeliveryCensusReadV1,
     attempt: &tracedecay_domain::WorkAttemptIdentityV1,
@@ -356,6 +362,7 @@ fn delivery_has_unsettled_observation(
     }
 }
 
+#[hotpath::measure]
 fn unresolved_effect(effect: &Option<tracedecay_application::WorkAttemptEffectHolderV1>) -> bool {
     effect.as_ref().is_some_and(|holder| {
         !matches!(
@@ -366,6 +373,7 @@ fn unresolved_effect(effect: &Option<tracedecay_application::WorkAttemptEffectHo
     })
 }
 
+#[hotpath::measure]
 fn horizon_elapsed(valid_at: UtcMicros, horizon_micros: u64, observed_at: UtcMicros) -> bool {
     i64::try_from(horizon_micros)
         .ok()
@@ -373,6 +381,7 @@ fn horizon_elapsed(valid_at: UtcMicros, horizon_micros: u64, observed_at: UtcMic
         .is_some_and(|deadline| observed_at.0 >= deadline)
 }
 
+#[hotpath::measure]
 fn terminal_horizon_elapsed(
     attempt: &tracedecay_domain::WorkAttemptV1,
     horizon_micros: u64,
@@ -390,6 +399,7 @@ fn terminal_horizon_elapsed(
     horizon_elapsed(observed_at, horizon_micros, scan_started_at)
 }
 
+#[hotpath::measure]
 fn opaque_leak_evidence_ref(
     kind: &str,
     attempt: &tracedecay_domain::WorkAttemptIdentityV1,
@@ -412,6 +422,7 @@ fn opaque_leak_evidence_ref(
     Ok(format!("work-leak:{kind}:{}", digest.as_str()))
 }
 
+#[hotpath::measure]
 fn delivery_evidence_digest(
     delivery: &tracedecay_global_db::WorkAttemptDeliveryCensusReadV1,
 ) -> Result<ManifestDigest, tracedecay_application::WorkLeakEvidenceErrorV1> {

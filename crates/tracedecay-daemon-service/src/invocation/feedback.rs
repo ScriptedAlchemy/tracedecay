@@ -60,6 +60,7 @@ pub struct DaemonAdvisoryCycleInvocationOwner {
     pub(crate) service: Arc<dyn DaemonAdvisoryCycleInvocationPort>,
 }
 
+#[hotpath::measure_all]
 impl DaemonAdvisoryCycleInvocationOwner {
     pub fn new(project_id: ProjectId, service: Arc<dyn DaemonAdvisoryCycleInvocationPort>) -> Self {
         Self {
@@ -166,6 +167,7 @@ pub struct DaemonFeedbackInvocationOwner {
     pub(crate) service: Arc<dyn DaemonFeedbackInvocationPort>,
 }
 
+#[hotpath::measure_all]
 impl DaemonFeedbackInvocationOwner {
     pub(crate) fn new(
         project_id: ProjectId,
@@ -178,6 +180,7 @@ impl DaemonFeedbackInvocationOwner {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn feedback_invocation_result<T>(
     result: ApplicationResult<T>,
 ) -> Result<DaemonFeedbackInvocationResult, ApplicationProblem>
@@ -187,6 +190,7 @@ where
     feedback_invocation_result_with(result, serde_json::to_value)
 }
 
+#[hotpath::measure]
 fn feedback_invocation_result_with<T>(
     result: ApplicationResult<T>,
     encode: impl FnOnce(T) -> Result<serde_json::Value, serde_json::Error>,
@@ -224,6 +228,7 @@ fn feedback_invocation_result_with<T>(
     })
 }
 
+#[hotpath::measure]
 fn feedback_owner_problem(error: FeedbackReadOwnerErrorV1) -> ApplicationProblem {
     match error {
         FeedbackReadOwnerErrorV1::NotFoundOrNotAuthorized => {
@@ -238,6 +243,7 @@ fn feedback_owner_problem(error: FeedbackReadOwnerErrorV1) -> ApplicationProblem
     }
 }
 
+#[hotpath::measure]
 pub(super) fn feedback_scope_matches(
     expected: Option<&ResolvedScope>,
     project_root: Option<&Path>,
@@ -307,6 +313,7 @@ pub(super) async fn execute_feedback(
     }
 }
 
+#[hotpath::measure]
 pub fn advisory_cycle_invocation_result(
     context: &RequestContext,
     started_at: UtcMicros,
@@ -526,6 +533,7 @@ pub fn advisory_cycle_invocation_result(
     })
 }
 
+#[hotpath::measure]
 fn incomplete_advisory_cycle_coverage() -> EvidenceCoverage {
     EvidenceCoverage {
         requested_domains: vec![EvidenceDomain::Diagnostic],
@@ -540,6 +548,7 @@ fn incomplete_advisory_cycle_coverage() -> EvidenceCoverage {
     }
 }
 
+#[hotpath::measure]
 fn empty_advisory_cycle_page() -> Result<PageState, ApplicationProblem> {
     PageState::first_page(
         SortContractId::new("sort.application.feedback.advisory-cycle.stable")
@@ -551,6 +560,7 @@ fn empty_advisory_cycle_page() -> Result<PageState, ApplicationProblem> {
     .map_err(|_| advisory_cycle_contract_problem())
 }
 
+#[hotpath::measure]
 fn advisory_cycle_contract_problem() -> ApplicationProblem {
     ApplicationProblem::unavailable(SafeDiagnostic {
         code: "feedback.advisory-cycle.contract".to_owned(),
@@ -612,7 +622,9 @@ pub(super) async fn execute_feedback_advisory_cycle(
     }
 }
 
+#[hotpath::measure_all]
 impl DaemonInvocationService {
+    #[hotpath::skip]
     pub async fn feedback_runtime(
         &self,
         project_root: Option<&Path>,
@@ -624,6 +636,7 @@ impl DaemonInvocationService {
             .await
     }
 
+    #[hotpath::skip]
     pub async fn feedback_cycle(
         &self,
         project_root: Option<&Path>,
@@ -631,6 +644,7 @@ impl DaemonInvocationService {
         self.project_runtimes.get(project_root?).await
     }
 
+    #[hotpath::skip]
     pub async fn delivery_read_authority(
         &self,
         project_root: Option<&Path>,
@@ -643,6 +657,7 @@ impl DaemonInvocationService {
             .await
     }
 
+    #[hotpath::skip]
     pub(super) async fn feedback_cycle_input(
         &self,
         project_root: Option<&Path>,

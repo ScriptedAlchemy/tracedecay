@@ -103,6 +103,7 @@ pub struct QuiescedDaemonLifecycle {
     restored: bool,
 }
 
+#[hotpath::measure_all]
 impl QuiescedDaemonLifecycle {
     pub fn acquire(operation: &str, expected_version: &str) -> Result<Self> {
         Self::acquire_with(
@@ -302,6 +303,7 @@ impl Drop for QuiescedDaemonLifecycle {
     }
 }
 
+#[hotpath::measure]
 pub fn with_quiesced_installed_service<T>(
     operation: &str,
     expected_version: &str,
@@ -315,6 +317,7 @@ pub fn with_quiesced_installed_service<T>(
     )
 }
 
+#[hotpath::measure]
 fn with_quiesced_installed_service_with_runner<T>(
     runner: ServiceRunner,
     operation: &str,
@@ -376,6 +379,7 @@ pub fn with_exclusive_maintenance_window<T>(
     combine_operation_and_restore(operation, operation_result, restore_result)
 }
 
+#[hotpath::measure_all]
 impl DaemonServiceState {
     fn is_running(self) -> bool {
         matches!(self, Self::RunningEnabled | Self::RunningDisabled)
@@ -420,6 +424,7 @@ impl DaemonServiceState {
     /// explicit operator shapes. A unit that was running while disabled keeps
     /// that enablement; a unit found stopped and disabled is healed, because
     /// that is the observed outage shape (dead + disabled).
+    #[hotpath::skip]
     pub(crate) const fn expected_after_update(self) -> Self {
         match self {
             Self::Missing | Self::Masked => self,
@@ -431,6 +436,7 @@ impl DaemonServiceState {
     }
 }
 
+#[hotpath::measure]
 fn daemon_service_enable_now_remedy() -> &'static str {
     if cfg!(target_os = "linux") {
         "`tracedecay daemon install-service` or `systemctl --user enable --now tracedecay.service`"
@@ -439,6 +445,7 @@ fn daemon_service_enable_now_remedy() -> &'static str {
     }
 }
 
+#[hotpath::measure]
 pub fn unavailable_daemon_socket_advice(
     socket_path: &Path,
     state: Option<DaemonServiceState>,
@@ -466,11 +473,13 @@ pub fn unavailable_daemon_socket_advice(
 
 /// Unit-file presence only. Connect-path diagnosis must not spawn `systemctl`,
 /// which races tests that fake PATH and is slower than a socket miss.
+#[hotpath::measure]
 fn installed_service_unit_present() -> Result<bool> {
     let service_path = service_unit_path()?;
     service_unit_exists(&service_path)
 }
 
+#[hotpath::measure_all]
 impl DaemonServiceSpec {
     pub fn render_systemd_user_unit(&self) -> Result<String> {
         validate_managed_remote_tls(self.remote_tls.as_ref())?;
@@ -655,6 +664,7 @@ impl DaemonServiceSpec {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn validate_managed_remote_tls(remote_tls: Option<&RemoteBrainTlsConfig>) -> Result<()> {
     let Some(remote_tls) = remote_tls else {
         return Ok(());
@@ -668,6 +678,7 @@ pub(super) fn validate_managed_remote_tls(remote_tls: Option<&RemoteBrainTlsConf
     Ok(())
 }
 
+#[hotpath::measure]
 fn managed_remote_tls_path_text<'a>(description: &str, path: &'a Path) -> Result<&'a str> {
     if !path.is_absolute() {
         return Err(TraceDecayError::Config {
@@ -690,6 +701,7 @@ fn managed_remote_tls_path_text<'a>(description: &str, path: &'a Path) -> Result
     Ok(path_text)
 }
 
+#[hotpath::measure]
 fn systemd_escape_exec_argument(value: &str) -> String {
     format!(
         "\"{}\"",
@@ -709,6 +721,7 @@ fn systemd_escape_exec_argument(value: &str) -> String {
 /// that need quoting use the escaped form the quote-aware
 /// `unit_file::systemd_exec_tokens` parser round-trips for every ExecStart
 /// read-back (the socket path and the Remote Brain TLS paths alike).
+#[hotpath::measure]
 fn systemd_quote_exec_argument_if_needed(value: &str) -> String {
     let needs_quoting = value
         .chars()
@@ -720,6 +733,7 @@ fn systemd_quote_exec_argument_if_needed(value: &str) -> String {
     }
 }
 
+#[hotpath::measure]
 fn daemon_service_path_env(tracedecay_bin: &Path) -> String {
     let mut dirs = Vec::new();
 
@@ -765,6 +779,7 @@ fn daemon_service_path_env(tracedecay_bin: &Path) -> String {
     )
 }
 
+#[hotpath::measure]
 fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
     if path.as_os_str().is_empty() || paths.iter().any(|existing| existing == &path) {
         return;
@@ -772,6 +787,7 @@ fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
     paths.push(path);
 }
 
+#[hotpath::measure]
 fn systemd_escape_env_value(value: &str) -> String {
     value
         .replace('\\', "\\\\")
@@ -779,6 +795,7 @@ fn systemd_escape_env_value(value: &str) -> String {
         .replace('%', "%%")
 }
 
+#[hotpath::measure]
 fn plist_xml_escape(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for ch in value.chars() {
@@ -794,6 +811,7 @@ fn plist_xml_escape(value: &str) -> String {
     escaped
 }
 
+#[hotpath::measure]
 fn plist_xml_unescape(value: &str) -> String {
     value
         .replace("&quot;", "\"")
@@ -803,6 +821,7 @@ fn plist_xml_unescape(value: &str) -> String {
         .replace("&amp;", "&")
 }
 
+#[hotpath::measure]
 fn home_for_service_env() -> Result<PathBuf> {
     std::env::var_os("HOME")
         .filter(|home| !home.is_empty())
@@ -813,12 +832,14 @@ fn home_for_service_env() -> Result<PathBuf> {
         })
 }
 
+#[hotpath::measure]
 fn tracedecay_data_dir() -> Result<PathBuf> {
     tracedecay_runtime_core::config::user_data_dir().ok_or_else(|| TraceDecayError::Config {
         message: "could not determine TraceDecay user data directory".to_string(),
     })
 }
 
+#[hotpath::measure]
 pub fn default_socket_path() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os(SOCKET_ENV).filter(|path| !path.is_empty()) {
         return Ok(PathBuf::from(path));
@@ -827,6 +848,7 @@ pub fn default_socket_path() -> Result<PathBuf> {
     Ok(default_socket_path_for_profile(&profile_root))
 }
 
+#[hotpath::measure]
 fn default_socket_path_for_profile(profile_root: &Path) -> PathBuf {
     let profile_scoped = profile_root.join("daemon.sock");
     #[cfg(unix)]
@@ -848,6 +870,7 @@ fn default_socket_path_for_profile(profile_root: &Path) -> PathBuf {
 /// group- or world-accessible parent is refused before binding, and an
 /// attacker-owned 0700 directory refuses the bind at the kernel.
 #[cfg(unix)]
+#[hotpath::measure]
 fn short_profile_socket_path(profile_root: &Path) -> PathBuf {
     let digest = sha2::Sha256::digest(profile_root.as_os_str().as_bytes());
     PathBuf::from(format!(
@@ -856,10 +879,12 @@ fn short_profile_socket_path(profile_root: &Path) -> PathBuf {
     ))
 }
 
+#[hotpath::measure]
 pub fn socket_path_or_default(socket: Option<String>) -> Result<PathBuf> {
     socket.map_or_else(default_socket_path, |path| Ok(PathBuf::from(path)))
 }
 
+#[hotpath::measure]
 pub fn service_spec(
     tracedecay_bin: impl Into<PathBuf>,
     socket: Option<String>,
@@ -867,6 +892,7 @@ pub fn service_spec(
     service_spec_with_remote_tls(tracedecay_bin, socket, None)
 }
 
+#[hotpath::measure]
 pub fn service_spec_with_remote_tls(
     tracedecay_bin: impl Into<PathBuf>,
     socket: Option<String>,
@@ -885,6 +911,7 @@ pub fn service_spec_with_remote_tls(
 }
 
 #[doc(hidden)]
+#[hotpath::measure]
 pub fn prepare_scoop_package_service(
     package_id: &str,
     state_file: &Path,
@@ -894,6 +921,7 @@ pub fn prepare_scoop_package_service(
 }
 
 #[doc(hidden)]
+#[hotpath::measure]
 pub fn restore_scoop_package_service(
     package_id: &str,
     state_file: &Path,
@@ -902,6 +930,7 @@ pub fn restore_scoop_package_service(
     windows_task::restore_scoop_package_service(package_id, state_file, expected_version)
 }
 
+#[hotpath::measure]
 pub fn install_service(
     spec: &DaemonServiceSpec,
     start: bool,
@@ -994,6 +1023,7 @@ fn refresh_service_with_runner(
 }
 
 #[doc(hidden)]
+#[hotpath::measure]
 pub fn refresh_installed_service_under_lease_with_state(
     spec: &DaemonServiceSpec,
     previous_state: DaemonServiceState,
@@ -1002,6 +1032,7 @@ pub fn refresh_installed_service_under_lease_with_state(
     refresh_installed_service_with_state(spec, Some(previous_state), expected_version)
 }
 
+#[hotpath::measure]
 fn refresh_installed_service_with_state(
     spec: &DaemonServiceSpec,
     previous_state: Option<DaemonServiceState>,
@@ -1015,6 +1046,7 @@ fn refresh_installed_service_with_state(
     )
 }
 
+#[hotpath::measure]
 fn refresh_installed_service_with_state_and_runner(
     runner: &ServiceRunner,
     spec: &DaemonServiceSpec,
@@ -1187,6 +1219,7 @@ pub fn restore_installed_service_after_update(
     )
 }
 
+#[hotpath::measure]
 fn restore_installed_service_after_update_with_runner(
     runner: &ServiceRunner,
     previous_state: DaemonServiceState,
@@ -1216,6 +1249,7 @@ fn restore_installed_service_after_update_with_runner(
     )
 }
 
+#[hotpath::measure]
 fn restore_installed_service_after_failed_acquire_with_runner(
     runner: &ServiceRunner,
     previous_state: DaemonServiceState,
@@ -1229,6 +1263,7 @@ fn restore_installed_service_after_failed_acquire_with_runner(
     restore_installed_service_after_update_with_runner(runner, previous_state, expected_version)
 }
 
+#[hotpath::measure]
 pub fn uninstall_service(stop: bool, expected_version: &str) -> Result<PathBuf> {
     if !stop {
         let state = installed_service_state()?;
@@ -1249,6 +1284,7 @@ pub fn uninstall_service(stop: bool, expected_version: &str) -> Result<PathBuf> 
     operation_result
 }
 
+#[hotpath::measure]
 pub fn installed_service_state() -> Result<DaemonServiceState> {
     let service_path = service_unit_path()?;
     if !service_unit_exists(&service_path)? {
@@ -1324,6 +1360,7 @@ pub fn wait_for_installed_service_state(
     )
 }
 
+#[hotpath::measure]
 pub(super) fn wait_for_installed_service_state_with_runner(
     runner: &ServiceRunner,
     expected: DaemonServiceState,
@@ -1338,6 +1375,7 @@ pub(super) fn wait_for_installed_service_state_with_runner(
     wait_for_installed_service_state_with(runner, expected, expected_version, TOTAL_TIMEOUT)
 }
 
+#[hotpath::measure]
 fn wait_for_installed_service_state_with(
     runner: &ServiceRunner,
     expected: DaemonServiceState,
@@ -1386,6 +1424,7 @@ fn wait_for_installed_service_state_with(
     })
 }
 
+#[hotpath::measure]
 fn installed_service_status_snapshot(
     runner: &ServiceRunner,
     expected_version: &str,
@@ -1418,6 +1457,7 @@ fn installed_service_status_snapshot(
     Ok((actual, socket_path, socket_state, protocol_state))
 }
 
+#[hotpath::measure]
 fn restored_service_matches(
     expected: DaemonServiceState,
     actual: DaemonServiceState,
@@ -1435,6 +1475,7 @@ fn restored_service_matches(
     }
 }
 
+#[hotpath::measure]
 fn combine_operation_and_restore<T>(
     operation: &str,
     operation_result: Result<T>,

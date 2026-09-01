@@ -9,7 +9,9 @@ use tracedecay_lsp::LspSessionRegistry;
 use super::DaemonInvocationService;
 use crate::project_runtime::ProjectRuntimeRootQuiescenceV1;
 
+#[hotpath::measure_all]
 impl DaemonInvocationService {
+    #[hotpath::skip]
     pub async fn expire_project(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
@@ -24,6 +26,7 @@ impl DaemonInvocationService {
         protocol_owners_retired && runtime_owners_retired
     }
 
+    #[hotpath::skip]
     pub async fn quiesce_project(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
@@ -103,6 +106,7 @@ impl DaemonInvocationService {
     }
 }
 
+#[hotpath::measure]
 fn workspace_belongs_to_project(
     workspace: &tracedecay_lsp::AuthorizedLspWorkspace,
     retired_workspace_digests: &HashSet<ManifestDigest>,

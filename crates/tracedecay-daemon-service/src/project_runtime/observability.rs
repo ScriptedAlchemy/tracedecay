@@ -26,6 +26,7 @@ struct StoreObservabilityCoreV1 {
     work_observations: Arc<WorkOwnerObservationRecoveryV1>,
 }
 
+#[hotpath::measure_all]
 impl StoreObservabilityCoreV1 {
     fn start(
         database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
@@ -60,6 +61,7 @@ impl StoreObservabilityCoreV1 {
         })
     }
 
+    #[hotpath::skip]
     async fn shutdown(&self) -> Result<(), tracedecay_application::ApplicationContractError> {
         let mut first_error = None;
         if let Err(error) = self.work_observations.shutdown().await {
@@ -87,6 +89,7 @@ impl StoreObservabilityCoreV1 {
 /// runtime binding and its verified locator are the canonical equality.
 /// Logical shard ids alone never match: two stores that share a
 /// brain/profile/project id remain distinct authorities.
+#[hotpath::measure]
 fn same_registered_store_authority(
     incumbent: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     candidate: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
@@ -143,6 +146,7 @@ pub struct StoreObservabilityMountV1 {
     pub(crate) delivery_capacity: usize,
 }
 
+#[hotpath::measure_all]
 impl StoreObservabilityMountV1 {
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn new(
@@ -204,6 +208,7 @@ pub struct StoreObservabilityRegistryV1 {
     entries: Arc<StdMutex<Vec<StoreObservabilityEntryV1>>>,
 }
 
+#[hotpath::measure_all]
 impl StoreObservabilityRegistryV1 {
     fn lock_entries(&self) -> Result<MutexGuard<'_, Vec<StoreObservabilityEntryV1>>, &'static str> {
         self.entries
@@ -432,6 +437,7 @@ pub struct RegisteredObservabilityProducerV1 {
     release: Option<Arc<StoreObservabilityCoreV1>>,
 }
 
+#[hotpath::measure_all]
 impl RegisteredObservabilityProducerV1 {
     fn alias(
         registry: StoreObservabilityRegistryV1,

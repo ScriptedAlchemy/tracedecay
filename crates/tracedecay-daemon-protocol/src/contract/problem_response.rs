@@ -5,6 +5,7 @@ use super::{
     DaemonInvocationProblem, DaemonInvocationResponse,
 };
 
+#[hotpath::measure_all]
 impl DaemonInvocationResponse {
     pub fn problem(request_id: impl Into<String>, problem: DaemonInvocationProblem) -> Self {
         Self {

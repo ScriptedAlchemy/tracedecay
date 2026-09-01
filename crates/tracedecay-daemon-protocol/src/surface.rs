@@ -100,7 +100,9 @@ pub enum ContextScoutSurfaceRequest {
     Feedback(ContextScoutFeedbackSurfaceRequest),
 }
 
+#[hotpath::measure_all]
 impl ContextScoutSurfaceRequest {
+    #[hotpath::skip]
     pub const fn address(&self) -> ContextScoutAddressV1 {
         match self {
             Self::Status(request) | Self::Capability(request) | Self::Budget(request) => {
@@ -115,6 +117,7 @@ impl ContextScoutSurfaceRequest {
         }
     }
 
+    #[hotpath::skip]
     pub const fn matches(&self, operation: ApplicationSurfaceOperation) -> bool {
         matches!(
             (self, operation),

@@ -15,6 +15,7 @@ pub struct DaemonConfigurationGrantAuthority {
     grants: Arc<RwLock<BTreeMap<ConfigurationGrantId, ConfigurationMutationGrantSnapshotV1>>>,
 }
 
+#[hotpath::measure_all]
 impl DaemonConfigurationGrantAuthority {
     pub fn issue_direct(
         &self,
@@ -153,6 +154,7 @@ impl DaemonConfigurationGrantAuthority {
     }
 }
 
+#[hotpath::measure]
 pub fn mounted_configuration_layers(
     project_id: &ProjectId,
     profile_id: &UserProfileId,
@@ -292,6 +294,7 @@ impl From<ProjectRuntimeAlreadyRegistered> for DaemonFeedbackRuntimeRegistration
 /// Callers match on the per-runtime variants (and each carries its own error
 /// message), so the enums keep their own `AlreadyRegistered`/`RegistryClosed`
 /// shapes and only this mapping is shared.
+#[hotpath::measure]
 pub(super) fn registry_registration_refusal<E>(
     error: ProjectRuntimeRegistryError,
     already_registered: E,
@@ -342,6 +345,7 @@ impl DaemonFeedbackPublicationTestGate {
         }
     }
 
+    #[hotpath::skip]
     async fn wait(&self) {
         self.publication_ready
             .lock()
@@ -390,6 +394,7 @@ impl DaemonFeedbackRuntimeRegistrar {
 
     /// Resolve the read store from the feedback runtime mounted for this exact
     /// project root. Doctor receives no provider runtime or write authority.
+    #[hotpath::skip]
     pub async fn doctor_read_store(&self, project_root: &Path) -> Option<ProjectFeedbackStore> {
         self.service
             .feedback_runtime(Some(project_root))
@@ -398,6 +403,7 @@ impl DaemonFeedbackRuntimeRegistrar {
     }
 
     /// Registers feedback readers from the authoritative admission result.
+    #[hotpath::skip]
     pub async fn open_and_register(
         &self,
         database: Database,
@@ -447,6 +453,7 @@ impl DaemonFeedbackRuntimeRegistrar {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::skip]
     pub async fn open_cycle_and_register(
         &self,
         project_root: PathBuf,
@@ -566,6 +573,7 @@ pub struct DaemonAdvisoryRuntimeRegistrar {
     service: DaemonInvocationService,
 }
 
+#[hotpath::measure_all]
 impl DaemonAdvisoryRuntimeRegistrar {
     pub fn new(service: &DaemonInvocationService) -> Self {
         Self {
@@ -573,6 +581,7 @@ impl DaemonAdvisoryRuntimeRegistrar {
         }
     }
 
+    #[hotpath::skip]
     pub async fn build_production(
         &self,
         project_root: &Path,
@@ -603,6 +612,7 @@ impl DaemonAdvisoryRuntimeRegistrar {
         )?))
     }
 
+    #[hotpath::skip]
     pub async fn publish(
         &self,
         project_root: &Path,
@@ -630,6 +640,7 @@ impl DaemonAdvisoryRuntimeRegistrar {
     /// project-open component. Each project open recomputes the same
     /// daemon-owned authority for this root, so the newest open's observation
     /// replaces a displaced incumbent instead of wedging a stale gate.
+    #[hotpath::skip]
     pub async fn publish_delivery_read(
         &self,
         project_root: &Path,
@@ -671,6 +682,7 @@ pub struct DaemonConfigurationRuntimeRegistrar {
     service: DaemonInvocationService,
 }
 
+#[hotpath::measure_all]
 impl DaemonConfigurationRuntimeRegistrar {
     pub fn new(service: &DaemonInvocationService) -> Self {
         Self {
@@ -696,6 +708,7 @@ impl DaemonConfigurationRuntimeRegistrar {
     /// user-profile mutation grant authority. The project configuration store
     /// is never used as a persistence sink for this setting.
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::skip]
     pub async fn commit_profile_code_index_worker_selection(
         &self,
         project_root: &Path,
@@ -760,6 +773,7 @@ impl DaemonConfigurationRuntimeRegistrar {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::skip]
     pub async fn register(
         &self,
         project_root: PathBuf,
@@ -858,6 +872,7 @@ impl DaemonConfigurationRuntimeRegistrar {
         Ok(())
     }
 
+    #[hotpath::skip]
     pub async fn install_semantic_operation(
         &self,
         project_root: &Path,
@@ -881,6 +896,7 @@ impl DaemonConfigurationRuntimeRegistrar {
             })?
     }
 
+    #[hotpath::skip]
     pub async fn install_semantic_activation_reconciler(
         &self,
         project_root: &Path,
@@ -903,6 +919,7 @@ pub struct DaemonWorkRuntimeRegistrar {
     service: DaemonInvocationService,
 }
 
+#[hotpath::measure_all]
 impl DaemonWorkRuntimeRegistrar {
     pub fn new(service: &DaemonInvocationService) -> Self {
         Self {
@@ -910,6 +927,7 @@ impl DaemonWorkRuntimeRegistrar {
         }
     }
 
+    #[hotpath::skip]
     pub async fn register(
         &self,
         project_root: PathBuf,
@@ -1042,6 +1060,7 @@ impl DaemonWorkRuntimeRegistrar {
         Ok(())
     }
 
+    #[hotpath::skip]
     pub async fn authority_matches(
         &self,
         project_root: &Path,
@@ -1074,6 +1093,7 @@ pub struct DaemonRetainedRuntimeRegistrar {
     service: DaemonInvocationService,
 }
 
+#[hotpath::measure_all]
 impl DaemonRetainedRuntimeRegistrar {
     pub fn new(service: &DaemonInvocationService) -> Self {
         Self {
@@ -1081,6 +1101,7 @@ impl DaemonRetainedRuntimeRegistrar {
         }
     }
 
+    #[hotpath::skip]
     pub async fn register(
         &self,
         project_root: PathBuf,
@@ -1137,7 +1158,9 @@ pub struct DaemonNativeIntegrationRuntimeRegistrar {
         Arc<tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationServiceRegistry>,
 }
 
+#[hotpath::measure_all]
 impl DaemonNativeIntegrationRuntimeRegistrar {
+    #[hotpath::skip]
     pub async fn ensure(
         &self,
         database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
@@ -1162,6 +1185,7 @@ impl DaemonNativeIntegrationRuntimeRegistrar {
             .await
     }
 
+    #[hotpath::skip]
     pub async fn for_repository_root(
         &self,
         repository_root: &Path,
@@ -1172,6 +1196,7 @@ impl DaemonNativeIntegrationRuntimeRegistrar {
         self.registry.for_repository_root(repository_root).await
     }
 
+    #[hotpath::skip]
     pub async fn retire_project_database(
         &self,
         project_id: &ProjectId,
@@ -1182,6 +1207,7 @@ impl DaemonNativeIntegrationRuntimeRegistrar {
             .await
     }
 
+    #[hotpath::skip]
     pub async fn shutdown(
         &self,
     ) -> Result<usize, tracedecay_application::NativeIntegrationPortError> {

@@ -26,6 +26,7 @@ pub struct Lease {
     token: CancellationToken,
 }
 
+#[hotpath::measure_all]
 impl Lease {
     pub fn token(&self) -> CancellationToken {
         self.token.clone()
@@ -77,11 +78,13 @@ pub fn cancel(request_id: &str) -> bool {
     }
 }
 
+#[hotpath::measure]
 fn state() -> &'static Mutex<State> {
     static STATE: OnceLock<Mutex<State>> = OnceLock::new();
     STATE.get_or_init(|| Mutex::new(State::default()))
 }
 
+#[hotpath::measure]
 fn expire_ephemeral(state: &mut State, now: Instant) {
     state
         .pending
@@ -91,6 +94,7 @@ fn expire_ephemeral(state: &mut State, now: Instant) {
         .retain(|_, completed_at| now.saturating_duration_since(*completed_at) < COMPLETED_TTL);
 }
 
+#[hotpath::measure]
 fn record_completed(state: &mut State, request_id: String, now: Instant) {
     if state.completed.len() >= COMPLETED_CAPACITY
         && let Some(oldest) = state

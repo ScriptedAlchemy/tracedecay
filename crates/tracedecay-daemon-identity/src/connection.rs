@@ -27,6 +27,7 @@ pub struct DaemonConnection {
     authority_record: Option<authority::DaemonAuthorityRecord>,
 }
 
+#[hotpath::measure_all]
 impl DaemonConnection {
     /// The loopback HTTP application endpoint published by this connection's
     /// authority, when one is available.
@@ -68,6 +69,7 @@ impl DaemonLivenessProbe for AuthorityLivenessProbe {
     }
 }
 
+#[hotpath::measure]
 fn ensure_record_current(
     expected: &authority::DaemonAuthorityRecord,
     request_label: &str,
@@ -92,6 +94,7 @@ fn ensure_record_current(
 }
 
 /// Authenticated invocation client for this process's current daemon authority.
+#[hotpath::measure]
 pub fn invocation_client_for_current(
     handshake: tracedecay_daemon_protocol::DaemonHandshake,
 ) -> Result<tracedecay_daemon_protocol::DaemonInvocationClient> {
@@ -101,6 +104,7 @@ pub fn invocation_client_for_current(
     ))
 }
 
+#[hotpath::measure]
 pub fn current_daemon_connection() -> Result<DaemonConnection> {
     let profile_root = tracedecay_runtime_core::config::user_data_dir().ok_or_else(|| {
         TraceDecayError::Config {
@@ -121,6 +125,7 @@ pub fn current_daemon_connection() -> Result<DaemonConnection> {
 }
 
 #[cfg(unix)]
+#[hotpath::measure]
 pub fn connection_for_socket_path(socket_path: &Path) -> DaemonConnection {
     if let Ok(connection) = current_daemon_connection()
         && let DaemonEndpoint::Unix(authority_path) = &connection.endpoint
@@ -154,6 +159,7 @@ pub fn connection_for_socket_path(socket_path: &Path) -> DaemonConnection {
 // Windows discovers the current daemon through a fallible endpoint lookup;
 // Unix keeps the same cross-platform contract even though its path is infallible.
 #[allow(clippy::unnecessary_wraps)]
+#[hotpath::measure]
 pub fn client_connection(socket_path: &Path) -> Result<DaemonConnection> {
     #[cfg(unix)]
     {

@@ -18,6 +18,7 @@ use super::{RegisteredWorkRuntime, current_micros};
 
 /// Policy-bound authority receipt and completed operation receipt for one
 /// admitted operation of the `family` request family.
+#[hotpath::measure]
 pub(super) fn administrative_authority(
     family: &'static str,
     registered: &RegisteredWorkRuntime,

@@ -161,6 +161,7 @@ pub(super) async fn execute_observatory_read(
     )
 }
 
+#[hotpath::measure]
 fn observatory_evidence(
     result: tracedecay_application::ObservatoryReadResultV1,
     authority: AuthorityReceipt,
@@ -199,6 +200,7 @@ fn observatory_evidence(
     }))
 }
 
+#[hotpath::measure]
 fn invalid_observatory_request() -> ApplicationProblem {
     ApplicationProblem::InvalidRequest {
         diagnostic: SafeDiagnostic {
@@ -210,6 +212,7 @@ fn invalid_observatory_request() -> ApplicationProblem {
     }
 }
 
+#[hotpath::measure]
 fn observatory_unavailable(request_id: String, code: &str) -> DaemonInvocationResponse {
     application_problem(
         request_id,

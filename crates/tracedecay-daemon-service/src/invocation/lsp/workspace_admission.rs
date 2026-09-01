@@ -19,6 +19,7 @@ pub(super) enum CurrentLspWorkspaceAuthorityV1 {
     Federated(AuthorizedDaemonLspWorkspace),
 }
 
+#[hotpath::measure_all]
 impl DaemonInvocationService {
     #[hotpath::measure(label = "daemon.service.lsp.workspace_authority", future = true)]
     pub(super) async fn current_lsp_workspace_authority(

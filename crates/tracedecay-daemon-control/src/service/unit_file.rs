@@ -115,6 +115,7 @@ pub(super) fn atomic_replace_service_unit_with(
     replacement_result
 }
 
+#[hotpath::measure]
 pub(super) fn write_service_unit(spec: &DaemonServiceSpec) -> Result<PathBuf> {
     let service_path = service_unit_path()?;
     let unit = spec.render_unit()?;
@@ -127,6 +128,7 @@ pub(super) fn write_service_unit(spec: &DaemonServiceSpec) -> Result<PathBuf> {
     Ok(service_path)
 }
 
+#[hotpath::measure]
 pub fn installed_service_socket_path() -> Result<Option<PathBuf>> {
     let service_path = service_unit_path()?;
     if !service_unit_exists(&service_path)? {
@@ -137,6 +139,7 @@ pub fn installed_service_socket_path() -> Result<Option<PathBuf>> {
     )?))
 }
 
+#[hotpath::measure]
 pub(super) fn read_service_unit(service_path: &Path) -> Result<String> {
     match ServicePlatform::current()? {
         ServicePlatform::WindowsTask => {
@@ -152,6 +155,7 @@ pub(super) fn read_service_unit(service_path: &Path) -> Result<String> {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn service_unit_exists(service_path: &Path) -> Result<bool> {
     match ServicePlatform::current()? {
         ServicePlatform::WindowsTask => windows_task::task_exists(),
@@ -178,6 +182,7 @@ pub(super) fn remove_service_unit(service_path: &Path) -> Result<()> {
     }
 }
 
+#[hotpath::measure]
 fn socket_path_from_args<'a>(mut args: impl Iterator<Item = &'a str>) -> Option<PathBuf> {
     while let Some(arg) = args.next() {
         if arg == "--socket" {
@@ -190,6 +195,7 @@ fn socket_path_from_args<'a>(mut args: impl Iterator<Item = &'a str>) -> Option<
     None
 }
 
+#[hotpath::measure]
 fn remote_tls_from_args<'a>(
     mut args: impl Iterator<Item = &'a str>,
 ) -> Result<Option<crate::RemoteBrainTlsConfig>> {
@@ -246,6 +252,7 @@ fn remote_tls_from_args<'a>(
     Ok(remote_tls)
 }
 
+#[hotpath::measure]
 pub(super) fn set_unique_argument<T>(
     slot: &mut Option<T>,
     value: Option<T>,
@@ -262,6 +269,7 @@ pub(super) fn set_unique_argument<T>(
     Ok(())
 }
 
+#[hotpath::measure]
 fn systemd_exec_tokens(exec_start: &str) -> Result<Vec<String>> {
     let mut tokens = Vec::new();
     let mut token = String::new();
@@ -309,6 +317,7 @@ fn systemd_exec_tokens(exec_start: &str) -> Result<Vec<String>> {
 /// yields `None` — callers fall back to the default socket path, and the
 /// refresh journey surfaces the typed parse error through
 /// [`remote_tls_from_service_unit`] on the same line.
+#[hotpath::measure]
 pub(super) fn socket_path_from_service_unit(unit: &str) -> Option<PathBuf> {
     unit.lines()
         .filter_map(|line| line.trim().strip_prefix("ExecStart="))
@@ -318,6 +327,7 @@ pub(super) fn socket_path_from_service_unit(unit: &str) -> Option<PathBuf> {
         })
 }
 
+#[hotpath::measure]
 pub(super) fn remote_tls_from_service_unit(
     unit: &str,
 ) -> Result<Option<crate::RemoteBrainTlsConfig>> {
@@ -331,6 +341,7 @@ pub(super) fn remote_tls_from_service_unit(
     remote_tls_from_args(tokens.iter().map(String::as_str))
 }
 
+#[hotpath::measure]
 pub(super) fn socket_path_from_launchd_plist(plist: &str) -> Option<PathBuf> {
     let program_arguments_start = plist.find("<key>ProgramArguments</key>")?;
     let arguments_text = &plist[program_arguments_start..];
@@ -343,6 +354,7 @@ pub(super) fn socket_path_from_launchd_plist(plist: &str) -> Option<PathBuf> {
     socket_path_from_args(strings.iter().map(String::as_str))
 }
 
+#[hotpath::measure]
 pub(super) fn remote_tls_from_launchd_plist(
     plist: &str,
 ) -> Result<Option<crate::RemoteBrainTlsConfig>> {
@@ -366,6 +378,7 @@ pub(super) fn remote_tls_from_launchd_plist(
     remote_tls_from_args(strings.iter().map(String::as_str))
 }
 
+#[hotpath::measure]
 pub(super) fn launchd_plist_env_value(plist: &str, name: &str) -> Option<String> {
     let env_start = plist.find("<key>EnvironmentVariables</key>")?;
     let after_env = &plist[env_start..];
@@ -381,6 +394,7 @@ pub(super) fn launchd_plist_env_value(plist: &str, name: &str) -> Option<String>
         .next()
 }
 
+#[hotpath::measure]
 fn plist_string_values(text: &str) -> Vec<String> {
     let mut values = Vec::new();
     let mut remaining = text;
@@ -396,6 +410,7 @@ fn plist_string_values(text: &str) -> Vec<String> {
     values
 }
 
+#[hotpath::measure]
 pub(super) fn socket_path_from_unit_text(unit: &str) -> Option<PathBuf> {
     match ServicePlatform::current().ok()? {
         ServicePlatform::Systemd => socket_path_from_service_unit(unit),
@@ -405,6 +420,7 @@ pub(super) fn socket_path_from_unit_text(unit: &str) -> Option<PathBuf> {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn remote_tls_from_unit_text(unit: &str) -> Result<Option<crate::RemoteBrainTlsConfig>> {
     match ServicePlatform::current()? {
         ServicePlatform::Systemd => remote_tls_from_service_unit(unit),
@@ -413,6 +429,7 @@ pub(super) fn remote_tls_from_unit_text(unit: &str) -> Result<Option<crate::Remo
     }
 }
 
+#[hotpath::measure]
 pub(super) fn service_unit_path() -> Result<PathBuf> {
     match ServicePlatform::current()? {
         ServicePlatform::Systemd => systemd_user_service_path(),
@@ -421,6 +438,7 @@ pub(super) fn service_unit_path() -> Result<PathBuf> {
     }
 }
 
+#[hotpath::measure]
 fn systemd_user_service_path() -> Result<PathBuf> {
     let config_home = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -431,6 +449,7 @@ fn systemd_user_service_path() -> Result<PathBuf> {
     Ok(config_home.join("systemd/user").join(crate::SERVICE_NAME))
 }
 
+#[hotpath::measure]
 fn launchd_user_service_path() -> Result<PathBuf> {
     let home = home_for_service_env()?;
     Ok(home.join("Library/LaunchAgents").join(LAUNCHD_PLIST_NAME))

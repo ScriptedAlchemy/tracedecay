@@ -6,6 +6,7 @@ pub struct DaemonLspOwnerRegistrar {
     service: DaemonInvocationService,
 }
 
+#[hotpath::measure_all]
 impl DaemonLspOwnerRegistrar {
     pub fn new(service: &DaemonInvocationService) -> Self {
         Self {
@@ -13,6 +14,7 @@ impl DaemonLspOwnerRegistrar {
         }
     }
 
+    #[hotpath::skip]
     pub async fn register_lsp_owner(
         &self,
         project_root: PathBuf,
@@ -22,6 +24,7 @@ impl DaemonLspOwnerRegistrar {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
+    #[hotpath::skip]
     pub async fn register_factory(
         &self,
         project_root: PathBuf,
@@ -37,6 +40,7 @@ impl DaemonLspOwnerRegistrar {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
+    #[hotpath::skip]
     pub async fn register_factory_for_project(
         &self,
         project_root: PathBuf,

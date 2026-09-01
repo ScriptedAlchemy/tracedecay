@@ -21,6 +21,7 @@ pub struct DaemonContextScoutRuntimeRegistrar {
     service: DaemonInvocationService,
 }
 
+#[hotpath::measure_all]
 impl DaemonContextScoutRuntimeRegistrar {
     pub fn new(service: &DaemonInvocationService) -> Self {
         Self {
@@ -54,6 +55,7 @@ impl DaemonContextScoutRuntimeRegistrar {
         Ok(registry)
     }
 
+    #[hotpath::skip]
     pub async fn get(
         &self,
         profile_id: &UserProfileId,

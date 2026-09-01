@@ -35,6 +35,7 @@ pub(super) async fn read_capped(
     Some((retained, total))
 }
 
+#[hotpath::measure]
 pub(super) fn provider_session(
     protocol: WorkProviderProtocol,
     captured: Option<&(Vec<u8>, u64)>,
@@ -47,6 +48,7 @@ pub(super) fn provider_session(
         .find_map(|event| session_from_event(protocol, &event))
 }
 
+#[hotpath::measure]
 fn session_from_event(
     protocol: WorkProviderProtocol,
     event: &serde_json::Value,
@@ -72,6 +74,7 @@ fn session_from_event(
     .ok()
 }
 
+#[hotpath::measure]
 pub(super) fn stream_summary(
     captured: Option<(Vec<u8>, u64)>,
 ) -> Option<WorkAttemptStreamSummaryV1> {
@@ -87,6 +90,7 @@ pub(super) fn stream_summary(
 /// A truncated stream means the provider exceeded its admitted output
 /// budget; that is a typed overflow outcome, not a silent trim, unless the
 /// attempt already ended in cancellation or timeout.
+#[hotpath::measure]
 pub(super) fn overflow_outcome(
     outcome: WorkAttemptProviderOutcomeV1,
     stdout: &Option<WorkAttemptStreamSummaryV1>,

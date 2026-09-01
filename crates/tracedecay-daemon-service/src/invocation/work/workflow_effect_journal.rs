@@ -22,6 +22,7 @@ use super::super::current_micros;
 use super::{RegisteredWorkRuntime, work_command_effect, work_effect, work_evidence_packet};
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 pub(super) fn complete_workflow_run_effect(
     registered: &RegisteredWorkRuntime,
     request_id: String,
@@ -70,6 +71,7 @@ pub(super) fn complete_workflow_run_effect(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 pub(super) fn complete_workflow_read<T>(
     registered: &RegisteredWorkRuntime,
     request_id: String,
@@ -119,6 +121,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 pub(super) fn execute_journaled_workflow_effect(
     registered: &RegisteredWorkRuntime,
     authority: &impl WorkflowEffectAuthorityPortV1,
@@ -234,6 +237,7 @@ pub(super) fn execute_journaled_workflow_effect(
     )
 }
 
+#[hotpath::measure]
 fn workflow_effect_idempotency_key(
     operation: WorkflowEffectOperationV1,
     operation_key: &str,
@@ -268,6 +272,7 @@ fn workflow_effect_idempotency_key(
     IdempotencyKey::new(format!("workflow.{operation_key}.{suffix}"))
 }
 
+#[hotpath::measure]
 fn workflow_effect_receipt_context(
     registered: &RegisteredWorkRuntime,
     context: &RequestContext,
@@ -332,6 +337,7 @@ fn workflow_effect_receipt_context(
     ))
 }
 
+#[hotpath::measure]
 fn workflow_effect_operation(operation_key: &str) -> Option<WorkflowEffectOperationV1> {
     match operation_key {
         "register_definition" => Some(WorkflowEffectOperationV1::RegisterDefinition),
@@ -344,6 +350,7 @@ fn workflow_effect_operation(operation_key: &str) -> Option<WorkflowEffectOperat
     }
 }
 
+#[hotpath::measure]
 pub(super) fn workflow_storage_problem(error: &TraceDecayError) -> DaemonInvocationProblem {
     match error {
         tracedecay_domain::errors::TraceDecayError::ResetRequired { authority, .. }
@@ -355,6 +362,7 @@ pub(super) fn workflow_storage_problem(error: &TraceDecayError) -> DaemonInvocat
     }
 }
 
+#[hotpath::measure]
 pub(super) fn workflow_effect_problem(problem: DaemonInvocationProblem) -> WorkflowEffectProblemV1 {
     match problem {
         DaemonInvocationProblem::NotFoundOrNotAuthorized => {
@@ -368,6 +376,7 @@ pub(super) fn workflow_effect_problem(problem: DaemonInvocationProblem) -> Workf
     }
 }
 
+#[hotpath::measure]
 fn workflow_effect_daemon_problem(problem: WorkflowEffectProblemV1) -> DaemonInvocationProblem {
     match problem {
         WorkflowEffectProblemV1::NotFoundOrNotAuthorized => {
@@ -379,6 +388,7 @@ fn workflow_effect_daemon_problem(problem: WorkflowEffectProblemV1) -> DaemonInv
     }
 }
 
+#[hotpath::measure]
 fn workflow_effect_outcome(
     terminal: &WorkflowEffectTerminalV1,
 ) -> Result<WorkflowApplicationOutcome, DaemonInvocationProblem> {
@@ -478,6 +488,7 @@ fn workflow_effect_outcome(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn task_handoff_problem(error: TaskHandoffError) -> DaemonInvocationProblem {
     match error {
         TaskHandoffError::AuthorityUnavailable(_) => DaemonInvocationProblem::Unavailable,

@@ -60,6 +60,7 @@ pub struct DaemonHandshake {
     pub moved_store_adoption: MovedStoreAdoption,
 }
 
+#[hotpath::measure_all]
 impl DaemonHandshake {
     pub fn to_line(&self) -> Result<String> {
         Ok(serde_json::to_string(self)?)
@@ -103,6 +104,7 @@ pub struct DaemonHandshakeRefusal {
     pub daemon_version: String,
 }
 
+#[hotpath::measure_all]
 impl DaemonHandshakeRefusal {
     /// Classify one unparseable handshake line into its refusal frame.
     pub fn for_unparseable_handshake(line: &str, daemon_version: &str) -> Self {
@@ -145,6 +147,7 @@ impl DaemonHandshakeRefusal {
 ///
 /// Old clients send no version (empty string); that is indistinguishable from
 /// "same version before this field existed", so it never counts as skew.
+#[hotpath::measure]
 pub fn client_version_skew(client_version: &str, daemon_version: &str) -> Option<String> {
     if client_version.is_empty() || client_version == daemon_version {
         return None;
@@ -152,10 +155,12 @@ pub fn client_version_skew(client_version: &str, daemon_version: &str) -> Option
     Some(client_version.to_string())
 }
 
+#[hotpath::measure]
 fn release_version(version: &str) -> Option<semver::Version> {
     semver::Version::parse(version.strip_prefix('v').unwrap_or(version)).ok()
 }
 
+#[hotpath::measure]
 pub fn version_skew_action(daemon_version: &str, client_version: &str) -> &'static str {
     // Precedence ordering (semver: prerelease identifiers ordered, build
     // metadata ignored) so a `0.1.0-beta.36` daemon under a `0.1.0-beta.37`

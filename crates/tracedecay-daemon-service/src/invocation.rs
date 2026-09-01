@@ -273,6 +273,7 @@ pub enum RegisteredRetainedRequestContextError {
     Runtime(TraceDecayError),
 }
 
+#[hotpath::measure]
 fn retained_request_admission_problem(admission: RequestAdmission) -> Option<ApplicationProblem> {
     match admission {
         RequestAdmission::Admitted => None,
@@ -355,6 +356,7 @@ impl Default for DaemonInvocationService {
     }
 }
 
+#[hotpath::measure_all]
 impl DaemonInvocationService {
     pub fn with_code_index_schedulers(
         code_index_schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
@@ -384,6 +386,7 @@ impl DaemonInvocationService {
 
     /// The one status broadcast shared by the native-integration invocation
     /// handler and every LSP session factory registered for `project_root`.
+    #[hotpath::skip]
     pub async fn native_integration_status_broadcast(
         &self,
         project_root: &Path,
@@ -467,6 +470,7 @@ impl DaemonInvocationService {
 
     /// Retains canonical profile/user session stores whose active rows remain
     /// cleanup holders even when no project-store mirror exists.
+    #[hotpath::skip]
     pub async fn mount_session_holder_databases(
         &self,
         databases: impl IntoIterator<Item = tracedecay_global_db::RegisteredGlobalDbLeaseV1>,

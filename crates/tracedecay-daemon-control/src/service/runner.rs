@@ -23,6 +23,7 @@ pub(super) enum ServicePlatform {
     WindowsTask,
 }
 
+#[hotpath::measure_all]
 impl ServicePlatform {
     pub(super) fn current() -> Result<Self> {
         if cfg!(target_os = "linux") {
@@ -37,6 +38,7 @@ impl ServicePlatform {
     }
 }
 
+#[hotpath::measure_all]
 impl ServiceRunner {
     pub(super) fn current() -> Result<Self> {
         let path_var = std::env::var_os("PATH");
@@ -336,6 +338,7 @@ impl ServiceRunner {
     }
 }
 
+#[hotpath::measure]
 fn launchctl_failure(args: &[&str], output: &std::process::Output) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!(
@@ -348,6 +351,7 @@ fn launchctl_failure(args: &[&str], output: &std::process::Output) -> TraceDecay
     }
 }
 
+#[hotpath::measure]
 fn run_launchctl(launchctl: &Path, args: &[&str]) -> Result<std::process::Output> {
     let output = launchctl_spawn(launchctl, args)?;
     if output.status.success() {
@@ -356,6 +360,7 @@ fn run_launchctl(launchctl: &Path, args: &[&str]) -> Result<std::process::Output
     Err(launchctl_failure(args, &output))
 }
 
+#[hotpath::measure]
 fn run_systemctl(systemctl: &Path, args: &[&str]) -> Result<()> {
     let output = Command::new(systemctl)
         .arg("--user")
@@ -377,6 +382,7 @@ fn run_systemctl(systemctl: &Path, args: &[&str]) -> Result<()> {
     })
 }
 
+#[hotpath::measure]
 fn unsupported_service_platform() -> TraceDecayError {
     TraceDecayError::Config {
         message: "daemon service install is currently supported on Linux systemd user services, macOS launchd agents, and per-user Windows scheduled tasks"
@@ -384,6 +390,7 @@ fn unsupported_service_platform() -> TraceDecayError {
     }
 }
 
+#[hotpath::measure]
 fn required_service_program(program: &str, lifecycle: &str, candidate: &Path) -> Result<PathBuf> {
     if !candidate.is_absolute() {
         return Err(TraceDecayError::Config {
@@ -397,6 +404,7 @@ fn required_service_program(program: &str, lifecycle: &str, candidate: &Path) ->
         .ok_or_else(|| service_program_unavailable(program, lifecycle))
 }
 
+#[hotpath::measure]
 fn require_service_program_on_path(
     program: &str,
     lifecycle: &str,
@@ -416,6 +424,7 @@ fn require_service_program_on_path(
     Err(service_program_unavailable(program, lifecycle))
 }
 
+#[hotpath::measure]
 fn canonical_service_program_candidate(
     program: &str,
     lifecycle: &str,
@@ -443,15 +452,18 @@ fn canonical_service_program_candidate(
 }
 
 #[cfg(unix)]
+#[hotpath::measure]
 fn service_program_is_executable(metadata: &std::fs::Metadata) -> bool {
     metadata.permissions().mode() & 0o111 != 0
 }
 
 #[cfg(not(unix))]
+#[hotpath::measure]
 fn service_program_is_executable(_metadata: &std::fs::Metadata) -> bool {
     true
 }
 
+#[hotpath::measure]
 fn service_program_spawn_error(
     program: &str,
     lifecycle: &str,
@@ -466,6 +478,7 @@ fn service_program_spawn_error(
     }
 }
 
+#[hotpath::measure]
 fn service_program_unavailable(program: &str, lifecycle: &str) -> TraceDecayError {
     TraceDecayError::HostCliUnavailable {
         program: program.to_owned(),
@@ -499,10 +512,12 @@ const TRANSIENT_BOOTSTRAP_MAX_BACKOFF: std::time::Duration = std::time::Duration
 /// Matches only launchd's EIO bootstrap rejection — the transient window
 /// while the booted-out job is still draining. Other bootstrap failures
 /// (bad plist, permission, unknown domain) are not transient and must fail.
+#[hotpath::measure]
 pub(super) fn launchctl_output_is_transient_bootstrap_failure(output: &str) -> bool {
     output.contains("Bootstrap failed: 5:")
 }
 
+#[hotpath::measure]
 fn run_launchctl_retrying_transient_bootstrap(launchctl: &Path, args: &[&str]) -> Result<()> {
     retry_transient_bootstrap(
         args,
@@ -511,6 +526,7 @@ fn run_launchctl_retrying_transient_bootstrap(launchctl: &Path, args: &[&str]) -
     )
 }
 
+#[hotpath::measure]
 pub(super) fn retry_transient_bootstrap(
     args: &[&str],
     mut spawn: impl FnMut() -> Result<std::process::Output>,
@@ -541,6 +557,7 @@ pub(super) fn retry_transient_bootstrap(
 /// (re)written the unit file, so systemd must re-read it even when the unit is
 /// not started now (`--no-start`); without the reload a later `start` launches
 /// whatever stale definition systemd last loaded.
+#[hotpath::measure]
 pub(super) fn systemd_install_command_plan(start: bool) -> Vec<Vec<&'static str>> {
     let mut plan = vec![vec!["daemon-reload"]];
     if start {
@@ -552,6 +569,7 @@ pub(super) fn systemd_install_command_plan(start: bool) -> Vec<Vec<&'static str>
 /// Commands that start the installed unit. A `start` can follow a unit
 /// rewrite that never went through install on this boot, so reload first;
 /// the reload is idempotent when the unit on disk is unchanged.
+#[hotpath::measure]
 pub(super) fn systemd_start_command_plan() -> Vec<Vec<&'static str>> {
     vec![vec!["daemon-reload"], vec!["start", crate::SERVICE_NAME]]
 }
@@ -560,6 +578,7 @@ pub(super) fn systemd_start_command_plan() -> Vec<Vec<&'static str>> {
 /// (tolerating "not loaded") makes the sequence idempotent, and enabling
 /// before bootstrap clears any persisted disabled state so the bootstrap
 /// cannot be rejected.
+#[hotpath::measure]
 pub(super) fn launchd_start_command_plan(
     domain: &str,
     target: &str,
@@ -579,6 +598,7 @@ pub(super) fn launchd_start_command_plan(
     ]
 }
 
+#[hotpath::measure]
 pub(super) fn launchd_uninstall_command_plan(target: &str) -> Vec<LaunchdCommand> {
     vec![
         LaunchdCommand::new(
@@ -591,6 +611,7 @@ pub(super) fn launchd_uninstall_command_plan(target: &str) -> Vec<LaunchdCommand
     ]
 }
 
+#[hotpath::measure]
 fn run_launchd_commands(launchctl: &Path, commands: &[LaunchdCommand]) -> Result<()> {
     for command in commands {
         let args: Vec<&str> = command.args.iter().map(String::as_str).collect();
@@ -612,6 +633,7 @@ fn run_launchd_commands(launchctl: &Path, commands: &[LaunchdCommand]) -> Result
     Ok(())
 }
 
+#[hotpath::measure]
 fn launchd_domain(id: &Path) -> Result<String> {
     let output = Command::new(id).arg("-u").output().map_err(|error| {
         service_program_spawn_error("id", "launchd user-domain resolution", error)
@@ -634,10 +656,12 @@ fn launchd_domain(id: &Path) -> Result<String> {
     Ok(format!("gui/{uid}"))
 }
 
+#[hotpath::measure]
 fn launchd_service_target(id: &Path) -> Result<String> {
     Ok(format!("{}/{}", launchd_domain(id)?, LAUNCHD_LABEL))
 }
 
+#[hotpath::measure]
 fn launchd_service_is_disabled(launchctl: &Path, id: &Path) -> Result<bool> {
     let domain = launchd_domain(id)?;
     let output = Command::new(launchctl)
@@ -652,6 +676,7 @@ fn launchd_service_is_disabled(launchctl: &Path, id: &Path) -> Result<bool> {
     ))
 }
 
+#[hotpath::measure]
 pub(super) fn launchd_disabled_output_contains_label(output: &str, label: &str) -> bool {
     output.lines().any(|line| {
         line.contains(label)
@@ -661,6 +686,7 @@ pub(super) fn launchd_disabled_output_contains_label(output: &str, label: &str) 
     })
 }
 
+#[hotpath::measure]
 fn ensure_launchd_runtime_dirs() -> Result<()> {
     let data_dir = tracedecay_data_dir()?;
     std::fs::create_dir_all(&data_dir).map_err(|e| TraceDecayError::Config {
@@ -671,6 +697,7 @@ fn ensure_launchd_runtime_dirs() -> Result<()> {
     })
 }
 
+#[hotpath::measure]
 fn launchd_install(
     launchctl: &Path,
     id: &Path,
@@ -689,6 +716,7 @@ fn launchd_install(
     launchd_start(launchctl, id, &target, service_path, socket_path)
 }
 
+#[hotpath::measure]
 fn launchd_refresh(
     launchctl: &Path,
     id: &Path,
@@ -700,6 +728,7 @@ fn launchd_refresh(
     launchd_start(launchctl, id, &target, service_path, socket_path)
 }
 
+#[hotpath::measure]
 fn launchd_start_preserving_enablement(
     launchctl: &Path,
     id: &Path,
@@ -724,6 +753,7 @@ fn launchd_start_preserving_enablement(
     }
 }
 
+#[hotpath::measure]
 fn launchd_start(
     launchctl: &Path,
     id: &Path,
@@ -739,6 +769,7 @@ fn launchd_start(
     verify_launchd_started(launchctl, target, socket_path)
 }
 
+#[hotpath::measure]
 fn launchd_before_uninstall(launchctl: &Path, id: &Path, stop: bool) -> Result<()> {
     if !stop {
         return Ok(());
@@ -747,11 +778,13 @@ fn launchd_before_uninstall(launchctl: &Path, id: &Path, stop: bool) -> Result<(
     run_launchd_commands(launchctl, &launchd_uninstall_command_plan(&target))
 }
 
+#[hotpath::measure]
 fn launchd_stop(launchctl: &Path, id: &Path) -> Result<()> {
     let target = launchd_service_target(id)?;
     run_launchctl_allow_not_loaded(launchctl, &["bootout", &target])
 }
 
+#[hotpath::measure]
 fn verify_launchd_started(launchctl: &Path, target: &str, socket_path: &Path) -> Result<()> {
     if daemon_socket_state(socket_path) == DaemonSocketState::Connectable {
         return Ok(());
@@ -759,6 +792,7 @@ fn verify_launchd_started(launchctl: &Path, target: &str, socket_path: &Path) ->
     run_launchctl(launchctl, &["print", target]).map(|_| ())
 }
 
+#[hotpath::measure]
 fn launchctl_spawn(launchctl: &Path, args: &[&str]) -> Result<std::process::Output> {
     Command::new(launchctl)
         .args(args)
@@ -772,6 +806,7 @@ fn launchctl_spawn(launchctl: &Path, args: &[&str]) -> Result<std::process::Outp
         })
 }
 
+#[hotpath::measure]
 fn run_launchctl_allow_not_loaded(launchctl: &Path, args: &[&str]) -> Result<()> {
     let output = launchctl_spawn(launchctl, args)?;
     if output.status.success()
@@ -788,6 +823,7 @@ pub(super) struct LaunchdCommand {
     failure_mode: LaunchctlFailureMode,
 }
 
+#[hotpath::measure_all]
 impl LaunchdCommand {
     pub(super) fn new(args: &[&str], failure_mode: LaunchctlFailureMode) -> Self {
         Self {
@@ -797,6 +833,7 @@ impl LaunchdCommand {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn launchctl_stderr_is_not_loaded(stderr: &str) -> bool {
     [
         "No such process",

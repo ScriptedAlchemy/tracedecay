@@ -24,6 +24,7 @@ impl AttemptAdmissionTimingV1 {
     }
 }
 
+#[hotpath::measure]
 pub(super) fn work_operation_resource_observation(
     attempt: &WorkAttemptV1,
     timing: AttemptAdmissionTimingV1,
@@ -86,6 +87,7 @@ pub(super) fn work_operation_resource_observation(
     })
 }
 
+#[hotpath::measure]
 fn duration_micros(later: Instant, earlier: Instant) -> Option<u64> {
     u64::try_from(later.checked_duration_since(earlier)?.as_micros()).ok()
 }

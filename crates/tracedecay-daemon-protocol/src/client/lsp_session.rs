@@ -21,6 +21,7 @@ pub struct DaemonLspSessionClient {
     next_request: ConnectionLocalRequestSequence,
 }
 
+#[hotpath::measure_all]
 impl DaemonLspSessionClient {
     #[hotpath::measure(label = "daemon.client.lsp.open", future = true)]
     pub async fn open(
@@ -74,6 +75,7 @@ impl DaemonLspSessionClient {
         self.scope_set_digest.as_ref()
     }
 
+    #[hotpath::skip]
     pub async fn try_send_client_frame(
         &mut self,
         frame: &str,
@@ -110,6 +112,7 @@ impl DaemonLspSessionClient {
         }
     }
 
+    #[hotpath::skip]
     pub async fn poll_daemon_frame(
         &mut self,
         deadline: Deadline,
@@ -141,6 +144,7 @@ impl DaemonLspSessionClient {
         }
     }
 
+    #[hotpath::skip]
     pub async fn acknowledge_daemon_frame(
         &mut self,
         deadline: Deadline,
@@ -166,6 +170,7 @@ impl DaemonLspSessionClient {
         }
     }
 
+    #[hotpath::skip]
     pub async fn reconnect(
         &mut self,
         deadline: Deadline,
@@ -194,6 +199,7 @@ impl DaemonLspSessionClient {
         }
     }
 
+    #[hotpath::skip]
     pub async fn detach(
         &mut self,
         deadline: Deadline,
@@ -219,6 +225,7 @@ impl DaemonLspSessionClient {
         }
     }
 
+    #[hotpath::skip]
     async fn invoke(
         &self,
         request: crate::contract::DaemonInvocationRequest,
@@ -243,6 +250,7 @@ impl DaemonLspSessionClient {
     }
 }
 
+#[hotpath::measure]
 fn invocation_outcome_error(outcome: crate::contract::DaemonInvocationOutcome) -> InvocationError {
     match outcome {
         crate::contract::DaemonInvocationOutcome::ApplicationProblem { problem } => {

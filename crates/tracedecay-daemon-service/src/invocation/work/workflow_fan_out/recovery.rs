@@ -17,6 +17,7 @@ use super::reconcile_workflow_fan_out;
 
 const RECOVERY_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
 
+#[hotpath::measure]
 pub(crate) fn reconcile_active_workflow_fan_out(
     registered: &RegisteredWorkRuntime,
     attempt_processes: Arc<super::super::super::work_attempt_exec::WorkAttemptProcessRegistryV1>,
@@ -35,6 +36,7 @@ pub(crate) fn reconcile_active_workflow_fan_out(
     .map(|_| ())
 }
 
+#[hotpath::measure]
 fn reconcile_active_workflow_fan_out_page(
     registered: &RegisteredWorkRuntime,
     attempt_processes: Arc<super::super::super::work_attempt_exec::WorkAttemptProcessRegistryV1>,
@@ -122,6 +124,7 @@ fn reconcile_active_workflow_fan_out_page(
     Ok(page.continuation)
 }
 
+#[hotpath::measure]
 fn resume_work_attempts_for_workflow_recovery(
     registered: &RegisteredWorkRuntime,
     workflows: &tracedecay_usecases::work::RegisteredWorkflowApplicationServicesV1,
@@ -191,6 +194,7 @@ fn resume_work_attempts_for_workflow_recovery(
     Ok(())
 }
 
+#[hotpath::measure]
 fn recover_workflow_fan_out_startup(
     registered: &RegisteredWorkRuntime,
     attempt_processes: &Arc<super::super::super::work_attempt_exec::WorkAttemptProcessRegistryV1>,
@@ -228,6 +232,7 @@ fn recover_workflow_fan_out_startup(
     )
 }
 
+#[hotpath::measure]
 fn workflow_fan_out_recovery_context(
     registered: &RegisteredWorkRuntime,
 ) -> Result<RequestContext, ApplicationContractError> {
@@ -257,6 +262,7 @@ struct WorkflowFanOutRecoveryInnerV1 {
     registered: Arc<std::sync::Mutex<RegisteredWorkRuntime>>,
 }
 
+#[hotpath::measure_all]
 impl WorkflowFanOutRecoveryOwnerV1 {
     pub(crate) fn mount(
         registered: RegisteredWorkRuntime,
@@ -431,6 +437,7 @@ impl WorkflowFanOutRecoveryOwnerV1 {
         self.inner.cancellation.cancel();
     }
 
+    #[hotpath::skip]
     pub(crate) async fn shutdown(&self) {
         self.cancel();
         let task = self

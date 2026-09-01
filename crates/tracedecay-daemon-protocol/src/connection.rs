@@ -58,6 +58,7 @@ pub struct DaemonConnection {
     liveness: Option<Arc<dyn DaemonLivenessProbe>>,
 }
 
+#[hotpath::measure_all]
 impl DaemonConnection {
     pub fn new(endpoint: DaemonEndpoint, auth_token: Option<String>) -> Self {
         Self {
@@ -86,6 +87,7 @@ impl DaemonConnection {
 }
 
 /// The local read bound for a request whose caller deadline is `request_deadline`.
+#[hotpath::measure]
 pub fn daemon_tool_response_bound(request_deadline: Instant) -> Result<Instant> {
     request_deadline
         .checked_add(DAEMON_TOOL_RESPONSE_GRACE)
@@ -99,10 +101,12 @@ pub fn daemon_tool_response_bound(request_deadline: Instant) -> Result<Instant> 
 /// Missing, empty, zero, or unparsable values fall back to
 /// [`DEFAULT_TOOL_REQUEST_DEADLINE`]. Values above [`MAX_TOOL_REQUEST_DEADLINE`]
 /// fail closed.
+#[hotpath::measure]
 pub fn tool_request_deadline() -> Result<Duration> {
     tool_request_deadline_from(std::env::var(TOOL_REQUEST_DEADLINE_ENV).ok())
 }
 
+#[hotpath::measure]
 fn tool_request_deadline_from(raw: Option<String>) -> Result<Duration> {
     let deadline = raw
         .and_then(|raw| raw.parse::<u64>().ok())
@@ -120,6 +124,7 @@ fn tool_request_deadline_from(raw: Option<String>) -> Result<Duration> {
 
 /// Typed connect failure after restart grace (or the same kinds immediately
 /// when the grace is already spent).
+#[hotpath::measure]
 pub fn daemon_connect_failure(
     endpoint: impl std::fmt::Display,
     err: &std::io::Error,
@@ -140,6 +145,7 @@ pub fn daemon_connect_failure(
 }
 
 /// Connected (or past the request deadline) with no response frame.
+#[hotpath::measure]
 pub fn daemon_response_stalled(elapsed: Duration) -> TraceDecayError {
     TraceDecayError::project_route(
         DAEMON_RESPONSE_STALLED,
@@ -153,6 +159,7 @@ pub fn daemon_response_stalled(elapsed: Duration) -> TraceDecayError {
 
 /// [`daemon_response_stalled`] with the in-flight stage and request named, for
 /// deadline runners that know which stage of which request timed out.
+#[hotpath::measure]
 pub fn daemon_response_stalled_during(
     stage: &'static str,
     request_label: &str,
@@ -247,6 +254,7 @@ pub async fn write_daemon_preamble(
     Ok(())
 }
 
+#[hotpath::measure]
 pub fn is_transient_daemon_connect_error(kind: std::io::ErrorKind) -> bool {
     matches!(
         kind,
@@ -256,10 +264,12 @@ pub fn is_transient_daemon_connect_error(kind: std::io::ErrorKind) -> bool {
     )
 }
 
+#[hotpath::measure]
 pub fn is_saturated_daemon_connect_error(kind: std::io::ErrorKind) -> bool {
     kind == std::io::ErrorKind::WouldBlock
 }
 
+#[hotpath::measure]
 pub fn daemon_connect_failure_advice(kind: std::io::ErrorKind) -> &'static str {
     if is_saturated_daemon_connect_error(kind) {
         "The daemon is up but not accepting connections — likely overloaded. Retry shortly, or check `tracedecay daemon status`."

@@ -2,6 +2,7 @@
 
 use super::*;
 
+#[hotpath::measure]
 pub fn lsp_delivery_attempt(
     frame: &[u8],
     session_id: &tracedecay_daemon_protocol::LspSessionId,
@@ -52,6 +53,7 @@ pub fn lsp_delivery_attempt(
     })
 }
 
+#[hotpath::measure]
 pub fn retain_lsp_delivery_attempt(
     retained: &mut Option<tracedecay_domain::DeliverySettlementAttemptV1>,
     next_sequence: &mut u64,
@@ -68,6 +70,7 @@ pub fn retain_lsp_delivery_attempt(
     retained.clone()
 }
 
+#[hotpath::measure_all]
 impl RuntimeLspSession {
     pub(super) fn settle_in_flight_delivery(
         &mut self,

@@ -94,10 +94,12 @@ impl fmt::Display for WireOversizedError {
 
 impl Error for WireOversizedError {}
 
+#[hotpath::measure]
 pub fn wire_oversized_io_error() -> io::Error {
     wire_oversized_io_error_with_prefix(Vec::new())
 }
 
+#[hotpath::measure]
 pub fn wire_oversized_io_error_with_prefix(mut inspect_prefix: Vec<u8>) -> io::Error {
     bound_inspect_prefix(&mut inspect_prefix);
     io::Error::new(
@@ -107,6 +109,7 @@ pub fn wire_oversized_io_error_with_prefix(mut inspect_prefix: Vec<u8>) -> io::E
 }
 
 /// Returns true when `err` is the typed wire oversized disposition.
+#[hotpath::measure]
 pub fn is_wire_oversized_io_error(err: &io::Error) -> bool {
     err.get_ref()
         .and_then(|inner| inner.downcast_ref::<WireOversizedError>())
@@ -115,12 +118,14 @@ pub fn is_wire_oversized_io_error(err: &io::Error) -> bool {
 }
 
 /// Bounded leading prefix carried by a typed oversized IO error, if any.
+#[hotpath::measure]
 pub fn wire_oversized_inspect_prefix(err: &io::Error) -> &[u8] {
     err.get_ref()
         .and_then(|inner| inner.downcast_ref::<WireOversizedError>())
         .map_or(&[], |inner| inner.inspect_prefix.as_slice())
 }
 
+#[hotpath::measure]
 fn bound_inspect_prefix(prefix: &mut Vec<u8>) {
     if prefix.len() > MCP_OVERSIZE_ID_INSPECT_BYTES {
         prefix.truncate(MCP_OVERSIZE_ID_INSPECT_BYTES);
@@ -128,6 +133,7 @@ fn bound_inspect_prefix(prefix: &mut Vec<u8>) {
     }
 }
 
+#[hotpath::measure]
 fn capture_inspect_prefix(retained: &[u8], next: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(MCP_OVERSIZE_ID_INSPECT_BYTES);
     let from_retained = retained.len().min(MCP_OVERSIZE_ID_INSPECT_BYTES);
@@ -176,6 +182,7 @@ pub fn read_bounded_to_end(
 }
 
 /// UTF-8 variant of [`read_bounded_to_end`].
+#[hotpath::measure]
 pub fn read_bounded_to_string(
     reader: &mut impl Read,
     max_bytes: usize,
@@ -211,8 +218,10 @@ pub struct BoundedLineReader<R> {
     inspect_prefix: Vec<u8>,
 }
 
+#[hotpath::measure_all]
 impl<R> BoundedLineReader<R> {
     /// Wrap a buffered source. No frame state is carried across sources.
+    #[hotpath::skip]
     pub const fn new(inner: R) -> Self {
         Self {
             inner,
@@ -224,6 +233,7 @@ impl<R> BoundedLineReader<R> {
 
     /// Borrow the underlying source. Bypassing the reader for a read would
     /// strand any retained partial frame, so this is for non-read access only.
+    #[hotpath::skip]
     pub const fn get_mut(&mut self) -> &mut R {
         &mut self.inner
     }
@@ -236,6 +246,7 @@ impl<R> BoundedLineReader<R> {
     /// True while bytes of an unterminated frame are held across calls. This is
     /// exactly the state a non-resumable reader would have lost on cancellation.
     #[must_use]
+    #[hotpath::skip]
     pub const fn has_partial_frame(&self) -> bool {
         !self.retained.is_empty() || self.oversized
     }
@@ -278,6 +289,7 @@ where
     /// Oversized input is discarded through newline/EOF and returned as the
     /// typed IO error carrying only a bounded leading prefix for request-id
     /// inspection.
+    #[hotpath::skip]
     pub async fn read_mcp_line(&mut self) -> io::Result<Option<String>> {
         match self.read_bounded(MAX_MCP_JSONRPC_FRAME_BYTES).await? {
             BoundedLineOutcome::Ready(line) => Ok(line),
@@ -291,6 +303,7 @@ where
     /// content (excluding the terminating newline). On overflow, discards until
     /// newline or EOF and reports [`WireReadOutcome::Oversized`].
     #[cfg(any(test, feature = "test-helpers"))]
+    #[hotpath::skip]
     pub async fn read_line(
         &mut self,
         max_bytes: usize,
@@ -376,6 +389,7 @@ where
     BoundedLineReader::new(reader).read_mcp_line().await
 }
 
+#[hotpath::measure]
 fn take_line_string(mut bytes: Vec<u8>) -> io::Result<String> {
     if bytes.last() == Some(&b'\r') {
         bytes.pop();

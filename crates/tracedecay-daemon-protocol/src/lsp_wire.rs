@@ -51,7 +51,9 @@ pub struct ConnectionLocalRequestSequence {
     next: u64,
 }
 
+#[hotpath::measure_all]
 impl ConnectionLocalRequestSequence {
+    #[hotpath::skip]
     pub const fn starting_at(first: u64) -> Self {
         Self { next: first }
     }
@@ -78,7 +80,9 @@ pub struct ProcessLocalRequestSequence {
     next: AtomicU64,
 }
 
+#[hotpath::measure_all]
 impl ProcessLocalRequestSequence {
+    #[hotpath::skip]
     pub const fn starting_at(first: u64) -> Self {
         Self {
             next: AtomicU64::new(first),
@@ -116,6 +120,7 @@ pub enum LspSessionIdentityError {
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct LspSessionId(String);
 
+#[hotpath::measure_all]
 impl LspSessionId {
     pub fn new(value: impl Into<String>) -> Result<Self, LspSessionIdentityError> {
         let value = value.into();
@@ -134,6 +139,7 @@ impl LspSessionId {
 #[derive(Clone, Eq, PartialEq)]
 pub struct LspSessionCredential(Vec<u8>);
 
+#[hotpath::measure_all]
 impl LspSessionCredential {
     pub fn new(value: impl Into<Vec<u8>>) -> Result<Self, LspSessionIdentityError> {
         let value = value.into();
@@ -162,6 +168,7 @@ pub struct LspSessionAccess {
     credential: LspSessionCredential,
 }
 
+#[hotpath::measure_all]
 impl LspSessionAccess {
     pub fn new(session_id: LspSessionId, credential: LspSessionCredential) -> Self {
         Self {

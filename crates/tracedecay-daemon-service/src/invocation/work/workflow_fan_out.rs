@@ -16,6 +16,7 @@ mod recovery;
 pub(crate) use recovery::{WorkflowFanOutRecoveryOwnerV1, reconcile_active_workflow_fan_out};
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 pub(super) fn reconcile_workflow_fan_out(
     registered: &RegisteredWorkRuntime,
     services: &tracedecay_usecases::work::RegisteredWorkflowApplicationServicesV1,
@@ -315,6 +316,7 @@ pub(super) fn reconcile_workflow_fan_out(
     Ok(projection)
 }
 
+#[hotpath::measure]
 fn reconcile_cancelled_fan_out(
     registered: &RegisteredWorkRuntime,
     services: &tracedecay_usecases::work::RegisteredWorkflowApplicationServicesV1,
@@ -379,6 +381,7 @@ fn reconcile_cancelled_fan_out(
     Ok((projection, cancelled_children))
 }
 
+#[hotpath::measure]
 fn settle_workflow_fan_out(
     services: &tracedecay_usecases::work::RegisteredWorkflowApplicationServicesV1,
     projection: &tracedecay_domain::WorkflowRunProjection,
@@ -484,6 +487,7 @@ fn settle_workflow_fan_out(
     )
 }
 
+#[hotpath::measure]
 fn request_fan_out_cancellation(
     context: &RequestContext,
     services: &tracedecay_usecases::work::RegisteredWorkApplicationServicesV1,
@@ -543,6 +547,7 @@ fn request_fan_out_cancellation(
     Ok(cancelled_children)
 }
 
+#[hotpath::measure]
 fn apply_scheduler_command(
     services: &tracedecay_usecases::work::RegisteredWorkflowApplicationServicesV1,
     projection: &tracedecay_domain::WorkflowRunProjection,
@@ -579,6 +584,7 @@ fn apply_scheduler_command(
         .map_err(workflow_run_problem)
 }
 
+#[hotpath::measure]
 pub(crate) fn admit_workflow_child(
     registered: &RegisteredWorkRuntime,
     context: &RequestContext,
@@ -711,6 +717,7 @@ pub(crate) fn admit_workflow_child(
         .map_err(|_| DaemonInvocationProblem::Unavailable)
 }
 
+#[hotpath::measure]
 pub(crate) fn workflow_product_binding()
 -> Result<tracedecay_application::WorkProductBindingV1, DaemonInvocationProblem> {
     Ok(tracedecay_application::WorkProductBindingV1::new(
@@ -721,6 +728,7 @@ pub(crate) fn workflow_product_binding()
     ))
 }
 
+#[hotpath::measure]
 pub(crate) fn workflow_product_revision_pins(
     registered: &RegisteredWorkRuntime,
 ) -> Result<tracedecay_application::WorkProductRevisionPinsV1, DaemonInvocationProblem> {
@@ -728,6 +736,7 @@ pub(crate) fn workflow_product_revision_pins(
         .map_err(|_| DaemonInvocationProblem::Unavailable)
 }
 
+#[hotpath::measure]
 fn current_workflow_product_graph(
     product: &tracedecay_usecases::work::RegisteredWorkProductServicesV1,
     context: &RequestContext,
@@ -749,6 +758,7 @@ fn current_workflow_product_graph(
     }
 }
 
+#[hotpath::measure]
 fn workflow_child_task_matches(
     graph: &tracedecay_domain::WorkProductGraphV1,
     child: &tracedecay_domain::WorkflowFanOutChildPlanV1,
@@ -766,6 +776,7 @@ fn workflow_child_task_matches(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 fn apply_workflow_child_product_mutation(
     registered: &RegisteredWorkRuntime,
     product: &tracedecay_usecases::work::RegisteredWorkProductServicesV1,
@@ -800,6 +811,7 @@ fn apply_workflow_child_product_mutation(
         .map_err(|_| DaemonInvocationProblem::Unavailable)
 }
 
+#[hotpath::measure]
 pub(crate) fn reconcile_workflow_fan_out_after_attempt(
     registered: &RegisteredWorkRuntime,
     attempt_processes: Arc<super::super::work_attempt_exec::WorkAttemptProcessRegistryV1>,
@@ -837,6 +849,7 @@ pub(crate) fn reconcile_workflow_fan_out_after_attempt(
     }
 }
 
+#[hotpath::measure]
 pub(super) fn synchronize_fan_out_run_controls(
     registered: &RegisteredWorkRuntime,
     context: &RequestContext,

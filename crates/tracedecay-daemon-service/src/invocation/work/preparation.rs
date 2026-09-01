@@ -12,6 +12,7 @@ use super::{
     RegisteredWorkRuntime, work_product_problem, work_projection_problem, work_topology_problem,
 };
 
+#[hotpath::measure]
 pub(super) fn prepare_graph_mutation(
     registered: &RegisteredWorkRuntime,
     context: &RequestContext,
@@ -46,6 +47,7 @@ pub(super) fn prepare_graph_mutation(
         .map_err(work_product_problem)
 }
 
+#[hotpath::measure]
 pub(super) fn prepare_duplicate_adjudication(
     services: &tracedecay_usecases::work::RegisteredWorkApplicationServicesV1,
     context: &RequestContext,
@@ -96,6 +98,7 @@ pub(super) fn prepare_duplicate_adjudication(
     )
 }
 
+#[hotpath::measure]
 fn require_attempt(
     services: &tracedecay_usecases::work::RegisteredWorkApplicationServicesV1,
     context: &RequestContext,
@@ -114,6 +117,7 @@ fn require_attempt(
         .map(|_| ())
 }
 
+#[hotpath::measure]
 pub(super) fn current_work_product_revision_pins(
     registered: &RegisteredWorkRuntime,
 ) -> Result<tracedecay_application::WorkProductRevisionPinsV1, ApplicationProblem> {
@@ -132,6 +136,7 @@ pub(super) fn current_work_product_revision_pins(
     })
 }
 
+#[hotpath::measure]
 pub(super) fn decide_product_proposal(
     registered: &RegisteredWorkRuntime,
     context: &RequestContext,
@@ -163,6 +168,7 @@ pub(super) fn decide_product_proposal(
         .map_err(work_product_problem)
 }
 
+#[hotpath::measure]
 fn invalid_work_product_request() -> ApplicationProblem {
     ApplicationProblem::InvalidRequest {
         diagnostic: SafeDiagnostic {
@@ -174,6 +180,7 @@ fn invalid_work_product_request() -> ApplicationProblem {
     }
 }
 
+#[hotpath::measure]
 fn work_product_authority_unavailable() -> ApplicationProblem {
     ApplicationProblem::unavailable(SafeDiagnostic {
         code: "work.graph_authority_unavailable".to_owned(),

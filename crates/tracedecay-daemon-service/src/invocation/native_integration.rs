@@ -261,7 +261,9 @@ struct NativeIntegrationExecutionV1 {
     owner_preview: Option<tracedecay_domain::NativeIntegrationPreviewV1>,
 }
 
+#[hotpath::measure_all]
 impl NativeIntegrationExecutionV1 {
+    #[hotpath::skip]
     const fn without_preview(result: NativeIntegrationSurfaceResultV1) -> Self {
         Self {
             result,
@@ -269,6 +271,7 @@ impl NativeIntegrationExecutionV1 {
         }
     }
 
+    #[hotpath::skip]
     const fn with_preview(
         result: NativeIntegrationSurfaceResultV1,
         owner_preview: tracedecay_domain::NativeIntegrationPreviewV1,
@@ -283,6 +286,7 @@ impl NativeIntegrationExecutionV1 {
 /// Publishes one observed transaction status to the project's read-only
 /// notification fan-out. Delivery is best-effort observation: a missing
 /// broadcast changes nothing about the operation result.
+#[hotpath::measure]
 fn publish_transaction_status(
     broadcast: Option<&Arc<NativeIntegrationStatusBroadcastV1>>,
     status: &tracedecay_domain::NativeIntegrationTransactionStatusV1,
@@ -294,6 +298,7 @@ fn publish_transaction_status(
 
 /// Reads and publishes the durable status a mutation just advanced, from the
 /// same blocking context that ran the mutation.
+#[hotpath::measure]
 fn publish_current_transaction_status(
     broadcast: Option<&Arc<NativeIntegrationStatusBroadcastV1>>,
     owner: &DaemonNativeIntegrationOwner,
@@ -718,6 +723,7 @@ async fn execute_worktree_with_owner(
     .map_err(|_| unavailable_native_integration())?
 }
 
+#[hotpath::measure]
 fn worktree_result_from_error(
     operation: WorktreeOperationV1,
     error: WorktreeContractError,
@@ -740,6 +746,7 @@ fn worktree_result_from_error(
     Ok(worktree_unavailable_for_operation(operation, reason))
 }
 
+#[hotpath::measure]
 fn worktree_unavailable(
     request: NativeWorktreeSurfaceRequest,
     reason: WorktreeUnavailableReasonV1,
@@ -754,6 +761,7 @@ fn worktree_unavailable(
     worktree_unavailable_for_operation(operation, reason)
 }
 
+#[hotpath::measure]
 fn worktree_unavailable_for_operation(
     operation: WorktreeOperationV1,
     reason: WorktreeUnavailableReasonV1,
@@ -808,6 +816,7 @@ fn worktree_unavailable_for_operation(
     }
 }
 
+#[hotpath::measure]
 fn registered_topology_request(
     owner: &DaemonNativeIntegrationOwner,
     snapshot: tracedecay_application::NativeIntegrationStackSnapshotSurfaceRequest,
@@ -828,6 +837,7 @@ fn registered_topology_request(
 
 /// Contract violations are the caller's invalid request; port failures map to
 /// the typed unavailable reason the wire contract declares for them.
+#[hotpath::measure]
 fn surface_result_from_contract_error(
     error: NativeIntegrationContractError,
 ) -> Result<NativeIntegrationSurfaceResultV1, ApplicationProblem> {
@@ -843,6 +853,7 @@ fn surface_result_from_contract_error(
 
 /// A live process-local cancellation signal carrying the caller's transport
 /// cancellation identity and any already-observed cancellation.
+#[hotpath::measure]
 pub(super) fn live_cancellation_signal(
     cancellation: &CancellationContext,
     observed_at: UtcMicros,
@@ -860,6 +871,7 @@ pub(super) fn live_cancellation_signal(
     Ok(signal)
 }
 
+#[hotpath::measure]
 fn unavailable_native_integration() -> ApplicationProblem {
     ApplicationProblem::Unavailable {
         classification: tracedecay_application::ApplicationUnavailableClassV1::Authority,
@@ -872,6 +884,7 @@ fn unavailable_native_integration() -> ApplicationProblem {
     }
 }
 
+#[hotpath::measure]
 fn stack_coordinator_contract_error(
     error: StackCoordinatorErrorV1,
 ) -> NativeIntegrationContractError {
@@ -890,6 +903,7 @@ fn stack_coordinator_contract_error(
 /// The typed problem for a native-integration request that does not satisfy
 /// its operation contract, or whose bounded authority receipt cannot be
 /// minted from the values the request supplied.
+#[hotpath::measure]
 fn invalid_native_integration_request() -> ApplicationProblem {
     ApplicationProblem::InvalidRequest {
         diagnostic: SafeDiagnostic {
@@ -908,6 +922,7 @@ fn invalid_native_integration_request() -> ApplicationProblem {
 /// Stack resolution, preflight, apply, status, and cancellation are separate
 /// capabilities, so the grant names exactly the one operation being invoked.
 /// A preflight grant can never satisfy an apply request.
+#[hotpath::measure]
 fn native_integration_authority(
     request_id: &str,
     registered: &RegisteredConfigurationRuntime,
@@ -981,6 +996,7 @@ fn native_integration_authority(
     Ok((context, authority))
 }
 
+#[hotpath::measure]
 fn native_integration_evidence(
     payload: serde_json::Value,
     authority: AuthorityReceipt,

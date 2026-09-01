@@ -21,6 +21,7 @@ pub const AUTH_PREFACE_PROTOCOL: &str = "tracedecay-daemon-v1";
 /// Env var naming the daemon socket path override.
 pub const SOCKET_ENV: &str = "TRACEDECAY_DAEMON_SOCKET";
 
+#[hotpath::measure]
 fn config_error(message: impl Into<String>) -> TraceDecayError {
     TraceDecayError::Config {
         message: message.into(),
@@ -35,6 +36,7 @@ pub enum DaemonEndpoint {
     Loopback(SocketAddr),
 }
 
+#[hotpath::measure_all]
 impl DaemonEndpoint {
     pub fn loopback(address: SocketAddr) -> Result<Self> {
         if !address.ip().is_loopback() {
@@ -90,6 +92,7 @@ pub struct DaemonAuthPreface {
     auth_token: String,
 }
 
+#[hotpath::measure_all]
 impl DaemonAuthPreface {
     pub fn new(auth_token: impl Into<String>) -> Self {
         Self {
@@ -149,7 +152,9 @@ pub enum BrokerWriteHalf {
     Tcp(tokio::net::tcp::OwnedWriteHalf),
 }
 
+#[hotpath::measure_all]
 impl BrokerStream {
+    #[hotpath::skip]
     pub async fn connect(endpoint: &DaemonEndpoint) -> Result<Self> {
         match endpoint {
             #[cfg(unix)]
@@ -228,10 +233,12 @@ impl AsyncWrite for BrokerWriteHalf {
     }
 }
 
+#[hotpath::measure_all]
 impl BrokerWriteHalf {
     /// Poll the native writable-readiness future once without waiting while a
     /// caller holds the shared writer mutex. A pending readiness registration
     /// is retried by the caller on its next bounded polling interval.
+    #[hotpath::skip]
     pub async fn peer_write_readiness_now(&self) -> Option<std::io::Result<tokio::io::Ready>> {
         let mut readiness = Box::pin(self.peer_write_readiness());
         std::future::poll_fn(|context| match readiness.as_mut().poll(context) {
@@ -241,6 +248,7 @@ impl BrokerWriteHalf {
         .await
     }
 
+    #[hotpath::skip]
     pub async fn peer_write_readiness(&self) -> std::io::Result<tokio::io::Ready> {
         match self {
             #[cfg(unix)]
@@ -326,6 +334,7 @@ pub const MAX_UNIX_SOCKET_PATH_BYTES: usize =
     };
 
 #[cfg(unix)]
+#[hotpath::measure]
 pub fn unix_socket_path_within_limit(path: &Path) -> bool {
     path.as_os_str().as_bytes().len() <= MAX_UNIX_SOCKET_PATH_BYTES
 }
@@ -333,6 +342,7 @@ pub fn unix_socket_path_within_limit(path: &Path) -> bool {
 /// Refuse to publish a socket through a symlink or a directory that is not
 /// owned privately by the current user.
 #[cfg(unix)]
+#[hotpath::measure]
 pub fn ensure_private_socket_parent(path: &Path) -> Result<()> {
     let parent = path
         .parent()
@@ -357,6 +367,7 @@ pub fn ensure_private_socket_parent(path: &Path) -> Result<()> {
 /// caller can publish or accept on a socket that is not already owner-only, and
 /// a socket that cannot be narrowed is torn down instead of served.
 #[cfg(unix)]
+#[hotpath::measure]
 fn bind_owner_only_unix_listener(path: &Path) -> Result<tokio::net::UnixListener> {
     // Binding the real path (rather than staging elsewhere and renaming) keeps
     // `EADDRINUSE` as the kernel-level guarantee that only one daemon owns the
@@ -375,7 +386,9 @@ fn bind_owner_only_unix_listener(path: &Path) -> Result<tokio::net::UnixListener
     Ok(listener)
 }
 
+#[hotpath::measure_all]
 impl BrokerListener {
+    #[hotpath::skip]
     pub async fn bind(endpoint: &DaemonEndpoint) -> Result<(Self, DaemonEndpoint)> {
         match endpoint {
             #[cfg(unix)]
@@ -405,6 +418,7 @@ impl BrokerListener {
         }
     }
 
+    #[hotpath::skip]
     pub async fn accept(&self) -> Result<BrokerStream> {
         match self {
             #[cfg(unix)]
@@ -419,6 +433,7 @@ impl BrokerListener {
 /// Dependents (the composition root and their tests) use this as the shared
 /// loopback bind address (`127.0.0.1:0`) rather than reconstructing the same
 /// [`DaemonEndpoint`] locally.
+#[hotpath::measure]
 pub fn default_loopback_endpoint() -> DaemonEndpoint {
     DaemonEndpoint::Loopback(SocketAddr::new(
         IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
