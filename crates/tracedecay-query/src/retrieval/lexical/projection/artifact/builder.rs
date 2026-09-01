@@ -28,11 +28,10 @@ use tracedecay_domain::{
 use tracedecay_private_fs::{create_private_file_retained, open_private_file};
 
 use super::format::{
-    BASE_SECTION_NAMES, CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1,
-    CodeLexicalArtifactSectionDigestV1, RECEIPT_RESERVATION_BYTES, SECTION_NAMES,
-    SERVING_INDEX_STEP_COUNT_V11, STATISTICS_STEP_COUNT_V11, VerifiedCodeLexicalArtifactV1,
-    absorb_page_base_sections_receipt, artifact_digest, decode_padded_receipt,
-    decode_padded_receipt_with_control, finish_base_section_receipt_fold,
+    BASE_SECTION_NAMES, CodeLexicalArtifactSectionDigestV1, RECEIPT_RESERVATION_BYTES,
+    SECTION_NAMES, SERVING_INDEX_STEP_COUNT_V11, STATISTICS_STEP_COUNT_V11,
+    VerifiedCodeLexicalArtifactV1, absorb_page_base_sections_receipt, artifact_digest,
+    decode_padded_receipt, decode_padded_receipt_with_control, finish_base_section_receipt_fold,
     initial_base_section_receipt_fold, metadata_digest, new_verified_receipt, padded_receipt,
     verify_artifact_table_layout, verify_required_artifact_indexes,
 };
@@ -41,7 +40,9 @@ use super::prepared::{
     PreparedCodeLexicalArtifactPageV1, PreparedTermPostingV1, prepare_page as prepare_page_values,
 };
 use super::schema::{
-    LexicalArtifactLayoutV1, field_code, field_code_from_encoded, intern_terms, stable_term_id,
+    CodeLexicalArtifactWriterRevisionV1, LexicalArtifactLayoutV1, exact_field_code_from_encoded,
+    field_code, field_code_from_encoded, intern_exact_terms, intern_terms, stable_exact_term_id,
+    stable_term_id,
 };
 use super::{
     ARTIFACT_SQLITE_CACHE_BYTES, CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
@@ -66,12 +67,11 @@ const FINALIZATION_CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(1);
 const TERM_INSERT_PLAN_BYTES_PER_REF: usize = 4 * std::mem::size_of::<usize>();
 const TERM_INSERT_CONTROL_INTERVAL: usize = 4_096;
 const TERM_INSERT_SORT_RUN_ROWS: usize = 4_096;
-// An exact-posting plan entry owns one document id plus a field/term BLOB
-// key carried as borrowed fat-pointer slices (`&str` and `&[u8]`, two words
-// each) rather than the single thin reference a term-posting entry holds.
-// Six words conservatively covers both the 32-bit and 64-bit layouts;
+// An exact-posting plan entry owns document, field, and term identifiers plus
+// the original field/term borrowed slices needed by the revision-11 writer.
+// Eight words conservatively covers both the 32-bit and 64-bit layouts;
 // general allocator metadata remains outside the ledger contract.
-const EXACT_INSERT_PLAN_BYTES_PER_REF: usize = 6 * std::mem::size_of::<usize>();
+const EXACT_INSERT_PLAN_BYTES_PER_REF: usize = 8 * std::mem::size_of::<usize>();
 const EXACT_INSERT_CONTROL_INTERVAL: usize = TERM_INSERT_CONTROL_INTERVAL;
 const EXACT_INSERT_SORT_RUN_ROWS: usize = TERM_INSERT_SORT_RUN_ROWS;
 // This gate serializes mutation within the private-profile/stable-handle
@@ -143,13 +143,43 @@ struct PreparedTermInsertPlanV1<'a> {
 struct PreparedExactInsertRefV1<'a> {
     document_id: i64,
     field: &'a str,
+    field_code: i64,
     term: &'a [u8],
+    term_id: i64,
+    layout: LexicalArtifactLayoutV1,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum PreparedExactInsertKeyV1<'a> {
+    V11 {
+        field: &'a str,
+        term: &'a [u8],
+        document_id: i64,
+    },
+    V12 {
+        term_id: i64,
+        field: i64,
+        document_id: i64,
+    },
 }
 
 #[hotpath::measure_all]
 impl PreparedExactInsertRefV1<'_> {
-    fn key(&self) -> (&str, &[u8], i64) {
-        (self.field, self.term, self.document_id)
+    fn key(&self) -> PreparedExactInsertKeyV1<'_> {
+        match self.layout {
+            LexicalArtifactLayoutV1::V10 | LexicalArtifactLayoutV1::V11 => {
+                PreparedExactInsertKeyV1::V11 {
+                    field: self.field,
+                    term: self.term,
+                    document_id: self.document_id,
+                }
+            }
+            LexicalArtifactLayoutV1::V12 => PreparedExactInsertKeyV1::V12 {
+                term_id: self.term_id,
+                field: self.field_code,
+                document_id: self.document_id,
+            },
+        }
     }
 }
 
@@ -247,6 +277,23 @@ const BUILDER_GATE_TRIGGER_LAYOUT: [(&str, &str, &str); 14] = [
         "INSERT",
     ),
 ];
+const EXACT_VOCABULARY_BUILDER_GATE_TRIGGER_LAYOUT: [(&str, &str, &str); 3] = [
+    (
+        "builder_gate_exact_vocabulary_insert",
+        "exact_vocabulary",
+        "INSERT",
+    ),
+    (
+        "builder_gate_exact_vocabulary_update",
+        "exact_vocabulary",
+        "UPDATE",
+    ),
+    (
+        "builder_gate_exact_vocabulary_delete",
+        "exact_vocabulary",
+        "DELETE",
+    ),
+];
 const IMMUTABLE_TRIGGER_LAYOUT: [(&str, &str, &str, &str); 10] = [
     (
         "immutable_source_pages_update",
@@ -307,6 +354,20 @@ const IMMUTABLE_TRIGGER_LAYOUT: [(&str, &str, &str, &str); 10] = [
         "ngram_postings",
         "DELETE",
         "immutable lexical ngram postings",
+    ),
+];
+const EXACT_VOCABULARY_IMMUTABLE_TRIGGER_LAYOUT: [(&str, &str, &str, &str); 2] = [
+    (
+        "immutable_exact_vocabulary_update",
+        "exact_vocabulary",
+        "UPDATE",
+        "immutable lexical exact vocabulary",
+    ),
+    (
+        "immutable_exact_vocabulary_delete",
+        "exact_vocabulary",
+        "DELETE",
+        "immutable lexical exact vocabulary",
     ),
 ];
 
@@ -446,7 +507,7 @@ impl FinalizationSectionV1 {
             (Self::TermPostings, LexicalArtifactLayoutV1::V10) => {
                 "SELECT field, term, document_id, frequency FROM term_postings ORDER BY field, term, document_id"
             }
-            (Self::TermPostings, LexicalArtifactLayoutV1::V11) => {
+            (Self::TermPostings, LexicalArtifactLayoutV1::V11 | LexicalArtifactLayoutV1::V12) => {
                 "SELECT term_id, field, document_id, frequency FROM term_postings ORDER BY term_id, field, document_id"
             }
             (Self::ExactPostings, _) => {
@@ -461,13 +522,13 @@ impl FinalizationSectionV1 {
             (Self::TermStatistics, LexicalArtifactLayoutV1::V10) => {
                 "SELECT field, term, document_frequency FROM term_stats ORDER BY field, term"
             }
-            (Self::TermStatistics, LexicalArtifactLayoutV1::V11) => {
+            (Self::TermStatistics, LexicalArtifactLayoutV1::V11 | LexicalArtifactLayoutV1::V12) => {
                 "SELECT term_id, field, document_frequency FROM term_stats ORDER BY term_id, field"
             }
             (Self::Vocabulary, LexicalArtifactLayoutV1::V10) => {
                 "SELECT term FROM vocabulary ORDER BY term"
             }
-            (Self::Vocabulary, LexicalArtifactLayoutV1::V11) => {
+            (Self::Vocabulary, LexicalArtifactLayoutV1::V11 | LexicalArtifactLayoutV1::V12) => {
                 "SELECT term_id, term, in_fuzzy FROM vocabulary ORDER BY term_id"
             }
         }
@@ -848,6 +909,7 @@ pub struct CodeLexicalArtifactBuilderV1 {
     file_identity: StableArtifactFileIdentityV1,
     connection: Connection,
     mutation_gate: Arc<AtomicU8>,
+    layout: LexicalArtifactLayoutV1,
     metadata: CodeLexicalProjectionMetadataV1,
     metadata_digest: ManifestDigest,
     memory_budget_bytes: usize,
@@ -886,11 +948,39 @@ impl CodeLexicalArtifactBuilderV1 {
         )
     }
 
+    pub fn create_with_format_revision(
+        path: impl AsRef<Path>,
+        metadata: CodeLexicalProjectionMetadataV1,
+        revision: CodeLexicalArtifactWriterRevisionV1,
+    ) -> Result<Self, CodeLexicalArtifactErrorV1> {
+        Self::create_with_memory_budget_and_format_revision(
+            path,
+            metadata,
+            CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+            revision,
+        )
+    }
+
     #[hotpath::measure(label = "query.artifact.create")]
     pub fn create_with_memory_budget(
         path: impl AsRef<Path>,
         metadata: CodeLexicalProjectionMetadataV1,
         memory_budget_bytes: usize,
+    ) -> Result<Self, CodeLexicalArtifactErrorV1> {
+        Self::create_with_memory_budget_and_format_revision(
+            path,
+            metadata,
+            memory_budget_bytes,
+            CodeLexicalArtifactWriterRevisionV1::default(),
+        )
+    }
+
+    #[hotpath::measure(label = "query.artifact.create")]
+    pub fn create_with_memory_budget_and_format_revision(
+        path: impl AsRef<Path>,
+        metadata: CodeLexicalProjectionMetadataV1,
+        memory_budget_bytes: usize,
+        revision: CodeLexicalArtifactWriterRevisionV1,
     ) -> Result<Self, CodeLexicalArtifactErrorV1> {
         metadata
             .validate()
@@ -903,9 +993,10 @@ impl CodeLexicalArtifactBuilderV1 {
                 "lexical artifact staging path already contains state".to_owned(),
             ));
         }
+        let layout = revision.layout();
         let (connection, private_file, file_identity) = create_private_builder_connection(path)?;
         let mutation_gate = register_builder_mutation_gate(&connection)?;
-        create_schema(&connection)?;
+        create_schema(&connection, layout)?;
         verify_builder_mutation_gate_schema(&connection)?;
         let metadata_digest = metadata_digest(&metadata)?;
         let metadata_bytes = serde_json::to_vec(&metadata)
@@ -914,7 +1005,7 @@ impl CodeLexicalArtifactBuilderV1 {
             .execute(
                 "INSERT INTO artifact_state(singleton, format_revision, metadata, metadata_digest, receipt) VALUES (1, ?1, ?2, ?3, ?4)",
                 params![
-                    i64::from(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1),
+                    i64::from(layout.revision()),
                     metadata_bytes,
                     metadata_digest.as_str(),
                     vec![0u8; RECEIPT_RESERVATION_BYTES],
@@ -928,6 +1019,7 @@ impl CodeLexicalArtifactBuilderV1 {
             file_identity,
             connection,
             mutation_gate,
+            layout,
             metadata,
             metadata_digest,
             memory_budget_bytes,
@@ -957,9 +1049,10 @@ impl CodeLexicalArtifactBuilderV1 {
             open_private_builder_connection(path)
         )?;
         let mutation_gate = register_builder_mutation_gate(&connection)?;
+        let layout = read_staged_artifact_layout(&connection)?;
         hotpath::measure_block!("query.artifact.open.schema_verify", {
             require_integrity(&connection, control)?;
-            verify_artifact_table_layout(&connection, LexicalArtifactLayoutV1::V11)?;
+            verify_artifact_table_layout(&connection, layout)?;
             verify_builder_mutation_gate_schema(&connection)
         })?;
         let expected_digest = hotpath::measure_block!("query.artifact.open.metadata_restore", {
@@ -968,6 +1061,7 @@ impl CodeLexicalArtifactBuilderV1 {
                 &connection,
                 &expected_metadata,
                 &expected_digest,
+                layout,
                 control,
             )?;
             Ok::<_, CodeLexicalArtifactErrorV1>(expected_digest)
@@ -984,7 +1078,7 @@ impl CodeLexicalArtifactBuilderV1 {
                 .as_ref()
                 .is_some_and(|state| state.phase == PersistedFinalizationPhaseV1::Digest)
         {
-            verify_required_artifact_indexes(&connection, LexicalArtifactLayoutV1::V11)?;
+            verify_required_artifact_indexes(&connection, layout)?;
         }
         validate_contiguous_pages(&connection, control)?;
         checkpoint(control)?;
@@ -995,6 +1089,7 @@ impl CodeLexicalArtifactBuilderV1 {
             file_identity,
             connection,
             mutation_gate,
+            layout,
             metadata: expected_metadata,
             metadata_digest: expected_digest,
             memory_budget_bytes,
@@ -1275,6 +1370,7 @@ impl CodeLexicalArtifactBuilderV1 {
             .map(|page| page_transient_peak_bytes(&self.metadata, page, usize::MAX))
             .collect::<Result<Vec<_>, _>>()?;
         let metadata = &self.metadata;
+        let layout = self.layout;
         let prepared = hotpath::measure_block!("query.artifact.batch.parallel_prepare", {
             tracedecay_code_index::parallelism::install(|| {
                 fresh_pages
@@ -1286,6 +1382,7 @@ impl CodeLexicalArtifactBuilderV1 {
                         tracedecay_code_index::parallelism::with_background_cpu_permit(|| {
                             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                 prepare_page_values(
+                                    layout,
                                     metadata,
                                     page,
                                     previous_cursor,
@@ -1367,6 +1464,7 @@ impl CodeLexicalArtifactBuilderV1 {
             prepare_exact_insert_plan(
                 self.fixed_ledger_charge_bytes,
                 self.memory_budget_bytes,
+                self.layout,
                 pages,
                 control,
             )
@@ -1391,6 +1489,7 @@ impl CodeLexicalArtifactBuilderV1 {
                     "query.artifact.batch.postings",
                     append_prepared_postings(
                         &transaction,
+                        self.layout,
                         pages,
                         &mut term_insert_plan,
                         &mut exact_insert_plan,
@@ -1473,6 +1572,7 @@ impl CodeLexicalArtifactBuilderV1 {
             &self.connection,
             &self.metadata,
             &self.metadata_digest,
+            self.layout,
             control,
         )?;
         if let Some(receipt) = read_receipt(&self.connection)? {
@@ -1487,7 +1587,7 @@ impl CodeLexicalArtifactBuilderV1 {
             let mut transaction_metrics = FinalizationTransactionMetricsV1::new();
             verify_staged_source_chain(&transaction, source, control)?;
             let content_epoch = authenticated_authority_epoch(&transaction, source)?;
-            install_base_freeze(&transaction)?;
+            install_base_freeze(&transaction, self.layout)?;
             store_finalization_state(
                 &transaction,
                 &PersistedFinalizationStateV1::new(content_epoch, source)?,
@@ -1521,7 +1621,7 @@ impl CodeLexicalArtifactBuilderV1 {
         }
         if state.phase != PersistedFinalizationPhaseV1::Digest {
             super::with_builder_sorter_cpu_admission(&transaction, || {
-                advance_pre_digest_work(&transaction, &mut state, control)
+                advance_pre_digest_work(&transaction, &mut state, self.layout, control)
             })??;
             store_finalization_state(&transaction, &state)?;
             checkpoint(control)?;
@@ -1627,7 +1727,7 @@ impl CodeLexicalArtifactBuilderV1 {
             source.import_dictionary_digest(),
             source.cumulative_digest(),
             &sections,
-            CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1,
+            self.layout.revision(),
         )?;
         let file_size_bytes = sqlite_file_size(&transaction)?;
         let receipt = new_verified_receipt(
@@ -1637,6 +1737,7 @@ impl CodeLexicalArtifactBuilderV1 {
             artifact_digest,
             sections,
             file_size_bytes,
+            self.layout,
         );
         transaction
             .execute(
@@ -2343,6 +2444,7 @@ fn next_term_insert<'a>(
 fn prepare_exact_insert_plan<'a>(
     fixed_ledger_charge_bytes: usize,
     memory_budget_bytes: usize,
+    layout: LexicalArtifactLayoutV1,
     pages: &'a [PreparedCodeLexicalArtifactPageV1],
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<PreparedExactInsertPlanV1<'a>, CodeLexicalArtifactErrorV1> {
@@ -2386,13 +2488,16 @@ fn prepare_exact_insert_plan<'a>(
         checkpoint(control)?;
         for document in &page.documents {
             checkpoint(control)?;
-            entries.extend(document.exact_postings.iter().map(|(field, term)| {
-                PreparedExactInsertRefV1 {
+            for (field, term) in &document.exact_postings {
+                entries.push(PreparedExactInsertRefV1 {
                     document_id: document.document_id,
                     field: field.as_str(),
+                    field_code: exact_field_code_from_encoded(field)?,
                     term: term.as_slice(),
-                }
-            }));
+                    term_id: stable_exact_term_id(term),
+                    layout,
+                });
+            }
         }
     }
     for run in entries.chunks_mut(EXACT_INSERT_SORT_RUN_ROWS) {
@@ -2978,12 +3083,16 @@ fn append_prepared_imports(
 #[hotpath::measure]
 fn append_prepared_postings(
     transaction: &Transaction<'_>,
+    layout: LexicalArtifactLayoutV1,
     pages: &[PreparedCodeLexicalArtifactPageV1],
     term_insert_plan: &mut PreparedTermInsertPlanV1<'_>,
     exact_insert_plan: &mut PreparedExactInsertPlanV1<'_>,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     let term_ids = intern_terms(transaction, pages, control)?;
+    if layout == LexicalArtifactLayoutV1::V12 {
+        intern_exact_terms(transaction, pages, control)?;
+    }
     let mut term_statement = transaction
         .prepare_cached(
             "INSERT INTO term_postings(term_id, field, document_id, frequency) VALUES (?1, ?2, ?3, ?4)",
@@ -3004,8 +3113,16 @@ fn append_prepared_postings(
     // unique, both within the batch and against every already-committed
     // row, so `OR IGNORE` could only mask a real corruption bug. A plain
     // INSERT lets that surface as a constraint failure instead of vanishing.
+    let exact_insert_sql = match layout {
+        LexicalArtifactLayoutV1::V12 => {
+            "INSERT INTO exact_postings(term_id, field, document_id) VALUES (?1, ?2, ?3)"
+        }
+        LexicalArtifactLayoutV1::V10 | LexicalArtifactLayoutV1::V11 => {
+            "INSERT INTO exact_postings(field, term, document_id) VALUES (?1, ?2, ?3)"
+        }
+    };
     let mut exact_statement = transaction
-        .prepare_cached("INSERT INTO exact_postings(field, term, document_id) VALUES (?1, ?2, ?3)")
+        .prepare_cached(exact_insert_sql)
         .map_err(sqlite_error)?;
     let mut ngram_statement = transaction
         .prepare_cached(
@@ -3046,9 +3163,18 @@ fn append_prepared_postings(
         if inserted_exact_rows.is_multiple_of(EXACT_INSERT_CONTROL_INTERVAL) {
             checkpoint(control)?;
         }
-        exact_statement
-            .execute(params![entry.field, entry.term, entry.document_id])
-            .map_err(sqlite_error)?;
+        match entry.layout {
+            LexicalArtifactLayoutV1::V10 | LexicalArtifactLayoutV1::V11 => {
+                exact_statement
+                    .execute(params![entry.field, entry.term, entry.document_id])
+                    .map_err(sqlite_error)?;
+            }
+            LexicalArtifactLayoutV1::V12 => {
+                exact_statement
+                    .execute(params![entry.term_id, entry.field_code, entry.document_id])
+                    .map_err(sqlite_error)?;
+            }
+        }
         inserted_exact_rows = inserted_exact_rows
             .checked_add(1)
             .ok_or_else(batch_ledger_overflow)?;
@@ -3161,7 +3287,10 @@ fn sqlite_file_size(connection: &Connection) -> Result<u64, CodeLexicalArtifactE
 }
 
 #[hotpath::measure]
-fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactErrorV1> {
+fn create_schema(
+    connection: &Connection,
+    layout: LexicalArtifactLayoutV1,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
     connection
         .execute_batch(
             "
@@ -3287,7 +3416,38 @@ fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactError
             CREATE TRIGGER builder_gate_ngram_postings_insert BEFORE INSERT ON ngram_postings WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
             ",
         )
-        .map_err(sqlite_error)
+        .map_err(sqlite_error)?;
+    if layout == LexicalArtifactLayoutV1::V12 {
+        connection
+            .execute_batch(
+                "
+                DROP TRIGGER builder_gate_exact_postings_insert;
+                DROP TRIGGER builder_gate_exact_postings_update;
+                DROP TRIGGER builder_gate_exact_postings_delete;
+                DROP TABLE exact_postings;
+                CREATE TABLE exact_vocabulary (
+                    term_id INTEGER PRIMARY KEY,
+                    term BLOB NOT NULL
+                );
+                CREATE TABLE exact_postings (
+                    term_id INTEGER NOT NULL,
+                    field INTEGER NOT NULL,
+                    document_id INTEGER NOT NULL,
+                    PRIMARY KEY(term_id, field, document_id)
+                ) WITHOUT ROWID;
+                CREATE TRIGGER builder_gate_exact_vocabulary_insert BEFORE INSERT ON exact_vocabulary WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
+                CREATE TRIGGER builder_gate_exact_vocabulary_update BEFORE UPDATE ON exact_vocabulary WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
+                CREATE TRIGGER builder_gate_exact_vocabulary_delete BEFORE DELETE ON exact_vocabulary WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
+                CREATE TRIGGER immutable_exact_vocabulary_update BEFORE UPDATE ON exact_vocabulary BEGIN SELECT RAISE(ABORT, 'immutable lexical exact vocabulary'); END;
+                CREATE TRIGGER immutable_exact_vocabulary_delete BEFORE DELETE ON exact_vocabulary BEGIN SELECT RAISE(ABORT, 'immutable lexical exact vocabulary'); END;
+                CREATE TRIGGER builder_gate_exact_postings_insert BEFORE INSERT ON exact_postings WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
+                CREATE TRIGGER builder_gate_exact_postings_update BEFORE UPDATE ON exact_postings WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
+                CREATE TRIGGER builder_gate_exact_postings_delete BEFORE DELETE ON exact_postings WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
+                ",
+            )
+            .map_err(sqlite_error)?;
+    }
+    Ok(())
 }
 
 #[hotpath::measure]
@@ -3300,11 +3460,34 @@ fn verify_builder_mutation_gate_schema(
         );
         verify_trigger_schema(connection, name, table, &expected)?;
     }
+    let has_exact_vocabulary: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'exact_vocabulary')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(sqlite_error)?;
+    if has_exact_vocabulary {
+        for (name, table, operation) in EXACT_VOCABULARY_BUILDER_GATE_TRIGGER_LAYOUT {
+            let expected = format!(
+                "CREATE TRIGGER {name} BEFORE {operation} ON {table} WHEN {BUILDER_MUTATION_GATE_FUNCTION}() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END"
+            );
+            verify_trigger_schema(connection, name, table, &expected)?;
+        }
+    }
     for (name, table, operation, message) in IMMUTABLE_TRIGGER_LAYOUT {
         let expected = format!(
             "CREATE TRIGGER {name} BEFORE {operation} ON {table} BEGIN SELECT RAISE(ABORT, '{message}'); END"
         );
         verify_trigger_schema(connection, name, table, &expected)?;
+    }
+    if has_exact_vocabulary {
+        for (name, table, operation, message) in EXACT_VOCABULARY_IMMUTABLE_TRIGGER_LAYOUT {
+            let expected = format!(
+                "CREATE TRIGGER {name} BEFORE {operation} ON {table} BEGIN SELECT RAISE(ABORT, '{message}'); END"
+            );
+            verify_trigger_schema(connection, name, table, &expected)?;
+        }
     }
     Ok(())
 }
@@ -3337,7 +3520,10 @@ fn verify_trigger_schema(
 }
 
 #[hotpath::measure]
-fn install_base_freeze(transaction: &Transaction<'_>) -> Result<(), CodeLexicalArtifactErrorV1> {
+fn install_base_freeze(
+    transaction: &Transaction<'_>,
+    layout: LexicalArtifactLayoutV1,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
     transaction
         .execute_batch(
             "
@@ -3359,7 +3545,19 @@ fn install_base_freeze(transaction: &Transaction<'_>) -> Result<(), CodeLexicalA
             CREATE TRIGGER frozen_ngram_postings_delete BEFORE DELETE ON ngram_postings BEGIN SELECT RAISE(ABORT, 'frozen lexical ngram postings'); END;
             ",
         )
-        .map_err(sqlite_error)
+        .map_err(sqlite_error)?;
+    if layout == LexicalArtifactLayoutV1::V12 {
+        transaction
+            .execute_batch(
+                "
+                CREATE TRIGGER frozen_exact_vocabulary_insert BEFORE INSERT ON exact_vocabulary BEGIN SELECT RAISE(ABORT, 'frozen lexical exact vocabulary'); END;
+                CREATE TRIGGER frozen_exact_vocabulary_update BEFORE UPDATE ON exact_vocabulary BEGIN SELECT RAISE(ABORT, 'frozen lexical exact vocabulary'); END;
+                CREATE TRIGGER frozen_exact_vocabulary_delete BEFORE DELETE ON exact_vocabulary BEGIN SELECT RAISE(ABORT, 'frozen lexical exact vocabulary'); END;
+                ",
+            )
+            .map_err(sqlite_error)?;
+    }
+    Ok(())
 }
 
 #[hotpath::measure]
@@ -3402,6 +3600,7 @@ fn authenticated_authority_epoch(
 fn advance_pre_digest_work(
     transaction: &Transaction<'_>,
     state: &mut PersistedFinalizationStateV1,
+    layout: LexicalArtifactLayoutV1,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     checkpoint(control)?;
@@ -3423,7 +3622,7 @@ fn advance_pre_digest_work(
         }
         PersistedFinalizationPhaseV1::Indexes => {
             with_cancellable_sqlite_statement(transaction, control, || {
-                build_serving_index_step(transaction, state.section_ordinal)?;
+                build_serving_index_step(transaction, state.section_ordinal, layout)?;
                 Ok(())
             })?;
             state.section_ordinal = state.section_ordinal.checked_add(1).ok_or_else(|| {
@@ -3432,7 +3631,7 @@ fn advance_pre_digest_work(
                 )
             })?;
             if state.section_ordinal == SERVING_INDEX_STEP_COUNT_V11 {
-                verify_required_artifact_indexes(transaction, LexicalArtifactLayoutV1::V11)?;
+                verify_required_artifact_indexes(transaction, layout)?;
                 state.phase = PersistedFinalizationPhaseV1::Digest;
                 state.section_ordinal = 0;
                 state.section_accumulator = initial_section_accumulator(SECTION_NAMES[0])?.to_vec();
@@ -3615,6 +3814,7 @@ fn derive_statistics_step(
 fn build_serving_index_step(
     transaction: &Transaction<'_>,
     ordinal: u64,
+    layout: LexicalArtifactLayoutV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     match ordinal {
         0 => hotpath::measure_block!(
@@ -3627,12 +3827,20 @@ fn build_serving_index_step(
                 "CREATE INDEX term_postings_by_document ON term_postings(document_id, term_id, field, frequency)",
             )
         ),
-        2 => hotpath::measure_block!(
-            "query.artifact.finalization.index.exact_postings_by_document",
-            transaction.execute_batch(
-                "CREATE INDEX exact_postings_by_document ON exact_postings(document_id, field, term)",
+        2 => {
+            let sql = match layout {
+                LexicalArtifactLayoutV1::V10 | LexicalArtifactLayoutV1::V11 => {
+                    "CREATE INDEX exact_postings_by_document ON exact_postings(document_id, field, term)"
+                }
+                LexicalArtifactLayoutV1::V12 => {
+                    "CREATE INDEX exact_postings_by_document ON exact_postings(document_id, field, term_id)"
+                }
+            };
+            hotpath::measure_block!(
+                "query.artifact.finalization.index.exact_postings_by_document",
+                transaction.execute_batch(sql)
             )
-        ),
+        }
         // `cardinality` rides in the index purely so the statistics
         // aggregation below is covered. Without it the index carries only the
         // reordered WITHOUT ROWID key columns, and every `SUM(cardinality)`
@@ -3705,6 +3913,7 @@ fn verify_artifact_state_metadata(
     connection: &Connection,
     expected_metadata: &CodeLexicalProjectionMetadataV1,
     expected_digest: &ManifestDigest,
+    expected_layout: LexicalArtifactLayoutV1,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     checkpoint(control)?;
@@ -3715,7 +3924,7 @@ fn verify_artifact_state_metadata(
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
-    if format_revision != CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1 {
+    if format_revision != expected_layout.revision() {
         return Err(CodeLexicalArtifactErrorV1::Incompatible(format!(
             "format revision {format_revision} is not supported"
         )));
@@ -3736,6 +3945,30 @@ fn verify_artifact_state_metadata(
     }
     checkpoint(control)?;
     Ok(())
+}
+
+#[hotpath::measure]
+fn read_staged_artifact_layout(
+    connection: &Connection,
+) -> Result<LexicalArtifactLayoutV1, CodeLexicalArtifactErrorV1> {
+    let revision: i64 = connection
+        .query_row(
+            "SELECT format_revision FROM artifact_state WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
+    let revision = u32::try_from(revision).map_err(|_| {
+        CodeLexicalArtifactErrorV1::Incompatible(
+            "lexical artifact staging revision is outside the supported range".to_owned(),
+        )
+    })?;
+    match LexicalArtifactLayoutV1::from_revision(revision)? {
+        LexicalArtifactLayoutV1::V10 => Err(CodeLexicalArtifactErrorV1::Incompatible(
+            "revision 10 artifacts are immutable reader inputs and cannot be resumed".to_owned(),
+        )),
+        layout @ (LexicalArtifactLayoutV1::V11 | LexicalArtifactLayoutV1::V12) => Ok(layout),
+    }
 }
 
 #[hotpath::measure]
@@ -5058,7 +5291,7 @@ mod tests {
     fn create_mutable_test_schema(connection: &Connection) -> BuilderMutationGuardV1 {
         let gate =
             register_builder_mutation_gate(connection).expect("register builder mutation gate");
-        create_schema(connection).expect("create artifact schema");
+        create_schema(connection, LexicalArtifactLayoutV1::V11).expect("create artifact schema");
         BuilderMutationGuardV1::enter(&gate).expect("enter test builder mutation authority")
     }
 
@@ -5203,7 +5436,8 @@ mod tests {
             [(0i64, 90i64, 0u32), (0, 100, 0), (1, 10, 1), (1, 20, 1)]
         {
             let bitmap = RoaringBitmap::from_iter([document]);
-            let encoded = encode_ngram_bitmap(&bitmap).expect("encode ngram bitmap");
+            let encoded = encode_ngram_bitmap(LexicalArtifactLayoutV1::V12, &bitmap)
+                .expect("encode ngram bitmap");
             connection
                 .execute(
                     "INSERT INTO ngram_postings(page_ordinal, kind, ngram, documents, cardinality) VALUES (?1, 1, ?2, ?3, 1)",
@@ -5258,7 +5492,8 @@ mod tests {
             (1, 10, vec![3]),
         ] {
             let bitmap = RoaringBitmap::from_iter(documents);
-            let encoded = encode_ngram_bitmap(&bitmap).expect("encode ngram bitmap");
+            let encoded = encode_ngram_bitmap(LexicalArtifactLayoutV1::V12, &bitmap)
+                .expect("encode ngram bitmap");
             connection
                 .execute(
                     "INSERT INTO ngram_postings(page_ordinal, kind, ngram, documents, cardinality) VALUES (?1, 1, ?2, ?3, ?4)",
@@ -5270,8 +5505,10 @@ mod tests {
         let transaction = connection
             .transaction()
             .expect("start serving-index transaction");
-        build_serving_index_step(&transaction, 3).expect("build ngram serving index");
-        build_serving_index_step(&transaction, 4).expect("build ngram serving statistics");
+        build_serving_index_step(&transaction, 3, LexicalArtifactLayoutV1::V11)
+            .expect("build ngram serving index");
+        build_serving_index_step(&transaction, 4, LexicalArtifactLayoutV1::V11)
+            .expect("build ngram serving statistics");
         transaction.commit().expect("commit ngram serving index");
 
         let unique: i64 = connection
@@ -5438,7 +5675,7 @@ mod tests {
             .transaction()
             .expect("start index-build transaction");
         for ordinal in [1, 2] {
-            build_serving_index_step(&transaction, ordinal)
+            build_serving_index_step(&transaction, ordinal, LexicalArtifactLayoutV1::V11)
                 .expect("build document integrity index");
         }
         transaction.commit().expect("commit integrity index");
@@ -5513,7 +5750,8 @@ mod tests {
             )
             .expect("seed exact posting");
         let encoded =
-            encode_ngram_bitmap(&RoaringBitmap::from_iter([0])).expect("encode ngram bitmap");
+            encode_ngram_bitmap(LexicalArtifactLayoutV1::V12, &RoaringBitmap::from_iter([0]))
+                .expect("encode ngram bitmap");
         connection
             .execute(
                 "INSERT INTO ngram_postings(page_ordinal, kind, ngram, documents, cardinality) VALUES (0, 1, 1, ?1, 1)",
@@ -5541,7 +5779,7 @@ mod tests {
         let transaction = connection
             .unchecked_transaction()
             .expect("start ngram serving-index transaction");
-        build_serving_index_step(&transaction, 3)
+        build_serving_index_step(&transaction, 3, LexicalArtifactLayoutV1::V11)
             .expect("build ngram serving index before digest verification");
         transaction.commit().expect("commit ngram serving index");
 

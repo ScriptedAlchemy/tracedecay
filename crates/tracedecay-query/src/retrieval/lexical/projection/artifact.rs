@@ -28,6 +28,7 @@ pub use format::{
 };
 pub use prepared::PreparedCodeLexicalArtifactPageV1;
 pub use reader::{CodeExactLexicalArtifactReaderV1, CodeLexicalArtifactReaderV1};
+pub use schema::CodeLexicalArtifactWriterRevisionV1;
 
 /// Default and maximum budget for the artifact build memory ledger.
 ///

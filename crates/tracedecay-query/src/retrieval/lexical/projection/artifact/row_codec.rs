@@ -43,7 +43,7 @@ pub(super) fn encode_artifact_row(
     match layout {
         LexicalArtifactLayoutV1::V10 => serde_json::to_vec(row)
             .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string())),
-        LexicalArtifactLayoutV1::V11 => encode_compact_v11(row),
+        LexicalArtifactLayoutV1::V11 | LexicalArtifactLayoutV1::V12 => encode_compact_v11(row),
     }
 }
 
@@ -82,7 +82,9 @@ pub(super) fn decode_artifact_row(
 ) -> Result<ArtifactRowV1, CodeLexicalArtifactErrorV1> {
     match layout {
         LexicalArtifactLayoutV1::V10 => decode_json_v10(generation, chunk_id, bytes),
-        LexicalArtifactLayoutV1::V11 => decode_compact_v11(generation, chunk_id, bytes),
+        LexicalArtifactLayoutV1::V11 | LexicalArtifactLayoutV1::V12 => {
+            decode_compact_v11(generation, chunk_id, bytes)
+        }
     }
 }
 

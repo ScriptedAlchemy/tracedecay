@@ -69,8 +69,8 @@ use tracedecay_query::retrieval::exact::{
 use tracedecay_query::retrieval::lexical::{
     CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactBuilderV1,
     CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1,
-    CodeLexicalProjectionMetadataV1, LexicalLane, LexicalLaneRequest, LexicalLaneRetriever,
-    MAX_FUZZY_TERM_EXPANSIONS_V1, lexical_query_parts,
+    CodeLexicalArtifactWriterRevisionV1, CodeLexicalProjectionMetadataV1, LexicalLane,
+    LexicalLaneRequest, LexicalLaneRetriever, MAX_FUZZY_TERM_EXPANSIONS_V1, lexical_query_parts,
 };
 use tracedecay_query::retrieval::{
     QUERY_EXACT_RULE_REVISION_V1, QUERY_LEXICAL_PROFILE_REVISION_V1, QUERY_LEXICAL_SCORE_DOMAIN_V1,
@@ -83,6 +83,7 @@ const WORKLOAD_REVISION: &str = "search-bench.v1";
 const DEFAULT_CORPUS_RELATIVE: &str = "benchmark_data/index-bench/corpus";
 const CORPUS_ENV: &str = "TRACEDECAY_SEARCH_BENCH_CORPUS";
 const REPLICAS_ENV: &str = "TRACEDECAY_SEARCH_BENCH_REPLICAS";
+const KEEP_SCRATCH_ENV: &str = "TRACEDECAY_SEARCH_BENCH_KEEP_SCRATCH";
 
 /// Sealed-source paging bounds, mirrored from `tracedecay-index-bench` so the
 /// artifact this workload queries is built the same way the daemon builds it.
@@ -164,6 +165,7 @@ fn configure_hotpath() {
 const USAGE: &str = "\
 usage: tracedecay-search-bench [--corpus DIR] [--replicas N] [--iterations N]
                                [--warmups N] [--fuzzy-budget N] [--artifact FILE]
+                               [--format-revision 11|12]
                                [--class NAME]... [--term CLASS=QUERY]...
 
   --corpus DIR       fixture corpus to index and query
@@ -175,6 +177,7 @@ usage: tracedecay-search-bench [--corpus DIR] [--replicas N] [--iterations N]
   --warmups N        untimed warmup iterations per class (default: 3)
   --fuzzy-budget N   lexical typo-recovery budget (default: production 64)
   --artifact FILE    reopen an existing sealed lexical artifact and skip ingest
+  --format-revision  select the writer revision for build A/B runs (default: 12)
   --class NAME       run only the named classes (repeatable; default: all)
   --term CLASS=QUERY override one class's query text (repeatable)
   -h, --help         print this message
@@ -211,6 +214,7 @@ struct Options {
     warmups: usize,
     fuzzy_budget: u32,
     artifact: Option<PathBuf>,
+    writer_revision: CodeLexicalArtifactWriterRevisionV1,
     classes: Vec<(String, String)>,
 }
 
@@ -225,6 +229,7 @@ impl Options {
         let mut selected: Vec<String> = Vec::new();
         let mut overrides: Vec<(String, String)> = Vec::new();
         let mut artifact = None;
+        let mut writer_revision = CodeLexicalArtifactWriterRevisionV1::default();
         let mut arguments = arguments.peekable();
         while let Some(argument) = arguments.next() {
             match argument.as_str() {
@@ -271,6 +276,16 @@ impl Options {
                         .next()
                         .ok_or_else(|| "--artifact needs a file".to_owned())?;
                     artifact = Some(PathBuf::from(value));
+                }
+                "--format-revision" => {
+                    let value = arguments
+                        .next()
+                        .ok_or_else(|| "--format-revision needs 11 or 12".to_owned())?;
+                    writer_revision = match value.as_str() {
+                        "11" => CodeLexicalArtifactWriterRevisionV1::V11,
+                        "12" => CodeLexicalArtifactWriterRevisionV1::V12,
+                        _ => return Err("--format-revision needs 11 or 12".to_owned()),
+                    };
                 }
                 "--term" => {
                     let value = arguments
@@ -319,6 +334,7 @@ impl Options {
             warmups,
             fuzzy_budget,
             artifact,
+            writer_revision,
             classes,
         }))
     }
@@ -632,7 +648,14 @@ fn run(options: &Options) -> Result<String, String> {
     let artifact_path = scratch.path().join("lexical.sqlite");
     let metadata = projection_metadata(&generation, &repository);
     let ingest_started = Instant::now();
-    let receipt = ingest_artifact(&artifact_path, metadata, &pages, &source_receipt, &control)?;
+    let receipt = ingest_artifact(
+        &artifact_path,
+        metadata,
+        &pages,
+        &source_receipt,
+        options.writer_revision,
+        &control,
+    )?;
     let ingest_wall = ingest_started.elapsed();
 
     // Reopen content-addressed: the byte-identical reader shape the daemon
@@ -679,7 +702,7 @@ fn run(options: &Options) -> Result<String, String> {
     drop(exact_lane);
     drop(lexical_lane);
     drop(reader);
-    scratch.remove()?;
+    scratch.finish()?;
 
     let total_wall = started.elapsed();
     let report = serde_json::json!({
@@ -692,7 +715,9 @@ fn run(options: &Options) -> Result<String, String> {
         "chunks": chunk_count,
         "sealed_bytes": sealed_len,
         "artifact_bytes": receipt.file_size_bytes(),
-        "artifact_digest": receipt.artifact_digest().as_str(),
+        "artifact_path": artifact_path.display().to_string(),
+        "artifact_digest": file_digest.as_str(),
+        "artifact_logical_digest": receipt.artifact_digest().as_str(),
         "iterations": options.iterations,
         "warmups": options.warmups,
         "fuzzy_budget": options.fuzzy_budget,
@@ -763,6 +788,7 @@ fn run_existing_artifact(options: &Options, artifact_path: &Path) -> Result<Stri
         "chunks": verified.total_chunks(),
         "artifact_bytes": file_size_bytes,
         "artifact_digest": file_digest.as_str(),
+        "artifact_logical_digest": verified.artifact_digest().as_str(),
         "iterations": options.iterations,
         "warmups": options.warmups,
         "fuzzy_budget": options.fuzzy_budget,
@@ -1194,10 +1220,15 @@ fn ingest_artifact(
     metadata: CodeLexicalProjectionMetadataV1,
     pages: &[VerifiedSealedLexicalPageV1],
     source_receipt: &VerifiedSealedLexicalSourceReceiptV1,
+    writer_revision: CodeLexicalArtifactWriterRevisionV1,
     control: &ActiveControl,
 ) -> Result<tracedecay_query::retrieval::lexical::VerifiedCodeLexicalArtifactV1, String> {
-    let mut builder = CodeLexicalArtifactBuilderV1::create(artifact_path, metadata)
-        .map_err(|error| format!("create lexical artifact: {error}"))?;
+    let mut builder = CodeLexicalArtifactBuilderV1::create_with_format_revision(
+        artifact_path,
+        metadata,
+        writer_revision,
+    )
+    .map_err(|error| format!("create lexical artifact: {error}"))?;
     for batch in pages.chunks(BATCH_MAX_PAGES) {
         builder
             .append_pages(batch, control)
@@ -1242,9 +1273,13 @@ impl Scratch {
         &self.path
     }
 
-    fn remove(self) -> Result<(), String> {
-        std::fs::remove_dir_all(&self.path)
-            .map_err(|error| format!("remove scratch {}: {error}", self.path.display()))
+    fn finish(self) -> Result<(), String> {
+        if std::env::var_os(KEEP_SCRATCH_ENV).is_some() {
+            Ok(())
+        } else {
+            std::fs::remove_dir_all(&self.path)
+                .map_err(|error| format!("remove scratch {}: {error}", self.path.display()))
+        }
     }
 }
 

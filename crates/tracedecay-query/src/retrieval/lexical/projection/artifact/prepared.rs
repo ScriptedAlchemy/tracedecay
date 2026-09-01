@@ -123,6 +123,7 @@ pub(super) struct PreparedTermPostingV1 {
 
 #[hotpath::measure]
 pub(super) fn prepare_page(
+    layout: LexicalArtifactLayoutV1,
     metadata: &CodeLexicalProjectionMetadataV1,
     page: &VerifiedSealedLexicalPageV1,
     previous_cursor: Option<Vec<u8>>,
@@ -159,6 +160,7 @@ pub(super) fn prepare_page(
                 )
             })?;
         let (prepared, ngrams) = prepare_document(
+            layout,
             metadata,
             i64::try_from(document).map_err(contract_number)?,
             admitted.chunk(),
@@ -208,7 +210,7 @@ pub(super) fn prepare_page(
     let mut ngram_shards = Vec::with_capacity(ngram_documents.len());
     for ((kind, ngram), documents) in ngram_documents {
         checkpoint(control)?;
-        let encoded = encode_ngram_bitmap(&documents)?;
+        let encoded = encode_ngram_bitmap(layout, &documents)?;
         ngram_shards.push(PreparedNgramShardV1 {
             kind,
             ngram,
@@ -363,6 +365,7 @@ fn prepare_base_sections_receipt(
 
 #[hotpath::measure]
 fn prepare_document(
+    layout: LexicalArtifactLayoutV1,
     metadata: &CodeLexicalProjectionMetadataV1,
     document_id: i64,
     chunk: &tracedecay_domain::CodeSearchChunkV1,
@@ -446,7 +449,7 @@ fn prepare_document(
     }
     let artifact_row = ArtifactRowV1::from(row);
     let chunk_id = artifact_row.id.as_str().to_owned();
-    let row = encode_artifact_row(LexicalArtifactLayoutV1::V11, &artifact_row)?;
+    let row = encode_artifact_row(layout, &artifact_row)?;
     let exact_postings = exact_postings.into_iter().collect::<Vec<_>>();
     let integrity_digest = document_integrity_digest(
         document_id,

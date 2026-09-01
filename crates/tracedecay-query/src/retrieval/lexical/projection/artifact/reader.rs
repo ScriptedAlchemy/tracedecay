@@ -32,7 +32,8 @@ use super::format::{
 use super::postings::{NGRAM_NORMALIZED, NGRAM_RAW_OVERRIDE, query_ngrams};
 use super::row_codec::decode_artifact_row;
 use super::schema::{
-    LexicalArtifactLayoutV1, field_code, field_from_code, lookup_term_id, lookup_term_ids,
+    LexicalArtifactLayoutV1, exact_field_code, field_code, field_from_code, lookup_term_id,
+    lookup_term_ids, stable_exact_term_id,
 };
 use super::{
     ARTIFACT_SQLITE_CACHE_BYTES, ARTIFACT_SQLITE_CACHE_FLOOR_BYTES,
@@ -769,6 +770,19 @@ impl DocumentQueryV1 {
         }
     }
 
+    fn exact_id(field: ExactFieldV1, term: &[u8]) -> Self {
+        Self {
+            sql: Some(
+                "SELECT document_id FROM exact_postings WHERE field = ? AND term_id = ?".to_owned(),
+            ),
+            parameters: vec![
+                Value::Integer(exact_field_code(field)),
+                Value::Integer(stable_exact_term_id(term)),
+            ],
+            maximum_bound_value_bytes: ARTIFACT_SQLITE_MAX_BOUND_VALUE_BYTES_V1,
+        }
+    }
+
     fn term_id(field: i64, term_id: i64) -> Self {
         Self {
             sql: Some(
@@ -943,14 +957,14 @@ fn visit_lexical_rows(
         };
         let assigned_ids = match layout {
             LexicalArtifactLayoutV1::V10 => BTreeMap::new(),
-            LexicalArtifactLayoutV1::V11 => {
+            LexicalArtifactLayoutV1::V11 | LexicalArtifactLayoutV1::V12 => {
                 lookup_term_ids(connection, terms).map_err(map_query_artifact_error)?
             }
         };
         let v11_ids = assigned_ids.values().copied().collect::<Vec<_>>();
         let dynamic_binds = match layout {
             LexicalArtifactLayoutV1::V10 => terms.len(),
-            LexicalArtifactLayoutV1::V11 => v11_ids.len(),
+            LexicalArtifactLayoutV1::V11 | LexicalArtifactLayoutV1::V12 => v11_ids.len(),
         };
         ensure_sqlite_bind_capacity(documents.parameters.len(), dynamic_binds)?;
         ensure_sqlite_bound_value_bytes(
@@ -962,7 +976,9 @@ fn visit_lexical_rows(
             Vec::with_capacity(documents.parameters.len().saturating_add(dynamic_binds));
         let frequencies = match layout {
             LexicalArtifactLayoutV1::V10 if terms.is_empty() => "'[]'".to_owned(),
-            LexicalArtifactLayoutV1::V11 if v11_ids.is_empty() => "'[]'".to_owned(),
+            LexicalArtifactLayoutV1::V11 | LexicalArtifactLayoutV1::V12 if v11_ids.is_empty() => {
+                "'[]'".to_owned()
+            }
             LexicalArtifactLayoutV1::V10 => {
                 let placeholders = std::iter::repeat_n("?", terms.len())
                     .collect::<Vec<_>>()
@@ -975,7 +991,7 @@ fn visit_lexical_rows(
                      AND posting.term IN ({placeholders})), '[]')"
                 )
             }
-            LexicalArtifactLayoutV1::V11 => {
+            LexicalArtifactLayoutV1::V11 | LexicalArtifactLayoutV1::V12 => {
                 let placeholders = std::iter::repeat_n("?", v11_ids.len())
                     .collect::<Vec<_>>()
                     .join(", ");
@@ -1025,7 +1041,7 @@ fn visit_lexical_rows(
                         ));
                     }
                 }
-                LexicalArtifactLayoutV1::V11 => {
+                LexicalArtifactLayoutV1::V11 | LexicalArtifactLayoutV1::V12 => {
                     let encoded: Vec<(i64, String, i64)> =
                         serde_json::from_str(&encoded_frequencies).map_err(contract_error)?;
                     entries.reserve(encoded.len());
@@ -1138,6 +1154,7 @@ fn ensure_sqlite_bound_value_bytes<'a>(
 #[hotpath::measure]
 fn ngram_document_query(
     connection: &Connection,
+    layout: LexicalArtifactLayoutV1,
     kind: i64,
     bytes: &[u8],
     metrics: &ArtifactQueryMetricsV1,
@@ -1150,7 +1167,7 @@ fn ngram_document_query(
         if ngrams.is_empty() {
             return Ok(DocumentQueryV1::empty());
         }
-        let candidates = ngram_bitmap_candidates(connection, kind, &ngrams, metrics)?;
+        let candidates = ngram_bitmap_candidates(connection, layout, kind, &ngrams, metrics)?;
         let encoded =
             encode_ngram_candidate_json(&candidates, ARTIFACT_NGRAM_CANDIDATE_JSON_BYTES_V1)?;
         #[cfg(feature = "hotpath")]
@@ -1175,6 +1192,7 @@ struct NgramSelectivityV1 {
 #[hotpath::measure]
 fn ngram_bitmap_candidates(
     connection: &Connection,
+    layout: LexicalArtifactLayoutV1,
     kind: i64,
     ngrams: &[u32],
     _metrics: &ArtifactQueryMetricsV1,
@@ -1237,6 +1255,7 @@ fn ngram_bitmap_candidates(
             let next = intersect_ngram_shards(
                 &mut rows,
                 Some(current),
+                layout,
                 &mut remaining_shards,
                 &mut remaining_encoded_bytes,
                 _metrics,
@@ -1255,6 +1274,7 @@ fn ngram_bitmap_candidates(
             let next = intersect_ngram_shards(
                 &mut rows,
                 None,
+                layout,
                 &mut remaining_shards,
                 &mut remaining_encoded_bytes,
                 _metrics,
@@ -1291,6 +1311,7 @@ fn ngram_bitmap_candidates(
 fn intersect_ngram_shards(
     rows: &mut rusqlite::Rows<'_>,
     current: Option<&BTreeMap<i64, RoaringBitmap>>,
+    layout: LexicalArtifactLayoutV1,
     remaining_shards: &mut usize,
     remaining_encoded_bytes: &mut usize,
     _metrics: &ArtifactQueryMetricsV1,
@@ -1314,7 +1335,7 @@ fn intersect_ngram_shards(
         *remaining_shards = remaining_shards
             .checked_sub(1)
             .ok_or(RetrievalPortError::BudgetExceeded)?;
-        let mut shard = decode_ngram_bitmap(&encoded).map_err(map_query_artifact_error)?;
+        let mut shard = decode_ngram_bitmap(layout, &encoded).map_err(map_query_artifact_error)?;
         if i64::try_from(shard.len()).map_err(contract_error)? != cardinality {
             return Err(RetrievalPortError::Contract(
                 "lexical artifact ngram shard cardinality changed after verification".to_owned(),
@@ -1467,6 +1488,7 @@ impl<'a> ArtifactQueryV1<'a> {
         for (_, normalized) in &prepared.phrases {
             let query = ngram_document_query(
                 self.connection,
+                self.layout,
                 NGRAM_NORMALIZED,
                 normalized.as_bytes(),
                 &self.metrics,
@@ -1719,7 +1741,7 @@ impl<'a> ArtifactQueryV1<'a> {
                     ));
                 }
             }
-            LexicalArtifactLayoutV1::V11 => {
+            LexicalArtifactLayoutV1::V11 | LexicalArtifactLayoutV1::V12 => {
                 let subtoken_field = field_code(LexicalFieldV1::Subtoken);
                 for term in &request.whole_terms {
                     if let Some(term_id) = lookup_term_id(self.connection, &normalize_lexical(term))
@@ -1766,22 +1788,35 @@ impl<'a> ArtifactQueryV1<'a> {
             ) {
                 sources.push(ngram_document_query(
                     self.connection,
+                    self.layout,
                     NGRAM_NORMALIZED,
                     &literal.original_bytes,
                     &self.metrics,
                 )?);
                 sources.push(ngram_document_query(
                     self.connection,
+                    self.layout,
                     NGRAM_RAW_OVERRIDE,
                     &literal.original_bytes,
                     &self.metrics,
                 )?);
             }
-            let field = encode_exact_field(literal.field).map_err(map_query_artifact_error)?;
-            sources.push(DocumentQueryV1::exact(
-                field,
-                literal.canonical_bytes.clone(),
-            ));
+            match self.layout {
+                LexicalArtifactLayoutV1::V10 | LexicalArtifactLayoutV1::V11 => {
+                    let field =
+                        encode_exact_field(literal.field).map_err(map_query_artifact_error)?;
+                    sources.push(DocumentQueryV1::exact(
+                        field,
+                        literal.canonical_bytes.clone(),
+                    ));
+                }
+                LexicalArtifactLayoutV1::V12 => {
+                    sources.push(DocumentQueryV1::exact_id(
+                        literal.field,
+                        &literal.canonical_bytes,
+                    ));
+                }
+            }
         }
         union_document_queries(sources)
     }
@@ -1888,7 +1923,9 @@ impl<'a> ArtifactQueryV1<'a> {
     fn vocabulary_sql(layout: LexicalArtifactLayoutV1) -> &'static str {
         match layout {
             LexicalArtifactLayoutV1::V10 => "SELECT term FROM vocabulary",
-            LexicalArtifactLayoutV1::V11 => "SELECT term FROM vocabulary WHERE in_fuzzy = 1",
+            LexicalArtifactLayoutV1::V11 | LexicalArtifactLayoutV1::V12 => {
+                "SELECT term FROM vocabulary WHERE in_fuzzy = 1"
+            }
         }
     }
 
@@ -1940,7 +1977,7 @@ impl<'a> ArtifactQueryV1<'a> {
                 LexicalArtifactLayoutV1::V10 => {
                     decode_field(&row.get::<_, String>(0).map_err(map_query_sql_error)?)?
                 }
-                LexicalArtifactLayoutV1::V11 => {
+                LexicalArtifactLayoutV1::V11 | LexicalArtifactLayoutV1::V12 => {
                     field_from_code(row.get::<_, i64>(0).map_err(map_query_sql_error)?)
                         .map_err(map_query_artifact_error)?
                 }
@@ -1985,7 +2022,7 @@ impl<'a> ArtifactQueryV1<'a> {
                     self.metrics.observe_statement(&statement)?;
                     self.metrics.rows(observed_rows);
                 }
-                LexicalArtifactLayoutV1::V11 => {
+                LexicalArtifactLayoutV1::V11 | LexicalArtifactLayoutV1::V12 => {
                     let assigned = lookup_term_ids(self.connection, terms)
                         .map_err(map_query_artifact_error)?;
                     let term_ids = assigned.values().copied().collect::<Vec<_>>();
@@ -3336,7 +3373,8 @@ mod tests {
             } else {
                 RoaringBitmap::from_iter([1])
             };
-            let encoded = encode_ngram_bitmap(&documents).expect("encode ngram shard");
+            let encoded = encode_ngram_bitmap(LexicalArtifactLayoutV1::V11, &documents)
+                .expect("encode ngram shard");
             connection
                 .execute(
                     "INSERT INTO ngram_postings(page_ordinal, kind, ngram, documents, cardinality) VALUES (0, ?1, ?2, ?3, ?4)",
@@ -3352,8 +3390,14 @@ mod tests {
         }
 
         let metrics = ArtifactQueryMetricsV1::default();
-        let query = ngram_document_query(&connection, NGRAM_NORMALIZED, phrase, &metrics)
-            .expect("build ngram bitmap query");
+        let query = ngram_document_query(
+            &connection,
+            LexicalArtifactLayoutV1::V11,
+            NGRAM_NORMALIZED,
+            phrase,
+            &metrics,
+        )
+        .expect("build ngram bitmap query");
 
         assert_eq!(query.parameters.len(), 1);
         assert_eq!(streamed_documents(&connection, &query), vec![1]);
@@ -3389,7 +3433,8 @@ mod tests {
             (1, 30, vec![3]),
         ] {
             let bitmap = RoaringBitmap::from_iter(documents);
-            let encoded = encode_ngram_bitmap(&bitmap).expect("encode ngram shard");
+            let encoded = encode_ngram_bitmap(LexicalArtifactLayoutV1::V11, &bitmap)
+                .expect("encode ngram shard");
             connection
                 .execute(
                     "INSERT INTO ngram_postings(page_ordinal, kind, ngram, documents, cardinality) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -3407,9 +3452,14 @@ mod tests {
         }
 
         let bounded_metrics = ArtifactQueryMetricsV1::default();
-        let matching =
-            ngram_bitmap_candidates(&connection, NGRAM_NORMALIZED, &[10, 20], &bounded_metrics)
-                .expect("intersect common and rare shards");
+        let matching = ngram_bitmap_candidates(
+            &connection,
+            LexicalArtifactLayoutV1::V11,
+            NGRAM_NORMALIZED,
+            &[10, 20],
+            &bounded_metrics,
+        )
+        .expect("intersect common and rare shards");
         assert_eq!(matching.iter().collect::<Vec<_>>(), [2]);
         assert_eq!(bounded_metrics.ngram_peak_candidates.get(), 1);
         assert_eq!(bounded_metrics.ngram_decoded_shards.get(), 2);
@@ -3418,6 +3468,7 @@ mod tests {
         let short_circuit_metrics = ArtifactQueryMetricsV1::default();
         let empty = ngram_bitmap_candidates(
             &connection,
+            LexicalArtifactLayoutV1::V11,
             NGRAM_NORMALIZED,
             &[10, 20, 30],
             &short_circuit_metrics,

@@ -35,9 +35,9 @@ pub use artifact::{
     CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
     CodeLexicalArtifactFinalizationPhaseV1, CodeLexicalArtifactFinalizationStepV1,
     CodeLexicalArtifactOccurrenceV1, CodeLexicalArtifactReaderV1,
-    CodeLexicalArtifactSectionDigestV1, CodeLexicalImportMembershipWitnessV1,
-    PreparedCodeLexicalArtifactBatchV1, PreparedCodeLexicalArtifactPageV1,
-    VerifiedCodeLexicalArtifactV1,
+    CodeLexicalArtifactSectionDigestV1, CodeLexicalArtifactWriterRevisionV1,
+    CodeLexicalImportMembershipWitnessV1, PreparedCodeLexicalArtifactBatchV1,
+    PreparedCodeLexicalArtifactPageV1, VerifiedCodeLexicalArtifactV1,
 };
 
 use postings::{ByteNgramBudget, ByteNgramPostings, FuzzyTermIndex};

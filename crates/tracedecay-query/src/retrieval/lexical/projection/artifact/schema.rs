@@ -7,17 +7,22 @@ use super::super::LexicalFieldV1;
 use super::prepared::PreparedCodeLexicalArtifactPageV1;
 use super::{CodeLexicalArtifactErrorV1, checkpoint};
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
+use tracedecay_domain::ExactFieldV1;
 
 /// Revision 10 is the last TEXT-term posting layout. Revision 11 interns
 /// terms, stores integer field codes, drops redundant serving indexes, and
-/// writes compact row payloads. Readers accept both; writers emit 11.
+/// writes compact row payloads. Revision 12 delta-encodes n-gram document
+/// lists and interns exact terms. Readers accept all shipped layouts; writers
+/// emit 12 unless an explicit benchmark revision is selected.
 pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V10: u32 = 10;
 pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V11: u32 = 11;
+pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V12: u32 = 12;
 pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 =
-    CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V11;
+    CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V12;
 
 const DIGEST_DOMAIN_V10: &[u8] = b"tracedecay.code-lexical-artifact.v10\0";
 const DIGEST_DOMAIN_V11: &[u8] = b"tracedecay.code-lexical-artifact.v11\0";
+const DIGEST_DOMAIN_V12: &[u8] = b"tracedecay.code-lexical-artifact.v12\0";
 
 const FIELD_SYMBOL_NAME: i64 = 1;
 const FIELD_QUALIFIED_NAME: i64 = 2;
@@ -81,15 +86,51 @@ pub(super) const REQUIRED_ARTIFACT_INDEXES_V11: [(&str, &str, &[&str]); 4] = [
     ),
 ];
 
+pub(super) const REQUIRED_ARTIFACT_INDEXES_V12: [(&str, &str, &[&str]); 4] = [
+    ("rows", "rows_by_chunk", &["chunk_id"]),
+    (
+        "term_postings",
+        "term_postings_by_document",
+        &["document_id", "term_id", "field", "frequency"],
+    ),
+    (
+        "exact_postings",
+        "exact_postings_by_document",
+        &["document_id", "field", "term_id"],
+    ),
+    (
+        "ngram_postings",
+        "ngram_postings_by_ngram",
+        &["kind", "ngram", "page_ordinal", "cardinality"],
+    ),
+];
+
 /// Statistics wakes stay at three steps (field, term, fuzzy flag). Index
 /// wakes are the four serving indexes plus n-gram selectivity.
 pub(super) const STATISTICS_STEP_COUNT_V11: u64 = 3;
 pub(super) const SERVING_INDEX_STEP_COUNT_V11: u64 = 5;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CodeLexicalArtifactWriterRevisionV1 {
+    V11,
+    #[default]
+    V12,
+}
+
+impl CodeLexicalArtifactWriterRevisionV1 {
+    pub(super) const fn layout(self) -> LexicalArtifactLayoutV1 {
+        match self {
+            Self::V11 => LexicalArtifactLayoutV1::V11,
+            Self::V12 => LexicalArtifactLayoutV1::V12,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum LexicalArtifactLayoutV1 {
     V10,
     V11,
+    V12,
 }
 
 #[hotpath::measure_all]
@@ -98,6 +139,7 @@ impl LexicalArtifactLayoutV1 {
         match revision {
             CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V10 => Ok(Self::V10),
             CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V11 => Ok(Self::V11),
+            CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V12 => Ok(Self::V12),
             _ => Err(CodeLexicalArtifactErrorV1::Incompatible(format!(
                 "format revision {revision} is unsupported"
             ))),
@@ -108,6 +150,7 @@ impl LexicalArtifactLayoutV1 {
         match self {
             Self::V10 => CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V10,
             Self::V11 => CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V11,
+            Self::V12 => CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V12,
         }
     }
 
@@ -115,6 +158,7 @@ impl LexicalArtifactLayoutV1 {
         match self {
             Self::V10 => DIGEST_DOMAIN_V10,
             Self::V11 => DIGEST_DOMAIN_V11,
+            Self::V12 => DIGEST_DOMAIN_V12,
         }
     }
 
@@ -124,6 +168,7 @@ impl LexicalArtifactLayoutV1 {
         match self {
             Self::V10 => &REQUIRED_ARTIFACT_INDEXES_V10,
             Self::V11 => &REQUIRED_ARTIFACT_INDEXES_V11,
+            Self::V12 => &REQUIRED_ARTIFACT_INDEXES_V12,
         }
     }
 }
@@ -171,6 +216,34 @@ pub(super) fn field_code_from_encoded(encoded: &str) -> Result<i64, CodeLexicalA
     Ok(field_code(field))
 }
 
+#[hotpath::measure]
+pub(super) fn exact_field_code(field: ExactFieldV1) -> i64 {
+    match field {
+        ExactFieldV1::Identifier => 1,
+        ExactFieldV1::QualifiedName => 2,
+        ExactFieldV1::Path => 3,
+        ExactFieldV1::QuotedPhrase => 4,
+        ExactFieldV1::DiagnosticCode => 5,
+        ExactFieldV1::DiagnosticText => 6,
+        ExactFieldV1::CompilerOrRuntimeError => 7,
+        ExactFieldV1::CliFlag => 8,
+        ExactFieldV1::ToolName => 9,
+        ExactFieldV1::ConfigurationKey => 10,
+        ExactFieldV1::CommitIdentifier => 11,
+        ExactFieldV1::TaskOrSessionId => 12,
+        ExactFieldV1::ProtocolField => 13,
+    }
+}
+
+#[hotpath::measure]
+pub(super) fn exact_field_code_from_encoded(
+    encoded: &str,
+) -> Result<i64, CodeLexicalArtifactErrorV1> {
+    let field: ExactFieldV1 = serde_json::from_str(encoded)
+        .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+    Ok(exact_field_code(field))
+}
+
 /// Content-addressed term primary key. Incrementing IDs follow first-seen
 /// batch order, so one-page and multi-page commits of the same source would
 /// disagree on `vocabulary` / `term_stats` section receipts.
@@ -183,6 +256,63 @@ pub(super) fn stable_term_id(term: &str) -> i64 {
     let mut prefix = [0u8; 8];
     prefix.copy_from_slice(&digest[..8]);
     (u64::from_be_bytes(prefix) & i64::MAX as u64) as i64
+}
+
+#[hotpath::measure]
+pub(super) fn stable_exact_term_id(term: &[u8]) -> i64 {
+    let mut hasher = Sha256::new();
+    hasher.update(b"tracedecay.code-lexical-artifact.exact-term-id.v12\0");
+    hasher.update(term);
+    let digest = hasher.finalize();
+    let mut prefix = [0u8; 8];
+    prefix.copy_from_slice(&digest[..8]);
+    (u64::from_be_bytes(prefix) & i64::MAX as u64) as i64
+}
+
+#[hotpath::measure]
+pub(super) fn intern_exact_terms(
+    transaction: &Transaction<'_>,
+    pages: &[PreparedCodeLexicalArtifactPageV1],
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let mut terms = BTreeMap::<i64, &[u8]>::new();
+    for page in pages {
+        for document in &page.documents {
+            for (_, term) in &document.exact_postings {
+                let term_id = stable_exact_term_id(term);
+                if let Some(previous) = terms.insert(term_id, term)
+                    && previous != term.as_slice()
+                {
+                    return Err(CodeLexicalArtifactErrorV1::Contract(
+                        "lexical artifact exact term identifier collided".to_owned(),
+                    ));
+                }
+            }
+        }
+    }
+    let mut insert = transaction
+        .prepare(
+            "INSERT INTO exact_vocabulary(term_id, term) VALUES (?1, ?2) ON CONFLICT(term_id) DO NOTHING",
+        )
+        .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
+    let mut lookup = transaction
+        .prepare("SELECT term FROM exact_vocabulary WHERE term_id = ?1")
+        .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
+    for (term_id, term) in terms {
+        checkpoint(control)?;
+        insert
+            .execute(params![term_id, term])
+            .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
+        let stored: Vec<u8> = lookup
+            .query_row([term_id], |row| row.get(0))
+            .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
+        if stored != term {
+            return Err(CodeLexicalArtifactErrorV1::Contract(
+                "lexical artifact exact term identifier collided".to_owned(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[hotpath::measure]
@@ -270,9 +400,11 @@ pub(super) fn lookup_term_ids(
 mod tests {
     use super::{
         CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V10, CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V11,
-        LexicalArtifactLayoutV1, field_code, field_from_code,
+        CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V12, LexicalArtifactLayoutV1, exact_field_code,
+        field_code, field_from_code, stable_exact_term_id,
     };
     use crate::retrieval::lexical::LexicalFieldV1;
+    use tracedecay_domain::ExactFieldV1;
 
     #[test]
     fn layout_accepts_open_revisions_and_fails_closed_otherwise() {
@@ -286,8 +418,13 @@ mod tests {
                 .expect("v11"),
             LexicalArtifactLayoutV1::V11
         );
+        assert_eq!(
+            LexicalArtifactLayoutV1::from_revision(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V12)
+                .expect("v12"),
+            LexicalArtifactLayoutV1::V12
+        );
         assert!(LexicalArtifactLayoutV1::from_revision(9).is_err());
-        assert!(LexicalArtifactLayoutV1::from_revision(12).is_err());
+        assert!(LexicalArtifactLayoutV1::from_revision(13).is_err());
     }
 
     #[test]
@@ -320,5 +457,39 @@ mod tests {
             super::stable_term_id("value")
         );
         assert!(super::stable_term_id("return") >= 0);
+    }
+
+    #[test]
+    fn exact_term_ids_are_deterministic_over_arbitrary_bytes() {
+        assert_eq!(
+            stable_exact_term_id(b"\xffreturn"),
+            stable_exact_term_id(b"\xffreturn")
+        );
+        assert_ne!(
+            stable_exact_term_id(b"\xffreturn"),
+            stable_exact_term_id(b"return")
+        );
+        assert!(stable_exact_term_id(b"\xffreturn") >= 0);
+    }
+
+    #[test]
+    fn exact_field_codes_are_stable() {
+        for (field, code) in [
+            (ExactFieldV1::Identifier, 1),
+            (ExactFieldV1::QualifiedName, 2),
+            (ExactFieldV1::Path, 3),
+            (ExactFieldV1::QuotedPhrase, 4),
+            (ExactFieldV1::DiagnosticCode, 5),
+            (ExactFieldV1::DiagnosticText, 6),
+            (ExactFieldV1::CompilerOrRuntimeError, 7),
+            (ExactFieldV1::CliFlag, 8),
+            (ExactFieldV1::ToolName, 9),
+            (ExactFieldV1::ConfigurationKey, 10),
+            (ExactFieldV1::CommitIdentifier, 11),
+            (ExactFieldV1::TaskOrSessionId, 12),
+            (ExactFieldV1::ProtocolField, 13),
+        ] {
+            assert_eq!(exact_field_code(field), code);
+        }
     }
 }

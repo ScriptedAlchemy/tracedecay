@@ -54,7 +54,8 @@ use tracedecay_query::retrieval::lexical::{
     CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactBatchLimitV1,
     CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
     CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1,
-    CodeLexicalProjectionAdapterV1, CodeLexicalProjectionBuildStepV1, CodeLexicalProjectionBuildV1,
+    CodeLexicalArtifactWriterRevisionV1, CodeLexicalProjectionAdapterV1,
+    CodeLexicalProjectionBuildStepV1, CodeLexicalProjectionBuildV1,
     CodeLexicalProjectionMetadataV1, LexicalFieldFilterV1, LexicalFieldV1, LexicalLane,
     LexicalLaneRequest, LexicalLaneRetriever, MAX_FUZZY_TERM_EXPANSIONS_V1,
     MAX_LEXICAL_QUERY_TERM_BYTES_V1, VerifiedCodeLexicalArtifactV1,
@@ -1415,9 +1416,9 @@ fn reader_rejects_unsupported_open_revisions_and_accepts_current() {
         CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
         &control,
     )
-    .expect("revision 11 must open");
+    .expect("revision 12 must open");
 
-    for revision in [9i64, 12] {
+    for revision in [9i64, 13] {
         let connection =
             rusqlite::Connection::open(&artifact_path).expect("open artifact mutation");
         connection
@@ -1440,6 +1441,91 @@ fn reader_rejects_unsupported_open_revisions_and_accepts_current() {
             "revision {revision} must fail closed"
         );
     }
+}
+
+#[test]
+fn writer_revision_toggle_preserves_v11_v12_lexical_results() {
+    let (fixture, pages, source_receipt) = real_verified_pages();
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let v11_path = directory.path().join("writer-v11.sqlite");
+    let v12_path = directory.path().join("writer-v12.sqlite");
+    let control = ArtifactControl { cancelled: false };
+    let mut v11_builder = CodeLexicalArtifactBuilderV1::create_with_format_revision(
+        &v11_path,
+        fixture.metadata.clone(),
+        CodeLexicalArtifactWriterRevisionV1::V11,
+    )
+    .expect("create revision 11 artifact");
+    for page in &pages {
+        v11_builder
+            .append_page(page, &control)
+            .expect("append v11 page");
+    }
+    let v11 = finish_staged_artifact(&mut v11_builder, &source_receipt, &control);
+    let connection = rusqlite::Connection::open(&v11_path).expect("inspect v11 artifact");
+    let revision: i64 = connection
+        .query_row(
+            "SELECT format_revision FROM artifact_state WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read v11 revision");
+    assert_eq!(revision, 11);
+    let legacy_ngram_rows: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM ngram_postings WHERE substr(documents, 1, 4) = x'54444e31'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count v11 ngram rows");
+    assert!(legacy_ngram_rows > 0);
+    let exact_term_column: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_xinfo('exact_postings') WHERE name = 'term' AND type = 'BLOB'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read v11 exact schema");
+    assert_eq!(exact_term_column, 1);
+    drop(connection);
+    let v11_reader = CodeLexicalArtifactReaderV1::open_with_control(
+        &v11_path,
+        &v11,
+        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        &control,
+    )
+    .expect("reopen revision 11 artifact");
+
+    let mut v12_builder = CodeLexicalArtifactBuilderV1::create_with_format_revision(
+        &v12_path,
+        fixture.metadata,
+        CodeLexicalArtifactWriterRevisionV1::V12,
+    )
+    .expect("create revision 12 artifact");
+    for page in &pages {
+        v12_builder
+            .append_page(page, &control)
+            .expect("append v12 page");
+    }
+    let v12 = finish_staged_artifact(&mut v12_builder, &source_receipt, &control);
+    let v12_reader = CodeLexicalArtifactReaderV1::open_with_control(
+        &v12_path,
+        &v12,
+        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        &control,
+    )
+    .expect("reopen revision 12 artifact");
+
+    let mut request = lexical_request("widget return", &["widget"], &[], &["return"], 2, 8);
+    request.generation = v11.generation().clone();
+    let v11_result = v11_reader
+        .read_lexical_postings(&request)
+        .expect("read v11 lexical postings");
+    request.generation = v12.generation().clone();
+    let v12_result = v12_reader
+        .read_lexical_postings(&request)
+        .expect("read v12 lexical postings");
+    assert_eq!(v12_result, v11_result);
 }
 
 /// Historical revision-10 artifact sealed by the pre-interning writer
@@ -1469,11 +1555,8 @@ fn reader_serves_historical_v10_writer_artifact() {
         .expect("restore private-file mode for content-addressed open");
     let bytes = std::fs::read(&artifact_path).expect("read historical v10 fixture");
     let file_size_bytes = u64::try_from(bytes.len()).expect("v10 fixture length");
-    let digest = ManifestDigest::new(format!(
-        "sha256:{}",
-        hex::encode(Sha256::digest(&bytes))
-    ))
-    .expect("v10 fixture digest");
+    let digest = ManifestDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(&bytes))))
+        .expect("v10 fixture digest");
 
     let reader = CodeLexicalArtifactReaderV1::open_content_addressed(
         &artifact_path,
@@ -1498,10 +1581,10 @@ fn reader_serves_historical_v10_writer_artifact() {
 }
 
 #[test]
-fn sealed_v11_artifact_uses_interned_plans_and_reports_dbstat() {
+fn sealed_v12_artifact_uses_compact_postings_and_reports_dbstat() {
     let (fixture, pages, source_receipt) = real_verified_pages();
     let directory = tempfile::tempdir().expect("artifact tempdir");
-    let artifact_path = directory.path().join("v11-plans.sqlite");
+    let artifact_path = directory.path().join("v12-plans.sqlite");
     let control = ArtifactControl { cancelled: false };
     let started = Instant::now();
     let mut builder = CodeLexicalArtifactBuilderV1::create(&artifact_path, fixture.metadata)
@@ -1515,6 +1598,42 @@ fn sealed_v11_artifact_uses_interned_plans_and_reports_dbstat() {
         .expect("artifact metadata")
         .len();
     let connection = rusqlite::Connection::open(&artifact_path).expect("inspect sealed artifact");
+    let format_revision: i64 = connection
+        .query_row(
+            "SELECT format_revision FROM artifact_state WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read current format revision");
+    assert_eq!(format_revision, 12);
+    let uncompressed_ngram_rows: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM ngram_postings WHERE substr(documents, 1, 4) = x'54444e31' OR length(documents) > cardinality + 4",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count non-delta ngram rows");
+    assert_eq!(
+        uncompressed_ngram_rows, 0,
+        "revision 12 ngram shards must use canonical delta varints"
+    );
+    let exact_columns = connection
+        .prepare(
+            "SELECT name, type FROM pragma_table_xinfo('exact_postings') WHERE hidden = 0 ORDER BY cid",
+        )
+        .expect("prepare exact columns")
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .expect("query exact columns")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect exact columns");
+    assert_eq!(
+        exact_columns,
+        [
+            ("term_id".to_owned(), "INTEGER".to_owned()),
+            ("field".to_owned(), "INTEGER".to_owned()),
+            ("document_id".to_owned(), "INTEGER".to_owned()),
+        ]
+    );
     let term_plan = connection
         .prepare(
             "EXPLAIN QUERY PLAN SELECT document_id FROM term_postings WHERE field = ?1 AND term_id = ?2",
@@ -1558,7 +1677,7 @@ fn sealed_v11_artifact_uses_interned_plans_and_reports_dbstat() {
         .expect("count dropped indexes");
     assert_eq!(
         missing_dropped, 0,
-        "revision 11 must not keep redundant indexes"
+        "revision 12 must not keep redundant indexes"
     );
     let compact_rows: i64 = connection
         .query_row(
@@ -1572,7 +1691,7 @@ fn sealed_v11_artifact_uses_interned_plans_and_reports_dbstat() {
         .expect("count rows");
     assert_eq!(
         compact_rows, total_rows,
-        "every v11 row carries the compact tag"
+        "every v12 row carries the compact tag"
     );
     {
         let dbstat = connection.prepare(
@@ -1592,14 +1711,18 @@ fn sealed_v11_artifact_uses_interned_plans_and_reports_dbstat() {
                 !sizes.keys().any(|name| name == "term_postings_by_term"),
                 "dbstat must not retain the dropped term-text index: {sizes:?}"
             );
+            assert!(
+                sizes.contains_key("exact_vocabulary"),
+                "dbstat must account the exact-term collision authority: {sizes:?}"
+            );
             eprintln!(
-                "lexical v11 dbstat file_bytes={file_bytes} build_ms={build_ms} pages={} digest={} sizes={sizes:?}",
+                "lexical v12 dbstat file_bytes={file_bytes} build_ms={build_ms} pages={} digest={} sizes={sizes:?}",
                 verified.page_count(),
                 verified.artifact_digest().as_str(),
             );
         } else {
             eprintln!(
-                "lexical v11 size file_bytes={file_bytes} build_ms={build_ms} pages={} digest={} (dbstat unavailable)",
+                "lexical v12 size file_bytes={file_bytes} build_ms={build_ms} pages={} digest={} (dbstat unavailable)",
                 verified.page_count(),
                 verified.artifact_digest().as_str(),
             );
@@ -1613,7 +1736,7 @@ fn sealed_v11_artifact_uses_interned_plans_and_reports_dbstat() {
         CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
         &control,
     )
-    .expect("open v11 artifact");
+    .expect("open v12 artifact");
     let mut request = lexical_request(
         "rendre return value",
         &["rendre"],
@@ -1627,13 +1750,13 @@ fn sealed_v11_artifact_uses_interned_plans_and_reports_dbstat() {
     let mut latencies = Vec::new();
     for _ in 0..16 {
         let started = Instant::now();
-        let _ = lane.retrieve_lexical(&request).expect("v11 lexical query");
+        let _ = lane.retrieve_lexical(&request).expect("v12 lexical query");
         latencies.push(started.elapsed().as_micros());
     }
     latencies.sort_unstable();
     let p50 = latencies[latencies.len() / 2];
     let p95 = latencies[(latencies.len() * 95) / 100];
-    eprintln!("lexical v11 query_us p50={p50} p95={p95} samples={latencies:?}");
+    eprintln!("lexical v12 query_us p50={p50} p95={p95} samples={latencies:?}");
     assert!(p50 > 0 || file_bytes > 0);
 }
 
@@ -2102,7 +2225,7 @@ fn disk_artifact_term_insert_execution_is_monotone_by_primary_key() {
 fn disk_artifact_posting_insert_plans_obey_exact_memory_boundary_before_mutation() {
     const TERM_INSERT_PLAN_BYTES_PER_REF: usize = 4 * std::mem::size_of::<usize>();
     const TERM_INSERT_SORT_RUN_ROWS: usize = 4_096;
-    const EXACT_INSERT_PLAN_BYTES_PER_REF: usize = 6 * std::mem::size_of::<usize>();
+    const EXACT_INSERT_PLAN_BYTES_PER_REF: usize = 8 * std::mem::size_of::<usize>();
     const EXACT_INSERT_SORT_RUN_ROWS: usize = TERM_INSERT_SORT_RUN_ROWS;
 
     let (fixture, pages, _) = real_verified_pages();
@@ -2151,15 +2274,7 @@ fn disk_artifact_posting_insert_plans_obey_exact_memory_boundary_before_mutation
         .expect("exact plan ledger charge");
     let exact_merge_heap_ledger = exact_rows
         .div_ceil(EXACT_INSERT_SORT_RUN_ROWS)
-        .checked_mul(std::mem::size_of::<(
-            i64,
-            usize,
-            usize,
-            usize,
-            usize,
-            usize,
-            usize,
-        )>())
+        .checked_mul(std::mem::size_of::<[usize; 10]>())
         .expect("exact merge heap ledger charge");
     let plan_ledger = entry_ledger
         .checked_add(merge_heap_ledger)
