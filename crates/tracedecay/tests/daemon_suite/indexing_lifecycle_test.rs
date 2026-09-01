@@ -1048,6 +1048,52 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
         "restart did not seal the recovered cancellation batch"
     );
 
+    let killed = daemon
+        .kill_and_wait()
+        .expect("hard-kill the graph-serving daemon");
+    assert!(
+        !killed.success(),
+        "hard-kill fault injection must not become a graceful daemon exit"
+    );
+    daemon = spawn_tracedecay_daemon_with(environment.home(), |command| {
+        command.env(
+            "RUST_LOG",
+            "tracedecay_code_index_runtime::code_index_scheduler::registry=debug",
+        );
+    });
+    let hard_restarted = wait_for_terminal_generation(
+        &socket,
+        &handshake,
+        &project,
+        &identity,
+        "refs/heads/feature/lifecycle",
+        None,
+        None,
+        "cancellation_probe_0000_000",
+        Some("src/cancelled_batch/file_0000.rs"),
+    )
+    .await;
+    let runtime = tool(
+        &socket,
+        &handshake,
+        "tracedecay_runtime",
+        json!({ "format": "json" }),
+    )
+    .await;
+    let census = &runtime["database"]["generation_census"];
+    assert_eq!(
+        census["state"], "observed",
+        "hard-kill restart status must match the serving graph generation: {census}"
+    );
+    assert_eq!(
+        census["generation_id"], hard_restarted.generation_id,
+        "hard-kill restart census attributed the serving graph to another generation: {census}"
+    );
+    assert_eq!(
+        census["freshness"]["state"], "current",
+        "hard-kill restart census must report the current serving projection: {census}"
+    );
+
     let signal_result = unsafe { libc::kill(daemon.id() as libc::pid_t, libc::SIGTERM) };
     assert_eq!(signal_result, 0, "stop restarted daemon");
     let exit = daemon
