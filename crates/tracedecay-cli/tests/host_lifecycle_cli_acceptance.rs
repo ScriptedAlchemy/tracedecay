@@ -155,7 +155,7 @@ fn host_case(host: HostKindV1) -> HostCase {
         HostKindV1::ClaudeCode => CLAUDE_CONFIGS,
         HostKindV1::CursorDesktop => CURSOR_CONFIGS,
         HostKindV1::Codex => CODEX_CONFIGS,
-        HostKindV1::DevinLocal => DEVIN_CONFIGS,
+        HostKindV1::Devin => DEVIN_CONFIGS,
         HostKindV1::Hermes => HERMES_CONFIGS,
         HostKindV1::Kiro => KIRO_CONFIGS,
         HostKindV1::KimiCode => &[],
@@ -268,7 +268,7 @@ fn assert_success(host: &str, phase: &str, output: Output) {
 fn assert_documented_mcp_registration(case: HostCase, cli: &IsolatedCli) {
     let (relative, root) = match case.host {
         HostKindV1::Cline => (".cline/mcp.json", "mcpServers"),
-        HostKindV1::DevinLocal => (".config/devin/mcp_config.json", "mcpServers"),
+        HostKindV1::Devin => (".config/devin/mcp_config.json", "mcpServers"),
         HostKindV1::RooCode => (
             ".config/Code/User/globalStorage/rooveterinaryinc.roo-cline/settings/cline_mcp_settings.json",
             "mcpServers",
@@ -284,7 +284,7 @@ fn assert_documented_mcp_registration(case: HostCase, cli: &IsolatedCli) {
         case.id
     );
     let theme = match case.host {
-        HostKindV1::Cline | HostKindV1::DevinLocal | HostKindV1::RooCode => &config["ui"]["theme"],
+        HostKindV1::Cline | HostKindV1::Devin | HostKindV1::RooCode => &config["ui"]["theme"],
         HostKindV1::Kilo => &config["theme"],
         _ => unreachable!(),
     };
@@ -300,13 +300,14 @@ fn assert_documented_mcp_registration(case: HostCase, cli: &IsolatedCli) {
             assert_eq!(entry["disabled"], false);
             assert_eq!(entry["autoApprove"], serde_json::json!([]));
         }
-        HostKindV1::DevinLocal => {
+        HostKindV1::Devin => {
             assert_eq!(
                 entry["command"],
                 serde_json::json!(cli.bin_dir.join("tracedecay"))
             );
             assert_eq!(entry["args"], serde_json::json!(["serve"]));
             assert_eq!(entry["env"], serde_json::json!({}));
+            assert_eq!(entry["transport"], "stdio");
         }
         HostKindV1::RooCode => {
             assert_eq!(
@@ -534,7 +535,7 @@ fn native_feedback(case: HostCase) -> Vec<(&'static str, &'static str, Vec<u8>)>
             ]
         }
         HostKindV1::Kiro
-        | HostKindV1::DevinLocal
+            | HostKindV1::Devin
         | HostKindV1::Gemini
         | HostKindV1::Copilot
         | HostKindV1::Cline
@@ -574,7 +575,7 @@ fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
     for host in [
         HostKindV1::OpenCode,
         HostKindV1::Cline,
-        HostKindV1::DevinLocal,
+        HostKindV1::Devin,
         HostKindV1::Hermes,
     ] {
         let case = host_case(host);

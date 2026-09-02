@@ -26,7 +26,7 @@ pub const RECEIPT_BACKED_HOST_KINDS: [HostKindV1; 13] = [
     HostKindV1::ClaudeCode,
     HostKindV1::CursorDesktop,
     HostKindV1::Codex,
-    HostKindV1::DevinLocal,
+    HostKindV1::Devin,
     HostKindV1::Hermes,
     HostKindV1::Kiro,
     HostKindV1::KimiCode,
@@ -110,7 +110,7 @@ pub fn unsupported_host_component_set_reason(
     match host {
         HostKindV1::ClaudeCode
         | HostKindV1::Codex
-        | HostKindV1::DevinLocal
+        | HostKindV1::Devin
         | HostKindV1::CursorDesktop
         | HostKindV1::Hermes
         | HostKindV1::Kiro
@@ -150,7 +150,7 @@ pub fn default_components(host: HostKindV1) -> Vec<HostBundleComponentV1> {
             HostBundleComponentV1::Core,
             HostBundleComponentV1::ContextMcp,
         ],
-        HostKindV1::DevinLocal => vec![HostBundleComponentV1::ContextMcp],
+        HostKindV1::Devin => vec![HostBundleComponentV1::ContextMcp],
         HostKindV1::CursorDesktop | HostKindV1::OpenCode => vec![
             HostBundleComponentV1::Core,
             HostBundleComponentV1::Agent,
@@ -608,14 +608,14 @@ fn component_assets(
                 r#"{"host":"cline","registration":"../mcp.json","registrar":"tracedecay managed merge","route":"mcp","server":{"command":"__TRACEDECAY_BIN__","args":["serve"]}}"#,
             )],
         ),
-        // Devin Local owns the shared user configuration document directly.
+    // Devin owns the shared user configuration document directly.
         // The component receipt owns this descriptor only; the activation
         // adapter merges its server entry into `mcp_config.json`.
-        (HostKindV1::DevinLocal, HostBundleComponentV1::ContextMcp) => (
+        (HostKindV1::Devin, HostBundleComponentV1::ContextMcp) => (
             ".config/devin/tracedecay",
             vec![(
                 "context-mcp.json",
-                r#"{"host":"devin-local","registration":"../mcp_config.json","registrar":"tracedecay managed merge","route":"mcp","server":{"command":"__TRACEDECAY_BIN__","args":["serve"]}}"#,
+                r#"{"host":"devin","registration":"../mcp_config.json","registrar":"tracedecay managed merge","route":"mcp","server":{"command":"__TRACEDECAY_BIN__","args":["serve"],"transport":"stdio"}}"#,
             )],
         ),
         (HostKindV1::RooCode, HostBundleComponentV1::ContextMcp) => (

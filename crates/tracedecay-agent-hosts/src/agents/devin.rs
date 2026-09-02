@@ -1,8 +1,8 @@
-//! Devin Local agent integration.
+//! Devin agent integration.
 //!
-//! Devin Local discovers stdio MCP servers from a dedicated configuration
+//! Devin discovers stdio MCP servers from a dedicated configuration
 //! document. TraceDecay owns only the `mcpServers.tracedecay` entry and leaves
-//! every other server untouched. Current Devin Local releases use
+//! every other server untouched. Current Devin releases use
 //! `~/.config/devin/mcp_config.json` for user scope and
 //! `<project>/.devin/mcp_config.json` for shared project scope; older main
 //! config entries are migrated by Devin itself.
@@ -26,19 +26,19 @@ fn devin_config_dir(home: &Path) -> PathBuf {
     home.join(".config/devin")
 }
 
-/// Current user-scoped MCP configuration path documented by Devin Local.
+/// Current user-scoped MCP configuration path documented by Devin.
 fn devin_mcp_config_path(home: &Path) -> PathBuf {
     devin_config_dir(home).join("mcp_config.json")
 }
 
-/// Current project-scoped MCP configuration path documented by Devin Local.
+/// Current project-scoped MCP configuration path documented by Devin.
 fn devin_project_mcp_config_path(project_path: &Path) -> PathBuf {
     project_path.join(".devin/mcp_config.json")
 }
 
 impl AgentIntegration for DevinIntegration {
     fn name(&self) -> &'static str {
-        "Devin Local"
+        "Devin"
     }
 
     fn id(&self) -> &'static str {
@@ -50,7 +50,7 @@ impl AgentIntegration for DevinIntegration {
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
-        eprintln!("\n\x1b[1mDevin Local integration\x1b[0m");
+        eprintln!("\n\x1b[1mDevin integration\x1b[0m");
         doctor_check_mcp_registration(
             dc,
             &devin_mcp_config_path(&ctx.home),
@@ -58,7 +58,7 @@ impl AgentIntegration for DevinIntegration {
             load_json_file,
             &McpDoctorLabels {
                 agent_id: "devin",
-                product: "Devin Local user configuration",
+                product: "Devin user configuration",
                 registered: "MCP server registered",
                 missing: "MCP server NOT registered",
             },
@@ -72,7 +72,7 @@ impl AgentIntegration for DevinIntegration {
                 load_json_file,
                 &McpDoctorLabels {
                     agent_id: "devin",
-                    product: "Devin Local project configuration",
+                    product: "Devin project configuration",
                     registered: "project MCP server registered",
                     missing: "project MCP server NOT registered",
                 },
@@ -219,8 +219,9 @@ fn install_mcp_if_selected(
                 "command": ctx.tracedecay_bin.clone(),
                 "args": ["serve"],
                 "env": {},
+                "transport": "stdio",
             }),
-            "Devin Local",
+            "Devin",
             JsonConfigDialect::Json,
         )?;
     }

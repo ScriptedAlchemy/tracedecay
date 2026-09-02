@@ -190,7 +190,7 @@ impl HostKindV1 {
             // and Copilot publishes no third-party hook surface at all, so
             // persisting a hook key for any of them would name a spool no event
             // can ever reach.
-            Self::DevinLocal | Self::ClineFamily | Self::Gemini | Self::Copilot => None,
+            Self::Devin | Self::ClineFamily | Self::Gemini | Self::Copilot => None,
             Self::Cline => Some(NativeHostIdentityV1::Cline),
             Self::RooCode => Some(NativeHostIdentityV1::RooCode),
             Self::Kilo => Some(NativeHostIdentityV1::Kilo),
@@ -253,9 +253,9 @@ pub fn host_descriptor_v1(host: HostKindV1) -> HostDescriptorV1 {
             Managed,
             CodexProjectDirectory,
         ),
-        HostKindV1::DevinLocal => (
+        HostKindV1::Devin => (
             "devin",
-            "devin-local",
+            "devin",
             NotApplicable,
             vec![ContextMcp],
             ManagedEmbedded,

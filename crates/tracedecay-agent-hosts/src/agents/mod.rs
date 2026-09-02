@@ -675,9 +675,9 @@ pub fn available_integrations() -> Vec<&'static str> {
 
 #[cfg(test)]
 #[test]
-fn devin_local_is_a_registered_independent_agent() {
-    let integration = get_integration("devin").expect("Devin Local integration is registered");
-    assert_eq!(integration.name(), "Devin Local");
+fn devin_is_a_registered_independent_agent() {
+    let integration = get_integration("devin").expect("Devin integration is registered");
+    assert_eq!(integration.name(), "Devin");
     assert!(available_integrations().contains(&"devin"));
 }
 
@@ -688,7 +688,7 @@ pub fn integration_id_for_host(host: host_bundle_v2::HostKindV1) -> &'static str
             "cursor"
         }
         host_bundle_v2::HostKindV1::Codex => "codex",
-        host_bundle_v2::HostKindV1::DevinLocal => "devin",
+        host_bundle_v2::HostKindV1::Devin => "devin",
         host_bundle_v2::HostKindV1::Hermes => "hermes",
         host_bundle_v2::HostKindV1::Kiro => "kiro",
         host_bundle_v2::HostKindV1::ClineFamily => "cline",
