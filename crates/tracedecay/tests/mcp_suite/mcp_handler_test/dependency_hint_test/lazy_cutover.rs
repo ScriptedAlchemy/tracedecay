@@ -51,7 +51,7 @@ fn assert_generation_advanced_retry(response: &Value) {
 fn code_generation(payload: &Value) -> &str {
     payload["code_generation"]
         .as_str()
-        .expect("search response code generation")
+        .unwrap_or_else(|| panic!("search response code generation: {payload}"))
 }
 
 async fn exact_symbol_payload(server: &McpServer, arguments: Value) -> Value {
@@ -83,7 +83,7 @@ async fn exact_symbol_explicit_lazy_admission_advances_generation_then_retry_fin
         "the ignored dependency must be absent before explicit admission: {zero}"
     );
     let after_zero =
-        search_payload(&server, json!({"query": "GenerationAnchor", "limit": 1})).await;
+        wait_for_search_payload(&server, json!({"query": "GenerationAnchor", "limit": 1})).await;
     assert_eq!(code_generation(&after_zero), code_generation(&before));
 
     let arguments = json!({
@@ -99,7 +99,8 @@ async fn exact_symbol_explicit_lazy_admission_advances_generation_then_retry_fin
     .await;
     assert_generation_advanced_retry(&first);
 
-    let after = search_payload(&server, json!({"query": "GenerationAnchor", "limit": 1})).await;
+    let after =
+        wait_for_search_payload(&server, json!({"query": "GenerationAnchor", "limit": 1})).await;
     assert_ne!(
         code_generation(&after),
         code_generation(&before),
@@ -142,7 +143,7 @@ async fn search_explicit_lazy_admission_advances_generation_then_retry_finds_dep
         "the ignored dependency must be absent before explicit admission: {zero}"
     );
     let after_zero =
-        search_payload(&server, json!({"query": "GenerationAnchor", "limit": 1})).await;
+        wait_for_search_payload(&server, json!({"query": "GenerationAnchor", "limit": 1})).await;
     assert_eq!(code_generation(&after_zero), code_generation(&before));
 
     let arguments = json!({
@@ -154,7 +155,7 @@ async fn search_explicit_lazy_admission_advances_generation_then_retry_finds_dep
         handle_real_server_tool_call_raw(&server, "tracedecay_search", arguments.clone()).await;
     assert_generation_advanced_retry(&first);
 
-    let retry = search_payload(&server, arguments.clone()).await;
+    let retry = wait_for_search_payload(&server, arguments.clone()).await;
     assert_ne!(
         code_generation(&retry),
         code_generation(&before),
@@ -189,7 +190,7 @@ async fn search_explicit_lazy_admission_advances_generation_then_retry_finds_dep
             })),
         "the returned chunk must retain its exact generation, chunk, and file occurrence: {retry}"
     );
-    let stable = search_payload(&server, arguments).await;
+    let stable = wait_for_search_payload(&server, arguments).await;
     assert_eq!(
         code_generation(&stable),
         code_generation(&retry),

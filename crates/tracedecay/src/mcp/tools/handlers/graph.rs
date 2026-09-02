@@ -235,24 +235,41 @@ where
     // the tool return nothing for the whole session (any serve launched from a
     // subdirectory sets a scope), so run the search and report below that the
     // scope was not honored rather than silently implying it was.
-    let search = execute_code_index_search(
-        search_executor,
-        crate::mcp::server::CodeIndexSearchRequestV1 {
-            project_root: cg.project_root().to_path_buf(),
-            query: query.to_owned(),
-            source_revision: None,
-            source_tree: None,
-            source_reference: None,
-            limit,
-            cursor,
-            mode: semantic_mode,
-            authority: search_authority.cloned(),
-            deadline: deadline.clone(),
-            cancellation: cancellation.clone(),
-        },
-    );
-    let (outcome, graph) =
-        race_primary_search_with_graph(search, graph, lazy_indexing_requested).await;
+    let search_request = crate::mcp::server::CodeIndexSearchRequestV1 {
+        project_root: cg.project_root().to_path_buf(),
+        query: query.to_owned(),
+        source_revision: None,
+        source_tree: None,
+        source_reference: None,
+        limit,
+        cursor,
+        mode: semantic_mode,
+        authority: search_authority.cloned(),
+        deadline: deadline.clone(),
+        cancellation: cancellation.clone(),
+    };
+    let search = execute_code_index_search(search_executor, search_request.clone());
+    let (mut outcome, graph) = race_primary_search_with_graph(
+        search,
+        graph,
+        lazy_indexing_requested,
+        Some(limit),
+        scope_prefix.is_some(),
+    )
+    .await;
+    if graph.is_ok()
+        && matches!(
+            &outcome,
+            crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(complete)
+                if scope_prefix.is_some()
+                    || dependency_hints::should_check_external_import_hint(
+                        complete.ordered_candidates.len(),
+                        limit,
+                    )
+        )
+    {
+        outcome = execute_code_index_search(search_executor, search_request).await;
+    }
     match outcome {
         crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(complete) => {
             let graph = bind_verified_graph_to_search(graph, &complete.code_generation);
@@ -329,7 +346,8 @@ where
             if let Some(unavailable) = graph_evidence.unavailable() {
                 output["verified_graph_evidence"] = unavailable.clone();
             }
-            if dependency_hints::should_check_external_import_hint(result_count, limit)
+            if (scope_prefix.is_some()
+                || dependency_hints::should_check_external_import_hint(result_count, limit))
                 && let Some(hint) = graph_evidence
                     .external_import_hint(
                         query,
@@ -742,7 +760,7 @@ where
         },
     );
     let memory = context_memory_outcome(cg, task, &memory_options, memory_read_control.as_ref());
-    let search_and_graph = race_primary_search_with_graph(search, graph, false);
+    let search_and_graph = race_primary_search_with_graph(search, graph, false, None, false);
     let ((outcome, graph), memory_outcome) = tokio::join!(search_and_graph, memory);
     let strict_semantic_unavailable = semantic_mode
         == crate::mcp::server::CodeIndexSearchModeV1::StrictSemantic

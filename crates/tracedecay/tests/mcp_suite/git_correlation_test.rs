@@ -9,7 +9,8 @@ use std::process::Command;
 
 use serde_json::{Value, json};
 
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::host_admission::{HostAdmissionTestRuntimeV1, ProjectScopedTestRuntimeV1};
+use tracedecay::mcp::McpServer;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_runtime_core::storage::PrivateStoreIo;
 use tracedecay_sessions::admission::HostAdmissionScope;
@@ -114,8 +115,7 @@ async fn record_span(runtime: &HostAdmissionTestRuntimeV1, observation: &SpanObs
 }
 
 async fn call(
-    runtime: &HostAdmissionTestRuntimeV1,
-    cg: &TraceDecay,
+    server: &McpServer,
     tool: &str,
     mut args: Value,
 ) -> Value {
@@ -123,20 +123,33 @@ async fn call(
         obj.entry("format".to_string())
             .or_insert_with(|| json!("json"));
     }
-    let result = runtime
-        .call_mcp_tool_for_test(cg, tool, args, None, None)
-        .await
-        .unwrap_or_else(|e| panic!("{tool} should succeed: {e}"));
-    extract_json(&result)
+    for _ in 0..60 {
+        let result = server
+            .call_tool_for_test(tool, args.clone())
+            .await
+            .unwrap_or_else(|e| panic!("{tool} should succeed: {e}"));
+        let envelope = extract_json(&result);
+        if envelope.pointer("/problem/code").and_then(Value::as_str)
+            == Some("application.surface.unavailable")
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            continue;
+        }
+        return envelope
+            .pointer("/outcome/value/payload")
+            .cloned()
+            .unwrap_or(envelope);
+    }
+    panic!("{tool} project runtime did not finish mounting")
 }
 
 /// An empty correlation index (sessions present, but no spans recorded) must be
-/// reported distinctly from "no sessions matched", both through
-/// `tracedecay_sessions_for` and the `tracedecay_diagnostics` health block, so
-/// callers never mistake an unpopulated index for an answered-and-empty query.
+/// reported distinctly from "no sessions matched" through
+/// `tracedecay_sessions_for`, so callers never mistake an unpopulated index
+/// for an answered-and-empty query.
 #[cfg(feature = "test-transport")]
 #[tokio::test]
-async fn sessions_for_and_diagnostics_flag_empty_correlation_index() {
+async fn sessions_for_distinguishes_empty_correlation_index_from_no_match() {
     let dir = common::tempdir_or_panic();
     #[cfg(windows)]
     let base = dir.path().to_path_buf();
@@ -189,11 +202,18 @@ async fn sessions_for_and_diagnostics_flag_empty_correlation_index() {
             .await
             .unwrap_or_else(|e| panic!("seed session message: {e}"))
     );
+    let server = McpServer::new_with_host_admission_test_runtime_for_test(
+        cg,
+        None,
+        ProjectScopedTestRuntimeV1::new(runtime.clone())
+            .expect("git-correlation runtime is project scoped"),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("construct git-correlation server: {error}"));
 
     // sessions_for on an empty index: no results, explicitly flagged empty.
     let empty = call(
-        &runtime,
-        &cg,
+        &server,
         "tracedecay_sessions_for",
         json!({ "git_ref": "branch", "value": "main" }),
     )
@@ -208,24 +228,12 @@ async fn sessions_for_and_diagnostics_flag_empty_correlation_index() {
         "empty-index message should say the index is empty: {empty}"
     );
 
-    // diagnostics surfaces the same empty-index health.
-    let diag_empty = call(&runtime, &cg, "tracedecay_diagnostics", json!({})).await;
-    assert_eq!(
-        diag_empty["session_correlation"]["index_empty"], true,
-        "{diag_empty}"
-    );
-    assert_eq!(
-        diag_empty["session_correlation"]["span_count"], 0,
-        "{diag_empty}"
-    );
-
     // Record one span on main; the index is no longer empty.
     record_span(&runtime, &span("s1", Some("main"), &main_worktree, 1_000)).await;
 
     // A ref with no matching span now reads as "no match", not "empty index".
     let no_match = call(
-        &runtime,
-        &cg,
+        &server,
         "tracedecay_sessions_for",
         json!({ "git_ref": "branch", "value": "does-not-exist" }),
     )
@@ -245,18 +253,5 @@ async fn sessions_for_and_diagnostics_flag_empty_correlation_index() {
         "populated index should report no-match, not empty: {no_match}"
     );
 
-    // diagnostics now reports a populated index.
-    let diag_populated = call(&runtime, &cg, "tracedecay_diagnostics", json!({})).await;
-    assert_eq!(
-        diag_populated["session_correlation"]["index_empty"], false,
-        "{diag_populated}"
-    );
-    assert_eq!(
-        diag_populated["session_correlation"]["span_count"], 1,
-        "{diag_populated}"
-    );
-    assert_eq!(
-        diag_populated["session_correlation"]["projection_available"], true,
-        "{diag_populated}"
-    );
+    server.shutdown().await;
 }

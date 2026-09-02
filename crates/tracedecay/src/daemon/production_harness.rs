@@ -301,6 +301,7 @@ async fn mount_production_composition_projects(
     project_roots: Vec<PathBuf>,
     profile_root: &Path,
     scope_prefix: Option<String>,
+    wait_for_code_index: bool,
 ) -> Result<(HashMap<PathBuf, Arc<crate::mcp::McpServer>>, bool)> {
     let client_identity = DaemonClientIdentity {
         profile_root: profile_root.to_path_buf(),
@@ -316,6 +317,7 @@ async fn mount_production_composition_projects(
                 &client_identity,
                 scope_prefix.as_deref(),
                 index,
+                wait_for_code_index,
             ))
             .await?;
         semantic_auto_download_enabled |= project_semantic;
@@ -331,6 +333,7 @@ async fn mount_one_production_composition_project(
     client_identity: &DaemonClientIdentity,
     scope_prefix: Option<&str>,
     index: usize,
+    wait_for_code_index: bool,
 ) -> Result<(PathBuf, Arc<crate::mcp::McpServer>, bool)> {
     let handshake = DaemonHandshake {
         client_version: binary_version()?.to_owned(),
@@ -376,23 +379,25 @@ async fn mount_one_production_composition_project(
             })
         })
         .await?;
-    let code_search_scope = {
-        let graph = composition.server.cg().await;
-        let target = graph.configuration_runtime().configuration_target();
-        tracedecay_code_index_runtime::resolved_scope_for_project(
-            graph.project_root(),
-            &target.project_id,
-        )
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("production-composition code-index scope is invalid: {error:?}"),
-        })?
-    };
-    Box::pin(wait_for_production_composition_code_index(
-        &stores.invocation,
-        &composition.canonical_project_path,
-        &code_search_scope,
-    ))
-    .await?;
+    if wait_for_code_index {
+        let code_search_scope = {
+            let graph = composition.server.cg().await;
+            let target = graph.configuration_runtime().configuration_target();
+            tracedecay_code_index_runtime::resolved_scope_for_project(
+                graph.project_root(),
+                &target.project_id,
+            )
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("production-composition code-index scope is invalid: {error:?}"),
+            })?
+        };
+        Box::pin(wait_for_production_composition_code_index(
+            &stores.invocation,
+            &composition.canonical_project_path,
+            &code_search_scope,
+        ))
+        .await?;
+    }
     let semantic_auto_download_enabled =
         composition
             .semantic_auto_download_enabled
@@ -432,6 +437,25 @@ impl ProductionProjectCompositionHarnessV1 {
             live_profile_root,
             None,
             false,
+            true,
+        )
+    }
+
+    /// Opens the production composition without making unrelated code-index
+    /// readiness a precondition for session-only lifecycle journeys.
+    #[doc(hidden)]
+    pub fn open_for_session_retrieval(
+        isolation_root: impl AsRef<Path>,
+        project_roots: impl IntoIterator<Item = PathBuf>,
+    ) -> ProductionHarnessOpenFuture {
+        let live_profile_root = crate::config::user_data_dir().filter(|path| path.exists());
+        Self::open_with_live_profile_root(
+            isolation_root.as_ref().to_path_buf(),
+            project_roots.into_iter().collect(),
+            live_profile_root,
+            None,
+            false,
+            false,
         )
     }
 
@@ -447,6 +471,7 @@ impl ProductionProjectCompositionHarnessV1 {
             live_profile_root,
             Some(scope_prefix.into()),
             false,
+            true,
         )
     }
 
@@ -456,6 +481,7 @@ impl ProductionProjectCompositionHarnessV1 {
         live_profile_root: Option<PathBuf>,
         scope_prefix: Option<String>,
         long_lived_session_maintenance_for_test: bool,
+        wait_for_code_index: bool,
     ) -> ProductionHarnessOpenFuture {
         // Embedded test compositions never pass through the binary's
         // product-runtime registration, so the canonical fixture is this
@@ -481,6 +507,7 @@ impl ProductionProjectCompositionHarnessV1 {
                     isolated.project_roots,
                     &isolated.profile_root,
                     scope_prefix,
+                    wait_for_code_index,
                 ))
                 .await?;
             Ok(Self {
@@ -512,6 +539,7 @@ impl ProductionProjectCompositionHarnessV1 {
             Some(live_profile_root),
             None,
             false,
+            true,
         )
     }
 
@@ -525,6 +553,7 @@ impl ProductionProjectCompositionHarnessV1 {
             project_roots.into_iter().collect(),
             None,
             None,
+            true,
             true,
         )
     }

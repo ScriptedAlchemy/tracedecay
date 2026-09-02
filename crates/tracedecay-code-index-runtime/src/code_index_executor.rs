@@ -827,6 +827,14 @@ where
                         QuerySearchExecutionErrorV1::AuthorityUnavailable
                         | QuerySearchExecutionErrorV1::Authority(
                             tracedecay_query::retrieval::QueryAuthorityErrorV1::AuthorityUnavailable,
+                        )
+                        | QuerySearchExecutionErrorV1::Retrieval(
+                            tracedecay_query::retrieval::RetrievalPortError::AuthorityUnavailable(_),
+                        )
+                        | QuerySearchExecutionErrorV1::Authority(
+                            tracedecay_query::retrieval::QueryAuthorityErrorV1::Retrieval(
+                                tracedecay_domain::RetrievalError::AuthorityUnavailable(_),
+                            ),
                         ) => (
                             code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
                             code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable

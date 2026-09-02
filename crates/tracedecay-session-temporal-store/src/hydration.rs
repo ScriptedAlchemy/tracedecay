@@ -294,7 +294,6 @@ struct SessionHydrationRelationAuthority<'snapshot> {
 }
 
 impl<'snapshot> GlobalDbHydrationBackend<'snapshot> {
-    #[cfg(test)]
     #[hotpath::skip]
     pub const fn new_registered(
         read: &'snapshot DatabaseEngineReadSnapshot,
@@ -326,7 +325,6 @@ pub type GlobalDbTemporalHydrationPort<'snapshot> =
     SessionTemporalHydrationAdapter<GlobalDbHydrationBackend<'snapshot>>;
 
 impl<'snapshot> SessionTemporalHydrationAdapter<GlobalDbHydrationBackend<'snapshot>> {
-    #[cfg(test)]
     #[hotpath::skip]
     pub const fn for_registered_snapshot(
         read: &'snapshot DatabaseEngineReadSnapshot,

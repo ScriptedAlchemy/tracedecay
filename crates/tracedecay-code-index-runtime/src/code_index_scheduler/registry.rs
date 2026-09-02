@@ -4171,15 +4171,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let _activation = activation
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if worktree.query_activation_revision.as_ref() != Some(expected_revision)
-            || worktree
-                .query_activation_redundancy
-                .as_ref()
-                .map(
-                    tracedecay_usecases::semantic_runtime::PreparedSemanticRedundancyAuthorityV1::configuration_revision,
-                )
-                != Some(expected_revision)
-        {
+        if worktree.query_activation_revision.as_ref() != Some(expected_revision) {
             return Err(CodeIndexSchedulerErrorV1::Identity(
                 "committed query fallback revision is no longer desired".to_owned(),
             ));
@@ -5578,7 +5570,6 @@ impl CodeIndexSchedulerRegistryV1 {
     /// [`Self::latest_generation_id`], which prefers the graph-bearing serving
     /// slot and therefore stays on the previous generation until optional
     /// graph activation finishes.
-    #[cfg(test)]
     pub async fn latest_text_serving_for_root(
         &self,
         project_root: &Path,
