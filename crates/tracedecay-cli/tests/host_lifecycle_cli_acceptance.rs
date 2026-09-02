@@ -50,6 +50,11 @@ const CODEX_CONFIGS: &[(&str, &[u8])] = &[(
     ".codex/config.toml",
     b"# operator comment\nmodel = \"o4-mini\" # keep inline\napproval_policy = \"on-failure\"\n\n[mcp_servers.foreign]\ncommand = \"foreign-bin\"\nargs = [\"--stdio\"]\n",
 )];
+const DEVIN_CONFIGS: &[(&str, &[u8])] = &[(
+    ".config/devin/mcp_config.json",
+    br#"{"mcpServers":{"foreign":{"command":"foreign-bin","args":["serve"]}},"ui":{"theme":"dark"}}
+"#,
+)];
 const HERMES_CONFIGS: &[(&str, &[u8])] = &[
     (
         ".hermes/config.yaml",
@@ -150,6 +155,7 @@ fn host_case(host: HostKindV1) -> HostCase {
         HostKindV1::ClaudeCode => CLAUDE_CONFIGS,
         HostKindV1::CursorDesktop => CURSOR_CONFIGS,
         HostKindV1::Codex => CODEX_CONFIGS,
+        HostKindV1::DevinLocal => DEVIN_CONFIGS,
         HostKindV1::Hermes => HERMES_CONFIGS,
         HostKindV1::Kiro => KIRO_CONFIGS,
         HostKindV1::KimiCode => &[],
@@ -262,6 +268,7 @@ fn assert_success(host: &str, phase: &str, output: Output) {
 fn assert_documented_mcp_registration(case: HostCase, cli: &IsolatedCli) {
     let (relative, root) = match case.host {
         HostKindV1::Cline => (".cline/mcp.json", "mcpServers"),
+        HostKindV1::DevinLocal => (".config/devin/mcp_config.json", "mcpServers"),
         HostKindV1::RooCode => (
             ".config/Code/User/globalStorage/rooveterinaryinc.roo-cline/settings/cline_mcp_settings.json",
             "mcpServers",
@@ -277,7 +284,7 @@ fn assert_documented_mcp_registration(case: HostCase, cli: &IsolatedCli) {
         case.id
     );
     let theme = match case.host {
-        HostKindV1::Cline | HostKindV1::RooCode => &config["ui"]["theme"],
+        HostKindV1::Cline | HostKindV1::DevinLocal | HostKindV1::RooCode => &config["ui"]["theme"],
         HostKindV1::Kilo => &config["theme"],
         _ => unreachable!(),
     };
@@ -292,6 +299,14 @@ fn assert_documented_mcp_registration(case: HostCase, cli: &IsolatedCli) {
             assert_eq!(entry["args"], serde_json::json!(["serve"]));
             assert_eq!(entry["disabled"], false);
             assert_eq!(entry["autoApprove"], serde_json::json!([]));
+        }
+        HostKindV1::DevinLocal => {
+            assert_eq!(
+                entry["command"],
+                serde_json::json!(cli.bin_dir.join("tracedecay"))
+            );
+            assert_eq!(entry["args"], serde_json::json!(["serve"]));
+            assert_eq!(entry["env"], serde_json::json!({}));
         }
         HostKindV1::RooCode => {
             assert_eq!(
@@ -519,6 +534,7 @@ fn native_feedback(case: HostCase) -> Vec<(&'static str, &'static str, Vec<u8>)>
             ]
         }
         HostKindV1::Kiro
+        | HostKindV1::DevinLocal
         | HostKindV1::Gemini
         | HostKindV1::Copilot
         | HostKindV1::Cline
@@ -555,7 +571,12 @@ fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
     // keeps one representative for each distinct lifecycle shape: OpenCode's
     // config-native bundle, Cline's MCP-only bundle, and Hermes' standalone
     // core integration.
-    for host in [HostKindV1::OpenCode, HostKindV1::Cline, HostKindV1::Hermes] {
+    for host in [
+        HostKindV1::OpenCode,
+        HostKindV1::Cline,
+        HostKindV1::DevinLocal,
+        HostKindV1::Hermes,
+    ] {
         let case = host_case(host);
         assert!(!lifecycle_requires_absent_host_binary(case.host));
         let cli = IsolatedCli::new();
@@ -724,6 +745,40 @@ fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
                 })
         );
     }
+}
+
+#[test]
+fn production_cli_installs_devin_project_mcp_without_touching_siblings() {
+    let cli = IsolatedCli::new();
+    let config = cli.project.path().join(".devin/mcp_config.json");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    fs::write(
+        &config,
+        br#"{"mcpServers":{"foreign":{"command":"foreign-bin"}},"ui":{"theme":"dark"}}"#,
+    )
+    .unwrap();
+
+    assert_success(
+        "devin",
+        "project install",
+        cli.run(&["install", "--agent", "devin", "--local"]),
+    );
+
+    let config: serde_json::Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
+    assert_eq!(config["ui"]["theme"], "dark");
+    assert_eq!(config["mcpServers"]["foreign"]["command"], "foreign-bin");
+    assert_eq!(
+        config["mcpServers"]["tracedecay"]["command"],
+        serde_json::json!(cli.bin_dir.join("tracedecay"))
+    );
+    assert_eq!(
+        config["mcpServers"]["tracedecay"]["args"],
+        serde_json::json!(["serve"])
+    );
+    assert_eq!(
+        config["mcpServers"]["tracedecay"]["env"],
+        serde_json::json!({})
+    );
 }
 
 #[test]

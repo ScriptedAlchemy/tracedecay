@@ -59,7 +59,10 @@ fn native_identities_preserve_provider_specific_hosts() {
             // reports `None` here and a `Native`/`Unavailable` mapping below is
             // still an incoherent projection and still panics.
             (
-                HostKindV1::ClineFamily | HostKindV1::Gemini | HostKindV1::Copilot,
+                HostKindV1::DevinLocal
+                | HostKindV1::ClineFamily
+                | HostKindV1::Gemini
+                | HostKindV1::Copilot,
                 None,
                 HostHookMappingV1::NotApplicable,
             ) => {}
@@ -149,6 +152,13 @@ fn activation_and_registration_never_invent_unsupported_routes() {
             HostProjectRegistrationPathV1::Unavailable
         );
     }
+
+    let devin = HostKindV1::DevinLocal.descriptor();
+    assert_eq!(devin.components(), &[HostComponentV1::ContextMcp]);
+    assert_eq!(
+        devin.project_registration_path().relative_path(),
+        Some(".devin")
+    );
 
     let kimi = HostKindV1::KimiCode.descriptor();
     assert_eq!(

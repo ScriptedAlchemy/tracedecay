@@ -279,6 +279,7 @@ fn stock_host_kinds_project_only_fixture_backed_observation_integrations() {
             "cursor_desktop",
             "cursor_cloud",
             "codex",
+            "devin_local",
             "hermes",
             "kiro",
             "cline_family",
@@ -314,6 +315,7 @@ fn stock_host_kinds_project_only_fixture_backed_observation_integrations() {
     );
     for host in [
         HostKindV1::CursorCloud,
+        HostKindV1::DevinLocal,
         HostKindV1::ClineFamily,
         HostKindV1::Cline,
         HostKindV1::RooCode,

@@ -34,6 +34,7 @@ pub enum HostKindV1 {
     CursorDesktop,
     CursorCloud,
     Codex,
+    DevinLocal,
     Hermes,
     Kiro,
     ClineFamily,
@@ -47,11 +48,12 @@ pub enum HostKindV1 {
 }
 
 impl HostKindV1 {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::ClaudeCode,
         Self::CursorDesktop,
         Self::CursorCloud,
         Self::Codex,
+        Self::DevinLocal,
         Self::Hermes,
         Self::Kiro,
         Self::ClineFamily,
@@ -73,7 +75,8 @@ impl HostKindV1 {
             Self::Codex => Some(HostIntegrationIdV1::Codex),
             Self::Hermes => Some(HostIntegrationIdV1::Hermes),
             Self::Kiro => Some(HostIntegrationIdV1::Kiro),
-            Self::CursorCloud
+            Self::DevinLocal
+            | Self::CursorCloud
             | Self::ClineFamily
             | Self::Cline
             | Self::RooCode
@@ -173,6 +176,15 @@ const fn canonical_stock_host_capabilities(host: HostKindV1) -> [HostCapabilityR
             Unavailable(HostRegistrationUnsupported),
             Unavailable(HostApiAbsent),
             Supported,
+            Supported,
+            Supported,
+        ),
+        // Devin Local owns local stdio MCP registration but exposes no
+        // TraceDecay-specific diagnostic or hook registration surface.
+        HostKindV1::DevinLocal => (
+            Unavailable(HostRegistrationUnsupported),
+            Unavailable(HostApiAbsent),
+            Unavailable(CheckedInEvidenceMissing),
             Supported,
             Supported,
         ),
@@ -482,16 +494,17 @@ impl HostIntegrationCatalogV1 {
             HostKindV1::CursorDesktop => &STOCK_HOST_CAPABILITIES[1],
             HostKindV1::CursorCloud => &STOCK_HOST_CAPABILITIES[2],
             HostKindV1::Codex => &STOCK_HOST_CAPABILITIES[3],
-            HostKindV1::Hermes => &STOCK_HOST_CAPABILITIES[4],
-            HostKindV1::Kiro => &STOCK_HOST_CAPABILITIES[5],
-            HostKindV1::ClineFamily => &STOCK_HOST_CAPABILITIES[6],
-            HostKindV1::Cline => &STOCK_HOST_CAPABILITIES[7],
-            HostKindV1::RooCode => &STOCK_HOST_CAPABILITIES[8],
-            HostKindV1::Kilo => &STOCK_HOST_CAPABILITIES[9],
-            HostKindV1::KimiCode => &STOCK_HOST_CAPABILITIES[10],
-            HostKindV1::OpenCode => &STOCK_HOST_CAPABILITIES[11],
-            HostKindV1::Gemini => &STOCK_HOST_CAPABILITIES[12],
-            HostKindV1::Copilot => &STOCK_HOST_CAPABILITIES[13],
+            HostKindV1::DevinLocal => &STOCK_HOST_CAPABILITIES[4],
+            HostKindV1::Hermes => &STOCK_HOST_CAPABILITIES[5],
+            HostKindV1::Kiro => &STOCK_HOST_CAPABILITIES[6],
+            HostKindV1::ClineFamily => &STOCK_HOST_CAPABILITIES[7],
+            HostKindV1::Cline => &STOCK_HOST_CAPABILITIES[8],
+            HostKindV1::RooCode => &STOCK_HOST_CAPABILITIES[9],
+            HostKindV1::Kilo => &STOCK_HOST_CAPABILITIES[10],
+            HostKindV1::KimiCode => &STOCK_HOST_CAPABILITIES[11],
+            HostKindV1::OpenCode => &STOCK_HOST_CAPABILITIES[12],
+            HostKindV1::Gemini => &STOCK_HOST_CAPABILITIES[13],
+            HostKindV1::Copilot => &STOCK_HOST_CAPABILITIES[14],
         }
     }
 
@@ -582,11 +595,12 @@ impl HostIntegrationCatalogV1 {
     }
 }
 
-const STOCK_HOST_CAPABILITIES: [[HostCapabilityRecordV1; 5]; 14] = [
+const STOCK_HOST_CAPABILITIES: [[HostCapabilityRecordV1; 5]; 15] = [
     canonical_stock_host_capabilities(HostKindV1::ClaudeCode),
     canonical_stock_host_capabilities(HostKindV1::CursorDesktop),
     canonical_stock_host_capabilities(HostKindV1::CursorCloud),
     canonical_stock_host_capabilities(HostKindV1::Codex),
+    canonical_stock_host_capabilities(HostKindV1::DevinLocal),
     canonical_stock_host_capabilities(HostKindV1::Hermes),
     canonical_stock_host_capabilities(HostKindV1::Kiro),
     canonical_stock_host_capabilities(HostKindV1::ClineFamily),
