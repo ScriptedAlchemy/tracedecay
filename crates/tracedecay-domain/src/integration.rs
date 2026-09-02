@@ -34,7 +34,7 @@ pub enum HostKindV1 {
     CursorDesktop,
     CursorCloud,
     Codex,
-    DevinLocal,
+    Devin,
     Hermes,
     Kiro,
     ClineFamily,
@@ -53,7 +53,7 @@ impl HostKindV1 {
         Self::CursorDesktop,
         Self::CursorCloud,
         Self::Codex,
-        Self::DevinLocal,
+        Self::Devin,
         Self::Hermes,
         Self::Kiro,
         Self::ClineFamily,
@@ -75,7 +75,7 @@ impl HostKindV1 {
             Self::Codex => Some(HostIntegrationIdV1::Codex),
             Self::Hermes => Some(HostIntegrationIdV1::Hermes),
             Self::Kiro => Some(HostIntegrationIdV1::Kiro),
-            Self::DevinLocal
+            Self::Devin
             | Self::CursorCloud
             | Self::ClineFamily
             | Self::Cline
@@ -179,9 +179,9 @@ const fn canonical_stock_host_capabilities(host: HostKindV1) -> [HostCapabilityR
             Supported,
             Supported,
         ),
-        // Devin Local owns local stdio MCP registration but exposes no
+    // Devin owns local stdio MCP registration but exposes no
         // TraceDecay-specific diagnostic or hook registration surface.
-        HostKindV1::DevinLocal => (
+        HostKindV1::Devin => (
             Unavailable(HostRegistrationUnsupported),
             Unavailable(HostApiAbsent),
             Unavailable(CheckedInEvidenceMissing),
@@ -494,7 +494,7 @@ impl HostIntegrationCatalogV1 {
             HostKindV1::CursorDesktop => &STOCK_HOST_CAPABILITIES[1],
             HostKindV1::CursorCloud => &STOCK_HOST_CAPABILITIES[2],
             HostKindV1::Codex => &STOCK_HOST_CAPABILITIES[3],
-            HostKindV1::DevinLocal => &STOCK_HOST_CAPABILITIES[4],
+        HostKindV1::Devin => &STOCK_HOST_CAPABILITIES[4],
             HostKindV1::Hermes => &STOCK_HOST_CAPABILITIES[5],
             HostKindV1::Kiro => &STOCK_HOST_CAPABILITIES[6],
             HostKindV1::ClineFamily => &STOCK_HOST_CAPABILITIES[7],
@@ -600,7 +600,7 @@ const STOCK_HOST_CAPABILITIES: [[HostCapabilityRecordV1; 5]; 15] = [
     canonical_stock_host_capabilities(HostKindV1::CursorDesktop),
     canonical_stock_host_capabilities(HostKindV1::CursorCloud),
     canonical_stock_host_capabilities(HostKindV1::Codex),
-    canonical_stock_host_capabilities(HostKindV1::DevinLocal),
+        canonical_stock_host_capabilities(HostKindV1::Devin),
     canonical_stock_host_capabilities(HostKindV1::Hermes),
     canonical_stock_host_capabilities(HostKindV1::Kiro),
     canonical_stock_host_capabilities(HostKindV1::ClineFamily),

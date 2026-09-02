@@ -289,7 +289,7 @@ impl CatalogHostComponentRegistrationAuthority {
     ) -> CatalogRegistrationMode {
         if component_set.host == crate::agents::host_bundle_v2::HostKindV1::ClaudeCode
             || component_set.host == crate::agents::host_bundle_v2::HostKindV1::Codex
-            || component_set.host == crate::agents::host_bundle_v2::HostKindV1::DevinLocal
+            || component_set.host == crate::agents::host_bundle_v2::HostKindV1::Devin
             || component_set.host == crate::agents::host_bundle_v2::HostKindV1::Hermes
             || component_set.host == crate::agents::host_bundle_v2::HostKindV1::KimiCode
             || component_set.host == crate::agents::host_bundle_v2::HostKindV1::Kiro
