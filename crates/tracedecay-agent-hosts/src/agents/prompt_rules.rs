@@ -13,6 +13,7 @@ pub(crate) const PROMPT_RULE_MARKER: &str = "## Prefer tracedecay MCP tools";
 
 /// Managed-skill index marker; strip heuristics stop here.
 pub(crate) const SKILL_INDEX_START: &str = "<!-- TRACEDECAY MANAGED SKILLS START -->";
+const SKILL_INDEX_START_PREFIX: &str = "<!-- TRACEDECAY MANAGED SKILLS START";
 
 /// Canonical rules paragraphs shared by the standard hosts.
 const STANDARD_PARAGRAPHS: &[&str] = &[
@@ -74,7 +75,7 @@ pub fn cli_fallback_paragraph() -> &'static str {
 /// whichever comes first.
 fn heading_block_end(contents: &str, search_from: usize) -> usize {
     let heading = contents[search_from..].find("\n## ");
-    let skill_index = contents[search_from..].find(SKILL_INDEX_START);
+    let skill_index = contents[search_from..].find(SKILL_INDEX_START_PREFIX);
     let relative = match (heading, skill_index) {
         (Some(h), Some(s)) => h.min(s),
         (Some(h), None) => h,
@@ -314,5 +315,29 @@ mod tests {
             foreign,
             "a stale refresh must not overwrite foreign bytes"
         );
+    }
+
+    #[test]
+    fn refresh_preserves_a_slugged_managed_skill_index_boundary() {
+        let root = tempfile::tempdir().expect("prompt-rules fixture");
+        let prompt = root.path().join("AGENTS.md");
+        let start = "<!-- TRACEDECAY MANAGED SKILLS START opencode -->";
+        let end = "<!-- TRACEDECAY MANAGED SKILLS END opencode -->";
+        let original = format!(
+            "{PROMPT_RULE_MARKER}\n\nstale managed instructions\n\n\
+             {start}\n## TraceDecay managed skills\n\nmanaged skill\n{end}\n"
+        );
+        fs::write(&prompt, original).expect("original prompt rules");
+
+        reconcile_prompt_rules(&prompt, PROMPT_RULE_MARKER, BLOCK)
+            .expect("refresh must preserve the managed-skill block");
+
+        let refreshed = fs::read_to_string(&prompt).expect("refreshed prompt rules");
+        assert!(
+            refreshed.contains(start),
+            "slugged start marker was removed"
+        );
+        assert!(refreshed.contains(end), "slugged end marker was removed");
+        assert!(refreshed.contains("managed skill"));
     }
 }

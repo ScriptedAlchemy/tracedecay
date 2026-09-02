@@ -94,6 +94,17 @@ impl AgentIntegration for CopilotIntegration {
         Some(vscode_settings_path(home))
     }
 
+    fn host_component_registration(
+        &self,
+        component: super::host_bundle_v2::HostBundleComponentV1,
+        ctx: &HealthcheckContext,
+    ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
+        if component != super::host_bundle_v2::HostBundleComponentV1::ContextMcp {
+            return super::host_bundle_v2::HostBundleRegistrationStateV1::Missing;
+        }
+        copilot_context_mcp_registration_state(&ctx.home)
+    }
+
     /// Mutable registration paths for the exact selected components.
     ///
     /// `ContextMcp` is the CLI-driven half of this integration: the only file
@@ -252,6 +263,32 @@ fn copilot_cli_mcp_config_path(home: &Path) -> PathBuf {
     super::copilot_cli_dir(home).join("mcp-config.json")
 }
 
+fn copilot_context_mcp_registration_state(
+    home: &Path,
+) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
+    let Ok(config_bytes) = std::fs::read(copilot_cli_mcp_config_path(home)) else {
+        return super::host_bundle_v2::HostBundleRegistrationStateV1::Missing;
+    };
+    let Ok(config) = serde_json::from_slice::<serde_json::Value>(&config_bytes) else {
+        return super::host_bundle_v2::HostBundleRegistrationStateV1::Corrupt;
+    };
+    let Some(server) = config
+        .pointer("/mcpServers/tracedecay")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return super::host_bundle_v2::HostBundleRegistrationStateV1::Missing;
+    };
+    let command_is_present = server
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|command| !command.is_empty());
+    if command_is_present && server_args_are_current(server) {
+        super::host_bundle_v2::HostBundleRegistrationStateV1::Current
+    } else {
+        super::host_bundle_v2::HostBundleRegistrationStateV1::Repairable
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Host-CLI-driven MCP registry lifecycle
 // ---------------------------------------------------------------------------
@@ -279,6 +316,10 @@ fn require_copilot_cli() -> Result<PathBuf> {
 /// `HOME` without mutating the process environment.
 #[hotpath::measure(label = "copilot_mcp_install")]
 fn copilot_mcp_add_with(copilot_cli: &Path, home: &Path, tracedecay_bin: &str) -> Result<()> {
+    let config_path = copilot_cli_mcp_config_path(home);
+    if super::mcp_config_has_tracedecay(&config_path, "mcpServers", load_json_file) {
+        copilot_mcp_remove_with(copilot_cli, home)?;
+    }
     let mut args = vec!["mcp", "add", COPILOT_MCP_SERVER_NAME, "--", tracedecay_bin];
     args.extend(MCP_SERVER_ARGS.iter().copied());
     run_mcp_registry_step(copilot_cli, &args, home)
@@ -303,13 +344,27 @@ fn copilot_mcp_remove_with(copilot_cli: &Path, home: &Path) -> Result<()> {
 }
 
 fn run_mcp_registry_step(copilot_cli: &Path, args: &[&str], home: &Path) -> Result<()> {
-    super::host_cli::run_mcp_registry_step(
+    super::host_cli::run_mcp_registry_step_with_peer_projection(
         copilot_cli,
         args,
         home,
         &copilot_cli_mcp_config_path(home),
         COPILOT_MCP_SERVER_NAME,
         "Copilot CLI",
+        |peers| {
+            for server in peers
+                .values_mut()
+                .filter_map(serde_json::Value::as_object_mut)
+            {
+                let default_all_tools = server
+                    .get("tools")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|tools| tools.len() == 1 && tools[0].as_str() == Some("*"));
+                if default_all_tools {
+                    server.remove("tools");
+                }
+            }
+        },
     )
 }
 
