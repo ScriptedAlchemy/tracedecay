@@ -6,9 +6,9 @@ use super::{
     async_runtime_flavor, async_worker_threads, command_profile_label, daemon_cpu_threads_from,
     hotpath_focus_is_valid, hotpath_output_format_is_none, hotpath_output_format_is_valid,
     hotpath_output_path_is_valid, hotpath_requires_protocol_safe_output, is_daemon_run,
-    is_full_component_set_adoption, is_local_install_command, requires_eager_mcp_tool_catalog,
-    should_skip_agent_install_check, should_skip_startup_maintenance, stderr_tracing_default,
-    validate_host_bundle_options,
+    is_full_component_set_adoption, is_local_install_command, normalize_tool_reserved_global_flags,
+    requires_eager_mcp_tool_catalog, should_skip_agent_install_check,
+    should_skip_startup_maintenance, stderr_tracing_default, validate_host_bundle_options,
 };
 use clap::{CommandFactory, Parser};
 use std::iter;
@@ -650,6 +650,29 @@ fn tool_fallback_skips_network_and_agent_startup_maintenance() {
         async_runtime_flavor(Some(&command)),
         AsyncRuntimeFlavor::CurrentThread
     );
+}
+
+#[test]
+fn tool_dry_run_is_forwarded_from_the_global_clap_flag() {
+    let mut cli = Cli::try_parse_from([
+        "tracedecay",
+        "tool",
+        "storage_status",
+        "--dry-run",
+        "--args",
+        "-",
+    ])
+    .expect("tool invocation");
+    assert!(cli.dry_run);
+
+    normalize_tool_reserved_global_flags(&mut cli);
+
+    assert!(!cli.dry_run);
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Tool { args, .. })
+            if args == ["--args", "-", "--dry-run"]
+    ));
 }
 
 #[test]

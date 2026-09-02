@@ -597,7 +597,7 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
     };
     #[cfg(feature = "hotpath")]
     let command_name = command_profile_label(&matches);
-    let cli = match Cli::from_arg_matches(&matches) {
+    let mut cli = match Cli::from_arg_matches(&matches) {
         Ok(cli) => cli,
         Err(error) => {
             let code = error.exit_code();
@@ -605,6 +605,7 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
             return Ok(CommandOutcome::Exit(code));
         }
     };
+    normalize_tool_reserved_global_flags(&mut cli);
     if requires_eager_mcp_tool_catalog(cli.command.as_ref()) {
         tracedecay::agents::register_mcp_tool_catalog_ports()?;
     }
@@ -2000,6 +2001,20 @@ fn is_local_install_command(command: &Commands) -> bool {
 
 fn requires_eager_mcp_tool_catalog(command: Option<&Commands>) -> bool {
     !matches!(command, Some(Commands::Tool { .. }))
+}
+
+fn normalize_tool_reserved_global_flags(cli: &mut Cli) {
+    if !cli.dry_run {
+        return;
+    }
+    let Some(Commands::Tool { args, .. }) = cli.command.as_mut() else {
+        return;
+    };
+    // Clap recognizes the lifecycle-global `--dry-run` before a tool's first
+    // trailing argument. Return it to the tool parser so the documented
+    // reserved flag has the same meaning on either side of `--args`.
+    args.push("--dry-run".to_owned());
+    cli.dry_run = false;
 }
 
 #[cfg(test)]
