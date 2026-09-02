@@ -10,7 +10,7 @@ use tracedecay_mcp::ToolResult;
 
 use super::support::{
     ProductionCompositionFixture, extract_json, extract_text, production_composition_fixture,
-    production_composition_fixture_with_sources,
+    production_composition_fixture_with_sources, wait_for_current_graph,
 };
 
 async fn call_tool(
@@ -37,27 +37,26 @@ async fn call_tool(
 }
 
 async fn resolve_node_id_over_mcp(fixture: &ProductionCompositionFixture, name: &str) -> String {
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production rendering server");
+    wait_for_current_graph(&server).await;
     let result = call_tool(
         fixture,
-        "tracedecay_grep",
-        json!({
-            "pattern": format!("fn {name}"),
-            "fixed_strings": true,
-            "format": "json"
-        }),
+        "tracedecay_find_exact_symbol",
+        json!({"name": name, "limit": 20, "format": "json"}),
     )
     .await;
     let payload = extract_json(&result.value);
-    payload["results"]
+    payload["matches"]
         .as_array()
-        .and_then(|results| {
-            results.iter().find_map(|result| {
-                (result["symbol"].as_str() == Some(name))
-                    .then(|| result["node_id"].as_str().map(str::to_owned))
-                    .flatten()
-            })
+        .and_then(|matches| matches.iter().find(|result| result["name"] == name))
+        .and_then(|result| result["id"].as_str())
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            panic!("node '{name}' missing from production exact-symbol response: {payload}")
         })
-        .unwrap_or_else(|| panic!("node '{name}' missing from production grep response: {payload}"))
 }
 
 #[tokio::test]

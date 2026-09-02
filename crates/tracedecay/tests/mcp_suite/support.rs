@@ -217,23 +217,15 @@ pub(crate) fn extract_real_server_text(result: &Value) -> &str {
         .expect("MCP text result")
 }
 
-/// Polls the daemon-owned code-index search authority through its typed
-/// cold-activation state (`authority_unavailable`) until it answers; any
-/// other failure surfaces immediately through the caller's assertions.
+/// Polls the daemon-owned code-index search authority until an exact
+/// generation is bound and its native code graph is serving.
+///
+/// Search generation publication and native graph publication are distinct
+/// boundaries; graph-facing fixtures require both.
 #[cfg(feature = "test-transport")]
 pub(crate) async fn warm_code_index_search(server: &McpServer, query: &str) {
-    for _ in 0..60 {
-        let result =
-            handle_real_server_tool_call(server, "tracedecay_search", json!({ "query": query }))
-                .await;
-        let payload: Value =
-            serde_json::from_str(extract_real_server_text(&result)).expect("search payload JSON");
-        if payload["reason"].as_str() != Some("authority_unavailable") {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    }
-    panic!("code-index search authority did not activate within the polling budget");
+    wait_for_code_index_generation(server, query).await;
+    wait_for_current_graph(server).await;
 }
 
 /// Poll `tracedecay_search` until it binds a `code_generation`. Authority
@@ -260,9 +252,12 @@ pub(crate) async fn wait_for_code_index_generation(server: &McpServer, query: &s
     panic!("code-index search did not bind a generation within the polling budget: {last}");
 }
 
-/// Poll `tracedecay_status` until `code_index_freshness.status` is `current`.
-/// Same publication contract as
-/// `mcp_handler_test::graph_analysis_test::graph_readiness::wait_for_current_graph`.
+/// Poll `tracedecay_status` until the exact generation is current and its
+/// native code graph is serving.
+///
+/// `code_index_freshness.status = current` permits a graph that is still
+/// pending or unavailable, so graph-facing fixtures must also observe the
+/// canonical `code_graph_serving.state = ready` publication boundary.
 #[cfg(feature = "test-transport")]
 pub(crate) async fn wait_for_current_graph(server: &McpServer) {
     tokio::time::timeout(Duration::from_secs(20), async {
@@ -280,9 +275,22 @@ pub(crate) async fn wait_for_current_graph(server: &McpServer) {
             .await;
             let status: Value = serde_json::from_str(extract_real_server_text(&status))
                 .expect("typed project status JSON");
-            match status["code_index_freshness"]["status"].as_str() {
-                Some("current") => break,
-                Some("warming") => tokio::time::sleep(Duration::from_millis(50)).await,
+            let freshness = &status["code_index_freshness"];
+            let serving = &freshness["worktree"]["code_graph_serving"];
+            match (
+                freshness["status"].as_str(),
+                serving["state"].as_str(),
+                serving["reason"].as_str(),
+            ) {
+                (Some("current"), Some("ready"), _) => break,
+                (Some("warming"), _, _)
+                | (_, Some("pending"), _)
+                | (_, Some("unavailable"), Some("generation_unavailable")) => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                (_, Some("refused"), _) | (_, _, Some("activation_disabled")) => {
+                    panic!("graph readiness was refused: {status}");
+                }
                 actual => panic!("graph readiness became {actual:?}: {status}"),
             }
         }
@@ -855,27 +863,7 @@ async fn call_project_open_source_edit_server(
     tool_name: &str,
     arguments: Value,
 ) -> tracedecay_domain::errors::Result<ToolResult> {
-    let request = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {
-            "name": tool_name,
-            "arguments": arguments,
-        }
-    });
-    let mut transport = CaptureTransport::default();
-    Box::pin(server.handle_and_write(&request.to_string(), &mut transport)).await?;
-    let response: Value =
-        serde_json::from_str(transport.output.trim()).map_err(|error| TraceDecayError::Config {
-            message: format!("source edit MCP response was invalid JSON: {error}"),
-        })?;
-    if !response["error"].is_null() {
-        return Err(TraceDecayError::Config {
-            message: format!("source edit MCP call failed: {}", response["error"]),
-        });
-    }
-    Ok(ToolResult::new(response["result"].clone(), Vec::new()))
+    server.call_tool_for_test(tool_name, arguments).await
 }
 
 pub(crate) struct GlobalDbEnvGuard {

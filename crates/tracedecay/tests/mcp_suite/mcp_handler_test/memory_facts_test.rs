@@ -220,8 +220,8 @@ async fn fact_search_ranks_exact_operational_evidence_and_tracks_once() {
         "exact operational evidence must outrank unrelated V2 facts: {first}"
     );
 
-    let context = invoke_production_tool(
-        &cg,
+    let context = handle_real_server_tool_call(
+        &cg.server,
         "tracedecay_context",
         json!({
             "task": "stale tracedecay serve processes versions open database file descriptors doctor upgrade",
@@ -229,8 +229,9 @@ async fn fact_search_ranks_exact_operational_evidence_and_tracks_once() {
             "memory_min_trust": 0.0
         })
     )
-    .await
-    .unwrap();
+    .await;
+    let context: Value = serde_json::from_str(extract_real_server_text(&context))
+        .expect("context should return canonical JSON");
     assert!(context["memory_matches"].as_array().is_some_and(|matches| {
         matches
             .iter()
@@ -727,7 +728,7 @@ async fn user_memory_scope_is_profile_level_and_isolated_from_project_memory() {
 }
 
 #[tokio::test]
-async fn memory_fact_store_update_rejects_secret_like_content_without_mutating_fact() {
+async fn memory_fact_store_update_redacts_secret_like_content() {
     let cg = setup_project().await;
     let added = invoke_production_tool(
         &cg,
@@ -744,18 +745,25 @@ async fn memory_fact_store_update_rejects_secret_like_content_without_mutating_f
         .expect("fact-store add should return a canonical fact id")
         .to_owned();
 
-    let rejected = invoke_production_tool(
+    let secret = "api_key=sk-test-742913 must not be persisted";
+    let redacted = invoke_production_tool(
         &cg,
         "tracedecay_fact_store_update",
         json!({
             "fact_id": fact_id.clone(),
-            "content": "api_key=sk-test-742913 must not be persisted"
+            "content": secret
         }),
     )
-    .await;
+    .await
+    .expect("secret-like updates commit a canonical redaction transition");
+    assert_eq!(redacted["commit"]["disposition"], "committed");
+    assert_eq!(redacted["commit"]["fact_id"], fact_id);
+    assert_eq!(redacted["fact"]["kind"], "unavailable");
+    assert_eq!(redacted["fact"]["status"]["fact_id"], fact_id);
+    assert_eq!(redacted["fact"]["status"]["payload_access"], "redacted");
     assert!(
-        rejected.is_err(),
-        "the exact update route must reject secret-like content"
+        !redacted.to_string().contains(secret),
+        "redaction receipt must not expose the rejected secret: {redacted}"
     );
 
     let stored = invoke_production_tool(
@@ -765,16 +773,12 @@ async fn memory_fact_store_update_rejects_secret_like_content_without_mutating_f
     )
     .await
     .unwrap();
-    let stored_fact = available_fact(&stored["fact"]);
-    assert_eq!(
-        stored_fact["content"],
-        "Project preference: never store provider API keys"
-    );
+    assert_eq!(stored["fact"]["kind"], "unavailable");
+    assert_eq!(stored["fact"]["status"]["fact_id"], fact_id);
+    assert_eq!(stored["fact"]["status"]["payload_access"], "redacted");
     assert!(
-        !stored_fact["content"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("sk-test-742913")
+        !stored.to_string().contains(secret),
+        "redacted fact reads must not expose the rejected secret: {stored}"
     );
     close_test_graph(cg).await;
 }

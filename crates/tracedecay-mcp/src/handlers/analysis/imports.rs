@@ -1,13 +1,15 @@
 //! `tracedecay_unused_imports` — `use`-statement identifiers weighed against identifier spans in the rest of the file.
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::Path;
 
 use serde_json::{Value, json};
+use tracedecay_code_extraction::RustExtractor;
+use tracedecay_domain::code_intelligence::{Node, NodeKind, Visibility};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_query::VerifiedGraphQuery;
 
-use super::{VerifiedAnalysisSymbol, verified_analysis_symbols};
+use super::{path_is_rust, verified_analysis_symbols};
 use crate::ToolResult;
 use crate::handlers::support::{rendered_tool_result, unique_file_paths};
 use crate::tools::render;
@@ -135,35 +137,15 @@ const UNUSED_IMPORTS_MAX_LIMIT: usize = 500;
 /// cursor rather than reporting a short list as the whole truth.
 const UNUSED_IMPORTS_FILE_BUDGET: usize = 400;
 
-/// The line span in which an identifier occurs within one masked file.
-///
-/// An identifier is referenced outside a `use` statement's own line range
-/// exactly when its first occurrence precedes that range or its last
-/// occurrence follows it, so two line numbers answer the question without
-/// rescanning the file per identifier.
-#[derive(Clone, Copy)]
-struct IdentifierSpan {
-    first_line: u32,
-    last_line: u32,
-}
-
 /// Indexes every identifier in a masked source once, so each import's
-/// reference check is a map lookup instead of a full-file scan.
-fn identifier_spans(source: &str) -> HashMap<String, IdentifierSpan> {
-    let mut spans: HashMap<String, IdentifierSpan> = HashMap::new();
-    for (line_index, line) in source.lines().enumerate() {
-        let line_index = line_index as u32;
-        for identifier in identifiers_in_line(line) {
-            spans
-                .entry(identifier)
-                .and_modify(|span| span.last_line = line_index)
-                .or_insert(IdentifierSpan {
-                    first_line: line_index,
-                    last_line: line_index,
-                });
-        }
+/// reference check is a set lookup instead of a full-file scan.
+#[hotpath::measure]
+fn identifiers_in_source(source: &str) -> HashSet<String> {
+    let mut identifiers = HashSet::new();
+    for line in source.lines() {
+        identifiers.extend(identifiers_in_line(line));
     }
-    spans
+    identifiers
 }
 
 /// Splits a masked source line into whole identifier tokens (boundaries are
@@ -208,17 +190,11 @@ pub async fn handle_unused_imports(
         .and_then(Value::as_str)
         .map(str::to_owned);
 
-    let use_symbols_by_file = hotpath::measure_block!("mcp.analysis.unused_imports.graph", {
-        let mut use_symbols_by_file = HashMap::<String, Vec<VerifiedAnalysisSymbol>>::new();
-        for symbol in verified_analysis_symbols(graph, scope_prefix)? {
-            if symbol.metadata.kind == "use" {
-                use_symbols_by_file
-                    .entry(symbol.path.clone())
-                    .or_default()
-                    .push(symbol);
-            }
-        }
-        use_symbols_by_file
+    let files = hotpath::measure_block!("mcp.analysis.unused_imports.graph", {
+        verified_analysis_symbols(graph, scope_prefix)?
+            .into_iter()
+            .map(|symbol| symbol.path)
+            .collect::<HashSet<_>>()
     });
     // Graph phase is done. Each candidate file is read and masked, so the
     // walk belongs on a blocking worker like the sibling analysis scans.
@@ -233,7 +209,7 @@ pub async fn handle_unused_imports(
             // drop that file from every continuation.
             let mut last_scanned: Option<String> = None;
             let mut partial_reason: Option<&'static str> = None;
-            let mut files = use_symbols_by_file.keys().cloned().collect::<Vec<_>>();
+            let mut files = files.into_iter().collect::<Vec<_>>();
             files.sort();
             for file_path in files
                 .into_iter()
@@ -244,11 +220,7 @@ pub async fn handle_unused_imports(
                     break;
                 }
                 scanned_files += 1;
-                let use_symbols = use_symbols_by_file
-                    .get(&file_path)
-                    .map_or(&[][..], Vec::as_slice);
-                let file_unused =
-                    unused_imports_in_file(&scan_project_root, &file_path, use_symbols)?;
+                let file_unused = unused_imports_in_file(&scan_project_root, &file_path)?;
                 if !file_unused.is_empty() {
                     touched.push(file_path.clone());
                 }
@@ -305,33 +277,45 @@ pub async fn handle_unused_imports(
 
 /// Reports the unused imports of one file.
 ///
-/// Source-text scan (comments and string/char literals masked, so an import
-/// merely named in a comment is not read as a real use): a `use` identifier is
-/// unused when it appears nowhere outside its own statement. A graph-only check
-/// is unreliable because the Rust resolver creates no `Uses` edge for
-/// std/foreign-crate imports.
+/// The canonical Rust extractor discovers declarations directly from the
+/// bounded source file, because a verified graph generation may omit `Use`
+/// nodes. Comments and string/char literals are masked, then every parsed use
+/// declaration is blanked before identifier indexing, so neither prose nor a
+/// second import of the same name counts as a reference.
 ///
 /// `pub use` re-exports are intentional public aliases and are never reported.
-fn unused_imports_in_file(
-    project_root: &Path,
-    file_path: &str,
-    use_nodes: &[VerifiedAnalysisSymbol],
-) -> Result<Vec<Value>> {
-    let private_use_nodes = use_nodes
-        .iter()
-        .filter(|node| node.metadata.visibility != "public")
-        .collect::<Vec<_>>();
-    if private_use_nodes.is_empty() {
+#[hotpath::measure]
+fn unused_imports_in_file(project_root: &Path, file_path: &str) -> Result<Vec<Value>> {
+    if !path_is_rust(file_path) {
         return Ok(Vec::new());
     }
     let Ok(source) = std::fs::read_to_string(project_root.join(file_path)) else {
         return Ok(Vec::new());
     };
-    let spans =
-        identifier_spans(&tracedecay_code_extraction::source_mask::masked_rust_source(&source));
+    let extraction = RustExtractor::extract(file_path, &source);
+    if let Some(error) = extraction.errors.first() {
+        return Err(TraceDecayError::Config {
+            message: format!("failed to parse {file_path} for unused imports: {error}"),
+        });
+    }
+    let use_nodes = extraction
+        .nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::Use)
+        .collect::<Vec<_>>();
+    if use_nodes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let masked =
+        tracedecay_code_extraction::source_mask::masked_rust_source(&source);
+    let referenced_identifiers =
+        identifiers_in_source(&without_use_declarations(masked, &source, &use_nodes)?);
 
     let mut unused = Vec::new();
-    for use_node in private_use_nodes {
+    for use_node in use_nodes
+        .into_iter()
+        .filter(|node| node.visibility == Visibility::Private)
+    {
         // The Use node's `name` is the full import path as written. Three
         // shapes show up in real Rust code:
         //   - `foo::bar`           → single identifier `bar`
@@ -340,21 +324,125 @@ fn unused_imports_in_file(
         // Grouped imports must expand, otherwise an unused member inside a
         // partially-used group is missed and the literal `{a, b as c}` is
         // treated as one identifier that matches nothing.
-        for identifier in identifiers_from_use_path(&use_node.metadata.simple_name) {
-            let referenced = spans.get(&identifier).is_some_and(|span| {
-                span.first_line < use_node.metadata.start_line
-                    || span.last_line > use_node.end_line()
-            });
-            if !referenced {
+        for identifier in identifiers_from_use_path(&use_node.name) {
+            if !referenced_identifiers.contains(&identifier) {
                 unused.push(json!({
-                    "id": use_node.occurrence.as_str(),
-                    "name": use_node.metadata.simple_name,
+                    "id": &use_node.id,
+                    "name": &use_node.name,
                     "unused": identifier,
                     "file": file_path,
-                    "line": use_node.metadata.start_line,
+                    "line": use_node.start_line,
                 }));
             }
         }
     }
     Ok(unused)
+}
+
+/// Blanks parser-confirmed use declarations while preserving line layout.
+///
+/// Tree-sitter columns are byte offsets, matching the UTF-8 source slices.
+/// Exact ranges preserve real code after a same-line declaration.
+#[hotpath::measure]
+fn without_use_declarations(
+    masked: String,
+    source: &str,
+    use_nodes: &[&Node],
+) -> Result<String> {
+    let mut line_starts = vec![0usize];
+    for (offset, byte) in source.bytes().enumerate() {
+        if byte == b'\n' {
+            line_starts.push(offset + 1);
+        }
+    }
+
+    let mut bytes = masked.into_bytes();
+    for node in use_nodes {
+        let start = line_starts
+            .get(node.start_line as usize)
+            .and_then(|line| line.checked_add(node.start_column as usize));
+        let end = line_starts
+            .get(node.end_line as usize)
+            .and_then(|line| line.checked_add(node.end_column as usize));
+        let range = start
+            .zip(end)
+            .and_then(|(start, end)| bytes.get_mut(start..end))
+            .ok_or_else(|| TraceDecayError::Config {
+                message: format!(
+                    "invalid parser range for unused import {} at {}:{}",
+                    node.name, node.start_line, node.start_column
+                ),
+            })?;
+        for byte in range {
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+    }
+    String::from_utf8(bytes).map_err(|error| TraceDecayError::Config {
+        message: format!("unused-import source mask produced invalid UTF-8: {error}"),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::unused_imports_in_file;
+
+    #[test]
+    fn source_scan_finds_grouped_aliases_without_graph_use_nodes() {
+        let project = tempfile::tempdir().expect("temporary project");
+        fs::create_dir_all(project.path().join("src")).expect("create source directory");
+        fs::write(
+            project.path().join("src/lib.rs"),
+            r#"use std::collections::{
+    HashMap,
+    HashSet as Set,
+    BTreeMap,
+};
+
+// BTreeMap is only mentioned in this comment.
+pub fn used() -> (HashMap<u32, u32>, Set<u32>) {
+    (HashMap::new(), Set::new())
+}
+"#,
+        )
+        .expect("write source");
+
+        let findings = unused_imports_in_file(project.path(), "src/lib.rs").expect("scan source");
+
+        assert_eq!(findings.len(), 1, "findings: {findings:?}");
+        assert_eq!(findings[0]["unused"], "BTreeMap");
+        assert!(
+            findings[0]["name"]
+                .as_str()
+                .is_some_and(|name| name.contains("HashSet as Set")),
+            "grouped import text must be retained: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn source_scan_ignores_public_reexports_and_reports_alias_line() {
+        let project = tempfile::tempdir().expect("temporary project");
+        fs::create_dir_all(project.path().join("src")).expect("create source directory");
+        fs::write(
+            project.path().join("src/lib.rs"),
+            "pub use crate::api::PublicApi;\n\
+             use crate::internal::PrivateApi as LocalApi;\n",
+        )
+        .expect("write source");
+
+        let findings = unused_imports_in_file(project.path(), "src/lib.rs").expect("scan source");
+
+        assert_eq!(findings.len(), 1, "findings: {findings:?}");
+        assert_eq!(findings[0]["unused"], "LocalApi");
+        assert_eq!(findings[0]["line"], 1);
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding["unused"] != "PublicApi"),
+            "public re-exports are not private unused imports: {findings:?}"
+        );
+    }
 }
