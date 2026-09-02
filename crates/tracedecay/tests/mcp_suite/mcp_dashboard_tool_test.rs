@@ -11,18 +11,14 @@ use crate::common::http_agent;
 #[cfg(feature = "test-transport")]
 use serde_json::Value;
 use serde_json::json;
-#[cfg(feature = "test-transport")]
-use std::sync::Arc;
 use tempfile::TempDir;
-#[cfg(feature = "test-transport")]
-use tracedecay::mcp::McpServer;
 use tracedecay::mcp::handle_tool_call;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 use crate::common::canonical_existing_path;
 use crate::support::extract_text;
 #[cfg(feature = "test-transport")]
-use crate::support::{handle_real_server_tool_call, open_active_project_scoped_runtime};
+use crate::support::{handle_real_server_tool_call, production_composition_fixture};
 
 /// The dashboard manager is process-global (one dashboard per MCP server
 /// process), so these tests must not run concurrently: serialize them.
@@ -50,14 +46,6 @@ fn main() { println!("hi"); }
         .await
         .unwrap();
     (cg, dir, home)
-}
-
-#[cfg(feature = "test-transport")]
-async fn dashboard_test_server(cg: TraceDecay) -> Arc<McpServer> {
-    let runtime = open_active_project_scoped_runtime(&cg).await;
-    McpServer::new_with_host_admission_test_runtime_for_test(cg, None, runtime)
-        .await
-        .expect("registered test server")
 }
 
 // Multi-thread runtime: the blocking ureq probe must not starve the spawned
@@ -100,8 +88,11 @@ async fn tracedecay_dashboard_tool_rejects_wildcard_host_without_starting() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tracedecay_dashboard_tool_starts_and_returns_url_and_serves_capabilities() {
     let _guard = TEST_LOCK.lock().await;
-    let (cg, _tmp, _home) = setup_minimal_project().await;
-    let server = dashboard_test_server(cg).await;
+    let fixture = production_composition_fixture().await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
 
     // Start via the MCP dispatch (uses current cg's project)
     let res = handle_real_server_tool_call(
@@ -153,6 +144,7 @@ async fn tracedecay_dashboard_tool_starts_and_returns_url_and_serves_capabilitie
                 json!({ "action": "stop" }),
             )
             .await;
+            fixture.harness.shutdown().await;
             return;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -167,8 +159,11 @@ async fn tracedecay_dashboard_tool_starts_and_returns_url_and_serves_capabilitie
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tracedecay_dashboard_tool_is_idempotent_and_supports_stop() {
     let _guard = TEST_LOCK.lock().await;
-    let (cg, _tmp, _home) = setup_minimal_project().await;
-    let server = dashboard_test_server(cg).await;
+    let fixture = production_composition_fixture().await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
 
     let res1 =
         handle_real_server_tool_call(&server, "tracedecay_dashboard", json!({"port": 0})).await;
@@ -203,6 +198,7 @@ async fn tracedecay_dashboard_tool_is_idempotent_and_supports_stop() {
         handle_real_server_tool_call(&server, "tracedecay_dashboard", json!({"action": "stop"}))
             .await;
     assert!(extract_text(&stop2).contains("not_running"));
+    fixture.harness.shutdown().await;
 }
 
 #[cfg(feature = "test-transport")]
