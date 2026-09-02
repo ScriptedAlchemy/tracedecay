@@ -54,7 +54,6 @@ pub(super) async fn materialize(path: &Path, control: SnapshotReadControl) -> io
     .map_err(|error| io::Error::other(format!("snapshot materialization task failed: {error}")))?
 }
 
-#[hotpath::measure]
 fn fold_wal_in_place(connection: &Connection, control: &SnapshotReadControl) -> io::Result<String> {
     if control.is_unlimited() {
         return set_delete_journal_mode(connection).map_err(io::Error::other);
@@ -113,7 +112,6 @@ fn fold_wal_in_place(connection: &Connection, control: &SnapshotReadControl) -> 
     fold.map_err(io::Error::other)
 }
 
-#[hotpath::measure]
 fn set_delete_journal_mode(connection: &Connection) -> rusqlite::Result<String> {
     connection.query_row("PRAGMA journal_mode = DELETE", [], |row| {
         row.get::<_, String>(0)

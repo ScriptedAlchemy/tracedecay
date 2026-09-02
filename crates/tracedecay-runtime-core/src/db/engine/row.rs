@@ -8,7 +8,6 @@ pub struct Row {
     values: Vec<Value>,
 }
 
-#[hotpath::measure_all]
 impl Row {
     pub fn from_values(values: Vec<Value>) -> Self {
         Self { values }
@@ -27,7 +26,6 @@ pub struct Rows {
     rows: VecDeque<Row>,
 }
 
-#[hotpath::measure_all]
 impl Rows {
     pub fn from_rows(rows: Vec<Row>) -> Self {
         Self::from_parts(Vec::new(), rows)

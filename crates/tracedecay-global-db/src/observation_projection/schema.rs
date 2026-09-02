@@ -447,7 +447,6 @@ async fn projection_rebuild_column_names(
     Ok(columns)
 }
 
-#[hotpath::measure]
 fn columns_match(actual: &[String], expected: &[&str]) -> bool {
     actual
         .iter()
@@ -544,7 +543,6 @@ async fn verify_final_projection_shape(conn: &impl QueryExecutor) -> Result<(), 
     Ok(())
 }
 
-#[hotpath::measure]
 fn unsupported_projection_schema(table: &str) -> Error {
     Error::invalid_operation(format!(
         "observation projection table `{table}` is not at the schema this binary supports; \

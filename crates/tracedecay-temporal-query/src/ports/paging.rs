@@ -18,7 +18,6 @@ pub struct PageLimits {
     max_page_items: usize,
 }
 
-#[hotpath::measure_all]
 impl PageLimits {
     pub fn new(
         max_items: usize,
@@ -63,7 +62,6 @@ pub struct CandidateFieldCaps {
     metadata_field_bytes: usize,
 }
 
-#[hotpath::measure_all]
 impl CandidateFieldCaps {
     #[hotpath::skip]
     pub(super) const fn new(
@@ -97,7 +95,6 @@ impl CandidateFieldCaps {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PageKey(String);
 
-#[hotpath::measure_all]
 impl PageKey {
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
@@ -121,7 +118,6 @@ pub struct PageRequest {
     candidate_field_caps: Option<CandidateFieldCaps>,
 }
 
-#[hotpath::measure_all]
 impl PageRequest {
     #[cfg(any(test, feature = "test-helpers"))]
     #[hotpath::skip]
@@ -204,7 +200,6 @@ pub struct BoundedPage<T> {
     pub(super) continuation: Option<PageKey>,
 }
 
-#[hotpath::measure_all]
 impl<T> BoundedPage<T> {
     pub fn items(&self) -> &[T] {
         &self.items
@@ -238,7 +233,6 @@ pub struct ReadState<T> {
     marker: PhantomData<fn() -> T>,
 }
 
-#[hotpath::measure_all]
 impl<T> ReadState<T> {
     #[hotpath::skip]
     pub const fn new(limits: PageLimits) -> Self {
@@ -398,7 +392,6 @@ pub struct BoundedPageSink<'a, T> {
 }
 
 // Measurement stays sealed so producers cannot substitute underreported byte counts.
-#[hotpath::measure_all]
 impl<T: MeasuredTemporalValue> BoundedPageSink<'_, T> {
     pub fn push(&mut self, value: T) -> Result<(), TemporalPortError> {
         self.control.checkpoint()?;

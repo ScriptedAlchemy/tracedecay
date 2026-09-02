@@ -7,7 +7,6 @@ use super::{SemanticChannelAblationResultV1, SemanticNativeEvaluationErrorV1};
 /// A digest proves that a fallback has not changed, but not that it was derived
 /// from this query. Bind the supplied fallback to the exact/lexical/graph
 /// baseline before optional semantic work can report it as preserved.
-#[hotpath::measure]
 pub(super) fn validate_query_fallback_baseline(
     fallback: &QueryFallbackSubpayload,
     baseline: &SemanticChannelAblationResultV1,
@@ -31,7 +30,6 @@ pub(super) fn validate_query_fallback_baseline(
     Ok(())
 }
 
-#[hotpath::measure]
 fn same_order_and_provenance(fallback: &[RankedCandidate], baseline: &[RankedCandidate]) -> bool {
     fallback.len() == baseline.len()
         && fallback.iter().zip(baseline).all(|(fallback, baseline)| {

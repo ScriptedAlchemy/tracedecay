@@ -46,7 +46,6 @@ pub struct HandoffOpenSqliteAuthority {
     retained: RetainedExactSqlCapability,
 }
 
-#[hotpath::measure_all]
 impl HandoffOpenSqliteAuthority {
     pub fn from_retained_exact_sql(
         retained: RetainedExactSqlCapability,
@@ -66,22 +65,18 @@ pub enum HandoffOpenSqliteAuthorityBuildError {
     Unavailable,
 }
 
-#[hotpath::measure]
 fn unavailable(_: ExactSqlError) -> HandoffOpenAuthorityError {
     HandoffOpenAuthorityError::Unavailable
 }
 
-#[hotpath::measure]
 fn codec_unavailable() -> HandoffOpenAuthorityError {
     HandoffOpenAuthorityError::Unavailable
 }
 
-#[hotpath::measure]
 fn statement(sql: &str, params: Vec<ExactSqlValue>) -> Result<ExactSqlStatement, ExactSqlError> {
     ExactSqlStatement::new(sql.to_owned(), params)
 }
 
-#[hotpath::measure]
 fn query_handle(
     handle: &ExactSqlHandle,
     sql: &str,
@@ -90,7 +85,6 @@ fn query_handle(
     handle.query(statement(sql, params)?, Duration::from_secs(5))
 }
 
-#[hotpath::measure]
 fn require_handoff_open_schema(
     handle: &ExactSqlHandle,
 ) -> Result<(), HandoffOpenSqliteAuthorityBuildError> {
@@ -107,7 +101,6 @@ fn require_handoff_open_schema(
     }
 }
 
-#[hotpath::measure]
 fn query_tx(
     transaction: &ExactSqlTransaction,
     sql: &str,
@@ -116,7 +109,6 @@ fn query_tx(
     transaction.query(statement(sql, params)?)
 }
 
-#[hotpath::measure]
 fn execute_tx(
     transaction: &ExactSqlTransaction,
     sql: &str,
@@ -125,7 +117,6 @@ fn execute_tx(
     transaction.execute(statement(sql, params)?).map(|_| ())
 }
 
-#[hotpath::measure]
 fn text(values: &[ExactSqlValue], index: usize) -> Option<&str> {
     match values.get(index)? {
         ExactSqlValue::Text(value) => Some(value),
@@ -133,7 +124,6 @@ fn text(values: &[ExactSqlValue], index: usize) -> Option<&str> {
     }
 }
 
-#[hotpath::measure]
 fn optional_text(values: &[ExactSqlValue], index: usize) -> Result<Option<&str>, ()> {
     match values.get(index) {
         Some(ExactSqlValue::Text(value)) => Ok(Some(value)),
@@ -142,12 +132,10 @@ fn optional_text(values: &[ExactSqlValue], index: usize) -> Result<Option<&str>,
     }
 }
 
-#[hotpath::measure]
 fn encode<T: serde::Serialize>(value: &T) -> Result<String, HandoffOpenAuthorityError> {
     serde_json::to_string(value).map_err(|_| codec_unavailable())
 }
 
-#[hotpath::measure]
 fn decode<T: serde::de::DeserializeOwned>(payload: &str) -> Result<T, HandoffOpenAuthorityError> {
     serde_json::from_str(payload).map_err(|_| codec_unavailable())
 }

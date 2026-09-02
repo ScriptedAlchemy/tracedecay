@@ -17,7 +17,6 @@ pub(crate) struct RuntimeWriterPersistence<E> {
     executor: E,
 }
 
-#[hotpath::measure_all]
 impl<E> RuntimeWriterPersistence<E> {
     #[hotpath::skip]
     pub(crate) const fn new(executor: E) -> Self {
@@ -71,7 +70,6 @@ where
     }
 }
 
-#[hotpath::measure]
 fn map_ledger_error(error: LedgerError) -> StorageRuntimeErrorV1 {
     match error {
         LedgerError::Corrupt { .. } => StorageRuntimeErrorV1::Corrupt {
@@ -81,12 +79,10 @@ fn map_ledger_error(error: LedgerError) -> StorageRuntimeErrorV1 {
     }
 }
 
-#[hotpath::measure]
 fn map_operation_error(error: StorageOperationError) -> StorageRuntimeErrorV1 {
     infrastructure(format!("closed native operation: {error}"))
 }
 
-#[hotpath::measure]
 fn infrastructure(operation: impl Into<String>) -> StorageRuntimeErrorV1 {
     StorageRuntimeErrorV1::Infrastructure {
         operation: operation.into(),

@@ -82,7 +82,6 @@ pub(super) struct DirectProfileRetainedSessionPortV1<'a> {
     identity: ResolvedSessionIdentity,
 }
 
-#[hotpath::measure_all]
 impl<'a> DirectProfileRetainedSessionPortV1<'a> {
     #[hotpath::skip]
     pub(super) const fn profile(
@@ -143,7 +142,6 @@ impl<'a> DirectProfileRetainedSessionPortV1<'a> {
     }
 }
 
-#[hotpath::measure_all]
 impl DirectRetainedSessionPortV1 {
     #[hotpath::skip]
     pub(super) const fn project(authorities: ProjectRetainedSessionAuthoritiesV1) -> Self {
@@ -376,7 +374,6 @@ struct MessageSearchInput {
     workflow_agent: Option<String>,
 }
 
-#[hotpath::measure_all]
 impl MessageSearchInput {
     fn parse(request: &MessageSearchRequestV1) -> Result<Self, RetainedSurfaceExecutionErrorV1> {
         let goals = request.goals;
@@ -696,7 +693,6 @@ impl MessageSearchInput {
     }
 }
 
-#[hotpath::measure]
 fn message_search_cursor_manifest_refusal(
     kind: tracedecay_domain::CursorManifestLimitKindV1,
     observed: usize,
@@ -705,7 +701,6 @@ fn message_search_cursor_manifest_refusal(
     RetainedSurfaceExecutionErrorV1::cursor_manifest_limit_refusal(kind, observed, maximum)
 }
 
-#[hotpath::measure]
 fn ensure_project_message_scope(
     context: &RetainedSurfaceExecutionContextV1<'_>,
     request: &MessageSearchRequestV1,
@@ -734,7 +729,6 @@ fn ensure_project_message_scope(
     Ok(())
 }
 
-#[hotpath::measure]
 fn ensure_profile_message_scope(
     request: &MessageSearchRequestV1,
 ) -> Result<(), RetainedSurfaceExecutionErrorV1> {
@@ -746,7 +740,6 @@ fn ensure_profile_message_scope(
     .ok_or(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized)
 }
 
-#[hotpath::measure]
 fn ensure_session_refresh_identity(
     context: &RetainedSurfaceExecutionContextV1<'_>,
     request: &SessionRefreshRequestV1,
@@ -771,7 +764,6 @@ fn ensure_session_refresh_identity(
     .ok_or(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized)
 }
 
-#[hotpath::measure]
 fn ensure_mounted_project_context(
     context: &RetainedSurfaceExecutionContextV1<'_>,
     authorities: &ProjectRetainedSessionAuthoritiesV1,
@@ -781,7 +773,6 @@ fn ensure_mounted_project_context(
         .ok_or(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized)
 }
 
-#[hotpath::measure]
 fn optional_string(value: Option<&str>) -> Result<Option<String>, RetainedSurfaceExecutionErrorV1> {
     value
         .map(str::trim)
@@ -793,7 +784,6 @@ fn optional_string(value: Option<&str>) -> Result<Option<String>, RetainedSurfac
         .transpose()
 }
 
-#[hotpath::measure]
 fn time_filter(
     value: Option<&tracedecay_application::retained_surfaces::RetainedTimeFilterV1>,
     bound: SearchTimeBound,
@@ -875,7 +865,6 @@ async fn retrieve_bounded(
     }
 }
 
-#[hotpath::measure]
 fn apply_page(
     result: &mut MessageSearchResultV1,
     page: SessionRetrievalPageView,
@@ -895,7 +884,6 @@ fn apply_page(
     Ok(())
 }
 
-#[hotpath::measure]
 fn apply_temporal(
     result: &mut MessageSearchResultV1,
     temporal_view: SessionTemporalMetadataView,
@@ -907,7 +895,6 @@ fn apply_temporal(
     result.temporal = Some(temporal(temporal_view, freshness));
 }
 
-#[hotpath::measure]
 fn message_search_hit(
     result: SessionMessageSearchResult,
 ) -> Result<MessageSearchHitV1, RetainedSurfaceExecutionErrorV1> {
@@ -925,7 +912,6 @@ fn message_search_hit(
     })
 }
 
-#[hotpath::measure]
 fn session_record(record: SessionRecord) -> SessionRecordV1 {
     SessionRecordV1 {
         provider: record.provider,
@@ -944,7 +930,6 @@ fn session_record(record: SessionRecord) -> SessionRecordV1 {
     }
 }
 
-#[hotpath::measure]
 fn session_message(message: SessionMessageRecord) -> SessionMessageV1 {
     SessionMessageV1 {
         provider: message.provider,
@@ -963,7 +948,6 @@ fn session_message(message: SessionMessageRecord) -> SessionMessageV1 {
     }
 }
 
-#[hotpath::measure]
 fn temporal(
     value: SessionTemporalMetadataView,
     freshness: SessionDataFreshness,
@@ -1026,7 +1010,6 @@ const fn coverage(value: TemporalCoverageCountsV1) -> TemporalCoverageV1 {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn source_coverage(value: SessionSourceCoverageV1) -> WireSourceCoverageV1 {
     WireSourceCoverageV1 {
         source_id: value.source_id().as_str().to_owned(),
@@ -1053,7 +1036,6 @@ pub(super) fn source_coverage(value: SessionSourceCoverageV1) -> WireSourceCover
     }
 }
 
-#[hotpath::measure]
 fn coverage_interval(value: SessionSourceCoverageIntervalV1) -> SessionCoverageIntervalV1 {
     SessionCoverageIntervalV1 {
         knowledge: ClosedUtcIntervalV1 {
@@ -1095,7 +1077,6 @@ const fn coverage_state(value: SessionSourceCoverageStateV1) -> SessionCoverageS
     }
 }
 
-#[hotpath::measure]
 fn coverage_reason(value: &SessionSourceCoverageReasonV1) -> SessionCoverageReasonV1 {
     match value {
         SessionSourceCoverageReasonV1::CaughtUp => SessionCoverageReasonV1::CaughtUp,

@@ -77,7 +77,6 @@ pub(in crate::execution_topology_metrics) struct ClassifiedExecutionTopologyPage
     pub(super) watermark: String,
 }
 
-#[hotpath::measure_all]
 impl ClassifiedExecutionTopologyPageV1 {
     pub(in crate::execution_topology_metrics) fn watermark(&self) -> &str {
         &self.watermark
@@ -149,7 +148,6 @@ struct ExecutionTopologyProducerDropCarryV1 {
     event_time_micros: i64,
 }
 
-#[hotpath::measure_all]
 impl ExecutionTopologyReducedRollupStateV1 {
     pub(in crate::execution_topology_metrics) fn validate(
         &self,
@@ -222,7 +220,6 @@ impl ExecutionTopologyReducedRollupStateV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl ExecutionTopologyProducerRollupV1 {
     fn validate(&self) -> Result<(), ExecutionTopologyRollupStateErrorV1> {
         self.check_carry()?;
@@ -368,7 +365,6 @@ impl ExecutionTopologyProducerRollupV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl ExecutionTopologyProducerDropCarryV1 {
     fn resolved_dropped(&self) -> u64 {
         match (self.receipt_lower_bound, self.carrier_dropped_count) {
@@ -380,7 +376,6 @@ impl ExecutionTopologyProducerDropCarryV1 {
     }
 }
 
-#[hotpath::measure]
 fn merge_drop_edge(
     target: &mut ExecutionTopologyProducerDropCarryV1,
     incoming: ExecutionTopologyProducerDropCarryV1,
@@ -409,7 +404,6 @@ fn merge_drop_edge(
     target.event_time_micros = target.event_time_micros.max(incoming.event_time_micros);
 }
 
-#[hotpath::measure]
 fn producer_drop_key(
     join: &DropCarrierJoinV1,
 ) -> Result<String, ExecutionTopologyRollupStateErrorV1> {
@@ -418,7 +412,6 @@ fn producer_drop_key(
         .map_err(|_| ExecutionTopologyRollupStateErrorV1::IncompatibleState)
 }
 
-#[hotpath::measure]
 pub(in crate::execution_topology_metrics) fn reduce_classified_execution_topology_rollup_state(
     horizon: &ObservabilityHorizonV1,
     classified: &ClassifiedExecutionTopologyPageV1,
@@ -441,7 +434,6 @@ pub(in crate::execution_topology_metrics) fn reduce_classified_execution_topolog
 
 /// Classifies one fully read page into the bounded evidence that the projector
 /// actually consumes. Rollups serialize this result, never the input page.
-#[hotpath::measure]
 pub(in crate::execution_topology_metrics) fn classify_execution_topology_page(
     authorized_scope_ref: &str,
     horizon: &ObservabilityHorizonV1,
@@ -592,7 +584,6 @@ pub(in crate::execution_topology_metrics) fn classify_execution_topology_page(
 
 /// Finalizes one retained-state projection. All family formulas run from
 /// aggregate sufficient statistics; no classified rows are rehydrated here.
-#[hotpath::measure]
 pub(in crate::execution_topology_metrics) fn project_reduced_execution_topology_rollup_state(
     authorized_scope_ref: String,
     horizon: ObservabilityHorizonV1,
@@ -672,7 +663,6 @@ pub(in crate::execution_topology_metrics) fn project_reduced_execution_topology_
     }))
 }
 
-#[hotpath::measure]
 fn protected_rollup_key_is_valid(reference: &str) -> bool {
     reference.len() == 71
         && reference.starts_with("sha256:")
@@ -681,7 +671,6 @@ fn protected_rollup_key_is_valid(reference: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-#[hotpath::measure]
 fn finalize_rollup_projection(
     mut model: ExecutionTopologyMetricsV1,
 ) -> ExecutionTopologyRollupProjectionV1 {
@@ -720,7 +709,6 @@ fn finalize_rollup_projection(
     ExecutionTopologyRollupProjectionV1 { model }
 }
 
-#[hotpath::measure]
 fn suppress_low_support_cells(measurements: &mut [super::super::ExecutionTopologyMeasurementV1]) {
     for measurement in measurements {
         let support = measurement.local_support();
@@ -747,7 +735,6 @@ fn suppress_low_support_cells(measurements: &mut [super::super::ExecutionTopolog
     }
 }
 
-#[hotpath::measure]
 fn same_drop_receipt(left: &ExplicitDropReceiptV1, right: &ExplicitDropReceiptV1) -> bool {
     left.join == right.join
         && left.proved_drop_lower_bound == right.proved_drop_lower_bound
@@ -755,7 +742,6 @@ fn same_drop_receipt(left: &ExplicitDropReceiptV1, right: &ExplicitDropReceiptV1
         && left.clean_shutdown_observed == right.clean_shutdown_observed
 }
 
-#[hotpath::measure]
 fn safe_cursor(cursor: &str) -> bool {
     !cursor.is_empty()
         && cursor.len() <= 512
@@ -763,7 +749,6 @@ fn safe_cursor(cursor: &str) -> bool {
         && !cursor.chars().any(char::is_control)
 }
 
-#[hotpath::measure]
 fn execution_payload_coverage(payload: &ObservabilityPayloadV1) -> Option<CoverageStateV1> {
     match payload {
         ObservabilityPayloadV1::WorkConflictPrediction(value) => Some(value.coverage),

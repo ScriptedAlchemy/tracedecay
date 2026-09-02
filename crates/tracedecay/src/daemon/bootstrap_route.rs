@@ -48,7 +48,6 @@ fn warming_bootstrap_tool_definitions() -> Result<Vec<ToolDefinition>> {
         })
 }
 
-#[hotpath::measure]
 pub(super) fn prewarm_daemon_bootstrap_catalog() -> Result<()> {
     warming_bootstrap_tool_definitions().map(|_| ())
 }
@@ -62,7 +61,6 @@ pub(super) async fn apply_daemon_initialize_route(
     apply_daemon_initialize_route_inner(handshake, first_request_line, store_administration).await
 }
 
-#[hotpath::measure]
 fn apply_daemon_initialize_route_inner<'a>(
     handshake: &'a mut DaemonHandshake,
     first_request_line: &'a str,
@@ -97,7 +95,6 @@ fn apply_daemon_initialize_route_inner<'a>(
     })
 }
 
-#[hotpath::measure]
 pub(super) fn attach_initialize_route_metadata(
     response: &mut JsonRpcResponse,
     route: &InitializeRouteMetadata,
@@ -110,7 +107,6 @@ pub(super) fn attach_initialize_route_metadata(
 
 /// Returns `None` for project-dependent requests, `Some(None)` for handled
 /// notifications, and `Some(Some(response))` for static MCP bootstrap calls.
-#[hotpath::measure]
 pub(super) fn daemon_bootstrap_response(
     request: &JsonRpcRequest,
     route: Option<&InitializeRouteMetadata>,

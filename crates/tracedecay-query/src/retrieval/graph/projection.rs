@@ -180,7 +180,6 @@ impl tracedecay_graph_db::GraphCancellation for GraphTraversalCancellationV1 {
     }
 }
 
-#[hotpath::measure]
 fn check_request_control(
     request: &GraphLaneRequest,
     control: &dyn GraphExecutionControl,
@@ -198,7 +197,6 @@ fn check_request_control(
     }
 }
 
-#[hotpath::measure]
 fn graph_path_segment(edge: CanonicalRelationEdgeV1) -> GraphPathSegmentV1 {
     GraphPathSegmentV1 {
         from: edge.from_occurrence,
@@ -209,7 +207,6 @@ fn graph_path_segment(edge: CanonicalRelationEdgeV1) -> GraphPathSegmentV1 {
     }
 }
 
-#[hotpath::measure]
 fn map_projection_error(error: CodeGraphProjectionError) -> RetrievalPortError {
     match error {
         CodeGraphProjectionError::Contract(message) => RetrievalPortError::Contract(message),
@@ -239,14 +236,12 @@ impl From<CodeGraphProjectionError> for RetrievalPortError {
     }
 }
 
-#[hotpath::measure]
 fn retrieval_anchor(value: String) -> Result<RetrievalAnchorId, RetrievalPortError> {
     RetrievalAnchorId::new(value).map_err(contract_error)
 }
 
 /// Shared freshness envelope for daemon-owned production graph/exact/lexical
 /// owners reading one complete published generation.
-#[hotpath::measure]
 pub fn production_code_index_freshness(
     observed_at: UtcMicros,
     policy_revision: ComponentRevision,

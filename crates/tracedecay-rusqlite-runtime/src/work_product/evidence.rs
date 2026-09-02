@@ -130,7 +130,6 @@ impl WorkEvidenceReadPortV1 for WorkSqliteStorage {
 
 /// Every link the folded version declares for one task, in canonical link-id
 /// order so a bounded page is a stable prefix rather than an arbitrary subset.
-#[hotpath::measure]
 fn task_links(graph: &WorkProductGraphV1, task_id: &TaskId) -> Vec<TaskEvidenceLinkV1> {
     let mut links = graph
         .evidence()
@@ -152,7 +151,6 @@ fn task_links(graph: &WorkProductGraphV1, task_id: &TaskId) -> Vec<TaskEvidenceL
 /// prefix is served normally — an event admitted under some other scope later
 /// in the journal does not retract evidence the caller is plainly authorized
 /// for.
-#[hotpath::measure]
 fn verified_graph(
     storage: &WorkSqliteStorage,
     context: &WorkProductPortContextV1,

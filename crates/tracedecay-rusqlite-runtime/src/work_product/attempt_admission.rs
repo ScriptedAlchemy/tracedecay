@@ -115,7 +115,6 @@ impl WorkProductAttemptAdmissionPortV1 for WorkSqliteStorage {
     }
 }
 
-#[hotpath::measure]
 fn admit_attempt_in_transaction(
     transaction: &ExactSqlTransaction,
     admission: &WorkProductAttemptAdmissionV1,
@@ -161,7 +160,6 @@ fn admit_attempt_in_transaction(
     }
 }
 
-#[hotpath::measure]
 fn admit_retry_in_transaction(
     transaction: &ExactSqlTransaction,
     admission: &WorkProductRetryAdmissionV1,
@@ -202,7 +200,6 @@ fn admit_retry_in_transaction(
     }
 }
 
-#[hotpath::measure]
 fn admit_synthesis_in_transaction(
     transaction: &ExactSqlTransaction,
     admission: &WorkProductSynthesisAdmissionV1,
@@ -244,7 +241,6 @@ fn admit_synthesis_in_transaction(
     }
 }
 
-#[hotpath::measure]
 fn product_commit(outcome: &WorkProductEventCommitOutcomeV1) -> &WorkProductEventCommitV1 {
     match outcome {
         WorkProductEventCommitOutcomeV1::Appended(commit)
@@ -252,7 +248,6 @@ fn product_commit(outcome: &WorkProductEventCommitOutcomeV1) -> &WorkProductEven
     }
 }
 
-#[hotpath::measure]
 fn graph_for_product(
     transaction: &ExactSqlTransaction,
     context: &tracedecay_application::WorkProductPortContextV1,
@@ -268,7 +263,6 @@ fn graph_for_product(
     Ok(graph)
 }
 
-#[hotpath::measure]
 fn require_declared_authority(
     admission: &WorkProductAttemptAdmissionV1,
 ) -> Result<(), AdmissionError> {
@@ -291,7 +285,6 @@ fn require_declared_authority(
     }
 }
 
-#[hotpath::measure]
 fn map_product_error(error: WorkProductEventPortErrorV1) -> AdmissionError {
     match error {
         WorkProductEventPortErrorV1::NotFoundOrNotAuthorized => {
@@ -305,7 +298,6 @@ fn map_product_error(error: WorkProductEventPortErrorV1) -> AdmissionError {
     }
 }
 
-#[hotpath::measure]
 fn map_attempt_error(error: WorkAttemptStorageError) -> AdmissionError {
     match error {
         WorkAttemptStorageError::NotFoundOrNotAuthorized => AdmissionError::NotFoundOrNotAuthorized,
@@ -318,7 +310,6 @@ fn map_attempt_error(error: WorkAttemptStorageError) -> AdmissionError {
     }
 }
 
-#[hotpath::measure]
 fn map_graph_admission_error(error: tracedecay_domain::WorkRuntimeContractError) -> AdmissionError {
     match error {
         tracedecay_domain::WorkRuntimeContractError::ProjectionMismatch => {
@@ -343,7 +334,6 @@ fn map_graph_admission_error(error: tracedecay_domain::WorkRuntimeContractError)
     }
 }
 
-#[hotpath::measure]
 fn require_request_active(
     context: &tracedecay_application::WorkProductPortContextV1,
 ) -> Result<(), AdmissionError> {
@@ -356,7 +346,6 @@ fn require_request_active(
     Ok(())
 }
 
-#[hotpath::measure]
 fn rollback_after_failure<T>(
     transaction: ExactSqlTransaction,
     error: AdmissionError,

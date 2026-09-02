@@ -49,7 +49,6 @@ enum PathKind {
     File,
 }
 
-#[hotpath::measure_all]
 impl PathKind {
     #[hotpath::skip]
     const fn inheritance(self) -> u32 {
@@ -103,7 +102,6 @@ struct OwnedSid {
     storage: Vec<usize>,
 }
 
-#[hotpath::measure_all]
 impl OwnedSid {
     fn as_psid(&self) -> PSID {
         self.storage.as_ptr().cast_mut().cast()
@@ -161,7 +159,6 @@ pub fn create_private_directory(path: &Path) -> io::Result<()> {
 }
 
 /// Validate that a directory path and every existing ancestor are not reparse points.
-#[hotpath::measure]
 pub fn validate_directory_path(path: &Path) -> io::Result<()> {
     let file = open_handle_with_share(
         path,
@@ -174,7 +171,6 @@ pub fn validate_directory_path(path: &Path) -> io::Result<()> {
 }
 
 /// Validate an exact protected, inheritable current-user directory ACL.
-#[hotpath::measure]
 pub fn validate_private_directory(path: &Path) -> io::Result<()> {
     drop(open_private_directory(path)?);
     Ok(())
@@ -193,7 +189,6 @@ pub fn open_private_directory(path: &Path) -> io::Result<File> {
 }
 
 /// Validate an exact protected current-user regular-file ACL.
-#[hotpath::measure]
 pub fn validate_private_file(path: &Path) -> io::Result<()> {
     drop(open_and_validate(
         path,
@@ -258,7 +253,6 @@ pub fn make_private_directory(path: &Path) -> io::Result<crate::MadePrivateDirec
 }
 
 /// Open or create a private lock file with concurrent read-write sharing.
-#[hotpath::measure]
 pub fn open_or_create_private_lock_file(path: &Path) -> io::Result<File> {
     let file = open_with_private_creation_acl(
         path,
@@ -272,7 +266,6 @@ pub fn open_or_create_private_lock_file(path: &Path) -> io::Result<File> {
 }
 
 /// Create a new empty regular file with an exact private ACL.
-#[hotpath::measure]
 pub fn create_private_file(path: &Path) -> io::Result<File> {
     create_private_file_retained(path).map_err(crate::PrivateFileCreationFailure::into_error)
 }
@@ -320,7 +313,6 @@ pub fn available_space(path: &Path) -> io::Result<u64> {
     Ok(available)
 }
 
-#[hotpath::measure]
 fn open_and_validate(
     path: &Path,
     kind: PathKind,
@@ -333,7 +325,6 @@ fn open_and_validate(
     Ok(file)
 }
 
-#[hotpath::measure]
 fn open_with_private_creation_acl(
     path: &Path,
     kind: PathKind,
@@ -346,7 +337,6 @@ fn open_with_private_creation_acl(
     })
 }
 
-#[hotpath::measure]
 fn protect_existing(file: &File, path: &Path, kind: PathKind) -> io::Result<()> {
     let current_user = current_user_sid()
         .map_err(|error| wrap_error("resolve current Windows user SID", path, error))?;
@@ -379,7 +369,6 @@ fn protect_existing(file: &File, path: &Path, kind: PathKind) -> io::Result<()> 
     Ok(())
 }
 
-#[hotpath::measure]
 fn with_private_security_attributes<T>(
     path: &Path,
     kind: PathKind,
@@ -445,7 +434,6 @@ fn with_private_security_attributes<T>(
     operation(&raw const attributes)
 }
 
-#[hotpath::measure]
 fn open_handle_with_share(
     path: &Path,
     disposition: u32,
@@ -464,7 +452,6 @@ fn open_handle_with_share(
     )
 }
 
-#[hotpath::measure]
 fn open_raw_handle(
     path: &Path,
     disposition: u32,
@@ -495,13 +482,11 @@ fn open_raw_handle(
     Ok(unsafe { File::from_raw_handle(handle) })
 }
 
-#[hotpath::measure]
 fn absolute_security_path(path: &Path) -> io::Result<PathBuf> {
     std::path::absolute(path)
         .map_err(|error| wrap_error("resolve absolute Windows security path", path, error))
 }
 
-#[hotpath::measure]
 fn hold_directory_ancestors(path: &Path) -> io::Result<Vec<File>> {
     let mut ancestor_paths = Vec::new();
     let mut current = path.parent();
@@ -528,7 +513,6 @@ fn hold_directory_ancestors(path: &Path) -> io::Result<Vec<File>> {
     Ok(handles)
 }
 
-#[hotpath::measure]
 fn encode_path(path: &Path) -> io::Result<Vec<u16>> {
     let encoded = path
         .as_os_str()
@@ -544,7 +528,6 @@ fn encode_path(path: &Path) -> io::Result<Vec<u16>> {
     Ok(encoded)
 }
 
-#[hotpath::measure]
 fn validate_private_handle(file: &File, path: &Path, kind: PathKind) -> io::Result<()> {
     validate_file_kind(file, path, kind)?;
     let current_user = current_user_sid()
@@ -552,7 +535,6 @@ fn validate_private_handle(file: &File, path: &Path, kind: PathKind) -> io::Resu
     validate_private_security(file, path, kind, &current_user)
 }
 
-#[hotpath::measure]
 fn validate_file_kind(file: &File, path: &Path, kind: PathKind) -> io::Result<()> {
     let mut information = MaybeUninit::<FILE_ATTRIBUTE_TAG_INFO>::uninit();
     // SAFETY: the output pointer is valid for the exact structure size and the
@@ -588,7 +570,6 @@ fn validate_file_kind(file: &File, path: &Path, kind: PathKind) -> io::Result<()
     Ok(())
 }
 
-#[hotpath::measure]
 fn current_user_sid() -> io::Result<OwnedSid> {
     let mut token = null_mut();
     // SAFETY: the process pseudo-handle is always valid and `token` is writable.
@@ -610,7 +591,6 @@ fn current_user_sid() -> io::Result<OwnedSid> {
     copy_sid(user, "user")
 }
 
-#[hotpath::measure]
 fn token_information(
     token: &OwnedHandle,
     information_class: TOKEN_INFORMATION_CLASS,
@@ -661,7 +641,6 @@ fn token_information(
     Ok(information)
 }
 
-#[hotpath::measure]
 fn copy_sid(source: PSID, description: &str) -> io::Result<OwnedSid> {
     // SAFETY: `source` came from successfully populated token information.
     if source.is_null() || unsafe { IsValidSid(source) } == 0 {
@@ -683,7 +662,6 @@ fn copy_sid(source: PSID, description: &str) -> io::Result<OwnedSid> {
     Ok(OwnedSid { storage })
 }
 
-#[hotpath::measure]
 fn private_acl(token_user: &OwnedSid, inheritance: u32) -> io::Result<LocalAllocation> {
     let entry = EXPLICIT_ACCESS_W {
         grfAccessPermissions: FILE_ALL_ACCESS,
@@ -717,7 +695,6 @@ fn private_acl(token_user: &OwnedSid, inheritance: u32) -> io::Result<LocalAlloc
     Ok(allocation)
 }
 
-#[hotpath::measure]
 fn acl_is_exact(snapshot: &AclSnapshot, inheritance: u32) -> bool {
     snapshot.ace_count == 1
         && snapshot.ace_is_allowed
@@ -726,7 +703,6 @@ fn acl_is_exact(snapshot: &AclSnapshot, inheritance: u32) -> bool {
         && snapshot.trustee_is_current_user
 }
 
-#[hotpath::measure]
 fn validate_private_security(
     file: &File,
     path: &Path,
@@ -753,7 +729,6 @@ fn validate_private_security(
     Ok(())
 }
 
-#[hotpath::measure]
 fn security_snapshot(
     file: &File,
     path: &Path,
@@ -818,7 +793,6 @@ fn security_snapshot(
     })
 }
 
-#[hotpath::measure]
 fn inspect_acl(dacl: *mut ACL, current_user: &OwnedSid) -> io::Result<AclSnapshot> {
     if dacl.is_null() || unsafe { IsValidAcl(dacl) } == 0 {
         return Err(io::Error::other("Windows returned an invalid or null DACL"));
@@ -871,12 +845,10 @@ fn inspect_acl(dacl: *mut ACL, current_user: &OwnedSid) -> io::Result<AclSnapsho
     Ok(snapshot)
 }
 
-#[hotpath::measure]
 fn contextual_error(operation: &str, path: &Path) -> io::Error {
     wrap_error(operation, path, io::Error::last_os_error())
 }
 
-#[hotpath::measure]
 fn wrap_error(operation: &str, path: &Path, source: io::Error) -> io::Error {
     if source.raw_os_error().is_some() {
         return source;
@@ -887,7 +859,6 @@ fn wrap_error(operation: &str, path: &Path, source: io::Error) -> io::Error {
     )
 }
 
-#[hotpath::measure]
 fn rejected(path: &Path, reason: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::PermissionDenied,

@@ -15,7 +15,6 @@ pub(crate) struct ProjectServerCapacityRetirementCompletion {
     completion: tokio::sync::watch::Receiver<ProjectServerRetirementStatus>,
 }
 
-#[hotpath::measure_all]
 impl ProjectServerCapacityRetirementCompletion {
     #[hotpath::skip]
     pub(crate) async fn wait(self) -> tracedecay_domain::errors::Result<()> {
@@ -48,7 +47,6 @@ pub(crate) struct ProjectServerRetirementAdmission<'a> {
     retirements: tokio::sync::MutexGuard<'a, Vec<ProjectServerRetirement>>,
 }
 
-#[hotpath::measure_all]
 impl ProjectServerRetirementAdmission<'_> {
     /// Snapshot only the already-tracked retirements for this exact physical
     /// project owner. Capacity reuse awaits these receipts inside its detached
@@ -131,7 +129,6 @@ pub(in crate::daemon) struct ProjectRetirementFenceV1 {
     _writer: crate::daemon::store_writer_gate::WriterAdmissionGuard,
 }
 
-#[hotpath::measure_all]
 impl ProjectRetirementFenceV1 {
     pub(super) fn new(
         invocation: tracedecay_daemon_service::ProjectRuntimeRootQuiescenceV1,
@@ -158,7 +155,6 @@ struct ProjectServerRetirementFinalizer {
     terminal: bool,
 }
 
-#[hotpath::measure_all]
 impl ProjectServerRetirementFinalizer {
     fn complete(mut self, status: ProjectServerRetirementStatus) {
         match &status {
@@ -189,7 +185,6 @@ impl Drop for ProjectServerRetirementFinalizer {
     }
 }
 
-#[hotpath::measure]
 fn retirement_shutdown_owner_label(owner: &StoreOwnerKey) -> String {
     match &owner.project_id {
         Some(project_id) => format!("project_server_retirement[{project_id}]"),
@@ -213,7 +208,6 @@ async fn wait_for_project_server_retirement(
     }
 }
 
-#[hotpath::measure]
 fn track_project_server_retirement_after_admission(
     retirements: &mut Vec<ProjectServerRetirement>,
     owner: StoreOwnerKey,
@@ -347,7 +341,6 @@ pub(super) async fn settle_project_retirements(
     receipt
 }
 
-#[hotpath::measure_all]
 impl StoreAdministration {
     /// Acquires the canonical retirement handoff before an upstream mutation.
     ///

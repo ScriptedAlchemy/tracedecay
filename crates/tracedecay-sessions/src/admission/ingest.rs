@@ -6,7 +6,6 @@
 /// switch: session history simply stays un-ingested, reported as a typed
 /// unavailable outcome rather than an empty success.
 #[must_use]
-#[hotpath::measure]
 pub fn session_ingest_disabled() -> bool {
     std::env::var("TRACEDECAY_SESSION_INGEST_DISABLED").is_ok_and(|v| !v.is_empty() && v != "0")
 }

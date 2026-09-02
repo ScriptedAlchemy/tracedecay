@@ -77,7 +77,6 @@ pub enum CodeIndexSearchUnavailableReasonV1 {
     Internal,
 }
 
-#[hotpath::measure_all]
 impl CodeIndexSearchUnavailableReasonV1 {
     #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
@@ -136,7 +135,6 @@ pub enum CodeIndexLaneStatusV1 {
     Unavailable { reason: &'static str },
 }
 
-#[hotpath::measure_all]
 impl CodeIndexLaneStatusV1 {
     /// Whether this lane contributed results to the response.
     #[hotpath::skip]
@@ -172,7 +170,6 @@ pub struct CodeIndexSearchCoverageV1 {
     pub semantic: CodeIndexLaneStatusV1,
 }
 
-#[hotpath::measure_all]
 impl CodeIndexSearchCoverageV1 {
     /// Every lane served the current generation.
     #[hotpath::skip]
@@ -424,7 +421,6 @@ pub enum CodeIndexBranchDiffPartialReasonV1 {
     ResultLimit,
 }
 
-#[hotpath::measure_all]
 impl CodeIndexBranchDiffPartialReasonV1 {
     pub fn as_str(self) -> &'static str {
         match self {

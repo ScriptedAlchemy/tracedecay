@@ -39,7 +39,6 @@ pub struct AuthorizedTemporalExecutionRequest {
     configuration_digest: String,
 }
 
-#[hotpath::measure_all]
 impl AuthorizedTemporalExecutionRequest {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -164,7 +163,6 @@ pub struct SessionTemporalExecutionReport {
     source_coverage: Option<SessionSourceCoverageReceiptV1>,
 }
 
-#[hotpath::measure_all]
 impl SessionTemporalExecutionReport {
     pub fn new(result: TemporalKernelResult, freshness: SessionDataFreshness) -> Self {
         let source_coverage = result.snapshot.source_coverage().ok();
@@ -325,7 +323,6 @@ pub struct AuthorizedTaskSessionExecutionRequestV1 {
     control: EvidenceLaneExecutionControlV1,
 }
 
-#[hotpath::measure_all]
 impl AuthorizedTaskSessionExecutionRequestV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -528,7 +525,6 @@ pub enum SessionDataFreshness {
     Partial { generation_lag: u64 },
 }
 
-#[hotpath::measure_all]
 impl SessionDataFreshness {
     #[must_use]
     pub fn from_source_coverage(receipt: &SessionSourceCoverageReceiptV1) -> Self {

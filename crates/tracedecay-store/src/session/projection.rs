@@ -32,7 +32,6 @@ pub struct SessionTemporalProjectionBatchV1 {
     assertions: Vec<TemporalAssertionRecordV1>,
 }
 
-#[hotpath::measure_all]
 impl SessionTemporalProjectionBatchV1 {
     #[hotpath::measure(label = "store.session.build_projection_batch")]
     pub fn new(
@@ -193,7 +192,6 @@ pub struct SessionTemporalProjectionBatchReceiptV1 {
     committed_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl SessionTemporalProjectionBatchReceiptV1 {
     pub fn applied(
         batch: &SessionTemporalProjectionBatchV1,
@@ -352,7 +350,6 @@ pub struct SessionGenerationRebuildRequestV1 {
     snapshot: SessionTemporalSnapshotV1,
 }
 
-#[hotpath::measure_all]
 impl SessionGenerationRebuildRequestV1 {
     pub fn new(
         session_id: SessionId,
@@ -394,7 +391,6 @@ pub enum SessionGenerationRebuildDispositionV1 {
     Complete,
 }
 
-#[hotpath::measure_all]
 impl SessionGenerationRebuildDispositionV1 {
     /// Valid durable transitions: started/resumed may resume or complete;
     /// complete is terminal and may only be observed again as complete.
@@ -420,7 +416,6 @@ pub struct SessionGenerationRebuildReceiptV1 {
     recorded_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl SessionGenerationRebuildReceiptV1 {
     pub fn new(
         request: &SessionGenerationRebuildRequestV1,
@@ -488,7 +483,6 @@ pub struct SessionGenerationActivationRequestV1 {
     execution_control: ExecutionControl,
 }
 
-#[hotpath::measure_all]
 impl SessionGenerationActivationRequestV1 {
     pub fn new(
         session_id: SessionId,
@@ -535,7 +529,6 @@ pub struct SessionGenerationActivationReceiptV1 {
     activated_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl SessionGenerationActivationReceiptV1 {
     pub fn new(
         request: &SessionGenerationActivationRequestV1,

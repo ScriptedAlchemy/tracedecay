@@ -114,7 +114,6 @@ pub(crate) struct ProjectMemoryReconciliationPassLeaseV1 {
     telemetry: Arc<ProjectMemoryReconciliationTelemetryV1>,
 }
 
-#[hotpath::measure_all]
 impl ProjectMemoryReconciliationTelemetryObserverV1 {
     pub(super) fn new(
         telemetry: Arc<ProjectMemoryReconciliationTelemetryV1>,
@@ -155,7 +154,6 @@ impl ProjectMemoryReconciliationTelemetryObserverV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl ProjectMemoryReconciliationTelemetryV1 {
     pub(crate) fn begin_reconciliation_pass(
         self: &Arc<Self>,
@@ -197,7 +195,6 @@ impl Drop for ProjectMemoryReconciliationPassLeaseV1 {
     }
 }
 
-#[hotpath::measure]
 fn increment_counter(
     counter: &AtomicU64,
     increment: u64,
@@ -211,7 +208,6 @@ fn increment_counter(
         .map_err(|_| counter_name)
 }
 
-#[hotpath::measure]
 fn decrement_counter(counter: &AtomicU64, counter_name: &'static str) -> Result<(), &'static str> {
     counter
         .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
@@ -283,7 +279,6 @@ pub struct MemoryGraphReconciliationTaskOwnerV1 {
         Arc<dyn Fn() -> Result<(), MemoryGraphReconciliationRuntimeErrorV1> + Send + Sync>,
 }
 
-#[hotpath::measure_all]
 impl MemoryGraphReconciliationCoordinatorV1 {
     pub(super) fn task_owner(
         &self,
@@ -395,7 +390,6 @@ struct WeakUpgradeLeaseV1 {
     shared: Weak<MemoryGraphReconciliationSharedV1>,
 }
 
-#[hotpath::measure_all]
 impl WeakUpgradeLeaseV1 {
     fn install(shared: &Arc<MemoryGraphReconciliationSharedV1>) -> Option<Self> {
         let mut state = shared
@@ -550,7 +544,6 @@ async fn run_memory_graph_reconciliation_worker<Operation, OperationFuture>(
     }
 }
 
-#[hotpath::measure_all]
 impl MemoryGraphReconciliationTaskOwnerV1 {
     pub fn same_coordinator(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.shared, &other.shared)
@@ -769,7 +762,6 @@ impl MemoryGraphReconciliationTaskOwnerV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl MemoryGraphReconciliationRetirementReceiptV1 {
     #[hotpath::skip]
     pub(in crate::db) async fn wait(self) -> MemoryGraphReconciliationRetirementTerminalV1 {
@@ -796,7 +788,6 @@ struct MemoryGraphReconciliationRetirementTaskFinalizerV1 {
     finished: bool,
 }
 
-#[hotpath::measure_all]
 impl MemoryGraphReconciliationRetirementTaskFinalizerV1 {
     fn new(shared: Arc<MemoryGraphReconciliationSharedV1>) -> Self {
         Self {
@@ -835,7 +826,6 @@ impl Drop for MemoryGraphReconciliationRetirementTaskFinalizerV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl MemoryGraphReconciliationRetirementReservationV1 {
     /// Linearizes the reconciliation fence and transfers cancellation/joining
     /// into a retained task. Graph retirement remains the graph registry's
@@ -889,7 +879,6 @@ struct MemoryGraphReconciliationJoinLeaseV1 {
     tasks: Vec<JoinHandle<()>>,
 }
 
-#[hotpath::measure_all]
 impl MemoryGraphReconciliationJoinLeaseV1 {
     fn remove_completed_task(&mut self) {
         let mut state = self

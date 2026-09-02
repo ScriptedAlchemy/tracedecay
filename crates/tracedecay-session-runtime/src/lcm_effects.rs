@@ -29,7 +29,6 @@ struct LcmEffectControl {
     expires_at: tokio::time::Instant,
 }
 
-#[hotpath::measure_all]
 impl LcmEffectControl {
     fn new(deadline: Option<&Deadline>, cancellation: Option<&CancellationSignal>) -> Self {
         let budget = deadline
@@ -88,7 +87,6 @@ impl LcmEffectControl {
     }
 }
 
-#[hotpath::measure_all]
 impl DaemonLcmEffectService {
     pub(super) fn new(
         db: RegisteredGlobalDbLeaseV1,
@@ -240,7 +238,6 @@ pub async fn lcm_session_boundary_for_test(
 /// Terminal compression outcomes for profiling, including deferrals and
 /// failures: a lane that only counts commits hides exactly the retried and
 /// cancelled work a compaction investigation needs to see.
-#[hotpath::measure]
 fn observe_compression_outcome(result: &Result<LcmCompressionResponse, LcmError>) {
     match result {
         Ok(response) if response.retry_status.is_some() => {
@@ -267,7 +264,6 @@ fn observe_compression_outcome(result: &Result<LcmCompressionResponse, LcmError>
     }
 }
 
-#[hotpath::measure]
 fn summary_unavailable(
     mut response: LcmCompressionResponse,
     reason: &'static str,

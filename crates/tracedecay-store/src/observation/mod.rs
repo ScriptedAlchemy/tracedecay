@@ -25,7 +25,6 @@ const MAX_REPLAY_LIMIT: usize = 1_000;
 /// Canonical authority namespace bound into every observation-capture anchor.
 pub const OBSERVATION_CAPTURE_AUTHORITY_V1: &str = "observation-capture.v1";
 
-#[hotpath::measure]
 fn cursor_transition_covers(
     expected: Option<&ObservationSourceCursorV1>,
     next: &ObservationSourceCursorV1,
@@ -59,7 +58,6 @@ pub struct ObservationWrite {
     next_cursor: ObservationSourceCursorV1,
 }
 
-#[hotpath::measure_all]
 impl ObservationWrite {
     pub fn new(
         observation: DurableObservationV1,
@@ -110,7 +108,6 @@ impl ObservationWrite {
 }
 
 /// Derives an owner-bound authorization snapshot when ingress has no richer policy object.
-#[hotpath::measure]
 pub fn build_observation_resolution_authorization_v1(
     observation: &DurableObservationV1,
     authority_namespace: &str,
@@ -134,7 +131,6 @@ pub fn build_observation_resolution_authorization_v1(
 /// retained record to carry one, such as absent or ambiguous anchor bindings.
 /// The request digest binds only the owner scope and the requested anchor id;
 /// it never embeds payload bytes or a source locator.
-#[hotpath::measure]
 pub fn build_scope_resolution_authorization_v1(
     scope: &ObservationScopeV1,
     anchor_id: &RetrievalAnchorId,
@@ -180,7 +176,6 @@ static ACCESS_POLICY_DIGESTS: LazyLock<hotpath::rw_locks::RwLock<HashMap<String,
         )
     });
 
-#[hotpath::measure]
 fn access_policy_digest_for(authority_namespace: &str) -> ObservationStoreResult<String> {
     hotpath::measure_block!("store.observation.access_policy_digest", {
         if let Ok(memo) = ACCESS_POLICY_DIGESTS.read()
@@ -208,13 +203,11 @@ fn access_policy_digest_for(authority_namespace: &str) -> ObservationStoreResult
 /// Returns the exact access-policy digest retained by production observation
 /// anchors so retrieval admission can bind to the same authority without
 /// duplicating its canonical digest construction.
-#[hotpath::measure]
 pub fn observation_capture_access_policy_digest_v1() -> ObservationStoreResult<AccessPolicyDigest> {
     AccessPolicyDigest::new(access_policy_digest_for(OBSERVATION_CAPTURE_AUTHORITY_V1)?)
         .map_err(ObservationStoreError::RetrievalAnchorContract)
 }
 
-#[hotpath::measure]
 fn build_resolution_authorization_v1(
     authority_namespace: &str,
     canonical_request_digest: String,
@@ -235,7 +228,6 @@ fn build_resolution_authorization_v1(
 }
 
 /// Builds the canonical stable anchor for one retained sanitized observation.
-#[hotpath::measure]
 pub fn build_observation_retrieval_anchor_v2(
     observation: &DurableObservationV1,
     projection_generation: ProjectionGenerationId,
@@ -335,7 +327,6 @@ pub enum ObservationCoverageReason {
     AdmissionRefused,
 }
 
-#[hotpath::measure_all]
 impl ObservationCoverageReason {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -446,7 +437,6 @@ pub struct ObservationCoverageV1 {
     range: ObservationSourceRangeV1,
 }
 
-#[hotpath::measure_all]
 impl ObservationCoverageV1 {
     pub fn new(
         generation: ObservationSourceGenerationV1,
@@ -483,7 +473,6 @@ pub struct ObservationCursorAdvance {
     sanitization_receipt: Option<SanitizationReceiptV1>,
 }
 
-#[hotpath::measure_all]
 impl ObservationCursorAdvance {
     pub fn new(
         source: ObservationSourceIdentityV1,
@@ -663,7 +652,6 @@ pub struct ObservationCommitReceipt {
     repository_provenance: RepositoryProvenanceAttachmentV1,
 }
 
-#[hotpath::measure_all]
 impl ObservationCommitReceipt {
     pub fn new(
         sequence: u64,
@@ -733,7 +721,6 @@ pub enum ObservationPersistOutcome {
     CoveredDuplicate(ObservationCommitReceipt),
 }
 
-#[hotpath::measure_all]
 impl ObservationPersistOutcome {
     pub fn receipt(&self) -> &ObservationCommitReceipt {
         match self {
@@ -751,7 +738,6 @@ pub struct StoredObservation {
     projection_status: ObservationProjectionStatus,
 }
 
-#[hotpath::measure_all]
 impl StoredObservation {
     pub fn new(
         sequence: u64,
@@ -836,7 +822,6 @@ pub struct ObservationBatchPersistOutcome {
     stored: Option<StoredObservation>,
 }
 
-#[hotpath::measure_all]
 impl ObservationBatchPersistOutcome {
     #[hotpath::skip]
     pub const fn new(
@@ -885,7 +870,6 @@ pub struct ObservationReplayRequest {
     limit: usize,
 }
 
-#[hotpath::measure_all]
 impl ObservationReplayRequest {
     pub fn new(after_sequence: u64, limit: usize) -> ObservationStoreResult<Self> {
         if limit == 0 || limit > MAX_REPLAY_LIMIT {

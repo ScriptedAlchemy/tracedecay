@@ -443,7 +443,6 @@ impl GitIndexTransactionStore for DaemonGitIndexTransactionStore {
     }
 }
 
-#[hotpath::measure]
 fn run_store_actor(
     runtime: &tokio::runtime::Runtime,
     database: &ActorDatabase,
@@ -624,7 +623,6 @@ fn duration_until(expires_at: UtcMicros, observed_at: UtcMicros) -> Duration {
 /// Reject a queued command with the typed cause that prevented executing it,
 /// so callers observe the real failure (for example a failed due purge)
 /// instead of a fabricated generic rejection.
-#[hotpath::measure]
 fn reject_store_command(command: StoreCommand, error: GitIndexTransactionStoreError) {
     match command {
         StoreCommand::SavePreviewInput(_, reply) => {
@@ -679,7 +677,6 @@ pub struct SharedDaemonGitIndexTransactionStore {
     inner: Arc<DaemonGitIndexTransactionStore>,
 }
 
-#[hotpath::measure_all]
 impl SharedDaemonGitIndexTransactionStore {
     pub fn from_arc(inner: Arc<DaemonGitIndexTransactionStore>) -> Self {
         Self { inner }

@@ -67,7 +67,6 @@ pub struct CanonicalCodeGraphStoreLeaseV1 {
     namespace: GraphNamespace,
 }
 
-#[hotpath::measure_all]
 impl CanonicalCodeGraphStoreLeaseV1 {
     pub fn code_shard_id(&self) -> &StoreShardIdV1 {
         &self.code_shard_id
@@ -219,7 +218,6 @@ impl Drop for CanonicalGraphStoreOwnerRetirementTargetV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl StoreRuntimeRegistry {
     /// Retains one physical project graph store together with the exact code
     /// namespace selected by a linked worktree, ref, or immutable snapshot and
@@ -732,7 +730,6 @@ fn map_owner_operation_lease_error(
     }
 }
 
-#[hotpath::measure_all]
 impl CanonicalGraphStoreOwnerRetirementTargetV1 {
     pub(super) fn belongs_to(&self, registry: &StoreRuntimeRegistry) -> bool {
         Arc::ptr_eq(&self.registry.inner, &registry.inner)
@@ -1006,7 +1003,6 @@ impl CanonicalGraphStoreOwnerRetirementTargetV1 {
     }
 }
 
-#[hotpath::measure]
 fn allocate_graph_owner_counter(counter: &mut u64) -> Result<u64, StoreRuntimeRegistryFailure> {
     *counter = counter
         .checked_add(1)
@@ -1014,7 +1010,6 @@ fn allocate_graph_owner_counter(counter: &mut u64) -> Result<u64, StoreRuntimeRe
     Ok(*counter)
 }
 
-#[hotpath::measure]
 fn entry_binding(entry: &RegistryEntry) -> &StoreRuntimeBindingV1 {
     match entry {
         RegistryEntry::Opening(opening) => &opening.binding,
@@ -1028,7 +1023,6 @@ fn entry_binding(entry: &RegistryEntry) -> &StoreRuntimeBindingV1 {
     }
 }
 
-#[hotpath::measure]
 fn validate_graph_scope(key: &StoreRuntimeKey) -> Result<(), StoreRuntimeRegistryFailure> {
     if matches!(
         key.shard_id().scope,
@@ -1043,7 +1037,6 @@ fn validate_graph_scope(key: &StoreRuntimeKey) -> Result<(), StoreRuntimeRegistr
     }
 }
 
-#[hotpath::measure]
 fn validate_project_code_scope(
     project_key: &StoreRuntimeKey,
     code_shard_id: &StoreShardIdV1,
@@ -1070,7 +1063,6 @@ fn validate_project_code_scope(
     Ok(())
 }
 
-#[hotpath::measure]
 fn code_graph_namespace(
     code_shard_id: &StoreShardIdV1,
     generation_id: &CodeGenerationId,

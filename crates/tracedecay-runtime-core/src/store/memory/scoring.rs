@@ -31,7 +31,6 @@ const RETRIEVAL_REINFORCEMENT_CAP: f64 = 0.50;
 /// Not the dashboard/write-time similarity tokenizer in
 /// `memory::similarity`: that one splits on `/` `:` `.`, keeps hyphens and
 /// apostrophes, and drops stopwords for near-duplicate classification.
-#[hotpath::measure]
 pub(super) fn project_memory_tokens(text: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
@@ -54,7 +53,6 @@ pub(super) fn project_memory_tokens(text: &str) -> Vec<String> {
     tokens
 }
 
-#[hotpath::measure]
 pub(super) fn project_memory_fact_tokens(fact: &ProjectMemoryFactV1) -> Vec<String> {
     let mut tokens = project_memory_tokens(fact.content());
     for tag in fact.tags() {
@@ -68,7 +66,6 @@ pub(super) fn project_memory_fact_tokens(fact: &ProjectMemoryFactV1) -> Vec<Stri
     tokens
 }
 
-#[hotpath::measure]
 pub(super) fn project_memory_term_coverage(query: &[String], fact: &[String]) -> f64 {
     if query.is_empty() {
         return 0.0;
@@ -85,7 +82,6 @@ pub(super) fn project_memory_term_coverage(query: &[String], fact: &[String]) ->
     matched as f64 / query.len() as f64
 }
 
-#[hotpath::measure]
 pub(super) fn project_memory_jaccard(left: &[String], right: &[String]) -> f64 {
     if left.is_empty() || right.is_empty() {
         return 0.0;
@@ -151,7 +147,6 @@ static FACT_VECTOR_CACHE: LazyLock<Mutex<FactVectorCache>> =
 
 /// Returns the FHRR encoding for a canonical fact projection, computing and
 /// retaining it on first use for the fact's current active assertion.
-#[hotpath::measure]
 pub(super) fn project_memory_fact_vector(
     encoder: &HolographicEncoder,
     fact: &ProjectMemoryFactV1,
@@ -189,7 +184,6 @@ pub(super) fn project_memory_fact_vector(
     Ok(vector)
 }
 
-#[hotpath::measure]
 pub(super) fn project_memory_holographic_score(
     encoder: &HolographicEncoder,
     query: &HolographicQueryVector,
@@ -204,12 +198,10 @@ pub(super) fn project_memory_holographic_score(
     ))
 }
 
-#[hotpath::measure]
 fn project_memory_holographic_midpoint(similarity: f64) -> f64 {
     f64::midpoint(similarity, 1.0).clamp(0.0, 1.0)
 }
 
-#[hotpath::measure]
 pub(super) fn project_memory_normalize_fts5_ranks(
     ranked: Vec<(FactId, f64)>,
 ) -> BTreeMap<FactId, f64> {
@@ -234,12 +226,10 @@ pub(super) fn project_memory_normalize_fts5_ranks(
         .collect()
 }
 
-#[hotpath::measure]
 pub(super) fn project_memory_fts_component(normalized_bm25: f64, coverage: f64) -> f64 {
     normalized_bm25.clamp(0.0, 1.0) * (0.5 + 0.5 * coverage.clamp(0.0, 1.0))
 }
 
-#[hotpath::measure]
 pub(super) fn project_memory_combined_score(
     fts: f64,
     jaccard: f64,
@@ -258,12 +248,10 @@ pub(super) fn project_memory_combined_score(
     relevance * trust.clamp(0.0, 1.0) * temporal_decay.clamp(0.0, 1.0) * usage_boost
 }
 
-#[hotpath::measure]
 pub(super) fn project_memory_millionths(value: f64) -> u32 {
     (value.clamp(0.0, 1.0) * 1_000_000.0).round() as u32
 }
 
-#[hotpath::measure]
 pub(super) fn project_memory_score_millionths(value: f64) -> u32 {
     (value.clamp(
         0.0,
@@ -272,7 +260,6 @@ pub(super) fn project_memory_score_millionths(value: f64) -> u32 {
         .round() as u32
 }
 
-#[hotpath::measure]
 pub(super) fn project_memory_temporal_decay(updated_at: UtcMicros, now: UtcMicros) -> f64 {
     if updated_at.0 <= 0 {
         return 1.0;
@@ -282,7 +269,6 @@ pub(super) fn project_memory_temporal_decay(updated_at: UtcMicros, now: UtcMicro
     0.5_f64.powf(age_days / 365.0).clamp(0.10, 1.0)
 }
 
-#[hotpath::measure]
 fn project_memory_fts5_rank_relevance(rank: f64) -> f64 {
     if rank.is_finite() {
         (-rank).max(0.0)
@@ -291,7 +277,6 @@ fn project_memory_fts5_rank_relevance(rank: f64) -> f64 {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn project_memory_holographic_error(error: HolographicEncodingError) -> FactStoreError {
     match error {
         HolographicEncodingError::DimensionMismatch { expected, actual } => {

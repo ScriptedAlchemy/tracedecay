@@ -255,7 +255,6 @@ pub(crate) async fn resolve_external_target(
     .await
 }
 
-#[hotpath::measure]
 fn unverifiable() -> HydrationResolution {
     HydrationResolution::Unavailable(HydrationStateV1::UnverifiableLegacy)
 }

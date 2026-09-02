@@ -56,7 +56,6 @@ pub struct RegistryOrphanRelinkReport {
     pub issues: Vec<String>,
 }
 
-#[hotpath::measure_all]
 impl RegistryOrphanRelinkReport {
     pub fn status_count(&self, status: RegistryOrphanRelinkStatus) -> usize {
         self.plans
@@ -96,7 +95,6 @@ pub struct RegistryGcReport {
     pub storage_project_candidates: Vec<PathBuf>,
 }
 
-#[hotpath::measure_all]
 impl RegistryGcReport {
     pub fn record_deletions(&mut self, code_projects: usize, storage_projects: usize) {
         self.apply = true;
@@ -185,7 +183,6 @@ pub async fn diff_registry_orphan_relink_report(
     diff
 }
 
-#[hotpath::measure]
 fn encode_registry_identity<T: serde::Serialize>(
     value: &T,
     label: impl std::fmt::Display,
@@ -585,7 +582,6 @@ where
     issues
 }
 
-#[hotpath::measure]
 fn record_batch_owner(
     owners: &mut BTreeMap<String, String>,
     key: &str,
@@ -602,7 +598,6 @@ fn record_batch_owner(
     }
 }
 
-#[hotpath::measure]
 fn graph_scope_location_drift_is_repairable(existing: &str, expected: &GraphScopeUpsert) -> bool {
     serde_json::from_str::<(String, String, String, String, Option<String>)>(existing).is_ok_and(
         |(project_id, store_id, branch_name, _, _)| {

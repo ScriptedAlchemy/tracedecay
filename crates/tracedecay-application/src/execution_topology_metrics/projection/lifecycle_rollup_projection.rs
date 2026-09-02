@@ -15,7 +15,6 @@ use super::lifecycle_rollup::{
 };
 use super::{ExecutionTopologyRollupStateErrorV1, ProjectionContext};
 
-#[hotpath::measure_all]
 impl ExecutionTopologyLifecycleRollupV1 {
     pub(in crate::execution_topology_metrics) fn project_with_carry(
         &self,
@@ -78,7 +77,6 @@ impl ExecutionTopologyLifecycleRollupV1 {
     }
 }
 
-#[hotpath::measure]
 fn project_stale_stack_rollup(
     aggregate: &ExecutionTopologyLifecycleRollupV1,
     context: &ProjectionContext,
@@ -132,7 +130,6 @@ fn project_stale_stack_rollup(
     }
 }
 
-#[hotpath::measure]
 fn project_merge_rollup(
     aggregate: &ExecutionTopologyLifecycleRollupV1,
     context: &ProjectionContext,
@@ -217,7 +214,6 @@ fn project_merge_rollup(
     }
 }
 
-#[hotpath::measure]
 fn project_blocked_rollup(
     aggregate: &ExecutionTopologyLifecycleRollupV1,
     context: &ProjectionContext,
@@ -296,7 +292,6 @@ fn project_blocked_rollup(
     }
 }
 
-#[hotpath::measure]
 fn project_rerun_rollup(
     aggregate: &ExecutionTopologyLifecycleRollupV1,
     context: &ProjectionContext,
@@ -385,7 +380,6 @@ fn project_rerun_rollup(
     }
 }
 
-#[hotpath::measure]
 fn project_leak_rollup(
     aggregate: &ExecutionTopologyLifecycleRollupV1,
     context: &ProjectionContext,
@@ -437,7 +431,6 @@ fn project_leak_rollup(
     }
 }
 
-#[hotpath::measure]
 fn project_delivery_rollup(
     aggregate: &ExecutionTopologyLifecycleRollupV1,
     context: &ProjectionContext,

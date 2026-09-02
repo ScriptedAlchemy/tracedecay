@@ -6,7 +6,6 @@ use clap::{
 };
 use tracedecay_api::WorkOperation;
 
-#[hotpath::measure]
 fn work_operation_parser() -> impl TypedValueParser<Value = WorkOperation> {
     PossibleValuesParser::new(WorkOperation::ALL.map(WorkOperation::route_segment))
         .try_map(|segment| segment.parse::<WorkOperation>())

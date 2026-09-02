@@ -49,7 +49,6 @@ pub struct IndexingIdentityV1 {
     head_tree: Option<TreeId>,
 }
 
-#[hotpath::measure_all]
 impl IndexingIdentityV1 {
     /// Resolve the exact indexing identity of `project_root` through gix.
     ///
@@ -158,7 +157,6 @@ pub struct GitMetadataFingerprintV1 {
     head_contents: Option<String>,
 }
 
-#[hotpath::measure_all]
 impl GitMetadataFingerprintV1 {
     /// Sample the current git-metadata fingerprint for `project_root`.
     ///
@@ -209,7 +207,6 @@ impl GitMetadataFingerprintV1 {
     }
 }
 
-#[hotpath::measure]
 fn mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path)
         .and_then(|meta| meta.modified())
@@ -230,7 +227,6 @@ fn mtime(path: &Path) -> Option<SystemTime> {
 /// coarse filesystem resolution. Hashing the bytes catches it unconditionally.
 /// Returns `None` when the tree is absent (all refs packed, or not a
 /// repository).
-#[hotpath::measure]
 fn refs_heads_signature(dir: &Path) -> Option<String> {
     if !dir.exists() {
         return None;
@@ -273,7 +269,6 @@ fn refs_heads_signature(dir: &Path) -> Option<String> {
 /// Resolve the git-dir (worktree-local) and common-dir (repository-shared)
 /// paths, falling back to `<root>/.git` when gix cannot open the checkout so a
 /// non-repository path still yields a stable, if empty, fingerprint.
-#[hotpath::measure]
 fn git_metadata_dirs(project_root: &Path) -> (PathBuf, PathBuf) {
     if let Ok(repository) = gix::open(project_root) {
         let git_dir = repository.git_dir().to_path_buf();

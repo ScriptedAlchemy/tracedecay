@@ -91,14 +91,12 @@ pub(super) async fn handle_workflow(
     })
 }
 
-#[hotpath::measure]
 fn mint_request_id() -> Result<RequestId> {
     mint_global_request_id(GlobalRequestSurface::McpFallback).map_err(|_| TraceDecayError::Config {
         message: "could not allocate a Workflow request id".to_owned(),
     })
 }
 
-#[hotpath::measure]
 fn workflow_controls(
     operation: WorkflowOperation,
     request_id: &RequestId,

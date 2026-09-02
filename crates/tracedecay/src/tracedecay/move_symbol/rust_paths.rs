@@ -9,7 +9,6 @@ use tracedecay_domain::code_intelligence::{NodeKind, Visibility};
 
 /// Item kinds that a `use` statement can bring into scope — the ones a moved
 /// body could depend on across a module boundary.
-#[hotpath::measure]
 pub(super) fn is_importable_item(kind: &NodeKind) -> bool {
     matches!(
         kind,
@@ -27,7 +26,6 @@ pub(super) fn is_importable_item(kind: &NodeKind) -> bool {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn visibility_word(v: &Visibility) -> &'static str {
     match v {
         Visibility::Pub => "pub",
@@ -39,7 +37,6 @@ pub(super) fn visibility_word(v: &Visibility) -> &'static str {
 
 /// Derives a Rust module path (`crate::a::b`) from a project-relative `.rs`
 /// file path under a `src/` root. Returns `None` for non-Rust files.
-#[hotpath::measure]
 pub(super) fn rust_module_path(rel: &str) -> Option<String> {
     let stem = rel.strip_suffix(".rs")?;
     // Normalize to components after an optional `src/` (or `.../src/`) segment.
@@ -67,7 +64,6 @@ pub(super) fn rust_module_path(rel: &str) -> Option<String> {
 
 /// The module stem for a destination file (`src/foo/bar.rs` -> `bar`,
 /// `src/foo/mod.rs` -> `foo`).
-#[hotpath::measure]
 pub(super) fn module_stem(rel: &str) -> Option<String> {
     let stem = rel.strip_suffix(".rs")?;
     let parts: Vec<&str> = stem.split('/').filter(|p| !p.is_empty()).collect();
@@ -85,7 +81,6 @@ pub(super) fn module_stem(rel: &str) -> Option<String> {
 
 /// The likely crate-root file for a destination, used to suggest where a
 /// `mod` statement belongs.
-#[hotpath::measure]
 pub(super) fn crate_root_file(dest_rel: &str) -> String {
     let src_prefix = dest_rel.rfind("src/").map(|i| &dest_rel[..i + 4]);
     match src_prefix {
@@ -95,7 +90,6 @@ pub(super) fn crate_root_file(dest_rel: &str) -> String {
 }
 
 /// Files that could declare `dest_rel`'s module with a `mod` statement.
-#[hotpath::measure]
 pub(super) fn parent_module_candidates(dest_rel: &str) -> Vec<String> {
     let Some(stem) = dest_rel.strip_suffix(".rs") else {
         return Vec::new();
@@ -132,7 +126,6 @@ pub(super) fn parent_module_candidates(dest_rel: &str) -> Vec<String> {
 /// Parse-level check for an external `mod name;` declaration. Text matches
 /// alone are unsafe here: comments, strings, and inline `mod name { ... }`
 /// blocks do not connect `name.rs` to the module tree.
-#[hotpath::measure]
 pub(super) fn source_declares_external_module(source: &str, expected: &str) -> bool {
     let Ok(language) = tracedecay_code_extraction::ts_provider::try_language("rust") else {
         return false;

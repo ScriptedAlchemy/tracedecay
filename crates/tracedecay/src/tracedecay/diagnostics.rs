@@ -16,7 +16,6 @@ use super::TraceDecay;
 /// that type rather than a structurally identical twin.
 pub use tracedecay_usecases::tracedecay::{BranchDiagnostics, TrackedBranchDiagnostic};
 
-#[hotpath::measure_all]
 impl TraceDecay {
     pub(crate) fn dashboard_database_guard(&self) -> std::sync::Arc<Database> {
         std::sync::Arc::new(self.db.clone())

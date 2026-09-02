@@ -89,7 +89,6 @@ pub(super) async fn shutdown_project_servers(
     receipt
 }
 
-#[hotpath::measure]
 fn apply_project_shutdown_attempts(
     retained: &mut Vec<super::branch_admin::RetainedProjectShutdownOwner>,
     server_attempts: &ShutdownTaskReceipt,

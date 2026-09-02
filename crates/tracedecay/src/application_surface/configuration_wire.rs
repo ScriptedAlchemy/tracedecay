@@ -30,7 +30,6 @@ pub(super) const CONFIGURATION_WIRE_OPERATIONS: [ApplicationSurfaceOperation; 13
     ApplicationSurfaceOperation::ConfigurationAudit,
 ];
 
-#[hotpath::measure]
 pub(super) fn is_configuration_operation(operation: ApplicationSurfaceOperation) -> bool {
     CONFIGURATION_WIRE_OPERATIONS.contains(&operation)
 }
@@ -86,12 +85,10 @@ pub(super) fn configuration_invocation_payload(
         .ok_or(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
 }
 
-#[hotpath::measure]
 fn payload_decodes<T: DeserializeOwned>(payload: Option<&Value>) -> bool {
     payload.is_none_or(|value| serde_json::from_value::<T>(value.clone()).is_ok())
 }
 
-#[hotpath::measure]
 fn configuration_terminal_is_legal(
     termination: OperationTermination,
     terminal_states: &TerminalStateContract,
@@ -108,7 +105,6 @@ fn configuration_terminal_is_legal(
     terminal_states.contains(terminal_state)
 }
 
-#[hotpath::measure]
 fn configuration_cancellation_is_legal(
     outcome: &ApplicationOutcome<Value>,
     cancellation: &CancellationContract,
@@ -135,7 +131,6 @@ fn configuration_cancellation_is_legal(
 
 /// Validate the transport serialization carrier against the concrete result
 /// DTO before an adapter can publish it.
-#[hotpath::measure]
 pub(super) fn validate_configuration_outcome(
     operation: ApplicationSurfaceOperation,
     outcome: &ApplicationOutcome<Value>,

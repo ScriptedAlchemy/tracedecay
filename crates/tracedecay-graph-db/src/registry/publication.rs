@@ -80,7 +80,6 @@ pub enum GraphPublicationPreparationV1 {
     Proven(Box<ProvenGraphPublicationV1>),
 }
 
-#[hotpath::measure_all]
 impl GraphDbRegistry {
     /// Recovers a dependency-free verified code graph directly from its
     /// sealed derived store and the exact relational head/replay authority.
@@ -963,8 +962,8 @@ impl GraphDbRegistry {
                                     // A repair that wrote missing native rows is
                                     // a new seal: build and prove its derived
                                     // artifact before seating it.
-                                    let (_, recovered) =
-                                        database.verify_generation_for_publication(
+                                    let (_, recovered) = database
+                                        .verify_generation_for_publication(
                                             &identity,
                                             sealed_digest,
                                             row_counts,

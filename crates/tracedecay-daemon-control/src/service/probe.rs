@@ -46,13 +46,11 @@ impl ProbeStream for StdTcpStream {
 /// Installers use this to warn when a daemon-scheduled feature is enabled but
 /// no daemon service is running to execute it.
 #[cfg(unix)]
-#[hotpath::measure]
 pub fn daemon_reachable() -> bool {
     default_socket_path().is_ok_and(|path| StdUnixStream::connect(path).is_ok())
 }
 
 #[cfg(not(unix))]
-#[hotpath::measure]
 pub fn daemon_reachable() -> bool {
     super::default_socket_path()
         .is_ok_and(|path| matches!(daemon_socket_state(&path), DaemonSocketState::Connectable))
@@ -102,7 +100,6 @@ impl std::fmt::Display for DaemonProtocolState {
 }
 
 #[cfg(unix)]
-#[hotpath::measure]
 pub(super) fn daemon_protocol_state(
     socket_path: &Path,
     expected_version: &str,
@@ -115,7 +112,6 @@ pub(super) fn daemon_protocol_state(
 }
 
 #[cfg(not(unix))]
-#[hotpath::measure]
 pub(super) fn daemon_protocol_state(
     transport_hint: &Path,
     expected_version: &str,
@@ -150,7 +146,6 @@ pub(super) fn daemon_protocol_state_with_timeout(
 }
 
 #[cfg(unix)]
-#[hotpath::measure]
 fn query_daemon_identity(
     socket_path: &Path,
     expected_version: &str,
@@ -171,7 +166,6 @@ fn query_daemon_identity(
 }
 
 #[cfg(not(unix))]
-#[hotpath::measure]
 fn query_daemon_identity(
     socket_path: &Path,
     expected_version: &str,
@@ -185,7 +179,6 @@ fn query_daemon_identity(
     query_daemon_identity_stream(stream, Some(&auth_token), expected_version, deadline)
 }
 
-#[hotpath::measure]
 fn query_daemon_identity_stream(
     mut stream: impl ProbeStream,
     auth_token: Option<&str>,
@@ -253,7 +246,6 @@ pub(super) enum DaemonShutdownRequest {
 }
 
 #[cfg(not(unix))]
-#[hotpath::measure]
 pub(super) fn request_daemon_shutdown(
     transport_hint: &Path,
     client_version: &str,
@@ -268,7 +260,6 @@ pub(super) fn request_daemon_shutdown(
 }
 
 #[cfg(not(unix))]
-#[hotpath::measure]
 fn request_daemon_shutdown_stream(
     mut stream: impl ProbeStream,
     auth_token: &str,
@@ -321,7 +312,6 @@ fn request_daemon_shutdown_stream(
     })
 }
 
-#[hotpath::measure]
 fn remaining_probe_time(
     deadline: std::time::Instant,
     operation: &str,
@@ -344,7 +334,6 @@ pub(super) fn shutdown_response_accepted(line: &str, request_id: i64) -> bool {
         && response.get("error").is_none()
 }
 
-#[hotpath::measure_all]
 impl DaemonSocketState {
     pub(super) fn is_proven_quiesced(self) -> bool {
         matches!(self, Self::Missing | Self::Stale)
@@ -366,7 +355,6 @@ impl std::fmt::Display for DaemonSocketState {
 }
 
 #[cfg(unix)]
-#[hotpath::measure]
 pub(super) fn daemon_socket_state(socket_path: &Path) -> DaemonSocketState {
     if !socket_path.exists() {
         return DaemonSocketState::Missing;
@@ -382,13 +370,11 @@ pub(super) fn daemon_socket_state(socket_path: &Path) -> DaemonSocketState {
 }
 
 #[cfg(not(unix))]
-#[hotpath::measure]
 pub(super) fn daemon_socket_state(transport_hint: &Path) -> DaemonSocketState {
     daemon_socket_state_with_timeout(transport_hint, std::time::Duration::from_millis(250))
 }
 
 #[cfg(not(unix))]
-#[hotpath::measure]
 pub(super) fn daemon_socket_state_with_timeout(
     transport_hint: &Path,
     timeout: std::time::Duration,
@@ -408,13 +394,11 @@ pub(super) fn daemon_socket_state_with_timeout(
 }
 
 #[cfg(unix)]
-#[hotpath::measure]
 pub(super) fn daemon_transport_display(socket_path: &Path) -> String {
     socket_path.display().to_string()
 }
 
 #[cfg(not(unix))]
-#[hotpath::measure]
 pub(super) fn daemon_transport_display(transport_hint: &Path) -> String {
     current_loopback_authority(transport_hint).map_or_else(
         |_| "authority record unavailable".to_string(),
@@ -428,7 +412,6 @@ pub(super) fn daemon_transport_display(transport_hint: &Path) -> String {
 }
 
 #[cfg(not(unix))]
-#[hotpath::measure]
 fn current_loopback_authority(
     transport_hint: &Path,
 ) -> Result<Option<(std::net::SocketAddr, String, String)>> {
@@ -459,7 +442,6 @@ fn current_loopback_authority(
 }
 
 #[cfg(not(unix))]
-#[hotpath::measure]
 fn missing_loopback_authority() -> TraceDecayError {
     TraceDecayError::Config {
         message: "TraceDecay daemon authority record is not available".to_string(),

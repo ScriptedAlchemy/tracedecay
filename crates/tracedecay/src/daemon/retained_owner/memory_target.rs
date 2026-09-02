@@ -30,7 +30,6 @@ pub(crate) struct RetainedMemoryTargetV1<'a> {
     _observation: RetainedMemoryTargetObservationV1,
 }
 
-#[hotpath::measure_all]
 impl<'a> RetainedMemoryTargetV1<'a> {
     fn new(database: ProjectMemoryDbHandle<'a>, owner: FactOwnerV1) -> Self {
         Self {
@@ -57,7 +56,6 @@ static RETAINED_MEMORY_TARGETS_OPEN: AtomicU64 = AtomicU64::new(0);
 struct RetainedMemoryTargetObservationV1;
 
 #[cfg(feature = "hotpath")]
-#[hotpath::measure_all]
 impl RetainedMemoryTargetObservationV1 {
     fn enter() -> Self {
         let open = RETAINED_MEMORY_TARGETS_OPEN
@@ -176,12 +174,10 @@ async fn open_selected_project_read_only<'a>(
     ))
 }
 
-#[hotpath::measure]
 fn denied<T>() -> Result<T, RetainedSurfaceExecutionErrorV1> {
     Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized)
 }
 
-#[hotpath::measure]
 fn map_target_infrastructure_error(
     error: tracedecay_domain::errors::TraceDecayError,
 ) -> RetainedSurfaceExecutionErrorV1 {

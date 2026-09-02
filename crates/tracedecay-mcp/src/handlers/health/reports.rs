@@ -78,7 +78,6 @@ pub async fn handle_gini(
     ))
 }
 
-#[hotpath::measure]
 fn verified_gini_values(
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     metric: &str,
@@ -158,7 +157,6 @@ fn verified_gini_values(
     }
 }
 
-#[hotpath::measure]
 fn verified_gini_fan_values(
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     symbols: &[(
@@ -200,7 +198,6 @@ fn verified_gini_fan_values(
     Ok(per_file.into_iter().collect())
 }
 
-#[hotpath::measure]
 fn verified_gini_member_values(
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     symbols: &[(

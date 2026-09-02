@@ -1,13 +1,14 @@
 use super::{
-    AnalyticsAction, Cli, CommandFamily, Commands, DAEMON_CPU_THREADS_ENV,
+    AnalyticsAction, AsyncRuntimeFlavor, Cli, CommandFamily, Commands, DAEMON_CPU_THREADS_ENV,
     DEFAULT_MAX_DAEMON_CPU_THREADS, DaemonAction, GitAction, GitProjectArgs, HostBundleCliOptions,
     HostBundleComponentArg, MAX_ASYNC_WORKER_THREADS, PackageHookAction, ProfileStorageAction,
     ProjectsAction, RAYON_NUM_THREADS_ENV, ScoopPackageHookAction, StderrTracingDefault,
-    async_worker_threads, command_profile_label, daemon_cpu_threads_from, hotpath_focus_is_valid,
-    hotpath_output_format_is_none, hotpath_output_format_is_valid, hotpath_output_path_is_valid,
-    hotpath_requires_protocol_safe_output, is_daemon_run, is_full_component_set_adoption,
-    is_local_install_command, should_skip_agent_install_check, should_skip_startup_maintenance,
-    stderr_tracing_default, validate_host_bundle_options,
+    async_runtime_flavor, async_worker_threads, command_profile_label, daemon_cpu_threads_from,
+    hotpath_focus_is_valid, hotpath_output_format_is_none, hotpath_output_format_is_valid,
+    hotpath_output_path_is_valid, hotpath_requires_protocol_safe_output, is_daemon_run,
+    is_full_component_set_adoption, is_local_install_command, normalize_tool_reserved_global_flags,
+    requires_eager_mcp_tool_catalog, should_skip_agent_install_check,
+    should_skip_startup_maintenance, stderr_tracing_default, validate_host_bundle_options,
 };
 use clap::{CommandFactory, Parser};
 use std::iter;
@@ -435,6 +436,7 @@ fn unrelated_and_uninstall_commands_reject_adoption() {
 fn async_runtime_bounds_parallel_allocators() {
     assert!((1..=MAX_ASYNC_WORKER_THREADS).contains(&async_worker_threads()));
     assert_eq!(MAX_ASYNC_WORKER_THREADS, 16);
+    assert_eq!(async_runtime_flavor(None), AsyncRuntimeFlavor::MultiThread);
     // The blocking pool is no longer a flat constant: `blocking_thread_limit_tests`
     // covers `tokio_blocking_thread_limit_from`, which derives the width from the
     // installed indexing workers plus a serving reserve.
@@ -622,14 +624,16 @@ fn explicit_agent_config_commands_skip_startup_maintenance() {
 
 #[test]
 fn normal_commands_keep_startup_maintenance() {
-    assert!(!should_skip_startup_maintenance(&Commands::Status {
+    let command = Commands::Status {
         path: None,
         project_id: None,
         project_path: None,
         json: false,
         short: false,
         runtime: false,
-    }));
+    };
+    assert!(!should_skip_startup_maintenance(&command));
+    assert!(requires_eager_mcp_tool_catalog(Some(&command)));
 }
 
 #[test]
@@ -641,6 +645,34 @@ fn tool_fallback_skips_network_and_agent_startup_maintenance() {
     };
     assert!(should_skip_startup_maintenance(&command));
     assert!(should_skip_agent_install_check(&command));
+    assert!(!requires_eager_mcp_tool_catalog(Some(&command)));
+    assert_eq!(
+        async_runtime_flavor(Some(&command)),
+        AsyncRuntimeFlavor::CurrentThread
+    );
+}
+
+#[test]
+fn tool_dry_run_is_forwarded_from_the_global_clap_flag() {
+    let mut cli = Cli::try_parse_from([
+        "tracedecay",
+        "tool",
+        "storage_status",
+        "--dry-run",
+        "--args",
+        "-",
+    ])
+    .expect("tool invocation");
+    assert!(cli.dry_run);
+
+    normalize_tool_reserved_global_flags(&mut cli);
+
+    assert!(!cli.dry_run);
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Tool { args, .. })
+            if args == ["--args", "-", "--dry-run"]
+    ));
 }
 
 #[test]

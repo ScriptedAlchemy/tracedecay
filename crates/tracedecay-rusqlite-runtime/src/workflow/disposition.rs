@@ -46,7 +46,6 @@ const TRANSITION_SELECT: &str = "SELECT to_revision, from_revision, operation,
 /// Registration is the only writer of revision 1, and replayed registration of
 /// a byte-identical definition must not disturb an already advanced
 /// disposition, so the insert is unconditionally ignored when a row exists.
-#[hotpath::measure]
 pub(super) fn seed_candidate_disposition(
     transaction: &ExactSqlTransaction,
     definition_id: &WorkflowDefinitionId,
@@ -68,7 +67,6 @@ pub(super) fn seed_candidate_disposition(
     Ok(())
 }
 
-#[hotpath::measure]
 pub(super) fn load_disposition_tx(
     transaction: &ExactSqlTransaction,
     definition_id: &WorkflowDefinitionId,
@@ -89,7 +87,6 @@ pub(super) fn load_disposition_tx(
     decode_disposition(definition_id, definition_version, row).map(Some)
 }
 
-#[hotpath::measure]
 pub(super) fn transition_history_tx(
     transaction: &ExactSqlTransaction,
     definition_id: &WorkflowDefinitionId,
@@ -117,7 +114,6 @@ pub(super) fn transition_history_tx(
 /// and returns the stored disposition unchanged, and any other mismatch is a
 /// typed revision conflict. Every state on the operation's path gets its own
 /// journal entry before the disposition is swapped.
-#[hotpath::measure]
 pub(super) fn apply_lifecycle_transition(
     transaction: &ExactSqlTransaction,
     command: &WorkflowDefinitionLifecycleCommand,
@@ -216,7 +212,6 @@ pub(super) fn apply_lifecycle_transition(
     ))
 }
 
-#[hotpath::measure]
 fn decode_disposition(
     definition_id: &WorkflowDefinitionId,
     definition_version: u64,
@@ -234,7 +229,6 @@ fn decode_disposition(
     })
 }
 
-#[hotpath::measure]
 fn decode_transition(
     definition_id: &WorkflowDefinitionId,
     definition_version: u64,
@@ -260,14 +254,12 @@ fn decode_transition(
     })
 }
 
-#[hotpath::measure]
 fn decode_state(value: Option<&str>) -> Result<WorkflowDefinitionLifecycleState, DispositionError> {
     value
         .and_then(WorkflowDefinitionLifecycleState::from_state_key)
         .ok_or(DispositionError::Corrupt)
 }
 
-#[hotpath::measure]
 fn decode_revision(value: Option<i64>) -> Result<u64, DispositionError> {
     value
         .filter(|revision| *revision > 0)

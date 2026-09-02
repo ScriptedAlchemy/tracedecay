@@ -17,7 +17,6 @@ use super::support::{
     validate_stage_history,
 };
 
-#[hotpath::measure]
 pub(super) fn retire_published_generation(
     storage: &SemanticVectorStagingExactSqlStorage,
     request: &SemanticVectorPublishedRetirement,
@@ -101,7 +100,6 @@ pub(super) fn retire_published_generation(
     Ok(outcome)
 }
 
-#[hotpath::measure]
 pub(super) fn generation_has_live_base_reference(
     storage: &SemanticVectorStagingExactSqlStorage,
     shard_id: &tracedecay_store::StoreShardIdV1,
@@ -121,7 +119,6 @@ pub(super) fn generation_has_live_base_reference(
     Ok(found)
 }
 
-#[hotpath::measure]
 fn generation_has_live_base_reference_in_tx(
     tx: &ExactSqlTransaction,
     shard_id: &tracedecay_store::StoreShardIdV1,
@@ -137,7 +134,6 @@ fn generation_has_live_base_reference_in_tx(
     Ok(!rows.rows.is_empty())
 }
 
-#[hotpath::measure]
 pub(super) fn published_generation_exists(
     storage: &SemanticVectorStagingExactSqlStorage,
     shard_id: &tracedecay_store::StoreShardIdV1,
@@ -155,7 +151,6 @@ pub(super) fn published_generation_exists(
     )
 }
 
-#[hotpath::measure]
 pub(super) fn source_generation_has_live_reference(
     storage: &SemanticVectorStagingExactSqlStorage,
     shard_id: &tracedecay_store::StoreShardIdV1,
@@ -174,7 +169,6 @@ pub(super) fn source_generation_has_live_reference(
     )
 }
 
-#[hotpath::measure]
 pub(super) fn source_scope_has_live_reference(
     storage: &SemanticVectorStagingExactSqlStorage,
     shard_id: &tracedecay_store::StoreShardIdV1,
@@ -193,7 +187,6 @@ pub(super) fn source_scope_has_live_reference(
     )
 }
 
-#[hotpath::measure]
 fn live_reference_exists(
     storage: &SemanticVectorStagingExactSqlStorage,
     shard_id: &tracedecay_store::StoreShardIdV1,
@@ -225,7 +218,6 @@ fn live_reference_exists(
     Ok(found)
 }
 
-#[hotpath::measure]
 pub(super) fn published_generation_dependency(
     storage: &SemanticVectorStagingExactSqlStorage,
     shard_id: &tracedecay_store::StoreShardIdV1,
@@ -296,7 +288,6 @@ pub(super) fn published_generation_dependency(
     Ok(outcome)
 }
 
-#[hotpath::measure]
 pub(super) fn validate_project_census_revision(
     storage: &SemanticVectorStagingExactSqlStorage,
     shard_id: &tracedecay_store::StoreShardIdV1,
@@ -313,7 +304,6 @@ pub(super) fn validate_project_census_revision(
     ensure_live(context)
 }
 
-#[hotpath::measure]
 pub(super) fn source_scope_binding(
     storage: &SemanticVectorStagingExactSqlStorage,
     shard_id: &tracedecay_store::StoreShardIdV1,
@@ -347,7 +337,6 @@ pub(super) fn source_scope_binding(
     Ok(binding)
 }
 
-#[hotpath::measure]
 pub(super) fn remove_source_scope_binding(
     storage: &SemanticVectorStagingExactSqlStorage,
     shard_id: &tracedecay_store::StoreShardIdV1,
@@ -399,7 +388,6 @@ pub(super) fn remove_source_scope_binding(
     Ok(true)
 }
 
-#[hotpath::measure]
 fn require_census_revision(
     tx: &ExactSqlTransaction,
     shard_id: &tracedecay_store::StoreShardIdV1,
@@ -428,7 +416,6 @@ fn require_census_revision(
     Ok(())
 }
 
-#[hotpath::measure]
 pub(super) fn pending_retirement_cleanup(
     storage: &SemanticVectorStagingExactSqlStorage,
     shard_id: &tracedecay_store::StoreShardIdV1,
@@ -470,7 +457,6 @@ pub(super) fn pending_retirement_cleanup(
     Ok(record)
 }
 
-#[hotpath::measure]
 pub(super) fn complete_retirement_cleanup(
     storage: &SemanticVectorStagingExactSqlStorage,
     retirement: &SemanticVectorPublishedRetirement,
@@ -511,7 +497,6 @@ pub(super) fn complete_retirement_cleanup(
     Ok(true)
 }
 
-#[hotpath::measure]
 fn insert_cleanup(
     tx: &ExactSqlTransaction,
     request: &SemanticVectorPublishedRetirement,
@@ -557,7 +542,6 @@ fn insert_cleanup(
     Ok(())
 }
 
-#[hotpath::measure]
 pub(super) fn remove_cancelled_generation(
     storage: &SemanticVectorStagingExactSqlStorage,
     request: &SemanticVectorCancelledRetirement,
@@ -589,7 +573,6 @@ pub(super) fn remove_cancelled_generation(
     Ok(SemanticVectorCancelledRetirementOutcome::Removed)
 }
 
-#[hotpath::measure]
 fn delete_stage_descendants(
     tx: &ExactSqlTransaction,
     stage_id: i64,

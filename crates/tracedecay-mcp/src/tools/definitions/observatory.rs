@@ -7,7 +7,6 @@ use crate::ToolDefinition;
 
 type DiscoveryResult<T> = Result<T, crate::McpCatalogError>;
 
-#[hotpath::measure]
 pub(super) fn observatory_definitions() -> DiscoveryResult<Vec<ToolDefinition>> {
     let registry = tracedecay_application::mcp_executable_binding_registry()
         .map_err(|error| crate::McpCatalogError::Initialization(error.to_string()))?;
@@ -29,7 +28,6 @@ pub(super) fn observatory_definitions() -> DiscoveryResult<Vec<ToolDefinition>> 
     }])
 }
 
-#[hotpath::measure]
 fn invalid_observatory_discovery(field: &'static str) -> crate::McpCatalogError {
     tracedecay_tool_catalog::CatalogValidationError::InvalidValue {
         field,

@@ -23,7 +23,6 @@ use crate::error::ApplicationContractError;
 /// Builds the one canonical baseline identity shared by feedback orchestration
 /// and the generation-bound diagnostics adapter. Keeping this calculation in
 /// one place prevents a store adapter from silently changing comparison scope.
-#[hotpath::measure]
 pub(crate) fn feedback_baseline_identity(
     input: &FeedbackEvaluationInputV1,
     runtime: &FeedbackRuntimeStateV1,
@@ -64,7 +63,6 @@ pub struct GenerationBoundFeedbackDiagnosticsAdapter<P> {
     providers: Vec<AnalyzerAdmittedDiagnosticProviderV1>,
 }
 
-#[hotpath::measure_all]
 impl<P> GenerationBoundFeedbackDiagnosticsAdapter<P> {
     pub fn new(
         source: P,
@@ -298,7 +296,6 @@ where
     }
 }
 
-#[hotpath::measure]
 fn provider_result<T>(
     identity: DiagnosticProviderIdentity,
     state: DiagnosticProviderState,
@@ -310,7 +307,6 @@ fn provider_result<T>(
     })
 }
 
-#[hotpath::measure]
 fn current_identity_matches_input(
     identity: &DiagnosticProviderIdentity,
     input: &FeedbackEvaluationInputV1,
@@ -320,7 +316,6 @@ fn current_identity_matches_input(
         && identity.document.file == input.target.file
 }
 
-#[hotpath::measure]
 fn current_records_match_input(
     records: &[GenerationDiagnosticV1],
     input: &FeedbackEvaluationInputV1,
@@ -339,7 +334,6 @@ fn current_records_match_input(
         })
 }
 
-#[hotpath::measure]
 fn historical_records_match_input(
     records: &[GenerationDiagnosticV1],
     input: &FeedbackEvaluationInputV1,
@@ -352,7 +346,6 @@ fn historical_records_match_input(
     })
 }
 
-#[hotpath::measure]
 fn baseline_state_for_provider(state: DiagnosticProviderState) -> FeedbackBaselineStateV1 {
     match state {
         DiagnosticProviderState::SupportedComplete => FeedbackBaselineStateV1::Complete,
@@ -368,7 +361,6 @@ fn baseline_state_for_provider(state: DiagnosticProviderState) -> FeedbackBaseli
     }
 }
 
-#[hotpath::measure]
 fn baseline(
     identity: FeedbackDiagnosticBaselineIdentityV1,
     diagnostic_anchors: Vec<RetrievalAnchorId>,

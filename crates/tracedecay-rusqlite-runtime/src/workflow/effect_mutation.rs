@@ -17,7 +17,6 @@ use super::{
     workflow_effect_unavailable,
 };
 
-#[hotpath::measure]
 pub(super) fn apply_workflow_effect(
     transaction: &ExactSqlTransaction,
     prepared: &WorkflowEffectPreparedV1,
@@ -50,7 +49,6 @@ pub(super) fn apply_workflow_effect(
 /// Retire and reject are terminal, so an illegal edge and a stale expected
 /// revision are both reported as conflicts rather than silently coerced; a
 /// replayed command returns the stored disposition unchanged.
-#[hotpath::measure]
 fn apply_lifecycle_command(
     transaction: &ExactSqlTransaction,
     command: &WorkflowDefinitionLifecycleCommand,
@@ -72,7 +70,6 @@ fn apply_lifecycle_command(
     })
 }
 
-#[hotpath::measure]
 fn lifecycle_success(
     operation: WorkflowLifecycleOperation,
     disposition: WorkflowDefinitionDisposition,
@@ -90,7 +87,6 @@ fn lifecycle_success(
     }
 }
 
-#[hotpath::measure]
 fn apply_definition_registration(
     transaction: &ExactSqlTransaction,
     definition: &WorkflowDefinition,
@@ -154,7 +150,6 @@ fn apply_definition_registration(
     ))
 }
 
-#[hotpath::measure]
 fn apply_handoff_issue(
     transaction: &ExactSqlTransaction,
     grant: &TaskHandoffGrant,
@@ -197,7 +192,6 @@ fn apply_handoff_issue(
     ))
 }
 
-#[hotpath::measure]
 fn apply_handoff_redeem(
     transaction: &ExactSqlTransaction,
     token_digest: &ManifestDigest,

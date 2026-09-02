@@ -53,7 +53,6 @@ pub enum LcmHostProtocol {
     },
 }
 
-#[hotpath::measure_all]
 impl LcmHostProtocol {
     pub fn provider(&self) -> &str {
         match self {
@@ -82,7 +81,6 @@ pub enum LcmCompressionEvidence {
     PressureOnly { protocol: LcmHostProtocol },
 }
 
-#[hotpath::measure_all]
 impl LcmCompressionEvidence {
     pub fn protocol(&self) -> &LcmHostProtocol {
         match self {
@@ -150,7 +148,6 @@ pub enum LcmAuthorityTarget {
     },
 }
 
-#[hotpath::measure_all]
 impl LcmAuthorityRequest {
     #[hotpath::skip]
     pub const fn operation(&self) -> LcmAuthorityOperation {
@@ -181,7 +178,6 @@ impl LcmAuthorityRequest {
     }
 }
 
-#[hotpath::measure]
 pub fn lcm_authority_operation_identity(
     operation: LcmAuthorityOperation,
 ) -> Result<(CapabilityId, UseCaseId), tracedecay_application::ApplicationContractError> {

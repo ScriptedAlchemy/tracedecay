@@ -11,7 +11,6 @@ use tracedecay_runtime_core::git_discovery::{
 use super::process::{read_optional_file, run_command_with_stdin, worktree_mode};
 use super::{FixedGitIndexRunner, NativeGitIndexError};
 
-#[hotpath::measure_all]
 impl FixedGitIndexRunner {
     #[hotpath::measure(label = "daemon.git.index_tx.tracked_worktree")]
     pub fn tracked_worktree_digest(&self) -> Result<ManifestDigest, NativeGitIndexError> {
@@ -225,7 +224,6 @@ impl FixedGitIndexRunner {
     }
 }
 
-#[hotpath::measure]
 fn nul_paths(bytes: &[u8]) -> BTreeSet<Vec<u8>> {
     bytes
         .split(|byte| *byte == 0)
@@ -234,7 +232,6 @@ fn nul_paths(bytes: &[u8]) -> BTreeSet<Vec<u8>> {
         .collect()
 }
 
-#[hotpath::measure]
 fn index_entry_path(entry: &[u8]) -> Result<&[u8], NativeGitIndexError> {
     let delimiter = entry.iter().position(|byte| *byte == b'\t').ok_or(
         NativeGitIndexError::MalformedOutput {

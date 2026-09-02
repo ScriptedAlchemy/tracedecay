@@ -41,7 +41,6 @@ pub trait LanguageRegistry {
 /// identity (lowercase, punctuation-free). Shared by the registry and the
 /// extractor adapter so descriptor and parser selection can never disagree
 /// about canonical identity.
-#[hotpath::measure]
 pub(crate) fn canonical_language_id(language_name: &str) -> String {
     match language_name {
         "C#" => "csharp".to_owned(),
@@ -63,7 +62,6 @@ pub(crate) fn canonical_language_id(language_name: &str) -> String {
 /// section — an oversized section splits at its sub-heading boundaries via
 /// `structural_segments` instead of at an arbitrary byte window, and a section
 /// that fits the budget stays one chunk.
-#[hotpath::measure]
 fn has_stable_member_spans(language: &str) -> bool {
     matches!(
         language,
@@ -102,7 +100,6 @@ fn has_stable_member_spans(language: &str) -> bool {
 }
 
 /// Root markers used by analyzer routing and host LSP projection.
-#[hotpath::measure]
 fn root_markers(language: &str) -> Vec<String> {
     let markers: &[&str] = match language {
         "rust" => &["Cargo.toml"],
@@ -138,7 +135,6 @@ fn root_markers(language: &str) -> Vec<String> {
 
 /// Additional host language identifiers beyond the lowercase extractor name
 /// and the canonical identity.
-#[hotpath::measure]
 fn extra_aliases(language: &str) -> Vec<&'static str> {
     match language {
         "csharp" => vec!["c#"],
@@ -166,7 +162,6 @@ pub struct StaticLanguageRegistry {
     by_alias: HashMap<String, usize>,
 }
 
-#[hotpath::measure_all]
 impl StaticLanguageRegistry {
     /// Build the registry from the compiled-in extraction registry. Every
     /// extension the extraction registry dispatches on is attributed to the
@@ -336,7 +331,6 @@ impl LanguageRegistry for StaticLanguageRegistry {
 
 /// Validate a full descriptor set, including every cross-descriptor lookup
 /// key, before constructing maps that would otherwise silently overwrite.
-#[hotpath::measure]
 pub(crate) fn validate_descriptors(
     descriptors: &[LanguageDescriptorV1],
 ) -> Result<(), DomainError> {

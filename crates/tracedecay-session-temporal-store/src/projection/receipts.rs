@@ -317,7 +317,6 @@ pub(super) async fn validate_canonical_assertion_completeness(
     Ok(())
 }
 
-#[hotpath::measure]
 pub(crate) fn digest_bytes(bytes: &[u8]) -> String {
     encode_tagged_lowercase_hex("sha256:", &Sha256::digest(bytes))
 }
@@ -461,7 +460,6 @@ pub async fn record_canonical_observation_effect(
     }
 }
 
-#[hotpath::measure]
 pub(super) fn sorted_json<T: serde::Serialize>(values: &[T]) -> SessionStoreResult<Vec<String>> {
     let mut encoded = values
         .iter()
@@ -472,7 +470,6 @@ pub(super) fn sorted_json<T: serde::Serialize>(values: &[T]) -> SessionStoreResu
     Ok(encoded)
 }
 
-#[hotpath::measure]
 pub(super) fn canonical_batch_digest(
     batch: &SessionTemporalProjectionBatchV1,
 ) -> SessionStoreResult<SessionTemporalDigestV1> {
@@ -686,7 +683,6 @@ pub(super) async fn digest_query_rows(
     ))
 }
 
-#[hotpath::measure]
 fn update_ordered_row_digest(digest: &mut Sha256, prior_rows: usize, row: &[u8]) {
     if prior_rows > 0 {
         digest.update(b"\n");
@@ -828,14 +824,12 @@ pub(super) async fn projection_coverage(
 }
 
 #[inline(always)]
-#[hotpath::measure]
 fn record_assertion_validation_probe() {
     #[cfg(feature = "hotpath")]
     hotpath::gauge!("session_temporal.activation.assertion_query_probes").inc(1_u64);
 }
 
 #[inline(always)]
-#[hotpath::measure]
 fn record_assertion_history_row(bytes: u64) {
     #[cfg(feature = "hotpath")]
     {
@@ -847,14 +841,12 @@ fn record_assertion_history_row(bytes: u64) {
 }
 
 #[inline(always)]
-#[hotpath::measure]
 fn record_coverage_query_probe() {
     #[cfg(feature = "hotpath")]
     hotpath::gauge!("session_temporal.coverage.query_probes").inc(1_u64);
 }
 
 #[inline(always)]
-#[hotpath::measure]
 fn record_coverage_row(bytes: u64) {
     #[cfg(feature = "hotpath")]
     {
@@ -865,7 +857,6 @@ fn record_coverage_row(bytes: u64) {
     let _ = bytes;
 }
 
-#[hotpath::measure]
 fn copy_identity_coverage(copies: &[LogicalCopyRelation]) -> SessionStoreResult<(usize, String)> {
     let encoded = sorted_json(copies)?;
     Ok((encoded.len(), digest_bytes(encoded.join("\n").as_bytes())))
@@ -1009,7 +1000,6 @@ pub(super) struct ProjectionCoverage {
     fts: (usize, String),
 }
 
-#[hotpath::measure]
 pub(super) fn empty_projection_coverage() -> ProjectionCoverage {
     let digest = digest_bytes(&[]);
     ProjectionCoverage {

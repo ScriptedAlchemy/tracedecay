@@ -11,7 +11,6 @@ pub(in crate::runtime) struct IngestByteBudget {
     allow_empty_when_exhausted: bool,
 }
 
-#[hotpath::measure_all]
 impl IngestByteBudget {
     #[hotpath::skip]
     pub(in crate::runtime) const fn bounded(limit: u64) -> Self {

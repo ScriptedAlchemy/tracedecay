@@ -5,7 +5,6 @@ pub struct Statement<'a> {
     sql: String,
 }
 
-#[hotpath::measure_all]
 impl<'a> Statement<'a> {
     pub(super) fn for_connection(connection: &'a Connection, sql: &str) -> Result<Self> {
         validate_sql(sql)?;
@@ -29,7 +28,6 @@ impl<'a> Statement<'a> {
     pub fn reset(&self) {}
 }
 
-#[hotpath::measure]
 fn validate_sql(sql: &str) -> Result<()> {
     if sql.trim().is_empty() {
         Err(super::Error::InvalidOperation(

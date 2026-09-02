@@ -27,7 +27,6 @@ pub struct DiagnosticGenerationSupersessionV1 {
     successor_generation: CodeGenerationId,
 }
 
-#[hotpath::measure_all]
 impl DiagnosticGenerationSupersessionV1 {
     pub fn new(
         prior_generation: CodeGenerationId,
@@ -77,7 +76,6 @@ pub struct SanitizedCleanDiagnosticSnapshotV1 {
     records: Vec<GenerationDiagnosticV1>,
 }
 
-#[hotpath::measure_all]
 impl SanitizedCleanDiagnosticSnapshotV1 {
     pub fn new(
         generation_id: CodeGenerationId,
@@ -147,7 +145,6 @@ pub struct DiagnosticPublicationReceiptV1 {
     disposition: DiagnosticPublicationDispositionV1,
 }
 
-#[hotpath::measure_all]
 impl DiagnosticPublicationReceiptV1 {
     pub fn new(
         generation_id: CodeGenerationId,

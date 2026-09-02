@@ -25,7 +25,6 @@ const CLEARED: &str = DIAGNOSTIC_STATE_CLEARED;
 #[derive(Clone, Default)]
 pub struct DiagnosticExecutor;
 
-#[hotpath::measure_all]
 impl DiagnosticExecutor {
     pub fn execute_write(
         &mut self,
@@ -198,7 +197,6 @@ impl DiagnosticExecutor {
 /// The walk stops at a current, cleared, or missing successor. An anchor
 /// already visited also stops the walk, so a cyclic `state_generation` graph
 /// cannot spin here.
-#[hotpath::measure]
 fn read_supersession_chain(
     connection: &rusqlite::Connection,
     anchor: &RetrievalAnchorId,
@@ -232,7 +230,6 @@ fn read_supersession_chain(
     }
 }
 
-#[hotpath::measure]
 fn read_logical_successor(
     connection: &rusqlite::Connection,
     prior: &GenerationDiagnosticV1,
@@ -269,7 +266,6 @@ fn read_logical_successor(
     Ok(records.pop())
 }
 
-#[hotpath::measure]
 fn insert_record(
     savepoint: &Savepoint<'_>,
     record: &GenerationDiagnosticV1,
@@ -326,7 +322,6 @@ fn insert_record(
     Ok(())
 }
 
-#[hotpath::measure]
 fn read_record_by_anchor(
     connection: &rusqlite::Connection,
     anchor: &RetrievalAnchorId,
@@ -338,7 +333,6 @@ fn read_record_by_anchor(
         .optional()
 }
 
-#[hotpath::measure]
 fn read_records<const N: usize>(
     connection: &rusqlite::Connection,
     clause: &str,
@@ -358,7 +352,6 @@ const SELECT_RECORDS: &str = "SELECT diagnostic_anchor, generation_id, repositor
     collected_at, record_state, state_generation
  FROM generation_diagnostics";
 
-#[hotpath::measure]
 fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GenerationDiagnosticV1> {
     let text = |index| row.get::<_, String>(index);
     let optional_text = |index| row.get::<_, Option<String>>(index);
@@ -436,39 +429,32 @@ fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GenerationDiagno
 // The mappings below delegate to the shared store codec; only the failure
 // wording stays local, because it is observable in this adapter's errors.
 
-#[hotpath::measure]
 fn state_columns(state: &DiagnosticRecordStateV1) -> (&'static str, Option<&str>) {
     diagnostic_state_columns(state)
 }
 
-#[hotpath::measure]
 fn severity_name(value: DiagnosticSeverityV1) -> &'static str {
     diagnostic_severity_name(value)
 }
 
-#[hotpath::measure]
 fn parse_severity(value: &str) -> rusqlite::Result<DiagnosticSeverityV1> {
     parse_diagnostic_severity(value)
         .ok_or_else(|| conversion(format!("unknown diagnostic severity {value}")))
 }
 
-#[hotpath::measure]
 fn producer_name(value: DiagnosticProducerKindV1) -> &'static str {
     diagnostic_producer_kind_name(value)
 }
 
-#[hotpath::measure]
 fn parse_producer(value: &str) -> rusqlite::Result<DiagnosticProducerKindV1> {
     parse_diagnostic_producer_kind(value)
         .ok_or_else(|| conversion(format!("unknown diagnostic producer {value}")))
 }
 
-#[hotpath::measure]
 fn evidence_name(value: DiagnosticEvidenceClassV1) -> &'static str {
     diagnostic_evidence_class_name(value)
 }
 
-#[hotpath::measure]
 fn parse_evidence(value: &str) -> rusqlite::Result<DiagnosticEvidenceClassV1> {
     parse_diagnostic_evidence_class(value)
         .ok_or_else(|| conversion(format!("unknown diagnostic evidence class {value}")))

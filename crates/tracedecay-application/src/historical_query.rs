@@ -35,7 +35,6 @@ pub struct HistoricalSourceAuthorizationV1 {
     paths: BTreeSet<String>,
 }
 
-#[hotpath::measure_all]
 impl HistoricalSourceAuthorizationV1 {
     pub fn new(
         scope: ResolvedScope,
@@ -202,7 +201,6 @@ pub enum HistoricalGitReadOutcomeV1 {
     },
 }
 
-#[hotpath::measure_all]
 impl HistoricalGitReadUnavailableReasonV1 {
     /// Project one adapter error onto the caller-facing unavailable reason.
     pub fn from_query_error(error: &HistoricalQueryError) -> Self {
@@ -225,7 +223,6 @@ pub struct HistoricalGitQueryAdapter<'a, P: GitHistoricalBlobReadPort> {
     scope: ResolvedScope,
 }
 
-#[hotpath::measure_all]
 impl<'a, P: GitHistoricalBlobReadPort> HistoricalGitQueryAdapter<'a, P> {
     pub fn new(port: &'a P, scope: ResolvedScope) -> Self {
         Self { port, scope }
@@ -422,7 +419,6 @@ impl<'a, P: GitHistoricalBlobReadPort> HistoricalGitQueryAdapter<'a, P> {
     }
 }
 
-#[hotpath::measure]
 fn validate_request(
     authorization: &HistoricalSourceAuthorizationV1,
     request: &HistoricalQueryRequestV1,
@@ -476,7 +472,6 @@ fn validate_request(
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_path(path: &str) -> Result<(), HistoricalQueryError> {
     if !is_canonical_repository_relative_path(path) {
         return Err(HistoricalQueryError::InvalidPath(path.to_owned()));
@@ -484,7 +479,6 @@ fn validate_path(path: &str) -> Result<(), HistoricalQueryError> {
     Ok(())
 }
 
-#[hotpath::measure]
 fn term_anchors(bytes: &[u8], terms: &[String]) -> Vec<HistoricalTermAnchorV1> {
     terms
         .iter()

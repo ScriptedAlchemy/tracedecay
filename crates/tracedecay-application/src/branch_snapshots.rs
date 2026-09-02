@@ -12,7 +12,6 @@ pub struct LocalBranchReadControlV1 {
     pub cancellation: Option<crate::CancellationSignal>,
 }
 
-#[hotpath::measure_all]
 impl LocalBranchReadControlV1 {
     pub fn termination(&self) -> Option<LocalBranchSnapshotErrorV1> {
         if self
@@ -73,7 +72,6 @@ pub struct LocalBranchSnapshotsV1 {
 }
 
 /// Resolves one exact local `refs/heads/*` branch tip to commit and tree.
-#[hotpath::measure]
 pub fn local_branch_revision_controlled(
     project_root: &std::path::Path,
     branch: &str,
@@ -85,7 +83,6 @@ pub fn local_branch_revision_controlled(
     local_branch_revision_in_repository(&repo, branch, control)
 }
 
-#[hotpath::measure]
 fn local_branch_revision_in_repository(
     repo: &gix::Repository,
     branch: &str,

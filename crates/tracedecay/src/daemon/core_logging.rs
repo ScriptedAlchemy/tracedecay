@@ -31,7 +31,6 @@ pub struct WatcherEvent {
 /// `event`.
 const DAEMON_LOG_MARKER: &str = "[tracedecay] event=";
 
-#[hotpath::measure]
 pub(crate) fn format_daemon_log_line(event: &str, fields: &[(&str, String)]) -> String {
     let mut line = format!("{DAEMON_LOG_MARKER}{}", quote_log_value(event));
     for (key, value) in fields {
@@ -43,7 +42,6 @@ pub(crate) fn format_daemon_log_line(event: &str, fields: &[(&str, String)]) -> 
     line
 }
 
-#[hotpath::measure]
 fn quote_log_value(value: &str) -> String {
     if !value.is_empty()
         && value
@@ -70,7 +68,6 @@ fn quote_log_value(value: &str) -> String {
     format!("\"{escaped}\"")
 }
 
-#[hotpath::measure]
 pub(crate) fn log_daemon_event(event: &str, fields: &[(&str, String)]) {
     eprintln!("{}", format_daemon_log_line(event, fields));
 }
@@ -95,7 +92,6 @@ pub(crate) struct StderrTracingFilter {
     unparsed: Vec<String>,
 }
 
-#[hotpath::measure_all]
 impl StderrTracingFilter {
     /// Parses a `RUST_LOG` value. `default` applies to every target the value
     /// does not name, and is what an unset or empty value resolves to.
@@ -186,7 +182,6 @@ impl StderrTracingFilter {
 
 /// Whether a `RUST_LOG` directive target is a plain module path this subset
 /// can match by prefix, rather than a span or field selector it cannot.
-#[hotpath::measure]
 fn is_plain_target(target: &str) -> bool {
     !target.is_empty()
         && !target
@@ -204,7 +199,6 @@ pub enum StderrTracingDefault {
     Silent,
 }
 
-#[hotpath::measure_all]
 impl StderrTracingDefault {
     fn level(self) -> LevelFilter {
         match self {
@@ -221,7 +215,6 @@ impl StderrTracingDefault {
 ///
 /// An explicit `RUST_LOG` is operator intent and outranks `default`, including
 /// for hooks: `Silent` only decides what happens in its absence.
-#[hotpath::measure]
 pub fn install_stderr_tracing(default: StderrTracingDefault) {
     install_stderr_tracing_filter(StderrTracingFilter::parse(
         std::env::var("RUST_LOG").ok().as_deref(),
@@ -229,7 +222,6 @@ pub fn install_stderr_tracing(default: StderrTracingDefault) {
     ));
 }
 
-#[hotpath::measure]
 fn install_stderr_tracing_filter(filter: StderrTracingFilter) {
     if let Some(diagnostic) = filter.diagnostic() {
         eprintln!("{diagnostic}");
@@ -256,7 +248,6 @@ fn install_stderr_tracing_filter(filter: StderrTracingFilter) {
 /// it. The marker is searched for rather than required at column zero because
 /// journald and launchd prepend their own timestamp and unit prefix.
 #[cfg(unix)]
-#[hotpath::measure]
 fn parse_watcher_log_line(line: &str) -> Option<WatcherEvent> {
     let idx = line.find(DAEMON_LOG_MARKER)?;
     let rest = &line[idx + DAEMON_LOG_MARKER.len()..];
@@ -279,7 +270,6 @@ fn parse_watcher_log_line(line: &str) -> Option<WatcherEvent> {
 /// Splits a `key=value key="quoted value" …` tail into a map. The leading value
 /// (the event name, which has no key) is stored under `__first__`.
 #[cfg(unix)]
-#[hotpath::measure]
 fn parse_log_fields(rest: &str) -> HashMap<String, String> {
     let mut out = HashMap::new();
     let bytes = rest.as_bytes();
@@ -339,7 +329,6 @@ fn parse_log_fields(rest: &str) -> HashMap<String, String> {
 }
 
 #[cfg(unix)]
-#[hotpath::measure]
 fn unquote(s: &str) -> String {
     s.trim_matches('"').to_string()
 }
@@ -394,7 +383,6 @@ fn read_daemon_log_tail(max_lines: usize) -> String {
     }
 }
 
-#[hotpath::measure]
 pub fn unavailable_error(socket_path: &Path) -> TraceDecayError {
     let advice = tracedecay_daemon_control::unavailable_daemon_socket_advice(socket_path, None);
     TraceDecayError::Config {

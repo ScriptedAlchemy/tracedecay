@@ -93,7 +93,6 @@ enum DurableAtomicWritePhase {
     AfterRename = 2,
 }
 
-#[hotpath::measure]
 fn inject_durable_atomic_write_fault(_phase: DurableAtomicWritePhase) -> io::Result<()> {
     #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
     if DURABLE_ATOMIC_WRITE_FAULT.with(|fault| {
@@ -115,7 +114,6 @@ fn inject_durable_atomic_write_fault(_phase: DurableAtomicWritePhase) -> io::Res
     Ok(())
 }
 
-#[hotpath::measure]
 fn inject_durable_namespace_sync_fault() -> io::Result<()> {
     #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
     if DURABLE_NAMESPACE_SYNC_FAULT.with(|fault| match fault.get() {
@@ -142,7 +140,6 @@ pub const REPOSITORY_IDENTITY_SCHEMA_VERSION: u32 = 1;
 /// This is deliberately file-only: opening `SQLite` may create or rewrite WAL/SHM
 /// sidecars before reporting that the main file is not a database. Recovery
 /// paths use this preflight to preserve the complete on-disk recovery set.
-#[hotpath::measure]
 pub fn has_sqlite_database_header(path: &Path) -> io::Result<bool> {
     let mut file = fs::File::open(path)?;
     let mut header = [0_u8; 16];
@@ -222,7 +219,6 @@ pub struct ProjectStorageLocation {
     pub status: ProjectStorageStatus,
 }
 
-#[hotpath::measure_all]
 impl ProjectStorageStatus {
     pub fn label(self) -> &'static str {
         match self {
@@ -238,7 +234,6 @@ impl ProjectStorageStatus {
     }
 }
 
-#[hotpath::measure]
 pub fn classify_project_storage(project_root: &Path) -> ProjectStorageLocation {
     match resolve_layout_for_current_profile(project_root) {
         Ok(layout) => classify_layout_storage(project_root, layout),
@@ -251,7 +246,6 @@ pub fn classify_project_storage(project_root: &Path) -> ProjectStorageLocation {
     }
 }
 
-#[hotpath::measure]
 fn classify_layout_storage(project_root: &Path, layout: StoreLayout) -> ProjectStorageLocation {
     let graph_exists = layout.graph_db_path.exists();
     let manifest_exists = layout
@@ -276,7 +270,6 @@ fn classify_layout_storage(project_root: &Path, layout: StoreLayout) -> ProjectS
     }
 }
 
-#[hotpath::measure]
 pub fn classify_registry_storage_value(
     project_root: &Path,
     profile_root: &Path,
@@ -295,7 +288,6 @@ pub fn classify_registry_storage_value(
 
 /// Field-shaped registry classifier. The `StoreInstanceRecord` wrapper
 /// lives in the root crate because `global_db` stays above this kernel.
-#[hotpath::measure]
 pub fn classify_registry_storage_fields(
     project_root: &Path,
     profile_root: &Path,
@@ -352,7 +344,6 @@ pub fn classify_registry_storage_fields(
     manifest_location.or(stale_location)
 }
 
-#[hotpath::measure]
 fn registry_relpath(value: &str) -> PathBuf {
     let path = Path::new(value);
     if path.is_absolute()
@@ -368,7 +359,6 @@ fn registry_relpath(value: &str) -> PathBuf {
         .collect()
 }
 
-#[hotpath::measure]
 fn registry_profile_roots(profile_root: &Path) -> Vec<PathBuf> {
     let mut roots = vec![profile_root.to_path_buf()];
     if let Ok(canonical) = profile_root.canonicalize()

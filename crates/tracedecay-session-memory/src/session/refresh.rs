@@ -34,7 +34,6 @@ pub struct SessionRefreshConfiguration {
     config_version: String,
 }
 
-#[hotpath::measure_all]
 impl SessionRefreshConfiguration {
     pub fn new(
         projector_version: impl Into<String>,
@@ -76,7 +75,6 @@ pub struct SessionRefreshTarget {
     frozen_frontier: SessionRefreshFrontierV1,
 }
 
-#[hotpath::measure_all]
 impl SessionRefreshTarget {
     pub fn new(
         session_id: SessionId,
@@ -128,7 +126,6 @@ impl SessionRefreshTarget {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct SessionRefreshDigest([u8; 32]);
 
-#[hotpath::measure_all]
 impl SessionRefreshDigest {
     #[hotpath::skip]
     pub const fn as_bytes(&self) -> &[u8; 32] {
@@ -145,7 +142,6 @@ pub struct SessionRefreshHandle {
     join_digest: SessionRefreshDigest,
 }
 
-#[hotpath::measure_all]
 impl SessionRefreshHandle {
     pub fn operation_id(&self) -> &SessionRefreshOperationIdV1 {
         &self.operation_id
@@ -242,7 +238,6 @@ pub struct SessionRefreshService<A, S, W> {
     configuration: SessionRefreshConfiguration,
 }
 
-#[hotpath::measure_all]
 impl<A, S, W> SessionRefreshService<A, S, W> {
     pub fn new(
         authorizer: A,
@@ -543,7 +538,6 @@ struct RefreshDigests {
 // The outcome enum carries receipts/handles by value; boxing its variants
 // for this private Result would churn the public refresh API.
 #[allow(clippy::result_large_err)]
-#[hotpath::measure]
 fn authorize<A>(
     authorizer: &A,
     context: &RequestContext,
@@ -572,7 +566,6 @@ where
     Ok(grant)
 }
 
-#[hotpath::measure]
 fn map_authorization_error(error: SessionAuthorizationError) -> SessionRefreshOutcome {
     match error {
         SessionAuthorizationError::Denied | SessionAuthorizationError::WrongContext => {
@@ -592,7 +585,6 @@ fn map_authorization_error(error: SessionAuthorizationError) -> SessionRefreshOu
     }
 }
 
-#[hotpath::measure]
 fn terminal_outcome(receipt: SessionRefreshReceiptV1) -> SessionRefreshOutcome {
     match receipt.state() {
         SessionRefreshTerminalStateV1::Complete => SessionRefreshOutcome::Complete(receipt),
@@ -601,7 +593,6 @@ fn terminal_outcome(receipt: SessionRefreshReceiptV1) -> SessionRefreshOutcome {
     }
 }
 
-#[hotpath::measure]
 fn request_interruption(
     context: &RequestContext,
     binding: &SessionRequestBinding,
@@ -640,7 +631,6 @@ const fn empty_coverage() -> TemporalCoverageCountsV1 {
     }
 }
 
-#[hotpath::measure]
 fn source_coverage_for_target(
     existing: Option<&SessionSourceCoverageReceiptV1>,
     target: &SessionRefreshTarget,
@@ -684,7 +674,6 @@ fn source_coverage_for_target(
     SessionSourceCoverageReceiptV1::new(request, vec![source]).ok()
 }
 
-#[hotpath::measure]
 fn refresh_digests(
     context: &RequestContext,
     binding: &SessionRequestBinding,
@@ -746,7 +735,6 @@ fn refresh_digests(
     }
 }
 
-#[hotpath::measure]
 fn digest_identity(digest: &mut CanonicalDigest, identity: &ResolvedSessionIdentity) {
     match identity.owner() {
         SessionOwner::Profile { profile_id } => {
@@ -777,7 +765,6 @@ fn digest_identity(digest: &mut CanonicalDigest, identity: &ResolvedSessionIdent
 
 struct CanonicalDigest(Sha256);
 
-#[hotpath::measure_all]
 impl CanonicalDigest {
     fn new(domain: &str) -> Self {
         let mut digest = Self(Sha256::new());
@@ -819,7 +806,6 @@ impl CanonicalDigest {
     }
 }
 
-#[hotpath::measure]
 fn validate_component(
     value: &str,
     max_len: usize,

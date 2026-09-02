@@ -17,7 +17,6 @@ pub enum ProjectVectorRetentionFailure {
     Denied(String),
 }
 
-#[hotpath::measure_all]
 impl ProjectVectorRetentionFailure {
     pub fn from_configuration(
         error: tracedecay_usecases::semantic_runtime::SemanticConfigurationBackendErrorV1,

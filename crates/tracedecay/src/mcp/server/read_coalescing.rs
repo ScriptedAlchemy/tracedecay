@@ -14,11 +14,6 @@ use crate::mcp::tools::mcp_dispatch_contract;
 use tracedecay_mcp::ToolResult;
 use tracedecay_runtime_core::weak_registry::WeakRegistry;
 
-#[cfg(feature = "hotpath")]
-type ReadFlightStateMutex<T> = hotpath::mutexes::Mutex<T>;
-#[cfg(not(feature = "hotpath"))]
-type ReadFlightStateMutex<T> = std::sync::Mutex<T>;
-
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct ReadFlightKey([u8; 32]);
 
@@ -42,7 +37,10 @@ enum ReadFlightState {
 }
 
 pub(super) struct ReadFlight {
-    state: ReadFlightStateMutex<ReadFlightState>,
+    // A flight exists for one in-flight request only. Instrumenting this
+    // per-request lock retains profiler histograms after the flight is gone;
+    // follower_wait and the coalescer methods provide stable timing instead.
+    state: Mutex<ReadFlightState>,
     completed: tokio::sync::Notify,
     active_followers: Arc<AtomicU64>,
 }
@@ -63,7 +61,6 @@ struct ReadFollowerWaitGuard {
     active: Arc<AtomicU64>,
 }
 
-#[hotpath::measure_all]
 impl ReadFollowerWaitGuard {
     fn enter(active: Arc<AtomicU64>) -> Self {
         active.fetch_add(1, Ordering::AcqRel);
@@ -87,7 +84,6 @@ pub(super) struct ReadCoalescingSnapshot {
     pub(super) active_flights: usize,
 }
 
-#[hotpath::measure_all]
 impl IdenticalReadCoalescer {
     pub(super) fn claim(
         &self,
@@ -99,10 +95,7 @@ impl IdenticalReadCoalescer {
         let key = read_flight_key(engine_identity, tool_name, arguments, scope_prefix);
         let (flight, hit) = self.inner.flights.get_or_insert_with(key, || {
             Arc::new(ReadFlight {
-                state: hotpath::mutex!(
-                    Mutex::new(ReadFlightState::Pending),
-                    label = "mcp.server.read_coalescing.state"
-                ),
+                state: Mutex::new(ReadFlightState::Pending),
                 completed: tokio::sync::Notify::new(),
                 active_followers: Arc::clone(&self.inner.active_followers),
             })
@@ -135,7 +128,6 @@ impl IdenticalReadCoalescer {
     }
 }
 
-#[hotpath::measure_all]
 impl ReadFlight {
     #[hotpath::measure(label = "mcp.server.read_coalescing.follower_wait", future = true)]
     pub(super) async fn wait(&self) -> Option<Arc<ToolResult>> {
@@ -156,7 +148,6 @@ impl ReadFlight {
     }
 }
 
-#[hotpath::measure_all]
 impl ReadFlightLeader {
     pub(super) fn complete(mut self, result: ToolResult) -> ToolResult {
         self.finished = true;
@@ -202,7 +193,6 @@ impl Drop for ReadFlightLeader {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn tool_allows_identical_read_coalescing(tool_name: &str) -> bool {
     if matches!(
         tool_name,
@@ -227,7 +217,6 @@ pub(super) fn tool_allows_identical_read_coalescing(tool_name: &str) -> bool {
         .is_ok_and(tracedecay_tool_catalog::McpDispatchContractV1::read_only)
 }
 
-#[hotpath::measure]
 fn read_flight_key(
     engine_identity: &str,
     tool_name: &str,

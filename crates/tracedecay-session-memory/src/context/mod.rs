@@ -43,7 +43,6 @@ macro_rules! string_id {
 
 string_id!(ProfileId, SessionStoreId, SessionRootId, BranchId,);
 
-#[hotpath::measure]
 fn validate_identifier(value: &str, field: &'static str) -> Result<(), RequestContextError> {
     if value.is_empty()
         || value.trim() != value
@@ -66,7 +65,6 @@ pub enum SessionOwner {
     },
 }
 
-#[hotpath::measure_all]
 impl SessionOwner {
     pub fn profile_id(&self) -> &ProfileId {
         match self {
@@ -89,7 +87,6 @@ pub struct ResolvedGitRoute {
     branch_id: BranchId,
 }
 
-#[hotpath::measure_all]
 impl ResolvedGitRoute {
     pub fn new(repository_id: RepositoryId, worktree_id: WorktreeId, branch_id: BranchId) -> Self {
         Self {
@@ -120,7 +117,6 @@ pub struct ResolvedSessionIdentity {
     git_route: Option<ResolvedGitRoute>,
 }
 
-#[hotpath::measure_all]
 impl ResolvedSessionIdentity {
     pub fn for_profile(
         profile_id: ProfileId,
@@ -279,7 +275,6 @@ macro_rules! digest {
 
 digest!(CapabilityDigest, PolicyDigest, ConfigurationDigest);
 
-#[hotpath::measure_all]
 impl PolicyDigest {
     /// Converts the canonical algorithm-tagged observation access-policy
     /// digest into the fixed-width session admission binding.
@@ -318,7 +313,6 @@ pub struct RequestBudgets {
     max_work_units: u64,
 }
 
-#[hotpath::measure_all]
 impl RequestBudgets {
     pub fn new(
         max_results: u64,
@@ -392,14 +386,12 @@ pub fn session_application_grant_digest(
 }
 
 /// Returns the current wall-clock observation used by application deadlines.
-#[hotpath::measure]
 pub fn application_observed_at() -> tracedecay_domain::UtcMicros {
     now_micros()
 }
 
 /// Rechecks immutable application admission together with the live transport
 /// cancellation token retained by the root runtime.
-#[hotpath::measure]
 pub fn application_request_interruption(
     context: &tracedecay_application::RequestContext,
     cancellation: &CancellationToken,

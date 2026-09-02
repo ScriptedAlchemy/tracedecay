@@ -12,7 +12,6 @@ use super::RegisteredGlobalDb;
 
 const MAX_PROVIDER_USAGE_READ: usize = 1_000;
 
-#[hotpath::measure_all]
 impl RegisteredGlobalDb {
     /// Reads immutable provider usage observations without consulting
     /// conversational rows or the Claude-only accounting import.
@@ -276,7 +275,6 @@ impl RegisteredGlobalDb {
     }
 }
 
-#[hotpath::measure]
 fn persisted_scope(scope: &ObservationScopeV1) -> (&'static str, Option<&str>) {
     match scope {
         ObservationScopeV1::Profile => ("profile", None),
@@ -284,7 +282,6 @@ fn persisted_scope(scope: &ObservationScopeV1) -> (&'static str, Option<&str>) {
     }
 }
 
-#[hotpath::measure]
 fn observation_scope(
     row: &tracedecay_runtime_core::db::engine::Row,
     kind_column: i32,
@@ -305,7 +302,6 @@ fn observation_scope(
     }
 }
 
-#[hotpath::measure]
 fn optional_observation_id(
     row: &tracedecay_runtime_core::db::engine::Row,
     column: i32,
@@ -318,7 +314,6 @@ fn optional_observation_id(
         .map_err(|error| format!("invalid provider usage {field} id: {error}"))
 }
 
-#[hotpath::measure]
 fn ordering_domain(value: &str) -> Result<ObservationOrderingDomainV1, String> {
     match value {
         "file_bytes" => Ok(ObservationOrderingDomainV1::FileBytes),

@@ -13,7 +13,6 @@ pub struct ResolutionEvidence {
     pub supporting_anchor_ids: BTreeSet<RetrievalAnchorId>,
 }
 
-#[hotpath::measure_all]
 impl ResolutionEvidence {
     pub fn new(authority: SessionAuthorityClassV1, authorization: ValidatedAuthorization) -> Self {
         Self {
@@ -41,7 +40,6 @@ pub enum ValidatedAuthorization {
     Unauthorized,
 }
 
-#[hotpath::measure_all]
 impl ValidatedAuthorization {
     #[hotpath::skip]
     pub const fn is_authorized(self) -> bool {
@@ -73,7 +71,6 @@ pub struct ResolutionAssertion {
     pub evidence: ResolutionEvidence,
 }
 
-#[hotpath::measure_all]
 impl ResolutionAssertion {
     pub fn from_record(
         assertion: &TemporalAssertionRecordV1,
@@ -103,7 +100,6 @@ pub struct ResolvedOccurrence {
     pub supporting_anchor_ids: BTreeSet<RetrievalAnchorId>,
 }
 
-#[hotpath::measure_all]
 impl ResolvedOccurrence {
     #[hotpath::skip]
     pub const fn certainty(&self) -> ResolutionCertainty {

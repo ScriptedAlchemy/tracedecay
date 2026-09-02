@@ -59,7 +59,6 @@ use skills::*;
 use testing::*;
 
 /// Read-only annotations shared by every tool.
-#[hotpath::measure]
 fn read_only(title: &str) -> Value {
     json!({
         "readOnlyHint": true,
@@ -68,7 +67,6 @@ fn read_only(title: &str) -> Value {
 }
 
 /// Build a `ToolDefinition` with `readOnlyHint` annotation and no `_meta`.
-#[hotpath::measure]
 fn def(name: &str, title: &str, description: &str, input_schema: Value) -> ToolDefinition {
     ToolDefinition {
         name: name.to_string(),
@@ -80,7 +78,6 @@ fn def(name: &str, title: &str, description: &str, input_schema: Value) -> ToolD
 }
 
 /// Write/exec annotations: tools that mutate files or run subprocesses.
-#[hotpath::measure]
 fn read_write(title: &str) -> Value {
     json!({
         "readOnlyHint": false,
@@ -90,7 +87,6 @@ fn read_write(title: &str) -> Value {
 
 /// Build a `ToolDefinition` for a tool that writes files or executes
 /// subprocesses (`readOnlyHint: false`, no `_meta`).
-#[hotpath::measure]
 fn def_rw(name: &str, title: &str, description: &str, input_schema: Value) -> ToolDefinition {
     ToolDefinition {
         name: name.to_string(),
@@ -102,7 +98,6 @@ fn def_rw(name: &str, title: &str, description: &str, input_schema: Value) -> To
 }
 
 /// Build a `ToolDefinition` with `readOnlyHint` AND `anthropic/alwaysLoad`.
-#[hotpath::measure]
 fn def_always_load(
     name: &str,
     title: &str,
@@ -118,26 +113,22 @@ fn def_always_load(
     }
 }
 
-#[hotpath::measure]
 fn object_schema(properties: Value) -> Value {
     let mut schema = json!({ "type": "object" });
     schema["properties"] = properties;
     schema
 }
 
-#[hotpath::measure]
 fn required_object_schema(properties: Value, required: &[&str]) -> Value {
     let mut schema = object_schema(properties);
     schema["required"] = json!(required);
     schema
 }
 
-#[hotpath::measure]
 fn def_object(name: &str, title: &str, description: &str, properties: Value) -> ToolDefinition {
     def(name, title, description, object_schema(properties))
 }
 
-#[hotpath::measure]
 fn def_required_object(
     name: &str,
     title: &str,
@@ -153,7 +144,6 @@ fn def_required_object(
     )
 }
 
-#[hotpath::measure]
 fn string_property(description: &str) -> Value {
     json!({
         "type": "string",
@@ -161,7 +151,6 @@ fn string_property(description: &str) -> Value {
     })
 }
 
-#[hotpath::measure]
 fn number_property(description: &str) -> Value {
     json!({
         "type": "number",
@@ -169,7 +158,6 @@ fn number_property(description: &str) -> Value {
     })
 }
 
-#[hotpath::measure]
 fn def_path_limit_tool(
     name: &str,
     title: &str,
@@ -188,7 +176,6 @@ fn def_path_limit_tool(
     )
 }
 
-#[hotpath::measure]
 fn def_path_flag_tool(
     name: &str,
     title: &str,
@@ -209,7 +196,6 @@ fn def_path_flag_tool(
     def_object(name, title, description, Value::Object(properties))
 }
 
-#[hotpath::measure]
 fn project_selector_properties() -> Value {
     json!({
         "project_selector": project_selector_object(
@@ -218,7 +204,6 @@ fn project_selector_properties() -> Value {
     })
 }
 
-#[hotpath::measure]
 fn with_project_selector_properties(mut properties: Value) -> Value {
     let Some(target) = properties.as_object_mut() else {
         return properties;
@@ -231,7 +216,6 @@ fn with_project_selector_properties(mut properties: Value) -> Value {
     properties
 }
 
-#[hotpath::measure]
 fn project_selector_object(description: &str) -> Value {
     json!({
         "type": "object",
@@ -248,7 +232,6 @@ fn project_selector_object(description: &str) -> Value {
 }
 
 /// Computes the call budget based on project size.
-#[hotpath::measure]
 pub fn explore_call_budget(total_nodes: u64) -> u8 {
     match total_nodes {
         0..=5_000 => 3,
@@ -260,7 +243,6 @@ pub fn explore_call_budget(total_nodes: u64) -> u8 {
 }
 
 /// Generates the `tracedecay_context` description with a dynamic call budget.
-#[hotpath::measure]
 pub fn context_description(node_count: u64, budget: u8) -> String {
     format!(
         "Build an AI-ready context for a task description. Returns relevant symbols, \
@@ -277,7 +259,6 @@ pub fn context_description(node_count: u64, budget: u8) -> String {
 }
 
 /// Returns tool definitions with a dynamic call budget for `tracedecay_context`.
-#[hotpath::measure]
 pub fn get_tool_definitions_with_budget(
     node_count: u64,
     budget: u8,
@@ -287,7 +268,6 @@ pub fn get_tool_definitions_with_budget(
     Ok(defs)
 }
 
-#[hotpath::measure]
 pub fn get_maximal_tool_definitions_with_budget(
     node_count: u64,
     budget: u8,
@@ -297,7 +277,6 @@ pub fn get_maximal_tool_definitions_with_budget(
     Ok(defs)
 }
 
-#[hotpath::measure]
 fn apply_context_budget(defs: &mut [ToolDefinition], node_count: u64, budget: u8) {
     // Replace the context tool's description with the budgeted version
     for def in defs {
@@ -313,7 +292,6 @@ pub enum ToolRegistryMode {
     DeterministicMaximal,
 }
 
-#[hotpath::measure]
 pub fn project_catalog_discovery_scope() -> BTreeSet<ScopeDimension> {
     [
         ScopeDimension::Project,
@@ -334,7 +312,6 @@ pub fn project_catalog_discovery_scope() -> BTreeSet<ScopeDimension> {
 
 /// Returns tool definitions with a conservative temporary context budget while
 /// a daemon opens the project graph needed to calculate the exact node count.
-#[hotpath::measure]
 pub fn get_tool_definitions_with_warming_budget(
     budget: u8,
 ) -> Result<Vec<ToolDefinition>, McpCatalogError> {
@@ -343,7 +320,6 @@ pub fn get_tool_definitions_with_warming_budget(
     Ok(defs)
 }
 
-#[hotpath::measure]
 pub fn apply_context_warming_budget(defs: &mut [ToolDefinition], budget: u8) {
     for def in defs {
         if def.name == "tracedecay_context" {
@@ -371,7 +347,6 @@ pub fn apply_context_warming_budget(defs: &mut [ToolDefinition], budget: u8) {
 /// `tracedecay_outline` remains advertised and reports its runtime
 /// `ast-grep outline` requirement from the handler, because the Cursor
 /// plugin docs/rules intentionally teach agents to start there.
-#[hotpath::measure]
 pub fn get_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogError> {
     let mut definitions = get_maximal_tool_definitions()?;
     retain_host_available_tool_definitions(&mut definitions);
@@ -395,7 +370,6 @@ pub(super) static MAXIMAL_DEFINITION_BUILDS: std::sync::atomic::AtomicUsize =
 /// profile/capability filtering in
 /// `get_catalog_filtered_tool_definitions_with_budget`) all run on the *clone*
 /// this returns, after the cache.
-#[hotpath::measure]
 pub fn get_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogError> {
     // The error type is not `Clone`, and a failure here is a deterministic
     // catalog/schema defect rather than a transient condition, so the cache
@@ -412,6 +386,16 @@ pub fn get_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogE
 fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogError> {
     #[cfg(test)]
     MAXIMAL_DEFINITION_BUILDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    // The dynamic registries have no shared mutable authority and dominate
+    // cold catalog construction. Build the application-backed definitions on
+    // this thread while the three independent extension registries assemble.
+    let observatory_worker =
+        spawn_definition_worker("tracedecay-catalog-observatory", observatory_definitions)?;
+    let work_worker = spawn_definition_worker("tracedecay-catalog-work", work::work_definitions)?;
+    let workflow_worker = spawn_definition_worker(
+        "tracedecay-catalog-workflow",
+        workflow::workflow_definitions,
+    )?;
     let application_registry = tracedecay_application::mcp_executable_binding_registry()
         .map_err(|error| McpCatalogError::Initialization(error.to_string()))?;
     let request_schema = |operation: &'static str| {
@@ -594,9 +578,24 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
     ];
     definitions.extend(configuration_definitions());
     definitions.extend(context_scout_control_definitions());
-    definitions.extend(observatory_definitions()?);
-    definitions.extend(work::work_definitions()?);
-    definitions.extend(workflow::workflow_definitions()?);
+    let observatory = observatory_worker.join().map_err(|_| {
+        McpCatalogError::Initialization(
+            "observatory tool catalog worker terminated unexpectedly".to_owned(),
+        )
+    })??;
+    let work = work_worker.join().map_err(|_| {
+        McpCatalogError::Initialization(
+            "work tool catalog worker terminated unexpectedly".to_owned(),
+        )
+    })??;
+    let workflow = workflow_worker.join().map_err(|_| {
+        McpCatalogError::Initialization(
+            "workflow tool catalog worker terminated unexpectedly".to_owned(),
+        )
+    })??;
+    definitions.extend(observatory);
+    definitions.extend(work);
+    definitions.extend(workflow);
     definitions.extend(native_worktree::native_worktree_definitions());
     add_registered_project_selector_properties(&mut definitions);
     add_lcm_storage_scope_property(&mut definitions);
@@ -604,7 +603,21 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
     Ok(definitions)
 }
 
-#[hotpath::measure]
+fn spawn_definition_worker(
+    name: &'static str,
+    worker: impl FnOnce() -> Result<Vec<ToolDefinition>, McpCatalogError> + Send + 'static,
+) -> Result<std::thread::JoinHandle<Result<Vec<ToolDefinition>, McpCatalogError>>, McpCatalogError>
+{
+    std::thread::Builder::new()
+        .name(name.to_owned())
+        .spawn(worker)
+        .map_err(|error| {
+            McpCatalogError::Initialization(format!(
+                "failed to start {name} tool catalog worker: {error}"
+            ))
+        })
+}
+
 pub fn retain_host_available_tool_definitions(definitions: &mut Vec<ToolDefinition>) {
     if !ast_grep_available() {
         definitions.retain(|d| d.name != "tracedecay_ast_grep_rewrite");
@@ -624,7 +637,6 @@ pub fn retain_host_available_tool_definitions(definitions: &mut Vec<ToolDefiniti
 /// Resolve a daemon-internal host surface for the CLI fallback without
 /// advertising it through MCP discovery.
 #[doc(hidden)]
-#[hotpath::measure]
 pub fn internal_daemon_tool_definition(name: &str) -> Option<ToolDefinition> {
     match name {
         "tracedecay_hook_runtime" => Some(def_rw(
@@ -637,7 +649,6 @@ pub fn internal_daemon_tool_definition(name: &str) -> Option<ToolDefinition> {
     }
 }
 
-#[hotpath::measure]
 fn add_lcm_storage_scope_property(definitions: &mut [ToolDefinition]) {
     for definition in definitions.iter_mut().filter(|definition| {
         definition.name.starts_with("tracedecay_lcm_")
@@ -661,7 +672,6 @@ fn add_lcm_storage_scope_property(definitions: &mut [ToolDefinition]) {
     }
 }
 
-#[hotpath::measure]
 fn matching_tool_definitions_mut<'a>(
     definitions: &'a mut [ToolDefinition],
     tool_names: &'a [&'static str],
@@ -671,7 +681,6 @@ fn matching_tool_definitions_mut<'a>(
         .filter(move |definition| tool_names.contains(&definition.name.as_str()))
 }
 
-#[hotpath::measure]
 fn add_registered_project_selector_properties(definitions: &mut [ToolDefinition]) {
     for definition in
         matching_tool_definitions_mut(definitions, &registered_project_reader_tool_names())
@@ -890,12 +899,10 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_type_hierarchy",
 ];
 
-#[hotpath::measure]
 pub fn format_capable_tool_names() -> &'static [&'static str] {
     FORMAT_CAPABLE_TOOL_NAMES
 }
 
-#[hotpath::measure]
 pub fn tool_defaults_to_markdown(tool_name: &str) -> bool {
     matches!(
         tool_name,
@@ -924,7 +931,6 @@ pub fn tool_defaults_to_markdown(tool_name: &str) -> bool {
     )
 }
 
-#[hotpath::measure]
 fn add_format_property(definitions: &mut [ToolDefinition]) -> Result<(), McpCatalogError> {
     for definition in matching_tool_definitions_mut(definitions, FORMAT_CAPABLE_TOOL_NAMES) {
         let Some(properties) = definition

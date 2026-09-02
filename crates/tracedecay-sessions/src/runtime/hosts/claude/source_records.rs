@@ -46,7 +46,6 @@ pub enum ClaudeRecordDisposition {
 
 /// Map one sanitized Claude record to the canonical conversational V1 row.
 /// Pure: no I/O, cursor access, global state, or persistence.
-#[hotpath::measure]
 pub fn map_sanitized_claude_record(
     record: &Value,
     context: &ClaudeRecordContext<'_>,
@@ -57,7 +56,6 @@ pub fn map_sanitized_claude_record(
 /// [`map_sanitized_claude_record`] with cwd worktree resolution routed through
 /// a source-lifetime cache, so batch transcript parses do not re-run git
 /// discovery once per message row for the same cwd.
-#[hotpath::measure]
 pub fn map_sanitized_claude_record_cached(
     record: &Value,
     context: &ClaudeRecordContext<'_>,
@@ -66,7 +64,6 @@ pub fn map_sanitized_claude_record_cached(
     map_sanitized_claude_record_with(record, context, Some(worktree_cache))
 }
 
-#[hotpath::measure]
 fn map_sanitized_claude_record_with(
     record: &Value,
     context: &ClaudeRecordContext<'_>,
@@ -123,7 +120,6 @@ fn map_sanitized_claude_record_with(
     }
 }
 
-#[hotpath::measure]
 fn durable_record_message_id(
     record: &Value,
     context: &ClaudeRecordContext<'_>,
@@ -142,7 +138,6 @@ fn durable_record_message_id(
     source_position_message_id(context.session_id, context.file_generation, offset)
 }
 
-#[hotpath::measure]
 pub(super) fn retain_unchanged_tool_event_ids(
     metadata: &mut Map<String, Value>,
     raw_ids: &[String],
@@ -169,7 +164,6 @@ pub(super) fn retain_unchanged_tool_event_ids(
     }
 }
 
-#[hotpath::measure]
 pub fn transcript_cwd(path: &Path) -> Option<PathBuf> {
     let file = std::fs::File::open(path).ok()?;
     let reader = std::io::BufReader::new(file);
@@ -216,7 +210,6 @@ pub fn transcript_cwd(path: &Path) -> Option<PathBuf> {
 ///   the owning turn.
 /// * **queue-operation records** — queued/removed user-turn bookkeeping. These
 ///   are ephemeral UI state; the actual user turn is ingested when it is sent.
-#[hotpath::measure]
 pub(super) fn message_from_line(
     record: &Value,
     session_id: &str,
@@ -308,7 +301,6 @@ pub(super) fn message_from_line(
 /// else the record `uuid`, else a synthesized `{session}:{offset}`. Shared by
 /// the message row and the reasoning row so a reasoning row's
 /// `{base}:thinking` id always links back to its owning assistant message.
-#[hotpath::measure]
 fn conversational_message_id(
     message: &Value,
     record: &Value,
@@ -325,7 +317,6 @@ fn conversational_message_id(
 
 /// Emit one searchable reasoning row for plaintext assistant `thinking` blocks.
 /// Redacted-only blocks produce no row; the owning message remains unchanged.
-#[hotpath::measure]
 pub(super) fn reasoning_from_line(
     record: &Value,
     path: &Path,
@@ -391,7 +382,6 @@ pub(super) fn reasoning_from_line(
     )
 }
 
-#[hotpath::measure]
 fn reasoning_from_canonical_envelope(
     envelope: &CanonicalObservationEnvelopeV1,
     path: &Path,
@@ -460,7 +450,6 @@ struct ReasoningRecordParts {
     redacted_blocks: usize,
 }
 
-#[hotpath::measure]
 fn build_reasoning_record(
     path: &Path,
     context: &ClaudeRecordContext<'_>,
@@ -512,7 +501,6 @@ fn build_reasoning_record(
 /// Map a `type=="system"` hook-summary record to a compact, signal-only
 /// `hook_event` row, or `None` for non-system records and routine hook
 /// summaries that carry no error/interruption signal.
-#[hotpath::measure]
 pub(super) fn system_hook_message_from_line(
     record: &Value,
     path: &Path,
@@ -620,7 +608,6 @@ pub(super) fn system_hook_message_from_line(
 /// `pr-link` records, `system` compaction boundaries, and model-fallback
 /// records. Returns `None` for every other record type (leaving the cursor to
 /// advance without emitting a row).
-#[hotpath::measure]
 pub(super) fn structured_marker_from_line(
     record: &Value,
     path: &Path,
@@ -659,7 +646,6 @@ pub(super) fn structured_marker_from_line(
 
 /// Read a record's `cwd`, falling back to the canonical envelope's session
 /// location fact.
-#[hotpath::measure]
 pub(super) fn record_cwd(record: &Value) -> Option<PathBuf> {
     if let Some(cwd) = record
         .get("cwd")

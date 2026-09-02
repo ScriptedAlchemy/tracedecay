@@ -72,7 +72,6 @@ enum PairMode {
     ConflictNoAbandon,
 }
 
-#[hotpath::measure]
 fn pair_mode(reflector: AdmissionState, skill: AdmissionState) -> PairMode {
     match (reflector, skill) {
         (AdmissionState::Execute, AdmissionState::Execute) => PairMode::Combined,
@@ -90,7 +89,6 @@ fn pair_mode(reflector: AdmissionState, skill: AdmissionState) -> PairMode {
     }
 }
 
-#[hotpath::measure]
 fn admission_state(admission: &AutomationEffectAdmission) -> AdmissionState {
     match admission {
         AutomationEffectAdmission::Execute(_) => AdmissionState::Execute,
@@ -115,7 +113,6 @@ enum DeferredLegTerminal {
     Abandon,
 }
 
-#[hotpath::measure]
 fn failed_leg_terminal(
     record: Option<
         tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord,
@@ -138,7 +135,6 @@ fn failed_leg_terminal(
     }
 }
 
-#[hotpath::measure]
 fn deferred_settlement_request(
     terminal: DeferredLegTerminal,
     engine: &DaemonEngine,
@@ -171,7 +167,6 @@ fn deferred_settlement_request(
     }
 }
 
-#[hotpath::measure]
 fn collect_settlement_result(
     project_path: &Path,
     task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
@@ -218,7 +213,6 @@ pub(super) enum CombinedEffectOutcome {
     Deferred,
 }
 
-#[hotpath::measure_all]
 impl CombinedEffectOutcome {
     pub(super) fn handled(self) -> bool {
         self != Self::Deferred

@@ -33,7 +33,6 @@ pub(crate) fn record_commit(
     )
 }
 
-#[hotpath::measure]
 pub(crate) fn record_runtime_commit(
     transaction: &impl LedgerTransaction,
     metadata: &StoreOperationMetadataV1,
@@ -106,7 +105,6 @@ fn record_with_bookkeeping(
     Ok(LedgerDisposition::Committed(receipt))
 }
 
-#[hotpath::measure]
 fn inbox_receipt(
     commit: &StoreCommitReceiptV1,
     entry: &TransactionalOutboxEntryV1,
@@ -135,7 +133,6 @@ fn inbox_receipt(
     })
 }
 
-#[hotpath::measure]
 fn acknowledgement(
     commit: &StoreCommitReceiptV1,
     inbox: &TransactionalInboxReceiptV1,

@@ -13,7 +13,6 @@ pub struct HostDiscoveryQueueEntry {
     pub path: PathBuf,
 }
 
-#[hotpath::measure]
 fn provider_prefix(provider: &str) -> Result<String, String> {
     if provider.is_empty()
         || !provider
@@ -27,7 +26,6 @@ fn provider_prefix(provider: &str) -> Result<String, String> {
 
 /// Exclusive BINARY range for `parse_offsets.file_path` (TEXT PK, default
 /// BINARY collation). `LIKE prefix%` cannot use that index.
-#[hotpath::measure]
 fn exclusive_prefix_range(prefix: &str) -> Result<(String, String), String> {
     let mut upper = prefix.as_bytes().to_vec();
     let Some(last) = upper.last_mut() else {
@@ -42,7 +40,6 @@ fn exclusive_prefix_range(prefix: &str) -> Result<(String, String), String> {
     Ok((prefix.to_owned(), upper))
 }
 
-#[hotpath::measure]
 fn path_bytes(path: &Path) -> Vec<u8> {
     #[cfg(unix)]
     {
@@ -63,12 +60,10 @@ fn path_bytes(path: &Path) -> Vec<u8> {
     }
 }
 
-#[hotpath::measure]
 fn queue_key(prefix: &str, path: &Path) -> String {
     format!("{prefix}{}", URL_SAFE_NO_PAD.encode(path_bytes(path)))
 }
 
-#[hotpath::measure]
 fn decode_path(prefix: &str, key: &str) -> Result<PathBuf, String> {
     let encoded = key
         .strip_prefix(prefix)
@@ -105,7 +100,6 @@ fn decode_path(prefix: &str, key: &str) -> Result<PathBuf, String> {
     }
 }
 
-#[hotpath::measure]
 fn decode_entry(
     prefix: &str,
     sequence: i64,
@@ -118,7 +112,6 @@ fn decode_entry(
     })
 }
 
-#[hotpath::measure_all]
 impl RegisteredGlobalDb {
     #[hotpath::measure(future = true, label = "global_db.discovery_queue.persist.enqueue")]
     pub async fn enqueue_host_discovery_paths(

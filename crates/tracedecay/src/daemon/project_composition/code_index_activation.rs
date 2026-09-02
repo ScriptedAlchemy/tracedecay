@@ -5,6 +5,7 @@
 //! reachable from the published MCP servers.
 
 use super::*;
+use tracedecay_code_index_runtime::code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1;
 use tracedecay_semantic_contracts::SemanticResourceCeilings;
 
 /// Inputs the deferred mount closure re-clones on every activation attempt.
@@ -31,7 +32,6 @@ pub(super) struct CodeIndexActivationMountInputs {
 /// both the route registration flag and the open cancellation token, and it
 /// subscribes to generation publications *before* mounting so the first sealed
 /// generation cannot be missed between the mount and the subscription.
-#[hotpath::measure]
 pub(super) fn code_index_activation_mount(
     inputs: CodeIndexActivationMountInputs,
 ) -> code_index_scheduler::CodeIndexActivationMountV1 {
@@ -135,7 +135,6 @@ struct QueryAuthorityWaitInputs {
 /// each end the wait without mounting; a lagged channel or the route poll
 /// re-reads the serving slot, because a retained `Noop` restore does not
 /// republish.
-#[hotpath::measure]
 fn spawn_query_authority_when_generation_ready(inputs: QueryAuthorityWaitInputs) {
     let QueryAuthorityWaitInputs {
         invocation: authority_invocation,
@@ -221,26 +220,77 @@ fn spawn_query_authority_when_generation_ready(inputs: QueryAuthorityWaitInputs)
             {
                 return;
             }
-            let mut fields = vec![
-                ("project", authority_project.display().to_string()),
-                ("phase", "code_index_query_authority".to_owned()),
-            ];
-            match outcome {
-                Ok(()) => fields.push(("outcome", "mounted".to_owned())),
-                Err(error) => {
-                    fields.push(("outcome", "degraded".to_owned()));
-                    fields.push(("error", error.to_string()));
-                }
-            }
-            log_daemon_event("project_open_phase", &fields);
+            log_query_authority_activation_outcome(&authority_project, outcome);
         },
         label = "daemon.project.activate.query_authority"
     ));
 }
 
+/// Classify and emit the post-wait query-authority mount result.
+///
+/// `GenerationUnavailable` is the expected pre-seat gap: the waiter already
+/// saw a generation id, but the mount still needs a current complete
+/// generation. That is typed status, not a WARN. A real mount refusal stays
+/// WARN so a broken profile or key cannot hide as warmup.
+fn log_query_authority_activation_outcome(
+    project: &Path,
+    outcome: std::result::Result<(), QueryRuntimeMountErrorV1>,
+) {
+    match outcome {
+        Ok(()) => {
+            log_daemon_event(
+                "project_open_phase",
+                &[
+                    ("project", project.display().to_string()),
+                    ("phase", "code_index_query_authority".to_owned()),
+                    ("outcome", "mounted".to_owned()),
+                ],
+            );
+        }
+        Err(QueryRuntimeMountErrorV1::GenerationUnavailable) => {
+            tracing::info!(
+                event = "project_open_phase",
+                project = %project.display(),
+                phase = "code_index_query_authority",
+                outcome = "awaiting_generation",
+                "query authority is unseated until a current generation exists"
+            );
+        }
+        Err(error) => {
+            log_daemon_event(
+                "project_open_phase",
+                &[
+                    ("project", project.display().to_string()),
+                    ("phase", "code_index_query_authority".to_owned()),
+                    ("outcome", "degraded".to_owned()),
+                    ("error", error.to_string()),
+                ],
+            );
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::daemon) enum QueryAuthorityActivationLogV1 {
+    Mounted,
+    AwaitingGeneration,
+    Degraded,
+}
+
+pub(in crate::daemon) fn classify_query_authority_activation_outcome(
+    outcome: &std::result::Result<(), QueryRuntimeMountErrorV1>,
+) -> QueryAuthorityActivationLogV1 {
+    match outcome {
+        Ok(()) => QueryAuthorityActivationLogV1::Mounted,
+        Err(QueryRuntimeMountErrorV1::GenerationUnavailable) => {
+            QueryAuthorityActivationLogV1::AwaitingGeneration
+        }
+        Err(_) => QueryAuthorityActivationLogV1::Degraded,
+    }
+}
+
 /// Hint sink handed to the activation owner: it coalesces after-edit hook paths
 /// and overflow notices onto the mounted scheduler.
-#[hotpath::measure]
 pub(super) fn code_index_activation_hint_sink(
     schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
     project_root: PathBuf,
@@ -270,7 +320,6 @@ pub(super) fn code_index_activation_hint_sink(
 /// MCP-facing after-edit hook sink. Accepts hints before the mount completes:
 /// the activation owner bounds and coalesces them, keeping this hook path
 /// independent of indexing.
-#[hotpath::measure]
 pub(super) fn code_index_hook_sink(
     activation: Arc<code_index_scheduler::CodeIndexActivationV1>,
 ) -> crate::mcp::server::CodeIndexHookSink {
@@ -284,7 +333,6 @@ pub(super) fn code_index_hook_sink(
 
 /// MCP-facing reconcile sink: an overflowed hook batch asks the activation
 /// owner for a full reconcile instead of enumerating paths.
-#[hotpath::measure]
 pub(super) fn code_index_reconcile_sink(
     schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
     activation: Arc<code_index_scheduler::CodeIndexActivationV1>,
@@ -306,7 +354,6 @@ pub(super) fn code_index_reconcile_sink(
 /// MCP-facing ordinary-read freshness probe. Unlike the explicit reconcile
 /// sink, this runs only the scheduler's bounded Git/stat ladder and creates an
 /// overflow wake solely when that evidence proves a reconcile is required.
-#[hotpath::measure]
 pub(super) fn code_index_freshness_probe_sink(
     schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
 ) -> crate::mcp::server::CodeIndexFreshnessProbeSink {
@@ -323,8 +370,29 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     use tempfile::TempDir;
+    use tracedecay_code_index_runtime::code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1;
 
     use super::*;
+
+    #[test]
+    fn pre_seat_generation_gap_is_typed_status_not_degraded() {
+        assert_eq!(
+            classify_query_authority_activation_outcome(&Ok(())),
+            QueryAuthorityActivationLogV1::Mounted
+        );
+        assert_eq!(
+            classify_query_authority_activation_outcome(&Err(
+                QueryRuntimeMountErrorV1::GenerationUnavailable
+            )),
+            QueryAuthorityActivationLogV1::AwaitingGeneration
+        );
+        assert_eq!(
+            classify_query_authority_activation_outcome(&Err(
+                QueryRuntimeMountErrorV1::KeyUnavailable
+            )),
+            QueryAuthorityActivationLogV1::Degraded
+        );
+    }
 
     fn git(root: &Path, arguments: &[&str]) {
         let status = Command::new(

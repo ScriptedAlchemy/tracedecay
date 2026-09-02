@@ -163,7 +163,6 @@ where
     }
 }
 
-#[hotpath::measure]
 fn recovery_proof_at(
     proof: &GitIndexTransactionReceiptV1,
     record: &GitIndexTransactionRecordV1,
@@ -185,7 +184,6 @@ fn recovery_proof_at(
     .map_err(GitIndexRecoveryError::Domain)
 }
 
-#[hotpath::measure]
 fn unobserved_needs_inspection(
     record: &GitIndexTransactionRecordV1,
     observed_at: UtcMicros,
@@ -249,7 +247,6 @@ where
     Ok(journal)
 }
 
-#[hotpath::measure]
 fn receipt_binds_record(
     receipt: &GitIndexTransactionReceiptV1,
     record: &GitIndexTransactionRecordV1,

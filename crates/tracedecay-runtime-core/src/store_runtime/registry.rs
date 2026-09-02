@@ -79,7 +79,6 @@ pub struct StoreRuntimeKey {
     incarnation: StoreIncarnationV1,
 }
 
-#[hotpath::measure_all]
 impl StoreRuntimeKey {
     pub fn new(shard_id: StoreShardIdV1, incarnation: StoreIncarnationV1) -> Self {
         Self {
@@ -221,7 +220,6 @@ enum DatabaseAttachmentState {
     Committed,
 }
 
-#[hotpath::measure_all]
 impl StoreRuntimeLeaseSource {
     fn binding(&self) -> &StoreRuntimeBindingV1 {
         &self.publication.binding
@@ -560,7 +558,6 @@ impl StoreRuntimeLeaseSource {
     }
 }
 
-#[hotpath::measure]
 fn allocate_database_attachment_counter(
     counter: &AtomicU64,
 ) -> Result<u64, StoreRuntimeRegistryFailure> {
@@ -571,7 +568,6 @@ fn allocate_database_attachment_counter(
         .map_err(|_| StoreRuntimeRegistryFailure::DatabaseAttachmentIdentityExhausted)
 }
 
-#[hotpath::measure_all]
 impl DatabaseRuntimeOwnerAttachmentReservationIdentityV1 {
     pub(crate) fn binding(&self) -> &StoreRuntimeBindingV1 {
         self.source.binding()
@@ -645,7 +641,6 @@ pub(crate) struct DatabaseRuntimeAttachment {
     id: DatabaseRuntimeAttachmentIdV1,
 }
 
-#[hotpath::measure_all]
 impl StoreRuntimeOwnerAttachment {
     fn issue_client_lease(&self) -> Result<StoreRuntimeClientLease, StoreRuntimeRegistryFailure> {
         let lifetime = ShardRuntime::issue_client_lifetime_lease(Arc::clone(&self.source.runtime))
@@ -661,7 +656,6 @@ impl StoreRuntimeOwnerAttachment {
     }
 }
 
-#[hotpath::measure_all]
 impl StoreRuntimeClientLease {
     #[must_use]
     pub fn shares_runtime_with(&self, other: &Self) -> bool {
@@ -700,7 +694,6 @@ impl StoreRuntimeClientLease {
     }
 }
 
-#[hotpath::measure_all]
 impl DatabaseRuntimeAttachment {
     pub(crate) fn issue_client_lease(
         &self,
@@ -760,7 +753,6 @@ struct RuntimeDatabaseWriteAuthority {
     opened_file_identity: u64,
 }
 
-#[hotpath::measure_all]
 impl RuntimeDatabaseWriteAuthority {
     fn verify_database(&self, intent: &str) -> Result<(), String> {
         self.authority
@@ -839,7 +831,6 @@ impl tracedecay_rusqlite_runtime::exact_sql::ExactSqlWriteAuthority
     }
 }
 
-#[hotpath::measure_all]
 impl StoreRuntimeClientLease {
     pub fn publication(&self) -> &StoreRuntimeRegistryPublicationV1 {
         &self.inner.publication
@@ -1540,7 +1531,6 @@ pub struct StoreRuntimeRegistry {
     inner: Arc<StoreRuntimeRegistryInner>,
 }
 
-#[hotpath::measure_all]
 impl StoreRuntimeRegistry {
     pub fn new(
         resolver: Arc<dyn StoreRuntimeResolver>,

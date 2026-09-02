@@ -9,7 +9,6 @@ use super::exact::SemanticVectorStagingExactSqlStorage;
 use super::published::*;
 use super::support::*;
 
-#[hotpath::measure]
 pub(super) fn begin_stage(
     storage: &SemanticVectorStagingExactSqlStorage,
     plan: &SemanticVectorStagePlan,
@@ -136,7 +135,6 @@ pub(super) fn begin_stage(
     Ok(SemanticVectorStageBeginOutcome::Begun(record))
 }
 
-#[hotpath::measure]
 fn admit_source_scope_binding(
     tx: &ExactSqlTransaction,
     plan: &SemanticVectorStagePlan,
@@ -177,7 +175,6 @@ fn admit_source_scope_binding(
     Ok(())
 }
 
-#[hotpath::measure]
 fn publication_identity_conflict(
     authority: &impl Query,
     plan: &SemanticVectorStagePlan,

@@ -29,7 +29,6 @@ struct StoredAssertionHeaderV1<'a> {
     actor_id: Option<&'a tracedecay_domain::ActorId>,
 }
 
-#[hotpath::measure]
 fn assertion_header_json(assertion: &FactAssertionV1) -> rusqlite::Result<String> {
     let payload_reference = assertion.payload().payload_reference().map_err(invalid)?;
     encode(&StoredAssertionHeaderV1 {
@@ -62,7 +61,6 @@ struct PersistedAssertion<'a> {
 /// One assertion evidence row in canonical ordinal order.
 type EvidenceRow = (String, String, String, String);
 
-#[hotpath::measure_all]
 impl<'a> PersistedAssertion<'a> {
     fn derive(owner: &OwnerColumns, assertion: &FactAssertionV1) -> rusqlite::Result<Self> {
         let payload_reference = assertion.payload().payload_reference().map_err(invalid)?;
@@ -126,7 +124,6 @@ impl<'a> PersistedAssertion<'a> {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn insert_assertion(
     savepoint: &Savepoint<'_>,
     owner: &OwnerColumns,
@@ -212,7 +209,6 @@ pub(super) fn insert_assertion(
     Ok(())
 }
 
-#[hotpath::measure]
 fn superseded_assertions(kind: &FactAssertionKindV1) -> Vec<&FactAssertionId> {
     match kind {
         FactAssertionKindV1::Correction { supersedes } => vec![supersedes],
@@ -228,7 +224,6 @@ fn superseded_assertions(kind: &FactAssertionKindV1) -> Vec<&FactAssertionId> {
 /// This mirrors the root commit engine so an exact replay is idempotent and a
 /// reused assertion id with different content is a collision, rather than a raw
 /// primary-key violation from the driver.
-#[hotpath::measure]
 fn assertion_children_match(
     connection: &rusqlite::Connection,
     owner: &OwnerColumns,
@@ -292,7 +287,6 @@ fn assertion_children_match(
 
 /// A missing payload row is only consistent with a purged projection, matching
 /// the root engine's allowance for `Quarantined` and `Deleted` access states.
-#[hotpath::measure]
 fn payload_is_purged_projection(
     connection: &rusqlite::Connection,
     owner: &OwnerColumns,

@@ -15,7 +15,6 @@ pub(crate) struct WriterCheckpointController<D> {
     hard_drain_required: bool,
 }
 
-#[hotpath::measure_all]
 impl<D: CheckpointDriver> WriterCheckpointController<D> {
     /// Construct policy state and disable SQLite's connection-local automatic
     /// checkpointing. Startup fails closed when this cannot be established.
@@ -226,7 +225,6 @@ impl<D: CheckpointDriver> WriterCheckpointController<D> {
     }
 }
 
-#[hotpath::measure]
 fn checkpoint_attribution(mode: CheckpointMode) -> crate::hotpath_observe::CheckpointAttribution {
     match mode {
         CheckpointMode::Passive => crate::hotpath_observe::CheckpointAttribution::Passive,
@@ -235,7 +233,6 @@ fn checkpoint_attribution(mode: CheckpointMode) -> crate::hotpath_observe::Check
     }
 }
 
-#[hotpath::measure_all]
 impl WriterCheckpointController<RusqliteCheckpointDriver> {
     pub(crate) fn connection_mut(&mut self) -> &mut rusqlite::Connection {
         self.driver.connection_mut()

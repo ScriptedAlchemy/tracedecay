@@ -17,7 +17,6 @@ pub(super) enum GitHistoryFailureReason {
     UnsupportedCanonicalWorktreeEncoding,
 }
 
-#[hotpath::measure_all]
 impl GitHistoryFailureReason {
     #[hotpath::skip]
     const fn as_str(self) -> &'static str {
@@ -92,7 +91,6 @@ pub(super) struct GitHistoryFailureRow {
     pub reflog_digest: Option<String>,
 }
 
-#[hotpath::measure_all]
 impl GitHistoryFailureRow {
     pub(super) fn from_candidate(
         row: &SessionActivityRow,

@@ -10,7 +10,6 @@ pub const SESSION_MESSAGE_SEARCH_MAX_FETCH: usize = 200;
 /// substantive hits while preserving the relative BM25 order within each
 /// group. Applied before truncation so a downranked hit still surfaces when it
 /// is the only match. Mirrors the lcm/grep re-rank.
-#[hotpath::measure]
 pub fn downrank_inventory_messages(results: &mut Vec<SessionMessageSearchResult>) {
     if results.len() < 2 {
         return;
@@ -32,7 +31,6 @@ pub fn downrank_inventory_messages(results: &mut Vec<SessionMessageSearchResult>
 /// tier. Workflow facts lead each tier because they are the authoritative
 /// structured representation; borrowing the paired transcript score keeps the
 /// merged page comparable when project shards are ranked again by the caller.
-#[hotpath::measure]
 pub fn interleave_workflow_search_results(
     transcript_results: Vec<SessionMessageSearchResult>,
     workflow_results: Vec<SessionMessageSearchResult>,
@@ -64,7 +62,6 @@ pub fn interleave_workflow_search_results(
     merged
 }
 
-#[hotpath::measure]
 pub fn session_fts_query(query: &str) -> String {
     query
         .split_whitespace()

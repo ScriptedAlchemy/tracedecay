@@ -50,7 +50,6 @@ const INVALID_BRANCH_REF: &str = "invalid_branch_ref";
 const BRANCH_ACTIVATION_FAILED: &str = "branch_activation_failed";
 const BRANCH_LIFECYCLE_CONTENDED: &str = "branch_lifecycle_contended";
 
-#[hotpath::measure]
 fn scheduler_unavailable(detail: &str) -> String {
     format!("{CODE_INDEX_SCHEDULER_UNAVAILABLE}: {detail}")
 }
@@ -92,7 +91,6 @@ pub(crate) struct ManualBranchArtifactsV1 {
     branch_digest: String,
 }
 
-#[hotpath::measure_all]
 impl ManualBranchArtifactsV1 {
     pub(crate) fn for_branch(data_root: &Path, branch: &str) -> Self {
         let branch_digest = sha256_hex(branch.as_bytes());
@@ -122,7 +120,6 @@ pub(crate) struct ManualBranchLifecycleLeaseV1 {
     _lock: std::fs::File,
 }
 
-#[hotpath::measure_all]
 impl ManualBranchLifecycleLeaseV1 {
     pub(crate) fn matches_branch(&self, branch: &str) -> bool {
         self.branch == branch
@@ -188,7 +185,6 @@ pub enum ManualBranchActivationError {
     LifecycleContended { detail: String },
 }
 
-#[hotpath::measure_all]
 impl ManualBranchActivationError {
     /// Stable reason code for JSON-RPC / project-route mapping.
     pub fn reason_code(&self) -> &'static str {
@@ -277,7 +273,6 @@ struct PrStoreAdministration<'a> {
     command_control: &'a PrCommandControl,
 }
 
-#[hotpath::measure_all]
 impl<'a> PrStoreAdministration<'a> {
     fn with_control(
         schedulers: &'a CodeIndexSchedulerRegistryV1,
@@ -330,7 +325,6 @@ impl Default for PrCommandControl {
     }
 }
 
-#[hotpath::measure]
 fn default_pr_command_control() -> &'static PrCommandControl {
     static CONTROL: std::sync::OnceLock<PrCommandControl> = std::sync::OnceLock::new();
     CONTROL.get_or_init(PrCommandControl::default)
@@ -388,24 +382,20 @@ pub struct PrAutotrackState {
 }
 
 /// The collision-proof internal tracking label for a PR.
-#[hotpath::measure]
 fn pr_label(number: u64) -> String {
     format!("tracedecay/autotrack/pr/{number}")
 }
 
 /// The deterministic local ref a PR head is fetched into.
-#[hotpath::measure]
 fn pr_tracking_ref(number: u64) -> String {
     format!("refs/tracedecay/pr/{number}")
 }
 
-#[hotpath::measure]
 fn state_path(data_root: &Path) -> PathBuf {
     data_root.join(STATE_FILENAME)
 }
 
 /// Loads the PR-autotrack state, returning an empty state when absent/corrupt.
-#[hotpath::measure]
 pub fn load_state(data_root: &Path) -> PrAutotrackState {
     let path = state_path(data_root);
     let Ok(content) = std::fs::read_to_string(&path) else {
@@ -414,7 +404,6 @@ pub fn load_state(data_root: &Path) -> PrAutotrackState {
     serde_json::from_str(&content).unwrap_or_default()
 }
 
-#[hotpath::measure]
 fn save_state(data_root: &Path, state: &PrAutotrackState) -> std::io::Result<()> {
     let path = state_path(data_root);
     let json = serde_json::to_string_pretty(state).map_err(std::io::Error::other)?;
@@ -438,7 +427,6 @@ pub struct ManagedPrSummary {
 }
 
 /// Returns the managed PR branches (sorted by PR number) for a project's store.
-#[hotpath::measure]
 pub fn managed_summary(data_root: &Path) -> Vec<ManagedPrSummary> {
     let state = load_state(data_root);
     let mut out: Vec<ManagedPrSummary> = state
@@ -479,7 +467,6 @@ struct GhPr {
 /// `limit` is the `--limit` passed to `gh`: if the result count reaches it the
 /// listing was truncated (there may be more open PRs), so the discovery is
 /// flagged `partial` and reconciliation will not untrack anything this pass.
-#[hotpath::measure]
 fn parse_gh_pr_list(json: &str, limit: usize) -> serde_json::Result<PrDiscovery> {
     let prs: Vec<GhPr> = serde_json::from_str(json)?;
     let mut discovery = PrDiscovery {
@@ -504,7 +491,6 @@ fn parse_gh_pr_list(json: &str, limit: usize) -> serde_json::Result<PrDiscovery>
 }
 
 /// Parses `git ls-remote --heads origin` into a `sha → branch` map.
-#[hotpath::measure]
 fn parse_ls_remote_heads(output: &str) -> HashMap<String, String> {
     let mut map = HashMap::new();
     for line in output.lines() {
@@ -520,7 +506,6 @@ fn parse_ls_remote_heads(output: &str) -> HashMap<String, String> {
 
 /// Parses `git ls-remote origin 'refs/pull/*/head'` into `(pr_number, sha)`
 /// pairs, ignoring `refs/pull/*/merge` and malformed lines.
-#[hotpath::measure]
 fn parse_ls_remote_pull_heads(output: &str) -> Vec<(u64, String)> {
     let mut out = Vec::new();
     for line in output.lines() {
@@ -540,7 +525,6 @@ fn parse_ls_remote_pull_heads(output: &str) -> Vec<(u64, String)> {
     out
 }
 
-#[hotpath::measure]
 fn split_ls_remote_line(line: &str) -> Option<(&str, &str)> {
     let mut parts = line.split_whitespace();
     let sha = parts.next()?;
@@ -554,7 +538,6 @@ fn split_ls_remote_line(line: &str) -> Option<(&str, &str)> {
 /// Maps PR head SHAs to branch names via the origin's `refs/heads/*` SHA index.
 /// A PR whose head SHA matches a head ref is a same-repo PR (tracked under
 /// `head_branch`); one that matches nothing is treated as a fork and skipped.
-#[hotpath::measure]
 fn map_pull_heads_to_branches(
     pull_heads: &[(u64, String)],
     head_shas: &HashMap<String, String>,
@@ -575,7 +558,6 @@ fn map_pull_heads_to_branches(
     discovery
 }
 
-#[hotpath::measure]
 fn run_git_with_control(
     repo_root: &Path,
     args: &[&str],
@@ -593,7 +575,6 @@ fn run_git_with_control(
     tracedecay_runtime_core::git::bounded_command_output(command, None, &bounds)
 }
 
-#[hotpath::measure]
 fn successful_git_with_control(
     repo_root: &Path,
     args: &[&str],
@@ -610,7 +591,6 @@ fn successful_git_with_control(
 /// passphrase-protected SSH key with no agent) would freeze PR-autotrack for
 /// *every* registered project. Failing fast instead keeps the loop live; the
 /// failure is then surfaced as a discovery error, never as "zero open PRs".
-#[hotpath::measure]
 fn disable_git_credential_prompt(command: &mut std::process::Command) {
     command
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -622,7 +602,6 @@ fn disable_git_credential_prompt(command: &mut std::process::Command) {
 /// `git remote get-url origin` every poll cycle (once per project, every minute)
 /// only re-decides a constant. A rare remote-URL change is picked up on the next
 /// daemon restart.
-#[hotpath::measure]
 fn origin_is_github(repo_root: &Path, control: &PrCommandControl) -> bool {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, bool>>> =
         std::sync::OnceLock::new();
@@ -650,7 +629,6 @@ const GH_PR_LIST_LIMIT: usize = 1000;
 /// answer is a property of the host binary, not of any repo, so probing it every
 /// poll cycle (once per enabled project, every minute) only re-decides a
 /// constant. The daemon restarts to pick up a newly installed `gh`.
-#[hotpath::measure]
 fn gh_available(control: &PrCommandControl) -> bool {
     if control
         .cancellation
@@ -687,7 +665,6 @@ fn gh_available(control: &PrCommandControl) -> bool {
 /// a transient `gh`/`git` failure can never masquerade as "every PR closed" and
 /// mass-untrack the managed set. An empty `Ok` result means the remote genuinely
 /// has no open PRs.
-#[hotpath::measure]
 pub fn discover_open_prs(repo_root: &Path) -> Result<PrDiscovery, String> {
     discover_open_prs_with_control(repo_root, default_pr_command_control())
 }
@@ -708,7 +685,6 @@ fn discover_open_prs_with_control(
     discover_via_ls_remote(repo_root, control)
 }
 
-#[hotpath::measure]
 fn discover_via_gh(repo_root: &Path, control: &PrCommandControl) -> Option<PrDiscovery> {
     let limit = GH_PR_LIST_LIMIT.to_string();
     let mut command = std::process::Command::new("gh");
@@ -738,7 +714,6 @@ fn discover_via_gh(repo_root: &Path, control: &PrCommandControl) -> Option<PrDis
     parse_gh_pr_list(&json, GH_PR_LIST_LIMIT).ok()
 }
 
-#[hotpath::measure]
 fn discover_via_ls_remote(
     repo_root: &Path,
     control: &PrCommandControl,
@@ -785,7 +760,6 @@ pub struct ReconcileReport {
 /// and PR number. Every skip path (persistence failure, track failure, fork,
 /// reconciled-state persistence failure) funnels through here so the field set
 /// and ordering stay identical across them.
-#[hotpath::measure]
 fn log_pr_skip(repo_root: &Path, branch_label: Option<&str>, pr: Option<u64>, reason: &str) {
     let mut fields = vec![
         ("project", repo_root.display().to_string()),
@@ -837,7 +811,6 @@ pub async fn activate_manual_branch(
 }
 
 /// Deterministic linked-worktree path for a manually activated branch head.
-#[hotpath::measure]
 pub fn manual_branch_worktree_path(data_root: &Path, branch: &str) -> PathBuf {
     ManualBranchArtifactsV1::for_branch(data_root, branch).worktree
 }
@@ -1076,7 +1049,6 @@ async fn activate_manual_branch_with_administration(
     }
 }
 
-#[hotpath::measure]
 fn resolve_branch_head(
     repo_root: &Path,
     branch: &str,
@@ -1097,7 +1069,6 @@ fn resolve_branch_head(
     )))
 }
 
-#[hotpath::measure]
 fn resolve_git_ref(
     repo_root: &Path,
     reference: &str,
@@ -1113,7 +1084,6 @@ fn resolve_git_ref(
     .filter(|sha| !sha.is_empty())
 }
 
-#[hotpath::measure]
 fn prepare_manual_branch_worktree(
     repo_root: &Path,
     worktree: &Path,
@@ -1286,7 +1256,6 @@ pub(crate) async fn cleanup_manual_branch_retirement(
     Ok(lifecycle)
 }
 
-#[hotpath::measure]
 pub(crate) fn manual_branch_source_owns_artifacts(
     data_root: &Path,
     branch: &str,
@@ -1439,7 +1408,6 @@ enum ExactRefReadV1 {
     Present(String),
 }
 
-#[hotpath::measure]
 fn checked_path_exists(path: &Path) -> std::result::Result<bool, ManualBranchActivationError> {
     path.try_exists().map_err(|error| {
         ManualBranchActivationError::git_unavailable(format!(
@@ -1449,7 +1417,6 @@ fn checked_path_exists(path: &Path) -> std::result::Result<bool, ManualBranchAct
     })
 }
 
-#[hotpath::measure]
 fn validated_git_oid(
     stdout: &[u8],
     reference: &str,
@@ -1468,7 +1435,6 @@ fn validated_git_oid(
     Ok(oid.to_owned())
 }
 
-#[hotpath::measure]
 fn read_exact_ref(
     repo_root: &Path,
     reference: &str,
@@ -1503,7 +1469,6 @@ fn read_exact_ref(
     }
 }
 
-#[hotpath::measure]
 fn read_worktree_head(
     worktree: &Path,
     command_control: &PrCommandControl,
@@ -1533,7 +1498,6 @@ fn read_worktree_head(
     }
 }
 
-#[hotpath::measure]
 fn read_worktree_branch(
     worktree: &Path,
     command_control: &PrCommandControl,
@@ -1571,7 +1535,6 @@ fn read_worktree_branch(
     }
 }
 
-#[hotpath::measure]
 fn exact_ref_ownership(
     repo_root: &Path,
     reference: &str,
@@ -1587,7 +1550,6 @@ fn exact_ref_ownership(
     }
 }
 
-#[hotpath::measure]
 fn manual_branch_artifact_ownership(
     repo_root: &Path,
     worktree: &Path,
@@ -1629,7 +1591,6 @@ fn manual_branch_artifact_ownership(
     }
 }
 
-#[hotpath::measure]
 fn cleanup_owned_worktree(
     repo_root: &Path,
     worktree: &Path,
@@ -1692,7 +1653,6 @@ fn cleanup_owned_worktree(
     )? == ManualBranchArtifactOwnershipV1::Absent)
 }
 
-#[hotpath::measure]
 fn manual_branch_artifacts_match(
     repo_root: &Path,
     artifacts: &ManualBranchArtifactsV1,
@@ -1717,7 +1677,6 @@ fn manual_branch_artifacts_match(
         )?)
 }
 
-#[hotpath::measure]
 fn manual_branch_owned_head(
     repo_root: &Path,
     artifacts: &ManualBranchArtifactsV1,
@@ -1741,7 +1700,6 @@ fn manual_branch_owned_head(
     Ok(None)
 }
 
-#[hotpath::measure]
 fn worktree_matches_branch_head(
     _repo_root: &Path,
     worktree: &Path,
@@ -1758,7 +1716,6 @@ fn worktree_matches_branch_head(
     ) && read_worktree_branch(worktree, command_control)?.as_deref() == Some(branch_ref))
 }
 
-#[hotpath::measure]
 fn delete_exact_ref(
     repo_root: &Path,
     reference: &str,
@@ -1784,7 +1741,6 @@ fn delete_exact_ref(
     )))
 }
 
-#[hotpath::measure]
 fn remove_owned_manual_worktree(
     repo_root: &Path,
     worktree: &Path,
@@ -2192,7 +2148,6 @@ async fn remove_pr_store(
     Ok(())
 }
 
-#[hotpath::measure]
 fn pr_number_from_label(label: &str) -> Option<u64> {
     label
         .strip_prefix("tracedecay/autotrack/pr/")
@@ -2232,7 +2187,6 @@ async fn cleanup_failed_track(
 
 /// Fetches `refs/pull/<N>/head` into `tracking_ref` and adds a linked worktree
 /// checked out on a local branch named `label` at that ref.
-#[hotpath::measure]
 fn prepare_pr_worktree(
     repo_root: &Path,
     worktree: &Path,
@@ -2262,7 +2216,6 @@ fn prepare_pr_worktree(
     checkout_linked_worktree(repo_root, worktree, tracking_ref, label, command_control)
 }
 
-#[hotpath::measure]
 fn checkout_linked_worktree(
     repo_root: &Path,
     worktree: &Path,
@@ -2440,7 +2393,6 @@ async fn cleanup_pr_worktree_off_runtime(
     }
 }
 
-#[hotpath::measure]
 fn cleanup_pr_worktree(
     repo_root: &Path,
     data_root: &Path,
@@ -2481,7 +2433,6 @@ fn cleanup_pr_worktree(
     }
 }
 
-#[hotpath::measure]
 fn ref_points_to(
     repo_root: &Path,
     reference: &str,
@@ -2491,7 +2442,6 @@ fn ref_points_to(
     ref_sha(repo_root, reference, command_control).is_some_and(|sha| sha == expected_head)
 }
 
-#[hotpath::measure]
 fn ref_sha(
     repo_root: &Path,
     reference: &str,
@@ -2502,7 +2452,6 @@ fn ref_sha(
         .map(|sha| sha.trim().to_string())
 }
 
-#[hotpath::measure]
 fn remove_worktree(repo_root: &Path, worktree: &Path, command_control: &PrCommandControl) {
     let wt_str = worktree.to_string_lossy();
     let _ = successful_git_with_control(

@@ -18,7 +18,6 @@ use cap_std::fs::OpenOptions;
 /// capabilities without allowing an occupied destination to be replaced.
 /// Platforms without a suitable primitive fail closed: retaining bytes is
 /// always preferable to risking a replacement.
-#[hotpath::measure]
 pub fn rename_noreplace(
     from_parent: &Dir,
     from: &OsStr,
@@ -101,7 +100,6 @@ pub fn rename_noreplace(
 }
 
 #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
-#[hotpath::measure]
 fn component_cstring(name: &OsStr) -> io::Result<std::ffi::CString> {
     use std::os::unix::ffi::OsStrExt;
 
@@ -110,7 +108,6 @@ fn component_cstring(name: &OsStr) -> io::Result<std::ffi::CString> {
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn dir_entry_wide(parent: &Dir, name: &OsStr) -> io::Result<Vec<u16>> {
     use std::os::windows::ffi::OsStrExt;
 
@@ -125,7 +122,6 @@ fn dir_entry_wide(parent: &Dir, name: &OsStr) -> io::Result<Vec<u16>> {
 /// Resolves an open directory capability back to its live filesystem path so
 /// path-based Win32 primitives can address entries below it.
 #[cfg(windows)]
-#[hotpath::measure]
 fn dir_path(directory: &Dir) -> io::Result<std::path::PathBuf> {
     use std::os::windows::ffi::OsStringExt;
     use std::os::windows::io::AsRawHandle;
@@ -174,7 +170,6 @@ fn dir_path(directory: &Dir) -> io::Result<std::path::PathBuf> {
 
 /// Flushes a directory capability's metadata so a preceding create, rename,
 /// or unlink beneath it is durable.
-#[hotpath::measure]
 pub fn sync_directory(directory: &Dir) -> io::Result<()> {
     #[cfg(windows)]
     {
@@ -195,7 +190,6 @@ pub fn sync_directory(directory: &Dir) -> io::Result<()> {
 /// tree. `interrupt` runs before every child operation; returning an error
 /// stops the descent and leaves the remaining entries in place for a later
 /// reconciliation.
-#[hotpath::measure]
 pub fn remove_open_dir_all_nofollow(
     directory: Dir,
     interrupt: &mut dyn FnMut() -> io::Result<()>,

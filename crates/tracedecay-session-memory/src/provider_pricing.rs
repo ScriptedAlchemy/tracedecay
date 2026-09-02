@@ -43,7 +43,6 @@ pub struct PriceTable {
     pub revision: String,
 }
 
-#[hotpath::measure]
 fn normalized_model(value: &str) -> String {
     value
         .rsplit('/')
@@ -55,7 +54,6 @@ fn normalized_model(value: &str) -> String {
         .collect()
 }
 
-#[hotpath::measure]
 fn provider_vendor(provider: &str) -> Option<&'static str> {
     match provider.to_ascii_lowercase().as_str() {
         "claude" | "anthropic" => Some("anthropic"),
@@ -70,7 +68,6 @@ fn provider_vendor(provider: &str) -> Option<&'static str> {
 /// Resolves a native provider/model identity against the one all-provider
 /// table. Exact slugs win; otherwise the longest normalized model prefix wins
 /// within the provider's vendor namespace.
-#[hotpath::measure]
 pub fn resolve_model_price<'a>(
     table: &'a PriceTable,
     provider: &str,
@@ -111,7 +108,6 @@ pub fn resolve_model_price<'a>(
 
 /// Prices one exact provider usage delta. Any missing required counter or
 /// price component keeps the result unavailable instead of fabricating zero.
-#[hotpath::measure]
 pub fn cost_of_usage(
     table: &PriceTable,
     provider: &str,
@@ -149,7 +145,6 @@ pub fn cost_of_usage(
 
 /// Reads a price field that `OpenRouter` serves as a per-token decimal string
 /// (sometimes a bare number) and converts it to USD per million tokens.
-#[hotpath::measure]
 fn price_per_mtok(pricing: &Value, key: &str) -> Option<f64> {
     let raw = pricing.get(key)?;
     let per_token = match raw {
@@ -166,7 +161,6 @@ fn price_per_mtok(pricing: &Value, key: &str) -> Option<f64> {
 /// Parses an `OpenRouter` `/api/v1/models` response (or the bundled snapshot,
 /// which uses the identical shape) into a slug → price map. Returns `None`
 /// when nothing usable was found, so callers never cache garbage.
-#[hotpath::measure]
 pub fn parse_openrouter_json(body: &str) -> Option<BTreeMap<String, ModelPrice>> {
     let parsed: Value = serde_json::from_str(body).ok()?;
     let entries = parsed.get("data")?.as_array()?;
@@ -212,7 +206,6 @@ pub fn parse_openrouter_json(body: &str) -> Option<BTreeMap<String, ModelPrice>>
 /// Parsing and content hashing happen once per process. The bundled bytes are
 /// immutable, so rebuilding the same map on each hook or dashboard read would
 /// add latency without providing fresher pricing.
-#[hotpath::measure]
 pub fn load_table() -> &'static PriceTable {
     PRICE_TABLE.get_or_init(|| {
         let (available, models) = match parse_openrouter_json(FALLBACK_JSON) {
@@ -232,7 +225,6 @@ pub fn load_table() -> &'static PriceTable {
 }
 
 /// JSON payload for `GET /api/plugins/savings/pricing`.
-#[hotpath::measure]
 pub fn pricing_payload() -> Value {
     let table = load_table();
     let mut models = Map::new();

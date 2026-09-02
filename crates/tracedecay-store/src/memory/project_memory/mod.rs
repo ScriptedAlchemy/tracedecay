@@ -61,12 +61,10 @@ pub use search::{
     ProjectMemoryFactSearchKindV1, ProjectMemoryFactSearchPageV1, ProjectMemoryFactSearchScoresV1,
 };
 
-#[hotpath::measure]
 fn validate_project_memory_entity(value: &str) -> FactStoreResult<()> {
     validate_project_memory_text(value, "fact entity")
 }
 
-#[hotpath::measure]
 fn validate_project_memory_text(value: &str, field: &'static str) -> FactStoreResult<()> {
     if !is_canonical_text_within(value, MAX_PROJECT_MEMORY_SEARCH_BYTES) {
         return Err(FactStoreError::Contract(DomainError::NonCanonical {
@@ -83,7 +81,6 @@ pub struct ProjectMemoryFactIdV1 {
     fact_id: FactId,
 }
 
-#[hotpath::measure_all]
 impl ProjectMemoryFactIdV1 {
     pub fn new(owner: FactOwnerV1, fact_id: FactId) -> FactStoreResult<Self> {
         owner.validate()?;
@@ -122,7 +119,6 @@ pub struct ProjectMemoryFactSnapshotV1 {
     projected_as_of: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl ProjectMemoryFactSnapshotV1 {
     pub fn new(
         active_assertion_id: FactAssertionId,
@@ -137,7 +133,6 @@ impl ProjectMemoryFactSnapshotV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl ProjectMemoryFactV1 {
     pub fn new(
         fact_id: FactId,
@@ -245,7 +240,6 @@ pub struct ProjectMemoryFactPageV1 {
     next_after_fact_id: Option<FactId>,
 }
 
-#[hotpath::measure_all]
 impl ProjectMemoryFactPageV1 {
     pub fn new(
         owner: FactOwnerV1,
@@ -336,7 +330,6 @@ pub struct ProjectMemoryPrivacyPurgeCursorV1 {
     assertion_id: FactAssertionId,
 }
 
-#[hotpath::measure_all]
 impl ProjectMemoryPrivacyPurgeCursorV1 {
     pub fn new(
         owner: FactOwnerV1,
@@ -366,7 +359,6 @@ impl ProjectMemoryPrivacyPurgeCursorV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl ProjectMemoryPrivacyPurgeReceiptV1 {
     pub fn new(
         owner: FactOwnerV1,
@@ -418,7 +410,6 @@ impl ProjectMemoryPrivacyPurgeReceiptV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl ProjectMemoryFactHistoryV1 {
     pub fn new(
         owner: FactOwnerV1,
@@ -487,7 +478,6 @@ pub struct ProjectMemoryFactInspectionV1 {
     status: ProjectMemoryFactStatusV1,
 }
 
-#[hotpath::measure_all]
 impl ProjectMemoryFactInspectionV1 {
     pub fn new(
         fact: ProjectMemoryFactV1,
@@ -562,7 +552,6 @@ pub struct ProjectMemoryFactUnavailableV1 {
     status: ProjectMemoryFactStatusV1,
 }
 
-#[hotpath::measure_all]
 impl ProjectMemoryFactUnavailableV1 {
     pub fn new(status: ProjectMemoryFactStatusV1) -> FactStoreResult<Self> {
         if status.payload_access() == tracedecay_domain::PayloadAccessState::Eligible {
@@ -591,7 +580,6 @@ pub enum ProjectMemoryFactProjectionV1 {
     Unavailable(ProjectMemoryFactUnavailableV1),
 }
 
-#[hotpath::measure_all]
 impl ProjectMemoryFactProjectionV1 {
     pub fn owner(&self) -> &FactOwnerV1 {
         match self {

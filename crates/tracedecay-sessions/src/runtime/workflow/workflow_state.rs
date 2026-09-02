@@ -73,7 +73,6 @@ pub async fn list_unfinished(
     Ok(out)
 }
 
-#[hotpath::measure]
 fn classify_evidence(content: &str, snippet: &str) -> Option<(String, String)> {
     let status = classify_status(content)?;
     let evidence_source = if snippet.trim().is_empty() {
@@ -87,7 +86,6 @@ fn classify_evidence(content: &str, snippet: &str) -> Option<(String, String)> {
     ))
 }
 
-#[hotpath::measure]
 fn classify_status(text: &str) -> Option<&'static str> {
     let lower = text.to_ascii_lowercase();
     if lower.contains("session limit") {
@@ -103,7 +101,6 @@ fn classify_status(text: &str) -> Option<&'static str> {
     }
 }
 
-#[hotpath::measure]
 fn task_id_from_metadata(metadata_json: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(metadata_json).ok()?;
     ["task_id", "taskId", "task", "id"]

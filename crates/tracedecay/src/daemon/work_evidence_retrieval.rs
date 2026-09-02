@@ -68,7 +68,6 @@ pub(crate) struct DaemonWorkEvidenceRetrievalV1 {
     federated_authority: Option<Arc<dyn WorkFederatedQueryAuthorityPortV1>>,
 }
 
-#[hotpath::measure_all]
 impl DaemonWorkEvidenceRetrievalV1 {
     pub(crate) fn new(retrieval: Arc<dyn SessionApplicationRetrievalPortV1>) -> Self {
         Self {
@@ -301,7 +300,6 @@ impl TaskSessionRankSelectorV1 for WorkTaskSessionSelectorV1<'_> {
     }
 }
 
-#[hotpath::measure]
 fn binding_matches_request(
     binding: &TaskSessionBindingV1,
     request: &WorkTaskSessionRequestV1,
@@ -315,7 +313,6 @@ fn binding_matches_request(
             .contains(binding.accepted_attempt())
 }
 
-#[hotpath::measure]
 fn map_reauthorization_error(
     error: WorkTaskSessionReauthorizationErrorV1,
 ) -> TaskSessionSelectionCallbackErrorV1 {
@@ -330,7 +327,6 @@ fn map_reauthorization_error(
     }
 }
 
-#[hotpath::measure]
 fn retrieval_request(
     context: &RequestContext,
     request: &WorkTaskSessionRequestV1,
@@ -373,7 +369,6 @@ fn retrieval_request(
     })
 }
 
-#[hotpath::measure]
 fn task_session_query_text(request: &WorkTaskSessionRequestV1) -> String {
     format!(
         "{} {} {} {}",
@@ -388,7 +383,6 @@ fn task_session_query_text(request: &WorkTaskSessionRequestV1) -> String {
     )
 }
 
-#[hotpath::measure]
 fn task_session_evidence(
     request: &WorkTaskSessionRequestV1,
     outcome: TaskSessionRetrievalOutcomeV1,
@@ -567,7 +561,6 @@ const fn budget_hydration_refusal(
     )
 }
 
-#[hotpath::measure]
 fn reauthorize_work_stage(
     selector: &dyn TaskSessionRankSelectorV1,
     binding: &TaskSessionBindingV1,
@@ -587,7 +580,6 @@ fn reauthorize_work_stage(
         })
 }
 
-#[hotpath::measure]
 fn task_session_continuation(
     request: &WorkTaskSessionRequestV1,
     participant_epoch: tracedecay_domain::ManifestDigest,

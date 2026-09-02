@@ -17,7 +17,6 @@ pub const MAX_SEMANTIC_VECTOR_ADOPTION_PAGE_RECORDS: u16 = 256;
 #[serde(transparent)]
 pub struct SemanticVectorStageCensusRevision(u64);
 
-#[hotpath::measure_all]
 impl SemanticVectorStageCensusRevision {
     pub const INITIAL: Self = Self(0);
 
@@ -60,7 +59,6 @@ pub struct SemanticVectorStageAdoptionCursor {
     pub after_stage_id: u64,
 }
 
-#[hotpath::measure_all]
 impl SemanticVectorStageAdoptionCursor {
     pub fn new(
         binding: StoreRuntimeBindingV1,
@@ -95,7 +93,6 @@ pub struct SemanticVectorStageAdoptionPageRequest {
     pub max_records: u16,
 }
 
-#[hotpath::measure_all]
 impl SemanticVectorStageAdoptionPageRequest {
     pub fn new(
         binding: StoreRuntimeBindingV1,
@@ -139,7 +136,6 @@ pub struct SemanticVectorStageAdoptionPage {
     pub continuation: Option<SemanticVectorStageAdoptionCursor>,
 }
 
-#[hotpath::measure_all]
 impl SemanticVectorStageAdoptionPage {
     pub fn new(
         binding: StoreRuntimeBindingV1,
@@ -180,7 +176,6 @@ pub struct SemanticVectorStageCensusCursor {
     pub record_digest: tracedecay_domain::ManifestDigest,
 }
 
-#[hotpath::measure_all]
 impl SemanticVectorStageCensusCursor {
     pub fn new(
         shard_id: StoreShardIdV1,
@@ -230,7 +225,6 @@ pub struct SemanticVectorStageCensusRequest {
     pub max_records: u16,
 }
 
-#[hotpath::measure_all]
 impl SemanticVectorStageCensusRequest {
     pub fn new(
         projection: GraphProjectionIdentityV1,
@@ -289,7 +283,6 @@ pub struct SemanticVectorStageCensusPage {
     pub complete_receipt: Option<SemanticVectorProjectCensusReceipt>,
 }
 
-#[hotpath::measure_all]
 impl SemanticVectorStageCensusPage {
     pub fn new(
         shard_id: StoreShardIdV1,
@@ -355,7 +348,6 @@ pub struct SemanticVectorStageCensusCounts {
     pub cancelled: u64,
 }
 
-#[hotpath::measure_all]
 impl SemanticVectorStageCensusCounts {
     pub fn checked_add_record(
         &mut self,
@@ -396,7 +388,6 @@ pub struct SemanticVectorProjectCensusReceipt {
     pub record_digest: tracedecay_domain::ManifestDigest,
 }
 
-#[hotpath::measure_all]
 impl SemanticVectorProjectCensusReceipt {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
         self.counts
@@ -429,7 +420,6 @@ pub enum SemanticVectorSourceScopeBindingLookup {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SemanticVectorRetirementCleanupCursor(u64);
 
-#[hotpath::measure_all]
 impl SemanticVectorRetirementCleanupCursor {
     pub fn new(value: u64) -> Result<Self, StorageRuntimeContractErrorV1> {
         if value == 0 {
@@ -462,7 +452,6 @@ pub struct SemanticVectorPublishedRetirement {
     pub writer_fence: SemanticVectorWriterFence,
 }
 
-#[hotpath::measure_all]
 impl SemanticVectorPublishedRetirement {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
         self.semantic_generation_id.validate().map_err(|_| {

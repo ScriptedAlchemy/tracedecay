@@ -27,7 +27,6 @@ pub struct PrAutotrackTask {
     task: tokio::task::JoinHandle<()>,
 }
 
-#[hotpath::measure_all]
 impl PrAutotrackTask {
     #[hotpath::skip]
     pub async fn shutdown(self) {
@@ -47,7 +46,6 @@ impl PrAutotrackTask {
 
 /// Spawns the PR-autotrack poll loop with the daemon's shared store coordinator
 /// and the retained code-index scheduler used for PR-head worktree activation.
-#[hotpath::measure]
 pub(crate) fn spawn_with_administration(
     administration: StoreAdministration,
     schedulers: CodeIndexSchedulerRegistryV1,

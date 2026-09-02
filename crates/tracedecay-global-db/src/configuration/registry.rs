@@ -20,13 +20,13 @@ use tracedecay_domain::configuration::{
     SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY, SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY,
     SYNC_READ_COOLDOWN_SECS_SETTING_KEY, SYNC_READ_REFRESH_SETTING_KEY,
     SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY, SYNC_SESSION_START_SYNC_SETTING_KEY,
-    SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY, SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY,
-    SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingDefinitionV1, SettingKey, SettingScopeV1,
-    SettingSensitivityV1, TELEMETRY_TIMINGS_SETTING_KEY, USER_CODE_INDEX_WORKERS_SETTING_KEY,
-    USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY, USER_UPLOAD_ENABLED_SETTING_KEY,
-    USER_WATCHER_DEBOUNCE_MS_SETTING_KEY, USER_WORK_EXPERTISE_CONSENT_SETTING_KEY,
-    WORK_EXECUTABLE_BINDINGS_SETTING_KEY, WORK_TOPOLOGY_POLICY_SETTING_KEY, WorkExpertiseConsentV1,
-    safe_work_topology_policy_v1,
+    SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY, SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
+    SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY, SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingDefinitionV1,
+    SettingKey, SettingScopeV1, SettingSensitivityV1, TELEMETRY_TIMINGS_SETTING_KEY,
+    USER_CODE_INDEX_WORKERS_SETTING_KEY, USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
+    USER_UPLOAD_ENABLED_SETTING_KEY, USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
+    USER_WORK_EXPERTISE_CONSENT_SETTING_KEY, WORK_EXECUTABLE_BINDINGS_SETTING_KEY,
+    WORK_TOPOLOGY_POLICY_SETTING_KEY, WorkExpertiseConsentV1, safe_work_topology_policy_v1,
 };
 use tracedecay_domain::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1;
 use tracedecay_semantic_contracts::SemanticConfig;
@@ -41,7 +41,7 @@ pub const MAX_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1: u64 = 10_000;
 
 /// Registry schema revision. Increment only when setting-definition semantics
 /// change, not when a setting value changes.
-pub const CONFIGURATION_REGISTRY_SCHEMA_REVISION: u16 = 5;
+pub const CONFIGURATION_REGISTRY_SCHEMA_REVISION: u16 = 6;
 
 #[derive(Debug, Error)]
 pub enum ConfigurationRegistryError {
@@ -97,7 +97,6 @@ pub struct ConfigurationRegistry {
     definitions: BTreeMap<SettingKey, SettingDefinitionV1>,
 }
 
-#[hotpath::measure_all]
 impl ConfigurationRegistry {
     /// Build the core registry. In addition to authority, policy,
     /// collection, analyzer, and topology definitions, this includes every
@@ -376,7 +375,6 @@ impl ConfigurationRegistry {
 /// Mirrors root `config::MIN_AUTO_TRACK_PR_POLL_SECS`.
 pub const MIN_AUTO_TRACK_PR_POLL_SECS: u64 = 60;
 
-#[hotpath::measure]
 fn register_project_stored_user_profile_settings(
     registry: &mut ConfigurationRegistry,
 ) -> Result<(), ConfigurationRegistryError> {
@@ -423,7 +421,6 @@ fn register_project_stored_user_profile_settings(
     Ok(())
 }
 
-#[hotpath::measure]
 fn code_index_worker_definition() -> Result<SettingDefinitionV1, ConfigurationRegistryError> {
     Ok(SettingDefinitionV1 {
         key: setting_key(USER_CODE_INDEX_WORKERS_SETTING_KEY)?,
@@ -456,6 +453,7 @@ struct ProjectDefaults {
 #[derive(Clone, Copy)]
 struct SyncDefaults {
     auto_watch: bool,
+    watch_linked_worktrees: bool,
     watch_debounce_ms: u64,
     watch_max_delay_ms: u64,
     watch_max_projects: usize,
@@ -477,6 +475,7 @@ impl Default for SyncDefaults {
     fn default() -> Self {
         Self {
             auto_watch: false,
+            watch_linked_worktrees: false,
             watch_debounce_ms: 2000,
             watch_max_delay_ms: 30000,
             watch_max_projects: 32,
@@ -524,7 +523,6 @@ impl Default for ProjectDefaults {
 }
 
 /// Register every project scalar in the sole typed registry.
-#[hotpath::measure]
 fn register_project_settings(
     registry: &mut ConfigurationRegistry,
 ) -> Result<(), ConfigurationRegistryError> {
@@ -582,6 +580,12 @@ fn register_project_settings(
         (
             SYNC_AUTO_WATCH_SETTING_KEY,
             ConfigurationValueV1::Boolean(sync.auto_watch),
+            SettingSensitivityV1::Public,
+            RestartRequirementV1::DaemonRestart,
+        ),
+        (
+            SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
+            ConfigurationValueV1::Boolean(sync.watch_linked_worktrees),
             SettingSensitivityV1::Public,
             RestartRequirementV1::DaemonRestart,
         ),
@@ -701,12 +705,10 @@ fn register_project_settings(
     Ok(())
 }
 
-#[hotpath::measure]
 fn setting_key(value: &str) -> Result<SettingKey, ConfigurationRegistryError> {
     Ok(SettingKey::new(value)?)
 }
 
-#[hotpath::measure]
 fn validate_semantic_runtime_payload(
     key: &SettingKey,
     value: &ConfigurationValueV1,
@@ -738,7 +740,6 @@ fn validate_semantic_runtime_payload(
         })
 }
 
-#[hotpath::measure]
 fn classify_semantic_json_error(error: &serde_json::Error) -> InvalidSettingPayloadReason {
     if error.is_syntax() || error.is_eof() {
         return InvalidSettingPayloadReason::MalformedJson;
@@ -753,7 +754,6 @@ fn classify_semantic_json_error(error: &serde_json::Error) -> InvalidSettingPayl
     }
 }
 
-#[hotpath::measure]
 fn semantic_config_has_invalid_artifact_digest(config: &SemanticConfig) -> bool {
     config
         .active_profile
@@ -849,7 +849,7 @@ mod user_profile_settings_tests {
 
     #[test]
     fn code_index_workers_default_is_automatic_and_zero_exact_is_denied() {
-        assert_eq!(CONFIGURATION_REGISTRY_SCHEMA_REVISION, 5);
+        assert_eq!(CONFIGURATION_REGISTRY_SCHEMA_REVISION, 6);
         let key = SettingKey::new(USER_CODE_INDEX_WORKERS_SETTING_KEY).expect("key");
         let project_registry = ConfigurationRegistry::core().expect("project registry");
         assert!(matches!(
@@ -916,6 +916,25 @@ mod automation_defaults_tests {
 #[cfg(test)]
 mod sync_defaults_tests {
     use super::*;
+
+    #[test]
+    fn linked_worktree_watching_requires_explicit_project_opt_in() {
+        let registry = ConfigurationRegistry::core().expect("registry");
+        let key = SettingKey::new(SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY).expect("setting key");
+        let definition = registry.definition(&key).expect("setting definition");
+
+        assert_eq!(
+            definition.default_value,
+            ConfigurationValueV1::Boolean(false)
+        );
+        assert_eq!(definition.value_kind, ConfigurationValueKindV1::Boolean);
+        assert_eq!(definition.scope, SettingScopeV1::Project);
+        assert_eq!(definition.sensitivity, SettingSensitivityV1::Public);
+        assert_eq!(
+            definition.restart_requirement,
+            RestartRequirementV1::DaemonRestart
+        );
+    }
 
     #[test]
     fn orphan_database_retention_has_one_exact_project_default() {

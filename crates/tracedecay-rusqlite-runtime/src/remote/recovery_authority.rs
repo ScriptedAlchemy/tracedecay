@@ -117,7 +117,6 @@ pub struct RemoteRecoverySqliteAuthorityV1 {
     effects: Arc<dyn RemoteRecoveryPhysicalEffectsV1>,
 }
 
-#[hotpath::measure_all]
 impl RemoteRecoverySqliteAuthorityV1 {
     /// Attaches recovery authority to one retained, write-authorized runtime.
     ///
@@ -404,7 +403,6 @@ impl RemoteRecoveryControlPortV1 for RecoveryReconciliationControlV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl RemoteSqliteStorageV1 {
     pub fn recovery_writer(
         &self,
@@ -654,7 +652,6 @@ impl RemoteRecoveryOperationPortV1 for RemoteRecoverySqliteAuthorityV1 {
     }
 }
 
-#[hotpath::measure]
 fn available_authority_state(
     handle: &ExactSqlHandle,
     expected: &RecoveryAuthorityExpectationV1,
@@ -697,7 +694,6 @@ fn available_authority_state(
     }
 }
 
-#[hotpath::measure]
 fn unavailable(
     reason: RemoteAuthorityUnavailableReasonV1,
     observed_at: UtcMicros,
@@ -708,7 +704,6 @@ fn unavailable(
     }
 }
 
-#[hotpath::measure]
 fn expectation_for_restore(
     request: &RemoteProtocolRequestV1<StagedRestoreConfirmationV1>,
 ) -> Result<RecoveryAuthorityExpectationV1, RemoteRecoveryOperationErrorV1> {
@@ -722,7 +717,6 @@ fn expectation_for_restore(
     )
 }
 
-#[hotpath::measure]
 fn expectation_for_promotion(
     request: &RemoteProtocolRequestV1<PromotionConfirmationV1>,
 ) -> Result<RecoveryAuthorityExpectationV1, RemoteRecoveryOperationErrorV1> {
@@ -736,7 +730,6 @@ fn expectation_for_promotion(
     )
 }
 
-#[hotpath::measure]
 fn expectation_from_writer(
     writer: &RemoteWriterFenceV1,
     epoch: u64,
@@ -757,7 +750,6 @@ fn expectation_from_writer(
     }
 }
 
-#[hotpath::measure]
 fn replacement_writer(
     request: &RemoteProtocolRequestV1<PromotionConfirmationV1>,
     caller: &RemoteRecoveryCallerV1,
@@ -787,7 +779,6 @@ fn replacement_writer(
     })
 }
 
-#[hotpath::measure]
 fn validate_promotion_output(
     output: &PromotionCasReceiptV1,
     expected: &RecoveryAuthorityExpectationV1,
@@ -808,7 +799,6 @@ fn validate_promotion_output(
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_sink_inventory(sink_ids: &[String]) -> Result<(), RemoteRecoveryOperationErrorV1> {
     let mut unique = std::collections::BTreeSet::new();
     if sink_ids.is_empty()
@@ -825,7 +815,6 @@ fn validate_sink_inventory(sink_ids: &[String]) -> Result<(), RemoteRecoveryOper
     Ok(())
 }
 
-#[hotpath::measure]
 fn persist_sink_receipts(
     handle: &ExactSqlHandle,
     operation_id: &str,
@@ -878,7 +867,6 @@ fn persist_sink_receipts(
     Ok(())
 }
 
-#[hotpath::measure]
 fn current_authority_from_receipt(
     receipt: &RemoteRecoveryOperationReceiptV1,
 ) -> Result<CurrentRemoteAuthorityV1, RemoteRecoveryOperationErrorV1> {
@@ -905,7 +893,6 @@ fn current_authority_from_receipt(
     })
 }
 
-#[hotpath::measure]
 fn authority_key_for_expectation(
     expected: &RecoveryAuthorityExpectationV1,
 ) -> Result<String, RemoteSqliteStorageErrorV1> {
@@ -919,7 +906,6 @@ fn authority_key_for_expectation(
     .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)
 }
 
-#[hotpath::measure]
 fn authority_key_for_writer(
     writer: &RemoteWriterFenceV1,
 ) -> Result<String, RemoteSqliteStorageErrorV1> {
@@ -933,7 +919,6 @@ fn authority_key_for_writer(
     .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)
 }
 
-#[hotpath::measure]
 fn map_physical_error(
     error: RemoteRecoveryPhysicalEffectErrorV1,
 ) -> RemoteRecoveryOperationErrorV1 {
@@ -953,14 +938,12 @@ fn map_physical_error(
     }
 }
 
-#[hotpath::measure]
 fn integer(value: u64) -> Result<ExactSqlValue, RemoteRecoveryOperationErrorV1> {
     i64::try_from(value)
         .map(ExactSqlValue::Integer)
         .map_err(|_| RemoteRecoveryOperationErrorV1::InvalidRequest)
 }
 
-#[hotpath::measure]
 fn exact_text(
     row: &crate::exact_sql::ExactSqlRow,
     index: usize,
@@ -971,7 +954,6 @@ fn exact_text(
     }
 }
 
-#[hotpath::measure]
 fn exact_text_store(
     row: &crate::exact_sql::ExactSqlRow,
     index: usize,
@@ -982,7 +964,6 @@ fn exact_text_store(
     }
 }
 
-#[hotpath::measure]
 fn exact_u64(
     row: &crate::exact_sql::ExactSqlRow,
     index: usize,
@@ -995,7 +976,6 @@ fn exact_u64(
     }
 }
 
-#[hotpath::measure]
 fn exact_u64_store(
     row: &crate::exact_sql::ExactSqlRow,
     index: usize,
@@ -1008,7 +988,6 @@ fn exact_u64_store(
     }
 }
 
-#[hotpath::measure]
 fn one_exact_row(
     rows: crate::exact_sql::ExactSqlRows,
 ) -> Result<crate::exact_sql::ExactSqlRow, RemoteRecoveryOperationErrorV1> {

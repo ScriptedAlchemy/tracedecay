@@ -17,7 +17,6 @@ pub struct PreparedQueryActivationViewV1 {
     pub query_authority: Arc<QueryAuthorityV1>,
 }
 
-#[hotpath::measure_all]
 impl PreparedQueryActivationViewV1 {
     pub fn scope(&self) -> &ResolvedScope {
         &self.scope
@@ -39,6 +38,7 @@ impl PreparedQueryActivationViewV1 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitWatchSyncConfigV1 {
     pub auto_watch: bool,
+    pub watch_linked_worktrees: bool,
     pub watch_debounce_ms: u64,
     pub watch_max_delay_ms: u64,
     pub watch_max_projects: usize,
@@ -49,6 +49,7 @@ impl Default for GitWatchSyncConfigV1 {
     fn default() -> Self {
         Self {
             auto_watch: false,
+            watch_linked_worktrees: false,
             watch_debounce_ms: 2000,
             watch_max_delay_ms: 30_000,
             watch_max_projects: 32,
@@ -66,7 +67,6 @@ pub struct GitWatchMaintenanceWakeV1 {
     wake: Arc<dyn Fn() + Send + Sync>,
 }
 
-#[hotpath::measure_all]
 impl GitWatchMaintenanceWakeV1 {
     pub fn new(wake: impl Fn() + Send + Sync + 'static) -> Self {
         Self {
@@ -94,7 +94,6 @@ pub struct ApplicationCatalogSnapshotErrorV1 {
     pub message: String,
 }
 
-#[hotpath::measure_all]
 impl ApplicationCatalogSnapshotErrorV1 {
     pub fn new(message: impl Into<String>) -> Self {
         Self {

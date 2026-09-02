@@ -45,7 +45,6 @@ pub struct ObservabilityRetentionReceiptV1 {
     pub has_more: bool,
 }
 
-#[hotpath::measure_all]
 impl RegisteredGlobalDb {
     /// Read an existing exact owner claim without allocating a new delivery.
     #[hotpath::measure(future = true, label = "global_db.registry.analytics.query.claim")]
@@ -769,7 +768,6 @@ struct StoredObservabilityOutboxRecord {
     analytics_event_id: Option<i64>,
 }
 
-#[hotpath::measure]
 fn validate_outbox_input(
     project_id: &str,
     owner_event_id: &str,
@@ -868,7 +866,6 @@ async fn append_observability_event_in_existing_tx(
     append_analytics_event_in_existing_tx(transaction, event).await
 }
 
-#[hotpath::measure]
 fn analytics_record_matches_insert(
     stored: &AnalyticsEventRecord,
     event: &AnalyticsEventInsert,

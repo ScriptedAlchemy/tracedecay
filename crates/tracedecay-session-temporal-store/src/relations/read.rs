@@ -26,7 +26,6 @@ pub struct SummaryRelationRead {
     pub successor_summary_ids: Vec<String>,
 }
 
-#[hotpath::measure_all]
 impl SessionRelationGraphStore {
     pub fn session_context(
         &self,
@@ -421,7 +420,6 @@ impl SessionRelationGraphStore {
     }
 }
 
-#[hotpath::measure]
 fn relation_kinds(names: &[&str]) -> Result<BTreeSet<GraphRelationKind>, SessionRelationError> {
     names
         .iter()
@@ -429,7 +427,6 @@ fn relation_kinds(names: &[&str]) -> Result<BTreeSet<GraphRelationKind>, Session
         .collect()
 }
 
-#[hotpath::measure]
 fn require_budget(max_relations: usize) -> Result<(), SessionRelationError> {
     if max_relations == 0 {
         Err(SessionRelationError::BudgetExhausted)
@@ -438,7 +435,6 @@ fn require_budget(max_relations: usize) -> Result<(), SessionRelationError> {
     }
 }
 
-#[hotpath::measure]
 fn string_property<'a>(
     relation: &'a GraphRelation,
     property: &GraphPropertyName,

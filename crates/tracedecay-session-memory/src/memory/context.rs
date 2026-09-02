@@ -17,7 +17,6 @@ pub struct MemoryOperationContext {
     actor: Option<ActorId>,
 }
 
-#[hotpath::measure_all]
 impl MemoryOperationContext {
     pub fn from_logical_effect<T: Serialize>(
         owner: &FactOwnerV1,
@@ -103,7 +102,6 @@ impl MemoryOperationContext {
     }
 }
 
-#[hotpath::measure]
 fn validated_owner(owner: &FactOwnerV1) -> Result<String, MemoryApplicationError> {
     owner.validate()?;
     Ok(match owner {
@@ -112,7 +110,6 @@ fn validated_owner(owner: &FactOwnerV1) -> Result<String, MemoryApplicationError
     })
 }
 
-#[hotpath::measure]
 fn validate_actor(actor: Option<&ActorId>) -> Result<(), MemoryApplicationError> {
     actor.map_or(Ok(()), |actor| {
         actor
@@ -123,7 +120,6 @@ fn validate_actor(actor: Option<&ActorId>) -> Result<(), MemoryApplicationError>
     })
 }
 
-#[hotpath::measure]
 pub(super) fn validate_operation_component(
     value: &str,
     invariant: &'static str,

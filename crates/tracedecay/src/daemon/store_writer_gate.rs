@@ -68,7 +68,6 @@ pub(super) enum WriterScope {
     },
 }
 
-#[hotpath::measure_all]
 impl WriterScope {
     /// Store-scoped acquisition for `data_root`. The caller is responsible for
     /// passing a canonical path; [`StoreWriterGates`] keys on it verbatim so
@@ -90,7 +89,6 @@ struct StoreGate {
     content: Arc<Mutex<()>>,
 }
 
-#[hotpath::measure_all]
 impl StoreGate {
     fn class_mutex(&self, class: StoreWriterClass) -> Arc<Mutex<()>> {
         match class {
@@ -137,7 +135,6 @@ impl Default for StoreWriterGates {
     }
 }
 
-#[hotpath::measure_all]
 impl StoreWriterGates {
     /// Resolves (creating if needed) the gate set for one store family.
     ///

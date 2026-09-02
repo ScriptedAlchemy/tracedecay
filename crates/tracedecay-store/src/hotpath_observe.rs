@@ -12,7 +12,6 @@ use crate::external_source::{
 };
 use crate::session::SessionTemporalProjectionBatchDispositionV1;
 
-#[hotpath::measure]
 pub(crate) fn record_source_commit_outcome(
     outcome: &SourceStoreResult<SourceCommitApplyOutcomeV1>,
 ) {
@@ -32,7 +31,6 @@ pub(crate) fn record_source_commit_outcome(
     let _ = outcome;
 }
 
-#[hotpath::measure]
 pub(crate) fn record_source_projection_outcome(
     outcome: &SourceStoreResult<SourceProjectionApplyOutcomeV1>,
 ) {
@@ -52,7 +50,6 @@ pub(crate) fn record_source_projection_outcome(
     let _ = outcome;
 }
 
-#[hotpath::measure]
 pub(crate) fn record_session_projection_batch_disposition(
     disposition: SessionTemporalProjectionBatchDispositionV1,
 ) {

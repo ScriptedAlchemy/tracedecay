@@ -12,7 +12,6 @@ use crate::{LCM_SCAN_PAGE_MAX_BYTES, LCM_SCAN_PAGE_ROWS};
 /// Shallow payload census, covered by `idx_lcm_external_payloads_owner_bytes`
 /// so the status probe never reads payload metadata records. The unbounded
 /// scope omits the non-sargable `(?1 = 'all' OR …)` tautology.
-#[hotpath::measure]
 pub(super) fn payload_summary_query(
     provider: &str,
     session_id: Option<&str>,
@@ -319,7 +318,6 @@ pub async fn payload_health_detail(
     })
 }
 
-#[hotpath::measure]
 pub fn payload_health_state(
     payload: &LcmPayloadStatus,
     payload_gc: &LcmPayloadGcStatus,
@@ -492,7 +490,6 @@ async fn payload_ref_locations_for_scope(
     }
 }
 
-#[hotpath::measure]
 fn payload_ref_location(
     payload_ref: &str,
     session_id: Option<&str>,
@@ -518,7 +515,6 @@ struct PayloadUnreferencedSamplesRequest<'a> {
     sample_limit: usize,
 }
 
-#[hotpath::measure]
 fn payload_unreferenced_samples(
     request: PayloadUnreferencedSamplesRequest<'_>,
 ) -> Vec<PayloadRefStatusSample> {
@@ -557,7 +553,6 @@ fn payload_unreferenced_samples(
     samples
 }
 
-#[hotpath::measure]
 fn unreferenced_eligible_at(
     marks: &HashMap<String, (String, i64)>,
     payload_ref: &str,
@@ -667,7 +662,6 @@ async fn placeholder_refs_for_scope(
     Ok(refs)
 }
 
-#[hotpath::measure]
 fn payload_file_present_strict(dir: &Path, payload_ref: &str) -> Result<bool, LcmError> {
     let path = dir.join(payload_ref);
     payload::ensure_contained(dir, &path)?;
@@ -700,7 +694,6 @@ async fn payload_has_integrity_mismatch(
     Ok(util::sha256_hex(&bytes) != metadata.content_hash)
 }
 
-#[hotpath::measure]
 fn payload_root_contained(storage_root: &Path) -> bool {
     let dir = payload::payload_dir(storage_root);
     if !dir.exists() {

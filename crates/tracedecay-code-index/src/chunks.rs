@@ -141,7 +141,6 @@ pub struct ExtractionAdmittedCodeSearchChunkV1 {
     chunk: Arc<CodeSearchChunkV1>,
 }
 
-#[hotpath::measure_all]
 impl ExtractionAdmittedCodeSearchChunkV1 {
     pub fn chunk(&self) -> &CodeSearchChunkV1 {
         &self.chunk
@@ -195,7 +194,6 @@ where
 /// Run `operation` over every chunk for its failure only, fanning out across
 /// the pool once the batch is large enough. The lowest-index failure is
 /// returned, matching the sequential sweep's short-circuit outcome.
-#[hotpath::measure]
 fn try_for_each_chunk_ordered<F>(
     chunks: &[Arc<CodeSearchChunkV1>],
     operation: F,
@@ -221,7 +219,6 @@ where
     }
 }
 
-#[hotpath::measure_all]
 impl ExactExtractionAuthorityV1 {
     fn mint(chunks: &[Arc<CodeSearchChunkV1>]) -> Result<Self, ChunkingFailureV1> {
         let digests = map_chunks_ordered(chunks, |chunk| {
@@ -341,7 +338,6 @@ impl ExactExtractionAuthorityV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl CodeFileChunksV1 {
     /// Validate the generation/file binding and canonical document membership
     /// of one chunker result before it can cross the publication boundary.
@@ -489,7 +485,6 @@ pub struct DeterministicCodeChunker {
     extractors: Arc<tracedecay_code_extraction::LanguageRegistry>,
 }
 
-#[hotpath::measure_all]
 impl DeterministicCodeChunker {
     /// Create a chunker bound to one generation. Chunks default to
     /// `SensitivityLevelV1::Public` under `policy_revision`; application
@@ -641,7 +636,6 @@ impl DeterministicCodeChunker {
 /// that must map a stored [`FileIdentityDigest`] back to a snapshot file
 /// (e.g. generation-bound search display metadata) recompute it here so the
 /// recipe cannot fork.
-#[hotpath::measure]
 pub fn code_file_identity(
     repository: &str,
     logical_path: &str,
@@ -653,7 +647,6 @@ pub fn code_file_identity(
 
 /// Canonical, domain-separated SHA-256 of a serializable payload, returned as
 /// the bare `sha256:<hex>` string for identity/digest newtype construction.
-#[hotpath::measure]
 fn canonical_digest<T: serde::Serialize>(
     separator: &'static str,
     payload: &T,
@@ -663,7 +656,6 @@ fn canonical_digest<T: serde::Serialize>(
         .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(error.to_string()))
 }
 
-#[hotpath::measure]
 fn symbol_occurrence_id(
     generation_id: &CodeGenerationId,
     file_occurrence_id: &FileOccurrenceId,
@@ -683,7 +675,6 @@ fn symbol_occurrence_id(
     })
 }
 
-#[hotpath::measure]
 fn rematerialized_symbol_occurrence_id(
     generation_id: &CodeGenerationId,
     file_occurrence_id: &FileOccurrenceId,
@@ -706,7 +697,6 @@ fn rematerialized_symbol_occurrence_id(
 /// Kinds whose nodes never become symbol chunks: imports, preprocessor
 /// lines, annotations, and other non-symbol structure. Every other kind is a
 /// symbol grain candidate.
-#[hotpath::measure]
 fn is_symbol_kind(kind: &NodeKind) -> bool {
     !matches!(
         kind,
@@ -743,7 +733,6 @@ struct SymbolRow {
 }
 
 /// Byte offset of one line start for every line in the source.
-#[hotpath::measure]
 fn line_offsets(bytes: &[u8]) -> Vec<u64> {
     let mut offsets = vec![0u64];
     for (index, byte) in bytes.iter().enumerate() {
@@ -755,14 +744,12 @@ fn line_offsets(bytes: &[u8]) -> Vec<u64> {
 }
 
 /// Convert a tree-sitter row/column to a clamped byte offset.
-#[hotpath::measure]
 fn byte_offset(offsets: &[u64], len: u64, row: u32, column: u32) -> u64 {
     let base = offsets.get(row as usize).copied().unwrap_or(len);
     base.saturating_add(u64::from(column)).min(len)
 }
 
 /// Snap an offset down to the nearest UTF-8 char boundary.
-#[hotpath::measure]
 pub(crate) fn snap_down(source: &str, mut offset: usize) -> usize {
     let len = source.len();
     if offset > len {
@@ -777,7 +764,6 @@ pub(crate) fn snap_down(source: &str, mut offset: usize) -> usize {
 /// Pinned fallback windows over `[start, end)`. Each window is
 /// `(absolute_start, len)`; consecutive windows overlap by
 /// `FALLBACK_WINDOW_OVERLAP_BYTES` and the union covers the whole region.
-#[hotpath::measure]
 fn fallback_windows(source: &str, start: u64, end: u64) -> Vec<(u64, u64)> {
     debug_assert!(start <= end);
     if end - start <= MAX_CHUNK_TEXT_BYTES as u64 {
@@ -806,7 +792,6 @@ fn fallback_windows(source: &str, start: u64, end: u64) -> Vec<(u64, u64)> {
 
 /// Encode a fallback window's split path as the pinned window start/size
 /// relative to the enclosing region base (Plan 25).
-#[hotpath::measure]
 fn window_split_path(base: u64, window: (u64, u64)) -> Vec<u32> {
     vec![
         u32::try_from(window.0 - base).unwrap_or(u32::MAX),
@@ -816,7 +801,6 @@ fn window_split_path(base: u64, window: (u64, u64)) -> Vec<u32> {
 
 /// Structural split of one oversized body at its member boundaries:
 /// deterministic segments `[start, c0), [c0, c1), ..., [cn, end)`.
-#[hotpath::measure]
 fn structural_segments(body: SourceSpan, mut member_starts: Vec<u64>) -> Vec<(u64, u64)> {
     member_starts.retain(|start| *start > body.start_byte && *start < body.end_byte);
     member_starts.sort_unstable();
@@ -838,7 +822,6 @@ fn structural_segments(body: SourceSpan, mut member_starts: Vec<u64>) -> Vec<(u6
 /// Exact technical terms and language-profiled subtokens for one chunk's
 /// sanitized text (Plan 25: whole exact terms and subtokens are distinct
 /// fields; this is extraction evidence only).
-#[hotpath::measure]
 fn classify_chunk_text(text: &str, base_offset: u64) -> (Vec<ExactTechnicalTermV1>, Vec<String>) {
     let mut terms = Vec::new();
     let mut seen_terms = BTreeSet::new();
@@ -931,7 +914,6 @@ fn classify_chunk_text(text: &str, base_offset: u64) -> (Vec<ExactTechnicalTermV
     (terms, subtokens)
 }
 
-#[hotpath::measure]
 fn line_has_ascii_error_marker(line: &str) -> bool {
     const MARKERS: [&[u8]; 3] = [b"compiler error:", b"runtime error:", b"panic:"];
     let bytes = line.as_bytes();
@@ -944,7 +926,6 @@ fn line_has_ascii_error_marker(line: &str) -> bool {
 
 /// Mint a whole technical term only after a type-specific recognizer has
 /// established its syntax. Subtokens intentionally remain broader evidence.
-#[hotpath::measure]
 fn mint_exact_term(
     terms: &mut Vec<ExactTechnicalTermV1>,
     seen_terms: &mut BTreeSet<(ExactTechnicalTermKindV1, Vec<u8>)>,
@@ -971,7 +952,6 @@ fn mint_exact_term(
     }
 }
 
-#[hotpath::measure]
 fn symbol_name_span(source: &str, symbol: &SymbolRow) -> Option<SourceSpan> {
     if symbol.name.is_empty() {
         return None;
@@ -1022,7 +1002,6 @@ impl CodeChunker for DeterministicCodeChunker {
     }
 }
 
-#[hotpath::measure_all]
 impl DeterministicCodeChunker {
     /// Build all parser-backed file artifacts. The legacy chunk-only port
     /// delegates here so chunk, lineage, and graph evidence are always
@@ -1844,7 +1823,6 @@ pub(crate) const CROSS_FILE_REFERENCE_BLOCKLIST: &[&str] = &[
 /// name match against this file's own symbol table resolves; ambiguous or
 /// unmatched references stay unresolved rather than guessing. Cross-file
 /// resolution requires the whole generation's symbol set and runs at sealing.
-#[hotpath::measure]
 fn resolve_file_references(
     unresolved: &[UnresolvedRef],
     symbols: &[SymbolRow],
@@ -1936,7 +1914,6 @@ fn resolve_file_references(
 /// paths (unknown receiver type), blocklisted ubiquitous names, relation
 /// kinds outside the canonical graph contract, and references whose
 /// enclosing symbol is not uniquely identified.
-#[hotpath::measure]
 fn cross_file_reference_candidate(
     reference: &UnresolvedRef,
     by_node_id: &BTreeMap<&str, Option<&SymbolRow>>,
@@ -1969,7 +1946,6 @@ fn cross_file_reference_candidate(
 /// `Calls` ref named `new` happily binds a same-file `struct new`, and an
 /// `impl Default for X` ref poisons rank/impls by binding an unrelated
 /// `Default` enum variant. Everything else stays permissive.
-#[hotpath::measure]
 fn reference_target_kind_is_compatible(reference_kind: EdgeKind, target_kind: &str) -> bool {
     match canonical_relation_kind(&reference_kind) {
         Some(kind) => relation_target_kind_is_compatible(kind, target_kind),
@@ -1982,7 +1958,6 @@ fn reference_target_kind_is_compatible(reference_kind: EdgeKind, target_kind: &s
 
 /// [`reference_target_kind_is_compatible`] over the canonical relation kinds,
 /// shared with generation sealing's cross-file resolution.
-#[hotpath::measure]
 pub(crate) fn relation_target_kind_is_compatible(
     kind: RelationEdgeKindV1,
     target_kind: &str,
@@ -2022,7 +1997,6 @@ pub(crate) fn relation_target_kind_is_compatible(
     }
 }
 
-#[hotpath::measure]
 fn canonical_relation_edges(
     raw_edges: &[Edge],
     symbols: &[SymbolRow],
@@ -2076,7 +2050,6 @@ fn canonical_relation_edges(
     (edges, abstentions)
 }
 
-#[hotpath::measure]
 fn canonical_relation_kind(kind: &EdgeKind) -> Option<RelationEdgeKindV1> {
     match kind {
         EdgeKind::Contains => Some(RelationEdgeKindV1::Contains),
@@ -2092,7 +2065,6 @@ fn canonical_relation_kind(kind: &EdgeKind) -> Option<RelationEdgeKindV1> {
     }
 }
 
-#[hotpath::measure]
 fn edge_abstention(
     edge: &Edge,
     reason: CodeIndexEdgeAbstentionReasonV1,
@@ -2105,7 +2077,6 @@ fn edge_abstention(
     }
 }
 
-#[hotpath::measure]
 pub(crate) fn canonical_edge_key(
     edge: &CanonicalRelationEdgeV1,
 ) -> (
@@ -2125,7 +2096,6 @@ pub(crate) fn canonical_edge_key(
 }
 
 /// End offset of the line containing `start` (exclusive of the newline).
-#[hotpath::measure]
 fn offsets_line_end(source: &str, start: u64) -> u64 {
     let rest = &source[start as usize..];
     start
@@ -2140,7 +2110,6 @@ fn offsets_line_end(source: &str, start: u64) -> u64 {
 /// gap-relative, never file-absolute, so pure line shifts outside the gap
 /// leave the chunk identity unchanged (content digests still track content),
 /// while the gap ordinal keeps two unowned regions from minting the same id.
-#[hotpath::measure]
 fn emit_windows(
     source: &str,
     start: u64,

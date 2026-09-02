@@ -25,7 +25,6 @@ pub struct SymbolGraphScope {
     pub path_prefix: Option<String>,
 }
 
-#[hotpath::measure_all]
 impl SymbolGraphScope {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         if let Some(path_prefix) = &self.path_prefix {
@@ -135,7 +134,6 @@ pub struct PrimitiveFailure {
     pub message: String,
 }
 
-#[hotpath::measure_all]
 impl PrimitiveFailure {
     pub fn new(
         kind: PrimitiveFailureKind,
@@ -154,7 +152,6 @@ impl PrimitiveFailure {
     }
 }
 
-#[hotpath::measure_all]
 impl PrimitiveSupportGap {
     pub fn unsupported(
         provider: Option<String>,
@@ -192,7 +189,6 @@ pub struct SymbolGraphPage<T> {
     pub support_gaps: Vec<PrimitiveSupportGap>,
 }
 
-#[hotpath::measure_all]
 impl<T> SymbolGraphPage<T> {
     pub fn complete(items: Vec<T>, total: Option<u64>, next_cursor: Option<OpaqueCursor>) -> Self {
         let truncated = next_cursor.is_some();
@@ -215,7 +211,6 @@ pub struct SymbolSearchPrimitiveRequest {
     pub meta: RetrievalRequestMeta,
 }
 
-#[hotpath::measure_all]
 impl SymbolSearchPrimitiveRequest {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         <Self as ValidatedPrimitiveRequest>::validate(self)
@@ -231,7 +226,6 @@ pub struct ExactSymbolRequest {
     pub meta: RetrievalRequestMeta,
 }
 
-#[hotpath::measure_all]
 impl ExactSymbolRequest {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         <Self as ValidatedPrimitiveRequest>::validate(self)
@@ -248,7 +242,6 @@ pub struct SignatureSearchRequest {
     pub meta: RetrievalRequestMeta,
 }
 
-#[hotpath::measure_all]
 impl SignatureSearchRequest {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         <Self as ValidatedPrimitiveRequest>::validate(self)
@@ -270,7 +263,6 @@ pub struct ImplementationsRequest {
     pub meta: RetrievalRequestMeta,
 }
 
-#[hotpath::measure_all]
 impl ImplementationsRequest {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         <Self as ValidatedPrimitiveRequest>::validate(self)
@@ -286,7 +278,6 @@ pub struct TypeHierarchyRequest {
     pub meta: RetrievalRequestMeta,
 }
 
-#[hotpath::measure_all]
 impl TypeHierarchyRequest {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         <Self as ValidatedPrimitiveRequest>::validate(self)
@@ -303,7 +294,6 @@ pub struct GraphRelationRequest {
     pub meta: RetrievalRequestMeta,
 }
 
-#[hotpath::measure_all]
 impl GraphRelationRequest {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         <Self as ValidatedPrimitiveRequest>::validate(self)
@@ -319,7 +309,6 @@ pub struct GraphImpactPrimitiveRequest {
     pub meta: RetrievalRequestMeta,
 }
 
-#[hotpath::measure_all]
 impl GraphImpactPrimitiveRequest {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         <Self as ValidatedPrimitiveRequest>::validate(self)
@@ -408,7 +397,6 @@ impl ValidatedPrimitiveRequest for GraphImpactPrimitiveRequest {
     }
 }
 
-#[hotpath::measure]
 fn validate_meta(meta: &RetrievalRequestMeta) -> Result<(), ApplicationContractError> {
     super::validate_current_temporal_meta(meta, "symbol graph temporal mode")
 }
@@ -419,7 +407,6 @@ fn validate_meta(meta: &RetrievalRequestMeta) -> Result<(), ApplicationContractE
 /// `validate_query`. Routing through the shared `super::validate_node_depth`
 /// closes that gap: symbol graph node ids are now bounded by
 /// `MAX_SYMBOL_GRAPH_QUERY_BYTES`, matching callable code's existing bound.
-#[hotpath::measure]
 fn validate_node_depth(node_id: &str, maximum_depth: u32) -> Result<(), ApplicationContractError> {
     super::validate_node_depth(
         node_id,
@@ -436,14 +423,12 @@ fn validate_node_depth(node_id: &str, maximum_depth: u32) -> Result<(), Applicat
 /// shared validator returns for the same violation. No caller, SDK, or test
 /// pins `InvalidRange` for query length on this surface, so the code is now
 /// unified on `InvalidIdentifier` via `super::validate_bounded_text`.
-#[hotpath::measure]
 fn validate_query(value: &str, field: &'static str) -> Result<(), ApplicationContractError> {
     super::validate_bounded_text(value, field, MAX_SYMBOL_GRAPH_QUERY_BYTES)
 }
 
 /// Unbounded sibling of [`validate_query`], used for free-text fields (path
 /// prefix, support-gap reason) that have no length cap.
-#[hotpath::measure]
 fn validate_text(value: &str, field: &'static str) -> Result<(), ApplicationContractError> {
     super::validate_bounded_text(value, field, usize::MAX)
 }

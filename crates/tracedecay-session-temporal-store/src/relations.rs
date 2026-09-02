@@ -110,7 +110,6 @@ pub enum SessionRelationScope {
     ProfileSessions { profile_id: UserProfileId },
 }
 
-#[hotpath::measure_all]
 impl SessionRelationScope {
     #[must_use]
     pub fn project_sessions(project_id: ProjectId) -> Self {
@@ -199,7 +198,6 @@ impl std::fmt::Debug for SessionRelationGraphStore {
     }
 }
 
-#[hotpath::measure_all]
 impl SessionRelationGraphStore {
     #[must_use]
     #[hotpath::skip]
@@ -410,7 +408,6 @@ impl SessionRelationGraphStore {
     }
 }
 
-#[hotpath::measure]
 pub(crate) fn projection_watermark(
     projection: &SessionRelationProjection,
 ) -> Result<GraphWatermark, SessionRelationError> {
@@ -447,7 +444,6 @@ pub(crate) fn projection_watermark(
     .map_err(map_graph_error)
 }
 
-#[hotpath::measure]
 fn build_graph(
     projection: &SessionRelationProjection,
 ) -> Result<(Vec<GraphEntity>, Vec<GraphRelation>), SessionRelationError> {
@@ -696,7 +692,6 @@ fn build_graph(
     Ok((entities.into_values().collect(), relations))
 }
 
-#[hotpath::measure]
 fn insert_entity(
     entities: &mut BTreeMap<GraphEntityId, GraphEntity>,
     identity: GraphEntityId,
@@ -716,7 +711,6 @@ fn insert_entity(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure]
 fn ordered_relation(
     session_id: &SessionId,
     generation: u64,
@@ -743,7 +737,6 @@ fn ordered_relation(
     .map_err(map_graph_error)
 }
 
-#[hotpath::measure]
 fn property_relation(
     session_id: &SessionId,
     generation: u64,
@@ -767,7 +760,6 @@ fn property_relation(
     .map_err(map_graph_error)
 }
 
-#[hotpath::measure]
 fn namespace(scope: &SessionRelationScope) -> Result<GraphNamespace, SessionRelationError> {
     let prefix = match scope {
         SessionRelationScope::ProjectSessions { .. } => "project_sessions",
@@ -776,7 +768,6 @@ fn namespace(scope: &SessionRelationScope) -> Result<GraphNamespace, SessionRela
     GraphNamespace::new(format!("{prefix}:{}", scope.identity())).map_err(map_graph_error)
 }
 
-#[hotpath::measure]
 fn projection(
     session_id: &SessionId,
     generation: u64,
@@ -791,7 +782,6 @@ fn projection(
     .map_err(map_graph_error)
 }
 
-#[hotpath::measure]
 fn summary_entity_id(
     session_id: &SessionId,
     generation: u64,
@@ -803,7 +793,6 @@ fn summary_entity_id(
     entity_id(session_id, generation, SUMMARY_KIND, summary_id)
 }
 
-#[hotpath::measure]
 fn occurrence_entity_id(
     session_id: &SessionId,
     generation: u64,
@@ -817,7 +806,6 @@ fn occurrence_entity_id(
     )
 }
 
-#[hotpath::measure]
 fn thread_entity_id(
     session_id: &SessionId,
     generation: u64,
@@ -826,7 +814,6 @@ fn thread_entity_id(
     entity_id(session_id, generation, THREAD_KIND, thread_id.as_str())
 }
 
-#[hotpath::measure]
 fn agent_entity_id(
     session_id: &SessionId,
     generation: u64,
@@ -835,7 +822,6 @@ fn agent_entity_id(
     entity_id(session_id, generation, AGENT_KIND, agent_id.as_str())
 }
 
-#[hotpath::measure]
 fn session_entity_id(
     projection_session_id: &SessionId,
     generation: u64,
@@ -849,7 +835,6 @@ fn session_entity_id(
     )
 }
 
-#[hotpath::measure]
 fn workflow_agent_entity_id(
     session_id: &SessionId,
     generation: u64,
@@ -868,7 +853,6 @@ fn workflow_agent_entity_id(
     )
 }
 
-#[hotpath::measure]
 fn entity_id(
     session_id: &SessionId,
     generation: u64,
@@ -882,7 +866,6 @@ fn entity_id(
     .map_err(map_graph_error)
 }
 
-#[hotpath::measure]
 fn parse_entity_id<'a>(
     value: &'a str,
     session_id: &SessionId,
@@ -898,7 +881,6 @@ fn parse_entity_id<'a>(
         .ok_or(SessionRelationError::Corrupt)
 }
 
-#[hotpath::measure]
 fn relation_ordinal(relation: &GraphRelation, ordinal_property: &GraphPropertyName) -> Option<i64> {
     match relation.properties.get(ordinal_property) {
         Some(GraphProperty::I64(value)) => Some(*value),
@@ -906,7 +888,6 @@ fn relation_ordinal(relation: &GraphRelation, ordinal_property: &GraphPropertyNa
     }
 }
 
-#[hotpath::measure]
 fn map_graph_error(error: GraphDbError) -> SessionRelationError {
     match error {
         GraphDbError::Cancelled => SessionRelationError::Cancelled,

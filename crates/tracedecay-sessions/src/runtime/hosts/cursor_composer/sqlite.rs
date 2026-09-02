@@ -25,7 +25,6 @@ pub(super) enum BoundedSqliteValue<T> {
     Corrupt,
 }
 
-#[hotpath::measure]
 pub(super) fn effective_sqlite_cap(max_bytes: u64, remaining: Option<u64>) -> u64 {
     match remaining {
         Some(remaining) => remaining.min(max_bytes),
@@ -33,7 +32,6 @@ pub(super) fn effective_sqlite_cap(max_bytes: u64, remaining: Option<u64>) -> u6
     }
 }
 
-#[hotpath::measure]
 fn composer_payload_bytes(value: &Value) -> u64 {
     serde_json::to_vec(value)
         .ok()
@@ -41,22 +39,18 @@ fn composer_payload_bytes(value: &Value) -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-#[hotpath::measure]
 pub(super) fn max_composer_record_bytes() -> u64 {
     u64::try_from(MAX_OBSERVATION_RECORD_BYTES).unwrap_or(u64::MAX)
 }
 
-#[hotpath::measure]
 pub(super) fn composer_source_charge(bytes: u64) -> u64 {
     bytes.min(max_composer_record_bytes().saturating_add(1))
 }
 
-#[hotpath::measure]
 pub(super) fn composer_budget_bytes(value: &Value) -> u64 {
     composer_payload_bytes(value).min(max_composer_record_bytes().saturating_add(1))
 }
 
-#[hotpath::measure]
 pub(super) fn composer_id_from_envelope_key(key: &str) -> Option<&str> {
     key.strip_prefix("composerData:")
         .filter(|id| !id.is_empty() && id.len() as u64 <= MAX_COMPOSER_SQLITE_KEY_BYTES)
@@ -258,7 +252,6 @@ pub(super) async fn fetch_bubble_bounded(
     }
 }
 
-#[hotpath::measure]
 pub(super) fn envelope_project(envelope: &Value) -> Option<ComposerProject> {
     if let Some(uri) = envelope
         .get("workspaceIdentifier")
@@ -292,7 +285,6 @@ pub(super) fn envelope_project(envelope: &Value) -> Option<ComposerProject> {
     None
 }
 
-#[hotpath::measure]
 pub(super) fn workspace_hash(envelope: &Value) -> Option<String> {
     envelope
         .get("workspaceIdentifier")
@@ -302,7 +294,6 @@ pub(super) fn workspace_hash(envelope: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-#[hotpath::measure]
 pub(super) fn epoch_ms_to_secs(ms: Option<i64>) -> Option<i64> {
     ms.filter(|v| *v > 0).map(|v| v / 1000)
 }

@@ -245,6 +245,7 @@ fn backstop_covers_elapsed_intervals_regardless_of_watcher_liveness() {
 fn fast_watch_config() -> SyncConfig {
     let mut config = SyncConfig {
         auto_watch: true,
+        watch_linked_worktrees: true,
         ..SyncConfig::default()
     };
     config.watch_debounce_ms = 25;

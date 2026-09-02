@@ -171,7 +171,6 @@ impl WorkDuplicateAdjudicationPortV1 for WorkSqliteStorage {
     }
 }
 
-#[hotpath::measure]
 fn replay_by_command(
     transaction: &ExactSqlTransaction,
     authority: &WorkAuthority,
@@ -202,7 +201,6 @@ fn replay_by_command(
     Ok(Some((digest, receipt)))
 }
 
-#[hotpath::measure]
 fn current_adjudication(
     source: &impl RegisteredWorkQuery,
     authority: &WorkAuthority,
@@ -231,7 +229,6 @@ fn current_adjudication(
         .transpose()
 }
 
-#[hotpath::measure]
 fn require_attempt(
     transaction: &ExactSqlTransaction,
     authority: &WorkAuthority,
@@ -260,7 +257,6 @@ fn require_attempt(
     }
 }
 
-#[hotpath::measure]
 fn insert_receipt(
     transaction: &ExactSqlTransaction,
     authority: &WorkAuthority,
@@ -319,7 +315,6 @@ fn insert_receipt(
     Ok(())
 }
 
-#[hotpath::measure]
 fn decode_receipt(
     authority: &WorkAuthority,
     payload: &str,

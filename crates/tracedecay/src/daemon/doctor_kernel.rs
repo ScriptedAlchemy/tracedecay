@@ -50,7 +50,6 @@ const DOCTOR_CONTEXT_HORIZON_MICROS: i64 = 30_000_000;
 /// accessor's `Err` — is a typed [`ConfigurationAuthorityReadV1::Absent`], never
 /// a fabricated healthy result.
 #[must_use]
-#[hotpath::measure]
 pub fn configuration_read_from_pin<E>(
     resolved: &Result<PinnedRuntimeConfiguration, E>,
 ) -> ConfigurationAuthorityReadV1 {
@@ -99,7 +98,6 @@ async fn observation_authority_audit_ok(
 
 // === Host/agent integration conformance (Advisory family) ====================
 
-#[hotpath::measure]
 fn host_integration_read_from_report(
     report: &crate::agents::host_bundle_v2::HostBundleDoctorReportV1,
 ) -> HostIntegrationReadV1 {
@@ -187,7 +185,6 @@ pub(in crate::daemon) async fn code_index_read_from_registry(
 
 /// Map the daemon diagnostic broker's project-active engine statuses.
 #[must_use]
-#[hotpath::measure]
 pub fn language_server_read_from_engine_states(
     states: impl IntoIterator<Item = tracedecay_lsp::analyzer::broker::EngineState>,
 ) -> LanguageServerReadV1 {
@@ -228,7 +225,6 @@ pub async fn language_server_read_from_broker(
 
 /// Map the canonical durable Plan-26 read model into a truthful Doctor read.
 #[must_use]
-#[hotpath::measure]
 pub fn observability_read_from_model(
     model: Result<
         tracedecay_usecases::feedback::observations::FeedbackObservationReadModelV1,
@@ -282,7 +278,6 @@ pub fn observability_read_from_model(
 /// single unavailable store makes the whole census `Unknown` rather than a
 /// silently partial healthy claim.
 #[must_use]
-#[hotpath::measure]
 pub fn ingest_refusal_read_from_censuses(
     censuses: &[tracedecay_global_db::observation::ObservationRefusalCensusV1],
 ) -> IngestRefusalCensusReadV1 {
@@ -318,7 +313,6 @@ pub fn ingest_refusal_read_from_censuses(
 
 // === Storage retention/size (Storage family) =================================
 
-#[hotpath::measure]
 fn orphan_store_findings_from_census(
     census: &[tracedecay_maintenance::retention::orphan_stores::StoreCensusEntry],
     retention_secs: i64,
@@ -397,7 +391,6 @@ const MAX_SYNCHRONOUS_EXHAUSTIVE_SCAN_ENTRIES: usize = 4_096;
 /// structurally unreachable.
 const MAX_SYNCHRONOUS_GENERATION_CENSUS_ENTRIES: usize = 4_096;
 
-#[hotpath::measure]
 fn permits_synchronous_exhaustive_scan(root: &Path) -> bool {
     let mut pending = vec![root.to_path_buf()];
     let mut observed_bytes = 0_u64;
@@ -441,7 +434,6 @@ fn permits_synchronous_exhaustive_scan(root: &Path) -> bool {
 
 /// Whether the sealed-generation directory is small enough (in *entries*) for a
 /// synchronous metadata census. Byte size is deliberately not consulted.
-#[hotpath::measure]
 fn permits_synchronous_generation_census(generations_root: &Path) -> bool {
     let Ok(entries) = std::fs::read_dir(generations_root) else {
         return false;
@@ -465,7 +457,6 @@ fn permits_synchronous_generation_census(generations_root: &Path) -> bool {
     true
 }
 
-#[hotpath::measure]
 fn permits_synchronous_session_retention_backlog(database_path: &Path) -> bool {
     ["", "-wal", "-shm"]
         .into_iter()
@@ -483,7 +474,6 @@ fn permits_synchronous_session_retention_backlog(database_path: &Path) -> bool {
         .is_some()
 }
 
-#[hotpath::measure]
 fn permits_synchronous_table_growth(
     read: &tracedecay_application::storage::StorageTelemetryReadV1,
 ) -> bool {
@@ -581,7 +571,6 @@ async fn collect_over_budget_store_findings(
     }
 }
 
-#[hotpath::measure]
 fn incident_debris_findings_from_census(
     census: &[tracedecay_maintenance::retention::orphan_stores::StoreCensusEntry],
     profile_root: &Path,
@@ -866,7 +855,6 @@ pub(in crate::daemon) type RemoteOperationalReadProviderV1 =
 /// kernel. The dashboard receives no database handles or authority-bearing
 /// inputs.
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure]
 pub(in crate::daemon) fn production_doctor_report_reader(
     project_root: PathBuf,
     project_id: tracedecay_domain::ProjectId,
@@ -1166,7 +1154,6 @@ pub(in crate::daemon) fn production_doctor_report_reader(
     })
 }
 
-#[hotpath::measure]
 pub(crate) fn doctor_report_request_context(
     scope: tracedecay_application::ResolvedScope,
 ) -> Result<RequestContext, ApplicationContractError> {
@@ -1211,7 +1198,6 @@ pub(crate) fn doctor_report_request_context(
     )
 }
 
-#[hotpath::measure]
 fn now_secs() -> i64 {
     i64::try_from(
         SystemTime::now()

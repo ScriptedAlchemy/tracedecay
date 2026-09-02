@@ -8,7 +8,6 @@ use super::{
 };
 use tracedecay_application::now_micros;
 
-#[hotpath::measure]
 pub(super) fn spawn(
     owner: &crate::mcp::McpServer,
     invocation: DaemonInvocationState,

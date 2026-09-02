@@ -13,7 +13,6 @@ use crate::provider_pricing::{PriceTable, cost_of_usage, load_table};
 
 const PROVIDER_USAGE_PAGE_SIZE: usize = 1_000;
 
-#[hotpath::measure]
 pub fn provider_usage_range_start(range: &str) -> Result<u64, String> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -76,7 +75,6 @@ pub struct AggregatedProviderUsageCountersV1 {
     pub total_tokens: Option<u64>,
 }
 
-#[hotpath::measure_all]
 impl AggregatedProviderUsageCountersV1 {
     #[hotpath::skip]
     pub const fn unknown() -> Self {
@@ -164,7 +162,6 @@ struct ProviderUsageScanV1 {
     last_cursor: Option<ProviderUsageCursorV1>,
 }
 
-#[hotpath::measure_all]
 impl ProviderUsageScanV1 {
     fn new() -> Self {
         Self {
@@ -329,7 +326,6 @@ struct Counters {
     total: Option<u64>,
 }
 
-#[hotpath::measure_all]
 impl Counters {
     fn from_observation(
         observation: &ProviderUsageObservationV1,
@@ -419,7 +415,6 @@ struct CounterSum {
     total: FieldSum,
 }
 
-#[hotpath::measure_all]
 impl CounterSum {
     fn add(&mut self, counters: &Counters) {
         self.input.add(counters.input);
@@ -449,7 +444,6 @@ struct FieldSum {
     complete: bool,
 }
 
-#[hotpath::measure_all]
 impl FieldSum {
     fn add(&mut self, value: Option<u64>) {
         if !self.observed {
@@ -481,7 +475,6 @@ struct ModelCostAccumulator {
     cost_complete: bool,
 }
 
-#[hotpath::measure_all]
 impl ModelCostAccumulator {
     fn add(&mut self, counters: &Counters, cost_usd: Option<f64>) {
         self.usage_events = self.usage_events.saturating_add(1);
@@ -520,7 +513,6 @@ struct Checkpoint {
     counters: Counters,
 }
 
-#[hotpath::measure]
 fn issue(
     kind: ProviderUsageIssueKindV1,
     observation: &ProviderUsageObservationV1,
@@ -533,7 +525,6 @@ fn issue(
     }
 }
 
-#[hotpath::measure]
 fn model_and_issue(
     observation: &ProviderUsageObservationV1,
 ) -> (Option<String>, Option<ProviderUsageIssueV1>) {
@@ -553,7 +544,6 @@ fn model_and_issue(
     }
 }
 
-#[hotpath::measure]
 fn delta(
     observation: &ProviderUsageObservationV1,
     counters: &Counters,
@@ -604,7 +594,6 @@ type CheckpointKey = (
     String,
 );
 
-#[hotpath::measure]
 fn checkpoint_key(
     observation: &ProviderUsageObservationV1,
 ) -> (CheckpointKey, Option<ProviderUsageIssueV1>) {
@@ -639,7 +628,6 @@ fn checkpoint_key(
 /// Reduces a stable, ordered provider-usage snapshot. Native deltas are the
 /// billing evidence; cumulative rows are checkpoints and are never summed in
 /// addition to a paired delta.
-#[hotpath::measure]
 pub fn reduce_provider_usage(
     observations: &[ProviderUsageObservationV1],
 ) -> ProviderUsageAggregateV1 {
@@ -836,7 +824,6 @@ pub fn reduce_provider_usage(
 }
 
 /// Pure pricing projection shared by every transport.
-#[hotpath::measure]
 pub fn price_provider_usage(
     aggregate: &ProviderUsageAggregateV1,
     prices: &PriceTable,

@@ -104,7 +104,6 @@ pub(super) fn open_registered_graph(
 /// quarantine protocol when a preexisting container reports the typed
 /// corruption verdict, then reopening the vacated path as a fresh store that
 /// the canonical replay authorities re-project into.
-#[hotpath::measure]
 fn open_registered_database(
     path: &Path,
     expected_format: GraphFormatVersion,
@@ -151,7 +150,6 @@ fn open_registered_database(
     }
 }
 
-#[hotpath::measure]
 fn registered_open_options(
     path: &Path,
     expected_format: GraphFormatVersion,
@@ -173,7 +171,6 @@ fn registered_open_options(
     }
 }
 
-#[hotpath::measure]
 fn check_cancelled(cancellation: &dyn GraphCancellation) -> Result<(), GraphDbError> {
     if cancellation.is_cancelled() {
         Err(GraphDbError::Cancelled)

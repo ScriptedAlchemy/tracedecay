@@ -31,7 +31,6 @@ pub enum MemoryConnection<'a> {
     Transaction(&'a MemoryTransaction),
 }
 
-#[hotpath::measure_all]
 impl<'a> MemoryConnection<'a> {
     #[hotpath::skip]
     pub const fn runtime(connection: &'a engine::Connection) -> Self {
@@ -108,7 +107,6 @@ pub enum MemoryTransaction {
     Runtime(engine::Transaction),
 }
 
-#[hotpath::measure_all]
 impl MemoryTransaction {
     #[hotpath::skip]
     pub async fn execute<P>(&self, sql: &str, params: P) -> Result<u64>

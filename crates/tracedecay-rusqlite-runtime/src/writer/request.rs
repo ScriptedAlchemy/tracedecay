@@ -27,7 +27,6 @@ pub(super) struct AcceptedRequest {
     _permit: Permit,
 }
 
-#[hotpath::measure_all]
 impl AcceptedRequest {
     pub(super) fn new(
         request: Arc<RuntimeSubmitRequestV1>,
@@ -95,7 +94,6 @@ pub(super) enum CheckpointCommandKind {
     },
 }
 
-#[hotpath::measure_all]
 impl CheckpointCommand {
     pub(super) fn new(
         snapshot_blockers: CheckpointBlockers,
@@ -161,7 +159,6 @@ impl CheckpointCommand {
 
 pub(super) struct CheckpointReply(oneshot::Sender<CheckpointRequestResult>);
 
-#[hotpath::measure_all]
 impl CheckpointReply {
     pub(super) fn settle(self, result: CheckpointRequestResult) {
         let _ = self.0.send(result);
@@ -174,7 +171,6 @@ pub(super) struct IncrementalVacuumCommand {
     reply: oneshot::Sender<Result<(), WriterActorError>>,
 }
 
-#[hotpath::measure_all]
 impl IncrementalVacuumCommand {
     pub(super) fn new(
         max_pages: u32,

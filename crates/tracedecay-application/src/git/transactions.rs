@@ -34,7 +34,6 @@ pub struct GitIndexOperationBindingV1 {
     pub operation: GitIndexTransactionOperationV1,
 }
 
-#[hotpath::measure_all]
 impl GitIndexOperationBindingV1 {
     pub fn for_operation(
         operation: GitIndexTransactionOperationV1,
@@ -99,7 +98,6 @@ pub struct GitIndexEffectProofV1 {
     pub external_proof: Option<RetrievalAnchorId>,
 }
 
-#[hotpath::measure_all]
 impl GitIndexEffectProofV1 {
     pub fn validate_for(
         &self,
@@ -141,7 +139,6 @@ pub struct GitIndexPreviewRequestV1 {
     pub observed_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl GitIndexPreviewRequestV1 {
     pub fn input_digest(&self) -> Result<ManifestDigest, ApplicationContractError> {
         self.validate()?;
@@ -228,7 +225,6 @@ pub struct GitIndexApplyRequestV1 {
     pub observed_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl GitIndexApplyRequestV1 {
     pub fn input_digest(&self) -> Result<ManifestDigest, ApplicationContractError> {
         self.validate()?;
@@ -302,7 +298,6 @@ pub struct GitIndexPreviewPortResultV1 {
     pub execution: OperationReceipt,
 }
 
-#[hotpath::measure_all]
 impl GitIndexPreviewPortResultV1 {
     pub fn validate_for(
         &self,
@@ -360,7 +355,6 @@ pub struct GitIndexApplyPortResultV1 {
     pub reconciliation: ReconciliationState,
 }
 
-#[hotpath::measure_all]
 impl GitIndexApplyPortResultV1 {
     pub fn validate_for(
         &self,
@@ -559,7 +553,6 @@ pub enum GitIndexTransactionApplicationError {
     Port(#[from] GitIndexTransactionPortError),
 }
 
-#[hotpath::measure]
 fn validate_admission(
     context: &RequestContext,
     authority: &AuthorityReceipt,
@@ -582,7 +575,6 @@ fn validate_admission(
     Ok(())
 }
 
-#[hotpath::measure]
 pub(super) fn scope_reference_matches_snapshot(
     reference: Option<&tracedecay_domain::RefId>,
     snapshot: &RepositoryStateSnapshotV1,

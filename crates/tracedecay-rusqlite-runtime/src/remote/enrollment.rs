@@ -4,7 +4,6 @@ use tracedecay_application::remote::auth::{
 };
 use tracedecay_domain::EnrollmentCredentialStateV1;
 
-#[hotpath::measure]
 pub(super) fn load_authority_state(
     handle: &ExactSqlHandle,
     brain_id: &BrainId,
@@ -32,7 +31,6 @@ pub(super) fn load_authority_state(
     serde_json::from_str(authority_json).map_err(|_| RemoteSqliteStorageErrorV1::Corruption)
 }
 
-#[hotpath::measure]
 pub(super) fn load_enrollment(
     handle: &ExactSqlHandle,
     sql: &str,
@@ -44,7 +42,6 @@ pub(super) fn load_enrollment(
         .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)
 }
 
-#[hotpath::measure]
 pub(super) fn enrollment_one_row(
     rows: ExactSqlRows,
     missing: RemoteEnrollmentAuthorityErrorV1,
@@ -57,7 +54,6 @@ pub(super) fn enrollment_one_row(
     }
 }
 
-#[hotpath::measure]
 pub(super) fn enrollment_row_text(
     row: &crate::exact_sql::ExactSqlRow,
     index: usize,
@@ -68,7 +64,6 @@ pub(super) fn enrollment_row_text(
     }
 }
 
-#[hotpath::measure]
 pub(super) fn map_enrollment_error(
     error: RemoteSqliteStorageErrorV1,
 ) -> RemoteEnrollmentAuthorityErrorV1 {

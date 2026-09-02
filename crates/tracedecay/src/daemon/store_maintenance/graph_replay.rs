@@ -25,7 +25,6 @@ pub(super) enum ReconcileOutcome {
 
 /// Removes the retired generation's sealed read bundle files from the
 /// durable generations root. Idempotent; an absent bundle is a success.
-#[hotpath::measure]
 fn retire_generation_read_bundle(store_root: &Path, generation_file: &str) -> Result<(), String> {
     let digest = generation_file
         .strip_prefix("generation-")
@@ -37,28 +36,24 @@ fn retire_generation_read_bundle(store_root: &Path, generation_file: &str) -> Re
         .map_err(|error| error.to_string())
 }
 
-#[hotpath::measure]
-pub(super) fn log_code_generation_retention_degraded(failure: &str) {
-    log_daemon_event(
-        "retention_degraded",
-        &[
-            ("pass", "code_generations".to_string()),
-            ("failure", failure.to_string()),
-        ],
-    );
+pub(super) fn log_code_generation_retention_degraded(
+    observations: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
+    project_root: &Path,
+    failure: &str,
+) {
+    observations.emit_retention_degraded(project_root, "code_generations", failure);
 }
 
 /// Shared deferral for a held graph-replay pool: the outer probe and the
 /// collection executor's typed busy result arm the same backoff and must
 /// not keep the daemon writer gate.
-#[hotpath::measure]
 pub(super) fn defer_graph_replay_pool_busy(
     observations: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
     project_root: &Path,
 ) -> super::CodeGenerationRetentionOutcomeV1 {
     observations.record_graph_replay_release_unhealthy(project_root);
     hotpath::gauge!("daemon.git.maintenance.replay_pool_busy_total").inc(1_u64);
-    log_code_generation_retention_degraded("graph_replay_pool_busy");
+    log_code_generation_retention_degraded(observations, project_root, "graph_replay_pool_busy");
     super::CodeGenerationRetentionOutcomeV1::Failed
 }
 
@@ -66,8 +61,12 @@ pub(super) fn defer_graph_replay_pool_busy(
 /// proved undiagnosable in production: `graph_replay_release_failed` recurred
 /// on every retention tick with no way to tell an unregistered graph shard
 /// from a pool-lock deadline from a conflict.
-#[hotpath::measure]
-fn log_code_generation_retention_degraded_with_error(failure: &str, error: &dyn std::fmt::Debug) {
+fn log_code_generation_retention_degraded_with_error(
+    observations: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
+    failure: &str,
+    error: &dyn std::fmt::Debug,
+) {
+    observations.mark_loud_retention_log();
     log_daemon_event(
         "retention_degraded",
         &[
@@ -82,7 +81,6 @@ fn log_code_generation_retention_degraded_with_error(failure: &str, error: &dyn 
 /// now — the class worth backing off from — as opposed to evidence or store
 /// defects (conflict, corruption, invalid identity) that must stay loud on
 /// every attempt until someone fixes them.
-#[hotpath::measure]
 fn release_failure_is_runtime_unhealthy(error: &tracedecay_graph_db::GraphDbError) -> bool {
     matches!(
         error,
@@ -129,13 +127,21 @@ pub(super) async fn reconcile_graph_replay_releases(
     cancellation: &tracedecay_session_memory::context::CancellationToken,
 ) -> ReconcileOutcome {
     let Some(project_id) = graph.hook_store_layout().identity.project_id.as_ref() else {
-        log_code_generation_retention_degraded("graph_replay_project_identity_unavailable");
+        log_code_generation_retention_degraded(
+            observations,
+            graph.project_root(),
+            "graph_replay_project_identity_unavailable",
+        );
         return ReconcileOutcome::Failed;
     };
     let project_id = match tracedecay_domain::ProjectId::new(project_id.clone()) {
         Ok(project_id) => project_id,
         Err(_) => {
-            log_code_generation_retention_degraded("graph_replay_project_identity_invalid");
+            log_code_generation_retention_degraded(
+                observations,
+                graph.project_root(),
+                "graph_replay_project_identity_invalid",
+            );
             return ReconcileOutcome::Failed;
         }
     };
@@ -159,6 +165,7 @@ pub(super) async fn reconcile_graph_replay_releases(
         Ok(page) => page,
         Err(error) => {
             log_code_generation_retention_degraded_with_error(
+                observations,
                 "graph_replay_release_evidence_invalid",
                 &error,
             );
@@ -193,6 +200,7 @@ pub(super) async fn reconcile_graph_replay_releases(
                 if let Err(error) =
                     retire_generation_read_bundle(store_root, &release.generation.generation_file)
                 {
+                    observations.mark_loud_retention_log();
                     log_daemon_event(
                         "retention_degraded",
                         &[
@@ -205,6 +213,8 @@ pub(super) async fn reconcile_graph_replay_releases(
                 }
                 if complete_code_generation_graph_replay_release(store_root, &release).is_err() {
                     log_code_generation_retention_degraded(
+                        observations,
+                        project_root,
                         "graph_replay_release_checkpoint_failed",
                     );
                     return ReconcileOutcome::Failed;
@@ -216,6 +226,7 @@ pub(super) async fn reconcile_graph_replay_releases(
                     observations.record_graph_replay_release_unhealthy(project_root);
                 }
                 log_code_generation_retention_degraded_with_error(
+                    observations,
                     "graph_replay_release_failed",
                     &error,
                 );

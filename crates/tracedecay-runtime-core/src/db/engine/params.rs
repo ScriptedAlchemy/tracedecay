@@ -65,7 +65,6 @@ pub struct Params {
     values: Result<Vec<Value>>,
 }
 
-#[hotpath::measure_all]
 impl Params {
     // Reached from outside the crate only through the exported `params!`
     // expansion, so it must stay `pub` even though no caller names it.
@@ -133,7 +132,6 @@ tuple_params!(A, B, C, D, E, F, G, H, I, J);
 tuple_params!(A, B, C, D, E, F, G, H, I, J, K);
 tuple_params!(A, B, C, D, E, F, G, H, I, J, K, L);
 
-#[hotpath::measure]
 pub fn params_from_iter<I>(values: I) -> Params
 where
     I: IntoIterator,

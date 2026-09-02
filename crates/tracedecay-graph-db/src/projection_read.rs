@@ -94,7 +94,6 @@ pub struct GraphProjectionLabelPage {
     pub total_entities: u64,
 }
 
-#[hotpath::measure_all]
 impl GraphDb {
     #[hotpath::measure(label = "graph_db.projection.read", impl_type = "GraphDb")]
     pub fn read_projection(
@@ -188,7 +187,6 @@ impl GraphDb {
     }
 }
 
-#[hotpath::measure_all]
 impl GraphSnapshot {
     pub fn read_projection(
         &self,
@@ -213,7 +211,6 @@ impl GraphSnapshot {
     }
 }
 
-#[hotpath::measure]
 fn projection_telemetry(
     handle: &GraphDb,
     database: &GrafeoDB,
@@ -254,7 +251,6 @@ fn projection_telemetry(
     }))
 }
 
-#[hotpath::measure]
 fn read_projection(
     handle: &GraphDb,
     database: &GrafeoDB,
@@ -282,7 +278,6 @@ fn read_projection(
     })
 }
 
-#[hotpath::measure]
 fn read_entity_page(
     handle: &GraphDb,
     database: &GrafeoDB,
@@ -329,7 +324,6 @@ fn read_entity_page(
     Ok((entities, next))
 }
 
-#[hotpath::measure]
 fn read_relation_page(
     handle: &GraphDb,
     database: &GrafeoDB,
@@ -376,7 +370,6 @@ fn read_relation_page(
     Ok((relations, next))
 }
 
-#[hotpath::measure]
 fn authenticate_entity_cursor(
     database: &GrafeoDB,
     request: &GraphProjectionReadRequest,
@@ -394,7 +387,6 @@ fn authenticate_entity_cursor(
     }
 }
 
-#[hotpath::measure]
 fn authenticate_relation_cursor(
     database: &GrafeoDB,
     request: &GraphProjectionReadRequest,
@@ -456,7 +448,6 @@ fn query_identity_page(
 /// The pre-index page scan, kept for projections whose identities exceed the
 /// index's retention budget. Bounded in memory by `limit` rather than by the
 /// projection's size.
-#[hotpath::measure]
 fn streaming_identity_page(
     database: &GrafeoDB,
     scope: IdentityScope<'_>,
@@ -504,7 +495,6 @@ fn streaming_identity_page(
 ///
 /// Answered from the same ordered index the pages are served from, so a count
 /// alongside a page scans the projection once rather than twice.
-#[hotpath::measure]
 fn count_labeled_nodes(
     handle: &GraphDb,
     database: &GrafeoDB,
@@ -530,7 +520,6 @@ fn count_labeled_nodes(
     Ok(count)
 }
 
-#[hotpath::measure]
 fn validate_page_limit(limit: usize) -> Result<(), GraphDbError> {
     if limit == 0 || limit > MAX_PROJECTION_PAGE_ITEMS {
         Err(GraphDbError::budget_exhausted_count(
@@ -542,7 +531,6 @@ fn validate_page_limit(limit: usize) -> Result<(), GraphDbError> {
     }
 }
 
-#[hotpath::measure]
 fn validate_optional_page_limit(limit: usize) -> Result<(), GraphDbError> {
     if limit > MAX_PROJECTION_PAGE_ITEMS {
         Err(GraphDbError::budget_exhausted_count(
@@ -554,7 +542,6 @@ fn validate_optional_page_limit(limit: usize) -> Result<(), GraphDbError> {
     }
 }
 
-#[hotpath::measure]
 fn check_cancelled(cancellation: &dyn GraphCancellation) -> Result<(), GraphDbError> {
     if cancellation.is_cancelled() {
         Err(GraphDbError::Cancelled)
@@ -563,7 +550,6 @@ fn check_cancelled(cancellation: &dyn GraphCancellation) -> Result<(), GraphDbEr
     }
 }
 
-#[hotpath::measure]
 fn persisted_identity_error(description: &str, error: GraphDbError) -> GraphDbError {
     GraphDbError::Corrupt {
         message: format!("invalid persisted {description} identity: {error}"),

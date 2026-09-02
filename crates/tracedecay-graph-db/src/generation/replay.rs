@@ -41,7 +41,6 @@ pub enum GraphGenerationReplaySource {
     SemanticVectorGeneration(SemanticVectorGenerationReplay),
 }
 
-#[hotpath::measure_all]
 impl GraphGenerationManifest {
     pub fn relational_metadata_replay(
         &self,
@@ -167,7 +166,6 @@ pub(crate) fn validate_metadata_binding(
     )
 }
 
-#[hotpath::measure]
 fn validate_metadata_publication(
     publication: &GraphPublicationReplayV1,
 ) -> Result<(), GraphDbError> {
@@ -180,7 +178,6 @@ fn validate_metadata_publication(
     })
 }
 
-#[hotpath::measure]
 fn validate_decoded_metadata_binding(
     publication: &GraphPublicationReplayV1,
     manifest: &GraphGenerationManifest,
@@ -265,7 +262,6 @@ pub(crate) fn validate_supplied_manifest_binding(
     }
 }
 
-#[hotpath::measure]
 fn validate_publication_manifest_identity(
     publication: &GraphPublicationReplayV1,
     manifest: &GraphGenerationManifest,
@@ -313,7 +309,6 @@ impl From<SealedGraphStateDigest> for String {
     }
 }
 
-#[hotpath::measure_all]
 impl SealedGraphStateDigest {
     #[must_use]
     pub fn as_str(&self) -> &str {
@@ -349,7 +344,6 @@ impl From<GraphProjectorRevision> for String {
     }
 }
 
-#[hotpath::measure_all]
 impl GraphProjectorRevision {
     #[must_use]
     pub fn as_str(&self) -> &str {
@@ -425,7 +419,6 @@ pub(crate) fn checked_decode_replay_source(
     Ok(source)
 }
 
-#[hotpath::measure]
 fn hydration_source(
     source: &GraphGenerationReplaySource,
 ) -> crate::hotpath_observe::HydrationSource {

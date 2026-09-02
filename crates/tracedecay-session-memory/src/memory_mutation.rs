@@ -21,7 +21,6 @@ pub enum MemoryMutationSettlement<T> {
     InvalidAuthority(T),
 }
 
-#[hotpath::measure]
 pub fn memory_mutation_settlement<T: Debug>(
     settlement: Result<T, MemoryMutationError<T>>,
 ) -> Result<MemoryMutationSettlement<T>, RetainedSurfaceExecutionErrorV1> {
@@ -36,7 +35,6 @@ pub fn memory_mutation_settlement<T: Debug>(
     }
 }
 
-#[hotpath::measure]
 pub fn validate_memory_mutation<T: Debug>(
     settlement: Result<T, MemoryMutationError<T>>,
     prepared: &PreparedRetainedEffect,
@@ -61,7 +59,6 @@ pub fn validate_memory_mutation<T: Debug>(
 
 /// Owns admission for exactly one commit attempt while retaining the caller's
 /// live interruption boundary until that attempt starts.
-#[hotpath::measure]
 pub fn fresh_one_shot_commit_gate(
     interrupted: Arc<dyn Fn() -> bool + Send + Sync>,
 ) -> Arc<dyn Fn() -> bool + Send + Sync> {
@@ -74,14 +71,12 @@ pub fn fresh_one_shot_commit_gate(
     })
 }
 
-#[hotpath::measure]
 fn effective_expiry(
     context: &RetainedSurfaceExecutionContextV1<'_>,
 ) -> tracedecay_domain::UtcMicros {
     effective_memory_deadline(context).expires_at
 }
 
-#[hotpath::measure]
 pub fn fact_write_control(context: &RetainedSurfaceExecutionContextV1<'_>) -> FactWriteControl {
     let interrupted_signal = context.cancellation_signal.clone();
     let commit_signal = context.cancellation_signal.clone();
@@ -147,7 +142,6 @@ where
     }
 }
 
-#[hotpath::measure]
 fn classify_memory_settlement<T>(
     context: &RetainedSurfaceExecutionContextV1<'_>,
     outcome: Result<T, RetainedSurfaceExecutionErrorV1>,

@@ -23,7 +23,6 @@ pub(super) struct CodexGoalEvent {
     pub updated_at: Option<i64>,
 }
 
-#[hotpath::measure_all]
 impl CodexGoalEvent {
     /// Key used to collapse identical consecutive lifecycle states within one
     /// parse pass. Token/time drift on the same `(objective, status)` is
@@ -74,7 +73,6 @@ impl CodexGoalEvent {
 /// Parse a `thread_goal_updated` `event_msg` into a [`CodexGoalEvent`], or
 /// `None` for any other line. A goal with an empty/absent objective is skipped
 /// (there is nothing to catalog or search).
-#[hotpath::measure]
 pub(super) fn codex_goal_event_from_line(record: &Value) -> Option<CodexGoalEvent> {
     if record.get("type").and_then(Value::as_str) != Some("event_msg") {
         return None;
@@ -114,7 +112,6 @@ pub(super) fn codex_goal_event_from_line(record: &Value) -> Option<CodexGoalEven
 /// Build the compact `goal` session row: the objective as searchable text, the
 /// lifecycle fields in `metadata_json`. Role `system` matches the other
 /// non-conversational Codex rows (goal context, compaction summaries).
-#[hotpath::measure]
 pub(super) fn goal_event_message(
     meta: &CodexMeta,
     model: Option<&str>,
@@ -149,7 +146,6 @@ pub(super) struct CodexGoalContext {
     tokens_remaining_unbounded: bool,
 }
 
-#[hotpath::measure_all]
 impl CodexGoalContext {
     pub(super) fn storage_text(&self) -> String {
         format!("Codex active goal: {}", self.objective)
@@ -184,7 +180,6 @@ impl CodexGoalContext {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn codex_goal_context_from_text(text: &str) -> Option<CodexGoalContext> {
     const START: &str = "<codex_internal_context source=\"goal\">";
     const END: &str = "</codex_internal_context>";
@@ -214,7 +209,6 @@ pub(super) fn codex_goal_context_from_text(text: &str) -> Option<CodexGoalContex
     })
 }
 
-#[hotpath::measure]
 fn tag_body<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
     let start_tag = format!("<{tag}>");
     let end_tag = format!("</{tag}>");
@@ -223,7 +217,6 @@ fn tag_body<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
     Some(body)
 }
 
-#[hotpath::measure]
 fn budget_line_value<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
     text.lines()
         .map(str::trim)
@@ -236,7 +229,6 @@ fn budget_line_value<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
         .map(str::trim)
 }
 
-#[hotpath::measure]
 fn parse_budget_count(value: &str) -> Option<i64> {
     let digits = value
         .chars()
@@ -249,7 +241,6 @@ fn parse_budget_count(value: &str) -> Option<i64> {
     }
 }
 
-#[hotpath::measure]
 fn is_unbounded_budget_value(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
@@ -257,7 +248,6 @@ fn is_unbounded_budget_value(value: &str) -> bool {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn goal_context_from_line(
     record: &Value,
     meta: &CodexMeta,
@@ -307,7 +297,6 @@ pub(super) fn goal_context_from_line(
     })
 }
 
-#[hotpath::measure]
 fn is_goal_context_text(text: &str) -> bool {
     let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
     let Some(header) = lines.next() else {

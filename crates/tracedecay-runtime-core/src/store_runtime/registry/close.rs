@@ -20,7 +20,6 @@ pub struct ClosedStoreRuntime {
     opened_file_identity: u64,
 }
 
-#[hotpath::measure_all]
 impl ClosedStoreRuntime {
     pub fn binding(&self) -> &StoreRuntimeBindingV1 {
         &self.binding
@@ -46,7 +45,6 @@ struct CloseReservation {
     owner: Arc<StoreRuntimeOwnerAttachment>,
 }
 
-#[hotpath::measure_all]
 impl StoreRuntimeRegistry {
     #[hotpath::measure(label = "runtime_core.registry.close_path")]
     pub async fn close_path(

@@ -4,7 +4,6 @@ use std::path::PathBuf;
 
 use serde_json::{Value, json};
 
-#[hotpath::measure]
 fn cli_project_root() -> Option<PathBuf> {
     std::env::current_dir()
         .ok()

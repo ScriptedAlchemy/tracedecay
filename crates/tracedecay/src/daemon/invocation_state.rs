@@ -56,7 +56,6 @@ impl Default for DaemonInvocationState {
     }
 }
 
-#[hotpath::measure_all]
 impl DaemonInvocationState {
     /// Construct one daemon-generation invocation state whose dashboard
     /// progress is ordered by the existing durable daemon-authority epoch.
@@ -1063,7 +1062,6 @@ pub(super) enum ParsedMultiRootOperationV1 {
     },
 }
 
-#[hotpath::measure]
 fn parse_multi_root_operation(
     operation: &tracedecay_application::MultiRootOperationV1,
 ) -> std::result::Result<ParsedMultiRootOperationV1, DaemonInvocationProblem> {

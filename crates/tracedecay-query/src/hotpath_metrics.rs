@@ -16,7 +16,6 @@ pub(crate) enum Residency {
     Rebuilding,
 }
 
-#[hotpath::measure_all]
 impl Residency {
     #[cfg(feature = "hotpath")]
     #[hotpath::skip]
@@ -40,7 +39,6 @@ impl Residency {
 /// Sample 1-in-16 of frequent inner scopes (per-row scoring).
 #[inline]
 #[cfg(feature = "hotpath")]
-#[hotpath::measure]
 pub(crate) fn sample_frequent() -> bool {
     thread_local! {
         static TICK: Cell<u32> = const { Cell::new(0) };
@@ -54,7 +52,6 @@ pub(crate) fn sample_frequent() -> bool {
 
 /// Time a frequent inner scope only when sampled. The body always runs.
 #[inline]
-#[hotpath::measure]
 pub(crate) fn measure_frequent<T>(label: &'static str, body: impl FnOnce() -> T) -> T {
     #[cfg(feature = "hotpath")]
     {
@@ -71,7 +68,6 @@ pub(crate) fn measure_frequent<T>(label: &'static str, body: impl FnOnce() -> T)
     }
 }
 
-#[hotpath::measure]
 pub(crate) fn record_lane<E>(
     candidates: &'static str,
     examined: &'static str,

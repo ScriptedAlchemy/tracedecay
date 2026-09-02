@@ -24,7 +24,6 @@ use super::types::{
 
 const SESSION_INGEST_HEALTH_PAGE_SIZE: i64 = 512;
 
-#[hotpath::measure]
 fn session_db_operation_error(
     operation: &'static str,
     source: impl std::error::Error + Send + Sync + 'static,
@@ -32,7 +31,6 @@ fn session_db_operation_error(
     TraceDecayError::database_operation(operation, source)
 }
 
-#[hotpath::measure]
 fn session_db_operation_message(
     operation: &'static str,
     message: impl Into<String>,
@@ -45,7 +43,6 @@ fn session_db_operation_message(
 
 /// Newest-first ordering where a missing timestamp ranks after every known
 /// timestamp instead of being compared as a fabricated epoch-zero time.
-#[hotpath::measure]
 fn descending_timestamp(left: Option<i64>, right: Option<i64>) -> std::cmp::Ordering {
     match (left, right) {
         (Some(left), Some(right)) => right.cmp(&left),
@@ -61,7 +58,6 @@ pub const SESSION_MESSAGES_AFTER_SQL: &str = "SELECT timestamp, ordinal, kind, t
                  ORDER BY timestamp, ordinal, message_id \
                  LIMIT ?4";
 
-#[hotpath::measure_all]
 impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     #[hotpath::skip]
     pub async fn cursor_session_ingest_health(&self) -> Result<SessionIngestHealth, String> {
@@ -883,22 +879,18 @@ async fn search_workflow_facts(
     Ok(results)
 }
 
-#[hotpath::measure]
 fn session_column_error(column: &str, error: &dyn std::fmt::Display) -> String {
     format!("failed to decode session column '{column}': {error}")
 }
 
-#[hotpath::measure]
 fn message_column_error(column: &str, error: &dyn std::fmt::Display) -> String {
     format!("failed to decode session message column '{column}': {error}")
 }
 
-#[hotpath::measure]
 fn workflow_column_error(column: &str, error: &dyn std::fmt::Display) -> String {
     format!("failed to decode workflow fact column '{column}': {error}")
 }
 
-#[hotpath::measure]
 fn row_to_session(
     row: &tracedecay_runtime_core::db::engine::Row,
 ) -> std::result::Result<SessionRecord, String> {
@@ -946,7 +938,6 @@ fn row_to_session(
     })
 }
 
-#[hotpath::measure]
 fn row_to_message(
     row: &tracedecay_runtime_core::db::engine::Row,
     offset: i32,
@@ -994,7 +985,6 @@ fn row_to_message(
     })
 }
 
-#[hotpath::measure]
 fn row_to_workflow_message(
     row: &tracedecay_runtime_core::db::engine::Row,
     offset: i32,

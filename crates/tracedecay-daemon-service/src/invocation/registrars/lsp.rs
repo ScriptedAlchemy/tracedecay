@@ -6,7 +6,6 @@ pub struct DaemonLspOwnerRegistrar {
     service: DaemonInvocationService,
 }
 
-#[hotpath::measure_all]
 impl DaemonLspOwnerRegistrar {
     pub fn new(service: &DaemonInvocationService) -> Self {
         Self {

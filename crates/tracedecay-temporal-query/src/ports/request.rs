@@ -11,7 +11,6 @@ pub enum TemporalRetrievalScope {
     AllSessionsInAuthorizedRoot,
 }
 
-#[hotpath::measure_all]
 impl TemporalRetrievalScope {
     #[hotpath::skip]
     pub const fn kind(&self) -> &'static str {
@@ -37,7 +36,6 @@ pub struct TemporalAuthorizedRoot {
     root_id: String,
 }
 
-#[hotpath::measure_all]
 impl TemporalAuthorizedRoot {
     pub fn profile(
         profile_id: impl Into<String>,
@@ -110,7 +108,6 @@ impl TemporalAuthorizedRoot {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn validate_label(field: &'static str, value: &str) -> Result<(), TemporalPortError> {
     if value.is_empty()
         || value.trim() != value
@@ -165,7 +162,6 @@ pub struct TemporalCandidateFilterV1 {
     pub goals: bool,
 }
 
-#[hotpath::measure_all]
 impl TemporalCandidateFilterV1 {
     pub fn validate(&self) -> Result<(), TemporalPortError> {
         if self
@@ -227,7 +223,6 @@ pub struct TemporalSnapshotRequest {
     control: ExecutionControl,
 }
 
-#[hotpath::measure_all]
 impl TemporalSnapshotRequest {
     pub fn new(
         session_id: SessionId,

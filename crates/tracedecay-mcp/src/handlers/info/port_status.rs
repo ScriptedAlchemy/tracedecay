@@ -27,7 +27,6 @@ use super::verified::{
 /// - group 3: interface, trait
 /// - group 4: enum
 /// - group 5: module
-#[hotpath::measure]
 fn kind_compat_group(kind: &str) -> u8 {
     match kind {
         "class" | "struct" => 0,
@@ -51,7 +50,6 @@ type PortKey = (String, Option<String>, u8);
 /// identity matters for matching (methods, fields, variants, etc.). Top-level
 /// items (struct, function, …) return false — their parent in `qualified_name`
 /// is just the file path and is not useful for cross-port matching.
-#[hotpath::measure]
 fn port_kind_has_parent(kind: &str) -> bool {
     matches!(
         kind,
@@ -72,7 +70,6 @@ fn port_kind_has_parent(kind: &str) -> bool {
 /// generic parameters so `Biquad<T>::new` and `Biquad::new` share the same
 /// parent. Returns `None` for kinds where the parent qualifier is not the
 /// containing type (e.g. top-level structs whose parent is the file path).
-#[hotpath::measure]
 fn port_parent_qualifier(kind: &str, qualified_name: &str) -> Option<String> {
     if !port_kind_has_parent(kind) {
         return None;

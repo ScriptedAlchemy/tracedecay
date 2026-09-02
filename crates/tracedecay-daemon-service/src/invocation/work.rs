@@ -26,7 +26,6 @@ use tracedecay_domain::git::{GitChangeKindV1, GitStatusEntryV1};
 pub(super) use workflow_dispatch::execute_workflow_application;
 use workflow_fan_out::reconcile_active_workflow_fan_out;
 
-#[hotpath::measure]
 pub(super) fn application_problem(
     request_id: String,
     problem: ApplicationProblem,
@@ -37,7 +36,6 @@ pub(super) fn application_problem(
     )
 }
 
-#[hotpath::measure]
 pub(super) fn concealed_application_problem(request_id: String) -> DaemonInvocationResponse {
     application_problem(
         request_id,
@@ -46,7 +44,6 @@ pub(super) fn concealed_application_problem(request_id: String) -> DaemonInvocat
 }
 
 /// Retryable state for an admitted project whose runtime is still mounting.
-#[hotpath::measure]
 pub(super) fn runtime_mounting_problem(request_id: String) -> DaemonInvocationResponse {
     application_problem(
         request_id,
@@ -109,7 +106,6 @@ pub async fn execute_work_application(
     response
 }
 
-#[hotpath::measure]
 fn publish_committed_task_activity_in_background(
     database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     project_root: PathBuf,
@@ -165,7 +161,6 @@ const fn work_invocation_mutates(request: &WorkApplicationInvocationV1) -> bool 
     }
 }
 
-#[hotpath::measure]
 fn observe_placement_target(
     project_root: Option<&std::path::Path>,
     target: &tracedecay_domain::WorkPlacementTargetV1,
@@ -220,7 +215,6 @@ fn observe_placement_target(
     })
 }
 
-#[hotpath::measure]
 fn work_activity_detail(outcome: &DaemonInvocationOutcome) -> Option<&'static str> {
     let DaemonInvocationOutcome::WorkApplication { outcome, .. } = outcome else {
         return None;

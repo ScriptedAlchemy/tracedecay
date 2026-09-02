@@ -21,7 +21,6 @@ pub enum VectorMetric {
     Euclidean,
 }
 
-#[hotpath::measure_all]
 impl VectorMetric {
     pub fn parse(value: &str) -> Result<Self, GraphDbError> {
         match value {
@@ -75,7 +74,6 @@ pub struct GraphVectorIndexRequest {
     pub cancellation: Arc<dyn GraphCancellation>,
 }
 
-#[hotpath::measure_all]
 impl GraphVectorIndexRequest {
     pub(crate) fn validate(&self) -> Result<(), GraphDbError> {
         if self.cancellation.is_cancelled() {
@@ -130,7 +128,6 @@ pub enum GraphVectorIndexStatus {
     Stale,
 }
 
-#[hotpath::measure_all]
 impl GraphVectorIndexStatus {
     /// Whether a caller should build or rebuild before trusting searches.
     #[must_use]
@@ -279,7 +276,6 @@ pub(crate) fn native_vector_label(
     entity_projection_label(namespace, projection)
 }
 
-#[hotpath::measure]
 fn normalize_distance(distance: f64) -> f64 {
     if distance.abs() <= f64::from(f32::EPSILON) {
         0.0
@@ -288,7 +284,6 @@ fn normalize_distance(distance: f64) -> f64 {
     }
 }
 
-#[hotpath::measure]
 fn validate_request(request: &VectorSearchRequest) -> Result<(), GraphDbError> {
     if request.cancellation.is_cancelled() {
         return Err(GraphDbError::Cancelled);

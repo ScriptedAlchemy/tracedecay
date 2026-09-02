@@ -532,7 +532,6 @@ pub(super) async fn apply_configuration_or_semantic_transition(
     Ok(receipt)
 }
 
-#[hotpath::measure]
 pub(super) fn requires_coordinated_semantic_profile_transition(
     current_active: bool,
     requested_active: bool,
@@ -540,7 +539,6 @@ pub(super) fn requires_coordinated_semantic_profile_transition(
     current_active || requested_active
 }
 
-#[hotpath::measure]
 fn semantic_profile_transition(
     mutation: &DirectConfigurationMutation,
 ) -> Result<Option<Option<SemanticProfileSelection>>, ConfigurationError> {
@@ -585,7 +583,6 @@ fn semantic_profile_transition(
     }
 }
 
-#[hotpath::measure]
 fn map_semantic_configuration_error(
     error: SemanticActivationCoordinationErrorV1,
 ) -> ConfigurationError {
@@ -600,7 +597,6 @@ fn map_semantic_configuration_error(
     }
 }
 
-#[hotpath::measure]
 fn issue_configuration_mutation_authority(
     registered: &RegisteredConfigurationRuntime,
     request_id: &str,
@@ -629,7 +625,6 @@ fn issue_configuration_mutation_authority(
         .map_err(|_| ConfigurationError::Unavailable)
 }
 
-#[hotpath::measure]
 pub(super) fn issue_direct_configuration_mutation_authority(
     registered: &RegisteredConfigurationRuntime,
     request_id: &str,
@@ -660,7 +655,6 @@ pub(super) fn issue_direct_configuration_mutation_authority(
         })
 }
 
-#[hotpath::measure]
 fn configuration_request_authority(
     registered: &RegisteredConfigurationRuntime,
     request_id: &str,
@@ -724,7 +718,6 @@ fn configuration_request_authority(
     .map_err(|_| invalid_configuration_request())
 }
 
-#[hotpath::measure]
 pub(super) fn context_scout_request_authority(
     registered: &RegisteredConfigurationRuntime,
     request_id: &str,
@@ -788,7 +781,6 @@ pub(super) fn context_scout_request_authority(
     .map_err(|_| invalid_configuration_request())
 }
 
-#[hotpath::measure]
 pub(super) fn configuration_evidence(
     payload: serde_json::Value,
     authority: AuthorityReceipt,
@@ -825,7 +817,6 @@ pub(super) fn configuration_evidence(
     Ok(ApplicationOutcome::Evidence(packet))
 }
 
-#[hotpath::measure]
 fn configuration_preview(
     payload: serde_json::Value,
     authority: AuthorityReceipt,
@@ -867,7 +858,6 @@ fn configuration_preview(
 /// `ConfigurationError::validation_message` constructors are admitted. Paths,
 /// quoted model ids, and other caller-supplied text are dropped so the
 /// diagnostic stays a `SafeDiagnostic`.
-#[hotpath::measure]
 fn safe_configuration_validation_message(reason: &str) -> String {
     const PREFIX: &str = "The configuration request is invalid: ";
     const GENERIC: &str = "The configuration request is invalid";
@@ -888,7 +878,6 @@ fn safe_configuration_validation_message(reason: &str) -> String {
     format!("{PREFIX}{bounded}")
 }
 
-#[hotpath::measure]
 fn is_safe_configuration_validation_reason(reason: &str) -> bool {
     !reason.is_empty()
         && reason.len() <= 512
@@ -901,7 +890,6 @@ fn is_safe_configuration_validation_reason(reason: &str) -> bool {
         })
 }
 
-#[hotpath::measure]
 fn invalid_configuration_request() -> ApplicationProblem {
     ApplicationProblem::InvalidRequest {
         diagnostic: SafeDiagnostic {
@@ -913,7 +901,6 @@ fn invalid_configuration_request() -> ApplicationProblem {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn configuration_problem(error: ConfigurationError) -> ApplicationProblem {
     match error {
         ConfigurationError::TargetUnavailable
@@ -996,7 +983,6 @@ pub struct DaemonSemanticRuntimeRegistrar {
     service: DaemonInvocationService,
 }
 
-#[hotpath::measure_all]
 impl DaemonSemanticRuntimeRegistrar {
     pub fn new(service: &DaemonInvocationService) -> Self {
         Self {

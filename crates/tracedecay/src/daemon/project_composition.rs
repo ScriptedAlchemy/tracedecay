@@ -44,7 +44,6 @@ pub(super) fn project_server_response_lifecycle_has_in_flight(
         .is_err()
 }
 
-#[hotpath::measure]
 fn project_server_has_in_flight_response(server: &Arc<crate::mcp::McpServer>) -> bool {
     let lifecycle = server.project_server_response_lifecycle();
     Arc::strong_count(server) > 1 || project_server_response_lifecycle_has_in_flight(&lifecycle)
@@ -445,13 +444,24 @@ async fn production_project_server_inner(
         invocation.code_index_schedulers.clone(),
         canonical_project_path.to_path_buf(),
     );
-    let code_index_activation = Arc::new(code_index_scheduler::CodeIndexActivationV1::new(
-        canonical_project_path,
-        Arc::clone(&route_registered),
-        cancellation.clone(),
-        code_index_mount,
-        code_index_hint_sink,
-    ));
+    let code_index_automatic_admission =
+        if tracedecay_runtime_core::worktree::is_linked_worktree(canonical_project_path)
+            && !cg.get_config().sync.watch_linked_worktrees
+        {
+            code_index_scheduler::CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled
+        } else {
+            code_index_scheduler::CodeIndexAutomaticAdmissionV1::Admitted
+        };
+    let code_index_activation = Arc::new(
+        code_index_scheduler::CodeIndexActivationV1::new_with_admission(
+            canonical_project_path,
+            Arc::clone(&route_registered),
+            cancellation.clone(),
+            code_index_automatic_admission,
+            code_index_mount,
+            code_index_hint_sink,
+        ),
+    );
     let code_index_hook_sink = code_index_hook_sink(Arc::clone(&code_index_activation));
     let code_index_reconcile_sink = code_index_reconcile_sink(
         invocation.code_index_schedulers.clone(),
@@ -1140,21 +1150,34 @@ async fn production_project_server_inner(
             ))
             .await;
             full_candidate.publish_doctor_report();
-            let indexing_requested = code_index_activation.activate();
+            let code_index_status = match code_index_activation.automatic_admission() {
+                code_index_scheduler::CodeIndexAutomaticAdmissionV1::Admitted => {
+                    if code_index_activation.activate() {
+                        "warming"
+                    } else {
+                        "unavailable"
+                    }
+                }
+                code_index_scheduler::CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled => {
+                    log_daemon_event(
+                        "code_index_activation_skipped",
+                        &[
+                            (
+                                "project",
+                                canonical_project_path.display().to_string(),
+                            ),
+                            ("reason", "linked_worktree_disabled".to_owned()),
+                        ],
+                    );
+                    "linked_worktree_disabled"
+                }
+            };
             log_daemon_event(
                 "project_open_phase",
                 &[
                     ("project", canonical_project_path.display().to_string()),
                     ("phase", "full_published".to_owned()),
-                    (
-                        "code_index",
-                        if indexing_requested {
-                            "warming"
-                        } else {
-                            "unavailable"
-                        }
-                        .to_owned(),
-                    ),
+                    ("code_index", code_index_status.to_owned()),
                     (
                         "elapsed_ms",
                         project_open_started.elapsed().as_millis().to_string(),
@@ -1250,7 +1273,6 @@ async fn cached_route_server(
 
 /// The composition returned by every cache hit. `inserted` is always false:
 /// reusing a published server never publishes a route.
-#[hotpath::measure]
 fn cached_project_composition(
     canonical_project_path: &Path,
     key: ProjectServerKey,
@@ -1286,7 +1308,6 @@ struct SemanticProjectRuntime {
 /// Derive this route's semantic runtime handle and startup choices. The
 /// composition runtime can veto auto-download even when configuration allows
 /// it, so both inputs are consulted here rather than at the use site.
-#[hotpath::measure]
 fn semantic_project_runtime(
     runtime_configuration: &tracedecay_configuration::config::PinnedRuntimeConfiguration,
     runtime: &ProductionProjectCompositionRuntime,
@@ -1335,7 +1356,6 @@ struct ProjectCodeIndexAuthorities {
 /// Resolve the project's search identity and bind every code-index read port to
 /// that one exact scope. Scope resolution reads the graph's own project root,
 /// not the handshake path, so a relocated store still binds its own scope.
-#[hotpath::measure]
 fn project_code_index_authorities(
     invocation: &DaemonInvocationState,
     cg: &Arc<crate::tracedecay::TraceDecay>,
@@ -1409,7 +1429,6 @@ fn project_code_index_authorities(
 }
 
 /// Dashboard-facing freshness reader for this route's code-index schedulers.
-#[hotpath::measure]
 fn project_dashboard_freshness_reader(
     schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
 ) -> tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader {
@@ -1424,7 +1443,6 @@ fn project_dashboard_freshness_reader(
 /// Register the project graph and the session databases this route owns with
 /// the sampling authority. An unavailable registration is recorded and skipped,
 /// never fatal: telemetry must not fail an otherwise healthy project open.
-#[hotpath::measure]
 fn register_route_store_telemetry(
     sampling: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
     cg: &Arc<crate::tracedecay::TraceDecay>,

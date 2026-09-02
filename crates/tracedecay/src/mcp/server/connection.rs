@@ -53,7 +53,6 @@ impl Default for McpShutdownCompletion {
     }
 }
 
-#[hotpath::measure_all]
 impl McpShutdownCompletion {
     #[hotpath::skip]
     async fn coordinate_until<Work>(
@@ -215,7 +214,6 @@ impl McpShutdownCompletion {
     }
 }
 
-#[hotpath::measure_all]
 impl McpShutdownState {
     fn finish(&self, status: crate::daemon::ShutdownStatus) {
         if status != crate::daemon::ShutdownStatus::TimedOut {
@@ -280,7 +278,6 @@ impl Drop for PendingRequestGaugeGuard {
     }
 }
 
-#[hotpath::measure_all]
 impl QueuedRequestLine {
     fn new(line: String) -> Self {
         let parsed = hotpath::measure_block!(
@@ -337,7 +334,6 @@ impl QueuedRequestLine {
     }
 }
 
-#[hotpath::measure]
 fn cancellable_queued_request_id(request: &JsonRpcRequest) -> Option<Value> {
     let cancellable = request.method == "tools/call"
         && request
@@ -352,7 +348,6 @@ fn cancellable_queued_request_id(request: &JsonRpcRequest) -> Option<Value> {
     request.id.clone()
 }
 
-#[hotpath::measure]
 fn queued_cancellable_request_key(
     pending_lines: &VecDeque<QueuedRequestLine>,
     request_id: &Value,
@@ -366,7 +361,6 @@ fn queued_cancellable_request_key(
         .then_some(expected)
 }
 
-#[hotpath::measure]
 fn current_cancellable_request_key(
     request: &JsonRpcRequest,
     request_id: &Value,
@@ -509,7 +503,6 @@ async fn dispatch_independent_read(
 
 struct ConnectionResponseWriter;
 
-#[hotpath::measure_all]
 impl ConnectionResponseWriter {
     async fn write(
         server: &McpServer,
@@ -563,7 +556,6 @@ async fn wait_for_peer_close(
     }
 }
 
-#[hotpath::measure_all]
 impl McpServer {
     #[hotpath::measure(label = "mcp.server.write", future = true)]
     async fn write_response_line_or_revoke(

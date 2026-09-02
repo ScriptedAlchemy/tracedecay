@@ -3,7 +3,6 @@ use tracedecay_sessions::runtime::SessionStoreAccess;
 
 use crate::RegisteredGlobalDb;
 
-#[hotpath::measure_all]
 impl RegisteredGlobalDb {
     #[hotpath::skip]
     pub async fn list_session_sync_source_frontiers(

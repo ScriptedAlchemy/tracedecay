@@ -48,7 +48,6 @@ pub(crate) struct DaemonRemoteExactObservationQueryPortV1 {
     targets: Arc<DaemonRemoteReplayTransactionAuthorityV1>,
 }
 
-#[hotpath::measure_all]
 impl DaemonRemoteExactObservationQueryPortV1 {
     pub(crate) fn new(
         authority: Arc<RemoteSqliteStorageV1>,
@@ -307,7 +306,6 @@ impl RemoteExactObservationQueryReadPortV1 for DaemonRemoteExactObservationQuery
     }
 }
 
-#[hotpath::measure]
 fn validate_snapshot(
     command: &RemoteExactObservationQueryCommandV1,
     snapshot: &RemoteQueryAuthoritySnapshotV1,
@@ -333,7 +331,6 @@ fn validate_snapshot(
     Ok(())
 }
 
-#[hotpath::measure]
 fn current_frontier(
     coverage: &RuntimeReadCoverageV1,
 ) -> Result<ShardWatermarkV1, RemoteExactObservationQueryErrorV1> {
@@ -355,7 +352,6 @@ fn current_frontier(
     }
 }
 
-#[hotpath::measure]
 fn runtime_control(
     command: &RemoteExactObservationQueryCommandV1,
 ) -> Result<RuntimeRequestControlV1, RemoteExactObservationQueryErrorV1> {

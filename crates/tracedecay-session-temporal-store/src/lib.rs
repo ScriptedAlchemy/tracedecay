@@ -104,7 +104,6 @@ pub use projection::record_canonical_observation_effect;
 pub use refresh::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
 pub use store::GlobalDbSessionTemporalStore;
 
-#[hotpath::measure_all]
 impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     /// Resolves a Git filter through the verified Git-evidence graph.
     ///
@@ -216,7 +215,6 @@ pub enum SessionPageReconstructionRequest<'a> {
     },
 }
 
-#[hotpath::measure_all]
 impl<'a> SessionPageReconstructionRequest<'a> {
     #[hotpath::skip]
     pub const fn occurrence(
@@ -1118,7 +1116,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> TaskSessionTemporalExecutionPortV1
     }
 }
 
-#[hotpath::measure]
 fn task_session_reauthorize(
     selector: &dyn TaskSessionRankSelectorV1,
     binding: &tracedecay_query::retrieval::evidence_lanes::TaskSessionBindingV1,
@@ -1130,7 +1127,6 @@ fn task_session_reauthorize(
     }
 }
 
-#[hotpath::measure]
 fn task_session_callback_omission(
     stage: TaskSessionReauthorizationStageV1,
     error: TaskSessionSelectionCallbackErrorV1,
@@ -1148,14 +1144,12 @@ fn task_session_callback_omission(
     Ok(Some(TaskSessionExecutionOmissionV1 { stage, reason }))
 }
 
-#[hotpath::measure]
 fn task_session_callback_contract(detail: String) -> SessionTemporalExecutionError {
     SessionTemporalExecutionError::Kernel(
         tracedecay_temporal_query::TemporalKernelError::CandidateExportContract(detail),
     )
 }
 
-#[hotpath::measure]
 fn map_kernel_execution_error(
     error: tracedecay_temporal_query::TemporalKernelError,
 ) -> SessionTemporalExecutionError {
@@ -1181,7 +1175,6 @@ fn map_kernel_execution_error(
     }
 }
 
-#[hotpath::measure]
 fn map_hydration_error(
     error: tracedecay_temporal_query::hydration::HydrationError,
 ) -> SessionTemporalExecutionError {
@@ -1251,7 +1244,6 @@ async fn session_record_from_frozen_read(
     }))
 }
 
-#[hotpath::measure]
 fn map_control_error(
     error: tracedecay_temporal_query::ports::TemporalPortError,
 ) -> SessionTemporalExecutionError {
@@ -1282,7 +1274,6 @@ fn map_control_error(
     }
 }
 
-#[hotpath::measure]
 fn map_lcm_error(error: LcmError) -> SessionTemporalExecutionError {
     match error {
         LcmError::SummaryNodeNotFound
@@ -1301,7 +1292,6 @@ fn map_lcm_error(error: LcmError) -> SessionTemporalExecutionError {
     }
 }
 
-#[hotpath::measure]
 fn lcm_source_cursor_sort_key(binding: &str, next_source_offset: usize) -> StableSortKey {
     StableSortKey {
         normalized_score_micros: 0,
@@ -1310,7 +1300,6 @@ fn lcm_source_cursor_sort_key(binding: &str, next_source_offset: usize) -> Stabl
     }
 }
 
-#[hotpath::measure]
 fn parse_lcm_source_cursor_offset(
     binding: &str,
     sort_key: &StableSortKey,
@@ -1328,7 +1317,6 @@ fn parse_lcm_source_cursor_offset(
         .map_err(|_| SessionTemporalExecutionError::Denied)
 }
 
-#[hotpath::measure]
 fn map_lcm_cursor_error(error: CursorError) -> SessionTemporalExecutionError {
     match error {
         CursorError::RootMismatch

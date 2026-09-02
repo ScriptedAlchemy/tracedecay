@@ -46,7 +46,6 @@ pub enum RetrievalAnchorOwnerV1 {
     V2(FactOwnerV1),
 }
 
-#[hotpath::measure_all]
 impl RetrievalAnchorOwnerV1 {
     pub fn validate(&self) -> RetrievalAnchorStoreResult<()> {
         match self {
@@ -90,7 +89,6 @@ pub enum StoredRetrievalAnchorRecordV1 {
     V2(RetrievalAnchorRecordV2),
 }
 
-#[hotpath::measure_all]
 impl StoredRetrievalAnchorRecordV1 {
     pub fn validate(&self) -> RetrievalAnchorStoreResult<()> {
         match self {
@@ -135,7 +133,6 @@ pub enum AnchorDispositionStateV1 {
     Unavailable,
 }
 
-#[hotpath::measure_all]
 impl AnchorDispositionStateV1 {
     #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
@@ -223,7 +220,6 @@ pub enum AnchorDispositionReasonClassV1 {
     SourceUnavailable,
 }
 
-#[hotpath::measure_all]
 impl AnchorDispositionReasonClassV1 {
     #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
@@ -247,7 +243,6 @@ pub enum AnchorDerivativeKindV1 {
     Finding,
 }
 
-#[hotpath::measure_all]
 impl AnchorDerivativeKindV1 {
     #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
@@ -280,7 +275,6 @@ pub struct RetrievalAnchorDispositionRecordV1 {
     effective_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl RetrievalAnchorDispositionRecordV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -365,7 +359,6 @@ pub struct RetrievalAnchorDerivativeV1 {
     direct_evidence: bool,
 }
 
-#[hotpath::measure_all]
 impl RetrievalAnchorDerivativeV1 {
     pub fn new(
         source_anchor_id: RetrievalAnchorId,
@@ -426,7 +419,6 @@ pub struct RetrievalAnchorTombstoneV1 {
     effective_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl RetrievalAnchorTombstoneV1 {
     pub fn new(
         anchor_id: RetrievalAnchorId,
@@ -525,7 +517,6 @@ pub trait RetrievalAnchorDispositionStore: Send + Sync {
     ) -> impl Future<Output = RetrievalAnchorStoreResult<Vec<RetrievalAnchorDerivativeV1>>> + Send;
 }
 
-#[hotpath::measure]
 fn validate_label(value: &str, field: &'static str) -> RetrievalAnchorStoreResult<()> {
     if !is_canonical_text_within(value, CANONICAL_TEXT_MAX_BYTES) {
         return Err(invalid(format!("{field} is not canonical")));
@@ -533,12 +524,10 @@ fn validate_label(value: &str, field: &'static str) -> RetrievalAnchorStoreResul
     Ok(())
 }
 
-#[hotpath::measure]
 fn domain(error: impl std::fmt::Display) -> RetrievalAnchorStoreError {
     invalid(error.to_string())
 }
 
-#[hotpath::measure]
 fn invalid(message: impl Into<String>) -> RetrievalAnchorStoreError {
     RetrievalAnchorStoreError::InvalidData(message.into())
 }

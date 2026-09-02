@@ -68,7 +68,6 @@ pub struct GraphGenerationRelation {
     pub properties: BTreeMap<GraphPropertyName, GraphProperty>,
 }
 
-#[hotpath::measure_all]
 impl GraphGenerationRelation {
     pub fn new(
         identity: GraphRelationId,
@@ -154,7 +153,6 @@ pub struct GraphGenerationManifestIdentity {
     digest_memo: DependencyClosureDigestMemo,
 }
 
-#[hotpath::measure_all]
 impl GraphGenerationManifestIdentity {
     /// An identity reconstructed from its metadata parts, with a cold
     /// dependency-closure memo: the digest is recomputed on first use exactly
@@ -209,7 +207,6 @@ struct DependencyClosureDigestMemo {
     )>,
 }
 
-#[hotpath::measure_all]
 impl DependencyClosureDigestMemo {
     fn digest(
         &self,
@@ -309,7 +306,6 @@ struct RecoveredGenerationDigestMemo {
     digest: GraphRecoveredGenerationDigestV1,
 }
 
-#[hotpath::measure_all]
 impl RecoveredGenerationDigestMemo {
     /// Whether the memoized digest still binds `manifest` exactly.
     fn binds(&self, manifest: &GraphGenerationManifest) -> bool {
@@ -330,7 +326,6 @@ pub enum GraphReplayCollectionOutcome {
     Absent,
 }
 
-#[hotpath::measure_all]
 impl GraphGenerationManifest {
     pub fn new(
         projection: GraphProjectionIdentity,
@@ -753,7 +748,6 @@ impl GraphGenerationManifest {
     }
 }
 
-#[hotpath::measure]
 fn checked_sorted_dependencies(
     mut dependencies: Vec<GraphGenerationDependency>,
     check: &dyn Fn() -> Result<(), GraphDbError>,
@@ -772,7 +766,6 @@ fn checked_sorted_dependencies(
     Ok(dependencies)
 }
 
-#[hotpath::measure]
 fn checked_sorted_entities(
     mut entities: Vec<GraphEntity>,
     check: &dyn Fn() -> Result<(), GraphDbError>,
@@ -791,7 +784,6 @@ fn checked_sorted_entities(
     Ok(entities)
 }
 
-#[hotpath::measure]
 fn checked_sorted_relations(
     mut relations: Vec<GraphGenerationRelation>,
     check: &dyn Fn() -> Result<(), GraphDbError>,
@@ -812,7 +804,6 @@ fn checked_sorted_relations(
 
 /// The dependency-closure digest, shared by the full manifest and its
 /// identity so both hash the exact same `dependencies` encoding.
-#[hotpath::measure]
 fn dependency_closure_digest(
     dependencies: &[GraphGenerationDependency],
     check: &dyn Fn() -> Result<(), GraphDbError>,
@@ -835,7 +826,6 @@ fn dependency_closure_digest(
     .map_err(|error| GraphDbError::invalid(error.to_string()))
 }
 
-#[hotpath::measure]
 fn relational_dependency_generations(
     dependencies: &[GraphGenerationDependency],
     shard_id: &StoreShardIdV1,
@@ -934,7 +924,6 @@ pub(crate) fn verify_sealed_copy_generation(
     verify_recovered_rows(database, identity, expected, check)
 }
 
-#[hotpath::measure]
 fn verify_recovered_rows(
     database: &GrafeoDB,
     identity: &GraphGenerationManifestIdentity,
@@ -1153,7 +1142,6 @@ pub(crate) fn recovered_entity_ref(
     Ok(GraphEntityRef::new(projection, identity))
 }
 
-#[hotpath::measure]
 fn recovered_generation_digest(
     manifest: &GraphGenerationManifest,
     check: &dyn Fn() -> Result<(), GraphDbError>,
@@ -1686,7 +1674,6 @@ fn append_encoded_manifest_frame<T: Serialize + ?Sized>(
 /// byte for byte, so both go through this one writer: the frame order
 /// (`format`, `projection`, `generation`, `source_generation`, `watermark`,
 /// `dependencies`) and each frame's canonical encoding live here only.
-#[hotpath::measure]
 fn write_generation_identity_frames(
     writer: &mut CheckedDigestWriter<'_>,
     canonical: &mut CheckedVecWriter<'_>,
@@ -1746,7 +1733,6 @@ fn write_generation_identity_frames(
 /// encoder (`generation::recovered`) emit the identical frame layout —
 /// `tag_len | tag | byte_len | bytes` — so the length encoding lives here
 /// once and the two emitters cannot drift.
-#[hotpath::measure]
 fn frame_length_headers(tag: &str, bytes: &[u8]) -> Result<([u8; 8], [u8; 8]), GraphDbError> {
     let tag_len =
         u64::try_from(tag.len()).map_err(|_| GraphDbError::invalid("digest tag is too large"))?;
@@ -1755,7 +1741,6 @@ fn frame_length_headers(tag: &str, bytes: &[u8]) -> Result<([u8; 8], [u8; 8]), G
     Ok((tag_len.to_be_bytes(), byte_len.to_be_bytes()))
 }
 
-#[hotpath::measure]
 fn write_frame(
     writer: &mut CheckedDigestWriter<'_>,
     tag: &str,
@@ -1779,7 +1764,6 @@ fn write_canonical_frame<T: Serialize + ?Sized>(
     write_frame(writer, tag, bytes)
 }
 
-#[hotpath::measure]
 fn write_digest_bytes(
     writer: &mut CheckedDigestWriter<'_>,
     bytes: &[u8],

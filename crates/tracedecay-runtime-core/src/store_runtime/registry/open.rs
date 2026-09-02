@@ -36,7 +36,6 @@ type BuiltShardRuntimePublication = (
     Option<crate::db::DatabaseAuthority>,
 );
 
-#[hotpath::measure_all]
 impl StoreRuntimeOpenBegin {
     #[hotpath::skip]
     pub async fn wait(self) -> StoreRuntimeOpenResult {
@@ -65,7 +64,6 @@ pub(crate) struct StoreRuntimeOpenJoin {
     updates: watch::Receiver<OpenState>,
 }
 
-#[hotpath::measure_all]
 impl StoreRuntimeOpenJoin {
     #[hotpath::skip]
     pub(super) async fn wait(mut self) -> StoreRuntimeOpenResult {
@@ -125,7 +123,6 @@ pub(super) struct OpeningRuntime {
     pub(super) access: StoreRuntimeAccessMode,
 }
 
-#[hotpath::measure_all]
 impl StoreRuntimeRegistry {
     pub(crate) fn begin_or_join_open(
         &self,
@@ -482,7 +479,6 @@ impl StoreRuntimeRegistry {
     }
 }
 
-#[hotpath::measure]
 fn open_access_compatible(request: &StoreRuntimeOpenRequest, opening: &OpeningRuntime) -> bool {
     if request.expected_opened_file_identity != opening.expected_opened_file_identity {
         return false;
@@ -499,7 +495,6 @@ fn open_access_compatible(request: &StoreRuntimeOpenRequest, opening: &OpeningRu
     }
 }
 
-#[hotpath::measure]
 fn close_unpublished_runtime(published: PublishedShardRuntime) -> Result<(), String> {
     let (runtime, attachment) = published.into_parts();
     let draining = runtime
@@ -520,7 +515,6 @@ fn close_unpublished_runtime(published: PublishedShardRuntime) -> Result<(), Str
     outcome.and(lifecycle)
 }
 
-#[hotpath::measure]
 fn retained_database_key(state: &RegistryState, path: &std::path::Path) -> Option<StoreRuntimeKey> {
     state.entries.iter().find_map(|(key, entry)| {
         let candidate = match entry {
@@ -571,7 +565,6 @@ struct OpenAttemptGuard {
     armed: bool,
 }
 
-#[hotpath::measure_all]
 impl OpenAttemptGuard {
     fn new(
         registry: StoreRuntimeRegistry,
@@ -673,7 +666,6 @@ impl OpenAttemptGuard {
     }
 }
 
-#[hotpath::measure]
 fn matching_database_authority(
     requested: Option<&crate::db::DatabaseAuthority>,
     retained: Option<&crate::db::DatabaseAuthority>,
@@ -713,12 +705,10 @@ impl Drop for OpenAttemptGuard {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn retain_authority_epoch_floor(floor: StoreAuthorityEpochV1) {
     PROCESS_AUTHORITY_EPOCH.fetch_max(floor.get(), Ordering::AcqRel);
 }
 
-#[hotpath::measure]
 pub(super) fn allocate_authority_epoch()
 -> Result<StoreAuthorityEpochV1, StoreRuntimeRegistryFailure> {
     let previous = PROCESS_AUTHORITY_EPOCH
@@ -730,7 +720,6 @@ pub(super) fn allocate_authority_epoch()
         .map_err(|_| StoreRuntimeRegistryFailure::AuthorityEpochExhausted)
 }
 
-#[hotpath::measure]
 fn allocate_publication(
     state: &mut RegistryState,
     binding: StoreRuntimeBindingV1,
@@ -746,7 +735,6 @@ fn allocate_publication(
     })
 }
 
-#[hotpath::measure]
 fn allocate_counter(counter: &mut u64) -> Option<u64> {
     *counter = counter.checked_add(1)?;
     Some(*counter)

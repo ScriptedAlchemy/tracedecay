@@ -5,7 +5,6 @@ use tracedecay_domain::canonical_text::encode_lowercase_hex;
 
 use super::*;
 
-#[hotpath::measure]
 pub(in crate::payload) fn read_verified_payload_text(
     path: &Path,
     expected_hash: &str,
@@ -21,7 +20,6 @@ pub(in crate::payload) fn read_verified_payload_text(
     )
 }
 
-#[hotpath::measure]
 pub(in crate::payload) fn read_verified_payload_text_with_checkpoint(
     path: &Path,
     expected_hash: &str,
@@ -39,7 +37,6 @@ pub(in crate::payload) fn read_verified_payload_text_with_checkpoint(
     .map(|verified| verified.map(|(content, authority)| (validated_string(content), authority)))
 }
 
-#[hotpath::measure]
 pub(super) fn read_stable_payload_bytes_with<F>(
     file: &mut fs::File,
     path: &Path,
@@ -58,7 +55,6 @@ where
     )
 }
 
-#[hotpath::measure]
 pub(super) fn read_stable_payload_bytes_bounded_with<F>(
     file: &mut fs::File,
     path: &Path,
@@ -79,7 +75,6 @@ where
     )
 }
 
-#[hotpath::measure]
 pub(super) fn read_stable_payload_bytes_bounded_with_checkpoint<F>(
     file: &mut fs::File,
     path: &Path,
@@ -135,7 +130,6 @@ where
     Ok(content)
 }
 
-#[hotpath::measure]
 pub(super) fn authority_for_content(
     path: &Path,
     identity: PayloadFileIdentity,
@@ -144,7 +138,6 @@ pub(super) fn authority_for_content(
     authority_for_content_with_checkpoint(path, identity, content, &mut || Ok(()))
 }
 
-#[hotpath::measure]
 pub(super) fn authority_for_content_with_checkpoint(
     path: &Path,
     identity: PayloadFileIdentity,
@@ -161,7 +154,6 @@ pub(super) fn authority_for_content_with_checkpoint(
     })
 }
 
-#[hotpath::measure]
 pub(super) fn validated_string(content: Vec<u8>) -> String {
     // SAFETY: every production caller obtains these bytes from
     // `authority_for_content_with_checkpoint`, whose single-pass scanner has
@@ -169,7 +161,6 @@ pub(super) fn validated_string(content: Vec<u8>) -> String {
     unsafe { String::from_utf8_unchecked(content) }
 }
 
-#[hotpath::measure]
 fn scan_utf8_content(
     content: &[u8],
     checkpoint: &mut impl FnMut() -> Result<(), LcmError>,
@@ -197,7 +188,6 @@ struct Utf8State {
     next_max: u8,
 }
 
-#[hotpath::measure_all]
 impl Utf8State {
     fn validate(&mut self, chunk: &[u8]) -> Result<u64, LcmError> {
         let mut chars = 0_u64;

@@ -79,7 +79,6 @@ pub struct WorkHandoffFrontierV1 {
     lineage: WorkHandoffLineageV1,
 }
 
-#[hotpath::measure_all]
 impl WorkHandoffFrontierV1 {
     pub fn new(
         task_id: TaskId,
@@ -184,7 +183,6 @@ impl<'de> Deserialize<'de> for WorkHandoffFrontierV1 {
     }
 }
 
-#[hotpath::measure]
 fn validate_entry_list(entries: &[String]) -> Result<(), WorkHandoffFrontierError> {
     if entries.len() > MAX_WORK_HANDOFF_ENTRIES {
         return Err(WorkHandoffFrontierError::InvalidList);

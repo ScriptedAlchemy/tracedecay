@@ -10,7 +10,6 @@ pub(super) const NGRAM_RAW_OVERRIDE: i64 = 1;
 /// A conservative pre-dedup n-gram scratch reservation for one document. The
 /// calculation is arithmetic-only so a page can be refused before any n-gram
 /// scratch allocation is attempted.
-#[hotpath::measure]
 pub(super) fn document_ngram_scratch(
     text_len: usize,
 ) -> Result<(usize, usize), CodeLexicalArtifactErrorV1> {
@@ -44,7 +43,6 @@ pub(super) fn document_ngram_scratch(
 
 /// Reserve the authorized pre-dedup n-gram scratch capacity, surfacing
 /// allocation failure as a typed I/O error.
-#[hotpath::measure]
 fn reserve_ngram_scratch(
     reservation_capacity: usize,
 ) -> Result<Vec<u32>, CodeLexicalArtifactErrorV1> {
@@ -60,7 +58,6 @@ fn reserve_ngram_scratch(
 }
 
 /// Canonical bounded value projection for out-of-transaction preparation.
-#[hotpath::measure]
 pub(super) fn document_ngrams(
     bytes: &[u8],
     control: &dyn CodeIndexExecutionControlV1,
@@ -106,7 +103,6 @@ pub(super) fn document_ngrams(
     Ok(ngrams)
 }
 
-#[hotpath::measure]
 pub(super) fn query_ngrams(bytes: &[u8]) -> BTreeSet<u32> {
     let width = bytes.len().min(3);
     if width == 0 {
@@ -115,7 +111,6 @@ pub(super) fn query_ngrams(bytes: &[u8]) -> BTreeSet<u32> {
     bytes.windows(width).map(pack_byte_ngram).collect()
 }
 
-#[hotpath::measure]
 fn pack_byte_ngram(bytes: &[u8]) -> u32 {
     debug_assert!((1..=3).contains(&bytes.len()));
     bytes

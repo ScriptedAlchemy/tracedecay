@@ -31,7 +31,6 @@ use tracedecay_store::{
 
 const PROJECT_MEMORY_RETENTION_CLASS: &str = "project-memory-canonical";
 
-#[hotpath::measure]
 fn ensure_optional_project_memory_read_active(
     read_control: Option<&FactReadControl>,
 ) -> FactStoreResult<()> {
@@ -359,7 +358,6 @@ pub(in crate::store::memory) struct SanitizedPayload {
     pub(in crate::store::memory) access: PayloadAccessState,
 }
 
-#[hotpath::measure]
 pub(in crate::store::memory) fn payload_metadata(metadata: &Value) -> Value {
     let mut metadata = metadata.clone();
     if let Some(object) = metadata.as_object_mut() {
@@ -368,7 +366,6 @@ pub(in crate::store::memory) fn payload_metadata(metadata: &Value) -> Value {
     metadata
 }
 
-#[hotpath::measure]
 pub(in crate::store::memory) fn sanitize_payload(
     content: &str,
     category: FactCategoryV1,
@@ -393,7 +390,6 @@ pub(in crate::store::memory) fn sanitize_payload(
     payload_from_parts(payload, category, receipt).map(Some)
 }
 
-#[hotpath::measure]
 pub(in crate::store::memory) fn verified_payload(
     content: &str,
     category: FactCategoryV1,
@@ -410,7 +406,6 @@ pub(in crate::store::memory) fn verified_payload(
     payload_from_parts(payload, category, receipt)
 }
 
-#[hotpath::measure]
 pub(in crate::store::memory) fn payload_material(
     content: &str,
     category: FactCategoryV1,
@@ -437,7 +432,6 @@ pub(in crate::store::memory) fn payload_material(
     Value::Object(material)
 }
 
-#[hotpath::measure]
 fn value_strings(value: &Value, field: &'static str) -> FactStoreResult<Vec<String>> {
     value
         .as_array()
@@ -459,7 +453,6 @@ fn value_strings(value: &Value, field: &'static str) -> FactStoreResult<Vec<Stri
         .collect()
 }
 
-#[hotpath::measure]
 fn payload_from_parts(
     payload: Value,
     category: FactCategoryV1,
@@ -534,7 +527,6 @@ fn payload_from_parts(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure]
 pub(in crate::store::memory) fn initial_batch(
     owner: &FactOwnerV1,
     operation_id: &ProvenanceId,

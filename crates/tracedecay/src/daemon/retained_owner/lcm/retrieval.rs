@@ -546,7 +546,6 @@ pub(super) async fn execute_expand_query(
 /// Requires non-blank text and clamps it to `max` characters, reporting
 /// whether it was truncated — the expand-query synthesis contract clamps
 /// oversized inputs with typed markers instead of refusing them.
-#[hotpath::measure]
 fn clamped_text(
     value: &str,
     max: usize,
@@ -558,7 +557,6 @@ fn clamped_text(
     Ok((clamped, truncated))
 }
 
-#[hotpath::measure]
 fn retrieval_query(
     session_id: &SessionId,
     provider: Option<&str>,
@@ -611,7 +609,6 @@ fn retrieval_query(
     .into_query())
 }
 
-#[hotpath::measure]
 fn retrieval_page(
     outcome: SessionRetrievalServiceOutcome,
 ) -> Result<
@@ -643,7 +640,6 @@ fn retrieval_page(
     }
 }
 
-#[hotpath::measure]
 fn retrieval_error(outcome: SessionRetrievalServiceOutcome) -> RetainedSurfaceExecutionErrorV1 {
     match outcome {
         SessionRetrievalServiceOutcome::ResetRequired { store_scope } => {
@@ -694,7 +690,6 @@ fn retrieval_error(outcome: SessionRetrievalServiceOutcome) -> RetainedSurfaceEx
     }
 }
 
-#[hotpath::measure]
 fn describe_error(outcome: LcmDescribeServiceOutcome) -> RetainedSurfaceExecutionErrorV1 {
     match outcome {
         LcmDescribeServiceOutcome::ResetRequired { store_scope } => {
@@ -742,7 +737,6 @@ fn describe_error(outcome: LcmDescribeServiceOutcome) -> RetainedSurfaceExecutio
     }
 }
 
-#[hotpath::measure]
 fn expand_error(outcome: LcmExpandServiceOutcome) -> RetainedSurfaceExecutionErrorV1 {
     match outcome {
         LcmExpandServiceOutcome::ResetRequired { store_scope } => reset_required_error(store_scope),
@@ -788,7 +782,6 @@ fn expand_error(outcome: LcmExpandServiceOutcome) -> RetainedSurfaceExecutionErr
     }
 }
 
-#[hotpath::measure]
 fn reset_required_error(
     store_scope: SessionRetrievalStoreScope,
 ) -> RetainedSurfaceExecutionErrorV1 {
@@ -802,7 +795,6 @@ fn reset_required_error(
     }
 }
 
-#[hotpath::measure]
 fn expand_result(
     outcome: LcmExpandServiceOutcome,
     provider: &str,
@@ -1068,7 +1060,6 @@ async fn expand_query_from_nodes(
 /// is `128_000` estimated bytes and twice the admitted ceiling, so every default
 /// `lcm_expand_query` would be refused before it read a single message. The
 /// assembly budget stays whole; only the retrieval window is bounded here.
-#[hotpath::measure]
 fn admitted_context_budget(requested_tokens: usize) -> ContextBudget {
     let max_bytes = requested_tokens
         .saturating_mul(4)
@@ -1080,7 +1071,6 @@ fn admitted_context_budget(requested_tokens: usize) -> ContextBudget {
     }
 }
 
-#[hotpath::measure]
 fn default_context_budget() -> ContextBudget {
     admitted_context_budget(ADMITTED_RETRIEVAL_BYTE_LIMIT / 4)
 }
@@ -1160,7 +1150,6 @@ mod refusal_tests {
     }
 }
 
-#[hotpath::measure]
 fn bounded_value(
     value: Option<u64>,
     default: usize,
@@ -1174,7 +1163,6 @@ fn bounded_value(
     }
 }
 
-#[hotpath::measure]
 fn bounded_limit(
     value: Option<u64>,
     default: usize,

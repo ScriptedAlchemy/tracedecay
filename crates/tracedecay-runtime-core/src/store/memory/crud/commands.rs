@@ -34,7 +34,6 @@ use tracedecay_store::{
     ProjectMemoryFactUpdateOutcomeV1, StoredFactV1,
 };
 
-#[hotpath::measure]
 pub(super) fn project_memory_feedback_action_label(
     action: ProjectMemoryFactFeedbackActionV1,
 ) -> &'static str {
@@ -44,7 +43,6 @@ pub(super) fn project_memory_feedback_action_label(
     }
 }
 
-#[hotpath::measure]
 pub(super) fn project_memory_feedback_delta(action: ProjectMemoryFactFeedbackActionV1) -> f64 {
     match action {
         ProjectMemoryFactFeedbackActionV1::Helpful => 0.05,
@@ -90,7 +88,6 @@ pub(super) async fn project_memory_update_feedback_projection_tx(
     Ok(())
 }
 
-#[hotpath::measure]
 fn project_memory_correction_batch(
     fact: &StoredFactV1,
     payload: FactPayloadV1,
@@ -158,7 +155,6 @@ fn project_memory_correction_batch(
     )
 }
 
-#[hotpath::measure]
 fn project_memory_removal_batch(
     owner: &FactOwnerV1,
     fact_id: &FactId,
@@ -188,7 +184,6 @@ fn project_memory_removal_batch(
     )
 }
 
-#[hotpath::measure]
 pub(super) fn commit_receipt_json(outcome: &'static str, receipt: &FactCommitReceipt) -> Value {
     json!({
         "outcome": outcome,

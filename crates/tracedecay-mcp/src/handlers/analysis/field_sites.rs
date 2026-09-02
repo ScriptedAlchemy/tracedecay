@@ -154,7 +154,6 @@ struct FieldSite {
     kind: FieldRefKind,
 }
 
-#[hotpath::measure]
 fn find_field_references(source: &str, field: &str) -> Vec<FieldSite> {
     let bytes = source.as_bytes();
     let needle = format!(".{field}");
@@ -184,7 +183,6 @@ fn find_field_references(source: &str, field: &str) -> Vec<FieldSite> {
     out
 }
 
-#[hotpath::measure]
 fn classify_field_reference(source: &str, after_name: usize) -> FieldRefKind {
     let bytes = source.as_bytes();
     let mut probe = after_name;
@@ -232,7 +230,6 @@ fn classify_field_reference(source: &str, after_name: usize) -> FieldRefKind {
     }
 }
 
-#[hotpath::measure]
 fn has_mut_borrow_prefix(source: &str, idx: usize) -> bool {
     let bytes = source.as_bytes();
     let mut probe = idx;
@@ -249,14 +246,12 @@ fn has_mut_borrow_prefix(source: &str, idx: usize) -> bool {
     window.ends_with("&mut")
 }
 
-#[hotpath::measure]
 fn line_at(source: &str, byte: usize) -> Option<&str> {
     let line_start = source[..byte].rfind('\n').map_or(0, |i| i + 1);
     let line_end = source[byte..].find('\n').map_or(source.len(), |i| byte + i);
     source.get(line_start..line_end)
 }
 
-#[hotpath::measure]
 fn line_is_comment(source: &str, byte: usize) -> bool {
     let line_start = source[..byte].rfind('\n').map_or(0, |i| i + 1);
     let line = &source[line_start..];

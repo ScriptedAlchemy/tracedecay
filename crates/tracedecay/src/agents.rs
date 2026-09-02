@@ -19,12 +19,10 @@ static ADVERTISED_MCP_TOOLS: OnceLock<
     Vec<tracedecay_agent_hosts::ports::mcp_tools::AdvertisedToolV1>,
 > = OnceLock::new();
 
-#[hotpath::measure]
 fn advertised_mcp_tools() -> Vec<tracedecay_agent_hosts::ports::mcp_tools::AdvertisedToolV1> {
     ADVERTISED_MCP_TOOLS.get().cloned().unwrap_or_default()
 }
 
-#[hotpath::measure]
 fn build_advertised_mcp_tools(
     definitions: Vec<tracedecay_mcp::ToolDefinition>,
 ) -> Vec<tracedecay_agent_hosts::ports::mcp_tools::AdvertisedToolV1> {
@@ -48,7 +46,6 @@ fn build_advertised_mcp_tools(
 }
 
 /// Wires the root MCP catalog into extracted agent-host installers.
-#[hotpath::measure]
 pub fn register_mcp_tool_catalog_ports() -> Result<()> {
     let definitions = tracedecay_mcp::get_tool_definitions().map_err(|error| {
         TraceDecayError::project_route(

@@ -42,7 +42,6 @@ pub enum RemoteCredentialUseV1 {
     Promote,
 }
 
-#[hotpath::measure_all]
 impl RemoteCredentialUseV1 {
     #[hotpath::skip]
     pub const fn credential_class(self) -> RemoteCredentialClassV1 {
@@ -117,7 +116,6 @@ pub enum RemoteCredentialAuthorityRecordV1 {
     },
 }
 
-#[hotpath::measure_all]
 impl RemoteCredentialAuthorityRecordV1 {
     fn fingerprint(&self) -> &RemoteCredentialFingerprintV1 {
         match self {
@@ -231,7 +229,6 @@ pub struct RemoteAuthenticatedSessionV1 {
     admitted_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl RemoteAuthenticatedSessionV1 {
     #[hotpath::skip]
     pub const fn use_case(&self) -> RemoteCredentialUseV1 {
@@ -553,7 +550,6 @@ impl RemoteSessionBoundProtocolBodyV1 for PromotionConfirmationV1 {
     }
 }
 
-#[hotpath::measure]
 fn bind_protocol_body<Request>(
     session: &RemoteAuthenticatedSessionV1,
     request: &RemoteProtocolRequestV1<Request>,
@@ -594,7 +590,6 @@ pub struct RemoteCredentialAdmissionServiceV1<S> {
     store: S,
 }
 
-#[hotpath::measure_all]
 impl<S> RemoteCredentialAdmissionServiceV1<S> {
     #[hotpath::skip]
     pub const fn new(store: S) -> Self {
@@ -678,7 +673,6 @@ where
     }
 }
 
-#[hotpath::measure]
 fn validate_state(
     record: &RemoteCredentialAuthorityRecordV1,
     observed_at: UtcMicros,
@@ -693,7 +687,6 @@ fn validate_state(
     }
 }
 
-#[hotpath::measure]
 fn map_lookup_error(error: RemoteCredentialLookupErrorV1) -> RemoteCredentialAdmissionErrorV1 {
     match error {
         RemoteCredentialLookupErrorV1::Unavailable => RemoteCredentialAdmissionErrorV1::Unavailable,

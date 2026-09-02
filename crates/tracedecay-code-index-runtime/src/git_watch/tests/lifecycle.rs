@@ -36,6 +36,34 @@ async fn pinned_project_config_is_the_only_activation_authority() {
 }
 
 #[tokio::test]
+async fn linked_worktrees_require_explicit_watch_admission() {
+    let (_container, primary, linked) = linked_worktree_fixture();
+    let mut config = fast_watch_config();
+    config.watch_linked_worktrees = false;
+    assert!(!config.watch_linked_worktrees);
+    let watcher = GitWatcher::new(config.clone());
+
+    assert_eq!(
+        watcher.ensure_watching(&primary).await,
+        GitWatcherAdmission::Ready
+    );
+    assert_eq!(
+        watcher.ensure_watching(&linked).await,
+        GitWatcherAdmission::LinkedWorktreeDisabled
+    );
+
+    let mut opted_in = config;
+    opted_in.watch_linked_worktrees = true;
+    assert_eq!(
+        watcher
+            .ensure_watching_with_config(&linked, &opted_in)
+            .await,
+        GitWatcherAdmission::Ready
+    );
+    assert!(watcher.shutdown().await.is_clean());
+}
+
+#[tokio::test]
 async fn linked_worktree_registration_reconciles_its_pinned_timing() {
     let (_container, primary, linked) = linked_worktree_fixture();
     let mut primary_config = fast_watch_config();

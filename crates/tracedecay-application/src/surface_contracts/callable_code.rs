@@ -25,7 +25,6 @@ pub struct CallableCodeSurfaceMeta {
     pub cursor: Option<OpaqueCursor>,
 }
 
-#[hotpath::measure_all]
 impl CallableCodeSurfaceMeta {
     pub fn into_application(self, page: PageRequest) -> RetrievalRequestMeta {
         let Self {
@@ -53,7 +52,6 @@ pub struct CodeExactOccurrenceSurfaceRequest {
     pub meta: CallableCodeSurfaceMeta,
 }
 
-#[hotpath::measure_all]
 impl CodeExactOccurrenceSurfaceRequest {
     pub fn into_application_request(
         self,
@@ -86,7 +84,6 @@ pub struct CodePhraseSearchSurfaceRequest {
     pub meta: CallableCodeSurfaceMeta,
 }
 
-#[hotpath::measure_all]
 impl CodePhraseSearchSurfaceRequest {
     pub fn into_application_request(
         self,
@@ -165,7 +162,6 @@ pub enum PrimitiveCodeSurfaceRequest {
     Callers(CodeCallersSurfaceRequest),
 }
 
-#[hotpath::measure]
 pub fn primitive_code_into_primitive(
     request: PrimitiveCodeSurfaceRequest,
     sanitizer_revision: SanitizerRevision,
@@ -212,7 +208,6 @@ pub fn primitive_code_into_primitive(
     })
 }
 
-#[hotpath::measure_all]
 impl CodeSymbolSearchSurfaceRequest {
     pub fn into_primitive_request(
         self,
@@ -244,7 +239,6 @@ pub struct CodeCalleesSurfaceRequest {
     pub meta: CallableCodeSurfaceMeta,
 }
 
-#[hotpath::measure_all]
 impl CodeCalleesSurfaceRequest {
     pub fn into_application_request(self, page: PageRequest) -> CodeRelationRequest {
         CodeRelationRequest {
@@ -265,7 +259,6 @@ pub struct CodeFacetSurfaceRequest {
     pub meta: CallableCodeSurfaceMeta,
 }
 
-#[hotpath::measure_all]
 impl CodeFacetSurfaceRequest {
     pub fn into_application_request(self, page: PageRequest) -> CodeFacetRequest {
         CodeFacetRequest {
@@ -283,7 +276,6 @@ pub struct CodeTimelineSurfaceRequest {
     pub meta: CallableCodeSurfaceMeta,
 }
 
-#[hotpath::measure_all]
 impl CodeTimelineSurfaceRequest {
     pub fn into_application_request(self, page: PageRequest) -> CodeTimelineRequest {
         CodeTimelineRequest {
@@ -301,7 +293,6 @@ pub struct CodeNavigationSurfaceRequest {
     pub meta: CallableCodeSurfaceMeta,
 }
 
-#[hotpath::measure_all]
 impl CodeNavigationSurfaceRequest {
     pub fn into_application_request(self, page: PageRequest) -> CodeNavigationRequest {
         CodeNavigationRequest {

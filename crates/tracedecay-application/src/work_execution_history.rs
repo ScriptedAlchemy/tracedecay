@@ -186,7 +186,6 @@ where
     })
 }
 
-#[hotpath::measure]
 fn terminal_digest(terminal: &WorkTerminalEvidenceV1) -> &ManifestDigest {
     match terminal {
         WorkTerminalEvidenceV1::Succeeded {

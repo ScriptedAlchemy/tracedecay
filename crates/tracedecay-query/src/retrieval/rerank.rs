@@ -344,7 +344,6 @@ where
     }
 }
 
-#[hotpath::measure]
 fn valid_pre_rerank_order(candidates: &[RankedCandidate]) -> bool {
     let mut approximate_seen = false;
     let mut anchors = BTreeSet::new();
@@ -357,7 +356,6 @@ fn valid_pre_rerank_order(candidates: &[RankedCandidate]) -> bool {
     })
 }
 
-#[hotpath::measure]
 fn apply_order(
     all: &[RankedCandidate],
     approximate_start: usize,
@@ -399,7 +397,6 @@ fn apply_order(
     Some(result)
 }
 
-#[hotpath::measure]
 fn executor_fallback(
     original: Vec<RankedCandidate>,
     failure: LocalRerankFailureV1,
@@ -425,14 +422,12 @@ fn executor_fallback(
     }
 }
 
-#[hotpath::measure]
 fn deadline_exhausted(policy: &RerankPolicy, control: &dyn RerankExecutionControlV1) -> bool {
     policy
         .deadline_micros
         .is_some_and(|deadline| control.elapsed_micros() >= deadline)
 }
 
-#[hotpath::measure]
 fn remaining_deadline(
     policy: &RerankPolicy,
     control: &dyn RerankExecutionControlV1,
@@ -442,7 +437,6 @@ fn remaining_deadline(
         .map(|deadline| deadline.saturating_sub(control.elapsed_micros()))
 }
 
-#[hotpath::measure]
 fn complete(
     ordered_candidates: Vec<RankedCandidate>,
     usage: RerankUsageV1,
@@ -456,7 +450,6 @@ fn complete(
     }
 }
 
-#[hotpath::measure]
 fn fallback(
     ordered_candidates: Vec<RankedCandidate>,
     public_status: OptionalStagePublicStatus,
@@ -474,7 +467,6 @@ fn fallback(
     }
 }
 
-#[hotpath::measure]
 fn budget_fallback(
     ordered_candidates: Vec<RankedCandidate>,
     mut usage: RerankUsageV1,

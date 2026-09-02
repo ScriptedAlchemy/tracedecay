@@ -202,7 +202,6 @@ pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 32] = [
 /// table quadratic in schema generations and put multiple seconds of pure CPU
 /// on the daemon startup path. Build it once per process and clone the
 /// assembled value instead.
-#[hotpath::measure]
 pub fn work_executable_binding_registry()
 -> Result<ExecutableBindingRegistryV1, CatalogValidationError> {
     static REGISTRY: LazyLock<Result<ExecutableBindingRegistryV1, CatalogValidationError>> =
@@ -210,7 +209,6 @@ pub fn work_executable_binding_registry()
     REGISTRY.clone()
 }
 
-#[hotpath::measure]
 fn build_work_executable_binding_registry()
 -> Result<ExecutableBindingRegistryV1, CatalogValidationError> {
     let bindings = vec![
@@ -447,7 +445,6 @@ fn build_work_executable_binding_registry()
 /// Transport adapters use this lookup for lifecycle metadata instead of
 /// reproducing the registry's effect, deadline, cancellation, or idempotency
 /// contract beside their own name normalization.
-#[hotpath::measure]
 pub fn work_executable_binding(
     operation_id: &OperationId,
 ) -> Result<Option<ExecutableBindingV1>, CatalogValidationError> {
@@ -457,7 +454,6 @@ pub fn work_executable_binding(
         .cloned())
 }
 
-#[hotpath::measure]
 pub fn work_executable_catalog_digest() -> Result<ManifestDigest, CatalogValidationError> {
     let registry = work_executable_binding_registry()?;
     canonical_sha256(&(
@@ -470,7 +466,6 @@ pub fn work_executable_catalog_digest() -> Result<ManifestDigest, CatalogValidat
     })
 }
 
-#[hotpath::measure]
 pub(crate) fn available<Request, Output>(
     operation: &str,
     route_path: &str,
@@ -522,12 +517,10 @@ where
     Ok(ExecutableBindingAvailabilityV1::available(binding))
 }
 
-#[hotpath::measure]
 fn invalid_identity(field: &'static str, reason: &'static str) -> CatalogValidationError {
     CatalogValidationError::InvalidValue { field, reason }
 }
 
-#[hotpath::measure]
 fn work_manifest(
     operation: &str,
     effect: EffectClass,
@@ -635,7 +628,6 @@ fn work_manifest(
     })
 }
 
-#[hotpath::measure]
 fn terminal_states(read_only: bool) -> Vec<TerminalState> {
     let mut states = vec![
         TerminalState::Completed,
@@ -650,7 +642,6 @@ fn terminal_states(read_only: bool) -> Vec<TerminalState> {
     states
 }
 
-#[hotpath::measure]
 fn schema_ref(id: String) -> Result<SchemaRef, CatalogValidationError> {
     let schema_id = SchemaId::new(id).map_err(|_| CatalogValidationError::InvalidValue {
         field: "work schema ID",

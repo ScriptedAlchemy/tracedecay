@@ -33,7 +33,6 @@ pub struct GrepRequestV1 {
     pub window: PrimitiveWindowV1,
 }
 
-#[hotpath::measure_all]
 impl GrepRequestV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         validate_nonempty_pattern(&self.pattern, "grep pattern", false)?;
@@ -79,7 +78,6 @@ pub struct AstGrepRequestV1 {
     pub window: PrimitiveWindowV1,
 }
 
-#[hotpath::measure_all]
 impl AstGrepRequestV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         validate_nonempty_pattern(&self.pattern, "AST grep pattern", true)?;
@@ -123,7 +121,6 @@ pub struct ComplexityRequestV1 {
     pub window: PrimitiveWindowV1,
 }
 
-#[hotpath::measure_all]
 impl ComplexityRequestV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         if self.window.limit > MAX_ANALYSIS_RESULTS_V1 {
@@ -178,7 +175,6 @@ pub struct RedundancyRequestV1 {
     pub cursor: Option<OpaqueCursor>,
 }
 
-#[hotpath::measure_all]
 impl RedundancyRequestV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         if self.max_pairs > MAX_REDUNDANCY_PAIRS_V1
@@ -286,7 +282,6 @@ pub struct DependencyDepthRequestV1 {
     pub window: PrimitiveWindowV1,
 }
 
-#[hotpath::measure_all]
 impl DependencyDepthRequestV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         if self.window.limit > MAX_ANALYSIS_RESULTS_V1 {
@@ -404,7 +399,6 @@ pub trait DependencyDepthAuthorityV1 {
     ) -> PrimitiveFutureV1<'a, DependencyDepthResultV1>;
 }
 
-#[hotpath::measure]
 fn validate_nonempty_pattern(
     value: &str,
     field: &'static str,

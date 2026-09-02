@@ -54,7 +54,6 @@ enum RmcpResponseWriteFailure {
     Transport(std::io::Error),
 }
 
-#[hotpath::measure_all]
 impl RmcpResponseWriteFailure {
     fn into_io_error(self) -> std::io::Error {
         match self {
@@ -67,7 +66,6 @@ impl RmcpResponseWriteFailure {
     }
 }
 
-#[hotpath::measure_all]
 impl BrokerStreamTransport {
     pub(super) fn new(stream: BrokerStream) -> Self {
         let (reader, writer) = stream.into_owned_split();
@@ -279,9 +277,7 @@ impl BrokerStreamTransport {
     ) {
         loop {
             if accepted_any_request.load(std::sync::atomic::Ordering::Acquire)
-                && active_requests
-                    .lock()
-                    .is_ok_and(|active| active.is_empty())
+                && active_requests.lock().is_ok_and(|active| active.is_empty())
             {
                 return;
             }

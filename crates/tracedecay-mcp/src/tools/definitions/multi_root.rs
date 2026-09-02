@@ -5,7 +5,6 @@ use serde_json::json;
 use super::{def, def_rw, required_object_schema};
 use crate::ToolDefinition;
 
-#[hotpath::measure]
 fn selector_schema() -> serde_json::Value {
     required_object_schema(
         json!({
@@ -22,7 +21,6 @@ fn selector_schema() -> serde_json::Value {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_multi_root_scope_set_read() -> ToolDefinition {
     def(
         "tracedecay_multi_root_scope_set_read",
@@ -40,7 +38,6 @@ pub(super) fn def_multi_root_scope_set_read() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_multi_root_scope_set_compare_and_swap() -> ToolDefinition {
     def_rw(
         "tracedecay_multi_root_scope_set_compare_and_swap",
@@ -69,7 +66,6 @@ pub(super) fn def_multi_root_scope_set_compare_and_swap() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_multi_root_execute() -> ToolDefinition {
     def(
         "tracedecay_multi_root_execute",

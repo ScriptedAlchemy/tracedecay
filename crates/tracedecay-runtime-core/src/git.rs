@@ -90,7 +90,6 @@ impl From<GitProgramUnavailable> for GitCommandError {
 ///   3. A typed unavailable result. Production callers must not reintroduce a
 ///      bare-program fallback because that delegates identity back to ambient
 ///      `PATH` at spawn time.
-#[hotpath::measure]
 pub fn try_git_program() -> Result<&'static OsStr, GitProgramUnavailable> {
     static PROGRAM: OnceLock<Result<OsString, GitProgramUnavailable>> = OnceLock::new();
     PROGRAM
@@ -100,7 +99,6 @@ pub fn try_git_program() -> Result<&'static OsStr, GitProgramUnavailable> {
         .map_err(|error| *error)
 }
 
-#[hotpath::measure]
 fn resolve_git_program() -> Result<OsString, GitProgramUnavailable> {
     resolve_git_program_from(
         std::env::var_os("GIT").as_deref(),
@@ -110,7 +108,6 @@ fn resolve_git_program() -> Result<OsString, GitProgramUnavailable> {
     )
 }
 
-#[hotpath::measure]
 fn resolve_git_program_from(
     git_override: Option<&OsStr>,
     path: Option<&OsStr>,
@@ -140,7 +137,6 @@ fn resolve_git_program_from(
 /// On Windows, each `PATH` entry is probed with every `PATHEXT` suffix (and the
 /// bare name) so `git.exe` resolves from `git`. On Unix, the bare name is probed
 /// and the entry must carry at least one execute bit.
-#[hotpath::measure]
 fn find_in_path(
     name: &str,
     path: &OsStr,
@@ -168,7 +164,6 @@ fn find_in_path(
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn probe_dir(dir: &Path, name: &str, pathext: Option<&OsStr>) -> Option<PathBuf> {
     // PATHEXT holds the executable suffixes (";"-separated), e.g.
     // ".COM;.EXE;.BAT;.CMD". Fall back to a sane default when unset.
@@ -195,27 +190,23 @@ fn probe_dir(dir: &Path, name: &str, pathext: Option<&OsStr>) -> Option<PathBuf>
 }
 
 #[cfg(not(windows))]
-#[hotpath::measure]
 fn probe_dir(dir: &Path, name: &str) -> Option<PathBuf> {
     let candidate = dir.join(name);
     is_executable_file(&candidate).then_some(candidate)
 }
 
 #[cfg(unix)]
-#[hotpath::measure]
 fn is_executable_file(path: &Path) -> bool {
     path.metadata()
         .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn is_executable_file(path: &Path) -> bool {
     path.is_file()
 }
 
 #[cfg(not(any(unix, windows)))]
-#[hotpath::measure]
 fn is_executable_file(path: &Path) -> bool {
     path.is_file()
 }
@@ -224,7 +215,6 @@ fn is_executable_file(path: &Path) -> bool {
 /// the command [`Output`] on a zero exit status, or `None` on spawn failure or a
 /// non-zero exit. Use this when the raw, untrimmed stdout matters (multi-line
 /// output such as `git reflog` or `git log`).
-#[hotpath::measure]
 pub fn git_output(repo_root: &Path, args: &[&str]) -> Option<Output> {
     let output = bounded_git_output(repo_root, args, &GitCommandBounds::default()).ok()?;
     output.status.success().then_some(output)
@@ -233,7 +223,6 @@ pub fn git_output(repo_root: &Path, args: &[&str]) -> Option<Output> {
 /// Runs `git <args>` with bounded output, cooperative cancellation, and an
 /// in-flight deadline. Pipes are drained concurrently so stderr cannot
 /// deadlock a stdout-heavy read, while retained bytes remain bounded.
-#[hotpath::measure]
 pub fn bounded_git_output(
     repo_root: &Path,
     args: &[&str],
@@ -261,7 +250,6 @@ pub fn bounded_git_output(
 /// environment. This function owns only process I/O, cancellation, deadline,
 /// and termination. [`bounded_git_output`] is the read-only Git wrapper that
 /// applies `TraceDecay`'s ambient-environment sanitization.
-#[hotpath::measure]
 pub fn bounded_command_output(
     command: Command,
     stdin: Option<&[u8]>,
@@ -456,7 +444,6 @@ async fn terminate_child(child: &mut tokio::process::Child) {
 /// `String`, or `None` on spawn failure, non-zero exit, non-UTF-8 output, or
 /// empty (after trimming) output. Convenience wrapper over [`git_output`] for
 /// the common single-value reads (`rev-parse`, `config --get`, ...).
-#[hotpath::measure]
 pub fn git_capture(repo_root: &Path, args: &[&str]) -> Option<String> {
     let output = git_output(repo_root, args)?;
     let text = String::from_utf8(output.stdout).ok()?;
@@ -479,7 +466,6 @@ pub enum GitCaptureAtResult {
 /// the child's initial `getcwd` when passed through [`Command::current_dir`].
 /// Git's `-C` resolves the repository after process startup and avoids that
 /// pre-argument cwd lookup. The child is killed and reaped at the hard deadline.
-#[hotpath::measure]
 pub fn git_capture_at(repo_root: &Path, args: &[&str]) -> GitCaptureAtResult {
     let Ok(mut command) = git_command_at(repo_root, args) else {
         return GitCaptureAtResult::Failed;
@@ -505,7 +491,6 @@ pub fn git_capture_at(repo_root: &Path, args: &[&str]) -> GitCaptureAtResult {
     }
 }
 
-#[hotpath::measure]
 fn git_command_at(repo_root: &Path, args: &[&str]) -> Result<Command, GitProgramUnavailable> {
     let mut command = Command::new(try_git_program()?);
     // Repository selection must come from `-C <repo_root>`, never from
@@ -525,7 +510,6 @@ enum ChildCaptureResult {
     TimedOut,
 }
 
-#[hotpath::measure]
 fn capture_child_with_deadline(mut child: Child, timeout: Duration) -> ChildCaptureResult {
     let deadline = Instant::now() + timeout;
     loop {

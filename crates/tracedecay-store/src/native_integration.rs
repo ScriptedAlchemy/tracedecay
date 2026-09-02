@@ -41,7 +41,6 @@ pub enum NativeIntegrationStoreError {
     InvalidData(String),
 }
 
-#[hotpath::measure_all]
 impl NativeIntegrationStoreError {
     pub fn unavailable(source: impl std::fmt::Display) -> Self {
         Self::Unavailable(source.to_string())
@@ -65,7 +64,6 @@ pub struct NativeIntegrationRecordV1 {
     pub terminal_receipt: Option<NativeIntegrationReceiptV1>,
 }
 
-#[hotpath::measure_all]
 impl NativeIntegrationRecordV1 {
     pub fn validate(&self) -> Result<(), DomainError> {
         self.preview.validate()?;

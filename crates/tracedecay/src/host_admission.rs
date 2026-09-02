@@ -103,7 +103,6 @@ static SESSION_CAPTURE_TEST_RESIDENT_MEMORY: LazyLock<Arc<ProcessResidentMemoryV
 /// same authority production and the scheduler's test fallback use — keeps
 /// the background CPU width consistent with any later worker-plan install in
 /// the same test process instead of poisoning it with an ad-hoc width.
-#[hotpath::measure]
 pub(crate) fn ensure_process_background_cpu_authority() -> Result<()> {
     if process_background_cpu().is_none() {
         let memory = SESSION_CAPTURE_TEST_RESIDENT_MEMORY.snapshot();
@@ -146,7 +145,6 @@ pub struct HostAdmissionTestRuntimeV1 {
     _database_scope: DaemonDatabaseScope,
 }
 
-#[hotpath::measure_all]
 impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     #[hotpath::skip]
@@ -1227,7 +1225,6 @@ impl HostAdmissionTestRuntimeV1 {
     }
 }
 
-#[hotpath::measure]
 fn canonical_session_domain_sha256(path: &Path) -> Result<[u8; 32]> {
     tracedecay_rusqlite_runtime::canonical_session_domain_content_sha256(path).map_err(|error| {
         TraceDecayError::Database {
@@ -1251,7 +1248,6 @@ const fn registered_authority_unavailable_outcome() -> HostAdmissionOutcome {
 #[derive(Clone)]
 pub struct ProjectScopedTestRuntimeV1(Arc<HostAdmissionTestRuntimeV1>);
 
-#[hotpath::measure_all]
 impl ProjectScopedTestRuntimeV1 {
     #[doc(hidden)]
     pub fn new(runtime: impl Into<Arc<HostAdmissionTestRuntimeV1>>) -> Result<Self> {
@@ -1282,7 +1278,6 @@ impl std::ops::Deref for ProjectScopedTestRuntimeV1 {
     }
 }
 
-#[hotpath::measure]
 fn validate_registered_authorities(
     brain_id: &BrainId,
     profile_id: &UserProfileId,
@@ -1372,7 +1367,6 @@ fn prepare_host_admission_test_profile_root(profile_root: &Path) -> Result<()> {
 /// identity marker (initializing a real git repository first when the fixture
 /// root has none). Nothing is written into the working tree and the registry
 /// fixture state stays exactly what each test arranged.
-#[hotpath::measure]
 fn prepare_host_admission_test_project_root(
     project_root: &Path,
     project_id: &ProjectId,

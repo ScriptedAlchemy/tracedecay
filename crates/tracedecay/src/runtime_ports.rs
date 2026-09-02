@@ -9,12 +9,13 @@
 //!
 //! Only the composition root can fill them, and it must do so before any
 //! transcript ingest, host installer, hook, or branch lock runs. That is what
-//! [`register_runtime_ports`] is: the single, idempotent, root-owned wiring
-//! call. Process entry paths invoke it — `src/main.rs` for every CLI and
-//! daemon invocation, and the composition-root registry wrappers
-//! (`join_standalone_session_registry`, session-runtime shutdown, host
-//! admission) for embedded and integration-test runtimes that never pass
-//! through `main`. The extracted store-runtime crate never calls this.
+//! [`register_runtime_ports`] is: the complete, idempotent, root-owned wiring
+//! call. The CLI first installs the non-catalog subset and then completes the
+//! registration for commands that can reach host integration. Composition-root
+//! registry wrappers (`join_standalone_session_registry`, session-runtime
+//! shutdown, host admission) invoke the complete form for embedded and
+//! integration-test runtimes that never pass through `main`. The extracted
+//! store-runtime crate never calls this.
 //!
 //! Every underlying `register` is `OnceLock::set`, so repeated calls are safe
 //! and the first registration wins.
@@ -34,16 +35,25 @@ use tracedecay_domain::errors::Result;
 /// which fail quietly (or fail closed) when the root never registered.
 #[hotpath::measure(label = "runtime_ports.register")]
 pub fn register_runtime_ports() -> Result<()> {
+    register_runtime_ports_without_mcp_tool_catalog();
+    crate::agents::register_mcp_tool_catalog_ports()
+}
+
+/// Installs the runtime ports needed by ordinary command execution without
+/// assembling the agent-host MCP schema catalog.
+///
+/// `tracedecay tool` resolves its selected operation itself, while daemon and
+/// host lifecycle entrypoints still call [`register_runtime_ports`] and retain
+/// the eager catalog failure check before serving or changing integrations.
+#[hotpath::measure(label = "runtime_ports.register_without_mcp_catalog")]
+pub fn register_runtime_ports_without_mcp_tool_catalog() {
     register_session_ports();
     register_agent_host_ports();
-    crate::agents::register_mcp_tool_catalog_ports()?;
     tracedecay_code_index_runtime::install_application_catalog_snapshot(
         compose_application_catalog_snapshot,
     );
-    Ok(())
 }
 
-#[hotpath::measure]
 fn compose_application_catalog_snapshot() -> std::result::Result<
     tracedecay_tool_catalog::CatalogSnapshotV1,
     tracedecay_code_index_runtime::ApplicationCatalogSnapshotErrorV1,
@@ -57,7 +67,6 @@ fn compose_application_catalog_snapshot() -> std::result::Result<
 // tracedecay_sessions::host_ports
 // ---------------------------------------------------------------------------
 
-#[hotpath::measure]
 fn register_session_ports() {
     use tracedecay_sessions::host_ports;
 
@@ -68,7 +77,6 @@ fn register_session_ports() {
     host_ports::unregistered_admission::register(unregistered_admission);
 }
 
-#[hotpath::measure]
 fn schedule_user_session_review<'a>(
     provider: &'a str,
     session_id: Option<&'a str>,
@@ -84,7 +92,6 @@ fn schedule_user_session_review<'a>(
 /// The standalone Codex entry points walk a rollout and count what they *would*
 /// admit; every capture through this facade fails closed because no registered
 /// database is attached.
-#[hotpath::measure]
 fn unregistered_admission(
     scope: tracedecay_sessions::host_ports::unregistered_admission::Scope,
 ) -> Box<dyn tracedecay_sessions::admission::HostAdmission> {
@@ -104,7 +111,6 @@ fn unregistered_admission(
 // tracedecay_agent_hosts::ports
 // ---------------------------------------------------------------------------
 
-#[hotpath::measure]
 fn register_agent_host_ports() {
     use tracedecay_agent_hosts::ports;
     use tracedecay_automation_runtime::ports as automation_ports;
@@ -160,7 +166,6 @@ fn run_codex_app_server_prompt(
 ///
 /// The port is a plain `fn` returning a boxed future so the extracted crate
 /// needs no async-trait machinery.
-#[hotpath::measure]
 fn daemon_tool_json<'a>(
     project_root: Option<&'a Path>,
     tool_name: &'a str,
@@ -182,7 +187,6 @@ fn daemon_tool_json<'a>(
     ))
 }
 
-#[hotpath::measure]
 fn resolve_project_root_with_identity(
     start: &Path,
 ) -> Pin<Box<dyn Future<Output = Option<std::path::PathBuf>> + Send + '_>> {
@@ -201,7 +205,6 @@ fn resolve_hook_scope(
         .map_err(|error| error.to_string())
 }
 
-#[hotpath::measure]
 fn notify_hook_event(
     project_root: &Path,
     event: tracedecay_hooks::DaemonHookEvent,
@@ -214,14 +217,12 @@ fn notify_hook_event(
     ))
 }
 
-#[hotpath::measure]
 fn hook_timings_enabled(project_root: &Path) -> Option<bool> {
     crate::config::cached_telemetry_config(project_root)
         .ok()
         .map(|telemetry| telemetry.timings)
 }
 
-#[hotpath::measure]
 fn resolve_hook_store_layout(
     project_root: &Path,
 ) -> Pin<Box<dyn Future<Output = Result<tracedecay_runtime_core::storage::StoreLayout>> + Send + '_>>
@@ -232,7 +233,6 @@ fn resolve_hook_store_layout(
     ))
 }
 
-#[hotpath::measure]
 fn cursor_catch_up_ingest_max_bytes() -> u64 {
     tracedecay_agent_hosts::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES
 }

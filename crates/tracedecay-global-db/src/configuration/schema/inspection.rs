@@ -37,7 +37,6 @@ struct IndexColumnDefinition {
     collation: String,
 }
 
-#[hotpath::measure]
 fn normalize_definition(sql: &str) -> String {
     sql.trim_end_matches(';').to_owned()
 }

@@ -36,7 +36,6 @@ use super::{ApplicationSurfaceAdapterError, invoke_registered_http};
 use tracedecay_daemon_protocol::DaemonInvocationExecutor;
 use tracedecay_daemon_protocol::{WorkApplicationInvocationV1, WorkApplicationOutcomeV1};
 
-#[hotpath::measure]
 pub(super) fn router_with_executor(
     executor: Arc<dyn DaemonInvocationExecutor>,
 ) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
@@ -46,7 +45,6 @@ pub(super) fn router_with_executor(
     }))
 }
 
-#[hotpath::measure]
 pub(super) fn dashboard_router_with_executor(
     executor: Arc<dyn DaemonInvocationExecutor>,
 ) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
@@ -58,7 +56,6 @@ pub(super) fn dashboard_router_with_executor(
 
 /// Refuse to mount Work unless the executable catalog advertises every
 /// canonical descriptor operation at the application path this build serves.
-#[hotpath::measure]
 pub(crate) fn validate_catalog_bindings() -> Result<(), ApplicationSurfaceAdapterError> {
     let registry = tracedecay_application::work_executable_binding_registry()
         .map_err(ApplicationSurfaceAdapterError::CatalogValidation)?;

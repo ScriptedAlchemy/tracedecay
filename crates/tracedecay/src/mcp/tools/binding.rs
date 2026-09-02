@@ -283,7 +283,6 @@ const MCP_TOOL_BINDING_SPECS: &[McpToolBinding] = &[
 pub(crate) static MCP_TOOL_BINDINGS: LazyLock<Vec<McpToolBinding>> =
     LazyLock::new(assemble_mcp_tool_bindings);
 
-#[hotpath::measure]
 fn assemble_mcp_tool_bindings() -> Vec<McpToolBinding> {
     let readers: HashSet<&str> = tracedecay_mcp::registered_project_reader_tool_names()
         .into_iter()
@@ -328,7 +327,6 @@ fn assemble_mcp_tool_bindings() -> Vec<McpToolBinding> {
 /// indexed by name once per process rather than scanned each time.
 /// `MCP_TOOL_BINDINGS` stays the authority for static rows: a duplicate name
 /// would collapse in the index, which `every_tool_is_bound_once` forbids.
-#[hotpath::measure]
 fn binding(tool_name: &str) -> Option<&'static McpToolBinding> {
     static BY_NAME: LazyLock<HashMap<&'static str, &'static McpToolBinding>> =
         LazyLock::new(|| {
@@ -341,7 +339,6 @@ fn binding(tool_name: &str) -> Option<&'static McpToolBinding> {
 }
 
 /// The statically bound dispatch group, if this tool has one.
-#[hotpath::measure]
 pub(crate) fn dispatch_group_for_tool(tool_name: &str) -> Option<McpToolDispatchGroup> {
     binding(tool_name)
         .and_then(|binding| binding.group)
@@ -349,7 +346,6 @@ pub(crate) fn dispatch_group_for_tool(tool_name: &str) -> Option<McpToolDispatch
         .or_else(|| workflow_operation_for_tool(tool_name).map(|_| McpToolDispatchGroup::Workflow))
 }
 
-#[hotpath::measure]
 pub(super) fn tool_accepts_registered_project_selector(tool_name: &str) -> bool {
     matches!(
         binding(tool_name).map(|binding| binding.project),
@@ -357,7 +353,6 @@ pub(super) fn tool_accepts_registered_project_selector(tool_name: &str) -> bool 
     )
 }
 
-#[hotpath::measure]
 pub(crate) fn tool_dispatches_registered_project_reader(tool_name: &str) -> bool {
     matches!(
         binding(tool_name).map(|binding| binding.project),
@@ -369,7 +364,6 @@ pub(crate) fn tool_dispatches_registered_project_reader(tool_name: &str) -> bool
 /// selected project's store. The calling session stays admitted; the retained
 /// owner denies a foreign selector as `NotFoundOrNotAuthorized`.
 #[cfg(test)]
-#[hotpath::measure]
 pub(super) fn tool_is_selector_bound_effect(tool_name: &str) -> bool {
     matches!(
         binding(tool_name).map(|binding| binding.project),
@@ -377,7 +371,6 @@ pub(super) fn tool_is_selector_bound_effect(tool_name: &str) -> bool {
     ) && direct_effect(tool_name).is_effect()
 }
 
-#[hotpath::measure]
 fn direct_effect(tool_name: &str) -> EffectClass {
     match tool_name {
         "tracedecay_multi_root_scope_set_compare_and_swap"
@@ -400,7 +393,6 @@ fn direct_effect(tool_name: &str) -> EffectClass {
 /// The three multi-root tools are daemon-owned: they carry no application
 /// surface binding, so their contract comes from the multi-root capability
 /// catalog rather than [`application_capability_for_tool`].
-#[hotpath::measure]
 fn multi_root_operation_for_tool(tool_name: &str) -> Option<MultiRootApplicationOperation> {
     match tool_name {
         "tracedecay_multi_root_scope_set_read" => Some(MultiRootApplicationOperation::ScopeSetRead),
@@ -412,7 +404,6 @@ fn multi_root_operation_for_tool(tool_name: &str) -> Option<MultiRootApplication
     }
 }
 
-#[hotpath::measure]
 fn multi_root_capability_for_tool(
     tool_name: &str,
 ) -> Result<
@@ -433,7 +424,6 @@ pub(super) struct DispatchCatalogBinding {
     pub(super) executable_binding: Option<ExecutableBindingV1>,
 }
 
-#[hotpath::measure]
 fn dispatch_catalog_bindings()
 -> Result<Vec<DispatchCatalogBinding>, super::dispatch::McpDispatchMetadataError> {
     let mut bindings = MCP_TOOL_BINDINGS
@@ -450,7 +440,6 @@ fn dispatch_catalog_bindings()
     Ok(bindings)
 }
 
-#[hotpath::measure]
 fn application_capability_for_tool(
     tool_name: &str,
 ) -> Result<
@@ -469,7 +458,6 @@ fn application_capability_for_tool(
     }))
 }
 
-#[hotpath::measure]
 pub(crate) fn canonical_tool_dispatch_ceiling(
     tool_name: &str,
 ) -> Result<std::time::Duration, super::dispatch::McpDispatchMetadataError> {
@@ -518,7 +506,6 @@ struct ToolDispatchPredicateFlags {
     canonical_effect_settlement: bool,
 }
 
-#[hotpath::measure]
 fn compute_tool_dispatch_predicate_flags(tool_name: &str) -> ToolDispatchPredicateFlags {
     ToolDispatchPredicateFlags {
         source_edit_effect: compute_tool_dispatches_source_edit_effect(tool_name),
@@ -527,7 +514,6 @@ fn compute_tool_dispatch_predicate_flags(tool_name: &str) -> ToolDispatchPredica
     }
 }
 
-#[hotpath::measure]
 fn tool_dispatch_predicate_flags(tool_name: &str) -> ToolDispatchPredicateFlags {
     static FLAGS: LazyLock<HashMap<String, ToolDispatchPredicateFlags>> = LazyLock::new(|| {
         let mut flags = HashMap::new();
@@ -555,12 +541,10 @@ fn tool_dispatch_predicate_flags(tool_name: &str) -> ToolDispatchPredicateFlags 
         .unwrap_or_else(|| compute_tool_dispatch_predicate_flags(tool_name))
 }
 
-#[hotpath::measure]
 pub(crate) fn tool_dispatches_source_edit_effect(tool_name: &str) -> bool {
     tool_dispatch_predicate_flags(tool_name).source_edit_effect
 }
 
-#[hotpath::measure]
 fn compute_tool_dispatches_source_edit_effect(tool_name: &str) -> bool {
     matches!(
         binding(tool_name).and_then(|binding| binding.group),
@@ -571,12 +555,10 @@ fn compute_tool_dispatches_source_edit_effect(tool_name: &str) -> bool {
         .is_some_and(|capability| capability.effect() == EffectClass::SourceEdit)
 }
 
-#[hotpath::measure]
 pub(crate) fn tool_supports_live_cancellation(tool_name: &str) -> bool {
     tool_dispatch_predicate_flags(tool_name).live_cancellation
 }
 
-#[hotpath::measure]
 fn compute_tool_supports_live_cancellation(tool_name: &str) -> bool {
     work_executable_binding_for_tool(tool_name)
         .ok()
@@ -615,12 +597,10 @@ fn compute_tool_supports_live_cancellation(tool_name: &str) -> bool {
         )
 }
 
-#[hotpath::measure]
 pub(crate) fn tool_requires_canonical_effect_settlement(tool_name: &str) -> bool {
     tool_dispatch_predicate_flags(tool_name).canonical_effect_settlement
 }
 
-#[hotpath::measure]
 fn compute_tool_requires_canonical_effect_settlement(tool_name: &str) -> bool {
     work_executable_binding_for_tool(tool_name)
         .ok()
@@ -638,7 +618,6 @@ fn compute_tool_requires_canonical_effect_settlement(tool_name: &str) -> bool {
             })
 }
 
-#[hotpath::measure]
 fn verified_effect_journey(tool_name: &str) -> bool {
     matches!(
         tool_name,
@@ -671,7 +650,6 @@ fn verified_effect_journey(tool_name: &str) -> bool {
     )
 }
 
-#[hotpath::measure]
 fn executable_handler_is_available(
     tool_name: &str,
     group: Option<McpToolDispatchGroup>,
@@ -694,7 +672,6 @@ fn executable_handler_is_available(
             })
 }
 
-#[hotpath::measure]
 fn inverse_for_tool(tool_name: &str, effect: EffectClass) -> McpInverseContract {
     if effect.is_read_only() {
         McpInverseContract::NotApplicable
@@ -710,7 +687,6 @@ fn inverse_for_tool(tool_name: &str, effect: EffectClass) -> McpInverseContract 
     }
 }
 
-#[hotpath::measure]
 fn idempotency_for_tool(
     tool_name: &str,
     application_capability: Option<&tracedecay_tool_catalog::CapabilityManifestV1>,
@@ -730,7 +706,6 @@ fn idempotency_for_tool(
     }
 }
 
-#[hotpath::measure]
 fn cancellation_for_tool(
     tool_name: &str,
     application_capability: Option<&tracedecay_tool_catalog::CapabilityManifestV1>,
@@ -754,7 +729,6 @@ fn cancellation_for_tool(
     CancellationContract::cooperative(points)
 }
 
-#[hotpath::measure]
 fn build_mcp_dispatch_catalog()
 -> Result<McpDispatchCatalogV1, super::dispatch::McpDispatchMetadataError> {
     let mut contracts = Vec::new();
@@ -864,7 +838,6 @@ fn build_mcp_dispatch_catalog()
     Ok(McpDispatchCatalogV1::new(contracts)?)
 }
 
-#[hotpath::measure]
 pub(crate) fn mcp_dispatch_catalog()
 -> Result<&'static McpDispatchCatalogV1, super::dispatch::McpDispatchMetadataError> {
     static CATALOG: LazyLock<Result<McpDispatchCatalogV1, String>> =
@@ -877,7 +850,6 @@ pub(crate) fn mcp_dispatch_catalog()
     }
 }
 
-#[hotpath::measure]
 pub(crate) fn mcp_dispatch_contract(
     tool_name: &str,
 ) -> Result<&'static McpDispatchContractV1, super::dispatch::McpDispatchMetadataError> {

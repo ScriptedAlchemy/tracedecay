@@ -22,8 +22,9 @@ use tracedecay_domain::configuration::{
     SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY, SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY,
     SYNC_READ_COOLDOWN_SECS_SETTING_KEY, SYNC_READ_REFRESH_SETTING_KEY,
     SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY, SYNC_SESSION_START_SYNC_SETTING_KEY,
-    SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY, SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY,
-    SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY, UserProfileId,
+    SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY, SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
+    SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY, SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey,
+    TELEMETRY_TIMINGS_SETTING_KEY, UserProfileId,
 };
 
 use tracedecay_configuration::ConfigurationControlStore;
@@ -85,14 +86,12 @@ pub use tracedecay_runtime_core::config::{GENERATED_DIR_SEGMENTS, is_generated_d
 ///
 /// Path-level (not just directory-level) so callers can filter a flat list
 /// of file paths in one pass, e.g. the redundancy scanner's candidate list.
-#[hotpath::measure]
 pub fn is_generated_path_segment(path: &str) -> bool {
     has_minified_suffix(path) || path.split('/').any(is_generated_dir_segment)
 }
 
 /// `true` for paths like `app.min.js` / `app.min.css.map` — a `.min.`
 /// component followed by at least one more character.
-#[hotpath::measure]
 fn has_minified_suffix(path: &str) -> bool {
     path.rfind(".min.").is_some_and(|idx| idx + 5 < path.len())
 }
@@ -113,7 +112,6 @@ fn has_minified_suffix(path: &str) -> bool {
 ///   "generated" elsewhere: a `bin/` directory can hold real source in some
 ///   project layouts, so it isn't added to the shared segment list.
 /// - `**/*.min.*` — mirrors [`is_generated_path_segment`]'s suffix check.
-#[hotpath::measure]
 fn default_exclude_patterns() -> Vec<String> {
     let mut patterns: Vec<String> = vec![
         ".git/**".to_string(),
@@ -183,96 +181,77 @@ pub struct TraceDecayConfig {
     pub telemetry: TelemetryConfig,
 }
 
-#[hotpath::measure]
 fn default_git_ignore() -> bool {
     true
 }
 
-#[hotpath::measure]
 fn default_native_graph_activation() -> bool {
     true
 }
 
-#[hotpath::measure]
 fn default_sync_auto_watch() -> bool {
     false
 }
-#[hotpath::measure]
+fn default_sync_watch_linked_worktrees() -> bool {
+    false
+}
 fn default_sync_watch_debounce_ms() -> u64 {
     2000
 }
-#[hotpath::measure]
 fn default_sync_watch_max_delay_ms() -> u64 {
     30000
 }
-#[hotpath::measure]
 fn default_sync_watch_max_projects() -> usize {
     32
 }
-#[hotpath::measure]
 fn default_sync_read_refresh() -> bool {
     true
 }
-#[hotpath::measure]
 fn default_sync_read_cooldown_secs() -> u64 {
     30
 }
-#[hotpath::measure]
 fn default_sync_session_start_sync() -> bool {
     true
 }
-#[hotpath::measure]
 fn default_sync_session_start_stale_threshold_secs() -> u64 {
     600
 }
-#[hotpath::measure]
 fn default_sync_backstop_interval_mins() -> u64 {
     15
 }
-#[hotpath::measure]
 fn default_sync_full_sync_escalation_files() -> usize {
     500
 }
-#[hotpath::measure]
 fn default_sync_max_concurrent_syncs() -> usize {
     2
 }
-#[hotpath::measure]
 fn default_sync_branch_gc_days() -> u64 {
     14
 }
-#[hotpath::measure]
 fn default_sync_orphan_db_gc_days() -> u64 {
     7
 }
-#[hotpath::measure]
 fn default_sync_auto_init() -> bool {
     true
 }
-#[hotpath::measure]
 fn default_sync_auto_track_pr_branches() -> bool {
     false
 }
-#[hotpath::measure]
 fn default_sync_auto_track_pr_poll_secs() -> u64 {
     300
 }
-#[hotpath::measure]
 fn default_retention_interval_hours() -> u64 {
     24
 }
 
-#[hotpath::measure]
 fn default_orphan_store_gc_days() -> Option<u64> {
     Some(30)
 }
 
-#[hotpath::measure]
 fn default_incident_debris_retention_days() -> Option<u64> {
     Some(30)
 }
 
-#[hotpath::measure]
 fn default_compaction_threshold() -> Option<CompactionThresholdConfig> {
     Some(CompactionThresholdConfig::default())
 }
@@ -325,7 +304,6 @@ impl Default for RetentionConfig {
     }
 }
 
-#[hotpath::measure_all]
 impl RetentionConfig {
     pub(crate) fn store_soft_budget(
         &self,
@@ -388,7 +366,6 @@ impl RetentionConfig {
 /// clamped up to this.
 pub const MIN_AUTO_TRACK_PR_POLL_SECS: u64 = 60;
 
-#[hotpath::measure]
 fn default_telemetry_timings() -> bool {
     true
 }
@@ -422,6 +399,10 @@ pub struct SyncConfig {
     /// Enable the daemon git-metadata watcher.
     #[serde(default = "default_sync_auto_watch")]
     pub auto_watch: bool,
+    /// Admit linked worktrees into the daemon watcher without an explicit
+    /// branch-indexing request.
+    #[serde(default = "default_sync_watch_linked_worktrees")]
+    pub watch_linked_worktrees: bool,
     /// Per-project quiet-period debounce before a watcher-triggered sync (ms).
     #[serde(default = "default_sync_watch_debounce_ms")]
     pub watch_debounce_ms: u64,
@@ -476,7 +457,6 @@ pub struct SyncConfig {
     pub retention: RetentionConfig,
 }
 
-#[hotpath::measure_all]
 impl SyncConfig {
     /// The effective PR-autotrack poll interval, never below the safety floor.
     #[must_use]
@@ -490,6 +470,7 @@ impl Default for SyncConfig {
     fn default() -> Self {
         Self {
             auto_watch: default_sync_auto_watch(),
+            watch_linked_worktrees: default_sync_watch_linked_worktrees(),
             watch_debounce_ms: default_sync_watch_debounce_ms(),
             watch_max_delay_ms: default_sync_watch_max_delay_ms(),
             watch_max_projects: default_sync_watch_max_projects(),
@@ -513,7 +494,6 @@ impl Default for SyncConfig {
 /// Parses a boolean env value. Truthy spellings (`1`/`true`/`yes`/`on`) share
 /// [`tracedecay_global_db::env_value_truthy`]; `0`/`false` are false. Any
 /// other value is ignored (returns `None`) so an override is not applied.
-#[hotpath::measure]
 fn parse_env_bool(raw: &str) -> Option<bool> {
     if tracedecay_global_db::env_value_truthy(raw) {
         return Some(true);
@@ -525,21 +505,18 @@ fn parse_env_bool(raw: &str) -> Option<bool> {
 }
 
 /// Reads a `TRACEDECAY_<suffix>` env var and parses it as a bool.
-#[hotpath::measure]
 pub(crate) fn env_bool(suffix: &str) -> Option<bool> {
     brand_env(suffix).as_deref().and_then(parse_env_bool)
 }
 
 /// Reads a `TRACEDECAY_<suffix>` env var and parses it as an integer of the
 /// caller's choosing.
-#[hotpath::measure]
 fn env_parse<T: std::str::FromStr>(suffix: &str) -> Option<T> {
     brand_env(suffix)
         .as_deref()
         .and_then(|raw| raw.trim().parse::<T>().ok())
 }
 
-#[hotpath::measure_all]
 impl SyncConfig {
     /// Applies legacy `TRACEDECAY_SYNC_*` environment overrides on top of
     /// `self`. This remains for pre-store/bootstrap compatibility only; live
@@ -548,6 +525,9 @@ impl SyncConfig {
     pub fn with_env_overrides(mut self) -> Self {
         if let Some(value) = env_bool("SYNC_AUTO_WATCH") {
             self.auto_watch = value;
+        }
+        if let Some(value) = env_bool("SYNC_WATCH_LINKED_WORKTREES") {
+            self.watch_linked_worktrees = value;
         }
         if let Some(value) = env_parse("SYNC_WATCH_DEBOUNCE_MS") {
             self.watch_debounce_ms = value;
@@ -633,7 +613,6 @@ pub struct PinnedRuntimeConfiguration {
     pub config: TraceDecayConfig,
 }
 
-#[hotpath::measure_all]
 impl PinnedRuntimeConfiguration {
     /// Materializes the legacy runtime shape from a complete typed snapshot.
     /// The conversion rejects missing or wrongly typed settings rather than
@@ -666,7 +645,6 @@ pub struct RuntimeConfigurationCache {
     project_by_root: RwLock<BTreeMap<PathBuf, String>>,
 }
 
-#[hotpath::measure_all]
 impl RuntimeConfigurationCache {
     pub fn insert(&self, configuration: PinnedRuntimeConfiguration) -> Result<()> {
         let expected = runtime_config_from_snapshot(
@@ -757,14 +735,12 @@ impl tracedecay_dashboard_api::config::DashboardConfigurationReadPort
     }
 }
 
-#[hotpath::measure]
 fn runtime_configuration_cache() -> &'static Arc<RuntimeConfigurationCache> {
     static CACHE: OnceLock<Arc<RuntimeConfigurationCache>> = OnceLock::new();
     CACHE.get_or_init(|| Arc::new(RuntimeConfigurationCache::default()))
 }
 
 /// Installs the root-owned configuration cache as the dashboard's read port.
-#[hotpath::measure]
 pub fn install_dashboard_configuration_read_port() -> Result<()> {
     tracedecay_dashboard_api::config::install_dashboard_configuration_read_port(
         runtime_configuration_cache().clone(),
@@ -772,7 +748,6 @@ pub fn install_dashboard_configuration_read_port() -> Result<()> {
 }
 
 /// Publishes one daemon-resolved snapshot for runtime and hook consumers.
-#[hotpath::measure]
 pub fn install_pinned_runtime_configuration(
     configuration: PinnedRuntimeConfiguration,
 ) -> Result<()> {
@@ -781,7 +756,6 @@ pub fn install_pinned_runtime_configuration(
 
 /// Builds a typed target from a resolved store layout. A missing project ID is
 /// never replaced by a path-derived identity.
-#[hotpath::measure]
 pub fn runtime_configuration_target_for_layout(
     project_root: &Path,
     layout: &tracedecay_runtime_core::storage::StoreLayout,
@@ -794,7 +768,6 @@ pub fn runtime_configuration_target_for_layout(
 
 /// Builds a typed configuration target from an already-authoritative project
 /// ID. The path remains non-authoritative routing context.
-#[hotpath::measure]
 pub fn runtime_configuration_target_for_project_id(
     project_root: &Path,
     project_id: &str,
@@ -813,7 +786,6 @@ pub fn runtime_configuration_target_for_project_id(
 /// destructive branch administration) use it after the daemon has published a
 /// snapshot. Daemon project-open paths that need to cold-start a process use
 /// [`open_runtime_configuration_for_registered_database`] instead.
-#[hotpath::measure]
 pub fn runtime_configuration_for_layout(
     project_root: &Path,
     layout: &tracedecay_runtime_core::storage::StoreLayout,
@@ -878,7 +850,6 @@ pub(crate) struct OpenedRuntimeConfiguration {
     pub(crate) registered_database: RegisteredGlobalDbLeaseV1,
 }
 
-#[hotpath::measure]
 fn usecase_runtime_configuration(
     configuration: PinnedRuntimeConfiguration,
 ) -> Result<tracedecay_configuration::config::PinnedRuntimeConfiguration> {
@@ -889,7 +860,6 @@ fn usecase_runtime_configuration(
     )
 }
 
-#[hotpath::measure]
 fn usecase_opened_runtime_configuration(
     opened: OpenedRuntimeConfiguration,
 ) -> Result<tracedecay_configuration::config::OpenedRuntimeConfiguration> {
@@ -901,7 +871,6 @@ fn usecase_opened_runtime_configuration(
     )
 }
 
-#[hotpath::measure]
 pub(crate) fn root_runtime_configuration(
     configuration: &tracedecay_configuration::config::PinnedRuntimeConfiguration,
 ) -> Result<PinnedRuntimeConfiguration> {
@@ -912,7 +881,6 @@ pub(crate) fn root_runtime_configuration(
     )
 }
 
-#[hotpath::measure]
 pub(crate) fn materialize_root_runtime_configuration(
     configuration: &tracedecay_configuration::config::PinnedRuntimeConfiguration,
 ) -> Result<TraceDecayConfig> {
@@ -1025,7 +993,6 @@ impl tracedecay_configuration::config::RuntimeConfigurationAuthorityPort
     }
 }
 
-#[hotpath::measure]
 pub(crate) fn install_usecase_runtime_configuration_authority() -> Result<()> {
     static INSTALLATION: LazyLock<std::result::Result<(), String>> = LazyLock::new(|| {
         tracedecay_configuration::config::install_runtime_configuration_authority(Arc::new(
@@ -1305,7 +1272,6 @@ async fn open_runtime_configuration_read_only_from_store(
     Ok(configuration)
 }
 
-#[hotpath::measure]
 fn validate_registered_configuration_database(
     target: &RuntimeConfigurationTarget,
     database: &RegisteredGlobalDb,
@@ -1380,7 +1346,6 @@ fn map_configuration_error(error: tracedecay_configuration::ConfigurationError) 
 
 /// Returns a cached configuration without resolving a layout, opening a
 /// database, performing IPC, or reading a file. This is the hook-safe lookup.
-#[hotpath::measure]
 pub fn cached_runtime_configuration(project_root: &Path) -> Result<PinnedRuntimeConfiguration> {
     runtime_configuration_cache().for_root(project_root)
 }
@@ -1388,7 +1353,6 @@ pub fn cached_runtime_configuration(project_root: &Path) -> Result<PinnedRuntime
 /// Looks up a daemon-published snapshot by an already-authoritative project
 /// ID. The supplied root is only used to materialize display metadata;
 /// it never participates in authority resolution.
-#[hotpath::measure]
 pub fn cached_runtime_configuration_for_project_id(
     project_root: &Path,
     project_id: &str,
@@ -1399,12 +1363,10 @@ pub fn cached_runtime_configuration_for_project_id(
         .retarget(target)
 }
 
-#[hotpath::measure]
 pub fn cached_sync_config(project_root: &Path) -> Result<SyncConfig> {
     Ok(cached_runtime_configuration(project_root)?.config.sync)
 }
 
-#[hotpath::measure]
 pub fn cached_telemetry_config(project_root: &Path) -> Result<TelemetryConfig> {
     Ok(cached_runtime_configuration(project_root)?.config.telemetry)
 }
@@ -1475,6 +1437,10 @@ pub fn runtime_config_from_snapshot(
         semantic: semantic_config_from_snapshot(snapshot)?,
         sync: SyncConfig {
             auto_watch: required_bool(snapshot, SYNC_AUTO_WATCH_SETTING_KEY)?,
+            watch_linked_worktrees: required_bool(
+                snapshot,
+                SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
+            )?,
             watch_debounce_ms: required_unsigned(snapshot, SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY)?,
             watch_max_delay_ms: required_unsigned(snapshot, SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY)?,
             watch_max_projects: required_usize(snapshot, SYNC_WATCH_MAX_PROJECTS_SETTING_KEY)?,
@@ -1513,7 +1479,6 @@ pub fn runtime_config_from_snapshot(
     })
 }
 
-#[hotpath::measure]
 fn semantic_config_from_snapshot(snapshot: &ConfigurationSnapshotV1) -> Result<SemanticConfig> {
     let key = SettingKey::new(SEMANTIC_RUNTIME_SETTING_KEY).map_err(|error| {
         config_error(format!(
@@ -1540,7 +1505,6 @@ fn semantic_config_from_snapshot(snapshot: &ConfigurationSnapshotV1) -> Result<S
     Ok(semantic)
 }
 
-#[hotpath::measure]
 fn retention_config_from_snapshot(snapshot: &ConfigurationSnapshotV1) -> Result<RetentionConfig> {
     let key = SettingKey::new(SYNC_RETENTION_SETTING_KEY).map_err(|error| {
         config_error(format!(
@@ -1565,7 +1529,6 @@ fn retention_config_from_snapshot(snapshot: &ConfigurationSnapshotV1) -> Result<
     Ok(retention)
 }
 
-#[hotpath::measure]
 fn required_setting<'a>(
     snapshot: &'a ConfigurationSnapshotV1,
     key_name: &str,
@@ -1580,7 +1543,6 @@ fn required_setting<'a>(
     })
 }
 
-#[hotpath::measure]
 fn required_bool(snapshot: &ConfigurationSnapshotV1, key_name: &str) -> Result<bool> {
     match required_setting(snapshot, key_name)? {
         ConfigurationValueV1::Boolean(value) => Ok(*value),
@@ -1591,7 +1553,6 @@ fn required_bool(snapshot: &ConfigurationSnapshotV1, key_name: &str) -> Result<b
     }
 }
 
-#[hotpath::measure]
 fn required_unsigned(snapshot: &ConfigurationSnapshotV1, key_name: &str) -> Result<u64> {
     match required_setting(snapshot, key_name)? {
         ConfigurationValueV1::Unsigned(value) => Ok(*value),
@@ -1602,7 +1563,6 @@ fn required_unsigned(snapshot: &ConfigurationSnapshotV1, key_name: &str) -> Resu
     }
 }
 
-#[hotpath::measure]
 fn required_usize(snapshot: &ConfigurationSnapshotV1, key_name: &str) -> Result<usize> {
     let value = required_unsigned(snapshot, key_name)?;
     usize::try_from(value).map_err(|_| {
@@ -1612,7 +1572,6 @@ fn required_usize(snapshot: &ConfigurationSnapshotV1, key_name: &str) -> Result<
     })
 }
 
-#[hotpath::measure]
 fn required_string_list(snapshot: &ConfigurationSnapshotV1, key_name: &str) -> Result<Vec<String>> {
     match required_setting(snapshot, key_name)? {
         ConfigurationValueV1::StringList(value) => Ok(value.clone()),
@@ -1623,7 +1582,6 @@ fn required_string_list(snapshot: &ConfigurationSnapshotV1, key_name: &str) -> R
     }
 }
 
-#[hotpath::measure]
 fn config_error(message: impl Into<String>) -> TraceDecayError {
     TraceDecayError::Config {
         message: message.into(),
@@ -1631,14 +1589,12 @@ fn config_error(message: impl Into<String>) -> TraceDecayError {
 }
 
 /// Reads the `TRACEDECAY_<suffix>` environment variable.
-#[hotpath::measure]
 pub fn brand_env(suffix: &str) -> Option<String> {
     std::env::var(format!("TRACEDECAY_{suffix}")).ok()
 }
 
 /// Returns the path to the configuration file (`config.json`) within the
 /// resolved data directory.
-#[hotpath::measure]
 pub fn get_config_path(project_root: &Path) -> PathBuf {
     if let Ok(layout) =
         tracedecay_runtime_core::storage::resolve_layout_for_current_profile(project_root)
@@ -1663,7 +1619,6 @@ pub async fn get_config_path_with_identity(project_root: &Path) -> PathBuf {
 /// runtime consumers must use a pinned resolved snapshot. If the file does
 /// not exist, it returns the legacy defaults with `root_dir` set to the given
 /// project root.
-#[hotpath::measure]
 pub fn load_config(project_root: &Path) -> Result<TraceDecayConfig> {
     let config_path = get_config_path(project_root);
     load_config_from_path(project_root, &config_path)
@@ -1676,7 +1631,6 @@ pub async fn load_config_with_identity(project_root: &Path) -> Result<TraceDecay
 
 /// Loads configuration from an explicit config path while preserving the
 /// project root used for default config values.
-#[hotpath::measure]
 pub fn load_config_from_path(project_root: &Path, config_path: &Path) -> Result<TraceDecayConfig> {
     if !config_path.exists() {
         return Ok(TraceDecayConfig {
@@ -1711,7 +1665,6 @@ pub fn load_config_from_path(project_root: &Path, config_path: &Path) -> Result<
 /// Production runtime code must use the daemon control plane instead of this
 /// compatibility helper. It remains for fixtures and legacy-input tests while
 /// callers complete their migration.
-#[hotpath::measure]
 pub fn save_config_to_path(config_path: &Path, config: &TraceDecayConfig) -> Result<()> {
     let data_dir = config_path
         .parent()
@@ -1764,7 +1717,6 @@ pub fn save_config_to_path(config_path: &Path, config: &TraceDecayConfig) -> Res
 /// user's global excludes file via `git check-ignore`. If Git cannot answer
 /// (for example outside a Git repository), falls back to checking the local
 /// `.gitignore` file only.
-#[hotpath::measure]
 pub fn is_in_gitignore(project_path: &Path) -> bool {
     if let Some(is_ignored) = is_ignored_by_git(project_path, None) {
         return is_ignored;
@@ -1773,7 +1725,6 @@ pub fn is_in_gitignore(project_path: &Path) -> bool {
     is_in_local_gitignore(project_path)
 }
 
-#[hotpath::measure]
 fn is_ignored_by_git(project_path: &Path, git_config_global: Option<&Path>) -> Option<bool> {
     let fallback_global_excludes = || {
         git_config_global
@@ -1811,7 +1762,6 @@ fn is_ignored_by_git(project_path: &Path, git_config_global: Option<&Path>) -> O
     }
 }
 
-#[hotpath::measure]
 fn is_ignored_by_explicit_global_excludes(
     project_path: &Path,
     git_config_global: &Path,
@@ -1870,7 +1820,6 @@ fn is_in_local_gitignore(project_path: &Path) -> bool {
 ///
 /// If `path` is `Some`, uses that value; otherwise falls back to the current
 /// working directory.
-#[hotpath::measure]
 pub fn resolve_path(path: Option<String>) -> PathBuf {
     let path = match path {
         Some(p) => PathBuf::from(p),
@@ -1879,7 +1828,6 @@ pub fn resolve_path(path: Option<String>) -> PathBuf {
     absolutize_path(path)
 }
 
-#[hotpath::measure]
 fn absolutize_path(path: PathBuf) -> PathBuf {
     if path.is_absolute() {
         path
@@ -1913,7 +1861,6 @@ pub async fn discover_project_root_with_identity(start: &Path) -> Option<PathBuf
 ///
 /// Used by `serve`, `sync`, and `status`. NOT used by `init` (which must
 /// create a fresh project at the target directory).
-#[hotpath::measure]
 pub fn resolve_path_with_discovery(path: Option<String>) -> PathBuf {
     if let Some(p) = path {
         PathBuf::from(p)
@@ -1929,14 +1876,12 @@ pub fn resolve_path_with_discovery(path: Option<String>) -> PathBuf {
 ///
 /// This is used to allow hidden (dot-prefixed) directories that would
 /// otherwise be skipped by the file walker.
-#[hotpath::measure]
 pub fn is_included(path: &str, config: &TraceDecayConfig) -> bool {
     any_pattern_matches(&config.include, &[path])
 }
 
 /// Returns `true` if a directory should be entered because it or one of its
 /// descendants matches an explicit include glob.
-#[hotpath::measure]
 pub fn is_included_dir(dir_path: &str, config: &TraceDecayConfig) -> bool {
     let descendant_probe = format!("{dir_path}/_");
     any_pattern_matches(&config.include, &[dir_path, &descendant_probe])
@@ -1948,7 +1893,6 @@ pub fn is_included_dir(dir_path: &str, config: &TraceDecayConfig) -> bool {
 /// also matches `dir` itself (for bare `**/dirname`-style globs).  This
 /// ensures that patterns like `**/node_modules` and `**/node_modules/**`
 /// both trigger directory pruning in `scan_files_walkdir`.
-#[hotpath::measure]
 pub fn is_excluded_dir(dir_path: &str, config: &TraceDecayConfig) -> bool {
     // Try both the dummy-file probe (catches `dir/**`) and the bare directory
     // path (catches `**/dirname`).
@@ -1957,7 +1901,6 @@ pub fn is_excluded_dir(dir_path: &str, config: &TraceDecayConfig) -> bool {
 }
 
 /// Returns `true` if the file matches any of the configured exclude patterns.
-#[hotpath::measure]
 pub fn is_excluded(file_path: &str, config: &TraceDecayConfig) -> bool {
     any_pattern_matches(&config.exclude, &[file_path])
 }
@@ -1976,7 +1919,6 @@ const PATTERN_MATCH_OPTIONS: glob::MatchOptions = glob::MatchOptions {
 ///
 /// Callers pass every candidate string they want probed, built once per call:
 /// the directory variants used to format their `dir/_` probe once per pattern.
-#[hotpath::measure]
 fn any_pattern_matches(patterns: &[String], candidates: &[&str]) -> bool {
     patterns.iter().any(|pattern_str| {
         Pattern::new(pattern_str).is_ok_and(|pattern| {

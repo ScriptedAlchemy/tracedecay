@@ -172,7 +172,6 @@ pub(crate) async fn handle_test_map(
     ))
 }
 
-#[hotpath::measure]
 fn test_map_unavailable(detail: &str) -> TraceDecayError {
     TraceDecayError::project_route("verified-test-evidence-unavailable", false, detail)
 }

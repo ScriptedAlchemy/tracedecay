@@ -3,9 +3,11 @@
  *
  * The plugin has no dashboard UI of its own. Its backend starts the same
  * `tracedecay dashboard` server used outside Hermes, and this component mounts
- * that server in an iframe. The dashboard HTML, JavaScript, CSS, workspaces,
- * routing, and API calls therefore all come from the one `dashboard/app-dist`
- * build embedded in the TraceDecay binary.
+ * that server in an iframe. The iframe src is the Hermes same-origin embed
+ * proxy (`/api/plugins/tracedecay/embed/`), never the loopback dashboard URL.
+ * The dashboard HTML, JavaScript, CSS, workspaces, routing, and API calls
+ * therefore all come from the one `dashboard/app-dist` build, reached through
+ * Hermes so remote and HTTPS hosts do not resolve 127.0.0.1 in the browser.
  */
 (function () {
   "use strict";
@@ -18,6 +20,20 @@
   const h = React.createElement;
   const DASHBOARD_URL_ENDPOINT = "/api/plugins/tracedecay/dashboard-url";
 
+  function assertSameOriginDashboardUrl(url) {
+    var parsed;
+    try {
+      parsed = new URL(url, window.location.href);
+    } catch (cause) {
+      throw new Error("dashboard URL response was invalid");
+    }
+    if (parsed.origin !== window.location.origin) {
+      throw new Error(
+        "dashboard URL must be a same-origin Hermes proxy path",
+      );
+    }
+  }
+
   function TraceDecayDashboard() {
     const [url, setUrl] = React.useState(null);
     const [error, setError] = React.useState(null);
@@ -29,6 +45,7 @@
           if (!payload || typeof payload.url !== "string" || payload.url.length === 0) {
             throw new Error("dashboard URL response was invalid");
           }
+          assertSameOriginDashboardUrl(payload.url);
           if (!cancelled) setUrl(payload.url);
         })
         .catch(function (cause) {

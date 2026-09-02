@@ -88,7 +88,6 @@ pub(super) async fn handle_automation_runs_command(
     Ok(())
 }
 
-#[hotpath::measure]
 fn print_automation_run_list(
     records: &[tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord],
 ) {
@@ -114,7 +113,6 @@ fn print_automation_run_list(
     }
 }
 
-#[hotpath::measure]
 fn print_automation_run_record(
     record: &tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord,
 ) {
@@ -150,7 +148,6 @@ fn print_automation_run_record(
     }
 }
 
-#[hotpath::measure]
 fn print_automation_run_artifact(
     run_id: &str,
     artifact: &tracedecay_automation_runtime::automation::run_ledger::AutomationRunArtifact,

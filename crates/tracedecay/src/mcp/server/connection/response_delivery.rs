@@ -6,7 +6,6 @@ use tracedecay_domain::errors::Result;
 use tracedecay_mcp::serialize_response_line;
 use tracedecay_mcp::transport::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 
-#[hotpath::measure_all]
 impl McpServer {
     /// Process a single raw JSON-RPC line and write the response. The
     /// in-process test-transport harness drives single requests through this

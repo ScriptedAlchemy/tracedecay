@@ -41,7 +41,6 @@ pub enum NativeWorktreeTargetV1 {
     },
 }
 
-#[hotpath::measure_all]
 impl NativeWorktreeTargetV1 {
     pub fn validate(&self) -> Result<(), WorktreeContractError> {
         match self {
@@ -97,7 +96,6 @@ pub struct NativeWorktreeScopeBindingV1 {
     pub target: NativeWorktreeTargetV1,
 }
 
-#[hotpath::measure_all]
 impl NativeWorktreeScopeBindingV1 {
     pub fn validate(&self) -> Result<(), WorktreeContractError> {
         self.scope_set_id.validate()?;
@@ -117,7 +115,6 @@ pub struct WorktreeInventoryRequestV1 {
     pub target: NativeWorktreeTargetV1,
 }
 
-#[hotpath::measure_all]
 impl WorktreeInventoryRequestV1 {
     pub fn binding(&self) -> NativeWorktreeScopeBindingV1 {
         NativeWorktreeScopeBindingV1 {
@@ -142,7 +139,6 @@ pub struct WorktreeCleanupInspectRequestV1 {
     pub target: NativeWorktreeTargetV1,
 }
 
-#[hotpath::measure_all]
 impl WorktreeCleanupInspectRequestV1 {
     pub fn binding(&self) -> NativeWorktreeScopeBindingV1 {
         NativeWorktreeScopeBindingV1 {
@@ -175,7 +171,6 @@ pub struct WorktreeCleanupConfirmRequestV1 {
     pub inspection_digest: ManifestDigest,
 }
 
-#[hotpath::measure_all]
 impl WorktreeCleanupConfirmRequestV1 {
     pub fn binding(&self) -> NativeWorktreeScopeBindingV1 {
         NativeWorktreeScopeBindingV1 {
@@ -212,7 +207,6 @@ pub struct WorktreeCleanupRemoveRequestV1 {
     pub confirmation_digest: ManifestDigest,
 }
 
-#[hotpath::measure_all]
 impl WorktreeCleanupRemoveRequestV1 {
     pub fn binding(&self) -> NativeWorktreeScopeBindingV1 {
         NativeWorktreeScopeBindingV1 {
@@ -259,7 +253,6 @@ pub enum NativeWorktreeSurfaceRequest {
     Reconcile(WorktreeCleanupReconcileRequestV1),
 }
 
-#[hotpath::measure_all]
 impl NativeWorktreeSurfaceRequest {
     #[hotpath::skip]
     pub const fn operation(&self) -> &'static str {
@@ -273,7 +266,6 @@ impl NativeWorktreeSurfaceRequest {
     }
 }
 
-#[hotpath::measure_all]
 impl WorktreeCleanupReconcileRequestV1 {
     pub fn binding(&self) -> NativeWorktreeScopeBindingV1 {
         NativeWorktreeScopeBindingV1 {
@@ -381,7 +373,6 @@ pub struct WorktreeInspectionV1 {
     pub inspection_digest: ManifestDigest,
 }
 
-#[hotpath::measure_all]
 impl WorktreeInspectionV1 {
     pub fn removal_eligible(&self) -> bool {
         self.presence == WorktreePresenceV1::Present
@@ -646,7 +637,6 @@ where
 /// Seal one inspection digest after all fields have been observed. Ports use
 /// this helper when issuing a confirmation; callers only ever receive the
 /// resulting digest.
-#[hotpath::measure]
 pub fn worktree_inspection_digest(
     inspection: &WorktreeInspectionV1,
 ) -> Result<ManifestDigest, WorktreeContractError> {
@@ -672,7 +662,6 @@ pub fn worktree_inspection_digest(
     })
 }
 
-#[hotpath::measure]
 pub fn worktree_confirmation_digest(
     target: &NativeWorktreeTargetV1,
     inspection_digest: &ManifestDigest,

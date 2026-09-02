@@ -7,7 +7,6 @@ use tracedecay_application::{
 
 use crate::invocation::DaemonInvocationService;
 
-#[hotpath::measure_all]
 impl DaemonInvocationService {
     /// Execute one federated query after transport admission has supplied the
     /// exact contexts and frozen root generations.

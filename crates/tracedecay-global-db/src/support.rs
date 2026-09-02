@@ -5,7 +5,6 @@ use tracedecay_runtime_core::db::engine::Value as EngineValue;
 
 use crate::{AnalyticsEventRecord, project_path_alias_key};
 
-#[hotpath::measure]
 pub(crate) fn global_db_operation_error(
     operation: &'static str,
     source: impl std::error::Error + Send + Sync + 'static,
@@ -13,7 +12,6 @@ pub(crate) fn global_db_operation_error(
     TraceDecayError::database_operation(operation, source)
 }
 
-#[hotpath::measure]
 pub(crate) fn global_db_operation_message(
     operation: &'static str,
     message: impl Into<String>,
@@ -26,7 +24,6 @@ pub(crate) fn global_db_operation_message(
 
 /// Returns the path to the global database: `global.db` inside the user-level
 /// data dir (`~/.tracedecay/` by default).
-#[hotpath::measure]
 pub fn global_db_path() -> Option<PathBuf> {
     tracedecay_runtime_core::config::global_db_path()
 }
@@ -34,7 +31,6 @@ pub fn global_db_path() -> Option<PathBuf> {
 /// True when `TRACEDECAY_GLOBAL_DB` pins the global DB to an explicit path.
 /// Consumers treat the override as an operator decision that wins over project
 /// store discovery.
-#[hotpath::measure]
 pub fn global_db_path_is_overridden() -> bool {
     tracedecay_runtime_core::config::global_db_path_is_overridden()
 }
@@ -52,7 +48,6 @@ pub enum AccountingMode {
     DisabledByEnv,
 }
 
-#[hotpath::measure_all]
 impl AccountingMode {
     pub fn enabled(self) -> bool {
         !matches!(self, Self::DisabledByEnv)
@@ -71,7 +66,6 @@ impl AccountingMode {
 /// case-folds, and accepts `1`/`true`/`yes`/`on`. (Two parsers used to
 /// coexist with diverging semantics — e.g. `TRACEDECAY_DISABLE_GLOBAL_DB=on`
 /// was silently ignored while the LCM doctor flag honored it.)
-#[hotpath::measure]
 pub fn env_value_truthy(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
@@ -80,7 +74,6 @@ pub fn env_value_truthy(value: &str) -> bool {
 }
 
 /// True when the named env var is set to a truthy value.
-#[hotpath::measure]
 pub fn env_flag(name: &str) -> bool {
     std::env::var(name).is_ok_and(|value| env_value_truthy(&value))
 }
@@ -91,7 +84,6 @@ pub fn env_flag(name: &str) -> bool {
 /// prefix is a naming rule with no dependencies — reaching up to root
 /// `src/config.rs` for one `std::env::var` call would be the only reason this
 /// crate needed the composition root.
-#[hotpath::measure]
 pub(crate) fn brand_env(suffix: &str) -> Option<String> {
     std::env::var(format!("TRACEDECAY_{suffix}")).ok()
 }
@@ -107,7 +99,6 @@ pub(crate) fn brand_env(suffix: &str) -> Option<String> {
 /// 1. `TRACEDECAY_ENABLE_GLOBAL_DB` set → its truthiness decides.
 /// 2. `TRACEDECAY_DISABLE_GLOBAL_DB` truthy → disabled.
 /// 3. Otherwise → enabled.
-#[hotpath::measure]
 pub fn global_accounting_mode() -> AccountingMode {
     if let Some(value) = brand_env("ENABLE_GLOBAL_DB") {
         return if env_value_truthy(&value) {
@@ -122,12 +113,10 @@ pub fn global_accounting_mode() -> AccountingMode {
     AccountingMode::Default
 }
 
-#[hotpath::measure]
 pub fn global_accounting_enabled() -> bool {
     global_accounting_mode().enabled()
 }
 
-#[hotpath::measure]
 pub(crate) fn row_to_analytics_event(
     row: &tracedecay_runtime_core::db::engine::Row,
 ) -> Option<AnalyticsEventRecord> {
@@ -149,7 +138,6 @@ pub(crate) fn row_to_analytics_event(
     })
 }
 
-#[hotpath::measure]
 pub(crate) fn push_optional_analytics_filter(
     clauses: &mut Vec<String>,
     values: &mut Vec<EngineValue>,
@@ -162,7 +150,6 @@ pub(crate) fn push_optional_analytics_filter(
     }
 }
 
-#[hotpath::measure]
 pub(crate) fn analytics_scope_query(
     select: &str,
     project_id: Option<&str>,
@@ -183,7 +170,6 @@ pub(crate) fn analytics_scope_query(
     (sql, values)
 }
 
-#[hotpath::measure]
 pub(crate) fn like_pattern(query: &str) -> String {
     let mut pattern = String::with_capacity(query.len() + 2);
     pattern.push('%');
@@ -200,7 +186,6 @@ pub(crate) fn like_pattern(query: &str) -> String {
     pattern
 }
 
-#[hotpath::measure]
 pub(crate) fn repo_identity_aliases(git_common_dir: Option<&Path>) -> Vec<String> {
     let mut aliases = Vec::new();
     if let Some(path) = git_common_dir {
@@ -209,7 +194,6 @@ pub(crate) fn repo_identity_aliases(git_common_dir: Option<&Path>) -> Vec<String
     aliases
 }
 
-#[hotpath::measure]
 pub(crate) fn git_remote_search_alias(remote: Option<&str>) -> Option<String> {
     let remote = remote?.trim().trim_end_matches('/');
     if remote.is_empty() {
@@ -228,7 +212,6 @@ pub(crate) fn git_remote_search_alias(remote: Option<&str>) -> Option<String> {
     Some(format!("git-remote-name:{}", name.to_ascii_lowercase()))
 }
 
-#[hotpath::measure]
 pub(crate) fn normalize_git_remote_url(remote: &str) -> Option<String> {
     let remote = remote.trim();
     if remote.is_empty() {

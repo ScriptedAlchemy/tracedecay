@@ -56,7 +56,6 @@ pub async fn handle_outline(graph: &VerifiedGraphQuery, args: Value) -> Result<T
     ))
 }
 
-#[hotpath::measure]
 fn ast_grep_outline(abs_path: &Path) -> Result<Value> {
     ensure_ast_grep_outline_available()?;
 
@@ -95,7 +94,6 @@ fn ast_grep_outline(abs_path: &Path) -> Result<Value> {
     })
 }
 
-#[hotpath::measure]
 fn ensure_ast_grep_outline_available() -> Result<()> {
     let diagnostics = definitions::ast_grep_diagnostics();
     if diagnostics.outline_available {
@@ -110,7 +108,6 @@ fn ensure_ast_grep_outline_available() -> Result<()> {
     }
 }
 
-#[hotpath::measure]
 fn render_outline_md(value: &Value) -> String {
     let mut md = Md::new();
     let file = render::field_str(value, "file");

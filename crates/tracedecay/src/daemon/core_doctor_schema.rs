@@ -7,7 +7,6 @@ pub(super) enum DoctorGraphSchemaState {
     Unsupported,
 }
 
-#[hotpath::measure]
 pub(super) fn doctor_graph_schema_state(actual: i64) -> DoctorGraphSchemaState {
     match actual {
         18 => DoctorGraphSchemaState::ReleasedV0067,

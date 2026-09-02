@@ -6,7 +6,6 @@
 ///
 /// This is the safe replacement for `&s[..max_bytes]` when `s` may contain
 /// non-ASCII text and the caller has a byte budget rather than a char budget.
-#[hotpath::measure]
 pub fn utf8_prefix_at_or_before(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
         return s;
@@ -20,7 +19,6 @@ pub fn utf8_prefix_at_or_before(s: &str, max_bytes: usize) -> &str {
 }
 
 /// Formats a token count as a compact string (e.g. "1.2M", "45.3k").
-#[hotpath::measure]
 pub fn format_token_count(tokens: u64) -> String {
     if tokens >= 1_000_000 {
         format!("{:.1}M", tokens as f64 / 1_000_000.0)
@@ -33,7 +31,6 @@ pub fn format_token_count(tokens: u64) -> String {
 
 /// Formats a UNIX timestamp as a human-readable relative time (e.g. "2m ago", "3d ago").
 /// Returns "never" when the timestamp is 0.
-#[hotpath::measure]
 pub fn format_relative_time(timestamp: u64) -> String {
     if timestamp == 0 {
         return "never".to_string();
@@ -55,7 +52,6 @@ pub fn format_relative_time(timestamp: u64) -> String {
 }
 
 /// Formats a byte count into a human-readable string (e.g. "798.0 MB").
-#[hotpath::measure]
 pub fn format_bytes(bytes: u64) -> String {
     if bytes >= 1_073_741_824 {
         format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
@@ -69,7 +65,6 @@ pub fn format_bytes(bytes: u64) -> String {
 }
 
 /// Formats a number with comma separators (e.g. 243302 -> "243,302").
-#[hotpath::measure]
 pub fn format_number(n: u64) -> String {
     let s = n.to_string();
     let mut result = String::new();

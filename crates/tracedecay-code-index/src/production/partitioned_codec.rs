@@ -159,7 +159,6 @@ fn chunk_identity_field(key: &str) -> bool {
     matches!(key, "chunk_id" | "chunk_ids" | "parent_chunk_id")
 }
 
-#[hotpath::measure]
 fn collect_symbol_occurrences(
     value: &Value,
     field: IdentityFieldV1,
@@ -183,7 +182,6 @@ fn collect_symbol_occurrences(
     }
 }
 
-#[hotpath::measure]
 fn normalize_identity_fields(
     value: &mut Value,
     field: IdentityFieldV1,
@@ -234,7 +232,6 @@ fn normalize_identity_fields(
     }
 }
 
-#[hotpath::measure]
 fn restore_identity_fields(
     value: &mut Value,
     field: IdentityFieldV1,
@@ -297,7 +294,6 @@ fn restore_identity_fields(
     Ok(())
 }
 
-#[hotpath::measure]
 fn normalize_evidence_identities(
     value: &mut Value,
     key: Option<&str>,
@@ -345,7 +341,6 @@ fn normalize_evidence_identities(
     }
 }
 
-#[hotpath::measure]
 fn restore_evidence_identities(
     value: &mut Value,
     key: Option<&str>,
@@ -402,7 +397,6 @@ fn restore_evidence_identities(
     Ok(())
 }
 
-#[hotpath::measure]
 fn encode_file_segment(
     generation_id: &CodeGenerationId,
     file: &FileGenerationArtifactsV1,
@@ -516,7 +510,6 @@ fn encode_file_segment(
     ))
 }
 
-#[hotpath::measure]
 fn decode_file_segment(
     descriptor: &PartitionedFileSegmentDescriptorV1,
     generation_id: &CodeGenerationId,
@@ -570,7 +563,6 @@ fn decode_file_segment(
     Ok(file)
 }
 
-#[hotpath::measure]
 fn encode_generation_evidence(
     generation: &CodeIndexPublishedGenerationV1,
     file_segments: &[PartitionedFileSegmentDescriptorV1],
@@ -644,7 +636,6 @@ fn encode_generation_evidence(
     ))
 }
 
-#[hotpath::measure]
 fn decode_generation_evidence(
     descriptor: &PartitionedComponentDescriptorV1,
     bytes: &[u8],
@@ -715,7 +706,6 @@ fn decode_generation_evidence(
     })
 }
 
-#[hotpath::measure]
 fn parse_partitioned_manifest(
     bytes: &[u8],
 ) -> Result<Option<PartitionedPublishedGenerationV1>, CodeIndexProductionErrorV1> {
@@ -770,7 +760,6 @@ fn parse_partitioned_manifest(
     Ok(Some(generation))
 }
 
-#[hotpath::measure_all]
 impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
     pub fn open_partitioned_sealed(
         reader: R,
@@ -809,7 +798,6 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
     }
 }
 
-#[hotpath::measure_all]
 impl CodeIndexPublishedGenerationV1 {
     pub fn encode_partitioned_sealed(
         &self,

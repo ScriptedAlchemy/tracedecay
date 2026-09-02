@@ -56,7 +56,6 @@ struct TestAttributionEvidenceDigestInput<'a> {
     occurrences: &'a [TestAttributionOccurrenceV1],
 }
 
-#[hotpath::measure_all]
 impl TestAttributionWatermarkV1 {
     pub fn recompute_evidence_digest(
         &self,
@@ -180,7 +179,6 @@ pub enum GenerationTestJoinErrorV1 {
     Contract(String),
 }
 
-#[hotpath::measure_all]
 impl GenerationTestJoinV1 {
     /// Join canonical test-attribution records to one exact code generation.
     pub fn join(
@@ -259,7 +257,6 @@ impl GenerationTestJoinV1 {
     }
 }
 
-#[hotpath::measure]
 fn canonical_attributions(
     attributions: &[GenerationTestAttributionV1],
 ) -> Result<Vec<GenerationTestAttributionV1>, GenerationTestJoinErrorV1> {
@@ -288,7 +285,6 @@ fn canonical_attributions(
     Ok(canonical)
 }
 
-#[hotpath::measure]
 fn canonical_occurrences(
     occurrences: &[TestAttributionOccurrenceV1],
 ) -> Result<Vec<TestAttributionOccurrenceV1>, GenerationTestJoinErrorV1> {
@@ -298,7 +294,6 @@ fn canonical_occurrences(
     Ok(canonical)
 }
 
-#[hotpath::measure]
 fn disposition_for(
     generation: &CodeGenerationManifestV1,
     snapshot: &ValidatedCodeSnapshotV1,
@@ -391,7 +386,6 @@ fn disposition_for(
     }
 }
 
-#[hotpath::measure]
 fn index_occurrences(
     occurrences: &[TestAttributionOccurrenceV1],
 ) -> Result<BTreeMap<&SymbolOccurrenceId, &TestAttributionOccurrenceV1>, GenerationTestJoinErrorV1>
@@ -422,7 +416,6 @@ fn index_occurrences(
     Ok(by_id)
 }
 
-#[hotpath::measure]
 fn validate_attribution(
     attribution: &GenerationTestAttributionV1,
 ) -> Result<(), GenerationTestJoinErrorV1> {
@@ -460,7 +453,6 @@ fn validate_attribution(
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_generation_snapshot(
     generation: &CodeGenerationManifestV1,
     snapshot: &ValidatedCodeSnapshotV1,
@@ -483,7 +475,6 @@ fn validate_generation_snapshot(
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_watermark(
     generation: &CodeGenerationManifestV1,
     snapshot: &ValidatedCodeSnapshotV1,
