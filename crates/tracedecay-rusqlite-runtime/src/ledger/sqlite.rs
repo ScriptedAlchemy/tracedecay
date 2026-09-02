@@ -70,7 +70,6 @@ impl_canonical_json!(
     TransactionalOutboxEntryV1,
 );
 
-#[hotpath::measure]
 pub(super) fn encode_json<T: CanonicalJson>(
     value: &T,
     field: &'static str,
@@ -82,7 +81,6 @@ pub(super) fn encode_json<T: CanonicalJson>(
     Ok(encoded)
 }
 
-#[hotpath::measure]
 pub(super) fn decode_json<T: CanonicalJson>(
     raw: &str,
     table: &'static str,
@@ -103,7 +101,6 @@ pub(super) struct BindingKey {
     pub(super) incarnation_sql: i64,
 }
 
-#[hotpath::measure_all]
 impl BindingKey {
     pub(super) fn from_binding(binding: &StoreRuntimeBindingV1) -> Result<Self, LedgerError> {
         Self::from_parts(&binding.shard_id, binding.incarnation)
@@ -130,7 +127,6 @@ pub(super) struct Submission<'a> {
     pub(super) durability_json: String,
 }
 
-#[hotpath::measure_all]
 impl<'a> Submission<'a> {
     pub(super) fn new(
         metadata: &'a StoreOperationMetadataV1,
@@ -159,7 +155,6 @@ impl<'a> Submission<'a> {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn sqlite_u64(value: u64, field: &'static str) -> Result<i64, LedgerError> {
     i64::try_from(value).map_err(|_| LedgerError::UnsupportedInteger { field })
 }

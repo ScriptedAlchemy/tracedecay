@@ -134,7 +134,6 @@ pub struct MemoryAutomationCurationReceiptV1 {
     pub canonical_digest: ManifestDigest,
 }
 
-#[hotpath::measure_all]
 impl MemoryAutomationCurationReceiptV1 {
     pub fn canonical_digest(&self) -> Result<ManifestDigest, DomainError> {
         canonical_sha256(&(
@@ -144,7 +143,6 @@ impl MemoryAutomationCurationReceiptV1 {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn curation_receipt_matches(
     run_id: &RunId,
     settled: &MemoryAutomationCurationReceiptV1,
@@ -204,7 +202,6 @@ struct CurationTracker<'a> {
     facts_linked: u64,
 }
 
-#[hotpath::measure_all]
 impl<'a> CurationTracker<'a> {
     fn new(owner: &'a FactCommitOwnerV1) -> Self {
         Self {
@@ -465,7 +462,6 @@ enum ActiveAssertion {
     Absent,
 }
 
-#[hotpath::measure_all]
 impl ActiveAssertion {
     fn matches(self, assertion_id: &Option<tracedecay_domain::FactAssertionId>) -> bool {
         match self {
@@ -476,7 +472,6 @@ impl ActiveAssertion {
     }
 }
 
-#[hotpath::measure]
 fn add_snapshot_matches(
     fact_id: &FactId,
     disposition: MemoryAutomationCurationAddDispositionV1,
@@ -502,7 +497,6 @@ fn add_snapshot_matches(
     }
 }
 
-#[hotpath::measure]
 fn remove_snapshot_matches(
     disposition: MemoryAutomationCurationRemoveDispositionV1,
     commit: Option<&FactCommitReceiptV1>,
@@ -514,7 +508,6 @@ fn remove_snapshot_matches(
     }
 }
 
-#[hotpath::measure]
 fn domain_owner(owner: &FactCommitOwnerV1) -> FactOwnerV1 {
     match owner {
         FactCommitOwnerV1::Profile => FactOwnerV1::Profile,
@@ -524,7 +517,6 @@ fn domain_owner(owner: &FactCommitOwnerV1) -> FactOwnerV1 {
     }
 }
 
-#[hotpath::measure]
 fn relation_matches_terminal(
     relation: &MemoryAutomationCurationRelationV1,
     owner: &FactCommitOwnerV1,
@@ -563,7 +555,6 @@ fn relation_matches_terminal(
             .is_some_and(|payload| payload.byte_len() > 0)
 }
 
-#[hotpath::measure]
 fn raw_sha256(value: &str) -> bool {
     value.len() == 64
         && value

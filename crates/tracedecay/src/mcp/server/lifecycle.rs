@@ -18,7 +18,6 @@ struct McpBackgroundTaskAdmission {
     tasks: tokio::task::JoinSet<()>,
 }
 
-#[hotpath::measure_all]
 impl McpBackgroundTaskOwner {
     fn spawn<Task>(&self, task: Task) -> bool
     where
@@ -111,7 +110,6 @@ pub(crate) enum StartupCatchUpStateV1 {
     Cancelled,
 }
 
-#[hotpath::measure_all]
 impl StartupCatchUpStateV1 {
     #[hotpath::skip]
     const fn settled(&self) -> bool {
@@ -153,7 +151,6 @@ impl Default for StartupCatchUpMachineV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl StartupCatchUpMachineV1 {
     fn state(&self) -> std::sync::MutexGuard<'_, StartupCatchUpStateV1> {
         self.state
@@ -283,7 +280,6 @@ impl Default for ProjectServerResponseLifecycle {
     }
 }
 
-#[hotpath::measure_all]
 impl ProjectServerResponseLifecycle {
     pub(crate) fn revoke(&self) {
         self.response_revoked.cancel();
@@ -329,7 +325,6 @@ impl ProjectServerResponseLifecycle {
 /// preserved as-is here rather than harmonized.
 struct CooldownGate;
 
-#[hotpath::measure_all]
 impl CooldownGate {
     /// Returns `true` iff at least `window_secs` have elapsed since
     /// `atomic`'s last stamp and this call won the race to advance it
@@ -346,7 +341,6 @@ impl CooldownGate {
     }
 }
 
-#[hotpath::measure_all]
 impl McpServer {
     pub(crate) fn spawn_background_task<Task>(&self, task: Task) -> bool
     where
@@ -797,7 +791,6 @@ impl McpServer {
 /// whether this caller claimed the (single-flighted) background refresh. The
 /// warning always reflects the last completed check; an expired cache serves
 /// that stale answer rather than making the caller wait for a fetch.
-#[hotpath::measure]
 fn cached_version_warning(cache: &mut VersionCheckState, current: &str) -> (Option<String>, bool) {
     let fresh = cache
         .checked_at

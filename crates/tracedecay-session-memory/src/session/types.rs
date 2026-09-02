@@ -24,7 +24,6 @@ pub struct AuthorizedSessionRoot {
     identity: ResolvedSessionIdentity,
 }
 
-#[hotpath::measure_all]
 impl AuthorizedSessionRoot {
     pub fn from_identity(identity: &ResolvedSessionIdentity) -> Self {
         Self {
@@ -50,7 +49,6 @@ pub struct SessionRequestBinding {
     admitted_grant_digest: Option<ManifestDigest>,
 }
 
-#[hotpath::measure_all]
 impl SessionRequestBinding {
     pub fn new(
         identity: ResolvedSessionIdentity,
@@ -192,7 +190,6 @@ pub struct SessionScopeAuthorizationRequest {
     access: SessionAccess,
 }
 
-#[hotpath::measure_all]
 impl SessionScopeAuthorizationRequest {
     pub fn new(
         actor_id: ActorId,
@@ -288,7 +285,6 @@ pub struct AuthorizedSessionScope {
     access: SessionAccess,
 }
 
-#[hotpath::measure_all]
 impl AuthorizedSessionScope {
     fn from_request(request: &SessionScopeAuthorizationRequest) -> Self {
         Self {
@@ -353,7 +349,6 @@ pub struct SessionAuthorizationGrant {
     binding: SessionRequestBinding,
 }
 
-#[hotpath::measure_all]
 impl SessionAuthorizationGrant {
     /// Issues a grant after an authorizer accepts the exact resolved scope.
     pub fn issue(
@@ -488,7 +483,6 @@ pub enum SessionFreshnessPolicy {
     RequireFresh,
 }
 
-#[hotpath::measure_all]
 impl SessionFreshnessPolicy {
     #[hotpath::skip]
     pub const fn accepts(self, freshness: SessionDataFreshness) -> bool {
@@ -513,7 +507,6 @@ pub struct SessionRetrievalRequest {
     limit: u64,
 }
 
-#[hotpath::measure_all]
 impl SessionRetrievalRequest {
     pub fn new(
         grant: SessionAuthorizationGrant,
@@ -611,7 +604,6 @@ pub enum SessionRetrievalOutcome<T> {
     Cancelled,
 }
 
-#[hotpath::measure_all]
 impl<T> SessionRetrievalOutcome<T> {
     pub fn complete(
         items: Vec<T>,

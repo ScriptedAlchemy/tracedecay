@@ -16,7 +16,6 @@ use super::{
 /// exists only so legacy identity can be adopted (read once, ingested into
 /// the home-profile registry) and so cleanup flows can recognize the debris.
 /// Users may delete the file at any time.
-#[hotpath::measure]
 pub fn legacy_enrollment_marker_path(project_root: &Path) -> PathBuf {
     project_root.join(TRACEDECAY_DIR).join(ENROLLMENT_FILENAME)
 }
@@ -26,7 +25,6 @@ pub fn legacy_enrollment_marker_path(project_root: &Path) -> PathBuf {
 /// Read-only legacy adoption source: registry-aware resolution ingests the
 /// identity it names exactly once (when the project is not otherwise
 /// resolvable) and never consults the file again. Nothing writes it.
-#[hotpath::measure]
 pub fn read_legacy_enrollment_marker(project_root: &Path) -> Result<Option<EnrollmentMarker>> {
     let path = legacy_enrollment_marker_path(project_root);
     if !path.is_file() {
@@ -51,7 +49,6 @@ pub fn read_legacy_enrollment_marker(project_root: &Path) -> Result<Option<Enrol
 /// Detached worktrees share repository identity with the primary checkout.
 /// Worktree/ref/snapshot identity is retained as query and generation
 /// provenance; it never selects a second mutable project database.
-#[hotpath::measure]
 pub fn repository_identity_path(project_root: &Path) -> Option<PathBuf> {
     crate::worktree::git_common_dir(project_root)
         .map(|common_dir| common_dir.join(REPOSITORY_IDENTITY_FILENAME))
@@ -61,12 +58,10 @@ pub fn repository_identity_path(project_root: &Path) -> Option<PathBuf> {
 ///
 /// Presence-only probe for discovery walks; identity resolution goes through
 /// [`read_repository_identity_marker`], which also validates the contents.
-#[hotpath::measure]
 pub fn has_repository_identity_marker(project_root: &Path) -> bool {
     repository_identity_path(project_root).is_some_and(|path| path.is_file())
 }
 
-#[hotpath::measure]
 pub fn read_repository_identity_marker(
     project_root: &Path,
 ) -> Result<Option<RepositoryIdentityMarker>> {
@@ -175,7 +170,6 @@ pub fn read_repository_identity_marker(
 /// [`read_repository_identity_marker`] (which would re-run conflict detection
 /// against the probed directory). An absent, unreadable, malformed, or
 /// differently-named marker returns `false`.
-#[hotpath::measure]
 fn stored_dir_marker_names_project(stored_common_dir: &Path, expected_project_id: &str) -> bool {
     let marker_path = stored_common_dir.join(REPOSITORY_IDENTITY_FILENAME);
     let Ok(text) = fs::read_to_string(&marker_path) else {
@@ -227,7 +221,6 @@ pub fn pin_fixture_repository_identity(project_root: &Path, project_id: &str) ->
     Ok(())
 }
 
-#[hotpath::measure]
 pub fn write_repository_identity_marker(project_root: &Path, project_id: &str) -> Result<bool> {
     validate_project_id(project_id).map_err(|message| TraceDecayError::Config {
         message: message.to_string(),

@@ -5,7 +5,6 @@ use crate::mcp::tools::{ToolCallRegistryOptions, handle_tool_call_with_registry_
 
 use super::super::read_coalescing::{ReadFlightClaim, tool_allows_identical_read_coalescing};
 
-#[hotpath::measure_all]
 impl McpServer {
     #[hotpath::skip]
     pub(super) async fn route_tool_arguments(
@@ -349,7 +348,6 @@ impl McpServer {
 }
 
 /// Keys [`registered_project_context`] reads when resolving a selected project.
-#[hotpath::measure]
 fn registered_project_selector_arguments(arguments: &Value) -> Value {
     const SELECTOR_KEYS: &[&str] = &[
         "project_selector",

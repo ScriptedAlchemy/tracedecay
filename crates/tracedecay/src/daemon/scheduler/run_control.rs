@@ -10,7 +10,6 @@ pub(super) struct AutomationSchedulerStop {
     requested: Arc<AtomicBool>,
 }
 
-#[hotpath::measure_all]
 impl AutomationSchedulerStop {
     pub(super) fn run_control(&self, lifecycle: DaemonLifecycle) -> AutomationRunControl {
         let requested = Arc::clone(&self.requested);

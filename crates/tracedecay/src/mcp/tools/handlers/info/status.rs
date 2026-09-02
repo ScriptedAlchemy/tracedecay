@@ -49,7 +49,6 @@ pub(crate) async fn handle_admin_sync(
     ))
 }
 
-#[hotpath::measure]
 fn status_arg_flag(args: &Value, key: &str, default: bool) -> bool {
     args.get(key).and_then(Value::as_bool).unwrap_or(default)
 }
@@ -82,7 +81,6 @@ enum CodeIndexRetrievalServingV1 {
     AuthorityUnattached,
 }
 
-#[hotpath::measure_all]
 impl CodeIndexRetrievalServingV1 {
     fn attach(&self, output: &mut Value) -> bool {
         match self {
@@ -122,7 +120,6 @@ impl CodeIndexRetrievalServingV1 {
 
 /// Whole seconds elapsed since a recorded microsecond timestamp, clamped at
 /// zero. `None` when the source never recorded the observation.
-#[hotpath::measure]
 fn age_seconds(recorded_at_micros: Option<i64>) -> Option<i64> {
     let recorded = recorded_at_micros?;
     let now = std::time::SystemTime::now()
@@ -132,7 +129,6 @@ fn age_seconds(recorded_at_micros: Option<i64>) -> Option<i64> {
     Some(now.saturating_sub(recorded).max(0) / 1_000_000)
 }
 
-#[hotpath::measure]
 fn attach_compact_branch_summary(
     cg: &TraceDecay,
     output: &mut Value,
@@ -150,7 +146,6 @@ fn attach_compact_branch_summary(
     }
 }
 
-#[hotpath::measure]
 fn attach_full_branch_status(
     cg: &TraceDecay,
     output: &mut Value,
@@ -432,7 +427,6 @@ pub(crate) async fn handle_status(
 /// background worker re-checks every wake but can never fix by waiting — so
 /// the warning carries the exact reason and remediation instead of a
 /// wait-longer message.
-#[hotpath::measure]
 fn code_index_freshness_projection(
     freshness: &tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1,
 ) -> (&'static str, Option<String>) {
@@ -481,7 +475,6 @@ async fn historical_session_catch_up(db: &RegisteredGlobalDb) -> Option<Value> {
     }
 }
 
-#[hotpath::measure]
 fn historical_session_catch_up_state(ingest: &SessionIngestHealth) -> Option<Value> {
     use std::collections::BTreeSet;
 
@@ -559,7 +552,6 @@ fn historical_session_catch_up_state(ingest: &SessionIngestHealth) -> Option<Val
     }))
 }
 
-#[hotpath::measure]
 fn render_status_md(value: &Value) -> String {
     let mut md = Md::new();
     md.heading(2, "Project Status");
@@ -604,7 +596,6 @@ fn render_status_md(value: &Value) -> String {
     md.render()
 }
 
-#[hotpath::measure]
 fn active_project_context(
     cg: &TraceDecay,
     branch: &BranchDiagnostics,
@@ -648,7 +639,6 @@ fn active_project_context(
     output
 }
 
-#[hotpath::measure]
 fn storage_mode_name(mode: &StorageMode) -> &'static str {
     match mode {
         StorageMode::ProjectLocal => "project_local",
@@ -656,7 +646,6 @@ fn storage_mode_name(mode: &StorageMode) -> &'static str {
     }
 }
 
-#[hotpath::measure]
 fn store_kind_name(kind: &StoreKind) -> &'static str {
     match kind {
         StoreKind::CodeProject => "code_project",

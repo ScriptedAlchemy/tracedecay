@@ -112,7 +112,6 @@ pub enum SessionRefreshServiceOutcome {
     Unavailable,
 }
 
-#[hotpath::measure]
 pub fn utc_micros_value(value: UtcMicros) -> i64 {
     value.0
 }

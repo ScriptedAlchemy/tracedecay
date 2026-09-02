@@ -5,7 +5,6 @@ use tracedecay_store::StoreShardIdV1;
 
 use super::{DaemonSessionRuntimeRegistryV1, Result, session_registry_error};
 
-#[hotpath::measure_all]
 impl DaemonSessionRuntimeRegistryV1 {
     fn memory_graph_reconciliation_owners(&self) -> Vec<MemoryGraphReconciliationTaskOwnerV1> {
         let mut owners = Vec::new();

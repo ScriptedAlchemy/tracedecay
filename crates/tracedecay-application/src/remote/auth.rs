@@ -38,7 +38,6 @@ pub struct OpaqueRemoteCredential {
     bytes: Box<[u8]>,
 }
 
-#[hotpath::measure_all]
 impl OpaqueRemoteCredential {
     pub fn new(bytes: impl Into<Box<[u8]>>) -> Result<Self, RemoteAuthenticationError> {
         let mut bytes = bytes.into();
@@ -160,7 +159,6 @@ pub struct RemoteEnrollmentAdmissionEvidenceV1 {
     effective_deadline: Deadline,
 }
 
-#[hotpath::measure_all]
 impl RemoteEnrollmentAdmissionEvidenceV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -363,7 +361,6 @@ pub struct RemoteEnrollmentCommitReceiptV1 {
     pub enrollment: EnrollmentCredentialRecordV1,
 }
 
-#[hotpath::measure_all]
 impl RemoteEnrollmentCommitReceiptV1 {
     pub fn validate(&self) -> Result<(), RemoteEnrollmentEvidenceErrorV1> {
         self.enrollment
@@ -642,7 +639,6 @@ where
     }
 }
 
-#[hotpath::measure]
 fn enrollment_protocol_failure(error: RemoteEnrollmentServiceErrorV1) -> RemoteProtocolFailureV1 {
     match error {
         RemoteEnrollmentServiceErrorV1::InvalidRequest => RemoteProtocolFailureV1::ScopeMismatch,
@@ -796,7 +792,6 @@ pub fn authenticate_remote_request(
     )
 }
 
-#[hotpath::measure]
 pub fn authenticate_caller(
     record: &EnrollmentCredentialRecordV1,
     presented: &OpaqueRemoteCredential,
@@ -831,7 +826,6 @@ pub fn authenticate_caller(
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_authority_credential(
     authority: &CurrentRemoteAuthorityV1,
     record: &EnrollmentCredentialRecordV1,
@@ -955,14 +949,12 @@ pub fn revoke_credential(
     Ok((next, receipt))
 }
 
-#[hotpath::measure]
 fn fingerprint(
     credential: &OpaqueRemoteCredential,
 ) -> Result<RemoteCredentialFingerprintV1, RemoteAuthenticationError> {
     credential.credential_fingerprint()
 }
 
-#[hotpath::measure]
 fn fingerprints_equal(
     left: &RemoteCredentialFingerprintV1,
     right: &RemoteCredentialFingerprintV1,

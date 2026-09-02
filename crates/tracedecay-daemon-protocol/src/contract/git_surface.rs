@@ -13,7 +13,6 @@ use super::{
     DaemonInvocationRequest,
 };
 
-#[hotpath::measure_all]
 impl DaemonInvocationRequest {
     pub fn git_read(
         request_id: impl Into<String>,

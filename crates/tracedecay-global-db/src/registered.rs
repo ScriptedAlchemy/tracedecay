@@ -44,7 +44,6 @@ pub struct RegisteredGlobalDbWeakLeaseIssuerV1 {
     project_graph: Arc<OnceLock<VerifiedGraphRuntimeWeakProxyV1>>,
 }
 
-#[hotpath::measure_all]
 impl RegisteredGlobalDbOwnerV1 {
     /// Validates the final schema installed during physical Store open before
     /// the owner becomes visible to any caller. The temporary issuance is
@@ -152,7 +151,6 @@ impl RegisteredGlobalDbOwnerV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl RegisteredGlobalDbWeakLeaseIssuerV1 {
     /// Issues one fresh registered-database lease while the exact map owner
     /// remains ready. The returned lease retains schema authority only through
@@ -214,7 +212,6 @@ impl std::borrow::Borrow<RegisteredGlobalDb> for RegisteredGlobalDbLeaseV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl RegisteredGlobalDbLeaseV1 {
     fn from_database(database: RegisteredGlobalDb) -> Self {
         Self {
@@ -239,7 +236,6 @@ pub struct RegisteredGlobalDb {
     )>,
 }
 
-#[hotpath::measure_all]
 impl RegisteredGlobalDb {
     #[hotpath::measure(future = true, label = "global_db.registered.schema")]
     pub async fn converge_schema(
@@ -640,7 +636,6 @@ pub struct RegisteredGlobalDbWriterConnection<'a> {
     database: &'a Database,
 }
 
-#[hotpath::measure_all]
 impl RegisteredGlobalDbWriterConnection<'_> {
     #[hotpath::skip]
     pub async fn execute<P>(
@@ -779,7 +774,6 @@ impl tracedecay_runtime_core::db::engine::DatabaseAttachmentExecutor
     }
 }
 
-#[hotpath::measure_all]
 impl RegisteredGlobalDbWriteTransaction<'_> {
     #[hotpath::skip]
     pub async fn execute<P>(
@@ -845,7 +839,6 @@ fn registered_error(operation: &str, error: impl std::fmt::Display) -> TraceDeca
     }
 }
 
-#[hotpath::measure]
 fn registered_owner_error(error: DatabaseOwnerErrorV1) -> TraceDecayError {
     registered_error(
         "issue registered global database client",
@@ -853,7 +846,6 @@ fn registered_owner_error(error: DatabaseOwnerErrorV1) -> TraceDecayError {
     )
 }
 
-#[hotpath::measure]
 fn engine_error(error: TraceDecayError) -> tracedecay_runtime_core::db::engine::Error {
     tracedecay_runtime_core::db::engine::Error::invalid_operation(error.to_string())
 }

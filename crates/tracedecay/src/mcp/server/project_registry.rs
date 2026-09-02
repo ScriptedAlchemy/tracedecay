@@ -27,7 +27,6 @@ pub(crate) struct DaemonProjectRegistryReadService {
     registry: RegisteredGlobalDbLeaseV1,
 }
 
-#[hotpath::measure_all]
 impl DaemonProjectRegistryReadService {
     #[hotpath::skip]
     pub(crate) const fn new(registry: RegisteredGlobalDbLeaseV1) -> Self {
@@ -156,7 +155,6 @@ impl DaemonProjectRegistryReadService {
     }
 }
 
-#[hotpath::measure]
 fn serialize_records<T: serde::Serialize>(records: &[T]) -> Result<Vec<Value>> {
     records
         .iter()

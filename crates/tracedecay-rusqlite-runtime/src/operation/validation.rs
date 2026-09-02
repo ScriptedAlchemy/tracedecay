@@ -1,6 +1,5 @@
 use tracedecay_store::{RuntimeSubmitRequestV1, StorageRuntimeContractErrorV1};
 
-#[hotpath::measure]
 pub(super) fn validate(
     request: &RuntimeSubmitRequestV1,
 ) -> Result<(), StorageRuntimeContractErrorV1> {

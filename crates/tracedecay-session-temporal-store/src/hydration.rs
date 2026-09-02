@@ -119,7 +119,6 @@ pub struct SessionTemporalHydrationAdapter<B> {
     backend: B,
 }
 
-#[hotpath::measure_all]
 impl<B> SessionTemporalHydrationAdapter<B> {
     #[hotpath::skip]
     pub const fn new(backend: B) -> Self {
@@ -127,7 +126,6 @@ impl<B> SessionTemporalHydrationAdapter<B> {
     }
 }
 
-#[hotpath::measure_all]
 impl<B: TemporalHydrationBackend> SessionTemporalHydrationAdapter<B> {
     async fn authorize(
         &self,
@@ -198,7 +196,6 @@ impl<B: TemporalHydrationBackend> SessionTemporalHydrationAdapter<B> {
     }
 }
 
-#[hotpath::measure]
 fn same_payload_descriptor(left: &PayloadDescriptor, right: &PayloadDescriptor) -> bool {
     left.byte_count == right.byte_count
         && left.content_hash == right.content_hash
@@ -296,7 +293,6 @@ struct SessionHydrationRelationAuthority<'snapshot> {
     store: SessionRelationGraphStore,
 }
 
-#[hotpath::measure_all]
 impl<'snapshot> GlobalDbHydrationBackend<'snapshot> {
     #[cfg(test)]
     #[hotpath::skip]
@@ -329,7 +325,6 @@ impl<'snapshot> GlobalDbHydrationBackend<'snapshot> {
 pub type GlobalDbTemporalHydrationPort<'snapshot> =
     SessionTemporalHydrationAdapter<GlobalDbHydrationBackend<'snapshot>>;
 
-#[hotpath::measure_all]
 impl<'snapshot> SessionTemporalHydrationAdapter<GlobalDbHydrationBackend<'snapshot>> {
     #[cfg(test)]
     #[hotpath::skip]
@@ -490,7 +485,6 @@ pub(super) async fn session_message_from_hydrated_bytes(
     })
 }
 
-#[hotpath::measure]
 fn canonical_projected_message(
     observation: &DurableObservationV1,
     message_id: &str,
@@ -509,7 +503,6 @@ fn canonical_projected_message(
         .map(|output| output.message().clone())
 }
 
-#[hotpath::measure_all]
 impl GlobalDbHydrationBackend<'_> {
     #[hotpath::measure(future = true, label = "session_temporal.hydrate.resolve")]
     async fn resolve_current(
@@ -732,13 +725,11 @@ async fn read_occurrence_content(
     }
 }
 
-#[hotpath::measure]
 fn content_matches_descriptor(content: &[u8], descriptor: &PayloadDescriptor) -> bool {
     content.len() == descriptor.byte_count
         && content_hash_matches(&descriptor.content_hash, content)
 }
 
-#[hotpath::measure]
 pub(super) fn hydration_failure(error: impl std::fmt::Display) -> HydrationError {
     tracing::error!(error = %error, "session temporal hydration failed");
     HydrationError::Unavailable
@@ -1164,7 +1155,6 @@ async fn summary_has_provider_evidence(
     Ok(matched)
 }
 
-#[hotpath::measure]
 fn hydration_relation_error(
     error: SessionRelationError,
     control: &ExecutionControl,
@@ -1198,7 +1188,6 @@ fn hydration_relation_error(
     }
 }
 
-#[hotpath::measure]
 fn authorized_root_owner(snapshot: &TemporalExecutionSnapshot) -> Option<ObservationScopeV1> {
     snapshot
         .request()
@@ -1231,7 +1220,6 @@ async fn session_owner(
     Ok(owner_from_project_key(project_key))
 }
 
-#[hotpath::measure]
 fn owner_from_project_key(project_key: String) -> Option<ObservationScopeV1> {
     if project_key == "user" {
         return Some(ObservationScopeV1::Profile);
@@ -1241,7 +1229,6 @@ fn owner_from_project_key(project_key: String) -> Option<ObservationScopeV1> {
         .map(|project_id| ObservationScopeV1::Project { project_id })
 }
 
-#[hotpath::measure]
 fn participant_access_state(
     snapshot: &TemporalExecutionSnapshot,
     session_id: &str,
@@ -1266,7 +1253,6 @@ fn participant_access_state(
     source_access_hydration_state(participant.access())
 }
 
-#[hotpath::measure]
 fn source_access_hydration_state(access: TemporalSourceAccess) -> Option<HydrationStateV1> {
     match access {
         TemporalSourceAccess::Available => None,
@@ -1279,7 +1265,6 @@ fn source_access_hydration_state(access: TemporalSourceAccess) -> Option<Hydrati
     }
 }
 
-#[hotpath::measure]
 fn classify_current_access(
     payload_access: PayloadAccessState,
     durability: &AnchorDurabilityClass,
@@ -1311,7 +1296,6 @@ fn classify_current_access(
     }
 }
 
-#[hotpath::measure]
 fn bounded_copy(
     bytes: &[u8],
     max_bytes: usize,
@@ -1332,19 +1316,16 @@ fn bounded_copy(
     Ok(copy)
 }
 
-#[hotpath::measure]
 fn nonnegative_usize(value: Option<i64>) -> Result<usize, HydrationError> {
     value
         .and_then(|value| usize::try_from(value).ok())
         .ok_or_else(|| hydration_failure("payload size is not a nonnegative usize"))
 }
 
-#[hotpath::measure]
 fn content_hash_matches(expected: &str, bytes: &[u8]) -> bool {
     expected.strip_prefix("sha256:").unwrap_or(expected) == sha256_hex(bytes)
 }
 
-#[hotpath::measure]
 fn is_canonical_sha256_hex(value: &str) -> bool {
     value.len() == 64
         && value
@@ -1352,7 +1333,6 @@ fn is_canonical_sha256_hex(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-#[hotpath::measure]
 fn sha256_hex(bytes: &[u8]) -> String {
     tracedecay_domain::canonical_text::sha256_hex(bytes)
 }

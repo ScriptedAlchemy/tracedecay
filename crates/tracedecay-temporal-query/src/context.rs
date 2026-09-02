@@ -96,7 +96,6 @@ pub struct OrderedTextContextAssembler {
     used_chars: usize,
 }
 
-#[hotpath::measure_all]
 impl OrderedTextContextAssembler {
     #[hotpath::skip]
     pub const fn new(max_chars: usize) -> Self {

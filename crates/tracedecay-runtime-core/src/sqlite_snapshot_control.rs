@@ -10,7 +10,6 @@ pub struct SnapshotReadControl {
     cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
 }
 
-#[hotpath::measure_all]
 impl SnapshotReadControl {
     pub fn new(deadline: Instant, cancelled: impl Fn() -> bool + Send + Sync + 'static) -> Self {
         Self {

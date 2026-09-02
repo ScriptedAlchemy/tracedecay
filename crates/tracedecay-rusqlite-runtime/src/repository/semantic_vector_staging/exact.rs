@@ -78,7 +78,6 @@ pub struct SemanticVectorStagingExactSqlStorage {
     pub(super) graph_publication: GraphPublicationExactSqlStorage,
 }
 
-#[hotpath::measure_all]
 impl SemanticVectorStagingExactSqlStorage {
     pub fn from_authorized_handle(
         handle: ExactSqlHandle,

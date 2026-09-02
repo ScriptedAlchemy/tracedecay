@@ -186,7 +186,6 @@ impl Clone for ExternalSourceExecutor {
     }
 }
 
-#[hotpath::measure_all]
 impl ExternalSourceExecutor {
     #[hotpath::measure(label = "rusqlite.external_source.execute_write")]
     pub fn execute_write(
@@ -429,7 +428,6 @@ impl ExternalSourceExecutor {
     }
 }
 
-#[hotpath::measure]
 fn load_acquisition_state(
     connection: &rusqlite::Connection,
     binding: &SourceBindingIdentityV1,
@@ -459,7 +457,6 @@ fn load_acquisition_state(
     Ok(state)
 }
 
-#[hotpath::measure]
 fn load_next_ready_acquisition(
     connection: &rusqlite::Connection,
     now: tracedecay_domain::UtcMicros,
@@ -988,7 +985,6 @@ fn persist_authority_publication(
     Ok(())
 }
 
-#[hotpath::measure]
 fn persist_definition_and_binding(
     savepoint: &Savepoint<'_>,
     definition: &tracedecay_domain::SourceDefinitionV1,
@@ -1049,7 +1045,6 @@ fn persist_definition_and_binding(
     Ok(())
 }
 
-#[hotpath::measure]
 fn upsert_current_state(
     savepoint: &Savepoint<'_>,
     state: &SourceStoreStateV1,
@@ -1187,14 +1182,12 @@ use reads::{
     load_projection_receipt_by_digest, verify_encoded_row,
 };
 
-#[hotpath::measure]
 fn frontier_key(frontier: Option<&tracedecay_domain::SourceAggregateFrontierV1>) -> &str {
     frontier.map_or(ROOT_PROJECTION_FRONTIER, |frontier| {
         frontier.digest().as_str()
     })
 }
 
-#[hotpath::measure]
 fn owner_key(owner: &SourceBindingOwnerV1) -> (&'static str, &str) {
     match owner {
         SourceBindingOwnerV1::Project(project_id) => ("project", project_id.as_str()),

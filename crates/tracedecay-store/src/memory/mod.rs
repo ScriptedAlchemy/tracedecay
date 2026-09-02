@@ -109,7 +109,6 @@ pub struct StoredFactV1 {
     projected_as_of: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl StoredFactV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -179,7 +178,6 @@ impl StoredFactV1 {
     }
 }
 
-#[hotpath::measure]
 fn validate_owned_fact_id(fact_id: &FactId, owner: &FactOwnerV1) -> FactStoreResult<()> {
     fact_id
         .validate_owner(owner)

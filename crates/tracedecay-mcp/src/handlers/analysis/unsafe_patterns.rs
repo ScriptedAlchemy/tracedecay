@@ -26,7 +26,6 @@ const UNSAFE_KINDS: &[&str] = &[
 /// Deliberately over-approximates: it only has to be true whenever
 /// [`line_matches_unsafe_kind`] could be true for some line, so the real
 /// per-line matcher stays the single source of truth for what counts.
-#[hotpath::measure]
 fn source_may_contain_unsafe_kind(source: &str, kind: &str) -> bool {
     match kind {
         "unwrap" => source.contains(".unwrap"),
@@ -40,7 +39,6 @@ fn source_may_contain_unsafe_kind(source: &str, kind: &str) -> bool {
     }
 }
 
-#[hotpath::measure]
 fn line_matches_unsafe_kind(line: &str, kind: &str) -> bool {
     let trimmed = line.trim_start();
     if trimmed.starts_with("//") || trimmed.starts_with("///") {
@@ -57,7 +55,6 @@ fn line_matches_unsafe_kind(line: &str, kind: &str) -> bool {
     }
 }
 
-#[hotpath::measure]
 fn contains_method_call(line: &str, method: &str, empty_parens: bool) -> bool {
     let needle = format!(".{method}");
     let bytes = line.as_bytes();
@@ -81,7 +78,6 @@ fn contains_method_call(line: &str, method: &str, empty_parens: bool) -> bool {
     false
 }
 
-#[hotpath::measure]
 fn contains_unsafe_block_start(line: &str) -> bool {
     let bytes = line.as_bytes();
     let mut start = 0usize;
@@ -107,7 +103,6 @@ fn contains_unsafe_block_start(line: &str) -> bool {
     false
 }
 
-#[hotpath::measure]
 fn path_looks_like_test(path: &str) -> bool {
     path.starts_with("tests/")
         || path.contains("/tests/")

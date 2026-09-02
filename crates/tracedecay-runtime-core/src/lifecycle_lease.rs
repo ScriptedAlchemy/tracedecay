@@ -52,7 +52,6 @@ pub enum ExclusiveLeaseAttempt {
     },
 }
 
-#[hotpath::measure_all]
 impl LifecycleLease {
     pub fn token(&self) -> Option<&str> {
         self.token.as_deref()
@@ -120,7 +119,6 @@ impl LifecycleLease {
     }
 }
 
-#[hotpath::measure]
 pub fn canonical_or_original(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
@@ -140,7 +138,6 @@ impl Drop for LifecycleLease {
     }
 }
 
-#[hotpath::measure]
 pub fn acquire_exclusive(operation: &str) -> Result<LifecycleLease> {
     acquire_exclusive_at(&lifecycle_lock_path()?, operation)
 }
@@ -148,7 +145,6 @@ pub fn acquire_exclusive(operation: &str) -> Result<LifecycleLease> {
 /// Waits up to `timeout` for existing lifecycle readers or writers to release
 /// before acquiring exclusive ownership. Non-contention errors still fail
 /// immediately.
-#[hotpath::measure]
 pub fn acquire_exclusive_with_timeout(
     operation: &str,
     timeout: Duration,
@@ -159,7 +155,6 @@ pub fn acquire_exclusive_with_timeout(
 /// Acquires the lifecycle lease rooted in an explicit profile. Migration
 /// commands use this instead of ambient HOME so synthetic profiles and
 /// user-selected profile roots cannot accidentally lock a different store.
-#[hotpath::measure]
 pub fn acquire_exclusive_for_profile(
     profile_root: &Path,
     operation: &str,
@@ -169,7 +164,6 @@ pub fn acquire_exclusive_for_profile(
 
 /// Attempts the exclusive profile lease without blocking, reporting
 /// contention as [`ExclusiveLeaseAttempt::Busy`] instead of a refusal error.
-#[hotpath::measure]
 pub fn try_acquire_exclusive_for_profile(
     profile_root: &Path,
     operation: &str,
@@ -191,7 +185,6 @@ pub fn try_acquire_exclusive_for_profile(
 /// Waits for the current exclusive owner to finish, then acquires a shared
 /// lease. Reserved for restoring a daemon that was stopped before a losing
 /// exclusive-acquisition race.
-#[hotpath::measure]
 pub fn acquire_shared_blocking(operation: &str) -> Result<LifecycleLease> {
     let path = lifecycle_lock_path()?;
     let file = open_lock_file(&path)?;
@@ -207,18 +200,15 @@ pub fn acquire_shared_blocking(operation: &str) -> Result<LifecycleLease> {
 /// Holds ordinary database activity open for one explicit profile. The
 /// managed daemon retains this for its lifetime so offline maintenance cannot
 /// overlap any daemon-owned database handle.
-#[hotpath::measure]
 pub fn acquire_shared_for_profile(profile_root: &Path, operation: &str) -> Result<LifecycleLease> {
     acquire_shared_at(&lifecycle_lock_path_for_profile(profile_root)?, operation)
 }
 
 /// Attempts to acquire a non-inherited shared lease without blocking.
-#[hotpath::measure]
 pub fn try_acquire_shared(operation: &str) -> Result<SharedLeaseAttempt> {
     try_acquire_shared_at(&lifecycle_lock_path()?, operation)
 }
 
-#[hotpath::measure]
 pub fn try_acquire_shared_for_profile(
     profile_root: &Path,
     operation: &str,
@@ -228,13 +218,11 @@ pub fn try_acquire_shared_for_profile(
 
 /// Acquires a shared diagnostic lease, or joins the exclusive lease held by
 /// this process's post-update parent.
-#[hotpath::measure]
 pub fn acquire_shared_or_inherited(operation: &str) -> Result<LifecycleLease> {
     let path = lifecycle_lock_path()?;
     acquire_shared_or_inherited_at(&path, operation)
 }
 
-#[hotpath::measure]
 fn acquire_shared_or_inherited_at(path: &Path, operation: &str) -> Result<LifecycleLease> {
     let mut file = open_lock_file(path)?;
     match fs2::FileExt::try_lock_shared(&file) {
@@ -264,7 +252,6 @@ fn acquire_shared_or_inherited_at(path: &Path, operation: &str) -> Result<Lifecy
 
 /// Acquires the lifecycle lease, or proves that this process is the
 /// post-update child of the process that still owns it.
-#[hotpath::measure]
 pub fn acquire_exclusive_or_inherited(
     operation: &str,
     inherited_token: Option<&str>,
@@ -283,7 +270,6 @@ pub fn acquire_exclusive_or_inherited(
         reason = "non-Windows inheritance validation consumes the token"
     )
 )]
-#[hotpath::measure]
 fn acquire_exclusive_or_inherited_at(
     path: &Path,
     operation: &str,
@@ -322,7 +308,6 @@ fn acquire_exclusive_or_inherited_at(
     }
 }
 
-#[hotpath::measure]
 fn lifecycle_lock_path() -> Result<PathBuf> {
     let root = crate::config::user_data_dir().ok_or_else(|| TraceDecayError::Config {
         message: "could not determine TraceDecay user data directory for lifecycle lease"
@@ -348,7 +333,6 @@ fn lifecycle_lock_path() -> Result<PathBuf> {
     Ok(root.join(LIFECYCLE_LOCK_FILENAME))
 }
 
-#[hotpath::measure]
 fn lifecycle_lock_path_for_profile(profile_root: &Path) -> Result<PathBuf> {
     let root_existed = profile_root.exists();
     std::fs::create_dir_all(profile_root).map_err(|error| TraceDecayError::Config {
@@ -370,7 +354,6 @@ fn lifecycle_lock_path_for_profile(profile_root: &Path) -> Result<PathBuf> {
     Ok(profile_root.join(LIFECYCLE_LOCK_FILENAME))
 }
 
-#[hotpath::measure]
 fn acquire_exclusive_at(path: &Path, operation: &str) -> Result<LifecycleLease> {
     acquire_exclusive_at_with_timeout(path, operation, Duration::ZERO)
 }
@@ -417,7 +400,6 @@ fn acquire_shared_at(path: &Path, operation: &str) -> Result<LifecycleLease> {
     }
 }
 
-#[hotpath::measure]
 fn try_acquire_shared_at(path: &Path, operation: &str) -> Result<SharedLeaseAttempt> {
     let file = open_lock_file(path)?;
     match fs2::FileExt::try_lock_shared(&file) {
@@ -432,7 +414,6 @@ fn try_acquire_shared_at(path: &Path, operation: &str) -> Result<SharedLeaseAtte
     }
 }
 
-#[hotpath::measure]
 fn own_exclusive(mut file: File, path: &Path, operation: &str) -> Result<LifecycleLease> {
     let token = lease_token();
     let pid = std::process::id();
@@ -453,7 +434,6 @@ fn own_exclusive(mut file: File, path: &Path, operation: &str) -> Result<Lifecyc
     })
 }
 
-#[hotpath::measure]
 fn write_owner_metadata(file: &mut File, path: &Path, owner: &str) -> std::io::Result<()> {
     file.set_len(0)?;
     file.seek(SeekFrom::Start(0))?;
@@ -466,7 +446,6 @@ fn write_owner_metadata(file: &mut File, path: &Path, owner: &str) -> std::io::R
     Ok(())
 }
 
-#[hotpath::measure]
 fn clear_owner_metadata(file: &mut File, path: &Path) -> std::io::Result<()> {
     file.set_len(0)?;
     file.seek(SeekFrom::Start(0))?;
@@ -482,7 +461,6 @@ fn clear_owner_metadata(file: &mut File, path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-#[hotpath::measure]
 fn failed_downgrade_restore_error(
     downgrade_error: &TraceDecayError,
     restore_error: &std::io::Error,
@@ -494,7 +472,6 @@ fn failed_downgrade_restore_error(
     }
 }
 
-#[hotpath::measure]
 fn register_process_token(token: &str) {
     PROCESS_LEASE_TOKENS
         .lock()
@@ -502,7 +479,6 @@ fn register_process_token(token: &str) {
         .push(token.to_string());
 }
 
-#[hotpath::measure]
 fn unregister_process_token(token: &str) {
     let mut tokens = PROCESS_LEASE_TOKENS
         .lock()
@@ -512,7 +488,6 @@ fn unregister_process_token(token: &str) {
     }
 }
 
-#[hotpath::measure]
 fn process_owns_token(token: &str) -> bool {
     PROCESS_LEASE_TOKENS
         .lock()
@@ -522,7 +497,6 @@ fn process_owns_token(token: &str) -> bool {
 }
 
 #[cfg(not(windows))]
-#[hotpath::measure]
 fn live_owner_matches(owner: &str, inherited_token: &str) -> bool {
     let mut fields = owner.split('\t');
     if fields.next() != Some(inherited_token) {
@@ -541,7 +515,6 @@ fn live_owner_matches(owner: &str, inherited_token: &str) -> bool {
 }
 
 #[cfg(not(windows))]
-#[hotpath::measure]
 fn process_start_time(pid: u32) -> Option<u64> {
     let pid = sysinfo::Pid::from_u32(pid);
     let mut system = sysinfo::System::new();
@@ -549,7 +522,6 @@ fn process_start_time(pid: u32) -> Option<u64> {
     system.process(pid).map(sysinfo::Process::start_time)
 }
 
-#[hotpath::measure]
 fn open_lock_file(path: &Path) -> Result<File> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| lock_error(path, "open", &error))?;
@@ -566,7 +538,6 @@ fn open_lock_file(path: &Path) -> Result<File> {
         .map_err(|error| lock_error(path, "open", &error))
 }
 
-#[hotpath::measure]
 fn read_owner(file: &mut File, _path: &Path) -> Option<String> {
     #[cfg(windows)]
     if let Ok(owner) = std::fs::read_to_string(owner_sidecar_path(_path)) {
@@ -583,13 +554,11 @@ fn read_owner(file: &mut File, _path: &Path) -> Option<String> {
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn owner_sidecar_path(path: &Path) -> PathBuf {
     path.with_extension("lock.owner")
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn remove_owner_sidecar_if_current(path: &Path, token: Option<&str>) {
     let Some(token) = token else {
         return;
@@ -604,7 +573,6 @@ fn remove_owner_sidecar_if_current(path: &Path, token: Option<&str>) {
     }
 }
 
-#[hotpath::measure]
 fn lease_token() -> String {
     let epoch_nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -618,7 +586,6 @@ fn lease_token() -> String {
     )
 }
 
-#[hotpath::measure]
 fn busy_error(operation: &str, owner: Option<&str>) -> TraceDecayError {
     let owner_operation = owner
         .and_then(|line| line.split('\t').nth(1))
@@ -630,7 +597,6 @@ fn busy_error(operation: &str, owner: Option<&str>) -> TraceDecayError {
     }
 }
 
-#[hotpath::measure]
 fn lock_error(path: &Path, operation: &str, error: &std::io::Error) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!(
@@ -640,7 +606,6 @@ fn lock_error(path: &Path, operation: &str, error: &std::io::Error) -> TraceDeca
     }
 }
 
-#[hotpath::measure]
 fn owner_write_error(error: &std::io::Error) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!("failed to record TraceDecay lifecycle lease owner: {error}"),

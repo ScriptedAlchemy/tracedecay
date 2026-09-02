@@ -19,7 +19,6 @@ struct Key {
     priority: OperationPriorityV1,
 }
 
-#[hotpath::measure_all]
 impl Key {
     fn of(item: &impl QueueItem) -> Self {
         Self {
@@ -53,7 +52,6 @@ impl<T> Default for ClientQueue<T> {
     }
 }
 
-#[hotpath::measure_all]
 impl<T> ClientQueue<T> {
     fn add_quantum(&mut self, weight: u32) {
         self.operation_deficit = self.operation_deficit.saturating_add(weight);
@@ -96,7 +94,6 @@ impl<T: QueueItem> Default for FairQueue<T> {
     }
 }
 
-#[hotpath::measure_all]
 impl<T: QueueItem> FairQueue<T> {
     pub(crate) fn push(&mut self, item: T) -> Result<(), T> {
         if !self.operation_ids.insert(item.operation_id().clone()) {
@@ -256,7 +253,6 @@ impl<T: QueueItem> FairQueue<T> {
     }
 }
 
-#[hotpath::measure]
 fn drain_deque<T>(queue: &mut VecDeque<T>, predicate: &impl Fn(&T) -> bool, removed: &mut Vec<T>) {
     let mut retained = VecDeque::with_capacity(queue.len());
     while let Some(item) = queue.pop_front() {

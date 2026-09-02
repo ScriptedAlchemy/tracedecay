@@ -99,7 +99,6 @@ pub struct ReaderLease<E: ReaderQueryExecutor> {
     snapshot_active: bool,
 }
 
-#[hotpath::measure_all]
 impl<E: ReaderQueryExecutor> ReaderLease<E> {
     /// Take ownership of a worker the pool has already accounted as leased.
     ///
@@ -311,7 +310,6 @@ pub struct SnapshotLease<'a, E: ReaderQueryExecutor> {
     lease: &'a mut ReaderLease<E>,
 }
 
-#[hotpath::measure_all]
 impl<E: ReaderQueryExecutor> SnapshotLease<'_, E> {
     pub fn execute(
         &mut self,
@@ -328,7 +326,6 @@ impl<E: ReaderQueryExecutor> Drop for SnapshotLease<'_, E> {
     }
 }
 
-#[hotpath::measure]
 fn finish_deferred_return<E: ReaderQueryExecutor>(
     inner: Arc<PoolInner<E>>,
     lane: ReaderLane,
@@ -373,7 +370,6 @@ fn finish_deferred_return<E: ReaderQueryExecutor>(
 
 type DeferredReturnTask = Box<dyn FnOnce() + Send + 'static>;
 
-#[hotpath::measure]
 fn spawn_or_run_deferred_return(
     task: DeferredReturnTask,
     spawn: impl FnOnce(DeferredReturnTask) -> std::io::Result<JoinHandle<()>>,

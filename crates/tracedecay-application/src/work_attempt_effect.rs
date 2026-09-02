@@ -41,7 +41,6 @@ pub enum WorkAttemptEffectDispatchOutcomeV1 {
     Replayed(WorkAttemptEffectHolderV1),
 }
 
-#[hotpath::measure_all]
 impl WorkAttemptEffectDispatchOutcomeV1 {
     #[hotpath::skip]
     pub const fn holder(&self) -> &WorkAttemptEffectHolderV1 {
@@ -67,7 +66,6 @@ pub struct WorkAttemptEffectHolderV1 {
     resolved_at: Option<UtcMicros>,
 }
 
-#[hotpath::measure_all]
 impl WorkAttemptEffectHolderV1 {
     pub fn dispatched(
         attempt: WorkAttemptIdentityV1,
@@ -254,7 +252,6 @@ where
     }
 }
 
-#[hotpath::measure]
 fn effect_problem(error: WorkAttemptEffectStorageErrorV1) -> ApplicationProblem {
     match error {
         WorkAttemptEffectStorageErrorV1::NotFoundOrNotAuthorized => {
@@ -278,7 +275,6 @@ fn effect_problem(error: WorkAttemptEffectStorageErrorV1) -> ApplicationProblem 
     }
 }
 
-#[hotpath::measure]
 fn invalid_holder_problem() -> ApplicationProblem {
     ApplicationProblem::InvalidRequest {
         diagnostic: SafeDiagnostic {

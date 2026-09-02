@@ -25,7 +25,6 @@ pub(super) enum ReconcileOutcome {
 
 /// Removes the retired generation's sealed read bundle files from the
 /// durable generations root. Idempotent; an absent bundle is a success.
-#[hotpath::measure]
 fn retire_generation_read_bundle(store_root: &Path, generation_file: &str) -> Result<(), String> {
     let digest = generation_file
         .strip_prefix("generation-")
@@ -37,7 +36,6 @@ fn retire_generation_read_bundle(store_root: &Path, generation_file: &str) -> Re
         .map_err(|error| error.to_string())
 }
 
-#[hotpath::measure]
 pub(super) fn log_code_generation_retention_degraded(
     observations: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
     project_root: &Path,
@@ -49,7 +47,6 @@ pub(super) fn log_code_generation_retention_degraded(
 /// Shared deferral for a held graph-replay pool: the outer probe and the
 /// collection executor's typed busy result arm the same backoff and must
 /// not keep the daemon writer gate.
-#[hotpath::measure]
 pub(super) fn defer_graph_replay_pool_busy(
     observations: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
     project_root: &Path,
@@ -64,7 +61,6 @@ pub(super) fn defer_graph_replay_pool_busy(
 /// proved undiagnosable in production: `graph_replay_release_failed` recurred
 /// on every retention tick with no way to tell an unregistered graph shard
 /// from a pool-lock deadline from a conflict.
-#[hotpath::measure]
 fn log_code_generation_retention_degraded_with_error(
     observations: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
     failure: &str,
@@ -85,7 +81,6 @@ fn log_code_generation_retention_degraded_with_error(
 /// now — the class worth backing off from — as opposed to evidence or store
 /// defects (conflict, corruption, invalid identity) that must stay loud on
 /// every attempt until someone fixes them.
-#[hotpath::measure]
 fn release_failure_is_runtime_unhealthy(error: &tracedecay_graph_db::GraphDbError) -> bool {
     matches!(
         error,

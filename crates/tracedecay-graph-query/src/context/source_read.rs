@@ -233,7 +233,6 @@ pub fn resolve_indexed_source_file(
     Ok((absolute_path, display_file))
 }
 
-#[hotpath::measure]
 fn source_symbol_context(
     reader: &CodeGraphInteractiveReader,
     cancellation: Arc<dyn GraphCancellation>,
@@ -274,7 +273,6 @@ fn relative_source_key(path: &Path) -> Result<Option<String>> {
     Ok(Some(parts.join("/")))
 }
 
-#[hotpath::measure]
 fn absolute_source_key(project_root: &Path, path: &Path) -> Result<Option<String>> {
     if !path.is_absolute() {
         return Ok(None);

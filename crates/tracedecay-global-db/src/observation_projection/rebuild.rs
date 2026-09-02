@@ -74,12 +74,10 @@ const MESSAGE_JSON_FIELDS: &[&str] = &[
     "metadata_json",
 ];
 
-#[hotpath::measure]
 fn json_extract_expr(column: &str, field: &str) -> String {
     format!("json_extract({column}, '$.{field}')")
 }
 
-#[hotpath::measure]
 fn json_extract_select_list(column: &str, fields: &[&str]) -> String {
     fields
         .iter()
@@ -88,7 +86,6 @@ fn json_extract_select_list(column: &str, fields: &[&str]) -> String {
         .join(",\n                ")
 }
 
-#[hotpath::measure]
 fn json_extract_neq_predicates(left_alias: &str, json_column: &str, fields: &[&str]) -> String {
     fields
         .iter()
@@ -369,7 +366,6 @@ pub async fn project_observation_with_engine(
     }
 }
 
-#[hotpath::measure]
 fn projection_retry_delay_micros(attempt_count: u32) -> i64 {
     let shift = attempt_count.saturating_sub(1).min(16);
     PROJECTION_RETRY_BASE_MICROS
@@ -1204,7 +1200,6 @@ enum CollisionGuardedWrite<'a> {
     Stage { generation: &'a str },
 }
 
-#[hotpath::measure_all]
 impl CollisionGuardedWrite<'_> {
     #[hotpath::skip]
     async fn run(
@@ -1351,7 +1346,6 @@ enum RebuildState {
     Ready,
 }
 
-#[hotpath::measure_all]
 impl RebuildState {
     fn parse(value: &str) -> ProjectionStoreResult<Self> {
         match value {
@@ -1391,18 +1385,15 @@ struct RebuildOutputState {
     projector_owned: bool,
 }
 
-#[hotpath::measure]
 fn sequence_i64(sequence: u64) -> ProjectionStoreResult<i64> {
     i64::try_from(sequence).map_err(|_| ProjectionStoreError::SequenceOverflow(sequence))
 }
 
-#[hotpath::measure]
 fn usize_i64(value: usize) -> ProjectionStoreResult<i64> {
     i64::try_from(value)
         .map_err(|_| storage_message("encode projection rebuild counter", "counter overflow"))
 }
 
-#[hotpath::measure]
 fn decode_usize(value: i64, operation: &'static str) -> ProjectionStoreResult<usize> {
     usize::try_from(value).map_err(|_| storage_message(operation, "invalid rebuild counter"))
 }
@@ -1501,7 +1492,6 @@ async fn read_rebuild_job(conn: &impl QueryExecutor) -> ProjectionStoreResult<Re
     })
 }
 
-#[hotpath::measure]
 fn encode_json<T: serde::Serialize>(
     value: &T,
     operation: &'static str,
@@ -1509,7 +1499,6 @@ fn encode_json<T: serde::Serialize>(
     serde_json::to_string(value).map_err(|error| storage(operation, error))
 }
 
-#[hotpath::measure]
 fn decode_json<T: serde::de::DeserializeOwned>(
     value: &str,
     operation: &'static str,

@@ -83,7 +83,6 @@ enum ReaderIntegrityAuthorityV1 {
     ReceiptOnly,
 }
 
-#[hotpath::measure]
 fn verify_reader_sqlite_integrity(
     connection: &Connection,
     authority: ReaderIntegrityAuthorityV1,
@@ -116,7 +115,6 @@ impl std::fmt::Debug for CodeLexicalArtifactReaderV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl CodeLexicalArtifactReaderV1 {
     /// Open a published artifact whose trust anchor is its content address:
     /// the durable head names the artifact file's size and SHA-256 digest,
@@ -730,7 +728,6 @@ struct DocumentQueryV1 {
     maximum_bound_value_bytes: usize,
 }
 
-#[hotpath::measure_all]
 impl DocumentQueryV1 {
     fn empty() -> Self {
         Self {
@@ -809,7 +806,6 @@ impl DocumentQueryV1 {
 /// the only storage used for the set-operation work table.
 const ARTIFACT_UNION_COMPOUND_ARMS_V1: usize = 64;
 
-#[hotpath::measure]
 fn union_document_queries(
     queries: impl IntoIterator<Item = DocumentQueryV1>,
 ) -> Result<DocumentQueryV1, RetrievalPortError> {
@@ -867,7 +863,6 @@ fn union_document_queries(
     })
 }
 
-#[hotpath::measure]
 fn rewrite_union_query_parameters(
     sql: &str,
     query_parameters: &[Value],
@@ -903,7 +898,6 @@ fn rewrite_union_query_parameters(
     Ok(rewritten)
 }
 
-#[hotpath::measure]
 fn visit_document_ids(
     connection: &Connection,
     query: &DocumentQueryV1,
@@ -937,7 +931,6 @@ fn visit_document_ids(
 /// Stream each candidate row with all request-relevant term frequencies from
 /// one SQLite statement. The correlated posting lookup seeks the maintained
 /// document index; it never emits the row BLOB once per matching term.
-#[hotpath::measure]
 fn visit_lexical_rows(
     connection: &Connection,
     documents: &DocumentQueryV1,
@@ -1105,7 +1098,6 @@ const ARTIFACT_NGRAM_MAX_CANDIDATES_V1: u64 = (ARTIFACT_NGRAM_CANDIDATE_BITMAP_B
     / ARTIFACT_NGRAM_CANDIDATE_BYTES_PER_DOCUMENT_V1)
     as u64;
 
-#[hotpath::measure]
 fn ensure_sqlite_bind_capacity(
     fixed_parameters: usize,
     dynamic_parameters: usize,
@@ -1119,7 +1111,6 @@ fn ensure_sqlite_bind_capacity(
     Ok(())
 }
 
-#[hotpath::measure]
 fn ensure_sqlite_bound_value_bytes<'a>(
     maximum_bytes: usize,
     fixed_parameters: &[Value],
@@ -1151,7 +1142,6 @@ fn ensure_sqlite_bound_value_bytes<'a>(
 /// The first fixed number of distinct n-grams forms a selective, bounded
 /// prefilter. It may admit a superset for a very long phrase; the row-level
 /// substring check remains the correctness authority before scoring.
-#[hotpath::measure]
 fn ngram_document_query(
     connection: &Connection,
     layout: LexicalArtifactLayoutV1,
@@ -1189,7 +1179,6 @@ struct NgramSelectivityV1 {
     cardinality: u64,
 }
 
-#[hotpath::measure]
 fn ngram_bitmap_candidates(
     connection: &Connection,
     layout: LexicalArtifactLayoutV1,
@@ -1307,7 +1296,6 @@ fn ngram_bitmap_candidates(
     Ok(candidates)
 }
 
-#[hotpath::measure]
 fn intersect_ngram_shards(
     rows: &mut rusqlite::Rows<'_>,
     current: Option<&BTreeMap<i64, RoaringBitmap>>,
@@ -1370,7 +1358,6 @@ fn intersect_ngram_shards(
     Ok(next)
 }
 
-#[hotpath::measure]
 fn encode_ngram_candidate_pages(
     candidates: &BTreeMap<i64, RoaringBitmap>,
 ) -> Result<String, RetrievalPortError> {
@@ -1392,7 +1379,6 @@ fn encode_ngram_candidate_pages(
     Ok(encoded)
 }
 
-#[hotpath::measure]
 fn ensure_ngram_candidate_cardinality(cardinality: u64) -> Result<(), RetrievalPortError> {
     if cardinality > ARTIFACT_NGRAM_MAX_CANDIDATES_V1 {
         Err(RetrievalPortError::BudgetExceeded)
@@ -1401,7 +1387,6 @@ fn ensure_ngram_candidate_cardinality(cardinality: u64) -> Result<(), RetrievalP
     }
 }
 
-#[hotpath::measure]
 fn charge_ngram_encoded_shard_bytes(
     remaining_bytes: &mut usize,
     shard_bytes: usize,
@@ -1416,7 +1401,6 @@ fn charge_ngram_encoded_shard_bytes(
     Ok(())
 }
 
-#[hotpath::measure]
 fn encode_ngram_candidate_json(
     candidates: &RoaringBitmap,
     maximum_bytes: usize,
@@ -1456,7 +1440,6 @@ fn encode_ngram_candidate_json(
     Ok(encoded)
 }
 
-#[hotpath::measure_all]
 impl<'a> ArtifactQueryV1<'a> {
     fn new(
         connection: &'a Connection,
@@ -2242,7 +2225,6 @@ struct LexicalStatsCacheV1 {
     document_frequencies: BTreeMap<LexicalFieldV1, BTreeMap<String, usize>>,
 }
 
-#[hotpath::measure]
 fn lexical_terms(
     prepared: &PreparedLexicalQueryV1<'_>,
     fuzzy: &FuzzyExpansionsV1,
@@ -2260,7 +2242,6 @@ fn lexical_terms(
     terms
 }
 
-#[hotpath::measure]
 fn term_frequency(
     frequencies: &LexicalTermFrequenciesV1,
     field: LexicalFieldV1,
@@ -2275,7 +2256,6 @@ fn term_frequency(
         .unwrap_or_default()
 }
 
-#[hotpath::measure_all]
 impl LexicalStatsCacheV1 {
     fn field_total(&self, field: LexicalFieldV1) -> usize {
         self.field_totals.get(&field).copied().unwrap_or_default()
@@ -2290,7 +2270,6 @@ impl LexicalStatsCacheV1 {
     }
 }
 
-#[hotpath::measure]
 fn candidate(
     receipt: &VerifiedCodeLexicalArtifactV1,
     row: &ArtifactRowV1,
@@ -2331,7 +2310,6 @@ fn candidate(
     })
 }
 
-#[hotpath::measure]
 fn binding(
     row: &ArtifactRowV1,
     candidate: &CompactCandidate,
@@ -2417,7 +2395,6 @@ impl Ord for RankedExactEntryV1 {
 /// push always evicts the current worst. Between calls the heap never holds
 /// more than `cap` entries, which bounds retained materialization to the
 /// lane candidate cap before any winner is hydrated.
-#[hotpath::measure]
 fn retain_bounded<K: Ord>(ranked: &mut BinaryHeap<K>, cap: usize, entry: K) {
     if cap == 0 {
         return;
@@ -2431,7 +2408,6 @@ fn retain_bounded<K: Ord>(ranked: &mut BinaryHeap<K>, cap: usize, entry: K) {
 /// The lexical ranking key: the checked sum of the filter-admitted field
 /// scores, or `None` when the typed field filters admit no scored field —
 /// the same exclusion the lexical lane applies after the port returns.
-#[hotpath::measure]
 fn admitted_score_micros(
     score: &LexicalRowScoreV1,
     filters: &[LexicalFieldFilterV1],
@@ -2449,7 +2425,6 @@ fn admitted_score_micros(
     Ok(total)
 }
 
-#[hotpath::measure]
 fn capped_batch<E>(
     examined: usize,
     eligible: u64,
@@ -2473,7 +2448,6 @@ fn capped_batch<E>(
 }
 
 /// Matched literal ordinals into `request.literals` plus matched term kinds.
-#[hotpath::measure]
 fn exact_matches_artifact(
     row: &ArtifactRowV1,
     request: &ExactLaneRequest,
@@ -2499,7 +2473,6 @@ struct EditDistanceScratchV1 {
     current: Vec<usize>,
 }
 
-#[hotpath::measure_all]
 impl EditDistanceScratchV1 {
     fn prepare_query(&mut self, query: &str) {
         self.query_chars.clear();
@@ -2552,12 +2525,10 @@ impl EditDistanceScratchV1 {
     }
 }
 
-#[hotpath::measure]
 fn decode_field(encoded: &str) -> Result<LexicalFieldV1, RetrievalPortError> {
     serde_json::from_str(encoded).map_err(contract_error)
 }
 
-#[hotpath::measure]
 fn validate_cache_budget(cache_budget_bytes: usize) -> Result<(), CodeLexicalArtifactErrorV1> {
     if cache_budget_bytes == 0
         || cache_budget_bytes > CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1
@@ -2583,7 +2554,6 @@ const ARTIFACT_DIGEST_READ_BUFFER_BYTES_V1: usize = 4 * 1024 * 1024;
 /// hash phases carry separate spans so a profile can attribute a slow pass
 /// to I/O wait or to SHA-256 work.
 #[inline]
-#[hotpath::measure]
 fn hash_artifact_file(
     file: &mut File,
     control: &dyn CodeIndexExecutionControlV1,
@@ -2622,7 +2592,6 @@ fn digest_content_addressed_file(
     })
 }
 
-#[hotpath::measure]
 fn digest_retained_artifact_file(
     file: &mut File,
     control: &dyn CodeIndexExecutionControlV1,
@@ -2641,7 +2610,6 @@ fn digest_retained_artifact_file(
 /// by SQLite. Rehash the retained file only after the SQLite handle has
 /// completed its full validation, so an in-place mutation cannot retain its
 /// inode and still be returned as the original content address.
-#[hotpath::measure]
 fn verify_retained_artifact_digest(
     file: &mut File,
     expected: &ManifestDigest,
@@ -2661,7 +2629,6 @@ fn verify_retained_artifact_digest(
 /// Make the content-addressed reader refuse a replacement at the published
 /// name. It runs immediately before and after SQLite opens that name; after
 /// the latter check, SQLite holds the verified file's own handle.
-#[hotpath::measure]
 fn verify_named_path_identity(path: &Path, file: &File) -> Result<(), CodeLexicalArtifactErrorV1> {
     let named = path.symlink_metadata().map_err(map_artifact_file_error)?;
     if !named.file_type().is_file() {
@@ -2712,7 +2679,6 @@ fn verify_named_path_identity(path: &Path, file: &File) -> Result<(), CodeLexica
     }
 }
 
-#[hotpath::measure]
 fn verify_artifact_state_revision(
     connection: &Connection,
     control: &dyn CodeIndexExecutionControlV1,
@@ -2739,7 +2705,6 @@ fn verify_artifact_state_revision(
     Ok(layout)
 }
 
-#[hotpath::measure]
 fn sealed_reader_mmap_bytes(file_size_bytes: u64) -> Result<i64, CodeLexicalArtifactErrorV1> {
     i64::try_from(file_size_bytes).map_err(|error| {
         CodeLexicalArtifactErrorV1::Contract(format!(
@@ -2748,7 +2713,6 @@ fn sealed_reader_mmap_bytes(file_size_bytes: u64) -> Result<i64, CodeLexicalArti
     })
 }
 
-#[hotpath::measure]
 fn configure_reader_window(
     connection: &Connection,
     cache_budget_bytes: usize,
@@ -2797,7 +2761,6 @@ fn configure_reader_window(
     Ok(page_cache_bytes)
 }
 
-#[hotpath::measure]
 fn map_artifact_file_error(error: std::io::Error) -> CodeLexicalArtifactErrorV1 {
     if error.kind() == std::io::ErrorKind::NotFound {
         CodeLexicalArtifactErrorV1::Missing(error.to_string())
@@ -2806,7 +2769,6 @@ fn map_artifact_file_error(error: std::io::Error) -> CodeLexicalArtifactErrorV1 
     }
 }
 
-#[hotpath::measure]
 fn map_private_artifact_file_error(error: std::io::Error) -> CodeLexicalArtifactErrorV1 {
     if error.kind() == std::io::ErrorKind::NotFound {
         CodeLexicalArtifactErrorV1::Missing(error.to_string())
@@ -2817,7 +2779,6 @@ fn map_private_artifact_file_error(error: std::io::Error) -> CodeLexicalArtifact
     }
 }
 
-#[hotpath::measure]
 fn map_reader_open_error(path: &Path, error: rusqlite::Error) -> CodeLexicalArtifactErrorV1 {
     match path.try_exists() {
         Ok(false) => CodeLexicalArtifactErrorV1::Missing(error.to_string()),
@@ -2825,7 +2786,6 @@ fn map_reader_open_error(path: &Path, error: rusqlite::Error) -> CodeLexicalArti
     }
 }
 
-#[hotpath::measure]
 fn row_occurrence(row: ArtifactRowV1) -> CodeLexicalArtifactOccurrenceV1 {
     CodeLexicalArtifactOccurrenceV1 {
         generation: row.anchor.generation_id,
@@ -2841,12 +2801,10 @@ fn row_occurrence(row: ArtifactRowV1) -> CodeLexicalArtifactOccurrenceV1 {
     }
 }
 
-#[hotpath::measure]
 fn map_query_sql_error(error: rusqlite::Error) -> RetrievalPortError {
     RetrievalPortError::AuthorityUnavailable(format!("lexical artifact read failed: {error}"))
 }
 
-#[hotpath::measure]
 fn map_query_artifact_error(error: CodeLexicalArtifactErrorV1) -> RetrievalPortError {
     match error {
         CodeLexicalArtifactErrorV1::Interrupted(_) => RetrievalPortError::Cancelled,

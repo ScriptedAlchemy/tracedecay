@@ -98,7 +98,6 @@ pub struct RuntimeRegistryWriterSnapshot {
     pub commit_sequence: u64,
 }
 
-#[hotpath::measure_all]
 impl RuntimeRegistrySnapshot {
     pub fn from_projection(
         projection: tracedecay_runtime_core::store_runtime::telemetry::RuntimeTelemetryProjection,
@@ -163,7 +162,6 @@ impl RuntimeRegistrySnapshot {
     }
 }
 
-#[hotpath::measure_all]
 impl RuntimeRegistryShardSnapshot {
     fn from_telemetry(
         telemetry: &tracedecay_runtime_core::store_runtime::telemetry::ShardRuntimeTelemetry,
@@ -213,7 +211,6 @@ impl RuntimeRegistryShardSnapshot {
     }
 }
 
-#[hotpath::measure]
 fn runtime_state_label(state: tracedecay_store::RuntimeMaintenanceStateV1) -> &'static str {
     match state {
         tracedecay_store::RuntimeMaintenanceStateV1::Closed => "closed",
@@ -228,7 +225,6 @@ fn runtime_state_label(state: tracedecay_store::RuntimeMaintenanceStateV1) -> &'
     }
 }
 
-#[hotpath::measure]
 fn runtime_health_label(
     health: tracedecay_runtime_core::store_runtime::shard::ShardRuntimeHealth,
 ) -> &'static str {

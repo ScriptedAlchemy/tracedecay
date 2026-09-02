@@ -7,7 +7,6 @@ use crate::exact_sql::ExactSqlTransaction;
 
 use super::support::{Query, Stage, corrupt, map_graph, projection_parts, stage_query, text};
 
-#[hotpath::measure]
 pub(super) fn published_stage_for(
     authority: &impl Query,
     key: &SemanticVectorPublishedGenerationKey,
@@ -26,7 +25,6 @@ pub(super) fn published_stage_for(
     )
 }
 
-#[hotpath::measure]
 pub(super) fn published_stage_evidence(
     authority: &ExactSqlTransaction,
     stage: &Stage,

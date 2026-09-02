@@ -80,7 +80,6 @@ pub(super) struct InteractiveCatalogCache {
 /// traversals rather than being refused for having too many.
 const SEMANTIC_NEIGHBOR_SEED_CHUNK: usize = 50_000;
 
-#[hotpath::measure_all]
 impl InteractiveCatalogCache {
     pub(super) fn new() -> Self {
         Self {
@@ -118,7 +117,6 @@ impl fmt::Debug for CodeGraphInteractiveReader {
     }
 }
 
-#[hotpath::measure_all]
 impl CodeGraphProjectionStore {
     /// Builds and validates the generation-pinned interactive catalog before
     /// serving latency-bounded reads. Only a fully built immutable catalog is
@@ -227,7 +225,6 @@ impl CodeGraphProjectionStore {
     }
 }
 
-#[hotpath::measure_all]
 impl CodeGraphInteractiveReader {
     #[hotpath::skip]
     pub(super) fn assemble(
@@ -1133,7 +1130,6 @@ impl CodeGraphInteractiveReader {
     }
 }
 
-#[hotpath::measure]
 fn resolve_from_index(
     catalog: &InteractiveCatalog,
     occurrences: Option<&Vec<SymbolOccurrenceId>>,
@@ -1155,7 +1151,6 @@ fn resolve_from_index(
         .collect()
 }
 
-#[hotpath::measure]
 fn summary_from_record(record: SymbolRecordV1) -> CodeGraphSymbolSummaryV1 {
     CodeGraphSymbolSummaryV1 {
         occurrence: record.occurrence,
@@ -1164,7 +1159,6 @@ fn summary_from_record(record: SymbolRecordV1) -> CodeGraphSymbolSummaryV1 {
     }
 }
 
-#[hotpath::measure]
 fn load_edge_record(
     entity: &GraphEntity,
 ) -> Result<CanonicalRelationEdgeV1, CodeGraphProjectionError> {
@@ -1183,7 +1177,6 @@ fn load_edge_record(
     Ok(edge)
 }
 
-#[hotpath::measure]
 fn entity_ids(
     occurrences: &[SymbolOccurrenceId],
 ) -> Result<Vec<GraphEntityId>, CodeGraphProjectionError> {
@@ -1203,17 +1196,14 @@ fn entity_ids(
         .collect()
 }
 
-#[hotpath::measure]
 fn source_relation_kinds() -> Result<BTreeSet<GraphRelationKind>, CodeGraphProjectionError> {
     Ok(BTreeSet::from([GraphRelationKind::new(SOURCE_EDGE_KIND)?]))
 }
 
-#[hotpath::measure]
 fn target_relation_kinds() -> Result<BTreeSet<GraphRelationKind>, CodeGraphProjectionError> {
     Ok(BTreeSet::from([GraphRelationKind::new(TARGET_EDGE_KIND)?]))
 }
 
-#[hotpath::measure]
 fn require_positive(value: usize, what: &str) -> Result<(), CodeGraphProjectionError> {
     if value == 0 {
         return Err(CodeGraphProjectionError::Contract(format!(
@@ -1223,7 +1213,6 @@ fn require_positive(value: usize, what: &str) -> Result<(), CodeGraphProjectionE
     Ok(())
 }
 
-#[hotpath::measure]
 fn reconstruct_path(
     parents: &BTreeMap<SymbolOccurrenceId, CanonicalRelationEdgeV1>,
     from: &SymbolOccurrenceId,
@@ -1249,14 +1238,12 @@ fn reconstruct_path(
     Ok(path)
 }
 
-#[hotpath::measure]
 fn catalog_lock_poisoned() -> CodeGraphProjectionError {
     CodeGraphProjectionError::Unavailable(
         "code graph interactive catalog lock is poisoned".to_owned(),
     )
 }
 
-#[hotpath::measure]
 fn cancel_unowned_catalog_warm(
     catalog: &InteractiveCatalogCache,
 ) -> Result<(), CodeGraphProjectionError> {

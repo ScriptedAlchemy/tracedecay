@@ -40,7 +40,6 @@ enum AdminProjectAction {
     },
 }
 
-#[hotpath::measure]
 fn project_memory_application<'a>(
     cg: &TraceDecay,
     db: &'a tracedecay_runtime_core::db::Database,
@@ -49,14 +48,12 @@ fn project_memory_application<'a>(
     MemoryApplication::new(owner, DatabaseFactStore::new(db)).map_err(memory_application_error)
 }
 
-#[hotpath::measure]
 fn memory_application_error(error: MemoryApplicationError) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!("project memory application failed: {error}"),
     }
 }
 
-#[hotpath::measure]
 fn admin_project_run_control(
     deadline: Deadline,
     cancellation: CancellationSignal,
@@ -66,14 +63,12 @@ fn admin_project_run_control(
     }))
 }
 
-#[hotpath::measure]
 fn parse_automatic_fact_apply_id(value: String) -> Result<ProvenanceId> {
     ProvenanceId::new(value).map_err(|error| TraceDecayError::Config {
         message: format!("invalid automatic fact apply id: {error}"),
     })
 }
 
-#[hotpath::measure]
 fn parse_automatic_fact_state(value: &str) -> Result<ProjectMemoryAutomaticFactStateV1> {
     let normalized = value.trim().replace('-', "_");
     match normalized.as_str() {
@@ -87,7 +82,6 @@ fn parse_automatic_fact_state(value: &str) -> Result<ProjectMemoryAutomaticFactS
     }
 }
 
-#[hotpath::measure]
 fn automatic_fact_state_name(state: ProjectMemoryAutomaticFactStateV1) -> &'static str {
     match state {
         ProjectMemoryAutomaticFactStateV1::Applied => "applied",
@@ -95,7 +89,6 @@ fn automatic_fact_state_name(state: ProjectMemoryAutomaticFactStateV1) -> &'stat
     }
 }
 
-#[hotpath::measure]
 fn automatic_fact_receipt_json(receipt: &ProjectMemoryAutomaticFactReceiptV1) -> Value {
     let request = receipt.request();
     let mut value = Map::from_iter([

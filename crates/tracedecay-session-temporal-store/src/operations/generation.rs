@@ -12,7 +12,6 @@ use crate::sql::GENERATION_COPY_STATEMENTS;
 const MAX_LINEAGE_DEPTH: usize = 64;
 const MAX_LINEAGE_NODES: usize = 4_096;
 
-#[hotpath::measure]
 pub(super) fn validate_lineage_projection(
     projection: &SessionRelationProjection,
     publication: &LcmImmutableSummaryPublication,
@@ -306,7 +305,6 @@ async fn stale_generation(
     })
 }
 
-#[hotpath::measure]
 fn stale_closure(
     projection: &SessionRelationProjection,
     predecessor: &str,
@@ -354,7 +352,6 @@ fn stale_closure(
     Ok(affected)
 }
 
-#[hotpath::measure]
 fn lineage_limit(summary_id: &str, reason: &str) -> LcmError {
     LcmError::SummarySourceUnavailable {
         source_id: summary_id.to_string(),
@@ -362,7 +359,6 @@ fn lineage_limit(summary_id: &str, reason: &str) -> LcmError {
     }
 }
 
-#[hotpath::measure]
 fn cycle(summary_id: &str) -> LcmError {
     LcmError::SummaryCycle {
         summary_id: summary_id.to_string(),

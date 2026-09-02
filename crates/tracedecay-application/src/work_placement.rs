@@ -359,7 +359,6 @@ where
     }
 }
 
-#[hotpath::measure]
 fn admit(context: &RequestContext, observed_at: UtcMicros) -> Result<(), ApplicationProblem> {
     match context.admission_at(observed_at) {
         RequestAdmission::Admitted => Ok(()),
@@ -368,7 +367,6 @@ fn admit(context: &RequestContext, observed_at: UtcMicros) -> Result<(), Applica
     }
 }
 
-#[hotpath::measure]
 fn storage_problem(error: WorkPlacementStorageError) -> ApplicationProblem {
     match error {
         WorkPlacementStorageError::NotFoundOrNotAuthorized => not_found_problem(),
@@ -380,7 +378,6 @@ fn storage_problem(error: WorkPlacementStorageError) -> ApplicationProblem {
     }
 }
 
-#[hotpath::measure]
 fn contract_problem(error: WorkPlacementContractError) -> ApplicationProblem {
     match error {
         WorkPlacementContractError::AlreadyReleased => conflict_problem(
@@ -407,7 +404,6 @@ fn contract_problem(error: WorkPlacementContractError) -> ApplicationProblem {
 /// The blocker names are a closed vocabulary and carry no path, so this message
 /// tells a caller what to fix without disclosing anything about the target it
 /// was not already authorized to see.
-#[hotpath::measure]
 fn blocked_problem(
     blockers: &std::collections::BTreeSet<WorkPlacementBlockerV1>,
 ) -> ApplicationProblem {
@@ -427,7 +423,6 @@ fn blocked_problem(
     }
 }
 
-#[hotpath::measure]
 fn authority_conflict_problem() -> ApplicationProblem {
     conflict_problem(
         "application.work-placement.authority-conflict",
@@ -435,12 +430,10 @@ fn authority_conflict_problem() -> ApplicationProblem {
     )
 }
 
-#[hotpath::measure]
 fn not_found_problem() -> ApplicationProblem {
     ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
 }
 
-#[hotpath::measure]
 fn conflict_problem(code: &str, message: &str) -> ApplicationProblem {
     ApplicationProblem::Conflict {
         diagnostic: SafeDiagnostic {

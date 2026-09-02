@@ -47,7 +47,6 @@ pub struct WriterServiceCounts {
     pub background_services: u64,
 }
 
-#[hotpath::measure_all]
 impl WriterServiceCounts {
     pub(crate) fn record(&mut self, priority: OperationPriorityV1, operations: u64) {
         let counter = match priority {
@@ -129,7 +128,6 @@ pub struct SqliteVmSnapshot {
     pub vm_steps: u64,
 }
 
-#[hotpath::measure_all]
 impl SqliteVmSnapshot {
     pub(crate) fn saturating_add(self, other: Self) -> Self {
         Self {
@@ -206,7 +204,6 @@ pub struct WriterTelemetrySnapshot {
     pub lock_work: WriterLockWorkSnapshot,
 }
 
-#[hotpath::measure]
 pub(crate) fn duration_micros(duration: Duration) -> u64 {
     u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
 }

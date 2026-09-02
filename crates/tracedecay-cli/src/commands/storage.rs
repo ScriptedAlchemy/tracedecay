@@ -27,14 +27,12 @@ const PROFILE_DATABASE_PATHS: [&str; 8] = [
     ".user-sessions.db.host-admission",
 ];
 
-#[hotpath::measure]
 fn sqlite_family_member(database: &Path, suffix: &str) -> PathBuf {
     let mut member = database.as_os_str().to_os_string();
     member.push(suffix);
     member.into()
 }
 
-#[hotpath::measure]
 fn wipe_io(
     operation: &str,
     path: &Path,
@@ -45,7 +43,6 @@ fn wipe_io(
     }
 }
 
-#[hotpath::measure]
 fn validate_complete_wipe_profile_root(
     profile_root: &Path,
     user_home: Option<&Path>,
@@ -99,7 +96,6 @@ fn validate_complete_wipe_profile_root(
     Ok(())
 }
 
-#[hotpath::measure]
 fn remove_fixed_profile_path(
     profile_root: &Path,
     name: &str,
@@ -157,7 +153,6 @@ pub(crate) enum ProfileOfflineAuthority {
     QuiescedDaemon(tracedecay_daemon_control::QuiescedDaemonLifecycle),
 }
 
-#[hotpath::measure_all]
 impl ProfileOfflineAuthority {
     pub(crate) fn lease(
         &self,
@@ -237,7 +232,6 @@ pub(crate) fn take_profile_offline(
     }
 }
 
-#[hotpath::measure]
 fn wipe_complete_profile_database_state(
     profile_root: &Path,
 ) -> tracedecay_domain::errors::Result<usize> {
@@ -390,7 +384,6 @@ fn handle_wipe_inner(
 
 /// Combines a destructive command's outcome with the daemon-restore outcome
 /// so neither failure can shadow the other.
-#[hotpath::measure]
 pub(crate) fn join_outcome_and_restore(
     operation: &str,
     outcome: tracedecay_domain::errors::Result<()>,
@@ -759,7 +752,6 @@ struct ListRow {
     tokens: Option<u64>,
 }
 
-#[hotpath::measure]
 fn append_orphan_manifest_rows(
     rows: &mut Vec<ListRow>,
     project_paths: &[std::path::PathBuf],

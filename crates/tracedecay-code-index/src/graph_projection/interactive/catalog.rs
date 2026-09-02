@@ -24,7 +24,6 @@ use crate::chunks::CodeIndexImportEvidenceV1;
 
 const CATALOG_SCAN_PAGE_ITEMS: usize = 1_024;
 
-#[hotpath::measure]
 pub(super) fn build_interactive_catalog(
     snapshot: &VerifiedGraphSnapshot,
     projection: &GraphProjectionIdentity,
@@ -94,7 +93,6 @@ pub(super) fn build_interactive_catalog(
 /// now, instead of paging the published projection back out of the store.
 /// One linear pass over rows the seal already holds — this is the seal-time
 /// derivation of the catalog bundle artifact.
-#[hotpath::measure]
 pub(in crate::graph_projection) fn build_interactive_catalog_from_manifest(
     manifest: &GraphGenerationManifest,
     cancellation: &dyn GraphCancellation,
@@ -130,7 +128,6 @@ struct CatalogScan {
     scanned_relations: usize,
 }
 
-#[hotpath::measure_all]
 impl CatalogScan {
     fn new() -> Self {
         Self {
@@ -377,7 +374,6 @@ impl CatalogScan {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn canonical_import_order(
     left: &CodeIndexImportEvidenceV1,
     right: &CodeIndexImportEvidenceV1,
@@ -396,7 +392,6 @@ pub(super) fn canonical_import_order(
         .then(left.module_kind.cmp(&right.module_kind))
 }
 
-#[hotpath::measure]
 pub(super) fn check_cancelled(
     cancellation: &dyn GraphCancellation,
 ) -> Result<(), CodeGraphProjectionError> {

@@ -4,7 +4,6 @@ use tracedecay_domain::{
 
 use super::*;
 
-#[hotpath::measure_all]
 impl RemoteSqliteStorageV1 {
     pub fn rotate_enrollment(
         &self,
@@ -76,7 +75,6 @@ impl RemoteSqliteStorageV1 {
     }
 }
 
-#[hotpath::measure]
 fn replace_enrollment(
     storage: &RemoteSqliteStorageV1,
     expected: &EnrollmentCredentialRecordV1,

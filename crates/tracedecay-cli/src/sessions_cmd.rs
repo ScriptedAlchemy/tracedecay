@@ -23,7 +23,6 @@ const DEFAULT_REFRESH_PROFILE_ID: &str = "profile.primary";
 const DEFAULT_REFRESH_TEMPORAL_MODE: &str = "current";
 const DEFAULT_REFRESH_GRAIN: &str = "logical_message";
 
-#[hotpath::measure]
 fn message_search_rpc_args(args: SessionsSearchArgs) -> Value {
     let SessionsSearchArgs {
         query,
@@ -148,7 +147,6 @@ async fn handle_sessions_search(args: SessionsSearchArgs) -> tracedecay_domain::
 /// accompanied it.
 struct SessionsSearchReport;
 
-#[hotpath::measure_all]
 impl SessionsSearchReport {
     fn render(result: &MessageSearchResultV1) -> String {
         let mut report = String::new();
@@ -246,7 +244,6 @@ enum SessionRefreshMode {
     Cancel,
 }
 
-#[hotpath::measure_all]
 impl SessionRefreshMode {
     #[hotpath::skip]
     const fn as_str(self) -> &'static str {
@@ -285,7 +282,6 @@ enum SessionRefreshOutcome {
     Error,
 }
 
-#[hotpath::measure_all]
 impl SessionRefreshOutcome {
     fn parse(payload: &Value) -> tracedecay_domain::errors::Result<Self> {
         let outcome = payload
@@ -501,7 +497,6 @@ where
         .await
 }
 
-#[hotpath::measure]
 fn validate_refresh_handle(
     mode: SessionRefreshMode,
     handle: Option<&str>,
@@ -613,7 +608,6 @@ where
     resolve_project_refresh_scope(&context, &active)
 }
 
-#[hotpath::measure]
 fn resolve_project_refresh_scope(
     context: &Value,
     active: &Value,
@@ -685,7 +679,6 @@ fn resolve_project_refresh_scope(
     })
 }
 
-#[hotpath::measure]
 fn required_context_string(
     object: &serde_json::Map<String, Value>,
     field: &str,
@@ -702,7 +695,6 @@ fn required_context_string(
         })
 }
 
-#[hotpath::measure]
 fn session_refresh_payload(
     mode: SessionRefreshMode,
     selectors: &SessionRefreshSelectors,
@@ -749,7 +741,6 @@ fn session_refresh_payload(
     payload
 }
 
-#[hotpath::measure]
 fn emit_session_refresh_outcome(
     payload: Value,
     json_output: bool,
@@ -768,7 +759,6 @@ fn emit_session_refresh_outcome(
     Ok(())
 }
 
-#[hotpath::measure]
 fn session_refresh_human_outcome(outcome: SessionRefreshOutcome, payload: &Value) -> String {
     let handle = payload
         .get("handle")
@@ -804,7 +794,6 @@ fn session_refresh_human_outcome(outcome: SessionRefreshOutcome, payload: &Value
     output
 }
 
-#[hotpath::measure]
 fn append_session_refresh_record(output: &mut String, record: &serde_json::Map<String, Value>) {
     if let Some(operation_id) = record.get("operation_id").and_then(Value::as_str) {
         output.push_str(&format!("; operation {operation_id}"));
@@ -831,14 +820,12 @@ fn append_session_refresh_record(output: &mut String, record: &serde_json::Map<S
     }
 }
 
-#[hotpath::measure]
 fn refresh_config_error(message: &str) -> tracedecay_domain::errors::TraceDecayError {
     tracedecay_domain::errors::TraceDecayError::Config {
         message: message.to_string(),
     }
 }
 
-#[hotpath::measure]
 fn refresh_response_error(detail: &str) -> tracedecay_domain::errors::TraceDecayError {
     tracedecay_domain::errors::TraceDecayError::Config {
         message: format!("daemon sessions refresh response {detail}"),

@@ -3,7 +3,6 @@
 
 use super::*;
 
-#[hotpath::measure_all]
 impl McpServer {
     /// Authorizes and admits one branch reconciliation without waiting for indexing.
     ///

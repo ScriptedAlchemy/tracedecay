@@ -113,7 +113,6 @@ pub struct InsertAtSymbolSurfaceRequestV1 {
     pub control: SourceEditApplyControlV1,
 }
 
-#[hotpath::measure]
 fn default_insert_after() -> String {
     "after".to_owned()
 }
@@ -130,12 +129,10 @@ pub struct MoveSymbolSurfaceRequestV1 {
     pub control: SourceEditApplyControlV1,
 }
 
-#[hotpath::measure]
 fn default_preview() -> bool {
     true
 }
 
-#[hotpath::measure]
 fn default_verify() -> bool {
     true
 }

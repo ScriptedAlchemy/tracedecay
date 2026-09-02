@@ -9,7 +9,6 @@ use super::{
 };
 use tracedecay_domain::errors::TraceDecayError;
 
-#[hotpath::measure_all]
 impl DaemonSessionRuntimeRegistryV1 {
     #[hotpath::skip]
     async fn project_graph_database(

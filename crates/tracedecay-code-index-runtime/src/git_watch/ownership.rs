@@ -120,7 +120,6 @@ pub struct GitWatcherShutdownOutcome {
     failures: Vec<GitWatcherTaskFailure>,
 }
 
-#[hotpath::measure_all]
 impl GitWatcherShutdownOutcome {
     pub fn is_clean(&self) -> bool {
         self.failures.is_empty()

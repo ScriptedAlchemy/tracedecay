@@ -49,7 +49,6 @@ pub struct WorkCliResponse {
     delivery: Option<WorkCliDelivery>,
 }
 
-#[hotpath::measure_all]
 impl WorkCliResponse {
     fn without_delivery(outcome: ApplicationResult<Value>) -> Self {
         Self {
@@ -69,7 +68,6 @@ pub struct WorkCliDelivery {
     target_request_id: String,
 }
 
-#[hotpath::measure_all]
 impl WorkCliDelivery {
     /// Acknowledge only after the caller's output write and flush succeeded.
     #[hotpath::skip]
@@ -102,7 +100,6 @@ impl WorkCliDelivery {
 
 /// Every Work operation this build accepts by route segment, for typed
 /// rejection messages.
-#[hotpath::measure]
 pub fn work_operation_segments() -> Vec<&'static str> {
     WorkOperation::ALL
         .iter()
@@ -110,7 +107,6 @@ pub fn work_operation_segments() -> Vec<&'static str> {
         .collect()
 }
 
-#[hotpath::measure]
 fn work_result_contract(operation: WorkOperation) -> Result<ResultContractRef> {
     let operation_id =
         OperationId::new(operation.operation_id_str().to_owned()).map_err(config_error)?;
@@ -132,7 +128,6 @@ fn work_result_contract(operation: WorkOperation) -> Result<ResultContractRef> {
     ))
 }
 
-#[hotpath::measure]
 fn decode_work_invocation(
     operation: WorkOperation,
     body: Value,
@@ -219,7 +214,6 @@ fn decode_work_invocation(
     }
 }
 
-#[hotpath::measure]
 fn work_outcome_matches(operation: WorkOperation, outcome: &WorkApplicationOutcomeV1) -> bool {
     matches!(
         (operation, outcome),
@@ -452,7 +446,6 @@ pub async fn invoke_work_cli_with_delivery(
     })
 }
 
-#[hotpath::measure]
 fn work_delivery_is_eligible(operation: WorkOperation, outcome: &WorkApplicationOutcomeV1) -> bool {
     match (operation, outcome) {
         (WorkOperation::StartAttempt, WorkApplicationOutcomeV1::StartAttempt(outcome))
@@ -473,7 +466,6 @@ fn work_delivery_is_eligible(operation: WorkOperation, outcome: &WorkApplication
     }
 }
 
-#[hotpath::measure]
 fn application_outcome_payload<T>(outcome: &ApplicationOutcome<T>) -> Option<&T> {
     match outcome {
         ApplicationOutcome::Evidence(result) => result.payload.as_ref(),
@@ -482,7 +474,6 @@ fn application_outcome_payload<T>(outcome: &ApplicationOutcome<T>) -> Option<&T>
     }
 }
 
-#[hotpath::measure]
 fn erase_work_outcome(outcome: WorkApplicationOutcomeV1) -> Result<ApplicationOutcome<Value>> {
     let outcome = match outcome {
         WorkApplicationOutcomeV1::GenerateProposal(outcome) => serde_json::to_value(outcome),
@@ -523,7 +514,6 @@ fn erase_work_outcome(outcome: WorkApplicationOutcomeV1) -> Result<ApplicationOu
     serde_json::from_value(outcome).map_err(Into::into)
 }
 
-#[hotpath::measure]
 fn work_problem(
     result_contract: ResultContractRef,
     request_id: tracedecay_application::RequestId,
@@ -532,7 +522,6 @@ fn work_problem(
     ApplicationProblemEnvelope::new(result_contract, request_id, problem).map_err(config_error)
 }
 
-#[hotpath::measure]
 fn invalid_work_request() -> ApplicationProblem {
     ApplicationProblem::InvalidRequest {
         diagnostic: SafeDiagnostic {
@@ -544,7 +533,6 @@ fn invalid_work_request() -> ApplicationProblem {
     }
 }
 
-#[hotpath::measure]
 fn daemon_application_problem(problem: DaemonInvocationProblem) -> ApplicationProblem {
     match problem {
         DaemonInvocationProblem::InvalidRequest => invalid_work_request(),
@@ -580,7 +568,6 @@ fn daemon_application_problem(problem: DaemonInvocationProblem) -> ApplicationPr
     }
 }
 
-#[hotpath::measure]
 fn decode<T>(body: Value) -> Result<T>
 where
     T: serde::de::DeserializeOwned,
@@ -590,7 +577,6 @@ where
     })
 }
 
-#[hotpath::measure]
 fn config_error(error: impl std::fmt::Display) -> TraceDecayError {
     TraceDecayError::Config {
         message: error.to_string(),

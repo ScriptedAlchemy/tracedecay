@@ -43,7 +43,6 @@ pub(crate) struct CommitMetadata {
     pub(crate) publication_record: Option<(GraphIdempotencyKey, String, String)>,
 }
 
-#[hotpath::measure_all]
 impl CommitMetadata {
     pub(crate) fn for_digest(digest: String) -> Self {
         Self {
@@ -131,7 +130,6 @@ pub(crate) fn apply(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure]
 fn apply_in_transaction(
     session: &Session,
     state: &FormatState,
@@ -296,7 +294,6 @@ fn apply_in_transaction(
     )
 }
 
-#[hotpath::measure]
 fn create_entity(
     session: &Session,
     entity: &crate::GraphEntity,
@@ -308,7 +305,6 @@ fn create_entity(
     tracked_create_node(session, &labels, properties, batch, check)
 }
 
-#[hotpath::measure]
 fn entity_node(
     changes: &HashMap<&str, Option<grafeo_common::types::NodeId>>,
     existing: &ExistingBatchState,
@@ -326,7 +322,6 @@ fn entity_node(
         .or_else(|| existing.entity_locators.get(&key).map(|stored| stored.node))
 }
 
-#[hotpath::measure]
 fn replace_entity(
     session: &Session,
     previous: &StoredEntity,
@@ -384,7 +379,6 @@ fn replace_entity(
 ///
 /// The target was resolved from the store under the exclusive write gate in
 /// this same transaction, so an absent node is store corruption, not a race.
-#[hotpath::measure]
 fn tracked_delete_node(
     session: &Session,
     node: grafeo_common::types::NodeId,
@@ -400,7 +394,6 @@ fn tracked_delete_node(
     check_cancelled(batch, check)
 }
 
-#[hotpath::measure]
 fn delete_entity(
     session: &Session,
     stored: &StoredEntity,
@@ -410,7 +403,6 @@ fn delete_entity(
     tracked_delete_node(session, stored.node, batch, check)
 }
 
-#[hotpath::measure]
 fn delete_relation(
     session: &Session,
     stored: &StoredRelation,
@@ -427,7 +419,6 @@ fn delete_relation(
     tracked_delete_node(session, stored.locator, batch, check)
 }
 
-#[hotpath::measure]
 fn tracked_replace_node_properties(
     session: &Session,
     label: &str,
@@ -471,7 +462,6 @@ fn tracked_replace_node_properties(
     execute_tracked(session, &query, params, batch, check)
 }
 
-#[hotpath::measure]
 fn tracked_replace_labels(
     session: &Session,
     anchor: &str,
@@ -521,7 +511,6 @@ fn tracked_replace_labels(
 /// Sets one property through the session's direct-id path; the GQL
 /// `MATCH … WHERE id(n) = …` equivalent scans every visible node id per
 /// statement, which this marker bump would otherwise pay on every batch.
-#[hotpath::measure]
 fn tracked_set_property(
     session: &Session,
     node: grafeo_common::types::NodeId,
@@ -537,7 +526,6 @@ fn tracked_set_property(
     check_cancelled(batch, check)
 }
 
-#[hotpath::measure]
 fn tracked_create_node(
     session: &Session,
     labels: &[String],
@@ -574,7 +562,6 @@ fn tracked_create_node(
     Ok(node)
 }
 
-#[hotpath::measure]
 fn execute_tracked(
     session: &Session,
     query: &str,
@@ -589,7 +576,6 @@ fn execute_tracked(
     check_cancelled(batch, check)
 }
 
-#[hotpath::measure]
 fn validate_references(
     database: &GrafeoDB,
     batch: &GraphWriteBatch,
@@ -752,7 +738,6 @@ fn validate_references(
     Ok(external_endpoints)
 }
 
-#[hotpath::measure]
 fn resolve_generation_endpoint(
     database: &GrafeoDB,
     candidate_namespace: &GraphNamespace,
@@ -780,7 +765,6 @@ fn resolve_generation_endpoint(
         })
 }
 
-#[hotpath::measure]
 fn entity_owner(
     changes: &HashMap<&str, EntityChange>,
     existing: &ExistingBatchState,
@@ -803,7 +787,6 @@ fn entity_owner(
         })
 }
 
-#[hotpath::measure]
 fn relation_owner(
     changes: &HashMap<&str, RelationChange>,
     existing: &BTreeMap<String, StoredRelation>,
@@ -817,7 +800,6 @@ fn relation_owner(
     existing.get(&key).map(|stored| stored.projection.clone())
 }
 
-#[hotpath::measure]
 fn check_cancelled(
     batch: &GraphWriteBatch,
     check: &dyn Fn() -> Result<(), GraphDbError>,
@@ -830,7 +812,6 @@ fn check_cancelled(
     }
 }
 
-#[hotpath::measure]
 fn rollback_or_poison(
     session: &mut Session,
     error: GraphDbError,
@@ -845,7 +826,6 @@ fn rollback_or_poison(
     }
 }
 
-#[hotpath::measure]
 fn map_commit_error(error: grafeo_common::utils::error::Error) -> GraphDbError {
     use grafeo_common::utils::error::ErrorCode;
     match error.error_code() {

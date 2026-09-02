@@ -146,7 +146,6 @@ fn decode_row(
     Ok(receipt)
 }
 
-#[hotpath::measure]
 fn encode_canonical<T: Serialize>(value: &T, field: &'static str) -> Result<String, LedgerError> {
     serde_json::to_string(value).map_err(|_| LedgerError::Encoding { value: field })
 }
@@ -164,7 +163,6 @@ fn decode_canonical<T: DeserializeOwned + Serialize>(
     Ok(value)
 }
 
-#[hotpath::measure]
 fn validate_target(
     binding: &StoreRuntimeBindingV1,
     identity: &EffectIdentityV1,

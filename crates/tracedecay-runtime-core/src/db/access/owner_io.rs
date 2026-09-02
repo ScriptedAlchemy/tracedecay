@@ -9,7 +9,6 @@ use tracedecay_domain::errors::Result;
 
 use super::{PROCESS_STARTED_EPOCH_MS, TOKEN_NONCE, WriterOwner, access_error, access_io_error};
 
-#[hotpath::measure]
 pub(super) fn publish_record_atomically(
     temporary: &Path,
     destination: &Path,
@@ -58,7 +57,6 @@ pub(super) fn publish_record_atomically(
     publish
 }
 
-#[hotpath::measure]
 pub(super) fn read_record_strict(path: &Path, record_name: &str) -> Result<Option<String>> {
     const MAX_RECORD_BYTES: u64 = 4096;
 
@@ -139,7 +137,6 @@ pub(super) fn read_record_strict(path: &Path, record_name: &str) -> Result<Optio
 }
 
 #[cfg(not(windows))]
-#[hotpath::measure]
 pub(super) fn replace_file_atomically(
     temporary: &Path,
     path: &Path,
@@ -149,7 +146,6 @@ pub(super) fn replace_file_atomically(
         .map_err(|error| access_io_error(&format!("publish {record_name}"), path, &error))
 }
 
-#[hotpath::measure]
 pub(super) fn replace_sqlite_with_rollback_atomically(
     staging: &Path,
     destination: &Path,
@@ -228,7 +224,6 @@ pub(super) fn replace_sqlite_with_rollback_atomically(
 }
 
 #[cfg(target_os = "linux")]
-#[hotpath::measure]
 fn platform_replace_with_rollback(
     replacement: &Path,
     destination: &Path,
@@ -295,7 +290,6 @@ fn platform_replace_with_rollback(
 }
 
 #[cfg(target_os = "macos")]
-#[hotpath::measure]
 fn platform_replace_with_rollback(
     replacement: &Path,
     destination: &Path,
@@ -356,7 +350,6 @@ fn platform_replace_with_rollback(
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn platform_replace_with_rollback(
     replacement: &Path,
     destination: &Path,
@@ -407,7 +400,6 @@ fn platform_replace_with_rollback(
 }
 
 #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
-#[hotpath::measure]
 fn platform_replace_with_rollback(
     _replacement: &Path,
     destination: &Path,
@@ -421,7 +413,6 @@ fn platform_replace_with_rollback(
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 pub(super) fn replace_file_atomically(
     temporary: &Path,
     path: &Path,
@@ -462,7 +453,6 @@ pub(super) fn replace_file_atomically(
     .map_err(|error| access_io_error(&format!("publish {record_name}"), path, &error))
 }
 
-#[hotpath::measure]
 pub(super) fn sync_parent_directory(path: &Path, record_name: &str) -> Result<()> {
     let parent = path.parent().ok_or_else(|| {
         access_error(
@@ -478,7 +468,6 @@ pub(super) fn sync_parent_directory(path: &Path, record_name: &str) -> Result<()
     .map_err(|error| access_io_error(&format!("sync {record_name} directory"), parent, &error))
 }
 
-#[hotpath::measure]
 pub(super) fn writer_owner(token: &str, intent: &str) -> WriterOwner {
     WriterOwner {
         token: token.to_string(),
@@ -490,18 +479,15 @@ pub(super) fn writer_owner(token: &str, intent: &str) -> WriterOwner {
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 pub fn is_lock_contended(error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::WouldBlock || error.raw_os_error() == Some(33)
 }
 
 #[cfg(not(windows))]
-#[hotpath::measure]
 pub fn is_lock_contended(error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::WouldBlock
 }
 
-#[hotpath::measure]
 pub(super) fn authority_token() -> String {
     let nonce = TOKEN_NONCE.fetch_add(1, Ordering::Relaxed);
     format!(
@@ -512,7 +498,6 @@ pub(super) fn authority_token() -> String {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn epoch_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -520,7 +505,6 @@ pub(super) fn epoch_ms() -> u128 {
         .as_millis()
 }
 
-#[hotpath::measure]
 fn sanitize_metadata(value: &str) -> String {
     const MAX_METADATA_BYTES: usize = 256;
 

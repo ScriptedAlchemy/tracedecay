@@ -32,7 +32,6 @@ pub(super) struct DaemonRemoteQueryProtocolPortV1 {
     invocation: DaemonInvocationService,
 }
 
-#[hotpath::measure_all]
 impl DaemonRemoteQueryProtocolPortV1 {
     pub(super) fn new(
         credentials: Arc<DaemonRemoteCredentialAuthorityV1>,
@@ -114,7 +113,6 @@ pub(super) fn record_remote_query_response(
     );
 }
 
-#[hotpath::measure]
 pub(super) fn remote_query_result_observation(
     operation_ref: &str,
     expected_shards: usize,
@@ -162,7 +160,6 @@ pub(super) fn remote_query_result_observation(
     }
 }
 
-#[hotpath::measure]
 fn pending_local(pending: &PendingLocalEvidenceV1) -> (Option<u32>, Option<&'static str>) {
     match pending {
         PendingLocalEvidenceV1::Available { evidence } => match u32::try_from(evidence.count) {
@@ -187,7 +184,6 @@ fn pending_local(pending: &PendingLocalEvidenceV1) -> (Option<u32>, Option<&'sta
     }
 }
 
-#[hotpath::measure]
 fn remote_query_response_observation(
     expected_shards: usize,
     response: &RemoteProtocolResponseV1<RemoteQueryResultV1>,
@@ -231,7 +227,6 @@ fn remote_query_response_observation(
     }
 }
 
-#[hotpath::measure]
 fn unavailable_observation(
     operation_ref: &str,
     expected_shards: usize,
@@ -250,7 +245,6 @@ fn unavailable_observation(
     }
 }
 
-#[hotpath::measure]
 fn apply_authority(
     observation: &mut RemoteCoverageObservedV1,
     authority: &CurrentRemoteAuthorityStateV1,

@@ -24,7 +24,6 @@ pub const REMOTE_ENROLLMENT_USE_CASE_ID_V1: &str = "use-case.remote.enrollment";
 pub const REMOTE_REPLAY_USE_CASE_ID_V1: &str = "use-case.remote.replay";
 pub const REMOTE_CAPTURE_USE_CASE_ID_V1: &str = "use-case.remote.capture";
 
-#[hotpath::measure]
 pub fn remote_enrollment_result_contract_v1() -> ResultContractRef {
     ResultContractRef::new(
         SchemaId::new("remote.result").expect("static remote result schema id is canonical"),
@@ -33,7 +32,6 @@ pub fn remote_enrollment_result_contract_v1() -> ResultContractRef {
     .expect("static remote result contract is canonical")
 }
 
-#[hotpath::measure]
 pub fn remote_replay_result_contract_v1() -> ResultContractRef {
     ResultContractRef::new(
         SchemaId::new("remote.replay.result")
@@ -43,7 +41,6 @@ pub fn remote_replay_result_contract_v1() -> ResultContractRef {
     .expect("static remote replay result contract is canonical")
 }
 
-#[hotpath::measure]
 pub fn remote_capture_result_contract_v1() -> ResultContractRef {
     ResultContractRef::new(
         SchemaId::new("remote.capture.result")
@@ -109,7 +106,6 @@ pub struct RemoteProtocolServiceV1<Port> {
     port: Port,
 }
 
-#[hotpath::measure_all]
 impl<Port> RemoteProtocolServiceV1<Port> {
     #[hotpath::skip]
     pub const fn new(port: Port) -> Self {
@@ -183,7 +179,6 @@ pub struct RemoteProtocolRequestV1<T> {
     pub body: T,
 }
 
-#[hotpath::measure_all]
 impl<T> RemoteProtocolRequestV1<T> {
     pub fn new(
         request_id: RequestId,
@@ -238,7 +233,6 @@ impl<T> RemoteProtocolRequestV1<T> {
     }
 }
 
-#[hotpath::measure_all]
 impl RemoteProtocolRequestV1<EnrollmentRequestV1> {
     pub fn new_initial_enrollment(
         request_id: RequestId,
@@ -284,7 +278,6 @@ pub struct RemoteProtocolResponseV1<T> {
     pub result: ApplicationResult<T>,
 }
 
-#[hotpath::measure_all]
 impl<T> RemoteProtocolResponseV1<T> {
     pub fn new(
         request_id: RequestId,
@@ -348,7 +341,6 @@ pub struct CurrentAuthorityRequestV1 {
     pub placement_revision: RemotePlacementRevisionV1,
 }
 
-#[hotpath::measure_all]
 impl CurrentAuthorityRequestV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         self.brain_id.validate()?;
@@ -371,7 +363,6 @@ impl RemoteProtocolBodyV1 for CurrentAuthorityRequestV1 {
 /// Ensure discovered authority evidence addresses exactly the requested
 /// Brain/shard/generation/placement. A response for a nearby shard or stale
 /// placement is never accepted as current.
-#[hotpath::measure]
 pub fn validate_current_authority_state(
     request: &CurrentAuthorityRequestV1,
     state: &CurrentRemoteAuthorityStateV1,
@@ -411,7 +402,6 @@ pub struct EnrollmentRequestV1 {
     pub scope: RemoteRepositoryScopeV1,
 }
 
-#[hotpath::measure_all]
 impl EnrollmentRequestV1 {
     pub fn validate(&self, observed_at: UtcMicros) -> Result<(), ApplicationContractError> {
         self.grant_id.validate()?;
@@ -455,7 +445,6 @@ pub struct CredentialRotationRequestV1 {
     pub expires_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl CredentialRotationRequestV1 {
     pub fn validate(&self, observed_at: UtcMicros) -> Result<(), ApplicationContractError> {
         self.enrollment_id.validate()?;
@@ -490,7 +479,6 @@ pub struct CredentialRevocationRequestV1 {
     pub revoked_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl CredentialRevocationRequestV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         self.enrollment_id.validate()?;
@@ -530,7 +518,6 @@ pub enum RemoteProtocolFailureV1 {
     AuthorityUnavailable,
 }
 
-#[hotpath::measure]
 pub fn remote_protocol_problem(
     contract: ResultContractRef,
     request_id: RequestId,
@@ -597,7 +584,6 @@ pub fn remote_protocol_problem(
     ApplicationProblemEnvelope::new(contract, request_id, problem)
 }
 
-#[hotpath::measure]
 fn safe_diagnostic(code: &str, message: &str) -> Result<SafeDiagnostic, ApplicationContractError> {
     SafeDiagnostic::new(code, message)
 }

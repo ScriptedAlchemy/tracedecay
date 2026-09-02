@@ -36,7 +36,6 @@ where
     TRANSCRIPT_SOURCE_HOME.scope(home, future).await
 }
 
-#[hotpath::measure]
 pub fn home_dir() -> Option<PathBuf> {
     TRANSCRIPT_SOURCE_HOME
         .try_with(Clone::clone)
@@ -547,7 +546,6 @@ async fn commit_attribution_sweep<S: GitCorrelationSessionStore>(
 /// recorded worktree is gone or `git log` fails, so the sweep holds its
 /// watermark and retries the target rather than treating "could not look" as
 /// "nothing there" and never revisiting those spans.
-#[hotpath::measure]
 pub(super) fn git_scan_commits(
     target: &git_correlation::SpanScanTarget,
     gap_secs: i64,
@@ -588,7 +586,6 @@ pub(super) fn git_scan_commits(
 
 /// Parses `%H %ct` lines from `git log` into scanned commits, skipping
 /// malformed rows.
-#[hotpath::measure]
 pub(super) fn parse_git_log_commits(stdout: &str) -> Vec<git_correlation::ScannedCommit> {
     stdout
         .lines()

@@ -26,7 +26,6 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 /// components do not exist yet, or whose directory was moved or had a symlink
 /// alias removed after the path was recorded.
 #[must_use]
-#[hotpath::measure]
 pub fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
     if let Ok(canonical) = path.canonicalize() {
         return Some(canonical);
@@ -53,7 +52,6 @@ pub fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
 
 /// [`canonicalize_existing_prefix`] falling back to `path` unchanged.
 #[must_use]
-#[hotpath::measure]
 pub fn canonicalize_path_or_existing_parent(path: &Path) -> PathBuf {
     canonicalize_existing_prefix(path).unwrap_or_else(|| path.to_path_buf())
 }
@@ -72,7 +70,6 @@ pub fn canonicalize_path_or_existing_parent(path: &Path) -> PathBuf {
 /// Both sides are resolved through their deepest existing ancestor, so a
 /// locator whose final component has not been created yet still compares.
 #[must_use]
-#[hotpath::measure]
 pub fn same_canonical_path(left: &Path, right: &Path) -> bool {
     left == right
         || canonicalize_path_or_existing_parent(left) == canonicalize_path_or_existing_parent(right)
@@ -85,7 +82,6 @@ pub fn same_canonical_path(left: &Path, right: &Path) -> bool {
 /// identity paths it writes, while the profile-identity migration must not —
 /// collapsing there would rewrite identity strings already on disk.
 #[must_use]
-#[hotpath::measure]
 pub fn collapse_relative_components(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {
@@ -106,7 +102,6 @@ pub fn collapse_relative_components(path: &Path) -> PathBuf {
 /// `.` components are dropped; anything that could escape or re-root the
 /// worktree — an absolute path, a prefix or root component, `..`, or a path
 /// that normalizes away to nothing — is rejected rather than repaired.
-#[hotpath::measure]
 pub fn normalize_source_edit_relative_path(path: &Path) -> Result<PathBuf> {
     if path.as_os_str().is_empty() || path.is_absolute() {
         return Err(source_edit_unsafe_path());
@@ -128,7 +123,6 @@ pub fn normalize_source_edit_relative_path(path: &Path) -> Result<PathBuf> {
 /// The single rejection every source-edit path check reports, so a caller
 /// cannot learn which specific check refused it.
 #[must_use]
-#[hotpath::measure]
 pub fn source_edit_unsafe_path() -> TraceDecayError {
     TraceDecayError::Config {
         message: "source edit path is not a regular file beneath the authorized worktree"
@@ -138,7 +132,6 @@ pub fn source_edit_unsafe_path() -> TraceDecayError {
 
 /// Names the failed source-edit filesystem operation alongside its `io` cause.
 #[must_use]
-#[hotpath::measure]
 pub fn source_edit_path_error(operation: &'static str, error: io::Error) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!("{operation}: {error}"),

@@ -91,7 +91,6 @@ impl Error for ReaderAcquireError {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn map_worker_error(error: ReaderWorkerError) -> ReaderAcquireError {
     match error {
         ReaderWorkerError::Interrupted { reason } => ReaderAcquireError::Interrupted { reason },
@@ -99,7 +98,6 @@ pub(super) fn map_worker_error(error: ReaderWorkerError) -> ReaderAcquireError {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn validate_probe(
     request: &RuntimeReadRequestV1,
     probe: &dyn RuntimeRequestProbeV1,
@@ -117,7 +115,6 @@ pub(super) fn validate_probe(
     Ok(())
 }
 
-#[hotpath::measure]
 pub(super) fn interruption(probe: &dyn RuntimeRequestProbeV1) -> Option<UnavailableReasonV1> {
     match probe.interruption() {
         Some(RuntimeInterruptionV1::Cancelled) => Some(UnavailableReasonV1::Cancelled),

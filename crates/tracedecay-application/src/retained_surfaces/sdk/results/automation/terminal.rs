@@ -48,7 +48,6 @@ pub enum AutomationSkipReasonV1 {
     ShippedFactProposalHistoryRetired,
 }
 
-#[hotpath::measure_all]
 impl AutomationSkipReasonV1 {
     /// Projects the exact agent-host ledger label into the closed application
     /// terminal. Unknown labels cannot become durable skipped outcomes.
@@ -158,7 +157,6 @@ pub struct AutomationRunSummaryV1 {
     pub skipped_count: u64,
 }
 
-#[hotpath::measure_all]
 impl AutomationRunSummaryV1 {
     pub(super) fn is_bounded(&self) -> bool {
         [

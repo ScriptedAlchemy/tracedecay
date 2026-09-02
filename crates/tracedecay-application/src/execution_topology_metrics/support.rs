@@ -29,7 +29,6 @@ pub(super) struct MeasurementInput<'a> {
     pub(super) context: &'a ProjectionContext,
 }
 
-#[hotpath::measure]
 pub(super) fn measurement(input: MeasurementInput<'_>) -> ExecutionTopologyMeasurementV1 {
     let MeasurementInput {
         metric,
@@ -102,7 +101,6 @@ pub(super) fn measurement(input: MeasurementInput<'_>) -> ExecutionTopologyMeasu
 
 /// Attach exact support for one dimensional entity cell without exposing it
 /// through the public measurement contract.
-#[hotpath::measure]
 pub(super) fn measurement_with_local_support(
     input: MeasurementInput<'_>,
     local_support: u64,
@@ -110,7 +108,6 @@ pub(super) fn measurement_with_local_support(
     measurement(input).with_local_support(local_support)
 }
 
-#[hotpath::measure]
 pub(super) fn unavailable_model(
     authorized_scope_ref: String,
     horizon: ObservabilityHorizonV1,
@@ -126,7 +123,6 @@ pub(super) fn unavailable_model(
     )
 }
 
-#[hotpath::measure]
 pub(super) fn unavailable_model_at(
     authorized_scope_ref: String,
     horizon: ObservabilityHorizonV1,
@@ -149,7 +145,6 @@ pub(super) fn unavailable_model_at(
     )
 }
 
-#[hotpath::measure]
 pub(super) fn unavailable_model_with_state_at(
     authorized_scope_ref: String,
     horizon: ObservabilityHorizonV1,
@@ -368,7 +363,6 @@ pub(super) const fn count_refusal(
 }
 
 /// A distribution additionally needs 90% of its eligible population observed.
-#[hotpath::measure]
 pub(super) fn distribution_refusal(
     complete: bool,
     eligible: u64,
@@ -384,7 +378,6 @@ pub(super) fn distribution_refusal(
 }
 
 /// A rate additionally needs the support floor of eligible cases.
-#[hotpath::measure]
 pub(super) fn rate_refusal(
     complete: bool,
     eligible: u64,
@@ -404,7 +397,6 @@ pub(super) fn rate_refusal(
 
 /// Conflict precision and recall carry the strictest floors: 50 adjudicated
 /// cases, 90% outcome coverage, and at most 10% censoring.
-#[hotpath::measure]
 pub(super) fn conflict_refusal(
     complete: bool,
     eligible: u64,
@@ -429,7 +421,6 @@ pub(super) fn conflict_refusal(
 // Coverage ratios compare bounded event counts; the float is a comparison,
 // not a reported quantity.
 #[allow(clippy::cast_precision_loss)]
-#[hotpath::measure]
 fn meets_coverage(eligible: u64, observed: u64) -> bool {
     if eligible == 0 {
         return false;
@@ -440,7 +431,6 @@ fn meets_coverage(eligible: u64, observed: u64) -> bool {
 // Censoring ratios compare bounded event counts; the float is a comparison,
 // not a reported quantity.
 #[allow(clippy::cast_precision_loss)]
-#[hotpath::measure]
 fn exceeds_censoring(eligible: u64, censored: u64) -> bool {
     if eligible == 0 {
         return true;
@@ -451,12 +441,10 @@ fn exceeds_censoring(eligible: u64, censored: u64) -> bool {
 // Recorded counts are bounded by the event budget and stay exactly
 // representable in an f64 mantissa.
 #[allow(clippy::cast_precision_loss)]
-#[hotpath::measure]
 pub(super) fn as_f64(value: u64) -> f64 {
     value as f64
 }
 
-#[hotpath::measure]
 pub(super) fn ratio(numerator: u64, denominator: u64) -> Option<f64> {
     if denominator == 0 {
         return None;
@@ -464,7 +452,6 @@ pub(super) fn ratio(numerator: u64, denominator: u64) -> Option<f64> {
     Some(as_f64(numerator) / as_f64(denominator))
 }
 
-#[hotpath::measure]
 pub(super) fn seconds(micros: u64) -> f64 {
     as_f64(micros) / 1_000_000.0
 }
@@ -472,7 +459,6 @@ pub(super) fn seconds(micros: u64) -> f64 {
 /// A valid-time interval contributes a duration only when both bounds are
 /// recorded and ordered. A missing or inverted bound is censored, never a
 /// zero-length interval.
-#[hotpath::measure]
 pub(super) fn bounded_interval(from: Option<i64>, until: Option<i64>) -> Option<u64> {
     match (from, until) {
         (Some(from), Some(until)) if until >= from => Some(span(from, until)),
@@ -480,7 +466,6 @@ pub(super) fn bounded_interval(from: Option<i64>, until: Option<i64>) -> Option<
     }
 }
 
-#[hotpath::measure]
 pub(super) fn union_micros(intervals: &mut [(i64, i64)]) -> u64 {
     intervals.sort_unstable();
     let mut total = 0u64;
@@ -504,12 +489,10 @@ pub(super) fn union_micros(intervals: &mut [(i64, i64)]) -> u64 {
     total
 }
 
-#[hotpath::measure]
 fn span(start: i64, end: i64) -> u64 {
     end.abs_diff(start)
 }
 
-#[hotpath::measure]
 pub(super) fn invalid_problem(code: &str, message: &str) -> ApplicationProblem {
     ApplicationProblem::InvalidRequest {
         diagnostic: SafeDiagnostic {

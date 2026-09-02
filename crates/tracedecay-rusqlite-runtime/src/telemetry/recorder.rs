@@ -22,7 +22,6 @@ struct State {
 #[derive(Clone, Default)]
 pub(crate) struct WriterTelemetry(Arc<Mutex<State>>);
 
-#[hotpath::measure_all]
 impl WriterTelemetry {
     fn update(&self, mutate: impl FnOnce(&mut State)) {
         mutate(
@@ -312,7 +311,6 @@ impl WriterTelemetry {
     }
 }
 
-#[hotpath::measure]
 fn record_client(state: &mut State, client: StoreClientIdV1, priority: OperationPriorityV1) {
     if let Some(services) = state.clients.get_mut(&client) {
         services.record(priority, 1);

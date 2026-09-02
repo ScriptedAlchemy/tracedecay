@@ -32,7 +32,6 @@ pub struct RecoveryAuthorityExpectationV1 {
     pub authority_epoch: u64,
 }
 
-#[hotpath::measure_all]
 impl RecoveryAuthorityExpectationV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         for (field, value) in [
@@ -75,7 +74,6 @@ pub struct BackupRequestV1 {
     pub expires_at_micros: i64,
 }
 
-#[hotpath::measure_all]
 impl BackupRequestV1 {
     pub fn validate(&self, now_micros: i64) -> Result<(), ApplicationContractError> {
         validate_identifier("backup operation id", &self.operation_id)?;
@@ -127,7 +125,6 @@ pub struct StagedRestorePreviewV1 {
     pub expires_at_micros: i64,
 }
 
-#[hotpath::measure_all]
 impl StagedRestorePreviewV1 {
     pub fn validate(&self, now_micros: i64) -> Result<(), ApplicationContractError> {
         validate_identifier("restore preview id", &self.preview_id)?;
@@ -159,7 +156,6 @@ pub struct StagedRestoreConfirmationV1 {
     pub expires_at_micros: i64,
 }
 
-#[hotpath::measure_all]
 impl StagedRestoreConfirmationV1 {
     pub fn validate(&self, now_micros: i64) -> Result<(), ApplicationContractError> {
         validate_identifier("restore preview id", &self.preview_id)?;
@@ -200,7 +196,6 @@ pub enum StagedRestoreProgressV1 {
     Published { receipt_id: String },
 }
 
-#[hotpath::measure_all]
 impl StagedRestoreProgressV1 {
     pub fn serving(&self) -> bool {
         matches!(self, Self::Published { .. })
@@ -218,7 +213,6 @@ pub struct PromotionPreviewV1 {
     pub expires_at_micros: i64,
 }
 
-#[hotpath::measure_all]
 impl PromotionPreviewV1 {
     pub fn validate(&self, now_micros: i64) -> Result<(), ApplicationContractError> {
         validate_identifier("promotion preview id", &self.preview_id)?;
@@ -259,7 +253,6 @@ pub struct PromotionConfirmationV1 {
     pub expires_at_micros: i64,
 }
 
-#[hotpath::measure_all]
 impl PromotionConfirmationV1 {
     pub fn validate(&self, now_micros: i64) -> Result<(), ApplicationContractError> {
         validate_identifier("promotion preview id", &self.preview_id)?;
@@ -297,7 +290,6 @@ pub struct PromotionCasReceiptV1 {
     pub old_authority_fenced: bool,
 }
 
-#[hotpath::measure_all]
 impl PromotionCasReceiptV1 {
     pub fn validate_against(
         &self,
@@ -345,7 +337,6 @@ pub enum AuthorityRejoinStateV1 {
     RejoinedReadOnly,
 }
 
-#[hotpath::measure_all]
 impl AuthorityRejoinStateV1 {
     pub fn may_accept_writes(&self) -> bool {
         matches!(self, Self::CurrentAuthority)
@@ -356,7 +347,6 @@ impl AuthorityRejoinStateV1 {
 /// [`crate::identity`] instead of re-implementing the same empty/trim/
 /// control-character/length checks locally. Recovery identifiers keep their
 /// existing 512-byte bound.
-#[hotpath::measure]
 fn validate_identifier(field: &'static str, value: &str) -> Result<(), ApplicationContractError> {
     crate::identity::validate_identifier(value, field, 512)
 }

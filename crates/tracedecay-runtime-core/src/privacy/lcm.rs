@@ -25,7 +25,6 @@ pub struct LcmSensitiveRedactionPolicyV1 {
     patterns: BTreeSet<String>,
 }
 
-#[hotpath::measure_all]
 impl LcmSensitiveRedactionPolicyV1 {
     pub fn enabled(patterns: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
         let mut patterns = patterns
@@ -58,7 +57,6 @@ pub struct LcmSensitiveRedactionV1 {
     patterns: Vec<String>,
 }
 
-#[hotpath::measure_all]
 impl LcmSensitiveRedactionV1 {
     pub fn text(&self) -> &str {
         &self.text
@@ -73,7 +71,6 @@ impl LcmSensitiveRedactionV1 {
     }
 }
 
-#[hotpath::measure]
 pub fn redact_lcm_sensitive_payload(
     raw: &str,
     policy: &LcmSensitiveRedactionPolicyV1,
@@ -142,7 +139,6 @@ impl SensitiveKeyPolicy for LcmSensitiveKeyPolicy<'_> {
     }
 }
 
-#[hotpath::measure]
 fn redact_structured(
     payload: &mut Value,
     policy: &LcmSensitiveRedactionPolicyV1,
@@ -168,7 +164,6 @@ fn redact_structured(
     );
 }
 
-#[hotpath::measure]
 fn redact_text(
     text: &str,
     policy: &LcmSensitiveRedactionPolicyV1,
@@ -211,7 +206,6 @@ fn redact_text(
     protected
 }
 
-#[hotpath::measure]
 fn record_pattern_change(
     protected: &mut String,
     next: String,
@@ -224,7 +218,6 @@ fn record_pattern_change(
     }
 }
 
-#[hotpath::measure]
 fn redact_assignments(text: &str, keys: &[&str], min_secret_len: usize) -> String {
     let lower = text.to_ascii_lowercase();
     let mut out = String::new();
@@ -290,7 +283,6 @@ fn redact_assignments(text: &str, keys: &[&str], min_secret_len: usize) -> Strin
     out
 }
 
-#[hotpath::measure]
 fn redact_bearer_tokens(text: &str) -> String {
     let lower = text.to_ascii_lowercase();
     let mut out = String::new();
@@ -313,7 +305,6 @@ fn redact_bearer_tokens(text: &str) -> String {
     out
 }
 
-#[hotpath::measure]
 fn redact_private_keys(text: &str) -> String {
     let lower = text.to_ascii_lowercase();
     let mut out = String::new();
@@ -329,7 +320,6 @@ fn redact_private_keys(text: &str) -> String {
     out
 }
 
-#[hotpath::measure]
 fn find_next_private_key_block(
     text: &str,
     lower: &str,
@@ -360,7 +350,6 @@ fn find_next_private_key_block(
     None
 }
 
-#[hotpath::measure]
 fn find_next_key(lower: &str, cursor: usize, keys: &[&str]) -> Option<(usize, usize)> {
     keys.iter()
         .filter_map(|key| {
@@ -371,7 +360,6 @@ fn find_next_key(lower: &str, cursor: usize, keys: &[&str]) -> Option<(usize, us
         .min_by_key(|(index, _)| *index)
 }
 
-#[hotpath::measure]
 fn skip_chars(text: &str, mut position: usize, predicate: impl Fn(char) -> bool) -> usize {
     while position < text.len() {
         let Some(character) = text[position..].chars().next() else {

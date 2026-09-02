@@ -86,7 +86,6 @@ impl LanguageExt for TdLang {
 /// Ported verbatim from `ast-grep-language`'s `pre_process_pattern` (MIT).
 /// `$A`/`$$A`/`$$$A` (named), `$_`, and `$$$` (anonymous multi) become expando
 /// runs; positional/other `$` sequences are left untouched.
-#[hotpath::measure]
 fn pre_process_pattern(expando: char, query: &str) -> Cow<'_, str> {
     let mut ret = Vec::with_capacity(query.len());
     let mut dollar_count = 0;
@@ -113,7 +112,6 @@ fn pre_process_pattern(expando: char, query: &str) -> Cow<'_, str> {
 ///
 /// Values mirror `ast-grep-language`'s per-language `impl_lang_expando!`
 /// declarations so pattern semantics match the upstream CLI.
-#[hotpath::measure]
 fn expando_for_key(key: &str) -> Option<char> {
     match key {
         // Languages whose grammar rejects `$` as an identifier char: `µ`.
@@ -134,7 +132,6 @@ fn expando_for_key(key: &str) -> Option<char> {
 /// key is still validated against the compiled grammar tier via
 /// [`ts_provider::try_language`], so listing a key here that is not bundled is
 /// harmless (the file is skipped).
-#[hotpath::measure]
 fn lang_key_for_ext(ext: &str) -> Option<&'static str> {
     Some(match ext {
         "rs" => "rust",
@@ -234,7 +231,6 @@ impl std::fmt::Display for AstGrepSearchError {
 
 /// Compiles a pattern for a language key, or returns the language wrapper +
 /// compiled pattern. Cached by the caller.
-#[hotpath::measure]
 fn build_lang_pattern(key: &str, pattern: &str) -> Option<Result<(TdLang, Pattern), String>> {
     let ts = ts_provider::try_language(key).ok()?;
     let lang = TdLang {
@@ -264,7 +260,6 @@ pub fn search_tree(
     search_tree_scoped(project_root, pattern, lang, path_glob, max_results, None)
 }
 
-#[hotpath::measure]
 pub(crate) fn search_tree_scoped(
     project_root: &Path,
     pattern: &str,
@@ -439,7 +434,6 @@ struct AstGrepFileIdentity<'file> {
     key: &'file str,
 }
 
-#[hotpath::measure]
 fn examine_ast_grep_file<C: Fn() -> bool>(
     source: &str,
     td_lang: &TdLang,
@@ -485,7 +479,6 @@ fn examine_ast_grep_file<C: Fn() -> bool>(
     false
 }
 
-#[hotpath::measure]
 fn source_line_at_byte(source: &str, byte_offset: usize) -> String {
     let Some(prefix) = source.get(..byte_offset) else {
         return String::new();
@@ -504,7 +497,6 @@ fn source_line_at_byte(source: &str, byte_offset: usize) -> String {
 
 /// Collapses a (possibly multi-line) matched snippet to a single display line,
 /// squeezing interior whitespace and capping length.
-#[hotpath::measure]
 fn collapse_snippet(text: &str) -> String {
     const MAX: usize = 200;
     let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -518,7 +510,6 @@ fn collapse_snippet(text: &str) -> String {
 
 /// Classifies a byte buffer as binary when a NUL byte appears in the head — the
 /// same heuristic `git` and `ripgrep` use.
-#[hotpath::measure]
 fn looks_binary(bytes: &[u8]) -> bool {
     bytes[..bytes.len().min(BINARY_SNIFF_BYTES)].contains(&0)
 }

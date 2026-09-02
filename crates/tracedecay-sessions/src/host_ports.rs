@@ -111,18 +111,15 @@ pub mod unregistered_admission {
 /// discovery walk resolves it directly rather than depending on the host
 /// bundle crate.
 #[must_use]
-#[hotpath::measure]
 pub fn vscode_data_dir(home: &Path) -> PathBuf {
     platform_data_dir(home, "Code")
 }
 
 #[must_use]
-#[hotpath::measure]
 pub fn kiro_data_dir(home: &Path) -> PathBuf {
     platform_data_dir(home, "Kiro")
 }
 
-#[hotpath::measure]
 fn platform_data_dir(home: &Path, product: &str) -> PathBuf {
     #[cfg(target_os = "macos")]
     {
@@ -153,7 +150,6 @@ fn platform_data_dir(home: &Path, product: &str) -> PathBuf {
 /// Provider record parsers all normalize timestamps through the kernel's
 /// zero-dependency parser; this is the unsigned-seconds shape they want.
 #[must_use]
-#[hotpath::measure]
 pub fn parse_timestamp(ts: &str) -> Option<u64> {
     let secs = tracedecay_runtime_core::timeutil::parse_rfc3339_timestamp(ts)?;
     u64::try_from(secs).ok()

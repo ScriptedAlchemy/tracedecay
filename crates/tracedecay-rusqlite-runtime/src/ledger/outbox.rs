@@ -85,7 +85,6 @@ pub(super) fn insert(
     Ok(())
 }
 
-#[hotpath::measure]
 pub(super) fn record(
     transaction: &impl LedgerTransaction,
     submission: &Submission<'_>,
@@ -127,7 +126,6 @@ pub(super) fn record(
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_source(
     entry: &TransactionalOutboxEntryV1,
     receipt: &StoreCommitReceiptV1,
@@ -175,7 +173,6 @@ pub(crate) fn outbox_entry(
     Ok(Some(entry))
 }
 
-#[hotpath::measure]
 pub(crate) fn prepare_dispatch(
     transaction: &impl LedgerTransaction,
     binding: &StoreRuntimeBindingV1,
@@ -192,7 +189,6 @@ pub(crate) fn prepare_dispatch(
     )
 }
 
-#[hotpath::measure]
 pub(crate) fn mark_effect_unknown(
     transaction: &impl LedgerTransaction,
     binding: &StoreRuntimeBindingV1,
@@ -208,7 +204,6 @@ pub(crate) fn mark_effect_unknown(
     )
 }
 
-#[hotpath::measure]
 pub(crate) fn acknowledge(
     transaction: &impl LedgerTransaction,
     binding: &StoreRuntimeBindingV1,
@@ -223,7 +218,6 @@ pub(crate) fn acknowledge(
     Ok(acknowledged)
 }
 
-#[hotpath::measure]
 fn ensure_ordering_head(
     transaction: &impl LedgerTransaction,
     binding: &StoreRuntimeBindingV1,
@@ -249,7 +243,6 @@ fn ensure_ordering_head(
     Ok(())
 }
 
-#[hotpath::measure]
 fn transition(
     transaction: &impl LedgerTransaction,
     binding: &StoreRuntimeBindingV1,
@@ -300,7 +293,6 @@ fn persist_transition(
     Ok(())
 }
 
-#[hotpath::measure]
 fn decode_row(
     row: &Row<'_>,
     binding: &StoreRuntimeBindingV1,
@@ -385,7 +377,6 @@ fn decode_row(
     Ok(entry)
 }
 
-#[hotpath::measure]
 fn state_name(state: OutboxEffectStateV1) -> &'static str {
     match state {
         OutboxEffectStateV1::Pending => "pending",

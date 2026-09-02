@@ -33,7 +33,6 @@ pub struct ProfileIdentityRecordV1 {
 /// Returns `Ok(None)` when the file is missing. Symlinks, non-regular files,
 /// non-0600 mode, unknown fields, unsupported schema, and invalid ids are
 /// rejected. Callers that require a record map `None` themselves.
-#[hotpath::measure]
 pub fn read_existing_profile_identity_record(
     path: &Path,
 ) -> Result<Option<ProfileIdentityRecordV1>> {
@@ -62,7 +61,6 @@ pub fn read_existing_profile_identity_record(
     Ok(Some(record))
 }
 
-#[hotpath::measure]
 fn validate_record(path: &Path, record: &ProfileIdentityRecordV1) -> Result<()> {
     if record.schema_version != PROFILE_IDENTITY_SCHEMA_VERSION {
         return Err(TraceDecayError::Config {
@@ -83,7 +81,6 @@ fn validate_record(path: &Path, record: &ProfileIdentityRecordV1) -> Result<()> 
         .map_err(|error| invalid_identity(path, "profile_id", error))
 }
 
-#[hotpath::measure]
 fn validate_private_identity_file(path: &Path, metadata: &std::fs::Metadata) -> Result<()> {
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(TraceDecayError::Config {
@@ -109,7 +106,6 @@ fn validate_private_identity_file(path: &Path, metadata: &std::fs::Metadata) -> 
     Ok(())
 }
 
-#[hotpath::measure]
 fn invalid_identity(path: &Path, field: &str, error: impl std::fmt::Display) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!(
@@ -119,7 +115,6 @@ fn invalid_identity(path: &Path, field: &str, error: impl std::fmt::Display) -> 
     }
 }
 
-#[hotpath::measure]
 fn profile_identity_io(operation: &str, path: &Path, error: &std::io::Error) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!(

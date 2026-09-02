@@ -33,7 +33,6 @@ pub enum CodeIndexCadenceTriggerV1 {
     BusyFollowUp,
 }
 
-#[hotpath::measure_all]
 impl CodeIndexCadenceTriggerV1 {
     /// Stable label for bounded, redacted telemetry.
     pub fn label(self) -> &'static str {
@@ -64,7 +63,6 @@ pub enum CodeIndexArrivalV1 {
     Unavailable,
 }
 
-#[hotpath::measure_all]
 impl CodeIndexArrivalV1 {
     /// The observed arrival instant, or `None` when arrival is unavailable.
     pub fn wake_micros(self) -> Option<i64> {
@@ -113,7 +111,6 @@ pub struct CodeIndexEventToReadyReceiptV1 {
     pub overflow_reconciled: bool,
 }
 
-#[hotpath::measure_all]
 impl CodeIndexEventToReadyReceiptV1 {
     pub fn new(
         project_root: PathBuf,
@@ -182,7 +179,6 @@ pub struct CodeIndexPercentileV1 {
     pub value: Option<i64>,
 }
 
-#[hotpath::measure_all]
 impl CodeIndexPercentileV1 {
     fn from_sorted(sorted: &[i64], percentile: usize, minimum_samples: usize) -> Self {
         let value = (sorted.len() >= minimum_samples)
@@ -209,7 +205,6 @@ pub struct CodeIndexPercentilesV1 {
     pub p99: CodeIndexPercentileV1,
 }
 
-#[hotpath::measure_all]
 impl CodeIndexPercentilesV1 {
     fn from_values(mut values: Vec<i64>) -> Self {
         values.sort_unstable();
@@ -223,7 +218,6 @@ impl CodeIndexPercentilesV1 {
 }
 
 /// Nearest-rank percentile over an ascending slice.
-#[hotpath::measure]
 fn nearest_rank(sorted: &[i64], percentile: usize) -> Option<i64> {
     let last = sorted.len().checked_sub(1)?;
     let index = last.saturating_mul(percentile).div_ceil(100);
@@ -265,7 +259,6 @@ pub struct CodeIndexCadenceTelemetryV1 {
     receipts: VecDeque<CodeIndexEventToReadyReceiptV1>,
 }
 
-#[hotpath::measure_all]
 impl CodeIndexCadenceTelemetryV1 {
     pub const CAPACITY: usize = 128;
 
@@ -353,7 +346,6 @@ impl CodeIndexCadenceTelemetryV1 {
 /// reason sets are closed enums, so the keys stay static; per-receipt latency
 /// stays in the ring's truthful percentile model rather than a profiler gauge.
 #[cfg(feature = "hotpath")]
-#[hotpath::measure]
 fn observe_receipt(receipt: &CodeIndexEventToReadyReceiptV1) {
     match receipt.trigger {
         CodeIndexCadenceTriggerV1::Mount => {

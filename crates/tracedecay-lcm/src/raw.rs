@@ -28,7 +28,6 @@ pub const RAW_MESSAGE_METADATA_SELECT_COLUMNS: &str =
                     timestamp, NULL AS content, content_hash, storage_kind, payload_ref,
                     '' AS snippet_text, legacy_source, legacy_truncated, metadata_json";
 
-#[hotpath::measure]
 pub fn raw_message_metadata_from_row(row: &Row) -> Result<LcmRawMessageMetadata, LcmError> {
     let storage_kind_text: String = row.get(9)?;
     let content_hash: String = row.get(8)?;
@@ -51,7 +50,6 @@ pub fn raw_message_metadata_from_row(row: &Row) -> Result<LcmRawMessageMetadata,
     })
 }
 
-#[hotpath::measure]
 fn verify_raw_message_receipt(message: &LcmRawMessage) -> Result<(), LcmError> {
     let metadata = message
         .metadata_json
@@ -109,7 +107,6 @@ pub fn verified_raw_message_from_row(row: &Row) -> Result<LcmRawMessage, LcmErro
     verified
 }
 
-#[hotpath::measure]
 fn decode_verified_raw_message(row: &Row) -> Result<LcmRawMessage, LcmError> {
     let inline_content: Option<String> = row.get(7)?;
     let snippet_text: String = row.get(11)?;
@@ -224,7 +221,6 @@ struct StagedWholeMessage {
     metadata_json: String,
 }
 
-#[hotpath::measure_all]
 impl PreparedMessage {
     fn receipt(&self) -> &SanitizationReceiptV1 {
         self.quarantine_receipt
@@ -238,7 +234,6 @@ struct PayloadExternalizer<'a> {
     rollback: &'a mut payload::PayloadFileRollback,
 }
 
-#[hotpath::measure_all]
 impl PayloadExternalizer<'_> {
     fn write(
         &mut self,
@@ -262,7 +257,6 @@ impl PayloadExternalizer<'_> {
     }
 }
 
-#[hotpath::measure]
 fn externalized_payload_placeholder(
     payload_ref: &super::LcmPayloadRef,
     field_path: &str,
@@ -338,7 +332,6 @@ async fn upsert_inline_raw_message(
     Ok(())
 }
 
-#[hotpath::measure]
 fn externalized_payload_metadata(
     payload_ref: &LcmPayloadRef,
     prepared: &PreparedMessage,
@@ -395,7 +388,6 @@ pub async fn upsert_projection_raw_message(
     .await
 }
 
-#[hotpath::measure]
 pub fn stage_raw_message_with_payload_tracked(
     storage_root: &Path,
     message: &SessionMessageRecord,
@@ -557,7 +549,6 @@ pub async fn protect_replay_field_value_tracked(
         .map_err(|error| LcmError::Db(format!("replay privacy decoding failed: {error}")))
 }
 
-#[hotpath::measure]
 fn prepare_message(
     message: &SessionMessageRecord,
     externalizer: &mut PayloadExternalizer<'_>,
@@ -649,7 +640,6 @@ fn prepare_message(
     Ok(prepared)
 }
 
-#[hotpath::measure]
 fn protect_json_media_payloads(
     value: &mut JsonValue,
     message: &SessionMessageRecord,
@@ -716,7 +706,6 @@ fn protect_json_media_payloads(
 /// Returns true when the text holds non-whitespace content outside its
 /// media/base64 spans, i.e. there is an inline scaffold worth preserving via
 /// substring externalization instead of whole-message externalization.
-#[hotpath::measure]
 fn has_inline_scaffold_outside_media_spans(text: &str) -> bool {
     let mut spans = security::data_uri_spans(text);
     spans.extend(security::long_base64_run_spans(text));
@@ -739,7 +728,6 @@ fn has_inline_scaffold_outside_media_spans(text: &str) -> bool {
 /// (ingest_protection.py:576-614): pass 1 externalizes data-URI base64 spans,
 /// pass 2 externalizes qualifying long base64 runs in the remaining text.
 /// Returns `None` when nothing matched.
-#[hotpath::measure]
 fn replace_media_substrings(
     text: &str,
     message: &SessionMessageRecord,
@@ -775,7 +763,6 @@ fn replace_media_substrings(
     Ok(Some(protected))
 }
 
-#[hotpath::measure]
 fn externalize_spans(
     text: &str,
     spans: &[(usize, usize)],
@@ -813,7 +800,6 @@ fn externalize_spans(
     Ok(protected)
 }
 
-#[hotpath::measure]
 fn ingest_payload_placeholder(payload_ref: &LcmPayloadRef, field_path: &str) -> String {
     format!(
         "[Externalized LCM ingest payload: kind={}; field={}; chars={}; bytes={}; ref={}]",
@@ -825,7 +811,6 @@ fn ingest_payload_placeholder(payload_ref: &LcmPayloadRef, field_path: &str) -> 
     )
 }
 
-#[hotpath::measure]
 fn safe_placeholder_metadata(value: &str) -> String {
     let safe = value
         .chars()
@@ -857,7 +842,6 @@ const MAX_PROVIDER_METADATA_BYTES: u64 = 1_048_576;
 /// under older detector rules is dirty when re-sanitizing it under the
 /// current rules yields a different document. A document the sanitizer
 /// refuses to evaluate is a typed refusal, never implicitly clean.
-#[hotpath::measure]
 pub fn provider_metadata_requires_resanitization(
     provider_metadata_json: &str,
 ) -> Result<bool, LcmError> {
@@ -876,7 +860,6 @@ pub fn provider_metadata_requires_resanitization(
 
 /// Pure function of the provider metadata bytes: every failure is a
 /// deterministic content refusal, never an environmental fault.
-#[hotpath::measure]
 fn protected_metadata_json(
     original: Option<&str>,
     prepared: &PreparedMessage,
@@ -903,14 +886,12 @@ fn protected_metadata_json(
     Ok(Some(metadata.to_string()))
 }
 
-#[hotpath::measure]
 fn payload_metadata_json(prepared: &PreparedMessage) -> Result<Option<String>, LcmError> {
     let mut metadata = JsonValue::Object(Map::new());
     add_sanitization_metadata(&mut metadata, prepared, None)?;
     Ok(Some(metadata.to_string()))
 }
 
-#[hotpath::measure]
 fn add_sanitization_metadata(
     metadata: &mut JsonValue,
     prepared: &PreparedMessage,

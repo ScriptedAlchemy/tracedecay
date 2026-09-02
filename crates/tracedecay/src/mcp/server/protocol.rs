@@ -19,7 +19,6 @@ pub(crate) enum McpMethod {
     Unknown,
 }
 
-#[hotpath::measure]
 pub(crate) fn classify_mcp_method(method: &str) -> McpMethod {
     if method == tracedecay_hooks::core_events::HOOK_EVENT_METHOD {
         return McpMethod::HookEvent;
@@ -62,7 +61,6 @@ pub(crate) const SERVER_INSTRUCTIONS: &str = concat!(
 
 /// The `initialize` result payload. Fallible because the advertised server
 /// version reads the registered product runtime.
-#[hotpath::measure]
 pub(crate) fn initialize_result(
     instructions: &str,
 ) -> Result<Value, crate::product_runtime::ProductRuntimeError> {
@@ -84,7 +82,6 @@ pub(crate) fn initialize_result(
 }
 
 /// The `resources/list` result payload.
-#[hotpath::measure]
 pub(crate) fn resources_list_result() -> Value {
     json!({
         "resources": [

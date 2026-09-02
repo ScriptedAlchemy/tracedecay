@@ -43,7 +43,6 @@ struct RuntimeLeaseWireV1 {
     expires_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl RuntimeLeaseV1 {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
         if self.expires_at <= self.acquired_at {
@@ -99,7 +98,6 @@ struct ReaderHealthLeaseWireV1 {
     expires_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl ReaderHealthLeaseV1 {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
         if self.lane != ReaderLaneV1::ReservedHealth {
@@ -160,7 +158,6 @@ struct RuntimeMaintenanceTransitionWireV1 {
     requested_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl RuntimeMaintenanceTransitionV1 {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
         self.lease.validate()?;
@@ -235,7 +232,6 @@ impl TryFrom<RuntimeMaintenanceTransitionWireV1> for RuntimeMaintenanceTransitio
     }
 }
 
-#[hotpath::measure_all]
 impl RuntimeMaintenanceStateV1 {
     pub fn name(self) -> &'static str {
         match self {
@@ -268,7 +264,6 @@ struct RuntimeBatchCompatibilityWireV1 {
     priority: OperationPriorityV1,
 }
 
-#[hotpath::measure_all]
 impl RuntimeBatchCompatibilityV1 {
     pub fn from_operation(
         metadata: &StoreOperationMetadataV1,
@@ -375,7 +370,6 @@ struct RuntimeTransactionScopeWireV1 {
     opened_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl RuntimeTransactionScopeV1 {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
         self.compatibility.validate()
@@ -429,7 +423,6 @@ struct RuntimeOperationPermitWireV1 {
     expires_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl RuntimeOperationPermitV1 {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
         self.transaction_scope.validate()?;

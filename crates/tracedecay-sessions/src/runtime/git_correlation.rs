@@ -82,7 +82,6 @@ pub enum CommitRelationFilter {
     All,
 }
 
-#[hotpath::measure_all]
 impl CommitRelationFilter {
     pub fn parse(value: Option<&str>) -> Result<Self, GitCorrelationError> {
         match value.unwrap_or("produced") {
@@ -170,7 +169,6 @@ pub struct GitEvidenceProjectionV1 {
     commit_sessions: Vec<CommitSessionRecord>,
 }
 
-#[hotpath::measure_all]
 impl GitEvidenceProjectionV1 {
     #[hotpath::measure(label = "sessions.git_correlation.projection_new")]
     pub fn new(
@@ -412,7 +410,6 @@ pub enum GitRefFilter {
     Commit(String),
 }
 
-#[hotpath::measure_all]
 impl GitRefFilter {
     pub fn parse(kind: &str, value: &str) -> Result<Self, GitCorrelationError> {
         let value = value.trim();
@@ -452,7 +449,6 @@ impl GitRefFilter {
 /// The value type lives in `tracedecay-lcm`; this constructor stays here
 /// because worktree normalization and commit-SHA validation are
 /// correlation-engine rules.
-#[hotpath::measure]
 pub fn git_scope_filter_from_args(
     branch: Option<&str>,
     worktree: Option<&str>,
@@ -503,7 +499,6 @@ pub struct CorrelationIndexHealth {
     pub backfill_watermark: Option<i64>,
 }
 
-#[hotpath::measure_all]
 impl CorrelationIndexHealth {
     #[hotpath::skip]
     pub const fn is_empty(&self) -> bool {
@@ -519,7 +514,6 @@ impl CorrelationIndexHealth {
     }
 }
 
-#[hotpath::measure]
 pub fn normalize_worktree(path: &str) -> String {
     let mut normalized = path.trim().replace('\\', "/");
     if let Some(stripped) = normalized.strip_prefix("//?/UNC/") {
@@ -536,7 +530,6 @@ pub fn normalize_worktree(path: &str) -> String {
     normalized
 }
 
-#[hotpath::measure]
 pub fn observation_extends_span(first_ts: i64, last_ts: i64, ts: i64, gap_secs: i64) -> bool {
     ts >= first_ts.saturating_sub(gap_secs) && ts <= last_ts.saturating_add(gap_secs)
 }
@@ -546,7 +539,6 @@ pub struct SpanObservationDebounce {
     last_write: HashMap<String, i64>,
 }
 
-#[hotpath::measure_all]
 impl SpanObservationDebounce {
     pub fn new() -> Self {
         Self::default()
@@ -568,7 +560,6 @@ impl SpanObservationDebounce {
     }
 }
 
-#[hotpath::measure]
 pub fn span_debounce_key(
     provider: &str,
     session_id: &str,
@@ -694,7 +685,6 @@ pub fn transcript_git_evidence(
     (records.into_values().collect(), spans)
 }
 
-#[hotpath::measure]
 pub fn direct_commit_records(
     messages: &[SessionMessageRecord],
     project_root: &std::path::Path,
@@ -713,7 +703,6 @@ pub fn ingest_span_observations(messages: &[SessionMessageRecord]) -> Vec<SpanOb
         .collect()
 }
 
-#[hotpath::measure]
 fn parsed_message_metadata(message: &SessionMessageRecord) -> Option<serde_json::Value> {
     message
         .metadata_json
@@ -721,7 +710,6 @@ fn parsed_message_metadata(message: &SessionMessageRecord) -> Option<serde_json:
         .and_then(|json| serde_json::from_str(json).ok())
 }
 
-#[hotpath::measure]
 fn span_observation_from_metadata(
     message: &SessionMessageRecord,
     metadata: &serde_json::Map<String, serde_json::Value>,
@@ -815,12 +803,10 @@ pub async fn write_meta_value(
 /// canonical map in [`GitEvidenceProjectionV1::new`] settles the final
 /// label. Two distinct non-empty providers never match — one session
 /// carrying both is rejected by `canonical_provider_map`.
-#[hotpath::measure]
 pub fn providers_compatible(left: &str, right: &str) -> bool {
     left.is_empty() || right.is_empty() || left == right
 }
 
-#[hotpath::measure]
 fn validate_span(span: &SessionGitSpan) -> Result<(), GitCorrelationError> {
     if span.span_id.is_empty()
         || span.session_id.is_empty()
@@ -835,7 +821,6 @@ fn validate_span(span: &SessionGitSpan) -> Result<(), GitCorrelationError> {
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_commit_record(record: &CommitSessionRecord) -> Result<(), GitCorrelationError> {
     parse_commit_sha(&record.commit_sha)?;
     if record.session_id.is_empty() || !(0..=100).contains(&record.confidence) {
@@ -846,7 +831,6 @@ fn validate_commit_record(record: &CommitSessionRecord) -> Result<(), GitCorrela
     Ok(())
 }
 
-#[hotpath::measure]
 fn canonical_providers(
     spans: &mut [SessionGitSpan],
     commits: &mut [CommitSessionRecord],
@@ -865,7 +849,6 @@ fn canonical_providers(
     Ok(())
 }
 
-#[hotpath::measure]
 fn canonical_provider_map(
     spans: &[SessionGitSpan],
     commits: &[CommitSessionRecord],
@@ -894,7 +877,6 @@ fn canonical_provider_map(
     Ok(providers)
 }
 
-#[hotpath::measure]
 fn commit_record_order(
     left: &CommitSessionRecord,
     right: &CommitSessionRecord,
@@ -904,19 +886,16 @@ fn commit_record_order(
         .then_with(|| left.session_id.cmp(&right.session_id))
 }
 
-#[hotpath::measure]
 fn digest_bytes(bytes: &[u8]) -> String {
     sha256_hex(bytes)
 }
 
-#[hotpath::measure]
 fn metadata_worktree(metadata: &serde_json::Map<String, serde_json::Value>) -> Option<&str> {
     MESSAGE_WORKTREE_KEYS
         .into_iter()
         .find_map(|key| metadata.get(key).and_then(serde_json::Value::as_str))
 }
 
-#[hotpath::measure]
 fn parse_commit_sha(value: &str) -> Result<String, GitCorrelationError> {
     if !(6..=64).contains(&value.len()) || !value.chars().all(|ch| ch.is_ascii_hexdigit()) {
         return Err(GitCorrelationError::InvalidArgument(
@@ -926,12 +905,10 @@ fn parse_commit_sha(value: &str) -> Result<String, GitCorrelationError> {
     Ok(value.to_ascii_lowercase())
 }
 
-#[hotpath::measure]
 fn nonempty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
 
-#[hotpath::measure]
 fn intersect_id_maps(
     accumulated: Option<BTreeMap<String, String>>,
     next: BTreeMap<String, String>,
@@ -944,7 +921,6 @@ fn intersect_id_maps(
     })
 }
 
-#[hotpath::measure]
 fn span_hit(spans: &[&SessionGitSpan]) -> SessionGitCorrelationHit {
     let providers = spans
         .iter()
@@ -988,14 +964,12 @@ fn span_hit(spans: &[&SessionGitSpan]) -> SessionGitCorrelationHit {
     }
 }
 
-#[hotpath::measure]
 fn one_value(values: BTreeSet<&str>) -> Option<String> {
     (values.len() == 1)
         .then(|| values.into_iter().next().map(str::to_owned))
         .flatten()
 }
 
-#[hotpath::measure]
 fn commit_hit(record: &CommitSessionRecord) -> SessionGitCorrelationHit {
     SessionGitCorrelationHit {
         provider: record.provider.clone(),
@@ -1017,7 +991,6 @@ fn commit_hit(record: &CommitSessionRecord) -> SessionGitCorrelationHit {
     }
 }
 
-#[hotpath::measure]
 fn record_strength(record: &CommitSessionRecord) -> (u8, i64) {
     (
         u8::from(record.relation == CommitRelation::Produced),
@@ -1025,7 +998,6 @@ fn record_strength(record: &CommitSessionRecord) -> (u8, i64) {
     )
 }
 
-#[hotpath::measure]
 fn commit_hit_strength(hit: &SessionGitCorrelationHit) -> (u8, i64) {
     (
         u8::from(hit.relation == Some(CommitRelation::Produced)),

@@ -115,12 +115,10 @@ pub struct UserConfig {
     pub extra: BTreeMap<String, toml::Value>,
 }
 
-#[hotpath::measure]
 fn default_watcher_debounce() -> String {
     "2s".to_string()
 }
 
-#[hotpath::measure]
 fn default_extraction_timeout_secs() -> u64 {
     60
 }
@@ -153,7 +151,6 @@ impl Default for UserConfig {
 }
 
 /// Returns the path to the user-level config file.
-#[hotpath::measure]
 pub fn config_path() -> Option<PathBuf> {
     tracedecay_runtime_core::config::user_data_dir().map(|dir| dir.join("config.toml"))
 }
@@ -161,7 +158,6 @@ pub fn config_path() -> Option<PathBuf> {
 /// Whether the user config explicitly contains an `[automation]` table.
 /// Missing automation configuration is distinct from an explicit disabled
 /// configuration for profile-level projectless self-improvement.
-#[hotpath::measure]
 pub fn automation_is_configured() -> bool {
     let Some(path) = config_path() else {
         return false;
@@ -212,7 +208,6 @@ pub enum ConfigSaveError {
     Lock { path: PathBuf, source: io::Error },
 }
 
-#[hotpath::measure_all]
 impl ConfigSaveError {
     /// True when the failure is a corrupt existing file that was left intact.
     #[must_use]
@@ -303,7 +298,6 @@ pub struct UserConfigMutation<T> {
 /// Sibling temp path in the same directory as `path`, used for the atomic
 /// write-then-rename. Includes pid and a nanosecond stamp so a stale temp from
 /// a crashed writer never collides with a live one.
-#[hotpath::measure]
 fn temp_write_path(path: &Path) -> PathBuf {
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -319,7 +313,6 @@ fn temp_write_path(path: &Path) -> PathBuf {
 
 /// Quarantine path (`config.toml.corrupt-<unix-ts>`) for a corrupt config file
 /// preserved during the explicit configuration recovery operation.
-#[hotpath::measure]
 fn corrupt_backup_path(path: &Path) -> PathBuf {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -335,7 +328,6 @@ fn corrupt_backup_path(path: &Path) -> PathBuf {
 /// Best-effort 1-based line number for a TOML parse error, derived from the
 /// error's byte span. `None` when the span is unavailable; the error's own
 /// message still carries the line/column in that case.
-#[hotpath::measure]
 fn parse_error_line(contents: &str, err: &toml::de::Error) -> Option<usize> {
     let span = err.span()?;
     let end = span.start.min(contents.len());
@@ -345,7 +337,6 @@ fn parse_error_line(contents: &str, err: &toml::de::Error) -> Option<usize> {
 /// Paths for which a corrupt-config warning has already been printed this
 /// process, so a hot loader (dashboard handlers, the daemon's per-request
 /// config read) doesn't spam stderr once per call.
-#[hotpath::measure]
 fn warned_corrupt_config_paths() -> &'static Mutex<HashSet<PathBuf>> {
     static WARNED: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
     WARNED.get_or_init(|| Mutex::new(HashSet::new()))
@@ -356,7 +347,6 @@ fn warned_corrupt_config_paths() -> &'static Mutex<HashSet<PathBuf>> {
 ///
 /// Shared by [`UserConfig::load`] call sites so silently-defaulting readers
 /// agree on what "corrupt" means and on not spamming stderr.
-#[hotpath::measure]
 pub fn parse_or_warn_default<T>(path: &Path, contents: &str) -> T
 where
     T: Default + serde::de::DeserializeOwned,
@@ -379,7 +369,6 @@ where
     }
 }
 
-#[hotpath::measure_all]
 impl UserConfig {
     /// Returns the persisted dashboard policy for an agent.
     ///
@@ -671,7 +660,6 @@ impl UserConfig {
 }
 
 /// Parse a human-readable duration string like "15s" or "1m" into a Duration.
-#[hotpath::measure]
 pub fn parse_duration(s: &str) -> Option<std::time::Duration> {
     let s = s.trim();
     if let Some(secs) = s.strip_suffix('s') {

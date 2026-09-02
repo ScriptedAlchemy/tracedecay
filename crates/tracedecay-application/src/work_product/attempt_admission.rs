@@ -29,7 +29,6 @@ pub struct WorkProductAttemptAdmissionV1 {
     pub concurrency: TopologyConcurrencyPolicyV1,
 }
 
-#[hotpath::measure_all]
 impl WorkProductAttemptAdmissionV1 {
     pub fn validate(&self) -> Result<(), WorkProductAttemptAdmissionErrorV1> {
         // The draft's policy revision is pinned by the mounted product
@@ -95,7 +94,6 @@ pub struct WorkProductRetryAdmissionV1 {
     pub retry: WorkRetryWriteV1,
 }
 
-#[hotpath::measure_all]
 impl WorkProductRetryAdmissionV1 {
     pub fn validate(&self) -> Result<(), WorkProductAttemptAdmissionErrorV1> {
         self.admission.validate()?;
@@ -117,7 +115,6 @@ pub struct WorkProductSynthesisAdmissionV1 {
     pub synthesis: WorkSynthesisAdmissionRecordV1,
 }
 
-#[hotpath::measure_all]
 impl WorkProductSynthesisAdmissionV1 {
     pub fn validate(&self) -> Result<(), WorkProductAttemptAdmissionErrorV1> {
         self.admission.validate()?;
@@ -152,7 +149,6 @@ pub enum WorkProductAttemptAdmissionErrorV1 {
     DurabilityUncertain,
 }
 
-#[hotpath::measure]
 fn selection_covers_authority(
     selection: &tracedecay_domain::WorkProductSelectionScopeV1,
     authority: &WorkAuthority,

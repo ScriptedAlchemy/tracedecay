@@ -19,7 +19,6 @@ pub(crate) use generated::PRODUCT_BUILD_VERSION;
 /// host plugins as their `generator_commit` provenance.
 pub(crate) use generated::PRODUCT_FULL_SHA;
 
-#[hotpath::measure]
 pub(crate) fn provider() -> tracedecay::ProductRuntimeProvider {
     tracedecay::ProductRuntimeProvider {
         release_version: env!("CARGO_PKG_VERSION"),

@@ -41,7 +41,6 @@ pub enum ReapEntryKind {
     CodeProject,
 }
 
-#[hotpath::measure_all]
 impl ReapEntryKind {
     #[must_use]
     pub fn label(self) -> &'static str {
@@ -155,7 +154,6 @@ impl std::error::Error for ProjectStoreResolutionError {
     }
 }
 
-#[hotpath::measure_all]
 impl RegistryReapPlan {
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -196,7 +194,6 @@ impl RegistryReapPlan {
 /// path-shaped (a `git-remote-name:` search alias, say) and therefore can
 /// never be judged dead by checking the filesystem.
 #[must_use]
-#[hotpath::measure]
 pub fn alias_key_path(alias: &str) -> Option<&Path> {
     let candidate = alias
         .strip_prefix(GIT_COMMON_DIR_ALIAS_PREFIX)
@@ -210,7 +207,6 @@ pub fn alias_key_path(alias: &str) -> Option<&Path> {
 /// Canonicalizes both sides where possible so a `/tmp` symlinked to
 /// `/private/tmp` (macOS) still matches.
 #[must_use]
-#[hotpath::measure]
 pub fn is_ephemeral_path(path: &Path) -> bool {
     let temp_root = std::env::temp_dir();
     let temp_root = temp_root.canonicalize().unwrap_or(temp_root);
@@ -244,7 +240,6 @@ pub const PROJECT_REGISTRY_AUTHORITY: &str = "project registry";
 /// fixtures and sandboxed runs keep working. Only a durable profile refuses an
 /// ephemeral root.
 #[must_use]
-#[hotpath::measure]
 pub fn ephemeral_root_rejection(project_root: &Path, profile_root: &Path) -> Option<String> {
     (is_ephemeral_path(project_root) && !is_ephemeral_path(profile_root)).then(|| {
         format!(
@@ -264,7 +259,6 @@ pub(super) enum ProjectIdentityAliasKind {
     GitCommonDir,
 }
 
-#[hotpath::measure_all]
 impl ProjectIdentityAliasKind {
     pub(super) fn prefix(self) -> &'static str {
         match self {
@@ -281,12 +275,10 @@ impl ProjectIdentityAliasKind {
 /// Resolving the deepest existing ancestor keeps old-path lookups aligned with
 /// the keys written while the path existed, so a moved project stays
 /// resolvable by its former root.
-#[hotpath::measure]
 pub(super) fn canonical_project_path(project_path: &Path) -> PathBuf {
     tracedecay_runtime_core::path_safety::canonicalize_path_or_existing_parent(project_path)
 }
 
-#[hotpath::measure]
 pub(super) fn project_path_alias_key(project_path: &Path) -> String {
     let canonical = canonical_project_path(project_path);
     if let Some(path) = canonical.to_str() {
@@ -295,7 +287,6 @@ pub(super) fn project_path_alias_key(project_path: &Path) -> String {
     native_project_path_alias_key(&canonical)
 }
 
-#[hotpath::measure]
 fn native_project_path_alias_key(path: &Path) -> String {
     encode_native_project_path_alias(
         native_project_path_platform(),
@@ -304,30 +295,25 @@ fn native_project_path_alias_key(path: &Path) -> String {
 }
 
 #[cfg(unix)]
-#[hotpath::measure]
 pub(super) fn native_project_path_platform() -> &'static str {
     "unix-bytes"
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 pub(super) fn native_project_path_platform() -> &'static str {
     "windows-utf16le"
 }
 
 #[cfg(not(any(unix, windows)))]
-#[hotpath::measure]
 pub(super) fn native_project_path_platform() -> &'static str {
     "rust-os-str"
 }
 
-#[hotpath::measure]
 pub(super) fn encode_native_project_path(path: &Path) -> Vec<u8> {
     tracedecay_runtime_core::os_str_bytes::native_os_str_bytes(path.as_os_str())
 }
 
 #[cfg(unix)]
-#[hotpath::measure]
 pub(super) fn decode_native_project_path(
     platform: &str,
     bytes: Vec<u8>,
@@ -348,7 +334,6 @@ pub(super) fn decode_native_project_path(
     clippy::needless_pass_by_value,
     reason = "all platform implementations share the owned database-value contract"
 )]
-#[hotpath::measure]
 pub(super) fn decode_native_project_path(
     platform: &str,
     bytes: Vec<u8>,
@@ -372,7 +357,6 @@ pub(super) fn decode_native_project_path(
 }
 
 #[cfg(not(any(unix, windows)))]
-#[hotpath::measure]
 pub(super) fn decode_native_project_path(
     _platform: &str,
     _bytes: Vec<u8>,
@@ -380,7 +364,6 @@ pub(super) fn decode_native_project_path(
     Err("native project paths are unsupported on this platform".to_string())
 }
 
-#[hotpath::measure]
 pub(super) fn encode_native_project_path_alias(platform: &str, native_path: &[u8]) -> String {
     format!(
         "{NATIVE_PROJECT_PATH_ALIAS_PREFIX}-{platform}-{}",
@@ -388,7 +371,6 @@ pub(super) fn encode_native_project_path_alias(platform: &str, native_path: &[u8
     )
 }
 
-#[hotpath::measure]
 pub(super) fn decode_native_project_path_alias(alias: &str) -> Result<Option<PathBuf>, String> {
     if !alias.starts_with(NATIVE_PROJECT_PATH_ALIAS_PREFIX) {
         return Ok(None);
@@ -417,7 +399,6 @@ pub(super) fn decode_native_project_path_alias(alias: &str) -> Result<Option<Pat
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn native_project_path_alias_decode_error(error: String) -> String {
     if error == "native Windows project path has odd byte length" {
         "native Windows project path alias has odd byte length".to_string()
@@ -463,7 +444,6 @@ struct ProjectRegistryDatabase<'db>(&'db RegisteredGlobalDb);
 
 struct ProjectRegistryReadSnapshot(tracedecay_runtime_core::db::DatabaseEngineReadSnapshot);
 
-#[hotpath::measure_all]
 impl<'db> ProjectRegistryDatabase<'db> {
     #[hotpath::measure(future = true, label = "global_db.registry.txn.snapshot")]
     async fn read_snapshot(
@@ -695,7 +675,6 @@ async fn list_lossless_paths_from(
     Ok(paths)
 }
 
-#[hotpath::measure_all]
 impl RegisteredGlobalDb {
     pub fn is_explicit_project_path_selector(selector: &str) -> bool {
         let selector = selector.trim();

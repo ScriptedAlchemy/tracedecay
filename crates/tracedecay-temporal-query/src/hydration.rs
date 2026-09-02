@@ -17,7 +17,6 @@ pub struct HydrationDenial {
     state: HydrationStateV1,
 }
 
-#[hotpath::measure_all]
 impl HydrationDenial {
     pub fn new(state: HydrationStateV1) -> Result<Self, HydrationError> {
         if state == HydrationStateV1::Available {
@@ -46,7 +45,6 @@ pub struct HydrationGrant<'a> {
     remaining_total_bytes: usize,
 }
 
-#[hotpath::measure_all]
 impl<'a> HydrationGrant<'a> {
     #[hotpath::skip]
     pub const fn snapshot(&self) -> &'a TemporalExecutionSnapshot {
@@ -74,7 +72,6 @@ pub struct HydrationSink<'a> {
     bytes: Zeroizing<Vec<u8>>,
 }
 
-#[hotpath::measure_all]
 impl<'a> HydrationSink<'a> {
     fn with_grant(grant: &'a HydrationGrant<'a>) -> Result<Self, HydrationError> {
         let capacity = grant
@@ -173,7 +170,6 @@ pub struct HydratedPayload {
     bytes: Zeroizing<Vec<u8>>,
 }
 
-#[hotpath::measure_all]
 impl HydratedPayload {
     pub fn anchor_id(&self) -> &RetrievalAnchorId {
         &self.anchor_id
@@ -205,7 +201,6 @@ pub struct UnavailableHydration {
     state: HydrationStateV1,
 }
 
-#[hotpath::measure_all]
 impl UnavailableHydration {
     pub fn anchor_id(&self) -> &RetrievalAnchorId {
         &self.anchor_id

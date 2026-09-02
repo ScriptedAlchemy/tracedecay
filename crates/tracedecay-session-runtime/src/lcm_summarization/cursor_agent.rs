@@ -32,7 +32,6 @@ impl Default for CursorAgentSummaryConfig {
     }
 }
 
-#[hotpath::measure_all]
 impl CursorAgentSummaryConfig {
     pub(super) fn from_env() -> Self {
         let mut config = Self::default();
@@ -54,14 +53,12 @@ impl CursorAgentSummaryConfig {
     }
 }
 
-#[hotpath::measure]
 fn non_empty_env(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
         .filter(|value| !value.trim().is_empty())
 }
 
-#[hotpath::measure]
 pub(super) fn summarize_with_cursor_agent(
     request: &LcmSummaryRequest,
     config: &CursorAgentSummaryConfig,
@@ -156,7 +153,6 @@ impl Drop for FileCleanupGuard {
     }
 }
 
-#[hotpath::measure]
 fn cursor_summary_prompt_filename() -> String {
     let nanos = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -168,7 +164,6 @@ fn cursor_summary_prompt_filename() -> String {
     )
 }
 
-#[hotpath::measure]
 fn build_cursor_summary_prompt(request: &LcmSummaryRequest) -> String {
     let mut prompt = String::new();
     prompt.push_str(

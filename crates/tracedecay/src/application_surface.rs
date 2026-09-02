@@ -162,7 +162,6 @@ pub fn normalize_application_tool_args(
 
 /// Rewrites the compatibility `tracedecay_diagnostics` argument shape into the
 /// reviewed `diagnostics_read` request body.
-#[hotpath::measure]
 fn compatibility_diagnostics_request(
     args: &Value,
 ) -> Result<Value, ApplicationSurfaceAdapterError> {
@@ -201,7 +200,6 @@ pub struct FeedbackAdvisoryCycleSurfaceRequest {
     pub document_uri: String,
 }
 
-#[hotpath::measure_all]
 impl FeedbackAdvisoryCycleSurfaceRequest {
     fn validate(&self) -> Result<(), ApplicationSurfaceAdapterError> {
         if self.document_uri.is_empty()
@@ -381,7 +379,6 @@ pub(crate) async fn invoke_multi_root_surface_request(
         .ok_or(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized)
 }
 
-#[hotpath::measure]
 fn work_application_router_with_executor(
     executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
 ) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
@@ -408,7 +405,6 @@ pub(crate) async fn invoke_work_operation(
 /// client can read a code, a retry directive or a request id out of, so these
 /// failures are reported as the same `ApplicationProblemEnvelope` the dispatched
 /// path returns, owned by the adapter layer rather than the runtime.
-#[hotpath::measure]
 fn registered_adapter_unavailable(request_id: RequestId, code: &str, message: &str) -> Response {
     let Ok(schema_id) = SchemaId::new("schema.tracedecay.http.adapter-problem.v1") else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -431,7 +427,6 @@ fn registered_adapter_unavailable(request_id: RequestId, code: &str, message: &s
     }
 }
 
-#[hotpath::measure]
 fn application_contract_error_response(error: ApplicationContractError) -> Response {
     tracing::error!(%error, "application problem envelope violated its canonical contract");
     StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -531,7 +526,6 @@ impl RegisteredHttpOperation for HandoffOperation {
 /// still an application failure of the named family, not an MCP tool-resolution
 /// failure, so the response must retain the operation's registered result
 /// schema and canonical runtime problem taxonomy.
-#[hotpath::measure]
 pub(crate) fn registered_executor_unavailable<T, O>(operation: O, request_id: RequestId) -> Response
 where
     T: Serialize,
@@ -776,7 +770,6 @@ const DASHBOARD_FEEDBACK_OPERATIONS: [ApplicationSurfaceOperation; 3] = [
     ApplicationSurfaceOperation::FeedbackList,
 ];
 
-#[hotpath::measure]
 pub fn http_application_router(
     client: tracedecay_daemon_protocol::DaemonInvocationClient,
     operation_events: OperationEventAuthority,
@@ -802,7 +795,6 @@ pub fn http_application_router_with_executor(
 ///
 /// Dashboard nests this under `/api/application` and applies one Axum layer
 /// after the full dashboard router is assembled.
-#[hotpath::measure]
 pub(crate) fn assemble_http_application_router(
     executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
     operation_events: OperationEventAuthority,
@@ -894,7 +886,6 @@ pub fn dashboard_feedback_application_router_with_executor(
 /// and middleware assembly. Leaf routers remain unlayered so merged routes
 /// emit exactly one server event and enter exactly one route scope.
 #[cfg(feature = "hotpath")]
-#[hotpath::measure]
 pub(crate) fn with_hotpath_server_layer<S>(router: axum::Router<S>) -> axum::Router<S>
 where
     S: Clone + Send + Sync + 'static,
@@ -903,7 +894,6 @@ where
 }
 
 #[cfg(not(feature = "hotpath"))]
-#[hotpath::measure]
 pub(crate) fn with_hotpath_server_layer<S>(router: axum::Router<S>) -> axum::Router<S> {
     router
 }
@@ -985,7 +975,6 @@ async fn application_http_context(
     response
 }
 
-#[hotpath::measure]
 fn invalid_http_request_control_response() -> Response {
     match mint_global_request_id(GlobalRequestSurface::Http) {
         Ok(request_id) => tracedecay_api::retained_invalid_request_response(request_id),
@@ -1042,7 +1031,6 @@ struct HttpOperationEventQuery {
     resume_token: Option<ResumeToken>,
 }
 
-#[hotpath::measure]
 fn operation_event_next_sequence(
     explicit_next_sequence: Option<u64>,
     headers: &HeaderMap,
@@ -1086,7 +1074,6 @@ struct HttpOperationPath {
     operation_id: String,
 }
 
-#[hotpath::measure]
 fn http_operation_event_router(
     authority: OperationEventAuthority,
     active_project_id: ProjectId,
@@ -1140,7 +1127,6 @@ async fn resolve_authenticated_http_request_context(
     .await
 }
 
-#[hotpath::measure]
 fn sse_observation_subject(request_id: &RequestId, operation_id: &str) -> Option<ManifestDigest> {
     canonical_sha256(&(
         "tracedecay.feedback.sse-observation.v1",
@@ -1163,7 +1149,6 @@ async fn emit_http_feedback_observation(
     }
 }
 
-#[hotpath::measure]
 fn feedback_sse_stream_event<T>(
     event: &StreamEvent<T>,
 ) -> Option<(FeedbackSseLifecycleV1, u32, bool)> {
@@ -1255,7 +1240,6 @@ enum OperationEventInvocationFailure {
     Application(ApplicationProblem),
 }
 
-#[hotpath::measure]
 fn operation_event_failure_from_invocation(
     error: tracedecay_application::InvocationError,
 ) -> OperationEventInvocationFailure {
@@ -1304,7 +1288,6 @@ fn operation_event_failure_from_invocation(
     }
 }
 
-#[hotpath::measure]
 fn operation_event_invocation_failure(
     request_id: &RequestId,
     error: tracedecay_application::InvocationError,
@@ -1764,7 +1747,6 @@ async fn http_operation_cancel(
     }
 }
 
-#[hotpath::measure]
 fn operation_event_problem(request_id: &RequestId, error: OperationEventError) -> Response {
     let problem = match error {
         OperationEventError::NotFoundOrNotAuthorized => {
@@ -1867,7 +1849,6 @@ fn operation_event_problem(request_id: &RequestId, error: OperationEventError) -
     application_problem_response(envelope)
 }
 
-#[hotpath::measure]
 fn operation_event_application_problem(
     request_id: &RequestId,
     problem: ApplicationProblem,
@@ -1927,7 +1908,6 @@ static APPLICATION_SURFACE_CATALOG: LazyLock<Result<CatalogSnapshotV1, CatalogCo
     LazyLock::new(build_application_catalog_snapshot);
 
 /// Borrow the process-wide catalog snapshot without recomposing it.
-#[hotpath::measure]
 pub(crate) fn application_surface_catalog_ref()
 -> Result<&'static CatalogSnapshotV1, ApplicationSurfaceAdapterError> {
     match &*APPLICATION_SURFACE_CATALOG {
@@ -1936,12 +1916,10 @@ pub(crate) fn application_surface_catalog_ref()
     }
 }
 
-#[hotpath::measure]
 pub fn application_surface_catalog() -> Result<CatalogSnapshotV1, ApplicationSurfaceAdapterError> {
     application_surface_catalog_ref().cloned()
 }
 
-#[hotpath::measure]
 pub fn application_surface_dispatch_input_with_controls(
     operation: ApplicationSurfaceOperation,
     request_id: RequestId,
@@ -1973,7 +1951,6 @@ pub fn application_surface_dispatch_input_with_controls(
     })
 }
 
-#[hotpath::measure_all]
 impl ApplicationSurfaceRequest {
     fn matches(&self, operation: ApplicationSurfaceOperation) -> bool {
         if let Self::Retained(request) = self {
@@ -2246,7 +2223,6 @@ impl ApplicationSurfaceRequest {
 ///
 /// `deny_unknown_fields` on every request type means an unexpected key is a
 /// rejection rather than a silently ignored hint.
-#[hotpath::measure]
 fn parse_native_integration_surface_request(
     operation: ApplicationSurfaceOperation,
     value: Value,
@@ -3174,7 +3150,6 @@ pub async fn execute_application_surface(
     })
 }
 
-#[hotpath::measure]
 fn feedback_delivery_route(surface: BindingSurface) -> FeedbackDeliveryRouteV1 {
     match surface {
         BindingSurface::Cli => FeedbackDeliveryRouteV1::Cli,
@@ -3184,7 +3159,6 @@ fn feedback_delivery_route(surface: BindingSurface) -> FeedbackDeliveryRouteV1 {
     }
 }
 
-#[hotpath::measure]
 fn feedback_surface_operation(operation: ApplicationSurfaceOperation) -> FeedbackOperationV1 {
     match operation {
         ApplicationSurfaceOperation::FeedbackDiagnostics => {
@@ -3271,7 +3245,6 @@ fn feedback_surface_operation(operation: ApplicationSurfaceOperation) -> Feedbac
     }
 }
 
-#[hotpath::measure]
 fn feedback_surface_is_observable(operation: ApplicationSurfaceOperation) -> bool {
     matches!(
         operation,
@@ -3340,7 +3313,6 @@ pub async fn observe_surface_argument_rejection(
         .await;
 }
 
-#[hotpath::measure]
 fn surface_rejection_metadata(
     error: &ApplicationSurfaceAdapterError,
 ) -> Option<(
@@ -3425,7 +3397,6 @@ pub async fn resolve_dashboard_application_surface(
     execute_application_surface(operation, dispatched, executor).await
 }
 
-#[hotpath::measure]
 pub fn resolve_http_application_surface_dispatch(
     operation: ApplicationSurfaceOperation,
     request_id: RequestId,
@@ -3441,7 +3412,6 @@ pub fn resolve_http_application_surface_dispatch(
     )
 }
 
-#[hotpath::measure]
 pub fn resolve_application_surface_dispatch(
     surface: BindingSurface,
     operation: ApplicationSurfaceOperation,
@@ -3489,7 +3459,6 @@ pub fn resolve_application_surface_dispatch_with_controls(
     Ok(dispatched)
 }
 
-#[hotpath::measure]
 fn invoke_catalog_bound_application_request(
     request: HttpApplicationRequest,
     surface: BindingSurface,
@@ -3627,7 +3596,6 @@ enum HttpPageProjection {
 /// [`apply_http_page_to_surface_body`] asks this and nothing else, so the
 /// cursor-carrying family and the diagnostics body-field case are stated in one
 /// place instead of a boolean allowlist plus a stray operation comparison.
-#[hotpath::measure]
 fn http_page_projection(operation: ApplicationSurfaceOperation) -> HttpPageProjection {
     match operation {
         ApplicationSurfaceOperation::CodeExactOccurrence
@@ -3649,7 +3617,6 @@ fn http_page_projection(operation: ApplicationSurfaceOperation) -> HttpPageProje
     }
 }
 
-#[hotpath::measure]
 fn apply_http_page_to_surface_body(
     operation: ApplicationSurfaceOperation,
     mut body: Value,
@@ -3682,7 +3649,6 @@ fn apply_http_page_to_surface_body(
     body
 }
 
-#[hotpath::measure]
 fn resolve_application_binding(
     resolver: &impl BindingResolver,
     surface: BindingSurface,
@@ -3691,7 +3657,6 @@ fn resolve_application_binding(
     resolve_named_binding(resolver, surface, operation.as_str())
 }
 
-#[hotpath::measure]
 fn resolve_named_binding(
     resolver: &impl BindingResolver,
     surface: BindingSurface,
@@ -3726,12 +3691,10 @@ pub fn resolve_catalog_tool_binding(
     Ok(resolve_named_binding(&resolver, surface, operation))
 }
 
-#[hotpath::measure]
 fn application_negotiated_features() -> BTreeSet<FeatureId> {
     BTreeSet::new()
 }
 
-#[hotpath::measure]
 fn validate_current_application_binding(
     operation: ApplicationSurfaceOperation,
     dispatched: &DispatchedInvocation<ApplicationSurfaceRequest>,
@@ -3750,7 +3713,6 @@ fn validate_current_application_binding(
     Ok(())
 }
 
-#[hotpath::measure]
 fn http_adapter_problem(
     contract: ResultContractRef,
     request_id: RequestId,
@@ -3815,7 +3777,6 @@ fn http_adapter_problem(
 /// cannot route the call to its handler; the truthful answer for the named
 /// operation is the reset-required terminal under its own mounted MCP result
 /// contract. Returns `None` for tools without a mounted application binding.
-#[hotpath::measure]
 pub(crate) fn mcp_project_open_reset_refusal(
     tool_name: &str,
     request_id: RequestId,
@@ -3836,7 +3797,6 @@ pub(crate) fn mcp_project_open_reset_refusal(
         .map(|envelope| envelope.with_owning_layer(ProblemOwningLayer::Runtime))
 }
 
-#[hotpath::measure]
 pub(crate) fn current_micros() -> Result<UtcMicros, ApplicationSurfaceAdapterError> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -3845,7 +3805,6 @@ pub(crate) fn current_micros() -> Result<UtcMicros, ApplicationSurfaceAdapterErr
     Ok(UtcMicros(now))
 }
 
-#[hotpath::measure]
 fn invocation_problem(
     problem: tracedecay_daemon_protocol::DaemonInvocationProblem,
 ) -> Result<ApplicationProblem, ApplicationSurfaceAdapterError> {
@@ -3885,7 +3844,6 @@ fn invocation_problem(
     })
 }
 
-#[hotpath::measure]
 fn invocation_contract_problem(
     error: tracedecay_application::InvocationError,
 ) -> Result<ApplicationProblem, ApplicationSurfaceAdapterError> {
@@ -3940,7 +3898,6 @@ fn invocation_contract_problem(
     })
 }
 
-#[hotpath::measure]
 pub fn map_dispatch_error(error: DispatchError) -> ApplicationSurfaceAdapterError {
     match error {
         DispatchError::UnknownOrNotAuthorized => {

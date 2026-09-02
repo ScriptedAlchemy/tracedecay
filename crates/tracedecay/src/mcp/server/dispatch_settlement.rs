@@ -27,7 +27,6 @@ pub(super) struct DispatchExecutionSettlement {
     state: AtomicU8,
 }
 
-#[hotpath::measure_all]
 impl DispatchExecutionSettlement {
     fn not_started() -> Self {
         Self {
@@ -52,7 +51,6 @@ impl DispatchExecutionSettlement {
     }
 }
 
-#[hotpath::measure_all]
 impl DispatchSettlement {
     /// Whether the admitted worker may already have crossed its commit point.
     ///
@@ -74,7 +72,6 @@ pub(super) struct DispatchFailure {
     error: TraceDecayError,
 }
 
-#[hotpath::measure_all]
 impl DispatchFailure {
     fn new(error: TraceDecayError) -> Self {
         Self { error }
@@ -95,7 +92,6 @@ pub(super) struct RetainedDispatchOutcome<T> {
     settlement: Arc<DispatchExecutionSettlement>,
 }
 
-#[hotpath::measure_all]
 impl<T> RetainedDispatchOutcome<T> {
     fn failed(error: TraceDecayError) -> Self {
         let settlement = Arc::new(DispatchExecutionSettlement::not_started());
@@ -110,7 +106,6 @@ impl<T> RetainedDispatchOutcome<T> {
     }
 }
 
-#[hotpath::measure]
 fn dispatch_capacity_for_host() -> usize {
     let parallelism = std::thread::available_parallelism().map_or(4, usize::from);
     parallelism.saturating_mul(8).clamp(16, 256)
@@ -125,7 +120,6 @@ struct ActiveDispatch {
 
 struct ActiveDispatchGaugeGuard;
 
-#[hotpath::measure_all]
 impl ActiveDispatchGaugeGuard {
     fn enter() -> Self {
         hotpath::gauge!("mcp.server.dispatch.active").inc(1_u64);
@@ -143,7 +137,6 @@ impl Drop for ActiveDispatchGaugeGuard {
 
 struct DispatchAdmissionWaitGuard;
 
-#[hotpath::measure_all]
 impl DispatchAdmissionWaitGuard {
     fn enter() -> Self {
         hotpath::gauge!("mcp.server.dispatch.admission_waiters").inc(1_u64);
@@ -174,7 +167,6 @@ pub(super) struct RetainedDispatchRegistry {
     state: RetainedDispatchStateMutex<RetainedDispatchState>,
 }
 
-#[hotpath::measure_all]
 impl RetainedDispatchRegistry {
     pub(super) fn new() -> Self {
         Self {
@@ -305,7 +297,6 @@ pub(super) struct RetainedDispatchAuthority {
     server: std::sync::Weak<super::McpServer>,
 }
 
-#[hotpath::measure_all]
 impl RetainedDispatchAuthority {
     pub(super) fn new(server: std::sync::Weak<super::McpServer>) -> Self {
         Self {
@@ -358,7 +349,6 @@ pub(super) struct ApplicationCancellationRegistration<'a> {
     request_id: Option<String>,
 }
 
-#[hotpath::measure_all]
 impl<'a> ApplicationCancellationRegistration<'a> {
     pub(super) fn new(
         registry: &'a std::sync::Mutex<HashMap<String, tracedecay_application::CancellationSignal>>,
@@ -395,7 +385,6 @@ pub(super) struct DispatchControl {
     canonical_effect_settlement: bool,
 }
 
-#[hotpath::measure_all]
 impl super::McpServer {
     pub(super) fn prepare_dispatch_control<'a>(
         &'a self,
@@ -492,7 +481,6 @@ impl super::McpServer {
     }
 }
 
-#[hotpath::measure_all]
 impl DispatchControl {
     pub(super) fn new(
         tool_name: impl Into<Arc<str>>,
@@ -635,7 +623,6 @@ impl DispatchControl {
     }
 }
 
-#[hotpath::measure]
 fn received_result<T>(
     output: std::result::Result<Result<T>, tokio::sync::oneshot::error::RecvError>,
 ) -> std::result::Result<T, DispatchFailure> {
@@ -662,7 +649,6 @@ async fn receive_canonical_result<T>(
 /// cancellation or a client timeout cannot replace effect-unknown state. The
 /// worker settlement is what decides which of those two worlds the caller is
 /// in, so it selects the reason code rather than only decorating the message.
-#[hotpath::measure]
 fn effect_unknown_error(
     tool_name: &str,
     settlement: DispatchSettlement,
@@ -683,13 +669,11 @@ fn effect_unknown_error(
 /// A read that stops being awaited leaves nothing to reconcile, so it keeps the
 /// plain cancelled/deadline terminal. Only a tool whose dispatch contract
 /// declares an effect can reach effect-unknown.
-#[hotpath::measure]
 fn tool_carries_effect(tool_name: &str) -> bool {
     crate::mcp::tools::binding::mcp_dispatch_contract(tool_name)
         .is_ok_and(|contract| !contract.read_only())
 }
 
-#[hotpath::measure]
 pub(super) fn dispatch_cancelled_error(
     tool_name: &str,
     settlement: DispatchSettlement,
@@ -707,7 +691,6 @@ pub(super) fn dispatch_cancelled_error(
     )
 }
 
-#[hotpath::measure]
 fn dispatch_deadline_error(tool_name: &str, settlement: DispatchSettlement) -> TraceDecayError {
     if settlement.effect_may_have_committed() && tool_carries_effect(tool_name) {
         return effect_unknown_error(tool_name, settlement, "its absolute deadline");
@@ -722,7 +705,6 @@ fn dispatch_deadline_error(tool_name: &str, settlement: DispatchSettlement) -> T
     )
 }
 
-#[hotpath::measure]
 fn dispatch_shutdown_error() -> TraceDecayError {
     TraceDecayError::project_route(
         "tool_dispatch_shutdown",

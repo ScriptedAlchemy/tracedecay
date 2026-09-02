@@ -31,7 +31,6 @@ fn prewarm_static_daemon_bootstrap_catalog() {
     }
 }
 
-#[hotpath::measure]
 fn log_catalog_prewarm_task(result: std::result::Result<(), tokio::task::JoinError>) {
     if let Err(error) = result {
         tracing::warn!(
@@ -42,7 +41,6 @@ fn log_catalog_prewarm_task(result: std::result::Result<(), tokio::task::JoinErr
 }
 
 #[cfg(unix)]
-#[hotpath::measure]
 pub fn run_foreground(
     socket_path: PathBuf,
     remote_tls: Option<RemoteBrainTlsConfig>,
@@ -54,7 +52,6 @@ pub fn run_foreground(
 }
 
 #[cfg(not(unix))]
-#[hotpath::measure]
 pub fn run_foreground(
     socket_path: PathBuf,
     remote_tls: Option<RemoteBrainTlsConfig>,
@@ -404,7 +401,6 @@ async fn run_foreground_loopback(
     endpoint_cleanup
 }
 
-#[hotpath::measure]
 fn log_client_drain_shutdown_receipt(receipt: &shutdown_orchestration::DaemonShutdownReceipt) {
     if receipt.in_flight.is_clean() && receipt.clients.is_clean() {
         return;
@@ -425,7 +421,6 @@ fn log_client_drain_shutdown_receipt(receipt: &shutdown_orchestration::DaemonShu
     );
 }
 
-#[hotpath::measure]
 fn log_background_shutdown_receipt(receipt: &shutdown_coordination::ShutdownReceipt) {
     for owner in receipt.unfinished() {
         // The receipt keeps each owner's typed status; the log must carry it
@@ -453,7 +448,6 @@ fn log_background_shutdown_receipt(receipt: &shutdown_coordination::ShutdownRece
     }
 }
 
-#[hotpath::measure]
 fn log_project_server_shutdown_receipt(receipt: &store_shutdown::ShutdownTaskReceipt) {
     if receipt.is_clean() {
         return;
@@ -483,7 +477,6 @@ fn log_project_server_shutdown_receipt(receipt: &store_shutdown::ShutdownTaskRec
     }
 }
 
-#[hotpath::measure]
 fn hosted_dashboard_shutdown_owner() -> shutdown_coordination::ShutdownOwner {
     shutdown_coordination::ShutdownOwner::with_deadline_result(
         "hosted_dashboard",
@@ -875,7 +868,6 @@ async fn log_accept_error_and_backoff(error: &TraceDecayError) {
     }
 }
 
-#[hotpath::measure]
 fn log_client_task_result(completed: std::result::Result<Result<()>, tokio::task::JoinError>) {
     let error = match completed {
         Ok(Ok(())) => return,
@@ -890,7 +882,6 @@ fn log_client_task_result(completed: std::result::Result<Result<()>, tokio::task
 }
 
 #[cfg(unix)]
-#[hotpath::measure]
 pub(super) fn set_owner_only_permissions(path: &Path, mode: u32) -> Result<()> {
     let permissions = std::fs::Permissions::from_mode(mode);
     std::fs::set_permissions(path, permissions).map_err(|e| TraceDecayError::Config {
@@ -902,7 +893,6 @@ pub(super) fn set_owner_only_permissions(path: &Path, mode: u32) -> Result<()> {
 }
 
 #[cfg(unix)]
-#[hotpath::measure]
 fn remove_stale_socket(socket_path: &Path) -> Result<()> {
     match std::fs::remove_file(socket_path) {
         Ok(()) => Ok(()),

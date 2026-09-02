@@ -81,7 +81,6 @@ pub(super) fn temporal_fields(value: SessionTemporalMetadataView) -> LcmTemporal
     }
 }
 
-#[hotpath::measure]
 fn source_coverage(value: SessionSourceCoverageV1) -> RetainedSourceCoverageV1 {
     RetainedSourceCoverageV1 {
         source_id: value.source_id().as_str().to_owned(),
@@ -108,7 +107,6 @@ fn source_coverage(value: SessionSourceCoverageV1) -> RetainedSourceCoverageV1 {
     }
 }
 
-#[hotpath::measure]
 fn coverage_interval(value: SessionSourceCoverageIntervalV1) -> SessionCoverageIntervalV1 {
     SessionCoverageIntervalV1 {
         knowledge: closed_interval(value.knowledge),
@@ -121,7 +119,6 @@ fn coverage_interval(value: SessionSourceCoverageIntervalV1) -> SessionCoverageI
     }
 }
 
-#[hotpath::measure]
 fn closed_interval(value: tracedecay_domain::ClosedUtcIntervalV1) -> ClosedUtcIntervalV1 {
     ClosedUtcIntervalV1 {
         from_inclusive: value.from_inclusive().map(|value| value.0),
@@ -152,7 +149,6 @@ const fn coverage_state(value: SessionSourceCoverageStateV1) -> SessionCoverageS
     }
 }
 
-#[hotpath::measure]
 fn coverage_reason(value: &SessionSourceCoverageReasonV1) -> SessionCoverageReasonV1 {
     match value {
         SessionSourceCoverageReasonV1::CaughtUp => SessionCoverageReasonV1::CaughtUp,
@@ -178,7 +174,6 @@ fn coverage_reason(value: &SessionSourceCoverageReasonV1) -> SessionCoverageReas
     }
 }
 
-#[hotpath::measure]
 pub(super) fn sliced_message(
     result: SessionMessageSearchResult,
     slice: LcmContentSlice,
@@ -218,7 +213,6 @@ pub(super) fn sliced_message(
     }
 }
 
-#[hotpath::measure]
 pub(super) fn grep_hit(result: SessionMessageSearchResult, max_chars: usize) -> LcmGrepHitV1 {
     let snippet = result.message.text.chars().take(max_chars).collect();
     let summary = result.message.kind.as_deref() == Some("summary");
@@ -241,7 +235,6 @@ pub(super) fn grep_hit(result: SessionMessageSearchResult, max_chars: usize) -> 
     }
 }
 
-#[hotpath::measure]
 pub(super) fn retrieval(value: LcmRetrievalOutcome) -> LcmRetrievalOutcomeV1 {
     match value {
         LcmRetrievalOutcome::Complete { freshness } => LcmRetrievalOutcomeV1::Complete {
@@ -269,7 +262,6 @@ const fn freshness_value(value: LcmDataFreshness) -> TemporalFreshnessV1 {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn description(value: LcmDescribeResponse) -> LcmDescriptionV1 {
     LcmDescriptionV1 {
         target: value.target,
@@ -390,7 +382,6 @@ pub(super) fn expansion(value: LcmExpandResponse) -> LcmExpansionV1 {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn lineage(value: Vec<CompactContextLineageEdgeV1>) -> Vec<CompactLineageEdgeV1> {
     value
         .into_iter()
@@ -410,7 +401,6 @@ pub(super) fn lineage(value: Vec<CompactContextLineageEdgeV1>) -> Vec<CompactLin
         .collect()
 }
 
-#[hotpath::measure]
 pub(super) fn expand_query_result(
     value: LcmExpandQueryResponse,
     status: RetainedOutcomeStatusV1,
@@ -512,7 +502,6 @@ const FLOOR_PROMPT_CHARS: usize = 512;
 /// blocks and match snippets with the synthesis prompt rebuilt from the
 /// compact blocks — and, if still over budget, floored to the bounded
 /// contract scalars with the unbounded arrays dropped.
-#[hotpath::measure]
 pub(super) fn bound_expand_query_result_for_mcp(
     result: &mut LcmExpandQueryResultV1,
     prompt_truncated: bool,
@@ -567,13 +556,11 @@ pub(super) fn bound_expand_query_result_for_mcp(
     );
 }
 
-#[hotpath::measure]
 fn serialized_within_budget(result: &LcmExpandQueryResultV1) -> bool {
     serde_json::to_string(result)
         .is_ok_and(|serialized| serialized.len() <= SYNTHESIS_PAYLOAD_BUDGET_CHARS)
 }
 
-#[hotpath::measure]
 fn clamp_chars(value: &mut String, max_chars: usize) {
     if value.chars().count() <= max_chars {
         return;
@@ -581,7 +568,6 @@ fn clamp_chars(value: &mut String, max_chars: usize) {
     *value = value.chars().take(max_chars).collect();
 }
 
-#[hotpath::measure]
 fn clamp_block_content(block: &mut LcmExpandQueryContextBlockV1, max_chars: usize) {
     let total = block.content.chars().count();
     if total <= max_chars {
@@ -594,7 +580,6 @@ fn clamp_block_content(block: &mut LcmExpandQueryContextBlockV1, max_chars: usiz
 
 /// Rebuilds the synthesis user prompt from the current (compacted) context
 /// blocks so the QUESTION section and the served context stay consistent.
-#[hotpath::measure]
 fn rebuild_synthesis_user_prompt(result: &mut LcmExpandQueryResultV1) {
     let Some(synthesis) = result.synthesis_prompt.as_mut() else {
         return;
@@ -636,7 +621,6 @@ const fn content_range(value: LcmContentRange) -> LcmContentRangeV1 {
     }
 }
 
-#[hotpath::measure]
 fn source_ref(value: LcmSourceRef) -> LcmSourceRefV1 {
     match value {
         LcmSourceRef::RawMessage { store_id } => LcmSourceRefV1::RawMessage { store_id },
@@ -644,7 +628,6 @@ fn source_ref(value: LcmSourceRef) -> LcmSourceRefV1 {
     }
 }
 
-#[hotpath::measure]
 fn raw_message(value: LcmRawMessage) -> LcmRawMessageV1 {
     LcmRawMessageV1 {
         provider: value.provider,
@@ -664,7 +647,6 @@ fn raw_message(value: LcmRawMessage) -> LcmRawMessageV1 {
     }
 }
 
-#[hotpath::measure]
 fn raw_message_metadata(value: LcmRawMessageMetadata) -> LcmRawMessageMetadataV1 {
     LcmRawMessageMetadataV1 {
         provider: value.provider,
@@ -683,7 +665,6 @@ fn raw_message_metadata(value: LcmRawMessageMetadata) -> LcmRawMessageMetadataV1
     }
 }
 
-#[hotpath::measure]
 fn summary_node(value: LcmSummaryNode) -> LcmSummaryNodeV1 {
     LcmSummaryNodeV1 {
         node_id: value.node_id,
@@ -793,7 +774,6 @@ pub(super) fn assemble_query(
     ))
 }
 
-#[hotpath::measure]
 pub(super) fn merge_temporal(
     target: &mut SessionTemporalMetadataView,
     incoming: SessionTemporalMetadataView,

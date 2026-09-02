@@ -1,7 +1,6 @@
 use super::connection::Database;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-#[hotpath::measure_all]
 impl Database {
     /// Owner-bound relational graph publication authority for this project
     /// shard. The retained runtime supplies its authorized exact-SQL handle;

@@ -73,7 +73,6 @@ pub const APPLICATION_RETRIEVAL_MAX_BYTES: u64 = 64 * 1024;
 /// ranker draws from, not the page it returns: clamping them to `limit` would
 /// leave a ten-result search ranking ten candidates instead of the default
 /// 256, silently trading recall for a budget the binding never asked about.
-#[hotpath::measure]
 pub fn admitted_execution_limits(limit: usize) -> ExecutionLimits {
     let bytes = usize::try_from(APPLICATION_RETRIEVAL_MAX_BYTES).unwrap_or(usize::MAX);
     let defaults = ExecutionLimits::default();
@@ -86,7 +85,6 @@ pub fn admitted_execution_limits(limit: usize) -> ExecutionLimits {
     }
 }
 
-#[hotpath::measure]
 pub(crate) fn temporal_kernel_deadline(error: &TemporalKernelError) -> bool {
     matches!(
         error,
@@ -131,7 +129,6 @@ pub struct SessionRetrievalServingIdentityV1 {
     pub project_root: std::path::PathBuf,
 }
 
-#[hotpath::measure_all]
 impl SessionRetrievalServingIdentityV1 {
     #[hotpath::skip]
     pub async fn resolve_project(
@@ -216,7 +213,6 @@ pub struct DaemonSessionRetrievalRoot {
     expected_runtime_shard: Option<StoreShardIdV1>,
 }
 
-#[hotpath::measure_all]
 impl DaemonSessionRetrievalRoot {
     pub fn identity(&self) -> &ResolvedSessionIdentity {
         &self.identity
@@ -494,7 +490,6 @@ pub struct DaemonSessionRetrievalService {
     refresh_status: Option<Arc<dyn SessionProjectionServingStatusPort>>,
 }
 
-#[hotpath::measure_all]
 impl DaemonSessionRetrievalService {
     pub fn new(
         database: RegisteredGlobalDbLeaseV1,
@@ -959,7 +954,6 @@ struct SessionPageReconstructionInputs<'a> {
     requests: Vec<SessionPageReconstructionRequest<'a>>,
 }
 
-#[hotpath::measure_all]
 impl<'a> SessionPageReconstructionInputs<'a> {
     fn is_empty(&self) -> bool {
         self.requests.is_empty()
@@ -1000,7 +994,6 @@ impl<'a> SessionPageReconstructionInputs<'a> {
     }
 }
 
-#[hotpath::measure]
 fn reconstruction_or_omission(
     reconstruction: Result<SessionPageReconstruction, SessionTemporalExecutionError>,
 ) -> Result<Result<SessionPageReconstruction, HydrationStateV1>, SessionTemporalExecutionError> {
@@ -1053,7 +1046,6 @@ fn message_search_digest(
     digest.finalize().into()
 }
 
-#[hotpath::measure]
 fn complete_page_outcome(
     page: SessionRetrievalPageView,
     freshness: SessionDataFreshness,
@@ -1070,7 +1062,6 @@ fn complete_page_outcome(
     }
 }
 
-#[hotpath::measure]
 fn page_hydration_slot<'a>(
     rank: usize,
     ranked: &RankedCandidate,

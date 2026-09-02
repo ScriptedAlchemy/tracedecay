@@ -24,7 +24,6 @@ pub(super) struct DatabaseClientLeaseV1 {
     access: DatabaseAccessMode,
 }
 
-#[hotpath::measure_all]
 impl DatabaseClientLeaseV1 {
     pub(super) fn runtime(&self) -> &StoreRuntimeClientLease {
         &self._runtime
@@ -43,7 +42,6 @@ pub struct DatabaseClientGuardV1 {
     client: Arc<DatabaseClientLeaseV1>,
 }
 
-#[hotpath::measure_all]
 impl DatabaseClientGuardV1 {
     pub(super) fn runtime(&self) -> &StoreRuntimeClientLease {
         self.client.runtime()
@@ -66,7 +64,6 @@ pub struct DatabaseRuntimeClientV1 {
     authority: Option<DatabaseAuthority>,
 }
 
-#[hotpath::measure_all]
 impl DatabaseRuntimeClientV1 {
     /// Returns a value copy of the exact Store publication selected for this
     /// guarded client. The publication can be used for identity CAS checks,
@@ -209,7 +206,6 @@ pub struct DatabaseGraphOwnerRetirementCompositionRefusalV1 {
     graph_owner_target: Box<CanonicalGraphStoreOwnerRetirementTargetV1>,
 }
 
-#[hotpath::measure_all]
 impl DatabaseGraphOwnerRetirementCompositionRefusalV1 {
     #[must_use]
     pub fn error(&self) -> &DatabaseOwnerErrorV1 {
@@ -284,7 +280,6 @@ pub(super) struct DatabaseInner {
         std::sync::Mutex<Option<super::graph_binding::MemoryGraphSourceStampedWatermarkV1>>,
 }
 
-#[hotpath::measure_all]
 impl DatabaseInner {
     /// Publishes an already-open canonical registry runtime without reopening
     /// the `SQLite` path.
@@ -400,7 +395,6 @@ impl DatabaseInner {
     }
 }
 
-#[hotpath::measure_all]
 impl Database {
     pub(crate) fn client_guard(&self) -> DatabaseClientGuardV1 {
         DatabaseClientGuardV1 {
@@ -450,7 +444,6 @@ impl Database {
     }
 }
 
-#[hotpath::measure_all]
 impl DatabaseOwnerV1 {
     pub(super) fn from_published_inner(
         inner: Arc<DatabaseInner>,
@@ -591,7 +584,6 @@ impl DatabaseOwnerV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl DatabaseOwnerWeakLeaseIssuerV1 {
     /// Issues a fresh independently counted client only while the exact owner
     /// is ready. The lifecycle lock covers both readiness validation and
@@ -648,7 +640,6 @@ impl DatabaseOwnerWeakLeaseIssuerV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl DatabaseOwnerRetirementReservationV1 {
     /// Consumes this exact owner reservation into the only Store retirement
     /// target authorized to reclassify the canonical attachment.
@@ -824,7 +815,6 @@ impl Drop for DatabaseOwnerRetirementReservationV1 {
     }
 }
 
-#[hotpath::measure]
 fn database_registry_error(operation: &str, error: impl std::fmt::Display) -> TraceDecayError {
     TraceDecayError::Database {
         operation: operation.to_owned(),

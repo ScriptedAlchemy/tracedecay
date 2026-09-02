@@ -45,7 +45,6 @@ const PROFILE_RETAINED_ACTOR_DOMAIN_V1: &str =
 const PROFILE_RETAINED_REQUEST_GRANT_DOMAIN_V1: &str =
     "tracedecay.daemon.profile-retained.request-grant.v1";
 
-#[hotpath::measure]
 pub(crate) fn profile_session_retrieval_serving_identity(
     identity: &dyn tracedecay_application::ProfileIdentityReadPort,
     expected_runtime_shard: &StoreShardIdV1,
@@ -82,7 +81,6 @@ pub(crate) struct ProfileRetainedConnectionAuthorityV1 {
     configuration_digest: ManifestDigest,
 }
 
-#[hotpath::measure_all]
 impl ProfileRetainedConnectionAuthorityV1 {
     pub(crate) fn session_identity(&self) -> &ResolvedSessionIdentity {
         &self.session_identity
@@ -93,7 +91,6 @@ impl ProfileRetainedConnectionAuthorityV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl ProfileRetainedConnectionAuthorityV1 {
     #[hotpath::measure(label = "daemon.retained.profile.admit")]
     fn admit_request(
@@ -172,7 +169,6 @@ impl ProfileRetainedConnectionAuthorityV1 {
     }
 }
 
-#[hotpath::measure]
 fn profile_retained_configuration_digest(
     brain_id: &BrainId,
     user_profile_id: &UserProfileId,
@@ -190,7 +186,6 @@ fn profile_retained_configuration_digest(
     })
 }
 
-#[hotpath::measure]
 pub(crate) fn profile_retained_connection_authority(
     identity: &dyn tracedecay_application::ProfileIdentityReadPort,
     session_identity: &ResolvedSessionIdentity,
@@ -202,7 +197,6 @@ pub(crate) fn profile_retained_connection_authority(
     )
 }
 
-#[hotpath::measure]
 fn profile_retained_connection_authority_from_persisted_identity(
     brain_id: &BrainId,
     user_profile_id: &UserProfileId,
@@ -326,7 +320,6 @@ pub(crate) async fn execute_profile_retained_application(
     )
 }
 
-#[hotpath::measure]
 fn application_problem_envelope(
     contract: tracedecay_application::ResultContractRef,
     request_id: RequestId,
@@ -339,7 +332,6 @@ fn application_problem_envelope(
     })
 }
 
-#[hotpath::measure]
 fn profile_retained_surface_ports<'a>(
     authorities: &'a ProfileRetainedAuthoritiesV1<'a>,
 ) -> Result<RetainedSurfacePortsV1<'a>, TraceDecayError> {

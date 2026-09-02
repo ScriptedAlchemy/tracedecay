@@ -9,7 +9,6 @@ use tracedecay_lsp::LspSessionRegistry;
 use super::DaemonInvocationService;
 use crate::project_runtime::ProjectRuntimeRootQuiescenceV1;
 
-#[hotpath::measure_all]
 impl DaemonInvocationService {
     #[hotpath::skip]
     pub async fn expire_project(
@@ -106,7 +105,6 @@ impl DaemonInvocationService {
     }
 }
 
-#[hotpath::measure]
 fn workspace_belongs_to_project(
     workspace: &tracedecay_lsp::AuthorizedLspWorkspace,
     retired_workspace_digests: &HashSet<ManifestDigest>,

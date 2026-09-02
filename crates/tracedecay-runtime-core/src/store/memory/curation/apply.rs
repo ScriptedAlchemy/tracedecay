@@ -36,7 +36,6 @@ use super::{
     available_curation_fact_tx, curated_correction_batch, link_facts_tx, normalize_tags_tx,
 };
 
-#[hotpath::measure]
 fn canonical_fact_ids(
     owner: &FactOwnerV1,
     values: &[Value],
@@ -63,13 +62,11 @@ fn canonical_fact_ids(
     Ok(facts)
 }
 
-#[hotpath::measure]
 fn curation_receipt_value(receipt: &ProjectMemoryFactCurationReceiptV1) -> FactStoreResult<Value> {
     serde_json::to_value(receipt)
         .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))
 }
 
-#[hotpath::measure]
 pub(super) fn curation_receipt_from_value(
     value: &Value,
 ) -> FactStoreResult<ProjectMemoryFactCurationReceiptV1> {
@@ -712,7 +709,6 @@ pub(in crate::store::memory) async fn apply_project_memory_fact_curation_tx(
     Ok(receipt)
 }
 
-#[hotpath::measure]
 fn merge_removal_batch(
     fact_id: &FactId,
     owner: &FactOwnerV1,
@@ -755,13 +751,11 @@ fn merge_removal_batch(
     )
 }
 
-#[hotpath::measure]
 fn merge_outcome_value(outcome: &ProjectMemoryFactMergeOutcomeV1) -> FactStoreResult<Value> {
     serde_json::to_value(outcome)
         .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))
 }
 
-#[hotpath::measure]
 fn merge_outcome_from_value(value: &Value) -> FactStoreResult<ProjectMemoryFactMergeOutcomeV1> {
     serde_json::from_value(value.clone())
         .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))

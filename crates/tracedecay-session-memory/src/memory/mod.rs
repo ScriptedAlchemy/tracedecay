@@ -69,7 +69,6 @@ use tracedecay_store::{
 /// [`TraceDecayError`]. The single conversion site for every project-memory
 /// route across the root crate and the dashboard API, so both stay in sync
 /// instead of maintaining independent copies.
-#[hotpath::measure]
 pub fn memory_application_error(error: MemoryApplicationError) -> TraceDecayError {
     match error {
         MemoryApplicationError::Store(tracedecay_store::FactStoreError::GraphResetRequired {
@@ -91,7 +90,6 @@ pub fn memory_application_error(error: MemoryApplicationError) -> TraceDecayErro
 /// holds an open [`Database`] rather than a higher-level fact-store handle —
 /// used by the root crate's daemon scheduler and MCP lifecycle paths as well
 /// as the dashboard API.
-#[hotpath::measure]
 pub fn memory_application_for_db(
     owner: FactOwnerV1,
     db: &Database,
@@ -106,7 +104,6 @@ pub struct MemoryApplication<A> {
     authority: A,
 }
 
-#[hotpath::measure_all]
 impl<A> MemoryApplication<A> {
     pub fn new(owner: FactOwnerV1, authority: A) -> Result<Self, MemoryApplicationError> {
         owner.validate()?;

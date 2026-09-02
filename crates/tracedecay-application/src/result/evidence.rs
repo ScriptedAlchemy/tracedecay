@@ -37,7 +37,6 @@ pub enum PageCursor {
     FactListAfter { fact_id: FactId },
 }
 
-#[hotpath::measure_all]
 impl PageCursor {
     #[hotpath::skip]
     pub const fn as_opaque(&self) -> Option<&OpaqueCursor> {
@@ -75,7 +74,6 @@ pub struct TemporalState {
     pub freshness: FreshnessState,
 }
 
-#[hotpath::measure_all]
 impl TemporalState {
     pub fn current(resolved_at: UtcMicros) -> Self {
         Self {
@@ -99,7 +97,6 @@ pub struct PolicyDecisionRef {
     pub evaluator_revision: ComponentVersion,
 }
 
-#[hotpath::measure_all]
 impl PolicyDecisionRef {
     pub fn new(
         decision_id: impl Into<String>,
@@ -151,7 +148,6 @@ pub struct AuthorityReceipt {
     pub revalidated_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl AuthorityReceipt {
     pub fn from_context(
         context: &RequestContext,
@@ -236,7 +232,6 @@ pub struct EvidenceCoverage {
     pub domains: Vec<CoverageDomainState>,
 }
 
-#[hotpath::measure_all]
 impl EvidenceCoverage {
     pub fn complete(
         mut requested_domains: Vec<EvidenceDomain>,
@@ -448,7 +443,6 @@ pub struct PageState {
     pub expires_at: Option<UtcMicros>,
 }
 
-#[hotpath::measure_all]
 impl PageState {
     pub fn first_page(
         sort_contract_id: SortContractId,
@@ -506,7 +500,6 @@ pub struct EvidencePacket<T> {
     pub payload: Option<T>,
 }
 
-#[hotpath::measure_all]
 impl<T> EvidencePacket<T> {
     pub fn from_retrieval(
         evidence: RetrievalEvidence<T>,
@@ -547,7 +540,6 @@ impl<T> EvidencePacket<T> {
     }
 }
 
-#[hotpath::measure_all]
 impl<T> EvidencePacket<Vec<T>> {
     pub fn is_truthful_complete_empty(&self) -> bool {
         self.execution.termination == super::OperationTermination::Completed

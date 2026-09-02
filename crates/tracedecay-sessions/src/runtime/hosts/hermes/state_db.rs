@@ -45,7 +45,6 @@ pub async fn table_columns(
         .unwrap_or_else(|| Err("could not inspect Hermes SQLite schema".to_string()))
 }
 
-#[hotpath::measure]
 fn table_columns_sync(
     conn: &rusqlite::Connection,
     table: &str,
@@ -73,7 +72,6 @@ fn table_columns_sync(
     Ok(out)
 }
 
-#[hotpath::measure]
 fn validate_required_columns(
     table: &str,
     columns: &std::collections::BTreeSet<String>,
@@ -106,7 +104,6 @@ pub async fn validate_required_schema(conn: &SqliteReadConn) -> Result<(), Strin
     validate_required_columns("sessions", &sessions, &["id"])
 }
 
-#[hotpath::measure]
 fn sql_byte_len(expr: &str) -> String {
     format!("length(CAST({expr} AS BLOB))")
 }
@@ -114,7 +111,6 @@ fn sql_byte_len(expr: &str) -> String {
 /// Returns the column only when it is TEXT, within `max_bytes`, and the whole
 /// row fits the current cumulative page budget. Hostile BLOB/`zeroblob`
 /// values and rows deferred to the next page never appear in the result set.
-#[hotpath::measure]
 fn sql_bounded_text(expr: &str, max_bytes: usize, row_fits_budget: &str) -> String {
     let byte_len = sql_byte_len(expr);
     format!(
@@ -126,7 +122,6 @@ fn sql_bounded_text(expr: &str, max_bytes: usize, row_fits_budget: &str) -> Stri
 /// Returns only `SQLite`'s fixed-size numeric representations. `SQLite` columns
 /// are dynamically typed, so selecting a nominal REAL/INTEGER column directly
 /// could otherwise materialize an attacker-controlled TEXT/BLOB value.
-#[hotpath::measure]
 fn sql_bounded_number(expr: &str) -> String {
     format!("CASE WHEN typeof({expr}) IN ('integer', 'real') THEN {expr} ELSE NULL END")
 }
@@ -134,7 +129,6 @@ fn sql_bounded_number(expr: &str) -> String {
 /// SQL UTF-8/blob byte charge without returning the value. Caps each column at
 /// `max_bytes + 1` so oversized/zeroblob sizes cannot inflate page accounting
 /// unboundedly while still signaling oversize.
-#[hotpath::measure]
 fn sql_capped_len(expr: &str, max_bytes: usize) -> String {
     let cap = max_bytes.saturating_add(1);
     let byte_len = sql_byte_len(expr);
@@ -149,7 +143,6 @@ fn sql_capped_len(expr: &str, max_bytes: usize) -> String {
     )
 }
 
-#[hotpath::measure]
 fn sql_value_oversized(expr: &str, max_bytes: usize) -> String {
     let byte_len = sql_byte_len(expr);
     format!(
@@ -161,7 +154,6 @@ fn sql_value_oversized(expr: &str, max_bytes: usize) -> String {
     )
 }
 
-#[hotpath::measure]
 pub fn select_new_messages_sql(
     message_columns: &std::collections::BTreeSet<String>,
     session_columns: &std::collections::BTreeSet<String>,
@@ -742,7 +734,6 @@ fn read_new_rows_strict_sync(
     })
 }
 
-#[hotpath::measure]
 fn row_i64_flag(row: &rusqlite::Row<'_>, idx: usize) -> i64 {
     row.get::<_, i64>(idx)
         .or_else(|_| {
@@ -753,7 +744,6 @@ fn row_i64_flag(row: &rusqlite::Row<'_>, idx: usize) -> i64 {
         .unwrap_or(0)
 }
 
-#[hotpath::measure]
 fn row_optional_f64(row: &rusqlite::Row<'_>, idx: usize) -> Option<f64> {
     row.get::<_, Option<f64>>(idx).ok().flatten().or_else(|| {
         row.get::<_, Option<i64>>(idx)
@@ -763,7 +753,6 @@ fn row_optional_f64(row: &rusqlite::Row<'_>, idx: usize) -> Option<f64> {
     })
 }
 
-#[hotpath::measure]
 fn map_row(rowid: i64, row: &rusqlite::Row<'_>, sql_measured_bytes: u64) -> Option<HermesRow> {
     let sql_value_oversized = row_i64_flag(row, 22) != 0;
     let session_id = match row.get::<_, Option<String>>(1).ok().flatten() {

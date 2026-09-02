@@ -13,7 +13,6 @@ use tracedecay_store::{
 use super::MemoryApplication;
 use super::error::MemoryApplicationError;
 
-#[hotpath::measure_all]
 impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     fn fact_identity(
         &self,

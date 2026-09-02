@@ -114,7 +114,6 @@ struct DirtySet {
     last_event: Option<Instant>,
 }
 
-#[hotpath::measure_all]
 impl DirtySet {
     fn is_clean(&self) -> bool {
         !self.dirty && !self.reconcile_metadata
@@ -201,7 +200,6 @@ impl Default for GitWatcher {
     }
 }
 
-#[hotpath::measure_all]
 impl GitWatcher {
     fn disabled() -> Self {
         Self::from_parts(
@@ -477,7 +475,6 @@ impl GitWatcher {
 
 /// The typed reason string behind one project's doctor-facing watch health,
 /// or `Null` for a healthy active watch.
-#[hotpath::measure]
 fn watch_status_reason(
     status: ProjectWatchStatus,
     heartbeat_pending: bool,
@@ -618,7 +615,6 @@ async fn repository_task(inner: Arc<GitWatcherInner>, state: Arc<WatchState>) {
 /// Translates a raw notify event into dirty-set marks. Does NOT re-derive git
 /// state — it only records *what kind of path changed* so the debounce drain
 /// can resolve the actual git state once, after quiescence.
-#[hotpath::measure]
 fn classify_and_mark(state: &Arc<WatchState>, event: &notify::Event) {
     let event_roots = state.event_roots(&event.paths);
     state.clear_retry();
@@ -653,19 +649,16 @@ fn classify_and_mark(state: &Arc<WatchState>, event: &notify::Event) {
     state.maintenance.wake();
 }
 
-#[hotpath::measure]
 fn mark_reconciliation_pending(state: &WatchState) {
     state.reconciliation_pending.store(true, Ordering::Release);
     state.wake.notify_one();
     state.maintenance.wake();
 }
 
-#[hotpath::measure]
 fn is_notify_capacity_error(error: &notify::Error) -> bool {
     matches!(error.kind, notify::ErrorKind::MaxFilesWatch)
 }
 
-#[hotpath::measure]
 fn mark_notify_failure(state: &WatchState, error: &notify::Error) {
     let status = if is_notify_capacity_error(error) {
         ProjectWatchStatus::NotifyCapacity
@@ -840,7 +833,6 @@ enum OperationObservation {
     Cancelled,
 }
 
-#[hotpath::measure]
 fn watch_observation_stopped(cancellation: &WatchCancellation, deadline: StdInstant) -> bool {
     cancellation.is_cancelled() || StdInstant::now() >= deadline
 }
@@ -1089,7 +1081,6 @@ async fn request_freshness_for_repository(
     }
 }
 
-#[hotpath::measure]
 fn retain_freshness_retry(state: &WatchState, affected_roots: Option<BTreeSet<PathBuf>>) {
     // Preserve one bounded pending cycle. Notify stores at most one permit, so
     // repeated Busy/deadline outcomes cannot form an unbounded queue.

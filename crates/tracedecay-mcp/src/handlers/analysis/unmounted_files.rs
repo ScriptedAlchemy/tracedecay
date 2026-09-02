@@ -98,7 +98,6 @@ pub(super) enum EcosystemStatus {
     Unsupported,
 }
 
-#[hotpath::measure_all]
 impl EcosystemStatus {
     fn as_str(self) -> &'static str {
         match self {
@@ -130,7 +129,6 @@ pub(super) struct EcosystemAudit {
     pub(super) unmounted: Vec<UnmountedFile>,
 }
 
-#[hotpath::measure_all]
 impl EcosystemAudit {
     /// An ecosystem with no manifest and no source files in this project.
     pub(super) fn not_present(ecosystem: &'static str, verdict: &'static str) -> Self {
@@ -185,7 +183,6 @@ pub(super) struct ProjectFiles {
     files: Vec<PathBuf>,
 }
 
-#[hotpath::measure_all]
 impl ProjectFiles {
     fn collect(project_root: &Path) -> Result<Self> {
         let walk = tracedecay_code_index::source_walk::source_walk(project_root, None).map_err(
@@ -246,7 +243,6 @@ impl ProjectFiles {
 }
 
 /// Project-relative, forward-slashed rendering of `path`.
-#[hotpath::measure]
 pub(super) fn relative_display(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
         .unwrap_or(path)
@@ -261,7 +257,6 @@ pub(super) fn relative_display(root: &Path, path: &Path) -> String {
 /// the same file, so both sides are normalized before they meet in the mounted
 /// set. Symlinks are deliberately not resolved: the walker does not follow them
 /// either, and resolving here would make the two sets disagree again.
-#[hotpath::measure]
 pub(super) fn normalized(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for component in path.components() {
@@ -382,7 +377,6 @@ pub async fn handle_unmounted_files(
 }
 
 /// Walks the working tree once and asks each ecosystem its own question.
-#[hotpath::measure]
 fn audit_project(project_root: &Path) -> Result<ProjectAudit> {
     let files = hotpath::measure_block!(
         "mcp.analysis.unmounted_files.walk",
@@ -403,7 +397,6 @@ fn audit_project(project_root: &Path) -> Result<ProjectAudit> {
 /// Reporting them as `unsupported` with a file count is the whole point: a
 /// caller who points the audit at a Go service must not read "no findings" as
 /// "no orphans". Silence is the one answer a truthfulness tool may not give.
-#[hotpath::measure]
 fn unmodelled_ecosystems(files: &ProjectFiles) -> Vec<EcosystemAudit> {
     /// Extension → ecosystem label, for languages the graph indexes but this
     /// audit cannot walk. Rust and the TypeScript family are absent because

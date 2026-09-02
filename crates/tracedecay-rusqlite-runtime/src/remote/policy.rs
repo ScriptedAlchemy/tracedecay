@@ -15,7 +15,6 @@ use tracedecay_domain::{
 
 use super::*;
 
-#[hotpath::measure_all]
 impl RemoteSqliteStorageV1 {
     pub fn recovery_policy_digest(
         &self,
@@ -214,7 +213,6 @@ impl RemoteQueryAuthorizationPortV1 for RemoteSqliteStorageV1 {
     }
 }
 
-#[hotpath::measure]
 fn replay_scope_digest(
     scope: &RemoteRepositoryScopeV1,
 ) -> Result<ManifestDigest, RemoteReplayApplicationErrorV1> {
@@ -222,7 +220,6 @@ fn replay_scope_digest(
         .map_err(|_| RemoteReplayApplicationErrorV1::PolicyMismatch)
 }
 
-#[hotpath::measure]
 fn query_scope_digest(
     scope: &RemoteRepositoryScopeV1,
 ) -> Result<ManifestDigest, RemoteExactObservationQueryErrorV1> {

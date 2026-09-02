@@ -136,7 +136,6 @@ impl WorkOwnerObservationStoragePortV1 for WorkSqliteStorage {
     }
 }
 
-#[hotpath::measure]
 fn decode_pending(values: &[ExactSqlValue]) -> Result<PendingWorkOwnerObservationV1, StorageError> {
     let text = |index| {
         exact_sql_text(values, index)
@@ -209,7 +208,6 @@ const fn kind_text(kind: WorkOwnerObservationKindV1) -> &'static str {
 
 type MarkerQuery = (String, Vec<ExactSqlValue>);
 
-#[hotpath::measure]
 fn marker_statements(
     marker: &WorkOwnerObservationMarkerV1,
 ) -> Result<(crate::exact_sql::ExactSqlStatement, MarkerQuery), StorageError> {

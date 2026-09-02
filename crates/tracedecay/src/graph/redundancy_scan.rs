@@ -74,7 +74,6 @@ struct RedundancyPairScan<'a> {
     found: Vec<RedundantPair<'a>>,
 }
 
-#[hotpath::measure_all]
 impl<'a> RedundancyPairScan<'a> {
     fn new(
         mut scoped: Vec<(&'a RedundancyCandidate, &'a Fingerprint)>,
@@ -162,7 +161,6 @@ impl<'a> RedundancyPairScan<'a> {
     }
 }
 
-#[hotpath::measure]
 fn redundant_pair<'a>(
     node_a: &'a RedundancyCandidate,
     fp_a: &'a Fingerprint,
@@ -207,7 +205,6 @@ fn find_redundant_pairs<'a>(
     scan.finish()
 }
 
-#[hotpath::measure]
 fn connected_node_groups<'a>(pairs: &'a [RedundantPair<'a>]) -> Vec<Vec<&'a RedundancyCandidate>> {
     let mut groups: Vec<Vec<&RedundancyCandidate>> = Vec::new();
     for pair in pairs {
@@ -382,12 +379,10 @@ async fn score_candidate_pairs<'a>(
 }
 
 /// `name (file:line)` locator that chains into `tracedecay_body` / `_callers`.
-#[hotpath::measure]
 fn node_label(node: &RedundancyCandidate) -> String {
     format!("{} ({}:{})", node.name, node.file_path, node.start_line)
 }
 
-#[hotpath::measure]
 fn pair_views(pairs: &[RedundantPair<'_>]) -> Vec<RedundancyPairViewV1> {
     pairs
         .iter()
@@ -419,7 +414,6 @@ fn pair_views(pairs: &[RedundantPair<'_>]) -> Vec<RedundancyPairViewV1> {
         .collect()
 }
 
-#[hotpath::measure]
 fn group_views(groups: &[Vec<&RedundancyCandidate>]) -> Vec<Vec<String>> {
     groups
         .iter()
@@ -435,7 +429,6 @@ struct SemanticPair<'a> {
     distance_micros: i64,
 }
 
-#[hotpath::measure]
 fn augment_redundancy_output(
     options: &RedundancyOptions<'_>,
     total_candidates: usize,
@@ -533,7 +526,6 @@ struct SemanticEntry<'a> {
 /// bucketing key, or `None` when the vector could never yield a finite cosine
 /// (empty, non-finite component, or zero norm) — matching [`semantic_cosine`]'s
 /// own usability preconditions, so no acceptable pair is ever excluded.
-#[hotpath::measure]
 fn normalized_projection(values: &[f32]) -> Option<f64> {
     let first = f64::from(*values.first()?);
     let mut norm_sq = 0.0_f64;
@@ -683,7 +675,6 @@ fn semantic_pairs<'a>(
     semantic_pairs
 }
 
-#[hotpath::measure]
 fn semantic_cosine(left: &[f32], right: &[f32]) -> Option<f64> {
     if left.is_empty() || left.len() != right.len() {
         return None;
@@ -705,7 +696,6 @@ fn semantic_cosine(left: &[f32], right: &[f32]) -> Option<f64> {
         .then(|| (dot / (left_norm.sqrt() * right_norm.sqrt())).clamp(-1.0, 1.0))
 }
 
-#[hotpath::measure]
 fn canonical_pair_ids<'a>(left: &'a str, right: &'a str) -> (&'a str, &'a str) {
     if left <= right {
         (left, right)
@@ -714,14 +704,12 @@ fn canonical_pair_ids<'a>(left: &'a str, right: &'a str) -> (&'a str, &'a str) {
     }
 }
 
-#[hotpath::measure]
 fn nodes_overlap(left: &RedundancyCandidate, right: &RedundancyCandidate) -> bool {
     left.file_path == right.file_path
         && left.start_line <= right.end_line
         && right.start_line <= left.end_line
 }
 
-#[hotpath::measure]
 fn semantic_pair_json(pair: &SemanticPair<'_>) -> Value {
     json!({
         "similarity": round4(pair.cosine),
@@ -745,7 +733,6 @@ fn semantic_pair_json(pair: &SemanticPair<'_>) -> Value {
     })
 }
 
-#[hotpath::measure]
 fn connected_rendered_groups<'a>(
     pairs: &[Value],
     nodes: &'a [RedundancyCandidate],
@@ -792,7 +779,6 @@ fn connected_rendered_groups<'a>(
     groups
 }
 
-#[hotpath::measure]
 fn redundancy_output(
     options: &RedundancyOptions<'_>,
     total_candidates: usize,
@@ -881,7 +867,6 @@ fn collect_candidates(
         .collect())
 }
 
-#[hotpath::measure]
 fn redundancy_node(
     symbol: tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1,
 ) -> Result<Option<RedundancyCandidate>> {
@@ -920,14 +905,12 @@ fn redundancy_node(
     }))
 }
 
-#[hotpath::measure]
 fn redundancy_graph_problem(detail: &str) -> TraceDecayError {
     TraceDecayError::project_route("verified-redundancy-evidence-unavailable", false, detail)
 }
 
 /// Re-admit a file through the indexer sanitizer so fingerprint spans and
 /// parse text share one coordinate space.
-#[hotpath::measure]
 fn admitted_redundancy_source(file_path: &str, raw: &str) -> Result<String> {
     let shape = match file_path.rsplit('.').next() {
         Some("json" | "toml" | "yaml" | "yml") => CodeSourceShapeV1::StructuredData,
@@ -960,7 +943,6 @@ fn admitted_redundancy_source(file_path: &str, raw: &str) -> Result<String> {
 /// `coverage`, and `venv` — segments this scanner didn't previously
 /// exclude but the other generated/vendored lists in the codebase already
 /// did.
-#[hotpath::measure]
 fn is_generated_path(path: &str) -> bool {
     crate::config::is_generated_path_segment(path)
 }
@@ -1114,7 +1096,6 @@ fn compute_fingerprints(
 /// language key used by `ts_provider::language`. Returns `None` for
 /// extractors whose grammar isn't wired up here (extending the map
 /// extends fingerprinting to that language).
-#[hotpath::measure]
 fn extractor_to_language_key(name: &str) -> Option<&'static str> {
     Some(match name {
         "Rust" => "rust",
@@ -1156,7 +1137,6 @@ fn extractor_to_language_key(name: &str) -> Option<&'static str> {
 
 type ScopedFingerprint<'a> = (&'a RedundancyCandidate, &'a Fingerprint);
 
-#[hotpath::measure]
 fn scoped_fingerprints<'a>(
     nodes: &'a [RedundancyCandidate],
     fingerprints: &'a HashMap<String, Fingerprint>,
@@ -1167,7 +1147,6 @@ fn scoped_fingerprints<'a>(
         .collect()
 }
 
-#[hotpath::measure]
 fn redundant_pair_json(pair: &RedundantPair<'_>) -> Value {
     json!({
         "similarity": round4(pair.score.similarity),
@@ -1188,7 +1167,6 @@ fn redundant_pair_json(pair: &RedundantPair<'_>) -> Value {
     })
 }
 
-#[hotpath::measure]
 fn node_json(node: &RedundancyCandidate) -> Value {
     json!({
         "file": node.file_path,
@@ -1198,7 +1176,6 @@ fn node_json(node: &RedundancyCandidate) -> Value {
     })
 }
 
-#[hotpath::measure]
 fn duplicate_groups(groups: &[Vec<&RedundancyCandidate>]) -> Vec<Value> {
     groups
         .iter()

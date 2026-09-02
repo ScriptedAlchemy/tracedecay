@@ -46,7 +46,6 @@ pub struct TemporalPreparedCandidateCohort {
     ordered_digest: BindingDigest,
 }
 
-#[hotpath::measure_all]
 impl TemporalPreparedCandidateCohort {
     pub fn new(candidates: Vec<RankingCandidate>) -> Result<Self, TemporalPortError> {
         let ordered_digest = candidate_cohort_digest(&candidates)?;
@@ -65,7 +64,6 @@ impl TemporalPreparedCandidateCohort {
     }
 }
 
-#[hotpath::measure]
 fn candidate_cohort_digest(
     candidates: &[RankingCandidate],
 ) -> Result<BindingDigest, TemporalPortError> {
@@ -190,7 +188,6 @@ pub struct TemporalParticipantGeneration {
     access: TemporalSourceAccess,
 }
 
-#[hotpath::measure_all]
 impl TemporalParticipantGeneration {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -294,7 +291,6 @@ pub struct TemporalParticipantManifest {
     epoch_digest: String,
 }
 
-#[hotpath::measure_all]
 impl TemporalParticipantManifest {
     pub fn new(mut entries: Vec<TemporalParticipantGeneration>) -> Result<Self, TemporalPortError> {
         entries.sort_by(|left, right| {
@@ -454,7 +450,6 @@ pub struct TemporalExecutionSnapshot {
     prepared_candidate_cohort: Option<TemporalPreparedCandidateCohort>,
 }
 
-#[hotpath::measure_all]
 impl TemporalExecutionSnapshot {
     pub fn new_authorized(
         request: TemporalSnapshotRequest,

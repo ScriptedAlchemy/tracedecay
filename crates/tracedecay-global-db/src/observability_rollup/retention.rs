@@ -6,7 +6,6 @@ use super::{
     OBSERVABILITY_ROLLUP_RETENTION_DAYS_V1, ObservabilityRollupRetentionReceiptV1, SECONDS_PER_DAY,
 };
 
-#[hotpath::measure_all]
 impl RegisteredGlobalDb {
     #[hotpath::measure(future = true, label = "global_db.observability_rollup.persist.prune")]
     pub async fn prune_observability_rollups(

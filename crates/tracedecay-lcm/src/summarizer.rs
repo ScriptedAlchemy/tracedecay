@@ -19,7 +19,6 @@ pub enum CompressionSummarizerAdapter {
     Persisted(PersistedSummaryInvocation),
 }
 
-#[hotpath::measure_all]
 impl CompressionSummarizerAdapter {
     pub fn from_mode(mode: LcmSummarizerMode) -> Self {
         match mode {
@@ -79,7 +78,6 @@ impl CompressionSummarizerAdapter {
     }
 }
 
-#[hotpath::measure]
 fn summary_request_for_backlog(
     provider: &str,
     session_id: &str,

@@ -28,7 +28,6 @@ pub struct OrphanStoreRecordV1 {
     pub observed_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl OrphanStoreRecordV1 {
     /// Validate ordering of the observation watermarks.
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
@@ -84,12 +83,10 @@ pub struct CodeGenerationRetentionRecordV1 {
 
 /// `serde(default)` needs a value, and `StorageByteSizeV1` deliberately has no
 /// `Default` impl; zero bytes is the only meaningful absence here.
-#[hotpath::measure]
 fn zero_storage_bytes() -> StorageByteSizeV1 {
     StorageByteSizeV1::ZERO
 }
 
-#[hotpath::measure_all]
 impl CodeGenerationRetentionRecordV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         if self.collectable_generation_count > self.superseded_generation_count
@@ -138,7 +135,6 @@ pub struct SemanticVectorRetentionRecordV1 {
     pub cancelled_generation_count: u64,
 }
 
-#[hotpath::measure_all]
 impl SemanticVectorRetentionRecordV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         self.pending_generation_count
@@ -179,7 +175,6 @@ pub struct RetentionBacklogRecordV1 {
     pub window_watermark_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl RetentionBacklogRecordV1 {
     /// Validate that the oldest past-window row is not newer than the watermark
     /// (that would mean there is no backlog to report).

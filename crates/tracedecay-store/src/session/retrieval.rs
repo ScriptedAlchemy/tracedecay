@@ -29,7 +29,6 @@ pub struct SessionTemporalRetrievalRequestV1 {
     execution_control: ExecutionControl,
 }
 
-#[hotpath::measure_all]
 impl SessionTemporalRetrievalRequestV1 {
     pub fn new(
         session_id: SessionId,
@@ -106,7 +105,6 @@ pub struct SessionRetrievalPageV1 {
     next_after_occurrence_id: Option<MessageOccurrenceIdV1>,
 }
 
-#[hotpath::measure_all]
 impl SessionRetrievalPageV1 {
     pub fn new(
         snapshot: SessionTemporalSnapshotV1,
@@ -201,7 +199,6 @@ impl SessionRetrievalPageV1 {
     }
 }
 
-#[hotpath::measure]
 fn deep_record_count(
     occurrences: &[MessageOccurrenceRecordV1],
     copies: &[LogicalCopyRecordV1],

@@ -20,7 +20,6 @@ use super::super::support::{decode, encode, invalid};
 /// batched liveness load correct if a caller ever exceeds it.
 const ANCHOR_LIVENESS_BATCH: usize = 500;
 
-#[hotpath::measure]
 pub(super) fn evidence_anchor_is_current(
     connection: &rusqlite::Connection,
     anchor: &RetrievalAnchorRecordV3,
@@ -51,7 +50,6 @@ pub(super) fn evidence_anchor_is_current(
 ///
 /// `None` means the anchor was never disposed, which every caller treats the
 /// same as an explicitly active disposition.
-#[hotpath::measure]
 fn latest_disposition_state(
     connection: &rusqlite::Connection,
     anchor_id: &str,
@@ -71,7 +69,6 @@ fn latest_disposition_state(
 /// Confirms the exact source anchor an occurrence names is present and active,
 /// returning the anchor's stored `owner_json` so a caller in the same
 /// transaction can reuse it instead of reading the row a second time.
-#[hotpath::measure]
 pub(super) fn require_source_anchor_current(
     connection: &rusqlite::Connection,
     occurrence: &EvidenceSourceOccurrenceRecordV1,
@@ -124,7 +121,6 @@ pub(super) struct AnchorLivenessCache {
 
 /// Loads every anchor row and latest disposition for `anchor_ids` in two
 /// batched statements, regardless of how many occurrences reference them.
-#[hotpath::measure]
 pub(super) fn load_anchor_liveness<'a, I>(
     connection: &rusqlite::Connection,
     anchor_ids: I,
@@ -201,7 +197,6 @@ where
     })
 }
 
-#[hotpath::measure_all]
 impl AnchorLivenessCache {
     /// The batched equivalent of the free [`evidence_anchor_is_current`].
     pub(super) fn evidence_anchor_is_current(
@@ -259,7 +254,6 @@ impl AnchorLivenessCache {
     }
 }
 
-#[hotpath::measure]
 fn source_owner_matches_assembly(
     source: &RetrievalAnchorOwnerV1,
     assembly: &tracedecay_domain::AnchorOwnerBindingV1,

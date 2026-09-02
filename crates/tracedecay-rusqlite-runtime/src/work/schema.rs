@@ -361,7 +361,6 @@ CREATE TABLE IF NOT EXISTS work_product_graph_versions_v1 (
 ) STRICT;
 ";
 
-#[hotpath::measure]
 pub fn install_work_schema(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch(WORK_SCHEMA_V1)?;
     connection.execute_batch(WORK_PRODUCT_SCHEMA_V1)

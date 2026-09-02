@@ -74,7 +74,6 @@ pub struct SafeDiagnostic {
     pub message: String,
 }
 
-#[hotpath::measure_all]
 impl SafeDiagnostic {
     pub fn new(
         code: impl Into<String>,
@@ -424,7 +423,6 @@ impl<'de> Deserialize<'de> for ApplicationProblem {
     }
 }
 
-#[hotpath::measure_all]
 impl ApplicationProblem {
     fn from_wire(wire: ApplicationProblemWire) -> Result<Self, ApplicationContractError> {
         let problem = match wire {

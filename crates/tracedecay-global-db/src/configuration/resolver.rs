@@ -22,7 +22,6 @@ pub struct ConfigurationLayerV1 {
     pub entries: BTreeMap<SettingKey, ConfigurationValueV1>,
 }
 
-#[hotpath::measure_all]
 impl ConfigurationLayerV1 {
     pub fn validate(
         &self,
@@ -75,7 +74,6 @@ pub enum ConfigurationResolutionError {
 /// Resolve all registered settings against layers from low to high precedence.
 /// Default definitions are always present and cannot be replaced by an
 /// adapter-provided default layer.
-#[hotpath::measure]
 pub fn resolve_configuration(
     registry: &ConfigurationRegistry,
     layers: &[ConfigurationLayerV1],
@@ -154,7 +152,6 @@ pub fn resolve_configuration(
     Ok(ConfigurationResolutionV1 { snapshot, settings })
 }
 
-#[hotpath::measure]
 fn layer_can_override(scope: SettingScopeV1, layer: &ConfigurationLayerIdV1) -> bool {
     matches!(
         (scope, layer.kind()),
@@ -169,7 +166,6 @@ fn layer_can_override(scope: SettingScopeV1, layer: &ConfigurationLayerIdV1) -> 
     )
 }
 
-#[hotpath::measure]
 pub(crate) fn registry_default_candidate() -> Result<ConfigurationCandidateV1, DomainError> {
     Ok(ConfigurationCandidateV1 {
         layer: ConfigurationLayerIdV1::Default,

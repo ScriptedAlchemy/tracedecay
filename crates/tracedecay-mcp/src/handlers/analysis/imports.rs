@@ -21,7 +21,6 @@ use crate::tools::render;
 ///   `foo::{a, nested::b}`  → a, b
 ///   `foo::{self, bar}`     → foo, bar   (self brings the module in)
 ///   `foo::*`               → (empty, glob — handled separately)
-#[hotpath::measure]
 fn identifiers_from_use_path(path: &str) -> Vec<String> {
     let trimmed = path.trim().trim_end_matches(';').trim();
     if trimmed.ends_with('*') {
@@ -69,7 +68,6 @@ fn identifiers_from_use_path(path: &str) -> Vec<String> {
     }
 }
 
-#[hotpath::measure]
 fn push_identifier(out: &mut Vec<String>, item: &str, parent: &str) {
     let item = item.trim();
     if item.is_empty() {
@@ -102,7 +100,6 @@ fn push_identifier(out: &mut Vec<String>, item: &str, parent: &str) {
 
 /// Resolves a single use-tree segment (no `::`) into the identifier it
 /// brings into scope, accounting for `as` aliases.
-#[hotpath::measure]
 fn identifier_from_segment(seg: &str) -> String {
     let seg = seg.trim().trim_end_matches(';').trim();
     if seg.is_empty() {
@@ -152,7 +149,6 @@ struct IdentifierSpan {
 
 /// Indexes every identifier in a masked source once, so each import's
 /// reference check is a map lookup instead of a full-file scan.
-#[hotpath::measure]
 fn identifier_spans(source: &str) -> HashMap<String, IdentifierSpan> {
     let mut spans: HashMap<String, IdentifierSpan> = HashMap::new();
     for (line_index, line) in source.lines().enumerate() {
@@ -173,7 +169,6 @@ fn identifier_spans(source: &str) -> HashMap<String, IdentifierSpan> {
 /// Splits a masked source line into whole identifier tokens (boundaries are
 /// any non-`[A-Za-z0-9_]` char or the line ends), so `Map` never matches
 /// inside `HashMap`.
-#[hotpath::measure]
 fn identifiers_in_line(line: &str) -> Vec<String> {
     let mut identifiers = Vec::new();
     let mut current = String::new();
@@ -317,7 +312,6 @@ pub async fn handle_unused_imports(
 /// std/foreign-crate imports.
 ///
 /// `pub use` re-exports are intentional public aliases and are never reported.
-#[hotpath::measure]
 fn unused_imports_in_file(
     project_root: &Path,
     file_path: &str,

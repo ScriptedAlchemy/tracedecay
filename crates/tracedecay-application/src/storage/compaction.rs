@@ -40,7 +40,6 @@ pub struct CompactionTriggerPolicyV1 {
     pub minimum_reclaimable_bytes: StorageByteSizeV1,
 }
 
-#[hotpath::measure_all]
 impl CompactionTriggerPolicyV1 {
     /// Validate the policy. A zero threshold would schedule compaction for every
     /// store on every pass; it is rejected in favor of an explicit positive
@@ -99,7 +98,6 @@ pub enum CompactionDecisionV1 {
     },
 }
 
-#[hotpath::measure_all]
 impl CompactionDecisionV1 {
     #[must_use]
     #[hotpath::skip]

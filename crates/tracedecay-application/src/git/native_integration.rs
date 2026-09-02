@@ -40,7 +40,6 @@ pub enum NativeIntegrationSelectionBindingV1 {
     },
 }
 
-#[hotpath::measure_all]
 impl NativeIntegrationSelectionBindingV1 {
     fn validate(&self) -> Result<(), ApplicationContractError> {
         match self {
@@ -91,7 +90,6 @@ pub struct NativeIntegrationStackResolutionRequestV1 {
     pub observed_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl NativeIntegrationStackResolutionRequestV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         self.source.validate()?;
@@ -155,7 +153,6 @@ impl NativeIntegrationStackResolutionRequestV1 {
     }
 }
 
-#[hotpath::measure]
 fn declared_node_matches_scope(
     revision: &BranchStackRevisionV1,
     node_id: &StackNodeId,
@@ -203,7 +200,6 @@ pub struct NativeIntegrationEvidenceRevisionsV1 {
     pub migration_revision_digest: ManifestDigest,
 }
 
-#[hotpath::measure_all]
 impl NativeIntegrationEvidenceRevisionsV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         self.graph_revision_digest.validate()?;
@@ -242,7 +238,6 @@ pub enum NativeIntegrationPreflightOutcomeV1 {
     Cancelled,
 }
 
-#[hotpath::measure_all]
 impl NativeIntegrationPreflightRequestV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         if self.context.admission_at(self.observed_at) != RequestAdmission::Admitted {
@@ -277,7 +272,6 @@ pub struct NativeIntegrationApplyRequestV1 {
     pub observed_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl NativeIntegrationApplyRequestV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         if self.context.admission_at(self.observed_at) != RequestAdmission::Admitted {
@@ -317,7 +311,6 @@ pub struct NativeIntegrationStatusRequestV1 {
     pub transaction_id: NativeIntegrationTransactionId,
 }
 
-#[hotpath::measure_all]
 impl NativeIntegrationStatusRequestV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         self.transaction_id.validate()?;
@@ -332,7 +325,6 @@ pub struct NativeIntegrationCancelRequestV1 {
     pub requested_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl NativeIntegrationCancelRequestV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         self.transaction_id.validate()?;
@@ -429,7 +421,6 @@ pub struct NativeIntegrationService<P> {
     port: P,
 }
 
-#[hotpath::measure_all]
 impl<P: NativeIntegrationPort> NativeIntegrationService<P> {
     #[hotpath::skip]
     pub const fn new(port: P) -> Self {

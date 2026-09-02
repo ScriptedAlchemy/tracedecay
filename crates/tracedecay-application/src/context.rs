@@ -39,7 +39,6 @@ pub struct ApplicationRequestControlV1 {
     pub request_id: RequestId,
 }
 
-#[hotpath::measure_all]
 impl ApplicationRequestControlV1 {
     pub fn new(request_id: RequestId) -> Self {
         Self { request_id }
@@ -59,7 +58,6 @@ pub struct ResolvedScope {
     pub scope_digest: ManifestDigest,
 }
 
-#[hotpath::measure_all]
 impl ResolvedScope {
     pub fn new(
         project_id: ProjectId,
@@ -158,7 +156,6 @@ pub struct CapabilityGrantSnapshot {
     pub disclosure: DisclosureClass,
 }
 
-#[hotpath::measure_all]
 impl CapabilityGrantSnapshot {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -223,7 +220,6 @@ pub struct Deadline {
     pub expires_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl Deadline {
     pub fn new(expires_at: UtcMicros) -> Result<Self, ApplicationContractError> {
         Ok(Self { expires_at })
@@ -250,7 +246,6 @@ pub struct CancellationContext {
     pub state: CancellationState,
 }
 
-#[hotpath::measure_all]
 impl CancellationContext {
     pub fn active(token_id: impl Into<String>) -> Result<Self, ApplicationContractError> {
         Ok(Self {
@@ -310,7 +305,6 @@ struct CancellationWait {
     listener_id: Option<u64>,
 }
 
-#[hotpath::measure_all]
 impl CancellationSignal {
     pub fn active(token_id: impl Into<String>) -> Result<Self, ApplicationContractError> {
         Ok(Self {
@@ -484,7 +478,6 @@ pub struct RequestContext {
     cancellation: CancellationContext,
 }
 
-#[hotpath::measure_all]
 impl RequestContext {
     pub fn new(
         actor: ActorId,

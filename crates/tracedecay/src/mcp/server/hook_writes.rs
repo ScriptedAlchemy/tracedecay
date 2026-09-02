@@ -38,7 +38,6 @@ pub(crate) type BackgroundRefreshWriter = Arc<
         + 'static,
 >;
 
-#[hotpath::measure]
 pub(crate) fn direct_background_refresh_writer() -> BackgroundRefreshWriter {
     Arc::new(|request| Box::pin(execute_background_refresh_direct(request)))
 }

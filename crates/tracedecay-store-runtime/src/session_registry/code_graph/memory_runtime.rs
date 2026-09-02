@@ -19,7 +19,6 @@ use tracedecay_store::{
 
 use super::super::{DaemonSessionRuntimeRegistryV1, Result, session_registry_error};
 
-#[hotpath::measure]
 pub fn inline_graph_publication_input_digest(
     publication_key: &GraphPublicationKeyV1,
     manifest: &GraphGenerationManifest,
@@ -34,7 +33,6 @@ pub fn inline_graph_publication_input_digest(
         .map_err(|error| GraphDbError::invalid(error.to_string()))
 }
 
-#[hotpath::measure]
 pub fn schedule_bound_memory_graph_reconciliation(
     database: &tracedecay_runtime_core::db::Database,
 ) -> Result<()> {
@@ -57,7 +55,6 @@ pub fn schedule_bound_memory_graph_reconciliation(
 }
 use super::RetainedVerifiedGraphRuntimeV1;
 
-#[hotpath::measure_all]
 impl RetainedVerifiedGraphRuntimeV1 {
     pub fn reconcile_verified_manifest(
         &self,
@@ -118,7 +115,6 @@ impl tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1
     }
 }
 
-#[hotpath::measure_all]
 impl DaemonSessionRuntimeRegistryV1 {
     #[cfg(test)]
     #[hotpath::skip]

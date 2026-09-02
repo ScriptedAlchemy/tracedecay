@@ -5,7 +5,6 @@ use tracedecay_automation_runtime::automation::config_error;
 use tracedecay_domain::errors::Result;
 use tracedecay_domain::{ObservationSourceRangeV1, SessionId, UtcMicros};
 
-#[hotpath::measure]
 pub(super) fn hook_now() -> UtcMicros {
     UtcMicros(
         SystemTime::now()
@@ -16,7 +15,6 @@ pub(super) fn hook_now() -> UtcMicros {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn hook_v2_envelope(
     args: &Value,
     action: &str,
@@ -32,7 +30,6 @@ pub(super) fn hook_v2_envelope(
     Ok(envelope)
 }
 
-#[hotpath::measure]
 pub(super) fn hook_v2_native_session_id(
     args: &Value,
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
@@ -43,7 +40,6 @@ pub(super) fn hook_v2_native_session_id(
         .then_some(session)
 }
 
-#[hotpath::measure]
 pub(super) fn hook_v2_requires_producer_work(
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
 ) -> bool {
@@ -57,7 +53,6 @@ pub(super) fn hook_v2_requires_producer_work(
     )
 }
 
-#[hotpath::measure]
 pub(super) fn hook_v2_lifecycle_range(
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
     receipt: tracedecay_hooks::HookAdmissionLedgerReceiptV1,
@@ -70,7 +65,6 @@ pub(super) fn hook_v2_lifecycle_range(
     ObservationSourceRangeV1::new(start, start.checked_add(1)?).ok()
 }
 
-#[hotpath::measure]
 fn daemon_mint_hook_v2_id(
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
     domain: &[u8],
@@ -99,7 +93,6 @@ fn daemon_mint_hook_v2_id(
 /// Derive a daemon-owned saved-file identity from the opaque native material.
 /// This is shared with the feedback owner so it can resolve an indexed file
 /// without retaining the provider path in a hook envelope.
-#[hotpath::measure]
 pub(crate) fn daemon_mint_hook_v2_file_id(
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
     native_file_id: [u8; 16],
@@ -107,7 +100,6 @@ pub(crate) fn daemon_mint_hook_v2_file_id(
     daemon_mint_hook_v2_id(envelope, b"file", native_file_id)
 }
 
-#[hotpath::measure]
 fn hook_v2_event_identity_domain(event: &tracedecay_hooks::HookEventV2) -> &'static [u8] {
     use tracedecay_hooks::{HookBoundaryV1, HookEventV2, HookLifecyclePhaseV1};
 
@@ -161,7 +153,6 @@ fn hook_v2_event_identity_domain(event: &tracedecay_hooks::HookEventV2) -> &'sta
 /// Mint canonical daemon-owned identities only after binding validation.
 /// Hook-provided fixed-size values are typed native identity material, never
 /// canonical ledger or orchestration identities.
-#[hotpath::measure]
 pub(crate) fn daemon_mint_hook_v2_envelope(
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
 ) -> tracedecay_hooks::HookEventEnvelopeV2 {

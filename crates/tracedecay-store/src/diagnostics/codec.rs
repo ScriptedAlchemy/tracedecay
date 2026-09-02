@@ -34,7 +34,6 @@ pub enum DiagnosticRecordStateKindV1 {
     Cleared,
 }
 
-#[hotpath::measure_all]
 impl DiagnosticRecordStateKindV1 {
     /// Classifies stored `record_state` text. `None` marks an unknown state;
     /// the caller decides how to report it.
@@ -99,7 +98,6 @@ impl DiagnosticRecordStateKindV1 {
 /// Projects a typed record state onto its `(record_state, state_generation)`
 /// column pair. The back-pointer borrows from `state`, so a caller that needs
 /// an owned column value copies it explicitly.
-#[hotpath::measure]
 pub fn diagnostic_state_columns(state: &DiagnosticRecordStateV1) -> (&'static str, Option<&str>) {
     match state {
         DiagnosticRecordStateV1::Current => (DIAGNOSTIC_STATE_CURRENT, None),
@@ -129,7 +127,6 @@ pub const fn diagnostic_severity_name(severity: DiagnosticSeverityV1) -> &'stati
 }
 
 /// Decodes stored `severity` text. `None` marks an unknown severity.
-#[hotpath::measure]
 pub fn parse_diagnostic_severity(value: &str) -> Option<DiagnosticSeverityV1> {
     match value {
         "error" => Some(DiagnosticSeverityV1::Error),
@@ -155,7 +152,6 @@ pub const fn diagnostic_producer_kind_name(kind: DiagnosticProducerKindV1) -> &'
 }
 
 /// Decodes stored `producer_kind` text. `None` marks an unknown producer.
-#[hotpath::measure]
 pub fn parse_diagnostic_producer_kind(value: &str) -> Option<DiagnosticProducerKindV1> {
     match value {
         "upstream_compiler" => Some(DiagnosticProducerKindV1::UpstreamCompiler),
@@ -183,7 +179,6 @@ pub const fn diagnostic_evidence_class_name(class: DiagnosticEvidenceClassV1) ->
 }
 
 /// Decodes stored `evidence_class` text. `None` marks an unknown class.
-#[hotpath::measure]
 pub fn parse_diagnostic_evidence_class(value: &str) -> Option<DiagnosticEvidenceClassV1> {
     match value {
         "observed_current" => Some(DiagnosticEvidenceClassV1::ObservedCurrent),

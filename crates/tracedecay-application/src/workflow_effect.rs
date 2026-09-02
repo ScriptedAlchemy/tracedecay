@@ -23,7 +23,6 @@ pub enum WorkflowEffectOperationV1 {
     HandoffRedeem,
 }
 
-#[hotpath::measure_all]
 impl WorkflowEffectOperationV1 {
     #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
@@ -52,7 +51,6 @@ pub struct WorkflowEffectIdentityV1 {
     receipt_context: WorkflowEffectReceiptContextV1,
 }
 
-#[hotpath::measure_all]
 impl WorkflowEffectIdentityV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -198,7 +196,6 @@ pub struct WorkflowEffectReceiptContextV1 {
     privacy_digest: ManifestDigest,
 }
 
-#[hotpath::measure_all]
 impl WorkflowEffectReceiptContextV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -295,7 +292,6 @@ pub enum WorkflowEffectMutationV1 {
     Problem(WorkflowEffectProblemV1),
 }
 
-#[hotpath::measure_all]
 impl WorkflowEffectPreparedV1 {
     pub fn register_definition(
         input_digest: ManifestDigest,
@@ -443,7 +439,6 @@ pub struct WorkflowEffectTerminalV1 {
     outcome: WorkflowEffectOutcomeV1,
 }
 
-#[hotpath::measure_all]
 impl WorkflowEffectTerminalV1 {
     pub fn new(
         identity: WorkflowEffectIdentityV1,
@@ -516,7 +511,6 @@ pub enum WorkflowEffectJournalStateV1 {
     Reconciled,
 }
 
-#[hotpath::measure_all]
 impl WorkflowEffectJournalStateV1 {
     #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
@@ -536,7 +530,6 @@ pub struct WorkflowEffectJournalRecordV1 {
     terminal: Option<WorkflowEffectTerminalV1>,
 }
 
-#[hotpath::measure_all]
 impl WorkflowEffectJournalRecordV1 {
     pub fn before_effect() -> Self {
         Self {

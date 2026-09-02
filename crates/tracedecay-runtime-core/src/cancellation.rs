@@ -13,7 +13,6 @@ use tokio_util::sync::CancellationToken as TokioCancellationToken;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MonotonicDeadline(Instant);
 
-#[hotpath::measure_all]
 impl MonotonicDeadline {
     #[must_use]
     #[hotpath::skip]
@@ -49,7 +48,6 @@ impl Default for CancellationToken {
     }
 }
 
-#[hotpath::measure_all]
 impl CancellationToken {
     #[must_use]
     pub fn new() -> Self {

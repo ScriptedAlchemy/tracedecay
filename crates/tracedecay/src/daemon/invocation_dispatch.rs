@@ -18,7 +18,6 @@ use tracedecay_daemon_service::{
 };
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
-#[hotpath::measure]
 fn semantic_invocation_interruption_response(
     request_id: &str,
     control: Option<&SemanticInvocationControlV1>,
@@ -30,7 +29,6 @@ fn semantic_invocation_interruption_response(
         })
 }
 
-#[hotpath::measure]
 fn record_project_open_refusal(
     operation: &str,
     error: &tracedecay_domain::errors::TraceDecayError,
@@ -46,7 +44,6 @@ fn record_project_open_refusal(
     );
 }
 
-#[hotpath::measure]
 fn record_project_route_refusal(
     operation: &str,
     error: &tracedecay_domain::errors::TraceDecayError,
@@ -62,7 +59,6 @@ fn record_project_route_refusal(
     );
 }
 
-#[hotpath::measure]
 fn record_admitted_root_refusal(operation: &str) {
     hotpath::gauge!("daemon.invocation.route.admitted_root_failed_total").inc(1_u64);
     tracing::warn!(
@@ -186,7 +182,6 @@ async fn await_lsp_route_rejoin<Output>(
     }
 }
 
-#[hotpath::measure]
 fn lsp_project_open_wait_response(
     request_id: &str,
     outcome: ProjectOpenWaitOutcome,
@@ -215,7 +210,6 @@ fn lsp_project_open_wait_response(
 /// `validate` gate. Validating them here keeps a malformed multi-root request
 /// from costing a project admission before it is rejected; authorization stays
 /// with the `AuthorizedScopeSet` compare-and-swap on the executor side.
-#[hotpath::measure]
 pub(super) fn invalid_multi_root_invocation_response(
     request: &DaemonInvocationRequest,
 ) -> Option<DaemonInvocationResponse> {
@@ -708,7 +702,6 @@ pub(super) async fn execute_daemon_invocation(
     .await
 }
 
-#[hotpath::measure]
 fn project_open_problem(
     error: &tracedecay_domain::errors::TraceDecayError,
     workflow_application: bool,

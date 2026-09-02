@@ -10,7 +10,6 @@ use crate::ToolDefinition;
 
 // ── alwaysLoad tools (loaded into the model prompt immediately) ─────────
 
-#[hotpath::measure]
 pub(super) fn def_search() -> ToolDefinition {
     def_always_load(
         "tracedecay_search",
@@ -46,7 +45,6 @@ pub(super) fn def_search() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_grep() -> ToolDefinition {
     // alwaysLoad: content/text search is the single most common native-tool
     // reflex (grep/rg). Keeping it in the always-loaded set means the model
@@ -90,7 +88,6 @@ pub(super) fn def_grep() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_retrieve() -> ToolDefinition {
     def(
         "tracedecay_retrieve",
@@ -110,7 +107,6 @@ pub(super) fn def_retrieve() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_context(input_schema: Value) -> ToolDefinition {
     def_always_load(
         "tracedecay_context",
@@ -120,7 +116,6 @@ pub(super) fn def_context(input_schema: Value) -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_callers_for() -> ToolDefinition {
     def(
         "tracedecay_callers_for",
@@ -151,7 +146,6 @@ pub(super) fn def_callers_for() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_by_qualified_name() -> ToolDefinition {
     def_required_object(
         "tracedecay_by_qualified_name",
@@ -166,7 +160,6 @@ pub(super) fn def_by_qualified_name() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_impls() -> ToolDefinition {
     def_object(
         "tracedecay_impls",
@@ -185,7 +178,6 @@ pub(super) fn def_impls() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_signature() -> ToolDefinition {
     def(
         "tracedecay_signature",
@@ -212,7 +204,6 @@ pub(super) fn def_signature() -> ToolDefinition {
 
 // ── Deferred tools (discovered via ToolSearch on demand) ────────────────
 
-#[hotpath::measure]
 pub(super) fn def_callers() -> ToolDefinition {
     // alwaysLoad: "who calls this / find references" is the second-most-common
     // native reflex after grep. It only needs a node_id, so keeping it loaded
@@ -232,7 +223,6 @@ pub(super) fn def_callers() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_callees(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_callees",
@@ -248,7 +238,6 @@ pub(super) fn def_callees(input_schema: Value) -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_impact(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_impact",
@@ -258,7 +247,6 @@ pub(super) fn def_impact(input_schema: Value) -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_node(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_node",
@@ -268,7 +256,6 @@ pub(super) fn def_node(input_schema: Value) -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_files() -> ToolDefinition {
     def(
         "tracedecay_files",
@@ -295,7 +282,6 @@ pub(super) fn def_files() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_similar(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_similar",
@@ -305,7 +291,6 @@ pub(super) fn def_similar(input_schema: Value) -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_type_hierarchy() -> ToolDefinition {
     def(
         "tracedecay_type_hierarchy",
@@ -328,7 +313,6 @@ pub(super) fn def_type_hierarchy() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_derives() -> ToolDefinition {
     def(
         "tracedecay_derives",
@@ -361,7 +345,6 @@ pub(super) fn def_derives() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_body() -> ToolDefinition {
     def(
         "tracedecay_body",
@@ -390,7 +373,6 @@ pub(super) fn def_body() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_field_sites() -> ToolDefinition {
     def(
         "tracedecay_field_sites",
@@ -424,7 +406,6 @@ pub(super) fn def_field_sites() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_constructors() -> ToolDefinition {
     def(
         "tracedecay_constructors",
@@ -454,7 +435,6 @@ pub(super) fn def_constructors() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_signature_search() -> ToolDefinition {
     def(
         "tracedecay_signature_search",
@@ -500,7 +480,6 @@ pub(super) fn def_signature_search() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_config() -> ToolDefinition {
     def(
         "tracedecay_config",
@@ -538,7 +517,6 @@ pub(super) fn def_config() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_implementations() -> ToolDefinition {
     def(
         "tracedecay_implementations",
@@ -572,7 +550,6 @@ pub(super) fn def_implementations() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_outline() -> ToolDefinition {
     def(
         "tracedecay_outline",
@@ -602,7 +579,6 @@ pub(super) fn def_outline() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_read() -> ToolDefinition {
     def(
         "tracedecay_read",
@@ -640,7 +616,6 @@ pub(super) fn def_read() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_find_exact_symbol() -> ToolDefinition {
     def(
         "tracedecay_find_exact_symbol",

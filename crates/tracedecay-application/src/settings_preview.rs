@@ -25,7 +25,6 @@ pub struct ProjectSettingsPatchInputV1 {
 /// Minimum accepted auto-track poll interval, mirrored from root runtime policy.
 pub const MIN_AUTO_TRACK_PR_POLL_SECS_V1: u64 = 60;
 
-#[hotpath::measure]
 fn issue(field: &str, message: &str) -> SettingsValidationIssueV1 {
     SettingsValidationIssueV1 {
         field: field.to_owned(),
@@ -38,7 +37,6 @@ fn issue(field: &str, message: &str) -> SettingsValidationIssueV1 {
 /// Exact glob syntax remains an adapter concern; this rejects empty/control
 /// patterns and zeroed numeric bounds so every surface shares the same fail-
 /// closed gates before mutation construction.
-#[hotpath::measure]
 pub fn validate_project_settings_patch(
     patch: &ProjectSettingsPatchInputV1,
 ) -> Result<(), Vec<SettingsValidationIssueV1>> {

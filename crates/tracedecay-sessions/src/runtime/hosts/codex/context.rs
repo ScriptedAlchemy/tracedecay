@@ -35,7 +35,6 @@ pub(super) struct CodexContextState {
     pub(super) compaction_depth: i64,
 }
 
-#[hotpath::measure_all]
 impl CodexContextState {
     pub(super) fn from_meta(meta: &CodexMeta) -> Self {
         Self {
@@ -160,7 +159,6 @@ struct PriorContextCache {
 
 static PRIOR_CONTEXT_CACHE: OnceLock<Mutex<PriorContextCache>> = OnceLock::new();
 
-#[hotpath::measure]
 fn prior_context_generation(file: &std::fs::File) -> Option<u64> {
     use std::hash::{Hash, Hasher};
     let meta = file.metadata().ok()?;
@@ -183,7 +181,6 @@ fn prior_context_generation(file: &std::fs::File) -> Option<u64> {
     Some(hasher.finish())
 }
 
-#[hotpath::measure]
 fn cached_prior_context(
     path: &Path,
     generation: u64,
@@ -198,7 +195,6 @@ fn cached_prior_context(
         .then(|| (entry.state.clone(), entry.offset))
 }
 
-#[hotpath::measure]
 fn store_prior_context(path: &Path, generation: u64, offset: u64, state: CodexContextState) {
     let cache = PRIOR_CONTEXT_CACHE.get_or_init(|| Mutex::new(PriorContextCache::default()));
     let mut cache = cache
@@ -226,7 +222,6 @@ fn store_prior_context(path: &Path, generation: u64, offset: u64, state: CodexCo
     );
 }
 
-#[hotpath::measure]
 pub(super) fn session_metadata_json(
     meta: &CodexMeta,
     summary: Option<&super::events::CodexSessionSummary>,
@@ -265,7 +260,6 @@ pub(super) fn session_metadata_json(
     serde_json::to_string(&Value::Object(metadata)).ok()
 }
 
-#[hotpath::measure]
 pub(super) fn annotate_message(
     message: &mut SessionMessageRecord,
     cwd: Option<&Path>,
@@ -292,7 +286,6 @@ pub(super) fn annotate_message(
     message.metadata_json = serde_json::to_string(&Value::Object(metadata)).ok();
 }
 
-#[hotpath::measure]
 fn insert_git_metadata(metadata: &mut serde_json::Map<String, Value>, git: Option<&Value>) {
     let Some(git) = git.and_then(Value::as_object) else {
         return;

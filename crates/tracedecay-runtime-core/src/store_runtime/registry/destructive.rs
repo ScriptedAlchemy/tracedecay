@@ -13,7 +13,6 @@ pub struct DestructiveMaintenanceTarget {
     initial_file_identities: Vec<(PathBuf, u64)>,
 }
 
-#[hotpath::measure_all]
 impl DestructiveMaintenanceTarget {
     pub fn new(
         root: impl Into<PathBuf>,
@@ -78,7 +77,6 @@ struct DestructiveReservationGuard {
     active: bool,
 }
 
-#[hotpath::measure_all]
 impl DestructiveReservationGuard {
     fn new(registry: StoreRuntimeRegistry, attempt: u64) -> Self {
         Self {
@@ -116,7 +114,6 @@ pub struct DestructiveMaintenanceReservation {
     released: bool,
 }
 
-#[hotpath::measure_all]
 impl DestructiveMaintenanceReservation {
     pub fn target(&self) -> &DestructiveMaintenanceTarget {
         &self.target
@@ -164,7 +161,6 @@ impl Drop for DestructiveMaintenanceReservation {
     }
 }
 
-#[hotpath::measure_all]
 impl StoreRuntimeRegistry {
     #[hotpath::skip]
     pub async fn begin_destructive_maintenance(
@@ -334,7 +330,6 @@ impl StoreRuntimeRegistry {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn reservation_matches(reservation: &DestructivePathReservation, path: &Path) -> bool {
     reservation
         .database_paths
@@ -342,7 +337,6 @@ pub(super) fn reservation_matches(reservation: &DestructivePathReservation, path
         .is_ok()
 }
 
-#[hotpath::measure]
 fn canonical_existing_directory(root: PathBuf) -> Result<PathBuf, StoreRuntimeRegistryFailure> {
     let canonical = root.canonicalize().map_err(|error| {
         StoreRuntimeRegistryFailure::DestructiveMaintenanceInvalidTarget {
@@ -359,7 +353,6 @@ fn canonical_existing_directory(root: PathBuf) -> Result<PathBuf, StoreRuntimeRe
     Ok(canonical)
 }
 
-#[hotpath::measure]
 fn canonical_database_under_root(
     root: &Path,
     path: &Path,
@@ -386,7 +379,6 @@ fn canonical_database_under_root(
     Ok(canonical)
 }
 
-#[hotpath::measure]
 fn paths_overlap(left: &Path, right: &Path) -> bool {
     left.starts_with(right) || right.starts_with(left)
 }

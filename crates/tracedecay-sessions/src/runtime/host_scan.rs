@@ -14,7 +14,6 @@ pub(super) struct HostScanEvidence {
     pub unavailable_units: u64,
 }
 
-#[hotpath::measure_all]
 impl HostScanEvidence {
     #[hotpath::skip]
     pub(super) const fn is_deferred(self) -> bool {
@@ -37,7 +36,6 @@ pub(super) struct HostScanBudget {
     evidence: HostScanEvidence,
 }
 
-#[hotpath::measure_all]
 impl HostScanBudget {
     #[hotpath::skip]
     pub(super) const fn new(

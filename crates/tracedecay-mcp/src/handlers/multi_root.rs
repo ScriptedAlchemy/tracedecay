@@ -23,7 +23,6 @@ use tracedecay_daemon_protocol::{
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-#[hotpath::measure]
 fn json_result(value: &Value) -> ToolResult {
     ToolResult::new(
         json!({ "content": [{ "type": "text", "text": value.to_string() }] }),
@@ -160,7 +159,6 @@ fn operation_for_tool(tool_name: &str) -> Option<MultiRootApplicationOperation> 
     }
 }
 
-#[hotpath::measure]
 fn render_response(
     operation: MultiRootApplicationOperation,
     request_id: RequestId,
@@ -202,7 +200,6 @@ fn render_response(
     }
 }
 
-#[hotpath::measure]
 fn success_result<T>(
     operation: MultiRootApplicationOperation,
     request_id: RequestId,
@@ -225,7 +222,6 @@ where
     Ok(json_result(&payload))
 }
 
-#[hotpath::measure]
 fn invalid_request(
     operation: MultiRootApplicationOperation,
     request_id: RequestId,
@@ -244,7 +240,6 @@ fn invalid_request(
     )
 }
 
-#[hotpath::measure]
 fn problem_result(
     operation: MultiRootApplicationOperation,
     request_id: RequestId,
@@ -266,7 +261,6 @@ fn problem_result(
     Ok(json_result(&payload).with_semantic_error(true))
 }
 
-#[hotpath::measure]
 fn daemon_problem(problem: DaemonInvocationProblem) -> ApplicationProblem {
     match problem {
         DaemonInvocationProblem::InvalidRequest | DaemonInvocationProblem::UnsupportedRevision => {
@@ -298,7 +292,6 @@ fn daemon_problem(problem: DaemonInvocationProblem) -> ApplicationProblem {
     }
 }
 
-#[hotpath::measure]
 fn unavailable(code: &'static str) -> ApplicationProblem {
     ApplicationProblem::unavailable(SafeDiagnostic {
         code: code.to_owned(),
@@ -306,7 +299,6 @@ fn unavailable(code: &'static str) -> ApplicationProblem {
     })
 }
 
-#[hotpath::measure]
 fn binding_id(operation: MultiRootApplicationOperation) -> Result<BindingId> {
     BindingId::new(format!(
         "binding.http.multi_root.{}.v1",
@@ -317,7 +309,6 @@ fn binding_id(operation: MultiRootApplicationOperation) -> Result<BindingId> {
     })
 }
 
-#[hotpath::measure]
 fn result_contract(operation: MultiRootApplicationOperation) -> Result<ResultContractRef> {
     let suffix = match operation {
         MultiRootApplicationOperation::ScopeSetRead => "scope-set-read",

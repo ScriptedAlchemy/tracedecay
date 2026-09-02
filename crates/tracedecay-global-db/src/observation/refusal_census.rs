@@ -37,7 +37,6 @@ pub enum ObservationRefusalCensusV1 {
     Unavailable,
 }
 
-#[hotpath::measure_all]
 impl RegisteredGlobalDb {
     /// Read-only census of durably refused source records.
     ///

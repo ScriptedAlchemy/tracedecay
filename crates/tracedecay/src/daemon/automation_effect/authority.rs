@@ -73,7 +73,6 @@ pub(super) async fn finalize_terminal_housekeeping(
     })?
 }
 
-#[hotpath::measure]
 fn spawn_terminal_housekeeping<T: Send + 'static>(
     finalize: impl FnOnce() -> Result<Option<T>> + Send + 'static,
     remove_pending: impl FnOnce(Option<&T>) -> Result<()> + Send + 'static,
@@ -84,7 +83,6 @@ fn spawn_terminal_housekeeping<T: Send + 'static>(
     })
 }
 
-#[hotpath::measure]
 fn run_terminal_housekeeping<T>(
     finalize: impl FnOnce() -> Result<Option<T>>,
     remove_pending: impl FnOnce(Option<&T>) -> Result<()>,
