@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::num::NonZeroU64;
+use std::path::{Component, Path};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
@@ -22,9 +23,12 @@ pub const DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1: NonZeroU64 =
 /// Environment override for the process resident-memory admission limit, in
 /// bytes. Unset, unparseable, or zero values fall back to the RAM-derived
 /// authority. The code-index worker pool derives its reservation from this
-/// same limit, so on hosts with plenty of RAM raising it both admits and
-/// widens indexing.
+/// same limit, so raising it can both admit and widen indexing, up to any
+/// finite cgroup-v2 memory ceiling.
 pub const PROCESS_RESIDENT_MEMORY_LIMIT_ENV_V1: &str = "TRACEDECAY_RESIDENT_MEMORY_LIMIT_BYTES";
+
+const PROC_SELF_CGROUP_V1: &str = "/proc/self/cgroup";
+const CGROUP_V2_ROOT_V1: &str = "/sys/fs/cgroup";
 
 /// Derive the concurrent resident-allocation authority for a known host size.
 #[must_use]
@@ -45,26 +49,103 @@ fn process_resident_memory_limit_override_v1() -> Option<NonZeroU64> {
         .and_then(NonZeroU64::new)
 }
 
+fn cgroup_v2_process_directory_v1(
+    proc_self_cgroup: &Path,
+    cgroup_root: &Path,
+) -> Option<std::path::PathBuf> {
+    let membership = std::fs::read_to_string(proc_self_cgroup).ok()?;
+    let relative = membership.lines().find_map(|line| {
+        let mut fields = line.splitn(3, ':');
+        let hierarchy = fields.next()?;
+        let controllers = fields.next()?;
+        let path = fields.next()?;
+        if hierarchy != "0" || !controllers.is_empty() {
+            return None;
+        }
+        Path::new(path)
+            .strip_prefix("/")
+            .ok()
+            .map(Path::to_path_buf)
+    })?;
+    if relative
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
+    {
+        return None;
+    }
+    Some(cgroup_root.join(relative))
+}
+
+fn finite_cgroup_memory_value_v1(path: &Path) -> Option<u64> {
+    let value = std::fs::read_to_string(path).ok()?;
+    let value = value.trim();
+    if value == "max" {
+        return None;
+    }
+    value.parse::<u64>().ok().map(|value| value.max(1))
+}
+
+fn cgroup_v2_memory_limit_v1(proc_self_cgroup: &Path, cgroup_root: &Path) -> Option<u64> {
+    let mut directory = cgroup_v2_process_directory_v1(proc_self_cgroup, cgroup_root)?;
+    let mut effective_limit = None;
+    loop {
+        for filename in ["memory.max", "memory.high"] {
+            if let Some(limit) = finite_cgroup_memory_value_v1(&directory.join(filename)) {
+                effective_limit =
+                    Some(effective_limit.map_or(limit, |current: u64| current.min(limit)));
+            }
+        }
+        if directory == cgroup_root {
+            break;
+        }
+        let parent = directory.parent()?;
+        if !parent.starts_with(cgroup_root) {
+            return None;
+        }
+        directory = parent.to_path_buf();
+    }
+    effective_limit
+}
+
+fn effective_memory_bytes_v1(total_memory_bytes: u64, cgroup_limit: Option<u64>) -> u64 {
+    match cgroup_limit {
+        Some(cgroup_limit) if total_memory_bytes == 0 => cgroup_limit,
+        Some(cgroup_limit) => total_memory_bytes.min(cgroup_limit),
+        None => total_memory_bytes,
+    }
+}
+
 /// Size the shared resident-allocation authority for this process.
 ///
-/// [`PROCESS_RESIDENT_MEMORY_LIMIT_ENV_V1`] wins when it names a usable limit,
-/// so operators can raise or lower the authority without rebuilding. Otherwise
-/// `TraceDecay` retains one quarter of physical RAM outside its modeled
-/// concurrent allocations for the OS, agent hosts, and allocations that do
-/// not yet participate in this authority. The remaining authority throttles
-/// simultaneous scratch ownership; it never limits repository bytes on disk.
+/// The automatic authority uses the lower of physical RAM and this process's
+/// finite cgroup-v2 `memory.max` / `memory.high`, then retains one quarter
+/// outside modeled concurrent allocations. [`PROCESS_RESIDENT_MEMORY_LIMIT_ENV_V1`]
+/// can lower or raise the automatic authority, but a finite cgroup ceiling
+/// remains an upper bound. The resulting authority throttles simultaneous
+/// scratch ownership; it never limits repository bytes on disk.
 #[must_use]
 pub fn detected_process_resident_memory_limit_v1() -> NonZeroU64 {
-    if let Some(limit) = process_resident_memory_limit_override_v1() {
-        hotpath::gauge!("resident_memory.admission_limit_bytes").set(limit.get() as f64);
-        return limit;
-    }
     let system = System::new_with_specifics(
         RefreshKind::new().with_memory(MemoryRefreshKind::new().with_ram()),
     );
     let total_memory_bytes = system.total_memory();
-    let limit = process_resident_memory_limit_for_system_v1(total_memory_bytes);
+    let proc_self_cgroup = Path::new(PROC_SELF_CGROUP_V1);
+    let cgroup_root = Path::new(CGROUP_V2_ROOT_V1);
+    let cgroup_limit = cgroup_v2_memory_limit_v1(proc_self_cgroup, cgroup_root);
+    let effective_memory_bytes = effective_memory_bytes_v1(total_memory_bytes, cgroup_limit);
+    let automatic_limit = process_resident_memory_limit_for_system_v1(effective_memory_bytes);
+    let limit =
+        process_resident_memory_limit_override_v1().map_or(automatic_limit, |override_limit| {
+            cgroup_limit.map_or(override_limit, |cgroup_limit| {
+                NonZeroU64::new(override_limit.get().min(cgroup_limit))
+                    .unwrap_or(DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1)
+            })
+        });
     hotpath::gauge!("resident_memory.system_total_bytes").set(total_memory_bytes as f64);
+    hotpath::gauge!("resident_memory.effective_total_bytes").set(effective_memory_bytes as f64);
+    if let Some(cgroup_limit) = cgroup_limit {
+        hotpath::gauge!("resident_memory.cgroup_limit_bytes").set(cgroup_limit as f64);
+    }
     hotpath::gauge!("resident_memory.admission_limit_bytes").set(limit.get() as f64);
     limit
 }

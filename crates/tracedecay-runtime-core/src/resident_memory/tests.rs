@@ -1,3 +1,4 @@
+use std::fs;
 use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex};
 
@@ -9,8 +10,8 @@ use super::{
     RESIDENT_MEMORY_PRESSURE_HIGH_WATERMARK_PERMILLE_V1,
     RESIDENT_MEMORY_PRESSURE_LOW_WATERMARK_PERMILLE_V1, ResidentMemoryAdmissionFailureV1,
     ResidentMemoryComponentIdV1, ResidentMemoryKeyV1, ResidentMemoryPressureStateV1,
-    ResidentMemoryPressureV1, process_resident_memory_limit_for_system_v1,
-    resident_memory_watermark_bytes_v1,
+    ResidentMemoryPressureV1, cgroup_v2_memory_limit_v1, effective_memory_bytes_v1,
+    process_resident_memory_limit_for_system_v1, resident_memory_watermark_bytes_v1,
 };
 
 fn bytes(value: u64) -> NonZeroU64 {
@@ -30,6 +31,155 @@ fn host_capacity_reserves_one_quarter_without_a_universal_ceiling() {
     assert_eq!(
         process_resident_memory_limit_for_system_v1(0),
         DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1
+    );
+}
+
+fn cgroup_fixture(
+    cgroup_membership: Option<&str>,
+    memory_max: Option<&str>,
+    memory_high: Option<&str>,
+) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let directory = tempfile::tempdir().expect("cgroup fixture root");
+    let proc_self_cgroup = directory.path().join("proc-self-cgroup");
+    let cgroup_root = directory.path().join("sys-fs-cgroup");
+    fs::create_dir_all(&cgroup_root).expect("cgroup mount fixture");
+    if let Some(membership) = cgroup_membership {
+        fs::write(&proc_self_cgroup, membership).expect("process cgroup membership fixture");
+    }
+    let process_cgroup = cgroup_root.join("trace.slice/daemon.scope");
+    fs::create_dir_all(&process_cgroup).expect("process cgroup fixture");
+    if let Some(limit) = memory_max {
+        fs::write(process_cgroup.join("memory.max"), limit).expect("memory.max fixture");
+    }
+    if let Some(limit) = memory_high {
+        fs::write(process_cgroup.join("memory.high"), limit).expect("memory.high fixture");
+    }
+    (directory, proc_self_cgroup, cgroup_root)
+}
+
+fn effective_memory_bytes(
+    total_memory_bytes: u64,
+    proc_self_cgroup: &std::path::Path,
+    cgroup_root: &std::path::Path,
+) -> u64 {
+    effective_memory_bytes_v1(
+        total_memory_bytes,
+        cgroup_v2_memory_limit_v1(proc_self_cgroup, cgroup_root),
+    )
+}
+
+#[test]
+fn absent_cgroup_membership_keeps_host_memory_capacity() {
+    let (_directory, proc_self_cgroup, cgroup_root) = cgroup_fixture(None, None, None);
+    assert_eq!(
+        effective_memory_bytes(88 * 1024 * 1024 * 1024, &proc_self_cgroup, &cgroup_root,),
+        88 * 1024 * 1024 * 1024
+    );
+}
+
+#[test]
+fn absent_cgroup_memory_files_keep_host_memory_capacity() {
+    let (_directory, proc_self_cgroup, cgroup_root) =
+        cgroup_fixture(Some("0::/trace.slice/daemon.scope\n"), None, None);
+    assert_eq!(
+        effective_memory_bytes(88 * 1024 * 1024 * 1024, &proc_self_cgroup, &cgroup_root,),
+        88 * 1024 * 1024 * 1024
+    );
+}
+
+#[test]
+fn unlimited_cgroup_memory_files_keep_host_memory_capacity() {
+    let (_directory, proc_self_cgroup, cgroup_root) = cgroup_fixture(
+        Some("0::/trace.slice/daemon.scope\n"),
+        Some("max\n"),
+        Some("max\n"),
+    );
+    assert_eq!(
+        effective_memory_bytes(88 * 1024 * 1024 * 1024, &proc_self_cgroup, &cgroup_root,),
+        88 * 1024 * 1024 * 1024
+    );
+}
+
+#[test]
+fn finite_memory_max_bounds_host_memory_capacity() {
+    let gib = 1024 * 1024 * 1024;
+    let (_directory, proc_self_cgroup, cgroup_root) = cgroup_fixture(
+        Some("0::/trace.slice/daemon.scope\n"),
+        Some("32212254720\n"),
+        Some("max\n"),
+    );
+    assert_eq!(
+        effective_memory_bytes(88 * gib, &proc_self_cgroup, &cgroup_root),
+        30 * gib
+    );
+}
+
+#[test]
+fn finite_memory_high_below_max_is_the_effective_capacity() {
+    let gib = 1024 * 1024 * 1024;
+    let (_directory, proc_self_cgroup, cgroup_root) = cgroup_fixture(
+        Some("0::/trace.slice/daemon.scope\n"),
+        Some("32212254720\n"),
+        Some("25769803776\n"),
+    );
+    assert_eq!(
+        effective_memory_bytes(88 * gib, &proc_self_cgroup, &cgroup_root),
+        24 * gib
+    );
+}
+
+#[test]
+fn finite_ancestor_limit_bounds_an_unlimited_process_cgroup() {
+    let gib = 1024 * 1024 * 1024;
+    let (directory, proc_self_cgroup, cgroup_root) = cgroup_fixture(
+        Some("0::/trace.slice/daemon.scope\n"),
+        Some("max\n"),
+        Some("max\n"),
+    );
+    fs::write(cgroup_root.join("trace.slice/memory.max"), "32212254720\n")
+        .expect("ancestor memory.max fixture");
+    fs::write(cgroup_root.join("trace.slice/memory.high"), "max\n")
+        .expect("ancestor memory.high fixture");
+
+    assert_eq!(
+        effective_memory_bytes(88 * gib, &proc_self_cgroup, &cgroup_root),
+        30 * gib
+    );
+    drop(directory);
+}
+
+#[test]
+fn low_effective_cgroup_ceiling_engages_measured_pressure_before_the_cap() {
+    let mib = 1024 * 1024;
+    let (_directory, proc_self_cgroup, cgroup_root) = cgroup_fixture(
+        Some("0::/trace.slice/daemon.scope\n"),
+        Some("134217728\n"),
+        Some("100663296\n"),
+    );
+    let effective = effective_memory_bytes(8 * 1024 * mib, &proc_self_cgroup, &cgroup_root);
+    let limit = process_resident_memory_limit_for_system_v1(effective);
+    let pressure = Arc::new(ResidentMemoryPressureV1::new(limit));
+    let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        limit,
+        Arc::clone(&pressure),
+    ));
+
+    assert_eq!(effective, 96 * mib);
+    assert_eq!(limit.get(), 72 * mib);
+    assert!(pressure.high_watermark_bytes() < effective);
+    assert!(
+        pressure
+            .publish_observed_resident_bytes(pressure.high_watermark_bytes())
+            .is_over_budget()
+    );
+    assert!(
+        authority
+            .reserve(
+                key("project-a", "worktree-a", "generation-a", "canonical"),
+                growth_request(),
+            )
+            .expect_err("cgroup-bounded pressure must refuse growth")
+            .is_observed_over_budget()
     );
 }
 
