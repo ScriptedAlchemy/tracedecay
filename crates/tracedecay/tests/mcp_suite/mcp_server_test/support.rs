@@ -41,63 +41,6 @@ pub(crate) async fn setup_server() -> (Arc<McpServer>, TempDir) {
     (server, dir)
 }
 
-/// The identity a fixture's store was actually opened with.
-///
-/// This is the authority the runtime and the retained project-graph resolver
-/// both key on, and unlike the repo-local identity marker it is always present
-/// for a template-seeded fixture.
-pub(crate) fn project_id_of(cg: &TraceDecay) -> tracedecay_domain::ProjectId {
-    let project_id = cg
-        .store_layout()
-        .identity
-        .project_id
-        .clone()
-        .expect("fixture project identity");
-    tracedecay_domain::ProjectId::new(project_id).expect("fixture project id is well formed")
-}
-
-/// Opens an already-initialized project and returns a server that retains the
-/// project's registered session authority.
-///
-/// Every LCM tool refuses to open a store without one, so a fixture built on
-/// [`McpServer::new`] makes each LCM call short-circuit to a typed
-/// `unavailable` payload instead of exercising the store. Requires an
-/// isolated profile (see [`crate::common::IsolatedEnv`]) because the runtime
-/// mounts the ambient profile root.
-pub(crate) async fn server_with_session_authority(project: &std::path::Path) -> Arc<McpServer> {
-    let cg = Box::pin(TraceDecay::open(project)).await.unwrap();
-    let project_id = project_id_of(&cg);
-    let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
-    let runtime = HostAdmissionTestRuntimeV1::project_scoped(&profile_root, project, project_id)
-        .await
-        .expect("registered project runtime opens for the isolated profile");
-    Box::pin(McpServer::new_with_host_admission_test_runtime_for_test(
-        cg, None, runtime,
-    ))
-    .await
-    .expect("registered test server")
-}
-
-/// As [`setup_server`], but the returned server retains the project's
-/// registered session authority. See [`server_with_session_authority`].
-pub(crate) async fn setup_server_with_session_authority() -> (Arc<McpServer>, TempDir) {
-    let dir = TempDir::new().unwrap();
-    let project = dir.path();
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(
-        project.join("src/main.rs"),
-        "fn main() { let x = helper(); }\nfn helper() -> i32 { 42 }\n",
-    )
-    .unwrap();
-    let cg = crate::fixture::init_project_from_template(project)
-        .await
-        .unwrap();
-    cg.checkpoint().await.unwrap();
-    drop(cg);
-    let server = server_with_session_authority(project).await;
-    (server, dir)
-}
-
 /// Sends a sequence of JSON-RPC messages to a server, runs it to completion,
 /// and returns all non-empty response lines.
 pub(crate) async fn run_server_with_messages(
@@ -242,36 +185,6 @@ impl McpTransport for ReadErrorTransport {
 /// Serializes tests that mutate process-wide global-accounting environment.
 pub(crate) static SAVINGS_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Awaits the server's ledger-write settlement signal (the rows are written
-/// by spawned fire-and-forget tasks), then reads the ledger once and asserts
-/// the expected row count for `project`. Settlement replaces a wall-clock
-/// deadline race against the spawned write task, and the profile belongs to
-/// this test alone, so no concurrent fixture can add rows to it.
-pub(crate) async fn settled_ledger_total(
-    server: &McpServer,
-    global_db_path: &std::path::Path,
-    project: &std::path::Path,
-    expected_calls: u64,
-) -> tracedecay_global_db::SavingsTotal {
-    server.ledger_writes_settled().await;
-    let runtime = tracedecay::host_admission::HostAdmissionTestRuntimeV1::profile(
-        global_db_path
-            .parent()
-            .expect("global db has a profile root"),
-    )
-    .await
-    .expect("registered profile runtime opens at isolated path");
-    let total = runtime
-        .sum_savings_for_test(Some(&project.to_string_lossy()), 0)
-        .await;
-    assert_eq!(
-        total.calls, expected_calls,
-        "every settled ledger write for this project must be visible (got {} calls)",
-        total.calls
-    );
-    total
-}
-
 /// A server whose accounting and analytics writes are actually observable.
 ///
 /// [`McpServer::new`] leaves both accounting databases unmounted, so ledger
@@ -280,8 +193,8 @@ pub(crate) async fn settled_ledger_total(
 /// registered runtime, and `global_db_path` reads the same profile back.
 pub(crate) struct AccountedServer {
     pub(crate) server: Arc<McpServer>,
-    pub(crate) project: TempDir,
     pub(crate) global_db_path: PathBuf,
+    _project: TempDir,
     _profile: TempDir,
 }
 
@@ -303,10 +216,6 @@ pub(crate) async fn setup_accounted_server() -> AccountedServer {
         "fn main() { let x = helper(); }\nfn helper() -> i32 { 42 }\n",
     )
     .await
-}
-
-pub(crate) async fn setup_accounted_savings_server() -> AccountedServer {
-    setup_accounted_server_with_source(&savings_project_source()).await
 }
 
 async fn setup_accounted_server_with_source(source: &str) -> AccountedServer {
@@ -345,24 +254,10 @@ async fn setup_accounted_server_with_source(source: &str) -> AccountedServer {
     .expect("registered test server");
     AccountedServer {
         server,
-        project: dir,
         global_db_path,
+        _project: dir,
         _profile: profile_dir,
     }
-}
-
-/// Extracts `(before, after)` from the `tracedecay_metrics:` line appended
-/// to a tool response's content array.
-pub(crate) fn parse_metrics_line(resp: &Value) -> Option<(u64, u64)> {
-    let content = resp["result"]["content"].as_array()?;
-    let line = content
-        .iter()
-        .filter_map(|item| item["text"].as_str())
-        .find(|t| t.contains("tracedecay_metrics: before="))?;
-    let tail = line.split("before=").nth(1)?;
-    let (before, rest) = tail.split_once(' ')?;
-    let after = rest.strip_prefix("after=")?;
-    Some((before.trim().parse().ok()?, after.trim().parse().ok()?))
 }
 
 pub(crate) async fn mcp_runtime_events(
@@ -445,6 +340,31 @@ pub(crate) async fn expect_harness_mcp_runtime_event(
 ) -> tracedecay_global_db::AnalyticsEventRecord {
     harness_mcp_runtime_events(harness, session_id)
         .await
+        .into_iter()
+        .find(|event| event.tool_name.as_deref() == Some(tool_name))
+        .unwrap_or_else(|| panic!("{label}"))
+}
+
+#[cfg(feature = "test-transport")]
+pub(crate) async fn expect_harness_project_mcp_runtime_event(
+    harness: &tracedecay::daemon::ProductionProjectCompositionHarnessV1,
+    project_id: &str,
+    tool_name: &str,
+    label: &str,
+) -> tracedecay_global_db::AnalyticsEventRecord {
+    harness
+        .read_profile_analytics_events(&tracedecay_global_db::AnalyticsEventQuery {
+            provider: Some("mcp".to_string()),
+            project_id: Some(project_id.to_string()),
+            session_id: None,
+            event_kind: Some("mcp_tool_call".to_string()),
+            since: None,
+            until: None,
+            before_id: None,
+            limit: 100,
+        })
+        .await
+        .expect("query project runtime analytics events")
         .into_iter()
         .find(|event| event.tool_name.as_deref() == Some(tool_name))
         .unwrap_or_else(|| panic!("{label}"))

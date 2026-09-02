@@ -6,6 +6,8 @@ use std::sync::Arc;
 
 #[tokio::test]
 async fn search_call_writes_savings_ledger_row() {
+    let _env_guard = SAVINGS_ENV_LOCK.lock().await;
+    let _enable = EnvVarGuard::set("TRACEDECAY_ENABLE_GLOBAL_DB", "1");
     let fixture = crate::support::production_composition_fixture().await;
     let server = fixture
         .harness
@@ -58,10 +60,8 @@ async fn search_call_writes_savings_ledger_row() {
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn search_call_writes_mcp_runtime_analytics_event() {
-    // Search lanes are served by the daemon-owned code-index authority, so
-    // this analytics journey runs through the production composition. The
-    // warm-up searches settle real ledger rows of their own, so ledger
-    // assertions work on per-call deltas.
+    let _env_guard = SAVINGS_ENV_LOCK.lock().await;
+    let _enable = EnvVarGuard::set("TRACEDECAY_ENABLE_GLOBAL_DB", "1");
     let fixture = crate::support::production_composition_fixture_with_sources(|root| {
         std::fs::create_dir_all(root.join("src")).expect("savings project src");
         std::fs::write(root.join("src/main.rs"), savings_project_source())
@@ -98,7 +98,6 @@ async fn search_call_writes_mcp_runtime_analytics_event() {
     .await;
 
     assert!(resp["error"].is_null(), "search should not error");
-    let (before, after) = parse_metrics_line(&resp).expect("metrics line present");
 
     server.ledger_writes_settled().await;
     let total = fixture
@@ -126,6 +125,12 @@ async fn search_call_writes_mcp_runtime_analytics_event() {
     )
     .await;
     let metadata = analytics_metadata(&event);
+    let before = metadata["before_tokens"]
+        .as_u64()
+        .expect("analytics event before-token count");
+    let after = metadata["after_tokens"]
+        .as_u64()
+        .expect("analytics event after-token count");
 
     assert_eq!(event.session_id.as_deref(), Some("mcp-session-9002"));
     assert_eq!(event.project_id, project_path);
@@ -139,7 +144,7 @@ async fn search_call_writes_mcp_runtime_analytics_event() {
     assert_eq!(event.outcome.as_deref(), Some("success"));
     assert_eq!(metadata["before_tokens"], before);
     assert_eq!(metadata["after_tokens"], after);
-    assert_eq!(metadata["tokens_saved"], before - after);
+    assert_eq!(metadata["tokens_saved"], before.saturating_sub(after));
     assert_eq!(metadata["transport"], "mcp");
     assert_eq!(metadata["tool_kind"], "mcp_tool");
     fixture.harness.shutdown().await;
@@ -159,9 +164,8 @@ async fn context_call_writes_memory_match_analytics_without_fact_bodies() {
 
     let fact_content =
         "Durable context memory analytics should report counts without leaking fact bodies.";
-    let added = call_tool(
-        Arc::clone(&server),
-        9005,
+    let added = crate::support::handle_real_server_tool_call_raw(
+        &server,
         "tracedecay_fact_store_add",
         json!({
             "format": "json",
@@ -234,13 +238,11 @@ async fn context_call_writes_memory_match_analytics_without_fact_bodies() {
         "commit must bind the created fact to its durable event: {commit}"
     );
 
-    let resp = call_tool(
-        Arc::clone(&server),
-        9006,
+    let resp = crate::support::handle_real_server_tool_call_raw(
+        &server,
         "tracedecay_context",
         json!({
-            "task": "context memory analytics",
-            "session_id": "mcp-session-9006"
+            "task": "context memory analytics"
         }),
     )
     .await;
@@ -258,10 +260,16 @@ async fn context_call_writes_memory_match_analytics_without_fact_bodies() {
     );
 
     server.ledger_writes_settled().await;
-    let event = expect_harness_mcp_runtime_event(
+    let project_id = fixture
+        .project_root
+        .canonicalize()
+        .expect("project path canonicalizes")
+        .to_string_lossy()
+        .to_string();
+    let event = expect_harness_project_mcp_runtime_event(
         &fixture.harness,
+        &project_id,
         "tracedecay_context",
-        "mcp-session-9006",
         "durable context MCP runtime analytics event",
     )
     .await;
@@ -547,67 +555,8 @@ async fn global_accounting_env_overrides() {
 /// the gross "before" estimate even when the response carried the whole file.
 #[tokio::test]
 async fn full_file_read_credits_zero_net_savings() {
-    let fixture = setup_accounted_savings_server().await;
-    let (server, server_handle) = (fixture.server.clone(), fixture.server.clone());
-    let (proj_tmp, db_path) = (&fixture.project, &fixture.global_db_path);
-    let project_path = proj_tmp.path().to_path_buf();
-
-    let responses = run_server_with_messages(
-        server,
-        vec![jsonrpc_request(
-            json!(9101),
-            "tools/call",
-            json!({
-                "name": "tracedecay_read",
-                "arguments": { "file": "src/main.rs", "mode": "full" }
-            }),
-        )],
-    )
-    .await;
-
-    let resp_str = responses
-        .iter()
-        .find(|r| parse_response(r)["id"] == 9101)
-        .expect("should have a response for id=9101");
-    let resp = parse_response(resp_str);
-    assert!(resp["error"].is_null(), "read should not error");
-
-    // The metrics line must prove the raw estimate was real (before > 0)
-    // and that a full read delivers at least as much as it "saves".
-    let (before, after) = parse_metrics_line(&resp).expect("metrics line present");
-    assert!(before > 0, "raw-file estimate should be nonzero");
-    assert!(
-        after >= before,
-        "full-file response ({after}) should be at least the raw estimate ({before})"
-    );
-
-    let total = settled_ledger_total(&server_handle, db_path, &project_path, 1).await;
-    assert_eq!(
-        total.saved_tokens, 0,
-        "ledger must not count a full-file read as savings"
-    );
-    let runtime = tracedecay::host_admission::HostAdmissionTestRuntimeV1::profile(
-        db_path.parent().expect("global db has a profile root"),
-    )
-    .await
-    .expect("registered profile runtime opens at isolated path");
-    assert_eq!(
-        runtime.get_project_tokens(&project_path).await,
-        0,
-        "lifetime counter must not be credited with the gross before estimate"
-    );
-}
-
-/// The lifetime counter and the ledger must agree: both credit the net
-/// saving (before - after) per call, so after a single compressed call the
-/// per-project counter equals the ledger total.
-#[cfg(feature = "test-transport")]
-#[tokio::test]
-async fn lifetime_counter_matches_ledger_net_savings() {
-    // Search lanes are served by the daemon-owned code-index authority, so
-    // the accounted journey runs through the production composition; warm-up
-    // searches settle ledger rows of their own, so both the ledger total and
-    // the lifetime counter are asserted as per-call deltas.
+    let _env_guard = SAVINGS_ENV_LOCK.lock().await;
+    let _enable = EnvVarGuard::set("TRACEDECAY_ENABLE_GLOBAL_DB", "1");
     let fixture = crate::support::production_composition_fixture_with_sources(|root| {
         std::fs::create_dir_all(root.join("src")).expect("savings project src");
         std::fs::write(root.join("src/main.rs"), savings_project_source())
@@ -634,7 +583,103 @@ async fn lifetime_counter_matches_ledger_net_savings() {
         .harness
         .project_lifetime_saved_tokens(&project_path)
         .await
-        .expect("baseline lifetime counter");
+        .expect("baseline lifetime savings");
+
+    let resp = crate::support::handle_real_server_tool_call_raw(
+        &server,
+        "tracedecay_read",
+        json!({
+            "file": "src/main.rs",
+            "mode": "full"
+        }),
+    )
+    .await;
+    assert!(resp["error"].is_null(), "read should not error: {resp}");
+
+    server.ledger_writes_settled().await;
+    let event = expect_harness_project_mcp_runtime_event(
+        &fixture.harness,
+        &project_key,
+        "tracedecay_read",
+        "durable full-file read analytics event",
+    )
+    .await;
+    let metadata = analytics_metadata(&event);
+    let before = metadata["before_tokens"]
+        .as_u64()
+        .expect("analytics event before-token count");
+    let after = metadata["after_tokens"]
+        .as_u64()
+        .expect("analytics event after-token count");
+    assert!(before > 0, "raw-file estimate should be nonzero");
+    assert!(
+        after >= before,
+        "full-file response ({after}) should be at least the raw estimate ({before})"
+    );
+
+    let total = fixture
+        .harness
+        .sum_profile_savings(Some(&project_key), 0)
+        .await
+        .expect("settled savings after full-file read");
+    assert_eq!(
+        total.calls,
+        baseline.calls + 1,
+        "the accounted call must settle exactly one new ledger row"
+    );
+    assert_eq!(
+        total.saved_tokens - baseline.saved_tokens,
+        0,
+        "ledger must not count a full-file read as savings"
+    );
+    let lifetime = fixture
+        .harness
+        .project_lifetime_saved_tokens(&project_path)
+        .await
+        .expect("lifetime savings after full-file read");
+    assert_eq!(
+        lifetime - baseline_lifetime,
+        0,
+        "lifetime counter must not be credited with the gross before estimate"
+    );
+    fixture.harness.shutdown().await;
+}
+
+/// The lifetime counter and the ledger must agree: both credit the net
+/// saving (before - after) per call, so after a single compressed call the
+/// per-project counter equals the ledger total.
+#[cfg(feature = "test-transport")]
+#[tokio::test]
+async fn lifetime_counter_matches_ledger_net_savings() {
+    let _env_guard = SAVINGS_ENV_LOCK.lock().await;
+    let _enable = EnvVarGuard::set("TRACEDECAY_ENABLE_GLOBAL_DB", "1");
+    let fixture = crate::support::production_composition_fixture_with_sources(|root| {
+        std::fs::create_dir_all(root.join("src")).expect("savings project src");
+        std::fs::write(root.join("src/main.rs"), savings_project_source())
+            .expect("savings project source");
+    })
+    .await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
+    crate::support::warm_code_index_search(&server, "helper").await;
+    server.ledger_writes_settled().await;
+    let project_path = fixture
+        .project_root
+        .canonicalize()
+        .expect("project path canonicalizes");
+    let project_key = project_path.to_string_lossy().to_string();
+    let baseline = fixture
+        .harness
+        .sum_profile_savings(Some(&project_key), 0)
+        .await
+        .expect("baseline settled savings");
+    let baseline_lifetime = fixture
+        .harness
+        .project_lifetime_saved_tokens(&project_path)
+        .await
+        .expect("baseline lifetime savings");
 
     let responses = run_server_with_messages(
         Arc::clone(&server),
@@ -643,7 +688,10 @@ async fn lifetime_counter_matches_ledger_net_savings() {
             "tools/call",
             json!({
                 "name": "tracedecay_search",
-                "arguments": { "query": "helper" }
+                "arguments": {
+                    "query": "helper",
+                    "session_id": "mcp-session-9102"
+                }
             }),
         )],
     )
@@ -656,18 +704,31 @@ async fn lifetime_counter_matches_ledger_net_savings() {
     let resp = parse_response(resp_str);
     assert!(resp["error"].is_null(), "search should not error");
 
-    let (before, after) = parse_metrics_line(&resp).expect("metrics line present");
+    server.ledger_writes_settled().await;
+    let event = expect_harness_mcp_runtime_event(
+        &fixture.harness,
+        "tracedecay_search",
+        "mcp-session-9102",
+        "durable compressed-search analytics event",
+    )
+    .await;
+    let metadata = analytics_metadata(&event);
+    let before = metadata["before_tokens"]
+        .as_u64()
+        .expect("analytics event before-token count");
+    let after = metadata["after_tokens"]
+        .as_u64()
+        .expect("analytics event after-token count");
     assert!(
         before > after,
         "compressed search should save tokens (before={before}, after={after})"
     );
 
-    server.ledger_writes_settled().await;
     let total = fixture
         .harness
         .sum_profile_savings(Some(&project_key), 0)
         .await
-        .expect("settled savings after the accounted call");
+        .expect("settled savings after compressed search");
     assert_eq!(
         total.calls,
         baseline.calls + 1,
@@ -682,7 +743,7 @@ async fn lifetime_counter_matches_ledger_net_savings() {
         .harness
         .project_lifetime_saved_tokens(&project_path)
         .await
-        .expect("lifetime counter after the accounted call");
+        .expect("lifetime savings after compressed search");
     assert_eq!(
         lifetime - baseline_lifetime,
         before - after,

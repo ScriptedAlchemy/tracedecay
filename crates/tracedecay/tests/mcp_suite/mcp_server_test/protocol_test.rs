@@ -2,7 +2,7 @@ use crate::mcp_server_test::support::*;
 use serde_json::{Value, json};
 use std::fs;
 use tempfile::TempDir;
-use tracedecay::tracedecay::{TraceDecay, current_timestamp};
+use tracedecay::tracedecay::current_timestamp;
 use tracedecay_mcp::response_handles::{
     RESPONSE_HANDLE_TTL_SECS, cleanup_expired_response_handles, store_response_handle,
 };
@@ -1162,11 +1162,8 @@ async fn test_server_stats_include_response_handle_metrics() {
         )
         .await;
         if i == 34 {
-            let added: Value =
+            let payload: Value =
                 serde_json::from_str(crate::support::extract_real_server_text(&added)).unwrap();
-            let payload = added
-                .pointer("/outcome/value/payload")
-                .expect("canonical fact-store add payload");
             assert_eq!(payload["outcome"], "committed");
             assert_eq!(payload["result"]["disposition"], "added");
             assert_eq!(payload["result"]["fact"]["kind"], "available");
@@ -1183,7 +1180,7 @@ async fn test_server_stats_include_response_handle_metrics() {
         }
     }
 
-    let listed = crate::support::handle_real_server_tool_call(
+    let listed = crate::support::handle_real_server_tool_call_raw(
         &server,
         "tracedecay_fact_store_list",
         json!({
@@ -1194,7 +1191,7 @@ async fn test_server_stats_include_response_handle_metrics() {
     )
     .await;
     let envelope: Value =
-        serde_json::from_str(crate::support::extract_real_server_text(&listed)).unwrap();
+        serde_json::from_str(crate::support::extract_real_server_text(&listed["result"])).unwrap();
     let handle = envelope["handle"]
         .as_str()
         .expect("retrieve handle")
@@ -1250,6 +1247,7 @@ async fn test_server_stats_include_response_handle_metrics() {
         !broken_result["error"].is_null(),
         "broken handle fixture should increment retrieve failure telemetry"
     );
+    fs::remove_dir(&broken_path).unwrap();
 
     assert!(
         store_response_handle(cg.project_root(), "{\"expires\":true}", current_timestamp()).is_ok(),
@@ -1322,11 +1320,8 @@ async fn test_server_stats_include_response_handle_metrics() {
             }),
         )
         .await;
-        let removed: Value =
+        let payload: Value =
             serde_json::from_str(crate::support::extract_real_server_text(&removed)).unwrap();
-        let payload = removed
-            .pointer("/outcome/value/payload")
-            .expect("canonical fact-store remove payload");
         assert_eq!(payload["outcome"], "removed");
         assert_eq!(payload["fact"]["kind"], "unavailable");
         assert_eq!(payload["fact"]["status"]["fact_id"], fact_id);
@@ -1921,8 +1916,18 @@ async fn test_run_returns_transport_read_errors() {
 // the migration-running path) before the status reads.
 #[tokio::test]
 async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
-    let (_env, _active_project) = crate::common::IsolatedEnv::acquire().await;
-    let (server, dir) = setup_server_with_session_authority().await;
+    let profile = crate::common::fixture::TestProfile::acquire().await;
+    let repository =
+        crate::common::fixture::GitFixture::primary(profile.path("lcm-migration-project"));
+    fs::create_dir_all(repository.root().join("src")).unwrap();
+    fs::write(
+        repository.root().join("src/main.rs"),
+        "fn main() { let x = helper(); }\nfn helper() -> i32 { 42 }\n",
+    )
+    .unwrap();
+    let project = profile.enroll(repository.root()).await;
+    let project_root = project.root().to_path_buf();
+    let server = project.mcp_server().await;
     let lcm_status_call = |id: i64| {
         jsonrpc_request(
             json!(id),
@@ -1954,23 +1959,23 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
             "lcm_status id={id} should not error"
         );
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
-        let payload: Value = serde_json::from_str(text).unwrap();
+        let envelope: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(
+            envelope.pointer("/outcome/outcome").and_then(Value::as_str),
+            Some("evidence"),
+            "lcm_status id={id} must return retained evidence: {envelope}"
+        );
+        let payload = envelope
+            .pointer("/outcome/value/payload")
+            .expect("lcm_status retained evidence payload");
         assert_eq!(payload["status"], "ok", "lcm_status id={id} payload");
     }
 
     // Stamp a sentinel applied_at; only a re-run of the migrations would
     // rewrite it (the version-gate fast path and the per-process ensured
     // flag both leave the row untouched).
-    let project_id = project_id_of(&TraceDecay::open(dir.path()).await.unwrap());
-    let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
-    let runtime = tracedecay::host_admission::HostAdmissionTestRuntimeV1::project(
-        &profile_root,
-        dir.path(),
-        project_id.clone(),
-    )
-    .await
-    .unwrap();
-    runtime
+    project
+        .registry()
         .set_lcm_schema_migration_applied_at_for_test(
             tracedecay_sessions::admission::HostAdmissionScope::Project,
             123,
@@ -1978,7 +1983,8 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
         .await
         .unwrap();
     assert_eq!(
-        runtime
+        project
+            .registry()
             .lcm_schema_migration_applied_at_for_test(
                 tracedecay_sessions::admission::HostAdmissionScope::Project,
             )
@@ -1986,14 +1992,14 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
             .unwrap(),
         Some(123)
     );
-    drop(runtime);
 
     // Store-resolution evidence for the final assertion: a rewritten sentinel
     // means migrations re-ran, and the stats below distinguish "the same
     // store file was recreated" (created/length drift on one path) from "a
     // different store file answered" (the seeded file left untouched).
-    let sessions_db = tracedecay_runtime_core::storage::resolve_project_session_db_path(dir.path())
-        .expect("resolve the project's sessions db path");
+    let sessions_db =
+        tracedecay_runtime_core::storage::resolve_project_session_db_path(&project_root)
+            .expect("resolve the project's sessions db path");
     let stat_sessions_db = |label: &str| match std::fs::metadata(&sessions_db) {
         Ok(meta) => format!(
             "{label}: path={} len={} created={:?} modified={:?}",
@@ -2013,7 +2019,7 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
     // LCM mutation tools are daemon-internal now, so the status reads are the
     // remaining serve-mode calls that would re-run migrations if the
     // per-process ensured cache failed.
-    let server = server_with_session_authority(dir.path()).await;
+    let server = project.mcp_server().await;
     let responses = run_server_with_messages(
         server,
         vec![
@@ -2033,22 +2039,24 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
     }
     for id in [2_i64, 3] {
         let resp = response_with_id(&responses, json!(id));
-        let payload: Value =
+        let envelope: Value =
             serde_json::from_str(successful_tool_text(&resp, "second-session lcm_status")).unwrap();
+        assert_eq!(
+            envelope.pointer("/outcome/outcome").and_then(Value::as_str),
+            Some("evidence"),
+            "second-session lcm_status id={id} must return retained evidence: {envelope}"
+        );
+        let payload = envelope
+            .pointer("/outcome/value/payload")
+            .expect("second-session lcm_status retained evidence payload");
         assert_eq!(
             payload["status"], "ok",
             "second-session lcm_status id={id} payload"
         );
     }
-    let runtime = tracedecay::host_admission::HostAdmissionTestRuntimeV1::project(
-        &profile_root,
-        dir.path(),
-        project_id,
-    )
-    .await
-    .unwrap();
     assert_eq!(
-        runtime
+        project
+            .registry()
             .lcm_schema_migration_applied_at_for_test(
                 tracedecay_sessions::admission::HostAdmissionScope::Project,
             )
