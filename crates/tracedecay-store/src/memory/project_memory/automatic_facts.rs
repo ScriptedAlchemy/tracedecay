@@ -64,7 +64,6 @@ pub struct ProjectMemoryAutomaticFactEvidenceV1 {
     validation: Option<Value>,
 }
 
-#[hotpath::measure_all]
 impl ProjectMemoryAutomaticFactEvidenceV1 {
     pub fn new(
         evidence_hash: Option<String>,
@@ -118,7 +117,6 @@ pub enum ProjectMemoryAutomaticFactEffectV1 {
     },
 }
 
-#[hotpath::measure_all]
 impl ProjectMemoryAutomaticFactEffectV1 {
     fn validate(&self, owner: &FactOwnerV1) -> FactStoreResult<()> {
         match self {
@@ -197,7 +195,6 @@ pub struct ProjectMemoryAutomaticFactReceiptV1 {
     recorded_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl ProjectMemoryAutomaticFactReceiptV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -303,7 +300,6 @@ pub struct ProjectMemoryAutomaticFactApplyResultV1 {
     disposition: ProjectMemoryAutomaticFactApplyDispositionV1,
 }
 
-#[hotpath::measure_all]
 impl ProjectMemoryAutomaticFactApplyResultV1 {
     pub fn new(
         receipt: ProjectMemoryAutomaticFactReceiptV1,
@@ -394,7 +390,6 @@ pub struct ProjectMemoryAutomaticFactReceiptPageV1 {
     next_after_apply_id: Option<ProvenanceId>,
 }
 
-#[hotpath::measure_all]
 impl ProjectMemoryAutomaticFactReceiptPageV1 {
     pub fn new(
         owner: FactOwnerV1,

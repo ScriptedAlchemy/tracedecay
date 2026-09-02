@@ -40,7 +40,6 @@ fn unavailable_read(
     })
 }
 
-#[hotpath::measure]
 fn validate_outcome(
     request: &RuntimeReadRequestV1,
     outcome: RuntimeReadOutcomeV1,

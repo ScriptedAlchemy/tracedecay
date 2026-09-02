@@ -28,7 +28,6 @@ pub struct ProjectRequestRuntimesV1 {
     pub lsp_owner: Option<DaemonLspInvocationOwner>,
 }
 
-#[hotpath::measure_all]
 impl ProjectRuntimeRegistryV1 {
     pub fn admit_request(
         &self,
@@ -170,7 +169,6 @@ impl ProjectRuntimeRegistryV1 {
     }
 }
 
-#[hotpath::measure]
 fn candidate_roots(project_root: &Path, canonical_root: Option<&Path>) -> BTreeSet<PathBuf> {
     let mut roots = BTreeSet::from([project_root.to_path_buf()]);
     if let Some(canonical_root) = canonical_root {
@@ -179,7 +177,6 @@ fn candidate_roots(project_root: &Path, canonical_root: Option<&Path>) -> BTreeS
     roots
 }
 
-#[hotpath::measure_all]
 impl ProjectRequestRuntimesV1 {
     pub fn is_admitted(&self) -> bool {
         self.admitted

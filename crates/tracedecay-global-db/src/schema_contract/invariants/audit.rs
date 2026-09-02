@@ -341,7 +341,6 @@ struct ProjectionAuthorityState {
     queued: bool,
 }
 
-#[hotpath::measure_all]
 impl ProjectionAuthorityState {
     #[hotpath::skip]
     async fn load(
@@ -426,7 +425,6 @@ struct ProjectionAliasRow {
     message_id: String,
 }
 
-#[hotpath::measure_all]
 impl ProjectionAliasRow {
     #[hotpath::skip]
     async fn load(
@@ -470,7 +468,6 @@ struct ProjectionProvenanceRow {
 /// Observation ids carried by one batched provenance statement.
 const PROVENANCE_ROW_BATCH_KEYS: usize = 128;
 
-#[hotpath::measure_all]
 impl ProjectionProvenanceRow {
     /// Every provenance row this projector holds for a page's observations,
     /// keyed by `(observation_id, output_ordinal)`.
@@ -553,7 +550,6 @@ struct ProjectionDispositionRow {
     reason: String,
 }
 
-#[hotpath::measure_all]
 impl ProjectionDispositionRow {
     #[hotpath::skip]
     async fn load(
@@ -591,7 +587,6 @@ struct ProjectionOutputOwnership {
 /// Requested output keys carried by one batched ownership statement.
 const OUTPUT_OWNERSHIP_BATCH_KEYS: usize = 256;
 
-#[hotpath::measure_all]
 impl ProjectionOutputOwnership {
     /// Creation-owner counts for a whole chunk of audited outputs.
     ///
@@ -699,7 +694,6 @@ struct ResolvedOutputAuthority {
     projection_rows: crate::observation_projection::ProjectionRowsBatch,
 }
 
-#[hotpath::measure_all]
 impl ResolvedOutputAuthority {
     fn provenance_row(
         &self,
@@ -733,7 +727,6 @@ impl ResolvedOutputAuthority {
     }
 }
 
-#[hotpath::measure]
 fn validate_alias_binding(
     alias: &ProjectionAliasRow,
     unaliased: &ObservationProjection,
@@ -759,7 +752,6 @@ fn validate_alias_binding(
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_provenance_row(
     actual: &ProjectionProvenanceRow,
     projection: &SessionMessageProjection,
@@ -898,7 +890,6 @@ async fn validate_skipped_projection(
     validate_skipped_projection_row(observation, &disposition, reason)
 }
 
-#[hotpath::measure]
 fn validate_skipped_projection_row(
     observation: &DurableObservationV1,
     disposition: &ProjectionDispositionRow,
@@ -1028,7 +1019,6 @@ async fn derive_projection_effect(
 /// Pending outputs are included: an observation that is still queued costs one
 /// extra key in the batched statement and no extra round trip, which is
 /// cheaper than deciding per row whether its authority will be consulted.
-#[hotpath::measure]
 fn requested_outputs(effects: &[ObservationProjection]) -> BTreeSet<(String, String)> {
     let mut outputs = BTreeSet::new();
     for effect in effects {
@@ -1185,7 +1175,6 @@ async fn validate_projection_effect(
     }
 }
 
-#[hotpath::measure]
 fn derive_unaliased_projection(
     observation: &DurableObservationV1,
 ) -> tracedecay_domain::errors::Result<ObservationProjection> {
@@ -1366,7 +1355,6 @@ async fn projection_audit_checkpoint_through_sequence(
     })
 }
 
-#[hotpath::measure]
 fn historical_projection_delta_required(checkpoint: AuditCheckpoint) -> bool {
     checkpoint.bounded_passes_since_exhaustive != INCOMPLETE_EXHAUSTIVE_PASS
 }

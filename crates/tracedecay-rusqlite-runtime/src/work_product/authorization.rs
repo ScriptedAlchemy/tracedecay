@@ -45,7 +45,6 @@ impl WorkProductOwnerAuthorizationPortV1 for WorkSqliteStorage {
     }
 }
 
-#[hotpath::measure]
 fn selection_is_within_resolved_scope(
     context: &RequestContext,
     selection: &WorkProductSelectionScopeV1,

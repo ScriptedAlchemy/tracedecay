@@ -75,7 +75,6 @@ pub struct CaptureProgressV1 {
     captured_bytes: AtomicU64,
 }
 
-#[hotpath::measure_all]
 impl CaptureProgressV1 {
     #[hotpath::skip]
     pub const fn new() -> Self {
@@ -214,7 +213,6 @@ impl CodeIndexExecutionControlV1 for branch_generations::BranchGenerationReadCon
     }
 }
 
-#[hotpath::measure_all]
 impl DaemonCodeIndexPublicationStoreV1 {
     pub fn exact_git_evidence(
         &self,
@@ -291,7 +289,6 @@ impl DaemonCodeIndexPublicationStoreV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl CodeIndexWorktreeSchedulerV1 {
     pub(super) fn capture_candidate_bytes_with_progress(
         &self,

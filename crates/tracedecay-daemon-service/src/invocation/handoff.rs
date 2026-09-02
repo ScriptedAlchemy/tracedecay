@@ -100,7 +100,6 @@ impl HandoffOpenTargetPort for DaemonHandoffOpenTargets {
     }
 }
 
-#[hotpath::measure]
 fn internal_feedback_request_id(
     context: &RequestContext,
     recheck_sequence: u64,
@@ -117,7 +116,6 @@ fn internal_feedback_request_id(
     ))
 }
 
-#[hotpath::measure]
 fn current_feedback_finding(
     result: Result<FeedbackReadInvocationResultV1, FeedbackReadOwnerErrorV1>,
 ) -> Result<Option<FeedbackFindingReadV1>, HandoffOpenTargetError> {
@@ -318,7 +316,6 @@ enum HandoffRequestContextError {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure]
 fn handoff_request_context(
     registered: &RegisteredWorkRuntime,
     request_id: &str,
@@ -367,7 +364,6 @@ enum HandoffApplicationResult {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure]
 fn complete_handoff_effect(
     registered: &RegisteredWorkRuntime,
     request_id: String,
@@ -456,7 +452,6 @@ fn complete_handoff_effect(
 /// leaves it byte-identical, so it carries an operation receipt and a coverage
 /// claim instead — and the coverage claim is only `Complete` when the
 /// enumeration did not hit its ceiling.
-#[hotpath::measure]
 fn handoff_evidence(
     registered: &RegisteredWorkRuntime,
     context: &RequestContext,

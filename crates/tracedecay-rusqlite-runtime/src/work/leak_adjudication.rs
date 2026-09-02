@@ -74,7 +74,6 @@ impl WorkLeakAdjudicationStoragePortV1 for WorkSqliteStorage {
     }
 }
 
-#[hotpath::measure]
 fn validate_write(write: &WorkLeakAdjudicationWriteV1) -> Result<(), StorageError> {
     let receipt = &write.receipt;
     let expected_revision = receipt
@@ -100,7 +99,6 @@ fn validate_write(write: &WorkLeakAdjudicationWriteV1) -> Result<(), StorageErro
     Ok(())
 }
 
-#[hotpath::measure]
 fn replay_by_command(
     transaction: &ExactSqlTransaction,
     authority: &WorkAuthority,
@@ -157,7 +155,6 @@ fn replay_by_command(
     Ok(Some((digest, receipt)))
 }
 
-#[hotpath::measure]
 fn require_attempt(
     transaction: &ExactSqlTransaction,
     authority: &WorkAuthority,
@@ -187,7 +184,6 @@ fn require_attempt(
     }
 }
 
-#[hotpath::measure]
 fn current_revision(
     transaction: &ExactSqlTransaction,
     authority: &WorkAuthority,
@@ -216,7 +212,6 @@ fn current_revision(
         .transpose()
 }
 
-#[hotpath::measure]
 fn insert_receipt(
     transaction: &ExactSqlTransaction,
     authority: &WorkAuthority,

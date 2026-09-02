@@ -139,7 +139,6 @@ impl Executor for SnapshotConnection {
     }
 }
 
-#[hotpath::measure]
 fn engine_value_to_rusqlite(value: Value) -> rusqlite::types::Value {
     match value {
         Value::Null => rusqlite::types::Value::Null,
@@ -150,7 +149,6 @@ fn engine_value_to_rusqlite(value: Value) -> rusqlite::types::Value {
     }
 }
 
-#[hotpath::measure]
 fn snapshot_value(value: ValueRef<'_>) -> crate::db::engine::Result<Value> {
     Ok(match value {
         ValueRef::Null => Value::Null,
@@ -165,7 +163,6 @@ fn snapshot_value(value: ValueRef<'_>) -> crate::db::engine::Result<Value> {
     })
 }
 
-#[hotpath::measure]
 fn snapshot_sqlite_error(operation: &'static str, error: rusqlite::Error) -> EngineError {
     match error {
         rusqlite::Error::SqliteFailure(code, message) => EngineError::Sqlite {

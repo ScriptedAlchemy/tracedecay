@@ -49,7 +49,6 @@ pub struct RemoteCaptureRequestV1 {
     pub observation: DurableObservationV1,
 }
 
-#[hotpath::measure_all]
 impl RemoteCaptureRequestV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         if self.writer.validate().is_err() || self.sequence.validate().is_err() {
@@ -289,7 +288,6 @@ where
     }
 }
 
-#[hotpath::measure]
 fn capture_effect_envelope(
     request: RemoteProtocolRequestV1<RemoteCaptureRequestV1>,
     outcome: RemoteOfflineCaptureServiceOutcomeV1,
@@ -387,7 +385,6 @@ fn capture_effect_envelope(
     ))
 }
 
-#[hotpath::measure]
 fn capture_protocol_failure(error: RemoteCaptureProtocolErrorV1) -> RemoteProtocolFailureV1 {
     match error {
         RemoteCaptureProtocolErrorV1::UnsupportedVersion => {

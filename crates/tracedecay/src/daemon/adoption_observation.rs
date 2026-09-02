@@ -41,7 +41,6 @@ const FAMILY_NAMESPACES: &[(&str, &str)] = &[
     ("capability.application.observatory-read", "analytics"),
 ];
 
-#[hotpath::measure]
 fn adoption_family(capability_id: &str) -> Option<&'static str> {
     FAMILY_NAMESPACES
         .iter()

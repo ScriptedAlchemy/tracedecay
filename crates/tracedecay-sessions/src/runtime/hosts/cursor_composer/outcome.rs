@@ -18,7 +18,6 @@ pub struct CursorComposerSweepOutcome {
     projected_session_ids: HashSet<String>,
 }
 
-#[hotpath::measure_all]
 impl CursorComposerSweepOutcome {
     pub(super) fn add_projection(
         &mut self,

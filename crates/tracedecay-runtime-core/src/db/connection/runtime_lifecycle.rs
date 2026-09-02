@@ -7,7 +7,6 @@ use super::{
     Result, StoreRuntimeClientLease, TraceDecayError, integrity,
 };
 
-#[hotpath::measure_all]
 impl Database {
     pub fn is_writable(&self) -> bool {
         self.client.is_writable()

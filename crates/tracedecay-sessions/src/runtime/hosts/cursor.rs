@@ -72,7 +72,6 @@ struct CursorObservationContext {
     location_provenance: Option<String>,
 }
 
-#[hotpath::measure]
 fn cursor_observation_context(
     event: &Value,
     transcript_path: &Path,
@@ -104,7 +103,6 @@ struct DispatchModelCache {
     models: Mutex<HashMap<(PathBuf, String), String>>,
 }
 
-#[hotpath::measure_all]
 impl DispatchModelCache {
     fn parent_dispatch_model(
         &self,
@@ -143,7 +141,6 @@ struct CursorEventSource {
     dispatch_models: DispatchModelCache,
 }
 
-#[hotpath::measure_all]
 impl TranscriptSource for CursorEventSource {
     fn provider(&self) -> &'static str {
         "cursor"
@@ -205,7 +202,6 @@ struct CursorJsonlAdmitState {
 // Cursor JSONL admission chokepoint: the whole per-file admission future is
 // boxed here so the per-file sweep loop no longer pins each call, keeping the
 // debug poll frame bounded through the deep ingest recursion chain.
-#[hotpath::measure]
 fn admit_cursor_jsonl_observations<'a>(
     parent_session_id: &'a str,
     path: &'a Path,
@@ -319,7 +315,6 @@ fn admit_cursor_jsonl_observations<'a>(
     })
 }
 
-#[hotpath::measure]
 fn cursor_native_with_context(
     mut native: Value,
     context: &CursorObservationContext,
@@ -754,7 +749,6 @@ pub async fn try_ingest_cursor_user_transcript_event_capped_with_admission(
     Ok(stats)
 }
 
-#[hotpath::measure]
 pub(in crate::runtime) fn try_ingest_cursor_project_sweep_capped_with_session_ids<
     'a,
     S: BuildHasher,
@@ -884,7 +878,6 @@ async fn admit_cursor_sweep_observations_with_session_ids(
     Ok(outcome)
 }
 
-#[hotpath::measure]
 fn cursor_hook_workspace_roots(event: &Value) -> Vec<PathBuf> {
     let candidates = if let Some(cwd) = event_cwd(event) {
         vec![cwd]
@@ -917,7 +910,6 @@ fn cursor_hook_workspace_roots(event: &Value) -> Vec<PathBuf> {
     roots
 }
 
-#[hotpath::measure]
 fn cursor_transcript_project_slug(path: &Path) -> Option<&str> {
     let components = path.components().collect::<Vec<_>>();
     let transcripts = components
@@ -956,7 +948,6 @@ pub struct CursorSweepSource {
     dispatch_models: DispatchModelCache,
 }
 
-#[hotpath::measure_all]
 impl CursorSweepSource {
     /// Source rooted at the real `~/.cursor/projects`. Returns `None` when the
     /// home directory cannot be resolved.
@@ -995,7 +986,6 @@ impl CursorSweepSource {
     }
 }
 
-#[hotpath::measure_all]
 impl TranscriptSource for CursorSweepSource {
     fn provider(&self) -> &'static str {
         "cursor"
@@ -1146,7 +1136,6 @@ impl TranscriptSource for CursorSweepSource {
 
 /// Synthesizes the minimal hook-shaped event used by startup sweeps so their
 /// scope and location provenance match the legacy parser's behavior.
-#[hotpath::measure]
 fn cursor_sweep_event(parent_session_id: &str, project_root: &Path, user_scope: bool) -> Value {
     if user_scope {
         serde_json::json!({
@@ -1166,7 +1155,6 @@ fn cursor_sweep_event(parent_session_id: &str, project_root: &Path, user_scope: 
 /// workspace path: every normal path component joined with `-`, case
 /// preserved (verified against real `~/.cursor/projects` entries).
 /// Returns `None` for non-UTF-8, relative, or traversal-containing paths.
-#[hotpath::measure]
 pub fn cursor_project_slug(project_root: &Path) -> Option<String> {
     let mut parts = Vec::new();
     for component in project_root.components() {
@@ -1184,7 +1172,6 @@ pub fn cursor_project_slug(project_root: &Path) -> Option<String> {
 /// re-grouping dash-separated tokens into path components (pruned to
 /// directories that actually exist). Returns `None` when the probe budget is
 /// exhausted, which callers must treat as "ambiguous".
-#[hotpath::measure]
 fn decode_slug_candidates(project_root: &Path, slug: &str) -> Option<Vec<PathBuf>> {
     let mut base = PathBuf::new();
     for component in project_root.components() {
@@ -1203,7 +1190,6 @@ fn decode_slug_candidates(project_root: &Path, slug: &str) -> Option<Vec<PathBuf
 /// Depth-first regrouping of `tokens` into existing directory components
 /// under `base`. Returns `true` when the probe budget ran out (enumeration is
 /// incomplete and the result must not be trusted).
-#[hotpath::measure]
 fn decode_slug_inner(
     base: &Path,
     tokens: &[&str],
@@ -1229,7 +1215,6 @@ fn decode_slug_inner(
 }
 
 /// Whether a transcript file lives in a `subagents/` directory.
-#[hotpath::measure]
 fn is_subagent_transcript(path: &Path) -> bool {
     path.parent()
         .and_then(Path::file_name)
@@ -1241,7 +1226,6 @@ fn is_subagent_transcript(path: &Path) -> bool {
 /// `…/<parent>/subagents/<child>.jsonl` belongs to `<parent>`; anything else
 /// is a parent transcript whose file stem *is* the session id (which always
 /// equals the `session_id` a live hook event would carry for that file).
-#[hotpath::measure]
 fn sweep_parent_session_id(path: &Path) -> Option<String> {
     if is_subagent_transcript(path) {
         return path
@@ -1254,7 +1238,6 @@ fn sweep_parent_session_id(path: &Path) -> Option<String> {
     path.file_stem()?.to_str().map(str::to_string)
 }
 
-#[hotpath::measure]
 fn cursor_subagent_paths(transcript_path: &Path, parent_session_id: &str) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     if let Some(parent_dir) = transcript_path.parent() {
@@ -1288,7 +1271,6 @@ fn cursor_subagent_paths(transcript_path: &Path, parent_session_id: &str) -> Vec
     paths
 }
 
-#[hotpath::measure]
 fn cursor_subagent_identity(path: &Path, parent_session_id: &str) -> Option<(String, String)> {
     let is_subagent_path = path
         .parent()
@@ -1310,7 +1292,6 @@ fn cursor_subagent_identity(path: &Path, parent_session_id: &str) -> Option<(Str
     Some((session_id.clone(), session_id))
 }
 
-#[hotpath::measure]
 fn parent_dispatch_model_for_subagent(
     path: &Path,
     parent_session_id: &str,
@@ -1329,7 +1310,6 @@ fn parent_dispatch_model_for_subagent(
     None
 }
 
-#[hotpath::measure]
 fn dispatch_model_for_agent(path: &Path, agent_id: &str) -> Option<String> {
     let file = File::open(path).ok()?;
     let mut frames = RawJsonlFrameReader::new(BufReader::new(file), MAX_JSONL_RECORD_BYTES);
@@ -1369,7 +1349,6 @@ fn dispatch_model_for_agent(path: &Path, agent_id: &str) -> Option<String> {
     }
 }
 
-#[hotpath::measure]
 fn dispatch_targets_agent(item: &Value, agent_id: &str) -> bool {
     let input = item.get("input").unwrap_or(item);
     [
@@ -1403,7 +1382,6 @@ pub struct TimestampCarry {
     fallback: Option<i64>,
 }
 
-#[hotpath::measure_all]
 impl TimestampCarry {
     pub fn new(fallback_mtime: Option<i64>) -> Self {
         Self {
@@ -1432,7 +1410,6 @@ struct CursorMessageContext<'a> {
     event_location_provenance: &'a str,
 }
 
-#[hotpath::measure]
 fn event_message(
     record: &Value,
     event: &Value,
@@ -1500,7 +1477,6 @@ fn event_message(
     })
 }
 
-#[hotpath::measure]
 fn event_dispatch_messages(
     record: &Value,
     event: &Value,
@@ -1576,12 +1552,10 @@ fn event_dispatch_messages(
     out
 }
 
-#[hotpath::measure]
 fn cursor_record_message_model(record: &Value, message: &Value) -> Option<String> {
     cursor_model_string(record).or_else(|| cursor_model_string(message))
 }
 
-#[hotpath::measure]
 fn content_is_only_subagent_dispatch(content: &Value) -> bool {
     let Some(items) = content.as_array() else {
         return false;
@@ -1596,7 +1570,6 @@ fn content_is_only_subagent_dispatch(content: &Value) -> bool {
         })
 }
 
-#[hotpath::measure]
 fn content_kind(content: &Value) -> Option<&'static str> {
     if content.is_array() {
         Some("message")
@@ -1607,7 +1580,6 @@ fn content_kind(content: &Value) -> Option<&'static str> {
     }
 }
 
-#[hotpath::measure]
 fn event_session_id(event: &Value, transcript_path: &Path) -> String {
     event
         .get("session_id")
@@ -1627,7 +1599,6 @@ fn event_session_id(event: &Value, transcript_path: &Path) -> String {
         )
 }
 
-#[hotpath::measure]
 fn event_project(event: &Value) -> (String, String) {
     let cwd_root = event_cwd(event)
         .and_then(|cwd| tracedecay_runtime_core::config::discover_project_root(&cwd));
@@ -1646,7 +1617,6 @@ fn event_project(event: &Value) -> (String, String) {
     (project.clone(), project)
 }
 
-#[hotpath::measure]
 fn event_cwd(event: &Value) -> Option<PathBuf> {
     event
         .get("cwd")
@@ -1655,7 +1625,6 @@ fn event_cwd(event: &Value) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-#[hotpath::measure]
 fn event_project_candidates(event: &Value) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     let mut push_unique = |candidate: PathBuf| {
@@ -1696,7 +1665,6 @@ fn event_project_candidates(event: &Value) -> Vec<PathBuf> {
     candidates
 }
 
-#[hotpath::measure]
 fn record_timestamp(value: &Value) -> Option<i64> {
     value
         .get("timestamp")
@@ -1708,7 +1676,6 @@ fn record_timestamp(value: &Value) -> Option<i64> {
         })
 }
 
-#[hotpath::measure]
 fn event_location_provenance(event: &Value) -> &str {
     event
         .get("tracedecay_location_provenance")
@@ -1717,7 +1684,6 @@ fn event_location_provenance(event: &Value) -> &str {
         .unwrap_or("hook_event")
 }
 
-#[hotpath::measure]
 fn session_metadata(event: &Value, event_cwd: Option<&Path>, location_provenance: &str) -> Value {
     let mut metadata = serde_json::Map::new();
     metadata.insert(
@@ -1747,7 +1713,6 @@ fn session_metadata(event: &Value, event_cwd: Option<&Path>, location_provenance
     Value::Object(metadata)
 }
 
-#[hotpath::measure]
 fn message_metadata(
     record: &Value,
     message: &Value,
@@ -1783,7 +1748,6 @@ fn message_metadata(
     Value::Object(metadata)
 }
 
-#[hotpath::measure]
 fn append_host_event_ordering(
     metadata: &mut serde_json::Map<String, Value>,
     event: &Value,
@@ -1818,7 +1782,6 @@ fn append_host_event_ordering(
     }
 }
 
-#[hotpath::measure]
 fn dispatch_message_metadata(
     record: &Value,
     event: &Value,

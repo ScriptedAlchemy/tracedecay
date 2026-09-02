@@ -7,7 +7,6 @@ const DAEMON_OBSERVABILITY_QUEUE_CAPACITY: usize = 1_024;
 const DAEMON_DELIVERY_SETTLEMENT_QUEUE_CAPACITY: usize = 1_024;
 static NEXT_DAEMON_OBSERVABILITY_PRODUCER_REGISTRATION: AtomicU64 = AtomicU64::new(1);
 
-#[hotpath::measure]
 fn daemon_observability_producer_identity(
     project_id: &ProjectId,
     configuration_revision: &ManifestDigest,
@@ -32,7 +31,6 @@ fn daemon_observability_producer_identity(
     )
 }
 
-#[hotpath::measure]
 fn registered_observability_producer_matches_mount(
     registered: &RegisteredObservabilityProducerV1,
     database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
@@ -55,7 +53,6 @@ fn registered_observability_producer_matches_mount(
     )
 }
 
-#[hotpath::measure_all]
 impl DaemonInvocationService {
     #[hotpath::measure(label = "daemon.service.observability.mount", future = true)]
     pub async fn mount_observability_producer(

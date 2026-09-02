@@ -20,7 +20,6 @@ pub enum ProjectWatchStatus {
     NotifyBackend,
 }
 
-#[hotpath::measure_all]
 impl ProjectWatchStatus {
     fn from_raw(raw: u8) -> Self {
         match raw {
@@ -96,7 +95,6 @@ impl ProjectHealthSnapshot {
     }
 }
 
-#[hotpath::measure]
 fn monotonic_health_millis() -> u64 {
     static PROCESS_HEALTH_EPOCH: OnceLock<Instant> = OnceLock::new();
     let elapsed = PROCESS_HEALTH_EPOCH.get_or_init(Instant::now).elapsed();

@@ -90,7 +90,6 @@ impl SessionTemporalRegisteredDb for RegisteredGlobalDb {
 
 /// Composition wrappers so existing `RegisteredGlobalDb` call sites keep
 /// working. This is not a module re-export of the temporal crate.
-#[hotpath::measure_all]
 impl RegisteredGlobalDb {
     pub fn git_scope_session_ids(
         &self,

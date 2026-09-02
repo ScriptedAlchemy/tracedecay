@@ -31,7 +31,6 @@ use host_receipt_review::run_host_receipt_review;
 use run_control::AutomationSchedulerStop;
 pub(super) use termination::MaintenanceTaskTermination;
 
-#[hotpath::measure]
 pub(super) fn scheduler_task_log_fields(
     project_path: &Path,
     task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
@@ -47,7 +46,6 @@ pub(super) fn scheduler_task_log_fields(
     ]
 }
 
-#[hotpath::measure]
 fn log_scheduler_task_start(
     project_path: &Path,
     task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
@@ -58,7 +56,6 @@ fn log_scheduler_task_start(
     );
 }
 
-#[hotpath::measure]
 fn scheduler_task_error_log_fields(
     project_path: &Path,
     task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
@@ -74,7 +71,6 @@ fn scheduler_task_error_log_fields(
     ]
 }
 
-#[hotpath::measure]
 fn log_scheduler_task_error(
     project_path: &Path,
     task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
@@ -86,7 +82,6 @@ fn log_scheduler_task_error(
     );
 }
 
-#[hotpath::measure]
 fn log_scheduler_automation_replay(
     project_path: &Path,
     task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
@@ -115,7 +110,6 @@ fn log_scheduler_automation_replay(
     );
 }
 
-#[hotpath::measure]
 pub(super) fn scheduler_application_problem_log_fields(
     project_path: &Path,
     task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
@@ -141,7 +135,6 @@ pub(super) fn scheduler_application_problem_log_fields(
     ]
 }
 
-#[hotpath::measure]
 fn scheduler_run_observer(
     engine: &DaemonEngine,
     project_id: &tracedecay_domain::ProjectId,
@@ -209,7 +202,6 @@ where
     }
 }
 
-#[hotpath::measure]
 fn scheduler_record_log_fields(
     project_path: &Path,
     record: &tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord,
@@ -253,7 +245,6 @@ pub(super) fn daemon_scheduler_record_log_line(
     )
 }
 
-#[hotpath::measure]
 fn log_daemon_scheduler_record(
     project_path: &Path,
     record: &tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord,
@@ -305,7 +296,6 @@ pub(super) struct AutomationSchedulerRetirement {
     termination: Arc<MaintenanceTaskTermination>,
 }
 
-#[hotpath::measure_all]
 impl AutomationSchedulerRetirement {
     #[hotpath::skip]
     pub(super) async fn wait(self) {
@@ -408,7 +398,6 @@ mod automation_scheduler_exit_barrier_tests {
     }
 }
 
-#[hotpath::measure_all]
 impl DaemonEngine {
     #[hotpath::skip]
     pub(super) async fn activate_automation_scheduler_for_open_project(
@@ -999,14 +988,12 @@ impl DaemonEngine {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn same_scheduler_owner(left: &ProjectServerKey, right: &ProjectServerKey) -> bool {
     left.owner.profile_root == right.owner.profile_root
         && left.owner.project_id == right.owner.project_id
         && left.scope_prefix == right.scope_prefix
 }
 
-#[hotpath::measure]
 fn observed_scheduler_lifecycle(
     handle: &AutomationSchedulerHandle,
 ) -> AutomationSchedulerLifecycle {
@@ -1319,7 +1306,6 @@ struct GlobalRetentionCadence {
     in_flight: bool,
 }
 
-#[hotpath::measure_all]
 impl GlobalRetentionCadence {
     fn reserve(&mut self, now: std::time::Instant) -> bool {
         if self.in_flight
@@ -1412,7 +1398,6 @@ struct GlobalRetentionReservation {
     active: bool,
 }
 
-#[hotpath::measure_all]
 impl GlobalRetentionReservation {
     fn finish(mut self, now: std::time::Instant, succeeded: bool) {
         finish_global_retention(now, succeeded);
@@ -1428,7 +1413,6 @@ impl Drop for GlobalRetentionReservation {
     }
 }
 
-#[hotpath::measure]
 fn reserve_global_retention(now: std::time::Instant) -> Option<GlobalRetentionReservation> {
     let mut guard = match GLOBAL_RETENTION_CADENCE.lock() {
         Ok(guard) => guard,
@@ -1444,7 +1428,6 @@ fn reserve_global_retention(now: std::time::Instant) -> Option<GlobalRetentionRe
         .then(|| GlobalRetentionReservation { active: true })
 }
 
-#[hotpath::measure]
 fn finish_global_retention(now: std::time::Instant, succeeded: bool) {
     let mut guard = match GLOBAL_RETENTION_CADENCE.lock() {
         Ok(guard) => guard,
@@ -1453,7 +1436,6 @@ fn finish_global_retention(now: std::time::Instant, succeeded: bool) {
     guard.finish(now, succeeded);
 }
 
-#[hotpath::measure]
 fn global_table_retention_config(
     config: &crate::config::RetentionConfig,
 ) -> tracedecay_maintenance::retention::RetentionConfig {
@@ -1918,7 +1900,6 @@ async fn effective_automation_config_for_project(
     })
 }
 
-#[hotpath::measure]
 pub(super) fn automation_scheduler_configured(
     config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
 ) -> bool {

@@ -25,7 +25,6 @@ enum HeadState {
     Detached,
 }
 
-#[hotpath::measure_all]
 impl HeadState {
     fn branch(&self) -> Option<&str> {
         match self {
@@ -44,7 +43,6 @@ struct Checkout {
     to: CheckoutTarget,
 }
 
-#[hotpath::measure]
 fn capture_head(repository: &gix::Repository) -> Result<HeadSeal, BoundedBackfillInterruption> {
     let head = repository
         .head()
@@ -55,7 +53,6 @@ fn capture_head(repository: &gix::Repository) -> Result<HeadSeal, BoundedBackfil
     })
 }
 
-#[hotpath::measure]
 fn head_state(seal: &HeadSeal) -> Result<HeadState, BoundedBackfillInterruption> {
     match seal.referent.as_deref() {
         Some(name) => {
@@ -70,7 +67,6 @@ fn head_state(seal: &HeadSeal) -> Result<HeadState, BoundedBackfillInterruption>
     }
 }
 
-#[hotpath::measure]
 fn parse_checkout(
     entry: &gix::refs::log::Line,
 ) -> Result<Option<Checkout>, BoundedBackfillInterruption> {
@@ -95,12 +91,10 @@ fn parse_checkout(
     }))
 }
 
-#[hotpath::measure]
 fn parse_checkout_target(target: &[u8]) -> Result<CheckoutTarget, BoundedBackfillInterruption> {
     Ok(CheckoutTarget(target.to_vec()))
 }
 
-#[hotpath::measure]
 fn classify_checkout_target(
     repository: &gix::Repository,
     target: &CheckoutTarget,
@@ -143,7 +137,6 @@ fn classify_checkout_target(
     Ok(HeadState::Detached)
 }
 
-#[hotpath::measure]
 fn validate_checkout_to(
     repository: &gix::Repository,
     target: &CheckoutTarget,
@@ -162,7 +155,6 @@ fn validate_checkout_to(
     }
 }
 
-#[hotpath::measure]
 fn seal_checkout_target_refs(
     repository: &gix::Repository,
     target: &CheckoutTarget,
@@ -190,7 +182,6 @@ fn seal_checkout_target_refs(
     Ok(())
 }
 
-#[hotpath::measure]
 fn consult_exact_ref(
     repository: &gix::Repository,
     consulted_refs: &mut BTreeMap<Vec<u8>, Option<gix::ObjectId>>,
@@ -205,7 +196,6 @@ fn consult_exact_ref(
     Ok(tip)
 }
 
-#[hotpath::measure]
 fn exact_ref_tip(
     repository: &gix::Repository,
     reference: &[u8],

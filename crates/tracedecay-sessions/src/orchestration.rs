@@ -15,7 +15,6 @@ pub struct ProviderRunOutcome<F> {
     admitted: bool,
 }
 
-#[hotpath::measure_all]
 impl<F> ProviderRunOutcome<F> {
     pub fn bounded(
         stats: TranscriptIngestStats,
@@ -66,7 +65,6 @@ impl<F> ProviderRunOutcome<F> {
     }
 }
 
-#[hotpath::measure_all]
 impl<F: ProviderRunFailure> ProviderRunOutcome<F> {
     pub fn retryable(&self) -> bool {
         self.failures
@@ -100,7 +98,6 @@ impl<F> Default for ProviderRunFold<F> {
     }
 }
 
-#[hotpath::measure_all]
 impl<F> ProviderRunFold<F> {
     pub fn record_retry(&mut self, outcome: &ProviderRunOutcome<F>) {
         self.deferred_units = self.deferred_units.saturating_add(outcome.deferred_units);

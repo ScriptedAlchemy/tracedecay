@@ -92,7 +92,6 @@ pub enum HostAdmissionScope {
     Profile,
 }
 
-#[hotpath::measure_all]
 impl HostAdmissionOutcome {
     #[hotpath::skip]
     const fn new(
@@ -310,7 +309,6 @@ impl HostAdmissionOutcome {
     }
 }
 
-#[hotpath::measure]
 pub(crate) fn is_admission_cancellation(
     outcome: &HostAdmissionOutcome,
     cancellation: &ObservationCancellation,

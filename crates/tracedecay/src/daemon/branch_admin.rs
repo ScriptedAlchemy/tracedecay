@@ -58,7 +58,6 @@ type HostAdmissionBrokers =
 /// naming the same store lands on the same gate. A path that cannot be
 /// canonicalized degrades to daemon-wide, which is strictly *more* exclusive and
 /// therefore can never split one store's gate into two.
-#[hotpath::measure]
 pub(super) fn store_writer_scope(data_root: &Path, class: StoreWriterClass) -> WriterScope {
     match authority::canonical_identity_path(data_root) {
         Ok(canonical) => WriterScope::store(canonical, class),
@@ -558,7 +557,6 @@ impl Default for StoreAdministration {
     }
 }
 
-#[hotpath::measure_all]
 impl StoreAdministration {
     pub(super) fn configure_codex_preparation_resources(
         &self,
@@ -1675,7 +1673,6 @@ pub(super) struct BranchAdminRequest {
         std::result::Result<tracedecay_runtime_core::branch::BranchAdminAction, String>,
 }
 
-#[hotpath::measure]
 pub(super) fn parse_branch_admin_request(line: &str) -> Option<BranchAdminRequest> {
     let request = serde_json::from_str::<JsonRpcRequest>(line.trim()).ok()?;
     if request.method != "tools/call" {
@@ -1696,7 +1693,6 @@ pub(super) fn parse_branch_admin_request(line: &str) -> Option<BranchAdminReques
     })
 }
 
-#[hotpath::measure]
 fn canonical_branch_database_paths(paths: &[PathBuf]) -> Result<HashSet<PathBuf>> {
     paths
         .iter()
@@ -1704,7 +1700,6 @@ fn canonical_branch_database_paths(paths: &[PathBuf]) -> Result<HashSet<PathBuf>
         .collect()
 }
 
-#[hotpath::measure]
 fn branch_administration_busy(detail: impl Into<String>) -> TraceDecayError {
     TraceDecayError::project_route("branch_administration_busy", true, detail)
 }
@@ -1719,7 +1714,6 @@ fn cached_scheduler_owns_selected<Scheduler>(
         .any(|key| database_paths.contains(&key.owner.graph_db_path))
 }
 
-#[hotpath::measure]
 fn ensure_no_cached_store_owners<Server>(
     project_servers: &DatabaseOwnerRegistry<Server>,
     scheduler_busy: bool,
@@ -1750,7 +1744,6 @@ fn ensure_no_cached_store_owners<Server>(
     )))
 }
 
-#[hotpath::measure]
 fn destructive_reservation_error(
     error: crate::daemon::store_runtime::registry::StoreRuntimeRegistryFailure,
 ) -> TraceDecayError {
@@ -1759,7 +1752,6 @@ fn destructive_reservation_error(
     }
 }
 
-#[hotpath::measure]
 fn branch_admin_tool_result(
     report: &tracedecay_runtime_core::branch::BranchAdminReport,
 ) -> Result<serde_json::Value> {
@@ -1771,7 +1763,6 @@ fn branch_admin_tool_result(
     }))
 }
 
-#[hotpath::measure]
 fn branch_admin_error_response(id: serde_json::Value, error: &TraceDecayError) -> JsonRpcResponse {
     if let Some((reason_code, retryable, detail)) = error.project_route_context() {
         return JsonRpcResponse::error_with_data(

@@ -141,7 +141,6 @@ pub struct ReadConnection {
     connection: Connection,
 }
 
-#[hotpath::measure_all]
 impl ReadConnection {
     #[hotpath::skip]
     pub async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
@@ -175,7 +174,6 @@ impl ReadConnection {
     }
 }
 
-#[hotpath::measure_all]
 impl Connection {
     pub fn attach(runtime: ExactSqlHandle) -> Self {
         Self {
@@ -417,12 +415,10 @@ impl Connection {
     }
 }
 
-#[hotpath::measure]
 fn join_error(error: tokio::task::JoinError) -> super::Error {
     super::Error::Runtime(format!("exact SQL worker task failed: {error}"))
 }
 
-#[hotpath::measure]
 pub(super) fn statement<P>(sql: &str, params: P) -> Result<ExactSqlStatement>
 where
     P: IntoParams,

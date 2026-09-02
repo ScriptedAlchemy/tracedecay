@@ -73,7 +73,6 @@ where
     }
 }
 
-#[hotpath::measure]
 fn branch_read_reason(error: &BranchRouteReadErrorV1) -> (&'static str, bool) {
     use tracedecay_application::branch_snapshots::LocalBranchSnapshotErrorV1;
 
@@ -190,7 +189,6 @@ pub(crate) async fn handle_branch_list(
     }
 }
 
-#[hotpath::measure]
 fn branch_reference_unavailable(
     cg: &TraceDecay,
     args: &Value,
@@ -216,7 +214,6 @@ fn branch_reference_unavailable(
     ))
 }
 
-#[hotpath::measure]
 fn branch_search_unavailable(
     cg: &TraceDecay,
     args: &Value,
@@ -245,7 +242,6 @@ fn branch_search_unavailable(
     ))
 }
 
-#[hotpath::measure]
 fn branch_unavailable_wire(
     reason: crate::mcp::server::CodeIndexSearchUnavailableReasonV1,
 ) -> (&'static str, bool) {
@@ -259,7 +255,6 @@ fn branch_unavailable_wire(
     )
 }
 
-#[hotpath::measure]
 fn branch_search_page_status(has_more: bool) -> (&'static str, Option<&'static str>) {
     if has_more {
         ("partial", Some("result_limit"))
@@ -421,7 +416,6 @@ pub(crate) async fn handle_branch_search(
     }
 }
 
-#[hotpath::measure]
 fn branch_diff_unavailable(
     cg: &TraceDecay,
     args: &Value,
@@ -453,7 +447,6 @@ fn branch_diff_unavailable(
     ))
 }
 
-#[hotpath::measure]
 fn branch_symbol_json(symbol: &crate::mcp::server::CodeIndexBranchSymbolV1) -> Value {
     json!({
         "symbol_identity": symbol.symbol_identity,
@@ -468,7 +461,6 @@ fn branch_symbol_json(symbol: &crate::mcp::server::CodeIndexBranchSymbolV1) -> V
     })
 }
 
-#[hotpath::measure]
 fn branch_change_json(change: &crate::mcp::server::CodeIndexBranchChangeV1) -> Value {
     match change {
         crate::mcp::server::CodeIndexBranchChangeV1::Added { symbol } => json!({
@@ -487,7 +479,6 @@ fn branch_change_json(change: &crate::mcp::server::CodeIndexBranchChangeV1) -> V
     }
 }
 
-#[hotpath::measure]
 fn branch_change_files(change: &crate::mcp::server::CodeIndexBranchChangeV1) -> [&str; 2] {
     match change {
         crate::mcp::server::CodeIndexBranchChangeV1::Added { symbol }
@@ -500,7 +491,6 @@ fn branch_change_files(change: &crate::mcp::server::CodeIndexBranchChangeV1) -> 
     }
 }
 
-#[hotpath::measure]
 fn branch_change_counts(
     changes: &[crate::mcp::server::CodeIndexBranchChangeV1],
 ) -> (usize, usize, usize) {

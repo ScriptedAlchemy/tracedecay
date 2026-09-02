@@ -59,7 +59,6 @@ pub struct CondensationDecisionInput<'a> {
     pub summarizer: &'a CompressionSummarizerAdapter,
 }
 
-#[hotpath::measure]
 pub fn boundary_transition_decision(
     request: &LcmSessionBoundaryRequest,
     now: i64,
@@ -81,7 +80,6 @@ pub fn boundary_transition_decision(
     }
 }
 
-#[hotpath::measure]
 pub fn cooldown_active(boundary_skip_at: Option<i64>, now: i64) -> bool {
     match boundary_skip_at {
         Some(boundary_skip_at) => {
@@ -91,7 +89,6 @@ pub fn cooldown_active(boundary_skip_at: Option<i64>, now: i64) -> bool {
     }
 }
 
-#[hotpath::measure]
 pub fn condensation_policy_decision(input: CondensationDecisionInput<'_>) -> CondensationDecision {
     if input.has_backlog {
         return CondensationDecision::Skip(CondensationSkipReason::BacklogPresent);
@@ -108,7 +105,6 @@ pub fn condensation_policy_decision(input: CondensationDecisionInput<'_>) -> Con
     })
 }
 
-#[hotpath::measure]
 pub fn preflight_decision(input: PreflightDecisionInput<'_>) -> PreflightDecision {
     if forced_overflow_pressure(
         input.request.current_tokens,
@@ -158,7 +154,6 @@ pub fn preflight_decision(input: PreflightDecisionInput<'_>) -> PreflightDecisio
     }
 }
 
-#[hotpath::measure]
 pub fn compression_plan(input: CompressionPlanInput<'_>) -> CompressionPlan {
     let forced_overflow_recovery = should_force_overflow_recovery(input.request);
     let leaf_chunk_tokens = effective_leaf_chunk_tokens(
@@ -179,7 +174,6 @@ pub fn compression_plan(input: CompressionPlanInput<'_>) -> CompressionPlan {
     }
 }
 
-#[hotpath::measure]
 pub fn frontier_has_maintenance_debt(frontier: &LcmLifecycleState) -> bool {
     frontier
         .maintenance_debt
@@ -187,7 +181,6 @@ pub fn frontier_has_maintenance_debt(frontier: &LcmLifecycleState) -> bool {
         .any(|debt| matches!(debt, LcmMaintenanceDebt::RawBacklog { .. }))
 }
 
-#[hotpath::measure]
 fn should_force_overflow_recovery(request: &LcmCompressionRequest) -> bool {
     forced_overflow_pressure(request.current_tokens, request.max_assembly_tokens)
 }

@@ -35,7 +35,6 @@ pub struct NativeIntegrationStackSnapshotSurfaceRequest {
     pub policy_digest: ManifestDigest,
 }
 
-#[hotpath::measure_all]
 impl NativeIntegrationStackSnapshotSurfaceRequest {
     /// Bind the caller-visible proof to the exact topology request the
     /// resolution authority accepts. `observed_at` is minted by the daemon,

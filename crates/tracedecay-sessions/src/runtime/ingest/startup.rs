@@ -20,7 +20,6 @@ pub struct TranscriptIngestOutcome {
     pub scheduling_state_written: bool,
 }
 
-#[hotpath::measure_all]
 impl TranscriptIngestOutcome {
     pub(super) fn new(
         stats: TranscriptIngestStats,
@@ -79,7 +78,6 @@ pub(super) enum StartupUserIngestClaim {
     RecentlyCompleted,
 }
 
-#[hotpath::measure_all]
 impl StartupUserIngestGuard {
     pub(super) fn claim(profile_root: PathBuf) -> StartupUserIngestClaim {
         let ingests = STARTUP_USER_INGESTS

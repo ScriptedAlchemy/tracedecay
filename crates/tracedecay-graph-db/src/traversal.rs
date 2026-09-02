@@ -23,7 +23,6 @@ use crate::{
 
 const MAX_BATCH_TRAVERSAL_STARTS: usize = 100_000;
 
-#[hotpath::measure]
 fn read_budget(limit: usize) -> GraphDbError {
     GraphDbError::budget_exhausted_count(GraphBudgetKind::Read, limit)
 }
@@ -91,7 +90,6 @@ pub struct GraphRelationTarget {
     pub target: GraphEntity,
 }
 
-#[hotpath::measure_all]
 impl GraphSnapshot {
     pub fn traverse(&self, request: TraversalRequest) -> Result<TraversalResult, GraphDbError> {
         let result = self.database.traverse(request)?;
@@ -209,7 +207,6 @@ pub(crate) fn incoming_relation_ids(
     )?))
 }
 
-#[hotpath::measure]
 fn relation_identities(batches: Vec<Vec<GraphRelation>>) -> Vec<Vec<GraphRelationId>> {
     batches
         .into_iter()
@@ -550,7 +547,6 @@ pub(crate) fn reachable_entities(
     Ok(results)
 }
 
-#[hotpath::measure]
 fn check_batch_request(
     starts: &[GraphEntityId],
     cancellation: &dyn GraphCancellation,
@@ -564,7 +560,6 @@ fn check_batch_request(
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_request(request: &TraversalRequest) -> Result<(), GraphDbError> {
     if request.cancellation.is_cancelled() {
         return Err(GraphDbError::Cancelled);
@@ -575,7 +570,6 @@ fn validate_request(request: &TraversalRequest) -> Result<(), GraphDbError> {
     Ok(())
 }
 
-#[hotpath::measure]
 fn relation_projection(
     store: Arc<dyn GraphStoreSearch>,
     relation_kinds: &BTreeSet<GraphRelationKind>,
@@ -587,7 +581,6 @@ fn relation_projection(
     GraphProjection::new(store, spec)
 }
 
-#[hotpath::measure]
 fn projection_relation_projection(
     store: Arc<dyn GraphStoreSearch>,
     namespace: &GraphNamespace,
@@ -891,7 +884,6 @@ fn directional_traversal(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure]
 fn projected_reachable(
     store: &dyn GraphStore,
     projected: &dyn GraphStore,
@@ -956,7 +948,6 @@ fn projected_reachable(
     Ok(visited)
 }
 
-#[hotpath::measure]
 fn edge_belongs_to_projection(
     store: &dyn GraphStore,
     edge: EdgeId,
@@ -990,7 +981,6 @@ fn edge_belongs_to_projection(
     Ok(stored_namespace == *namespace && stored_projection == *projection)
 }
 
-#[hotpath::measure]
 fn admit_visit(admitted: &mut usize, max_visits: usize) -> Result<(), GraphDbError> {
     *admitted = admitted
         .checked_add(1)
@@ -1002,7 +992,6 @@ fn admit_visit(admitted: &mut usize, max_visits: usize) -> Result<(), GraphDbErr
     }
 }
 
-#[hotpath::measure]
 fn node_for_entity(
     store: &dyn GraphStore,
     namespace: &GraphNamespace,
@@ -1012,7 +1001,6 @@ fn node_for_entity(
         .ok_or_else(|| GraphDbError::invalid("traversal start entity does not exist"))
 }
 
-#[hotpath::measure]
 fn optional_node_for_entity(
     store: &dyn GraphStore,
     namespace: &GraphNamespace,
@@ -1046,7 +1034,6 @@ fn optional_node_for_entity(
 
 /// [`entity_identity`] memoized over one traversal: the first decode verifies
 /// the stored node, repeat visits within the same read snapshot reuse it.
-#[hotpath::measure]
 fn cached_entity_identity(
     store: &dyn GraphStore,
     node: NodeId,
@@ -1063,7 +1050,6 @@ fn cached_entity_identity(
 
 /// [`relation_identity`] memoized over one traversal, mirroring
 /// [`cached_entity_identity`].
-#[hotpath::measure]
 fn cached_relation_identity(
     store: &dyn GraphStore,
     edge: EdgeId,
@@ -1082,7 +1068,6 @@ fn cached_relation_identity(
     Ok(identity)
 }
 
-#[hotpath::measure]
 fn entity_identity(
     store: &dyn GraphStore,
     node: NodeId,
@@ -1107,7 +1092,6 @@ fn entity_identity(
     })
 }
 
-#[hotpath::measure]
 fn relation_identity(
     store: &dyn GraphStore,
     edge: EdgeId,
@@ -1164,7 +1148,6 @@ enum RelationEndpointCheck<'a> {
     },
 }
 
-#[hotpath::measure]
 fn relation_for_edge(
     store: &dyn GraphStore,
     edge: EdgeId,
@@ -1251,7 +1234,6 @@ fn relation_for_edge(
     })
 }
 
-#[hotpath::measure]
 fn required_entity_property(
     value: Option<&Value>,
     description: &str,
@@ -1274,7 +1256,6 @@ fn required_string_property<'a>(
         })
 }
 
-#[hotpath::measure]
 fn require_namespace(
     value: Option<&Value>,
     namespace: &GraphNamespace,

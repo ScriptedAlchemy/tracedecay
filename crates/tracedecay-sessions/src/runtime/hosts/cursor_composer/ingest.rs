@@ -42,12 +42,10 @@ use super::{CursorComposerSweepOutcome, CursorComposerSweepResult, PROVIDER};
 /// startup; already-watermarked sessions are skipped cheaply and do not count.
 pub const DEFAULT_COMPOSER_ENVELOPE_CAP: usize = 256;
 
-#[hotpath::measure]
 pub(super) fn directory_entry_is_real_dir(entry: &std::fs::DirEntry) -> bool {
     entry.file_type().is_ok_and(|kind| kind.is_dir())
 }
 
-#[hotpath::measure]
 pub(super) fn path_is_regular_file_no_follow(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
 }
@@ -106,7 +104,6 @@ struct ComposerIngestContext<'facade, 'root> {
     matchers: &'root ProjectRootMatcherCache,
 }
 
-#[hotpath::measure_all]
 impl ComposerIngestContext<'_, '_> {
     /// Resolve this sweep's scope boundary once, rather than per composer
     /// envelope and per workspace directory.
@@ -139,12 +136,10 @@ async fn drain_composer_projection_queue(
     .await
 }
 
-#[hotpath::measure]
 fn composer_cancellation_error() -> TranscriptIngestError {
     TranscriptIngestError::Cancelled { provider: PROVIDER }
 }
 
-#[hotpath::measure]
 fn cursor_composer_source(composer_id: &str) -> Result<ObservationSourceIdentityV1, String> {
     ObservationSourceIdentityV1::for_provider(
         ProviderId::new(PROVIDER)
@@ -155,7 +150,6 @@ fn cursor_composer_source(composer_id: &str) -> Result<ObservationSourceIdentity
     .map_err(|error| format!("invalid Cursor composer source: {error}"))
 }
 
-#[hotpath::measure]
 pub(super) fn snapshot_generation(path: &Path) -> Option<ObservationSourceGenerationV1> {
     let identity = tracedecay_runtime_core::db::sqlite_generation_identity(path).ok()?;
     ObservationSourceGenerationV1::new(identity).ok()
@@ -204,7 +198,6 @@ pub struct CursorComposerSource {
     project_matchers: ProjectRootMatcherCache,
 }
 
-#[hotpath::measure_all]
 impl CursorComposerSource {
     /// Source rooted at the real user home. `None` when it cannot be resolved.
     pub fn new() -> Option<Self> {

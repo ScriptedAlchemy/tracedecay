@@ -38,7 +38,6 @@ pub(super) enum AuthorizedDatabaseOperation {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure]
 pub(super) fn with_exact_sql_guard<T, F>(
     connection: &Connection,
     allow_savepoints: bool,
@@ -195,7 +194,6 @@ where
 /// fixed attachment lifecycle operations; caller-provided SQL cannot enable
 /// them. `load_extension`, unrecognized actions, and non-allowlisted pragmas
 /// remain denied unconditionally.
-#[hotpath::measure]
 fn authorize_exact_sql_writer(
     context: rusqlite::hooks::AuthContext<'_>,
     database_operation: Option<&AuthorizedDatabaseOperation>,
@@ -264,7 +262,6 @@ fn authorize_exact_sql_writer(
     }
 }
 
-#[hotpath::measure]
 fn is_allowed_exact_sql_pragma(pragma_name: &str, pragma_value: Option<&str>) -> bool {
     is_exact_sql_read_pragma(pragma_name, pragma_value)
         || (pragma_value.is_none() && pragma_name.eq_ignore_ascii_case("shrink_memory"))
@@ -288,7 +285,6 @@ fn is_allowed_exact_sql_pragma(pragma_name: &str, pragma_value: Option<&str>) ->
         })
 }
 
-#[hotpath::measure]
 fn is_exact_sql_read_pragma(pragma_name: &str, pragma_value: Option<&str>) -> bool {
     const ARGUMENT_SAFE: &[&str] = &[
         "foreign_key_check",

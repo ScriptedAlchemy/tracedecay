@@ -32,7 +32,6 @@ use crate::{
 /// cannot be projected without being asserted, and a registry added here is
 /// exposed in the generated Rust and TypeScript SDKs by the same edit. Each
 /// operation ID names its own family, so the list needs no parallel labels.
-#[hotpath::measure]
 fn mounted_executable_binding_registries()
 -> Result<Vec<ExecutableBindingRegistryV1>, ApplicationContractError> {
     Ok(vec![
@@ -57,7 +56,6 @@ fn mounted_executable_binding_registries()
 /// lifecycle semantics. MCP operations derive from their owning catalog
 /// contribution: a canonical executable schema projects to the official MCP
 /// transport, while a missing schema remains typed unavailable.
-#[hotpath::measure]
 pub fn sdk_executable_binding_registry()
 -> Result<SdkExecutableBindingRegistryV1, ApplicationContractError> {
     let mounted = mounted_executable_binding_registries()?;
@@ -89,7 +87,6 @@ pub fn sdk_executable_binding_registry()
     Ok(SdkExecutableBindingRegistryV1::new(bindings)?)
 }
 
-#[hotpath::measure]
 fn project_http_binding(
     availability: &ExecutableBindingAvailabilityV1,
 ) -> Result<SdkExecutableBindingAvailabilityV1, CatalogValidationError> {
@@ -121,7 +118,6 @@ fn project_http_binding(
     Ok(SdkExecutableBindingAvailabilityV1::available(binding))
 }
 
-#[hotpath::measure]
 fn unavailable_disposition(
     availability: &ExecutableBindingAvailabilityV1,
 ) -> ExecutableUnavailableDispositionV1 {
@@ -133,7 +129,6 @@ fn unavailable_disposition(
     }
 }
 
-#[hotpath::measure]
 fn project_mcp_availability(
     contribution: &CatalogContributionV1,
     surface: &SurfaceBindingV1,
@@ -199,7 +194,6 @@ fn project_mcp_availability(
 
 /// The daemon service family that owns one MCP-bound application capability
 /// (`capability.application.git.status` -> `service.application.git`).
-#[hotpath::measure]
 fn mcp_service_id(capability_id: &CapabilityId) -> Result<ServiceId, CatalogValidationError> {
     let family = capability_id
         .as_str()
@@ -218,7 +212,6 @@ fn mcp_service_id(capability_id: &CapabilityId) -> Result<ServiceId, CatalogVali
     })
 }
 
-#[hotpath::measure]
 fn sdk_method_name(operation_id: &OperationId) -> Result<String, CatalogValidationError> {
     let operation = operation_id.as_str().strip_prefix("operation.").ok_or(
         CatalogValidationError::InvalidValue {

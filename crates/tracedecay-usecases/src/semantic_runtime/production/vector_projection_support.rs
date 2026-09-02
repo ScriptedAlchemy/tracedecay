@@ -94,7 +94,6 @@ struct EvaluationPreparedPageIndexV1<'corpus> {
     tombstones: BTreeMap<&'corpus CodeSearchChunkId, &'corpus VectorTombstoneV1>,
 }
 
-#[hotpath::measure_all]
 impl<'corpus> EvaluationPreparedPageIndexV1<'corpus> {
     fn new(
         prepared: &'corpus PreparedVectorGenerationV1,

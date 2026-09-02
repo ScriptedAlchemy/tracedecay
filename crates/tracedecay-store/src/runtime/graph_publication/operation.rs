@@ -27,7 +27,6 @@ pub struct GraphPublicationOperationContextV1<'a> {
     commit_started: AtomicBool,
 }
 
-#[hotpath::measure_all]
 impl<'a> GraphPublicationOperationContextV1<'a> {
     pub fn new(
         control: &RuntimeRequestControlV1,

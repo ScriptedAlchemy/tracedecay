@@ -105,7 +105,6 @@ impl tracedecay_mcp::McpConnectionLifecyclePort for DaemonLifecycle {
     }
 }
 
-#[hotpath::measure_all]
 impl DaemonLifecycle {
     pub(crate) fn accepting(&self) -> bool {
         !self.inner.draining.load(Ordering::Acquire)
@@ -319,7 +318,6 @@ impl DaemonLifecycle {
     }
 }
 
-#[hotpath::measure_all]
 impl DaemonShutdownAttempt {
     #[hotpath::measure(label = "daemon.engine.shutdown.wait_receipt", future = true)]
     pub(super) async fn wait_for_receipt(

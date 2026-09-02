@@ -120,7 +120,6 @@ struct UserClaudeScope {
     registered_roots: Vec<PathBuf>,
 }
 
-#[hotpath::measure_all]
 impl ClaudeSource {
     /// Source rooted at the real `~/.claude/projects`. Returns `None` when the
     /// home directory cannot be resolved.
@@ -285,7 +284,6 @@ pub async fn ingest_user_sessions_with_admission(
     }
 }
 
-#[hotpath::measure]
 fn discover_claude_session_scoped_paths(
     projects_dir: &Path,
     session_id: &str,
@@ -377,7 +375,6 @@ fn discover_claude_session_scoped_paths(
     report
 }
 
-#[hotpath::measure_all]
 impl TranscriptSource for ClaudeSource {
     fn provider(&self) -> &'static str {
         PROVIDER
@@ -472,7 +469,6 @@ struct ClaudeSubagentMeta {
 /// ancestors for a `subagents` component instead of demanding it be the file's
 /// immediate parent. That immediate-parent assumption was a bug: workflow-nested
 /// subagents failed it and were ingested as orphan standalone sessions.
-#[hotpath::measure]
 fn claude_subagent_identity(path: &Path) -> Option<ClaudeSubagentInfo> {
     let session_id = claude_source_component(path.file_stem()?);
 
@@ -530,7 +526,6 @@ fn claude_subagent_identity(path: &Path) -> Option<ClaudeSubagentInfo> {
 
 /// Read the sibling `agent-<id>.meta.json` next to a subagent transcript. Fail
 /// open: a missing or malformed file yields empty facts rather than an error.
-#[hotpath::measure]
 fn read_subagent_meta(transcript_path: &Path) -> ClaudeSubagentMeta {
     let mut meta_filename = transcript_path
         .file_stem()

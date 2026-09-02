@@ -29,7 +29,6 @@ use super::symbols::resolve_symbol_for_edit;
 /// behind). The common tail of every anchored-edit / move-symbol splice:
 /// build the new line list, then hand it here instead of hand-rolling
 /// `join("\n")` plus a conditional trailing push at each call site.
-#[hotpath::measure]
 pub(in crate::tracedecay) fn splice_lines<S: AsRef<str>>(
     lines: &[S],
     source_had_trailing_newline: bool,
@@ -45,7 +44,6 @@ pub(in crate::tracedecay) fn splice_lines<S: AsRef<str>>(
     joined
 }
 
-#[hotpath::measure_all]
 impl TraceDecay {
     /// Resolves a path to a relative path string.
     /// If the path is already relative, validates that it stays in the project.

@@ -8,7 +8,6 @@ use crate::ToolDefinition;
 
 /// The hook wakeup carries no signal content or actor. This MCP operation is
 /// where the daemon mints actor authority and expands one opaque signal ID.
-#[hotpath::measure]
 pub(super) fn def_github_stack_signal_expand() -> ToolDefinition {
     def(
         "tracedecay_github_stack_signal_expand",

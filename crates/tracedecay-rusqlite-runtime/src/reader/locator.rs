@@ -21,7 +21,6 @@ pub struct ExistingReaderLocator {
     opened_database: Option<Arc<OpenedDatabaseFile>>,
 }
 
-#[hotpath::measure_all]
 impl ExistingReaderLocator {
     pub fn new(
         binding: StoreRuntimeBindingV1,

@@ -67,7 +67,6 @@ pub struct RemoteRecoveryAdmission {
     _hold: Box<dyn Send + Sync>,
 }
 
-#[hotpath::measure_all]
 impl RemoteRecoveryAdmission {
     pub fn hold<T: Send + Sync + 'static>(value: T) -> Self {
         Self {
@@ -81,7 +80,6 @@ pub struct RemoteRecoveryQuiescence {
     _hold: Box<dyn Send + Sync>,
 }
 
-#[hotpath::measure_all]
 impl RemoteRecoveryQuiescence {
     pub fn hold<T: Send + Sync + 'static>(value: T) -> Self {
         Self {
@@ -164,7 +162,6 @@ static SESSION_STORE_MOUNTS_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 pub(crate) struct StoreMountObservationV1;
 
 #[cfg(feature = "hotpath")]
-#[hotpath::measure_all]
 impl StoreMountObservationV1 {
     pub fn enter() -> Self {
         let in_flight = SESSION_STORE_MOUNTS_IN_FLIGHT
@@ -211,7 +208,6 @@ struct RegisteredSessionOwnerV1 {
     graph_open_task_key: String,
 }
 
-#[hotpath::measure_all]
 impl RegisteredSessionOwnerV1 {
     fn with_attached_graph(
         database: RegisteredGlobalDbOwnerV1,
@@ -352,7 +348,6 @@ struct ProjectRuntimeOwnerRegistryV1(
     Arc<StdMutex<BTreeMap<ProjectId, ProjectRuntimeOwnerStateV1>>>,
 );
 
-#[hotpath::measure_all]
 impl ProjectRuntimeOwnerRegistryV1 {
     fn lock(
         &self,
@@ -572,7 +567,6 @@ impl ProjectRuntimeOwnerRegistryV1 {
     }
 }
 
-#[hotpath::measure]
 fn bind_ready_project_memory_graph(
     owners: &ProjectRuntimeOwnerRegistryV1,
     project_id: &ProjectId,
@@ -622,7 +616,6 @@ struct ProjectSessionRetirementOwnerV1 {
     graph_open_task_key: String,
 }
 
-#[hotpath::measure_all]
 impl ProjectSessionRetirementOwnerV1 {
     fn from_ready(
         owner: RegisteredSessionOwnerV1,
@@ -695,7 +688,6 @@ enum MemoryGraphAttachmentStateV1 {
     },
 }
 
-#[hotpath::measure_all]
 impl MemoryStoreOwnerV1 {
     fn issue_database_lease(&self) -> Result<Database> {
         self.database.issue_lease().map_err(|error| {
@@ -826,7 +818,6 @@ struct RemoteNodeOwnerOpeningReservationV1<'a> {
     armed: bool,
 }
 
-#[hotpath::measure_all]
 impl RemoteNodeOwnerOpeningReservationV1<'_> {
     fn publish(&mut self, owner: RemoteNodeStoreOwnerV1) -> Result<()> {
         let mut nodes = self.nodes.lock().map_err(|_| {
@@ -914,7 +905,6 @@ enum ProjectSessionRecoveryInspectionV1 {
     Terminal { proof_is_exact_and_closed: bool },
 }
 
-#[hotpath::measure_all]
 impl ProjectSessionRecoveryInspectionV1 {
     fn description(&self) -> String {
         match self {
@@ -937,7 +927,6 @@ impl ProjectSessionRecoveryInspectionV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl ProjectSessionRecoveryPhaseV1 {
     fn inspection(&self) -> ProjectSessionRecoveryInspectionV1 {
         match self {
@@ -963,7 +952,6 @@ struct ProjectSessionClosedRetirementProofV1 {
     store: StoreRuntimeRetirementCommit,
 }
 
-#[hotpath::measure_all]
 impl ProjectSessionClosedRetirementProofV1 {
     fn verify(&self) -> bool {
         matches!(
@@ -997,7 +985,6 @@ pub(crate) struct ProjectSessionTerminalVacancyAuthorityV1 {
     locator: tracedecay_store::VerifiedStoreLocatorV1,
 }
 
-#[hotpath::measure_all]
 impl ProjectSessionTerminalVacancyAuthorityV1 {
     fn valid(&self) -> bool {
         self.binding.shard_id == self.locator.shard_id
@@ -1020,7 +1007,6 @@ enum ProjectSessionTerminalProofV1 {
     Durable(Box<ProjectSessionTerminalVacancyAuthorityV1>),
 }
 
-#[hotpath::measure_all]
 impl ProjectSessionTerminalProofV1 {
     fn verify(&self) -> bool {
         match self {
@@ -1066,7 +1052,6 @@ enum ProjectRuntimeRetirementFaultInspectionV1 {
     },
 }
 
-#[hotpath::measure_all]
 impl ProjectRuntimeRetirementFaultInspectionV1 {
     fn description(&self) -> String {
         match self {
@@ -1100,7 +1085,6 @@ struct ProjectRuntimeFaultRecoveryInspectionV1 {
     fault: ProjectRuntimeRetirementFaultInspectionV1,
 }
 
-#[hotpath::measure_all]
 impl ProjectRuntimeFaultRecoveryInspectionV1 {
     fn description(&self) -> String {
         format!(
@@ -1122,7 +1106,6 @@ struct ProjectRuntimeFaultedOwnersV1 {
     fault: ProjectRuntimeRetirementFaultV1,
 }
 
-#[hotpath::measure_all]
 impl ProjectRuntimeFaultedOwnersV1 {
     fn recovery_inspection(&self) -> ProjectRuntimeFaultRecoveryInspectionV1 {
         let fault = match &self.fault {
@@ -1175,7 +1158,6 @@ struct ProjectRuntimeOwnerOpeningReservationV1 {
     armed: bool,
 }
 
-#[hotpath::measure_all]
 impl ProjectRuntimeOwnerOpeningReservationV1 {
     fn publish_sessions(&mut self, sessions: RegisteredSessionOwnerV1) -> Result<()> {
         let mut entries = self.owners.lock().map_err(|_| {
@@ -1271,7 +1253,6 @@ struct ProjectRuntimeOwnerRetirementReservationV1 {
     armed: bool,
 }
 
-#[hotpath::measure_all]
 impl ProjectRuntimeOwnerRetirementReservationV1 {
     fn memory(&self) -> Result<&MemoryStoreOwnerV1> {
         self.retained
@@ -1442,7 +1423,6 @@ struct ProjectSessionReplacementReservationV1 {
     armed: bool,
 }
 
-#[hotpath::measure_all]
 impl ProjectSessionReplacementReservationV1 {
     fn replay_descriptor(
         &self,
@@ -1826,7 +1806,6 @@ struct ProjectSessionReplacementVacancyV1 {
     armed: bool,
 }
 
-#[hotpath::measure_all]
 impl ProjectSessionReplacementVacancyV1 {
     fn require_verified_proof(&self) -> Result<()> {
         let proof = self.proof.as_ref().ok_or_else(|| {
@@ -1978,7 +1957,6 @@ struct ProjectSessionCandidateActivationV1 {
     project_id: ProjectId,
 }
 
-#[hotpath::measure_all]
 impl ProjectSessionCandidateActivationV1 {
     fn issue_lease_with_replay_descriptor(
         &self,
@@ -2149,7 +2127,6 @@ struct ProjectSessionRecoveryReservationV1 {
     armed: bool,
 }
 
-#[hotpath::measure_all]
 impl ProjectSessionRecoveryReservationV1 {
     fn has_candidate(&self) -> bool {
         self.recovery
@@ -2431,7 +2408,6 @@ struct ProjectSessionNativeRetirementV1 {
     graph_native_boundary: bool,
 }
 
-#[hotpath::measure_all]
 impl ProjectSessionNativeRetirementV1 {
     fn new(
         replacement: ProjectSessionReplacementReservationV1,
@@ -2639,12 +2615,10 @@ impl Drop for ProjectSessionNativeRetirementV1 {
 
 static LONG_LIVED_SESSION_MAINTENANCE: AtomicBool = AtomicBool::new(false);
 
-#[hotpath::measure]
 fn remote_restore_quarantine_fence_path(database: &Path) -> std::path::PathBuf {
     database.with_extension("remote-restore-quarantine.json")
 }
 
-#[hotpath::measure]
 pub fn mark_process_long_lived_for_session_maintenance() {
     LONG_LIVED_SESSION_MAINTENANCE.store(true, Ordering::Relaxed);
 }
@@ -2655,7 +2629,6 @@ pub fn mark_process_long_lived_for_session_maintenance() {
 /// completion and must not occupy the default WARN surface. WARN is reserved
 /// for degraded outcomes — a failed converge, a poisoned status lock, or a
 /// memory-release failure after the audit.
-#[hotpath::measure]
 pub fn log_store_runtime_event(event: &str, fields: &[(&str, String)]) {
     if store_runtime_event_is_success(fields) {
         tracing::info!(event, ?fields, "store-runtime event");
@@ -2664,7 +2637,6 @@ pub fn log_store_runtime_event(event: &str, fields: &[(&str, String)]) {
     }
 }
 
-#[hotpath::measure]
 fn store_runtime_event_is_success(fields: &[(&str, String)]) -> bool {
     fields
         .iter()
@@ -2700,7 +2672,6 @@ mod store_runtime_event_level_tests {
     }
 }
 
-#[hotpath::measure]
 pub fn release_process_allocator_memory() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
@@ -2712,7 +2683,6 @@ pub fn release_process_allocator_memory() {
     }
 }
 
-#[hotpath::measure_all]
 impl DaemonSessionRuntimeRegistryV1 {
     pub fn profile_id(&self) -> &tracedecay_domain::configuration::UserProfileId {
         self.identity.profile_id()
@@ -3008,7 +2978,6 @@ pub struct DaemonSessionRuntimeRegistryV1 {
     long_lived_session_maintenance: bool,
 }
 
-#[hotpath::measure_all]
 impl DaemonSessionRuntimeRegistryV1 {
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn lookup_store_runtime(
@@ -3028,7 +2997,6 @@ impl DaemonSessionRuntimeRegistryV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl DaemonSessionRuntimeRegistryV1 {
     /// Awaits settlement (attached or detached) of the profile session
     /// relation graph, which `profile_sessions` opens as bounded background
@@ -3206,7 +3174,6 @@ impl ProfileRuntime for DaemonSessionRuntimeRegistryV1 {
     }
 }
 
-#[hotpath::measure]
 fn runtime_incarnation(identity: &LocalProfileIdentityAuthorityV1) -> Result<StoreIncarnationV1> {
     let process_run_id = tracedecay_runtime_core::runtime_identity::process_run_id();
     let daemon_generation =
@@ -3231,7 +3198,6 @@ fn runtime_incarnation(identity: &LocalProfileIdentityAuthorityV1) -> Result<Sto
         .map_err(|error| session_registry_error("create store incarnation", error.to_string()))
 }
 
-#[hotpath::measure]
 pub fn process_runtime_generation(process_run_id: &str) -> Option<u64> {
     let raw = process_run_id
         .get(..16)
@@ -3393,7 +3359,6 @@ async fn open_runtime_with_presence(
     }
 }
 
-#[hotpath::measure]
 pub fn registry_open_error(
     operation: &'static str,
     failure: StoreRuntimeRegistryFailure,
@@ -3406,7 +3371,6 @@ pub fn registry_open_error(
     }
 }
 
-#[hotpath::measure]
 fn session_registry_error(operation: &'static str, message: String) -> TraceDecayError {
     TraceDecayError::Database {
         operation: operation.to_owned(),

@@ -96,7 +96,6 @@ struct AdminCliContext<'a> {
     cancellation: Option<CancellationSignal>,
 }
 
-#[hotpath::measure_all]
 impl<'a> AdminCliContext<'a> {
     fn with_project(
         cg: &'a TraceDecay,
@@ -251,7 +250,6 @@ pub(crate) async fn handle_projectless_admin_cli(
     .await
 }
 
-#[hotpath::measure]
 fn parse_admin_cli_action(args: Value) -> Result<AdminCliAction> {
     serde_json::from_value(args).map_err(|error| TraceDecayError::Config {
         message: format!("invalid tracedecay_admin_cli arguments: {error}"),
@@ -640,7 +638,6 @@ async fn cost_summary(
     }))
 }
 
-#[hotpath::measure]
 fn unavailable_provider_usage_cost_summary()
 -> tracedecay_session_memory::provider_usage::ProviderUsageCostSummaryV1 {
     tracedecay_session_memory::provider_usage::ProviderUsageCostSummaryV1 {
@@ -738,7 +735,6 @@ async fn execute_session_sync(
     Ok(render_session_sync_outcome(service.execute(request).await))
 }
 
-#[hotpath::measure]
 fn session_sync_scope(context: &AdminCliContext<'_>) -> Result<SessionSyncScopeV1> {
     let project = context.require_project()?;
     let identity = context.require_profile_identity()?;
@@ -788,7 +784,6 @@ async fn control_session_sync(
     Ok(render_session_sync_outcome(outcome))
 }
 
-#[hotpath::measure]
 fn render_session_sync_outcome(outcome: SessionSyncOutcomeV1) -> Value {
     match outcome {
         SessionSyncOutcomeV1::Accepted(receipt) => json!({

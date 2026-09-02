@@ -106,7 +106,6 @@ const FIRST_TOUCH_STORE_TOOLS: &[&str] = &[
     "tracedecay_lcm_expand_query",
 ];
 
-#[hotpath::measure]
 fn tool_deadline_range_error() -> TraceDecayError {
     TraceDecayError::Config {
         message: format!(
@@ -116,12 +115,10 @@ fn tool_deadline_range_error() -> TraceDecayError {
     }
 }
 
-#[hotpath::measure]
 fn tool_command_deadline() -> Result<Duration> {
     tracedecay::daemon::tool_request_deadline()
 }
 
-#[hotpath::measure]
 fn tool_timeout_error(tool_name: &str) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!(
@@ -130,7 +127,6 @@ fn tool_timeout_error(tool_name: &str) -> TraceDecayError {
     }
 }
 
-#[hotpath::measure]
 fn reject_tool_result_truncation(result_value: &Value, tool_name: &str) -> Result<()> {
     reject_truncation_envelope(result_value, tool_name)?;
     let Some(blocks) = result_value.get("content").and_then(Value::as_array) else {
@@ -157,7 +153,6 @@ pub(crate) async fn run(
     run_inner(project, name, args).await
 }
 
-#[hotpath::measure]
 fn run_inner(
     project: Option<String>,
     name: Option<String>,
@@ -316,7 +311,6 @@ pub(crate) async fn dispatch_catalogued_cli_operation(
 /// Splits a CLI `--args` object into the reviewed application request body and
 /// the requested output format, through the same adapter every other transport
 /// uses. `--json` and `format: "json"` are the same request for JSON output.
-#[hotpath::measure]
 fn cli_surface_invocation(
     tool_name: &str,
     tool_args: Value,
@@ -355,7 +349,6 @@ async fn dispatch_cli_application_surface(
     .await
 }
 
-#[hotpath::measure]
 fn dispatch_cli_application_surface_inner(
     operation: ApplicationSurfaceOperation,
     tool_args: Value,
@@ -467,7 +460,6 @@ fn dispatch_cli_application_surface_inner(
     })
 }
 
-#[hotpath::measure]
 fn print_cli_application_surface(
     result: ApplicationSurfaceInvocationResult,
     raw_json: bool,
@@ -502,7 +494,6 @@ struct DaemonToolDispatch {
     allow_init: bool,
 }
 
-#[hotpath::measure_all]
 impl DaemonToolDispatch {
     fn for_tool(explicit_project: Option<String>, tool_name: &str, tool_args: &Value) -> Self {
         // Profile-authority tools (Hermes user LCM/memory) must never invent a
@@ -561,7 +552,6 @@ impl DaemonToolDispatch {
     }
 }
 
-#[hotpath::measure]
 fn requests_profile_authority(tool_args: &Value) -> bool {
     matches!(
         tool_args.get("storage_scope").and_then(Value::as_str),
@@ -572,12 +562,10 @@ fn requests_profile_authority(tool_args: &Value) -> bool {
     )
 }
 
-#[hotpath::measure]
 fn implicit_tool_project_path(cwd: &Path) -> Option<PathBuf> {
     tracedecay::config::discover_project_root(cwd)
 }
 
-#[hotpath::measure]
 fn map_tool_deadline_error(tool_name: &str, error: TraceDecayError) -> TraceDecayError {
     if tracedecay::daemon::error_is_read_deadline(&error) {
         tool_timeout_error(tool_name)
@@ -647,7 +635,6 @@ async fn dispatch_compatibility_tool(
 /// it keeps exit 0. Only an outcome the daemon itself marked as failed changes
 /// the status, which mirrors what the typed application-surface path already
 /// does in [`print_cli_application_surface`].
-#[hotpath::measure]
 fn tool_result_process_outcome(result_value: &Value, tool_name: &str) -> Result<()> {
     if result_value.get("isError").and_then(Value::as_bool) != Some(true) {
         return Ok(());
@@ -661,7 +648,6 @@ fn tool_result_process_outcome(result_value: &Value, tool_name: &str) -> Result<
     })
 }
 
-#[hotpath::measure]
 fn print_tool_output(result_value: &Value, raw_json: bool) {
     println!("{}", rendered_tool_output(result_value, raw_json));
 }
@@ -670,7 +656,6 @@ fn print_tool_output(result_value: &Value, raw_json: bool) {
 /// result: the exact daemon JSON object when `--json` is set, otherwise the
 /// joined `content[*].text` markdown. Status is decided separately from
 /// top-level `isError`.
-#[hotpath::measure]
 fn rendered_tool_output(result_value: &Value, raw_json: bool) -> String {
     if raw_json {
         serde_json::to_string_pretty(result_value).unwrap_or_default()
@@ -683,7 +668,6 @@ fn rendered_tool_output(result_value: &Value, raw_json: bool) -> String {
 /// blank line. Handlers sometimes prepend a warning/notice block ahead of the
 /// real payload+metrics block; printing only `content[0].text` would silently
 /// drop the payload. Falls back to the empty string when no text blocks exist.
-#[hotpath::measure]
 fn join_content_text(result_value: &Value) -> String {
     result_value
         .get("content")
@@ -702,7 +686,6 @@ fn join_content_text(result_value: &Value) -> String {
 /// Print a grouped list of every available tool. Tools annotated as
 /// `alwaysLoad` come first since they're the most commonly used; everything
 /// else is alphabetized.
-#[hotpath::measure]
 fn print_tool_list(defs: &[ToolDefinition]) {
     let mut groups: BTreeMap<&str, Vec<&ToolDefinition>> = BTreeMap::new();
     let mut always = Vec::new();
@@ -759,7 +742,6 @@ fn print_tool_list(defs: &[ToolDefinition]) {
 }
 
 /// First line of a (possibly multi-line) description, truncated for layout.
-#[hotpath::measure]
 fn first_line(s: &str) -> String {
     let line = s.lines().next().unwrap_or("");
     if line.len() > 90 {
@@ -772,7 +754,6 @@ fn first_line(s: &str) -> String {
 /// Best-effort categorisation by tool-name prefix. Matches how the codebase
 /// already groups handlers (`graph`, `info`, `git`, `analysis`, `health`,
 /// `edit`, `memory`). Tools that don't match any prefix fall under `other`.
-#[hotpath::measure]
 fn group_for(def: &ToolDefinition) -> &'static str {
     let n = def.name.as_str();
     if ApplicationSurfaceOperation::from_tool_name(n).is_some() {
@@ -858,7 +839,6 @@ fn group_for(def: &ToolDefinition) -> &'static str {
 }
 
 /// Print one tool's description, usage line, and parameter table.
-#[hotpath::measure]
 fn print_tool_help(def: &ToolDefinition) {
     print!("{}", render_tool_cli_help(def));
 }

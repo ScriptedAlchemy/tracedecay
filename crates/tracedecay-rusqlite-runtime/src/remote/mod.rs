@@ -117,7 +117,6 @@ pub struct RemoteSpoolLimitsV1 {
     pub maximum_ciphertext_bytes: u64,
 }
 
-#[hotpath::measure_all]
 impl RemoteSpoolLimitsV1 {
     pub fn new(
         maximum_events: u64,
@@ -150,7 +149,6 @@ pub struct RemoteSqliteStorageV1 {
     limits: RemoteSpoolLimitsV1,
 }
 
-#[hotpath::measure_all]
 impl RemoteSqliteStorageV1 {
     /// Attaches remote-node storage to one retained, write-authorized runtime.
     ///
@@ -680,7 +678,6 @@ impl RemoteCapturePortV1 for RemoteSqliteStorageV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl RemoteSqliteStorageV1 {
     /// Exports one locally encrypted frame for an authenticated reconnect
     /// upload. The receiving node still decrypts and validates it with the
@@ -874,7 +871,6 @@ impl RemoteFrameTransferPortV1 for RemoteSqliteStorageV1 {
     }
 }
 
-#[hotpath::measure]
 fn map_transfer_persistence_error(
     error: RemoteCapturePersistenceErrorV1,
 ) -> RemoteFrameTransferErrorV1 {
@@ -886,7 +882,6 @@ fn map_transfer_persistence_error(
     }
 }
 
-#[hotpath::measure]
 fn validate_final_schema(handle: &ExactSqlHandle) -> Result<(), RemoteSqliteStorageErrorV1> {
     let rows = query(
         handle,
@@ -1190,7 +1185,6 @@ struct EncryptedFrameV1 {
     ciphertext: Vec<u8>,
 }
 
-#[hotpath::measure]
 fn random_nonce() -> Result<[u8; 12], RemoteCapturePersistenceErrorV1> {
     let mut nonce = [0_u8; 12];
     SystemRandom::new()
@@ -1199,7 +1193,6 @@ fn random_nonce() -> Result<[u8; 12], RemoteCapturePersistenceErrorV1> {
     Ok(nonce)
 }
 
-#[hotpath::measure]
 fn validate_previous_frame(
     transaction: &crate::exact_sql::ExactSqlTransaction,
     command: &AdmittedRemoteCaptureV1,

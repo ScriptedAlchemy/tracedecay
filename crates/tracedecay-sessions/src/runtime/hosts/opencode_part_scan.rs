@@ -14,7 +14,6 @@ use super::opencode::{
 
 const PROVIDER: &str = "opencode";
 
-#[hotpath::measure]
 pub(super) fn scan_part_reference_page(
     source: &OpenCodeScanSource,
     cursor: OpenCodePageCursor,
@@ -179,7 +178,6 @@ pub(super) fn scan_part_reference_page(
     ))
 }
 
-#[hotpath::measure]
 fn scan_error(
     operation: &'static str,
     path: &Path,

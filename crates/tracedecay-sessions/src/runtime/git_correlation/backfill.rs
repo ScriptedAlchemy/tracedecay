@@ -45,7 +45,6 @@ pub struct SessionActivityRow {
     pub message_max_ts: Option<i64>,
 }
 
-#[hotpath::measure_all]
 impl SessionActivityRow {
     /// Coarse `[start, end]` window from the widest pair of known bounds, or
     /// `None` when the session carries no usable timestamp at all. Each bound is
@@ -95,7 +94,6 @@ pub type BranchTimelineEntry = (i64, Option<String>);
 ///
 /// Returned oldest-first (reflog output is newest-first, so this reverses it),
 /// which is the order [`window_branch_segments`] expects. Pure: no IO.
-#[hotpath::measure]
 pub fn branch_timeline_from_reflog(reflog_text: &str) -> Vec<BranchTimelineEntry> {
     let mut entries: Vec<BranchTimelineEntry> = Vec::new();
     for line in reflog_text.lines() {
@@ -112,7 +110,6 @@ pub fn branch_timeline_from_reflog(reflog_text: &str) -> Vec<BranchTimelineEntry
 /// detached sha). Non-checkout and unparseable lines return `None`.
 ///
 /// Expected shape: `<sha> HEAD@{<unix>}: checkout: moving from <X> to <Y>`.
-#[hotpath::measure]
 fn parse_reflog_checkout_line(line: &str) -> Option<BranchTimelineEntry> {
     let ts_open = line.find("HEAD@{")? + "HEAD@{".len();
     let ts_close = line[ts_open..].find('}')? + ts_open;
@@ -133,7 +130,6 @@ fn parse_reflog_checkout_line(line: &str) -> Option<BranchTimelineEntry> {
 
 /// Classifies a checkout target: a 7–64 char all-hex token is a detached-HEAD
 /// commit (`None`); anything else is treated as a branch name.
-#[hotpath::measure]
 fn branch_from_checkout_target(target: &str) -> Option<String> {
     let looks_like_sha =
         (7..=64).contains(&target.len()) && target.chars().all(|c| c.is_ascii_hexdigit());
@@ -162,7 +158,6 @@ pub struct WindowBranchSegment {
 /// points at as the floor).
 ///
 /// Pure: no IO. Segments are clamped to the window and returned oldest-first.
-#[hotpath::measure]
 pub fn window_branch_segments(
     win_start: i64,
     win_end: i64,
@@ -257,7 +252,6 @@ pub struct BackfillStats {
     pub skipped_git_error: usize,
 }
 
-#[hotpath::measure_all]
 impl BackfillStats {
     fn record_skip(&mut self, reason: BackfillSkipReason) {
         match reason {
@@ -292,7 +286,6 @@ pub trait GitReflogSource: Send + Sync {
 /// Real git-subprocess implementation of [`GitReflogSource`].
 pub struct SystemGit;
 
-#[hotpath::measure_all]
 impl SystemGit {
     fn output(worktree: &std::path::Path, args: &[&str]) -> Option<String> {
         let output = tracedecay_runtime_core::git::git_output(worktree, args)?;
@@ -330,7 +323,6 @@ impl GitReflogSource for SystemGit {
 
 /// Parses `git log --pretty=%H %ct` output into `(sha, committed_at)` pairs,
 /// capping at `max`. Malformed and non-hex lines are skipped. Pure.
-#[hotpath::measure]
 pub fn parse_commit_log(log_text: &str, max: usize) -> Vec<(String, i64)> {
     let mut commits = Vec::new();
     for line in log_text.lines() {
@@ -534,7 +526,6 @@ pub(super) async fn advance_history_frontier(
 /// (or `HEAD` for detached spans) inside the gap-widened span window. Reports
 /// [`TargetScan::Unavailable`] — not an empty list — when the worktree is gone
 /// or git fails, so the sweep holds its watermark and retries the target.
-#[hotpath::measure]
 fn scan_span_target<G: GitReflogSource + ?Sized>(
     git: &G,
     target: &SpanScanTarget,
@@ -824,7 +815,6 @@ pub(super) async fn session_activity_page_after(
 }
 
 /// Decodes one `session_activity_rows*` result row into a [`SessionActivityRow`].
-#[hotpath::measure]
 fn decode_session_activity_row(row: &Row) -> Result<SessionActivityRow, String> {
     Ok(SessionActivityRow {
         provider: row

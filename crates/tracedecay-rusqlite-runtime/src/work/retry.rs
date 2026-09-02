@@ -76,7 +76,6 @@ impl WorkRetryStoragePortV1 for WorkSqliteStorage {
 }
 
 /// Persist one retry and receipt without settling the caller-owned transaction.
-#[hotpath::measure]
 pub(crate) fn insert_retry_bounded_in_transaction(
     transaction: &ExactSqlTransaction,
     authority: &WorkAuthority,
@@ -121,7 +120,6 @@ pub(crate) fn insert_retry_bounded_in_transaction(
     })
 }
 
-#[hotpath::measure]
 fn validate_write(write: &WorkRetryWriteV1) -> Result<(), WorkAttemptStorageError> {
     let command = &write.receipt.command;
     let expected = canonical_sha256(&("tracedecay.application.work-retry-input.v1", command))
@@ -140,7 +138,6 @@ fn validate_write(write: &WorkRetryWriteV1) -> Result<(), WorkAttemptStorageErro
     Ok(())
 }
 
-#[hotpath::measure]
 fn replay(
     transaction: &ExactSqlTransaction,
     authority: &WorkAuthority,
@@ -210,7 +207,6 @@ fn replay(
     }))
 }
 
-#[hotpath::measure]
 fn load_attempt(
     transaction: &ExactSqlTransaction,
     authority: &WorkAuthority,
@@ -273,7 +269,6 @@ const fn attempt_state(state: tracedecay_domain::WorkAttemptStateV1) -> &'static
     }
 }
 
-#[hotpath::measure]
 fn require_attempt(
     transaction: &ExactSqlTransaction,
     authority: &WorkAuthority,
@@ -304,7 +299,6 @@ fn require_attempt(
     }
 }
 
-#[hotpath::measure]
 fn require_run_reservation(
     transaction: &ExactSqlTransaction,
     authority: &WorkAuthority,
@@ -335,7 +329,6 @@ fn require_run_reservation(
     }
 }
 
-#[hotpath::measure]
 fn require_first_run_admission(
     transaction: &ExactSqlTransaction,
     authority: &WorkAuthority,
@@ -373,7 +366,6 @@ fn require_first_run_admission(
     }
 }
 
-#[hotpath::measure]
 fn insert_attempt(
     transaction: &ExactSqlTransaction,
     authority: &WorkAuthority,
@@ -411,7 +403,6 @@ fn insert_attempt(
     Ok(())
 }
 
-#[hotpath::measure]
 fn insert_receipt(
     transaction: &ExactSqlTransaction,
     authority: &WorkAuthority,
@@ -467,7 +458,6 @@ fn insert_receipt(
     Ok(())
 }
 
-#[hotpath::measure]
 fn identity_params(identity: &WorkAttemptIdentityV1) -> [ExactSqlValue; 3] {
     [
         ExactSqlValue::Text(identity.task_id().as_str().to_owned()),

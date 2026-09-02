@@ -6,7 +6,6 @@ use super::super::history_progress::{
 use super::{BoundedBackfillInterruption, GitHistoryIndexFrontier, native};
 use crate::runtime::git_correlation::normalize_worktree;
 
-#[hotpath::measure]
 pub(super) fn session_row_from_progress(progress: &GitHistoryProgressRow) -> SessionActivityRow {
     SessionActivityRow {
         provider: progress.provider.clone(),
@@ -26,7 +25,6 @@ pub(super) const fn progress_frontier(progress: &GitHistoryProgressRow) -> GitHi
     }
 }
 
-#[hotpath::measure]
 pub(super) fn progress_from_cursor(
     key: GitHistoryProgressKey,
     activity_timestamp: i64,
@@ -79,7 +77,6 @@ pub(super) fn progress_from_cursor(
     })
 }
 
-#[hotpath::measure]
 pub(super) fn cursor_from_progress(
     progress: &GitHistoryProgressRow,
 ) -> Result<native::ReflogCursor, BoundedBackfillInterruption> {
@@ -115,7 +112,6 @@ pub(super) fn cursor_from_progress(
     })
 }
 
-#[hotpath::measure]
 pub(super) fn repository_seal_from_progress(
     progress: &GitHistoryProgressRow,
 ) -> Result<native::RepositorySeal, BoundedBackfillInterruption> {
@@ -129,14 +125,12 @@ pub(super) fn repository_seal_from_progress(
     })
 }
 
-#[hotpath::measure]
 pub(super) fn canonical_worktree_path(
     progress: &GitHistoryProgressRow,
 ) -> Result<std::path::PathBuf, BoundedBackfillInterruption> {
     native::decode_path(&progress.worktree)
 }
 
-#[hotpath::measure]
 pub(super) fn canonical_worktree_evidence(
     progress: &GitHistoryProgressRow,
 ) -> Result<String, BoundedBackfillInterruption> {
@@ -147,7 +141,6 @@ pub(super) fn canonical_worktree_evidence(
     Ok(normalize_worktree(exact))
 }
 
-#[hotpath::measure]
 pub(super) fn copy_cursor_to_progress(
     progress: &mut GitHistoryProgressRow,
     cursor: native::ReflogCursor,

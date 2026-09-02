@@ -42,7 +42,6 @@ pub struct SourceEditEffectProofV1 {
     pub external_proof: Option<RetrievalAnchorId>,
 }
 
-#[hotpath::measure_all]
 impl SourceEditEffectProofV1 {
     pub fn validate_for(
         &self,
@@ -82,7 +81,6 @@ pub struct SourceEditAuthorizationAdmissionV1 {
     pub proof: SourceEditEffectProofV1,
 }
 
-#[hotpath::measure_all]
 impl SourceEditAuthorizationAdmissionV1 {
     pub fn new(
         receipt: AuthorityReceipt,
@@ -117,7 +115,6 @@ pub struct SourceEditEffectRequestV1 {
     pub observed_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl SourceEditEffectRequestV1 {
     pub fn input_digest(&self) -> Result<ManifestDigest, ApplicationContractError> {
         self.validate()?;
@@ -210,7 +207,6 @@ pub struct SourceEditReconciliationRequestV1 {
     pub observed_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl SourceEditReconciliationRequestV1 {
     pub fn attempt_input_digest(&self) -> Result<ManifestDigest, ApplicationContractError> {
         self.validate()?;

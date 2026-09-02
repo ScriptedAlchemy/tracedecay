@@ -9,7 +9,6 @@ use crate::exact_sql::ExactSqlReadSnapshot;
 
 use super::support::{ensure_live, integer, query, receipt_by_ordinal, stage_by_key, text};
 
-#[hotpath::measure]
 pub(super) fn validate_batch_cursor(
     snapshot: &ExactSqlReadSnapshot,
     stage_id: i64,
@@ -24,7 +23,6 @@ pub(super) fn validate_batch_cursor(
     Ok(())
 }
 
-#[hotpath::measure]
 pub(super) fn validate_pending_effect_cursor(
     snapshot: &ExactSqlReadSnapshot,
     request: &SemanticVectorStagePendingEffectPageRequest,
@@ -55,7 +53,6 @@ pub(super) fn validate_pending_effect_cursor(
     Ok(())
 }
 
-#[hotpath::measure]
 pub(super) fn validate_ready_cursor(
     snapshot: &ExactSqlReadSnapshot,
     request: &SemanticVectorReadyPublicationPageRequest,
@@ -69,7 +66,6 @@ pub(super) fn validate_ready_cursor(
     Ok(())
 }
 
-#[hotpath::measure]
 fn invalid_cursor(
     context: &GraphPublicationOperationContextV1<'_>,
     field: &'static str,

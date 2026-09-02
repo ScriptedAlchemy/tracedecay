@@ -19,7 +19,6 @@ use crate::result::{
 
 use super::RetrievalPortOutcome;
 
-#[hotpath::measure]
 pub(super) fn problem_envelope<T>(
     context: &RequestContext,
     operation: &ApplicationOperation,
@@ -61,7 +60,6 @@ struct PreparedEvidence<T> {
     requires_recheck: bool,
 }
 
-#[hotpath::measure_all]
 impl<T> PreparedEvidence<T> {
     fn deny_publication(&mut self) {
         self.termination = OperationTermination::Failed;
@@ -70,7 +68,6 @@ impl<T> PreparedEvidence<T> {
     }
 }
 
-#[hotpath::measure]
 fn prepare_evidence_for_publication<T>(
     context: &RequestContext,
     outcome: RetrievalPortOutcome<T>,
@@ -143,7 +140,6 @@ fn prepare_evidence_for_publication<T>(
     }
 }
 
-#[hotpath::measure]
 fn finish_evidence_envelope<T>(
     context: &RequestContext,
     operation: &ApplicationOperation,
@@ -185,7 +181,6 @@ fn finish_evidence_envelope<T>(
     )))
 }
 
-#[hotpath::measure]
 fn suppress_unpublished_evidence<T>(
     evidence: &mut RetrievalEvidence<T>,
     reason: OmissionReason,

@@ -83,7 +83,6 @@ pub struct KiroSource {
     project_matchers: ProjectRootMatcherCache,
 }
 
-#[hotpath::measure_all]
 impl KiroSource {
     /// Source rooted at the real Kiro IDE storage. Returns `None` when home
     /// cannot be resolved.
@@ -110,7 +109,6 @@ impl KiroSource {
     }
 }
 
-#[hotpath::measure_all]
 impl TranscriptSource for KiroSource {
     fn provider(&self) -> &'static str {
         PROVIDER
@@ -173,7 +171,6 @@ impl TranscriptSource for KiroSource {
     }
 }
 
-#[hotpath::measure_all]
 impl KiroSource {
     fn parse_snapshot(
         &self,
@@ -343,14 +340,12 @@ pub async fn capture_kiro_snapshot_observations(
     .await
 }
 
-#[hotpath::measure]
 fn ensure_bounded_snapshot(path: &Path, byte_cap: u64) -> TranscriptIngestResult<()> {
     bounded_snapshot_input_len(PROVIDER, path, byte_cap)
         .map(|_| ())
         .map_err(|_| non_durable(path, "snapshot exceeds provider byte bound"))
 }
 
-#[hotpath::measure_all]
 impl KiroSource {
     fn snapshot_input_bytes(&self, path: &Path) -> TranscriptIngestResult<u64> {
         let transcript_bytes = bounded_snapshot_input_len(PROVIDER, path, MAX_SNAPSHOT_FILE_BYTES)?;
@@ -365,7 +360,6 @@ impl KiroSource {
     }
 }
 
-#[hotpath::measure]
 fn non_durable(path: &Path, reason: &'static str) -> TranscriptIngestError {
     non_durable_snapshot_record(PROVIDER, path, reason)
 }
@@ -541,7 +535,6 @@ fn collect_user_agent_storage_files(
     out
 }
 
-#[hotpath::measure]
 fn collect_extensionless_execution_files(dir: &Path, max_depth: u8, out: &mut Vec<PathBuf>) {
     if max_depth == 0 {
         return;
@@ -568,7 +561,6 @@ fn collect_extensionless_execution_files(dir: &Path, max_depth: u8, out: &mut Ve
     }
 }
 
-#[hotpath::measure]
 fn transcript_location_path(path: &Path, workspace_storage_dir: &Path) -> Option<PathBuf> {
     if let Some(workspace) = workspace_from_sessions_path(path) {
         return Some(workspace);
@@ -577,7 +569,6 @@ fn transcript_location_path(path: &Path, workspace_storage_dir: &Path) -> Option
     workspace_path_from_hash(workspace_storage_dir, &hash)
 }
 
-#[hotpath::measure]
 fn workspace_from_sessions_path(path: &Path) -> Option<PathBuf> {
     let components = path.components().collect::<Vec<_>>();
     let idx = components
@@ -587,7 +578,6 @@ fn workspace_from_sessions_path(path: &Path) -> Option<PathBuf> {
     decode_kiro_workspace_path(encoded)
 }
 
-#[hotpath::measure]
 fn workspace_hash_from_path(path: &Path) -> Option<String> {
     path.ancestors().find_map(|ancestor| {
         ancestor
@@ -609,12 +599,10 @@ fn workspace_path_from_hash(workspace_storage_dir: &Path, hash: &str) -> Option<
     folder_field_to_path(value.get("folder").and_then(Value::as_str)?)
 }
 
-#[hotpath::measure]
 fn workspace_metadata_path(workspace_storage_dir: &Path, hash: &str) -> PathBuf {
     workspace_storage_dir.join(hash).join("workspace.json")
 }
 
-#[hotpath::measure]
 fn folder_field_to_path(folder: &str) -> Option<PathBuf> {
     let scheme_len = if folder
         .get(..7)
@@ -650,7 +638,6 @@ fn folder_field_to_path(folder: &str) -> Option<PathBuf> {
     }
 }
 
-#[hotpath::measure]
 fn percent_decode_path(value: &str) -> PathBuf {
     let mut out = Vec::new();
     let bytes = value.as_bytes();
@@ -674,7 +661,6 @@ fn percent_decode_path(value: &str) -> PathBuf {
 }
 
 #[cfg(unix)]
-#[hotpath::measure]
 fn pathbuf_from_decoded_bytes(bytes: Vec<u8>) -> PathBuf {
     PathBuf::from(OsString::from_vec(bytes))
 }
@@ -684,12 +670,10 @@ fn pathbuf_from_decoded_bytes(bytes: Vec<u8>) -> PathBuf {
     clippy::needless_pass_by_value,
     reason = "all platform implementations share the owned decoded-byte contract"
 )]
-#[hotpath::measure]
 fn pathbuf_from_decoded_bytes(bytes: Vec<u8>) -> PathBuf {
     PathBuf::from(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-#[hotpath::measure]
 fn session_id_from_transcript(path: &Path, value: &Value) -> String {
     string_field(value, &["sessionId", "conversationId", "workflowId", "id"])
         .or_else(|| {
@@ -705,7 +689,6 @@ fn session_id_from_transcript(path: &Path, value: &Value) -> String {
         })
 }
 
-#[hotpath::measure]
 fn model_from_transcript(value: &Value) -> Option<String> {
     string_field(value, &["modelId", "modelID", "modelName", "model"]).or_else(|| {
         value
@@ -765,7 +748,6 @@ fn messages_from_transcript(
     Err(non_durable(path, "unsupported snapshot message layout"))
 }
 
-#[hotpath::measure]
 fn legacy_chat_messages(
     chat: &[Value],
     session_id: &str,
@@ -820,7 +802,6 @@ fn legacy_chat_messages(
     out
 }
 
-#[hotpath::measure]
 fn modern_messages(
     messages: &[Value],
     session_id: &str,
@@ -878,7 +859,6 @@ fn modern_messages(
     out
 }
 
-#[hotpath::measure]
 fn normalized_role(entry: &Value) -> Option<&'static str> {
     let role = entry
         .get("role")
@@ -893,7 +873,6 @@ fn normalized_role(entry: &Value) -> Option<&'static str> {
     }
 }
 
-#[hotpath::measure]
 fn parse_timestamp_secs(value: &Value) -> Option<i64> {
     if let Some(ts) = value.as_i64() {
         return Some(normalize_timestamp_secs(ts));
@@ -904,7 +883,6 @@ fn parse_timestamp_secs(value: &Value) -> Option<i64> {
         .map(|secs| secs as i64)
 }
 
-#[hotpath::measure]
 fn string_field(value: &Value, keys: &[&str]) -> Option<String> {
     keys.iter()
         .find_map(|key| value.get(*key).and_then(Value::as_str))
@@ -943,7 +921,6 @@ pub fn normalize_kiro_snapshot_observations(
         .collect()
 }
 
-#[hotpath::measure]
 fn stable_message_id(
     session_id: &str,
     entry: &Value,
@@ -963,7 +940,6 @@ fn stable_message_id(
     )
 }
 
-#[hotpath::measure]
 fn session_metadata(location_cwd: Option<&Path>, transcript: Option<&Value>) -> Value {
     let mut metadata = serde_json::Map::new();
     metadata.insert(
@@ -993,7 +969,6 @@ fn session_metadata(location_cwd: Option<&Path>, transcript: Option<&Value>) -> 
     Value::Object(metadata)
 }
 
-#[hotpath::measure]
 fn message_metadata(entry: &Value, location_cwd: Option<&Path>) -> Value {
     let mut metadata = Map::new();
     metadata.insert(

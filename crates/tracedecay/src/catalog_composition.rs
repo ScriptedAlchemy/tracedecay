@@ -43,7 +43,6 @@ pub struct ApplicationCatalogComposition<Dispatcher> {
     dispatcher: Dispatcher,
 }
 
-#[hotpath::measure_all]
 impl<Dispatcher> ApplicationCatalogComposition<Dispatcher> {
     pub fn snapshot(&self) -> &CatalogSnapshotV1 {
         &self.snapshot
@@ -77,7 +76,6 @@ impl<Dispatcher> ApplicationCatalogComposition<Dispatcher> {
 /// Compose the immutable catalog and retain its one canonical application
 /// dispatcher. Request and result types remain compile-time checked by the
 /// dispatcher's per-request trait implementations.
-#[hotpath::measure]
 pub fn compose_application_catalog<Dispatcher>(
     dispatcher: Dispatcher,
 ) -> Result<ApplicationCatalogComposition<Dispatcher>, CatalogCompositionError> {
@@ -86,7 +84,6 @@ pub fn compose_application_catalog<Dispatcher>(
 
 /// Compose the catalog when the retained dispatcher also needs the validated
 /// immutable snapshot for its own binding checks.
-#[hotpath::measure]
 pub fn compose_application_catalog_with<Dispatcher>(
     dispatcher: impl FnOnce(&CatalogSnapshotV1) -> Dispatcher,
 ) -> Result<ApplicationCatalogComposition<Dispatcher>, CatalogCompositionError> {
@@ -101,7 +98,6 @@ pub fn compose_application_catalog_with<Dispatcher>(
 
 /// Build the immutable catalog snapshot used by transport binding resolution.
 /// Callers that execute operations must use [`compose_application_catalog`].
-#[hotpath::measure]
 pub fn build_application_catalog_snapshot() -> Result<CatalogSnapshotV1, CatalogCompositionError> {
     assemble_application_catalog().map(|(snapshot, _handlers)| snapshot)
 }
@@ -147,7 +143,6 @@ fn assemble_application_catalog()
 /// Contribution builders derive availability and bindings from their concrete
 /// runtime registrars. Root composition only validates the resulting
 /// use-case/schema mapping; it does not maintain a second availability list.
-#[hotpath::measure]
 pub fn validate_application_catalog(
     contributions: &[CatalogContributionV1],
     handlers: &ApplicationHandlerDescriptors,
@@ -156,7 +151,6 @@ pub fn validate_application_catalog(
     Ok(())
 }
 
-#[hotpath::measure]
 fn application_profiles(
     contributions: &[CatalogContributionV1],
 ) -> Result<Vec<ProfileDefinition>, CatalogCompositionError> {
@@ -199,7 +193,6 @@ fn application_profiles(
     .collect()
 }
 
-#[hotpath::measure]
 fn application_profile(
     contributions: &[CatalogContributionV1],
     profile_id: &str,
@@ -324,7 +317,6 @@ fn application_profile(
     })?)
 }
 
-#[hotpath::measure]
 fn unique_routing_fixture_utterance(
     capability: &tracedecay_tool_catalog::CapabilityManifestV1,
     used: &mut BTreeSet<String>,

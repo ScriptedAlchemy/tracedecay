@@ -11,7 +11,6 @@ use tracedecay_store::{FactCurrentQuery, FactLineageQuery, StoredFactV1};
 use super::super::support::{decode, invalid, usize_to_i64};
 use super::OwnerColumns;
 
-#[hotpath::measure]
 pub(super) fn read_current(
     connection: &rusqlite::Connection,
     query: &FactCurrentQuery,
@@ -78,7 +77,6 @@ pub(super) fn read_current(
     .map_err(invalid)
 }
 
-#[hotpath::measure]
 pub(super) fn read_lineage(
     connection: &rusqlite::Connection,
     query: &FactLineageQuery,

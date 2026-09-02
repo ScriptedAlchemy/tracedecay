@@ -50,7 +50,6 @@ pub(super) struct ActualTableMetadata {
     pub(super) indexes: Vec<ActualIndex>,
 }
 
-#[hotpath::measure]
 fn requested_values(count: usize) -> String {
     (1..=count)
         .map(|index| format!("(?{index})"))

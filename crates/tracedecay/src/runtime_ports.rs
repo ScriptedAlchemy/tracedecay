@@ -54,7 +54,6 @@ pub fn register_runtime_ports_without_mcp_tool_catalog() {
     );
 }
 
-#[hotpath::measure]
 fn compose_application_catalog_snapshot() -> std::result::Result<
     tracedecay_tool_catalog::CatalogSnapshotV1,
     tracedecay_code_index_runtime::ApplicationCatalogSnapshotErrorV1,
@@ -68,7 +67,6 @@ fn compose_application_catalog_snapshot() -> std::result::Result<
 // tracedecay_sessions::host_ports
 // ---------------------------------------------------------------------------
 
-#[hotpath::measure]
 fn register_session_ports() {
     use tracedecay_sessions::host_ports;
 
@@ -79,7 +77,6 @@ fn register_session_ports() {
     host_ports::unregistered_admission::register(unregistered_admission);
 }
 
-#[hotpath::measure]
 fn schedule_user_session_review<'a>(
     provider: &'a str,
     session_id: Option<&'a str>,
@@ -95,7 +92,6 @@ fn schedule_user_session_review<'a>(
 /// The standalone Codex entry points walk a rollout and count what they *would*
 /// admit; every capture through this facade fails closed because no registered
 /// database is attached.
-#[hotpath::measure]
 fn unregistered_admission(
     scope: tracedecay_sessions::host_ports::unregistered_admission::Scope,
 ) -> Box<dyn tracedecay_sessions::admission::HostAdmission> {
@@ -115,7 +111,6 @@ fn unregistered_admission(
 // tracedecay_agent_hosts::ports
 // ---------------------------------------------------------------------------
 
-#[hotpath::measure]
 fn register_agent_host_ports() {
     use tracedecay_agent_hosts::ports;
     use tracedecay_automation_runtime::ports as automation_ports;
@@ -171,7 +166,6 @@ fn run_codex_app_server_prompt(
 ///
 /// The port is a plain `fn` returning a boxed future so the extracted crate
 /// needs no async-trait machinery.
-#[hotpath::measure]
 fn daemon_tool_json<'a>(
     project_root: Option<&'a Path>,
     tool_name: &'a str,
@@ -193,7 +187,6 @@ fn daemon_tool_json<'a>(
     ))
 }
 
-#[hotpath::measure]
 fn resolve_project_root_with_identity(
     start: &Path,
 ) -> Pin<Box<dyn Future<Output = Option<std::path::PathBuf>> + Send + '_>> {
@@ -212,7 +205,6 @@ fn resolve_hook_scope(
         .map_err(|error| error.to_string())
 }
 
-#[hotpath::measure]
 fn notify_hook_event(
     project_root: &Path,
     event: tracedecay_hooks::DaemonHookEvent,
@@ -225,14 +217,12 @@ fn notify_hook_event(
     ))
 }
 
-#[hotpath::measure]
 fn hook_timings_enabled(project_root: &Path) -> Option<bool> {
     crate::config::cached_telemetry_config(project_root)
         .ok()
         .map(|telemetry| telemetry.timings)
 }
 
-#[hotpath::measure]
 fn resolve_hook_store_layout(
     project_root: &Path,
 ) -> Pin<Box<dyn Future<Output = Result<tracedecay_runtime_core::storage::StoreLayout>> + Send + '_>>
@@ -243,7 +233,6 @@ fn resolve_hook_store_layout(
     ))
 }
 
-#[hotpath::measure]
 fn cursor_catch_up_ingest_max_bytes() -> u64 {
     tracedecay_agent_hosts::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES
 }

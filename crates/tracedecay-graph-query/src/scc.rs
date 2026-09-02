@@ -145,7 +145,6 @@ where
 /// it's just an isolated vertex. Components of size >= 2 are always
 /// cyclic by Tarjan's definition.
 #[allow(clippy::implicit_hasher)]
-#[hotpath::measure]
 pub fn is_cyclic_scc<N>(scc: &[N], adj: &HashMap<N, HashSet<N>>) -> bool
 where
     N: Eq + Hash,

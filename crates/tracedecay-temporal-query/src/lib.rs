@@ -54,7 +54,6 @@ pub struct TemporalKernelRequest {
 }
 
 /// Canonical candidate plan shared by root-wide preparation and kernel reads.
-#[hotpath::measure]
 pub fn plan_temporal_candidates(
     query: &str,
     direct_anchor: Option<&RetrievalAnchorId>,
@@ -78,7 +77,6 @@ pub struct TemporalHydratedResult {
     content: Option<Zeroizing<Vec<u8>>>,
 }
 
-#[hotpath::measure_all]
 impl TemporalHydratedResult {
     fn available(
         rank: u32,
@@ -250,7 +248,6 @@ pub struct TemporalCandidateExport {
     summary_eligibility: SummaryLineageEligibility,
 }
 
-#[hotpath::measure_all]
 impl TemporalCandidateExport {
     pub fn snapshot(&self) -> &TemporalExecutionSnapshot {
         &self.snapshot
@@ -584,7 +581,6 @@ pub async fn execute_temporal_candidate_export(
     })
 }
 
-#[hotpath::measure]
 fn evaluate_summaries_for_scope(
     summaries: &[SessionSummaryRecordV1],
     source_states: &BTreeMap<RetrievalAnchorId, SummarySourceState>,
@@ -640,7 +636,6 @@ fn evaluate_summaries_for_scope(
     }
 }
 
-#[hotpath::measure]
 fn check_control(snapshot: &TemporalExecutionSnapshot) -> Result<(), TemporalKernelError> {
     snapshot
         .request()
@@ -649,7 +644,6 @@ fn check_control(snapshot: &TemporalExecutionSnapshot) -> Result<(), TemporalKer
         .map_err(map_port_error)
 }
 
-#[hotpath::measure]
 fn map_port_error(error: TemporalPortError) -> TemporalKernelError {
     match error {
         TemporalPortError::Cancelled => TemporalKernelError::Cancelled,
@@ -670,7 +664,6 @@ fn map_port_error(error: TemporalPortError) -> TemporalKernelError {
     }
 }
 
-#[hotpath::measure]
 fn map_context_error(error: ContextError) -> TemporalKernelError {
     match error {
         ContextError::Interrupted(error) => map_port_error(error),
@@ -681,7 +674,6 @@ fn map_context_error(error: ContextError) -> TemporalKernelError {
     }
 }
 
-#[hotpath::measure]
 fn map_hydration_error(error: HydrationError) -> TemporalKernelError {
     match error {
         HydrationError::Interrupted(error) => map_port_error(error),
@@ -692,7 +684,6 @@ fn map_hydration_error(error: HydrationError) -> TemporalKernelError {
     }
 }
 
-#[hotpath::measure]
 fn stable_sort_key(candidate: &RankedCandidate) -> StableSortKey {
     StableSortKey {
         normalized_score_micros: candidate.normalized_score_micros,
@@ -701,7 +692,6 @@ fn stable_sort_key(candidate: &RankedCandidate) -> StableSortKey {
     }
 }
 
-#[hotpath::measure]
 fn is_after(candidate: &RankedCandidate, after: &StableSortKey) -> bool {
     candidate.normalized_score_micros < after.normalized_score_micros
         || (candidate.normalized_score_micros == after.normalized_score_micros
@@ -711,7 +701,6 @@ fn is_after(candidate: &RankedCandidate, after: &StableSortKey) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure]
 fn temporal_context_frames(
     all_candidate_anchors: &BTreeSet<RetrievalAnchorId>,
     visible_anchors: &BTreeSet<RetrievalAnchorId>,
@@ -832,7 +821,6 @@ enum CoverageClass {
     Redacted,
 }
 
-#[hotpath::measure]
 fn increment_coverage(coverage: &mut TemporalCoverageCountsV1, class: CoverageClass) {
     match class {
         CoverageClass::Hidden => coverage.hidden += 1,
@@ -841,7 +829,6 @@ fn increment_coverage(coverage: &mut TemporalCoverageCountsV1, class: CoverageCl
     }
 }
 
-#[hotpath::measure]
 fn increment_hydration_coverage(coverage: &mut TemporalCoverageCountsV1, state: HydrationStateV1) {
     let class = match state {
         HydrationStateV1::Unauthorized => CoverageClass::Hidden,
@@ -864,7 +851,6 @@ enum SummaryRejectionClass {
     Unknown,
 }
 
-#[hotpath::measure_all]
 impl SummaryRejectionClass {
     #[hotpath::skip]
     const fn coverage(self) -> CoverageClass {
@@ -884,7 +870,6 @@ impl SummaryRejectionClass {
     }
 }
 
-#[hotpath::measure]
 fn summary_rejection_class(
     rejection: &SummaryLineageRejection,
     rejections: &BTreeMap<tracedecay_domain::SessionSummaryIdV1, SummaryLineageRejection>,
@@ -931,7 +916,6 @@ fn summary_rejection_class(
     }
 }
 
-#[hotpath::measure]
 fn public_summary_omissions(eligibility: &SummaryLineageEligibility) -> Vec<SummaryOmission> {
     eligibility
         .omissions
@@ -943,7 +927,6 @@ fn public_summary_omissions(eligibility: &SummaryLineageEligibility) -> Vec<Summ
         .collect()
 }
 
-#[hotpath::measure]
 fn summary_rejection_reason(rejection: &SummaryLineageRejection) -> ContextOmissionReasonV1 {
     match rejection {
         SummaryLineageRejection::UnauthorizedSource { .. }
@@ -969,7 +952,6 @@ fn summary_rejection_reason(rejection: &SummaryLineageRejection) -> ContextOmiss
     }
 }
 
-#[hotpath::measure]
 fn context_lineage_edge(edge: &ResolutionLineageEdge) -> CompactContextLineageEdgeV1 {
     CompactContextLineageEdgeV1 {
         kind: match edge.kind {

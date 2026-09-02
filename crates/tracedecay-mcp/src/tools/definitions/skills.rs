@@ -5,7 +5,6 @@ use serde_json::{Value, json};
 use super::def;
 use crate::ToolDefinition;
 
-#[hotpath::measure]
 fn skill_state_property() -> Value {
     json!({
         "type": "string",
@@ -14,7 +13,6 @@ fn skill_state_property() -> Value {
     })
 }
 
-#[hotpath::measure]
 pub(super) fn def_skill_list() -> ToolDefinition {
     def(
         "tracedecay_skill_list",
@@ -33,7 +31,6 @@ pub(super) fn def_skill_list() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_skill_view() -> ToolDefinition {
     def(
         "tracedecay_skill_view",
@@ -56,7 +53,6 @@ pub(super) fn def_skill_view() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_hermes_skill_bridge() -> ToolDefinition {
     def(
         "tracedecay_hermes_skill_bridge",

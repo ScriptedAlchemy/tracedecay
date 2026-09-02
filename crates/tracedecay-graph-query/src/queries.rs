@@ -46,7 +46,6 @@ pub struct GraphQueryManager<'a> {
     cancellation: Arc<dyn GraphCancellation>,
 }
 
-#[hotpath::measure_all]
 impl<'a> GraphQueryManager<'a> {
     pub fn new(
         reader: &'a CodeGraphInteractiveReader,
@@ -508,7 +507,6 @@ impl<'a> GraphQueryManager<'a> {
     }
 }
 
-#[hotpath::measure]
 pub fn is_test_marker(record: &tracedecay_code_index::lineage::LineageSymbolRecordV1) -> bool {
     record.kind == "annotation_usage"
         && matches!(
@@ -517,7 +515,6 @@ pub fn is_test_marker(record: &tracedecay_code_index::lineage::LineageSymbolReco
         )
 }
 
-#[hotpath::measure]
 fn unavailable(detail: &str) -> TraceDecayError {
     TraceDecayError::ProjectRoute {
         reason_code: "verified-code-graph-evidence-unavailable".to_owned(),

@@ -85,7 +85,6 @@ pub(crate) enum CredentialPatternProfile {
     Memory,
 }
 
-#[hotpath::measure_all]
 impl CredentialPatternProfile {
     fn token(self) -> &'static str {
         match self {
@@ -136,7 +135,6 @@ pub(crate) struct CredentialPatternSet {
     keyword_matcher: KeywordMatcher,
 }
 
-#[hotpath::measure_all]
 impl CredentialPatternSet {
     fn new(patterns: Vec<CredentialPattern>) -> Result<Self, CredentialRuleSetError> {
         let keyword_matcher = KeywordMatcher::from_patterns(&patterns)?;
@@ -172,7 +170,6 @@ struct KeywordMatcher {
     keyword_rules: Vec<Vec<usize>>,
 }
 
-#[hotpath::measure_all]
 impl KeywordMatcher {
     fn from_patterns(patterns: &[CredentialPattern]) -> Result<Self, CredentialRuleSetError> {
         let mut keyword_rules = BTreeSet::new();
@@ -267,7 +264,6 @@ pub(crate) struct CredentialPattern {
     allowlists: Vec<CompiledAllowlist>,
 }
 
-#[hotpath::measure_all]
 impl CredentialPattern {
     pub fn kind(&self) -> CredentialPatternKind {
         self.kind
@@ -378,7 +374,6 @@ struct CompiledAllowlist {
     stopwords: Vec<String>,
 }
 
-#[hotpath::measure_all]
 impl CompiledAllowlist {
     fn excuses(&self, text: &str, whole: Match<'_>, secret: Match<'_>) -> bool {
         // `regexTarget` selects what the *regexes* read. Stopwords always read
@@ -410,7 +405,6 @@ impl CompiledAllowlist {
 ///
 /// Keywords and stopwords are lowercased at load, and both are matched against
 /// text we must not copy on every rule for every value we scan.
-#[hotpath::measure]
 fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
     let (haystack, needle) = (haystack.as_bytes(), needle.as_bytes());
     if needle.is_empty() {
@@ -426,7 +420,6 @@ fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
 
 /// `regexTarget = "line"` resolved against the scanned text rather than a file:
 /// the line the match starts on.
-#[hotpath::measure]
 fn line_containing(text: &str, offset: usize) -> &str {
     let start = text[..offset].rfind('\n').map_or(0, |index| index + 1);
     let end = text[offset..]
@@ -471,7 +464,6 @@ pub(crate) fn compile_credential_patterns(
     Ok(patterns)
 }
 
-#[hotpath::measure]
 pub(crate) fn compile_credential_pattern_set(
     profile: CredentialPatternProfile,
 ) -> Result<CredentialPatternSet, CredentialRuleSetError> {
@@ -487,7 +479,6 @@ enum RuleOrigin {
     Supplement,
 }
 
-#[hotpath::measure]
 fn compile_document(
     document: &'static str,
     text: &str,
@@ -594,7 +585,6 @@ fn compile_document(
     Ok(patterns)
 }
 
-#[hotpath::measure]
 fn compile_allowlist(
     document: &'static str,
     rule_id: &str,
@@ -637,7 +627,6 @@ fn compile_allowlist(
     }))
 }
 
-#[hotpath::measure]
 fn compile_regex(
     document: &'static str,
     rule_id: &str,
@@ -675,7 +664,6 @@ fn compile_regex(
 ///
 /// Character classes are tracked because `\w` expands differently inside one:
 /// `[\w-]` has to become `[0-9A-Za-z_-]`, never a nested class.
-#[hotpath::measure]
 fn re2_compatible_regex(pattern: &str) -> Cow<'_, str> {
     if !pattern.contains('{') && !pattern.contains(r"\w") {
         return Cow::Borrowed(pattern);
@@ -736,7 +724,6 @@ fn re2_compatible_regex(pattern: &str) -> Cow<'_, str> {
     Cow::Owned(rewritten)
 }
 
-#[hotpath::measure]
 fn next_boundary(text: &str, index: usize) -> usize {
     let mut end = index + 1;
     while end < text.len() && !text.is_char_boundary(end) {
@@ -747,7 +734,6 @@ fn next_boundary(text: &str, index: usize) -> usize {
 
 /// Length of a valid `{n}`, `{n,}` or `{n,m}` at the head of `rest`, which
 /// begins with `{`. `None` means the brace is a literal.
-#[hotpath::measure]
 fn repetition_len(rest: &[u8]) -> Option<usize> {
     let mut index = 1;
     let digits = rest[index..]
@@ -768,7 +754,6 @@ fn repetition_len(rest: &[u8]) -> Option<usize> {
     (rest.get(index) == Some(&b'}')).then_some(index + 1)
 }
 
-#[hotpath::measure]
 fn vendored_kind(rule_id: &str, source_regex: &str) -> CredentialPatternKind {
     if rule_id == VENDORED_PRIVATE_KEY_RULE {
         return CredentialPatternKind::PrivateKey;
@@ -780,7 +765,6 @@ fn vendored_kind(rule_id: &str, source_regex: &str) -> CredentialPatternKind {
     }
 }
 
-#[hotpath::measure]
 fn parse_kind(token: &str) -> Option<CredentialPatternKind> {
     match token {
         "private_key" => Some(CredentialPatternKind::PrivateKey),
@@ -794,7 +778,6 @@ fn parse_kind(token: &str) -> Option<CredentialPatternKind> {
 /// Upstream states thresholds in Shannon bits per character; our kernel reports
 /// per mille. A threshold beyond the representable range saturates rather than
 /// wrapping to a low bound that would silently admit everything.
-#[hotpath::measure]
 fn entropy_threshold_per_mille(bits_per_character: f64) -> u32 {
     let scaled = (bits_per_character * 1_000.0).round();
     if scaled.is_nan() || scaled <= 0.0 {
@@ -868,7 +851,6 @@ const SOURCE_ASSIGNMENT_RULE_ID: &str = "tracedecay-sensitive-source-assignment-
 /// end rather than accepting whatever a character class happens to cover, so a
 /// value containing punctuation is still redacted whole, and a value whose
 /// closing quote the record truncated is still redacted to the line end.
-#[hotpath::measure]
 fn credential_assignment_ranges<'a>(
     text: &'a str,
     prefix: &'a Regex,
@@ -990,12 +972,10 @@ fn credential_assignment_ranges<'a>(
 /// A bare `key: value` prefix also appears in Rust field and parameter syntax.
 /// Only reject a value when it is plainly a type or a call expression without a
 /// literal: neither form carries credential bytes in the indexed source.
-#[hotpath::measure]
 fn assignment_uses_colon(matched: &Match<'_>) -> bool {
     matched.as_str().trim_end().ends_with(':')
 }
 
-#[hotpath::measure]
 fn is_obvious_rust_non_secret_value(
     text: &str,
     assignment_start: usize,
@@ -1007,7 +987,6 @@ fn is_obvious_rust_non_secret_value(
         || looks_like_non_literal_call_expression(value)
 }
 
-#[hotpath::measure]
 fn has_rust_declaration_context(text: &str, assignment_start: usize) -> bool {
     let line_start = text[..assignment_start]
         .rfind(['\r', '\n'])
@@ -1020,7 +999,6 @@ fn has_rust_declaration_context(text: &str, assignment_start: usize) -> bool {
         || prefix.ends_with("let mut")
 }
 
-#[hotpath::measure]
 fn looks_like_rust_type_annotation(value: &str) -> bool {
     let Some((candidate, terminator)) = value
         .char_indices()
@@ -1078,7 +1056,6 @@ fn looks_like_rust_type_annotation(value: &str) -> bool {
     })
 }
 
-#[hotpath::measure]
 fn looks_like_non_literal_call_expression(value: &str) -> bool {
     let value = value.trim().trim_end_matches([';', ',', '}']).trim_end();
     if !value.contains('(')
@@ -1113,7 +1090,6 @@ fn looks_like_non_literal_call_expression(value: &str) -> bool {
 /// Source formatters may put an assigned value on the next indented line. This
 /// is deliberately unavailable to generic dotenv/memory assignments, whose
 /// values are line-delimited by contract.
-#[hotpath::measure]
 fn source_assignment_value_start(bytes: &[u8], start: usize, limit: usize) -> Option<usize> {
     if !bytes
         .get(start)
@@ -1142,7 +1118,6 @@ struct RustRawString {
 
 /// Recognizes Rust `r"…"`, `r#"…"#`, and byte-raw `br#"…"#` prefixes at an
 /// assignment value boundary. The caller owns terminator validation.
-#[hotpath::measure]
 fn rust_raw_string(bytes: &[u8], start: usize, limit: usize) -> Option<RustRawString> {
     let mut cursor = start;
     if bytes.get(cursor) == Some(&b'b') {

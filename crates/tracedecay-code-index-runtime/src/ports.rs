@@ -17,7 +17,6 @@ pub struct PreparedQueryActivationViewV1 {
     pub query_authority: Arc<QueryAuthorityV1>,
 }
 
-#[hotpath::measure_all]
 impl PreparedQueryActivationViewV1 {
     pub fn scope(&self) -> &ResolvedScope {
         &self.scope
@@ -68,7 +67,6 @@ pub struct GitWatchMaintenanceWakeV1 {
     wake: Arc<dyn Fn() + Send + Sync>,
 }
 
-#[hotpath::measure_all]
 impl GitWatchMaintenanceWakeV1 {
     pub fn new(wake: impl Fn() + Send + Sync + 'static) -> Self {
         Self {
@@ -96,7 +94,6 @@ pub struct ApplicationCatalogSnapshotErrorV1 {
     pub message: String,
 }
 
-#[hotpath::measure_all]
 impl ApplicationCatalogSnapshotErrorV1 {
     pub fn new(message: impl Into<String>) -> Self {
         Self {

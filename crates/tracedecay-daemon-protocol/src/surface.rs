@@ -100,7 +100,6 @@ pub enum ContextScoutSurfaceRequest {
     Feedback(ContextScoutFeedbackSurfaceRequest),
 }
 
-#[hotpath::measure_all]
 impl ContextScoutSurfaceRequest {
     #[hotpath::skip]
     pub const fn address(&self) -> ContextScoutAddressV1 {

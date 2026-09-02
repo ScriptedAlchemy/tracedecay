@@ -16,7 +16,6 @@ pub(super) struct SanitizedAddFactRequest {
     receipt: SanitizationReceiptV1,
 }
 
-#[hotpath::measure_all]
 impl SanitizedAddFactRequest {
     pub(super) fn into_parts(self) -> (ProjectMemoryFactAddRequest, SanitizationReceiptV1) {
         (self.request, self.receipt)
@@ -38,7 +37,6 @@ pub(super) struct SanitizedFactPayloadWire {
     pub(super) source_label: Option<String>,
 }
 
-#[hotpath::measure]
 pub(super) fn fact_payload_wire(
     content: &str,
     category: FactCategoryV1,
@@ -63,7 +61,6 @@ pub(super) fn fact_payload_wire(
     wire
 }
 
-#[hotpath::measure]
 pub(super) fn sanitize_add_fact_request(
     mut request: ProjectMemoryFactAddRequest,
 ) -> Result<Option<SanitizedAddFactRequest>, MemoryApplicationError> {
@@ -110,14 +107,12 @@ pub(super) fn sanitize_add_fact_request(
 /// `automation_run_id` is typed command metadata. Never permit a caller to
 /// smuggle it through a payload that will be persisted and privacy-scanned as
 /// ordinary fact metadata.
-#[hotpath::measure]
 fn strip_reserved_automation_run_id(metadata: &mut serde_json::Value) {
     if let serde_json::Value::Object(metadata) = metadata {
         metadata.remove("automation_run_id");
     }
 }
 
-#[hotpath::measure]
 pub(super) fn sanitize_optional_memory_text(value: Option<String>) -> Option<Option<String>> {
     match value {
         Some(value) => sanitize_provider_metadata_text(&value).map(Some),
@@ -125,7 +120,6 @@ pub(super) fn sanitize_optional_memory_text(value: Option<String>) -> Option<Opt
     }
 }
 
-#[hotpath::measure]
 pub(super) fn sanitize_curation_text(
     value: String,
     invariant: &'static str,
@@ -134,7 +128,6 @@ pub(super) fn sanitize_curation_text(
         .ok_or(MemoryApplicationError::InvalidInput { invariant })
 }
 
-#[hotpath::measure]
 pub(super) fn sanitize_curation_texts(
     values: Vec<String>,
     invariant: &'static str,
@@ -152,7 +145,6 @@ struct SanitizedRelationProvenanceWire {
     metadata: Value,
 }
 
-#[hotpath::measure]
 pub(super) fn sanitize_curation_provenance(
     source_label: String,
     metadata: Value,

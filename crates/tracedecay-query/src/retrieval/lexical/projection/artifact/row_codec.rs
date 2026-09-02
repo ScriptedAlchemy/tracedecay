@@ -35,7 +35,6 @@ struct ArtifactRowCompactV11 {
     field_lengths: BTreeMap<LexicalFieldV1, usize>,
 }
 
-#[hotpath::measure]
 pub(super) fn encode_artifact_row(
     layout: LexicalArtifactLayoutV1,
     row: &ArtifactRowV1,
@@ -47,7 +46,6 @@ pub(super) fn encode_artifact_row(
     }
 }
 
-#[hotpath::measure]
 fn encode_compact_v11(row: &ArtifactRowV1) -> Result<Vec<u8>, CodeLexicalArtifactErrorV1> {
     let compact = ArtifactRowCompactV11 {
         file_occurrence_id: row.anchor.file_occurrence_id.clone(),
@@ -73,7 +71,6 @@ fn encode_compact_v11(row: &ArtifactRowV1) -> Result<Vec<u8>, CodeLexicalArtifac
     Ok(bytes)
 }
 
-#[hotpath::measure]
 pub(super) fn decode_artifact_row(
     layout: LexicalArtifactLayoutV1,
     generation: &CodeGenerationId,
@@ -88,7 +85,6 @@ pub(super) fn decode_artifact_row(
     }
 }
 
-#[hotpath::measure]
 fn decode_json_v10(
     generation: &CodeGenerationId,
     chunk_id: &str,
@@ -104,7 +100,6 @@ fn decode_json_v10(
     Ok(row)
 }
 
-#[hotpath::measure]
 fn decode_compact_v11(
     generation: &CodeGenerationId,
     chunk_id: &str,

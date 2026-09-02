@@ -63,7 +63,6 @@ pub enum ProjectMemoryFactCurationOperationEffectV1 {
     },
 }
 
-#[hotpath::measure_all]
 impl ProjectMemoryFactCurationOperationEffectV1 {
     pub(in crate::memory::project_memory) fn durable_operation_identity(
         &self,
@@ -468,7 +467,6 @@ impl<'de> Deserialize<'de> for ProjectMemoryFactCurationLinkEffectV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl ProjectMemoryFactCurationLinkEffectV1 {
     fn from_relation(relation: &FactRelationV1) -> FactStoreResult<Self> {
         let sanitization = relation.provenance().sanitization_receipt();

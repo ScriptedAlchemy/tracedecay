@@ -96,7 +96,6 @@ async fn table_columns(
     Ok(columns)
 }
 
-#[hotpath::measure]
 fn canonical_column_set(columns: &[&str]) -> BTreeSet<String> {
     columns.iter().map(|column| (*column).to_string()).collect()
 }

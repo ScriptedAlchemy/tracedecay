@@ -10,7 +10,6 @@ pub struct RemoteReplayStartupRecoveryV1 {
     pub recovered_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl RemoteSqliteStorageV1 {
     /// Releases only persisted in-flight markers. Frame state, attempt number,
     /// canonical receipt, and ciphertext remain unchanged so the next replay

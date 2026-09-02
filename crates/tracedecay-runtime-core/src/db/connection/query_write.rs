@@ -4,7 +4,6 @@ use super::{
     TraceDecayError, TransactionBehavior, database_query_error, integrity,
 };
 
-#[hotpath::measure_all]
 impl Database {
     /// Runs a bounded scalar inspection on the retained runtime, projecting the
     /// first column of the first row.

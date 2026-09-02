@@ -51,7 +51,6 @@ pub struct WorkflowSqliteAuthority {
     retained: RetainedExactSqlCapability,
 }
 
-#[hotpath::measure_all]
 impl WorkflowSqliteAuthority {
     pub fn from_retained_exact_sql(
         retained: RetainedExactSqlCapability,
@@ -269,7 +268,6 @@ impl WorkflowDefinitionAuthorityPort for WorkflowSqliteAuthority {
     }
 }
 
-#[hotpath::measure]
 fn decode_definition_source_row(
     row: &crate::exact_sql::ExactSqlRow,
 ) -> Result<WorkflowDefinition, WorkflowDefinitionAuthorityError> {
@@ -288,7 +286,6 @@ fn decode_definition_source_row(
     Ok(definition)
 }
 
-#[hotpath::measure]
 fn definition_authority_unavailable() -> WorkflowDefinitionAuthorityError {
     WorkflowDefinitionAuthorityError::Unavailable(
         "workflow definition source journal is unavailable".to_owned(),
@@ -302,7 +299,6 @@ pub enum WorkflowSqliteAuthorityBuildError {
     Unavailable,
 }
 
-#[hotpath::measure]
 fn require_workflow_schema(
     handle: &ExactSqlHandle,
 ) -> Result<(), WorkflowSqliteAuthorityBuildError> {
@@ -383,7 +379,6 @@ fn require_workflow_schema(
     Ok(())
 }
 
-#[hotpath::measure]
 fn require_columns(
     handle: &ExactSqlHandle,
     table: &WorkflowTableContractV1,
@@ -413,38 +408,32 @@ fn require_columns(
     }
 }
 
-#[hotpath::measure]
 fn handoff_unavailable(error: ExactSqlError) -> TaskHandoffAuthorityError {
     TaskHandoffAuthorityError::Unavailable(format!(
         "workflow handoff authority unavailable: {error}"
     ))
 }
 
-#[hotpath::measure]
 fn handoff_codec_unavailable() -> TaskHandoffAuthorityError {
     TaskHandoffAuthorityError::Unavailable("workflow handoff authority unavailable".to_owned())
 }
 
-#[hotpath::measure]
 fn workflow_effect_unavailable(error: ExactSqlError) -> WorkflowEffectAuthorityErrorV1 {
     WorkflowEffectAuthorityErrorV1::Unavailable(format!(
         "registered workflow effect storage unavailable: {error}"
     ))
 }
 
-#[hotpath::measure]
 fn workflow_effect_codec_unavailable() -> WorkflowEffectAuthorityErrorV1 {
     WorkflowEffectAuthorityErrorV1::Unavailable(
         "registered workflow effect receipt unavailable".to_owned(),
     )
 }
 
-#[hotpath::measure]
 fn statement(sql: &str, params: Vec<ExactSqlValue>) -> Result<ExactSqlStatement, ExactSqlError> {
     ExactSqlStatement::new(sql.to_owned(), params)
 }
 
-#[hotpath::measure]
 fn sql_text(values: &[ExactSqlValue], index: usize) -> Option<&str> {
     match values.get(index)? {
         ExactSqlValue::Text(value) => Some(value),
@@ -452,7 +441,6 @@ fn sql_text(values: &[ExactSqlValue], index: usize) -> Option<&str> {
     }
 }
 
-#[hotpath::measure]
 fn sql_integer(values: &[ExactSqlValue], index: usize) -> Option<i64> {
     match values.get(index)? {
         ExactSqlValue::Integer(value) => Some(*value),
@@ -460,32 +448,26 @@ fn sql_integer(values: &[ExactSqlValue], index: usize) -> Option<i64> {
     }
 }
 
-#[hotpath::measure]
 fn version_i64(version: u64) -> Result<i64, ()> {
     i64::try_from(version).map_err(|_| ())
 }
 
-#[hotpath::measure]
 fn definition_digest(definition: &WorkflowDefinition) -> Result<ManifestDigest, ()> {
     canonical_sha256(definition).map_err(|_| ())
 }
 
-#[hotpath::measure]
 fn encode_definition(definition: &WorkflowDefinition) -> Result<String, ()> {
     serde_json::to_string(definition).map_err(|_| ())
 }
 
-#[hotpath::measure]
 fn encode_json<T: serde::Serialize>(value: &T) -> Result<String, ()> {
     serde_json::to_string(value).map_err(|_| ())
 }
 
-#[hotpath::measure]
 fn decode_json<T: serde::de::DeserializeOwned>(payload: &str) -> Result<T, ()> {
     serde_json::from_str(payload).map_err(|_| ())
 }
 
-#[hotpath::measure]
 fn query_tx(
     transaction: &ExactSqlTransaction,
     sql: &str,
@@ -494,7 +476,6 @@ fn query_tx(
     transaction.query(statement(sql, params)?)
 }
 
-#[hotpath::measure]
 fn execute_tx(
     transaction: &ExactSqlTransaction,
     sql: &str,
@@ -503,7 +484,6 @@ fn execute_tx(
     transaction.execute(statement(sql, params)?).map(|_| ())
 }
 
-#[hotpath::measure]
 fn execute_tx_changed(
     transaction: &ExactSqlTransaction,
     sql: &str,
@@ -848,7 +828,6 @@ impl WorkflowEffectAuthorityPortV1 for WorkflowSqliteAuthority {
     }
 }
 
-#[hotpath::measure]
 fn decode_workflow_effect_state(
     value: &str,
 ) -> Result<WorkflowEffectJournalStateV1, WorkflowEffectAuthorityErrorV1> {
@@ -861,7 +840,6 @@ fn decode_workflow_effect_state(
     }
 }
 
-#[hotpath::measure]
 fn decode_workflow_effect_record(
     values: &[ExactSqlValue],
 ) -> Result<WorkflowEffectJournalRecordV1, WorkflowEffectAuthorityErrorV1> {
@@ -898,7 +876,6 @@ fn decode_workflow_effect_record(
     }
 }
 
-#[hotpath::measure]
 fn decode_workflow_effect_identity(
     values: &[ExactSqlValue],
 ) -> Result<WorkflowEffectIdentityV1, WorkflowEffectAuthorityErrorV1> {
@@ -923,7 +900,6 @@ fn decode_workflow_effect_identity(
     Ok(identity)
 }
 
-#[hotpath::measure]
 fn decode_workflow_effect_preparation(
     values: &[ExactSqlValue],
 ) -> Result<WorkflowEffectPreparedV1, WorkflowEffectAuthorityErrorV1> {
@@ -942,7 +918,6 @@ fn decode_workflow_effect_preparation(
     Ok(prepared)
 }
 
-#[hotpath::measure]
 fn reconcile_workflow_effect(
     storage: &ExactSqlHandle,
     identity: &WorkflowEffectIdentityV1,

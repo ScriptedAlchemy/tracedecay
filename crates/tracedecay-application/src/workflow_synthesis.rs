@@ -45,7 +45,6 @@ pub enum WorkflowSynthesisRefusal {
     UnknownCitation,
 }
 
-#[hotpath::measure_all]
 impl WorkflowSynthesisRefusal {
     #[hotpath::skip]
     pub const fn as_str(&self) -> &'static str {
@@ -63,7 +62,6 @@ impl WorkflowSynthesisRefusal {
 /// Verifies a synthesis claim against the immutable fan-out evidence it must
 /// cite. The evidence itself is never modified: acceptance only means the
 /// claimed artifact may complete alongside its sources.
-#[hotpath::measure]
 pub fn verify_workflow_synthesis_draft(
     step: &WorkflowStep,
     outputs: &[WorkflowStepOutput],

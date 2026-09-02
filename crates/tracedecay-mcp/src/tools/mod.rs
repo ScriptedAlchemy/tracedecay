@@ -67,7 +67,6 @@ pub struct ToolResult {
     failure_message: Option<String>,
 }
 
-#[hotpath::measure_all]
 impl ToolResult {
     pub fn new(value: Value, touched_files: Vec<String>) -> Self {
         Self {
@@ -122,7 +121,6 @@ impl ToolResult {
 ///
 /// Kept in the library so tests and generated integration surfaces can
 /// validate the dynamic tool help without spawning the binary once per tool.
-#[hotpath::measure]
 pub fn render_tool_cli_help(def: &ToolDefinition) -> String {
     let short = short_tool_name(&def.name);
     let mut out = String::new();
@@ -231,12 +229,10 @@ Per-key values starting with @ are read from that file; @- reads stdin.";
 /// `{"anyOf": [{"$ref": "#/$defs/Type"}, {"type": "null"}]}`, which hid the
 /// referenced enum vocabulary from help rendering and client-side validation
 /// and advertised such parameters as bare strings.
-#[hotpath::measure]
 pub fn resolve_property_schema<'a>(root: &'a Value, schema: &'a Value) -> &'a Value {
     resolve_property_schema_bounded(root, schema, 8)
 }
 
-#[hotpath::measure]
 fn resolve_property_schema_bounded<'a>(
     root: &'a Value,
     schema: &'a Value,
@@ -272,7 +268,6 @@ fn resolve_property_schema_bounded<'a>(
 /// with `oneOf` and no `type` at all. The last form used to fall through to the
 /// `"string"` default, so an object-shaped parameter was advertised as a string
 /// and every caller that believed the help constructed an invalid request.
-#[hotpath::measure]
 fn schema_type(schema: &Value) -> &'static str {
     if let Some(ty) = schema.get("type").and_then(Value::as_str) {
         return match ty {
@@ -305,7 +300,6 @@ fn schema_type(schema: &Value) -> &'static str {
     "string"
 }
 
-#[hotpath::measure]
 fn json_type_only(ty: &Value) -> Value {
     let mut schema = serde_json::Map::new();
     schema.insert("type".to_owned(), ty.clone());
@@ -313,14 +307,12 @@ fn json_type_only(ty: &Value) -> Value {
 }
 
 /// The `oneOf` variants of a schema, if it is a closed variant union.
-#[hotpath::measure]
 fn one_of_variants(schema: &Value) -> Option<&Vec<Value>> {
     schema.get("oneOf").and_then(Value::as_array)
 }
 
 /// A short label for one `oneOf` variant: its discriminating `const`, or its
 /// required keys.
-#[hotpath::measure]
 fn variant_label(variant: &Value) -> Option<String> {
     if let Some(literal) = variant.get("const").and_then(Value::as_str) {
         return Some(format!("\"{literal}\""));
@@ -346,7 +338,6 @@ fn variant_label(variant: &Value) -> Option<String> {
 /// description, which told a caller nothing about the fields the daemon
 /// actually requires; naming the required sub-keys here is what makes those
 /// tools callable from their own help.
-#[hotpath::measure]
 fn param_shape_note(schema: &Value, ty: &str) -> Option<String> {
     if let Some(allowed) = schema.get("enum").and_then(Value::as_array) {
         let values: Vec<&str> = allowed.iter().filter_map(Value::as_str).collect();
@@ -413,13 +404,11 @@ const EXAMPLE_MAX_DEPTH: usize = 6;
 /// Object-valued properties are expanded recursively. Emitting `{}` for them —
 /// as this did before — produced an example the daemon rejects outright
 /// whenever the nested schema has required keys of its own.
-#[hotpath::measure]
 fn example_args_object(props: &serde_json::Map<String, Value>, required: &[&str]) -> String {
     serde_json::to_string(&example_object_value(props, required, 0))
         .unwrap_or_else(|_| "{}".to_string())
 }
 
-#[hotpath::measure]
 fn example_object_value(
     props: &serde_json::Map<String, Value>,
     required: &[&str],
@@ -439,7 +428,6 @@ fn example_object_value(
 }
 
 /// Expand an object schema into a skeleton containing its required keys.
-#[hotpath::measure]
 fn example_from_object_schema(schema: &Value, depth: usize) -> Value {
     if depth >= EXAMPLE_MAX_DEPTH {
         return Value::Object(serde_json::Map::new());
@@ -460,7 +448,6 @@ fn example_from_object_schema(schema: &Value, depth: usize) -> Value {
     example_object_value(props, &required, depth + 1)
 }
 
-#[hotpath::measure]
 fn placeholder_value(key: &str, schema: &Value, ty: &str, depth: usize) -> Value {
     match ty {
         "boolean" => Value::Bool(true),
@@ -505,7 +492,6 @@ fn placeholder_value(key: &str, schema: &Value, ty: &str, depth: usize) -> Value
     }
 }
 
-#[hotpath::measure]
 pub fn short_tool_name(full: &str) -> &str {
     full.strip_prefix("tracedecay_").unwrap_or(full)
 }

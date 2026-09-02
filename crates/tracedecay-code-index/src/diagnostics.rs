@@ -129,7 +129,6 @@ pub enum GenerationDiagnosticJoinErrorV1 {
     Contract(String),
 }
 
-#[hotpath::measure_all]
 impl GenerationDiagnosticJoinV1 {
     /// Join Plan-35 records to one exact clean generation.
     pub fn join(
@@ -205,7 +204,6 @@ impl GenerationDiagnosticJoinV1 {
     }
 }
 
-#[hotpath::measure]
 fn disposition_for(
     generation: &CodeGenerationManifestV1,
     snapshot: &ValidatedCodeSnapshotV1,
@@ -293,7 +291,6 @@ fn disposition_for(
     }
 }
 
-#[hotpath::measure]
 fn validate_generation_snapshot(
     generation: &CodeGenerationManifestV1,
     snapshot: &ValidatedCodeSnapshotV1,
@@ -316,7 +313,6 @@ fn validate_generation_snapshot(
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_watermark(
     generation: &CodeGenerationManifestV1,
     snapshot: &ValidatedCodeSnapshotV1,

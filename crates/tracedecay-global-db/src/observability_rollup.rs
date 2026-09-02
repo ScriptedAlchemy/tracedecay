@@ -29,7 +29,6 @@ use types::{
     PublishedGeneration, SECONDS_PER_DAY, merge_coverage, validate_day, validate_identifier,
 };
 
-#[hotpath::measure_all]
 impl RegisteredGlobalDb {
     #[hotpath::measure(
         future = true,
@@ -306,7 +305,6 @@ impl RegisteredGlobalDb {
     }
 }
 
-#[hotpath::measure]
 fn validate_rebuild(request: &ObservabilityRollupRebuildV1) -> Result<(), String> {
     validate_identifier("scope", &request.authorized_scope_ref)?;
     validate_identifier("projector revision", &request.projector_revision)?;
@@ -340,7 +338,6 @@ fn validate_rebuild(request: &ObservabilityRollupRebuildV1) -> Result<(), String
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_fragment_query(query: &ObservabilityRollupFragmentQueryV1) -> Result<(), String> {
     validate_identifier("scope", &query.authorized_scope_ref)?;
     validate_day(query.since_day_start_seconds)?;
@@ -357,7 +354,6 @@ fn validate_fragment_query(query: &ObservabilityRollupFragmentQueryV1) -> Result
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_fragment_json(fragment_json: &str) -> Result<(), String> {
     if fragment_json.len() > MAX_FRAGMENT_JSON_BYTES {
         return Err("observability rollup fragment exceeds 4 MiB".to_owned());
@@ -376,7 +372,6 @@ fn validate_fragment_json(fragment_json: &str) -> Result<(), String> {
     Ok(())
 }
 
-#[hotpath::measure]
 fn digest_json(value: &impl Serialize) -> Result<String, String> {
     let encoded = serde_json::to_vec(value)
         .map_err(|error| format!("failed to serialize observability rollup digest: {error}"))?;
@@ -548,12 +543,10 @@ async fn insert_journal_receipt(
     Ok(())
 }
 
-#[hotpath::measure]
 fn encode_u64(value: u64, field: &str) -> Result<i64, String> {
     i64::try_from(value).map_err(|_| format!("observability rollup {field} exceeds storage range"))
 }
 
-#[hotpath::measure]
 fn decode_u64(
     row: &tracedecay_runtime_core::db::engine::Row,
     index: i32,
@@ -565,7 +558,6 @@ fn decode_u64(
     decode_nonnegative(value, field)
 }
 
-#[hotpath::measure]
 fn decode_nonnegative(value: i64, field: &str) -> Result<u64, String> {
     u64::try_from(value).map_err(|_| format!("rollup {field} was negative"))
 }
@@ -581,7 +573,6 @@ const fn coverage_name(coverage: CoverageStateV1) -> &'static str {
     }
 }
 
-#[hotpath::measure]
 fn parse_coverage(value: &str) -> Result<CoverageStateV1, String> {
     match value {
         "known" => Ok(CoverageStateV1::Known),

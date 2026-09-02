@@ -48,7 +48,6 @@ pub trait SnapshotAdmissionRecord {
     }
 }
 
-#[hotpath::measure]
 pub fn snapshot_capture_request<R>(
     record: &R,
     scope: ObservationScopeV1,
@@ -178,7 +177,6 @@ pub struct SnapshotAdmissionRunner {
     sessions: BTreeSet<String>,
 }
 
-#[hotpath::measure_all]
 impl SnapshotAdmissionRunner {
     pub fn new(provider: &'static str, max_new_bytes: Option<u64>) -> Self {
         Self {
@@ -474,7 +472,6 @@ impl SnapshotAdmissionRunner {
     }
 }
 
-#[hotpath::measure]
 fn ensure_snapshot_admission_active(
     provider: &'static str,
     cancellation: &ObservationCancellation,
@@ -514,7 +511,6 @@ async fn session_cursor(
     Ok(cursor)
 }
 
-#[hotpath::measure]
 pub fn snapshot_source_identity(
     provider: &'static str,
     session_id: &str,
@@ -617,7 +613,6 @@ pub async fn snapshot_range_was_committed(
     snapshot_cursor_covers_range(cursor.as_ref(), generation, range)
 }
 
-#[hotpath::measure]
 pub fn snapshot_cursor_covers_range(
     cursor: Option<&ObservationSourceCursorV1>,
     generation: ObservationSourceGenerationV1,

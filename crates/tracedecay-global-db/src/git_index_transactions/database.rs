@@ -70,7 +70,6 @@ impl Executor for GitMutationWriteTransaction<'_> {
     }
 }
 
-#[hotpath::measure_all]
 impl GitMutationDatabase<'_> {
     #[hotpath::measure(future = true, label = "global_db.git_index.txn.begin")]
     pub(crate) async fn begin_write(
@@ -101,7 +100,6 @@ impl GitMutationDatabase<'_> {
     }
 }
 
-#[hotpath::measure_all]
 impl GitMutationWriteTransaction<'_> {
     #[hotpath::skip]
     pub(crate) async fn commit(self) -> tracedecay_runtime_core::db::engine::Result<()> {

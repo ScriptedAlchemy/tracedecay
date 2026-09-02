@@ -18,7 +18,6 @@ pub enum ReadMode {
     Signatures,
 }
 
-#[hotpath::measure_all]
 impl ReadMode {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -45,7 +44,6 @@ pub struct LineRange {
     pub end: u32,
 }
 
-#[hotpath::measure_all]
 impl LineRange {
     pub fn parse(s: &str) -> Option<Self> {
         if let Some((a, b)) = s.trim().split_once('-') {
@@ -62,15 +60,12 @@ impl LineRange {
     }
 }
 
-#[hotpath::measure]
 pub fn render_full(source: &str) -> String {
     source.to_owned()
 }
-#[hotpath::measure]
 pub fn estimate_tokens(s: &str) -> u32 {
     s.chars().count().div_ceil(4).min(u32::MAX as usize) as u32
 }
-#[hotpath::measure]
 pub fn render_lines(source: &str, range: LineRange) -> String {
     let lines = source.lines().collect::<Vec<_>>();
     let start = range.start.saturating_sub(1) as usize;
@@ -130,7 +125,6 @@ pub fn render_symbol_context(
 }
 
 /// Builds the `mode="map"` payload from an already-fetched symbol page.
-#[hotpath::measure]
 fn map_value(
     nodes: &[CodeGraphSymbolSummaryV1],
     file_path: &str,
@@ -154,7 +148,6 @@ fn map_value(
 }
 
 /// Builds the `mode="signatures"` payload from an already-fetched symbol page.
-#[hotpath::measure]
 fn signatures_value(nodes: &[CodeGraphSymbolSummaryV1], file_path: &str) -> Value {
     let mut symbols = Vec::new();
     let mut without_signature = 0usize;
@@ -179,7 +172,6 @@ fn signatures_value(nodes: &[CodeGraphSymbolSummaryV1], file_path: &str) -> Valu
 
 /// Builds the symbol-context payload from an already-fetched symbol page,
 /// scoping to `range` when the projection makes that possible.
-#[hotpath::measure]
 fn symbol_context_value(
     nodes: &[CodeGraphSymbolSummaryV1],
     file_path: &str,
@@ -216,7 +208,6 @@ fn symbol_context_value(
 /// A range narrows the selection only when at least one symbol publishes a
 /// usable line span; otherwise the whole page is returned so the caller can
 /// degrade instead of failing.
-#[hotpath::measure]
 fn scope_to_range(
     nodes: &[CodeGraphSymbolSummaryV1],
     range: Option<LineRange>,
@@ -247,7 +238,6 @@ fn scope_to_range(
 /// verified graph handlers use. A zero span or an overflowing sum is a
 /// degenerate record: this yields `None` rather than an error, because symbol
 /// enrichment must never fail the source read that carries it.
-#[hotpath::measure]
 fn symbol_line_span(node: &CodeGraphSymbolSummaryV1) -> Option<(u32, u32)> {
     let metadata = node.metadata.as_ref()?;
     if metadata.line_span == 0 {
@@ -258,7 +248,6 @@ fn symbol_line_span(node: &CodeGraphSymbolSummaryV1) -> Option<(u32, u32)> {
     Some((start, end))
 }
 
-#[hotpath::measure]
 fn fetch_nodes(
     reader: &CodeGraphInteractiveReader,
     cancellation: Arc<dyn GraphCancellation>,
@@ -274,7 +263,6 @@ fn fetch_nodes(
 /// One symbol row. `line`/`end_line` are 1-based inclusive and null when the
 /// record carries no usable span; `signature` is null when the extractor
 /// published none.
-#[hotpath::measure]
 fn symbol_entry(node: &CodeGraphSymbolSummaryV1) -> Value {
     let span = node
         .binding

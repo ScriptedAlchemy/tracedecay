@@ -2,7 +2,6 @@ use crate::chunks::CodeIndexImportEvidenceV1;
 
 use super::{CodeIndexProductionErrorV1, FileGenerationArtifactsV1};
 
-#[hotpath::measure]
 pub(super) fn derive_import_evidence<T>(files: &[T]) -> Vec<CodeIndexImportEvidenceV1>
 where
     T: AsRef<FileGenerationArtifactsV1>,
@@ -10,7 +9,6 @@ where
     derive_import_evidence_from(files.iter().map(AsRef::as_ref))
 }
 
-#[hotpath::measure]
 fn derive_import_evidence_from<'a>(
     files: impl Iterator<Item = &'a FileGenerationArtifactsV1>,
 ) -> Vec<CodeIndexImportEvidenceV1> {
@@ -31,7 +29,6 @@ fn derive_import_evidence_from<'a>(
         .collect()
 }
 
-#[hotpath::measure]
 pub(super) fn validate_import_evidence(
     files: &[&FileGenerationArtifactsV1],
     imports: &[CodeIndexImportEvidenceV1],

@@ -150,7 +150,6 @@ pub(crate) async fn execute_retained_memory_curator(
     }
 }
 
-#[hotpath::measure]
 fn automation_problem(
     problem: Box<
         tracedecay_automation_runtime::automation::effect_runtime::AutomationSettledProblem,

@@ -31,7 +31,6 @@ pub(crate) struct DashboardDeliveryReadAdapter {
     project_root: PathBuf,
 }
 
-#[hotpath::measure_all]
 impl DashboardDeliveryReadAdapter {
     pub(crate) fn new(service: DaemonInvocationService, project_root: PathBuf) -> Self {
         Self {
@@ -168,7 +167,6 @@ async fn live_expected_head_commit_id(
     attached_head_commit(expected_reference.as_ref(), status.value.head)
 }
 
-#[hotpath::measure]
 fn attached_head_commit(
     expected_reference: Option<&tracedecay_domain::RefId>,
     head: GitHeadStateV1,
@@ -197,7 +195,6 @@ impl DashboardDeliveryReadPortV1 for DashboardDeliveryReadAdapter {
     }
 }
 
-#[hotpath::measure]
 fn request_context(
     control: &DashboardHttpRequestControlV1,
     access: tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot,
@@ -235,7 +232,6 @@ fn request_context_from_parts(
     )
 }
 
-#[hotpath::measure]
 fn request_context_from_parts_with_deadline(
     request_id: tracedecay_application::RequestId,
     cancellation: tracedecay_application::CancellationSignal,
@@ -320,7 +316,6 @@ fn request_context_from_parts_with_deadline(
     ))
 }
 
-#[hotpath::measure]
 fn monotonic_deadline(
     monotonic_now: Instant,
     observed_at: tracedecay_domain::UtcMicros,
@@ -333,7 +328,6 @@ fn monotonic_deadline(
     monotonic_now.checked_add(Duration::from_micros(u64::try_from(remaining_micros).ok()?))
 }
 
-#[hotpath::measure]
 fn has_delivery_source_capability(
     access: &tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot,
 ) -> bool {

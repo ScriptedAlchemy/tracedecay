@@ -17,7 +17,6 @@ pub(super) struct IndexedFileSummary {
     pub(super) size: u64,
 }
 
-#[hotpath::measure]
 pub(super) fn all_symbols(graph: &VerifiedGraphQuery) -> Result<Vec<CodeGraphSymbolSummaryV1>> {
     let page = graph.symbols_page(None, INFO_SYMBOL_CENSUS_LIMIT)?;
     if page.has_more {
@@ -77,7 +76,6 @@ pub(super) async fn indexed_files(
     })?
 }
 
-#[hotpath::measure]
 pub(super) fn symbols_in_dir(
     graph: &VerifiedGraphQuery,
     directory: &str,
@@ -100,14 +98,12 @@ pub(super) fn symbols_in_dir(
     Ok(selected)
 }
 
-#[hotpath::measure]
 pub(super) fn required_symbol_parts(
     symbol: &CodeGraphSymbolSummaryV1,
 ) -> Result<(&LineageSymbolRecordV1, &str)> {
     Ok((required_metadata(symbol)?, required_file_path(symbol)?))
 }
 
-#[hotpath::measure]
 pub(super) fn required_metadata(
     symbol: &CodeGraphSymbolSummaryV1,
 ) -> Result<&LineageSymbolRecordV1> {
@@ -122,7 +118,6 @@ pub(super) fn required_metadata(
     })
 }
 
-#[hotpath::measure]
 pub(super) fn required_file_path(symbol: &CodeGraphSymbolSummaryV1) -> Result<&str> {
     symbol
         .binding
@@ -139,7 +134,6 @@ pub(super) fn required_file_path(symbol: &CodeGraphSymbolSummaryV1) -> Result<&s
         })
 }
 
-#[hotpath::measure]
 pub(super) fn end_line(metadata: &LineageSymbolRecordV1) -> Result<u32> {
     if metadata.line_span == 0 {
         return Err(info_graph_error(
@@ -164,7 +158,6 @@ pub(super) fn end_line(metadata: &LineageSymbolRecordV1) -> Result<u32> {
         })
 }
 
-#[hotpath::measure]
 pub(super) fn info_graph_error(reason_code: &str, detail: &str) -> TraceDecayError {
     TraceDecayError::project_route(reason_code, false, detail)
 }

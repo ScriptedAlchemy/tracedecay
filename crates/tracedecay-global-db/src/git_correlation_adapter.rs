@@ -39,7 +39,6 @@ static GIT_EVIDENCE_PUBLICATION_LOCKS: OnceLock<
     Mutex<BTreeMap<String, Weak<GitEvidencePublicationLock>>>,
 > = OnceLock::new();
 
-#[hotpath::measure]
 fn shared_git_evidence_publication_lock(
     runtime: &VerifiedGraphRuntimeWeakProxyV1,
 ) -> Result<Arc<GitEvidencePublicationLock>, String> {
@@ -51,7 +50,6 @@ fn shared_git_evidence_publication_lock(
     shared_git_evidence_publication_lock_for_identity(identity)
 }
 
-#[hotpath::measure]
 fn shared_git_evidence_publication_lock_for_identity(
     identity: String,
 ) -> Result<Arc<GitEvidencePublicationLock>, String> {

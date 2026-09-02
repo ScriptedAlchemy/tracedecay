@@ -115,7 +115,6 @@ pub(crate) async fn handle_init(
 /// project, bare `--yes` confirms a unique candidate, `--fresh` opts out of
 /// adoption entirely, and no flags means candidates are offered in a typed
 /// refusal instead of silently remapped.
-#[hotpath::measure]
 fn moved_store_adoption_request(
     adopt_project: Option<String>,
     fresh: bool,
@@ -142,7 +141,6 @@ fn moved_store_adoption_request(
 /// remedy is the scoped operator reset, not manual directory removal, so init
 /// names the exact command for this project instead of leaving the raw
 /// refusal as the last word.
-#[hotpath::measure]
 fn annotate_reset_required_init_error(
     error: tracedecay_domain::errors::TraceDecayError,
     project_path: &Path,

@@ -24,7 +24,6 @@ pub struct SessionRefreshFrontierV1 {
     committed_through: u64,
 }
 
-#[hotpath::measure_all]
 impl SessionRefreshFrontierV1 {
     pub fn new(observed_through: u64, committed_through: u64) -> SessionStoreResult<Self> {
         if committed_through > observed_through {
@@ -64,7 +63,6 @@ pub struct SessionRefreshBeginOrJoinRequestV1 {
     coverage_request: SessionTemporalCoverageRequestV1,
 }
 
-#[hotpath::measure_all]
 impl SessionRefreshBeginOrJoinRequestV1 {
     pub fn new(session_id: SessionId, target_frontier: SessionRefreshFrontierV1) -> Self {
         Self {
@@ -133,7 +131,6 @@ pub struct SessionRefreshBeginOrJoinReceiptV1 {
     accepted_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl SessionRefreshBeginOrJoinReceiptV1 {
     pub fn new(
         operation_id: SessionRefreshOperationIdV1,
@@ -182,7 +179,6 @@ pub struct SessionRefreshProgressRequestV1 {
     session_id: SessionId,
 }
 
-#[hotpath::measure_all]
 impl SessionRefreshProgressRequestV1 {
     pub fn new(operation_id: SessionRefreshOperationIdV1, session_id: SessionId) -> Self {
         Self {
@@ -213,7 +209,6 @@ pub struct SessionRefreshProgressV1 {
     updated_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl SessionRefreshProgressV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -309,7 +304,6 @@ impl SessionRefreshProgressV1 {
     }
 }
 
-#[hotpath::measure]
 fn source_coverage_is_successor(
     current: Option<&SessionSourceCoverageReceiptV1>,
     next: Option<&SessionSourceCoverageReceiptV1>,
@@ -344,7 +338,6 @@ pub struct SessionRefreshCompletionRequestV1 {
     source_coverage: Option<SessionSourceCoverageReceiptV1>,
 }
 
-#[hotpath::measure_all]
 impl SessionRefreshCompletionRequestV1 {
     pub fn new(
         operation_id: SessionRefreshOperationIdV1,
@@ -403,7 +396,6 @@ impl SessionRefreshCompletionRequestV1 {
 #[serde(transparent)]
 pub struct SessionRefreshFailureCodeV1(String);
 
-#[hotpath::measure_all]
 impl SessionRefreshFailureCodeV1 {
     pub const MAX_LEN: usize = 64;
 
@@ -475,7 +467,6 @@ impl<'de> Deserialize<'de> for SessionRefreshFailureCodeV1 {
     }
 }
 
-#[hotpath::measure]
 fn is_canonical_failure_code(bytes: &[u8]) -> bool {
     bytes[0].is_ascii_lowercase()
         && bytes
@@ -496,7 +487,6 @@ pub struct SessionRefreshFailureRequestV1 {
     failure_code: SessionRefreshFailureCodeV1,
 }
 
-#[hotpath::measure_all]
 impl SessionRefreshFailureRequestV1 {
     pub fn new(
         operation_id: SessionRefreshOperationIdV1,
@@ -556,7 +546,6 @@ pub struct SessionRefreshCancellationRequestV1 {
     source_coverage: Option<SessionSourceCoverageReceiptV1>,
 }
 
-#[hotpath::measure_all]
 impl SessionRefreshCancellationRequestV1 {
     pub fn new(
         operation_id: SessionRefreshOperationIdV1,
@@ -621,7 +610,6 @@ pub struct SessionRefreshReceiptV1 {
     terminal_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl SessionRefreshReceiptV1 {
     pub fn completed(request: SessionRefreshCompletionRequestV1, terminal_at: UtcMicros) -> Self {
         Self {
@@ -738,7 +726,6 @@ pub struct SessionRefreshReceiptRequestV1 {
     session_id: SessionId,
 }
 
-#[hotpath::measure_all]
 impl SessionRefreshReceiptRequestV1 {
     pub fn new(operation_id: SessionRefreshOperationIdV1, session_id: SessionId) -> Self {
         Self {

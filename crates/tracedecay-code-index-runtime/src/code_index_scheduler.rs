@@ -251,7 +251,6 @@ impl Default for SharedCodeIndexBytePoolV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl SharedCodeIndexBytePoolV1 {
     fn intern(&self, bytes: Vec<u8>) -> (ContentDigest, Arc<[u8]>) {
         let digest = content_digest(&bytes);
@@ -361,7 +360,6 @@ struct DecodedGenerationStateV1 {
     in_flight: Vec<DecodeSubjectV1>,
 }
 
-#[hotpath::measure_all]
 impl DecodedGenerationStateV1 {
     fn is_in_flight(&self, subject: &DecodeSubjectV1) -> bool {
         self.in_flight.iter().any(|pending| pending == subject)
@@ -496,7 +494,6 @@ impl Drop for DecodeLeaseV1<'_> {
 struct GenerationDecodeObservationV1;
 
 #[cfg(feature = "hotpath")]
-#[hotpath::measure_all]
 impl GenerationDecodeObservationV1 {
     fn enter() -> Self {
         let active = CODE_INDEX_GENERATION_DECODES_ACTIVE
@@ -525,7 +522,6 @@ impl Drop for GenerationDecodeObservationV1 {
 struct GenerationDecodeWaitObservationV1;
 
 #[cfg(feature = "hotpath")]
-#[hotpath::measure_all]
 impl GenerationDecodeWaitObservationV1 {
     fn enter() -> Self {
         let waiters = CODE_INDEX_GENERATION_DECODE_WAITERS
@@ -599,7 +595,6 @@ struct UndecodedActivePublicationExpectationV1 {
     state_digest: String,
 }
 
-#[hotpath::measure_all]
 impl UndecodedActivePublicationExpectationV1 {
     fn matches(&self, pointer: &DurablePublicationPointerV1) -> bool {
         self.generation_id == pointer.generation_id
@@ -637,7 +632,6 @@ struct TemporaryGenerationFileV1 {
     committed: bool,
 }
 
-#[hotpath::measure_all]
 impl TemporaryGenerationFileV1 {
     fn new(path: PathBuf) -> Self {
         Self {
@@ -659,7 +653,6 @@ impl Drop for TemporaryGenerationFileV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl DaemonCodeIndexPublicationStoreV1 {
     fn new(
         store_root: &Path,
@@ -718,11 +711,12 @@ impl DaemonCodeIndexPublicationStoreV1 {
     }
 
     fn write_durable(path: &Path, bytes: &[u8]) -> Result<(), CodeIndexPublicationStoreErrorV1> {
-        let mut file = std::fs::OpenOptions::new()
+        let file = std::fs::OpenOptions::new()
             .create_new(true)
             .write(true)
             .open(path)
             .map_err(Self::unavailable)?;
+        let mut file = hotpath::io!(file, label = "code_index.generation.sealing.io");
         file.write_all(bytes).map_err(Self::unavailable)?;
         file.sync_all().map_err(Self::unavailable)
     }
@@ -1942,7 +1936,6 @@ struct PendingHintsV1 {
     overflow: bool,
 }
 
-#[hotpath::measure_all]
 impl PendingHintsV1 {
     fn count(&self) -> Option<u64> {
         (!self.overflow).then(|| u64::try_from(self.paths.len()).unwrap_or(u64::MAX))
@@ -1991,7 +1984,6 @@ struct DrainedPendingHintsV1 {
     pending: Option<PendingHintsV1>,
 }
 
-#[hotpath::measure_all]
 impl DrainedPendingHintsV1 {
     fn new(authority: Arc<Mutex<PendingHintsV1>>, pending: PendingHintsV1) -> Self {
         Self {
@@ -2120,7 +2112,6 @@ enum GenerationTextCancellationSourceV1 {
     Superseded,
 }
 
-#[hotpath::measure_all]
 impl GenerationTextControlV1 {
     fn new(shutting_down: Arc<AtomicBool>) -> Self {
         let retirement_epoch = Arc::new(AtomicU64::new(0));
@@ -2170,7 +2161,6 @@ pub struct CodeIndexBuildProgressSlotStateV1 {
     snapshot: Option<Arc<CodeIndexBuildProgressV1>>,
 }
 
-#[hotpath::measure_all]
 impl CodeIndexBuildProgressSlotStateV1 {
     fn replace_generation(&mut self, generation_id: CodeGenerationId) -> u64 {
         self.owner_epoch = self.owner_epoch.saturating_add(1).max(1);
@@ -2230,7 +2220,6 @@ impl CodeIndexBuildProgressSlotStateV1 {
 
 /// Publishes an observational scan sample without delaying sealed-byte authentication.
 /// Generation ownership and durable phase transitions continue to use blocking writes.
-#[hotpath::measure]
 fn try_publish_build_progress(
     slot: &CodeIndexBuildProgressSlotV1,
     generation_id: &CodeGenerationId,
@@ -2264,7 +2253,6 @@ struct CodeIndexBuildProgressStateV1 {
     committed_samples: VecDeque<CodeIndexCommittedProgressSampleV1>,
 }
 
-#[hotpath::measure_all]
 impl CodeIndexBuildProgressStateV1 {
     fn new() -> Self {
         Self {
@@ -2380,7 +2368,6 @@ struct DurableActiveSealedGenerationBindingV1 {
     state_digest: ManifestDigest,
 }
 
-#[hotpath::measure_all]
 impl DurableActiveSealedGenerationBindingV1 {
     fn matches(&self, pointer: Option<&DurablePublicationPointerV1>) -> bool {
         pointer.is_some_and(|pointer| {
@@ -2423,7 +2410,6 @@ pub struct ProductionCodeIndexQueryOwnersV1 {
     _reader_reservation: Arc<ResidentMemoryReservationV1>,
 }
 
-#[hotpath::measure_all]
 impl ProductionCodeIndexQueryOwnersV1 {
     pub fn retrieve_exact(
         &self,
@@ -2566,7 +2552,6 @@ enum CodeTextProjectionSlotV1 {
     Building(Box<CodeTextArtifactBuildV1>),
 }
 
-#[hotpath::measure_all]
 impl CodeTextProjectionStateV1 {
     fn new() -> Self {
         Self {
@@ -2639,7 +2624,6 @@ enum TextHeadOpenOutcomeV1 {
     Build(Box<CodeTextArtifactBuildV1>),
 }
 
-#[hotpath::measure]
 fn map_text_artifact_error(error: CodeLexicalArtifactErrorV1) -> RetrievalPortError {
     match error {
         CodeLexicalArtifactErrorV1::Interrupted(
@@ -2659,7 +2643,6 @@ fn map_text_artifact_error(error: CodeLexicalArtifactErrorV1) -> RetrievalPortEr
     }
 }
 
-#[hotpath::measure]
 fn map_sealed_page_source_error(error: CodeIndexProductionErrorV1) -> RetrievalPortError {
     match error {
         CodeIndexProductionErrorV1::Interrupted(
@@ -2673,7 +2656,6 @@ fn map_sealed_page_source_error(error: CodeIndexProductionErrorV1) -> RetrievalP
     }
 }
 
-#[hotpath::measure]
 fn text_artifact_unavailable(error: impl std::fmt::Display) -> RetrievalPortError {
     RetrievalPortError::AuthorityUnavailable(error.to_string())
 }
@@ -2695,7 +2677,6 @@ pub struct DaemonCodeTextArtifactStoreV1 {
     worktree_id: WorktreeId,
 }
 
-#[hotpath::measure_all]
 impl DaemonCodeTextArtifactStoreV1 {
     fn bind(
         store_root: &Path,
@@ -3250,7 +3231,6 @@ impl LatestCompleteCodeIndexV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl LatestCodeTextGenerationV1 {
     pub fn metadata(&self) -> &VerifiedSealedTextGenerationMetadataV1 {
         &self.metadata
@@ -3270,7 +3250,6 @@ impl LatestCodeTextGenerationV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl LatestCompleteCodeIndexV1 {
     /// Whether the record lookup indices are already built for this generation.
     #[cfg(test)]
@@ -3303,7 +3282,6 @@ impl LatestCodeTextGenerationV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl LatestCompleteCodeIndexV1 {
     fn semantic_evaluation_snapshot(&self) -> SemanticEvaluationCodeSnapshotV1 {
         SemanticEvaluationCodeSnapshotV1 {
@@ -3399,7 +3377,6 @@ impl LatestCodeTextGenerationV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl LatestCodeTextGenerationV1 {
     fn production_graph_serving(
         &self,
@@ -3423,7 +3400,6 @@ impl LatestCodeTextGenerationV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl LatestCompleteCodeIndexV1 {
     /// Whether this generation's native graph has neither activated nor been
     /// refused.
@@ -3461,7 +3437,6 @@ impl LatestCompleteCodeIndexV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl LatestCodeTextGenerationV1 {
     /// The retained verified-snapshot projection store for graph reads,
     /// present once persistent graph publication has completed.
@@ -3488,7 +3463,6 @@ impl LatestCodeTextGenerationV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl LatestCodeTextGenerationV1 {
     pub fn code_graph_serving_readiness(
         &self,
@@ -3538,7 +3512,6 @@ impl LatestCodeTextGenerationV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl LatestCodeTextGenerationV1 {
     fn source_freshness(&self) -> Result<tracedecay_domain::SourceFreshness, RetrievalPortError> {
         production_code_index_freshness(
@@ -4402,7 +4375,6 @@ impl LatestCodeTextGenerationV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl LatestCodeTextGenerationV1 {
     fn install_graph_serving(
         &self,
@@ -4579,7 +4551,6 @@ impl CodeIndexSchedulerErrorV1 {
 /// in-progress signal early.
 pub struct ReconcilePassGuard(Arc<AtomicUsize>);
 
-#[hotpath::measure_all]
 impl ReconcilePassGuard {
     pub fn enter(passes: &Arc<AtomicUsize>) -> Self {
         passes.fetch_add(1, Ordering::AcqRel);
@@ -4628,7 +4599,6 @@ struct BusyWitnessMemoV1 {
     verdict: bool,
 }
 
-#[hotpath::measure_all]
 impl SourceFreshnessFenceV1 {
     fn unverified(staleness_threshold: Duration, source_epoch: Arc<AtomicU64>) -> Self {
         Self {
@@ -4850,7 +4820,6 @@ pub struct HistoricalCodeIndexGenerationOwnerV1 {
     progress_producer_incarnation: u64,
 }
 
-#[hotpath::measure_all]
 impl HistoricalCodeIndexGenerationOwnerV1 {
     fn bind_complete(
         &self,
@@ -4875,7 +4844,7 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
                 text_control: GenerationTextControlV1::new(Arc::clone(&self.shutting_down)),
                 text_progress_state: Arc::new(hotpath::mutex!(
                     Mutex::new(CodeIndexBuildProgressStateV1::new()),
-                    label = "query.artifact.progress.state"
+                    label = "query.artifact.progress.historical_state"
                 )),
                 text_progress_slot: Arc::new(RwLock::new(progress_slot)),
                 text_progress_owner_epoch,
@@ -4890,7 +4859,7 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
                 ),
                 preopened_source: Arc::new(hotpath::mutex!(
                     Mutex::new(None),
-                    label = "query.artifact.preopened_source"
+                    label = "query.artifact.preopened_historical_source"
                 )),
                 publication_binding: None,
             },
@@ -4942,7 +4911,6 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl CodeIndexWorktreeSchedulerV1 {
     pub fn open(
         project_id: ProjectId,
@@ -6015,7 +5983,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         );
         let text_progress_state = Arc::new(hotpath::mutex!(
             Mutex::new(CodeIndexBuildProgressStateV1::new()),
-            label = "query.artifact.progress.state"
+            label = "query.artifact.progress.retained_state"
         ));
         let text_control = GenerationTextControlV1::new(Arc::clone(&self.shutting_down));
         let text_artifact_store = DaemonCodeTextArtifactStoreV1::bind(
@@ -6143,7 +6111,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             text_artifact_store,
             preopened_source: Arc::new(hotpath::mutex!(
                 Mutex::new(preopened_source),
-                label = "query.artifact.preopened_source"
+                label = "query.artifact.preopened_retained_source"
             )),
             publication_binding: Some(Arc::new(DurableActiveSealedGenerationBindingV1 {
                 generation_id,
@@ -6860,7 +6828,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                             GenerationTextControlV1::new(Arc::clone(&self.shutting_down)),
                             Arc::new(hotpath::mutex!(
                                 Mutex::new(CodeIndexBuildProgressStateV1::new()),
-                                label = "query.artifact.progress.state"
+                                label = "query.artifact.progress.published_state"
                             )),
                             progress_epoch,
                         )
@@ -6916,7 +6884,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 ),
                 preopened_source: Arc::new(hotpath::mutex!(
                     Mutex::new(None),
-                    label = "query.artifact.preopened_source"
+                    label = "query.artifact.preopened_published_source"
                 )),
                 publication_binding: None,
             });
@@ -7242,7 +7210,6 @@ impl CodeIndexWorktreeSchedulerV1 {
     }
 }
 
-#[hotpath::measure]
 fn cancelled_code_index_reconcile() -> CodeIndexSchedulerErrorV1 {
     CodeIndexProductionErrorV1::Interrupted(
         crate::code_index::production::CodeIndexInterruptionV1::Cancelled,
@@ -7265,7 +7232,6 @@ where
         .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))
 }
 
-#[hotpath::measure]
 fn file_occurrence_id(
     repository: &RepositoryId,
     worktree: &WorktreeId,
@@ -7289,7 +7255,6 @@ fn file_occurrence_id(
 }
 
 /// The one central exact-admission authority every serving owner installs.
-#[hotpath::measure]
 fn exact_serving_authority() -> Result<CentralExactAdmissionAuthorityV1, RetrievalPortError> {
     Ok(CentralExactAdmissionAuthorityV1::new(
         ExactAdmissionRuleRevision::new(tracedecay_query::retrieval::QUERY_EXACT_RULE_REVISION_V1)
@@ -7297,7 +7262,6 @@ fn exact_serving_authority() -> Result<CentralExactAdmissionAuthorityV1, Retriev
     ))
 }
 
-#[hotpath::measure]
 fn projection_key() -> Result<ProjectionKeyV1, CodeIndexSchedulerErrorV1> {
     Ok(ProjectionKeyV1 {
         kind: ProjectionKindV1::Lexical,
@@ -7306,7 +7270,6 @@ fn projection_key() -> Result<ProjectionKeyV1, CodeIndexSchedulerErrorV1> {
     })
 }
 
-#[hotpath::measure]
 fn snapshot_content_identity(
     files: &[SanitizedCodeFileV1],
     sanitization_receipts: &[SanitizationReceiptId],
@@ -7329,7 +7292,6 @@ fn snapshot_content_identity(
 /// Cancellation is checked before opening and after every bounded read, so a
 /// shutdown or superseding generation cannot strand publication in a
 /// corpus-sized uninterruptible hash.
-#[hotpath::measure]
 fn sha256_private_file_hex_and_size(
     path: &Path,
     control: &dyn CodeIndexExecutionControlV1,
@@ -7394,7 +7356,6 @@ fn sha256_private_file_hex_and_size(
     ))
 }
 
-#[hotpath::measure]
 fn ensure_private_text_artifacts_root(path: &Path) -> Result<(), RetrievalPortError> {
     match tracedecay_private_fs::create_private_directory(path) {
         Ok(()) => Ok(()),
@@ -7438,7 +7399,6 @@ fn ensure_private_text_artifacts_root(path: &Path) -> Result<(), RetrievalPortEr
 
 /// Unix permission bits currently on `path`, for typed contract messages.
 #[cfg(unix)]
-#[hotpath::measure]
 fn observed_unix_mode(path: &Path) -> Option<u32> {
     use std::os::unix::fs::PermissionsExt;
     path.symlink_metadata()
@@ -7447,12 +7407,10 @@ fn observed_unix_mode(path: &Path) -> Option<u32> {
 }
 
 #[cfg(not(unix))]
-#[hotpath::measure]
 fn observed_unix_mode(_path: &Path) -> Option<u32> {
     None
 }
 
-#[hotpath::measure]
 fn checkpoint_text_artifact_control(
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), RetrievalPortError> {
@@ -7469,7 +7427,6 @@ fn checkpoint_text_artifact_control(
 /// retained decode window and the `SQLite` builder. Each component fitting the
 /// ceiling independently is insufficient because both remain live while a
 /// page is admitted.
-#[hotpath::measure]
 fn text_artifact_builder_budget(source_window_bytes: usize) -> Result<usize, RetrievalPortError> {
     CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1
         .checked_sub(source_window_bytes)

@@ -8,7 +8,6 @@ use super::{
 
 const DETAIL_RETENTION_SECONDS: i64 = 30 * SECONDS_PER_DAY;
 
-#[hotpath::measure_all]
 impl RegisteredGlobalDb {
     /// Returns at most one retained fragment whose protected correction carry
     /// has reached the detail-retention boundary. The application owns the
@@ -152,7 +151,6 @@ impl RegisteredGlobalDb {
     }
 }
 
-#[hotpath::measure]
 fn validate_compaction(request: &ObservabilityRollupCompactionV1) -> Result<(), String> {
     validate_identifier("scope", &request.candidate.authorized_scope_ref)?;
     validate_identifier("projector revision", &request.candidate.projector_revision)?;

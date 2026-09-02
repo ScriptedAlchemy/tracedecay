@@ -65,7 +65,6 @@ pub enum TestRunFailure {
     },
 }
 
-#[hotpath::measure_all]
 impl TestRunFailure {
     fn with_partial_output(
         self,
@@ -170,7 +169,6 @@ pub struct TestRunControl {
     process_group: Arc<Mutex<Option<u32>>>,
 }
 
-#[hotpath::measure_all]
 impl TestRunControl {
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
@@ -271,7 +269,6 @@ pub async fn run_cargo_tests(
     .map_err(|_| TestRunFailure::Spawn("cargo test runner task ended unexpectedly".to_owned()))?
 }
 
-#[hotpath::measure]
 pub fn cargo_test_args(profile: TestProfile, test_identity: &str) -> Vec<String> {
     let mut args = vec!["test".to_string(), "--no-fail-fast".to_string()];
     if profile == TestProfile::Release {
@@ -285,7 +282,6 @@ pub fn cargo_test_args(profile: TestProfile, test_identity: &str) -> Vec<String>
     args
 }
 
-#[hotpath::measure]
 fn cargo_test_command(project_root: &Path, profile: TestProfile, test_identity: &str) -> Command {
     let mut command = Command::new("cargo");
     command
@@ -396,7 +392,6 @@ fn run_selected_cargo_tests(
     })
 }
 
-#[hotpath::measure]
 fn validate_test_identity(test_identity: &str) -> Result<(), TestRunFailure> {
     if test_identity.trim().is_empty()
         || test_identity.trim() != test_identity
@@ -411,7 +406,6 @@ fn validate_test_identity(test_identity: &str) -> Result<(), TestRunFailure> {
     Ok(())
 }
 
-#[hotpath::measure]
 fn configure_command(command: &mut Command) {
     command
         .stdin(Stdio::null())
@@ -421,7 +415,6 @@ fn configure_command(command: &mut Command) {
     command.process_group(0);
 }
 
-#[hotpath::measure]
 fn run_bounded_test_command(
     command: &mut Command,
     timeout: Duration,
@@ -522,7 +515,6 @@ enum ProcessOutcome {
     ReadFailure,
 }
 
-#[hotpath::measure]
 fn wait_for_process(
     child: &mut Child,
     process_group: u32,
@@ -553,7 +545,6 @@ fn wait_for_process(
     }
 }
 
-#[hotpath::measure]
 fn terminate_and_reap(child: &mut Child, process_group: u32) {
     signal_process_tree(process_group, TerminationSignal::Terminate);
     #[cfg(not(unix))]
@@ -585,7 +576,6 @@ enum StreamCapture {
     ReadFailure(Vec<u8>),
 }
 
-#[hotpath::measure_all]
 impl StreamCapture {
     fn is_captured(&self) -> bool {
         match self {
@@ -602,7 +592,6 @@ impl StreamCapture {
     }
 }
 
-#[hotpath::measure]
 fn read_bounded(
     mut reader: impl Read,
     stream: TestRunStream,
@@ -625,7 +614,6 @@ fn read_bounded(
     }
 }
 
-#[hotpath::measure]
 fn join_reader(reader: Option<thread::JoinHandle<StreamCapture>>) -> StreamCapture {
     reader
         .and_then(|reader| reader.join().ok())
@@ -639,7 +627,6 @@ enum TerminationSignal {
 }
 
 #[cfg(unix)]
-#[hotpath::measure]
 fn signal_process_tree(process_group: u32, signal: TerminationSignal) {
     let signal = match signal {
         TerminationSignal::Terminate => libc::SIGTERM,
@@ -649,7 +636,6 @@ fn signal_process_tree(process_group: u32, signal: TerminationSignal) {
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn signal_process_tree(process_group: u32, _signal: TerminationSignal) {
     let _ = Command::new("taskkill")
         .args(["/PID", &process_group.to_string(), "/T", "/F"])
@@ -660,10 +646,8 @@ fn signal_process_tree(process_group: u32, _signal: TerminationSignal) {
 }
 
 #[cfg(not(any(unix, windows)))]
-#[hotpath::measure]
 fn signal_process_tree(_process_group: u32, _signal: TerminationSignal) {}
 
-#[hotpath::measure]
 pub fn parse_libtest_output(stdout: &str) -> Vec<(String, bool)> {
     let mut results = Vec::new();
     for raw in stdout.lines() {

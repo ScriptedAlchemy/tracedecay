@@ -21,7 +21,6 @@ use super::super::{
     settlement::{interruption_outcome, missing_authority},
 };
 
-#[hotpath::measure]
 pub(super) fn cancel_waiting(queue: &mut FairQueue<AcceptedRequest>, telemetry: &WriterTelemetry) {
     for item in queue.drain_matching(|item| item.probe.interruption().is_some()) {
         let bytes = item.admission_bytes();
@@ -38,7 +37,6 @@ pub(super) fn cancel_waiting(queue: &mut FairQueue<AcceptedRequest>, telemetry: 
     }
 }
 
-#[hotpath::measure]
 pub(super) fn reject_unauthorized(
     queue: &mut FairQueue<AcceptedRequest>,
     telemetry: &WriterTelemetry,
@@ -56,7 +54,6 @@ pub(super) fn reject_unauthorized(
     }
 }
 
-#[hotpath::measure]
 pub(super) fn reject_all(queue: &mut FairQueue<AcceptedRequest>, telemetry: &WriterTelemetry) {
     for item in queue.drain_all() {
         let bytes = item.admission_bytes();
@@ -69,35 +66,30 @@ pub(super) fn reject_all(queue: &mut FairQueue<AcceptedRequest>, telemetry: &Wri
     }
 }
 
-#[hotpath::measure]
 pub(super) fn reject_all_exact_sql(queue: &mut VecDeque<ExactSqlWriterCommand>) {
     for command in queue.drain(..) {
         reject_writer_command(command);
     }
 }
 
-#[hotpath::measure]
 pub(super) fn reject_online_backup(command: OnlineBackupCommand) {
     command.settle(Err(WriterActorError::OnlineBackupFailed(
         WriterOnlineBackupError::WriterShuttingDown,
     )));
 }
 
-#[hotpath::measure]
 pub(super) fn reject_all_online_backup(queue: &mut VecDeque<OnlineBackupCommand>) {
     for command in queue.drain(..) {
         reject_online_backup(command);
     }
 }
 
-#[hotpath::measure]
 pub(super) fn reject_incremental_vacuum(command: IncrementalVacuumCommand) {
     command.settle(Err(WriterActorError::IncrementalVacuumFailed(
         "writer is unavailable".to_owned(),
     )));
 }
 
-#[hotpath::measure]
 pub(super) fn reject_all_incremental_vacuum(queue: &mut VecDeque<IncrementalVacuumCommand>) {
     for command in queue.drain(..) {
         reject_incremental_vacuum(command);

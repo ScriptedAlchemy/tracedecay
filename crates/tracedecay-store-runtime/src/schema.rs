@@ -9,7 +9,6 @@
 
 /// Installs the registered global/session schema installer into the kernel's
 /// store-runtime registry.
-#[hotpath::measure]
 pub fn register_registered_schema_installer() {
     tracedecay_runtime_core::ports::registered_schema::register(|connection| {
         Box::pin(tracedecay_global_db::ensure_registered_schema(connection))

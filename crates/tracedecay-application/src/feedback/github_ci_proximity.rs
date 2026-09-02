@@ -43,7 +43,6 @@ pub struct GitHubReviewReadRequestV1 {
     pub pull_request_id: GitHubPullRequestIdV1,
 }
 
-#[hotpath::measure_all]
 impl GitHubReviewReadRequestV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         self.scope.validate()?;
@@ -67,7 +66,6 @@ pub struct GitHubReviewReadResponseV1 {
     pub checkpoint: GitHubReviewReadCheckpointV1,
 }
 
-#[hotpath::measure_all]
 impl GitHubReviewReadResponseV1 {
     pub fn validate_for(
         &self,
@@ -128,7 +126,6 @@ pub struct CiFailureLocalizationRequestV1 {
     pub run: CiFailureRunIdentityV1,
 }
 
-#[hotpath::measure_all]
 impl CiFailureLocalizationRequestV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         self.scope.validate()?;
@@ -146,7 +143,6 @@ pub enum CiFailureLocalizationPortOutcomeV1 {
     Unavailable,
 }
 
-#[hotpath::measure_all]
 impl CiFailureLocalizationPortOutcomeV1 {
     pub fn validate_for(
         &self,
@@ -187,7 +183,6 @@ pub struct ProximityEvaluationRequestV1 {
     pub observed_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl ProximityEvaluationRequestV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         self.scope.validate()?;
@@ -202,7 +197,6 @@ pub enum ProximityCandidatesPortOutcomeV1 {
     Unavailable,
 }
 
-#[hotpath::measure_all]
 impl ProximityCandidatesPortOutcomeV1 {
     pub fn validate_for(
         &self,

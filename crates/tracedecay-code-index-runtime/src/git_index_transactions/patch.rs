@@ -21,7 +21,6 @@ pub struct ValidatedIndexPatch {
     bytes: Vec<u8>,
 }
 
-#[hotpath::measure_all]
 impl ValidatedIndexPatch {
     pub fn new(hunk: HunkRefV1, bytes: Vec<u8>) -> Result<Self, NativeGitIndexError> {
         hunk.validate()?;
@@ -97,7 +96,6 @@ impl ValidatedIndexPatch {
 
 /// Stored hunk headers are normalized `@@ -a,b +c,d @@` text: a trailing
 /// section heading is as much a mismatch as a malformed range.
-#[hotpath::measure]
 fn parse_hunk_line_counts(header: &str) -> Result<(u32, u32), NativeGitIndexError> {
     match parse_hunk_header(header) {
         Some(parsed) if parsed.section.is_none() => Ok((parsed.old_count, parsed.new_count)),

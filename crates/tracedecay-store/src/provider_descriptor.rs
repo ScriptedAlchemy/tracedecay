@@ -46,7 +46,6 @@ pub type ToolMetadataNormalizer = fn(
 /// A record from such a provider is allowed to carry no native record id: the
 /// envelope's `stable_record_id` is the identity. Every other provider must
 /// carry one, and the projection rejects the record when it does not match.
-#[hotpath::measure]
 pub fn synthesizes_native_record_id(provider: &str) -> bool {
     provider == SYNTHESIZED_RECORD_ID_PROVIDER
 }
@@ -56,7 +55,6 @@ pub fn synthesizes_native_record_id(provider: &str) -> bool {
 /// Keyed by source rather than provider because the source is what records the
 /// captured shape: it is the shape, not the host, that decides which
 /// normalization the canonical message metadata still needs.
-#[hotpath::measure]
 pub fn tool_metadata_normalizer(source: Option<&str>) -> Option<ToolMetadataNormalizer> {
     if source == Some(CURSOR_TRANSCRIPT_SOURCE) {
         Some(normalize_cursor_tool_metadata)
@@ -67,7 +65,6 @@ pub fn tool_metadata_normalizer(source: Option<&str>) -> Option<ToolMetadataNorm
 
 /// Restates a Cursor transcript record's tool invocations as the canonical
 /// cross-provider `tool_calls`, `tool_events`, and `tool_use_id` fields.
-#[hotpath::measure]
 fn normalize_cursor_tool_metadata(
     metadata: &mut serde_json::Map<String, serde_json::Value>,
     facts: &[CanonicalObservationFactV1],

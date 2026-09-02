@@ -302,7 +302,6 @@ struct ProjectRuntimeReservation {
     slots: Vec<ReservedProjectRuntimeSlot>,
 }
 
-#[hotpath::measure_all]
 impl ProjectRuntimeReservation {
     fn reserve<C>(&mut self)
     where
@@ -473,7 +472,6 @@ pub(crate) struct RegisteredAdvisoryRuntimeV1 {
     hook_orchestrator: Arc<BoundedHookOrchestratorV1>,
 }
 
-#[hotpath::measure_all]
 impl RegisteredAdvisoryRuntimeV1 {
     pub(crate) fn new(
         owner: Arc<dyn Any + Send + Sync>,
@@ -505,7 +503,6 @@ pub struct RegisteredDeliveryReadAuthorityV1 {
     source_access: Arc<dyn tracedecay_usecases::ProjectSourceAccessSnapshotPort>,
 }
 
-#[hotpath::measure_all]
 impl RegisteredDeliveryReadAuthorityV1 {
     pub fn new(
         project_root: PathBuf,
@@ -578,7 +575,6 @@ struct ProjectRuntimeRootFencesV1 {
     request_leases: BTreeMap<PathBuf, usize>,
 }
 
-#[hotpath::measure_all]
 impl ProjectRuntimeRootFencesV1 {
     fn contains(&self, root: &Path) -> bool {
         self.retired.contains(root) || self.quiesced.contains(root)
@@ -658,7 +654,6 @@ impl Clone for ProjectRuntimeRequestLeaseV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl ProjectRuntimeRequestLeaseV1 {
     pub fn covers(&self, registry: &ProjectRuntimeRegistryV1, project_root: &Path) -> bool {
         Arc::ptr_eq(&self.inner.registry.root_fences, &registry.root_fences)
@@ -700,7 +695,6 @@ impl Drop for ProjectRuntimeRequestLeaseInnerV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl ProjectRuntimeReservationLease {
     #[hotpath::skip]
     async fn release(mut self) {
@@ -793,7 +787,6 @@ impl Drop for ProjectRuntimeReservationLease {
     }
 }
 
-#[hotpath::measure_all]
 impl ProjectRuntimeRegistryV1 {
     fn lock_root_fences(&self) -> MutexGuard<'_, ProjectRuntimeRootFencesV1> {
         match self.root_fences.lock() {

@@ -22,14 +22,12 @@ use tracedecay_daemon_protocol::{DaemonInvocationExecutor, RequestedOutputFormat
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::application_output::view::CanonicalHumanView;
 
-#[hotpath::measure]
 pub(super) fn request_id() -> Result<RequestId> {
     mint_global_request_id(GlobalRequestSurface::McpFallback).map_err(|_| TraceDecayError::Config {
         message: "could not allocate an application surface request id".to_owned(),
     })
 }
 
-#[hotpath::measure]
 pub(super) fn complete_protocol_controls(
     operation: ApplicationSurfaceOperation,
     request_id: &RequestId,
@@ -40,7 +38,6 @@ pub(super) fn complete_protocol_controls(
     complete_protocol_controls_for_tool(&tool_name, request_id, deadline, cancellation)
 }
 
-#[hotpath::measure]
 pub(super) fn complete_retained_protocol_controls(
     operation: RetainedSurfaceOperation,
     request_id: &RequestId,
@@ -86,7 +83,6 @@ pub(super) fn complete_retained_protocol_controls(
     complete_protocol_controls_with_ceiling(ceiling, request_id, deadline, cancellation)
 }
 
-#[hotpath::measure]
 fn complete_protocol_controls_for_tool(
     tool_name: &str,
     request_id: &RequestId,
@@ -101,7 +97,6 @@ fn complete_protocol_controls_for_tool(
     complete_protocol_controls_with_ceiling(ceiling, request_id, deadline, cancellation)
 }
 
-#[hotpath::measure]
 fn complete_protocol_controls_with_ceiling(
     ceiling: std::time::Duration,
     request_id: &RequestId,
@@ -215,7 +210,6 @@ pub(super) async fn handle_application_surface(
 
 /// Map surface-resolution failures to typed reason codes so MCP clients see
 /// truthful unavailable/denied states instead of an untyped internal error.
-#[hotpath::measure]
 fn application_surface_dispatch_error(
     error: crate::application_surface::ApplicationSurfaceAdapterError,
 ) -> TraceDecayError {
@@ -242,7 +236,6 @@ fn application_surface_dispatch_error(
     TraceDecayError::project_route(reason_code, retryable, error.to_string())
 }
 
-#[hotpath::measure]
 fn render_result(
     cg: &TraceDecay,
     result: ApplicationSurfaceInvocationResult,
@@ -250,7 +243,6 @@ fn render_result(
     render_result_for_root(Some(cg.project_root()), result)
 }
 
-#[hotpath::measure]
 fn render_result_for_root(
     project_root: Option<&std::path::Path>,
     result: ApplicationSurfaceInvocationResult,
@@ -264,7 +256,6 @@ fn render_result_for_root(
     )
 }
 
-#[hotpath::measure]
 fn render_result_parts(
     project_root: Option<&std::path::Path>,
     operation: &str,
@@ -322,7 +313,6 @@ fn render_result_parts(
     })
 }
 
-#[hotpath::measure]
 pub(super) fn render_retained_result(
     project_root: Option<&std::path::Path>,
     operation: RetainedSurfaceOperation,
@@ -344,7 +334,6 @@ pub(super) fn render_retained_result(
     )
 }
 
-#[hotpath::measure]
 fn render_canonical_markdown(
     operation: &str,
     binding_id: &BindingId,

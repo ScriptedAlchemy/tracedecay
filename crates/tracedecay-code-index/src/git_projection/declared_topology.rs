@@ -34,7 +34,6 @@ pub struct GitWorktreeOccupancyV1 {
     pub reference: Option<RefId>,
 }
 
-#[hotpath::measure_all]
 impl GitTopologyProjectionStore {
     pub fn branch_stacks(&self) -> &[GitBranchStackBindingV1] {
         &self.branch_stacks
@@ -254,7 +253,6 @@ impl GitTopologyProjectionStore {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn validate_declared_topology(
     repository: &RepositoryId,
     branch_stacks: &[GitBranchStackBindingV1],
@@ -287,7 +285,6 @@ pub(super) fn validate_declared_topology(
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_branch_stack_binding(
     binding: &GitBranchStackBindingV1,
 ) -> Result<(), GitTopologyProjectionError> {
@@ -325,7 +322,6 @@ fn validate_branch_stack_binding(
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_worktree_occupancy(
     occupancy: &GitWorktreeOccupancyV1,
 ) -> Result<(), GitTopologyProjectionError> {
@@ -361,7 +357,6 @@ fn validate_worktree_occupancy(
     Ok(())
 }
 
-#[hotpath::measure]
 pub(super) fn compare_branch_stack_bindings(
     left: &GitBranchStackBindingV1,
     right: &GitBranchStackBindingV1,
@@ -387,7 +382,6 @@ pub(super) fn compare_branch_stack_bindings(
         .then_with(|| left.revision.digest.cmp(&right.revision.digest))
 }
 
-#[hotpath::measure]
 fn same_branch_stack_identity(
     left: &GitBranchStackBindingV1,
     right: &GitBranchStackBindingV1,
@@ -401,7 +395,6 @@ fn same_branch_stack_identity(
         && left.revision.revision_id == right.revision.revision_id
 }
 
-#[hotpath::measure]
 pub(super) fn compare_worktree_occupancies(
     left: &GitWorktreeOccupancyV1,
     right: &GitWorktreeOccupancyV1,
@@ -416,7 +409,6 @@ pub(super) fn compare_worktree_occupancies(
         .then_with(|| left.reference.cmp(&right.reference))
 }
 
-#[hotpath::measure]
 fn same_worktree_occupancy_identity(
     left: &GitWorktreeOccupancyV1,
     right: &GitWorktreeOccupancyV1,
@@ -429,7 +421,6 @@ fn same_worktree_occupancy_identity(
         && left.worktree_id == right.worktree_id
 }
 
-#[hotpath::measure]
 fn validate_exact_binding_request(
     project: &ProjectId,
     repository: &RepositoryId,
@@ -455,7 +446,6 @@ fn validate_exact_binding_request(
     Ok(())
 }
 
-#[hotpath::measure]
 fn exact_scope_matches(
     project_matches: bool,
     repository_matches: bool,
@@ -471,7 +461,6 @@ fn exact_scope_matches(
         && digest_matches
 }
 
-#[hotpath::measure]
 fn check_cancellation(
     cancellation: &dyn GraphCancellation,
 ) -> Result<(), GitTopologyProjectionError> {

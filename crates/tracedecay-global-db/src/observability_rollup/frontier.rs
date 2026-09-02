@@ -7,7 +7,6 @@ use super::{
     ObservabilityRollupFrontierV1, SECONDS_PER_DAY, validate_day, validate_identifier,
 };
 
-#[hotpath::measure_all]
 impl RegisteredGlobalDb {
     /// Records the first full UTC day this mounted scope can truthfully cover.
     /// Repeated mounts return the original boundary unchanged.
@@ -257,7 +256,6 @@ impl RegisteredGlobalDb {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn validate_empty_day_claim(
     claim: &ObservabilityRollupEmptyDayClaimV1,
 ) -> Result<(), String> {

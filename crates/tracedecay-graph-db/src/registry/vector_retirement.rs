@@ -56,7 +56,6 @@ enum SemanticVectorRetirementReservationKind {
     Published(Box<GraphPublicationReplayRetirementV1>),
 }
 
-#[hotpath::measure_all]
 impl SemanticVectorRetirementReservation {
     pub fn generation_id(&self) -> &VectorGenerationIdV1 {
         &self.record.plan.semantic_generation_id
@@ -103,7 +102,6 @@ pub enum SemanticVectorRetentionStep {
     },
 }
 
-#[hotpath::measure_all]
 impl GraphDbRegistry {
     #[allow(clippy::too_many_arguments)]
     #[hotpath::measure(
@@ -267,7 +265,6 @@ impl GraphDbRegistry {
     }
 }
 
-#[hotpath::measure]
 fn continuation_after_action(
     page: &tracedecay_store::SemanticVectorStageCensusPage,
     cursor: &SemanticVectorStageCensusCursor,
@@ -279,7 +276,6 @@ fn continuation_after_action(
     (action_index + 1 < page.records.len() || page.continuation.is_some()).then(|| cursor.clone())
 }
 
-#[hotpath::measure]
 fn summarize_page(
     page: &tracedecay_store::SemanticVectorStageCensusPage,
 ) -> SemanticVectorRetentionCensus {
@@ -301,7 +297,6 @@ fn summarize_page(
 /// `Retained` head then records as Observed instead of looking like an
 /// incomplete census. A remaining continuation is a partial page, so the
 /// receipt stays unset.
-#[hotpath::measure]
 fn summarize_through_action(
     page: &tracedecay_store::SemanticVectorStageCensusPage,
     cursor: &SemanticVectorStageCensusCursor,
@@ -329,7 +324,6 @@ fn summarize_through_action(
     ))
 }
 
-#[hotpath::measure]
 fn summarize_records(
     records: &[tracedecay_store::SemanticVectorStageCensusRecord],
     continuation: Option<SemanticVectorStageCensusCursor>,
@@ -361,7 +355,6 @@ fn summarize_records(
     census
 }
 
-#[hotpath::measure]
 fn empty_census(
     shard_id: StoreShardIdV1,
     continuation: Option<SemanticVectorStageCensusCursor>,
@@ -384,7 +377,6 @@ fn empty_census(
     }
 }
 
-#[hotpath::measure]
 fn reserve_published(
     _registration: &GraphDbRegistration,
     authority: &mut dyn SemanticVectorPublicationAuthority,
@@ -448,7 +440,6 @@ fn reserve_published(
     }))
 }
 
-#[hotpath::measure]
 fn reserve_cancelled(
     database: &GraphDbLeaseV1,
     record: &tracedecay_store::SemanticVectorStageRecord,
@@ -465,7 +456,6 @@ fn reserve_cancelled(
     })
 }
 
-#[hotpath::measure]
 fn finish_reserved_cancelled(
     registration: &GraphDbRegistration,
     authority: &mut dyn SemanticVectorPublicationAuthority,
@@ -521,7 +511,6 @@ fn finish_reserved_cancelled(
     }
 }
 
-#[hotpath::measure]
 fn finish_reserved_published(
     registration: &GraphDbRegistration,
     authority: &mut dyn SemanticVectorPublicationAuthority,
@@ -612,7 +601,6 @@ fn finish_reserved_published(
     }
 }
 
-#[hotpath::measure]
 fn converge_retired_cleanup(
     registration: &GraphDbRegistration,
     authority: &mut dyn SemanticVectorPublicationAuthority,

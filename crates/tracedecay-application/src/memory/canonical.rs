@@ -45,7 +45,6 @@ pub struct MemoryCommitFactCommand<C> {
     command: C,
 }
 
-#[hotpath::measure_all]
 impl<C> MemoryCommitFactCommand<C> {
     pub fn new(owner: FactOwnerV1, fact_id: FactId, command: C) -> Self {
         Self {
@@ -64,7 +63,6 @@ pub struct MemoryCommitFactPortResult<T> {
     receipt_fact_id: Option<FactId>,
 }
 
-#[hotpath::measure_all]
 impl<T> MemoryCommitFactPortResult<T> {
     pub fn new(
         output: T,
@@ -99,7 +97,6 @@ pub struct MemoryFactSnapshot {
     projected_as_of: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl MemoryFactSnapshot {
     #[hotpath::skip]
     pub const fn new(owner: FactOwnerV1, fact_id: FactId, projected_as_of: UtcMicros) -> Self {
@@ -119,7 +116,6 @@ pub struct MemoryReadCoverage {
     redacted: u64,
 }
 
-#[hotpath::measure_all]
 impl MemoryReadCoverage {
     #[hotpath::skip]
     pub const fn new(visible: u64, hidden: u64, unknown: u64, redacted: u64) -> Self {
@@ -171,7 +167,6 @@ pub struct MemoryReadResult<T> {
     contradiction: MemoryContradictionState,
 }
 
-#[hotpath::measure_all]
 impl<T> MemoryReadResult<T> {
     #[hotpath::skip]
     pub const fn new(
@@ -214,7 +209,6 @@ pub struct MemoryCurrentFactsQuery<Q> {
     query: Q,
 }
 
-#[hotpath::measure_all]
 impl<Q> MemoryCurrentFactsQuery<Q> {
     pub fn new(owner: FactOwnerV1, after_fact_id: Option<FactId>, limit: usize, query: Q) -> Self {
         Self {
@@ -232,7 +226,6 @@ pub struct MemoryCurrentFactsPortResult<T> {
     snapshots: Vec<MemoryFactSnapshot>,
 }
 
-#[hotpath::measure_all]
 impl<T> MemoryCurrentFactsPortResult<T> {
     pub fn new(output: T, snapshots: Vec<MemoryFactSnapshot>) -> Self {
         Self { output, snapshots }
@@ -258,7 +251,6 @@ pub struct MemoryFactAsOfQuery<Q> {
     query: Q,
 }
 
-#[hotpath::measure_all]
 impl<Q> MemoryFactAsOfQuery<Q> {
     pub fn new(owner: FactOwnerV1, fact_id: FactId, as_of: UtcMicros, query: Q) -> Self {
         Self {
@@ -276,7 +268,6 @@ pub struct MemoryOptionalFactPortResult<T> {
     snapshot: Option<MemoryFactSnapshot>,
 }
 
-#[hotpath::measure_all]
 impl<T> MemoryOptionalFactPortResult<T> {
     pub fn new(output: T, snapshot: Option<MemoryFactSnapshot>) -> Self {
         Self { output, snapshot }
@@ -301,7 +292,6 @@ pub struct MemoryFactCurrentQuery<Q> {
     query: Q,
 }
 
-#[hotpath::measure_all]
 impl<Q> MemoryFactCurrentQuery<Q> {
     pub fn new(owner: FactOwnerV1, fact_id: FactId, query: Q) -> Self {
         Self {
@@ -329,7 +319,6 @@ pub struct MemoryFactLineageCursor {
     event_id: FactEventId,
 }
 
-#[hotpath::measure_all]
 impl MemoryFactLineageCursor {
     #[hotpath::skip]
     pub const fn new(occurred_at: UtcMicros, event_id: FactEventId) -> Self {
@@ -349,7 +338,6 @@ pub struct MemoryFactLineageQuery<Q> {
     query: Q,
 }
 
-#[hotpath::measure_all]
 impl<Q> MemoryFactLineageQuery<Q> {
     pub fn new(
         owner: FactOwnerV1,
@@ -385,7 +373,6 @@ pub struct MemoryFactLineagePortResult<T> {
     events: Vec<FactLineageEventV1>,
 }
 
-#[hotpath::measure_all]
 impl<T> MemoryFactLineagePortResult<T> {
     pub fn new(output: T, events: Vec<FactLineageEventV1>) -> Self {
         Self { output, events }
@@ -399,7 +386,6 @@ pub struct MemoryRetrievalAnchorQuery<Q> {
     query: Q,
 }
 
-#[hotpath::measure_all]
 impl<Q> MemoryRetrievalAnchorQuery<Q> {
     pub fn new(owner: FactOwnerV1, anchor_id: RetrievalAnchorId, query: Q) -> Self {
         Self {
@@ -425,7 +411,6 @@ pub struct MemoryApplication<P> {
     port: P,
 }
 
-#[hotpath::measure_all]
 impl<P> MemoryApplication<P> {
     pub fn new(owner: FactOwnerV1, port: P) -> Result<Self, MemoryApplicationInvariantError> {
         owner.validate()?;
@@ -452,7 +437,6 @@ impl<P> MemoryApplication<P> {
     }
 }
 
-#[hotpath::measure_all]
 impl<P: CommitFactPort> MemoryApplication<P> {
     #[hotpath::measure(label = "application.memory.commit", future = true)]
     pub async fn commit_fact(
@@ -475,7 +459,6 @@ impl<P: CommitFactPort> MemoryApplication<P> {
     }
 }
 
-#[hotpath::measure_all]
 impl<P: CurrentFactsPort> MemoryApplication<P> {
     #[hotpath::measure(label = "application.memory.query_current", future = true)]
     pub async fn query_current_facts(
@@ -519,7 +502,6 @@ impl<P: CurrentFactsPort> MemoryApplication<P> {
     }
 }
 
-#[hotpath::measure_all]
 impl<P: FactAsOfPort> MemoryApplication<P> {
     #[hotpath::measure(label = "application.memory.query_as_of", future = true)]
     pub async fn query_fact_as_of(
@@ -552,7 +534,6 @@ impl<P: FactAsOfPort> MemoryApplication<P> {
     }
 }
 
-#[hotpath::measure_all]
 impl<P: FactCurrentPort> MemoryApplication<P> {
     #[hotpath::measure(label = "application.memory.query_current_fact", future = true)]
     pub async fn query_fact_current(
@@ -584,7 +565,6 @@ impl<P: FactCurrentPort> MemoryApplication<P> {
     }
 }
 
-#[hotpath::measure_all]
 impl<P: FactLineagePort> MemoryApplication<P> {
     #[hotpath::measure(label = "application.memory.query_lineage", future = true)]
     pub async fn query_fact_lineage(
@@ -628,7 +608,6 @@ impl<P: FactLineagePort> MemoryApplication<P> {
     }
 }
 
-#[hotpath::measure_all]
 impl<P: RetrievalAnchorPort> MemoryApplication<P> {
     #[hotpath::measure(label = "application.memory.get_anchor", future = true)]
     pub async fn get_retrieval_anchor(
@@ -658,7 +637,6 @@ impl<P: RetrievalAnchorPort> MemoryApplication<P> {
     }
 }
 
-#[hotpath::measure]
 fn validate_commit_result<T>(
     owner: &FactOwnerV1,
     fact_id: &FactId,
@@ -673,7 +651,6 @@ fn validate_commit_result<T>(
     )
 }
 
-#[hotpath::measure]
 fn validate_commit_proof(
     owner: &FactOwnerV1,
     fact_id: &FactId,

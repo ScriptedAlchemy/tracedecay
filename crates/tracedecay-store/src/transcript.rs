@@ -72,7 +72,6 @@ pub enum TranscriptWriteKind {
     },
 }
 
-#[hotpath::measure_all]
 impl TranscriptWriteBatch {
     /// Builds an offset-only write for parsed input that emitted no messages.
     pub fn advance_offset(

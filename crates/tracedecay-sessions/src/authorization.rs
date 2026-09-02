@@ -5,7 +5,6 @@ use tracedecay_domain::SessionId;
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AuthorizationGrantId(String);
 
-#[hotpath::measure_all]
 impl AuthorizationGrantId {
     pub fn new(value: impl Into<String>) -> Result<Self, SessionAuthorizationError> {
         let value = value.into();
@@ -37,7 +36,6 @@ pub enum SessionAccess {
     Hydrate,
 }
 
-#[hotpath::measure_all]
 impl SessionAccess {
     #[hotpath::skip]
     pub const fn matches_requested_access(self, requested: Self) -> bool {
@@ -56,7 +54,6 @@ pub enum SessionRetrievalScope {
     AllSessionsInAuthorizedRoot,
 }
 
-#[hotpath::measure_all]
 impl SessionRetrievalScope {
     #[hotpath::skip]
     pub const fn kind(&self) -> &'static str {

@@ -147,12 +147,10 @@ const CREATE_CURSOR_ADVANCE_DELETE_TRIGGER: &str = "CREATE TRIGGER \
 mod restore;
 pub use restore::replay_current_release_state_for_restore;
 
-#[hotpath::measure]
 fn db_error(source: impl std::error::Error + Send + Sync + 'static) -> TraceDecayError {
     TraceDecayError::database_operation(OPERATION, source)
 }
 
-#[hotpath::measure]
 fn require_apply_transaction<T>(transaction: Option<T>, message: &'static str) -> Result<T> {
     transaction.ok_or_else(|| TraceDecayError::Database {
         operation: OPERATION.to_string(),
@@ -196,23 +194,19 @@ pub struct ObservationRetentionConfig {
     pub max_batch_size: usize,
 }
 
-#[hotpath::measure]
 fn default_max_batch_size() -> usize {
     500
 }
 
-#[hotpath::measure]
 fn default_retention_enabled() -> bool {
     true
 }
 
-#[hotpath::measure]
 fn default_reclaim_superseded_cursor_advances() -> bool {
     true
 }
 
 #[allow(clippy::unnecessary_wraps)]
-#[hotpath::measure]
 fn default_evidence_release_after_days() -> Option<u32> {
     Some(30)
 }
@@ -230,7 +224,6 @@ impl Default for ObservationRetentionConfig {
     }
 }
 
-#[hotpath::measure_all]
 impl ObservationRetentionConfig {
     fn batch_limit(&self) -> i64 {
         i64::try_from(self.max_batch_size.max(1)).unwrap_or(i64::MAX)
@@ -255,7 +248,6 @@ pub enum RetentionMode {
     Apply,
 }
 
-#[hotpath::measure_all]
 impl RetentionMode {
     fn is_apply(self) -> bool {
         matches!(self, Self::Apply)
@@ -313,7 +305,6 @@ pub struct ObservationRetentionReport {
     pub errors: Vec<String>,
 }
 
-#[hotpath::measure_all]
 impl ObservationRetentionReport {
     /// Total payload bytes reclaimed across every pass.
     pub fn bytes_reclaimed(&self) -> u64 {
@@ -325,7 +316,6 @@ impl ObservationRetentionReport {
     }
 }
 
-#[hotpath::measure]
 fn cutoff_secs(window_days: u32, now_secs: i64) -> i64 {
     now_secs.saturating_sub(i64::from(window_days).saturating_mul(SECONDS_PER_DAY))
 }
@@ -374,7 +364,6 @@ async fn live_payload_count(
 // The release passes write the marker consts verbatim (and the restore scan
 // matches them exactly), so a direct string comparison is the released test —
 // no JSON parse of every multi-KB live payload.
-#[hotpath::measure]
 fn anchor_payload_count_sql() -> String {
     format!(
         "SELECT COUNT(*) FROM retrieval_anchors a
@@ -383,7 +372,6 @@ fn anchor_payload_count_sql() -> String {
     )
 }
 
-#[hotpath::measure]
 fn observation_payload_count_sql() -> String {
     format!(
         "SELECT COUNT(*) FROM observations o
@@ -488,7 +476,6 @@ enum RetentionQueryExecutor<'reader, 'database> {
     Transaction(&'reader DatabaseWriteTransaction<'database>),
 }
 
-#[hotpath::measure_all]
 impl RetentionQueryExecutor<'_, '_> {
     #[hotpath::skip]
     async fn query(
@@ -507,7 +494,6 @@ impl RetentionQueryExecutor<'_, '_> {
 /// Reclaimed bytes for one released column: the original length minus the
 /// compact marker that replaces it (saturating so a payload already smaller
 /// than the marker never underflows).
-#[hotpath::measure]
 fn reclaimed_bytes(original_len: u64, marker: &str) -> u64 {
     original_len.saturating_sub(marker.len() as u64)
 }

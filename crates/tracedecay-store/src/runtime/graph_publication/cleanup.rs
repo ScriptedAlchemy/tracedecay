@@ -16,7 +16,6 @@ pub struct GraphPublicationRetiredCleanupPageRequestV1 {
     pub max_records: u16,
 }
 
-#[hotpath::measure_all]
 impl GraphPublicationRetiredCleanupPageRequestV1 {
     pub fn new(
         projection: GraphProjectionIdentityV1,
@@ -69,7 +68,6 @@ pub struct GraphPublicationRetiredCleanupPageV1 {
     pub continuation: Option<GraphPublicationReplayCursorV1>,
 }
 
-#[hotpath::measure_all]
 impl GraphPublicationRetiredCleanupPageV1 {
     pub fn new(
         records: Vec<GraphPublicationReplayTombstoneV1>,

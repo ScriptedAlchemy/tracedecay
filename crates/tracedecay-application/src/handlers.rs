@@ -27,7 +27,6 @@ pub struct ApplicationOperation {
     resource_addressed: bool,
 }
 
-#[hotpath::measure_all]
 impl ApplicationOperation {
     pub fn new(
         capability_id: CapabilityId,
@@ -119,7 +118,6 @@ pub struct BoundApplicationHandler<'a, Dispatcher> {
     dispatcher: &'a Dispatcher,
 }
 
-#[hotpath::measure_all]
 impl<'a, Dispatcher> BoundApplicationHandler<'a, Dispatcher> {
     fn new(descriptor: &'a ApplicationHandlerDescriptor, dispatcher: &'a Dispatcher) -> Self {
         Self {
@@ -160,7 +158,6 @@ pub struct ApplicationHandlerDescriptor {
     result_schema: SchemaRef,
 }
 
-#[hotpath::measure_all]
 impl ApplicationHandlerDescriptor {
     pub fn new(
         operation: ApplicationOperation,
@@ -214,7 +211,6 @@ pub struct ApplicationHandlerDescriptors {
     descriptors: BTreeMap<UseCaseId, ApplicationHandlerDescriptor>,
 }
 
-#[hotpath::measure_all]
 impl ApplicationHandlerDescriptors {
     pub fn new(
         descriptors: impl IntoIterator<Item = ApplicationHandlerDescriptor>,
@@ -296,7 +292,6 @@ impl ApplicationHandlerDescriptors {
     }
 }
 
-#[hotpath::measure]
 fn validate_descriptor_mapping(
     descriptor: &ApplicationHandlerDescriptor,
     capability: &tracedecay_tool_catalog::CapabilityManifestV1,
@@ -323,7 +318,6 @@ fn validate_descriptor_mapping(
 
 /// Application-owned descriptor source. Root catalog composition remains
 /// intentionally outside this crate and is introduced by its owning packet.
-#[hotpath::measure]
 pub fn application_handler_descriptors()
 -> Result<ApplicationHandlerDescriptors, ApplicationContractError> {
     let mut descriptors = vec![crate::retrieval::catalog::symbol_search_handler_descriptor()?];

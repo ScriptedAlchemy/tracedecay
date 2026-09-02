@@ -5,7 +5,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tracedecay_application::clock::now_micros as application_now_micros;
 use tracedecay_domain::UtcMicros;
 
-#[hotpath::measure]
 pub fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -13,12 +12,10 @@ pub fn now_millis() -> u64 {
         .unwrap_or_default()
 }
 
-#[hotpath::measure]
 pub fn current_micros() -> UtcMicros {
     now_micros()
 }
 
-#[hotpath::measure]
 pub(super) fn now_micros() -> UtcMicros {
     application_now_micros()
 }

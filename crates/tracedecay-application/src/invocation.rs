@@ -23,7 +23,6 @@ pub enum InvocationTarget {
     Resolved(ResolvedScope),
 }
 
-#[hotpath::measure_all]
 impl InvocationTarget {
     pub fn resolved(&self) -> Option<&ResolvedScope> {
         match self {
@@ -43,7 +42,6 @@ pub struct ApplicationInvocationBinding {
     page: PageRequest,
 }
 
-#[hotpath::measure_all]
 impl ApplicationInvocationBinding {
     pub fn new(
         binding_id: BindingId,
@@ -110,7 +108,6 @@ pub struct ApplicationInvocationContext {
     cancellation: CancellationSignal,
 }
 
-#[hotpath::measure_all]
 impl ApplicationInvocationContext {
     pub fn new(
         request_id: RequestId,
@@ -174,7 +171,6 @@ pub enum ApplicationRequest {
     },
 }
 
-#[hotpath::measure_all]
 impl ApplicationRequest {
     pub fn surface(
         binding: ApplicationInvocationBinding,
@@ -280,7 +276,6 @@ pub struct ApplicationInvocation {
     request: ApplicationRequest,
 }
 
-#[hotpath::measure_all]
 impl ApplicationInvocation {
     pub fn new(
         context: ApplicationInvocationContext,
@@ -376,7 +371,6 @@ pub enum ApplicationResponse {
     ObservationAccepted,
 }
 
-#[hotpath::measure_all]
 impl ApplicationResponse {
     pub fn unary(envelope: ApplicationEnvelope<Value>) -> Self {
         Self::Unary {

@@ -1578,7 +1578,6 @@ pub(in crate::schema_contract) const INVARIANTS: &[Invariant] = &[
 /// on one of the given tables. The scoped observation reset restores the
 /// triggers that dropped with their tables through this single authority, so
 /// it can never install a trigger shape the contract validator would refuse.
-#[hotpath::measure]
 pub(crate) fn invariant_trigger_sql_for_tables(tables: &[&str]) -> Vec<&'static str> {
     INVARIANTS
         .iter()
@@ -1592,7 +1591,6 @@ pub(crate) fn invariant_trigger_sql_for_tables(tables: &[&str]) -> Vec<&'static 
         .collect()
 }
 
-#[hotpath::measure]
 pub(crate) fn invariant_trigger_names_for_tables(tables: &[&str]) -> Vec<&'static str> {
     INVARIANTS
         .iter()

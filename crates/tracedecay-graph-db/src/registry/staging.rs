@@ -27,7 +27,6 @@ pub struct VerifiedGenerationBatchApply {
     pub commit: GraphCommit,
 }
 
-#[hotpath::measure_all]
 impl GraphDbRegistry {
     #[hotpath::measure(
         label = "graph_db.generation.stage.begin",
@@ -610,7 +609,6 @@ impl GraphDbRegistry {
     }
 }
 
-#[hotpath::measure]
 fn require_active_stage_replay(
     authority: &mut dyn SemanticVectorPublicationAuthority,
     context: &GraphPublicationOperationContextV1<'_>,
@@ -637,7 +635,6 @@ fn require_active_stage_replay(
     }
 }
 
-#[hotpath::measure]
 fn require_unpublished_stage(
     authority: &mut dyn SemanticVectorPublicationAuthority,
     context: &GraphPublicationOperationContextV1<'_>,
@@ -658,7 +655,6 @@ fn require_unpublished_stage(
     Ok(())
 }
 
-#[hotpath::measure]
 fn cleanup_cancelled_generation(
     database: &crate::GraphDb,
     authority: &mut dyn SemanticVectorPublicationAuthority,
@@ -677,7 +673,6 @@ fn cleanup_cancelled_generation(
     database.delete_cancelled_staged_generation(&record.plan, &check)
 }
 
-#[hotpath::measure]
 fn require_stage_replay_intent(
     record: &SemanticVectorStageRecord,
     replay: &GraphPublicationReplayRecordV1,
@@ -710,7 +705,6 @@ fn require_stage_replay_intent(
     Ok(())
 }
 
-#[hotpath::measure]
 fn require_stage_plan(
     record: &SemanticVectorStageRecord,
     plan: &SemanticVectorStagePlan,
@@ -721,7 +715,6 @@ fn require_stage_plan(
     Ok(())
 }
 
-#[hotpath::measure]
 fn require_same_semantic_generation(
     existing: &SemanticVectorStagePlan,
     requested: &SemanticVectorStagePlan,
@@ -742,7 +735,6 @@ fn require_same_semantic_generation(
     Ok(())
 }
 
-#[hotpath::measure]
 fn require_stage_key(
     record: &SemanticVectorStageRecord,
     stage: &tracedecay_store::SemanticVectorStageKey,
@@ -753,7 +745,6 @@ fn require_stage_key(
     Ok(())
 }
 
-#[hotpath::measure]
 fn require_stage_binding(
     registration: &GraphDbRegistration,
     stage: &tracedecay_store::SemanticVectorStageKey,
@@ -764,7 +755,6 @@ fn require_stage_binding(
     Ok(())
 }
 
-#[hotpath::measure]
 fn require_plan_binding(
     registration: &GraphDbRegistration,
     plan: &SemanticVectorStagePlan,

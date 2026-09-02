@@ -15,7 +15,6 @@ pub enum GraphBudgetKind {
     Mutation,
 }
 
-#[hotpath::measure_all]
 impl GraphBudgetKind {
     #[must_use]
     #[hotpath::skip]
@@ -123,7 +122,6 @@ pub enum GraphDbError {
     Closed,
 }
 
-#[hotpath::measure_all]
 impl GraphDbError {
     pub fn invalid(message: impl Into<String>) -> Self {
         Self::InvalidRequest {

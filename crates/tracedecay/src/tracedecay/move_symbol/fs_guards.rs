@@ -11,7 +11,6 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 /// resolves outside the canonical project root. This covers both a symlinked
 /// destination file and a symlinked directory component while still allowing
 /// symlinks that stay inside the checkout.
-#[hotpath::measure]
 pub(super) fn validate_write_containment(
     project_root: &Path,
     path: &Path,
@@ -58,12 +57,10 @@ pub(super) fn validate_write_containment(
     Ok(())
 }
 
-#[hotpath::measure]
 pub(super) fn same_existing_file(source: &Path, destination: &Path) -> bool {
     same_file::is_same_file(source, destination).unwrap_or(false)
 }
 
-#[hotpath::measure]
 pub(super) fn write_path_preserving_final_symlink(path: &Path, label: &str) -> Result<PathBuf> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -79,7 +76,6 @@ pub(super) fn write_path_preserving_final_symlink(path: &Path, label: &str) -> R
     }
 }
 
-#[hotpath::measure]
 pub(super) fn ensure_text_unchanged(
     path: &Path,
     expected: Option<&str>,

@@ -680,7 +680,6 @@ where
     }
 }
 
-#[hotpath::measure]
 fn native_result_binds_record(
     native: &NativeGitIndexApplyResult,
     record: &tracedecay_store::GitIndexTransactionRecordV1,
@@ -712,7 +711,6 @@ where
         .map_err(|_| GitIndexTransactionPortError::NeedsInspection)
 }
 
-#[hotpath::measure]
 fn transaction_id(
     request: &GitIndexApplyRequestV1,
     preview_digest: &ManifestDigest,
@@ -735,7 +733,6 @@ fn transaction_id(
         .map_err(|_| GitIndexTransactionPortError::StalePreview)
 }
 
-#[hotpath::measure]
 fn deterministic_effect_id(
     transaction_id: &GitIndexTransactionId,
 ) -> Result<EffectId, GitIndexTransactionPortError> {
@@ -743,7 +740,6 @@ fn deterministic_effect_id(
         .map_err(|_| GitIndexTransactionPortError::StalePreview)
 }
 
-#[hotpath::measure]
 fn receipt_id(
     transaction_id: &GitIndexTransactionId,
 ) -> Result<GitIndexReceiptId, GitIndexTransactionPortError> {
@@ -787,7 +783,6 @@ where
     Ok(journal)
 }
 
-#[hotpath::measure]
 fn replay_result(
     request: &GitIndexApplyRequestV1,
     receipt: &GitIndexTransactionReceiptV1,
@@ -809,7 +804,6 @@ fn replay_result(
     )
 }
 
-#[hotpath::measure]
 fn result_from_receipt(
     request: &GitIndexApplyRequestV1,
     effect_id: EffectId,
@@ -863,7 +857,6 @@ fn result_from_receipt(
     })
 }
 
-#[hotpath::measure]
 fn terminal_execution(
     request: &GitIndexApplyRequestV1,
     termination: EffectTermination,
@@ -899,7 +892,6 @@ const fn operation_termination(termination: EffectTermination) -> OperationTermi
 /// and quarantine path.
 struct GitIndexApplyGaugeGuard;
 
-#[hotpath::measure_all]
 impl GitIndexApplyGaugeGuard {
     fn enter() -> Self {
         hotpath::gauge!("daemon.git.tx.apply.in_flight").inc(1_u64);
@@ -915,7 +907,6 @@ impl Drop for GitIndexApplyGaugeGuard {
 }
 
 #[allow(clippy::needless_pass_by_value)]
-#[hotpath::measure]
 fn map_store_error(error: GitIndexTransactionStoreError) -> GitIndexTransactionPortError {
     match error {
         GitIndexTransactionStoreError::IdempotencyConflict => {
@@ -940,7 +931,6 @@ fn map_store_error(error: GitIndexTransactionStoreError) -> GitIndexTransactionP
     }
 }
 
-#[hotpath::measure]
 fn map_journal_error(error: GitIndexJournalError) -> GitIndexTransactionPortError {
     match error {
         GitIndexJournalError::Store(error) => map_store_error(error),
@@ -949,7 +939,6 @@ fn map_journal_error(error: GitIndexJournalError) -> GitIndexTransactionPortErro
 }
 
 #[allow(clippy::needless_pass_by_value)]
-#[hotpath::measure]
 fn map_queue_error(error: RepositoryMutationQueueError) -> GitIndexTransactionPortError {
     match error {
         RepositoryMutationQueueError::Unavailable | RepositoryMutationQueueError::Saturated => {

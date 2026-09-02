@@ -19,7 +19,6 @@ pub(crate) enum LiveTranscriptRefreshJoin {
     PublicationJoined,
 }
 
-#[hotpath::measure]
 fn required_refresh_scope(
     tool_name: &str,
     arguments: &Value,
@@ -47,7 +46,6 @@ fn required_refresh_scope(
     })
 }
 
-#[hotpath::measure]
 fn refresh_unavailable(tool_name: &str) -> TraceDecayError {
     const DETAIL: &str = "session temporal refresh did not publish before hook completion";
     if tool_name == "tracedecay_hook_runtime" {

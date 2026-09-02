@@ -224,7 +224,6 @@ where
     }
 }
 
-#[hotpath::measure]
 fn attempt_authority_and_identity(
     context: &RequestContext,
     command: &StartWorkAttemptCommand,
@@ -239,7 +238,6 @@ fn attempt_authority_and_identity(
     Ok((authority, identity))
 }
 
-#[hotpath::measure]
 fn command_id(identity: &WorkAttemptIdentityV1) -> Result<WorkCommandId, ApplicationProblem> {
     let digest = canonical_sha256(&(COMMAND_DOMAIN, identity)).map_err(|_| identity_conflict())?;
     WorkCommandId::new(format!(
@@ -249,7 +247,6 @@ fn command_id(identity: &WorkAttemptIdentityV1) -> Result<WorkCommandId, Applica
     .map_err(|_| identity_conflict())
 }
 
-#[hotpath::measure]
 fn mint_lease<S>(
     storage: &S,
     authority: &WorkAuthority,
@@ -274,7 +271,6 @@ where
     .map_err(contract_problem)
 }
 
-#[hotpath::measure]
 fn identity_conflict() -> ApplicationProblem {
     conflict_problem(
         "application.work-attempt.identity-conflict",

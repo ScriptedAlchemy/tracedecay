@@ -37,7 +37,6 @@ pub use add::{
 
 /// Typed project-memory use cases. Only the authority owns each mutation
 /// transaction and its durable projection.
-#[hotpath::measure_all]
 impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     #[hotpath::measure(label = "usecases.memory.list", future = true)]
     pub async fn list_project_memory_facts(
@@ -549,7 +548,6 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     }
 }
 
-#[hotpath::measure]
 fn validate_project_memory_page(
     owner: &FactOwnerV1,
     after_fact_id: Option<&FactId>,
@@ -581,7 +579,6 @@ fn validate_project_memory_page(
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_project_memory_search_page(
     owner: &FactOwnerV1,
     after: Option<&ProjectMemoryFactSearchCursorV1>,
@@ -622,7 +619,6 @@ fn validate_project_memory_search_page(
     Ok(())
 }
 
-#[hotpath::measure]
 fn search_hit_follows_cursor(
     hit: &tracedecay_store::ProjectMemoryFactSearchHitV1,
     after: &ProjectMemoryFactSearchCursorV1,
@@ -634,7 +630,6 @@ fn search_hit_follows_cursor(
                     && hit.fact().fact_id() > after.fact_id())))
 }
 
-#[hotpath::measure]
 pub(super) fn validate_lineage(
     owner: &FactOwnerV1,
     fact_id: &FactId,
@@ -663,7 +658,6 @@ pub(super) fn validate_lineage(
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_project_memory_projection(
     owner: &FactOwnerV1,
     target: &ProjectMemoryFactIdV1,
@@ -682,7 +676,6 @@ fn validate_project_memory_projection(
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_project_memory_inspection(
     owner: &FactOwnerV1,
     target: &ProjectMemoryFactIdV1,
@@ -714,7 +707,6 @@ fn validate_project_memory_inspection(
     Ok(())
 }
 
-#[hotpath::measure]
 pub(super) fn validate_project_memory_add_outcome(
     owner: &FactOwnerV1,
     outcome: &ProjectMemoryFactAddOutcomeV1,
@@ -745,7 +737,6 @@ pub(super) fn validate_project_memory_add_outcome(
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_commit_receipt(
     owner: &FactOwnerV1,
     fact_id: &FactId,
@@ -761,7 +752,6 @@ fn validate_commit_receipt(
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_project_memory_retrieval_outcome(
     owner: &FactOwnerV1,
     operation_id: &ProvenanceId,
@@ -809,7 +799,6 @@ fn validate_project_memory_retrieval_outcome(
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_project_memory_automatic_fact_receipt(
     owner: &FactOwnerV1,
     apply_id: &ProvenanceId,
@@ -826,7 +815,6 @@ fn validate_project_memory_automatic_fact_receipt(
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_project_memory_automatic_fact_apply_receipt(
     owner: &FactOwnerV1,
     apply_id: &ProvenanceId,
@@ -843,7 +831,6 @@ fn validate_project_memory_automatic_fact_apply_receipt(
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_project_memory_automatic_fact_receipt_page(
     owner: &FactOwnerV1,
     after_apply_id: Option<&ProvenanceId>,

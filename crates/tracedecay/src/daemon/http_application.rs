@@ -94,7 +94,6 @@ struct ProjectRouterCache {
     least_recently_used: VecDeque<String>,
 }
 
-#[hotpath::measure_all]
 impl ProjectRouterCache {
     fn get(&mut self, project_id: &str) -> Option<Router> {
         let router = self.routers.get(project_id).cloned()?;
@@ -169,7 +168,6 @@ impl Default for DaemonHttpApplicationRegistry {
     }
 }
 
-#[hotpath::measure_all]
 impl DaemonHttpApplicationRegistry {
     #[hotpath::skip]
     pub(super) async fn mount(&self, project_id: &str, router: Router) -> Result<()> {
@@ -435,7 +433,6 @@ const REMOTE_STATUS_HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// The CLI must not open a local store or construct a fresh in-process
 /// registry; this is the daemon's live mounted operational state.
-#[hotpath::measure]
 pub fn live_remote_operational_status() -> Result<RemoteOperationalStatusReadV1> {
     let connection = tracedecay_daemon_identity::current_daemon_connection()?;
     let Some(endpoint) = connection.http_application_endpoint() else {
@@ -482,7 +479,6 @@ pub fn live_remote_operational_status() -> Result<RemoteOperationalStatusReadV1>
     })
 }
 
-#[hotpath::measure]
 fn missing_daemon_authority() -> TraceDecayError {
     TraceDecayError::Config {
         message:
@@ -491,7 +487,6 @@ fn missing_daemon_authority() -> TraceDecayError {
     }
 }
 
-#[hotpath::measure]
 fn remote_status_daemon_unavailable() -> TraceDecayError {
     match tracedecay_daemon_control::default_socket_path() {
         Ok(socket_path) => super::unavailable_error(&socket_path),
@@ -546,7 +541,6 @@ async fn dispatch_project_application(
     }
 }
 
-#[hotpath::measure]
 fn outer_application_request_id(
     tail: &str,
     headers: &HeaderMap,
@@ -572,7 +566,6 @@ fn outer_application_request_id(
         .map_err(|_| OuterApplicationRequestIdError::InvalidHeader)
 }
 
-#[hotpath::measure]
 fn invalid_request_control_response() -> Response {
     let Ok(request_id) = mint_global_request_id(GlobalRequestSurface::Http) else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
@@ -580,7 +573,6 @@ fn invalid_request_control_response() -> Response {
     tracedecay_api::retained_invalid_request_response(request_id)
 }
 
-#[hotpath::measure]
 fn project_router_problem_response(
     request_id: Option<RequestId>,
     problem: ProjectRouterProblem,
@@ -616,7 +608,6 @@ fn project_router_problem_response(
     transport_problem_response(request_id, problem)
 }
 
-#[hotpath::measure]
 fn transport_problem_response(
     request_id: Option<RequestId>,
     problem: ApplicationProblem,
@@ -639,7 +630,6 @@ struct LocalHttpAdmission {
     origin: HeaderValue,
 }
 
-#[hotpath::measure_all]
 impl LocalHttpAdmission {
     fn new(auth_token: &str, endpoint: SocketAddr) -> Result<Self> {
         if auth_token.len() != 64 || !auth_token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -775,7 +765,6 @@ impl RemoteBrainTlsEgressObserver {
     }
 }
 
-#[hotpath::measure_all]
 impl DaemonHttpApplicationService {
     #[cfg(test)]
     #[hotpath::skip]
@@ -1224,7 +1213,6 @@ async fn serve_remote_brain_tls_connection(
     }
 }
 
-#[hotpath::measure]
 fn observe_remote_brain_connection_join(joined: std::result::Result<(), tokio::task::JoinError>) {
     if let Err(error) = joined
         && !error.is_cancelled()
@@ -1270,7 +1258,6 @@ struct RemoteBrainTlsIo {
     _permit: OwnedSemaphorePermit,
 }
 
-#[hotpath::measure_all]
 impl RemoteBrainTlsIo {
     fn new(
         handshake: tokio_rustls::Accept<tokio::net::TcpStream>,
@@ -1703,7 +1690,6 @@ impl Drop for RemoteBrainTlsIo {
     }
 }
 
-#[hotpath::measure]
 fn declared_http11_body_length(header_bytes: &[u8]) -> io::Result<u64> {
     let headers = std::str::from_utf8(header_bytes).map_err(|_| {
         io::Error::new(
@@ -1758,7 +1744,6 @@ fn declared_http11_body_length(header_bytes: &[u8]) -> io::Result<u64> {
     Ok(content_length.unwrap_or(0))
 }
 
-#[hotpath::measure]
 fn tls_configuration_error(operation: &str, error: impl std::fmt::Display) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!("failed to {operation}: {error}"),

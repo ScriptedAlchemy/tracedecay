@@ -44,7 +44,6 @@ pub(super) fn project_server_response_lifecycle_has_in_flight(
         .is_err()
 }
 
-#[hotpath::measure]
 fn project_server_has_in_flight_response(server: &Arc<crate::mcp::McpServer>) -> bool {
     let lifecycle = server.project_server_response_lifecycle();
     Arc::strong_count(server) > 1 || project_server_response_lifecycle_has_in_flight(&lifecycle)
@@ -1274,7 +1273,6 @@ async fn cached_route_server(
 
 /// The composition returned by every cache hit. `inserted` is always false:
 /// reusing a published server never publishes a route.
-#[hotpath::measure]
 fn cached_project_composition(
     canonical_project_path: &Path,
     key: ProjectServerKey,
@@ -1310,7 +1308,6 @@ struct SemanticProjectRuntime {
 /// Derive this route's semantic runtime handle and startup choices. The
 /// composition runtime can veto auto-download even when configuration allows
 /// it, so both inputs are consulted here rather than at the use site.
-#[hotpath::measure]
 fn semantic_project_runtime(
     runtime_configuration: &tracedecay_configuration::config::PinnedRuntimeConfiguration,
     runtime: &ProductionProjectCompositionRuntime,
@@ -1359,7 +1356,6 @@ struct ProjectCodeIndexAuthorities {
 /// Resolve the project's search identity and bind every code-index read port to
 /// that one exact scope. Scope resolution reads the graph's own project root,
 /// not the handshake path, so a relocated store still binds its own scope.
-#[hotpath::measure]
 fn project_code_index_authorities(
     invocation: &DaemonInvocationState,
     cg: &Arc<crate::tracedecay::TraceDecay>,
@@ -1433,7 +1429,6 @@ fn project_code_index_authorities(
 }
 
 /// Dashboard-facing freshness reader for this route's code-index schedulers.
-#[hotpath::measure]
 fn project_dashboard_freshness_reader(
     schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
 ) -> tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader {
@@ -1448,7 +1443,6 @@ fn project_dashboard_freshness_reader(
 /// Register the project graph and the session databases this route owns with
 /// the sampling authority. An unavailable registration is recorded and skipped,
 /// never fatal: telemetry must not fail an otherwise healthy project open.
-#[hotpath::measure]
 fn register_route_store_telemetry(
     sampling: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
     cg: &Arc<crate::tracedecay::TraceDecay>,

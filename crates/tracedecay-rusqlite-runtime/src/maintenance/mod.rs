@@ -7,7 +7,6 @@ use crate::checkpoint::CheckpointBlockers;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MaintenanceOwnerId(u64);
 
-#[hotpath::measure_all]
 impl MaintenanceOwnerId {
     pub fn new(value: u64) -> Option<Self> {
         (value != 0).then_some(Self(value))
@@ -22,7 +21,6 @@ pub struct DrainBlockers {
     pub writer_active: bool,
 }
 
-#[hotpath::measure_all]
 impl DrainBlockers {
     #[hotpath::skip]
     pub const fn is_clear(&self) -> bool {
@@ -41,7 +39,6 @@ pub struct DrainedStateProof {
     observed: DrainBlockers,
 }
 
-#[hotpath::measure_all]
 impl DrainedStateProof {
     pub fn observe(
         publication: StoreRuntimeRegistryPublicationV1,
@@ -66,7 +63,6 @@ pub struct ExclusiveMaintenancePermit {
     _drained: DrainedStateProof,
 }
 
-#[hotpath::measure_all]
 impl ExclusiveMaintenancePermit {
     pub fn issue_after_drain(
         owner: MaintenanceOwnerId,

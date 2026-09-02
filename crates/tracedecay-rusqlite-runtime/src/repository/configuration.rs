@@ -23,7 +23,6 @@ const ACTIVATION_NOT_RECORDED: &str = "not_recorded_by_configuration_store_v1";
 #[derive(Clone, Default)]
 pub struct ConfigurationExecutor;
 
-#[hotpath::measure_all]
 impl ConfigurationExecutor {
     pub fn execute_write(
         &mut self,
@@ -117,7 +116,6 @@ struct StoredAuditPayloadV1<'a> {
     event: &'a tracedecay_domain::configuration::ConfigurationAuditEvent,
 }
 
-#[hotpath::measure]
 fn current_revision_id(connection: &rusqlite::Connection) -> rusqlite::Result<Option<String>> {
     let mut statement = connection.prepare_cached(
         "SELECT revision_id
@@ -140,7 +138,6 @@ fn current_revision_id(connection: &rusqlite::Connection) -> rusqlite::Result<Op
     }
 }
 
-#[hotpath::measure]
 fn insert_revision(
     savepoint: &Savepoint<'_>,
     revision: &ConfigurationRevisionRecordV1,
@@ -204,7 +201,6 @@ fn insert_revision(
     Ok(())
 }
 
-#[hotpath::measure]
 fn snapshot_layer(provenance: &[ConfigurationCandidateV1]) -> (&'static str, Option<String>) {
     let layer = provenance
         .iter()
@@ -230,7 +226,6 @@ fn snapshot_layer(provenance: &[ConfigurationCandidateV1]) -> (&'static str, Opt
     }
 }
 
-#[hotpath::measure]
 fn insert_receipt(
     savepoint: &Savepoint<'_>,
     commit: &ConfigurationCommitV1,
@@ -266,7 +261,6 @@ fn insert_receipt(
     Ok(())
 }
 
-#[hotpath::measure]
 fn insert_audit_event(
     savepoint: &Savepoint<'_>,
     commit: &ConfigurationCommitV1,
@@ -302,7 +296,6 @@ fn insert_audit_event(
     Ok(())
 }
 
-#[hotpath::measure]
 fn read_revision(
     connection: &rusqlite::Connection,
     revision_id: &ConfigurationRevisionId,

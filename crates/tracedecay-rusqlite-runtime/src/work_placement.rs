@@ -190,7 +190,6 @@ impl WorkPlacementStoragePort for WorkSqliteStorage {
     }
 }
 
-#[hotpath::measure]
 fn identity_params(identity: &WorkPlacementIdentityV1) -> [ExactSqlValue; 2] {
     [
         ExactSqlValue::Text(identity.task_id().as_str().to_owned()),
@@ -198,7 +197,6 @@ fn identity_params(identity: &WorkPlacementIdentityV1) -> [ExactSqlValue; 2] {
     ]
 }
 
-#[hotpath::measure]
 fn kind_text(kind: WorkPlacementKindV1) -> String {
     match kind {
         WorkPlacementKindV1::NoManagedPlacement => "no_managed_placement",
@@ -209,7 +207,6 @@ fn kind_text(kind: WorkPlacementKindV1) -> String {
     .to_owned()
 }
 
-#[hotpath::measure]
 fn state_text(state: WorkPlacementStateV1) -> String {
     match state {
         WorkPlacementStateV1::Admitted => "admitted",

@@ -123,7 +123,6 @@ struct LegacySealPayload<'a> {
 /// The canonical expected digest a generation planner must seal before handing
 /// rows and the expected digest to the store publication port. The emitter
 /// verifies this digest before emitting capabilities for the generation.
-#[hotpath::measure]
 pub fn expected_seal_digest(
     generation: &CodeGenerationManifestV1,
 ) -> Result<ManifestDigest, DomainError> {
@@ -161,7 +160,6 @@ pub fn expected_seal_digest(
 /// Recompute the canonical digest of one base capability manifest (the
 /// digest field itself is excluded from the hashed bytes; the digest
 /// algorithm and domain separator are owned by the domain contract).
-#[hotpath::measure]
 pub fn capability_manifest_digest(
     manifest: &CodeIndexCapabilityManifestV1,
 ) -> Result<ManifestDigest, DomainError> {
@@ -183,7 +181,6 @@ pub struct BaseCapabilityEmitter<R: LanguageRegistry> {
     sanitization_receipts: Vec<SanitizationReceiptId>,
 }
 
-#[hotpath::measure_all]
 impl<R: LanguageRegistry> BaseCapabilityEmitter<R> {
     /// Create an emitter with the query base pins: chunk schema
     /// `code-search-chunk.v1`, the chunker's exact-term kinds, and the
@@ -326,7 +323,6 @@ pub struct BaseCapabilityValidator {
     authorized_privacy_domains: BTreeMap<String, u64>,
 }
 
-#[hotpath::measure_all]
 impl BaseCapabilityValidator {
     /// Create a validator for the query base chunk schema.
     pub fn new() -> Self {

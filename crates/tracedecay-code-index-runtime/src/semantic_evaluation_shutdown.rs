@@ -16,7 +16,6 @@ pub struct SemanticEvaluationShutdownReceiptV1 {
     pub remaining_workers: usize,
 }
 
-#[hotpath::measure_all]
 impl SemanticEvaluationShutdownReceiptV1 {
     pub fn is_clean(self) -> bool {
         self.remaining_workers == 0 && self.failed_workers == 0

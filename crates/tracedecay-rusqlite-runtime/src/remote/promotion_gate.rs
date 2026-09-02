@@ -4,7 +4,6 @@ use crate::exact_sql::{ExactSqlHandle, ExactSqlRows, ExactSqlTransaction, ExactS
 
 use super::{RemoteSqliteStorageErrorV1, one_row, query, statement, text};
 
-#[hotpath::measure]
 fn promotion_authority_key(
     writer: &RemoteWriterFenceV1,
 ) -> Result<ManifestDigest, RemoteSqliteStorageErrorV1> {
@@ -17,7 +16,6 @@ fn promotion_authority_key(
     .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)
 }
 
-#[hotpath::measure]
 pub(super) fn promotion_pending(
     handle: &ExactSqlHandle,
     writer: &RemoteWriterFenceV1,
@@ -35,7 +33,6 @@ pub(super) fn promotion_pending(
     pending_value(rows)
 }
 
-#[hotpath::measure]
 pub(super) fn promotion_pending_in(
     transaction: &ExactSqlTransaction,
     writer: &RemoteWriterFenceV1,
@@ -52,7 +49,6 @@ pub(super) fn promotion_pending_in(
     pending_value(rows)
 }
 
-#[hotpath::measure]
 fn pending_value(rows: ExactSqlRows) -> Result<bool, RemoteSqliteStorageErrorV1> {
     let row = one_row(rows)?;
     match row.values.first() {

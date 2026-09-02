@@ -19,7 +19,6 @@ pub const USER_SESSIONS_DB_FILENAME: &str = "user-sessions.db";
 
 /// Resolves the profile-scoped user session database inside `profile_root`.
 #[must_use]
-#[hotpath::measure]
 pub fn user_sessions_db_path(profile_root: &Path) -> PathBuf {
     profile_root.join(USER_SESSIONS_DB_FILENAME)
 }

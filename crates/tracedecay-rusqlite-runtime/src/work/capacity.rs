@@ -14,7 +14,6 @@ use crate::exact_sql::{ExactSqlError, ExactSqlRows};
 
 use super::{RegisteredWorkQuery, exact_sql_integer, registered_work_query};
 
-#[hotpath::measure]
 pub(crate) fn capacity(
     source: &impl RegisteredWorkQuery,
     authority: &WorkAuthority,
@@ -31,7 +30,6 @@ pub(crate) fn capacity(
     .ok_or(WorkAttemptStorageError::Unavailable)
 }
 
-#[hotpath::measure]
 pub(crate) fn capacities(
     source: &impl RegisteredWorkQuery,
     authority: &WorkAuthority,
@@ -124,7 +122,6 @@ pub(crate) fn capacities(
 const COHERENT_CAPACITY_QUERY_LIMIT: Duration = Duration::from_secs(5);
 const COHERENT_CAPACITY_BUSY_ATTEMPTS: u8 = 64;
 
-#[hotpath::measure]
 fn coherent_capacity_query(
     mut query: impl FnMut() -> Result<ExactSqlRows, ExactSqlError>,
 ) -> Result<ExactSqlRows, ExactSqlError> {
@@ -149,7 +146,6 @@ fn coherent_capacity_query(
     }
 }
 
-#[hotpath::measure]
 fn sqlite_busy_or_locked(error: &ExactSqlError) -> bool {
     matches!(
         error,
@@ -157,7 +153,6 @@ fn sqlite_busy_or_locked(error: &ExactSqlError) -> bool {
     )
 }
 
-#[hotpath::measure]
 pub(crate) fn require_capacity(
     source: &impl RegisteredWorkQuery,
     authority: &WorkAuthority,

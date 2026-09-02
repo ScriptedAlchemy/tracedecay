@@ -173,7 +173,6 @@ const TIERS: &[(&str, &[&str])] = &[
     ("admin", ADMIN_TOOLS),
 ];
 
-#[hotpath::measure]
 fn config_error(message: impl std::fmt::Display) -> TraceDecayError {
     TraceDecayError::Config {
         message: message.to_string(),
@@ -182,7 +181,6 @@ fn config_error(message: impl std::fmt::Display) -> TraceDecayError {
 
 /// Strips a `tracedecay_`/`mcp__tracedecay__` prefix and returns the bucket
 /// name for a tool. Unknown/non-tracedecay tool names bucket as `"other"`.
-#[hotpath::measure]
 fn tool_tier(tool_name: &str) -> &'static str {
     let normalized = tracedecay_automation::analytics::normalize_tool_name(tool_name);
     let normalized = normalized
@@ -230,7 +228,6 @@ struct ToolCallCounts {
     errors: i64,
 }
 
-#[hotpath::measure]
 fn parse_scope(args: &Value) -> Result<bool> {
     match args.get("scope").and_then(Value::as_str) {
         None | Some("project") => Ok(false),
@@ -241,7 +238,6 @@ fn parse_scope(args: &Value) -> Result<bool> {
     }
 }
 
-#[hotpath::measure]
 fn parse_window_days(args: &Value) -> i64 {
     args.get("window_days")
         .and_then(Value::as_i64)
@@ -249,7 +245,6 @@ fn parse_window_days(args: &Value) -> i64 {
         .clamp(1, 365)
 }
 
-#[hotpath::measure]
 fn parse_section(args: &Value) -> Result<Option<&str>> {
     match args.get("section").and_then(Value::as_str) {
         None => Ok(None),
@@ -260,7 +255,6 @@ fn parse_section(args: &Value) -> Result<Option<&str>> {
     }
 }
 
-#[hotpath::measure]
 fn wants_section(filter: Option<&str>, name: &str) -> bool {
     filter.is_none_or(|section| section == name)
 }
@@ -433,7 +427,6 @@ pub(super) async fn handle_analytics(
     }))
 }
 
-#[hotpath::measure]
 fn tools_section(rows: &[AnalyticsToolCounts]) -> Result<Value> {
     let mut per_tool: BTreeMap<String, ToolCallCounts> = BTreeMap::new();
     for row in rows {

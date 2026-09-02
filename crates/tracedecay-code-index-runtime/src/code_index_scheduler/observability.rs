@@ -26,7 +26,6 @@ pub struct CodeIndexObservabilityV1 {
     producer: Arc<BoundedObservabilityProducerV1>,
 }
 
-#[hotpath::measure_all]
 impl CodeIndexObservabilityV1 {
     pub fn new(producer: Arc<BoundedObservabilityProducerV1>) -> Self {
         Self { producer }
@@ -96,7 +95,6 @@ impl CodeIndexObservabilityV1 {
 /// Project one terminal reconcile outcome into the closed index-lifecycle
 /// vocabulary. A publication carries its changed-chunk volume; a no-op rescan
 /// produced no items and abstains rather than counting as a publication.
-#[hotpath::measure]
 fn reconcile_index_observation(
     outcome: &CodeIndexReconcileOutcomeV1,
     service_micros: u64,

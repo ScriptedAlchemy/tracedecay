@@ -41,7 +41,6 @@ pub const HANDOFF_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 4] = [
     ),
 ];
 
-#[hotpath::measure]
 pub fn handoff_executable_binding_registry()
 -> Result<ExecutableBindingRegistryV1, CatalogValidationError> {
     ExecutableBindingRegistryV1::new(vec![
@@ -72,7 +71,6 @@ pub fn handoff_executable_binding_registry()
     ])
 }
 
-#[hotpath::measure]
 fn available<Request, Output>(
     operation: &str,
     route_path: &str,
@@ -127,7 +125,6 @@ const fn is_read_operation(operation: &str) -> bool {
     matches!(operation.as_bytes(), b"list_task_handoffs")
 }
 
-#[hotpath::measure]
 fn handoff_manifest(operation: &str) -> Result<CapabilityManifestV1, CatalogValidationError> {
     let binding_id = identifier(
         format!("binding.http.handoff.{operation}"),
@@ -255,12 +252,10 @@ fn handoff_manifest(operation: &str) -> Result<CapabilityManifestV1, CatalogVali
     })
 }
 
-#[hotpath::measure]
 fn schema_ref(id: String) -> Result<SchemaRef, CatalogValidationError> {
     SchemaRef::new(identifier(id, "handoff schema ID")?, 1)
 }
 
-#[hotpath::measure]
 fn identifier<T>(value: String, field: &'static str) -> Result<T, CatalogValidationError>
 where
     T: TryFrom<String, Error = IdentifierError>,

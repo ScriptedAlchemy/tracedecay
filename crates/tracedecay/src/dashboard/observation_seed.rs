@@ -40,14 +40,12 @@ pub struct DashboardSessionMessageSeedV1<'a> {
     pub ordinal: u64,
 }
 
-#[hotpath::measure]
 fn fixture_error(operation: &str, error: impl std::fmt::Display) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!("dashboard observation fixture {operation}: {error}"),
     }
 }
 
-#[hotpath::measure]
 fn seed_role(role: &str) -> Result<CanonicalMessageRoleV1> {
     match role {
         "user" => Ok(CanonicalMessageRoleV1::User),
@@ -60,7 +58,6 @@ fn seed_role(role: &str) -> Result<CanonicalMessageRoleV1> {
     }
 }
 
-#[hotpath::measure]
 fn build_observation(seed: &DashboardSessionMessageSeedV1<'_>) -> Result<DurableObservationV1> {
     let session_id =
         SessionId::new(seed.session_id).map_err(|error| fixture_error("session id", error))?;

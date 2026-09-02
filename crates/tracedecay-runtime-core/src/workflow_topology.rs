@@ -63,7 +63,6 @@ impl From<GraphDbError> for WorkflowTopologyError {
     }
 }
 
-#[hotpath::measure]
 pub fn workflow_topology_projection_identity(
     namespace: GraphNamespace,
 ) -> Result<GraphProjectionIdentity, WorkflowTopologyError> {
@@ -73,7 +72,6 @@ pub fn workflow_topology_projection_identity(
     ))
 }
 
-#[hotpath::measure]
 pub fn workflow_topology_generation_id(
     definition: &WorkflowDefinition,
     projector_revision: &GraphProjectorRevision,
@@ -90,7 +88,6 @@ pub fn workflow_topology_generation_id(
     GraphGenerationId::new(format!("workflow-topology:{}", digest.as_str())).map_err(Into::into)
 }
 
-#[hotpath::measure]
 pub fn workflow_topology_namespace(
     definition: &WorkflowDefinition,
 ) -> Result<GraphNamespace, WorkflowTopologyError> {
@@ -106,7 +103,6 @@ pub fn workflow_topology_namespace(
     GraphNamespace::new(format!("workflow-topology:{}", digest.as_str())).map_err(Into::into)
 }
 
-#[hotpath::measure]
 pub fn workflow_topology_idempotency_key(
     definition: &WorkflowDefinition,
     projector_revision: &GraphProjectorRevision,
@@ -115,7 +111,6 @@ pub fn workflow_topology_idempotency_key(
     GraphIdempotencyKey::new(format!("publish:{}", generation.as_str())).map_err(Into::into)
 }
 
-#[hotpath::measure]
 pub fn build_workflow_topology_manifest_checked(
     identity: GraphProjectionIdentity,
     definition: &WorkflowDefinition,
@@ -186,7 +181,6 @@ impl fmt::Debug for WorkflowTopologyStore {
     }
 }
 
-#[hotpath::measure_all]
 impl WorkflowTopologyStore {
     #[hotpath::measure(label = "runtime_core.workflow.publish")]
     pub fn publish_from_definition(
@@ -363,7 +357,6 @@ impl WorkflowTopologyStore {
     }
 }
 
-#[hotpath::measure]
 fn step_entity(step: &WorkflowStep) -> Result<GraphEntity, WorkflowTopologyError> {
     GraphEntity::new(
         step_entity_id(&step.step_id)?,
@@ -382,7 +375,6 @@ fn step_entity(step: &WorkflowStep) -> Result<GraphEntity, WorkflowTopologyError
     .map_err(Into::into)
 }
 
-#[hotpath::measure]
 fn precedes_relation(
     projection: &GraphProjectionIdentity,
     predecessor: &WorkflowStepId,
@@ -401,7 +393,6 @@ fn precedes_relation(
     .map_err(Into::into)
 }
 
-#[hotpath::measure]
 fn step_id_from_ref(
     snapshot: &VerifiedGraphSnapshot,
     reference: &GraphEntityRef,
@@ -423,12 +414,10 @@ fn step_id_from_ref(
         .map_err(|error| WorkflowTopologyError::Corrupt(error.to_string()))
 }
 
-#[hotpath::measure]
 fn step_entity_id(step_id: &WorkflowStepId) -> Result<GraphEntityId, WorkflowTopologyError> {
     GraphEntityId::new(stable_identity("step", step_id.as_str())).map_err(Into::into)
 }
 
-#[hotpath::measure]
 fn check_cancelled(cancellation: &dyn GraphCancellation) -> Result<(), WorkflowTopologyError> {
     if cancellation.is_cancelled() {
         Err(WorkflowTopologyError::Cancelled)
@@ -437,7 +426,6 @@ fn check_cancelled(cancellation: &dyn GraphCancellation) -> Result<(), WorkflowT
     }
 }
 
-#[hotpath::measure]
 fn stable_identity(kind: &str, value: &str) -> String {
     let mut digest = Sha256::new();
     digest.update(kind.as_bytes());
@@ -446,7 +434,6 @@ fn stable_identity(kind: &str, value: &str) -> String {
     format!("{kind}:{}", hex::encode(digest.finalize()))
 }
 
-#[hotpath::measure]
 fn serialize(value: &impl Serialize) -> Result<Vec<u8>, WorkflowTopologyError> {
     serde_json::to_vec(value).map_err(|error| WorkflowTopologyError::Contract(error.to_string()))
 }

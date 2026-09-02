@@ -11,7 +11,6 @@ use crate::runtime::shared::{ProjectMembership, ProjectRootMatcher};
 use super::ingest::HermesProfileSource;
 use super::rows::HermesRow;
 
-#[hotpath::measure]
 pub(super) fn user_turn_locations(
     rows: &[HermesRow],
     source: &HermesProfileSource,
@@ -40,7 +39,6 @@ pub(super) fn user_turn_locations(
     locations
 }
 
-#[hotpath::measure]
 fn assign_user_turn(rows: &[&HermesRow], has_fallback: bool, locations: &mut HashSet<i64>) {
     if rows
         .iter()
@@ -54,7 +52,6 @@ fn assign_user_turn(rows: &[&HermesRow], has_fallback: bool, locations: &mut Has
     locations.extend(rows.iter().map(|row| row.id));
 }
 
-#[hotpath::measure]
 pub(super) fn turn_project_locations(
     rows: &[HermesRow],
     project_root: &Path,
@@ -111,7 +108,6 @@ pub(super) enum DestinationRoutingError {
     UnknownMembership,
 }
 
-#[hotpath::measure]
 pub(super) fn turn_project_locations_for_destinations(
     rows: &[HermesRow],
     destination_matchers: &[ProjectRootMatcher],
@@ -179,7 +175,6 @@ pub(super) fn turn_project_locations_for_destinations(
     Ok(locations)
 }
 
-#[hotpath::measure]
 fn assign_turn_locations_for_destinations(
     rows: &[&HermesRow],
     destination_matchers: &[ProjectRootMatcher],
@@ -221,7 +216,6 @@ fn assign_turn_locations_for_destinations(
     Ok(())
 }
 
-#[hotpath::measure]
 fn matching_destinations(
     path: &Path,
     destination_matchers: &[ProjectRootMatcher],
@@ -246,7 +240,6 @@ fn matching_destinations(
     Ok(indices)
 }
 
-#[hotpath::measure]
 fn assign_turn_location(
     rows: &[&HermesRow],
     project_matcher: &ProjectRootMatcher,
@@ -273,7 +266,6 @@ fn assign_turn_location(
     }
 }
 
-#[hotpath::measure]
 fn structured_tool_project_paths(row: &HermesRow) -> Vec<PathBuf> {
     let Some(raw) = row.tool_calls.as_deref() else {
         return Vec::new();
@@ -316,7 +308,6 @@ fn structured_tool_project_paths(row: &HermesRow) -> Vec<PathBuf> {
     paths
 }
 
-#[hotpath::measure]
 fn session_is_candidate_for_project(
     row: &HermesRow,
     project_matcher: &ProjectRootMatcher,

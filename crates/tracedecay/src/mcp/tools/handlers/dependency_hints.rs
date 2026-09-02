@@ -12,12 +12,10 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_query::VerifiedGraphQuery;
 use tracedecay_mcp::tools::render::{self, Md};
 
-#[hotpath::measure]
 pub(super) fn should_check_external_import_hint(result_count: usize, limit: usize) -> bool {
     result_count == 0 || result_count < limit.clamp(1, 20)
 }
 
-#[hotpath::measure]
 pub(super) fn lazy_indexing_requested(args: &Value) -> bool {
     args.get("lazy_index_ignored_dependencies")
         .and_then(Value::as_bool)
@@ -53,7 +51,6 @@ pub(super) async fn external_import_hint(
     })))
 }
 
-#[hotpath::measure]
 pub(super) fn unavailable_evidence(error: &TraceDecayError) -> PrimitiveUnavailableEvidenceV1 {
     let (reason_code, retryable, detail) =
         if let Some((reason_code, retryable, detail)) = error.project_route_context() {
@@ -75,7 +72,6 @@ pub(super) fn unavailable_evidence(error: &TraceDecayError) -> PrimitiveUnavaila
     }
 }
 
-#[hotpath::measure]
 pub(super) fn unavailable_hint(error: &TraceDecayError) -> Value {
     json!(unavailable_evidence(error))
 }
@@ -161,7 +157,6 @@ pub(super) async fn admit_verified_ignored_dependency(
     }
 }
 
-#[hotpath::measure]
 fn ignored_dependency_candidates(
     graph: &VerifiedGraphQuery,
     query: &str,
@@ -188,7 +183,6 @@ fn ignored_dependency_candidates(
     graph.external_type_import_candidates(query, scope_prefix, limit.clamp(1, 20))
 }
 
-#[hotpath::measure]
 fn generation_advanced() -> TraceDecayError {
     TraceDecayError::project_route(
         "application.symbol-graph.ignored-dependency-generation-advanced",
@@ -197,7 +191,6 @@ fn generation_advanced() -> TraceDecayError {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn append_external_import_hint_md(md: &mut Md, value: &Value) {
     let Some(hint) = value.get("external_import_hint") else {
         return;
@@ -230,7 +223,6 @@ pub(super) fn append_external_import_hint_md(md: &mut Md, value: &Value) {
     }
 }
 
-#[hotpath::measure]
 fn user_line(line: u32) -> u32 {
     line.saturating_add(1)
 }

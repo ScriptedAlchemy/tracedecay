@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 /// takes `&T`; the `trivially_copy_pass_by_ref` lint is expected for `Copy`
 /// scalars and allowed here once for every caller.
 #[allow(clippy::trivially_copy_pass_by_ref)]
-#[hotpath::measure]
 fn is_default<T: Default + PartialEq>(value: &T) -> bool {
     *value == T::default()
 }
@@ -34,7 +33,6 @@ pub enum WorkflowStatus {
     Unknown,
 }
 
-#[hotpath::measure_all]
 impl WorkflowStatus {
     #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
@@ -150,7 +148,6 @@ pub enum WorkflowIndexState {
     IndexNotBuilt,
 }
 
-#[hotpath::measure_all]
 impl WorkflowIndexState {
     #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
@@ -204,7 +201,6 @@ pub struct WorkflowReadError {
     message: String,
 }
 
-#[hotpath::measure_all]
 impl WorkflowReadError {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
@@ -257,7 +253,6 @@ pub trait WorkflowIndexReadPort: Send + Sync {
     }
 }
 
-#[hotpath::measure]
 fn matches_token(value: &str, tokens: &[&str]) -> bool {
     tokens.iter().any(|token| value.eq_ignore_ascii_case(token))
 }

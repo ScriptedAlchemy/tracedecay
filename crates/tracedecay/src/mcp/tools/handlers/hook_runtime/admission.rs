@@ -24,7 +24,6 @@ pub(super) enum HookV2BindingAdmission {
     CatchupRequired,
 }
 
-#[hotpath::measure]
 fn classify_hook_v2_binding(
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
     outcome: tracedecay_hooks::HookConfigurationReadOutcomeV1,
@@ -53,7 +52,6 @@ pub(super) fn hook_v2_binding_admission(
     classify_hook_v2_binding(envelope, subscriber.load_current(envelope.producer, now))
 }
 
-#[hotpath::measure]
 pub(super) fn hook_v2_catchup_response(action: &str) -> Value {
     json!({
         "action": action,
@@ -66,7 +64,6 @@ pub(super) fn hook_v2_catchup_response(action: &str) -> Value {
 /// ledger per (hook data root, producing host) — the same daemon-owned hook
 /// data root that already holds the published bindings and the replay spool.
 /// No migrated database participates.
-#[hotpath::measure]
 pub(crate) fn hook_v2_admission_ledger_root(
     data_root: &Path,
     host: tracedecay_hooks::HookHostV1,
@@ -83,13 +80,11 @@ const MAX_OPEN_HOOK_V2_ADMISSION_LEDGERS: usize = 64;
 type HookV2AdmissionLedgers =
     BTreeMap<(std::path::PathBuf, &'static str), tracedecay_hooks::HookAdmissionLedgerV1>;
 
-#[hotpath::measure]
 fn hook_v2_admission_ledgers() -> &'static StdMutex<HookV2AdmissionLedgers> {
     static LEDGERS: OnceLock<StdMutex<HookV2AdmissionLedgers>> = OnceLock::new();
     LEDGERS.get_or_init(|| StdMutex::new(BTreeMap::new()))
 }
 
-#[hotpath::measure]
 fn hook_v2_pending_work_root(
     data_root: &Path,
     host: tracedecay_hooks::HookHostV1,
@@ -97,13 +92,11 @@ fn hook_v2_pending_work_root(
     data_root.join("hook-v2-pending-work").join(host.hook_key())
 }
 
-#[hotpath::measure]
 fn hook_v2_pending_work_gate() -> &'static StdMutex<()> {
     static GATE: OnceLock<StdMutex<()>> = OnceLock::new();
     GATE.get_or_init(|| StdMutex::new(()))
 }
 
-#[hotpath::measure]
 fn complete_hook_v2_pending_work(
     data_root: &Path,
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
@@ -151,7 +144,6 @@ fn complete_hook_v2_pending_work(
     true
 }
 
-#[hotpath::measure]
 fn retain_hook_v2_pending_work(
     data_root: &Path,
     pending_envelope: &tracedecay_hooks::HookEventEnvelopeV2,
@@ -206,7 +198,6 @@ pub(crate) fn hook_v2_pending_work_envelopes(
 
 /// Durably record one admission identity. `None` means the ledger itself is
 /// unavailable — the caller must not claim an admission it cannot deduplicate.
-#[hotpath::measure]
 pub(crate) fn record_hook_v2_admission(
     data_root: &Path,
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
@@ -262,7 +253,6 @@ pub(crate) enum HookV2AdmissionOutcomeV1 {
     Unavailable,
 }
 
-#[hotpath::measure]
 fn cursor_stack_wakeup_allowed(
     first_admission: bool,
     producer: tracedecay_hooks::HookHostV1,
@@ -607,7 +597,6 @@ pub(super) fn hook_v2_profile_admit(
     })
 }
 
-#[hotpath::measure]
 fn profile_hook_v2_binding(
     profile_identity: &dyn tracedecay_application::ProfileIdentityReadPort,
     host: tracedecay_hooks::HookHostV1,

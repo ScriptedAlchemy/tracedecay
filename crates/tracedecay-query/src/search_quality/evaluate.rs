@@ -27,7 +27,6 @@ use super::semantic_native;
 ///
 /// The caller owns sorting so repeated percentile reads can share one sort.
 /// Empty samples and percentiles outside `1..=100` return `None`.
-#[hotpath::measure]
 pub fn nearest_rank(sorted: &[u64], percentile: usize) -> Option<u64> {
     if sorted.is_empty() || !(1..=100).contains(&percentile) {
         return None;
@@ -78,7 +77,6 @@ pub struct DirectActivationEvaluationV1 {
     evaluated_material: DirectEvaluatedProfileMaterialV1,
 }
 
-#[hotpath::measure_all]
 impl DirectActivationEvaluationV1 {
     /// Read the genuine evaluator report without granting construction or
     /// serialization authority for an activation candidate.
@@ -101,7 +99,6 @@ impl DirectActivationEvaluationV1 {
     }
 }
 
-#[hotpath::measure]
 pub fn load_authoritative_default_workload_metadata() -> Result<CandidateWorkloadV1, SearchEvalError>
 {
     let workload = packaged::load_workload()?;
@@ -109,7 +106,6 @@ pub fn load_authoritative_default_workload_metadata() -> Result<CandidateWorkloa
     Ok(workload)
 }
 
-#[hotpath::measure]
 pub fn validate_activation_profile_matrix(
     workload: &CandidateWorkloadV1,
 ) -> Result<(), SearchEvalError> {
@@ -151,7 +147,6 @@ pub fn validate_activation_profile_matrix(
     Ok(())
 }
 
-#[hotpath::measure]
 pub fn activation_profile_chain(
     workload: &CandidateWorkloadV1,
     evaluated_profile_id: &str,
@@ -170,7 +165,6 @@ pub fn activation_profile_chain(
     Ok(profile_ids.into_iter().map(str::to_owned).collect())
 }
 
-#[hotpath::measure]
 pub fn load_default_evaluated_profile_material(
     profile_id: &str,
 ) -> Result<DirectEvaluatedProfileMaterialV1, SearchEvalError> {
@@ -178,7 +172,6 @@ pub fn load_default_evaluated_profile_material(
     Ok(direct_evaluated_profile_material(&workload, profile_id)?)
 }
 
-#[hotpath::measure]
 pub fn evaluate_generated_outputs(
     repo_root: &Path,
     workload: &CandidateWorkloadV1,
@@ -191,7 +184,6 @@ pub fn evaluate_generated_outputs(
 /// Rebuild a report from retained outputs against an already-authoritative
 /// corpus digest. Package qualification uses this to validate embedded bytes
 /// without materializing the packaged fixture into a temporary directory.
-#[hotpath::measure]
 pub fn evaluate_generated_outputs_against_corpus(
     workload: &CandidateWorkloadV1,
     generated: &GenerateCandidateOutputsResultV1,
@@ -402,7 +394,6 @@ fn evaluate_profile(
     })
 }
 
-#[hotpath::measure]
 fn validate_optional_stage_evidence(
     profile: &candidate_output::ProfileSpecV1,
     output: &ProductionCandidateOutputV1,
@@ -450,7 +441,6 @@ fn validate_optional_stage_evidence(
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_stage_request<T>(
     requested: bool,
     status: OptionalStageMeasurementV1,
@@ -502,7 +492,6 @@ fn validate_stage_request<T>(
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_rerank_stage_request<On, Execution>(
     requested: bool,
     status: OptionalStageMeasurementV1,
@@ -543,7 +532,6 @@ fn validate_rerank_stage_request<On, Execution>(
     )
 }
 
-#[hotpath::measure]
 fn validate_output_matrix(
     workload: &CandidateWorkloadV1,
     generated: &GenerateCandidateOutputsResultV1,
@@ -701,7 +689,6 @@ fn evaluate_query(
     })
 }
 
-#[hotpath::measure]
 fn candidate_matches_anchor(
     candidate: &candidate_output::RankedCandidateRowV1,
     anchor: &str,
@@ -713,7 +700,6 @@ fn candidate_matches_anchor(
             .any(|candidate_anchor| candidate_anchor == anchor)
 }
 
-#[hotpath::measure]
 fn candidate_matches_any_anchor(
     candidate: &candidate_output::RankedCandidateRowV1,
     anchors: &[String],
@@ -723,7 +709,6 @@ fn candidate_matches_any_anchor(
         .any(|anchor| candidate_matches_anchor(candidate, anchor))
 }
 
-#[hotpath::measure]
 fn ratio_metric(numerator: u64, denominator: u64) -> DirectRatioMetricV1 {
     let ppm = if denominator == 0 {
         0
@@ -744,7 +729,6 @@ fn ratio_metric(numerator: u64, denominator: u64) -> DirectRatioMetricV1 {
     }
 }
 
-#[hotpath::measure]
 fn ndcg_at_10_ppm(
     candidates: &[&candidate_output::RankedCandidateRowV1],
     anchors: &[String],
@@ -770,7 +754,6 @@ fn ndcg_at_10_ppm(
     }
 }
 
-#[hotpath::measure]
 fn label_strings(label: &serde_json::Value, field: &str) -> Result<Vec<String>, SearchEvalError> {
     let Some(value) = label.get(field) else {
         return Ok(Vec::new());
@@ -788,7 +771,6 @@ fn label_strings(label: &serde_json::Value, field: &str) -> Result<Vec<String>, 
         .collect()
 }
 
-#[hotpath::measure]
 fn aggregate_quality(results: &[DirectQueryEvaluationV1]) -> DirectQualityMetricsV1 {
     let rows = results.iter().collect::<Vec<_>>();
     let aggregate = aggregate_quality_rows(&rows);
@@ -875,7 +857,6 @@ struct AggregateQualityRowsV1 {
     duplicate_rate: DirectRatioMetricV1,
 }
 
-#[hotpath::measure]
 fn aggregate_quality_rows(rows: &[&DirectQueryEvaluationV1]) -> AggregateQualityRowsV1 {
     let relevant = rows
         .iter()
@@ -907,7 +888,6 @@ fn aggregate_quality_rows(rows: &[&DirectQueryEvaluationV1]) -> AggregateQuality
     }
 }
 
-#[hotpath::measure]
 fn aggregate_ratio<'a>(
     metrics: impl Iterator<Item = &'a DirectRatioMetricV1>,
 ) -> DirectRatioMetricV1 {
@@ -920,7 +900,6 @@ fn aggregate_ratio<'a>(
     ratio_metric(numerator, denominator)
 }
 
-#[hotpath::measure]
 fn mean_ppm(values: impl Iterator<Item = u32>, support: u64) -> u32 {
     if support == 0 {
         return 0;
@@ -997,7 +976,6 @@ const fn optional_stages_pending(stages: OptionalStageMeasurementsV1) -> bool {
         || matches!(stages.rerank, OptionalStageMeasurementV1::Pending)
 }
 
-#[hotpath::measure]
 fn aggregate_profile_status(profiles: &[DirectProfileEvaluationV1]) -> DirectEvaluationStatusV1 {
     if profiles
         .iter()
@@ -1014,19 +992,16 @@ fn aggregate_profile_status(profiles: &[DirectProfileEvaluationV1]) -> DirectEva
     }
 }
 
-#[hotpath::measure]
 fn pairwise_candidate_status(profiles: &[DirectProfileEvaluationV1]) -> DirectEvaluationStatusV1 {
     pairwise_candidate_evaluation(profiles).0
 }
 
-#[hotpath::measure]
 pub(super) fn pairwise_candidate_failure_diagnostic(
     profiles: &[DirectProfileEvaluationV1],
 ) -> Option<String> {
     pairwise_candidate_evaluation(profiles).1
 }
 
-#[hotpath::measure]
 fn pairwise_candidate_evaluation(
     profiles: &[DirectProfileEvaluationV1],
 ) -> (DirectEvaluationStatusV1, Option<String>) {

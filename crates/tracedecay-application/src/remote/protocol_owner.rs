@@ -59,7 +59,6 @@ pub struct RemoteProtocolOwnerV1 {
     operations: RemoteOperationProtocolPortsV1,
 }
 
-#[hotpath::measure_all]
 impl RemoteProtocolOwnerV1 {
     pub fn new(
         enrollment: Arc<dyn RemoteEnrollmentProtocolPortV1>,

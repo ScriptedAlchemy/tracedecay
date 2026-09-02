@@ -46,7 +46,6 @@ enum GenerationStagePageKind {
     Relations,
 }
 
-#[hotpath::measure_all]
 impl GenerationStagePageKind {
     fn as_str(self) -> &'static str {
         match self {
@@ -64,7 +63,6 @@ struct GenerationStagePage {
     live_bytes: usize,
 }
 
-#[hotpath::measure_all]
 impl GenerationStagePage {
     fn mutation_count(&self) -> usize {
         self.range.end - self.range.start
@@ -177,7 +175,6 @@ pub(crate) enum GenerationStageOutcome {
     Reseated(GraphCommit),
 }
 
-#[hotpath::measure_all]
 impl GenerationStageOutcome {
     pub(crate) fn commit(self) -> GraphCommit {
         match self {
@@ -192,7 +189,6 @@ enum GenerationRetirementPageKind {
     Entities,
 }
 
-#[hotpath::measure_all]
 impl GraphDb {
     #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
     #[hotpath::measure(label = "graph_db.generation.verify_in_place", impl_type = "GraphDb")]
@@ -1806,7 +1802,6 @@ impl GraphDb {
     }
 }
 
-#[hotpath::measure]
 fn typed_entity_ref(
     database: &grafeo_engine::GrafeoDB,
     node: grafeo_common::types::NodeId,
@@ -1823,7 +1818,6 @@ fn typed_entity_ref(
     Ok(GraphEntityRef::new(projection, identity))
 }
 
-#[hotpath::measure]
 fn generation_stage_pages(
     manifest: &GraphGenerationManifest,
 ) -> Result<Vec<GenerationStagePage>, GraphDbError> {
@@ -1834,7 +1828,6 @@ fn generation_stage_pages(
     )
 }
 
-#[hotpath::measure]
 fn generation_stage_pages_with_limits(
     manifest: &GraphGenerationManifest,
     maximum_mutations: usize,
@@ -1860,7 +1853,6 @@ fn generation_stage_pages_with_limits(
     Ok(pages)
 }
 
-#[hotpath::measure]
 fn first_generation_stage_page_with_limits(
     manifest: &GraphGenerationManifest,
     maximum_mutations: usize,
@@ -1895,7 +1887,6 @@ fn first_generation_stage_page_with_limits(
     Ok(pages.into_iter().next())
 }
 
-#[hotpath::measure]
 fn generation_entity_live_bytes(entity: &crate::GraphEntity) -> Result<usize, GraphDbError> {
     entity
         .labels
@@ -1909,7 +1900,6 @@ fn generation_entity_live_bytes(entity: &crate::GraphEntity) -> Result<usize, Gr
         .ok_or_else(stage_live_bytes_exhausted)
 }
 
-#[hotpath::measure]
 fn generation_relation_live_bytes(
     relation: &GraphGenerationRelation,
 ) -> Result<usize, GraphDbError> {
@@ -1932,7 +1922,6 @@ fn generation_relation_live_bytes(
     })
 }
 
-#[hotpath::measure]
 fn stage_live_bytes_exhausted() -> GraphDbError {
     GraphDbError::budget_exhausted_count(
         GraphBudgetKind::Write,
@@ -1940,7 +1929,6 @@ fn stage_live_bytes_exhausted() -> GraphDbError {
     )
 }
 
-#[hotpath::measure]
 fn append_generation_stage_pages_with_limits(
     pages: &mut Vec<GenerationStagePage>,
     kind: GenerationStagePageKind,
@@ -1988,7 +1976,6 @@ fn append_generation_stage_pages_with_limits(
     Ok(())
 }
 
-#[hotpath::measure]
 fn generation_stage_page_receipt(
     identity: &GraphGenerationManifestIdentity,
     expected: &GraphRecoveredGenerationDigestV1,
@@ -2014,7 +2001,6 @@ fn generation_stage_page_receipt(
     ))
 }
 
-#[hotpath::measure]
 fn generation_stage_finalization_receipt(
     identity: &GraphGenerationManifestIdentity,
     expected: &GraphRecoveredGenerationDigestV1,
@@ -2034,7 +2020,6 @@ fn generation_stage_finalization_receipt(
     ))
 }
 
-#[hotpath::measure]
 fn prepare_generation_stage_batch(
     manifest: &GraphGenerationManifest,
     identity: &GraphGenerationManifestIdentity,
@@ -2195,7 +2180,6 @@ fn construct_owned_generation_stage_page(
     })
 }
 
-#[hotpath::measure]
 fn endpoint_namespace(
     identity: &GraphGenerationManifestIdentity,
     candidate_namespace: &GraphNamespace,
@@ -2211,7 +2195,6 @@ fn endpoint_namespace(
         .ok_or_else(|| GraphDbError::invalid("relation endpoint dependency is not verified"))
 }
 
-#[hotpath::measure]
 fn generation_dependency_locators(
     identity: &GraphGenerationManifestIdentity,
 ) -> Vec<GenerationLocator> {

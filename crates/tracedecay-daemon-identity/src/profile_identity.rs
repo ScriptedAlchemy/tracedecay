@@ -21,7 +21,6 @@ pub struct LocalProfileIdentityAuthorityV1 {
     record: ProfileIdentityRecordV1,
 }
 
-#[hotpath::measure_all]
 impl LocalProfileIdentityAuthorityV1 {
     pub fn profile_root(&self) -> &Path {
         &self.profile_root
@@ -50,12 +49,10 @@ impl ProfileIdentityReadPort for LocalProfileIdentityAuthorityV1 {
     }
 }
 
-#[hotpath::measure]
 pub fn load_or_create(profile_root: &Path) -> Result<LocalProfileIdentityAuthorityV1> {
     load_or_create_pinned(profile_root, None)
 }
 
-#[hotpath::measure]
 pub fn load_existing(profile_root: &Path) -> Result<LocalProfileIdentityAuthorityV1> {
     let profile_root = canonical_identity_path(profile_root)?;
     validate_private_profile_root(&profile_root)?;
@@ -149,7 +146,6 @@ pub(crate) fn load_or_create_pinned(
     })
 }
 
-#[hotpath::measure]
 fn validate_expected_identity(
     path: &Path,
     record: &ProfileIdentityRecordV1,
@@ -169,7 +165,6 @@ fn validate_expected_identity(
     Ok(())
 }
 
-#[hotpath::measure]
 fn new_record() -> Result<ProfileIdentityRecordV1> {
     Ok(ProfileIdentityRecordV1 {
         schema_version: PROFILE_IDENTITY_SCHEMA_VERSION,
@@ -186,7 +181,6 @@ fn new_record() -> Result<ProfileIdentityRecordV1> {
     })
 }
 
-#[hotpath::measure]
 fn random_identity(prefix: &str) -> Result<String> {
     let mut bytes = [0_u8; 16];
     getrandom::getrandom(&mut bytes).map_err(|error| TraceDecayError::Config {
@@ -195,7 +189,6 @@ fn random_identity(prefix: &str) -> Result<String> {
     Ok(format!("{prefix}.{}", hex::encode(bytes)))
 }
 
-#[hotpath::measure]
 fn profile_identity_io(operation: &str, path: &Path, error: &std::io::Error) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!(
@@ -206,7 +199,6 @@ fn profile_identity_io(operation: &str, path: &Path, error: &std::io::Error) -> 
 }
 
 #[cfg(unix)]
-#[hotpath::measure]
 fn restrict_new_profile_root(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -215,12 +207,10 @@ fn restrict_new_profile_root(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-#[hotpath::measure]
 fn restrict_new_profile_root(_path: &Path) -> Result<()> {
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_private_profile_root(path: &Path) -> Result<()> {
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|error| profile_identity_io("inspect", path, &error))?;

@@ -1035,7 +1035,6 @@ async fn inspect_workflow_schema_for_admission(
     Ok(WorkflowSchemaAdmission::Complete)
 }
 
-#[hotpath::measure]
 fn workflow_schema_reset_required(reason: &str) -> tracedecay_domain::errors::TraceDecayError {
     tracedecay_domain::errors::TraceDecayError::reset_required("workflow", reason)
 }

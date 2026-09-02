@@ -9,7 +9,6 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 const JSON_RPC_VERSION: &str = "2.0";
 
-#[hotpath::measure]
 fn deserialize_request_id<'de, D>(
     deserializer: D,
 ) -> std::result::Result<Option<serde_json::Value>, D::Error>
@@ -49,7 +48,6 @@ pub struct JsonRpcResponse {
     pub error: Option<JsonRpcError>,
 }
 
-#[hotpath::measure_all]
 impl JsonRpcResponse {
     pub fn success(id: serde_json::Value, result: serde_json::Value) -> Self {
         Self {
@@ -101,7 +99,6 @@ pub enum ErrorCode {
     InternalError,
 }
 
-#[hotpath::measure_all]
 impl ErrorCode {
     pub fn as_i32(self) -> i32 {
         match self {

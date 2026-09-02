@@ -29,7 +29,6 @@ pub const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The self-identifying version of this binary: [`PACKAGE_VERSION`] plus build
 /// metadata naming the commit it came from, precomposed by the registered
 /// product runtime.
-#[hotpath::measure]
 pub fn build_version() -> Result<&'static str, ProductRuntimeError> {
     Ok(crate::product_runtime::product_runtime()?.build_version())
 }

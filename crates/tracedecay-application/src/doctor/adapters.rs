@@ -34,7 +34,6 @@ pub struct ConfigurationAuthorityDoctorAdapterV1 {
     read: ConfigurationAuthorityReadV1,
 }
 
-#[hotpath::measure_all]
 impl ConfigurationAuthorityDoctorAdapterV1 {
     /// Build the adapter from an already-resolved kernel read.
     #[must_use]
@@ -83,7 +82,6 @@ pub struct DaemonRuntimeHealthSignalV1 {
 /// actually observed. A missing signal drops coverage to partial (an honest
 /// "healthy so far as observed", never a healthy-complete claim).
 #[must_use]
-#[hotpath::measure]
 pub fn runtime_health_read(signal: &DaemonRuntimeHealthSignalV1) -> RuntimeHealthReadV1 {
     if !signal.serving {
         return RuntimeHealthReadV1::Observed {
@@ -125,7 +123,6 @@ pub struct RuntimeHealthDoctorAdapterV1 {
     read: RuntimeHealthReadV1,
 }
 
-#[hotpath::measure_all]
 impl RuntimeHealthDoctorAdapterV1 {
     /// Build the adapter from an already-resolved kernel read.
     #[must_use]
@@ -149,7 +146,6 @@ pub struct OperationalAuditDoctorAdapterV1 {
     read: OperationalAuditReadV1,
 }
 
-#[hotpath::measure_all]
 impl OperationalAuditDoctorAdapterV1 {
     #[must_use]
     pub fn from_read(read: OperationalAuditReadV1) -> Self {
@@ -172,7 +168,6 @@ pub struct HostIntegrationDoctorAdapterV1 {
     read: HostIntegrationReadV1,
 }
 
-#[hotpath::measure_all]
 impl HostIntegrationDoctorAdapterV1 {
     /// Build the adapter from an already-resolved kernel read.
     #[must_use]
@@ -194,7 +189,6 @@ impl HostIntegrationDoctorPort for HostIntegrationDoctorAdapterV1 {
 /// Project the latest exact-scope durable feedback publication into Doctor's
 /// distinct advisory port. Host conformance remains a separate source.
 #[must_use]
-#[hotpath::measure]
 pub fn advisory_feedback_read_from_publication(
     publication: Option<&FeedbackCompletedPublicationV1>,
     current_generation: Option<&CodeGenerationId>,
@@ -267,7 +261,6 @@ pub struct AdvisoryFeedbackDoctorAdapterV1 {
     read: AdvisoryFeedbackReadV1,
 }
 
-#[hotpath::measure_all]
 impl AdvisoryFeedbackDoctorAdapterV1 {
     #[must_use]
     pub fn from_read(read: AdvisoryFeedbackReadV1) -> Self {
@@ -290,7 +283,6 @@ pub struct CodeIndexMountDoctorAdapterV1 {
     read: CodeIndexMountReadV1,
 }
 
-#[hotpath::measure_all]
 impl CodeIndexMountDoctorAdapterV1 {
     /// Build the adapter from an already-resolved kernel read.
     #[must_use]
@@ -314,7 +306,6 @@ pub struct LanguageServerDoctorAdapterV1 {
     read: LanguageServerReadV1,
 }
 
-#[hotpath::measure_all]
 impl LanguageServerDoctorAdapterV1 {
     #[must_use]
     pub fn from_read(read: LanguageServerReadV1) -> Self {
@@ -338,7 +329,6 @@ pub struct ObservabilityDoctorAdapterV1 {
     refusals: IngestRefusalCensusReadV1,
 }
 
-#[hotpath::measure_all]
 impl ObservabilityDoctorAdapterV1 {
     #[must_use]
     pub fn from_read(read: ObservabilityReadV1) -> Self {
@@ -381,7 +371,6 @@ impl ObservabilityDoctorPort for ObservabilityDoctorAdapterV1 {
 /// claim; the composer classifies an empty observed read as absent regardless,
 /// and this keeps the intent explicit at the source.
 #[must_use]
-#[hotpath::measure]
 pub fn storage_family_read(findings: Vec<DoctorStorageFindingV1>) -> DoctorStorageFamilyReadV1 {
     if findings.is_empty() {
         DoctorStorageFamilyReadV1::Absent
@@ -395,7 +384,6 @@ pub fn storage_family_read(findings: Vec<DoctorStorageFindingV1>) -> DoctorStora
 /// Findings accumulate. When either side is unresolved, coverage weakens to
 /// the more severe incomplete reason rather than dropping observed findings.
 #[must_use]
-#[hotpath::measure]
 pub fn merge_storage_reads(
     first: DoctorStorageFamilyReadV1,
     second: DoctorStorageFamilyReadV1,
@@ -428,7 +416,6 @@ pub fn merge_storage_reads(
     }
 }
 
-#[hotpath::measure]
 fn storage_read_parts(
     read: DoctorStorageFamilyReadV1,
 ) -> (
@@ -471,7 +458,6 @@ pub struct StorageDoctorAdapterV1 {
     read: DoctorStorageFamilyReadV1,
 }
 
-#[hotpath::measure_all]
 impl StorageDoctorAdapterV1 {
     /// Build the adapter from an already-resolved kernel read.
     #[must_use]

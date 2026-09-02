@@ -91,7 +91,6 @@ pub struct RemoteRecoveryOperationReceiptV1 {
     pub interruption_observed_after_commit: Option<RemoteRecoveryInterruptionV1>,
 }
 
-#[hotpath::measure_all]
 impl RemoteRecoveryOperationReceiptV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         if self.operation_id.is_empty()
@@ -193,7 +192,6 @@ pub struct RemoteRecoveryProtocolOwnerV1 {
     clock: fn() -> UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl RemoteRecoveryProtocolOwnerV1 {
     pub fn new(
         credentials: Arc<dyn RemoteCredentialAdmissionPortV1>,
@@ -363,7 +361,6 @@ impl RemoteRecoveryProtocolOwnerV1 {
     }
 }
 
-#[hotpath::measure]
 fn termination_evidence(
     receipt: &RemoteRecoveryOperationReceiptV1,
 ) -> (
@@ -417,7 +414,6 @@ fn termination_evidence(
     }
 }
 
-#[hotpath::measure]
 fn result_contract(schema_id: &str) -> Result<ResultContractRef, ApplicationContractError> {
     let schema_id =
         SchemaId::new(schema_id).map_err(|_| ApplicationContractError::InvalidIdentifier {
@@ -426,23 +422,19 @@ fn result_contract(schema_id: &str) -> Result<ResultContractRef, ApplicationCont
     ResultContractRef::new(schema_id, 1)
 }
 
-#[hotpath::measure]
 pub fn remote_backup_result_contract_v1() -> Result<ResultContractRef, ApplicationContractError> {
     result_contract("remote.backup.result")
 }
 
-#[hotpath::measure]
 pub fn remote_restore_result_contract_v1() -> Result<ResultContractRef, ApplicationContractError> {
     result_contract("remote.restore.result")
 }
 
-#[hotpath::measure]
 pub fn remote_promotion_result_contract_v1() -> Result<ResultContractRef, ApplicationContractError>
 {
     result_contract("remote.promotion.result")
 }
 
-#[hotpath::measure]
 fn map_admission_error(error: RemoteCredentialAdmissionErrorV1) -> RemoteProtocolFailureV1 {
     match error {
         RemoteCredentialAdmissionErrorV1::NotYetValid
@@ -462,7 +454,6 @@ fn map_admission_error(error: RemoteCredentialAdmissionErrorV1) -> RemoteProtoco
     }
 }
 
-#[hotpath::measure]
 fn map_operation_error(error: RemoteRecoveryOperationErrorV1) -> RemoteProtocolFailureV1 {
     match error {
         RemoteRecoveryOperationErrorV1::Authentication => {

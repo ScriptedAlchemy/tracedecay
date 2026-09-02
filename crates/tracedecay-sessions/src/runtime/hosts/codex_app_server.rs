@@ -36,7 +36,6 @@ struct ActiveCodexChildren {
 
 static ACTIVE_CODEX_CHILDREN: OnceLock<Mutex<ActiveCodexChildren>> = OnceLock::new();
 
-#[hotpath::measure]
 fn active_codex_children() -> &'static Mutex<ActiveCodexChildren> {
     ACTIVE_CODEX_CHILDREN.get_or_init(|| Mutex::new(ActiveCodexChildren::default()))
 }
@@ -47,7 +46,6 @@ pub struct CodexAppServerCancellation {
     process_group: Arc<Mutex<Option<u32>>>,
 }
 
-#[hotpath::measure_all]
 impl CodexAppServerCancellation {
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
@@ -101,7 +99,6 @@ pub struct CodexAppServerShutdownGuard;
         reason = "Windows daemon shutdown does not use this guard yet"
     )
 )]
-#[hotpath::measure]
 pub fn begin_codex_app_server_shutdown() -> CodexAppServerShutdownGuard {
     let process_groups = {
         let mut active = active_codex_children()
@@ -155,7 +152,6 @@ pub struct CodexAppServerLaunchReceipt {
     started_at: Arc<Mutex<Option<Instant>>>,
 }
 
-#[hotpath::measure_all]
 impl CodexAppServerLaunchReceipt {
     pub fn started_at(&self) -> Option<Instant> {
         *self
@@ -182,7 +178,6 @@ impl Default for CodexAppServerSummaryConfig {
     }
 }
 
-#[hotpath::measure_all]
 impl CodexAppServerSummaryConfig {
     pub fn from_env() -> Self {
         let mut config = Self::default();
@@ -201,19 +196,16 @@ impl CodexAppServerSummaryConfig {
     }
 }
 
-#[hotpath::measure]
 fn non_empty_env(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
         .filter(|value| !value.trim().is_empty())
 }
 
-#[hotpath::measure]
 fn configured_model(config: &CodexAppServerSummaryConfig) -> Option<&str> {
     config.model.as_deref().filter(|model| !model.is_empty())
 }
 
-#[hotpath::measure]
 pub fn summarize_with_codex_app_server(
     request: &LcmSummaryRequest,
     config: &CodexAppServerSummaryConfig,
@@ -222,7 +214,6 @@ pub fn summarize_with_codex_app_server(
     run_prompt_with_codex_app_server(&prompt, config, "tracedecay_codex_summary")
 }
 
-#[hotpath::measure]
 pub fn run_prompt_with_codex_app_server(
     prompt: &str,
     config: &CodexAppServerSummaryConfig,
@@ -246,7 +237,6 @@ pub struct CodexAppServerWorkExecution<'a> {
 /// values captured for this spawn. The durable Work authority is the
 /// snapshot's allowlisted key set; callers resolve those keys just in time, so
 /// this function never persists plaintext credential values.
-#[hotpath::measure]
 pub fn run_work_with_codex_app_server(
     prompt: &str,
     config: &CodexAppServerSummaryConfig,
@@ -256,7 +246,6 @@ pub fn run_work_with_codex_app_server(
     run_prompt_with_optional_execution(prompt, config, thread_source, Some(execution))
 }
 
-#[hotpath::measure]
 fn run_prompt_with_optional_execution(
     prompt: &str,
     config: &CodexAppServerSummaryConfig,
@@ -344,7 +333,6 @@ fn run_prompt_with_optional_execution(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure]
 fn run_codex_protocol(
     child: &mut ChildGuard,
     line_rx: &mpsc::Receiver<std::io::Result<String>>,
@@ -441,7 +429,6 @@ fn run_codex_protocol(
     })
 }
 
-#[hotpath::measure]
 fn spawn_codex_app_server(command: &mut Command, codex_bin: &str) -> Result<Child> {
     hotpath::measure_block!("sessions.hosts.codex_app_server.spawn", {
         #[cfg(unix)]
@@ -480,7 +467,6 @@ fn spawn_codex_app_server(command: &mut Command, codex_bin: &str) -> Result<Chil
     })
 }
 
-#[hotpath::measure]
 fn codex_app_server_command(codex_bin: &str) -> Command {
     let mut command = command_for_codex_bin(codex_bin);
     command.arg("app-server");
@@ -488,7 +474,6 @@ fn codex_app_server_command(codex_bin: &str) -> Command {
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn command_for_codex_bin(codex_bin: &str) -> Command {
     let extension = Path::new(codex_bin)
         .extension()
@@ -503,12 +488,10 @@ fn command_for_codex_bin(codex_bin: &str) -> Command {
 }
 
 #[cfg(not(windows))]
-#[hotpath::measure]
 fn command_for_codex_bin(codex_bin: &str) -> Command {
     Command::new(codex_bin)
 }
 
-#[hotpath::measure]
 fn build_ephemeral_thread_start_params(model: Option<&str>, thread_source: &str) -> Value {
     let mut params = json!({
         "ephemeral": true,
@@ -543,7 +526,6 @@ impl Drop for ChildGuard {
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn terminate_process_tree(process_group: u32) {
     let _ = Command::new("taskkill")
         .arg("/PID")
@@ -556,7 +538,6 @@ fn terminate_process_tree(process_group: u32) {
 }
 
 #[cfg(unix)]
-#[hotpath::measure]
 fn terminate_process_tree(process_group: u32) {
     const SIGKILL: i32 = 9;
     unsafe extern "C" {
@@ -568,7 +549,6 @@ fn terminate_process_tree(process_group: u32) {
 }
 
 #[cfg(not(any(unix, windows)))]
-#[hotpath::measure]
 fn terminate_process_tree(_process_group: u32) {}
 
 #[hotpath::measure(label = "sessions.hosts.codex_app_server.send")]
@@ -599,7 +579,6 @@ fn wait_for_response(
     }
 }
 
-#[hotpath::measure]
 fn wait_for_turn_summary(
     line_rx: &mpsc::Receiver<std::io::Result<String>>,
     deadline: Instant,
@@ -648,7 +627,6 @@ fn wait_for_turn_summary(
     })
 }
 
-#[hotpath::measure]
 fn recv_line(
     line_rx: &mpsc::Receiver<std::io::Result<String>>,
     deadline: Instant,
@@ -673,7 +651,6 @@ fn recv_line(
     }
 }
 
-#[hotpath::measure]
 fn collect_item_text(value: Option<&Value>) -> Option<String> {
     match value? {
         Value::String(text) => Some(text.clone()),
@@ -696,7 +673,6 @@ fn collect_item_text(value: Option<&Value>) -> Option<String> {
     }
 }
 
-#[hotpath::measure]
 fn find_model_id(value: &Value) -> Option<String> {
     match value {
         Value::Object(map) => {
@@ -723,7 +699,6 @@ fn find_model_id(value: &Value) -> Option<String> {
     }
 }
 
-#[hotpath::measure]
 pub fn build_codex_summary_prompt(request: &LcmSummaryRequest) -> String {
     hotpath::measure_block!("sessions.hosts.codex_app_server.prompt", {
         let mut prompt = String::new();
@@ -745,7 +720,6 @@ pub fn build_codex_summary_prompt(request: &LcmSummaryRequest) -> String {
     })
 }
 
-#[hotpath::measure]
 pub fn strip_reasoning_tags(text: &str) -> String {
     let mut output = String::new();
     let mut rest = text;

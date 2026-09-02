@@ -163,7 +163,6 @@ impl HydrationExecutionControlV1 for SystemHydrationExecutionControl {
     }
 }
 
-#[hotpath::measure_all]
 impl<'a, S> CanonicalLateHydration<'a, S> {
     pub fn new(source: &'a mut S) -> Self {
         Self { source }
@@ -332,7 +331,6 @@ impl<'a, S> CanonicalLateHydration<'a, S> {
     }
 }
 
-#[hotpath::measure]
 fn prework_unavailable(
     budget: &RetrievalBudget,
     control: &dyn HydrationExecutionControlV1,
@@ -352,7 +350,6 @@ fn prework_unavailable(
         .then_some(HydrationUnavailableV1::BudgetExceeded)
 }
 
-#[hotpath::measure]
 fn work_permit(
     ranked: &RankedCandidate,
     budget: &RetrievalBudget,
@@ -378,7 +375,6 @@ fn work_permit(
     }
 }
 
-#[hotpath::measure]
 fn validate_receipt(
     ranked: &RankedCandidate,
     permit: &HydrationWorkPermitV1,

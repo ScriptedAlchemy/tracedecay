@@ -58,7 +58,6 @@ enum FactRescanDispositionV1 {
     Quarantine,
 }
 
-#[hotpath::measure_all]
 impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     /// Rescans every currently served fact under the current detector
     /// revision, remediating hits through the canonical curation authority.
@@ -197,7 +196,6 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     }
 }
 
-#[hotpath::measure]
 fn remediation_confidence() -> Result<Confidence, MemoryApplicationError> {
     Confidence::new(1.0).map_err(|_| MemoryApplicationError::InvalidInput {
         invariant: "privacy remediation confidence",
@@ -207,7 +205,6 @@ fn remediation_confidence() -> Result<Confidence, MemoryApplicationError> {
 /// Re-evaluates one served fact's canonical payload wire under the current
 /// detector. The wire mirrors the ingest sanitizer exactly, so an unchanged
 /// durable answer proves the persisted row already satisfies the revision.
-#[hotpath::measure]
 fn rescan_fact(
     fact: &ProjectMemoryFactV1,
 ) -> Result<FactRescanDispositionV1, MemoryApplicationError> {

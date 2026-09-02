@@ -113,7 +113,6 @@ impl From<tracedecay_rusqlite_runtime::exact_sql::ExactSqlError> for Error {
     }
 }
 
-#[hotpath::measure_all]
 impl Error {
     pub fn invalid_operation(message: impl Into<String>) -> Self {
         Self::InvalidOperation(message.into())

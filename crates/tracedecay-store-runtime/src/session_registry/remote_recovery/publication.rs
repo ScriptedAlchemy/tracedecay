@@ -35,7 +35,6 @@ pub(super) enum RestorePublicationV1 {
     RolledBack,
 }
 
-#[hotpath::measure_all]
 impl RemoteRecoveryPublicationContextV1 {
     fn issue_session_lease(
         &self,

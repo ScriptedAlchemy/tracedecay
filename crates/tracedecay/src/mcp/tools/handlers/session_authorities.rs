@@ -23,7 +23,6 @@ pub struct SessionAuthorities<'a> {
         Option<&'a dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>,
 }
 
-#[hotpath::measure_all]
 impl<'a> SessionAuthorities<'a> {
     #[hotpath::skip]
     pub(crate) const fn new(

@@ -317,7 +317,6 @@ pub struct GlobalDbConfigurationControlStore<'db> {
     db: &'db RegisteredGlobalDb,
 }
 
-#[hotpath::measure_all]
 impl<'db> GlobalDbConfigurationControlStore<'db> {
     #[hotpath::skip]
     pub const fn new_registered(db: &'db RegisteredGlobalDb) -> Self {
@@ -806,7 +805,6 @@ pub struct ProfileCodeIndexWorkerConfigurationStore<'db> {
     profile_id: UserProfileId,
 }
 
-#[hotpath::measure_all]
 impl<'db> ProfileCodeIndexWorkerConfigurationStore<'db> {
     pub fn new_registered(
         db: &'db RegisteredGlobalDb,
@@ -994,7 +992,6 @@ pub struct OwnedGlobalDbConfigurationControlStore {
     db: RegisteredGlobalDbLeaseV1,
 }
 
-#[hotpath::measure_all]
 impl OwnedGlobalDbConfigurationControlStore {
     pub fn from_registered_project_runtime_db(db: RegisteredGlobalDbLeaseV1) -> Self {
         Self { db }

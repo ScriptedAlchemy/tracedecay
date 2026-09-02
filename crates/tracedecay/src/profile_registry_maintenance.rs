@@ -14,7 +14,6 @@ use tracedecay_global_db::{
     registry_maintenance::forget_registry_project,
 };
 
-#[hotpath::measure]
 fn store_removal_error(
     operation: &str,
     path: &Path,
@@ -27,7 +26,6 @@ fn store_removal_error(
 
 /// Verifies a removed store path left no namespace entry behind (a dangling
 /// symlink still occupies the name and must be reported, not read as gone).
-#[hotpath::measure]
 pub fn verify_store_path_absent(path: &Path) -> tracedecay_domain::errors::Result<()> {
     match std::fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -92,7 +90,6 @@ pub fn remove_store_directory(path: &Path) -> tracedecay_domain::errors::Result<
 /// Resolves one registered store-instance relpath under the profile root,
 /// refusing anything but a plain relative path so a corrupted registry row
 /// can never direct a destructive command outside the profile.
-#[hotpath::measure]
 fn resolve_store_data_root(
     profile_root: &Path,
     store_relpath: &str,
@@ -130,7 +127,6 @@ pub struct ProfileRegistryMaintenanceRuntime {
     profile_database: RegisteredGlobalDbLeaseV1,
 }
 
-#[hotpath::measure_all]
 impl ProfileRegistryMaintenanceRuntime {
     /// Opens an existing exact-final profile registry without creating one.
     #[hotpath::skip]

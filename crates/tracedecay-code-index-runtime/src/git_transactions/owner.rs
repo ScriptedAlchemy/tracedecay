@@ -220,7 +220,6 @@ impl Default for DaemonGitAuthoritySlot {
     }
 }
 
-#[hotpath::measure_all]
 impl DaemonGitAuthoritySlot {
     fn install(
         &self,
@@ -264,7 +263,6 @@ pub struct DaemonGitIndexPolicyRecheck {
     authority: Arc<dyn DaemonGitAuthoritySource>,
 }
 
-#[hotpath::measure_all]
 impl DaemonGitIndexPolicyRecheck {
     pub fn new(authority: Arc<dyn DaemonGitAuthoritySource>) -> Self {
         Self { authority }
@@ -353,7 +351,6 @@ pub fn preview_conflict_risk(preview: &GitIndexPreviewV1) -> GitConflictRiskV1 {
     }
 }
 
-#[hotpath::measure]
 fn scope_matches_snapshot(
     scope: &ResolvedScope,
     snapshot: &tracedecay_domain::RepositoryStateSnapshotV1,
@@ -371,7 +368,6 @@ fn scope_matches_snapshot(
         }
 }
 
-#[hotpath::measure]
 fn current_micros() -> UtcMicros {
     UtcMicros(
         i64::try_from(
@@ -398,7 +394,6 @@ pub struct DaemonGitInvocationOwner {
     authority: Arc<DaemonGitAuthoritySlot>,
 }
 
-#[hotpath::measure_all]
 impl DaemonGitInvocationOwner {
     pub fn current_authority(
         &self,
@@ -431,7 +426,6 @@ struct ServiceKey {
     repository_root: PathBuf,
 }
 
-#[hotpath::measure_all]
 impl ServiceKey {
     fn new(database_path: &Path, project_id: &ProjectId, repository_root: &Path) -> Self {
         Self {
@@ -483,7 +477,6 @@ pub struct DaemonGitIndexShutdownReceiptV1 {
     pub store_actors_joined: usize,
 }
 
-#[hotpath::measure_all]
 impl DaemonGitIndexTransactionServiceRegistry {
     #[hotpath::measure(label = "daemon.git.tx.ensure", future = true)]
     pub async fn ensure(

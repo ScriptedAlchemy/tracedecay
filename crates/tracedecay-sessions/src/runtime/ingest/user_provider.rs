@@ -25,7 +25,6 @@ use super::user::{
     try_ingest_user_cursor_sessions_with_db_bounded,
 };
 
-#[hotpath::measure]
 fn cursor_provider_run_outcome(
     result: Result<BoundedProviderOutcome, BoundedProviderFailure>,
 ) -> ProviderRunOutcome {
@@ -54,7 +53,6 @@ fn cursor_provider_run_outcome(
     }
 }
 
-#[hotpath::measure]
 fn claude_provider_run_outcome(
     stats: &claude_observation::ClaudeObservationIngestStats,
     error: Option<&claude_observation::ClaudeObservationIngestError>,
@@ -82,7 +80,6 @@ pub(super) struct UserProviderRunResult {
     pub(super) claude_projected_session_ids: BTreeSet<String>,
 }
 
-#[hotpath::measure_all]
 impl UserProviderRunResult {
     fn provider(outcome: ProviderRunOutcome) -> Self {
         Self {
@@ -110,7 +107,6 @@ pub(super) struct UserProviderUnit<'a, S> {
     pub(super) codex_discovery: Option<(&'a crate::runtime::codex::CodexDiscoveryHub, &'a str)>,
 }
 
-#[hotpath::measure_all]
 impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
     #[hotpath::skip]
     pub(super) async fn run(self) -> UserProviderRunResult {
