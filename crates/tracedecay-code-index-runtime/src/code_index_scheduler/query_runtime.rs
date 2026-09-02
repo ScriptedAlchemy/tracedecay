@@ -118,8 +118,13 @@ pub async fn mount_core_query_authority_on_project_open(
     scope: &ResolvedScope,
     cursor_keys: &tracedecay_session_temporal_store::GlobalDbCursorKeyProvider,
 ) -> Result<(), QueryRuntimeMountErrorV1> {
-    let authority =
-        prepare_core_query_authority_on_project_open(registry, scope, cursor_keys).await?;
+    let authority = prepare_core_query_authority_on_project_open(
+        registry,
+        project_root,
+        scope,
+        cursor_keys,
+    )
+    .await?;
     registry
         .mount_query_authority(project_root, scope, authority)
         .await
@@ -136,8 +141,13 @@ pub async fn mount_core_query_authority_for_committed_fallback_on_project_open(
     expected_revision: &ConfigurationRevisionId,
     cursor_keys: &tracedecay_session_temporal_store::GlobalDbCursorKeyProvider,
 ) -> Result<(), QueryRuntimeMountErrorV1> {
-    let authority =
-        prepare_core_query_authority_on_project_open(registry, scope, cursor_keys).await?;
+    let authority = prepare_core_query_authority_on_project_open(
+        registry,
+        project_root,
+        scope,
+        cursor_keys,
+    )
+    .await?;
     registry
         .mount_query_authority_for_committed_fallback(
             project_root,
@@ -151,10 +161,16 @@ pub async fn mount_core_query_authority_for_committed_fallback_on_project_open(
 
 async fn prepare_core_query_authority_on_project_open(
     registry: &CodeIndexSchedulerRegistryV1,
+    project_root: &Path,
     scope: &ResolvedScope,
     cursor_keys: &tracedecay_session_temporal_store::GlobalDbCursorKeyProvider,
 ) -> Result<Arc<QueryAuthorityV1>, QueryRuntimeMountErrorV1> {
-    let privacy_domain = if let Some(text) = registry.latest_text_serving_for_scope(scope).await {
+    let root_text = registry.latest_text_serving_for_root(project_root).await;
+    let privacy_domain = if let Some(text) = registry
+        .latest_text_serving_for_scope(scope)
+        .await
+        .or(root_text)
+    {
         text.metadata().manifest().privacy_domain.clone()
     } else {
         registry

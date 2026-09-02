@@ -206,21 +206,46 @@ fn spawn_query_authority_when_generation_ready(inputs: QueryAuthorityWaitInputs)
             {
                 return;
             }
-            let outcome = tokio::select! {
-                biased;
-                () = authority_cancellation.cancelled() => return,
-                outcome = authority_invocation.mount_query_authority_for_project(
-                    &authority_project,
-                    &authority_profile_id,
-                    &authority_scope,
-                ) => outcome,
-            };
-            if authority_cancellation.is_cancelled()
-                || !authority_route_registered.load(Ordering::Acquire)
-            {
-                return;
+            let mut awaiting_generation_logged = false;
+            loop {
+                let outcome = tokio::select! {
+                    biased;
+                    () = authority_cancellation.cancelled() => return,
+                    outcome = authority_invocation.mount_query_authority_for_project(
+                        &authority_project,
+                        &authority_profile_id,
+                        &authority_scope,
+                    ) => outcome,
+                };
+                if authority_cancellation.is_cancelled()
+                    || !authority_route_registered.load(Ordering::Acquire)
+                {
+                    return;
+                }
+                match outcome {
+                    Err(error @ QueryRuntimeMountErrorV1::GenerationUnavailable) => {
+                        if !awaiting_generation_logged {
+                            log_query_authority_activation_outcome(
+                                &authority_project,
+                                Err(error),
+                            );
+                            awaiting_generation_logged = true;
+                        }
+                        tokio::select! {
+                            () = authority_cancellation.cancelled() => return,
+                            _ = route_poll.tick() => {},
+                            publication = publications.recv() => match publication {
+                                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                            }
+                        }
+                    }
+                    outcome => {
+                        log_query_authority_activation_outcome(&authority_project, outcome);
+                        return;
+                    }
+                }
             }
-            log_query_authority_activation_outcome(&authority_project, outcome);
         },
         label = "daemon.project.activate.query_authority"
     ));

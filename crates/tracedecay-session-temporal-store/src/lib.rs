@@ -1013,22 +1013,30 @@ impl<D: SessionTemporalRegisteredDb + Sync> TaskSessionTemporalExecutionPortV1
                 .db_path()
                 .parent()
                 .ok_or(SessionTemporalExecutionError::Unavailable)?;
-            let (relation_scope, relation_store) = self
-                .db
-                .session_relation_store()
-                .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+            let relation_authority = self.db.session_relation_store().ok();
             let kernel_request = request.temporal().clone().into_kernel_request(snapshot);
-            let read = GlobalDbTemporalReadPort::new_registered_with_relations(
-                &read_snapshot,
-                &relation_scope,
-                relation_store.clone(),
-            );
-            let hydration = GlobalDbTemporalHydrationPort::for_registered_snapshot_with_relations(
-                &read_snapshot,
-                storage_root,
-                &relation_scope,
-                relation_store,
-            );
+            let read = match &relation_authority {
+                Some((scope, store)) => GlobalDbTemporalReadPort::new_registered_with_relations(
+                    &read_snapshot,
+                    scope,
+                    store.clone(),
+                ),
+                None => GlobalDbTemporalReadPort::new_registered(&read_snapshot),
+            };
+            let hydration = match &relation_authority {
+                Some((scope, store)) => {
+                    GlobalDbTemporalHydrationPort::for_registered_snapshot_with_relations(
+                        &read_snapshot,
+                        storage_root,
+                        scope,
+                        store.clone(),
+                    )
+                }
+                None => GlobalDbTemporalHydrationPort::for_registered_snapshot(
+                    &read_snapshot,
+                    storage_root,
+                ),
+            };
             let export = execute_temporal_candidate_export(&kernel_request, &read, &authenticator)
                 .await
                 .map_err(map_kernel_execution_error)?;

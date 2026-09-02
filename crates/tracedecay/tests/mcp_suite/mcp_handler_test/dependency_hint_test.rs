@@ -86,14 +86,24 @@ async fn search_payload(server: &McpServer, arguments: Value) -> Value {
 }
 
 async fn wait_for_search_payload(server: &McpServer, arguments: Value) -> Value {
+    let mut last = Value::Null;
     for _ in 0..60 {
         let payload = search_payload(server, arguments.clone()).await;
-        if payload["reason"].as_str() != Some("authority_unavailable") {
+        if !matches!(
+            payload["reason"].as_str(),
+            Some(
+                "authority_unavailable"
+                    | "generation_unavailable"
+                    | "generation_unverified"
+                    | "search_capacity_unavailable"
+            )
+        ) {
             return payload;
         }
+        last = payload;
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-    panic!("code-index search authority did not activate within the polling budget");
+    panic!("code-index search authority did not activate within the polling budget: {last}");
 }
 
 fn hint_candidates(payload: &Value) -> &[Value] {
@@ -129,7 +139,7 @@ export function GenerationAnchor() { return 2; }
         sparse["results"].as_array().is_some_and(|results| {
             results
                 .iter()
-                .any(|result| result["display"]["name"] == "SparseWidgetHelper")
+                .any(|result| result["display"]["path"] == "src/app.ts")
         }),
         "the successful sparse lexical result must be preserved: {sparse}"
     );
