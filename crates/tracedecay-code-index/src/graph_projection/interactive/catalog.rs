@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use tracedecay_domain::SanitizedCodeFileV1;
 use tracedecay_graph_db::{
-    GraphCancellation, GraphEntity, GraphEntityId, GraphGenerationManifest,
-    GraphProjectionIdentity, GraphProjectionReadRequest, GraphRelation,
-    MAX_VERIFIED_GENERATION_RELATIONS, VerifiedGraphSnapshot,
+    GraphCancellation, GraphEntity, GraphEntityId, GraphProjectionIdentity,
+    GraphProjectionReadRequest, GraphRelation, MAX_VERIFIED_GENERATION_RELATIONS,
+    VerifiedGraphSnapshot,
 };
 
 use super::super::schema::{
@@ -86,38 +86,6 @@ pub(super) fn build_interactive_catalog(
     hotpath::measure_block!("code_graph.catalog.finish", {
         scan.finish(projection_node_count)
     })
-}
-
-/// Builds the same interactive catalog as [`build_interactive_catalog`], but
-/// from the in-hand manifest rows of a generation that is being sealed right
-/// now, instead of paging the published projection back out of the store.
-/// One linear pass over rows the seal already holds — this is the seal-time
-/// derivation of the catalog bundle artifact.
-pub(in crate::graph_projection) fn build_interactive_catalog_from_manifest(
-    manifest: &GraphGenerationManifest,
-    cancellation: &dyn GraphCancellation,
-) -> Result<InteractiveCatalog, CodeGraphProjectionError> {
-    let mut scan = CatalogScan::new();
-    let projection_node_count = manifest.entities.len();
-    scan.record_entity_page(&manifest.entities, projection_node_count, cancellation)?;
-    for relation in &manifest.relations {
-        check_cancelled(cancellation)?;
-        scan.count_relation()?;
-        if relation.kind.as_str() != FILE_IMPORT_EDGE_KIND {
-            continue;
-        }
-        let relation = GraphRelation::new(
-            relation.identity.clone(),
-            relation.from.identity.clone(),
-            relation.to.identity.clone(),
-            relation.kind.clone(),
-            relation.properties.clone(),
-        )
-        .map_err(CodeGraphProjectionError::from)?;
-        scan.record_import_link(relation)?;
-    }
-    check_cancelled(cancellation)?;
-    scan.finish(projection_node_count)
 }
 
 struct CatalogScan {
