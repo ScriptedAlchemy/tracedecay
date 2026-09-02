@@ -14,6 +14,8 @@ pub(super) async fn race_primary_search_with_graph<S, G>(
     search: S,
     graph: G,
     require_graph_for_empty_result: bool,
+    sparse_result_limit: Option<usize>,
+    scoped_search: bool,
 ) -> (
     crate::mcp::server::CodeIndexSearchOutcomeV1,
     Result<VerifiedGraphQuery>,
@@ -28,12 +30,19 @@ where
         biased;
         graph = &mut graph => (search.await, graph),
         outcome = &mut search => {
-            let wait_for_graph = require_graph_for_empty_result
-                && matches!(
-                    &outcome,
-                    crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(complete)
-                        if complete.ordered_candidates.is_empty()
-                );
+            let wait_for_graph = matches!(
+                &outcome,
+                crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(complete)
+                    if scoped_search
+                        || sparse_result_limit.is_some_and(|limit| {
+                            dependency_hints::should_check_external_import_hint(
+                                complete.ordered_candidates.len(),
+                                limit,
+                            )
+                        })
+                        || (require_graph_for_empty_result
+                            && complete.ordered_candidates.is_empty())
+            );
             let graph = if wait_for_graph {
                 graph.await
             } else {

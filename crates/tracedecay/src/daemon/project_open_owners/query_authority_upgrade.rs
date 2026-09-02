@@ -57,7 +57,7 @@ pub(super) fn spawn_deferred_query_authority_mount(
             loop {
                 if invocation
                     .code_index_schedulers
-                    .latest_text_serving_for_scope(&scope)
+                    .latest_text_serving_for_root(&project_root)
                     .await
                     .is_some()
                     && try_deferred_mount(&invocation, &project_root, &scope, &mount).await

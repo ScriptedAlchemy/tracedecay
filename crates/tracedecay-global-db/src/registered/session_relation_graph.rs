@@ -39,43 +39,37 @@ impl RegisteredGlobalDb {
                 "graph scope or exact graph authority does not match the registered session shard",
             ));
         }
-        if let Some((existing_scope, existing_graph, existing_binding, existing_locator)) =
-            self.session_relation_graph.get()
+        let mut mounted = self
+            .session_relation_graph
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((existing_scope, _, existing_binding, existing_locator)) = mounted.as_ref()
+            && (existing_scope != &scope
+                || existing_binding != &graph_binding
+                || existing_locator != &graph_verified_locator)
         {
-            return if existing_scope == &scope
-                && existing_graph.shares_runtime_with(&graph)
-                && existing_binding == &graph_binding
-                && existing_locator == &graph_verified_locator
-            {
-                Ok(())
-            } else {
-                Err(registered_error(
-                    "bind session relation graph",
-                    "registered session shard already has a different graph owner",
-                ))
-            };
+            return Err(registered_error(
+                "bind session relation graph",
+                "registered session shard already has a different graph owner",
+            ));
         }
-        self.session_relation_graph
-            .set((scope, graph, graph_binding, graph_verified_locator))
-            .map_err(|_| {
-                registered_error(
-                    "bind session relation graph",
-                    "registered session shard graph binding raced",
-                )
-            })
+        *mounted = Some((scope, graph, graph_binding, graph_verified_locator));
+        Ok(())
     }
 
     pub(crate) fn session_relation_graph(
         &self,
     ) -> tracedecay_domain::errors::Result<(
-        &SessionRelationScope,
-        &tracedecay_graph_db::GraphDbLeaseV1,
-        &StoreRuntimeBindingV1,
-        &VerifiedStoreLocatorV1,
+        SessionRelationScope,
+        tracedecay_graph_db::GraphDbLeaseV1,
+        StoreRuntimeBindingV1,
+        VerifiedStoreLocatorV1,
     )> {
         self.session_relation_graph
-            .get()
-            .map(|(scope, graph, binding, locator)| (scope, graph, binding, locator))
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .cloned()
             .ok_or_else(|| {
                 registered_error(
                     "resolve session relation graph",
@@ -86,16 +80,16 @@ impl RegisteredGlobalDb {
 
     pub fn session_relation_graph_identity(
         &self,
-    ) -> tracedecay_domain::errors::Result<(&StoreRuntimeBindingV1, &VerifiedStoreLocatorV1)> {
+    ) -> tracedecay_domain::errors::Result<(StoreRuntimeBindingV1, VerifiedStoreLocatorV1)> {
         let (_, _, binding, locator) = self.session_relation_graph()?;
         Ok((binding, locator))
     }
 
     pub fn session_relation_store(
         &self,
-    ) -> tracedecay_domain::errors::Result<(&SessionRelationScope, SessionRelationGraphStore)> {
+    ) -> tracedecay_domain::errors::Result<(SessionRelationScope, SessionRelationGraphStore)> {
         let (scope, graph, _, _) = self.session_relation_graph()?;
-        Ok((scope, SessionRelationGraphStore::new(graph.clone())))
+        Ok((scope, SessionRelationGraphStore::new(graph)))
     }
 
     /// Shared-crate graph lease so dependents (including this crate's
@@ -105,6 +99,6 @@ impl RegisteredGlobalDb {
         &self,
     ) -> tracedecay_domain::errors::Result<tracedecay_graph_db::GraphDbLeaseV1> {
         let (_, graph, _, _) = self.session_relation_graph()?;
-        Ok(graph.clone())
+        Ok(graph)
     }
 }

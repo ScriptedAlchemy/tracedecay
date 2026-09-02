@@ -1,6 +1,6 @@
 use std::future::Future;
 use std::path::Path;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::{
@@ -228,12 +228,12 @@ impl RegisteredGlobalDbLeaseV1 {
 pub struct RegisteredGlobalDb {
     database: Database,
     project_graph: Arc<OnceLock<VerifiedGraphRuntimeWeakProxyV1>>,
-    session_relation_graph: OnceLock<(
+    session_relation_graph: RwLock<Option<(
         tracedecay_session_temporal_store::relations::SessionRelationScope,
         tracedecay_graph_db::GraphDbLeaseV1,
         StoreRuntimeBindingV1,
         VerifiedStoreLocatorV1,
-    )>,
+    )>>,
 }
 
 impl RegisteredGlobalDb {
@@ -281,7 +281,7 @@ impl RegisteredGlobalDb {
         Self {
             database,
             project_graph,
-            session_relation_graph: OnceLock::new(),
+            session_relation_graph: RwLock::new(None),
         }
     }
 

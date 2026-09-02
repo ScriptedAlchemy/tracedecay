@@ -1258,7 +1258,8 @@ async fn register_semantic_activation_owner(
     if let Some(current_state) = current_state {
         let mut activation_restore = InitialSemanticActivationRestoreV1::Mounted;
         let mut deferred_activation_revision = None;
-        if current_state.audit().is_empty() {
+        let initial_state_uses_core_fallback = current_state.audit().is_empty();
+        if initial_state_uses_core_fallback {
             let cursor_keys = Arc::new(
                 session_db
                     .load_session_cursor_key_provider_result()
@@ -1290,6 +1291,7 @@ async fn register_semantic_activation_owner(
                         .to_owned(),
                 })?;
             let committed_revision = committed.state.configuration_revision().clone();
+            deferred_activation_revision = Some(committed_revision.clone());
             activation_restore = classify_initial_semantic_activation_restore(
                 observer.activation_committed(committed).await,
             )
@@ -1297,7 +1299,6 @@ async fn register_semantic_activation_owner(
                 message: format!("semantic retrieval activation restore failed: {error}"),
             })?;
             if activation_restore == InitialSemanticActivationRestoreV1::Deferred {
-                deferred_activation_revision = Some(committed_revision);
                 hotpath::gauge!("daemon.semantic.activation_restore.deferred_total").inc(1_u64);
                 tracing::info!(
                     event = "semantic_activation_restore",
@@ -1307,7 +1308,9 @@ async fn register_semantic_activation_owner(
                 );
             }
         }
-        let query_mount = if activation_restore == InitialSemanticActivationRestoreV1::Deferred {
+        let mut core_fallback_selected = initial_state_uses_core_fallback
+            || activation_restore == InitialSemanticActivationRestoreV1::Deferred;
+        let query_mount = if core_fallback_selected {
             match (
                 session_db.load_session_cursor_key_provider_result().await,
                 deferred_activation_revision.as_ref(),
@@ -1318,6 +1321,15 @@ async fn register_semantic_activation_owner(
                             project_root,
                             &scope,
                             expected_revision,
+                            &cursor_keys,
+                        )
+                        .await
+                }
+                (Ok(cursor_keys), None) if initial_state_uses_core_fallback => {
+                    invocation
+                        .mount_core_query_authority_for_project(
+                            project_root,
+                            &scope,
                             &cursor_keys,
                         )
                         .await
@@ -1338,9 +1350,52 @@ async fn register_semantic_activation_owner(
                 }
             }
         } else {
-            invocation
+            let configured = invocation
                 .mount_query_authority_for_project(project_root, &profile_id, &scope)
-                .await
+                .await;
+            match configured {
+                Err(
+                    tracedecay_code_index_runtime::code_index_scheduler::query_runtime::
+                        QueryRuntimeMountErrorV1::Provider(_)
+                    | tracedecay_code_index_runtime::code_index_scheduler::query_runtime::
+                        QueryRuntimeMountErrorV1::AuthorityMissing
+                    | tracedecay_code_index_runtime::code_index_scheduler::query_runtime::
+                        QueryRuntimeMountErrorV1::Authority(
+                            tracedecay_query::retrieval::QueryAuthorityErrorV1::
+                                AuthorityUnavailable,
+                        ),
+                ) => {
+                    core_fallback_selected = true;
+                    match session_db.load_session_cursor_key_provider_result().await {
+                        Ok(cursor_keys) => match deferred_activation_revision.as_ref() {
+                            Some(expected_revision) => {
+                                invocation
+                                    .mount_core_query_authority_for_committed_fallback(
+                                        project_root,
+                                        &scope,
+                                        expected_revision,
+                                        &cursor_keys,
+                                    )
+                                    .await
+                            }
+                            None => {
+                                invocation
+                                    .mount_core_query_authority_for_project(
+                                        project_root,
+                                        &scope,
+                                        &cursor_keys,
+                                    )
+                                    .await
+                            }
+                        },
+                        Err(_) => Err(
+                            tracedecay_code_index_runtime::code_index_scheduler::query_runtime::
+                                QueryRuntimeMountErrorV1::KeyUnavailable,
+                        ),
+                    }
+                }
+                outcome => outcome,
+            }
         };
         if let Err(error) = query_mount {
             tracing::debug!(
@@ -1359,7 +1414,7 @@ async fn register_semantic_activation_owner(
                     invocation.clone(),
                     project_root.to_path_buf(),
                     scope.clone(),
-                    if activation_restore == InitialSemanticActivationRestoreV1::Deferred {
+                    if core_fallback_selected {
                         query_authority_upgrade::DeferredQueryAuthorityMountV1::CoreFallback {
                             session_db: session_db.clone(),
                             committed_revision: deferred_activation_revision.clone(),

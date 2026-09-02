@@ -10,8 +10,6 @@ use std::path::Path;
 #[cfg(feature = "test-transport")]
 use std::process::Command;
 #[cfg(feature = "test-transport")]
-use std::time::Duration;
-#[cfg(feature = "test-transport")]
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 
 #[cfg(feature = "test-transport")]
@@ -55,55 +53,6 @@ fn write_production_codex_rollout(home: &Path, project: &Path) {
         format!("{rollout}\n"),
     )
     .expect("write isolated Codex rollout");
-}
-
-#[cfg(feature = "test-transport")]
-async fn demand_production_code_index(
-    harness: &ProductionProjectCompositionHarnessV1,
-    project: &Path,
-) {
-    // The first search demands demand-driven publication; poll the same tool
-    // until a generation binds and the fixture symbol is retrievable.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-    loop {
-        let response = harness
-            .call_tool(
-                project,
-                "tracedecay_search",
-                json!({"query": "helper", "limit": 1, "format": "json"}),
-            )
-            .await
-            .expect("production code-index search");
-        let result = response
-            .result
-            .expect("production code-index search result");
-        assert_ne!(
-            result["isError"], true,
-            "production code-index search returned an error: {result}"
-        );
-        let payload: Value = serde_json::from_str(
-            result["content"][0]["text"]
-                .as_str()
-                .expect("production code-index search JSON content"),
-        )
-        .expect("production code-index search JSON");
-        let generation_bound = payload["code_generation"].as_str().is_some();
-        let helper_found = payload["results"].as_array().is_some_and(|results| {
-            results.iter().any(|result| {
-                result["display"]["name"]
-                    .as_str()
-                    .is_some_and(|name| name == "helper")
-            })
-        });
-        if generation_bound && helper_found {
-            return;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "production code index did not publish after search demand: {payload}"
-        );
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
 }
 
 #[cfg(feature = "test-transport")]
@@ -361,10 +310,13 @@ async fn production_codex_hook_ingest_survives_message_search_reopen() {
     assert!(commit.success(), "git commit must succeed");
     write_production_codex_rollout(&home, &project);
 
-    let harness = ProductionProjectCompositionHarnessV1::open(&isolation, [project.clone()])
+    let harness =
+        ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+            &isolation,
+            [project.clone()],
+        )
         .await
         .expect("production composition harness");
-    demand_production_code_index(&harness, &project).await;
     let response = harness
         .call_tool(
             &project,
@@ -405,10 +357,13 @@ async fn production_codex_hook_ingest_survives_message_search_reopen() {
 
     harness.shutdown().await;
 
-    let restarted = ProductionProjectCompositionHarnessV1::open(&isolation, [project.clone()])
+    let restarted =
+        ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+            &isolation,
+            [project.clone()],
+        )
         .await
         .expect("reopen production composition");
-    demand_production_code_index(&restarted, &project).await;
     let resumed = production_codex_message_search(&restarted, &project).await;
     assert!(
         resumed["results"]
