@@ -117,12 +117,25 @@ if ! python3 "$here/grade.py" --check-hints; then
   exit 3
 fi
 
-# ---- work dir + hermetic tracedecay store ---------------------------------- #
+# Fixture initialization is daemon-brokered: the daemon owns the code-index
+# scheduler. Re-enter the runner under the repository's bounded isolated-daemon
+# harness so fixture init and every agent tool call share one private profile
+# and socket. TRACEDECAY_BIN pins the child invocation to the same candidate
+# binary that owns the daemon.
+export TRACEDECAY_ENABLE_GLOBAL_DB=0
+if [[ "${TRACEDECAY_DAEMON_HARNESS_ACTIVE:-}" != "1" ]]; then
+  exec "$repo_root/scripts/with-isolated-tracedecay-daemon.sh" \
+    --bin "$TD" \
+    --ready-timeout 60 \
+    --stop-timeout 10 \
+    --lifecycle-label "agent-adoption eval daemon" \
+    -- env TRACEDECAY_BIN="$TD" "$0" "$@"
+fi
+
+# ---- work dir + hermetic host state ---------------------------------------- #
 work="$(mktemp -d "${TMPDIR:-/tmp}/agent-evals.XXXXXX")"
 run_dir="$work/run"
 mkdir -p "$run_dir"
-export TRACEDECAY_DATA_DIR="$work/.tracedecay"
-export TRACEDECAY_ENABLE_GLOBAL_DB=0
 
 REAL_HOME="${HOME:?HOME must be set}"
 REAL_CODEX_HOME="${CODEX_HOME:-$REAL_HOME/.codex}"

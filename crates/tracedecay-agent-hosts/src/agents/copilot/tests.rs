@@ -41,6 +41,10 @@ fn fake_copilot_cli(bin: &Path, log: &Path, body: &str) {
 const FAKE_REGISTRY_BODY: &str = r#"case "$1 $2" in
   "mcp add")
     [ "$4" = "--" ] || { echo 'missing -- separator before the server command' >&2; exit 64; }
+    if [ -f "$HOME/.copilot/mcp-config.json" ] && /bin/grep -q '"tracedecay"' "$HOME/.copilot/mcp-config.json"; then
+      echo 'cannot update an existing MCP registration in place' >&2
+      exit 9
+    fi
     command="$5"
     /bin/mkdir -p "$HOME/.copilot"
     if [ -f "$HOME/.copilot/mcp-config.json" ] && /bin/grep -q '"other"' "$HOME/.copilot/mcp-config.json"; then
@@ -51,7 +55,7 @@ const FAKE_REGISTRY_BODY: &str = r#"case "$1 $2" in
     ;;
   "mcp remove")
     if [ -f "$HOME/.copilot/mcp-config.json" ] && /bin/grep -q '"other"' "$HOME/.copilot/mcp-config.json"; then
-      printf '%s\n' '{"mcpServers":{"other":{"command":"other","args":[]}}}' > "$HOME/.copilot/mcp-config.json"
+      printf '%s\n' '{"mcpServers":{"other":{"tools":["*"],"command":"other","args":[]}}}' > "$HOME/.copilot/mcp-config.json"
     else
       /bin/rm -f "$HOME/.copilot/mcp-config.json"
     fi
@@ -139,7 +143,7 @@ fn removal_drives_the_hosts_own_mcp_remove_and_reverses_the_registration() {
 
 #[cfg(unix)]
 #[test]
-fn add_and_remove_preserve_an_operator_owned_peer_server() {
+fn refresh_replaces_an_existing_registration_and_preserves_an_operator_owned_peer_server() {
     let home = tempfile::tempdir().unwrap();
     let bin_dir = tempfile::tempdir().unwrap();
     let log = bin_dir.path().join("invocations.log");
@@ -154,7 +158,15 @@ fn add_and_remove_preserve_an_operator_owned_peer_server() {
     .unwrap();
 
     copilot_mcp_add_with(&copilot_cli, home.path(), "/new/tracedecay")
-        .expect("host add must update tracedecay while preserving the peer");
+        .expect("host refresh must replace tracedecay while preserving the peer");
+    assert_eq!(
+        recorded_invocations(&log),
+        vec![
+            "mcp remove tracedecay".to_string(),
+            "mcp add tracedecay -- /new/tracedecay serve".to_string(),
+        ],
+        "an existing registration must be removed before Copilot can add its replacement"
+    );
     let added: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&mcp_path).unwrap()).unwrap();
     assert_eq!(added["mcpServers"]["other"]["command"], "other");
@@ -284,5 +296,29 @@ fn the_doctor_readback_accepts_exactly_the_cli_launch_arguments() {
     assert!(
         !server_args_are_current(&stale),
         "a server launched with different arguments must not read back as current"
+    );
+}
+
+#[test]
+fn component_registration_reads_the_cli_owned_mcp_state() {
+    let home = tempfile::tempdir().unwrap();
+    let mcp_path = copilot_cli_mcp_config_path(home.path());
+    std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &mcp_path,
+        br#"{"mcpServers":{"tracedecay":{"tools":["*"],"type":"stdio","command":"/bin/tracedecay","args":["serve"]}}}"#,
+    )
+    .unwrap();
+    let health = HealthcheckContext {
+        home: home.path().to_path_buf(),
+        project_path: home.path().to_path_buf(),
+    };
+
+    assert_eq!(
+        CopilotIntegration.host_component_registration(
+            super::super::host_bundle_v2::HostBundleComponentV1::ContextMcp,
+            &health,
+        ),
+        super::super::host_bundle_v2::HostBundleRegistrationStateV1::Current,
     );
 }

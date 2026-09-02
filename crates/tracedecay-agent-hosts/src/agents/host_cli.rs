@@ -397,10 +397,36 @@ pub(crate) fn run_mcp_registry_step(
     own_server_name: &str,
     host_label: &str,
 ) -> Result<()> {
-    let (_, peers_before) = read_mcp_config_observation(mcp_path, own_server_name, host_label)?;
+    run_mcp_registry_step_with_peer_projection(
+        program,
+        args,
+        home,
+        mcp_path,
+        own_server_name,
+        host_label,
+        |_| {},
+    )
+}
+
+/// Run a registry step while comparing peers through a host-specific semantic
+/// projection. Most registries use [`run_mcp_registry_step`] for exact values;
+/// Copilot uses this boundary because its CLI materializes documented default
+/// fields on otherwise unchanged peer registrations.
+pub(crate) fn run_mcp_registry_step_with_peer_projection(
+    program: &Path,
+    args: &[&str],
+    home: &Path,
+    mcp_path: &Path,
+    own_server_name: &str,
+    host_label: &str,
+    project_peers: impl Fn(&mut serde_json::Map<String, serde_json::Value>),
+) -> Result<()> {
+    let (_, mut peers_before) = read_mcp_config_observation(mcp_path, own_server_name, host_label)?;
+    project_peers(&mut peers_before);
     let outcome = run_host_cli(program, args, home)?;
-    let (observed_bytes, peers_after) =
+    let (observed_bytes, mut peers_after) =
         read_mcp_config_observation(mcp_path, own_server_name, host_label)?;
+    project_peers(&mut peers_after);
     if peers_before != peers_after {
         return Err(TraceDecayError::Config {
             message: format!(

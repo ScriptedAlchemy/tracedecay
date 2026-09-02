@@ -5945,4 +5945,48 @@ esac
         assert!(!plugin.join("dashboard/plugin_api.py").exists());
         assert!(!plugin.join("dashboard/dist/index.js").exists());
     }
+
+    #[test]
+    fn hermes_receiptless_beta_plugin_is_adopted_and_refreshed() {
+        let _profile = pinned_host_profile();
+        let home = tempfile::tempdir().unwrap();
+        let data_dir = home.path().join(".tracedecay-data");
+        let _data_dir_guard = EnvVarGuard::set(
+            tracedecay_runtime_core::config::USER_DATA_DIR_ENV,
+            &data_dir,
+        );
+        std::fs::create_dir_all(home.path().join(".hermes/profiles/work")).unwrap();
+
+        apply_default_canonical_component_set(
+            "hermes",
+            HostBundleCliOperation::Install,
+            home.path(),
+            true,
+            false,
+        )
+        .unwrap();
+
+        std::fs::remove_dir_all(data_dir.join("host-components")).unwrap();
+        for manifest in [
+            home.path().join(".hermes/plugins/tracedecay/plugin.yaml"),
+            home.path()
+                .join(".hermes/profiles/work/plugins/tracedecay/plugin.yaml"),
+        ] {
+            let contents = std::fs::read_to_string(&manifest).unwrap();
+            std::fs::write(
+                manifest,
+                contents.replace(env!("CARGO_PKG_VERSION"), "0.1.0-beta.33"),
+            )
+            .unwrap();
+        }
+
+        apply_default_canonical_component_set(
+            "hermes",
+            HostBundleCliOperation::Install,
+            home.path(),
+            true,
+            true,
+        )
+        .expect("a receiptless generated Hermes plugin must be adoptable");
+    }
 }
