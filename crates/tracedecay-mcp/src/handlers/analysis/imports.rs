@@ -1,6 +1,6 @@
 //! `tracedecay_unused_imports` — `use`-statement identifiers weighed against identifier spans in the rest of the file.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::Path;
 
 use serde_json::{Value, json};
@@ -137,30 +137,15 @@ const UNUSED_IMPORTS_MAX_LIMIT: usize = 500;
 /// cursor rather than reporting a short list as the whole truth.
 const UNUSED_IMPORTS_FILE_BUDGET: usize = 400;
 
-#[derive(Clone, Copy)]
-struct IdentifierSpan {
-    first_line: u32,
-    last_line: u32,
-}
-
 /// Indexes every identifier in a masked source once, so each import's
-/// reference check is a map lookup instead of a full-file scan.
+/// reference check is a set lookup instead of a full-file scan.
 #[hotpath::measure]
-fn identifier_spans(source: &str) -> HashMap<String, IdentifierSpan> {
-    let mut spans: HashMap<String, IdentifierSpan> = HashMap::new();
-    for (line_index, line) in source.lines().enumerate() {
-        let line_index = line_index as u32;
-        for identifier in identifiers_in_line(line) {
-            spans
-                .entry(identifier)
-                .and_modify(|span| span.last_line = line_index)
-                .or_insert(IdentifierSpan {
-                    first_line: line_index,
-                    last_line: line_index,
-                });
-        }
+fn identifiers_in_source(source: &str) -> HashSet<String> {
+    let mut identifiers = HashSet::new();
+    for line in source.lines() {
+        identifiers.extend(identifiers_in_line(line));
     }
-    spans
+    identifiers
 }
 
 /// Splits a masked source line into whole identifier tokens (boundaries are
@@ -324,7 +309,7 @@ fn unused_imports_in_file(project_root: &Path, file_path: &str) -> Result<Vec<Va
     let masked =
         tracedecay_code_extraction::source_mask::masked_rust_source(&source);
     let referenced_identifiers =
-        identifier_spans(&without_use_declarations(masked, &source, &use_nodes)?);
+        identifiers_in_source(&without_use_declarations(masked, &source, &use_nodes)?);
 
     let mut unused = Vec::new();
     for use_node in use_nodes
@@ -340,7 +325,7 @@ fn unused_imports_in_file(project_root: &Path, file_path: &str) -> Result<Vec<Va
         // partially-used group is missed and the literal `{a, b as c}` is
         // treated as one identifier that matches nothing.
         for identifier in identifiers_from_use_path(&use_node.name) {
-            if !referenced_identifiers.contains_key(&identifier) {
+            if !referenced_identifiers.contains(&identifier) {
                 unused.push(json!({
                     "id": &use_node.id,
                     "name": &use_node.name,
