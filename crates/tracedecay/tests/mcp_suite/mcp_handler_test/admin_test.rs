@@ -1,5 +1,3 @@
-#[cfg(feature = "test-transport")]
-use crate::fixture;
 use crate::support::*;
 use serde_json::{Value, json};
 #[cfg(feature = "test-transport")]
@@ -16,7 +14,25 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let registry_dir = test_temp_dir();
     let registry_path = registry_dir.path().join("global.db");
-    let registry_runtime = seed_project_registry(&registry_path, cg.project_root()).await;
+    let seeded_project_root = registry_dir.path().join("registered-alpha-project");
+    fs::create_dir_all(&seeded_project_root).unwrap();
+    let registry_runtime = seed_project_registry(&registry_path, &seeded_project_root).await;
+    let active_project_id = cg
+        .store_layout()
+        .identity
+        .project_id
+        .clone()
+        .expect("active project identity");
+    registry_runtime
+        .upsert_code_project(
+            &active_project_id,
+            cg.project_root(),
+            None,
+            None,
+            Some("main"),
+        )
+        .await
+        .unwrap();
     let _env_guard = GlobalDbEnvGuard::set(&registry_path);
 
     let list = handle_tool_call_with_runtime(
@@ -39,7 +55,7 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
         matches!(
             list_payload["projects"][0]["project_id"].as_str(),
             Some("proj_alpha" | "proj_beta")
-        ),
+        ) || list_payload["projects"][0]["project_id"] == active_project_id,
         "the bounded list must return one registered project: {list_payload}"
     );
     let list_text = extract_text(&list.value);
@@ -79,8 +95,8 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
     assert_eq!(search_projects.len(), 1);
     assert_eq!(search_projects[0]["project_id"], "proj_alpha");
     assert_eq!(
-        search_projects[0]["is_active"], true,
-        "the calling project must be marked is_active in project search: {search_payload}"
+        search_projects[0]["is_active"], false,
+        "a separately registered project must not be marked active: {search_payload}"
     );
     assert_eq!(search_payload["project_tree"].as_array().unwrap().len(), 1);
     let search_text = extract_text(&search.value);
@@ -134,14 +150,14 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
         &cg,
         &registry_runtime,
         "tracedecay_project_context",
-        json!({"project_selector": {"project_id": "proj_alpha"}, "format": "json"}),
+        json!({"project_selector": {"project_id": active_project_id}, "format": "json"}),
         None,
         None,
     )
     .await
     .unwrap();
     let context_payload: Value = serde_json::from_str(extract_text(&context.value)).unwrap();
-    assert_eq!(context_payload["project"]["project_id"], "proj_alpha");
+    assert_eq!(context_payload["project"]["project_id"], active_project_id);
     assert_eq!(
         context_payload["is_active"], true,
         "the calling project must be marked is_active in project context: {context_payload}"
@@ -155,13 +171,28 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
         !context_text.contains("secret") && !context_text.contains("git_remote_url"),
         "project context must not expose credential-bearing remotes: {context_text}"
     );
-    assert_eq!(context_payload["stores"].as_array().unwrap().len(), 1);
+    let seeded_context = handle_tool_call_with_runtime(
+        &cg,
+        &registry_runtime,
+        "tracedecay_project_context",
+        json!({"project_selector": {"project_id": "proj_alpha"}, "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let seeded_context_payload: Value =
+        serde_json::from_str(extract_text(&seeded_context.value)).unwrap();
     assert_eq!(
-        context_payload["stores"][0]["graph_scopes"][0]["branch_name"],
+        seeded_context_payload["stores"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(
+        seeded_context_payload["stores"][0]["graph_scopes"][0]["branch_name"],
         "main"
     );
     assert_eq!(
-        context_payload["stores"][0]["artifacts"][0]["artifact_kind"],
+        seeded_context_payload["stores"][0]["artifacts"][0]["artifact_kind"],
         "graph_db"
     );
 
@@ -180,7 +211,7 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
     assert_eq!(alias_payload["project"]["project_id"], "proj_alpha");
     assert_eq!(
         alias_payload["project"]["display_root"],
-        cg.project_root().to_string_lossy().as_ref()
+        seeded_project_root.to_string_lossy().as_ref()
     );
 
     let unknown_alias = handle_tool_call_with_runtime(
@@ -405,7 +436,9 @@ async fn project_registry_tools_prefer_injected_registry_over_process_default() 
         .await
         .unwrap();
     drop(process_db);
-    seed_project_registry(&client_registry_path, cg.project_root()).await;
+    let client_seed_root = client_registry_dir.path().join("registered-alpha-project");
+    fs::create_dir_all(&client_seed_root).unwrap();
+    seed_project_registry(&client_registry_path, &client_seed_root).await;
     let project_id = cg
         .store_layout()
         .identity
@@ -420,6 +453,20 @@ async fn project_registry_tools_prefer_injected_registry_over_process_default() 
     )
     .await
     .unwrap();
+    client_runtime
+        .upsert_code_project(
+            cg.store_layout()
+                .identity
+                .project_id
+                .as_deref()
+                .expect("active project identity"),
+            cg.project_root(),
+            None,
+            None,
+            Some("main"),
+        )
+        .await
+        .unwrap();
     let server = tracedecay::mcp::McpServer::new_with_host_admission_test_runtime_for_test(
         tracedecay::tracedecay::TraceDecay::open(cg.project_root())
             .await
@@ -486,117 +533,54 @@ async fn project_registry_tools_prefer_injected_registry_over_process_default() 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn selected_project_read_skips_cache_write_for_read_only_store() {
-    let project_dir = test_temp_dir();
-    let (cg, _env) = init_test_project(project_dir.path()).await;
-    // Both graphs and the registry share one profile: a test runtime only
-    // mounts stores inside its own profile root, so a registry parked in a
-    // separate directory could never reach either graph.
-    let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
-    let target_dir = test_temp_dir();
-    let target_project = target_dir.path();
-
-    fs::create_dir_all(target_project.join("src")).unwrap();
-    fs::write(
-        target_project.join("src/main.rs"),
-        "fn main() { println!(\"selected\"); }\n",
-    )
-    .unwrap();
-
-    let project_id = cg
-        .store_layout()
-        .identity
-        .project_id
-        .as_deref()
-        .and_then(|value| tracedecay_domain::ProjectId::new(value.to_string()).ok())
-        .expect("test project identity");
-    let registry =
-        HostAdmissionTestRuntimeV1::project_scoped(&profile_root, cg.project_root(), project_id)
-            .await
-            .unwrap();
-    // One profile end to end: the target must init with the same explicit
-    // profile/global-db pair its read-only reopen below uses. Env-derived
-    // targets at init point the global DB at the env override while the
-    // explicit reopen derives it from the profile root, splitting one
-    // project across two configuration stores — and the reopen correctly
-    // refuses the uninitialized one instead of sealing a revision through a
-    // read-only open.
-    let target_options = tracedecay::tracedecay::TraceDecayOpenOptions {
-        global_db_path: Some(profile_root.join("global.db")),
-        profile_root: Some(profile_root.clone()),
-    };
-    let target_cg = TestTraceDecay::new(
-        fixture::init_project_from_template_with_options(target_project, target_options.clone())
-            .await
-            .unwrap(),
-    );
-    let target_project_key = target_cg
-        .store_layout()
-        .identity
-        .project_id
-        .clone()
-        .expect("target project identity");
-    let target_project_id = tracedecay_domain::ProjectId::new(target_project_key.clone())
-        .expect("target project identity is a valid project id");
-    // The retained resolver matches a mounted graph by its store identity, so
-    // the registry entry has to carry the target's real project id; a synthetic
-    // id registers a route that can never resolve to the graph.
-    registry
-        .upsert_code_project(
-            &target_project_key,
-            target_project,
-            None,
-            None,
-            Some("main"),
-        )
-        .await
-        .unwrap();
-    let target_runtime = HostAdmissionTestRuntimeV1::project_scoped(
-        &profile_root,
-        target_project,
-        target_project_id,
-    )
-    .await
-    .unwrap();
-    let target_graph = target_runtime
-        .open_project_graph_read_only_for_test(target_project, target_options)
-        .await
-        .expect("target project graph opens through its own scoped runtime");
-    let target_server = tracedecay::mcp::McpServer::new_with_host_admission_test_runtime_for_test(
-        target_graph,
-        None,
-        target_runtime,
-    )
-    .await
-    .expect("target project server");
-    let server = tracedecay::mcp::McpServer::new_with_retained_test_servers_for_test(
-        tracedecay::tracedecay::TraceDecay::open(cg.project_root())
-            .await
-            .unwrap(),
-        None,
-        registry,
-        vec![target_server],
-    )
-    .await
-    .expect("registered test server");
-
+    let fixture = production_composition_fixture().await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
+    wait_for_current_graph(&server).await;
+    let storage =
+        handle_real_server_tool_call(&server, "tracedecay_storage_status", json!({})).await;
+    let storage_payload: Value = serde_json::from_str(extract_real_server_text(&storage)).unwrap();
+    let target_project_key = storage_payload["scope"]["project_id"]
+        .as_str()
+        .expect("production project identity")
+        .to_owned();
     let read_args = json!({
         "project_selector": {"project_id": target_project_key},
         "file": "src/main.rs",
         "mode": "full",
         "format": "json"
     });
-    for attempt in 1..=2 {
-        let selected_read =
-            handle_real_server_tool_call(&server, "tracedecay_read", read_args.clone()).await;
-        let read_payload = extract_first_json_content(&selected_read);
-        assert_eq!(read_payload["file"], "src/main.rs");
-        assert!(
-            read_payload["body"]
-                .as_str()
-                .is_some_and(|body| body.contains("selected")),
-            "attempt {attempt}: selected read should return file content without writing to the read-only cache: {read_payload}"
-        );
-    }
+    let initial_read =
+        handle_real_server_tool_call(&server, "tracedecay_read", read_args.clone()).await;
+    let initial_payload = extract_first_json_content(&initial_read);
+    assert_eq!(initial_payload["file"], "src/main.rs");
+    assert!(
+        initial_payload["body"]
+            .as_str()
+            .is_some_and(|body| body.contains("fn main()")),
+        "initial selected read should return the mounted file content: {initial_payload}"
+    );
+    let initial_digest = initial_payload["digest"].clone();
+    assert!(initial_digest.is_string(), "{initial_payload}");
+
+    let unchanged_read = handle_real_server_tool_call(&server, "tracedecay_read", read_args).await;
+    let unchanged_payload = extract_first_json_content(&unchanged_read);
+    assert_eq!(unchanged_payload["file"], "src/main.rs");
+    assert_eq!(
+        unchanged_payload["unchanged"], true,
+        "the successful second read must publish the canonical no-write result: {unchanged_payload}"
+    );
+    assert_eq!(
+        unchanged_payload["digest"], initial_digest,
+        "the no-write result must identify the exact content returned initially"
+    );
+    assert!(
+        unchanged_payload["body"].is_null(),
+        "an unchanged read must not duplicate the file body: {unchanged_payload}"
+    );
+    fixture.harness.shutdown().await;
 }
 
 #[test]

@@ -806,6 +806,11 @@ async fn test_move_symbol_non_utf8_destination_refuses() {
     )
     .unwrap();
     let (cg, _env) = init_test_project(project).await;
+    let server = cg
+        .harness
+        .server(&cg.project_root)
+        .expect("production project server");
+    warm_code_index_search(&server, "movable").await;
 
     // Write an existing destination with invalid UTF-8 bytes AFTER indexing so
     // the indexer never has to parse it.

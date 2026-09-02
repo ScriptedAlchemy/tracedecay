@@ -134,9 +134,20 @@ impl McpServer {
                 None,
                 application_invocation_executor,
                 application_invocation_target,
-                None,
-                None,
-                None,
+                Some(
+                    tracedecay_application::RequestId::new("request.mcp.test-transport")
+                        .expect("static test-transport request identity"),
+                ),
+                Some(
+                    tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(i64::MAX))
+                        .expect("static test-transport deadline"),
+                ),
+                Some(
+                    tracedecay_application::CancellationSignal::active(
+                        "cancellation.mcp.test-transport",
+                    )
+                    .expect("static test-transport cancellation"),
+                ),
             )
             .await
     }

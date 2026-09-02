@@ -424,10 +424,9 @@ async fn hook_route_to_registered_but_unmounted_project_fails_closed() {
     );
 }
 
-/// Registering one root under a second project id leaves that root's alias
-/// pointing at a project row that owns no store. Selector resolution must
-/// refuse rather than pick a registration, and must not quietly answer from
-/// the active project.
+/// Registering one root under a second project id moves that root's exact
+/// alias to a project row with no mounted server. Selector resolution must
+/// refuse as unmounted and must not quietly answer from the active project.
 #[tokio::test]
 async fn hook_route_to_ambiguously_registered_project_fails_closed() {
     let projects = routed_projects().await;
@@ -443,8 +442,8 @@ async fn hook_route_to_ambiguously_registered_project_fails_closed() {
         )
         .await
         .expect("duplicate registration of the target root is accepted by the registry");
-    // Route selection fails on the ambiguous registration before retained
-    // server lookup.
+    // Route selection resolves the registry's current alias owner, then fails
+    // closed because that owner has no retained server.
     let server = McpServer::new_with_retained_test_servers_for_test(
         projects.active,
         None,
@@ -466,8 +465,8 @@ async fn hook_route_to_ambiguously_registered_project_fails_closed() {
 
     assert_route_failed_closed(
         &response_with_id(&responses, json!(1)),
-        "read routed to an ambiguously registered project",
-        "not found for selector",
+        "read routed to a re-registered but unmounted project",
+        "not mounted",
     );
 }
 

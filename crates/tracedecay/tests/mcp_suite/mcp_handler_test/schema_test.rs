@@ -1,5 +1,7 @@
 use crate::support::*;
 use serde_json::{Value, json};
+use std::sync::Arc;
+use tracedecay::mcp::McpServer;
 use tracedecay::tracedecay::TraceDecay;
 use tracedecay_mcp::get_tool_definitions;
 #[test]
@@ -31,10 +33,19 @@ async fn schema_required_arguments_match_representative_handler_parsers() {
     )
     .await;
 
+    // Routed graph tools need the production query authority mounted before
+    // dispatch reaches their operation parser.
+    let fixture = production_composition_fixture().await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
+    wait_for_current_graph(&server).await;
+
     // Shared helper parser style, including canonical node_id despite id alias support.
     assert_schema_requires(&tools, "tracedecay_callers", &["node_id"]);
-    expect_missing_argument_error(
-        &cg,
+    expect_real_server_missing_argument_error(
+        &server,
         "tracedecay_callers",
         json!({}),
         "missing required parameter: node_id",
@@ -43,8 +54,13 @@ async fn schema_required_arguments_match_representative_handler_parsers() {
 
     // Non-empty array parser style.
     assert_schema_requires(&tools, "tracedecay_callers_for", &["node_ids"]);
-    expect_missing_argument_error(&cg, "tracedecay_callers_for", json!({}), "node_ids").await;
-
+    expect_real_server_missing_argument_error(
+        &server,
+        "tracedecay_callers_for",
+        json!({}),
+        "node_ids",
+    )
+    .await;
     // Multi-field edit parser style.
     assert_schema_requires(
         &tools,
@@ -69,37 +85,37 @@ async fn schema_required_arguments_match_representative_handler_parsers() {
         (
             "tracedecay_fact_store_add",
             &["content"][..],
-            "missing required parameter: content",
+            "missing field `content`",
         ),
         (
             "tracedecay_fact_store_search",
             &["query"][..],
-            "missing required parameter: query",
+            "missing field `query`",
         ),
         (
             "tracedecay_fact_store_probe",
             &["entity"][..],
-            "missing required parameter: entity",
+            "missing field `entity`",
         ),
         (
             "tracedecay_fact_store_related",
             &["entity"][..],
-            "missing required parameter: entity",
+            "missing field `entity`",
         ),
         (
             "tracedecay_fact_store_get",
             &["fact_id"][..],
-            "missing required parameter: fact_id",
+            "missing field `fact_id`",
         ),
         (
             "tracedecay_fact_store_update",
             &["fact_id"][..],
-            "missing required parameter: fact_id",
+            "missing field `fact_id`",
         ),
         (
             "tracedecay_fact_store_remove",
             &["fact_id"][..],
-            "missing required parameter: fact_id",
+            "missing field `fact_id`",
         ),
         // Hand-written git schemas, parsed with the `require_*_arg` helpers.
         (
@@ -127,8 +143,25 @@ async fn schema_required_arguments_match_representative_handler_parsers() {
         ("tracedecay_context", &["task"][..], "missing field `task`"),
     ] {
         assert_schema_requires(&tools, tool_name, required_args);
-        expect_missing_argument_error(&cg, tool_name, json!({}), expected_message).await;
+        if matches!(
+            tool_name,
+            "tracedecay_diff_context"
+                | "tracedecay_changelog"
+                | "tracedecay_port_status"
+                | "tracedecay_port_order"
+        ) {
+            expect_real_server_missing_argument_error(
+                &server,
+                tool_name,
+                json!({}),
+                expected_message,
+            )
+            .await;
+        } else {
+            expect_missing_argument_error(&cg, tool_name, json!({}), expected_message).await;
+        }
     }
+    fixture.harness.shutdown().await;
 
     // Nested-object parser style.
     assert_schema_requires(
@@ -151,7 +184,7 @@ async fn schema_required_arguments_match_representative_handler_parsers() {
         &cg,
         "tracedecay_lcm_expand",
         json!({ "provider": "cursor", "session_id": "session-1", "target": {} }),
-        "target.kind must be one of raw_message, summary_node, external_payload",
+        "target: missing field `kind`",
     )
     .await;
 }
@@ -692,6 +725,22 @@ pub(crate) async fn expect_missing_argument_error(
     expected_message: &str,
 ) {
     let message = expect_tool_error(handle_tool_call(cg, tool_name, args, None, None).await);
+    assert!(
+        message.contains(expected_message),
+        "{tool_name} parser error should mention `{expected_message}`, got `{message}`"
+    );
+}
+
+async fn expect_real_server_missing_argument_error(
+    server: &Arc<McpServer>,
+    tool_name: &str,
+    args: Value,
+    expected_message: &str,
+) {
+    let response = handle_real_server_tool_call_raw(server, tool_name, args).await;
+    let message = response["error"]["message"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{tool_name} should reject missing arguments: {response}"));
     assert!(
         message.contains(expected_message),
         "{tool_name} parser error should mention `{expected_message}`, got `{message}`"

@@ -21,6 +21,11 @@ fn extract_edit_json(value: &Value) -> Value {
         .unwrap_or_else(|| panic!("missing JSON content item in {value}"))
 }
 
+async fn wait_for_source_generation(fixture: &ProductionSourceEditFixture, symbol: &str) {
+    let server = fixture.harness.server(&fixture.project_root).unwrap();
+    warm_code_index_search(&server, symbol).await;
+}
+
 #[tokio::test]
 async fn source_edit_preview_apply_and_retry_use_daemon_owned_cas_authority() {
     let dir = test_temp_dir();
@@ -236,13 +241,14 @@ async fn path_containment_read_rejects_parent_traversal_before_serving_file() {
 async fn read_and_outline_preserve_symlink_indexed_file_key() {
     let dir = test_temp_dir();
     let project = dir.path().join("repo");
-    let external = dir.path().join("external-src");
+    let indexed_src = project.join("indexed-src");
     fs::create_dir_all(&project).unwrap();
-    fs::create_dir_all(&external).unwrap();
-    fs::write(external.join("lib.rs"), "pub fn through_symlink() {}\n").unwrap();
-    unix_fs::symlink(&external, project.join("src")).unwrap();
+    fs::create_dir_all(&indexed_src).unwrap();
+    fs::write(indexed_src.join("lib.rs"), "pub fn through_symlink() {}\n").unwrap();
+    unix_fs::symlink(&indexed_src, project.join("src")).unwrap();
 
     let (cg, _env) = init_test_project(&project).await;
+    wait_for_source_generation(&cg, "through_symlink").await;
 
     let read = handle_tool_call(
         &cg,
@@ -281,12 +287,21 @@ async fn read_and_outline_preserve_symlink_indexed_file_key() {
     let outline_payload: serde_json::Value = serde_json::from_str(outline_text).unwrap();
     assert_eq!(outline_payload["file"], "src/lib.rs");
     assert!(
-        outline_payload["symbols"]
+        outline_payload["ast_grep_outline"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|symbol| symbol["name"] == "through_symlink"),
-        "outline should query graph by indexed symlink path: {outline_payload:?}"
+            .any(|file| {
+                file["path"]
+                    .as_str()
+                    .is_some_and(|path| path.ends_with("/indexed-src/lib.rs"))
+                    && file["items"].as_array().is_some_and(|items| {
+                        items
+                            .iter()
+                            .any(|symbol| symbol["name"] == "through_symlink")
+                    })
+            }),
+        "outline should preserve the request key and generate symbols from the contained target: {outline_payload:?}"
     );
 }
 
@@ -300,6 +315,7 @@ async fn outline_preserves_generation_payload_and_adds_ast_grep_outline_when_ava
     let project = dir.path().join("project");
     crate::fixture::write_indexed_fixture_sources(&project);
     let (cg, _env) = init_test_project(&project).await;
+    wait_for_source_generation(&cg, "helper").await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_outline",
@@ -895,7 +911,12 @@ async fn test_str_replace_unsupported_file_type_succeeds() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
     let project = project_root.as_path();
-    fs::create_dir_all(project).unwrap();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(
+        project.join("src/lib.rs"),
+        "pub fn source_edit_anchor() {}\n",
+    )
+    .unwrap();
 
     let stylesheet = project.join("style.css");
     fs::write(&stylesheet, ".foo {\n\tfont-size: 14px;\n}\n").unwrap();
@@ -905,6 +926,7 @@ async fn test_str_replace_unsupported_file_type_succeeds() {
     );
 
     let (cg, _env) = init_test_project(project).await;
+    wait_for_source_generation(&cg, "source_edit_anchor").await;
 
     let result = handle_tool_call(
         &cg,
@@ -920,11 +942,16 @@ async fn test_str_replace_unsupported_file_type_succeeds() {
     .await
     .unwrap();
 
-    let warning = extract_text(&result.value);
-    assert!(warning.contains("style.css"), "{warning}");
-    assert!(warning.contains("edited after the last sync"), "{warning}");
     let parsed = extract_edit_json(&result.value);
     assert_eq!(parsed["success"], true);
+    assert_eq!(parsed["effect"]["effect_class"], "source_edit");
+    assert_eq!(parsed["effect"]["receipt"]["outcome"], "completed");
+    assert_eq!(parsed["effect"]["payload"]["success"], true);
+    assert_eq!(
+        parsed["effect"]["payload"]["operation"],
+        "use-case.application.source-edit.str-replace"
+    );
+    assert_eq!(parsed["effect"]["payload"]["files"], json!(["style.css"]));
 
     let content = fs::read_to_string(project.join("style.css")).unwrap();
     assert!(content.contains("0.85rem"));
@@ -1055,7 +1082,12 @@ async fn test_multi_str_replace_unsupported_file_type_succeeds() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
     let project = project_root.as_path();
-    fs::create_dir_all(project).unwrap();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(
+        project.join("src/lib.rs"),
+        "pub fn source_edit_anchor() {}\n",
+    )
+    .unwrap();
 
     let stylesheet = project.join("style.css");
     fs::write(
@@ -1069,6 +1101,7 @@ async fn test_multi_str_replace_unsupported_file_type_succeeds() {
     );
 
     let (cg, _env) = init_test_project(project).await;
+    wait_for_source_generation(&cg, "source_edit_anchor").await;
 
     let result = handle_tool_call(
         &cg,
@@ -1086,12 +1119,18 @@ async fn test_multi_str_replace_unsupported_file_type_succeeds() {
     .await
     .unwrap();
 
-    let warning = extract_text(&result.value);
-    assert!(warning.contains("style.css"), "{warning}");
-    assert!(warning.contains("edited after the last sync"), "{warning}");
     let parsed = extract_edit_json(&result.value);
     assert_eq!(parsed["success"], true);
     assert_eq!(parsed["applied_count"], 2);
+    assert_eq!(parsed["effect"]["effect_class"], "source_edit");
+    assert_eq!(parsed["effect"]["receipt"]["outcome"], "completed");
+    assert_eq!(parsed["effect"]["payload"]["success"], true);
+    assert_eq!(
+        parsed["effect"]["payload"]["operation"],
+        "use-case.application.source-edit.multi-str-replace"
+    );
+    assert_eq!(parsed["effect"]["payload"]["change_count"], 2);
+    assert_eq!(parsed["effect"]["payload"]["files"], json!(["style.css"]));
 
     let content = fs::read_to_string(project.join("style.css")).unwrap();
     assert!(content.contains("0.85rem"));

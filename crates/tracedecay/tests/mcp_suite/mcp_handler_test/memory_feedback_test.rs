@@ -34,7 +34,18 @@ fn fact_feedback_schema_is_canonical_and_excludes_legacy_aliases() {
         feedback.input_schema["required"],
         json!(["fact_id", "action"])
     );
-    assert_eq!(properties["fact_id"]["type"], "string");
+    let fact_id_schema = &properties["fact_id"];
+    let fact_id_is_string = fact_id_schema["type"] == "string"
+        || fact_id_schema["$ref"]
+            .as_str()
+            .and_then(|reference| reference.strip_prefix("#/$defs/"))
+            .is_some_and(|definition| {
+                feedback.input_schema["$defs"][definition]["type"] == "string"
+            });
+    assert!(
+        fact_id_is_string,
+        "fact_id must resolve to the canonical string newtype schema: {fact_id_schema}"
+    );
     for field in [
         "expected_last_event_id",
         "source_label",
