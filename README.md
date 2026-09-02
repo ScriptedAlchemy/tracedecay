@@ -65,6 +65,7 @@ tracedecay status
 tracedecay install --agent claude
 tracedecay install --agent codex
 tracedecay install --agent cursor
+tracedecay install --agent devin
 tracedecay install --agent gemini
 tracedecay install --agent hermes
 ```
@@ -74,6 +75,7 @@ Project-local setup:
 ```bash
 tracedecay install --local --agent cursor
 tracedecay install --local --agent codex
+tracedecay install --local --agent devin
 ```
 
 After setup, restart the agent so it loads the MCP server, plugin, hooks, or rules written for that host.
