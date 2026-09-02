@@ -33,6 +33,31 @@ const HOST_EVENT_FIXTURES: [(&str, &str); 5] = [
     ),
 ];
 
+#[test]
+fn stock_host_order_preserves_existing_rows_and_appends_devin() {
+    assert_eq!(
+        HostKindV1::ALL,
+        [
+            HostKindV1::ClaudeCode,
+            HostKindV1::CursorDesktop,
+            HostKindV1::CursorCloud,
+            HostKindV1::Codex,
+            HostKindV1::Hermes,
+            HostKindV1::Kiro,
+            HostKindV1::ClineFamily,
+            HostKindV1::Cline,
+            HostKindV1::RooCode,
+            HostKindV1::Kilo,
+            HostKindV1::KimiCode,
+            HostKindV1::OpenCode,
+            HostKindV1::Gemini,
+            HostKindV1::Copilot,
+            HostKindV1::Devin,
+        ],
+        "new stock hosts append so established capability rows retain their positions"
+    );
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum FixtureAdmissionReason {
