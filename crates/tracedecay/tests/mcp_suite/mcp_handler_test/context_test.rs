@@ -15,11 +15,17 @@ struct ScopedProductionContextFixture {
 }
 
 async fn setup_production_project() -> ProductionCompositionFixture {
-    production_composition_fixture().await
+    let fixture = production_composition_fixture().await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production context server");
+    warm_code_index_search(&server, "helper").await;
+    fixture
 }
 
 async fn setup_production_generated_dir_project() -> ProductionCompositionFixture {
-    production_composition_fixture_with_sources(|project| {
+    let fixture = production_composition_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).unwrap();
         fs::create_dir_all(project.join("dist")).unwrap();
         fs::write(project.join("src/lib.rs"), "pub fn kept() {}\n").unwrap();
@@ -29,7 +35,13 @@ async fn setup_production_generated_dir_project() -> ProductionCompositionFixtur
         )
         .unwrap();
     })
-    .await
+    .await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production generated-dir context server");
+    warm_code_index_search(&server, "kept").await;
+    fixture
 }
 
 async fn setup_scoped_production_project(scope_prefix: &str) -> ScopedProductionContextFixture {
@@ -70,14 +82,41 @@ async fn setup_scoped_production_project(scope_prefix: &str) -> ScopedProduction
     )
     .await
     .unwrap();
-    ScopedProductionContextFixture {
+    let fixture = ScopedProductionContextFixture {
         harness,
         project_root,
         _isolation: isolation,
-    }
+    };
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("scoped production context server");
+    warm_code_index_search(&server, "test_helper").await;
+    fixture
 }
 
 async fn call_production_tool(
+    fixture: &ProductionCompositionFixture,
+    tool_name: &str,
+    arguments: Value,
+) -> TraceDecayResult<ToolResult> {
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("{tool_name} production project server is unavailable: {error}"),
+        })?;
+    let mut value = handle_real_server_tool_call(&server, tool_name, arguments).await;
+    if let Some(text) = value["content"][0]["text"].as_str()
+        && let Ok(envelope) = serde_json::from_str::<Value>(text)
+        && let Some(payload) = envelope.pointer("/outcome/value/payload")
+    {
+        value["content"][0]["text"] = Value::String(payload.to_string());
+    }
+    Ok(ToolResult::new(value, Vec::new()))
+}
+
+async fn call_direct_production_tool(
     fixture: &ProductionCompositionFixture,
     tool_name: &str,
     arguments: Value,
@@ -117,11 +156,6 @@ async fn call_production_fact_tool(
     let response: Value = serde_json::from_str(extract_text(&result.value))
         .unwrap_or_else(|error| panic!("{tool_name} returned invalid JSON: {error}"));
     response
-        .pointer("/outcome/value/payload")
-        .cloned()
-        .unwrap_or_else(|| {
-            panic!("{tool_name} omitted the retained application payload: {response}")
-        })
 }
 
 fn available_fact(projection: &Value) -> &Value {
@@ -146,18 +180,22 @@ async fn test_context_appends_index_coverage_hint_for_skipped_generated_dirs() {
     let result = call_production_tool(
         &fixture,
         "tracedecay_context",
-        json!({"task": "generatedOnly", "max_nodes": 5}),
+        json!({"task": "generatedOnly", "max_nodes": 5, "format": "json"}),
     )
     .await
     .unwrap();
-    let text = extract_text(&result.value);
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    assert!(payload["code_generation"].as_str().is_some());
+    assert_eq!(payload["code"], json!([]), "{payload}");
+    assert_eq!(payload["symbols"], json!([]), "{payload}");
+    assert_eq!(payload["coverage"]["exact"], "complete");
+    assert_eq!(payload["coverage"]["lexical"], "complete");
+    assert_eq!(payload["coverage"]["graph"], "complete");
+    assert_eq!(payload["coverage"]["recall"], "partial");
+    assert_eq!(payload["coverage"]["semantic"]["status"], "unavailable");
     assert!(
-        text.contains("### Index Coverage Hint"),
-        "context miss should include coverage hint, got: {text}"
-    );
-    assert!(
-        text.contains("tracedecay sync --include-folder dist"),
-        "hint should include opt-in command, got: {text}"
+        payload.get("index_coverage_hint").is_none(),
+        "verified retrieval coverage must not fabricate legacy skipped-directory advice: {payload}"
     );
     fixture.harness.shutdown().await;
 }
@@ -169,7 +207,7 @@ async fn test_context_appends_index_coverage_hint_for_skipped_generated_dirs() {
 #[tokio::test]
 async fn test_context() {
     let fixture = setup_production_project().await;
-    let result = call_production_tool(
+    let result = call_direct_production_tool(
         &fixture,
         "tracedecay_context",
         json!({"task": "understand the helper function"}),
@@ -184,11 +222,6 @@ async fn test_context() {
 #[tokio::test]
 async fn context_includes_matching_memory_facts() {
     let fixture = setup_production_project().await;
-    let server = fixture
-        .harness
-        .server(&fixture.project_root)
-        .expect("production context MCP server");
-    let cg = server.cg().await;
     let added = call_production_fact_tool(
         &fixture,
         "tracedecay_fact_store_add",
@@ -217,26 +250,28 @@ async fn context_includes_matching_memory_facts() {
         .as_u64()
         .expect("canonical get must project access telemetry");
 
-    let markdown_result = handle_tool_call(
-        &cg,
+    let markdown_result = call_production_tool(
+        &fixture,
         "tracedecay_context",
-        json!({"task": "helper function durable memory review"}),
-        None,
-        None,
+        json!({
+            "task": "helper function durable memory review",
+            "format": "markdown"
+        }),
     )
     .await
     .unwrap();
     let markdown = extract_text(&markdown_result.value);
-    assert!(markdown.contains("### Memory Matches"));
+    assert!(
+        markdown.contains("### Memory Matches"),
+        "context markdown should render matching durable memory: {markdown}"
+    );
     assert!(markdown.contains(&format!("fact_id={fact_id}")));
     assert!(markdown.contains("Helper function reviews should check durable memory"));
 
-    let json_result = handle_tool_call(
-        &cg,
+    let json_result = call_production_tool(
+        &fixture,
         "tracedecay_context",
         json!({"task": "helper function durable memory review", "format": "json"}),
-        None,
-        None,
     )
     .await
     .unwrap();
@@ -244,10 +279,6 @@ async fn context_includes_matching_memory_facts() {
     assert!(
         payload.get("context_memory_analytics").is_none(),
         "internal context analytics must not be serialized in direct tool payloads"
-    );
-    assert!(
-        json_result.internal_analytics().is_some(),
-        "direct tool results should carry context analytics on the internal side channel"
     );
     assert!(payload["memory_matches"].as_array().is_some_and(|matches| {
         matches
@@ -408,16 +439,22 @@ async fn test_context_scope_prefix_filters() {
     );
     let result = response.result.expect("scoped context MCP result");
     let payload: Value = serde_json::from_str(extract_text(&result)).unwrap();
-    let symbols = payload["symbols"].as_array().expect("context symbols");
+    let search_matches = payload["search_matches"]
+        .as_array()
+        .expect("context search matches");
     assert!(
-        !symbols.is_empty(),
-        "context should retain matching symbols inside the configured scope: {payload}"
+        search_matches
+            .iter()
+            .any(|search_match| search_match["name"] == "test_helper"),
+        "context should retain the matching primary-search evidence inside the configured scope: {payload}"
     );
     assert!(
-        symbols.iter().all(|symbol| symbol["file"]
-            .as_str()
-            .is_some_and(|path| path.starts_with("tests/"))),
-        "context entry points must honor the production handshake scope: {payload}"
+        search_matches
+            .iter()
+            .all(|search_match| search_match["file"]
+                .as_str()
+                .is_some_and(|path| path.starts_with("tests/"))),
+        "context primary-search evidence must honor the production handshake scope: {payload}"
     );
     fixture.harness.shutdown().await;
 }

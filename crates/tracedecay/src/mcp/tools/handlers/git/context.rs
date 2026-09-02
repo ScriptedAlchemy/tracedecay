@@ -1080,9 +1080,14 @@ where
     let mut added = Vec::new();
     let mut modified = Vec::new();
     let mut nodes = Vec::with_capacity(symbol_page.symbols.len());
+    let mut config_key_counts = HashMap::<String, usize>::new();
     for symbol in symbol_page.symbols {
         controls.checkpoint()?;
         let path = symbol_path(&symbol)?;
+        if classify_file_role(path, &files_with_inline_tests) == "config" {
+            *config_key_counts.entry(path.to_owned()).or_default() += 1;
+            continue;
+        }
         let value = symbol_value(&symbol, false)?;
         if added_path_set.contains(path) {
             added.push(value);
@@ -1090,6 +1095,20 @@ where
             modified.push(value);
         }
         nodes.push(symbol);
+    }
+    let mut config_summaries = config_key_counts.into_iter().collect::<Vec<_>>();
+    config_summaries.sort_by(|left, right| left.0.cmp(&right.0));
+    for (path, config_keys) in config_summaries {
+        let summary = json!({
+            "file": path,
+            "kind": "config_summary",
+            "config_keys": config_keys,
+        });
+        if added_path_set.contains(path.as_str()) {
+            added.push(summary);
+        } else {
+            modified.push(summary);
+        }
     }
     let returned_symbols = added.len().saturating_add(modified.len());
     let symbols_added = added.len();

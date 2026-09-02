@@ -1,6 +1,11 @@
-use serde_json::Value;
+use std::collections::HashMap;
+
+use serde_json::{Value, json};
 use tracedecay_application::{ApplicationProblem, ResultContractRef};
+use tracedecay_code_extraction::LanguageRegistry;
+use tracedecay_code_index::intake::content_digest;
 use tracedecay_graph_query::VerifiedGraphQueryRequest;
+use tracedecay_runtime_core::privacy::{CodeSourceShapeV1, sanitize_code_source_bytes};
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
 use crate::application_surface::resolve_catalog_tool_binding;
@@ -17,6 +22,7 @@ use tracedecay_mcp::handlers::grep as portable_grep;
 use tracedecay_mcp::handlers::info as portable_info;
 
 use super::ToolCallRegistryOptions;
+use super::support::{effective_path, generic_tool_result, unique_file_paths};
 use super::tool_call_support::handle_retrieve;
 use super::unknown_tool_error;
 use super::{
@@ -37,6 +43,276 @@ fn graph_read_unavailable(detail: &str) -> TraceDecayError {
         retryable: false,
         detail: detail.to_owned(),
     }
+}
+
+const DOC_COVERAGE_SYMBOL_BUDGET: usize = 500_000;
+
+#[hotpath::measure]
+fn doc_coverage_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "function"
+            | "method"
+            | "class"
+            | "interface"
+            | "trait"
+            | "struct"
+            | "enum"
+            | "module"
+            | "field"
+            | "enum_variant"
+            | "const"
+            | "static"
+            | "type_alias"
+            | "property"
+            | "csharp_property"
+            | "record"
+            | "data_class"
+            | "sealed_class"
+            | "object"
+            | "case_class"
+            | "kotlin_object"
+            | "inner_class"
+            | "abstract_method"
+            | "constructor"
+            | "struct_method"
+            | "val"
+            | "var"
+            | "mixin"
+            | "extension"
+            | "union"
+            | "typedef"
+    )
+}
+
+#[hotpath::measure]
+fn doc_coverage_unavailable(detail: impl Into<String>) -> TraceDecayError {
+    TraceDecayError::project_route("verified-doc-coverage-unavailable", false, detail.into())
+}
+
+#[hotpath::measure]
+fn extract_doc_nodes(
+    project_root: &std::path::Path,
+    path: &str,
+    registry: &LanguageRegistry,
+) -> Result<(Vec<u8>, Vec<tracedecay_domain::code_intelligence::Node>)> {
+    let raw = std::fs::read(project_root.join(path)).map_err(|error| {
+        doc_coverage_unavailable(format!(
+            "verified documentation source `{path}` could not be read: {error}"
+        ))
+    })?;
+    let shape = match path.rsplit('.').next() {
+        Some("json" | "toml" | "yaml" | "yml") => CodeSourceShapeV1::StructuredData,
+        _ => CodeSourceShapeV1::CodeOrProse,
+    };
+    let sanitized = sanitize_code_source_bytes(&raw, shape).map_err(|error| {
+        doc_coverage_unavailable(format!(
+            "verified documentation source `{path}` could not be admitted through the code sanitizer: {error}"
+        ))
+    })?;
+    let (bytes, _receipt) = sanitized.into_parts();
+    let source = std::str::from_utf8(&bytes).map_err(|error| {
+        doc_coverage_unavailable(format!(
+            "verified documentation source `{path}` sanitized to non-UTF-8: {error}"
+        ))
+    })?;
+    let extractor = registry.extractor_for_file(path).ok_or_else(|| {
+        doc_coverage_unavailable(format!(
+            "the admitted graph contains `{path}` but its documentation grammar is unavailable"
+        ))
+    })?;
+    let nodes = extractor.extract(path, source).nodes;
+    Ok((bytes, nodes))
+}
+
+#[hotpath::measure(future = true, label = "mcp.analysis.doc_coverage.total")]
+async fn handle_verified_doc_coverage(
+    cg: &TraceDecay,
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
+    args: Value,
+    scope_prefix: Option<&str>,
+) -> Result<ToolResult> {
+    let path_prefix = effective_path(&args, scope_prefix);
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map_or(50, |value| value.min(500) as usize);
+    let page = graph.symbols_page(None, DOC_COVERAGE_SYMBOL_BUDGET)?;
+    if page.has_more {
+        return Err(doc_coverage_unavailable(
+            "verified documentation census exceeded its declared symbol budget",
+        ));
+    }
+    let mut candidates = Vec::new();
+    for symbol in page.symbols {
+        let metadata = symbol.metadata.as_ref().ok_or_else(|| {
+            doc_coverage_unavailable(format!(
+                "symbol {} has no admitted documentation metadata",
+                symbol.occurrence.as_str()
+            ))
+        })?;
+        let path = symbol
+            .binding
+            .as_ref()
+            .and_then(|binding| binding.logical_path.as_deref())
+            .ok_or_else(|| {
+                doc_coverage_unavailable(format!(
+                    "symbol {} has no admitted logical file binding",
+                    symbol.occurrence.as_str()
+                ))
+            })?;
+        if metadata.visibility == "public"
+            && doc_coverage_kind(&metadata.kind)
+            && tracedecay_runtime_core::path_scope::path_matches_scope(path, path_prefix)
+        {
+            candidates.push(symbol);
+        }
+    }
+    candidates.sort_by(|left, right| {
+        let left_path = left
+            .binding
+            .as_ref()
+            .and_then(|binding| binding.logical_path.as_deref());
+        let right_path = right
+            .binding
+            .as_ref()
+            .and_then(|binding| binding.logical_path.as_deref());
+        left_path
+            .cmp(&right_path)
+            .then_with(|| {
+                left.metadata
+                    .as_ref()
+                    .map(|metadata| metadata.start_line)
+                    .cmp(&right.metadata.as_ref().map(|metadata| metadata.start_line))
+            })
+            .then_with(|| left.occurrence.cmp(&right.occurrence))
+    });
+
+    let registry = LanguageRegistry::new();
+    let mut extracted_path = None::<String>;
+    let mut extracted_bytes = Vec::new();
+    let mut extracted_nodes = Vec::new();
+    let mut undocumented = Vec::new();
+    for symbol in candidates {
+        if undocumented.len() == limit {
+            break;
+        }
+        let metadata = symbol.metadata.as_ref().ok_or_else(|| {
+            doc_coverage_unavailable("documentation candidate metadata disappeared")
+        })?;
+        let path = symbol
+            .binding
+            .as_ref()
+            .and_then(|binding| binding.logical_path.as_deref())
+            .ok_or_else(|| {
+                doc_coverage_unavailable("documentation candidate file binding disappeared")
+            })?;
+        if extracted_path.as_deref() != Some(path) {
+            (extracted_bytes, extracted_nodes) =
+                extract_doc_nodes(cg.project_root(), path, &registry)?;
+            extracted_path = Some(path.to_owned());
+        }
+        let source_span = symbol
+            .binding
+            .as_ref()
+            .and_then(|binding| binding.source_span)
+            .ok_or_else(|| {
+                doc_coverage_unavailable(format!(
+                    "public symbol {} has no admitted source span",
+                    symbol.occurrence.as_str()
+                ))
+            })?;
+        let start = usize::try_from(source_span.start_byte).map_err(|error| {
+            doc_coverage_unavailable(format!(
+                "public symbol {} source start does not fit this host: {error}",
+                symbol.occurrence.as_str()
+            ))
+        })?;
+        let end = usize::try_from(source_span.end_byte).map_err(|error| {
+            doc_coverage_unavailable(format!(
+                "public symbol {} source end does not fit this host: {error}",
+                symbol.occurrence.as_str()
+            ))
+        })?;
+        let admitted_symbol_source = extracted_bytes.get(start..end).ok_or_else(|| {
+            doc_coverage_unavailable(format!(
+                "public symbol {} source span is outside `{path}`",
+                symbol.occurrence.as_str()
+            ))
+        })?;
+        if content_digest(admitted_symbol_source) != metadata.content_digest {
+            return Err(doc_coverage_unavailable(format!(
+                "documentation source for symbol {} no longer matches the admitted graph generation",
+                symbol.occurrence.as_str()
+            )));
+        }
+        let extracted = extracted_nodes
+            .iter()
+            .find(|node| {
+                node.qualified_name == metadata.qualified_name
+                    && node.kind.as_str() == metadata.kind
+                    && node.start_line == metadata.start_line
+            })
+            .ok_or_else(|| {
+                doc_coverage_unavailable(format!(
+                    "public symbol {} is absent from the re-admitted documentation source `{path}`",
+                    symbol.occurrence.as_str()
+                ))
+            })?;
+        if extracted
+            .docstring
+            .as_deref()
+            .is_none_or(|docstring| docstring.trim().is_empty())
+        {
+            undocumented.push((
+                path.to_owned(),
+                json!({
+                    "id": symbol.occurrence.as_str(),
+                    "name": metadata.simple_name,
+                    "kind": metadata.kind,
+                    "line": metadata.start_line,
+                    "signature": metadata.signature,
+                }),
+            ));
+        }
+    }
+
+    let touched_files = unique_file_paths(undocumented.iter().map(|(path, _symbol)| path.as_str()));
+    let mut by_file = HashMap::<String, Vec<Value>>::new();
+    for (path, symbol) in undocumented {
+        by_file.entry(path).or_default().push(symbol);
+    }
+    let mut files = by_file
+        .into_iter()
+        .map(|(file, symbols)| {
+            json!({
+                "file": file,
+                "count": symbols.len(),
+                "symbols": symbols,
+            })
+        })
+        .collect::<Vec<_>>();
+    files.sort_by(|left, right| {
+        right["count"]
+            .as_u64()
+            .cmp(&left["count"].as_u64())
+            .then_with(|| left["file"].as_str().cmp(&right["file"].as_str()))
+    });
+    let output = json!({
+        "path_filter": path_prefix,
+        "total_undocumented": files
+            .iter()
+            .filter_map(|file| file["count"].as_u64())
+            .sum::<u64>(),
+        "file_count": files.len(),
+        "files": files,
+    });
+    Ok(generic_tool_result(
+        Some(cg.project_root()),
+        &args,
+        &output,
+        touched_files,
+    ))
 }
 
 async fn admitted_graph_query(
@@ -238,8 +514,10 @@ fn dispatch_graph_tools_inner<'a>(
                 .await
             }
             "tracedecay_grep" => {
+                let graph = admitted_graph_query(cg, &options, "source_lines").await;
                 portable_grep::handle_grep(
                     cg.project_root(),
+                    graph.as_ref(),
                     args,
                     selected_scope_prefix,
                     options.application_deadline.clone(),
@@ -707,7 +985,7 @@ fn dispatch_analysis_tools_inner<'a>(
             }
             "tracedecay_doc_coverage" => {
                 let graph = admitted_graph_query(cg, &options, "health_read").await?;
-                portable_analysis::handle_doc_coverage(&graph, args, scope_prefix).await
+                handle_verified_doc_coverage(cg, &graph, args, scope_prefix).await
             }
             "tracedecay_god_class" => {
                 let graph = admitted_graph_query(cg, &options, "health_read").await?;

@@ -1,6 +1,8 @@
 //! Request routing and handlers: per-method JSON-RPC dispatch,
 //! handshake handling, resources, and `tools/call` execution.
 
+use std::path::Component;
+
 use super::dispatch_settlement::{
     ApplicationCancellationRegistration, DispatchControl, DispatchSettlement,
     PreparedDispatchControl, dispatch_cancelled_error,
@@ -962,6 +964,55 @@ impl McpServer {
             })
     }
 
+    /// Resolves the raw-read counterfactual from the retained cache, falling
+    /// back to bounded metadata reads for files owned by the current response.
+    ///
+    /// The daemon code-index cutover intentionally stopped reading the legacy
+    /// graph database's file table, so a cache miss is not evidence that a
+    /// touched source file costs zero tokens.
+    #[hotpath::measure(label = "mcp.server.accounting.raw_file_tokens", future = true)]
+    async fn raw_file_tokens(&self, project_root: &Path, touched_files: &[String]) -> u64 {
+        let cached_tokens = self.estimate_raw_file_tokens(touched_files);
+        let uncached_files = {
+            let token_map = recover_lock(&self.file_token_map);
+            touched_files
+                .iter()
+                .filter(|path| !path.is_empty() && !token_map.contains_key(path.as_str()))
+                .cloned()
+                .collect::<HashSet<_>>()
+        };
+        if uncached_files.is_empty() {
+            return cached_tokens;
+        }
+
+        let project_root = project_root.to_path_buf();
+        let uncached_tokens = tokio::task::spawn_blocking(move || {
+            uncached_files
+                .into_iter()
+                .filter_map(|path| {
+                    let relative = Path::new(&path);
+                    if relative.is_absolute()
+                        || relative
+                            .components()
+                            .any(|component| matches!(component, Component::ParentDir))
+                    {
+                        return None;
+                    }
+                    std::fs::metadata(project_root.join(relative))
+                        .ok()
+                        .filter(|metadata| metadata.is_file())
+                        .map(|metadata| metadata.len() / 4)
+                })
+                .fold(0_u64, u64::saturating_add)
+        })
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "raw-file token estimation task failed");
+            0
+        });
+        cached_tokens.saturating_add(uncached_tokens)
+    }
+
     #[hotpath::skip]
     async fn apply_token_accounting(
         &self,
@@ -975,7 +1026,9 @@ impl McpServer {
         // "Before" counterfactual: reading every referenced file raw,
         // in full. Counters credit only the net saving per call —
         // before minus what this response actually delivered.
-        let raw_file_tokens = self.estimate_raw_file_tokens(&result.touched_files);
+        let raw_file_tokens = self
+            .raw_file_tokens(cg.project_root(), &result.touched_files)
+            .await;
         let net_saved_tokens = raw_file_tokens.saturating_sub(response_tokens);
         self.spawn_token_accounting_persist(
             cg.project_root(),
@@ -1029,7 +1082,9 @@ impl McpServer {
         // and notify make the write's completion observable to
         // [`Self::ledger_writes_settled`] without making it awaited
         // anywhere on the request path.
-        if let Some(registered) = self.accounting_db.clone() {
+        let savings_db = self.accounting_db.clone();
+        let analytics_db = self.global_db.clone();
+        if savings_db.is_some() || analytics_db.is_some() {
             let ToolTokenAccounting {
                 raw_file_tokens,
                 response_tokens,
@@ -1060,21 +1115,22 @@ impl McpServer {
                 failure_reason: failure_reason.as_deref(),
             });
             self.spawn_observed_ledger_write(async move {
-                // Background ledger append: the tool response already went
-                // out, so a failed write degrades to a named warning.
-                if let Err(e) = registered
-                    .try_record_savings(
-                        &project_path_str,
-                        &tool_name_owned,
-                        raw_file_tokens,
-                        response_tokens,
-                        ts,
-                    )
-                    .await
+                if let Some(registered) = savings_db
+                    && let Err(e) = registered
+                        .try_record_savings(
+                            &project_path_str,
+                            &tool_name_owned,
+                            raw_file_tokens,
+                            response_tokens,
+                            ts,
+                        )
+                        .await
                 {
                     tracing::warn!(error = %e, "MCP savings ledger append failed");
                 }
-                if let Err(e) = registered.append_analytics_event(&analytics_event).await {
+                if let Some(registered) = analytics_db
+                    && let Err(e) = registered.append_analytics_event(&analytics_event).await
+                {
                     tracing::warn!(error = %e, "MCP analytics event insert failed");
                 }
             });
