@@ -53,7 +53,6 @@ struct CodeIndexWorkerPlanV1 {
     reservation_bytes: u64,
 }
 
-#[hotpath::measure_all]
 impl CodeIndexWorkerPlanV1 {
     fn status(self) -> CodeIndexWorkerStatusV1 {
         CodeIndexWorkerStatusV1 {
@@ -183,7 +182,6 @@ static STANDALONE_POOL_INSTALL: Mutex<()> = Mutex::new(());
 
 /// Automatic CPU target: use every logical CPU through eight, then floor half.
 #[must_use]
-#[hotpath::measure]
 pub fn indexing_worker_target(total_cores: usize) -> usize {
     let total = total_cores.max(1);
     if total <= 8 { total } else { total / 2 }
@@ -195,7 +193,6 @@ pub fn indexing_worker_target(total_cores: usize) -> usize {
 /// callers must not treat `available / INDEX_WORKER_RESIDENT_BUDGET_BYTES_V1`
 /// as an affordable width.
 #[must_use]
-#[hotpath::measure]
 pub fn memory_safe_worker_count(available_bytes: u64) -> usize {
     usize::try_from(
         worker_memory_budget_bytes(available_bytes) / INDEX_WORKER_RESIDENT_BUDGET_BYTES_V1,
@@ -204,7 +201,6 @@ pub fn memory_safe_worker_count(available_bytes: u64) -> usize {
 }
 
 #[must_use]
-#[hotpath::measure]
 fn worker_memory_headroom_bytes(available_bytes: u64) -> u64 {
     INDEX_NON_WORKER_MEMORY_HEADROOM_BYTES_V1
         .max(available_bytes / 4)
@@ -212,30 +208,25 @@ fn worker_memory_headroom_bytes(available_bytes: u64) -> u64 {
 }
 
 #[must_use]
-#[hotpath::measure]
 fn worker_memory_budget_bytes(available_bytes: u64) -> u64 {
     available_bytes.saturating_sub(worker_memory_headroom_bytes(available_bytes))
 }
 
 #[must_use]
-#[hotpath::measure]
 pub fn worker_reservation_bytes(workers: usize) -> u64 {
     u64::try_from(workers)
         .unwrap_or(u64::MAX)
         .saturating_mul(INDEX_WORKER_RESIDENT_BUDGET_BYTES_V1)
 }
 
-#[hotpath::measure]
 fn detected_cores() -> usize {
     std::thread::available_parallelism().map_or(1, usize::from)
 }
 
-#[hotpath::measure]
 fn saturating_u16(value: usize) -> u16 {
     u16::try_from(value).unwrap_or(u16::MAX)
 }
 
-#[hotpath::measure]
 fn worker_plan_from(
     configured: CodeIndexWorkerSelectionV1,
     available_logical_cpus: usize,
@@ -309,7 +300,6 @@ fn worker_plan_from(
     })
 }
 
-#[hotpath::measure]
 fn parse_environment_override(
     environment_override: Option<&str>,
 ) -> Result<Option<u16>, CodeIndexWorkerPlanErrorV1> {
@@ -326,7 +316,6 @@ fn parse_environment_override(
         .transpose()
 }
 
-#[hotpath::measure]
 fn environment_override_value() -> Result<Option<String>, CodeIndexWorkerPlanErrorV1> {
     match std::env::var(INDEXING_WORKERS_ENV) {
         Ok(value) => Ok(Some(value)),
@@ -342,7 +331,6 @@ fn environment_override_value() -> Result<Option<String>, CodeIndexWorkerPlanErr
 /// canonical resident-memory authority (`limit - used`), never a second
 /// estimator. Environment precedence and every typed refusal are identical to
 /// [`install_worker_plan`].
-#[hotpath::measure]
 pub fn preview_worker_plan(
     configured: CodeIndexWorkerSelectionV1,
     available_memory_bytes: u64,
@@ -356,7 +344,6 @@ pub fn preview_worker_plan(
     )
 }
 
-#[hotpath::measure]
 fn preview_worker_plan_from(
     configured: CodeIndexWorkerSelectionV1,
     available_logical_cpus: usize,
@@ -372,7 +359,6 @@ fn preview_worker_plan_from(
     .map(CodeIndexWorkerPlanV1::status)
 }
 
-#[hotpath::measure]
 fn compare_installed_plan(
     existing: &CodeIndexWorkerPlanV1,
     requested: &CodeIndexWorkerPlanV1,
@@ -387,7 +373,6 @@ fn compare_installed_plan(
     }
 }
 
-#[hotpath::measure]
 fn record_plan(plan: CodeIndexWorkerPlanV1) {
     hotpath::gauge!("code_index_workers_requested").set(plan.requested_workers);
     hotpath::gauge!("code_index_workers_effective").set(plan.effective_workers);
@@ -407,7 +392,6 @@ fn record_plan(plan: CodeIndexWorkerPlanV1) {
 /// Install the process-resident plan before the first code-index build.
 /// Repeating the byte-identical plan is idempotent; a second owner asking for
 /// a different process-wide pool is refused.
-#[hotpath::measure]
 pub fn install_worker_plan(
     configured: CodeIndexWorkerSelectionV1,
     available_memory_bytes: u64,
@@ -467,7 +451,6 @@ pub fn install_worker_plan(
 
 /// Canonical runtime status for configuration/dashboard projection.
 #[must_use]
-#[hotpath::measure]
 pub fn installed_worker_status() -> Option<CodeIndexWorkerStatusV1> {
     WORKER_RUNTIME.get().map(|runtime| runtime.plan.status())
 }
@@ -488,7 +471,6 @@ pub enum CodeIndexParallelismErrorV1 {
     },
 }
 
-#[hotpath::measure_all]
 impl CodeIndexParallelismErrorV1 {
     /// Recover the panic message from a caught unwind payload, falling back to
     /// a stable label when the payload is not a string.
@@ -536,7 +518,6 @@ static FORCED_WORKERS: AtomicUsize = AtomicUsize::new(0);
 /// Indexing width callers should fan out to. A width below 2 means "run
 /// inline".
 #[must_use]
-#[hotpath::measure]
 pub fn indexing_workers() -> usize {
     match FORCED_WORKERS.load(Ordering::Relaxed) {
         0 => WORKER_RUNTIME.get().map_or_else(
@@ -555,14 +536,12 @@ pub fn indexing_workers() -> usize {
 /// digests directly. It is not a supported runtime control — production sizing
 /// comes from [`indexing_workers`].
 #[doc(hidden)]
-#[hotpath::measure]
 pub fn force_indexing_workers_for_test(workers: usize) {
     FORCED_WORKERS.store(workers.max(1), Ordering::Relaxed);
 }
 
 /// Restore production sizing after [`force_indexing_workers_for_test`].
 #[doc(hidden)]
-#[hotpath::measure]
 pub fn clear_forced_indexing_workers_for_test() {
     FORCED_WORKERS.store(0, Ordering::Relaxed);
 }

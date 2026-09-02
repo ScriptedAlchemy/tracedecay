@@ -31,7 +31,6 @@ pub struct TranscriptCatchUpFailure {
     pub source_locator: Option<ObservationSourceRangeV1>,
 }
 
-#[hotpath::measure_all]
 impl TranscriptCatchUpFailure {
     #[hotpath::skip]
     pub(super) const fn new(
@@ -113,14 +112,12 @@ pub(super) type ProviderRunFold = GenericProviderRunFold<TranscriptCatchUpFailur
 ///
 /// Callers must branch on this before warning, recording a source failure, or
 /// publishing provider coverage.
-#[hotpath::measure]
 pub(super) fn cancelled_provider_outcome(
     error: &source::TranscriptIngestError,
 ) -> Option<ProviderRunOutcome> {
     error.is_cancelled().then(ProviderRunOutcome::skipped)
 }
 
-#[hotpath::measure]
 pub(super) fn cancelled_claude_provider_outcome(
     error: &claude_observation::ClaudeObservationIngestError,
 ) -> Option<ProviderRunOutcome> {
@@ -162,7 +159,6 @@ pub enum IngestPassCoverage {
     },
 }
 
-#[hotpath::measure_all]
 impl IngestPassCoverage {
     #[hotpath::skip]
     pub const fn is_complete(self) -> bool {
@@ -186,7 +182,6 @@ pub struct IngestPassOutcome {
     pub byte_bounds_enforced: bool,
 }
 
-#[hotpath::measure_all]
 impl IngestPassOutcome {
     pub(super) fn failed(failure: TranscriptCatchUpFailure) -> Self {
         Self {
@@ -216,7 +211,6 @@ pub(super) struct RoundRobinAdmission {
 ///
 /// A fully covered pass (`discovered <= max_units`) reports complete coverage;
 /// callers persist rotation only for bounded partial passes.
-#[hotpath::measure]
 pub(super) fn plan_round_robin_admission(
     discovered: usize,
     frontier_offset: u64,
@@ -254,7 +248,6 @@ pub(super) fn plan_round_robin_admission(
     }
 }
 
-#[hotpath::measure]
 pub(super) fn allocate_pass_byte_budgets(unit_count: usize, bounds: IngestPassBounds) -> Vec<u64> {
     let mut remaining = bounds.bytes_per_pass;
     let mut budgets = Vec::with_capacity(unit_count.min(bounds.units_per_pass));
@@ -270,7 +263,6 @@ pub(super) fn allocate_pass_byte_budgets(unit_count: usize, bounds: IngestPassBo
 ///
 /// Cancellation and full coverage never write. Partial / backpressured passes
 /// write only when at least one unit was attempted so rotation can continue.
-#[hotpath::measure]
 pub(super) fn scheduling_write_required(
     coverage: IngestPassCoverage,
     attempted_units: usize,
@@ -299,7 +291,6 @@ pub struct TranscriptIngestDisposition {
     pub source_locator: Option<ObservationSourceRangeV1>,
 }
 
-#[hotpath::measure]
 pub fn classify_transcript_ingest_disposition(
     error: &source::TranscriptIngestError,
 ) -> TranscriptIngestDisposition {
@@ -393,7 +384,6 @@ pub fn classify_transcript_ingest_disposition(
     }
 }
 
-#[hotpath::measure]
 pub fn classify_transcript_ingest_failure(
     provider: &'static str,
     source: &'static str,
@@ -409,7 +399,6 @@ pub fn classify_transcript_ingest_failure(
     .with_source_locator(disposition.source_locator)
 }
 
-#[hotpath::measure]
 fn non_durable_reason_code(reason: &'static str) -> &'static str {
     match reason {
         "normalized observation record is not durable" => "normalized_observation_not_durable",
@@ -431,7 +420,6 @@ fn non_durable_reason_code(reason: &'static str) -> &'static str {
 }
 
 /// Classify an observation drain error under any provider label.
-#[hotpath::measure]
 pub(super) fn observation_catch_up_failure(
     provider: &'static str,
     source: &'static str,
@@ -441,7 +429,6 @@ pub(super) fn observation_catch_up_failure(
     TranscriptCatchUpFailure::new(provider, source, failure.reason_code, failure.retryable)
 }
 
-#[hotpath::measure]
 pub(super) fn claude_catch_up_failure(
     source: &'static str,
     error: &claude_observation::ClaudeObservationIngestError,
@@ -451,7 +438,6 @@ pub(super) fn claude_catch_up_failure(
 
 /// Classify a transcript catch-up error, warn its bounded reason code, and
 /// return the typed failure.
-#[hotpath::measure]
 pub(super) fn warn_transcript_catch_up_failure(
     provider: &'static str,
     source: &'static str,
@@ -467,7 +453,6 @@ pub(super) fn warn_transcript_catch_up_failure(
     failure
 }
 
-#[hotpath::measure]
 pub fn classify_claude_observation_failure(
     error: &claude_observation::ClaudeObservationIngestError,
 ) -> ClaudeObservationFailureClass {

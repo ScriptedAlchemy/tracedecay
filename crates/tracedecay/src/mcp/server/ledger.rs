@@ -10,14 +10,12 @@ use tracedecay_global_db::RegisteredGlobalDb;
 /// shutdown drains) indefinitely as the previous unbounded loop allowed.
 const LEDGER_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
 
-#[hotpath::measure]
 fn configuration_authority_unavailable(detail: impl std::fmt::Display) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!("configuration authority unavailable: {detail}"),
     }
 }
 
-#[hotpath::measure]
 fn upload_enabled_from_desired_configuration(
     desired: &tracedecay_domain::configuration::ConfigurationSnapshotV1,
 ) -> Result<bool> {
@@ -69,7 +67,6 @@ pub(crate) struct McpToolErrorAnalyticsRequest<'a> {
     pub(crate) connection_instance_id: Option<&'a str>,
 }
 
-#[hotpath::measure_all]
 impl McpServer {
     /// Resolves the ledger sink: the dedicated accounting database when the
     /// daemon mounted one, otherwise the registry handle it shares with, and

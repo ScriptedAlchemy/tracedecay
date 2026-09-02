@@ -72,7 +72,6 @@ pub(in super::super) struct ReflogCursor {
     pub content_chain: String,
 }
 
-#[hotpath::measure_all]
 impl ReflogCursor {
     pub(in super::super) fn repository_seal(&self) -> RepositorySeal {
         RepositorySeal {
@@ -135,7 +134,6 @@ pub(in super::super) struct GraphChunk {
     pub budget_exhausted: bool,
 }
 
-#[hotpath::measure]
 pub(in super::super) fn initialize_reflog_cursor(
     project_path: &Path,
     window_end: i64,
@@ -198,7 +196,6 @@ pub(in super::super) fn initialize_reflog_cursor(
     })
 }
 
-#[hotpath::measure]
 pub(in super::super) fn scan_reflog_chunk(
     project_path: &Path,
     window_start: i64,
@@ -319,7 +316,6 @@ pub(in super::super) fn scan_reflog_chunk(
     })
 }
 
-#[hotpath::measure]
 pub(in super::super) fn scan_reflog_verification_chunk(
     project_path: &Path,
     source: &ReflogCursor,
@@ -378,7 +374,6 @@ pub(in super::super) fn scan_reflog_verification_chunk(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure]
 pub(in super::super) fn scan_graph_chunk(
     project_path: &Path,
     window_start: i64,
@@ -483,7 +478,6 @@ pub(in super::super) fn scan_graph_chunk(
     })
 }
 
-#[hotpath::measure]
 fn cross_entry(
     repository: &gix::Repository,
     entry: &gix::refs::log::Line,
@@ -500,7 +494,6 @@ fn cross_entry(
     Ok(())
 }
 
-#[hotpath::measure]
 fn push_segment(
     cursor: &mut ReflogCursor,
     segments: &mut Vec<ReflogSegment>,
@@ -526,7 +519,6 @@ fn push_segment(
     Ok(())
 }
 
-#[hotpath::measure]
 fn read_reverse_block(
     path: &Path,
     end: u64,
@@ -558,7 +550,6 @@ fn read_reverse_block(
     }
 }
 
-#[hotpath::measure]
 fn complete_line_ranges(
     bytes: &[u8],
     absolute_start: u64,
@@ -594,7 +585,6 @@ fn complete_line_ranges(
     Ok(ranges)
 }
 
-#[hotpath::measure]
 fn source_head(cursor: &ReflogCursor) -> Result<HeadSeal, BoundedBackfillInterruption> {
     Ok(HeadSeal {
         referent: cursor.source_head_referent.clone(),
@@ -602,13 +592,11 @@ fn source_head(cursor: &ReflogCursor) -> Result<HeadSeal, BoundedBackfillInterru
     })
 }
 
-#[hotpath::measure]
 fn parse_oid(value: &str) -> Result<gix::ObjectId, BoundedBackfillInterruption> {
     gix::ObjectId::from_hex(value.as_bytes())
         .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)
 }
 
-#[hotpath::measure]
 fn present_source_generation(
     path: &Path,
     metadata: &std::fs::Metadata,
@@ -628,7 +616,6 @@ fn present_source_generation(
     Ok(encode_tagged_lowercase_hex("sha256:", &hasher.finalize()))
 }
 
-#[hotpath::measure]
 fn verify_reflog_termination(
     path: &Path,
     source_length: u64,
@@ -650,7 +637,6 @@ fn verify_reflog_termination(
 }
 
 #[cfg(unix)]
-#[hotpath::measure]
 fn hash_path(hasher: &mut Sha256, path: &Path) {
     use std::os::unix::ffi::OsStrExt as _;
 
@@ -660,7 +646,6 @@ fn hash_path(hasher: &mut Sha256, path: &Path) {
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn hash_path(hasher: &mut Sha256, path: &Path) {
     use std::os::windows::ffi::OsStrExt as _;
 
@@ -672,11 +657,9 @@ fn hash_path(hasher: &mut Sha256, path: &Path) {
 }
 
 #[cfg(not(any(unix, windows)))]
-#[hotpath::measure]
 fn hash_path(_hasher: &mut Sha256, _path: &Path) {}
 
 #[cfg(unix)]
-#[hotpath::measure]
 fn hash_file_identity(
     hasher: &mut Sha256,
     _path: &Path,
@@ -692,7 +675,6 @@ fn hash_file_identity(
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn hash_file_identity(
     hasher: &mut Sha256,
     path: &Path,
@@ -712,7 +694,6 @@ fn hash_file_identity(
 }
 
 #[cfg(not(any(unix, windows)))]
-#[hotpath::measure]
 fn hash_file_identity(
     _hasher: &mut Sha256,
     _path: &Path,
@@ -722,7 +703,6 @@ fn hash_file_identity(
 }
 
 #[cfg(any(unix, windows))]
-#[hotpath::measure]
 fn absent_source_generation(path: &Path) -> Result<String, BoundedBackfillInterruption> {
     let mut hasher = Sha256::new();
     hasher.update(b"tracedecay-git-reflog-absent-source-v1\0");
@@ -734,12 +714,10 @@ fn absent_source_generation(path: &Path) -> Result<String, BoundedBackfillInterr
 }
 
 #[cfg(not(any(unix, windows)))]
-#[hotpath::measure]
 fn absent_source_generation(_path: &Path) -> Result<String, BoundedBackfillInterruption> {
     Err(BoundedBackfillInterruption::SourceUnavailable)
 }
 
-#[hotpath::measure]
 fn extend_content_chain(
     previous: &str,
     absolute_line_start: u64,
@@ -762,7 +740,6 @@ fn extend_content_chain(
     Ok(encode_tagged_lowercase_hex("sha256:", &hasher.finalize()))
 }
 
-#[hotpath::measure]
 pub(in super::super) fn verify_source(
     repository: &gix::Repository,
     cursor: &ReflogCursor,
@@ -797,7 +774,6 @@ pub(in super::super) fn verify_source(
     Ok(())
 }
 
-#[hotpath::measure]
 pub(in super::super) fn verify_reflog_source(
     project_path: &Path,
     cursor: &ReflogCursor,
@@ -811,7 +787,6 @@ pub(in super::super) fn verify_reflog_source(
 }
 
 #[cfg(unix)]
-#[hotpath::measure]
 pub(in super::super) fn encode_path(path: &Path) -> Result<Vec<u8>, BoundedBackfillInterruption> {
     use std::os::unix::ffi::OsStrExt as _;
 
@@ -819,7 +794,6 @@ pub(in super::super) fn encode_path(path: &Path) -> Result<Vec<u8>, BoundedBackf
 }
 
 #[cfg(unix)]
-#[hotpath::measure]
 pub(in super::super) fn decode_path(
     encoded: &[u8],
 ) -> Result<PathBuf, BoundedBackfillInterruption> {
@@ -829,7 +803,6 @@ pub(in super::super) fn decode_path(
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 pub(in super::super) fn encode_path(path: &Path) -> Result<Vec<u8>, BoundedBackfillInterruption> {
     use std::os::windows::ffi::OsStrExt as _;
 
@@ -841,7 +814,6 @@ pub(in super::super) fn encode_path(path: &Path) -> Result<Vec<u8>, BoundedBackf
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 pub(in super::super) fn decode_path(
     encoded: &[u8],
 ) -> Result<PathBuf, BoundedBackfillInterruption> {
@@ -858,20 +830,17 @@ pub(in super::super) fn decode_path(
 }
 
 #[cfg(not(any(unix, windows)))]
-#[hotpath::measure]
 pub(in super::super) fn encode_path(_path: &Path) -> Result<Vec<u8>, BoundedBackfillInterruption> {
     Err(BoundedBackfillInterruption::SourceUnavailable)
 }
 
 #[cfg(not(any(unix, windows)))]
-#[hotpath::measure]
 pub(in super::super) fn decode_path(
     _encoded: &[u8],
 ) -> Result<PathBuf, BoundedBackfillInterruption> {
     Err(BoundedBackfillInterruption::SourceUnavailable)
 }
 
-#[hotpath::measure]
 fn decode_ref_seal(
     encoded: &BTreeMap<Vec<u8>, Option<String>>,
 ) -> Result<BTreeMap<Vec<u8>, Option<gix::ObjectId>>, BoundedBackfillInterruption> {
@@ -886,7 +855,6 @@ fn decode_ref_seal(
         .collect()
 }
 
-#[hotpath::measure]
 fn encode_ref_seal(
     seal: &BTreeMap<Vec<u8>, Option<gix::ObjectId>>,
 ) -> BTreeMap<Vec<u8>, Option<String>> {

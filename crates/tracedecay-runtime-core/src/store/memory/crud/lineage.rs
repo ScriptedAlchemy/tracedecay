@@ -301,7 +301,6 @@ pub(in crate::store::memory) struct Projection {
     pub(in crate::store::memory) updated_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl Projection {
     pub(super) fn empty() -> FactStoreResult<Self> {
         Ok(Self {

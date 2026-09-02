@@ -36,7 +36,6 @@ pub(crate) async fn handle_cost(
     Ok(())
 }
 
-#[hotpath::measure]
 fn print_cost_summary(
     today: &ProviderUsageCostSummaryV1,
     range: &str,
@@ -57,7 +56,6 @@ fn print_cost_summary(
     Ok(())
 }
 
-#[hotpath::measure]
 fn print_cost_export(
     fmt: &str,
     range: &str,
@@ -87,7 +85,6 @@ fn print_cost_export(
     Ok(())
 }
 
-#[hotpath::measure]
 fn print_cost_csv(summary: &CostSummaryPayload, by_model: bool, by_task: bool) {
     let usage = &summary.provider_usage;
     if by_model {
@@ -131,7 +128,6 @@ fn print_cost_csv(summary: &CostSummaryPayload, by_model: bool, by_task: bool) {
     }
 }
 
-#[hotpath::measure]
 fn print_model_table(summary: &CostSummaryPayload) {
     let usage = &summary.provider_usage;
     println!(
@@ -160,12 +156,10 @@ fn print_model_table(summary: &CostSummaryPayload) {
     }
 }
 
-#[hotpath::measure]
 fn print_task_table(_summary: &CostSummaryPayload) {
     println!("Task cost attribution is unavailable from canonical provider usage.");
 }
 
-#[hotpath::measure]
 fn print_default_summary(
     today: &ProviderUsageCostSummaryV1,
     range: &str,
@@ -233,7 +227,6 @@ async fn call_cost_admin(range: &str) -> tracedecay_domain::errors::Result<Value
     tracedecay::daemon::tool_json_payload(&result, "tracedecay_admin_cli")
 }
 
-#[hotpath::measure]
 fn print_cost_row(
     label: &str,
     cost: Option<f64>,

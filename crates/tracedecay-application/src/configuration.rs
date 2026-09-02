@@ -220,7 +220,6 @@ pub enum ConfigurationWireRequestV1 {
 /// envelope [`ConfigurationWireRequestV1`] uses on the daemon contract. The
 /// envelope form fails admission because the inner request structs deny
 /// unknown fields (`operation` is not a member of those structs).
-#[hotpath::measure]
 pub fn configuration_wire_request_from_invocation_payload(
     operation: &str,
     payload: Value,
@@ -265,7 +264,6 @@ pub fn configuration_wire_request_from_invocation_payload(
     }
 }
 
-#[hotpath::measure]
 fn wrap_configuration_inner<T: DeserializeOwned>(
     payload: Value,
     wrap: fn(T) -> ConfigurationWireRequestV1,
@@ -444,7 +442,6 @@ pub const CONFIGURATION_SURFACE_OPERATION_NAMES: [&str; 13] = [
     "configuration_audit",
 ];
 
-#[hotpath::measure]
 pub fn configuration_surface_catalog_contribution()
 -> Result<CatalogContributionV1, ApplicationContractError> {
     let mut capabilities = Vec::with_capacity(CONFIGURATION_SPECS.len());
@@ -474,7 +471,6 @@ pub fn configuration_surface_catalog_contribution()
 /// The contribution above owns both manifest references and generated schema
 /// bodies. This registry adds only the concrete daemon service, codec, and
 /// externally mounted HTTP path consumed by first-party SDKs.
-#[hotpath::measure]
 pub fn configuration_executable_binding_registry()
 -> Result<ExecutableBindingRegistryV1, ApplicationContractError> {
     let contribution = configuration_surface_catalog_contribution()?;
@@ -525,7 +521,6 @@ pub fn configuration_executable_binding_registry()
     Ok(ExecutableBindingRegistryV1::new(bindings)?)
 }
 
-#[hotpath::measure]
 fn configuration_executable_schemas(
     contribution: &CatalogContributionV1,
 ) -> Result<Vec<ExecutableSchemaAuthority>, ApplicationContractError> {
@@ -643,7 +638,6 @@ fn configuration_executable_schemas(
     Ok(schemas)
 }
 
-#[hotpath::measure]
 fn configuration_executable_schema<Request, Response>(
     contribution: &CatalogContributionV1,
     operation: &str,
@@ -671,13 +665,11 @@ where
     )?)
 }
 
-#[hotpath::measure]
 pub fn configuration_surface_handler_descriptors()
 -> Result<Vec<ApplicationHandlerDescriptor>, ApplicationContractError> {
     CONFIGURATION_SPECS.iter().map(handler_descriptor).collect()
 }
 
-#[hotpath::measure]
 pub fn configuration_surface_operation(
     name: &str,
 ) -> Result<Option<ApplicationOperation>, ApplicationContractError> {
@@ -688,7 +680,6 @@ pub fn configuration_surface_operation(
         .transpose()
 }
 
-#[hotpath::measure]
 fn capability(
     spec: &ConfigurationSurfaceSpec,
     capability_id: CapabilityId,
@@ -807,7 +798,6 @@ fn capability(
     })?)
 }
 
-#[hotpath::measure]
 fn handler_descriptor(
     spec: &ConfigurationSurfaceSpec,
 ) -> Result<ApplicationHandlerDescriptor, ApplicationContractError> {
@@ -819,7 +809,6 @@ fn handler_descriptor(
     )
 }
 
-#[hotpath::measure]
 fn application_operation(
     spec: &ConfigurationSurfaceSpec,
 ) -> Result<ApplicationOperation, ApplicationContractError> {
@@ -832,21 +821,18 @@ fn application_operation(
     ))
 }
 
-#[hotpath::measure]
 pub fn configuration_surface_request_schema(
     operation: &str,
 ) -> Result<SchemaRef, ApplicationContractError> {
     configuration_surface_schema(operation, "request")
 }
 
-#[hotpath::measure]
 pub fn configuration_surface_result_schema(
     operation: &str,
 ) -> Result<SchemaRef, ApplicationContractError> {
     configuration_surface_schema(operation, "result")
 }
 
-#[hotpath::measure]
 fn configuration_surface_schema(
     operation: &str,
     direction: &str,
@@ -864,7 +850,6 @@ fn configuration_surface_schema(
     )?)
 }
 
-#[hotpath::measure]
 fn capability_id(operation: &str) -> String {
     format!(
         "capability.application.configuration.{}",
@@ -872,7 +857,6 @@ fn capability_id(operation: &str) -> String {
     )
 }
 
-#[hotpath::measure]
 fn use_case_id(operation: &str) -> String {
     format!(
         "use-case.application.configuration.{}",
@@ -880,7 +864,6 @@ fn use_case_id(operation: &str) -> String {
     )
 }
 
-#[hotpath::measure]
 fn operation_suffix(operation: &str) -> &str {
     operation
         .strip_prefix("configuration_")

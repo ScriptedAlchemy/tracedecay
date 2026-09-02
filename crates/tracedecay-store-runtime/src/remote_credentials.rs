@@ -84,14 +84,12 @@ pub struct DaemonRemoteCredentialLookupV1 {
     authority: Arc<DaemonRemoteCredentialAuthorityV1>,
 }
 
-#[hotpath::measure_all]
 impl DaemonRemoteCredentialLookupV1 {
     pub fn new(authority: Arc<DaemonRemoteCredentialAuthorityV1>) -> Self {
         Self { authority }
     }
 }
 
-#[hotpath::measure_all]
 impl DaemonRemoteCredentialAuthorityV1 {
     /// Brain identity this authority admits against. Not credential material.
     pub fn brain_id(&self) -> &BrainId {
@@ -454,7 +452,6 @@ impl RemoteCredentialLookupPortV1 for DaemonRemoteCredentialLookupV1 {
 /// Aggregates per-node authority states into one truthful read. All nodes
 /// available yields the highest-epoch authority; a mix yields `Partial` with
 /// the union of missing evidence; nothing available yields `Unavailable`.
-#[hotpath::measure]
 fn aggregate_authority_states(
     states: Vec<CurrentRemoteAuthorityStateV1>,
     observed_at: UtcMicros,
@@ -521,7 +518,6 @@ fn aggregate_authority_states(
     }
 }
 
-#[hotpath::measure]
 fn validate_store_binding(
     brain_id: &BrainId,
     profile_id: &UserProfileId,
@@ -542,7 +538,6 @@ fn validate_store_binding(
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_registration(
     brain_id: &BrainId,
     node_id: &BrainNodeId,
@@ -554,7 +549,6 @@ fn validate_registration(
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_record_route(
     brain_id: &BrainId,
     node_id: &BrainNodeId,
@@ -588,7 +582,6 @@ fn validate_record_route(
     }
 }
 
-#[hotpath::measure]
 fn map_inventory_error(
     error: RemoteCredentialInventoryErrorV1,
 ) -> DaemonRemoteCredentialRegistryErrorV1 {

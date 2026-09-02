@@ -566,7 +566,6 @@ pub enum ContextScoutSurfaceRequestV1 {
     Feedback(ContextScoutFeedbackRequestV1),
 }
 
-#[hotpath::measure_all]
 impl ContextScoutSurfaceRequestV1 {
     #[hotpath::skip]
     pub const fn address(&self) -> ContextScoutAddressV1 {
@@ -634,7 +633,6 @@ const fn configuration_control_spec(
     }
 }
 
-#[hotpath::measure]
 pub fn context_scout_surface_catalog_contribution()
 -> Result<CatalogContributionV1, ApplicationContractError> {
     let mut capabilities = Vec::with_capacity(CONTEXT_SCOUT_SPECS.len());
@@ -756,7 +754,6 @@ pub fn context_scout_surface_catalog_contribution()
 }
 
 /// Daemon-owned public HTTP bindings for every shipped Scout operation.
-#[hotpath::measure]
 pub fn context_scout_executable_binding_registry()
 -> Result<ExecutableBindingRegistryV1, ApplicationContractError> {
     let contribution = context_scout_surface_catalog_contribution()?;
@@ -807,7 +804,6 @@ pub fn context_scout_executable_binding_registry()
     Ok(ExecutableBindingRegistryV1::new(bindings)?)
 }
 
-#[hotpath::measure]
 fn context_scout_executable_schemas(
     contribution: &CatalogContributionV1,
 ) -> Result<Vec<ExecutableSchemaAuthority>, ApplicationContractError> {
@@ -903,7 +899,6 @@ fn context_scout_executable_schemas(
     Ok(schemas)
 }
 
-#[hotpath::measure]
 fn context_scout_executable_schema<Request, Response>(
     contribution: &CatalogContributionV1,
     operation: &str,
@@ -936,7 +931,6 @@ where
     )?)
 }
 
-#[hotpath::measure]
 pub fn context_scout_surface_handler_descriptors()
 -> Result<Vec<ApplicationHandlerDescriptor>, ApplicationContractError> {
     CONTEXT_SCOUT_SPECS
@@ -955,7 +949,6 @@ pub fn context_scout_surface_handler_descriptors()
         .collect()
 }
 
-#[hotpath::measure]
 pub fn context_scout_surface_operation(
     name: &str,
 ) -> Result<Option<ApplicationOperation>, ApplicationContractError> {
@@ -973,7 +966,6 @@ pub fn context_scout_surface_operation(
         .transpose()
 }
 
-#[hotpath::measure]
 fn capability_id(
     spec: &ContextScoutOperationSpec,
 ) -> Result<CapabilityId, ApplicationContractError> {
@@ -983,7 +975,6 @@ fn capability_id(
     ))?)
 }
 
-#[hotpath::measure]
 fn use_case_id(spec: &ContextScoutOperationSpec) -> Result<UseCaseId, ApplicationContractError> {
     Ok(UseCaseId::new(format!(
         "use-case.application.{}",
@@ -991,17 +982,14 @@ fn use_case_id(spec: &ContextScoutOperationSpec) -> Result<UseCaseId, Applicatio
     ))?)
 }
 
-#[hotpath::measure]
 fn request_schema(spec: &ContextScoutOperationSpec) -> Result<SchemaRef, ApplicationContractError> {
     schema(spec, "request")
 }
 
-#[hotpath::measure]
 fn result_schema(spec: &ContextScoutOperationSpec) -> Result<SchemaRef, ApplicationContractError> {
     schema(spec, "result")
 }
 
-#[hotpath::measure]
 fn schema(
     spec: &ContextScoutOperationSpec,
     suffix: &str,

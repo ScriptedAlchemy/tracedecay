@@ -62,7 +62,6 @@ pub struct SanitizedObservationByteRangeV1 {
     pub end: u64,
 }
 
-#[hotpath::measure_all]
 impl SanitizedObservationByteRangeV1 {
     pub fn new(start: u64, end: u64) -> EvidenceAssemblyStoreResult<Self> {
         if start >= end {
@@ -100,7 +99,6 @@ pub enum SourceOccurrenceCoordinateV1 {
     },
 }
 
-#[hotpath::measure_all]
 impl SourceOccurrenceCoordinateV1 {
     pub fn validate(&self) -> EvidenceAssemblyStoreResult<()> {
         match self {
@@ -178,7 +176,6 @@ pub enum SourceOccurrenceRelationV1 {
     },
 }
 
-#[hotpath::measure_all]
 impl SourceOccurrenceRelationV1 {
     fn source_id(&self) -> &SourceOccurrenceId {
         match self {
@@ -203,7 +200,6 @@ pub struct SourceOccurrenceSanitizationV1 {
     pub projection: SanitizationReceiptRefV1,
 }
 
-#[hotpath::measure_all]
 impl SourceOccurrenceSanitizationV1 {
     pub fn new(
         capture: SanitizationReceiptRefV1,
@@ -236,7 +232,6 @@ pub struct SourceTimelineKeyV1 {
     pub ordering_domain: ObservationOrderingDomainV1,
 }
 
-#[hotpath::measure_all]
 impl SourceTimelineKeyV1 {
     pub fn validate(&self) -> EvidenceAssemblyStoreResult<()> {
         self.source.validate().map_err(invalid)?;
@@ -258,7 +253,6 @@ pub type EvidenceSourceTimelineV1 = SourceTimelineKeyV1;
 #[serde(transparent)]
 pub struct EvidenceAssemblyIdempotencyKeyV1(ManifestDigest);
 
-#[hotpath::measure_all]
 impl EvidenceAssemblyIdempotencyKeyV1 {
     pub fn new(value: ManifestDigest) -> EvidenceAssemblyStoreResult<Self> {
         value.validate().map_err(invalid)?;
@@ -304,7 +298,6 @@ pub struct EvidenceAssemblyOwnerV1 {
     pub key_epoch: u64,
 }
 
-#[hotpath::measure_all]
 impl EvidenceAssemblyOwnerV1 {
     pub fn validate(&self) -> EvidenceAssemblyStoreResult<()> {
         self.owner.validate().map_err(invalid)?;
@@ -347,7 +340,6 @@ pub struct SourceOccurrenceIdentityProjectionV1 {
     pub projector_version: ComponentVersion,
 }
 
-#[hotpath::measure_all]
 impl SourceOccurrenceIdentityProjectionV1 {
     pub fn validate(&self) -> EvidenceAssemblyStoreResult<()> {
         self.owner.validate().map_err(invalid)?;
@@ -408,7 +400,6 @@ impl SourceOccurrenceIdentityProjectionV1 {
     }
 }
 
-#[hotpath::measure]
 pub fn derive_source_occurrence_id_v1(
     projection: &SourceOccurrenceIdentityProjectionV1,
 ) -> EvidenceAssemblyStoreResult<SourceOccurrenceId> {
@@ -417,7 +408,6 @@ pub fn derive_source_occurrence_id_v1(
     SourceOccurrenceId::new(digest.as_str()).map_err(invalid)
 }
 
-#[hotpath::measure_all]
 impl EvidenceSourceOccurrenceRecordV1 {
     pub fn identity_projection(&self) -> SourceOccurrenceIdentityProjectionV1 {
         SourceOccurrenceIdentityProjectionV1 {
@@ -485,7 +475,6 @@ pub struct CanonicalSourceOccurrenceSetIdentityProjectionV1 {
     pub canonical_members: Vec<SourceOccurrenceId>,
 }
 
-#[hotpath::measure_all]
 impl CanonicalSourceOccurrenceSetIdentityProjectionV1 {
     pub fn validate(&self) -> EvidenceAssemblyStoreResult<()> {
         self.owner.validate().map_err(invalid)?;
@@ -501,7 +490,6 @@ impl CanonicalSourceOccurrenceSetIdentityProjectionV1 {
     }
 }
 
-#[hotpath::measure]
 pub fn derive_canonical_source_occurrence_set_id_v1(
     projection: &CanonicalSourceOccurrenceSetIdentityProjectionV1,
 ) -> EvidenceAssemblyStoreResult<CanonicalSourceOccurrenceSetIdV1> {
@@ -510,7 +498,6 @@ pub fn derive_canonical_source_occurrence_set_id_v1(
     CanonicalSourceOccurrenceSetIdV1::new(digest.as_str()).map_err(invalid)
 }
 
-#[hotpath::measure_all]
 impl CanonicalSourceOccurrenceSetRecordV1 {
     pub fn identity_projection(&self) -> CanonicalSourceOccurrenceSetIdentityProjectionV1 {
         CanonicalSourceOccurrenceSetIdentityProjectionV1 {
@@ -549,7 +536,6 @@ pub struct SourceCapabilityCatalogBindingV1 {
     pub source_watermark: ManifestDigest,
 }
 
-#[hotpath::measure_all]
 impl SourceCapabilityCatalogBindingV1 {
     pub fn validate(&self) -> EvidenceAssemblyStoreResult<()> {
         validate_label(&self.connector_id, "evidence source connector id")?;
@@ -580,7 +566,6 @@ pub enum EvidenceSpanCatalogBindingV1 {
     },
 }
 
-#[hotpath::measure_all]
 impl EvidenceSpanCatalogBindingV1 {
     pub fn validate(&self) -> EvidenceAssemblyStoreResult<()> {
         match self {
@@ -606,7 +591,6 @@ pub struct VerifiedSourceOrderingProofV1 {
     pub source_orders: Vec<u64>,
 }
 
-#[hotpath::measure_all]
 impl VerifiedSourceOrderingProofV1 {
     pub fn verify(
         expected_timeline: SourceTimelineKeyV1,
@@ -673,7 +657,6 @@ pub struct EvidenceSpanRunV1 {
     pub occurrence_ids: Vec<SourceOccurrenceId>,
 }
 
-#[hotpath::measure_all]
 impl EvidenceSpanRunV1 {
     pub fn validate(&self) -> EvidenceAssemblyStoreResult<()> {
         self.timeline.validate()?;
@@ -707,7 +690,6 @@ pub struct EvidenceSpanHorizonV1 {
     pub contains_unknown_valid_time: bool,
 }
 
-#[hotpath::measure_all]
 impl EvidenceSpanHorizonV1 {
     pub fn validate_members(
         &self,
@@ -764,7 +746,6 @@ pub struct EvidenceSpanIdentityProjectionV1 {
     pub catalog_binding: EvidenceSpanCatalogBindingV1,
 }
 
-#[hotpath::measure_all]
 impl EvidenceSpanIdentityProjectionV1 {
     pub fn validate(&self) -> EvidenceAssemblyStoreResult<()> {
         self.owner.validate().map_err(invalid)?;
@@ -802,7 +783,6 @@ impl EvidenceSpanIdentityProjectionV1 {
     }
 }
 
-#[hotpath::measure]
 pub fn derive_evidence_span_id_v1(
     projection: &EvidenceSpanIdentityProjectionV1,
 ) -> EvidenceAssemblyStoreResult<EvidenceSpanIdV1> {
@@ -811,7 +791,6 @@ pub fn derive_evidence_span_id_v1(
     EvidenceSpanIdV1::new(digest.as_str()).map_err(invalid)
 }
 
-#[hotpath::measure_all]
 impl EvidenceSpanRecordV1 {
     pub fn identity_projection(&self) -> EvidenceSpanIdentityProjectionV1 {
         EvidenceSpanIdentityProjectionV1 {
@@ -871,7 +850,6 @@ pub struct EvidenceSpanMemberReceiptBindingV1 {
     pub sanitization: SourceOccurrenceSanitizationV1,
 }
 
-#[hotpath::measure_all]
 impl EvidenceSpanMemberReceiptBindingV1 {
     pub fn validate(&self) -> EvidenceAssemblyStoreResult<()> {
         self.occurrence_id.validate().map_err(invalid)?;
@@ -906,7 +884,6 @@ pub struct EvidenceSpanProjectionReceiptIdentityProjectionV1 {
     pub exact_source_anchors: Vec<RetrievalAnchorId>,
 }
 
-#[hotpath::measure_all]
 impl EvidenceSpanProjectionReceiptIdentityProjectionV1 {
     pub fn validate(&self) -> EvidenceAssemblyStoreResult<()> {
         EvidenceSpanIdV1::new(self.span_id.as_str()).map_err(invalid)?;
@@ -938,7 +915,6 @@ impl EvidenceSpanProjectionReceiptIdentityProjectionV1 {
     }
 }
 
-#[hotpath::measure]
 pub fn derive_evidence_span_projection_receipt_id_v1(
     projection: &EvidenceSpanProjectionReceiptIdentityProjectionV1,
 ) -> EvidenceAssemblyStoreResult<EvidenceSpanProjectionReceiptIdV1> {
@@ -947,7 +923,6 @@ pub fn derive_evidence_span_projection_receipt_id_v1(
     EvidenceSpanProjectionReceiptIdV1::new(digest.as_str()).map_err(invalid)
 }
 
-#[hotpath::measure_all]
 impl EvidenceSpanProjectionReceiptV1 {
     pub fn identity_projection(&self) -> EvidenceSpanProjectionReceiptIdentityProjectionV1 {
         EvidenceSpanProjectionReceiptIdentityProjectionV1 {
@@ -981,7 +956,6 @@ pub struct RetrieverIdentityV1 {
     pub component_version: ComponentVersion,
 }
 
-#[hotpath::measure_all]
 impl RetrieverIdentityV1 {
     pub fn validate(&self) -> EvidenceAssemblyStoreResult<()> {
         self.capability_id.validate().map_err(invalid)?;
@@ -999,7 +973,6 @@ pub struct PrivacyBoundRequestEnvelopeV1 {
     pub requested_capabilities: Vec<CapabilityId>,
 }
 
-#[hotpath::measure_all]
 impl PrivacyBoundRequestEnvelopeV1 {
     pub fn validate(&self) -> EvidenceAssemblyStoreResult<()> {
         self.use_case_id.validate().map_err(invalid)?;
@@ -1027,7 +1000,6 @@ pub struct PrivacyBoundRequestDigestV1 {
     pub digest: ManifestDigest,
 }
 
-#[hotpath::measure_all]
 impl PrivacyBoundRequestDigestV1 {
     pub fn derive(
         privacy_domain_id: PrivacyDomainId,
@@ -1075,7 +1047,6 @@ pub struct RetrieverWatermarkBindingV1 {
     pub summary_watermark: Option<ManifestDigest>,
 }
 
-#[hotpath::measure_all]
 impl RetrieverWatermarkBindingV1 {
     pub fn validate(&self) -> EvidenceAssemblyStoreResult<()> {
         self.source_watermark.validate().map_err(invalid)?;
@@ -1128,7 +1099,6 @@ pub struct RetrieverContributionIdentityProjectionV1 {
     pub coverage: CoverageReportV1,
 }
 
-#[hotpath::measure_all]
 impl RetrieverContributionIdentityProjectionV1 {
     pub fn validate(&self) -> EvidenceAssemblyStoreResult<()> {
         self.owner.validate()?;
@@ -1151,7 +1121,6 @@ impl RetrieverContributionIdentityProjectionV1 {
     }
 }
 
-#[hotpath::measure]
 pub fn derive_retriever_contribution_id_v1(
     projection: &RetrieverContributionIdentityProjectionV1,
 ) -> EvidenceAssemblyStoreResult<RetrieverContributionIdV1> {
@@ -1160,7 +1129,6 @@ pub fn derive_retriever_contribution_id_v1(
     RetrieverContributionIdV1::new(digest.as_str()).map_err(invalid)
 }
 
-#[hotpath::measure_all]
 impl RetrieverContributionRecordV1 {
     pub fn identity_projection(&self) -> RetrieverContributionIdentityProjectionV1 {
         RetrieverContributionIdentityProjectionV1 {
@@ -1240,7 +1208,6 @@ pub struct EvidenceAssemblyPublicationIdentityProjectionV1 {
     pub exact_source_anchors: Vec<RetrievalAnchorId>,
 }
 
-#[hotpath::measure_all]
 impl EvidenceAssemblyPublicationIdentityProjectionV1 {
     pub fn validate(&self) -> EvidenceAssemblyStoreResult<()> {
         self.owner.validate()?;
@@ -1268,7 +1235,6 @@ impl EvidenceAssemblyPublicationIdentityProjectionV1 {
     }
 }
 
-#[hotpath::measure]
 pub fn derive_evidence_assembly_publication_receipt_id_v1(
     projection: &EvidenceAssemblyPublicationIdentityProjectionV1,
 ) -> EvidenceAssemblyStoreResult<EvidenceAssemblyPublicationReceiptIdV1> {
@@ -1277,7 +1243,6 @@ pub fn derive_evidence_assembly_publication_receipt_id_v1(
     EvidenceAssemblyPublicationReceiptIdV1::new(digest.as_str()).map_err(invalid)
 }
 
-#[hotpath::measure_all]
 impl EvidenceAssemblyPublicationReceiptV1 {
     pub fn validate(&self) -> EvidenceAssemblyStoreResult<()> {
         self.publication_receipt_id.validate().map_err(invalid)?;
@@ -1324,7 +1289,6 @@ pub struct EvidenceAssemblyWriteV1 {
     pub receipt: EvidenceAssemblyPublicationReceiptV1,
 }
 
-#[hotpath::measure_all]
 impl EvidenceAssemblyWriteV1 {
     #[hotpath::measure(label = "store.evidence_assembly.validate_write")]
     pub fn validate(&self) -> EvidenceAssemblyStoreResult<()> {
@@ -1485,7 +1449,6 @@ impl EvidenceAssemblyWriteV1 {
     }
 }
 
-#[hotpath::measure]
 fn validate_derived_anchor_lineage(
     anchor: &RetrievalAnchorRecordV3,
     owner: &AnchorOwnerBindingV1,
@@ -1546,7 +1509,6 @@ pub enum EvidenceAssemblyReadResultV1 {
     ContributionPage(Option<EvidenceAssemblyDrilldownPageV1>),
 }
 
-#[hotpath::measure]
 fn validate_member_count(count: usize) -> EvidenceAssemblyStoreResult<()> {
     if count == 0 || count > MAX_EVIDENCE_ASSEMBLY_MEMBERS_V1 {
         return Err(invalid("evidence assembly member count"));
@@ -1554,7 +1516,6 @@ fn validate_member_count(count: usize) -> EvidenceAssemblyStoreResult<()> {
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_half_open(
     start: u64,
     end: u64,
@@ -1566,7 +1527,6 @@ fn validate_half_open(
     Ok(())
 }
 
-#[hotpath::measure]
 fn ensure_unique<T: Ord>(values: &[T], field: &'static str) -> EvidenceAssemblyStoreResult<()> {
     let mut seen = BTreeSet::new();
     if values.iter().any(|value| !seen.insert(value)) {
@@ -1575,7 +1535,6 @@ fn ensure_unique<T: Ord>(values: &[T], field: &'static str) -> EvidenceAssemblyS
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_label(value: &str, field: &'static str) -> EvidenceAssemblyStoreResult<()> {
     if !is_canonical_text_within(value, CANONICAL_TEXT_MAX_BYTES) {
         return Err(invalid(field));
@@ -1583,12 +1542,10 @@ fn validate_label(value: &str, field: &'static str) -> EvidenceAssemblyStoreResu
     Ok(())
 }
 
-#[hotpath::measure]
 fn invalid(error: impl std::fmt::Display) -> EvidenceAssemblyStoreError {
     EvidenceAssemblyStoreError::InvalidData(error.to_string())
 }
 
-#[hotpath::measure]
 fn canonical_identity_digest<T: Serialize>(
     domain: &'static str,
     projection: &T,

@@ -22,7 +22,6 @@ pub(crate) use exact::append_replay_in_transaction;
 
 pub const GRAPH_PUBLICATION_SCHEMA_V1: &str = include_str!("graph_publication_schema.sql");
 
-#[hotpath::measure]
 pub(crate) fn authoritative_verified_head_in_transaction(
     transaction: &crate::exact_sql::ExactSqlTransaction,
     projection: &GraphProjectionIdentityV1,
@@ -30,7 +29,6 @@ pub(crate) fn authoritative_verified_head_in_transaction(
     exact::authoritative_verified_head_in_transaction(transaction, projection)
 }
 
-#[hotpath::measure]
 pub(crate) fn active_replay_in_transaction(
     transaction: &crate::exact_sql::ExactSqlTransaction,
     key: &GraphPublicationKeyV1,
@@ -38,7 +36,6 @@ pub(crate) fn active_replay_in_transaction(
     exact::active_replay_in_transaction(transaction, key)
 }
 
-#[hotpath::measure]
 pub(crate) fn retire_replay_in_transaction(
     transaction: &crate::exact_sql::ExactSqlTransaction,
     request: &GraphPublicationReplayRetirementV1,
@@ -53,7 +50,6 @@ struct EncodedProjection {
     projection: String,
 }
 
-#[hotpath::measure_all]
 impl EncodedProjection {
     fn new(identity: &GraphProjectionIdentityV1) -> GraphPublicationStoreResultV1<Self> {
         Ok(Self {
@@ -132,7 +128,6 @@ struct ReplayMetadata {
     expected_recovered_digest: GraphRecoveredGenerationDigestV1,
 }
 
-#[hotpath::measure_all]
 impl ReplayMetadata {
     fn verified_head(
         &self,
@@ -153,7 +148,6 @@ impl ReplayMetadata {
     }
 }
 
-#[hotpath::measure]
 fn decode_replay(
     raw: RawReplay,
     direct_dependency_generations: Vec<GraphDependencyGenerationIdentityV1>,
@@ -199,7 +193,6 @@ fn decode_replay(
     GraphPublicationReplayRecordV1::new(sequence_from_i64(raw.sequence)?, replay).map_err(corrupt)
 }
 
-#[hotpath::measure]
 fn decode_tombstone(
     raw: RawReplayTombstone,
     direct_dependency_generations: Vec<GraphDependencyGenerationIdentityV1>,
@@ -242,7 +235,6 @@ fn decode_tombstone(
     .map_err(corrupt)
 }
 
-#[hotpath::measure]
 fn decode_verified_head(
     raw: RawVerifiedHead,
 ) -> GraphPublicationStoreResultV1<GraphVerifiedHeadV1> {
@@ -275,7 +267,6 @@ fn decode_verified_head(
     })
 }
 
-#[hotpath::measure]
 fn decode_replay_metadata(raw: RawReplayMetadata) -> GraphPublicationStoreResultV1<ReplayMetadata> {
     Ok(ReplayMetadata {
         sequence: sequence_from_i64(raw.sequence)?,
@@ -304,7 +295,6 @@ fn decode_replay_metadata(raw: RawReplayMetadata) -> GraphPublicationStoreResult
     })
 }
 
-#[hotpath::measure]
 fn encode_optional_head(
     head: Option<&GraphVerifiedHeadV1>,
 ) -> GraphPublicationStoreResultV1<Option<String>> {
@@ -314,14 +304,12 @@ fn encode_optional_head(
     .transpose()
 }
 
-#[hotpath::measure]
 fn encode_direct_dependency_generations(
     dependencies: &[GraphDependencyGenerationIdentityV1],
 ) -> GraphPublicationStoreResultV1<Vec<u8>> {
     serde_json::to_vec(dependencies).map_err(|_| GraphPublicationStoreErrorV1::Infrastructure)
 }
 
-#[hotpath::measure]
 fn sequence_from_i64(value: i64) -> GraphPublicationStoreResultV1<GraphPublicationSequenceV1> {
     let value = u64::try_from(value).map_err(|_| {
         GraphPublicationStoreErrorV1::Corrupt("graph publication sequence is negative".to_owned())
@@ -329,7 +317,6 @@ fn sequence_from_i64(value: i64) -> GraphPublicationStoreResultV1<GraphPublicati
     GraphPublicationSequenceV1::new(value).map_err(corrupt)
 }
 
-#[hotpath::measure]
 fn sequence_to_i64(value: GraphPublicationSequenceV1) -> GraphPublicationStoreResultV1<i64> {
     i64::try_from(value.get()).map_err(|_| {
         GraphPublicationStoreErrorV1::Corrupt(
@@ -338,7 +325,6 @@ fn sequence_to_i64(value: GraphPublicationSequenceV1) -> GraphPublicationStoreRe
     })
 }
 
-#[hotpath::measure]
 fn ensure_not_interrupted(
     context: &GraphPublicationOperationContextV1<'_>,
 ) -> GraphPublicationStoreResultV1<()> {
@@ -347,7 +333,6 @@ fn ensure_not_interrupted(
     })
 }
 
-#[hotpath::measure]
 fn begin_verified_commit(
     context: &GraphPublicationOperationContextV1<'_>,
 ) -> GraphPublicationStoreResultV1<()> {
@@ -360,7 +345,6 @@ fn begin_verified_commit(
     )
 }
 
-#[hotpath::measure]
 fn begin_replay_retirement_commit(
     context: &GraphPublicationOperationContextV1<'_>,
 ) -> GraphPublicationStoreResultV1<()> {
@@ -373,7 +357,6 @@ fn begin_replay_retirement_commit(
     )
 }
 
-#[hotpath::measure]
 fn begin_pending_discard_commit(
     context: &GraphPublicationOperationContextV1<'_>,
 ) -> GraphPublicationStoreResultV1<()> {
@@ -386,7 +369,6 @@ fn begin_pending_discard_commit(
     )
 }
 
-#[hotpath::measure]
 fn begin_retired_cleanup_finalize_commit(
     context: &GraphPublicationOperationContextV1<'_>,
 ) -> GraphPublicationStoreResultV1<()> {
@@ -399,7 +381,6 @@ fn begin_retired_cleanup_finalize_commit(
     )
 }
 
-#[hotpath::measure]
 fn corrupt(error: impl std::fmt::Display) -> GraphPublicationStoreErrorV1 {
     GraphPublicationStoreErrorV1::Corrupt(error.to_string())
 }

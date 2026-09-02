@@ -18,7 +18,6 @@ use tracedecay_code_index_runtime::code_index_scheduler::{
 };
 use tracedecay_graph_query::{CodeGraphReadError, CodeGraphReadRequest, VerifiedCodeGraphRead};
 
-#[hotpath::measure]
 fn refuse_projection_wait(request: &CodeGraphReadRequest<'_>) -> Result<(), CodeGraphReadError> {
     if request.cancellation.is_cancelled()
         || request
@@ -69,7 +68,6 @@ struct ProjectCodeGraphServingProjectionV1 {
     freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
 }
 
-#[hotpath::measure_all]
 impl ProjectCodeGraphServingAuthorityV1 {
     async fn project(&self) -> Result<ProjectCodeGraphServingProjectionV1, CodeGraphReadError> {
         if let Some(latest) = self
@@ -218,7 +216,6 @@ impl tracedecay_graph_query::CodeGraphProjectionReadPort for ProjectCodeGraphPro
     }
 }
 
-#[hotpath::measure]
 pub(crate) fn project_code_graph_projection_read_port(
     schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     project_root: PathBuf,
@@ -237,7 +234,6 @@ pub(crate) fn project_code_graph_projection_read_port(
 /// root and resolved scope through the same serving projection that graph
 /// queries open. A missing graph seat is an explicit unavailable census; it
 /// never falls back to the runtime database.
-#[hotpath::measure]
 pub(crate) fn project_code_index_generation_census_reader(
     schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     project_root: PathBuf,

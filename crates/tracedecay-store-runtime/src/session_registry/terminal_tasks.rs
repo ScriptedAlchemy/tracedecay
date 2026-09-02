@@ -1,6 +1,5 @@
 use super::DaemonSessionRuntimeRegistryV1;
 
-#[hotpath::measure_all]
 impl DaemonSessionRuntimeRegistryV1 {
     pub fn cancel_terminal_tasks(&self) {
         self.retained_hook_tasks.begin_shutdown();

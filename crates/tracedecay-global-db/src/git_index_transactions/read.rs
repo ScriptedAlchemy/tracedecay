@@ -31,7 +31,6 @@ pub struct GitIndexReadExecutor<'store, 'db> {
     store: &'store GlobalDbGitIndexTransactionStore<'db>,
 }
 
-#[hotpath::measure_all]
 impl<'store, 'db> GitIndexReadExecutor<'store, 'db> {
     #[hotpath::skip]
     pub const fn new(store: &'store GlobalDbGitIndexTransactionStore<'db>) -> Self {
@@ -111,7 +110,6 @@ impl<'store, 'db> GitIndexReadExecutor<'store, 'db> {
     }
 }
 
-#[hotpath::measure]
 fn paginate_candidates(
     mut records: Vec<GitIndexTransactionRecordV1>,
     after: Option<&GitIndexIdempotencyKey>,
@@ -133,7 +131,6 @@ fn paginate_candidates(
     CodeRecoveryCandidatesPageV1 { records, next }
 }
 
-#[hotpath::measure]
 fn paginate_repositories(
     mut repositories: Vec<RepositoryId>,
     after: Option<&RepositoryId>,
@@ -156,7 +153,6 @@ fn paginate_repositories(
 /// Truncates an in-memory page back to `limit` and returns the last retained
 /// element's cursor when more rows remain. Mirrors the over-fetch/`page_tail`
 /// pattern the effects executor uses against SQL `LIMIT n + 1`.
-#[hotpath::measure]
 fn page_tail<T, C>(items: &mut Vec<T>, limit: u32, cursor: impl Fn(&T) -> C) -> Option<C> {
     let limit = limit as usize;
     if items.len() > limit {

@@ -15,7 +15,6 @@ pub struct DaemonConfigurationGrantAuthority {
     grants: Arc<RwLock<BTreeMap<ConfigurationGrantId, ConfigurationMutationGrantSnapshotV1>>>,
 }
 
-#[hotpath::measure_all]
 impl DaemonConfigurationGrantAuthority {
     pub fn issue_direct(
         &self,
@@ -154,7 +153,6 @@ impl DaemonConfigurationGrantAuthority {
     }
 }
 
-#[hotpath::measure]
 pub fn mounted_configuration_layers(
     project_id: &ProjectId,
     profile_id: &UserProfileId,
@@ -294,7 +292,6 @@ impl From<ProjectRuntimeAlreadyRegistered> for DaemonFeedbackRuntimeRegistration
 /// Callers match on the per-runtime variants (and each carries its own error
 /// message), so the enums keep their own `AlreadyRegistered`/`RegistryClosed`
 /// shapes and only this mapping is shared.
-#[hotpath::measure]
 pub(super) fn registry_registration_refusal<E>(
     error: ProjectRuntimeRegistryError,
     already_registered: E,
@@ -573,7 +570,6 @@ pub struct DaemonAdvisoryRuntimeRegistrar {
     service: DaemonInvocationService,
 }
 
-#[hotpath::measure_all]
 impl DaemonAdvisoryRuntimeRegistrar {
     pub fn new(service: &DaemonInvocationService) -> Self {
         Self {
@@ -682,7 +678,6 @@ pub struct DaemonConfigurationRuntimeRegistrar {
     service: DaemonInvocationService,
 }
 
-#[hotpath::measure_all]
 impl DaemonConfigurationRuntimeRegistrar {
     pub fn new(service: &DaemonInvocationService) -> Self {
         Self {
@@ -919,7 +914,6 @@ pub struct DaemonWorkRuntimeRegistrar {
     service: DaemonInvocationService,
 }
 
-#[hotpath::measure_all]
 impl DaemonWorkRuntimeRegistrar {
     pub fn new(service: &DaemonInvocationService) -> Self {
         Self {
@@ -1093,7 +1087,6 @@ pub struct DaemonRetainedRuntimeRegistrar {
     service: DaemonInvocationService,
 }
 
-#[hotpath::measure_all]
 impl DaemonRetainedRuntimeRegistrar {
     pub fn new(service: &DaemonInvocationService) -> Self {
         Self {
@@ -1158,7 +1151,6 @@ pub struct DaemonNativeIntegrationRuntimeRegistrar {
         Arc<tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationServiceRegistry>,
 }
 
-#[hotpath::measure_all]
 impl DaemonNativeIntegrationRuntimeRegistrar {
     #[hotpath::skip]
     pub async fn ensure(

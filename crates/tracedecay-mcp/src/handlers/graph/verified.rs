@@ -24,7 +24,6 @@ const CODE_SYMBOL_EVIDENCE_PREFIX: &str = "code-symbol:";
 /// anchors in the `code-symbol:` namespace are unwrapped to the enclosed
 /// occurrence. Other `code-*` evidence namespaces fail closed instead of
 /// looking up a non-existent graph entity and rendering empty adjacency.
-#[hotpath::measure]
 pub fn graph_occurrence_id(raw: &str) -> Result<SymbolOccurrenceId> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -74,7 +73,6 @@ pub fn nodes_addressed_by_args(
     graph.resolve_qualified_name(qualified_name, None, 1_000)
 }
 
-#[hotpath::measure]
 pub fn required_graph_metadata(
     symbol: &CodeGraphSymbolSummaryV1,
 ) -> Result<&LineageSymbolRecordV1> {
@@ -86,7 +84,6 @@ pub fn required_graph_metadata(
     })
 }
 
-#[hotpath::measure]
 pub fn required_graph_file_path(symbol: &CodeGraphSymbolSummaryV1) -> Result<&str> {
     symbol
         .binding
@@ -100,7 +97,6 @@ pub fn required_graph_file_path(symbol: &CodeGraphSymbolSummaryV1) -> Result<&st
         })
 }
 
-#[hotpath::measure]
 pub fn graph_symbol_end_line(metadata: &LineageSymbolRecordV1) -> Result<u32> {
     if metadata.line_span == 0 {
         return Err(graph_symbol_corrupt(format!(
@@ -119,7 +115,6 @@ pub fn graph_symbol_end_line(metadata: &LineageSymbolRecordV1) -> Result<u32> {
         })
 }
 
-#[hotpath::measure]
 pub fn graph_symbol_paths(symbols: &[CodeGraphSymbolSummaryV1]) -> Result<Vec<String>> {
     let mut paths = symbols
         .iter()
@@ -130,7 +125,6 @@ pub fn graph_symbol_paths(symbols: &[CodeGraphSymbolSummaryV1]) -> Result<Vec<St
     Ok(paths.into_iter().map(str::to_owned).collect())
 }
 
-#[hotpath::measure]
 pub fn graph_symbols_in_scope(
     symbols: Vec<CodeGraphSymbolSummaryV1>,
     scope_prefix: Option<&str>,
@@ -145,7 +139,6 @@ pub fn graph_symbols_in_scope(
     Ok(scoped)
 }
 
-#[hotpath::measure]
 pub fn graph_symbol_location_value(symbol: &CodeGraphSymbolSummaryV1) -> Result<Value> {
     let metadata = required_graph_metadata(symbol)?;
     let file_path = required_graph_file_path(symbol)?;
@@ -161,7 +154,6 @@ pub fn graph_symbol_location_value(symbol: &CodeGraphSymbolSummaryV1) -> Result<
     }))
 }
 
-#[hotpath::measure]
 pub fn graph_name_matches(metadata: &LineageSymbolRecordV1, query: &str) -> bool {
     let query = query.to_ascii_lowercase();
     metadata.simple_name.to_ascii_lowercase().contains(&query)
@@ -171,7 +163,6 @@ pub fn graph_name_matches(metadata: &LineageSymbolRecordV1, query: &str) -> bool
             .contains(&query)
 }
 
-#[hotpath::measure]
 pub fn canonical_relation_kind(kind: EdgeKind) -> Result<RelationEdgeKindV1> {
     match kind {
         EdgeKind::Calls => Ok(RelationEdgeKindV1::Calls),
@@ -190,7 +181,6 @@ pub fn canonical_relation_kind(kind: EdgeKind) -> Result<RelationEdgeKindV1> {
     }
 }
 
-#[hotpath::measure]
 pub fn canonical_relation_kind_name(kind: RelationEdgeKindV1) -> &'static str {
     match kind {
         RelationEdgeKindV1::Calls => "calls",
@@ -205,7 +195,6 @@ pub fn canonical_relation_kind_name(kind: RelationEdgeKindV1) -> &'static str {
     }
 }
 
-#[hotpath::measure]
 pub fn single_graph_adjacency_batch<T>(mut batches: Vec<Vec<T>>) -> Result<Vec<T>> {
     if batches.len() != 1 {
         return Err(graph_symbol_corrupt(format!(
@@ -267,7 +256,6 @@ pub fn traverse_verified_neighbors(
     Ok(results)
 }
 
-#[hotpath::measure]
 pub fn verified_neighbor_value(result: &VerifiedNeighbor) -> Result<Value> {
     let metadata = required_graph_metadata(&result.symbol)?;
     Ok(json!({
@@ -352,7 +340,6 @@ pub fn verified_trait_dispatch_targets(
     Ok(targets)
 }
 
-#[hotpath::measure]
 pub fn cost_to_expand_verified(
     metadata: &LineageSymbolRecordV1,
     file_size_bytes: u64,
@@ -365,7 +352,6 @@ pub fn cost_to_expand_verified(
     }))
 }
 
-#[hotpath::measure]
 pub fn line_for_byte_offset(source: &str, byte_offset: u64) -> Result<u32> {
     let offset = usize::try_from(byte_offset).map_err(|_| {
         graph_symbol_corrupt("graph evidence byte offset exceeds this platform".to_owned())
@@ -386,7 +372,6 @@ pub fn line_for_byte_offset(source: &str, byte_offset: u64) -> Result<u32> {
     .map_err(|_| graph_symbol_corrupt("graph evidence line exceeds u32".to_owned()))
 }
 
-#[hotpath::measure]
 pub fn graph_symbol_corrupt(detail: String) -> TraceDecayError {
     TraceDecayError::ProjectRoute {
         reason_code: "verified-code-graph-symbol-corrupt".to_owned(),

@@ -27,7 +27,6 @@ pub(crate) struct StructuredSanitizationLimits {
     items: usize,
 }
 
-#[hotpath::measure_all]
 impl StructuredSanitizationLimits {
     pub(crate) fn new(
         raw_bytes: usize,
@@ -54,7 +53,6 @@ pub(crate) struct StructuredSanitizedPayload {
     structurally_parsed: bool,
 }
 
-#[hotpath::measure_all]
 impl StructuredSanitizedPayload {
     pub(crate) fn payload(&self) -> &Value {
         &self.payload
@@ -134,7 +132,6 @@ pub(crate) fn sanitize_structured_payload(
     }
 }
 
-#[hotpath::measure]
 pub fn sanitize_provider_metadata_json(text: &str, max_bytes: u64) -> Option<Value> {
     let max_bytes = usize::try_from(max_bytes).ok()?;
     if text.len() > max_bytes {
@@ -151,7 +148,6 @@ pub fn sanitize_provider_metadata_json(text: &str, max_bytes: u64) -> Option<Val
         .filter(Value::is_object)
 }
 
-#[hotpath::measure]
 fn sanitize_parsed(
     value: Value,
     limits: StructuredSanitizationLimits,
@@ -170,7 +166,6 @@ fn sanitize_parsed(
     })
 }
 
-#[hotpath::measure]
 fn sanitize_malformed(
     text: &str,
     limits: StructuredSanitizationLimits,
@@ -246,7 +241,6 @@ pub(crate) enum StructuredTextParseFailureV1 {
 /// because it accepts the widest range of inputs. A format that only parses
 /// part of the input is rejected outright: partially structured input is
 /// untrusted raw input, never implicitly safe.
-#[hotpath::measure]
 pub(crate) fn parse_structured_text(
     text: &str,
 ) -> Result<Option<ParsedStructuredTextV1>, StructuredTextParseFailureV1> {
@@ -278,7 +272,6 @@ pub(crate) fn parse_structured_text(
 /// before its fields are inspected or redacted. This keeps JSON/YAML/TOML
 /// parse expansion, depth, and item counts on the same authority as captured
 /// observations rather than assigning text-shaped metadata a weaker budget.
-#[hotpath::measure]
 pub(super) fn validate_structured_text_limits(
     value: &Value,
 ) -> Result<(), StructuredSanitizationError> {
@@ -292,7 +285,6 @@ pub(super) fn validate_structured_text_limits(
     validate_expansion(value, limits)
 }
 
-#[hotpath::measure]
 fn parsed(format: StructuredTextFormatV1, value: Value) -> ParsedStructuredTextV1 {
     ParsedStructuredTextV1 {
         format,
@@ -301,14 +293,12 @@ fn parsed(format: StructuredTextFormatV1, value: Value) -> ParsedStructuredTextV
     }
 }
 
-#[hotpath::measure]
 fn first_content_line(text: &str) -> Option<&str> {
     text.lines()
         .map(str::trim)
         .find(|line| !line.is_empty() && !line.starts_with('#') && !is_yaml_preamble_line(line))
 }
 
-#[hotpath::measure]
 fn is_yaml_preamble_line(line: &str) -> bool {
     line == "..."
         || line.starts_with("%YAML ")
@@ -317,12 +307,10 @@ fn is_yaml_preamble_line(line: &str) -> bool {
             .is_some_and(|rest| rest.is_empty() || rest.trim_start().starts_with('#'))
 }
 
-#[hotpath::measure]
 fn has_yaml_preamble(text: &str) -> bool {
     text.lines().map(str::trim).any(is_yaml_preamble_line)
 }
 
-#[hotpath::measure]
 fn looks_like_yaml_mapping(line: &str) -> bool {
     let line = line.trim_start();
     let line = line.strip_prefix("- ").unwrap_or(line);
@@ -336,7 +324,6 @@ fn looks_like_yaml_mapping(line: &str) -> bool {
     is_yaml_mapping_key(key.trim_end())
 }
 
-#[hotpath::measure]
 fn split_yaml_mapping_entry(line: &str) -> Option<(&str, &str)> {
     if let Some(quote) = line
         .chars()
@@ -352,7 +339,6 @@ fn split_yaml_mapping_entry(line: &str) -> Option<(&str, &str)> {
     line.split_once(':')
 }
 
-#[hotpath::measure]
 fn is_yaml_mapping_key(key: &str) -> bool {
     let quoted = key.len() >= 2
         && ((key.starts_with('"') && key.ends_with('"'))
@@ -366,7 +352,6 @@ fn is_yaml_mapping_key(key: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'_' | b'-' | b'.'))
 }
 
-#[hotpath::measure]
 fn has_yaml_mapping_intent(text: &str) -> bool {
     if !has_yaml_preamble(text) && has_code_shape_context(text) {
         return false;
@@ -377,7 +362,6 @@ fn has_yaml_mapping_intent(text: &str) -> bool {
         .any(looks_like_yaml_mapping)
 }
 
-#[hotpath::measure]
 fn has_sensitive_yaml_mapping_intent(text: &str) -> bool {
     text.lines()
         .map(str::trim)
@@ -395,7 +379,6 @@ fn has_sensitive_yaml_mapping_intent(text: &str) -> bool {
         })
 }
 
-#[hotpath::measure]
 fn is_assignment_key(key: &str) -> bool {
     !key.is_empty()
         && !key.starts_with(|character: char| character.is_ascii_digit())
@@ -404,7 +387,6 @@ fn is_assignment_key(key: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
 }
 
-#[hotpath::measure]
 fn is_dotenv_key(key: &str) -> bool {
     !key.is_empty()
         && !key.starts_with(|character: char| character.is_ascii_digit())
@@ -413,7 +395,6 @@ fn is_dotenv_key(key: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.'))
 }
 
-#[hotpath::measure]
 fn has_assignment_intent(text: &str) -> bool {
     if has_code_shape_context(text) {
         return false;
@@ -431,7 +412,6 @@ fn has_assignment_intent(text: &str) -> bool {
     })
 }
 
-#[hotpath::measure]
 fn parse_json_document(
     text: &str,
 ) -> Result<Option<ParsedStructuredTextV1>, StructuredTextParseFailureV1> {
@@ -473,7 +453,6 @@ fn parse_json_document(
 /// Walks the JSON stream with serde before `Value` materializes it. `Value`
 /// normally keeps the final duplicate member and loses the earlier bytes,
 /// which would let an earlier sensitive value survive the span sanitizer.
-#[hotpath::measure]
 pub(crate) fn parse_json_value(
     text: &str,
     max_depth: usize,
@@ -519,7 +498,6 @@ struct JsonStructureBudget {
     values: usize,
 }
 
-#[hotpath::measure_all]
 impl JsonStructureBudget {
     fn record_value(&mut self, depth: usize) -> Result<(), JsonPreflightFailureV1> {
         if depth > self.max_depth {
@@ -563,7 +541,6 @@ struct JsonStructurePreflightVisitor<'a> {
     depth: usize,
 }
 
-#[hotpath::measure_all]
 impl JsonStructurePreflightVisitor<'_> {
     fn record<E: de::Error>(&mut self) -> Result<(), E> {
         self.budget.record_value(self.depth).map_err(|failure| {
@@ -667,7 +644,6 @@ impl<'de> Visitor<'de> for JsonStructurePreflightVisitor<'_> {
     }
 }
 
-#[hotpath::measure]
 fn parse_yaml_document(
     text: &str,
 ) -> Result<Option<ParsedStructuredTextV1>, StructuredTextParseFailureV1> {
@@ -725,7 +701,6 @@ fn parse_yaml_document(
     Ok(None)
 }
 
-#[hotpath::measure]
 fn is_yaml_shaped_document(text: &str) -> bool {
     text.lines().all(|line| {
         if line.starts_with(char::is_whitespace) {
@@ -741,7 +716,6 @@ fn is_yaml_shaped_document(text: &str) -> bool {
     })
 }
 
-#[hotpath::measure]
 fn parse_toml_document(
     text: &str,
 ) -> Result<Option<ParsedStructuredTextV1>, StructuredTextParseFailureV1> {
@@ -798,7 +772,6 @@ fn parse_toml_document(
 
 /// Parses a `KEY=value` environment file, recording the exact span of each
 /// value so quoting is preserved when the value is redacted.
-#[hotpath::measure]
 fn parse_dotenv_document(
     text: &str,
 ) -> Result<Option<ParsedStructuredTextV1>, StructuredTextParseFailureV1> {
@@ -865,7 +838,6 @@ fn parse_dotenv_document(
     }))
 }
 
-#[hotpath::measure]
 fn is_http_field_name(name: &str) -> bool {
     !name.is_empty()
         && name.bytes().all(|byte| {
@@ -890,7 +862,6 @@ fn is_http_field_name(name: &str) -> bool {
         })
 }
 
-#[hotpath::measure]
 fn is_http_start_line(line: &str) -> bool {
     line.starts_with("HTTP/")
         || line
@@ -901,7 +872,6 @@ fn is_http_start_line(line: &str) -> bool {
 /// Parses an HTTP header block. A blank line ends the block; anything after it
 /// makes the input a message with a body rather than a header block, which the
 /// raw scan handles instead.
-#[hotpath::measure]
 fn parse_http_header_document(
     text: &str,
 ) -> Result<Option<ParsedStructuredTextV1>, StructuredTextParseFailureV1> {
@@ -982,7 +952,6 @@ fn parse_http_header_document(
 /// parameters as fields. Values keep their percent-encoded span so redaction
 /// stays byte-exact, while `decoded_value` carries the decoded form detectors
 /// must also inspect.
-#[hotpath::measure]
 fn parse_url_document(
     text: &str,
 ) -> Result<Option<ParsedStructuredTextV1>, StructuredTextParseFailureV1> {
@@ -1064,7 +1033,6 @@ fn parse_url_document(
     }))
 }
 
-#[hotpath::measure]
 fn has_url_intent(text: &str) -> bool {
     let Some((scheme, remainder)) = text.split_once(':') else {
         return false;
@@ -1086,13 +1054,11 @@ fn has_url_intent(text: &str) -> bool {
     ) && remainder.trim_start().starts_with("//")
 }
 
-#[hotpath::measure]
 fn decoded_component(raw: &str) -> Option<String> {
     let decoded = percent_decode_str(raw).decode_utf8().ok()?.into_owned();
     (decoded != raw).then_some(decoded)
 }
 
-#[hotpath::measure]
 fn decode_url_key(raw: &str) -> Result<String, StructuredTextParseFailureV1> {
     percent_decode_str(raw)
         .decode_utf8()
@@ -1105,7 +1071,6 @@ fn decode_url_key(raw: &str) -> Result<String, StructuredTextParseFailureV1> {
 /// parser-native limits, so this conservative lexical guard uses the canonical
 /// `ParseLimits` authority to stop excessive indentation, delimiter nesting,
 /// and structural members before their parsers can recurse or expand values.
-#[hotpath::measure]
 fn preflight_tree_document(text: &str) -> Result<(), StructuredTextParseFailureV1> {
     let policy = ParseLimits::default_policy();
     let mut delimiter_depth = 0usize;
@@ -1151,7 +1116,6 @@ fn preflight_tree_document(text: &str) -> Result<(), StructuredTextParseFailureV
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_expansion(
     value: &Value,
     limits: StructuredSanitizationLimits,

@@ -63,7 +63,6 @@ pub struct QueueBudgetV1 {
     pub max_bytes: u64,
 }
 
-#[hotpath::measure_all]
 impl QueueBudgetV1 {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
         if self.max_operations == 0 {
@@ -88,7 +87,6 @@ pub struct BatchBudgetV1 {
     pub max_delay_ms: u64,
 }
 
-#[hotpath::measure_all]
 impl BatchBudgetV1 {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
         if self.max_operations == 0 {
@@ -128,7 +126,6 @@ pub struct ReaderBudgetV1 {
     pub idle_burst_retire_ms: u64,
 }
 
-#[hotpath::measure_all]
 impl ReaderBudgetV1 {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
         if self.min_per_hot_shard < 2 {
@@ -203,7 +200,6 @@ pub struct WalBudgetV1 {
     pub hard_limit_bytes: u64,
 }
 
-#[hotpath::measure_all]
 impl WalBudgetV1 {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
         if self.soft_limit_bytes == 0 {
@@ -282,7 +278,6 @@ impl Default for AdmissionConfigV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl AdmissionConfigV1 {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
         hotpath::measure_block!("store.runtime_operation.validate_admission", {
@@ -411,7 +406,6 @@ impl<'de> Deserialize<'de> for AdmissionConfigV1 {
     }
 }
 
-#[hotpath::measure]
 fn validate_batch_ceiling(
     budget: &BatchBudgetV1,
     field: &'static str,
@@ -448,7 +442,6 @@ fn validate_batch_ceiling(
 #[serde(transparent)]
 pub struct CommandDigestV1(String);
 
-#[hotpath::measure_all]
 impl CommandDigestV1 {
     pub fn new(value: impl Into<String>) -> Result<Self, StorageRuntimeContractErrorV1> {
         let value = value.into();
@@ -489,7 +482,6 @@ pub struct IdempotencyIdentityV1 {
     pub command_digest: CommandDigestV1,
 }
 
-#[hotpath::measure_all]
 impl IdempotencyIdentityV1 {
     pub fn check_replay(&self, candidate: &Self) -> Result<bool, StorageRuntimeContractErrorV1> {
         if self.key != candidate.key {
@@ -525,7 +517,6 @@ pub struct RuntimeCancellationIdentityV1 {
     pub generation: u64,
 }
 
-#[hotpath::measure_all]
 impl RuntimeCancellationIdentityV1 {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
         if self.generation == 0 {
@@ -570,7 +561,6 @@ pub struct RuntimeRequestControlV1 {
     pub cancellation: RuntimeCancellationIdentityV1,
 }
 
-#[hotpath::measure_all]
 impl RuntimeRequestControlV1 {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
         self.cancellation.validate()
@@ -634,7 +624,6 @@ pub struct GraphNodeV1 {
     pub parent_id: Option<String>,
 }
 
-#[hotpath::measure_all]
 impl GraphNodeV1 {
     pub const MAX_TEXT_BYTES: usize = 1024 * 1024;
 
@@ -693,7 +682,6 @@ pub struct GraphStatsV1 {
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
 pub struct GraphSearchScoreV1(f64);
 
-#[hotpath::measure_all]
 impl GraphSearchScoreV1 {
     pub fn new(value: f64) -> Result<Self, StorageRuntimeContractErrorV1> {
         if !value.is_finite() {
@@ -736,7 +724,6 @@ pub struct GraphSearchResultV1 {
     pub score: GraphSearchScoreV1,
 }
 
-#[hotpath::measure_all]
 impl GraphSearchResultV1 {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
         self.node.validate()?;
@@ -762,7 +749,6 @@ pub struct StoreOperationMetadataV1 {
     pub admitted_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl StoreOperationMetadataV1 {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
         if self.admission_bytes == 0 {
@@ -804,7 +790,6 @@ pub enum RepositoryWritePayloadV1 {
     AcknowledgeOutbox(Box<TransactionalInboxReceiptV1>),
 }
 
-#[hotpath::measure_all]
 impl RepositoryWritePayloadV1 {
     pub fn name(&self) -> &'static str {
         match self {
@@ -1035,7 +1020,6 @@ impl RepositoryWritePayloadV1 {
     }
 }
 
-#[hotpath::measure]
 fn observation_scope_matches(
     observation_scope: &ObservationScopeV1,
     shard_scope: &StoreShardScopeV1,
@@ -1061,7 +1045,6 @@ pub struct RepositoryOperationEnvelopeV1 {
     pub payload: RepositoryWritePayloadV1,
 }
 
-#[hotpath::measure_all]
 impl RepositoryOperationEnvelopeV1 {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
         hotpath::measure_block!("store.runtime_operation.validate_envelope", {
@@ -1246,7 +1229,6 @@ impl RepositoryOperationEnvelopeV1 {
     }
 }
 
-#[hotpath::measure]
 fn fact_owner_matches_shard(
     owner: &tracedecay_domain::FactOwnerV1,
     shard_id: &StoreShardIdV1,
@@ -1264,7 +1246,6 @@ fn fact_owner_matches_shard(
     }
 }
 
-#[hotpath::measure]
 fn retrieval_anchor_owner_matches_shard(
     owner: &crate::RetrievalAnchorOwnerV1,
     shard_id: &StoreShardIdV1,
@@ -1312,7 +1293,6 @@ struct StoreCommitReceiptWireV1 {
     committed_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl StoreCommitReceiptV1 {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
         if self.commit_sequence.0 == 0 {

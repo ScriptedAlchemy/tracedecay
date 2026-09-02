@@ -6,7 +6,6 @@ use crate::{
     GraphRelation, GraphRelationId, GraphSnapshot,
 };
 
-#[hotpath::measure_all]
 impl GraphDb {
     #[hotpath::measure(label = "graph_db.read.entity", impl_type = "GraphDb")]
     pub fn entity(
@@ -61,7 +60,6 @@ impl GraphDb {
     }
 }
 
-#[hotpath::measure_all]
 impl GraphSnapshot {
     pub fn entity(
         &self,

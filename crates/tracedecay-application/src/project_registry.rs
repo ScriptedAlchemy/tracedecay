@@ -78,7 +78,6 @@ pub struct ProjectRegistryView {
 /// Shared by the MCP registry tools and `tracedecay project list`. Lives
 /// next to the presentation DTO so neither `tracedecay-mcp` nor
 /// `tracedecay-dashboard-api` owns a private copy.
-#[hotpath::measure]
 pub fn render_project_registry_view(title: &str, view: &ProjectRegistryView) -> String {
     if view.summary.project_count == 0 {
         return format!("No {title} found.");

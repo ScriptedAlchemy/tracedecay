@@ -5,7 +5,6 @@ use serde_json::json;
 use super::{def, git_scope};
 use crate::ToolDefinition;
 
-#[hotpath::measure]
 pub(super) fn def_lcm_status() -> ToolDefinition {
     def(
         "tracedecay_lcm_status",
@@ -31,7 +30,6 @@ pub(super) fn def_lcm_status() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_lcm_doctor() -> ToolDefinition {
     def(
         "tracedecay_lcm_doctor",
@@ -45,7 +43,6 @@ pub(super) fn def_lcm_doctor() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_lcm_load_session() -> ToolDefinition {
     def(
         "tracedecay_lcm_load_session",
@@ -119,7 +116,6 @@ pub(super) fn def_lcm_load_session() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_lcm_grep() -> ToolDefinition {
     def(
         "tracedecay_lcm_grep",
@@ -233,7 +229,6 @@ pub(super) fn def_lcm_grep() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_lcm_describe() -> ToolDefinition {
     def(
         "tracedecay_lcm_describe",
@@ -296,7 +291,6 @@ pub(super) fn def_lcm_describe() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_lcm_expand() -> ToolDefinition {
     def(
         "tracedecay_lcm_expand",
@@ -387,7 +381,6 @@ pub(super) fn def_lcm_expand() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_lcm_expand_query() -> ToolDefinition {
     def(
         "tracedecay_lcm_expand_query",

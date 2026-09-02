@@ -1,6 +1,5 @@
 use super::*;
 
-#[hotpath::measure_all]
 impl CodeGraphEvidenceReader {
     #[cfg(feature = "test-helpers")]
     pub fn new(

@@ -5,7 +5,6 @@
 //! or query text in names or values.
 
 #[inline]
-#[hotpath::measure]
 pub(crate) fn add(name: &'static str, delta: u64) {
     #[cfg(feature = "hotpath")]
     {
@@ -19,7 +18,6 @@ pub(crate) fn add(name: &'static str, delta: u64) {
 }
 
 #[inline(always)]
-#[hotpath::measure]
 fn add_usize(name: &'static str, delta: usize) {
     #[cfg(feature = "hotpath")]
     add(name, u64::try_from(delta).unwrap_or(u64::MAX));
@@ -35,7 +33,6 @@ fn add_usize(name: &'static str, delta: usize) {
 /// stay visible because a rejected row aborts its whole page — decode work
 /// paid and then discarded.
 #[inline(always)]
-#[hotpath::measure]
 pub(crate) fn record_lcm_raw_row_verified(content_bytes: Option<usize>) {
     match content_bytes {
         Some(bytes) => add_usize("sessions.lcm.raw.verified_bytes", bytes),
@@ -50,7 +47,6 @@ pub(crate) fn record_lcm_raw_row_verified(content_bytes: Option<usize>) {
 /// the two query plans have very different costs, and without the split a
 /// slow-grep profile cannot say which plan the workload is actually on.
 #[inline(always)]
-#[hotpath::measure]
 pub(crate) fn record_lcm_grep(hits: usize, like_fallback: bool) {
     add("sessions.lcm.grep.pages", 1);
     add_usize("sessions.lcm.grep.hits", hits);
@@ -63,13 +59,11 @@ pub(crate) fn record_lcm_grep(hits: usize, like_fallback: bool) {
 /// assembled backlog, ingest writes, and summary drafts behind it are all
 /// discarded work that success-only counters would hide.
 #[inline(always)]
-#[hotpath::measure]
 pub(crate) fn record_lcm_compress_failed() {
     add("sessions.lcm.compress.failed", 1);
 }
 
 #[inline(always)]
-#[hotpath::measure]
 pub(crate) fn record_lcm_compression(summary_nodes: usize, attempts: usize, replay_tokens: i64) {
     add_usize("sessions.lcm.compress.summary_nodes", summary_nodes);
     add_usize("sessions.lcm.compress.attempts", attempts);
@@ -80,20 +74,17 @@ pub(crate) fn record_lcm_compression(summary_nodes: usize, attempts: usize, repl
 }
 
 #[inline(always)]
-#[hotpath::measure]
 pub(crate) fn record_lcm_gc(bytes: u64, files: usize) {
     add("sessions.lcm.gc.reclaimed_bytes", bytes);
     add_usize("sessions.lcm.gc.reclaimed_files", files);
 }
 
 #[inline(always)]
-#[hotpath::measure]
 pub(crate) fn record_lcm_retention(bytes: u64) {
     add("sessions.lcm.retention.reclaimed_bytes", bytes);
 }
 
 #[inline(always)]
-#[hotpath::measure]
 pub(crate) fn record_lcm_retrieval(matches: usize) {
     add_usize("sessions.lcm.retrieval.matches", matches);
 }

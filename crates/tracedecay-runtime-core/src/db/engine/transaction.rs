@@ -218,14 +218,12 @@ impl Transaction {
     }
 }
 
-#[hotpath::measure]
 fn lock_runtime<T>(runtime: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>> {
     runtime
         .lock()
         .map_err(|_| super::Error::Runtime("exact SQL transaction lock poisoned".to_owned()))
 }
 
-#[hotpath::measure]
 fn join_error(error: tokio::task::JoinError) -> super::Error {
     super::Error::Runtime(format!("exact SQL transaction task failed: {error}"))
 }

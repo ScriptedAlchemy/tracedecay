@@ -39,7 +39,6 @@ pub enum GlobalRequestSurface {
     LcmDaemon,
 }
 
-#[hotpath::measure_all]
 impl GlobalRequestSurface {
     #[hotpath::skip]
     const fn prefix(self) -> &'static str {
@@ -77,7 +76,6 @@ pub enum GlobalOpaqueIdentityKind {
     MemoryOperation,
 }
 
-#[hotpath::measure_all]
 impl GlobalOpaqueIdentityKind {
     #[hotpath::skip]
     const fn prefix(self) -> &'static str {
@@ -97,7 +95,6 @@ pub enum GlobalOperationIdentityKind {
     HostFeedbackRollback,
 }
 
-#[hotpath::measure_all]
 impl GlobalOperationIdentityKind {
     #[hotpath::skip]
     const fn domain(self) -> &'static [u8] {
@@ -117,7 +114,6 @@ pub enum LogicalEffectIdempotencyDomain {
     ConfigurationEffect,
 }
 
-#[hotpath::measure_all]
 impl LogicalEffectIdempotencyDomain {
     #[hotpath::skip]
     const fn domain(self) -> &'static str {
@@ -135,7 +131,6 @@ pub enum PreviewIdentityDomain {
     SourceEdit,
 }
 
-#[hotpath::measure_all]
 impl PreviewIdentityDomain {
     #[hotpath::skip]
     const fn domain(self) -> &'static str {
@@ -164,7 +159,6 @@ struct ProcessUniqueIdentityAuthority {
     next_sequence: AtomicU64,
 }
 
-#[hotpath::measure_all]
 impl ProcessUniqueIdentityAuthority {
     fn from_instance_nonce(instance_nonce: [u8; 16]) -> Self {
         Self {
@@ -206,7 +200,6 @@ impl ProcessUniqueIdentityAuthority {
     }
 }
 
-#[hotpath::measure]
 fn global_authority() -> Result<&'static ProcessUniqueIdentityAuthority, RequestIdentityError> {
     static AUTHORITY: OnceLock<Option<ProcessUniqueIdentityAuthority>> = OnceLock::new();
     AUTHORITY
@@ -225,7 +218,6 @@ fn global_authority() -> Result<&'static ProcessUniqueIdentityAuthority, Request
 /// The process nonce comes from OS entropy and the checked sequence is shared
 /// by every surface in this process. Callers cannot accidentally choose a
 /// process-local timestamp/counter scope.
-#[hotpath::measure]
 pub fn mint_global_request_id(
     surface: GlobalRequestSurface,
 ) -> Result<RequestId, RequestIdentityError> {
@@ -235,7 +227,6 @@ pub fn mint_global_request_id(
 
 /// Mints a globally unique opaque identifier for a non-request correlation
 /// object such as a preview or dashboard run.
-#[hotpath::measure]
 pub fn mint_global_opaque_id(
     kind: GlobalOpaqueIdentityKind,
 ) -> Result<String, RequestIdentityError> {
@@ -243,7 +234,6 @@ pub fn mint_global_opaque_id(
 }
 
 /// Mints a globally unique binary operation identifier.
-#[hotpath::measure]
 pub fn mint_global_operation_id(
     kind: GlobalOperationIdentityKind,
 ) -> Result<[u8; 16], RequestIdentityError> {
@@ -254,7 +244,6 @@ pub fn mint_global_operation_id(
 ///
 /// Unlike [`mint_global_request_id`], identical domain/material pairs must
 /// produce identical bytes so an exact retry resolves to the same receipt.
-#[hotpath::measure]
 pub fn derive_logical_effect_idempotency<T: Serialize + ?Sized>(
     domain: LogicalEffectIdempotencyDomain,
     material: &T,
@@ -263,7 +252,6 @@ pub fn derive_logical_effect_idempotency<T: Serialize + ?Sized>(
         .map_err(|_| RequestIdentityError::InvalidLogicalEffectIdentity)
 }
 
-#[hotpath::measure]
 pub fn derive_feedback_observation_idempotency<Saved, Observation>(
     saved_evaluation_digest: &Saved,
     observation: &Observation,
@@ -280,7 +268,6 @@ where
     .map_err(|_| RequestIdentityError::InvalidLogicalEffectIdentity)
 }
 
-#[hotpath::measure]
 pub fn derive_feedback_source_event_idempotency<Subject, Event>(
     subject_digest: &Subject,
     observed_at: UtcMicros,
@@ -304,7 +291,6 @@ where
 /// A preview is not an effect replay key: its material includes the request
 /// correlation and the complete proposed edit so distinct previews cannot
 /// alias even when a transport request id is reused.
-#[hotpath::measure]
 pub fn derive_preview_identity<Request, Edit>(
     domain: PreviewIdentityDomain,
     request: &Request,
@@ -320,7 +306,6 @@ where
 
 /// Widens a JSON-RPC id that is unique only within one globally unique MCP
 /// connection scope. This preserves the existing persisted MCP identity format.
-#[hotpath::measure]
 pub fn mcp_connection_request_id(id: &Value, connection_scope: &str) -> Option<RequestId> {
     if connection_scope.is_empty() || !matches!(id, Value::String(_) | Value::Number(_)) {
         return None;
@@ -339,7 +324,6 @@ pub struct McpConnectionIdentityAuthority {
     next_connection: AtomicU64,
 }
 
-#[hotpath::measure_all]
 impl McpConnectionIdentityAuthority {
     pub fn from_os_entropy() -> Self {
         let mut instance_nonce = [0_u8; 16];

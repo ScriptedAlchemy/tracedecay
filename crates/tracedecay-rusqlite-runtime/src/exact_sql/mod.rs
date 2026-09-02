@@ -105,7 +105,6 @@ pub struct ExactSqlHandle {
     write_authority: Option<Arc<dyn ExactSqlWriteAuthority>>,
 }
 
-#[hotpath::measure_all]
 impl ExactSqlHandle {
     pub fn attach<E: ReaderQueryExecutor>(
         writer: &PersistentWriter,
@@ -535,7 +534,6 @@ pub struct ExactSqlReadSnapshot {
     query: std::sync::Mutex<Box<ExactSqlSnapshotQuery>>,
 }
 
-#[hotpath::measure_all]
 impl ExactSqlReadSnapshot {
     pub(crate) fn new<F>(query: F) -> Self
     where
@@ -560,7 +558,6 @@ pub struct ExactSqlTransaction {
     policy: TransactionPolicy,
 }
 
-#[hotpath::measure_all]
 impl ExactSqlTransaction {
     pub fn attach_database(&self, attachment: ExactSqlAttachment) -> Result<(), ExactSqlError> {
         let sender = self
@@ -695,7 +692,6 @@ impl ExactSqlTransaction {
     }
 }
 
-#[hotpath::measure]
 fn execute_request(
     connection: &Connection,
     request: SqlRequest,
@@ -740,7 +736,6 @@ fn execute_request(
     (result, insert_tracker.applied.load(Ordering::Acquire))
 }
 
-#[hotpath::measure]
 fn verify_write_authority(
     authority: Option<&dyn ExactSqlWriteAuthority>,
     intent: ExactSqlWriteIntent,
@@ -751,7 +746,6 @@ fn verify_write_authority(
     }
 }
 
-#[hotpath::measure]
 fn publish_last_insert_rowid(
     result: &mut Result<SqlResult, ExactSqlError>,
     inserted: bool,
@@ -769,7 +763,6 @@ fn publish_last_insert_rowid(
     }
 }
 
-#[hotpath::measure]
 fn validate_request(request: &SqlRequest) -> Result<(), ExactSqlError> {
     match request {
         SqlRequest::Validate(statement)
@@ -782,7 +775,6 @@ fn validate_request(request: &SqlRequest) -> Result<(), ExactSqlError> {
 /// The reader pool reports `Released` only with a non-zero connection count,
 /// so merging is exact: a released reader outcome gains the writer flag, and
 /// a reader no-op is superseded only when the writer actually released.
-#[hotpath::measure]
 fn merge_memory_release(readers: MemoryReleaseOutcome, writer: bool) -> MemoryReleaseOutcome {
     match readers {
         MemoryReleaseOutcome::Released {
@@ -799,7 +791,6 @@ fn merge_memory_release(readers: MemoryReleaseOutcome, writer: bool) -> MemoryRe
     }
 }
 
-#[hotpath::measure]
 fn validate_batch(sql: &String) -> Result<(), ExactSqlError> {
     if sql.trim().is_empty() {
         Err(ExactSqlError::InvalidStatement)
@@ -832,7 +823,6 @@ fn execute_statement(
     })
 }
 
-#[hotpath::measure]
 fn attach_database(
     connection: &Connection,
     attachment: &ExactSqlAttachment,
@@ -861,7 +851,6 @@ fn attach_database(
     )
 }
 
-#[hotpath::measure]
 fn detach_database(
     connection: &Connection,
     database_name: &str,
@@ -889,7 +878,6 @@ fn detach_database(
     )
 }
 
-#[hotpath::measure]
 fn execute_batch(connection: &Connection, sql: &str) -> Result<ExactSqlBatchResult, ExactSqlError> {
     let before = connection.total_changes();
     connection
@@ -923,7 +911,6 @@ pub(crate) fn execute_query(
     )
 }
 
-#[hotpath::measure]
 fn execute_query_unchecked(
     connection: &Connection,
     request: ExactSqlStatement,
@@ -989,7 +976,6 @@ fn execute_query_unchecked(
     Ok(ExactSqlRows { columns, rows })
 }
 
-#[hotpath::measure]
 fn sqlite_error(operation: &'static str, error: rusqlite::Error) -> ExactSqlError {
     let (code, extended_code) = match &error {
         rusqlite::Error::SqliteFailure(error, _) => {
@@ -1005,7 +991,6 @@ fn sqlite_error(operation: &'static str, error: rusqlite::Error) -> ExactSqlErro
     }
 }
 
-#[hotpath::measure]
 fn map_writer_send_error(error: tokio_mpsc::error::TrySendError<WriterCommand>) -> ExactSqlError {
     match error {
         tokio_mpsc::error::TrySendError::Full(_) => ExactSqlError::Busy,
@@ -1013,7 +998,6 @@ fn map_writer_send_error(error: tokio_mpsc::error::TrySendError<WriterCommand>) 
     }
 }
 
-#[hotpath::measure]
 fn transaction_terminal_error(expired: &AtomicBool) -> ExactSqlError {
     if expired.load(Ordering::Acquire) {
         ExactSqlError::TransactionExpired
@@ -1022,7 +1006,6 @@ fn transaction_terminal_error(expired: &AtomicBool) -> ExactSqlError {
     }
 }
 
-#[hotpath::measure]
 fn map_transaction_send_error(
     error: mpsc::TrySendError<TransactionCommand>,
     expired: &AtomicBool,

@@ -25,7 +25,6 @@ pub(super) struct RecordQuery {
 const MAX_RECORD_QUERY_PARAMETERS: usize = 24_000;
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure]
 pub(super) fn build_record_query_with_relations(
     scope: &TemporalRetrievalScope,
     snapshot: &TemporalExecutionSnapshot,
@@ -569,7 +568,6 @@ pub(super) fn build_record_query_with_relations(
     Ok(RecordQuery { sql, params })
 }
 
-#[hotpath::measure]
 fn retained_summary_provider_predicate(provider_param: usize, summary_generation: &str) -> String {
     format!(
         "(?{provider_param} IS NULL OR EXISTS (
@@ -589,7 +587,6 @@ fn retained_summary_provider_predicate(provider_param: usize, summary_generation
     )
 }
 
-#[hotpath::measure]
 fn copy_relation_values(
     relations: &[RecordCopyRelation],
     params: &mut Vec<SqlValue>,
@@ -619,7 +616,6 @@ fn copy_relation_values(
     Ok(values)
 }
 
-#[hotpath::measure]
 fn summary_relation_values(
     relations: &[RecordSummaryRelation],
     params: &mut Vec<SqlValue>,
@@ -651,7 +647,6 @@ fn summary_relation_values(
     Ok(values)
 }
 
-#[hotpath::measure]
 fn summary_source_values(
     relations: &[RecordSummarySourceRelation],
     params: &mut Vec<SqlValue>,
@@ -688,7 +683,6 @@ fn summary_source_values(
     Ok(values)
 }
 
-#[hotpath::measure]
 fn retained_summary_anchor_values(
     relations: &[RecordRetainedSummaryAnchor],
     params: &mut Vec<SqlValue>,
@@ -713,7 +707,6 @@ fn retained_summary_anchor_values(
     Ok(values)
 }
 
-#[hotpath::measure_all]
 impl RecordScopeSql {
     pub(super) fn new(
         scope: &TemporalRetrievalScope,
@@ -767,7 +760,6 @@ impl RecordScopeSql {
     }
 }
 
-#[hotpath::measure_all]
 impl RecordModeSql {
     pub(super) fn new(mode: TemporalModeV1, cutoff_param: usize) -> Self {
         match mode {

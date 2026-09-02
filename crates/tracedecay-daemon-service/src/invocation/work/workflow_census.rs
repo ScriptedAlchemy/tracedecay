@@ -7,7 +7,6 @@ use tracedecay_daemon_protocol::DaemonInvocationProblem;
 
 use super::RegisteredWorkRuntime;
 
-#[hotpath::measure]
 pub(super) fn persist_workflow_fan_out_census(
     registered: &RegisteredWorkRuntime,
     workflow: &tracedecay_usecases::work::RegisteredWorkflowApplicationServicesV1,
@@ -33,7 +32,6 @@ pub(super) fn persist_workflow_fan_out_census(
     }
 }
 
-#[hotpath::measure]
 fn try_persist_workflow_fan_out_census(
     registered: &RegisteredWorkRuntime,
     workflow: &tracedecay_usecases::work::RegisteredWorkflowApplicationServicesV1,
@@ -265,7 +263,6 @@ fn try_persist_workflow_fan_out_census(
     }
 }
 
-#[hotpath::measure]
 fn census_readiness(
     registered: &RegisteredWorkRuntime,
     work: &tracedecay_usecases::work::RegisteredWorkApplicationServicesV1,
@@ -427,7 +424,6 @@ struct WorkflowFanOutCensusObservationRecoveryInnerV1 {
     task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
-#[hotpath::measure_all]
 impl WorkflowFanOutCensusObservationRecoveryOwnerV1 {
     pub(crate) fn mount(
         database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
@@ -567,7 +563,6 @@ impl Drop for WorkflowFanOutCensusObservationRecoveryInnerV1 {
     }
 }
 
-#[hotpath::measure]
 fn read_pending_census_observations(
     database: &tracedecay_global_db::RegisteredGlobalDb,
 ) -> Result<
@@ -583,7 +578,6 @@ fn read_pending_census_observations(
     )
 }
 
-#[hotpath::measure]
 fn pending_census_envelopes(
     producer: &tracedecay_usecases::observability::BoundedObservabilityProducerV1,
     project_id: &tracedecay_domain::ProjectId,
@@ -619,7 +613,6 @@ fn pending_census_envelopes(
         .collect()
 }
 
-#[hotpath::measure]
 fn mark_durable_census_observations(
     database: &tracedecay_global_db::RegisteredGlobalDb,
     observations: &[tracedecay_application::WorkflowFanOutCensusObservationV1],

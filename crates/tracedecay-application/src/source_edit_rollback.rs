@@ -28,7 +28,6 @@ pub struct SourceEditRollbackRequestV1 {
     pub observed_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl SourceEditRollbackRequestV1 {
     pub fn input_digest(&self) -> Result<ManifestDigest, ApplicationContractError> {
         self.validate()?;
@@ -79,7 +78,6 @@ impl SourceEditRollbackRequestV1 {
     }
 }
 
-#[hotpath::measure]
 pub fn source_edit_rollback_operation() -> Result<ApplicationOperation, ApplicationContractError> {
     let result_schema = source_edit_rollback_schema("result")?;
     Ok(ApplicationOperation::new(
@@ -90,7 +88,6 @@ pub fn source_edit_rollback_operation() -> Result<ApplicationOperation, Applicat
     ))
 }
 
-#[hotpath::measure]
 pub(crate) fn source_edit_rollback_schema(
     suffix: &str,
 ) -> Result<SchemaRef, ApplicationContractError> {

@@ -52,7 +52,6 @@ struct DashboardProfileCodeIndexWorkerSettingsAdapter {
     registrar: tracedecay_daemon_service::DaemonConfigurationRuntimeRegistrar,
 }
 
-#[hotpath::measure_all]
 impl DashboardProfileCodeIndexWorkerSettingsAdapter {
     fn new(
         database: RegisteredGlobalDbLeaseV1,
@@ -69,7 +68,6 @@ impl DashboardProfileCodeIndexWorkerSettingsAdapter {
     }
 }
 
-#[hotpath::measure]
 pub(crate) fn compose_dashboard_profile_code_index_worker_settings(
     database: RegisteredGlobalDbLeaseV1,
     profile_id: UserProfileId,
@@ -152,7 +150,6 @@ impl DashboardProfileCodeIndexWorkerSettingsPort
     }
 }
 
-#[hotpath::measure]
 fn dashboard_code_index_worker_configuration(
     configuration: tracedecay_global_db::configuration::ProfileCodeIndexWorkerConfigurationV1,
 ) -> DashboardCodeIndexWorkerConfigurationV1 {
@@ -169,7 +166,6 @@ struct DashboardInvocationExecutorAdapter {
     user_profile_id: Option<UserProfileId>,
 }
 
-#[hotpath::measure_all]
 impl DashboardInvocationExecutorAdapter {
     fn new(
         executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
@@ -447,7 +443,6 @@ pub(crate) async fn dashboard_native_integration_status(
     })
 }
 
-#[hotpath::measure]
 fn append_direct_configuration_mutations(
     mutation: DirectConfigurationMutation,
     direct_mutations: &mut Vec<tracedecay_application::ConfigurationDirectMutationRequestV1>,
@@ -475,7 +470,6 @@ fn append_direct_configuration_mutations(
     }
 }
 
-#[hotpath::measure]
 fn dashboard_configuration_unavailable(
     contract: tracedecay_application::ResultContractRef,
     request_id: RequestId,
@@ -500,7 +494,6 @@ struct RunningDashboard {
     completed: Arc<tokio::sync::Notify>,
 }
 
-#[hotpath::measure_all]
 impl RunningDashboard {
     fn request_shutdown(&mut self) {
         if let Some(shutdown) = self.shutdown.take() {
@@ -527,7 +520,6 @@ static DASHBOARD_MANAGER: std::sync::OnceLock<
     tokio::sync::Mutex<HashMap<PathBuf, RunningDashboard>>,
 > = std::sync::OnceLock::new();
 
-#[hotpath::measure]
 fn get_manager() -> &'static tokio::sync::Mutex<HashMap<PathBuf, RunningDashboard>> {
     DASHBOARD_MANAGER.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()))
 }
@@ -651,7 +643,6 @@ pub(crate) async fn shutdown_dashboard() -> Result<()> {
     .await
 }
 
-#[hotpath::measure]
 fn dashboard_tool_result(cg: &TraceDecay, args: &Value, payload: &Value) -> ToolResult {
     generic_tool_result(Some(cg.project_root()), args, payload, vec![])
 }

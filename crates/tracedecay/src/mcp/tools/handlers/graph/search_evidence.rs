@@ -48,7 +48,6 @@ where
     }
 }
 
-#[hotpath::measure]
 pub(super) fn bind_verified_graph_to_search(
     graph: Result<VerifiedGraphQuery>,
     search_generation: &str,
@@ -72,7 +71,6 @@ pub(super) struct SearchGraphEvidence<'a> {
     unavailable: Option<Value>,
 }
 
-#[hotpath::measure]
 pub(super) fn append_verified_graph_evidence_md(md: &mut Md, value: &Value) {
     let Some(evidence) = value.get("verified_graph_evidence") else {
         return;
@@ -89,7 +87,6 @@ pub(super) fn append_verified_graph_evidence_md(md: &mut Md, value: &Value) {
         .line(&format!("Graph enrichment unavailable: {detail}"));
 }
 
-#[hotpath::measure_all]
 impl<'a> SearchGraphEvidence<'a> {
     pub(super) fn new(
         graph: std::result::Result<&'a VerifiedGraphQuery, &'a TraceDecayError>,
@@ -150,7 +147,6 @@ impl<'a> SearchGraphEvidence<'a> {
     }
 }
 
-#[hotpath::measure]
 fn unique_graph_node_id_for_search_display(
     graph: &VerifiedGraphQuery,
     display: &CodeIndexSearchDisplayV1,

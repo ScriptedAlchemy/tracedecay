@@ -85,7 +85,6 @@ pub(super) fn execute_github_stack_signal_expand(
     }
 }
 
-#[hotpath::measure]
 fn github_stack_signal_authority(
     request_id: &str,
     registered: &RegisteredConfigurationRuntime,
@@ -137,7 +136,6 @@ fn github_stack_signal_authority(
     .map_err(|_| invalid_github_stack_signal_request())
 }
 
-#[hotpath::measure]
 fn github_stack_signal_authority_receipt(
     context: &RequestContext,
     registered: &RegisteredConfigurationRuntime,
@@ -160,7 +158,6 @@ fn github_stack_signal_authority_receipt(
     .map_err(|_| invalid_github_stack_signal_request())
 }
 
-#[hotpath::measure]
 fn github_stack_signal_evidence(
     payload: serde_json::Value,
     authority: AuthorityReceipt,
@@ -196,7 +193,6 @@ fn github_stack_signal_evidence(
     }))
 }
 
-#[hotpath::measure]
 fn invalid_github_stack_signal_request() -> ApplicationProblem {
     ApplicationProblem::InvalidRequest {
         diagnostic: SafeDiagnostic {

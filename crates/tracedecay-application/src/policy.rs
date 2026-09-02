@@ -73,7 +73,6 @@ pub struct PolicyEvidenceHorizonV1 {
     pub agreement: PolicyEvidenceAgreementV1,
 }
 
-#[hotpath::measure_all]
 impl PolicyEvidenceHorizonV1 {
     /// Conservative routing prerequisite without replacing either recorded
     /// frontier. The full independent states remain on the result.
@@ -99,7 +98,6 @@ pub struct PolicyEvaluationContextV1 {
     policy_digest: ManifestDigest,
 }
 
-#[hotpath::measure_all]
 impl PolicyEvaluationContextV1 {
     pub fn new(
         request: RequestContext,
@@ -195,7 +193,6 @@ pub struct RegisteredPolicyCapabilityV1 {
     capability_digest: ManifestDigest,
 }
 
-#[hotpath::measure_all]
 impl RegisteredPolicyCapabilityV1 {
     pub fn capability_id(&self) -> &str {
         &self.capability_id
@@ -233,7 +230,6 @@ pub struct PolicyEvaluatorCompositionV1 {
     analyzer: AnalyzerAdmissionEvaluatorV1,
 }
 
-#[hotpath::measure_all]
 impl PolicyEvaluatorCompositionV1 {
     /// Builds the routing projection from the canonical catalog and matching
     /// application handlers. Static unavailability remains a policy fact even
@@ -485,14 +481,12 @@ impl PolicyEvaluatorCompositionV1 {
     }
 }
 
-#[hotpath::measure]
 fn policy_identifier(value: &str) -> Result<PolicyIdentifierV1, ApplicationContractError> {
     PolicyIdentifierV1::new(value).map_err(|_| ApplicationContractError::InvalidIdentifier {
         field: "policy routing identifier",
     })
 }
 
-#[hotpath::measure]
 fn routing_grant(
     request: &RequestContext,
 ) -> Result<CapabilityRoutingGrantV1, ApplicationContractError> {
@@ -517,7 +511,6 @@ fn routing_grant(
     })
 }
 
-#[hotpath::measure]
 fn routing_cancellation(request: &RequestContext) -> CapabilityRoutingCancellationV1 {
     match &request.cancellation().state {
         CancellationState::Active => CapabilityRoutingCancellationV1::Active,
@@ -529,7 +522,6 @@ fn routing_cancellation(request: &RequestContext) -> CapabilityRoutingCancellati
     }
 }
 
-#[hotpath::measure]
 fn catalog_availability(availability: &AvailabilityContract) -> CapabilityAvailabilityV1 {
     match availability {
         AvailabilityContract::Available => CapabilityAvailabilityV1::Available,
@@ -537,7 +529,6 @@ fn catalog_availability(availability: &AvailabilityContract) -> CapabilityAvaila
     }
 }
 
-#[hotpath::measure]
 fn route_effect(effect: EffectClass) -> Result<CapabilityEffectClassV1, ApplicationContractError> {
     match effect {
         EffectClass::Read => Ok(CapabilityEffectClassV1::Read),

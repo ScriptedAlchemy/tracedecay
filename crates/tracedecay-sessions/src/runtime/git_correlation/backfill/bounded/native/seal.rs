@@ -12,7 +12,6 @@ pub(in super::super) struct RepositorySeal {
     pub common_dir_identity: Vec<u8>,
 }
 
-#[hotpath::measure]
 pub(super) fn capture_repository_seal(
     repository: &gix::Repository,
 ) -> Result<RepositorySeal, BoundedBackfillInterruption> {
@@ -33,7 +32,6 @@ pub(super) fn capture_repository_seal(
     })
 }
 
-#[hotpath::measure]
 pub(super) fn verify_repository_identity(
     repository: &gix::Repository,
     expected: &RepositorySeal,
@@ -44,7 +42,6 @@ pub(super) fn verify_repository_identity(
     Ok(())
 }
 
-#[hotpath::measure]
 pub(in super::super) fn verify_repository_source(
     project_path: &Path,
     seal: &RepositorySeal,
@@ -57,7 +54,6 @@ pub(in super::super) fn verify_repository_source(
     control.check()
 }
 
-#[hotpath::measure]
 fn canonical_directory(path: &Path) -> Result<PathBuf, BoundedBackfillInterruption> {
     let canonical = path
         .canonicalize()
@@ -69,7 +65,6 @@ fn canonical_directory(path: &Path) -> Result<PathBuf, BoundedBackfillInterrupti
 }
 
 #[cfg(unix)]
-#[hotpath::measure]
 fn stable_filesystem_identity(path: &Path) -> Result<Vec<u8>, BoundedBackfillInterruption> {
     use std::os::unix::fs::MetadataExt as _;
 
@@ -82,7 +77,6 @@ fn stable_filesystem_identity(path: &Path) -> Result<Vec<u8>, BoundedBackfillInt
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn stable_filesystem_identity(path: &Path) -> Result<Vec<u8>, BoundedBackfillInterruption> {
     use std::os::windows::fs::OpenOptionsExt as _;
 
@@ -105,7 +99,6 @@ fn stable_filesystem_identity(path: &Path) -> Result<Vec<u8>, BoundedBackfillInt
 }
 
 #[cfg(not(any(unix, windows)))]
-#[hotpath::measure]
 fn stable_filesystem_identity(_path: &Path) -> Result<Vec<u8>, BoundedBackfillInterruption> {
     Err(BoundedBackfillInterruption::SourceUnavailable)
 }

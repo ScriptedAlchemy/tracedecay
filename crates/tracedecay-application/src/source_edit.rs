@@ -20,7 +20,6 @@ use crate::{current_bindings, current_bindings_with_slug};
 
 /// `serde` `skip_serializing_if` predicate for default-off flags.
 #[allow(clippy::trivially_copy_pass_by_ref)]
-#[hotpath::measure]
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -176,7 +175,6 @@ pub enum SourceEditKind {
     RenameSymbol,
 }
 
-#[hotpath::measure_all]
 impl SourceEditKind {
     #[hotpath::skip]
     pub const fn operation_name(self) -> &'static str {
@@ -266,7 +264,6 @@ pub enum SourceEditRequest {
     },
 }
 
-#[hotpath::measure_all]
 impl SourceEditRequest {
     #[hotpath::skip]
     pub const fn kind(&self) -> SourceEditKind {
@@ -395,7 +392,6 @@ const SOURCE_EDIT_KINDS: [SourceEditKind; 8] = [
 
 const SOURCE_EDIT_SURFACES: [BindingSurface; 2] = [BindingSurface::Cli, BindingSurface::Mcp];
 
-#[hotpath::measure]
 pub fn source_edit_operation(
     kind: SourceEditKind,
 ) -> Result<ApplicationOperation, ApplicationContractError> {
@@ -414,7 +410,6 @@ pub fn source_edit_operation(
     ))
 }
 
-#[hotpath::measure]
 pub fn source_edit_handler_descriptors()
 -> Result<Vec<ApplicationHandlerDescriptor>, ApplicationContractError> {
     let mut descriptors = SOURCE_EDIT_KINDS
@@ -440,7 +435,6 @@ pub fn source_edit_handler_descriptors()
     Ok(descriptors)
 }
 
-#[hotpath::measure]
 pub fn source_edit_catalog_contribution() -> Result<CatalogContributionV1, ApplicationContractError>
 {
     let rollback_operation = source_edit_rollback_operation()?;
@@ -663,7 +657,6 @@ pub fn source_edit_catalog_contribution() -> Result<CatalogContributionV1, Appli
 
 /// SDK schemas are paired with the exact request accepted by each mounted MCP
 /// operation and the exact typed result its daemon-owned use case serializes.
-#[hotpath::measure]
 fn source_edit_executable_schemas(
     contribution: &CatalogContributionV1,
 ) -> Result<Vec<ExecutableSchemaAuthority>, ApplicationContractError> {
@@ -737,7 +730,6 @@ fn source_edit_executable_schemas(
     ])
 }
 
-#[hotpath::measure]
 fn source_edit_executable_schema<Request, Response>(
     contribution: &CatalogContributionV1,
     capability_id: &CapabilityId,
@@ -763,7 +755,6 @@ where
     )?)
 }
 
-#[hotpath::measure]
 pub fn source_edit_reconciliation_operation()
 -> Result<ApplicationOperation, ApplicationContractError> {
     let result_schema = source_edit_reconciliation_schema("result")?;
@@ -775,7 +766,6 @@ pub fn source_edit_reconciliation_operation()
     ))
 }
 
-#[hotpath::measure]
 fn source_edit_reconciliation_schema(suffix: &str) -> Result<SchemaRef, ApplicationContractError> {
     Ok(SchemaRef::new(
         SchemaId::new(format!("schema.application.source-edit.reconcile.{suffix}"))?,
@@ -783,7 +773,6 @@ fn source_edit_reconciliation_schema(suffix: &str) -> Result<SchemaRef, Applicat
     )?)
 }
 
-#[hotpath::measure]
 fn source_edit_schema(
     kind: SourceEditKind,
     suffix: &str,

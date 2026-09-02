@@ -4,7 +4,6 @@ use crate::config::TraceDecayConfig;
 use crate::tracedecay::TraceDecay;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-#[hotpath::measure]
 fn parse_counter(key: &'static str, value: Option<String>) -> Result<u64> {
     let Some(value) = value else {
         return Ok(0);
@@ -17,7 +16,6 @@ fn parse_counter(key: &'static str, value: Option<String>) -> Result<u64> {
         })
 }
 
-#[hotpath::measure_all]
 impl TraceDecay {
     /// Returns the persisted tokens-saved counter.
     #[hotpath::skip]

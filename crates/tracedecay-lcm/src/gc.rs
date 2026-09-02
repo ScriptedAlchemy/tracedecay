@@ -40,7 +40,6 @@ const GC_PREFIXES: [&str; 2] = [GC_PAYLOAD_PREFIX, GC_TOOL_OUTPUT_PREFIX];
 const MAX_SAMPLES: usize = 20;
 const GC_MARK_UPSERT_BINDS_PER_ROW: usize = 4;
 
-#[hotpath::measure]
 pub(crate) fn is_known_payload_placeholder_prefix(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
     LIVE_PREFIX_REWRITES
@@ -56,7 +55,6 @@ pub struct LcmGcPhaseReport {
     pub refs: Vec<String>,
 }
 
-#[hotpath::measure_all]
 impl LcmGcPhaseReport {
     fn add(&mut self, payload_ref: &str, bytes: u64) {
         self.count += 1;
@@ -135,7 +133,6 @@ pub struct LcmGcReport {
     pub backup: Option<Value>,
 }
 
-#[hotpath::measure_all]
 impl LcmGcReport {
     fn new(
         provider: &str,
@@ -284,7 +281,6 @@ pub async fn referenced_payload_refs(
     }
 }
 
-#[hotpath::measure]
 fn extract_live_payload_refs_from_text(text: &str) -> Vec<String> {
     let mut refs = Vec::new();
     let mut offset = 0usize;
@@ -305,7 +301,6 @@ fn extract_live_payload_refs_from_text(text: &str) -> Vec<String> {
     refs
 }
 
-#[hotpath::measure]
 pub fn text_has_tombstoned_payload_ref(text: &str, payload_ref: &str) -> bool {
     if text.is_empty() || !text.contains(payload_ref) {
         return false;
@@ -331,7 +326,6 @@ pub fn text_has_tombstoned_payload_ref(text: &str, payload_ref: &str) -> bool {
     false
 }
 
-#[hotpath::measure]
 pub fn tombstone_placeholder_in_text(text: &str, payload_ref: &str) -> String {
     if text.is_empty() || !text.contains(payload_ref) {
         return text.to_string();
@@ -360,14 +354,12 @@ pub fn tombstone_placeholder_in_text(text: &str, payload_ref: &str) -> String {
     result
 }
 
-#[hotpath::measure]
 fn placeholder_mentions_ref(placeholder: &str, payload_ref: &str) -> bool {
     payload::extract_payload_refs_from_text(placeholder)
         .iter()
         .any(|candidate| candidate == payload_ref)
 }
 
-#[hotpath::measure]
 fn tombstone_placeholder(placeholder: &str) -> String {
     let lower = placeholder.to_ascii_lowercase();
     if GC_PREFIXES.iter().any(|prefix| lower.starts_with(prefix)) {
@@ -762,7 +754,6 @@ async fn preview_missing_metadata(
     Ok(())
 }
 
-#[hotpath::measure]
 fn preview_dangling_placeholders(
     dir: Option<&Path>,
     metadata_refs: &BTreeSet<String>,
@@ -1111,7 +1102,6 @@ async fn tombstone_dangling_refs_in_transaction(
     Ok(total)
 }
 
-#[hotpath::measure]
 fn tombstone_row_for_refs(
     row: PlaceholderTextRow,
     payload_refs: &BTreeSet<String>,
@@ -1134,7 +1124,6 @@ fn tombstone_row_for_refs(
     (content, snippet_text, index_text, metadata_json, changed)
 }
 
-#[hotpath::measure]
 fn tombstone_text_for_refs(text: &str, payload_refs: &BTreeSet<String>) -> (String, usize) {
     let mut out = text.to_string();
     let mut changed = 0usize;
@@ -1281,7 +1270,6 @@ async fn upsert_gc_marks(
     Ok(())
 }
 
-#[hotpath::measure]
 fn gc_database_path(storage_root: &Path) -> PathBuf {
     let sessions = storage_root.join("sessions.db");
     if sessions.is_file() {

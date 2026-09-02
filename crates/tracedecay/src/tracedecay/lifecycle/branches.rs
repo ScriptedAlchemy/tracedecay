@@ -19,7 +19,6 @@ use tracedecay_runtime_core::storage::StoreLayout;
 
 use super::{TraceDecay, TraceDecayOpenOptions};
 
-#[hotpath::measure_all]
 impl TraceDecay {
     /// Resolves the serving-branch provenance for a given live branch.
     ///

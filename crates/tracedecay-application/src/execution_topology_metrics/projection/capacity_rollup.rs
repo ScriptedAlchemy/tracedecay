@@ -77,7 +77,6 @@ struct ConflictCapacityRollupV1 {
     false_negative: u64,
     outcomes: [u64; CONFLICT_OUTCOME_COUNT_V1],
 }
-#[hotpath::measure_all]
 impl ExecutionTopologyEvidenceV1 {
     pub(in crate::execution_topology_metrics) fn reduce_capacity_rollup(
         &self,
@@ -94,7 +93,6 @@ impl ExecutionTopologyEvidenceV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl ExecutionTopologyCapacityRollupV1 {
     pub(in crate::execution_topology_metrics) fn validate(
         &self,
@@ -745,7 +743,6 @@ impl ExecutionTopologyCapacityRollupV1 {
     }
 }
 
-#[hotpath::measure]
 fn add_topology(target: &mut TopologyCapacityRollupV1, incoming: TopologyCapacityRollupV1) {
     target.eligible = target.eligible.saturating_add(incoming.eligible);
     target.duration_observed = target
@@ -771,7 +768,6 @@ fn add_topology(target: &mut TopologyCapacityRollupV1, incoming: TopologyCapacit
     );
 }
 
-#[hotpath::measure]
 fn add_duplicate(target: &mut DuplicateCapacityRollupV1, incoming: DuplicateCapacityRollupV1) {
     target.eligible = target.eligible.saturating_add(incoming.eligible);
     target.adjudicated = target.adjudicated.saturating_add(incoming.adjudicated);
@@ -812,7 +808,6 @@ fn add_duplicate(target: &mut DuplicateCapacityRollupV1, incoming: DuplicateCapa
     );
 }
 
-#[hotpath::measure]
 fn add_conflict(target: &mut ConflictCapacityRollupV1, incoming: ConflictCapacityRollupV1) {
     target.eligible = target.eligible.saturating_add(incoming.eligible);
     target.linked = target.linked.saturating_add(incoming.linked);
@@ -828,21 +823,18 @@ fn add_conflict(target: &mut ConflictCapacityRollupV1, incoming: ConflictCapacit
     add_array(&mut target.outcomes, incoming.outcomes);
 }
 
-#[hotpath::measure]
 fn add_array<const N: usize>(target: &mut [u64; N], incoming: [u64; N]) {
     for (target, incoming) in target.iter_mut().zip(incoming) {
         *target = target.saturating_add(incoming);
     }
 }
 
-#[hotpath::measure]
 fn checked_sum(values: impl IntoIterator<Item = u64>) -> Option<u64> {
     values
         .into_iter()
         .try_fold(0u64, |total, value| total.checked_add(value))
 }
 
-#[hotpath::measure]
 fn add_matrix<const ROWS: usize, const COLUMNS: usize>(
     target: &mut [[u64; COLUMNS]; ROWS],
     incoming: [[u64; COLUMNS]; ROWS],
@@ -852,7 +844,6 @@ fn add_matrix<const ROWS: usize, const COLUMNS: usize>(
     }
 }
 
-#[hotpath::measure]
 fn duration_coverage(
     context: &ProjectionContext,
     topology: &TopologyCapacityRollupV1,

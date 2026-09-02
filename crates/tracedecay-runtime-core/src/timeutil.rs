@@ -19,7 +19,6 @@ pub use tracedecay_capture::{
 ///
 /// The caller owns sorting so repeated percentile reads can share one sort.
 /// Empty samples and percentiles outside `1..=100` return `None`.
-#[hotpath::measure]
 pub fn nearest_rank(sorted: &[u64], percentile: usize) -> Option<u64> {
     if sorted.is_empty() || !(1..=100).contains(&percentile) {
         return None;
@@ -37,7 +36,6 @@ pub enum SearchTimeBound {
 /// Parses search filter timestamps. Accepts Unix seconds, RFC3339, `YYYY-MM-DD`
 /// UTC dates, `today`, `yesterday`, and relative forms like `last hour`, with
 /// `bound` deciding which end of a whole-day value is returned.
-#[hotpath::measure]
 pub fn parse_search_time_filter_bound(
     value: &str,
     now: i64,
@@ -88,7 +86,6 @@ pub fn parse_search_time_filter_bound(
     Some(now.saturating_sub(seconds))
 }
 
-#[hotpath::measure]
 fn bound_day_timestamp(day_start: i64, bound: SearchTimeBound) -> i64 {
     match bound {
         SearchTimeBound::Start => day_start,
@@ -97,7 +94,6 @@ fn bound_day_timestamp(day_start: i64, bound: SearchTimeBound) -> i64 {
 }
 
 /// Formats "days since 1970-01-01 UTC" as `YYYY-MM-DD`.
-#[hotpath::measure]
 pub fn format_yyyy_mm_dd(days: i64) -> String {
     days.checked_mul(86_400)
         .and_then(|seconds| DateTime::<Utc>::from_timestamp(seconds, 0))
@@ -108,7 +104,6 @@ pub fn format_yyyy_mm_dd(days: i64) -> String {
 }
 
 /// Formats Unix seconds as `YYYY-MM-DD HH:MM:SSZ`.
-#[hotpath::measure]
 pub fn humanize_unix_secs(secs: i64) -> String {
     DateTime::<Utc>::from_timestamp(secs, 0).map_or_else(
         || {
@@ -126,14 +121,12 @@ pub fn humanize_unix_secs(secs: i64) -> String {
 }
 
 /// The current UTC time as an ISO 8601 `yyyy-mm-ddThh:mm:ssZ` string.
-#[hotpath::measure]
 pub fn now_iso_utc() -> String {
     DateTime::<Utc>::from(SystemTime::now())
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string()
 }
 
-#[hotpath::measure]
 fn format_calendar_day(days: i64) -> String {
     let (year, month, day) = civil_from_days(days);
     format!("{year:04}-{month:02}-{day:02}")
@@ -141,7 +134,6 @@ fn format_calendar_day(days: i64) -> String {
 
 /// Converts a Unix-day count to a proleptic Gregorian date outside Chrono's
 /// representable range, preserving the established formatting contract.
-#[hotpath::measure]
 fn civil_from_days(days: i64) -> (i128, u32, u32) {
     let z = i128::from(days) + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;

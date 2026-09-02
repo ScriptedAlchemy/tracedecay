@@ -12,17 +12,14 @@ pub enum Value {
     Blob(Vec<u8>),
 }
 
-#[hotpath::measure]
 pub fn opt_text(value: Option<&str>) -> Value {
     value.map_or(Value::Null, |text| Value::Text(text.to_string()))
 }
 
-#[hotpath::measure]
 pub fn opt_i64(value: Option<i64>) -> Value {
     value.map_or(Value::Null, Value::Integer)
 }
 
-#[hotpath::measure_all]
 impl Value {
     #[hotpath::skip]
     pub(super) const fn kind(&self) -> &'static str {
@@ -157,7 +154,6 @@ impl<T: FromValue> FromValue for Option<T> {
     }
 }
 
-#[hotpath::measure]
 fn type_mismatch(column: i32, expected: &'static str, value: &Value) -> Error {
     Error::TypeMismatch {
         column,

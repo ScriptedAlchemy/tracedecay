@@ -224,7 +224,6 @@ pub(in crate::store::memory) async fn load_current_fact_tx(
     Ok(Some(fact))
 }
 
-#[hotpath::measure]
 fn stored_fact_from_current_row(
     row: &crate::db::engine::Row,
     typed_owner: &FactOwnerV1,
@@ -512,7 +511,6 @@ struct FactResponseMetadata {
 /// unbounded read is exactly `occurred_at <= i64::MAX`. Binding the sentinel
 /// lets every lineage helper carry a single SQL literal instead of forking the
 /// whole statement on `Option`.
-#[hotpath::measure]
 fn as_of_cutoff(as_of: Option<UtcMicros>) -> i64 {
     as_of.map_or(i64::MAX, |cutoff| cutoff.0)
 }
@@ -603,7 +601,6 @@ enum LatestLineageField {
     Present(Option<String>),
 }
 
-#[hotpath::measure_all]
 impl LatestLineageField {
     /// Yields the field, rejecting an event that exists without one.
     fn require(self, malformed: &'static str) -> FactStoreResult<Option<String>> {
@@ -809,7 +806,6 @@ async fn query_fact_coverage_tx(
     Ok(FactQueryCoverageV1::new(visible, hidden, unknown, redacted))
 }
 
-#[hotpath::measure]
 fn classify_fact_coverage(
     effective_access: PayloadAccessState,
     anchor: Option<&RetrievalAnchorRecordV2>,
@@ -906,7 +902,6 @@ pub(in crate::store::memory) async fn get_retrieval_anchor_tx(
     Ok(Some(anchor))
 }
 
-#[hotpath::measure_all]
 impl DatabaseFactStore<'_> {
     #[hotpath::skip]
     pub(in crate::store::memory) async fn commit_batch(

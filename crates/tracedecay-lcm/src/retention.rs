@@ -116,30 +116,25 @@ pub struct LcmRetentionConfig {
     pub max_batch_size: usize,
 }
 
-#[hotpath::measure]
 fn default_max_batch_size() -> usize {
     500
 }
 
-#[hotpath::measure]
 fn default_retention_enabled() -> bool {
     true
 }
 
 #[allow(clippy::unnecessary_wraps)]
-#[hotpath::measure]
 fn default_offload_after_days() -> Option<u32> {
     Some(30)
 }
 
 #[allow(clippy::unnecessary_wraps)]
-#[hotpath::measure]
 fn default_drop_after_days() -> Option<u32> {
     Some(180)
 }
 
 #[allow(clippy::unnecessary_wraps)]
-#[hotpath::measure]
 fn default_dedupe_projected_after_days() -> Option<u32> {
     Some(30)
 }
@@ -156,7 +151,6 @@ impl Default for LcmRetentionConfig {
     }
 }
 
-#[hotpath::measure_all]
 impl LcmRetentionConfig {
     fn batch_limit(&self) -> i64 {
         i64::try_from(self.max_batch_size.max(1)).unwrap_or(i64::MAX)
@@ -180,7 +174,6 @@ pub enum RetentionMode {
     Apply,
 }
 
-#[hotpath::measure_all]
 impl RetentionMode {
     fn is_apply(self) -> bool {
         matches!(self, Self::Apply)
@@ -203,7 +196,6 @@ pub struct LcmRetentionPhaseReport {
     pub oldest_eligible_at: Option<i64>,
 }
 
-#[hotpath::measure_all]
 impl LcmRetentionPhaseReport {
     fn disabled() -> Self {
         Self::default()
@@ -238,7 +230,6 @@ pub struct LcmRetentionReport {
     pub errors: Vec<String>,
 }
 
-#[hotpath::measure_all]
 impl LcmRetentionReport {
     /// Total content bytes reclaimed across every pass.
     pub fn bytes_reclaimed(&self) -> u64 {
@@ -249,7 +240,6 @@ impl LcmRetentionReport {
     }
 }
 
-#[hotpath::measure]
 fn cutoff_secs(window_days: u32, now_secs: i64) -> i64 {
     now_secs.saturating_sub(i64::from(window_days).saturating_mul(SECONDS_PER_DAY))
 }
@@ -622,7 +612,6 @@ enum RetentionQueryExecutor<'query, 'store> {
     Transaction(&'query RetentionWriteTransaction<'store>),
 }
 
-#[hotpath::measure_all]
 impl RetentionQueryExecutor<'_, '_> {
     #[hotpath::skip]
     async fn query(

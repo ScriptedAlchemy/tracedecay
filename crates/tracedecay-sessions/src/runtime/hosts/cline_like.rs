@@ -76,7 +76,6 @@ struct TaskMetadataCache {
     entries: Arc<Mutex<HashMap<PathBuf, Value>>>,
 }
 
-#[hotpath::measure_all]
 impl TaskMetadataCache {
     fn get(&self, provider: &'static str, task_dir: &Path) -> Option<Value> {
         if let Some(cached) = self
@@ -109,7 +108,6 @@ pub struct ClineLikeSource {
     task_metadata: TaskMetadataCache,
 }
 
-#[hotpath::measure_all]
 impl ClineLikeSource {
     /// Cline VS Code extension storage:
     /// `Code/User/globalStorage/saoudrizwan.claude-dev/tasks`.
@@ -179,7 +177,6 @@ impl ClineLikeSource {
     }
 }
 
-#[hotpath::measure_all]
 impl TranscriptSource for ClineLikeSource {
     fn provider(&self) -> &'static str {
         self.provider
@@ -225,7 +222,6 @@ impl TranscriptSource for ClineLikeSource {
     }
 }
 
-#[hotpath::measure_all]
 impl ClineLikeSource {
     fn snapshot_location(&self, path: &Path, project_root: &Path) -> Option<PathBuf> {
         let metadata = self.task_metadata.get(self.provider, path.parent()?)?;
@@ -422,7 +418,6 @@ pub async fn capture_cline_like_snapshot_observations(
     .await
 }
 
-#[hotpath::measure]
 fn ensure_bounded_file(
     provider: &'static str,
     path: &Path,
@@ -455,7 +450,6 @@ fn snapshot_input_bytes(provider: &'static str, path: &Path) -> TranscriptIngest
     Ok(primary.saturating_add(ui).saturating_add(metadata))
 }
 
-#[hotpath::measure]
 fn non_durable(provider: &'static str, path: &Path, reason: &'static str) -> TranscriptIngestError {
     non_durable_snapshot_record(provider, path, reason)
 }
@@ -511,14 +505,12 @@ fn read_task_metadata(provider: &'static str, task_dir: &Path) -> Option<Value> 
     None
 }
 
-#[hotpath::measure]
 fn metadata_project_paths(value: &Value) -> Vec<PathBuf> {
     let mut out = Vec::new();
     collect_metadata_project_paths(value, None, &mut out);
     out
 }
 
-#[hotpath::measure]
 fn collect_metadata_project_paths(value: &Value, key: Option<&str>, out: &mut Vec<PathBuf>) {
     match value {
         Value::Object(map) => {
@@ -547,7 +539,6 @@ fn collect_metadata_project_paths(value: &Value, key: Option<&str>, out: &mut Ve
     }
 }
 
-#[hotpath::measure]
 fn metadata_task_title(metadata: &Value) -> Option<&str> {
     metadata
         .get("task")
@@ -680,7 +671,6 @@ fn usage_records(
     Ok(Some(records))
 }
 
-#[hotpath::measure]
 fn usage_from_api_req_started(text: &str) -> Option<Value> {
     let payload: Value = serde_json::from_str(text).ok()?;
     let mut counters = Map::new();
@@ -718,7 +708,6 @@ fn usage_from_api_req_started(text: &str) -> Option<Value> {
     (!counters.is_empty()).then_some(Value::Object(counters))
 }
 
-#[hotpath::measure]
 fn map_counter(
     counters: &mut Map<String, Value>,
     target_key: &str,
@@ -733,7 +722,6 @@ fn map_counter(
     }
 }
 
-#[hotpath::measure]
 fn message_from_entry(
     provider: &str,
     entry: &Value,
@@ -796,7 +784,6 @@ fn message_from_entry(
     })
 }
 
-#[hotpath::measure]
 fn entry_timestamp(entry: &Value) -> Option<i64> {
     entry
         .get("ts")
@@ -809,7 +796,6 @@ fn entry_timestamp(entry: &Value) -> Option<i64> {
         })
 }
 
-#[hotpath::measure]
 fn native_record_id(entry: &Value) -> Option<&str> {
     ["id", "messageId", "message_id", "requestId", "apiRequestId"]
         .iter()
@@ -849,7 +835,6 @@ pub fn normalize_cline_like_snapshot_observations(
 /// The shared fixture contract exposes `content[].type = "tool_use"` names but
 /// no native lineage, reasoning, structured tool IDs/arguments/results, Git,
 /// or workflow evidence.
-#[hotpath::measure]
 fn snapshot_native_payload(
     provider: &str,
     message: &SessionMessageRecord,
@@ -873,7 +858,6 @@ fn snapshot_native_payload(
     Value::Object(payload)
 }
 
-#[hotpath::measure]
 fn stable_message_id(
     task_id: &str,
     kind: &str,
@@ -908,7 +892,6 @@ fn stable_message_id(
     )
 }
 
-#[hotpath::measure]
 fn session_metadata(provider: &str, location_cwd: Option<&Path>) -> Value {
     let mut metadata = serde_json::Map::new();
     metadata.insert(
@@ -923,7 +906,6 @@ fn session_metadata(provider: &str, location_cwd: Option<&Path>) -> Value {
     Value::Object(metadata)
 }
 
-#[hotpath::measure]
 fn message_metadata(provider: &str, entry: &Value, location_cwd: &Path) -> Value {
     let mut metadata = Map::new();
     metadata.insert(

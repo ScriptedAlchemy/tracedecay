@@ -9,7 +9,6 @@ pub enum SessionSyncInterruption {
     Shutdown,
 }
 
-#[hotpath::measure_all]
 impl SessionSyncInterruption {
     #[hotpath::skip]
     pub const fn termination(self) -> Option<OperationTermination> {
@@ -30,7 +29,6 @@ impl SessionSyncInterruption {
     }
 }
 
-#[hotpath::measure_all]
 impl DaemonSessionSyncService {
     #[hotpath::skip]
     pub(super) async fn mirror_primary_terminal(
@@ -376,7 +374,6 @@ impl DaemonSessionSyncService {
     }
 }
 
-#[hotpath::measure_all]
 impl SessionSyncProjectContext {
     #[hotpath::skip]
     pub(super) async fn source_frontiers_for(
@@ -765,7 +762,6 @@ impl SessionSyncProjectContext {
     }
 }
 
-#[hotpath::measure]
 pub fn git_sync_with_topology_result(
     work: SessionSyncWorkResult,
     topology_result: Result<(), super::git_topology::GitTopologySyncFailure>,
@@ -803,7 +799,6 @@ pub fn git_sync_with_topology_result(
     }
 }
 
-#[hotpath::measure]
 pub fn git_sync_work_result(
     project_id: &ProjectId,
     outcome: tracedecay_sessions::runtime::git_correlation::BoundedBackfillOutcome,
@@ -893,7 +888,6 @@ const fn git_history_interruption_reason(
     }
 }
 
-#[hotpath::measure]
 pub fn git_history_frontier_from_meta(
     activity_timestamp: Option<i64>,
     source_rowid: Option<i64>,
@@ -906,7 +900,6 @@ pub fn git_history_frontier_from_meta(
     })
 }
 
-#[hotpath::measure]
 pub fn git_history_source_frontier(
     project_id: &ProjectId,
     frontier: tracedecay_sessions::runtime::git_correlation::GitHistoryIndexFrontier,
@@ -929,7 +922,6 @@ pub fn git_history_source_frontier(
     }
 }
 
-#[hotpath::measure]
 pub fn coalesced_alias_local_interruption(
     primary: &SessionSyncJournalV1,
     alias: &SessionSyncJournalV1,
@@ -947,7 +939,6 @@ pub fn coalesced_alias_local_interruption(
     }
 }
 
-#[hotpath::measure]
 pub(super) fn log_session_sync_join(result: Result<(), tokio::task::JoinError>) {
     if let Err(error) = result
         && !error.is_cancelled()

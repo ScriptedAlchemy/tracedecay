@@ -67,7 +67,6 @@ pub(super) struct LaneAdmission {
     background: bool,
 }
 
-#[hotpath::measure_all]
 impl LaneAdmission {
     fn for_priority(priority: OperationPriorityV1) -> Self {
         match priority {
@@ -138,7 +137,6 @@ pub(super) struct PoolState {
     snapshot_admissions: u64,
 }
 
-#[hotpath::measure_all]
 impl PoolState {
     fn workers(&self, lane: ReaderLane) -> u16 {
         self.records
@@ -227,7 +225,6 @@ struct WaitingGuard<'pool, E: ReaderQueryExecutor> {
     counted: bool,
 }
 
-#[hotpath::measure_all]
 impl<'pool, E: ReaderQueryExecutor> WaitingGuard<'pool, E> {
     #[hotpath::skip]
     const fn new(inner: &'pool PoolInner<E>, lane: ReaderLane) -> Self {
@@ -320,7 +317,6 @@ impl<E: ReaderQueryExecutor> Clone for WeakReaderPool<E> {
     }
 }
 
-#[hotpath::measure_all]
 impl<E: ReaderQueryExecutor> WeakReaderPool<E> {
     pub(crate) fn upgrade(&self) -> Option<ReaderPool<E>> {
         self.inner.upgrade().map(|inner| ReaderPool { inner })
@@ -335,7 +331,6 @@ impl<E: ReaderQueryExecutor> Clone for ReaderPool<E> {
     }
 }
 
-#[hotpath::measure_all]
 impl<E: ReaderQueryExecutor> ReaderPool<E> {
     pub fn start(
         locator: ExistingReaderLocator,
@@ -1012,7 +1007,6 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
 /// fires instead of the failure vanishing into a "pool closed" no-op. Workers
 /// that were skipped (terminated, or busy inside a retained snapshot) are not
 /// failures: the release reports only the connections it actually shrank.
-#[hotpath::measure]
 fn aggregate_worker_memory_releases(
     results: impl Iterator<Item = Result<worker::WorkerMemoryRelease, worker::ReaderWorkerError>>,
     total: usize,

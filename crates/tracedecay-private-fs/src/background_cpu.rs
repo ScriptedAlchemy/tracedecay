@@ -300,14 +300,12 @@ impl ProcessBackgroundCpuV1 {
     }
 }
 
-#[hotpath::measure]
 fn record_state(state: &BackgroundCpuStateV1, width: NonZeroUsize) {
     hotpath::gauge!("private_fs.background_cpu.width").set(width.get());
     hotpath::gauge!("private_fs.background_cpu.active_units").set(state.active_units);
     hotpath::gauge!("private_fs.background_cpu.waiting_work_units").set(waiting_units(state));
 }
 
-#[hotpath::measure]
 fn waiting_units(state: &BackgroundCpuStateV1) -> usize {
     state
         .waiters
@@ -353,7 +351,6 @@ pub enum BackgroundCpuInstallErrorV1 {
 static PROCESS_BACKGROUND_CPU: OnceLock<Arc<ProcessBackgroundCpuV1>> = OnceLock::new();
 
 /// Install or idempotently reuse the one process background CPU authority.
-#[hotpath::measure]
 pub fn install_process_background_cpu(
     width: NonZeroUsize,
 ) -> Result<Arc<ProcessBackgroundCpuV1>, BackgroundCpuInstallErrorV1> {
@@ -370,7 +367,6 @@ pub fn install_process_background_cpu(
     }
 }
 
-#[hotpath::measure]
 fn compare_installed_width(
     installed: &Arc<ProcessBackgroundCpuV1>,
     requested: NonZeroUsize,
@@ -387,7 +383,6 @@ fn compare_installed_width(
 
 /// Installed process authority, or `None` before daemon worker-plan admission.
 #[must_use]
-#[hotpath::measure]
 pub fn process_background_cpu() -> Option<Arc<ProcessBackgroundCpuV1>> {
     PROCESS_BACKGROUND_CPU.get().map(Arc::clone)
 }

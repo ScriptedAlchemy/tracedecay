@@ -15,7 +15,6 @@ use super::super::TraceDecay;
 use super::file_authority::SourceEditFileAuthority;
 use super::preview::edit_success_message;
 
-#[hotpath::measure_all]
 impl TraceDecay {
     /// Performs structural rewrite using ast-grep CLI.
     #[hotpath::measure(label = "edits.ast_grep_rewrite", future = true)]
@@ -239,7 +238,6 @@ fn reconstruct_ast_grep_rewrite(source: &str, output: &[u8]) -> Result<String> {
     Ok(modified)
 }
 
-#[hotpath::measure]
 fn can_use_literal_rewrite_fallback(pattern: &str) -> bool {
     let trimmed = pattern.trim();
     !trimmed.is_empty()

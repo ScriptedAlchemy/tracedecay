@@ -5,7 +5,6 @@ use super::{
     SourceEditExecutor, SourceEditReconciliationExecutor, SourceEditRollbackExecutor,
 };
 
-#[hotpath::measure_all]
 impl McpServer {
     /// Installs the sole source-edit invocation owner resolved during
     /// project-open admission. Reinstallation is rejected so a later caller

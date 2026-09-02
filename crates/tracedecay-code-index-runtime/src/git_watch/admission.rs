@@ -14,7 +14,6 @@ use super::{
 };
 use crate::ports::GitWatchSyncConfigV1 as SyncConfig;
 
-#[hotpath::measure_all]
 impl GitWatcher {
     /// Lazily starts watching `project_root` if not already watched and under
     /// the repository cap. Linked worktrees register distinct scheduler roots
@@ -256,7 +255,6 @@ impl GitWatcher {
 /// Bounded typed admission counters. Refusals are first-class evidence: a
 /// profile must separate capacity pressure from identity-discovery churn and
 /// shutdown races without recording repository paths.
-#[hotpath::measure]
 fn record_admission_outcome(admission: GitWatcherAdmission) {
     match admission {
         GitWatcherAdmission::Ready => {
@@ -287,7 +285,6 @@ fn record_admission_outcome(admission: GitWatcherAdmission) {
 /// panic, or definitive admission can never leak the count.
 struct IdentityRetryGaugeGuard;
 
-#[hotpath::measure_all]
 impl IdentityRetryGaugeGuard {
     fn enter() -> Self {
         hotpath::gauge!("daemon.git.watch.identity_retry.active").inc(1_u64);

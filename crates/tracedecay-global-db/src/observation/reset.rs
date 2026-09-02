@@ -91,7 +91,6 @@ pub struct ObservationAuthorityResetV1 {
     pub cleared_session_message_rows: u64,
 }
 
-#[hotpath::measure]
 fn reset_storage(error: rusqlite::Error) -> TraceDecayError {
     TraceDecayError::Database {
         operation: OPERATION.to_string(),
@@ -99,7 +98,6 @@ fn reset_storage(error: rusqlite::Error) -> TraceDecayError {
     }
 }
 
-#[hotpath::measure]
 fn table_exists(conn: &rusqlite::Connection, table: &str) -> Result<bool, TraceDecayError> {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
@@ -109,7 +107,6 @@ fn table_exists(conn: &rusqlite::Connection, table: &str) -> Result<bool, TraceD
     .map_err(reset_storage)
 }
 
-#[hotpath::measure]
 fn table_columns(
     conn: &rusqlite::Connection,
     table: &str,
@@ -125,7 +122,6 @@ fn table_columns(
     Ok(columns)
 }
 
-#[hotpath::measure]
 fn row_count(conn: &rusqlite::Connection, table: &str) -> Result<u64, TraceDecayError> {
     let count = conn
         .query_row(&format!("SELECT COUNT(*) FROM \"{table}\""), [], |row| {
@@ -138,7 +134,6 @@ fn row_count(conn: &rusqlite::Connection, table: &str) -> Result<u64, TraceDecay
     })
 }
 
-#[hotpath::measure]
 fn canonical(columns: &[&str]) -> BTreeSet<String> {
     columns.iter().map(|column| (*column).to_string()).collect()
 }
@@ -146,7 +141,6 @@ fn canonical(columns: &[&str]) -> BTreeSet<String> {
 /// Whether the store currently carries a shape the observation authority
 /// refuses at admission. Mirrors the refusal predicates in `super::schema`
 /// through the shared canonical column sets.
-#[hotpath::measure]
 fn observation_authority_refused(conn: &rusqlite::Connection) -> Result<bool, TraceDecayError> {
     if table_exists(conn, "observations")? {
         let marker_recorded = table_exists(conn, "global_schema_migrations")?
@@ -178,7 +172,6 @@ fn observation_authority_refused(conn: &rusqlite::Connection) -> Result<bool, Tr
 /// refused shape (protecting healthy data from an accidental reset) or when
 /// durable session-temporal rows still reference observation rows (a scoped
 /// reset must not orphan or delete them).
-#[hotpath::measure]
 pub fn reset_refused_observation_authority(
     conn: &mut rusqlite::Connection,
 ) -> Result<ObservationAuthorityResetV1, TraceDecayError> {

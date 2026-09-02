@@ -118,14 +118,12 @@ pub enum ProjectMemoryGraphReconciliationScheduleV1 {
 /// Product callers mutate canonical facts through [`ProjectMemoryFactStore`];
 /// they never reconcile topology directly.
 #[doc(hidden)]
-#[hotpath::measure]
 pub fn schedule_project_memory_graph_reconciliation(
     db: Database,
 ) -> ProjectMemoryGraphReconciliationScheduleV1 {
     graph::schedule_project_memory_graph_reconciliation(db)
 }
 
-#[hotpath::measure_all]
 impl<'a> DatabaseFactStore<'a> {
     #[hotpath::skip]
     pub const fn new(db: &'a Database) -> Self {
@@ -847,7 +845,6 @@ pub enum ProjectMemoryDbHandle<'a> {
     Owned(Box<Database>),
 }
 
-#[hotpath::measure_all]
 impl<'a> ProjectMemoryDbHandle<'a> {
     /// Borrows the resolved database regardless of ownership.
     pub fn as_db(&self) -> &Database {
@@ -877,7 +874,6 @@ pub struct ProjectFactStore<'a> {
     db: ProjectMemoryDbHandle<'a>,
 }
 
-#[hotpath::measure_all]
 impl<'a> ProjectFactStore<'a> {
     /// Wraps the active database without taking ownership.
     #[hotpath::skip]

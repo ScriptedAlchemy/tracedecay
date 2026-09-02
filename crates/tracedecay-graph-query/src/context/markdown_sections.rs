@@ -51,7 +51,6 @@ pub const MAX_SECTION_HANDLES: usize = 64;
 const MARKDOWN_SECTION_KIND: &str = "module";
 
 /// `true` when `path` is a file the markdown extractor claims.
-#[hotpath::measure]
 pub fn is_markdown_file(path: &str) -> bool {
     let extension = path.rsplit_once('.').map(|(_, extension)| extension);
     matches!(
@@ -67,7 +66,6 @@ pub struct SectionEnrichment<'a> {
     handles_minted: usize,
 }
 
-#[hotpath::measure_all]
 impl<'a> SectionEnrichment<'a> {
     pub fn new(project_root: Option<&'a Path>, now: i64) -> Self {
         Self {
@@ -214,7 +212,6 @@ const SUMMARY_UNCHECKED_LIMIT: usize = 8;
 /// ownership of its own markdown builder: an adapter emits each line under the
 /// symbol's bullet. The preview is collapsed to a single line here because the
 /// surrounding surface is a list; the verbatim preview stays in the JSON.
-#[hotpath::measure]
 pub fn section_summary_lines(section: &Value) -> Vec<String> {
     let mut lines = Vec::new();
     let preview = collapse_whitespace(field_str(section, "preview"));
@@ -252,7 +249,6 @@ pub fn section_summary_lines(section: &Value) -> Vec<String> {
     lines
 }
 
-#[hotpath::measure]
 fn push_structure_lines(lines: &mut Vec<String>, structure: &Value) {
     if let Some(checklist) = structure.get("checklist") {
         let total = checklist
@@ -311,21 +307,18 @@ fn push_structure_lines(lines: &mut Vec<String>, structure: &Value) {
     }
 }
 
-#[hotpath::measure]
 fn field_str<'a>(value: &'a Value, key: &str) -> &'a str {
     value.get(key).and_then(Value::as_str).unwrap_or_default()
 }
 
 /// Squashes newlines and runs of blanks so a multi-line preview stays on one
 /// summary line.
-#[hotpath::measure]
 fn collapse_whitespace(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// The section body: 1-based inclusive lines `start ..= end`, empty when the
 /// heading carries no body or the span points past the end of the file.
-#[hotpath::measure]
 pub fn section_body(source: &str, start: u32, end: u32) -> &str {
     if end < start || start == 0 {
         return "";
@@ -355,7 +348,6 @@ pub fn section_body(source: &str, start: u32, end: u32) -> &str {
 }
 
 /// `(preview, truncated)` for a section body.
-#[hotpath::measure]
 fn preview_of(body: &str) -> (String, bool) {
     let trimmed = body.trim();
     let mut preview = String::new();
@@ -378,7 +370,6 @@ fn preview_of(body: &str) -> (String, bool) {
 
 /// Publishes the parsed structure as JSON, with the counts a reader needs to
 /// decide whether to pull the full body.
-#[hotpath::measure]
 fn structure_value(structure: &MarkdownSectionStructure) -> Value {
     let mut value = json!({});
     if !structure.checklist.is_empty() {

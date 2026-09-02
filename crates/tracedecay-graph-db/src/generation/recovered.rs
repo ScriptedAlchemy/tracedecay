@@ -76,7 +76,6 @@ pub(crate) fn recovered_generation_digest_from_database(
 /// The chunk size is a parameter so tests can force the parallel pipeline
 /// over small fixtures and pin its digest against the serial stream (and so
 /// the cost probe can time the serial stream on generation-scale rows).
-#[hotpath::measure]
 pub(crate) fn recovered_generation_digest_chunked(
     database: &GrafeoDB,
     identity: &GraphGenerationManifestIdentity,
@@ -200,8 +199,7 @@ struct EncodedProofChunk {
 }
 
 impl EncodedProofChunk {
-    #[hotpath::measure]
-    fn with_rows(rows: usize) -> Self {
+        fn with_rows(rows: usize) -> Self {
         Self {
             buffer: Vec::new(),
             frame_ends: Vec::with_capacity(rows),
@@ -210,8 +208,7 @@ impl EncodedProofChunk {
 
     /// Appends one frame in exactly the layout `write_frame` streams:
     /// `tag_len | tag | byte_len | bytes`, lengths big-endian u64.
-    #[hotpath::measure]
-    fn push_frame(&mut self, tag: &str, bytes: &[u8]) -> Result<(), GraphDbError> {
+        fn push_frame(&mut self, tag: &str, bytes: &[u8]) -> Result<(), GraphDbError> {
         let (tag_len, byte_len) = frame_length_headers(tag, bytes)?;
         self.buffer.extend_from_slice(&tag_len);
         self.buffer.extend_from_slice(tag.as_bytes());
@@ -298,7 +295,6 @@ fn digest_rows_parallel(
     })
 }
 
-#[hotpath::measure]
 fn encode_proof_chunk(
     store: &dyn GraphStore,
     chunk: ProofChunk<'_>,
@@ -349,7 +345,6 @@ fn encode_proof_chunk(
 /// Loads and decodes one enumerated entity, refusing a row whose identity no
 /// longer matches its sort key: a divergence means the row changed under the
 /// enumeration and the frames would no longer be hashed in sorted order.
-#[hotpath::measure]
 fn decode_sorted_entity(
     store: &dyn GraphStore,
     sorted_identity: &ArcStr,
@@ -370,7 +365,6 @@ fn decode_sorted_entity(
 
 /// Loads and decodes one enumerated relation with memoized endpoint refs,
 /// under the same sort-key refusal as entities.
-#[hotpath::measure]
 fn decode_sorted_relation(
     store: &dyn GraphStore,
     sorted_identity: &ArcStr,
@@ -407,7 +401,6 @@ fn decode_sorted_relation(
 /// identity-sized refs only, never entity rows, so the verification memory
 /// posture is preserved while each distinct endpoint is read at most once
 /// per memo scope.
-#[hotpath::measure]
 fn memoized_endpoint_ref(
     store: &dyn GraphStore,
     memo: &mut HashMap<NodeId, GraphEntityRef>,

@@ -42,7 +42,6 @@ struct GitPrComparison {
     commits: Vec<Value>,
 }
 
-#[hotpath::measure]
 fn git_error_result(cg: &TraceDecay, args: &Value, operation: &str, message: &str) -> ToolResult {
     let output = json!({
         "error": {
@@ -63,14 +62,12 @@ fn git_error_result(cg: &TraceDecay, args: &Value, operation: &str, message: &st
 /// unbounded on pathological or diverged inputs. When the carried deadline
 /// elapses the caller must receive the same shaped, semantic error every other
 /// git failure surfaces — never a bare hang or a panic.
-#[hotpath::measure]
 pub(crate) fn git_dispatch_deadline_result(cg: &TraceDecay, tool_name: &str) -> ToolResult {
     let message =
         format!("git tool '{tool_name}' exceeded its dispatch deadline and was cancelled");
     git_error_result(cg, &json!({ "tool": tool_name }), "deadline", &message)
 }
 
-#[hotpath::measure]
 fn require_string_array_arg(args: &Value, name: &str) -> Result<Vec<String>> {
     args.get(name)
         .and_then(|v| v.as_array())
@@ -84,14 +81,12 @@ fn require_string_array_arg(args: &Value, name: &str) -> Result<Vec<String>> {
         })
 }
 
-#[hotpath::measure]
 fn clamped_depth_arg(args: &Value, name: &str, default: usize, max: usize) -> usize {
     args.get(name)
         .and_then(serde_json::Value::as_u64)
         .map_or(default, |v| v.min(max as u64) as usize)
 }
 
-#[hotpath::measure]
 fn matches_test_file(
     path: &str,
     custom_glob: Option<&glob::Pattern>,

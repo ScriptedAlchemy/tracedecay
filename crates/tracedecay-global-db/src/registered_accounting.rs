@@ -7,7 +7,6 @@ use super::{
     push_optional_analytics_filter,
 };
 
-#[hotpath::measure_all]
 impl RegisteredGlobalDb {
     #[hotpath::measure(future = true, label = "global_db.registered.accounting.upsert")]
     pub async fn try_upsert_project_tokens(
@@ -238,7 +237,6 @@ impl RegisteredGlobalDb {
     }
 }
 
-#[hotpath::measure]
 fn tokens_saved_query(project_path: Option<&str>) -> (String, Vec<Value>) {
     let mut clauses = Vec::new();
     let mut values = Vec::new();
@@ -254,7 +252,6 @@ fn tokens_saved_query(project_path: Option<&str>) -> (String, Vec<Value>) {
     (sql, values)
 }
 
-#[hotpath::measure]
 fn savings_scope_query(select: &str, project_id: Option<&str>, since: i64) -> (String, Vec<Value>) {
     let mut clauses = Vec::new();
     let mut values = Vec::new();

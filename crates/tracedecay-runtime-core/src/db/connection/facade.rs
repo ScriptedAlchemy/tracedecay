@@ -4,7 +4,6 @@ use super::{
     DatabaseWriterConnection, Path, Result, TraceDecayError,
 };
 
-#[hotpath::measure_all]
 impl DatabaseWriterConnection<'_> {
     pub(crate) fn engine_connection(&self) -> DatabaseEngineWriteConnection {
         DatabaseEngineWriteConnection {
@@ -51,7 +50,6 @@ impl DatabaseWriterConnection<'_> {
     }
 }
 
-#[hotpath::measure_all]
 impl DatabaseEngineWriteConnection {
     #[hotpath::skip]
     pub async fn query<P>(
@@ -121,7 +119,6 @@ impl crate::db::engine::Executor for DatabaseEngineWriteConnection {
     }
 }
 
-#[hotpath::measure_all]
 impl DatabaseEngineReadConnection {
     pub async fn query<P>(
         &self,
@@ -177,7 +174,6 @@ impl crate::db::engine::QueryExecutor for DatabaseEngineReadConnection {
     }
 }
 
-#[hotpath::measure_all]
 impl DatabaseEngineReadSnapshot {
     #[hotpath::skip]
     pub async fn query<P>(
@@ -218,7 +214,6 @@ impl crate::db::engine::QueryExecutor for DatabaseEngineReadSnapshot {
     }
 }
 
-#[hotpath::measure_all]
 impl DatabaseEngineLongLeaseTransaction {
     #[hotpath::skip]
     pub(crate) async fn execute_authority_revalidated_batch(
@@ -270,7 +265,6 @@ impl crate::db::engine::Executor for DatabaseEngineLongLeaseTransaction {
     }
 }
 
-#[hotpath::measure_all]
 impl<'a> DatabaseMemoryTransaction<'a> {
     pub fn read(snapshot: DatabaseEngineReadSnapshot) -> Self {
         Self::Read(snapshot)
@@ -401,7 +395,6 @@ impl crate::db::engine::DatabaseAttachmentExecutor for DatabaseMemoryTransaction
     }
 }
 
-#[hotpath::measure_all]
 impl DatabaseWriteTransaction<'_> {
     #[hotpath::skip]
     pub async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>

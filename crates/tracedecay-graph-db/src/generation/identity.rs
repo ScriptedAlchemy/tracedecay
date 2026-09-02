@@ -12,7 +12,6 @@ pub struct GraphProjectionIdentity {
     pub projection: GraphProjectionId,
 }
 
-#[hotpath::measure_all]
 impl GraphProjectionIdentity {
     #[must_use]
     pub fn new(namespace: GraphNamespace, projection: GraphProjectionId) -> Self {
@@ -37,7 +36,6 @@ pub struct GraphGenerationDependency {
     pub idempotency_key: GraphIdempotencyKey,
 }
 
-#[hotpath::measure_all]
 impl GraphGenerationDependency {
     #[must_use]
     pub fn new(
@@ -60,7 +58,6 @@ pub struct GraphEntityRef {
     pub identity: GraphEntityId,
 }
 
-#[hotpath::measure_all]
 impl GraphEntityRef {
     #[must_use]
     pub fn new(projection: GraphProjectionIdentity, identity: GraphEntityId) -> Self {
@@ -78,7 +75,6 @@ pub struct GraphRelationRef {
     pub identity: GraphRelationId,
 }
 
-#[hotpath::measure_all]
 impl GraphRelationRef {
     #[must_use]
     pub fn new(projection: GraphProjectionIdentity, identity: GraphRelationId) -> Self {

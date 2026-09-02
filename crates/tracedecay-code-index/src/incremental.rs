@@ -72,7 +72,6 @@ pub struct GenerationChunkManifestV1 {
     chunks: Vec<Arc<CodeSearchChunkV1>>,
 }
 
-#[hotpath::measure_all]
 impl GenerationChunkManifestV1 {
     /// Construct a canonical generation chunk manifest.
     pub fn new(
@@ -369,7 +368,6 @@ pub fn plan_chunk_increment(
     Ok(changes)
 }
 
-#[hotpath::measure]
 fn map_chunking_error(error: ChunkingFailureV1) -> ChunkIncrementErrorV1 {
     match error {
         ChunkingFailureV1::GenerationMismatch => ChunkIncrementErrorV1::MixedGeneration,
@@ -377,12 +375,10 @@ fn map_chunking_error(error: ChunkingFailureV1) -> ChunkIncrementErrorV1 {
     }
 }
 
-#[hotpath::measure]
 fn map_lineage_error(error: LineageResolutionErrorV1) -> ChunkIncrementErrorV1 {
     ChunkIncrementErrorV1::NonCanonical(error.to_string())
 }
 
-#[hotpath::measure]
 fn placeholder_digest() -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", "0".repeat(64)))
         .expect("a zeroed sha256 digest is canonical")

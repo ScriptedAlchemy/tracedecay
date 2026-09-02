@@ -60,7 +60,6 @@ struct WorkBlockedIntervalObservationRecoveryInnerV1 {
     task: Mutex<Option<JoinHandle<()>>>,
 }
 
-#[hotpath::measure_all]
 impl WorkBlockedIntervalObservationRecoveryOwnerV1 {
     pub(crate) fn mount(
         database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
@@ -238,7 +237,6 @@ async fn run_recovery(
     }
 }
 
-#[hotpath::measure]
 fn read_pending_receipts(
     database: &tracedecay_global_db::RegisteredGlobalDb,
     context: &RequestContext,
@@ -250,7 +248,6 @@ fn read_pending_receipts(
         .map_err(RecoveryFailureV1::Application)
 }
 
-#[hotpath::measure]
 fn mark_receipt_durable(
     database: &tracedecay_global_db::RegisteredGlobalDb,
     context: &RequestContext,

@@ -5,7 +5,6 @@ use serde_json::{Value, json};
 use super::{def, def_rw};
 use crate::ToolDefinition;
 
-#[hotpath::measure]
 fn source_edit_schema(mut schema: Value) -> Value {
     let Some(root) = schema.as_object_mut() else {
         unreachable!("source edit input schema must be an object");
@@ -55,7 +54,6 @@ fn source_edit_schema(mut schema: Value) -> Value {
     schema
 }
 
-#[hotpath::measure]
 pub(super) fn def_source_edit_reconcile() -> ToolDefinition {
     def_rw(
         "tracedecay_source_edit_reconcile",
@@ -141,7 +139,6 @@ pub(super) fn def_source_edit_reconcile() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_source_edit_rollback() -> ToolDefinition {
     def_rw(
         "tracedecay_source_edit_rollback",
@@ -197,7 +194,6 @@ pub(super) fn def_source_edit_rollback() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_str_replace() -> ToolDefinition {
     ToolDefinition {
         name: "tracedecay_str_replace".to_string(),
@@ -236,7 +232,6 @@ pub(super) fn def_str_replace() -> ToolDefinition {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn def_multi_str_replace() -> ToolDefinition {
     ToolDefinition {
         name: "tracedecay_multi_str_replace".to_string(),
@@ -277,7 +272,6 @@ pub(super) fn def_multi_str_replace() -> ToolDefinition {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn def_insert_at() -> ToolDefinition {
     ToolDefinition {
         name: "tracedecay_insert_at".to_string(),
@@ -321,7 +315,6 @@ pub(super) fn def_insert_at() -> ToolDefinition {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn def_rename_preview(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_rename_preview",
@@ -340,7 +333,6 @@ pub(super) fn def_rename_preview(input_schema: Value) -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_rename_symbol() -> ToolDefinition {
     def_rw(
         "tracedecay_rename_symbol",
@@ -435,7 +427,6 @@ pub(super) fn def_rename_symbol() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_ast_grep_search() -> ToolDefinition {
     def(
         "tracedecay_ast_grep_search",
@@ -473,7 +464,6 @@ pub(super) fn def_ast_grep_search() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_ast_grep_rewrite() -> ToolDefinition {
     ToolDefinition {
         name: "tracedecay_ast_grep_rewrite".to_string(),
@@ -512,7 +502,6 @@ pub(super) fn def_ast_grep_rewrite() -> ToolDefinition {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn def_replace_symbol() -> ToolDefinition {
     def_rw(
         "tracedecay_replace_symbol",
@@ -553,7 +542,6 @@ pub(super) fn def_replace_symbol() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_move_symbol() -> ToolDefinition {
     def_rw(
         "tracedecay_move_symbol",
@@ -605,7 +593,6 @@ pub(super) fn def_move_symbol() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_insert_at_symbol() -> ToolDefinition {
     def_rw(
         "tracedecay_insert_at_symbol",

@@ -70,7 +70,6 @@ pub async fn handle_files(
 
 /// Renders the listing from the records the handler already holds, rather than
 /// reading the keys back out of the JSON payload it just built.
-#[hotpath::measure]
 fn render_files_md(files: &[verified::IndexedFileSummary], layout: &str) -> String {
     let mut md = Md::new();
     md.heading(2, "Files");

@@ -40,7 +40,6 @@ pub struct WorktreeIndexMismatch {
 /// `git rev-parse --show-toplevel` returns the per-worktree root: the main
 /// checkout and each linked worktree report their own distinct directory,
 /// which is exactly the distinction this module relies on.
-#[hotpath::measure]
 pub fn git_worktree_root(dir: &Path) -> Option<PathBuf> {
     crate::git_repository::GitRepositoryAuthority::discover(dir)
         .ok()?
@@ -53,7 +52,6 @@ pub fn git_worktree_root(dir: &Path) -> Option<PathBuf> {
 /// Bounded and cancellable callers use this authority so discovery cannot
 /// escape their subprocess deadline through [`git_worktree_root`]'s
 /// command-line fallback.
-#[hotpath::measure]
 pub fn discover_git_worktree_root(dir: &Path) -> Option<PathBuf> {
     let repo = gix::discover(dir).ok()?;
     realpath(repo.workdir()?)
@@ -63,7 +61,6 @@ pub fn discover_git_worktree_root(dir: &Path) -> Option<PathBuf> {
 ///
 /// For a linked worktree this is the main checkout's `.git` directory, which is
 /// the stable local identity all linked worktrees share.
-#[hotpath::measure]
 pub fn git_common_dir(dir: &Path) -> Option<PathBuf> {
     crate::git_repository::GitRepositoryAuthority::discover(dir)
         .ok()
@@ -76,7 +73,6 @@ pub fn git_common_dir(dir: &Path) -> Option<PathBuf> {
 /// this binds that authority to their canonical Git common directory.
 /// Independent clones retain distinct locators. Non-Git projects fall back
 /// to their canonical root.
-#[hotpath::measure]
 pub fn locator_digest_for_project(project_root: &Path) -> Result<ManifestDigest, TraceDecayError> {
     let repository_locator = git_common_dir(project_root).unwrap_or_else(|| {
         project_root
@@ -104,7 +100,6 @@ pub fn locator_digest_for_project(project_root: &Path) -> Result<ManifestDigest,
 /// worktree whose path could not be resolved. The unresolved path is
 /// compared instead, and `Some(primary)` is still returned when that
 /// directory exists.
-#[hotpath::measure]
 pub fn primary_checkout_root(
     project_root: &Path,
     git_common_dir: Option<&Path>,
@@ -140,7 +135,6 @@ pub fn primary_checkout_root(
 /// the primary checkout, is not a worktree root at all (a package directory
 /// inside a monorepo is its own project), is outside git, or has a repository
 /// shape whose primary checkout cannot be derived safely.
-#[hotpath::measure]
 pub fn repository_identity_root(dir: &Path) -> Option<PathBuf> {
     let worktree_root = git_worktree_root(dir)?;
     // Only a worktree ROOT inherits repository identity. Without this check a
@@ -154,12 +148,10 @@ pub fn repository_identity_root(dir: &Path) -> Option<PathBuf> {
 }
 
 /// Returns whether `dir` resolves to a linked worktree root.
-#[hotpath::measure]
 pub fn is_linked_worktree(dir: &Path) -> bool {
     git_worktree_root(dir).is_some_and(|root| root.join(".git").is_file())
 }
 
-#[hotpath::measure]
 pub(crate) fn is_detached_linked_worktree(dir: &Path) -> bool {
     is_linked_worktree(dir) && crate::branch::current_branch(dir).is_none()
 }
@@ -169,7 +161,6 @@ pub(crate) fn is_detached_linked_worktree(dir: &Path) -> bool {
 /// Detached worktrees share repository identity and the mutable project store
 /// with the primary checkout, but retain an exact graph provenance scope so
 /// indexing branchless files cannot replace another checkout's generation.
-#[hotpath::measure]
 pub fn detached_worktree_graph_scope(dir: &Path) -> Option<String> {
     if !is_detached_linked_worktree(dir) {
         return None;
@@ -191,7 +182,6 @@ pub fn detached_worktree_graph_scope(dir: &Path) -> Option<String> {
 /// somewhere in its ancestor chain or the caller overrides discovery via
 /// `GIT_DIR`. Spawning `git` costs ~100-300ms on Windows, so callers skip
 /// the spawn when it is guaranteed to fail anyway.
-#[hotpath::measure]
 pub fn git_may_resolve_repo(dir: &Path) -> bool {
     if std::env::var_os("GIT_DIR").is_some() {
         return true;
@@ -209,7 +199,6 @@ pub fn git_may_resolve_repo(dir: &Path) -> bool {
 ///     directory that merely happens to contain a data dir), which
 ///     keeps non-git and monorepo-subdir layouts from producing false
 ///     warnings.
-#[hotpath::measure]
 pub(crate) fn detect_worktree_index_mismatch(
     start_path: &Path,
     index_root: &Path,
@@ -235,7 +224,6 @@ pub(crate) fn detect_worktree_index_mismatch(
 /// Detect a borrowed index for the client scope represented by a daemon-held
 /// project. The daemon process's own current directory is unrelated to the
 /// client and must never participate in this decision.
-#[hotpath::measure]
 pub fn detect_scoped_worktree_index_mismatch(
     index_root: &Path,
     scope_prefix: Option<&str>,
@@ -249,7 +237,6 @@ pub fn detect_scoped_worktree_index_mismatch(
 
 /// Verbose multi-line warning for `tracedecay status` and similar contexts
 /// where the answer can sit alongside a heads-up block.
-#[hotpath::measure]
 pub fn worktree_mismatch_warning(m: &WorktreeIndexMismatch) -> String {
     format!(
         "This tracedecay index belongs to a different git working tree.\n  \
@@ -267,7 +254,6 @@ pub fn worktree_mismatch_warning(m: &WorktreeIndexMismatch) -> String {
 /// tools return their answer inline, so the heads-up has to ride on the
 /// same payload the agent is already reading — a multi-line block would
 /// bury the result.
-#[hotpath::measure]
 pub fn worktree_mismatch_notice(m: &WorktreeIndexMismatch) -> String {
     format!(
         "WARNING: tracedecay results below come from a different git worktree ({}), \
@@ -281,7 +267,6 @@ pub fn worktree_mismatch_notice(m: &WorktreeIndexMismatch) -> String {
 /// Resolve symlinks where possible so tmp/realpath quirks don't break
 /// equality checks. `None` when canonicalize fails (e.g. directory was
 /// deleted between rev-parse and the fs call); callers choose the fallback.
-#[hotpath::measure]
 fn realpath(p: &Path) -> Option<PathBuf> {
     std::fs::canonicalize(p).ok()
 }

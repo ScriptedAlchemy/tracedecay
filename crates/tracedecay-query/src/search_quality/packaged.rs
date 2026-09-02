@@ -98,12 +98,10 @@ const FILES: &[(&str, &[u8])] = &[
     ),
 ];
 
-#[hotpath::measure]
 pub fn packaged_evaluator_files() -> &'static [(&'static str, &'static [u8])] {
     FILES
 }
 
-#[hotpath::measure]
 pub fn load_workload() -> Result<CandidateWorkloadV1, SearchEvalError> {
     let observed_workload_digest = sha256_hex(FILES[0].1);
     if observed_workload_digest != WORKLOAD_SHA256 {
@@ -121,7 +119,6 @@ pub fn load_workload() -> Result<CandidateWorkloadV1, SearchEvalError> {
 /// Derive the corpus binding from the bytes embedded in this package. This is
 /// deliberately separate from evaluator materialization: qualification loading
 /// must not create a temporary evaluator root merely to establish corpus identity.
-#[hotpath::measure]
 pub fn current_corpus_digest(workload: &CandidateWorkloadV1) -> Result<String, SearchEvalError> {
     Ok(compute_corpus_digest_from_embedded_bytes(workload, FILES)?)
 }

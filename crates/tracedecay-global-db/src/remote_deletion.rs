@@ -15,7 +15,6 @@ pub enum RemoteDeletionTarget {
     Project,
 }
 
-#[hotpath::measure_all]
 impl RemoteDeletionTarget {
     fn as_str(self) -> &'static str {
         match self {
@@ -48,7 +47,6 @@ pub enum RemoteDeletionFailureCode {
     RegistryCleanupFailed,
 }
 
-#[hotpath::measure_all]
 impl RemoteDeletionFailureCode {
     fn as_str(self) -> &'static str {
         match self {
@@ -95,7 +93,6 @@ pub enum RemoteDeletionPhase {
     RemoveRegistryEntry,
 }
 
-#[hotpath::measure_all]
 impl RemoteDeletionPhase {
     fn as_str(self) -> &'static str {
         match self {
@@ -142,7 +139,6 @@ pub enum RemoteDeletionCleanupState {
     Deleted,
 }
 
-#[hotpath::measure_all]
 impl RemoteDeletionCleanupState {
     fn status(&self) -> &'static str {
         match self {
@@ -239,7 +235,6 @@ pub struct RemoteDeletionTombstone {
     pub cleanup: RemoteDeletionCleanupState,
 }
 
-#[hotpath::measure_all]
 impl RemoteDeletionTombstone {
     fn project_key(&self) -> &str {
         self.project_id.as_deref().unwrap_or("")
@@ -296,7 +291,6 @@ pub enum RemoteDeletionTombstoneTransitionOutcome {
     Conflict { existing: RemoteDeletionTombstone },
 }
 
-#[hotpath::measure_all]
 impl RegisteredGlobalDb {
     #[hotpath::skip]
     pub async fn remote_deletion_tombstone(
@@ -493,7 +487,6 @@ impl RegisteredGlobalDb {
     }
 }
 
-#[hotpath::measure]
 fn validate_transition(next: &RemoteDeletionCleanupState) -> Result<()> {
     if matches!(next, RemoteDeletionCleanupState::Pending) {
         return Err(remote_deletion_error(
@@ -568,7 +561,6 @@ async fn read_tombstone(
     }))
 }
 
-#[hotpath::measure]
 fn validate_identifier(field: &str, value: &str) -> Result<()> {
     if value.trim().is_empty() || value.len() > 256 {
         return Err(remote_deletion_error(
@@ -579,7 +571,6 @@ fn validate_identifier(field: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-#[hotpath::measure]
 fn remote_deletion_error(operation: &str, error: impl std::fmt::Display) -> TraceDecayError {
     TraceDecayError::Database {
         operation: operation.to_owned(),

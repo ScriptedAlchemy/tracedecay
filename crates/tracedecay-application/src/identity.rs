@@ -14,7 +14,6 @@ use crate::error::ApplicationContractError;
 
 /// Reject identifiers that are empty, untrimmed, over `maximum_bytes`, or carry
 /// control characters. `field` names the offending contract field in the error.
-#[hotpath::measure]
 pub(crate) fn validate_identifier(
     value: &str,
     field: &'static str,

@@ -51,7 +51,6 @@ enum MovedStoreEvidence {
     NoMatch,
 }
 
-#[hotpath::measure_all]
 impl TraceDecay {
     /// Remaps a moved non-git project onto `project_root` under an explicit
     /// operator adoption decision.
@@ -162,7 +161,6 @@ impl TraceDecay {
     }
 }
 
-#[hotpath::measure]
 fn candidate_ids(candidates: &[MovedNongitCandidate]) -> String {
     candidates
         .iter()
@@ -171,7 +169,6 @@ fn candidate_ids(candidates: &[MovedNongitCandidate]) -> String {
         .join(", ")
 }
 
-#[hotpath::measure]
 fn refuse_if_adoption_conflicts(
     adoption: &MovedStoreAdoption,
     existing_project_id: &str,
@@ -224,7 +221,6 @@ async fn discover_moved_nongit_candidates(
     Ok(candidates)
 }
 
-#[hotpath::measure]
 fn existing_profile_store_layout(
     profile_root: &Path,
     project_id: &str,
@@ -242,7 +238,6 @@ fn existing_profile_store_layout(
     Ok(store_exists.then_some(layout))
 }
 
-#[hotpath::measure]
 fn moved_store_evidence(
     layout: &StoreLayout,
     previous_root: &Path,
@@ -288,7 +283,6 @@ fn moved_store_evidence(
     Ok(MovedStoreEvidence::NoMatch)
 }
 
-#[hotpath::measure]
 fn paths_record_same_root(recorded: &Path, previous_root: &Path) -> bool {
     if recorded == previous_root {
         return true;

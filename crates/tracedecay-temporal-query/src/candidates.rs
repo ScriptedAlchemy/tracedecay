@@ -31,7 +31,6 @@ pub struct CandidatePlan {
     clauses: Vec<CandidateClause>,
 }
 
-#[hotpath::measure_all]
 impl CandidatePlan {
     pub fn clauses(&self) -> &[CandidateClause] {
         &self.clauses
@@ -162,7 +161,6 @@ pub fn plan_candidates(query: &str) -> CandidatePlan {
     CandidatePlan { clauses }
 }
 
-#[hotpath::measure]
 fn push_clause(
     clauses: &mut Vec<CandidateClause>,
     seen: &mut BTreeSet<(CandidateChannel, String)>,
@@ -188,7 +186,6 @@ fn push_clause(
     });
 }
 
-#[hotpath::measure]
 fn split_quoted(text: &str) -> (Vec<String>, String) {
     let mut phrases = Vec::new();
     let mut remainder = String::with_capacity(text.len());
@@ -249,7 +246,6 @@ fn split_quoted(text: &str) -> (Vec<String>, String) {
     (phrases, remainder)
 }
 
-#[hotpath::measure]
 fn is_fts_operator(token: &str) -> bool {
     matches!(
         token.to_ascii_uppercase().as_str(),
@@ -257,7 +253,6 @@ fn is_fts_operator(token: &str) -> bool {
     )
 }
 
-#[hotpath::measure]
 fn looks_like_iso_date(token: &str) -> bool {
     let bytes = token.as_bytes();
     bytes.len() == 10
@@ -269,7 +264,6 @@ fn looks_like_iso_date(token: &str) -> bool {
             .all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit())
 }
 
-#[hotpath::measure]
 fn looks_like_exact_entity(token: &str) -> bool {
     token.contains('/')
         || token.contains('\\')
@@ -280,13 +274,11 @@ fn looks_like_exact_entity(token: &str) -> bool {
         || looks_like_rust_error_code(token)
 }
 
-#[hotpath::measure]
 fn looks_like_rust_error_code(token: &str) -> bool {
     let bytes = token.as_bytes();
     bytes.len() == 5 && bytes[0] == b'E' && bytes[1..].iter().all(u8::is_ascii_digit)
 }
 
-#[hotpath::measure]
 fn looks_like_command(query: &str) -> bool {
     let first = query.split_whitespace().next().unwrap_or_default();
     matches!(

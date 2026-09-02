@@ -10,7 +10,6 @@ pub struct PayloadFileRollback {
     cleanup_on_drop: bool,
 }
 
-#[hotpath::measure_all]
 impl PayloadFileRollback {
     /// Arms synchronous file cleanup when the owning database transaction is
     /// dropped before commit. The caller must disarm this guard only after the

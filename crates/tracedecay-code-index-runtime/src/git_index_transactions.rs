@@ -72,7 +72,6 @@ pub enum NativeGitIndexError {
     Domain(#[from] DomainError),
 }
 
-#[hotpath::measure_all]
 impl NativeGitIndexError {
     /// Preserve ambiguity once a native publication/commit boundary may have
     /// happened. Callers must reconcile rather than retry the operation.
@@ -125,7 +124,6 @@ impl Drop for NativeIndexLock {
 /// Resolves the identity of a bare repository rooted exactly at `directory`.
 /// Returns `None` unless git confirms the directory is itself bare, so
 /// non-repositories and worktree misresolutions keep their typed outcome.
-#[hotpath::measure]
 fn bare_repository_identity(directory: &Path) -> Option<GitRepositoryIdentity> {
     let root = directory.canonicalize().ok()?;
     let output = git_command(&root)
@@ -151,7 +149,6 @@ fn bare_repository_identity(directory: &Path) -> Option<GitRepositoryIdentity> {
     })
 }
 
-#[hotpath::measure_all]
 impl FixedGitIndexRunner {
     pub fn new(repository_root: impl AsRef<Path>) -> Result<Self, NativeGitIndexError> {
         let identity = match discover_repository_identity_bounded(repository_root.as_ref()) {

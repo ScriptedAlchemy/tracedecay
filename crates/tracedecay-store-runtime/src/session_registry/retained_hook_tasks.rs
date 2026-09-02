@@ -25,7 +25,6 @@ pub(super) struct RetainedHookTasks {
     state: Arc<Mutex<RetainedHookTaskState>>,
 }
 
-#[hotpath::measure_all]
 impl RetainedHookTasks {
     pub(super) fn new() -> Self {
         Self {
@@ -145,7 +144,6 @@ impl RetainedHookTasks {
     }
 }
 
-#[hotpath::measure]
 fn finish_retained_hook_task(
     state: Weak<Mutex<RetainedHookTaskState>>,
     key: &str,

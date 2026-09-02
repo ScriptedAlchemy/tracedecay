@@ -32,7 +32,6 @@ pub(super) struct CodeIndexActivationMountInputs {
 /// both the route registration flag and the open cancellation token, and it
 /// subscribes to generation publications *before* mounting so the first sealed
 /// generation cannot be missed between the mount and the subscription.
-#[hotpath::measure]
 pub(super) fn code_index_activation_mount(
     inputs: CodeIndexActivationMountInputs,
 ) -> code_index_scheduler::CodeIndexActivationMountV1 {
@@ -136,7 +135,6 @@ struct QueryAuthorityWaitInputs {
 /// each end the wait without mounting; a lagged channel or the route poll
 /// re-reads the serving slot, because a retained `Noop` restore does not
 /// republish.
-#[hotpath::measure]
 fn spawn_query_authority_when_generation_ready(inputs: QueryAuthorityWaitInputs) {
     let QueryAuthorityWaitInputs {
         invocation: authority_invocation,
@@ -234,7 +232,6 @@ fn spawn_query_authority_when_generation_ready(inputs: QueryAuthorityWaitInputs)
 /// saw a generation id, but the mount still needs a current complete
 /// generation. That is typed status, not a WARN. A real mount refusal stays
 /// WARN so a broken profile or key cannot hide as warmup.
-#[hotpath::measure]
 fn log_query_authority_activation_outcome(
     project: &Path,
     outcome: std::result::Result<(), QueryRuntimeMountErrorV1>,
@@ -280,7 +277,6 @@ pub(in crate::daemon) enum QueryAuthorityActivationLogV1 {
     Degraded,
 }
 
-#[hotpath::measure]
 pub(in crate::daemon) fn classify_query_authority_activation_outcome(
     outcome: &std::result::Result<(), QueryRuntimeMountErrorV1>,
 ) -> QueryAuthorityActivationLogV1 {
@@ -295,7 +291,6 @@ pub(in crate::daemon) fn classify_query_authority_activation_outcome(
 
 /// Hint sink handed to the activation owner: it coalesces after-edit hook paths
 /// and overflow notices onto the mounted scheduler.
-#[hotpath::measure]
 pub(super) fn code_index_activation_hint_sink(
     schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
     project_root: PathBuf,
@@ -325,7 +320,6 @@ pub(super) fn code_index_activation_hint_sink(
 /// MCP-facing after-edit hook sink. Accepts hints before the mount completes:
 /// the activation owner bounds and coalesces them, keeping this hook path
 /// independent of indexing.
-#[hotpath::measure]
 pub(super) fn code_index_hook_sink(
     activation: Arc<code_index_scheduler::CodeIndexActivationV1>,
 ) -> crate::mcp::server::CodeIndexHookSink {
@@ -339,7 +333,6 @@ pub(super) fn code_index_hook_sink(
 
 /// MCP-facing reconcile sink: an overflowed hook batch asks the activation
 /// owner for a full reconcile instead of enumerating paths.
-#[hotpath::measure]
 pub(super) fn code_index_reconcile_sink(
     schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
     activation: Arc<code_index_scheduler::CodeIndexActivationV1>,
@@ -361,7 +354,6 @@ pub(super) fn code_index_reconcile_sink(
 /// MCP-facing ordinary-read freshness probe. Unlike the explicit reconcile
 /// sink, this runs only the scheduler's bounded Git/stat ladder and creates an
 /// overflow wake solely when that evidence proves a reconcile is required.
-#[hotpath::measure]
 pub(super) fn code_index_freshness_probe_sink(
     schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
 ) -> crate::mcp::server::CodeIndexFreshnessProbeSink {

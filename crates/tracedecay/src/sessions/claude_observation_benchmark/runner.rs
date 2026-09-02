@@ -34,7 +34,6 @@ use tracedecay_usecases::observation::ObservationCancellation;
 /// (a second install with a different memory handle fails closed), so this
 /// delegates to the same helper `HostAdmissionTestRuntimeV1` uses instead of
 /// racing it with a benchmark-private handle.
-#[hotpath::measure]
 fn ensure_background_cpu_authority() {
     crate::host_admission::ensure_process_background_cpu_authority()
         .expect("install process capture authorities for the benchmark");
@@ -61,7 +60,6 @@ use super::{
 };
 use super::{baseline, manifest};
 
-#[hotpath::measure]
 fn benchmark_tempdir(prefix: &str) -> TempDir {
     let executable = fs::canonicalize(std::env::current_exe().expect("resolve test executable"))
         .expect("canonicalize test executable");
@@ -84,7 +82,6 @@ pub(super) struct Fixture {
     _temp: TempDir,
 }
 
-#[hotpath::measure_all]
 impl Fixture {
     #[hotpath::skip]
     pub(super) async fn new(repetition: usize) -> Self {
@@ -248,7 +245,6 @@ impl Fixture {
     }
 }
 
-#[hotpath::measure]
 fn write_records(path: &Path, session_id: &str) {
     let mut body = String::new();
     for index in 0..RECORDS_PER_REPETITION {
@@ -277,7 +273,6 @@ struct PhaseSnapshot {
     database_storage_bytes: u64,
 }
 
-#[hotpath::measure_all]
 impl PhaseSnapshot {
     fn start(database_storage_bytes: u64) -> Self {
         reset_peak_rss();
@@ -348,7 +343,6 @@ enum ProviderKind {
     Kilo,
 }
 
-#[hotpath::measure_all]
 impl ProviderKind {
     const ALL: [Self; 8] = [
         Self::Claude,
@@ -379,7 +373,6 @@ impl ProviderKind {
     }
 }
 
-#[hotpath::measure]
 fn enroll_provider_benchmark_project(project: &Path) -> ProjectId {
     let status = std::process::Command::new("git")
         .args(["-C"])
@@ -413,7 +406,6 @@ struct ProviderFixture {
     _temp: TempDir,
 }
 
-#[hotpath::measure_all]
 impl ProviderFixture {
     #[hotpath::skip]
     async fn new(kind: ProviderKind, repetition: usize) -> Self {
@@ -717,7 +709,6 @@ struct ProviderSamples {
     no_op: Vec<RawPhaseSample>,
 }
 
-#[hotpath::measure_all]
 impl ProviderSamples {
     fn new(kind: ProviderKind, repetitions: usize) -> Self {
         Self {
@@ -907,7 +898,6 @@ async fn run_provider_benchmark_suite(
     }
 }
 
-#[hotpath::measure]
 fn provider_phase_result(
     scope: &str,
     raw_samples: Vec<RawProviderPhaseSample>,
@@ -943,7 +933,6 @@ fn provider_phase_result(
     }
 }
 
-#[hotpath::measure]
 fn native_fixture(path: &str) -> serde_json::Value {
     let source = NATIVE_PROVIDER_FIXTURES
         .iter()
@@ -953,7 +942,6 @@ fn native_fixture(path: &str) -> serde_json::Value {
         .unwrap_or_else(|error| panic!("parse native fixture {path}: {error}"))
 }
 
-#[hotpath::measure]
 fn benchmark_canary(repetition: usize, index: usize) -> String {
     format!(
         "{BENCHMARK_SECRET_PREFIX}{:06}",
@@ -961,7 +949,6 @@ fn benchmark_canary(repetition: usize, index: usize) -> String {
     )
 }
 
-#[hotpath::measure]
 fn inject_canary(content: &mut serde_json::Value, canary: &str) {
     if let Some(text) = content.as_str() {
         *content = json!(format!("{text} {canary}"));
@@ -998,7 +985,6 @@ async fn write_provider_fixture(
     }
 }
 
-#[hotpath::measure]
 fn write_provider_claude(home: &Path, repetition: usize) -> PathBuf {
     let session_id = format!("benchmark-claude-session-{repetition}");
     let path = home
@@ -1024,7 +1010,6 @@ fn write_provider_claude(home: &Path, repetition: usize) -> PathBuf {
     path
 }
 
-#[hotpath::measure]
 fn write_provider_codex(home: &Path, project: &Path, repetition: usize) -> PathBuf {
     let session_id = format!("benchmark-codex-session-{repetition}");
     let directory = home.join(".codex/sessions/2026/07/15");
@@ -1049,7 +1034,6 @@ fn write_provider_codex(home: &Path, project: &Path, repetition: usize) -> PathB
     path
 }
 
-#[hotpath::measure]
 fn write_provider_cursor(root: &Path, repetition: usize) -> PathBuf {
     let path = root.join(format!("benchmark-cursor-session-{repetition}.jsonl"));
     let template =
@@ -1170,7 +1154,6 @@ async fn write_provider_hermes(home: &Path, project: &Path, repetition: usize) -
     hermes_home
 }
 
-#[hotpath::measure]
 fn write_provider_kiro(home: &Path, project: &Path, repetition: usize) -> PathBuf {
     let data_dir = tracedecay_sessions::host_ports::kiro_data_dir(home);
     let workspace_hash = "0123456789abcdef0123456789abcdef";
@@ -1209,7 +1192,6 @@ fn write_provider_kiro(home: &Path, project: &Path, repetition: usize) -> PathBu
     path
 }
 
-#[hotpath::measure]
 fn write_provider_cline_like(
     kind: ProviderKind,
     home: &Path,
@@ -1262,7 +1244,6 @@ fn write_provider_cline_like(
     path
 }
 
-#[hotpath::measure]
 fn write_provider_jsonl(path: &Path, record: impl Fn(usize) -> serde_json::Value) {
     let values = (0..baseline::PROVIDER_RECORDS_PER_REPETITION)
         .map(record)
@@ -1270,7 +1251,6 @@ fn write_provider_jsonl(path: &Path, record: impl Fn(usize) -> serde_json::Value
     write_jsonl_values(path, &values);
 }
 
-#[hotpath::measure]
 fn write_jsonl_values(path: &Path, values: &[serde_json::Value]) {
     let mut body = String::new();
     for value in values {

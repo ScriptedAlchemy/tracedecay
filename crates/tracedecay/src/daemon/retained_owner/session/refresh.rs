@@ -13,7 +13,6 @@ use tracedecay_session_memory::session::{
     SessionRefreshReceiptView, SessionRefreshServiceOutcome,
 };
 
-#[hotpath::measure]
 pub(super) fn status_result(
     outcome: SessionRefreshServiceOutcome,
 ) -> Result<RetainedSurfaceResultV1, RetainedSurfaceExecutionErrorV1> {
@@ -113,7 +112,6 @@ pub(super) struct EffectProjection {
     pub(super) reconciliation_required: bool,
 }
 
-#[hotpath::measure]
 pub(super) fn begin_result(
     outcome: SessionRefreshServiceOutcome,
 ) -> Result<EffectProjection, RetainedSurfaceExecutionErrorV1> {
@@ -182,7 +180,6 @@ pub(super) fn begin_result(
     })
 }
 
-#[hotpath::measure]
 pub(super) fn cancel_result(
     outcome: SessionRefreshServiceOutcome,
     handle: Option<&str>,
@@ -227,7 +224,6 @@ pub(super) fn cancel_result(
     })
 }
 
-#[hotpath::measure]
 fn effect_error(outcome: SessionRefreshServiceOutcome) -> RetainedSurfaceExecutionErrorV1 {
     match outcome {
         SessionRefreshServiceOutcome::Busy => RetainedSurfaceExecutionErrorV1::Saturated,
@@ -264,7 +260,6 @@ fn effect_error(outcome: SessionRefreshServiceOutcome) -> RetainedSurfaceExecuti
     }
 }
 
-#[hotpath::measure]
 fn refresh_problem(
     outcome: RetainedOutcomeStatusV1,
     code: &str,
@@ -278,7 +273,6 @@ fn refresh_problem(
     (outcome, None, None, Some(refresh_error(code, message)))
 }
 
-#[hotpath::measure]
 fn refresh_error(code: &str, message: &str) -> RetainedErrorV1 {
     RetainedErrorV1 {
         code: code.to_owned(),
@@ -291,14 +285,12 @@ fn refresh_error(code: &str, message: &str) -> RetainedErrorV1 {
     }
 }
 
-#[hotpath::measure]
 fn refresh_progress(
     value: SessionRefreshProgressView,
 ) -> Result<SessionRefreshProgressV1, RetainedSurfaceExecutionErrorV1> {
     Ok(session_refresh_progress_from_view(value))
 }
 
-#[hotpath::measure]
 fn refresh_receipt(
     value: SessionRefreshReceiptView,
 ) -> Result<SessionRefreshReceiptV1, RetainedSurfaceExecutionErrorV1> {
@@ -309,7 +301,6 @@ fn refresh_receipt(
     })
 }
 
-#[hotpath::measure]
 fn session_refresh_frontier_from_view(
     value: SessionRefreshFrontierView,
 ) -> SessionRefreshFrontierResultV1 {
@@ -319,7 +310,6 @@ fn session_refresh_frontier_from_view(
     }
 }
 
-#[hotpath::measure]
 fn temporal_coverage_from_view(value: SessionRefreshCoverageView) -> TemporalCoverageV1 {
     TemporalCoverageV1 {
         visible: value.visible,
@@ -329,7 +319,6 @@ fn temporal_coverage_from_view(value: SessionRefreshCoverageView) -> TemporalCov
     }
 }
 
-#[hotpath::measure]
 fn session_refresh_progress_from_view(
     value: SessionRefreshProgressView,
 ) -> SessionRefreshProgressV1 {
@@ -349,7 +338,6 @@ fn session_refresh_progress_from_view(
     }
 }
 
-#[hotpath::measure]
 fn session_refresh_receipt_from_view(
     value: SessionRefreshReceiptView,
 ) -> Option<SessionRefreshReceiptV1> {

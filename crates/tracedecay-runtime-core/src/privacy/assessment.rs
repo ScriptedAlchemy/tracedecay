@@ -36,7 +36,6 @@ pub enum SanitizationHeuristicScaleV1 {
     ShannonEntropyBitsPerCharacter,
 }
 
-#[hotpath::measure_all]
 impl SanitizationHeuristicScaleV1 {
     #[hotpath::skip]
     const fn ceiling_per_mille(self) -> u32 {
@@ -92,7 +91,6 @@ pub struct SanitizationCalibrationProfileV1 {
     drift: SanitizationCalibrationDriftV1,
 }
 
-#[hotpath::measure_all]
 impl SanitizationCalibrationProfileV1 {
     pub fn new(
         cohort: SanitizationDetectorCohortV1,
@@ -170,7 +168,6 @@ pub enum SanitizationAssessmentV1 {
 /// Producers abstain on failure (the finding keeps its structural evidence and
 /// drops the assessment); the wire decoder rejects, so a stale or
 /// under-supported calibration can never enter through deserialization.
-#[hotpath::measure]
 pub(super) fn validate_assessment(
     confidence: DetectionConfidenceV1,
     assessment: &SanitizationAssessmentV1,

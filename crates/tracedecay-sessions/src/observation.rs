@@ -34,7 +34,6 @@ pub struct ObservationCancellation {
     notify: Arc<tokio::sync::Notify>,
 }
 
-#[hotpath::measure_all]
 impl ObservationCancellation {
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
@@ -92,7 +91,6 @@ pub struct CaptureObservationRequest {
     repository_provenance: Option<RepositoryProvenanceAdmissionContext>,
 }
 
-#[hotpath::measure_all]
 impl CaptureObservationRequest {
     pub fn new(
         parsed_record: ParsedObservationRecordV1,
@@ -150,7 +148,6 @@ pub struct GetObservationRequest {
     cancellation: ObservationCancellation,
 }
 
-#[hotpath::measure_all]
 impl GetObservationRequest {
     pub fn new(
         observation_id: CanonicalObservationIdV1,
@@ -173,7 +170,6 @@ pub struct AdvanceNonDurableSourceCursorRequest {
     cancellation: ObservationCancellation,
 }
 
-#[hotpath::measure_all]
 impl AdvanceNonDurableSourceCursorRequest {
     pub fn new(advance: ObservationCursorAdvance, cancellation: ObservationCancellation) -> Self {
         Self {
@@ -183,7 +179,6 @@ impl AdvanceNonDurableSourceCursorRequest {
     }
 }
 
-#[hotpath::measure_all]
 impl ReplayObservationsRequest {
     pub fn new(replay: ObservationReplayRequest, cancellation: ObservationCancellation) -> Self {
         Self {
@@ -228,7 +223,6 @@ pub enum CaptureObservationOutcome {
     },
 }
 
-#[hotpath::measure_all]
 impl CaptureObservationOutcome {
     pub fn sanitization_receipt(&self) -> &SanitizationReceiptV1 {
         match self {
@@ -260,7 +254,6 @@ pub struct ExternalSourceProjectionRetryHandleV1 {
     source_receipt_digest: ManifestDigest,
 }
 
-#[hotpath::measure_all]
 impl ExternalSourceProjectionRetryHandleV1 {
     pub fn new(binding: SourceBindingIdentityV1, source_receipt_digest: ManifestDigest) -> Self {
         Self {
@@ -300,7 +293,6 @@ pub struct ObservationPointRead {
     coverage: ObservationReplayCoverage,
 }
 
-#[hotpath::measure_all]
 impl ObservationPointRead {
     pub fn observation(&self) -> Option<&StoredObservation> {
         self.observation.as_ref()
@@ -311,7 +303,6 @@ impl ObservationPointRead {
     }
 }
 
-#[hotpath::measure_all]
 impl ObservationReplayPage {
     pub fn observations(&self) -> &[StoredObservation] {
         &self.observations
@@ -386,7 +377,6 @@ struct PersistedObservationCapture {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ObservationBatchConcurrency(NonZeroUsize);
 
-#[hotpath::measure_all]
 impl ObservationBatchConcurrency {
     #[hotpath::skip]
     pub const fn new(max_in_flight: NonZeroUsize) -> Self {

@@ -41,7 +41,6 @@ pub struct SqliteStoreSizeTelemetryPort {
     table_watermarks: Arc<Mutex<Option<BTreeMap<TableNameV1, TableWatermark>>>>,
 }
 
-#[hotpath::measure_all]
 impl SqliteStoreSizeTelemetryPort {
     #[must_use]
     pub fn new(
@@ -192,7 +191,6 @@ impl StoreSizeTelemetryPort for SqliteStoreSizeTelemetryPort {
     }
 }
 
-#[hotpath::measure]
 fn compare_table_growth(
     store: &StoreKeyV1,
     current_tables: BTreeMap<TableNameV1, StorageByteSizeV1>,
@@ -262,7 +260,6 @@ fn compare_table_growth(
     }
 }
 
-#[hotpath::measure]
 fn interruption(context: &RequestContext) -> Option<UnavailableReasonV1> {
     match context.admission_at(now_micros()) {
         RequestAdmission::Admitted => None,

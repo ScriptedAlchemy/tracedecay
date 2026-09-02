@@ -16,7 +16,6 @@ pub struct FileInformation {
     pub number_of_links: u32,
 }
 
-#[hotpath::measure]
 pub fn information(file: &File) -> io::Result<FileInformation> {
     let mut information = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
     // SAFETY: `file` owns a valid Windows file handle, and `information` points

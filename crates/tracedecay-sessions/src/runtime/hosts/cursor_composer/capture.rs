@@ -28,7 +28,6 @@ use super::PROVIDER;
 const COMPOSER_OBSERVATION_RETENTION: &str = "retention.provider-observation";
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure]
 pub(super) fn build_cursor_composer_capture_request_for_project(
     composer_id: &str,
     bubble_id: &str,
@@ -93,7 +92,6 @@ pub(super) fn build_cursor_composer_capture_request_for_project(
     .map_err(|error| format!("invalid Cursor composer capture request: {error}"))
 }
 
-#[hotpath::measure]
 pub fn build_cursor_composer_capture_request(
     composer_id: &str,
     bubble_id: &str,
@@ -127,7 +125,6 @@ pub async fn capture_cursor_composer_observation(
         .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: PROVIDER })
 }
 
-#[hotpath::measure]
 pub(super) fn build_cursor_composer_envelope_capture_request_for_project(
     composer_id: &str,
     envelope: &Value,
@@ -196,7 +193,6 @@ pub(super) fn build_cursor_composer_envelope_capture_request_for_project(
 /// over native todo id/content/status/order) so pending→completed and content
 /// or order revisions admit as new observations without inventing
 /// `WorkflowLifecycle.revision`.
-#[hotpath::measure]
 pub fn build_cursor_composer_envelope_capture_request(
     composer_id: &str,
     envelope: &Value,

@@ -99,7 +99,6 @@ pub(super) struct ProductionCodeGraphInputs<'a> {
     pub(super) imports: &'a [CodeIndexImportEvidenceV1],
 }
 
-#[hotpath::measure]
 pub(super) fn build_projection(
     projection: &GraphProjectionIdentity,
     generation: &CodeGenerationId,
@@ -350,7 +349,6 @@ pub(super) fn build_projection(
     })
 }
 
-#[hotpath::measure]
 fn require_symbol_id<'ids>(
     symbol_ids: &'ids BTreeMap<SymbolOccurrenceId, GraphEntityId>,
     occurrence: &SymbolOccurrenceId,
@@ -364,7 +362,6 @@ fn require_symbol_id<'ids>(
 
 /// One retained edge's entity plus both endpoint relations, sharing a single
 /// serialization and identity derivation of the edge payload.
-#[hotpath::measure]
 fn edge_artifacts(
     projection: &GraphProjectionIdentity,
     edge: &CanonicalRelationEdgeV1,
@@ -406,7 +403,6 @@ fn edge_artifacts(
     Ok((entity, source, target))
 }
 
-#[hotpath::measure]
 fn file_entity(
     identity: GraphEntityId,
     file: &SanitizedCodeFileV1,
@@ -424,7 +420,6 @@ fn file_entity(
     .map_err(Into::into)
 }
 
-#[hotpath::measure]
 fn import_entity(
     identity: GraphEntityId,
     import: &CodeIndexImportEvidenceV1,
@@ -440,7 +435,6 @@ fn import_entity(
     .map_err(Into::into)
 }
 
-#[hotpath::measure]
 fn chunk_entity(
     identity: GraphEntityId,
     chunk: &CodeSearchChunkV1,
@@ -465,7 +459,6 @@ fn chunk_entity(
     .map_err(Into::into)
 }
 
-#[hotpath::measure]
 fn file_symbol_relation(
     projection: &GraphProjectionIdentity,
     binding: &CodeGraphSymbolBindingV1,
@@ -486,7 +479,6 @@ fn file_symbol_relation(
     .map_err(Into::into)
 }
 
-#[hotpath::measure]
 fn file_import_relation(
     projection: &GraphProjectionIdentity,
     import: &CodeIndexImportEvidenceV1,
@@ -503,7 +495,6 @@ fn file_import_relation(
     .map_err(Into::into)
 }
 
-#[hotpath::measure]
 fn chunk_symbol_relation(
     projection: &GraphProjectionIdentity,
     chunk_id: &GraphEntityId,
@@ -524,12 +515,10 @@ fn chunk_symbol_relation(
     .map_err(Into::into)
 }
 
-#[hotpath::measure]
 fn chunk_entity_id(chunk: &CodeSearchChunkId) -> Result<GraphEntityId, CodeGraphProjectionError> {
     GraphEntityId::new(stable_identity("chunk", chunk.as_str())).map_err(Into::into)
 }
 
-#[hotpath::measure]
 pub(super) fn validate_symbol_metadata(
     metadata: &LineageSymbolRecordV1,
     occurrence: &SymbolOccurrenceId,

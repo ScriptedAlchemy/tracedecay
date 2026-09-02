@@ -15,7 +15,6 @@ pub struct McpRequestActivity {
     _retain: Box<dyn Send>,
 }
 
-#[hotpath::measure_all]
 impl McpRequestActivity {
     pub fn retain<T: Send + 'static>(guard: T) -> Self {
         Self {

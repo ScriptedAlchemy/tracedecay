@@ -40,7 +40,6 @@ const EMPTY_EXECUTION_TOPOLOGY_WATERMARK_V1: &str = "analytics:empty";
 /// Builds the canonical Known artifact for a fully observed UTC day with no
 /// eligible topology events. It uses the ordinary projector, so the ordinary
 /// reduced fragment remains the retained authority.
-#[hotpath::measure]
 pub fn build_empty_execution_topology_daily_rollup(
     authorized_scope_ref: &str,
     exact_day_horizon: &ObservabilityHorizonV1,

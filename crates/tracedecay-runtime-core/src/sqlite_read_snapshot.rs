@@ -140,7 +140,6 @@ pub struct SnapshotAttachToken<'snapshot> {
     file_identity: u64,
 }
 
-#[hotpath::measure_all]
 impl SnapshotAttachToken<'_> {
     pub fn verified_path(&self) -> io::Result<&Path> {
         self.snapshot.validate_source()?;
@@ -180,7 +179,6 @@ pub struct SourceGeneration {
     states: Vec<FileState>,
 }
 
-#[hotpath::measure_all]
 impl SourceGeneration {
     pub fn validate(&self) -> io::Result<()> {
         let current = family_state(&self.source)?;
@@ -203,7 +201,6 @@ pub struct SnapshotSet {
     _scratch: Arc<ScratchDirectory>,
 }
 
-#[hotpath::measure_all]
 impl SnapshotSet {
     #[cfg(any(test, feature = "test-helpers"))]
     #[hotpath::skip]
@@ -414,7 +411,6 @@ pub async fn open_foreign_in(
 /// Inspects a checkpointed, offline database through the canonical immutable
 /// snapshot boundary. This is intentionally purpose-bound: callers cannot
 /// obtain a connection or issue arbitrary SQL.
-#[hotpath::measure]
 pub fn checkpointed_database_has_any_rows(path: &Path, tables: &[&str]) -> io::Result<bool> {
     let mut has_rows = false;
     for table in tables {
@@ -486,7 +482,6 @@ pub fn checkpointed_database_has_any_rows(path: &Path, tables: &[&str]) -> io::R
     Ok(has_rows)
 }
 
-#[hotpath::measure]
 pub fn family_fingerprint(path: &Path) -> io::Result<String> {
     use std::io::Read;
 
@@ -548,7 +543,6 @@ pub const BOUNDED_PROBE_BUSY_TIMEOUT: Duration = Duration::from_millis(200);
 ///
 /// `SQLITE_OPEN_NO_MUTEX` is sound here because `rusqlite::Connection` is not
 /// `Sync`, so the returned connection stays owned by one thread at a time.
-#[hotpath::measure]
 pub fn open_read_only_probe(path: &Path, busy_timeout: Duration) -> rusqlite::Result<Connection> {
     let connection = Connection::open_with_flags(
         path,
@@ -568,7 +562,6 @@ pub fn open_read_only_probe(path: &Path, busy_timeout: Duration) -> rusqlite::Re
 /// `SQLITE_OPEN_NO_MUTEX` is sound here for the same reason it is in
 /// [`open_read_only_probe`]: `rusqlite::Connection` is not `Sync`, so the
 /// returned connection stays owned by one thread at a time.
-#[hotpath::measure]
 pub fn open_immutable_read_only(path: &Path) -> io::Result<Connection> {
     Connection::open_with_flags(
         immutable_uri(path)?,
@@ -586,7 +579,6 @@ pub fn open_immutable_read_only(path: &Path) -> io::Result<Connection> {
 /// or byte count, for which a negative value is not a smaller number but a
 /// missing one.
 #[must_use]
-#[hotpath::measure]
 pub fn pragma_u64(connection: &Connection, pragma: &str) -> Option<u64> {
     connection
         .query_row(&format!("PRAGMA {pragma}"), [], |row| row.get::<_, i64>(0))
@@ -594,7 +586,6 @@ pub fn pragma_u64(connection: &Connection, pragma: &str) -> Option<u64> {
         .map(|value: i64| value.max(0) as u64)
 }
 
-#[hotpath::measure]
 fn prepare_one(
     source: &Path,
     scratch: &ScratchDirectory,
@@ -666,7 +657,6 @@ fn prepare_one(
     })
 }
 
-#[hotpath::measure]
 fn checkpointed_snapshot_mode() -> SnapshotMode {
     // SQLite's immutable connection still holds a byte-range lock on Windows.
     // Consolidation retains read snapshots while copying the frozen inputs, so
@@ -768,7 +758,6 @@ fn copy_snapshot_family(
     Ok((prepared, scratch))
 }
 
-#[hotpath::measure]
 fn changed_during_snapshot(source: &Path) -> io::Error {
     io::Error::other(format!(
         "SQLite database family '{}' changed while taking a read snapshot",
@@ -776,7 +765,6 @@ fn changed_during_snapshot(source: &Path) -> io::Error {
     ))
 }
 
-#[hotpath::measure]
 fn insufficient_scratch_space(copied_bytes: u64, available: u64, scratch_path: &Path) -> io::Error {
     io::Error::new(
         io::ErrorKind::StorageFull,
@@ -787,7 +775,6 @@ fn insufficient_scratch_space(copied_bytes: u64, available: u64, scratch_path: &
     )
 }
 
-#[hotpath::measure]
 fn create_scratch_directory(
     root: &Path,
     expected_uid: Option<u32>,
@@ -837,7 +824,6 @@ fn default_scratch_root(paths: &[PathBuf]) -> io::Result<PathBuf> {
 }
 
 #[cfg_attr(not(unix), allow(clippy::unnecessary_wraps))] // Preserve the fallible Unix contract.
-#[hotpath::measure]
 fn expected_owner(paths: &[PathBuf]) -> io::Result<Option<u32>> {
     #[cfg(unix)]
     {
@@ -857,7 +843,6 @@ fn expected_owner(paths: &[PathBuf]) -> io::Result<Option<u32>> {
     }
 }
 
-#[hotpath::measure]
 fn ensure_private_root(root: &Path, expected_uid: Option<u32>) -> io::Result<()> {
     match fs::symlink_metadata(root) {
         Ok(metadata) if metadata.is_dir() => {}
@@ -894,7 +879,6 @@ fn ensure_private_root(root: &Path, expected_uid: Option<u32>) -> io::Result<()>
     Ok(())
 }
 
-#[hotpath::measure]
 fn create_private_directory(path: &Path) -> io::Result<()> {
     let builder = fs::DirBuilder::new();
     #[cfg(unix)]
@@ -907,7 +891,6 @@ fn create_private_directory(path: &Path) -> io::Result<()> {
     builder.create(path)
 }
 
-#[hotpath::measure]
 fn create_private_directory_all(path: &Path) -> io::Result<()> {
     let path = if path.is_absolute() {
         path.to_path_buf()
@@ -987,7 +970,6 @@ fn create_private_directory_all(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-#[hotpath::measure]
 fn open_private_lock(path: &Path, create: bool) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options
@@ -1003,7 +985,6 @@ fn open_private_lock(path: &Path, create: bool) -> io::Result<File> {
     options.open(path)
 }
 
-#[hotpath::measure]
 fn cleanup_stale_directories(root: &Path) -> io::Result<()> {
     for entry in fs::read_dir(root)? {
         let entry = entry?;
@@ -1027,7 +1008,6 @@ fn cleanup_stale_directories(root: &Path) -> io::Result<()> {
     Ok(())
 }
 
-#[hotpath::measure]
 fn family_state(path: &Path) -> io::Result<Vec<FileState>> {
     let mut states = Vec::new();
     for member in family_paths(path) {
@@ -1064,7 +1044,6 @@ fn family_state(path: &Path) -> io::Result<Vec<FileState>> {
     Ok(states)
 }
 
-#[hotpath::measure]
 fn durable_family_state(path: &Path, states: &[FileState]) -> Vec<FileState> {
     let wal = with_suffix(path, "-wal");
     states
@@ -1074,7 +1053,6 @@ fn durable_family_state(path: &Path, states: &[FileState]) -> Vec<FileState> {
         .collect()
 }
 
-#[hotpath::measure]
 pub(super) fn family_paths(path: &Path) -> [PathBuf; 3] {
     [
         path.to_path_buf(),
@@ -1083,19 +1061,16 @@ pub(super) fn family_paths(path: &Path) -> [PathBuf; 3] {
     ]
 }
 
-#[hotpath::measure]
 pub(super) fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut value = path.as_os_str().to_os_string();
     value.push(suffix);
     PathBuf::from(value)
 }
 
-#[hotpath::measure]
 pub(crate) fn immutable_uri(path: &Path) -> io::Result<String> {
     Ok(format!("{}&immutable=1", read_only_uri(path)?))
 }
 
-#[hotpath::measure]
 fn read_only_uri(path: &Path) -> io::Result<String> {
     let raw = path.to_str().ok_or_else(|| {
         io::Error::new(

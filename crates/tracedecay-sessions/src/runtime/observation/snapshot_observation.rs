@@ -49,7 +49,6 @@ pub struct StableMessageIdDomains {
 
 /// Two-tier snapshot message identity: native fast path with a collision-safe
 /// delimited fallback, otherwise a derived digest over the provider frames.
-#[hotpath::measure]
 pub fn stable_snapshot_message_id(
     domains: StableMessageIdDomains,
     id: &str,
@@ -70,7 +69,6 @@ pub fn stable_snapshot_message_id(
     format!("{}{digest}", domains.derived_prefix)
 }
 
-#[hotpath::measure]
 pub fn non_durable_snapshot_record(
     provider: &'static str,
     path: &Path,
@@ -85,7 +83,6 @@ pub fn non_durable_snapshot_record(
     }
 }
 
-#[hotpath::measure]
 pub fn bounded_snapshot_input_len(
     provider: &'static str,
     path: &Path,
@@ -105,7 +102,6 @@ pub fn bounded_snapshot_input_len(
     Ok(metadata.len())
 }
 
-#[hotpath::measure]
 pub fn read_snapshot_text_bounded(
     provider: &'static str,
     path: &Path,
@@ -140,7 +136,6 @@ pub fn read_snapshot_text_bounded(
     }
 }
 
-#[hotpath::measure]
 pub fn host_admission_error(
     provider: &'static str,
     outcome: HostAdmissionOutcome,
@@ -162,7 +157,6 @@ pub fn host_admission_error(
     }
 }
 
-#[hotpath::measure]
 pub fn host_admission_status_message(provider_label: &str, status: HostAdmissionStatus) -> String {
     match status {
         HostAdmissionStatus::Backpressured => {
@@ -186,7 +180,6 @@ pub fn host_admission_status_message(provider_label: &str, status: HostAdmission
     }
 }
 
-#[hotpath::measure]
 pub fn snapshot_message_fields(
     provider: &str,
     message: &SessionMessageRecord,
@@ -216,7 +209,6 @@ pub fn snapshot_message_fields(
     fields
 }
 
-#[hotpath::measure]
 pub fn canonical_snapshot_envelope(
     native: &Value,
     provider: &str,
@@ -339,7 +331,6 @@ pub fn canonical_snapshot_envelope(
     .map_err(|_| invalid())
 }
 
-#[hotpath::measure]
 fn optional_observation_id(
     value: &Value,
     key: &str,
@@ -352,7 +343,6 @@ fn optional_observation_id(
         .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
 }
 
-#[hotpath::measure]
 fn apply_optional_relation(
     relations: CanonicalObservationRelationsV1,
     native: &Value,
@@ -365,7 +355,6 @@ fn apply_optional_relation(
     }
 }
 
-#[hotpath::measure]
 fn append_tool_invocation_facts(
     facts: &mut Vec<CanonicalObservationFactV1>,
     native: &Value,
@@ -430,7 +419,6 @@ fn append_tool_invocation_facts(
     Ok(())
 }
 
-#[hotpath::measure]
 fn append_reasoning_fact(
     facts: &mut Vec<CanonicalObservationFactV1>,
     native: &Value,
@@ -471,7 +459,6 @@ fn append_reasoning_fact(
     Ok(())
 }
 
-#[hotpath::measure]
 fn parse_reasoning_visibility(raw: &str) -> Result<CanonicalReasoningVisibilityV1, ()> {
     match raw {
         "visible" => Ok(CanonicalReasoningVisibilityV1::Visible),
@@ -482,7 +469,6 @@ fn parse_reasoning_visibility(raw: &str) -> Result<CanonicalReasoningVisibilityV
     }
 }
 
-#[hotpath::measure]
 fn append_typed_git_fact(facts: &mut Vec<CanonicalObservationFactV1>, native: &Value) {
     let Some(git) = native.get("git").filter(|value| !value.is_null()) else {
         return;
@@ -501,7 +487,6 @@ fn append_typed_git_fact(facts: &mut Vec<CanonicalObservationFactV1>, native: &V
     });
 }
 
-#[hotpath::measure]
 fn typed_git_evidence_kind(git: &Value) -> Option<CanonicalGitEvidenceKindV1> {
     match git.get("evidence_kind").and_then(Value::as_str)? {
         "diff" => Some(CanonicalGitEvidenceKindV1::Diff),
@@ -514,7 +499,6 @@ fn typed_git_evidence_kind(git: &Value) -> Option<CanonicalGitEvidenceKindV1> {
     }
 }
 
-#[hotpath::measure]
 fn append_typed_workflow_fact(facts: &mut Vec<CanonicalObservationFactV1>, native: &Value) {
     let Some(workflow) = native.get("workflow").filter(|value| !value.is_null()) else {
         return;
@@ -532,7 +516,6 @@ fn append_typed_workflow_fact(facts: &mut Vec<CanonicalObservationFactV1>, nativ
     });
 }
 
-#[hotpath::measure]
 fn typed_workflow_evidence_kind(workflow: &Value) -> Option<CanonicalWorkflowEvidenceKindV1> {
     match workflow.get("evidence_kind").and_then(Value::as_str)? {
         "plan" => Some(CanonicalWorkflowEvidenceKindV1::Plan),

@@ -96,7 +96,6 @@ struct CurrentSourceEditAuthorityV1 {
     proof: tracedecay_application::SourceEditEffectProofV1,
 }
 
-#[hotpath::measure_all]
 impl ProjectOpenSourceEditAuthorizationV1 {
     #[hotpath::skip]
     async fn current_access(
@@ -251,7 +250,6 @@ impl tracedecay_application::SourceEditAuthorizationPort for ProjectOpenSourceEd
     }
 }
 
-#[hotpath::measure]
 fn concealed_source_edit_problem() -> tracedecay_application::ApplicationProblem {
     tracedecay_application::ApplicationProblem::not_found_or_not_authorized(
         tracedecay_application::RetryDirective::Never,
@@ -420,7 +418,6 @@ pub(crate) struct SourceEditMutationGate {
     state: AtomicU8,
 }
 
-#[hotpath::measure_all]
 impl SourceEditMutationGate {
     const WARMING: u8 = 0;
     const READY: u8 = 1;
@@ -473,7 +470,6 @@ impl SourceEditMutationGate {
     }
 }
 
-#[hotpath::measure]
 fn install_project_open_source_edit_owners(
     server: &McpServer,
     graph: Arc<crate::tracedecay::TraceDecay>,
@@ -1188,7 +1184,6 @@ enum InitialSemanticActivationRestoreV1 {
     Deferred,
 }
 
-#[hotpath::measure]
 fn classify_initial_semantic_activation_restore(
     observed: std::result::Result<
         (),
@@ -1510,7 +1505,6 @@ async fn register_production_lsp_owner(
         .await
 }
 
-#[hotpath::measure]
 fn github_repository_from_remote(remote: &str) -> Option<(String, String)> {
     let (owner, repository) = if let Ok(url) = url::Url::parse(remote) {
         if (url.scheme() != "https" && url.scheme() != "ssh")
@@ -1553,7 +1547,6 @@ fn github_repository_from_remote(remote: &str) -> Option<(String, String)> {
         .then_some((target.owner, target.repository))
 }
 
-#[hotpath::measure]
 pub(super) fn daemon_owned_project_source_access_at(
     scope: &ResolvedScope,
     project_root: &Path,
@@ -1705,7 +1698,6 @@ impl tracedecay_usecases::ProjectSourceAccessSnapshotPort for DaemonOwnedProject
     }
 }
 
-#[hotpath::measure]
 fn project_open_work_grant(
     access: &ProjectSourceAccessSnapshot,
     observed_at: UtcMicros,
@@ -1767,7 +1759,6 @@ fn project_open_work_grant(
     )
 }
 
-#[hotpath::measure]
 pub(super) fn project_open_retained_grant(
     access: &ProjectSourceAccessSnapshot,
     observed_at: UtcMicros,
@@ -1823,7 +1814,6 @@ pub(super) fn project_open_retained_grant(
     )
 }
 
-#[hotpath::measure]
 pub(super) fn project_open_lsp_scope_grant(
     access: &ProjectSourceAccessSnapshot,
     observed_at: UtcMicros,
@@ -1877,7 +1867,6 @@ pub(super) fn project_open_lsp_scope_grant(
     )
 }
 
-#[hotpath::measure]
 fn production_owner_capabilities()
 -> std::result::Result<BTreeSet<CapabilityId>, ApplicationContractError> {
     let mut capabilities = BTreeSet::new();

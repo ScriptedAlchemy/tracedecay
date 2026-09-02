@@ -21,7 +21,6 @@ pub struct DaemonContextScoutRuntimeRegistrar {
     service: DaemonInvocationService,
 }
 
-#[hotpath::measure_all]
 impl DaemonContextScoutRuntimeRegistrar {
     pub fn new(service: &DaemonInvocationService) -> Self {
         Self {

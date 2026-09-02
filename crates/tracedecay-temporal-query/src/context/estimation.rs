@@ -27,7 +27,6 @@ pub enum TokenSummary {
     },
 }
 
-#[hotpath::measure_all]
 impl TokenSummary {
     pub fn empty(policy: TokenPolicy) -> Result<Self, ContextError> {
         match policy {
@@ -285,7 +284,6 @@ impl TokenSummary {
     }
 }
 
-#[hotpath::measure]
 fn validate_token_pattern(pattern: &str) -> Result<(), ContextError> {
     if pattern.is_empty() || pattern.len() > MAX_TOKEN_PATTERN_BYTES || !pattern.is_ascii() {
         return Err(ContextError::InvalidBundle(
@@ -295,7 +293,6 @@ fn validate_token_pattern(pattern: &str) -> Result<(), ContextError> {
     Ok(())
 }
 
-#[hotpath::measure]
 fn count_substrings(bytes: &[u8], pattern: &[u8]) -> usize {
     if bytes.len() < pattern.len() {
         return 0;
@@ -306,7 +303,6 @@ fn count_substrings(bytes: &[u8], pattern: &[u8]) -> usize {
         .count()
 }
 
-#[hotpath::measure]
 fn count_crossing_substrings(bytes: &[u8], boundary: usize, pattern: &[u8]) -> usize {
     if bytes.len() < pattern.len() {
         return 0;

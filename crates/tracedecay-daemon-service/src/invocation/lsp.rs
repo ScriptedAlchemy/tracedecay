@@ -14,7 +14,6 @@ pub(super) use workspace_diagnostics::PublishedCodeIndexWorkspaceDocuments;
 pub const LSP_WORKSPACE_CAPABILITY_ID_V1: &str = "capability.application.lsp.workspace-folders";
 pub const LSP_WORKSPACE_USE_CASE_ID_V1: &str = "use-case.application.lsp.workspace-folders";
 
-#[hotpath::measure]
 pub(super) fn admit_lsp_control(
     request_id: String,
     deadline: &Deadline,
@@ -35,7 +34,6 @@ pub(super) fn admit_lsp_control(
     Ok(())
 }
 
-#[hotpath::measure]
 pub fn canonicalize_lsp_roots(
     roots: &mut [(
         PathBuf,
@@ -57,7 +55,6 @@ pub(super) async fn runtime_lsp_actor(
     DaemonLspSessionFactory::open_federated_workspace_session(workspace, factories).await
 }
 
-#[hotpath::measure_all]
 impl DaemonInvocationService {
     /// The synchronous half of `begin_shutdown`: close every admission gate
     /// that does not need an await to close.

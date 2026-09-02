@@ -5,7 +5,6 @@ use tracedecay_domain::GitIndexPreviewV1;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure]
 pub(super) fn git_read_evidence_packet(
     request_id: &str,
     request: &tracedecay_application::git::GitReadRequestV1,
@@ -477,7 +476,6 @@ pub(super) async fn execute_git_read(
     }
 }
 
-#[hotpath::measure]
 pub(super) fn git_read_output_limit_problem() -> ApplicationProblem {
     ApplicationProblem::Saturated {
         diagnostic: SafeDiagnostic {
@@ -566,7 +564,6 @@ struct PreparedGitApply {
     request: GitIndexApplyRequestV1,
 }
 
-#[hotpath::measure]
 fn prepare_git_preview(
     wire_request_id: String,
     owner: DaemonGitInvocationOwner,
@@ -678,7 +675,6 @@ fn prepare_git_preview(
     }))
 }
 
-#[hotpath::measure]
 fn prepare_git_apply(
     wire_request_id: String,
     owner: DaemonGitInvocationOwner,
@@ -851,7 +847,6 @@ async fn publish_invocation_terminal(
     let _ = emitter.terminal(receipt).await;
 }
 
-#[hotpath::measure]
 fn invocation_operation_receipt(response: &DaemonInvocationResponse) -> Option<OperationReceipt> {
     match &response.outcome {
         DaemonInvocationOutcome::GitRead { result, .. } => Some(result.execution().clone()),
@@ -862,7 +857,6 @@ fn invocation_operation_receipt(response: &DaemonInvocationResponse) -> Option<O
     }
 }
 
-#[hotpath::measure]
 fn build_git_preview_request(
     request_id: &str,
     request: GitPreviewSurfaceRequest,
@@ -918,7 +912,6 @@ fn build_git_preview_request(
     })
 }
 
-#[hotpath::measure]
 fn mint_git_preview_id() -> Result<GitIndexPreviewId, ApplicationProblem> {
     let identity =
         mint_global_opaque_id(GlobalOpaqueIdentityKind::GitIndexPreview).map_err(|_| {
@@ -935,7 +928,6 @@ fn mint_git_preview_id() -> Result<GitIndexPreviewId, ApplicationProblem> {
     })
 }
 
-#[hotpath::measure]
 fn build_git_apply_request(
     request_id: &str,
     request: GitApplySurfaceRequest,
@@ -972,7 +964,6 @@ fn build_git_apply_request(
     })
 }
 
-#[hotpath::measure]
 fn git_request_authority(
     request_id: &str,
     snapshot: &tracedecay_domain::RepositoryStateSnapshotV1,
@@ -1068,14 +1059,12 @@ fn git_request_authority(
     Ok((context, authority, binding))
 }
 
-#[hotpath::measure]
 pub(super) fn stable_digest(
     material: &impl Serialize,
 ) -> Result<ManifestDigest, ApplicationProblem> {
     canonical_sha256(material).map_err(|_| invalid_git_request())
 }
 
-#[hotpath::measure]
 fn invalid_git_request() -> ApplicationProblem {
     ApplicationProblem::InvalidRequest {
         diagnostic: SafeDiagnostic {
@@ -1087,7 +1076,6 @@ fn invalid_git_request() -> ApplicationProblem {
     }
 }
 
-#[hotpath::measure]
 fn map_git_error(error: GitIndexTransactionApplicationError) -> ApplicationProblem {
     match error {
         GitIndexTransactionApplicationError::Contract(_) => invalid_git_request(),
@@ -1095,7 +1083,6 @@ fn map_git_error(error: GitIndexTransactionApplicationError) -> ApplicationProbl
     }
 }
 
-#[hotpath::measure]
 fn map_git_port_problem(error: GitIndexTransactionPortError) -> ApplicationProblem {
     match error {
         GitIndexTransactionPortError::StalePreview => ApplicationProblem::stale(SafeDiagnostic {

@@ -14,7 +14,6 @@ pub struct WireMeasure {
     summary: TokenSummary,
 }
 
-#[hotpath::measure_all]
 impl WireMeasure {
     pub fn empty(policy: TokenPolicy) -> Result<Self, ContextError> {
         Ok(Self {
@@ -49,7 +48,6 @@ pub struct StreamingWriter<'a> {
     policy: TokenPolicy,
 }
 
-#[hotpath::measure_all]
 impl<'a> StreamingWriter<'a> {
     pub fn measuring(
         policy: TokenPolicy,

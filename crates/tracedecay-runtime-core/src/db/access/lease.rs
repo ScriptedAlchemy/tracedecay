@@ -1,6 +1,5 @@
 use super::*;
 
-#[hotpath::measure]
 pub(super) fn exact_scoped_runtime_role(
     profile_root: &Path,
     intent: &str,
@@ -26,7 +25,6 @@ pub(super) fn exact_scoped_runtime_role(
     }
 }
 
-#[hotpath::measure]
 pub(super) fn scoped_runtime_role(
     identity: &DatabaseIdentity,
     intent: &str,
@@ -44,7 +42,6 @@ pub(super) fn scoped_runtime_role(
         .map_err(|message| access_error(intent, &identity.profile_root, message))
 }
 
-#[hotpath::measure]
 pub(super) fn fallback_scoped_runtime_role(
     maintenance_count: usize,
     daemon_count: usize,
@@ -57,7 +54,6 @@ pub(super) fn fallback_scoped_runtime_role(
     }
 }
 
-#[hotpath::measure]
 pub fn enter_daemon_database_scope(
     profile_root: &Path,
     election_epoch: u64,
@@ -101,7 +97,6 @@ pub fn enter_daemon_database_scope(
 }
 
 #[doc(hidden)]
-#[hotpath::measure]
 pub fn enter_maintenance_database_scope<'lease>(
     lifecycle: &'lease crate::lifecycle_lease::LifecycleLease,
     profile_root: &Path,
@@ -131,7 +126,6 @@ pub fn enter_owned_maintenance_database_scope(
     })
 }
 
-#[hotpath::measure]
 fn register_maintenance_database_scope(
     lifecycle: &crate::lifecycle_lease::LifecycleLease,
     profile_root: &Path,
@@ -215,7 +209,6 @@ impl Drop for OwnedMaintenanceDatabaseScope {
     }
 }
 
-#[hotpath::measure]
 fn release_maintenance_database_scope(profile_root: &Path, token: &str) {
     let mut scopes = MAINTENANCE_SCOPES
         .lock()
@@ -252,7 +245,6 @@ impl Drop for AuthorityInner {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn acquire_process_lease(
     identity: &DatabaseIdentity,
     role: DatabaseAuthorityRole,
@@ -296,7 +288,6 @@ pub(super) fn acquire_process_lease(
     Ok(token)
 }
 
-#[hotpath::measure]
 pub fn probe_writer_owner(db_path: &Path) -> Result<WriterOwnership> {
     let identity = DatabaseIdentity::for_path(db_path)?;
     Ok(PROCESS_LEASES

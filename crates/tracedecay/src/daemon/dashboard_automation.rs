@@ -49,7 +49,6 @@ type DashboardAutomationProjectResolver =
 
 const USER_JOB_REQUEST_TIMEOUT_SECS: u64 = 120;
 
-#[hotpath::measure]
 fn automation_run_observer(
     producer: Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
     project_root: PathBuf,
@@ -70,7 +69,6 @@ struct DashboardAutomationRequestRuntime {
     backend: CodexAppServerBackend,
 }
 
-#[hotpath::measure_all]
 impl DashboardAutomationRequestRuntime {
     fn new(configured: &AutomationConfig) -> Self {
         let mut config = configured.clone();
@@ -84,7 +82,6 @@ impl DashboardAutomationRequestRuntime {
     }
 }
 
-#[hotpath::measure]
 pub(crate) fn dashboard_automation_observation_port(
     invocation_service: DaemonInvocationService,
 ) -> tracedecay_dashboard_api::DashboardAutomationObservationPortV1 {
@@ -113,7 +110,6 @@ pub(crate) fn dashboard_automation_observation_port(
 
 /// Builds the single exact-profile authority used by production dashboard
 /// states and their host-admission integration journeys.
-#[hotpath::measure]
 pub(crate) fn compose_dashboard_automation_authority(
     profile_root: PathBuf,
     daemon_user_profile_id: UserProfileId,
@@ -133,7 +129,6 @@ pub(crate) fn compose_dashboard_automation_authority(
     )
 }
 
-#[hotpath::measure]
 fn compose_dashboard_automation_authority_with_resolver(
     profile_root: PathBuf,
     project_resolver: DashboardAutomationProjectResolver,
@@ -194,7 +189,6 @@ pub(crate) fn compose_dashboard_automation_authority_for_test(
     )
 }
 
-#[hotpath::measure]
 fn dashboard_automation_run_port(
     profile_root: PathBuf,
     project_resolver: DashboardAutomationProjectResolver,
@@ -223,7 +217,6 @@ fn dashboard_automation_run_port(
     })
 }
 
-#[hotpath::measure]
 fn dashboard_automation_run_control(
     control: &DashboardHttpRequestControlV1,
 ) -> AutomationRunControl {
@@ -234,7 +227,6 @@ fn dashboard_automation_run_control(
     }))
 }
 
-#[hotpath::measure]
 fn dashboard_managed_skill_command_port(
     profile_root: PathBuf,
     project_resolver: DashboardAutomationProjectResolver,
@@ -259,7 +251,6 @@ fn dashboard_managed_skill_command_port(
     })
 }
 
-#[hotpath::measure]
 fn dashboard_automation_project_resolver(
     daemon_user_profile_id: UserProfileId,
     retained_project_server_resolver: RetainedProjectServerResolver,
@@ -298,7 +289,6 @@ fn dashboard_automation_project_resolver(
     })
 }
 
-#[hotpath::measure]
 fn validate_dashboard_automation_project(
     retained: Arc<TraceDecay>,
     requested_project_root: &Path,
@@ -589,7 +579,6 @@ async fn load_exact_managed_skill(
     }
 }
 
-#[hotpath::measure]
 fn managed_skill_lifecycle_error(
     profile_root: &Path,
     id: &str,
@@ -604,28 +593,24 @@ fn managed_skill_lifecycle_error(
     }
 }
 
-#[hotpath::measure]
 fn automation_invalid(error: impl std::fmt::Display) -> DashboardAutomationAuthorityErrorV1 {
     DashboardAutomationAuthorityErrorV1::Invalid {
         detail: error.to_string(),
     }
 }
 
-#[hotpath::measure]
 fn automation_failed(error: impl std::fmt::Display) -> DashboardAutomationAuthorityErrorV1 {
     DashboardAutomationAuthorityErrorV1::Failed {
         detail: error.to_string(),
     }
 }
 
-#[hotpath::measure]
 fn automation_admission_conflict() -> DashboardAutomationAuthorityErrorV1 {
     DashboardAutomationAuthorityErrorV1::Conflict {
         detail: "automation run identity conflicts with its durable admission".to_owned(),
     }
 }
 
-#[hotpath::measure]
 fn automation_terminal_run(
     terminal: &tracedecay_automation_runtime::automation::effect_runtime::AutomationSettledTerminal,
 ) -> DashboardAutomationResult<tracedecay_application::retained_surfaces::AutomationRunResultV1> {
@@ -640,7 +625,6 @@ fn automation_terminal_run(
     ))
 }
 
-#[hotpath::measure]
 fn automation_problem(
     problem: Box<
         tracedecay_automation_runtime::automation::effect_runtime::AutomationSettledProblem,

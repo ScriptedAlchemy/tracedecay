@@ -77,7 +77,6 @@ struct ModuleDeclaration {
     attribute_directory: PathBuf,
 }
 
-#[hotpath::measure_all]
 impl ModuleDeclaration {
     /// The directory an inline module's own children resolve against.
     fn nested_directory(&self) -> PathBuf {
@@ -132,7 +131,6 @@ struct ManifestEntry {
 
 /// Walks every discovered cargo package's module tree and reports the files it
 /// never reaches.
-#[hotpath::measure]
 pub(super) fn audit(files: &ProjectFiles) -> Result<EcosystemAudit> {
     let project_root = files.root();
     let manifest_paths = files.named("Cargo.toml");
@@ -295,7 +293,6 @@ fn workspace_declarations(project_root: &Path) -> Result<(Vec<String>, Vec<PathB
     Ok((excluded_globs, excluded_dirs))
 }
 
-#[hotpath::measure]
 fn build_excluded_matcher(
     project_root: &Path,
     globs: &[String],
@@ -316,7 +313,6 @@ fn build_excluded_matcher(
 /// audit walks. Returns `None` for a manifest with no `[package]` (a virtual
 /// workspace root owns no targets) and for one whose declared targets do not
 /// exist on disk — both are claim boundaries with nothing to audit.
-#[hotpath::measure]
 fn cargo_package(project_root: &Path, dir: &Path) -> Option<CratePackage> {
     let manifest_path = dir.join("Cargo.toml");
     let manifest_text = std::fs::read_to_string(&manifest_path).ok()?;
@@ -421,7 +417,6 @@ fn cargo_package(project_root: &Path, dir: &Path) -> Option<CratePackage> {
 /// a root; every other file under `tests/mcp_suite/` is reachable only through
 /// that root's own `mod` declarations, so a file added to the directory without
 /// a matching `mod` line compiles nowhere and is seen by no one.
-#[hotpath::measure]
 fn auto_discovered_roots(directory: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(directory) else {
         return Vec::new();
@@ -455,7 +450,6 @@ struct DirIndex {
     entries: HashMap<PathBuf, HashMap<String, Vec<OsString>>>,
 }
 
-#[hotpath::measure_all]
 impl DirIndex {
     fn resolve(&mut self, candidate: &Path) -> Option<PathBuf> {
         if !candidate.is_file() {
@@ -476,7 +470,6 @@ impl DirIndex {
     }
 }
 
-#[hotpath::measure]
 fn read_dir_index(directory: &Path) -> HashMap<String, Vec<OsString>> {
     let mut index: HashMap<String, Vec<OsString>> = HashMap::new();
     let Ok(entries) = std::fs::read_dir(directory) else {
@@ -494,7 +487,6 @@ fn read_dir_index(directory: &Path) -> HashMap<String, Vec<OsString>> {
 /// spelling, the single case-variant when it holds exactly one, and `None` when
 /// the directory holds several (a case-sensitive filesystem with both `Foo.rs`
 /// and `foo.rs` — guessing there would mount the wrong file).
-#[hotpath::measure]
 fn on_disk_spelling(listing: &HashMap<String, Vec<OsString>>, wanted: &OsStr) -> Option<OsString> {
     let lowered = wanted.to_string_lossy().to_ascii_lowercase();
     let names = listing.get(&lowered)?;
@@ -610,7 +602,6 @@ fn parse_rust(source: &str) -> Option<tree_sitter::Tree> {
 
 /// The directory a non-root module file's own declarations resolve against:
 /// `a/b/mod.rs` declares into `a/b/`, `a/b.rs` declares into `a/b/`.
-#[hotpath::measure]
 fn module_child_directory(file: &Path) -> PathBuf {
     let parent = file.parent().map(Path::to_path_buf).unwrap_or_default();
     match file.file_stem().and_then(|stem| stem.to_str()) {
@@ -637,7 +628,6 @@ fn module_child_directory(file: &Path) -> PathBuf {
 /// `attribute_directory` starts as the directory holding the source file and
 /// then tracks the module directory once the walk is inside an inline module
 /// block, which is exactly what the language reference specifies for `#[path]`.
-#[hotpath::measure]
 fn collect_module_declarations(
     source: &str,
     node: Node<'_>,
@@ -715,7 +705,6 @@ fn collect_module_declarations(
 /// A computed path (`concat!`, `env!("OUT_DIR")`) is deliberately not guessed
 /// at: those name generated files that do not exist in the working tree, so
 /// resolving them would be inventing a mount for a file the audit never sees.
-#[hotpath::measure]
 fn collect_include_paths(source: &str, node: Node<'_>, directory: &Path, out: &mut Vec<PathBuf>) {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
@@ -734,7 +723,6 @@ fn collect_include_paths(source: &str, node: Node<'_>, directory: &Path, out: &m
 
 /// The single string literal a macro invocation was handed, if that is all it
 /// was handed.
-#[hotpath::measure]
 fn sole_string_argument(source: &str, invocation: Node<'_>) -> Option<String> {
     let mut cursor = invocation.walk();
     let tokens = invocation.named_children(&mut cursor).collect::<Vec<_>>();
@@ -756,7 +744,6 @@ fn sole_string_argument(source: &str, invocation: Node<'_>) -> Option<String> {
 }
 
 /// The contents of a Rust string literal, plain or raw.
-#[hotpath::measure]
 fn string_literal_value(text: &str) -> Option<String> {
     let text = text.trim();
     if let Some(rest) = text.strip_prefix('r') {
@@ -779,7 +766,6 @@ enum PathAttribute {
     Conditional(Vec<String>),
 }
 
-#[hotpath::measure]
 fn path_attribute(source: &str, attribute: Node<'_>) -> Option<PathAttribute> {
     let text = attribute.utf8_text(source.as_bytes()).ok()?;
     let inner = text
@@ -803,7 +789,6 @@ fn path_attribute(source: &str, attribute: Node<'_>) -> Option<PathAttribute> {
 
 /// Every `path = "…"` assignment in attribute text, skipping string contents so
 /// `#[cfg_attr(feature = "path", path = "real.rs")]` yields only `real.rs`.
-#[hotpath::measure]
 fn scan_path_assignments(text: &str) -> Vec<String> {
     let bytes = text.as_bytes();
     let mut out = Vec::new();
@@ -853,7 +838,6 @@ fn scan_path_assignments(text: &str) -> Vec<String> {
 /// is a puzzle. Climbing rather than reporting only the immediate parent
 /// matters because a whole detached subtree has one repair at its top, not one
 /// per file.
-#[hotpath::measure]
 fn repair_for_unmounted_file(
     project_root: &Path,
     file: &Path,
@@ -884,7 +868,6 @@ fn repair_for_unmounted_file(
 }
 
 /// The directory owned by the module that would declare `file`.
-#[hotpath::measure]
 fn parent_module_directory(file: &Path) -> Option<PathBuf> {
     let parent = file.parent()?;
     match file.file_stem().and_then(|stem| stem.to_str()) {
@@ -895,7 +878,6 @@ fn parent_module_directory(file: &Path) -> Option<PathBuf> {
 }
 
 /// The files that could be the module owning `directory`.
-#[hotpath::measure]
 fn parent_module_files(directory: &Path) -> Vec<PathBuf> {
     let mut candidates = vec![
         directory.join("mod.rs"),
@@ -912,7 +894,6 @@ fn parent_module_files(directory: &Path) -> Vec<PathBuf> {
 }
 
 /// The module name a file would be declared under.
-#[hotpath::measure]
 fn module_stem(file: &Path) -> Option<String> {
     match file.file_stem().and_then(|stem| stem.to_str()) {
         Some("mod") => file

@@ -13,7 +13,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracedecay_domain::UtcMicros;
 
 /// Shared wall-clock duration since Unix epoch. Pre-epoch clocks yield zero.
-#[hotpath::measure]
 fn wall_clock_since_epoch() -> Duration {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -21,7 +20,6 @@ fn wall_clock_since_epoch() -> Duration {
 }
 
 /// Returns the current UNIX timestamp in seconds.
-#[hotpath::measure]
 pub fn current_timestamp() -> i64 {
     wall_clock_since_epoch().as_secs() as i64
 }
@@ -31,7 +29,6 @@ pub fn current_timestamp() -> i64 {
 /// A pre-epoch clock reads as zero and an overflowing microsecond count as
 /// `i64::MAX`. This is the kernel-local equivalent of
 /// `tracedecay_application::clock::now_micros`.
-#[hotpath::measure]
 pub(crate) fn saturating_utc_now() -> UtcMicros {
     UtcMicros(i64::try_from(wall_clock_since_epoch().as_micros()).unwrap_or(i64::MAX))
 }

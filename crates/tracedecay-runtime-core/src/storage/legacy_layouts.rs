@@ -17,7 +17,6 @@ use super::{
 /// path-derived project id but still name this exact local checkout, or one of
 /// its linked worktrees, in their manifest. Remote URLs are deliberately not
 /// considered: two clones of one remote are different local identities.
-#[hotpath::measure]
 pub fn matching_legacy_profile_layouts(
     project_root: &Path,
     profile_root: &Path,
@@ -32,7 +31,6 @@ pub fn matching_legacy_profile_layouts(
     )
 }
 
-#[hotpath::measure]
 fn matching_legacy_profile_layouts_with_git_identity_resolver<D, G>(
     project_root: &Path,
     profile_root: &Path,
@@ -172,7 +170,6 @@ where
     ))
 }
 
-#[hotpath::measure]
 fn same_local_path(left: &Path, right: &Path) -> bool {
     if left == right {
         return true;
@@ -183,7 +180,6 @@ fn same_local_path(left: &Path, right: &Path) -> bool {
     }
 }
 
-#[hotpath::measure]
 fn unknown_git_identity(path: &Path, reason: GitDiscoveryUnknown) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!(
@@ -193,7 +189,6 @@ fn unknown_git_identity(path: &Path, reason: GitDiscoveryUnknown) -> TraceDecayE
     }
 }
 
-#[hotpath::measure]
 fn invalid_legacy_manifest(path: &Path, detail: impl std::fmt::Display) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!(

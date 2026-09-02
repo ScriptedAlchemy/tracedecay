@@ -77,7 +77,6 @@ pub struct VerifiedGraphRuntimeWeakProxyV1 {
     runtime: VerifiedGraphRuntimeSlotV1,
 }
 
-#[hotpath::measure_all]
 impl VerifiedGraphRuntimeWeakProxyV1 {
     pub(crate) fn new(
         relational_binding: StoreRuntimeBindingV1,

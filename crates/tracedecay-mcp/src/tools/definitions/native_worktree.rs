@@ -33,14 +33,12 @@ use crate::ToolDefinition;
 /// `for_deserialize` is deliberate: the schema advertised to a caller must be
 /// the schema the daemon will actually decode against, not the serialize-side
 /// view of the same type.
-#[hotpath::measure]
 fn request_schema<T: schemars::JsonSchema>() -> Value {
     let generator = SchemaSettings::default().for_deserialize().into_generator();
     serde_json::to_value(generator.into_root_schema_for::<T>())
         .unwrap_or_else(|_| json!({ "type": "object" }))
 }
 
-#[hotpath::measure]
 fn worktree_tool(
     operation: &str,
     title: &str,
@@ -67,7 +65,6 @@ fn worktree_tool(
 /// mutates nothing), and remove is `Administrative` — the only one of the five
 /// that changes anything on disk, and even then only a linked-worktree
 /// registration and root. It never deletes a branch.
-#[hotpath::measure]
 pub(super) fn native_worktree_definitions() -> Vec<ToolDefinition> {
     vec![
         worktree_tool(

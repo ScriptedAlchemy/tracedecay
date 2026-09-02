@@ -229,7 +229,6 @@ async fn link_in_transaction(
     ))
 }
 
-#[hotpath::measure]
 fn session_boundary_response(recorded: bool, reason: &str) -> LcmSessionBoundaryResponse {
     LcmSessionBoundaryResponse {
         status: "ok".to_string(),
@@ -350,7 +349,6 @@ pub async fn preflight(
     })
 }
 
-#[hotpath::measure]
 fn canonical_replay_messages(raw_messages: &[LcmRawMessage]) -> Vec<Value> {
     let replay = raw_messages
         .iter()
@@ -452,7 +450,6 @@ async fn compress_inner(
     ))
 }
 
-#[hotpath::measure]
 fn record_compression_gauges(response: LcmCompressionResponse) -> LcmCompressionResponse {
     crate::metrics::record_lcm_compression(
         response.summary_nodes_created,
@@ -533,7 +530,6 @@ async fn prepare_compression_context(
     })
 }
 
-#[hotpath::measure]
 fn frontier_changed_response(
     request: &LcmCompressionRequest,
     context: &CompressionTransactionContext,
@@ -702,7 +698,6 @@ async fn backlog_below_threshold_response(
     )))
 }
 
-#[hotpath::measure]
 fn auxiliary_summary_response(
     request: &LcmCompressionRequest,
     summarizer: &CompressionSummarizerAdapter,
@@ -1018,7 +1013,6 @@ struct CompressionWindow {
     fresh_tail: Vec<LcmRawMessage>,
 }
 
-#[hotpath::measure]
 fn compression_window(
     raw_messages: &[LcmRawMessage],
     current_frontier_store_id: Option<i64>,
@@ -1068,7 +1062,6 @@ fn compression_window(
     }
 }
 
-#[hotpath::measure]
 fn filtered_session_reason(
     session_id: &str,
     ignore_session_patterns: &[String],
@@ -1083,12 +1076,10 @@ fn filtered_session_reason(
     }
 }
 
-#[hotpath::measure]
 fn is_policy_anchor_role(role: &str) -> bool {
     matches!(role, "system" | "developer")
 }
 
-#[hotpath::measure]
 fn replay_without_summary(
     pinned_anchors: &[LcmRawMessage],
     fresh_tail: &[LcmRawMessage],
@@ -1199,7 +1190,6 @@ async fn assemble_overflow_recovery_replay(
 /// Mirrors hermes-lcm `_leading_anchor_count`: policy anchors at the very
 /// start of the remaining context behave like the leading system message and
 /// are never budget-dropped.
-#[hotpath::measure]
 fn split_leading_anchors<'a>(
     parts: &ReplayWindowParts<'a>,
 ) -> (Vec<&'a LcmRawMessage>, Vec<&'a LcmRawMessage>) {
@@ -1217,7 +1207,6 @@ fn split_leading_anchors<'a>(
     (anchors, raws)
 }
 
-#[hotpath::measure]
 fn assemble_replay_messages(
     anchors: &[&LcmRawMessage],
     summaries: &[dag::LcmUncondensedSummaryNode],
@@ -1316,7 +1305,6 @@ fn assemble_replay_messages(
 /// contiguous run of messages that fits under the cap; a non-fitting
 /// assistant/tool turn is skipped (evicted), a non-fitting prompt-bearing
 /// turn stops selection, and nothing older is kept once a gap was skipped.
-#[hotpath::measure]
 fn select_budget_tail<'a>(
     raws: &[&'a LcmRawMessage],
     used: i64,
@@ -1351,7 +1339,6 @@ fn select_budget_tail<'a>(
 /// Mirrors hermes-lcm `_is_budget_droppable_tail_message`: assistant/tool
 /// turns are derived context and may be evicted under budget pressure;
 /// user/system turns are prompt-bearing and stop tail selection.
-#[hotpath::measure]
 fn is_budget_droppable_tail_message(message: &LcmRawMessage) -> bool {
     if !matches!(message.role.as_str(), "assistant" | "tool") {
         return false;
@@ -1361,7 +1348,6 @@ fn is_budget_droppable_tail_message(message: &LcmRawMessage) -> bool {
         && !content.contains(PRESERVED_OBJECTIVE_CONTEXT_PREFIX)
 }
 
-#[hotpath::measure]
 fn latest_user_context_anchor(
     raws: &[LcmRawMessage],
     selected_tail: &[&LcmRawMessage],
@@ -1396,14 +1382,12 @@ fn latest_user_context_anchor(
     None
 }
 
-#[hotpath::measure]
 fn is_preserved_todo_context_message(content: &str) -> bool {
     content
         .trim_start()
         .starts_with(PRESERVED_TODO_CONTEXT_PREFIX)
 }
 
-#[hotpath::measure]
 fn preserved_objective_context_content(content: &str) -> Option<&str> {
     content
         .trim_start()
@@ -1414,7 +1398,6 @@ fn preserved_objective_context_content(content: &str) -> Option<&str> {
 /// Mirrors hermes-lcm summary-block budgeting: highest-depth summaries claim
 /// the budget first; parts that do not fit are skipped without ending the
 /// scan, so smaller lower-depth summaries can still land.
-#[hotpath::measure]
 fn select_budget_summaries(
     summaries: &[dag::LcmUncondensedSummaryNode],
     summary_budget: i64,
@@ -1439,7 +1422,6 @@ fn select_budget_summaries(
         .collect()
 }
 
-#[hotpath::measure]
 fn compression_response(
     status: &str,
     reason: &str,
@@ -1482,7 +1464,6 @@ struct CompressionAttemptState<'a> {
     retry_status: Option<&'a str>,
 }
 
-#[hotpath::measure]
 fn compression_response_with_attempt_state(
     parts: CompressionResponseParts<'_>,
     attempt_state: CompressionAttemptState<'_>,
@@ -1527,7 +1508,6 @@ fn compression_response_with_attempt_state(
     }
 }
 
-#[hotpath::measure]
 fn context_recovery_hint(summary_nodes: &[LcmSummaryNode]) -> Option<String> {
     let summary = summary_nodes.first()?;
     Some(format!(
@@ -1536,17 +1516,14 @@ fn context_recovery_hint(summary_nodes: &[LcmSummaryNode]) -> Option<String> {
     ))
 }
 
-#[hotpath::measure]
 fn replay_token_estimate(messages: &[Value]) -> i64 {
     messages.iter().map(crate::lcm_message_budget_tokens).sum()
 }
 
-#[hotpath::measure]
 fn replay_exceeds_budget(replay_token_estimate: i64, max_assembly_tokens: Option<i64>) -> bool {
     max_assembly_tokens.is_some_and(|max_tokens| replay_token_estimate > max_tokens)
 }
 
-#[hotpath::measure]
 fn summary_draft(
     provider: &str,
     conversation_id: &str,
@@ -1592,7 +1569,6 @@ fn summary_draft(
     }
 }
 
-#[hotpath::measure]
 fn condensation_draft(
     provider: &str,
     conversation_id: &str,
@@ -2145,7 +2121,6 @@ async fn message_ids_for_store_ids(
 
 /// Stored LCM rows require a real role. Missing or empty role is a typed skip
 /// — never a fabricated `"user"` that would persist and enter identity hashes.
-#[hotpath::measure]
 fn active_message_role(message: &Value) -> Option<&str> {
     message
         .get("role")
@@ -2153,7 +2128,6 @@ fn active_message_role(message: &Value) -> Option<&str> {
         .filter(|role| !role.is_empty())
 }
 
-#[hotpath::measure]
 fn message_content_value(message: &Value) -> Value {
     message
         .get("content")
@@ -2161,7 +2135,6 @@ fn message_content_value(message: &Value) -> Value {
         .unwrap_or_else(|| Value::String(String::new()))
 }
 
-#[hotpath::measure]
 fn default_message_kind(role: &str) -> String {
     if role.eq_ignore_ascii_case("tool") {
         "tool_result".to_string()
@@ -2170,7 +2143,6 @@ fn default_message_kind(role: &str) -> String {
     }
 }
 
-#[hotpath::measure]
 fn active_message_metadata(message: &Value, replay: &Value) -> String {
     let mut metadata = Map::new();
     metadata.insert(
@@ -2187,7 +2159,6 @@ fn active_message_metadata(message: &Value, replay: &Value) -> String {
     Value::Object(metadata).to_string()
 }
 
-#[hotpath::measure]
 fn replay_content_value(
     original_content: &Value,
     raw: &LcmRawMessage,
@@ -2202,7 +2173,6 @@ fn replay_content_value(
     serde_json::from_str(&raw.content).unwrap_or_else(|_| Value::String(raw.content.clone()))
 }
 
-#[hotpath::measure]
 fn active_replay_metadata_json(existing_metadata_json: Option<&str>, replay: &Value) -> String {
     let mut metadata = existing_metadata_json
         .and_then(|text| serde_json::from_str::<Value>(text).ok())
@@ -2219,7 +2189,6 @@ fn active_replay_metadata_json(existing_metadata_json: Option<&str>, replay: &Va
     Value::Object(metadata).to_string()
 }
 
-#[hotpath::measure]
 fn active_replay_for_metadata(replay: &Value) -> Value {
     let mut replay = replay.clone();
     if let Some(object) = replay.as_object_mut() {
@@ -2401,7 +2370,6 @@ fn deterministic_message_id(
     )
 }
 
-#[hotpath::measure]
 fn summary_replay_message(summary: &LcmSummaryNode) -> Value {
     json!({
         "role": "system",
@@ -2410,7 +2378,6 @@ fn summary_replay_message(summary: &LcmSummaryNode) -> Value {
     })
 }
 
-#[hotpath::measure]
 fn source_token_count(backlog: &[LcmRawMessage]) -> i64 {
     backlog
         .iter()
@@ -2418,7 +2385,6 @@ fn source_token_count(backlog: &[LcmRawMessage]) -> i64 {
         .sum::<i64>()
 }
 
-#[hotpath::measure]
 fn debt_for_deferred_backlog(deferred_backlog: &[LcmRawMessage]) -> Vec<LcmMaintenanceDebt> {
     match (deferred_backlog.first(), deferred_backlog.last()) {
         (Some(first), Some(last)) => vec![LcmMaintenanceDebt::RawBacklog {
@@ -2429,7 +2395,6 @@ fn debt_for_deferred_backlog(deferred_backlog: &[LcmRawMessage]) -> Vec<LcmMaint
     }
 }
 
-#[hotpath::measure]
 fn debt_to_db(debt: &LcmMaintenanceDebt) -> (String, &'static str, Option<i64>, Option<i64>) {
     match debt {
         LcmMaintenanceDebt::RawBacklog {
@@ -2444,7 +2409,6 @@ fn debt_to_db(debt: &LcmMaintenanceDebt) -> (String, &'static str, Option<i64>, 
     }
 }
 
-#[hotpath::measure]
 fn debt_from_db(
     debt_kind: &str,
     from_store_id: Option<i64>,

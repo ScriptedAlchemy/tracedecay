@@ -299,7 +299,6 @@ impl WorkRunControlStoragePort for WorkSqliteStorage {
     }
 }
 
-#[hotpath::measure]
 fn run_control_frontier_from(
     source: &impl RegisteredWorkQuery,
     authority: &WorkAuthority,
@@ -316,7 +315,6 @@ fn run_control_frontier_from(
     }))
 }
 
-#[hotpath::measure]
 fn run_admission_from(
     source: &impl RegisteredWorkQuery,
     authority: &WorkAuthority,
@@ -375,7 +373,6 @@ fn run_admission_from(
     }))
 }
 
-#[hotpath::measure]
 fn load_run_control_from(
     source: &impl RegisteredWorkQuery,
     authority: &WorkAuthority,
@@ -406,7 +403,6 @@ fn load_run_control_from(
         .map_err(|_| WorkRunControlStorageError::Unavailable)
 }
 
-#[hotpath::measure]
 fn open_blocked_intervals_from(
     source: &impl RegisteredWorkQuery,
     authority: &WorkAuthority,
@@ -432,7 +428,6 @@ fn open_blocked_intervals_from(
         .collect()
 }
 
-#[hotpath::measure]
 fn publish_run_control_tx(
     transaction: &ExactSqlTransaction,
     authority: &WorkAuthority,
@@ -507,7 +502,6 @@ fn publish_run_control_tx(
     )
 }
 
-#[hotpath::measure]
 fn load_blocked_interval_observation_cursor(
     transaction: &ExactSqlTransaction,
     authority: &WorkAuthority,
@@ -529,7 +523,6 @@ fn load_blocked_interval_observation_cursor(
         .ok_or(WorkRunControlStorageError::Unavailable)
 }
 
-#[hotpath::measure]
 fn settled_blocked_interval_observation_page(
     transaction: &ExactSqlTransaction,
     authority: &WorkAuthority,
@@ -575,7 +568,6 @@ fn settled_blocked_interval_observation_page(
         .collect()
 }
 
-#[hotpath::measure]
 fn persist_blocked_interval_observation_cursor(
     transaction: &ExactSqlTransaction,
     authority: &WorkAuthority,
@@ -618,7 +610,6 @@ struct BlockedIntervalObservationCursor {
     cause_authority_version: i64,
 }
 
-#[hotpath::measure_all]
 impl BlockedIntervalObservationCursor {
     fn from_receipt(
         receipt: &WorkBlockedIntervalReceiptV1,
@@ -658,7 +649,6 @@ impl BlockedIntervalObservationCursor {
     }
 }
 
-#[hotpath::measure]
 fn persist_blocked_intervals(
     transaction: &ExactSqlTransaction,
     authority: &WorkAuthority,
@@ -743,7 +733,6 @@ fn persist_blocked_intervals(
     })
 }
 
-#[hotpath::measure]
 fn decode_blocked_interval(
     value: Option<&ExactSqlValue>,
 ) -> Result<WorkBlockedIntervalReceiptV1, WorkRunControlStorageError> {
@@ -753,7 +742,6 @@ fn decode_blocked_interval(
     serde_json::from_str(payload).map_err(|_| WorkRunControlStorageError::Unavailable)
 }
 
-#[hotpath::measure]
 fn blocked_identity_params(receipt: &WorkBlockedIntervalReceiptV1) -> [ExactSqlValue; 4] {
     [
         ExactSqlValue::Text(receipt.identity().task_id().as_str().to_owned()),
@@ -766,7 +754,6 @@ fn blocked_identity_params(receipt: &WorkBlockedIntervalReceiptV1) -> [ExactSqlV
 /// Closes every open interval for an attempt inside that attempt's own fenced
 /// terminal CAS. The interval receipt cannot survive a terminal attempt with
 /// no end instant, and a crash can commit neither half independently.
-#[hotpath::measure]
 pub(crate) fn close_blocked_intervals_on_terminal_attempt(
     transaction: &ExactSqlTransaction,
     authority: &WorkAuthority,
@@ -826,7 +813,6 @@ pub(crate) fn close_blocked_intervals_on_terminal_attempt(
 /// the live attempt is stored with an optional immutable synthesis admission.
 /// Run control deliberately reads only the live attempt, because synthesis
 /// replay material cannot change a run's deadline or topology authority.
-#[hotpath::measure]
 fn attempt_from_payload(payload: &str) -> Result<WorkAttemptV1, WorkRunControlStorageError> {
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -841,7 +827,6 @@ fn attempt_from_payload(payload: &str) -> Result<WorkAttemptV1, WorkRunControlSt
         .map_err(|_| WorkRunControlStorageError::Unavailable)
 }
 
-#[hotpath::measure]
 fn run_params(task_id: &TaskId, run_id: &RunId) -> [ExactSqlValue; 2] {
     [
         ExactSqlValue::Text(task_id.as_str().to_owned()),
@@ -849,7 +834,6 @@ fn run_params(task_id: &TaskId, run_id: &RunId) -> [ExactSqlValue; 2] {
     ]
 }
 
-#[hotpath::measure]
 fn state_text(state: WorkRunControlStateV1) -> String {
     match state {
         WorkRunControlStateV1::Running => "running",

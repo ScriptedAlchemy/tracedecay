@@ -107,7 +107,6 @@ pub(super) struct OnlineBackupCommand {
     reply: oneshot::Sender<Result<OnlineBackupReceipt, WriterActorError>>,
 }
 
-#[hotpath::measure_all]
 impl OnlineBackupCommand {
     pub(super) fn new(
         destination: PathBuf,
@@ -128,7 +127,6 @@ impl OnlineBackupCommand {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn validate_destination(
     source: &Path,
     destination: &Path,
@@ -161,7 +159,6 @@ pub(super) fn validate_destination(
     Ok(destination)
 }
 
-#[hotpath::measure]
 pub(super) fn run_online_backup(
     source: &Connection,
     binding: &StoreRuntimeBindingV1,
@@ -232,7 +229,6 @@ pub(super) fn run_online_backup(
     command.settle(result);
 }
 
-#[hotpath::measure]
 fn finish_online_backup(
     completed: CompletedStaging,
     destination: &Path,
@@ -265,7 +261,6 @@ fn finish_online_backup(
     })
 }
 
-#[hotpath::measure]
 fn publish_staging(
     completed: CompletedStaging,
     destination: &Path,
@@ -326,7 +321,6 @@ struct BackupControl<'a> {
     abort: Cell<Option<BackupAbort>>,
 }
 
-#[hotpath::measure_all]
 impl BackupControl<'_> {
     fn check(&self) -> Result<(), WriterOnlineBackupError> {
         if self.is_cancelled() {
@@ -378,7 +372,6 @@ struct StagedBackupDestination {
     final_path: PathBuf,
 }
 
-#[hotpath::measure_all]
 impl StagedBackupDestination {
     fn new(final_path: PathBuf) -> Self {
         Self { final_path }
@@ -390,7 +383,6 @@ struct StagedFile {
     pinned: OpenedDatabaseFile,
 }
 
-#[hotpath::measure_all]
 impl StagedFile {
     fn abandon(self) {
         let _ = self.pinned.discard_created(&self.path);
@@ -402,7 +394,6 @@ struct CompletedStaging {
     pinned: OpenedDatabaseFile,
 }
 
-#[hotpath::measure_all]
 impl CompletedStaging {
     fn abandon(self) {
         let _ = self.pinned.discard_created(&self.path);
@@ -498,7 +489,6 @@ impl SqliteBackupFilesystem for StagedBackupDestination {
     }
 }
 
-#[hotpath::measure]
 fn verify_sqlite(completed: &CompletedStaging) -> Result<(), WriterOnlineBackupError> {
     completed
         .pinned
@@ -530,7 +520,6 @@ fn verify_sqlite(completed: &CompletedStaging) -> Result<(), WriterOnlineBackupE
         .map_err(file_identity_error)
 }
 
-#[hotpath::measure]
 fn hash_staging(
     completed: &CompletedStaging,
 ) -> Result<(u64, Sha256Digest), WriterOnlineBackupError> {
@@ -554,7 +543,6 @@ fn hash_staging(
 }
 
 #[cfg(unix)]
-#[hotpath::measure]
 fn sync_parent(destination: &Path) -> Result<(), WriterOnlineBackupError> {
     hotpath::measure_block!("rusqlite.sync_parent", {
         File::open(
@@ -569,12 +557,10 @@ fn sync_parent(destination: &Path) -> Result<(), WriterOnlineBackupError> {
 }
 
 #[cfg(not(unix))]
-#[hotpath::measure]
 fn sync_parent(_destination: &Path) -> Result<(), WriterOnlineBackupError> {
     Ok(())
 }
 
-#[hotpath::measure]
 fn file_identity_error(error: OpenedDatabaseFileError) -> WriterOnlineBackupError {
     match error {
         OpenedDatabaseFileError::Replaced => WriterOnlineBackupError::DestinationReplaced,
@@ -582,7 +568,6 @@ fn file_identity_error(error: OpenedDatabaseFileError) -> WriterOnlineBackupErro
     }
 }
 
-#[hotpath::measure]
 fn map_backup_error(
     error: SqliteBackupError<WriterOnlineBackupError>,
     abort: Option<BackupAbort>,
@@ -610,7 +595,6 @@ fn map_backup_error(
     }
 }
 
-#[hotpath::measure]
 fn interruption_error(interruption: RuntimeInterruptionV1) -> WriterActorError {
     WriterActorError::OnlineBackupFailed(match interruption {
         RuntimeInterruptionV1::Cancelled => WriterOnlineBackupError::Cancelled,

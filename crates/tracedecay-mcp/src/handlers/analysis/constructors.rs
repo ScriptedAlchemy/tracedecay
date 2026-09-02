@@ -168,7 +168,6 @@ struct LiteralSite {
     brace_open_byte: usize,
 }
 
-#[hotpath::measure]
 fn find_struct_literals(source: &str, struct_name: &str) -> Vec<LiteralSite> {
     let bytes = source.as_bytes();
     let mut pattern_stack: Vec<i32> = Vec::new();
@@ -278,12 +277,10 @@ fn find_struct_literals(source: &str, struct_name: &str) -> Vec<LiteralSite> {
     out
 }
 
-#[hotpath::measure]
 fn lookahead_let(bytes: &[u8], at: usize) -> bool {
     matches_word(bytes, skip_ascii_whitespace(bytes, at), b"let")
 }
 
-#[hotpath::measure]
 fn matches_word(bytes: &[u8], at: usize, needle: &[u8]) -> bool {
     if at + needle.len() > bytes.len() {
         return false;
@@ -299,7 +296,6 @@ fn matches_word(bytes: &[u8], at: usize, needle: &[u8]) -> bool {
     left_ok && right_ok
 }
 
-#[hotpath::measure]
 fn has_disqualifying_prefix(source: &str, idx: usize) -> bool {
     let bytes = source.as_bytes();
     let mut probe = idx;
@@ -327,7 +323,6 @@ fn has_disqualifying_prefix(source: &str, idx: usize) -> bool {
     )
 }
 
-#[hotpath::measure]
 fn parse_literal_fields(source: &str, open_byte: usize) -> Vec<String> {
     let bytes = source.as_bytes();
     if bytes.get(open_byte).copied() != Some(b'{') {
@@ -380,7 +375,6 @@ fn parse_literal_fields(source: &str, open_byte: usize) -> Vec<String> {
     fields
 }
 
-#[hotpath::measure]
 fn field_name_from_chunk(chunk: &str) -> Option<String> {
     let trimmed = chunk.trim();
     if trimmed.is_empty() {

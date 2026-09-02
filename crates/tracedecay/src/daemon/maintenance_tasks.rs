@@ -11,7 +11,6 @@ use super::*;
 ///
 /// Session-store mounts retain the registered database authority for the
 /// lifetime of each maintenance task. One-shot commands never enable it.
-#[hotpath::measure]
 pub fn mark_process_long_lived_for_session_maintenance() {
     tracedecay_store_runtime::mark_process_long_lived_for_session_maintenance();
 }
@@ -23,7 +22,6 @@ pub(super) struct SemanticArtifactGcMaintenanceTask {
     task: Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>,
 }
 
-#[hotpath::measure_all]
 impl SemanticArtifactGcMaintenanceTask {
     pub(super) fn cancel(&self) {
         if let Ok(task) = self.task.try_lock()
@@ -56,7 +54,6 @@ impl Drop for SemanticArtifactGcMaintenanceTask {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn spawn_semantic_artifact_gc_maintenance() -> SemanticArtifactGcMaintenanceTask {
     let task = tokio::spawn(hotpath::future!(
         async {

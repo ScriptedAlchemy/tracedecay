@@ -21,14 +21,12 @@ use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use super::daemon::daemon_tool_json;
 
-#[hotpath::measure]
 fn configuration_error(message: impl Into<String>) -> tracedecay_domain::errors::TraceDecayError {
     tracedecay_domain::errors::TraceDecayError::Config {
         message: message.into(),
     }
 }
 
-#[hotpath::measure]
 fn cli_configuration_idempotency_key(
     project_id: &ProjectId,
     expected_revision: &ConfigurationRevisionId,
@@ -49,7 +47,6 @@ fn cli_configuration_idempotency_key(
         .map_err(|error| configuration_error(format!("invalid configuration request key: {error}")))
 }
 
-#[hotpath::measure]
 fn cli_user_configuration_idempotency_key(
     profile_id: &UserProfileId,
     expected_revision: &ConfigurationRevisionId,
@@ -74,7 +71,6 @@ fn cli_user_configuration_idempotency_key(
         })
 }
 
-#[hotpath::measure]
 fn configuration_deadline(
     operation: ApplicationSurfaceOperation,
     observed_at: UtcMicros,
@@ -287,7 +283,6 @@ async fn mutate_user_configuration(
     configuration_effect_receipt(envelope, &idempotency_key).map(Some)
 }
 
-#[hotpath::measure]
 fn configuration_effect_receipt(
     envelope: ApplicationEnvelope<serde_json::Value>,
     idempotency_key: &ConfigurationIdempotencyKey,
@@ -311,7 +306,6 @@ fn configuration_effect_receipt(
     Ok(effect.receipt)
 }
 
-#[hotpath::measure]
 pub(crate) fn project_configuration_set(
     project_id: &ProjectId,
     key: &str,
@@ -326,7 +320,6 @@ pub(crate) fn project_configuration_set(
     })
 }
 
-#[hotpath::measure]
 pub(crate) fn report_configuration_receipt(receipt: Option<&EffectReceipt>) {
     if let Some(receipt) = receipt {
         eprintln!("Receipt: {}", receipt.request_id.as_str());

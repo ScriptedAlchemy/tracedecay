@@ -62,7 +62,6 @@ const MAX_SESSION_CONTEXT_RELATIONS: usize = 256;
 const FILTER_SCAN_PAGE_ITEMS: usize = 64;
 const MAX_RECORD_QUERY_CANDIDATES: usize = 8;
 
-#[hotpath::measure]
 fn temporal_relation_error(
     error: SessionRelationError,
     control: &tracedecay_temporal_query::ports::ExecutionControl,
@@ -100,7 +99,6 @@ fn temporal_relation_error(
     }
 }
 
-#[hotpath::measure]
 fn observation_matches_filter(
     encoded: &str,
     occurrence_role: &str,
@@ -189,7 +187,6 @@ pub(super) struct GlobalDbPreparedCandidatePort<'port, 'db, 'request> {
     plan: &'request CandidatePlan,
 }
 
-#[hotpath::measure_all]
 impl<'port, 'db, 'request> GlobalDbPreparedCandidatePort<'port, 'db, 'request> {
     #[hotpath::skip]
     pub(super) const fn new(
@@ -231,7 +228,6 @@ struct SessionReadRelationAuthority<'a> {
     store: SessionRelationGraphStore,
 }
 
-#[hotpath::measure_all]
 impl<'a> GlobalDbTemporalReadPort<'a> {
     #[cfg(test)]
     #[hotpath::skip]

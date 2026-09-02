@@ -4,7 +4,6 @@ use serde_json::{Value, json};
 
 use super::{ErrorCode, JsonRpcResponse, McpServer};
 
-#[hotpath::measure_all]
 impl McpServer {
     /// Returns project identity and typed graph-statistics availability.
     #[hotpath::skip]

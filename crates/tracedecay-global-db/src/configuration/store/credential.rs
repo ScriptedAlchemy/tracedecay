@@ -294,7 +294,6 @@ impl CredentialWritePort for GlobalDbConfigurationControlStore<'_> {
     }
 }
 
-#[hotpath::measure]
 fn credential_operation_digest(
     authority: &ConfigurationMutationAuthority,
     idempotency_key: &tracedecay_domain::configuration::ConfigurationIdempotencyKey,

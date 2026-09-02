@@ -135,13 +135,11 @@ impl Drop for QuarantineDecisionLock {
     }
 }
 
-#[hotpath::measure]
 fn quarantine_decision_lock_path(container: &Path) -> Result<PathBuf, GraphDbError> {
     let file_name = container_file_name(container)?;
     Ok(container.with_file_name(format!("{file_name}{STORE_QUARANTINE_LOCK_SUFFIX}")))
 }
 
-#[hotpath::measure]
 fn acquire_quarantine_decision_lock(
     container: &Path,
 ) -> Result<QuarantineDecisionLock, GraphDbError> {
@@ -179,7 +177,6 @@ fn acquire_quarantine_decision_lock(
 /// authority, so an interruption mid-move leaves the corrupt container in
 /// place for the next deciding authority rather than a vacant path beside
 /// stranded sidecars.
-#[hotpath::measure]
 fn quarantine_container_family(container: &Path, fault: &str) -> Result<PathBuf, GraphDbError> {
     let container_name = container_file_name(container)?.to_owned();
     match container.symlink_metadata() {
@@ -261,7 +258,6 @@ fn quarantine_container_family(container: &Path, fault: &str) -> Result<PathBuf,
     Ok(quarantine_directory)
 }
 
-#[hotpath::measure]
 fn move_family_member(
     source: &Path,
     quarantine_directory: &Path,
@@ -302,7 +298,6 @@ fn move_family_member(
 /// A move failure before anything moved is a clean retryable abort; after the
 /// first member moved the family is split across two directories and the
 /// durable outcome can no longer be described as either state.
-#[hotpath::measure]
 fn member_move_failure(
     source: &Path,
     quarantine_directory: &Path,
@@ -326,7 +321,6 @@ fn member_move_failure(
     }
 }
 
-#[hotpath::measure]
 fn quarantine_durability_failure(
     quarantine_directory: &Path,
     context: &str,
@@ -341,20 +335,17 @@ fn quarantine_durability_failure(
     }
 }
 
-#[hotpath::measure]
 fn fault_fingerprint(fault: &str) -> String {
     format!("sha256:{}", hex::encode(Sha256::digest(fault.as_bytes())))
 }
 
 /// `graph.grafeo` -> `graph.grafeo.wal`, matching Grafeo's sidecar layout.
-#[hotpath::measure]
 fn wal_sidecar_path(container: &Path) -> PathBuf {
     let mut sidecar = container.as_os_str().to_owned();
     sidecar.push(".wal");
     PathBuf::from(sidecar)
 }
 
-#[hotpath::measure]
 fn container_file_name(container: &Path) -> Result<&str, GraphDbError> {
     container
         .file_name()
@@ -367,7 +358,6 @@ fn container_file_name(container: &Path) -> Result<&str, GraphDbError> {
         })
 }
 
-#[hotpath::measure]
 fn current_wall_micros() -> Result<i64, GraphDbError> {
     let elapsed = SystemTime::now()
         .duration_since(UNIX_EPOCH)

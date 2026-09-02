@@ -17,7 +17,6 @@ pub struct DaemonClientIdentity {
     pub global_db_path: PathBuf,
 }
 
-#[hotpath::measure_all]
 impl DaemonClientIdentity {
     pub fn new(profile_root: PathBuf, global_db_path: PathBuf) -> Self {
         Self {

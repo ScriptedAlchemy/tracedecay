@@ -76,7 +76,6 @@ struct MountedContextScoutClaimAuthorityV1 {
     input_watermark: [u8; 32],
 }
 
-#[hotpath::measure_all]
 impl TraceDecay {
     pub(crate) fn storage_telemetry_handle(&self) -> Result<DatabaseStorageTelemetryHandle> {
         self.db.storage_telemetry_handle()
@@ -245,7 +244,6 @@ pub struct TraceDecayOpenOptions {
     pub global_db_path: Option<PathBuf>,
 }
 
-#[hotpath::measure_all]
 impl TraceDecayOpenOptions {
     fn resolved_profile_root(&self) -> Result<PathBuf> {
         if let Some(profile_root) = &self.profile_root {

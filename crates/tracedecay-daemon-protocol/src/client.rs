@@ -75,7 +75,6 @@ pub enum DispatchError {
     UnknownOrNotAuthorized,
 }
 
-#[hotpath::measure_all]
 impl<T> CanonicalInvocation<T> {
     pub fn new(
         request: T,
@@ -104,7 +103,6 @@ pub struct BoundInvocation<T> {
     pub invocation: CanonicalInvocation<T>,
 }
 
-#[hotpath::measure_all]
 impl<T> BoundInvocation<T> {
     pub fn new(binding: ResolvedBinding, invocation: CanonicalInvocation<T>) -> Self {
         Self {
@@ -191,7 +189,6 @@ pub struct CatalogBindingResolver<'a> {
     catalog: &'a CatalogSnapshotV1,
 }
 
-#[hotpath::measure_all]
 impl<'a> CatalogBindingResolver<'a> {
     pub fn new(catalog: &'a CatalogSnapshotV1) -> Self {
         Self { catalog }
@@ -243,7 +240,6 @@ impl BindingResolver for CatalogBindingResolver<'_> {
 /// Resolve one transport binding and construct the canonical invocation.
 ///
 /// The surface is selected by adapter code, never decoded from user input.
-#[hotpath::measure]
 pub fn resolve_dispatch<T>(
     resolver: &impl BindingResolver,
     surface: BindingSurface,
@@ -281,7 +277,6 @@ pub struct DispatchedInvocation<T> {
     pub invocation: BoundInvocation<T>,
 }
 
-#[hotpath::measure_all]
 impl<T> DispatchedInvocation<T> {
     pub fn new(
         request_id: RequestId,
@@ -322,7 +317,6 @@ pub enum DaemonInvocationError {
     },
 }
 
-#[hotpath::measure_all]
 impl DaemonInvocationError {
     pub fn into_application_problem(self) -> ApplicationProblem {
         match self {
@@ -411,7 +405,6 @@ struct DaemonInvocationClientActivityGuard {
     phase: DaemonInvocationClientPhase,
 }
 
-#[hotpath::measure_all]
 impl DaemonInvocationClientActivity {
     fn queued(self: &Arc<Self>) -> DaemonInvocationClientActivityGuard {
         self.queued.fetch_add(1, Ordering::AcqRel);
@@ -432,7 +425,6 @@ impl DaemonInvocationClientActivity {
     }
 }
 
-#[hotpath::measure_all]
 impl DaemonInvocationClientActivityGuard {
     fn into_in_flight(self) -> Self {
         let activity = Arc::clone(&self.activity);
@@ -474,7 +466,6 @@ pub const SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS: i64 = 900_000_000;
 /// this from the 906s deadline miss after reused paging.
 pub const SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS: i64 = 1_800_000_000;
 
-#[hotpath::measure_all]
 impl DaemonInvocationClient {
     pub fn new(
         connection: crate::connection::DaemonConnection,
@@ -1035,7 +1026,6 @@ impl DaemonInvocationExecutor for DaemonInvocationClient {
 /// This is the socket-client dispatch arm: producers strip the tagged
 /// `ConfigurationWireRequestV1` envelope before admission, so the client
 /// deserializes the inner request and wraps the operation-selected variant.
-#[hotpath::measure]
 fn configuration_request_from_surface_payload(
     operation: ApplicationSurfaceOperation,
     payload: serde_json::Value,
@@ -1047,7 +1037,6 @@ fn configuration_request_from_surface_payload(
     .map_err(|_| InvocationError::InvalidRequest)
 }
 
-#[hotpath::measure]
 fn feedback_handle_from_surface_payload(
     payload: serde_json::Value,
 ) -> Result<tracedecay_application::feedback::FeedbackHandleRequestV1, InvocationError> {
@@ -1148,12 +1137,10 @@ impl ApplicationInvocationExecutor for DaemonInvocationClient {
 /// and CLI commands (the bin target is a separate crate, so `pub(crate)`
 /// would hide it from `src/commands`); the saturating clamp is the one
 /// shared definition.
-#[hotpath::measure]
 pub fn invocation_now_micros() -> UtcMicros {
     tracedecay_application::clock::now_micros()
 }
 
-#[hotpath::measure]
 pub fn application_delivery_route(surface: BindingSurface) -> FeedbackDeliveryRouteV1 {
     match surface {
         BindingSurface::Cli => FeedbackDeliveryRouteV1::Cli,
@@ -1163,7 +1150,6 @@ pub fn application_delivery_route(surface: BindingSurface) -> FeedbackDeliveryRo
     }
 }
 
-#[hotpath::measure]
 pub fn map_invocation_error(error: DaemonInvocationError) -> InvocationError {
     match error {
         DaemonInvocationError::Cancelled { .. } => InvocationError::Cancelled,
@@ -1179,7 +1165,6 @@ pub fn map_invocation_error(error: DaemonInvocationError) -> InvocationError {
     }
 }
 
-#[hotpath::measure]
 pub fn application_response(
     request_id: RequestId,
     result_contract: tracedecay_application::ResultContractRef,
@@ -1240,7 +1225,6 @@ pub fn application_response(
     Ok(ApplicationResponse::unary(envelope))
 }
 
-#[hotpath::measure]
 fn invocation_error_from_problem(problem: &ApplicationProblem) -> InvocationError {
     match problem.kind() {
         ApplicationProblemKind::NotFoundOrNotAuthorized => InvocationError::Denied,
@@ -1261,7 +1245,6 @@ fn invocation_error_from_problem(problem: &ApplicationProblem) -> InvocationErro
     }
 }
 
-#[hotpath::measure]
 fn semantic_evaluation_application_problem(
     problem: ApplicationProblem,
 ) -> tracedecay_domain::errors::TraceDecayError {
@@ -1344,7 +1327,6 @@ fn semantic_evaluation_application_problem(
 
 /// A daemon that could not serve this client's handshake refused before any
 /// request ran; name the refusal, both versions, and the action.
-#[hotpath::measure]
 pub fn handshake_refusal_error(
     refusal: &crate::handshake::DaemonHandshakeRefusal,
     handshake: &crate::handshake::DaemonHandshake,
@@ -1390,7 +1372,6 @@ pub const DAEMON_AUTHENTICATION_REJECTED: &str = "daemon_authentication_rejected
 /// daemon's typed problems arrive as `Ok` responses), so a version mismatch
 /// between the authority record's daemon and this client is the most likely
 /// cause and must be visible instead of a bare `Connection reset by peer`.
-#[hotpath::measure]
 fn with_daemon_version_skew_context(
     error: tracedecay_domain::errors::TraceDecayError,
     connection: &crate::connection::DaemonConnection,
@@ -1428,7 +1409,6 @@ fn with_daemon_version_skew_context(
 /// (evaluation problems come from the semantic evaluation route,
 /// configuration problems from the mutation route); this mapping preserves
 /// that detail instead of flattening it into a generic message.
-#[hotpath::measure]
 fn semantic_activation_application_problem(
     problem: ApplicationProblem,
 ) -> tracedecay_domain::errors::TraceDecayError {
@@ -1514,7 +1494,6 @@ fn semantic_activation_application_problem(
     }
 }
 
-#[hotpath::measure]
 fn semantic_qualification_daemon_problem(
     problem: crate::contract::DaemonInvocationProblem,
 ) -> tracedecay_domain::errors::TraceDecayError {
@@ -1549,7 +1528,6 @@ fn semantic_qualification_daemon_problem(
     }
 }
 
-#[hotpath::measure]
 fn semantic_qualification_application_problem(
     problem: ApplicationProblem,
 ) -> tracedecay_domain::errors::TraceDecayError {
@@ -1657,14 +1635,12 @@ pub struct SemanticEvaluationQualificationResultV1 {
     pub qualification_bytes: Vec<u8>,
 }
 
-#[hotpath::measure]
 pub fn deadline_remaining(deadline: &Deadline) -> Option<Duration> {
     let now = current_system_micros().map_or(i64::MAX, |now| now.0);
     let remaining = deadline.expires_at.0.checked_sub(now)?;
     (remaining > 0).then(|| Duration::from_micros(remaining as u64))
 }
 
-#[hotpath::measure]
 fn current_system_micros() -> Option<UtcMicros> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

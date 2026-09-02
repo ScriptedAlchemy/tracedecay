@@ -390,7 +390,6 @@ pub struct LcmStoreTokenCoverage {
     pub next_after_store_id: Option<i64>,
 }
 
-#[hotpath::measure_all]
 impl LcmStoreTokenCoverage {
     #[hotpath::skip]
     pub const fn complete(scanned_messages: i64) -> Self {
@@ -477,7 +476,6 @@ pub struct LcmGcConfig {
     pub gc_enabled: bool,
 }
 
-#[hotpath::measure_all]
 impl LcmGcConfig {
     pub const MIN_GRACE_SECONDS: u64 = 300;
 
@@ -507,42 +505,34 @@ impl Default for LcmGcConfig {
     }
 }
 
-#[hotpath::measure]
 fn default_lcm_gc_grace_seconds() -> u64 {
     86_400
 }
 
-#[hotpath::measure]
 fn default_lcm_gc_reap_missing_after() -> u64 {
     604_800
 }
 
-#[hotpath::measure]
 fn default_lcm_gc_reap_missing_enabled() -> bool {
     false
 }
 
-#[hotpath::measure]
 fn default_lcm_gc_max_batch_size() -> usize {
     500
 }
 
-#[hotpath::measure]
 fn default_lcm_gc_backup_before_reap() -> bool {
     true
 }
 
-#[hotpath::measure]
 fn default_lcm_gc_interval_seconds() -> u64 {
     21_600
 }
 
-#[hotpath::measure]
 fn default_lcm_gc_enabled() -> bool {
     true
 }
 
-#[hotpath::measure]
 fn deserialize_lcm_gc_grace_seconds<'de, D>(deserializer: D) -> Result<u64, D::Error>
 where
     D: serde::Deserializer<'de>,

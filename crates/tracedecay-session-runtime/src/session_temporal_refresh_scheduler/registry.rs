@@ -80,7 +80,6 @@ impl SessionTemporalRefreshPassReport {
 /// all of them.
 const MAX_CONCURRENT_HISTORICAL_INGEST_PASSES: usize = 2;
 
-#[hotpath::measure]
 fn bounded_historical_ingest_permits() -> usize {
     std::thread::available_parallelism().map_or(1, |cores| {
         cores.get().min(MAX_CONCURRENT_HISTORICAL_INGEST_PASSES)
@@ -96,7 +95,6 @@ struct SessionTemporalRefreshSchedulerEntry {
 
 struct SessionTemporalRefreshSupervisorInstrumentation;
 
-#[hotpath::measure_all]
 impl SessionTemporalRefreshSupervisorInstrumentation {
     fn new() -> Self {
         hotpath::gauge!("session_temporal_refresh_supervisors_active").inc(1.0);
@@ -110,7 +108,6 @@ impl Drop for SessionTemporalRefreshSupervisorInstrumentation {
     }
 }
 
-#[hotpath::measure_all]
 impl SessionTemporalRefreshSchedulerEntry {
     #[hotpath::skip]
     async fn shutdown(self) {
@@ -201,7 +198,6 @@ impl Drop for SessionTemporalRefreshSchedulerRegistry {
     }
 }
 
-#[hotpath::measure_all]
 impl SessionTemporalRefreshSchedulerRegistry {
     #[cfg(any(test, feature = "test-helpers"))]
     pub(crate) fn configure_for_test(
@@ -688,12 +684,10 @@ impl SessionTemporalRefreshSchedulerRegistry {
     }
 }
 
-#[hotpath::measure]
 fn inert_session_temporal_refresh_wake() -> SessionTemporalRefreshWake {
     SessionTemporalRefreshWake::unavailable()
 }
 
-#[hotpath::measure]
 pub(crate) fn session_refresh_retry_delay(
     class: SessionTemporalRefreshRetryClass,
     attempt: u32,

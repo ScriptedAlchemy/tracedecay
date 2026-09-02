@@ -209,7 +209,6 @@ pub(super) fn compare_proposal(
     )
 }
 
-#[hotpath::measure]
 fn unavailable(request_id: String) -> DaemonInvocationResponse {
     DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::Unavailable)
 }

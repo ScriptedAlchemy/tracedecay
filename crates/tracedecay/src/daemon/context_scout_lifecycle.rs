@@ -26,7 +26,6 @@ struct RegisteredContextScoutLifecycleAuthorityV1 {
 type ContextScoutLifecycleAuthoritiesV1 =
     StdMutex<BTreeMap<ContextScoutLifecycleKeyV1, RegisteredContextScoutLifecycleAuthorityV1>>;
 
-#[hotpath::measure]
 fn registered_context_scout_lifecycle_authorities() -> &'static ContextScoutLifecycleAuthoritiesV1 {
     static AUTHORITIES: OnceLock<ContextScoutLifecycleAuthoritiesV1> = OnceLock::new();
     AUTHORITIES.get_or_init(|| StdMutex::new(BTreeMap::new()))
@@ -46,7 +45,6 @@ pub(crate) enum AuthorityRejectionV1 {
     ProjectNotOwnedByAuthority,
 }
 
-#[hotpath::measure_all]
 impl AuthorityRejectionV1 {
     #[hotpath::skip]
     pub(crate) const fn as_str(self) -> &'static str {
@@ -79,7 +77,6 @@ pub(crate) enum AuthorityRegistrationV1 {
     Rejected(AuthorityRejectionV1),
 }
 
-#[hotpath::measure]
 pub(crate) fn register_context_scout_lifecycle_authority(
     hook_project_id: [u8; 16],
     hook_worktree_id: [u8; 16],
@@ -116,7 +113,6 @@ pub(crate) fn register_context_scout_lifecycle_authority(
     registration
 }
 
-#[hotpath::measure]
 fn register_context_scout_lifecycle_authority_checked(
     hook_project_id: [u8; 16],
     hook_worktree_id: [u8; 16],
@@ -176,7 +172,6 @@ fn register_context_scout_lifecycle_authority_checked(
 /// Removes exactly the given session store's registration; a different live
 /// authority under the same locator pair is left untouched so a rolled-back
 /// advisory setup can never unregister its successor.
-#[hotpath::measure]
 pub(crate) fn unregister_context_scout_lifecycle_authority(
     hook_project_id: [u8; 16],
     hook_worktree_id: [u8; 16],
@@ -204,7 +199,6 @@ pub(crate) fn unregister_context_scout_lifecycle_authority(
 /// Shared prologue for both replay entry points below: resolve the
 /// native profile/project/worktree identity and a session lease, or
 /// `None` if no authority is registered.
-#[hotpath::measure]
 fn resolve_authority(
     hook_project_id: [u8; 16],
     hook_worktree_id: [u8; 16],
@@ -353,7 +347,6 @@ pub(crate) enum ContextScoutLifecycleLookupFailureV1 {
     NoCompleteLifecycle,
 }
 
-#[hotpath::measure_all]
 impl ContextScoutLifecycleLookupFailureV1 {
     #[hotpath::skip]
     const fn as_str(self) -> &'static str {
@@ -385,7 +378,6 @@ pub(crate) enum ContextScoutLifecycleLookupV1 {
     Unresolved(ContextScoutLifecycleLookupFailureV1),
 }
 
-#[hotpath::measure_all]
 impl ContextScoutLifecycleLookupV1 {
     /// Collapses to the fail-closed `Option`, discarding the reason (which
     /// the lookup already emitted to tracing).
@@ -545,7 +537,6 @@ async fn lookup_context_scout_lifecycle_inner(
     Err(Failure::NoCompleteLifecycle)
 }
 
-#[hotpath::measure]
 fn lifecycle_from_canonical(
     profile_id: &UserProfileId,
     project_id: &ProjectId,

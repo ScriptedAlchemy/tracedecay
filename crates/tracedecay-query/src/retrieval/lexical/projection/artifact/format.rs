@@ -81,7 +81,6 @@ pub(super) struct PageBaseSectionReceiptBuilderV1 {
     hasher: Sha256,
 }
 
-#[hotpath::measure_all]
 impl PageBaseSectionReceiptBuilderV1 {
     pub(super) fn new(
         page_ordinal: u64,
@@ -146,7 +145,6 @@ impl PageBaseSectionReceiptBuilderV1 {
     }
 }
 
-#[hotpath::measure]
 fn hash_receipt_bytes(hasher: &mut Sha256, value: &[u8]) -> Result<(), CodeLexicalArtifactErrorV1> {
     hasher.update(
         u64::try_from(value.len())
@@ -157,7 +155,6 @@ fn hash_receipt_bytes(hasher: &mut Sha256, value: &[u8]) -> Result<(), CodeLexic
     Ok(())
 }
 
-#[hotpath::measure]
 pub(super) fn encode_page_base_sections_receipt(
     page_ordinal: u64,
     sections: Vec<CodeLexicalArtifactSectionDigestV1>,
@@ -170,7 +167,6 @@ pub(super) fn encode_page_base_sections_receipt(
     .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
 }
 
-#[hotpath::measure]
 pub(super) fn decode_page_base_sections_receipt(
     expected_page_ordinal: u64,
     bytes: &[u8],
@@ -190,7 +186,6 @@ pub(super) fn decode_page_base_sections_receipt(
     Ok(receipt)
 }
 
-#[hotpath::measure_all]
 impl CodeLexicalArtifactPageBaseSectionsReceiptV1 {
     pub(super) fn sections(&self) -> &[CodeLexicalArtifactSectionDigestV1] {
         &self.sections
@@ -212,7 +207,6 @@ pub(super) fn initial_base_section_receipt_fold()
     Ok((row_counts, accumulators))
 }
 
-#[hotpath::measure]
 pub(super) fn absorb_page_base_sections_receipt(
     page_ordinal: u64,
     bytes: &[u8],
@@ -252,7 +246,6 @@ pub(super) fn absorb_page_base_sections_receipt(
     Ok(())
 }
 
-#[hotpath::measure]
 pub(super) fn finish_base_section_receipt_fold(
     row_counts: &[u64],
     accumulators: &[Vec<u8>],
@@ -291,7 +284,6 @@ pub(super) fn finish_base_section_receipt_fold(
         .collect()
 }
 
-#[hotpath::measure]
 fn validate_page_base_sections(
     page_ordinal: u64,
     sections: &[CodeLexicalArtifactSectionDigestV1],
@@ -309,7 +301,6 @@ fn validate_page_base_sections(
     Ok(())
 }
 
-#[hotpath::measure]
 pub(super) fn verify_required_artifact_indexes(
     connection: &Connection,
     layout: LexicalArtifactLayoutV1,
@@ -371,7 +362,6 @@ pub(super) fn verify_required_artifact_indexes(
     Ok(())
 }
 
-#[hotpath::measure]
 pub(super) fn verify_artifact_table_layout(
     connection: &Connection,
     layout: LexicalArtifactLayoutV1,
@@ -538,7 +528,6 @@ pub(super) fn verify_artifact_table_layout(
     Ok(())
 }
 
-#[hotpath::measure]
 fn verify_interned_term_layout(
     connection: &Connection,
     layout: LexicalArtifactLayoutV1,
@@ -639,7 +628,6 @@ fn verify_interned_term_layout(
     Ok(())
 }
 
-#[hotpath::measure]
 fn table_columns(
     connection: &Connection,
     table: &str,
@@ -667,7 +655,6 @@ fn table_columns(
         })
 }
 
-#[hotpath::measure]
 pub(super) fn ngram_page_digest<'a>(
     page_ordinal: u64,
     rows: impl IntoIterator<Item = (i64, i64, &'a [u8], u64)>,
@@ -699,7 +686,6 @@ pub(super) fn ngram_page_digest<'a>(
         .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
 }
 
-#[hotpath::measure]
 pub(super) fn encode_ngram_bitmap(
     layout: LexicalArtifactLayoutV1,
     bitmap: &RoaringBitmap,
@@ -712,7 +698,6 @@ pub(super) fn encode_ngram_bitmap(
     }
 }
 
-#[hotpath::measure]
 fn encode_ngram_bitmap_v11(bitmap: &RoaringBitmap) -> Result<Vec<u8>, CodeLexicalArtifactErrorV1> {
     let cardinality = bitmap.len();
     let mut range_count = 0u64;
@@ -787,7 +772,6 @@ fn encode_ngram_bitmap_v11(bitmap: &RoaringBitmap) -> Result<Vec<u8>, CodeLexica
     Ok(encoded)
 }
 
-#[hotpath::measure]
 pub(super) fn decode_ngram_bitmap(
     layout: LexicalArtifactLayoutV1,
     encoded: &[u8],
@@ -800,7 +784,6 @@ pub(super) fn decode_ngram_bitmap(
     }
 }
 
-#[hotpath::measure]
 fn decode_ngram_bitmap_v11(encoded: &[u8]) -> Result<RoaringBitmap, CodeLexicalArtifactErrorV1> {
     let header = encoded.get(..16).ok_or_else(|| {
         CodeLexicalArtifactErrorV1::Corrupt(
@@ -861,7 +844,6 @@ fn decode_ngram_bitmap_v11(encoded: &[u8]) -> Result<RoaringBitmap, CodeLexicalA
     Ok(bitmap)
 }
 
-#[hotpath::measure]
 fn encode_ngram_delta_varints_v12(
     bitmap: &RoaringBitmap,
 ) -> Result<Vec<u8>, CodeLexicalArtifactErrorV1> {
@@ -883,7 +865,6 @@ fn encode_ngram_delta_varints_v12(
     Ok(encoded)
 }
 
-#[hotpath::measure]
 fn decode_ngram_delta_varints_v12(
     encoded: &[u8],
 ) -> Result<RoaringBitmap, CodeLexicalArtifactErrorV1> {
@@ -921,7 +902,6 @@ fn decode_ngram_delta_varints_v12(
     Ok(bitmap)
 }
 
-#[hotpath::measure]
 fn encode_u32_varint(mut value: u32, encoded: &mut Vec<u8>) {
     while value >= 0x80 {
         encoded.push((value as u8 & 0x7f) | 0x80);
@@ -930,7 +910,6 @@ fn encode_u32_varint(mut value: u32, encoded: &mut Vec<u8>) {
     encoded.push(value as u8);
 }
 
-#[hotpath::measure]
 fn decode_u32_varint(encoded: &[u8]) -> Result<(u32, usize), CodeLexicalArtifactErrorV1> {
     let mut value = 0u32;
     for (ordinal, byte) in encoded.iter().copied().take(5).enumerate() {
@@ -992,7 +971,6 @@ pub struct VerifiedCodeLexicalArtifactV1 {
     file_size_bytes: u64,
 }
 
-#[hotpath::measure_all]
 impl VerifiedCodeLexicalArtifactV1 {
     pub fn artifact_digest(&self) -> &ManifestDigest {
         &self.artifact_digest
@@ -1118,7 +1096,6 @@ impl From<ProjectedChunkV1> for ArtifactRowV1 {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn manifest_digest<T: Serialize + ?Sized>(
     domain: &[u8],
     value: &T,
@@ -1137,7 +1114,6 @@ pub(super) fn manifest_digest<T: Serialize + ?Sized>(
         .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
 }
 
-#[hotpath::measure]
 pub(super) fn metadata_digest(
     metadata: &CodeLexicalProjectionMetadataV1,
 ) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
@@ -1145,7 +1121,6 @@ pub(super) fn metadata_digest(
 }
 
 #[allow(clippy::too_many_arguments)] // one committed digest tuple, spelled once
-#[hotpath::measure]
 pub(super) fn artifact_digest(
     metadata_digest: &ManifestDigest,
     source_state_digest: &ManifestDigest,
@@ -1179,13 +1154,11 @@ pub(super) fn artifact_digest(
     )
 }
 
-#[hotpath::measure]
 pub(super) fn encode_field(field: LexicalFieldV1) -> Result<String, CodeLexicalArtifactErrorV1> {
     serde_json::to_string(&field)
         .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
 }
 
-#[hotpath::measure]
 pub(super) fn encode_exact_field(
     field: ExactFieldV1,
 ) -> Result<String, CodeLexicalArtifactErrorV1> {
@@ -1193,7 +1166,6 @@ pub(super) fn encode_exact_field(
         .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
 }
 
-#[hotpath::measure]
 pub(super) fn padded_receipt(
     receipt: &VerifiedCodeLexicalArtifactV1,
 ) -> Result<Vec<u8>, CodeLexicalArtifactErrorV1> {
@@ -1208,7 +1180,6 @@ pub(super) fn padded_receipt(
     Ok(bytes)
 }
 
-#[hotpath::measure]
 pub(super) fn decode_padded_receipt(
     bytes: &[u8],
 ) -> Result<Option<VerifiedCodeLexicalArtifactV1>, CodeLexicalArtifactErrorV1> {
@@ -1243,7 +1214,6 @@ pub(super) fn decode_padded_receipt(
 /// Decode a fixed-size receipt while honoring the caller's canonical work
 /// control. Reopen paths use this version so a corrupt or cold artifact never
 /// turns an expired epoch into an unbounded padding scan.
-#[hotpath::measure]
 pub(super) fn decode_padded_receipt_with_control(
     bytes: &[u8],
     control: &dyn CodeIndexExecutionControlV1,
@@ -1294,7 +1264,6 @@ pub(super) fn decode_padded_receipt_with_control(
     Ok(Some(receipt))
 }
 
-#[hotpath::measure]
 pub(super) fn new_verified_receipt(
     metadata: CodeLexicalProjectionMetadataV1,
     metadata_digest: ManifestDigest,

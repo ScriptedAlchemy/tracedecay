@@ -9,7 +9,6 @@ use tracedecay_sessions::serving::{
     SessionProjectionWorkerRetryClass,
 };
 
-#[hotpath::measure]
 pub(super) fn not_current_unavailable(
     status_port: &dyn SessionProjectionServingStatusPort,
 ) -> Option<SessionRetrievalUnavailable> {
@@ -58,7 +57,6 @@ pub(super) fn not_current_unavailable(
     })
 }
 
-#[hotpath::measure]
 fn worker_status(status: &SessionProjectionServingStatus) -> SessionRetrievalWorkerStatusView {
     SessionRetrievalWorkerStatusView {
         last_progress_at_unix_micros: status.last_progress_at_unix_micros,

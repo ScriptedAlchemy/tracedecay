@@ -37,7 +37,6 @@ pub struct StoreSizeSampleV1 {
     pub observed_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl StoreSizeSampleV1 {
     /// Validate the sample. A store with pages must have a non-zero page size,
     /// and the freelist can never exceed the total page count.
@@ -106,7 +105,6 @@ pub struct TableGrowthBaselinePendingV1 {
     pub observed_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl TableGrowthSampleV1 {
     /// Validate ordering: the current watermark must not precede the previous.
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
@@ -143,7 +141,6 @@ pub struct StoreSizeBudgetV1 {
     pub soft_limit_bytes: StorageByteSizeV1,
 }
 
-#[hotpath::measure_all]
 impl StoreSizeBudgetV1 {
     /// Validate the budget. A zero soft limit is meaningless (every store would
     /// be perpetually over budget) and is rejected.
@@ -201,7 +198,6 @@ pub enum StoreBudgetEvaluationV1 {
     },
 }
 
-#[hotpath::measure_all]
 impl StoreBudgetEvaluationV1 {
     #[must_use]
     #[hotpath::skip]
@@ -236,7 +232,6 @@ pub enum StorageTelemetryReadV1 {
     Unknown { store: StoreKeyV1 },
 }
 
-#[hotpath::measure_all]
 impl StorageTelemetryReadV1 {
     #[must_use]
     pub fn store(&self) -> &StoreKeyV1 {
@@ -276,7 +271,6 @@ pub enum TableGrowthTelemetryReadV1 {
     Unknown { store: StoreKeyV1 },
 }
 
-#[hotpath::measure_all]
 impl TableGrowthTelemetryReadV1 {
     #[must_use]
     pub fn store(&self) -> &StoreKeyV1 {
@@ -299,7 +293,6 @@ pub const SIGNIFICANT_TABLE_GROWTH_PERCENT: u64 = 10;
 
 /// Whether one table-growth sample is operationally meaningful enough to surface.
 #[must_use]
-#[hotpath::measure]
 pub fn is_significant_table_growth(sample: &TableGrowthSampleV1) -> bool {
     let growth = sample.growth_bytes().get();
     growth >= SIGNIFICANT_TABLE_GROWTH_ABSOLUTE_BYTES
@@ -345,7 +338,6 @@ pub enum TableGrowthDoctorEvidenceV1 {
     },
 }
 
-#[hotpath::measure_all]
 impl TableGrowthDoctorEvidenceV1 {
     /// Doctor health state for this evidence. Ordinary growth is informational:
     /// it remains healthy with complete coverage.
@@ -369,7 +361,6 @@ impl TableGrowthDoctorEvidenceV1 {
 /// Below-threshold observed samples are omitted. Baseline and unavailable
 /// states always produce evidence so they cannot collapse into zero growth.
 #[must_use]
-#[hotpath::measure]
 pub fn table_growth_doctor_evidence(
     read: &TableGrowthTelemetryReadV1,
 ) -> Vec<TableGrowthDoctorEvidenceV1> {

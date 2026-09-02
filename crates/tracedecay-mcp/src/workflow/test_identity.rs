@@ -20,7 +20,6 @@ const AUXILIARY_TARGET_ROOTS: [&str; 3] = ["tests", "benches", "examples"];
 
 /// Normalizes a stored path or qualified name to the `/`-separated,
 /// leading-`./`-free form the graph writes for project-relative paths.
-#[hotpath::measure]
 fn normalize(value: &str) -> String {
     let normalized = value.trim().replace('\\', "/");
     normalized
@@ -35,7 +34,6 @@ fn normalize(value: &str) -> String {
 /// `src/auth/login.rs` -> `auth::login`, `src/auth/mod.rs` -> `auth`,
 /// `crates/pkg/src/spool/tests.rs` -> `spool::tests`, `src/lib.rs` -> `None`,
 /// `tests/harness.rs` -> `None`, `tests/harness/support.rs` -> `support`.
-#[hotpath::measure]
 pub fn libtest_module_prefix(file_path: &str) -> Option<String> {
     let normalized = normalize(file_path);
     let stem = normalized.strip_suffix(".rs")?;
@@ -85,7 +83,6 @@ pub fn libtest_module_prefix(file_path: &str) -> Option<String> {
 ///
 /// Returns `None` when the stored qualified name does not carry the node's own
 /// file path, which is the only shape this authority can decide.
-#[hotpath::measure]
 pub fn libtest_identity(file_path: &str, qualified_name: &str) -> Option<String> {
     let file_path_prefix = format!("{}::", normalize(file_path));
     let in_file_chain = normalize(qualified_name)

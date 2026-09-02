@@ -115,7 +115,6 @@ pub const WORKFLOW_APPLICATION_OPERATION_IDS: [(&str, &str, &str); 16] = [
 /// call, making operation-table iteration quadratic in schema generations on
 /// the daemon startup path. Build it once per process and clone the
 /// assembled value instead.
-#[hotpath::measure]
 pub fn workflow_executable_binding_registry()
 -> Result<ExecutableBindingRegistryV1, CatalogValidationError> {
     static REGISTRY: LazyLock<Result<ExecutableBindingRegistryV1, CatalogValidationError>> =
@@ -123,7 +122,6 @@ pub fn workflow_executable_binding_registry()
     REGISTRY.clone()
 }
 
-#[hotpath::measure]
 fn build_workflow_executable_binding_registry()
 -> Result<ExecutableBindingRegistryV1, CatalogValidationError> {
     ExecutableBindingRegistryV1::new(
@@ -134,7 +132,6 @@ fn build_workflow_executable_binding_registry()
     )
 }
 
-#[hotpath::measure]
 fn workflow_binding(
     operation: &str,
 ) -> Result<ExecutableBindingAvailabilityV1, CatalogValidationError> {
@@ -266,7 +263,6 @@ fn workflow_binding(
     }
 }
 
-#[hotpath::measure]
 fn available<Request, Output>(
     operation: &str,
     route_path: &str,
@@ -305,7 +301,6 @@ where
     Ok(ExecutableBindingAvailabilityV1::available(binding))
 }
 
-#[hotpath::measure]
 fn workflow_manifest(operation: &str) -> Result<CapabilityManifestV1, CatalogValidationError> {
     let read_only = matches!(
         operation,
@@ -420,7 +415,6 @@ fn workflow_manifest(operation: &str) -> Result<CapabilityManifestV1, CatalogVal
     })
 }
 
-#[hotpath::measure]
 fn schema_ref(id: String) -> Result<SchemaRef, CatalogValidationError> {
     SchemaRef::new(
         SchemaId::new(id)

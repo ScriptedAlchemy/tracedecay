@@ -126,7 +126,6 @@ fn download_bytes(agent: &ureq::Agent, url: &str, description: &str) -> Result<V
     Ok(bytes)
 }
 
-#[hotpath::measure]
 fn expected_sha256(manifest: &[u8], asset_name: &str) -> Result<String> {
     let text = std::str::from_utf8(manifest).map_err(|e| TraceDecayError::Config {
         message: format!("SHA256SUMS is not valid UTF-8: {e}"),
@@ -300,7 +299,6 @@ fn replace_binary(
 /// when the running binary is behind a symlink (avoids ENOENT caused by
 /// `self_replace` resolving relative symlink targets from CWD).
 /// Returns the path the new binary was written to, when known.
-#[hotpath::measure]
 fn replace_default(new_exe: &Path) -> Result<Option<PathBuf>> {
     // Capture the exe path before the swap: on Linux the rename makes
     // `/proc/self/exe` read `… (deleted)` afterwards.
@@ -363,7 +361,6 @@ enum UpgradeStatus<'a> {
     UpgradeAvailable(&'a str),
 }
 
-#[hotpath::measure]
 fn classify_upgrade<'a>(current: &str, latest: &'a str) -> UpgradeStatus<'a> {
     // Plain semver is safe across the version-epoch reset: `cloud::fetch_latest_*`
     // never yields pre-reset releases (see `release_has_current_platform_asset`).
@@ -380,7 +377,6 @@ enum UpgradeSource {
     GitHubRelease,
 }
 
-#[hotpath::measure]
 fn upgrade_source_for(method: &InstallMethod) -> UpgradeSource {
     match method {
         InstallMethod::Brew => UpgradeSource::Homebrew,
@@ -390,12 +386,10 @@ fn upgrade_source_for(method: &InstallMethod) -> UpgradeSource {
     }
 }
 
-#[hotpath::measure]
 fn latest_upgrade_version(is_beta: bool) -> Result<String> {
     cloud::fetch_latest_version().ok_or_else(|| github_latest_unavailable_error(is_beta))
 }
 
-#[hotpath::measure]
 fn github_latest_unavailable_error(is_beta: bool) -> TraceDecayError {
     let channel = if is_beta { "beta" } else { "stable" };
     TraceDecayError::Config {
@@ -407,7 +401,6 @@ fn github_latest_unavailable_error(is_beta: bool) -> TraceDecayError {
     }
 }
 
-#[hotpath::measure]
 fn install_upgrade_version(
     latest: &str,
     is_beta: bool,
@@ -417,7 +410,6 @@ fn install_upgrade_version(
     perform_upgrade(latest, &download, method)
 }
 
-#[hotpath::measure]
 fn run_versioned_upgrade(
     current: &str,
     is_beta: bool,
@@ -448,7 +440,6 @@ fn run_versioned_upgrade(
 /// Avoids `ETXTBSY` on Linux (rename swaps directory entries rather than
 /// writing into the running executable).
 #[cfg(unix)]
-#[hotpath::measure]
 fn install_binary(src: &Path, target: &Path) -> Result<()> {
     let dir = target.parent().ok_or_else(|| TraceDecayError::Config {
         message: "cannot determine target directory".into(),
@@ -472,7 +463,6 @@ fn install_binary(src: &Path, target: &Path) -> Result<()> {
 }
 
 #[cfg(unix)]
-#[hotpath::measure]
 fn retarget_homebrew_symlink(
     symlink_path: &Path,
     old_version: &str,
@@ -492,7 +482,6 @@ fn retarget_homebrew_symlink(
 }
 
 #[cfg(unix)]
-#[hotpath::measure]
 fn rewrite_homebrew_install_receipt(
     receipt: &Path,
     old_version: &str,
@@ -506,7 +495,6 @@ fn rewrite_homebrew_install_receipt(
 }
 
 #[cfg(unix)]
-#[hotpath::measure]
 fn warn_best_effort(step: &str, error: &TraceDecayError) {
     eprintln!("\n  \x1b[33mwarning:\x1b[0m {step}: {error}");
 }
@@ -518,7 +506,6 @@ fn warn_best_effort(step: &str, error: &TraceDecayError) {
 /// Returns the stable `<prefix>/bin` symlink path when one exists, so
 /// downstream consumers never pin the keg-versioned path.
 #[cfg(unix)]
-#[hotpath::measure]
 fn replace_for_brew(new_exe: &Path, new_version: &str) -> Result<Option<PathBuf>> {
     let exe = std::env::current_exe().map_err(io_err("cannot determine current exe"))?;
     let canonical = exe
@@ -603,7 +590,6 @@ fn replace_for_brew(new_exe: &Path, new_version: &str) -> Result<Option<PathBuf>
 }
 
 #[cfg(not(unix))]
-#[hotpath::measure]
 fn replace_for_brew(new_exe: &Path, _new_version: &str) -> Result<Option<PathBuf>> {
     replace_default(new_exe)
 }
@@ -614,7 +600,6 @@ fn replace_for_brew(new_exe: &Path, _new_version: &str) -> Result<Option<PathBuf
 /// then update Scoop's version directory and junction so that
 /// `scoop status` reports the new version.
 #[cfg(windows)]
-#[hotpath::measure]
 fn replace_for_scoop(new_exe: &Path, new_version: &str) -> Result<Option<PathBuf>> {
     let exe = std::env::current_exe().ok();
     self_replace::self_replace(new_exe).map_err(|e| TraceDecayError::Config {
@@ -632,7 +617,6 @@ fn replace_for_scoop(new_exe: &Path, new_version: &str) -> Result<Option<PathBuf
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn update_scoop_metadata(new_version: &str) {
     use std::os::windows::process::CommandExt;
 
@@ -778,7 +762,6 @@ fn update_scoop_metadata(new_version: &str) {
 /// Walk the canonical path to find the Scoop version directory.
 /// Layout: `<scoop>/apps/<app>/<version>/…`
 #[cfg(windows)]
-#[hotpath::measure]
 fn find_scoop_version_dir(path: &Path) -> Option<std::path::PathBuf> {
     let mut found_apps = false;
     let mut depth_after_apps = 0u8;
@@ -801,7 +784,6 @@ fn find_scoop_version_dir(path: &Path) -> Option<std::path::PathBuf> {
 }
 
 #[cfg(not(windows))]
-#[hotpath::measure]
 fn replace_for_scoop(new_exe: &Path, _new_version: &str) -> Result<Option<PathBuf>> {
     replace_default(new_exe)
 }
@@ -812,7 +794,6 @@ fn replace_for_scoop(new_exe: &Path, _new_version: &str) -> Result<Option<PathBu
 /// Verifies the release asset exists on GitHub and returns the download URL.
 /// Call this early so we fail fast when CI hasn't finished building the
 /// release yet.
-#[hotpath::measure]
 fn preflight_asset_check(version: &str, is_beta: bool) -> Result<ReleaseDownload> {
     let tag = release_tag(version);
     let asset = asset_name(version, is_beta);
@@ -825,7 +806,6 @@ fn preflight_asset_check(version: &str, is_beta: bool) -> Result<ReleaseDownload
 /// `previous_version` and decides whether reinstall is required for the
 /// transition (e.g. minor/major bumps re-register agents to pick up new MCP
 /// tools or hook changes; patch bumps just update the field).
-#[hotpath::measure]
 fn record_previous_version() {
     let current = env!("CARGO_PKG_VERSION");
     let mut cfg = UserConfig::load();
@@ -842,7 +822,6 @@ fn record_previous_version() {
 }
 
 /// Returns the path the new binary was installed at, when known.
-#[hotpath::measure]
 fn perform_upgrade(
     version: &str,
     download: &ReleaseDownload,
@@ -868,7 +847,6 @@ fn perform_upgrade(
     Ok(installed_at)
 }
 
-#[hotpath::measure]
 fn brew_upgrade_command() -> (&'static str, [&'static str; 2]) {
     ("brew", ["upgrade", "tracedecay"])
 }
@@ -876,7 +854,6 @@ fn brew_upgrade_command() -> (&'static str, [&'static str; 2]) {
 /// The stable Homebrew-managed binary path: the opt symlink reported by
 /// `brew --prefix tracedecay`, which survives keg-version bumps and cleanup
 /// (unlike the keg-versioned Cellar path the running process resolves to).
-#[hotpath::measure]
 fn brew_linked_binary() -> Option<PathBuf> {
     let output = std::process::Command::new("brew")
         .args(["--prefix", "tracedecay"])
@@ -892,7 +869,6 @@ fn brew_linked_binary() -> Option<PathBuf> {
 
 /// Extracts the version from `tracedecay --version` output
 /// (e.g. `tracedecay 5.0.1` → `5.0.1`).
-#[hotpath::measure]
 fn parse_version_output(output: &str) -> Option<String> {
     let version = output.split_whitespace().last()?;
     Some(version.trim_start_matches('v').to_string())
@@ -901,7 +877,6 @@ fn parse_version_output(output: &str) -> Option<String> {
 /// Asks the binary at `path` for its version, killing it after a short
 /// deadline so a wedged binary cannot hang the upgrade. `None` when it
 /// cannot be run, times out, or its output is unrecognizable.
-#[hotpath::measure]
 fn installed_binary_version(path: &Path) -> Option<String> {
     let mut child = std::process::Command::new(path)
         .arg("--version")
@@ -933,12 +908,10 @@ fn installed_binary_version(path: &Path) -> Option<String> {
 /// Whether a delegated `brew upgrade` was a no-op: the linked binary still
 /// reports the version we are already running. `None` (undetectable) is
 /// treated as a real install so the refresh chain never silently skips.
-#[hotpath::measure]
 fn brew_upgrade_was_noop(current: &str, installed_version: Option<&str>) -> bool {
     installed_version == Some(current)
 }
 
-#[hotpath::measure]
 fn run_brew_upgrade() -> Result<UpgradeOutcome> {
     let current = env!("CARGO_PKG_VERSION");
     eprintln!("Updating Homebrew formula cache...");
@@ -992,7 +965,6 @@ fn run_brew_upgrade() -> Result<UpgradeOutcome> {
 /// Check for a newer version and perform the upgrade if one is available.
 ///
 /// Returns whether a new binary was actually installed.
-#[hotpath::measure]
 pub fn run_upgrade() -> Result<UpgradeOutcome> {
     let current = env!("CARGO_PKG_VERSION");
     let is_beta = cloud::is_beta();
@@ -1014,7 +986,6 @@ pub fn run_upgrade() -> Result<UpgradeOutcome> {
 }
 
 /// Print the current channel.
-#[hotpath::measure]
 pub fn show_channel() {
     let current = env!("CARGO_PKG_VERSION");
     let channel = if cloud::is_beta() { "beta" } else { "stable" };

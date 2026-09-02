@@ -21,13 +21,11 @@ const STATUS_RESPONSE_MARGIN: Duration = Duration::from_secs(15);
 const MAX_STATUS_COMMAND_DEADLINE: Duration = Duration::from_hours(24);
 const STATUS_DEADLINE_ENV: &str = "TRACEDECAY_STATUS_DEADLINE_MS";
 
-#[hotpath::measure]
 fn default_status_command_deadline() -> Duration {
     tracedecay_daemon_protocol::DEFAULT_DAEMON_OPERATION_DEADLINE
         .saturating_add(STATUS_RESPONSE_MARGIN)
 }
 
-#[hotpath::measure]
 fn status_command_deadline_from(raw: Option<&str>) -> tracedecay_domain::errors::Result<Duration> {
     let deadline = raw
         .and_then(|raw| raw.parse::<u64>().ok())
@@ -43,13 +41,11 @@ fn status_command_deadline_from(raw: Option<&str>) -> tracedecay_domain::errors:
     Ok(deadline)
 }
 
-#[hotpath::measure]
 fn status_command_deadline() -> tracedecay_domain::errors::Result<Duration> {
     let raw = std::env::var(STATUS_DEADLINE_ENV).ok();
     status_command_deadline_from(raw.as_deref())
 }
 
-#[hotpath::measure]
 fn status_server_request_budget(command_budget: Duration) -> Duration {
     command_budget
         .saturating_sub(STATUS_RESPONSE_MARGIN)
@@ -70,12 +66,10 @@ async fn await_daemon_tool_result<T>(
     })?
 }
 
-#[hotpath::measure]
 fn should_print_status_logo(short: bool, stdout_is_terminal: bool) -> bool {
     !short && stdout_is_terminal
 }
 
-#[hotpath::measure]
 fn should_fetch_online_status_embellishments(stdout_is_terminal: bool) -> bool {
     stdout_is_terminal
 }
@@ -83,7 +77,6 @@ fn should_fetch_online_status_embellishments(stdout_is_terminal: bool) -> bool {
 /// Compact CLI status args: keep graph identity fields while skipping the
 /// expensive optional diagnostics that commonly push responses over the
 /// semantic truncation envelope.
-#[hotpath::measure]
 fn compact_status_tool_args() -> Value {
     serde_json::json!({
         "format": "json",
@@ -116,7 +109,6 @@ async fn daemon_tool_json_within(
     .await
 }
 
-#[hotpath::measure]
 pub(crate) fn format_memory_status_report(status: &MemoryStatusV1) -> String {
     let owner = match &status.owner {
         FactCommitOwnerV1::Profile => "profile".to_owned(),

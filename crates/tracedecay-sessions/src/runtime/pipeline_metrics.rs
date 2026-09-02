@@ -39,7 +39,6 @@ pub struct JsonlIoAccounting {
 }
 
 #[inline]
-#[hotpath::measure]
 pub(crate) fn add(name: &'static str, delta: u64) {
     #[cfg(feature = "hotpath")]
     {
@@ -53,7 +52,6 @@ pub(crate) fn add(name: &'static str, delta: u64) {
 }
 
 #[inline(always)]
-#[hotpath::measure]
 fn add_usize(name: &'static str, delta: usize) {
     #[cfg(feature = "hotpath")]
     add(name, u64::try_from(delta).unwrap_or(u64::MAX));
@@ -62,7 +60,6 @@ fn add_usize(name: &'static str, delta: usize) {
 }
 
 #[inline(always)]
-#[hotpath::measure]
 pub(crate) fn record_jsonl_io(io: &JsonlIoAccounting, change: Option<JsonlChangeKind>) {
     #[cfg(feature = "hotpath")]
     {
@@ -95,14 +92,12 @@ pub(crate) fn record_jsonl_io(io: &JsonlIoAccounting, change: Option<JsonlChange
 
 #[inline(always)]
 #[cfg(feature = "hotpath")]
-#[hotpath::measure]
 pub(crate) fn record_discovery_files(considered: u64, selected: u64, metadata_bytes: u64) {
     add("sessions.discovery.files.considered", considered);
     add("sessions.discovery.files.selected", selected);
     add("sessions.discovery.metadata_bytes", metadata_bytes);
 }
 
-#[hotpath::measure]
 pub(crate) fn record_file_opened() {
     add("sessions.discovery.files.opened", 1);
 }
@@ -113,13 +108,11 @@ pub(crate) fn record_file_opened() {
 /// bucket listed three times to answer three questions charges three times here
 /// while `files.considered` reports one tree. Divergence between this and the
 /// bucket count is the signal that a pass is re-walking what it already knows.
-#[hotpath::measure]
 pub(crate) fn record_dir_enumerated() {
     add("sessions.discovery.dirs.enumerated", 1);
 }
 
 #[inline(always)]
-#[hotpath::measure]
 pub(crate) fn record_sweep_outcome(complete: bool) {
     #[cfg(feature = "hotpath")]
     if complete {
@@ -138,7 +131,6 @@ pub(crate) fn record_sweep_outcome(complete: bool) {
 /// storm and a rule that mistakes ordinary appends for rewrites look identical
 /// in latency and nowhere else. Rejected scans are re-read from scratch on the
 /// next pass, so a persistently non-zero rate is wasted I/O, not just noise.
-#[hotpath::measure]
 pub(crate) fn record_scan_generation_changed() {
     add("sessions.jsonl.scan.generation_changed", 1);
 }
@@ -150,7 +142,6 @@ pub(crate) fn record_scan_generation_changed() {
 /// observation writes with code-index writes, so a cold run makes batching look
 /// far worse than it is. Counting windows and frames at the point they are
 /// submitted keeps the ratio attributable to session ingestion alone.
-#[hotpath::measure]
 pub(crate) fn record_capture_window(frames: usize) {
     add("sessions.jsonl.capture.windows", 1);
     add_usize("sessions.jsonl.capture.framed", frames);
@@ -160,7 +151,6 @@ pub(crate) fn record_capture_window(frames: usize) {
 ///
 /// A ratio that looks good only because most frames never reach a window is
 /// not batching; this is what tells the two apart.
-#[hotpath::measure]
 pub(crate) fn record_capture_single() {
     add("sessions.jsonl.capture.single", 1);
 }
@@ -172,7 +162,6 @@ pub(crate) fn record_capture_single() {
 /// out-of-scope frame was read, decoded, and parsed before anything consulted
 /// its scope. Only the split says whether the scope test belongs earlier —
 /// which is why this takes the reason rather than counting skips as one number.
-#[hotpath::measure]
 pub(crate) fn record_frame_skipped(reason: ObservationCoverageReason) {
     add(
         match reason {
@@ -209,7 +198,6 @@ pub(crate) fn record_frame_skipped(reason: ObservationCoverageReason) {
 /// but not how much of it was avoided, so a change that moves a verdict earlier
 /// is indistinguishable from one that does nothing.
 #[inline(always)]
-#[hotpath::measure]
 pub(crate) fn record_admission_progress(
     frames_decoded: u64,
     frames_accepted: u64,
@@ -242,14 +230,12 @@ pub(crate) fn record_admission_progress(
 }
 
 #[inline(always)]
-#[hotpath::measure]
 pub(crate) fn record_git_backfill(sessions_scanned: usize, spans_written: usize) {
     add_usize("sessions.git.backfill.sessions_scanned", sessions_scanned);
     add_usize("sessions.git.backfill.spans_written", spans_written);
 }
 
 #[inline(always)]
-#[hotpath::measure]
 pub(crate) fn record_historical_ingest(complete: bool) {
     #[cfg(feature = "hotpath")]
     if complete {

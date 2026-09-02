@@ -37,7 +37,6 @@ impl Drop for InvocationDispatchGaugeGuard {
 /// Counts a request the front door denied before any payload handler ran.
 /// The reason set is the closed [`DaemonInvocationProblem`] enum, so every
 /// key is static and bounded.
-#[hotpath::measure]
 fn observe_front_door_denial(problem: DaemonInvocationProblem) {
     match problem {
         DaemonInvocationProblem::InvalidRequest => {
@@ -61,7 +60,6 @@ fn observe_front_door_denial(problem: DaemonInvocationProblem) {
     }
 }
 
-#[hotpath::measure_all]
 impl DaemonInvocationService {
     pub fn operation_events(&self) -> OperationEventAuthority {
         self.operation_events.clone()

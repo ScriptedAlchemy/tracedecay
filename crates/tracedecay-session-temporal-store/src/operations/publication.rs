@@ -27,7 +27,6 @@ pub struct GlobalDbLcmSummaryPublication<'a, E> {
     relation_projection: Mutex<SessionRelationProjection>,
 }
 
-#[hotpath::measure_all]
 impl<'a, E> GlobalDbLcmSummaryPublication<'a, E> {
     pub fn for_scope(conn: &'a E, relation_projection: SessionRelationProjection) -> Self {
         Self {
@@ -77,7 +76,6 @@ where
     }
 }
 
-#[hotpath::measure]
 fn relation_node(
     publication: &LcmImmutableSummaryPublication,
     manifest: &CanonicalPublicationManifest,
@@ -104,7 +102,6 @@ fn relation_node(
     })
 }
 
-#[hotpath::measure]
 fn verify_projection_summary(
     projection: &SessionRelationProjection,
     publication: &LcmImmutableSummaryPublication,
@@ -267,7 +264,6 @@ pub async fn publish_immutable_summary(
     })
 }
 
-#[hotpath::measure]
 fn validate_publication_shape(
     publication: &LcmImmutableSummaryPublication,
 ) -> Result<(), LcmError> {
@@ -568,7 +564,6 @@ pub(crate) async fn load_and_verify_receipt(
     Ok(receipt)
 }
 
-#[hotpath::measure]
 fn summary_node(
     summary_id: &str,
     manifest: &CanonicalPublicationManifest,
@@ -593,7 +588,6 @@ fn summary_node(
     }
 }
 
-#[hotpath::measure]
 fn conflict(summary_id: &str) -> LcmError {
     LcmError::ImmutableSummaryConflict {
         summary_id: summary_id.to_string(),

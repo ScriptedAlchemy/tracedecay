@@ -135,7 +135,6 @@ struct WorkAttemptProcessHolderV1 {
     handle: Option<tokio::task::JoinHandle<()>>,
 }
 
-#[hotpath::measure_all]
 impl WorkAttemptProcessRegistryV1 {
     fn key(worktree_id: Option<&WorktreeId>, identity: &WorkAttemptIdentityV1) -> String {
         format!(
@@ -417,7 +416,6 @@ impl Drop for WorkAttemptProcessRegistryV1 {
 /// Spawns the background execution task for one leased or recovery-required
 /// attempt. Ownership is exclusive: if the registry already tracks the
 /// attempt, the existing task keeps it.
-#[hotpath::measure]
 pub(super) fn spawn_attempt_execution(
     registered: RegisteredWorkRuntime,
     registry: Arc<WorkAttemptProcessRegistryV1>,
@@ -577,7 +575,6 @@ struct ProviderDenial {
     fallback: Option<WorkProviderFallbackRecordV1>,
 }
 
-#[hotpath::measure_all]
 impl ProviderDenial {
     #[hotpath::skip]
     const fn preferred(state: WorkProviderAvailabilityV1) -> Self {
@@ -591,7 +588,6 @@ impl ProviderDenial {
 /// argv the stdio transport forwards for one admitted `(backend, protocol)`
 /// pair. The app-server pair carries none: its `app-server` argument belongs
 /// to the session client that owns that transport.
-#[hotpath::measure]
 fn provider_arguments(
     backend: WorkProviderBackendV1,
     protocol: WorkProviderProtocol,
@@ -618,7 +614,6 @@ fn provider_arguments(
     }
 }
 
-#[hotpath::measure]
 fn select_provider(
     project_root: &std::path::Path,
     attempt: &WorkAttemptV1,
@@ -632,7 +627,6 @@ fn select_provider(
 }
 
 /// The preference gate proper, over an already-built binding authority.
-#[hotpath::measure]
 fn select_with_resolver<R: WorkExecutableBindingResolver>(
     resolver: &R,
     attempt: &WorkAttemptV1,
@@ -692,7 +686,6 @@ fn select_with_resolver<R: WorkExecutableBindingResolver>(
 
 /// Probes one pinned binding: capability admission, path canonicalization,
 /// and a byte-exact digest match against the snapshot's pinned artifact.
-#[hotpath::measure]
 fn resolve_binding<R: WorkExecutableBindingResolver>(
     resolver: &R,
     executable: &WorkExecutableReference,
@@ -711,7 +704,6 @@ fn resolve_binding<R: WorkExecutableBindingResolver>(
     })
 }
 
-#[hotpath::measure]
 fn availability_state(error: WorkExecutableBindingError) -> WorkProviderAvailabilityV1 {
     match error {
         WorkExecutableBindingError::Absent { .. } => WorkProviderAvailabilityV1::Absent,
@@ -726,7 +718,6 @@ fn availability_state(error: WorkExecutableBindingError) -> WorkProviderAvailabi
 
 /// Seals a terminal denial for an attempt whose provider never started:
 /// fence to `RecoveryRequired`, then fail recovery with the typed outcome.
-#[hotpath::measure]
 fn settle_unstarted<S>(
     attempts: &tracedecay_application::WorkAttemptService<S>,
     context: &RequestContext,
@@ -779,7 +770,6 @@ fn settle_unstarted<S>(
 /// durable attempt authority; credential references resolve just in time.
 /// A missing allowlisted value stays absent rather than receiving an invented
 /// empty replacement or an unadmitted ambient fallback.
-#[hotpath::measure]
 fn admitted_provider_environment(
     snapshot: &tracedecay_domain::WorkExecutionSnapshot,
 ) -> BTreeMap<String, std::ffi::OsString> {
@@ -1214,7 +1204,6 @@ async fn execute_app_server<S>(
 /// stall is the monotonic elapsed time from attempt start to the deadline arm
 /// firing; a zero armed budget is refused by the payload contract, and
 /// emission never alters the timed-out product handling.
-#[hotpath::measure]
 fn offer_no_progress_observation(
     observability_producer: Option<&BoundedObservabilityProducerV1>,
     identity: &WorkAttemptIdentityV1,
@@ -1297,7 +1286,6 @@ enum TerminationSignal {
 }
 
 #[cfg(unix)]
-#[hotpath::measure]
 fn terminate(child: &mut tokio::process::Child, signal: TerminationSignal) {
     let signal = match signal {
         TerminationSignal::Interrupt => libc::SIGINT,
@@ -1316,13 +1304,11 @@ fn terminate(child: &mut tokio::process::Child, signal: TerminationSignal) {
 }
 
 #[cfg(not(unix))]
-#[hotpath::measure]
 fn terminate(child: &mut tokio::process::Child, _signal: TerminationSignal) {
     let _ = child.start_kill();
 }
 
 #[cfg(unix)]
-#[hotpath::measure]
 fn exit_outcome(status: std::process::ExitStatus) -> WorkAttemptProviderOutcomeV1 {
     use std::os::unix::process::ExitStatusExt;
 
@@ -1334,7 +1320,6 @@ fn exit_outcome(status: std::process::ExitStatus) -> WorkAttemptProviderOutcomeV
 }
 
 #[cfg(not(unix))]
-#[hotpath::measure]
 fn exit_outcome(status: std::process::ExitStatus) -> WorkAttemptProviderOutcomeV1 {
     match status.code() {
         Some(code) => WorkAttemptProviderOutcomeV1::Exited { code },

@@ -74,7 +74,6 @@ pub(super) enum HostProviderCoverage {
     Unavailable = 3,
 }
 
-#[hotpath::measure_all]
 impl HostProviderCoverage {
     pub(super) fn from_file_id(file_id: u64) -> Option<Self> {
         match file_id {
@@ -241,7 +240,6 @@ pub enum TranscriptIngestError {
     CursorKeyMismatch { expected: String, actual: String },
 }
 
-#[hotpath::measure_all]
 impl TranscriptIngestError {
     #[hotpath::skip]
     pub const fn is_cancelled(&self) -> bool {
@@ -257,7 +255,6 @@ impl TranscriptIngestError {
     }
 }
 
-#[hotpath::measure]
 fn log_source_skip(path: &Path, action: &'static str, error: &impl std::fmt::Display) {
     tracing::debug!(
         transcript_path = %path.display(),
@@ -267,7 +264,6 @@ fn log_source_skip(path: &Path, action: &'static str, error: &impl std::fmt::Dis
     );
 }
 
-#[hotpath::measure]
 fn log_jsonl_decode_skip(path: &Path, offset: u64, error: &serde_json::Error) {
     tracing::debug!(
         transcript_path = %path.display(),
@@ -277,7 +273,6 @@ fn log_jsonl_decode_skip(path: &Path, offset: u64, error: &serde_json::Error) {
     );
 }
 
-#[hotpath::measure]
 fn log_jsonl_oversized_skip(path: &Path, offset: u64, byte_len: u64) {
     tracing::debug!(
         transcript_path = %path.display(),
@@ -325,7 +320,6 @@ enum DurableTranscriptCursorKey {
     Opaque(String),
 }
 
-#[hotpath::measure_all]
 impl TranscriptCursorKey {
     pub fn for_path(path: &Path) -> Self {
         Self {
@@ -490,7 +484,6 @@ pub trait TranscriptSource: Send + Sync {
 /// `LocalSet` on a multi-thread runtime, which this workspace does not use.
 /// `spawn_blocking` is not usable at this boundary because the section
 /// borrows `&dyn TranscriptSource`, which is not `'static`.
-#[hotpath::measure]
 pub(crate) fn run_blocking_transcript_section<T>(work: impl FnOnce() -> T) -> T {
     match tokio::runtime::Handle::try_current() {
         Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
@@ -801,7 +794,6 @@ pub async fn persist_parsed_transcript<S: TranscriptIngestStore>(
     })
 }
 
-#[hotpath::measure]
 fn protect_parsed_transcript_structural_ids(
     parsed: &mut ParsedTranscript,
 ) -> Result<(), tracedecay_runtime_core::privacy::PrivacySanitizerError> {
@@ -827,7 +819,6 @@ fn protect_parsed_transcript_structural_ids(
     Ok(())
 }
 
-#[hotpath::measure]
 fn merge_session_metadata(existing: Option<&str>, incoming: Option<String>) -> Option<String> {
     let previous = existing.and_then(|value| serde_json::from_str::<Value>(value).ok());
     let next = incoming
@@ -854,7 +845,6 @@ fn merge_session_metadata(existing: Option<&str>, incoming: Option<String>) -> O
     }
 }
 
-#[hotpath::measure]
 fn merge_session_metadata_rollup(key: &str, existing: &mut Vec<Value>, incoming: Vec<Value>) {
     for value in incoming {
         if !existing
@@ -866,7 +856,6 @@ fn merge_session_metadata_rollup(key: &str, existing: &mut Vec<Value>, incoming:
     }
 }
 
-#[hotpath::measure]
 fn session_metadata_rollup_items_match(key: &str, left: &Value, right: &Value) -> bool {
     match key {
         "pr_links" => {
@@ -953,7 +942,6 @@ pub struct ChangedFile {
 /// with deterministic ids. Idempotent upserts make re-adding unchanged messages
 /// a no-op. Returns `None` when the file cannot be read or is unchanged since
 /// the last run.
-#[hotpath::measure]
 pub fn read_changed_file(path: &Path, prev: StoredCursor, max_bytes: u64) -> Option<ChangedFile> {
     let meta = match std::fs::metadata(path) {
         Ok(meta) => meta,
@@ -987,7 +975,6 @@ pub fn read_changed_file(path: &Path, prev: StoredCursor, max_bytes: u64) -> Opt
 /// own content hash moves or a companion sidecar file's hash moves. The stored
 /// cursor's `position` is a combined hash of both files so a sidecar-only
 /// update (e.g. Cline `ui_messages.json` usage counters) triggers a re-ingest.
-#[hotpath::measure]
 pub fn read_changed_with_companion(
     primary: &Path,
     companion: &Path,
@@ -1046,7 +1033,6 @@ pub fn read_changed_with_companion(
     })
 }
 
-#[hotpath::measure]
 fn read_file_to_string_bounded(path: &Path, max_bytes: u64) -> Option<String> {
     let mut file = match File::open(path) {
         Ok(file) => file,
@@ -1084,7 +1070,6 @@ pub fn collect_files_with_ext(dir: &Path, ext: &str, max_depth: u8) -> Vec<PathB
 }
 
 /// File modification time in epoch seconds, or 0 when unavailable.
-#[hotpath::measure]
 fn file_mtime_secs(meta: &std::fs::Metadata) -> u64 {
     meta.modified()
         .ok()
@@ -1094,7 +1079,6 @@ fn file_mtime_secs(meta: &std::fs::Metadata) -> u64 {
 
 const JSONL_HEAD_FINGERPRINT_BYTES: usize = 1024;
 
-#[hotpath::measure]
 fn should_resume_jsonl(prev: StoredCursor, file_size: u64, mtime: u64, file_id: u64) -> bool {
     if prev.position == 0 || file_size < prev.position {
         return false;
@@ -1109,7 +1093,6 @@ fn should_resume_jsonl(prev: StoredCursor, file_size: u64, mtime: u64, file_id: 
     mtime >= prev.mtime
 }
 
-#[hotpath::measure]
 fn stable_jsonl_file_id(
     file: &mut std::fs::File,
     meta: &std::fs::Metadata,
@@ -1148,14 +1131,12 @@ fn stable_jsonl_file_id(
     Ok((u64::from_be_bytes(bytes), identity_window_bytes))
 }
 
-#[hotpath::measure]
 pub(super) fn jsonl_file_identity(path: &Path) -> std::io::Result<u64> {
     let mut file = File::open(path)?;
     let metadata = file.metadata()?;
     Ok(stable_jsonl_file_id(&mut file, &metadata)?.0)
 }
 
-#[hotpath::measure]
 fn jsonl_head_fingerprint(file: &mut std::fs::File) -> std::io::Result<(u64, u64)> {
     file.seek(SeekFrom::Start(0))?;
     let mut reader = BufReader::new(file);
@@ -1178,7 +1159,6 @@ fn jsonl_head_fingerprint(file: &mut std::fs::File) -> std::io::Result<(u64, u64
 
 /// Stable 64-bit content hash prefix suitable for the existing integer
 /// `parse_offsets.byte_offset` column.
-#[hotpath::measure]
 pub fn content_hash64(contents: &str) -> u64 {
     let mut hasher = Sha256::new();
     hasher.update(contents.as_bytes());

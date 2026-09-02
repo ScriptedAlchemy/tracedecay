@@ -120,7 +120,6 @@ pub async fn get_parse_offset(
     }
 }
 
-#[hotpath::measure]
 fn sqlite_missing_column(error: &tracedecay_runtime_core::db::engine::Error, column: &str) -> bool {
     match error {
         tracedecay_runtime_core::db::engine::Error::Sqlite { message, .. } => {
@@ -130,7 +129,6 @@ fn sqlite_missing_column(error: &tracedecay_runtime_core::db::engine::Error, col
     }
 }
 
-#[hotpath::measure]
 fn decode_u64(
     row: &Row,
     index: i32,
@@ -142,12 +140,10 @@ fn decode_u64(
     u64::try_from(value).map_err(|error| TranscriptPersistenceError::storage(operation, error))
 }
 
-#[hotpath::measure]
 fn encode_i64(value: u64, operation: &'static str) -> Result<i64, TranscriptPersistenceError> {
     i64::try_from(value).map_err(|error| TranscriptPersistenceError::storage(operation, error))
 }
 
-#[hotpath::measure]
 fn decode_file_id(
     row: &Row,
     index: i32,
@@ -159,12 +155,10 @@ fn decode_file_id(
     Ok(decode_file_id_value(value))
 }
 
-#[hotpath::measure]
 fn encode_file_id(value: u64) -> i64 {
     i64::from_le_bytes(value.to_le_bytes())
 }
 
-#[hotpath::measure]
 fn decode_file_id_value(value: i64) -> u64 {
     u64::from_le_bytes(value.to_le_bytes())
 }
@@ -206,7 +200,6 @@ pub async fn set_parse_offset(
     .map_err(|error| TranscriptPersistenceError::storage("write transcript parse offset", error))
 }
 
-#[hotpath::measure_all]
 impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     #[hotpath::skip]
     pub(super) async fn begin_transcript_transaction(
@@ -389,8 +382,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         )
     }
 
-    #[hotpath::measure]
-    fn session_message_projection_statement(
+        fn session_message_projection_statement(
         message: &SessionMessageRecord,
         text: &str,
         metadata_json: Option<&str>,

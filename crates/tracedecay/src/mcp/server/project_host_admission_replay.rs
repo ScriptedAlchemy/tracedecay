@@ -39,7 +39,6 @@ pub(super) struct ProjectHostAdmissionReplayWorker {
     idle: Notify,
 }
 
-#[hotpath::measure_all]
 impl ProjectHostAdmissionReplayTask {
     pub(super) fn start(broker: SharedHostAdmissionBroker, pass: PassFn) -> Self {
         let worker = Arc::new(ProjectHostAdmissionReplayWorker {
@@ -95,7 +94,6 @@ impl Drop for ProjectHostAdmissionReplayTask {
     }
 }
 
-#[hotpath::measure_all]
 impl ProjectHostAdmissionReplayWorker {
     fn kick(&self) {
         self.dirty.store(true, Ordering::Release);
@@ -224,7 +222,6 @@ impl ProjectHostAdmissionReplayWorker {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn project_replay_backoff(attempt: u32) -> Duration {
     replay_backoff(attempt, REPLAY_BACKOFF_SHIFT_CAP)
 }

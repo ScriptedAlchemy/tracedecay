@@ -10,7 +10,6 @@ use tracedecay_store::ProjectId;
 
 use super::{MovedStoreAdoption, TraceDecay, TraceDecayOpenOptions};
 
-#[hotpath::measure_all]
 impl TraceDecay {
     pub(in crate::tracedecay) fn registered_project_id(
         store_layout: &StoreLayout,
@@ -432,7 +431,6 @@ impl TraceDecay {
     }
 }
 
-#[hotpath::measure]
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }

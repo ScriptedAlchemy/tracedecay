@@ -45,7 +45,6 @@ struct ScopeRootProofInputsV1 {
     vector_sources: std::collections::BTreeSet<tracedecay_domain::CodeGenerationId>,
 }
 
-#[hotpath::measure_all]
 impl ScopeRootProofInputsV1 {
     fn bind_candidate(
         &self,
@@ -294,12 +293,10 @@ pub(super) async fn run_semantic_vector_generation_retention(
 /// configuration commits neither an active nor a rollback retrieval profile.
 /// A committed profile with an unseated activation coordinator is a transient
 /// (or genuinely degraded) state that must stay retryable, not a quiet pin.
-#[hotpath::measure]
 fn semantic_retrieval_profiles_disabled(semantic: &SemanticConfig) -> bool {
     semantic.active_profile.is_none() && semantic.rollback_profile.is_none()
 }
 
-#[hotpath::measure]
 fn log_semantic_vector_retention_degraded(
     observations: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
     project_root: &Path,
@@ -338,7 +335,6 @@ pub(super) enum VectorRetentionInventoryV1 {
     },
 }
 
-#[hotpath::measure_all]
 impl VectorRetentionInventoryV1 {
     /// The `retention_degraded` failure the code-generation pass reports for
     /// this inventory, or `None` for states that are ordinary journeys and
@@ -398,7 +394,6 @@ pub(super) async fn resolve_vector_retention_inventory(
 /// Map the mounted graph's readable-source read onto the retention inventory:
 /// unavailable degrades to the offline protection set, while reset, corrupt,
 /// and denied stay fail-closed and refuse the sweep.
-#[hotpath::measure]
 fn classify_vector_readable_sources(
     sources: tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources,
     configuration: tracedecay_usecases::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
@@ -991,7 +986,6 @@ async fn apply_code_generation_retention(
     }
 }
 
-#[hotpath::measure]
 fn git_worktree_root_inventory(
     project_root: &Path,
 ) -> Result<
@@ -1753,7 +1747,6 @@ pub(super) async fn run_code_index_scope_reconciliation(
 ///
 /// Every failure is an `Err`, never a smaller set: a truncated live set is
 /// indistinguishable from stranding and would authorize deletion.
-#[hotpath::measure]
 pub(super) fn resolve_live_code_index_roots(
     project_root: &Path,
 ) -> Result<std::collections::BTreeSet<PathBuf>, &'static str> {
@@ -1763,7 +1756,6 @@ pub(super) fn resolve_live_code_index_roots(
 /// Record both the literal path and its symlink-resolved form. The scope hash
 /// is taken over the canonical root string recorded at publication time, and a
 /// live root spelled differently must never be mistaken for a dead one.
-#[hotpath::measure]
 fn insert_live_root_variants(roots: &mut std::collections::BTreeSet<PathBuf>, root: &Path) {
     roots.insert(root.to_path_buf());
     if let Ok(resolved) = std::fs::canonicalize(root) {
@@ -1774,14 +1766,12 @@ fn insert_live_root_variants(roots: &mut std::collections::BTreeSet<PathBuf>, ro
 /// The shared `code-index-v1/` parent that holds every scope root for one
 /// repository. Scope reconciliation operates here; generation retention
 /// operates one level down.
-#[hotpath::measure]
 pub(super) fn code_index_scope_store_root(data_root: &Path) -> PathBuf {
     data_root.join("code-index-v1")
 }
 
 /// Durable failure visibility for scope reconciliation. Every refusal names why
 /// so a fail-closed pass is never mistaken for "nothing was stranded".
-#[hotpath::measure]
 fn log_code_index_scope_reconciliation_degraded(failure: &str) {
     log_daemon_event(
         "retention_degraded",
@@ -1798,7 +1788,6 @@ fn log_code_index_scope_reconciliation_degraded(failure: &str) {
 /// reports on. A cadence pointed at any other directory would find no sealed
 /// generations and silently reclaim nothing, which is the failure this pass
 /// exists to end.
-#[hotpath::measure]
 pub(super) fn code_index_store_root(data_root: &Path, project_root: &Path) -> PathBuf {
     tracedecay_code_index_retention::code_index_generations::scoped_code_index_store_root(
         &code_index_scope_store_root(data_root),
@@ -1993,7 +1982,6 @@ enum RetainedCompactionStore<'a> {
     Project(&'a tracedecay_runtime_core::db::Database),
 }
 
-#[hotpath::measure_all]
 impl RetainedCompactionStore<'_> {
     #[hotpath::skip]
     async fn storage_page_counts(&self) -> tracedecay_domain::errors::Result<(u64, u64, u64)> {
@@ -2073,7 +2061,6 @@ async fn run_compaction(
     true
 }
 
-#[hotpath::measure]
 fn compaction_is_scheduled(
     page_size: u64,
     page_count: u64,
@@ -2115,7 +2102,6 @@ fn compaction_is_scheduled(
         .map_err(|_| ())
 }
 
-#[hotpath::measure]
 fn log_compaction(store_name: &'static str, freelist_before: u64, freelist_after: u64) {
     log_daemon_event(
         "retention_compaction",
@@ -2206,7 +2192,6 @@ pub(super) async fn run_branch_compaction(
     branch_compaction_succeeded(&report)
 }
 
-#[hotpath::measure]
 pub(super) fn branch_compaction_succeeded(
     report: &tracedecay_maintenance::retention::branch_compaction::BranchCompactionReport,
 ) -> bool {

@@ -13,7 +13,6 @@ use tracedecay_tool_catalog::ExecutableBindingV1;
 use super::{DispatchCatalogBinding, McpToolDispatchGroup};
 
 /// Resolve a Workflow MCP name through the canonical Workflow descriptor.
-#[hotpath::measure]
 pub(crate) fn workflow_operation_for_tool(
     tool_name: &str,
 ) -> Option<tracedecay_api::WorkflowOperation> {
@@ -24,7 +23,6 @@ pub(crate) fn workflow_operation_for_tool(
 }
 
 /// Resolve the executable Workflow binding that names an MCP tool.
-#[hotpath::measure]
 pub(super) fn workflow_executable_binding_for_tool(
     tool_name: &str,
 ) -> Result<Option<ExecutableBindingV1>, super::super::dispatch::McpDispatchMetadataError> {
@@ -47,7 +45,6 @@ pub(super) fn workflow_executable_binding_for_tool(
 /// Resolves the registry once and looks each operation up in it, rather than
 /// re-fetching the registry per operation through
 /// [`workflow_executable_binding_for_tool`].
-#[hotpath::measure]
 pub(super) fn dispatch_catalog_bindings()
 -> Result<Vec<DispatchCatalogBinding>, super::super::dispatch::McpDispatchMetadataError> {
     let registry = tracedecay_application::workflow_executable_binding_registry()
@@ -77,7 +74,6 @@ pub(super) fn dispatch_catalog_bindings()
         .collect()
 }
 
-#[hotpath::measure]
 fn invalid_workflow_binding(
     reason: &'static str,
 ) -> super::super::dispatch::McpDispatchMetadataError {

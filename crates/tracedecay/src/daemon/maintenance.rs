@@ -68,7 +68,6 @@ pub(super) struct GuardedStoreTelemetryPort {
     table_watermarks: Arc<std::sync::Mutex<Option<BTreeMap<TableNameV1, TableWatermark>>>>,
 }
 
-#[hotpath::measure_all]
 impl GuardedStoreTelemetryPort {
     fn new(
         handle: DatabaseStorageTelemetryHandle,
@@ -210,7 +209,6 @@ impl StoreSizeTelemetryPort for GuardedStoreTelemetryPort {
     }
 }
 
-#[hotpath::measure]
 fn compare_table_growth(
     store: &StoreKeyV1,
     current_tables: BTreeMap<TableNameV1, StorageByteSizeV1>,
@@ -280,7 +278,6 @@ fn compare_table_growth(
     }
 }
 
-#[hotpath::measure]
 fn telemetry_interruption(
     context: &RequestContext,
 ) -> Option<tracedecay_store::UnavailableReasonV1> {
@@ -364,7 +361,6 @@ pub(super) struct SemanticVectorRetentionBacklogV1 {
     pub(super) cancelled: u64,
 }
 
-#[hotpath::measure_all]
 impl SemanticVectorRetentionBacklogV1 {
     pub(super) fn from_receipt(
         receipt: &tracedecay_store::SemanticVectorProjectCensusReceipt,
@@ -392,7 +388,6 @@ pub(super) enum SemanticVectorRetentionCensusOutcome {
     ReceiptIdentityMismatch,
 }
 
-#[hotpath::measure_all]
 impl SemanticVectorRetentionCensusOutcome {
     #[hotpath::skip]
     pub(super) const fn as_failure_label(self) -> Option<&'static str> {
@@ -433,7 +428,6 @@ struct SemanticVectorRetentionProgressV1 {
     semantic_unseated: bool,
 }
 
-#[hotpath::measure_all]
 impl StoreTelemetrySamplingRegistry {
     pub(super) fn register_port<E>(
         &self,
@@ -911,7 +905,6 @@ impl StoreTelemetrySamplingRegistry {
 
 /// Persistent by-design retention conditions log once, then count on gauges.
 /// Corrupt, reset, denied, and cancelled failures stay loud every attempt.
-#[hotpath::measure]
 pub(super) fn retention_failure_is_by_design(
     lane: RetentionOperatorLogLaneV1,
     failure: &str,
@@ -927,7 +920,6 @@ pub(super) fn retention_failure_is_by_design(
     }
 }
 
-#[hotpath::measure]
 fn storage_telemetry_request_context(
     scope: ResolvedScope,
 ) -> Result<RequestContext, ApplicationContractError> {
@@ -996,7 +988,6 @@ pub(in crate::daemon) enum MaintenanceContinuation {
     CodeGenerationRetention,
 }
 
-#[hotpath::measure_all]
 impl MaintenanceContinuation {
     /// Two phases asking to continue collapse to the one whose continuation
     /// tick still advances both: a code-generation continuation re-runs the
@@ -1021,7 +1012,6 @@ pub(in crate::daemon) enum MaintenanceTickOutcome {
     Retry,
 }
 
-#[hotpath::measure_all]
 impl MaintenanceTickOutcome {
     pub(in crate::daemon) fn is_complete(self) -> bool {
         self == Self::Complete
@@ -1082,7 +1072,6 @@ pub(super) struct MaintenanceCadence {
     in_flight: bool,
 }
 
-#[hotpath::measure_all]
 impl MaintenanceCadence {
     pub(super) fn new(interval: Duration) -> Self {
         Self {
@@ -1115,7 +1104,6 @@ impl MaintenanceCadence {
 
 struct MaintenanceLifecycleInstrumentation;
 
-#[hotpath::measure_all]
 impl MaintenanceLifecycleInstrumentation {
     fn new() -> Self {
         #[cfg(any(feature = "hotpath", test))]
@@ -1164,7 +1152,6 @@ struct MaintenancePhaseInstrumentation {
     continuation: Option<MaintenanceContinuation>,
 }
 
-#[hotpath::measure_all]
 impl MaintenancePhaseInstrumentation {
     fn new(continuation: Option<MaintenanceContinuation>) -> Self {
         match continuation {
@@ -1246,7 +1233,6 @@ pub(super) struct ColdStoreCursorV1 {
     pub(super) after_project_id: Option<String>,
 }
 
-#[hotpath::measure]
 fn next_cold_store_cursor(
     previous: Option<&str>,
     project_ids: &[String],
@@ -1272,7 +1258,6 @@ pub(super) enum MaintenanceStoreOutcomeV1 {
     Cancelled,
 }
 
-#[hotpath::measure_all]
 impl MaintenanceStoreOutcomeV1 {
     fn was_processed(self) -> bool {
         self == Self::Processed
@@ -1336,7 +1321,6 @@ enum MaintenanceStoreWork {
     Graph(Arc<crate::tracedecay::TraceDecay>),
 }
 
-#[hotpath::measure_all]
 impl MaintenanceStoreWork {
     fn database_path(&self) -> &Path {
         match self {
@@ -1354,7 +1338,6 @@ impl MaintenanceStoreWork {
 /// `ceil(len / budget)` consecutive ticks, every store is processed at least
 /// once — nothing that should be reclaimed is starved forever — while any
 /// single tick touches no more than `budget` stores.
-#[hotpath::measure]
 fn select_store_window(
     keys: &[String],
     after: Option<&str>,
@@ -1376,7 +1359,6 @@ fn select_store_window(
     (indices, next)
 }
 
-#[hotpath::measure]
 fn cursor_after_attempted_units(
     keys: &[String],
     window: &[usize],
@@ -1391,7 +1373,6 @@ fn cursor_after_attempted_units(
         .or_else(|| prior.map(str::to_owned))
 }
 
-#[hotpath::measure_all]
 impl MaintenanceCoordinator {
     #[hotpath::skip]
     pub(super) async fn spawn(
@@ -1776,7 +1757,6 @@ impl MaintenanceCoordinator {
 /// measurement says the process is over budget. There is exactly one reader
 /// here — the gauge and the admission cell consume the same sample.
 #[cfg(target_os = "linux")]
-#[hotpath::measure]
 fn record_process_resident_memory_gauge() {
     if let Some(bytes) =
         tracedecay_runtime_core::resident_memory::sampled_process_resident_bytes_v1()
@@ -1803,7 +1783,6 @@ fn record_process_resident_memory_gauge() {
 }
 
 #[cfg(not(target_os = "linux"))]
-#[hotpath::measure]
 fn record_process_resident_memory_gauge() {}
 
 #[derive(Debug)]
@@ -1947,7 +1926,6 @@ async fn run_cold_store_page(
     Ok(metrics)
 }
 
-#[hotpath::measure]
 fn classify_cold_store_state(
     cancelled: bool,
     manifest_readable: bool,
@@ -1964,20 +1942,17 @@ fn classify_cold_store_state(
     }
 }
 
-#[hotpath::measure]
 fn checkpoint_path(profile_root: &Path) -> PathBuf {
     profile_root
         .join(CHECKPOINT_DIRECTORY)
         .join(CHECKPOINT_FILE)
 }
 
-#[hotpath::measure]
 fn load_cursor(path: &Path) -> Option<ColdStoreCursorV1> {
     let bytes = std::fs::read(path).ok()?;
     serde_json::from_slice(&bytes).ok()
 }
 
-#[hotpath::measure]
 fn persist_cursor(path: &Path, cursor: &ColdStoreCursorV1) -> std::io::Result<()> {
     let parent = path
         .parent()
@@ -1991,7 +1966,6 @@ fn persist_cursor(path: &Path, cursor: &ColdStoreCursorV1) -> std::io::Result<()
     std::fs::rename(temporary, path)
 }
 
-#[hotpath::measure]
 pub(super) fn retention_maintenance_enabled(retention: &crate::config::RetentionConfig) -> bool {
     retention.session_lcm.enabled
         || retention.observation.enabled
@@ -2000,7 +1974,6 @@ pub(super) fn retention_maintenance_enabled(retention: &crate::config::Retention
         || retention.compaction.is_some()
 }
 
-#[hotpath::measure]
 pub(super) fn retention_window_secs(days: u64) -> i64 {
     i64::try_from(days)
         .ok()
@@ -2008,7 +1981,6 @@ pub(super) fn retention_window_secs(days: u64) -> i64 {
         .unwrap_or(i64::MAX)
 }
 
-#[hotpath::measure]
 pub(crate) fn now_secs_i64() -> Result<i64, &'static str> {
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)

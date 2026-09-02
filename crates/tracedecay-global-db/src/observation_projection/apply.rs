@@ -28,7 +28,6 @@ use super::transition::{
     message_transition, write_workflow_fact_transition,
 };
 
-#[hotpath::measure]
 fn decode_canonical_envelope(
     payload: &serde_json::Value,
 ) -> Result<CanonicalObservationEnvelopeV1, serde_json::Error> {
@@ -48,7 +47,6 @@ pub(in super::super) fn derive_projection(
     }
 }
 
-#[hotpath::measure]
 fn derive_claude_projection(
     observation: &DurableObservationV1,
 ) -> ProjectionStoreResult<ObservationProjection> {
@@ -248,7 +246,6 @@ async fn derive_projection_with_alias_from_generation(
 
 /// Objective used for goal-state dedupe: prefer native `/objective` (Codex),
 /// else the already-extracted `content_text`.
-#[hotpath::measure]
 fn goal_objective_from_content(content: Option<&serde_json::Value>, content_text: &str) -> String {
     content
         .and_then(|content| content.get("objective"))
@@ -258,12 +255,10 @@ fn goal_objective_from_content(content: Option<&serde_json::Value>, content_text
         .map_or_else(|| content_text.to_owned(), str::to_owned)
 }
 
-#[hotpath::measure]
 fn goal_dedupe_objective(fact: &WorkflowFactRecord) -> String {
     goal_objective_from_content(fact.content.as_ref(), &fact.content_text)
 }
 
-#[hotpath::measure]
 fn goal_dedupe_key(fact: &WorkflowFactRecord) -> (String, Option<String>) {
     (goal_dedupe_objective(fact), fact.status.clone())
 }
@@ -651,7 +646,6 @@ async fn apply_rows(
     Ok(transition == MessageTransition::Insert)
 }
 
-#[hotpath::measure]
 fn workflow_content_json(
     projection: &WorkflowFactProjection,
 ) -> ProjectionStoreResult<Option<String>> {
@@ -1168,7 +1162,6 @@ struct ProviderUsageRow {
     native_field: String,
 }
 
-#[hotpath::measure]
 fn provider_usage_from_observation(
     observation: &DurableObservationV1,
 ) -> ProjectionStoreResult<Option<(CanonicalObservationEnvelopeV1, Vec<ProviderUsageRow>)>> {
@@ -1179,7 +1172,6 @@ fn provider_usage_from_observation(
     Ok((!rows.is_empty()).then_some((envelope, rows)))
 }
 
-#[hotpath::measure]
 fn provider_usage_rows_from_envelope(
     envelope: &CanonicalObservationEnvelopeV1,
 ) -> ProjectionStoreResult<Vec<ProviderUsageRow>> {
@@ -1241,7 +1233,6 @@ fn provider_usage_rows_from_envelope(
         .collect()
 }
 
-#[hotpath::measure]
 fn provider_usage_scope(scope: &ObservationScopeV1) -> (&'static str, Option<&str>) {
     match scope {
         ObservationScopeV1::Profile => ("profile", None),
@@ -1401,7 +1392,6 @@ struct ProviderUsageContext<'a> {
     source_end: i64,
 }
 
-#[hotpath::measure_all]
 impl<'a> ProviderUsageContext<'a> {
     fn from_decoded(
         sequence: i64,

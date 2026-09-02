@@ -38,7 +38,6 @@ struct EntityAggregate {
     fact_ids: BTreeSet<FactId>,
 }
 
-#[hotpath::measure]
 fn dashboard_fact_summary(
     projection: ProjectMemoryFactProjectionV1,
 ) -> ProjectMemoryDashboardFactSummaryV1 {
@@ -140,7 +139,6 @@ async fn dashboard_canonical_projections_tx(
     Ok(projections)
 }
 
-#[hotpath::measure]
 fn dashboard_entity_aggregates(
     facts: &[ProjectMemoryFactProjectionV1],
     read_control: &FactReadControl,
@@ -168,7 +166,6 @@ fn dashboard_entity_aggregates(
     Ok(entities)
 }
 
-#[hotpath::measure]
 fn dashboard_entities(
     owner: &FactOwnerV1,
     aggregates: &BTreeMap<String, EntityAggregate>,
@@ -197,7 +194,6 @@ fn dashboard_entities(
     Ok(projected)
 }
 
-#[hotpath::measure]
 fn dashboard_fact_entity_links(
     owner: &FactOwnerV1,
     aggregates: &BTreeMap<String, EntityAggregate>,
@@ -443,7 +439,6 @@ pub(super) async fn dashboard_project_memory_overview_tx(
     )
 }
 
-#[hotpath::measure]
 fn dashboard_entities_for_fact(
     fact: &ProjectMemoryFactV1,
     read_control: &FactReadControl,
@@ -632,7 +627,6 @@ pub(super) async fn dashboard_project_memory_vector_points_tx(
         .collect::<FactStoreResult<Vec<_>>>()
 }
 
-#[hotpath::measure]
 fn dashboard_oplog_operation(kind: &FactLineageEventKindV1) -> &'static str {
     match kind {
         FactLineageEventKindV1::AssertionRecorded { .. } => "assertion_recorded",

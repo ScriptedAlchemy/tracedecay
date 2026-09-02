@@ -27,7 +27,6 @@ pub enum SessionHistoricalIngestOutcome {
     Cancelled,
 }
 
-#[hotpath::measure_all]
 impl SessionHistoricalIngestOutcome {
     #[hotpath::skip]
     pub const fn needs_another_pass(self) -> bool {
@@ -67,7 +66,6 @@ pub struct ProjectSessionHistoricalIngestor {
     codex_registered: AtomicBool,
 }
 
-#[hotpath::measure_all]
 impl ProjectSessionHistoricalIngestor {
     pub fn new(
         database: RegisteredGlobalDbLeaseV1,
@@ -160,7 +158,6 @@ pub struct ProfileSessionHistoricalIngestor {
     codex_registered: AtomicBool,
 }
 
-#[hotpath::measure_all]
 impl ProfileSessionHistoricalIngestor {
     pub fn new(
         database: RegisteredGlobalDbLeaseV1,
@@ -199,7 +196,6 @@ impl ProfileSessionHistoricalIngestor {
     }
 }
 
-#[hotpath::measure]
 fn codex_consumer_key(
     kind: &str,
     brain_id: &str,
@@ -258,7 +254,6 @@ impl Drop for ProfileSessionHistoricalIngestor {
     }
 }
 
-#[hotpath::measure]
 fn classify_transcript_ingest_outcome(
     outcome: tracedecay_sessions::runtime::TranscriptIngestOutcome,
     cancellation: &ObservationCancellation,

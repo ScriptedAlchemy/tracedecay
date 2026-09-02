@@ -50,7 +50,6 @@ pub struct SessionTemporalRefreshProjectorError {
     pub code: String,
 }
 
-#[hotpath::measure_all]
 impl SessionTemporalRefreshProjectorError {
     pub fn retryable(code: impl Into<String>) -> Self {
         Self {
@@ -131,7 +130,6 @@ impl SessionTemporalRefreshProjector for CanonicalSessionTemporalProjector {
     }
 }
 
-#[hotpath::measure]
 fn refresh_clock_micros() -> UtcMicros {
     UtcMicros(
         i64::try_from(
@@ -144,7 +142,6 @@ fn refresh_clock_micros() -> UtcMicros {
     )
 }
 
-#[hotpath::measure]
 pub fn zero_refresh_coverage() -> TemporalCoverageCountsV1 {
     TemporalCoverageCountsV1 {
         visible: 0,
@@ -154,7 +151,6 @@ pub fn zero_refresh_coverage() -> TemporalCoverageCountsV1 {
     }
 }
 
-#[hotpath::measure]
 fn canonical_noop_complete_effect(
     recovery: &SessionRefreshRecoveryV1,
 ) -> std::result::Result<SessionTemporalRefreshEffect, SessionTemporalRefreshProjectorError> {
@@ -203,7 +199,6 @@ fn canonical_noop_complete_effect(
     Ok(SessionTemporalRefreshEffect::Projection { progress, batch })
 }
 
-#[hotpath::measure]
 pub fn durable_projector_failure_code(code: &str) -> String {
     match SessionRefreshFailureCodeV1::new(code) {
         Ok(code) => code.as_str().to_string(),

@@ -7,7 +7,6 @@ use super::{
 };
 use crate::ToolDefinition;
 
-#[hotpath::measure]
 pub(super) fn def_dead_code() -> ToolDefinition {
     def(
         "tracedecay_dead_code",
@@ -38,7 +37,6 @@ pub(super) fn def_dead_code() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_circular() -> ToolDefinition {
     def(
         "tracedecay_circular",
@@ -64,7 +62,6 @@ pub(super) fn def_circular() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_hotspots() -> ToolDefinition {
     def(
         "tracedecay_hotspots",
@@ -82,7 +79,6 @@ pub(super) fn def_hotspots() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_unused_imports() -> ToolDefinition {
     def(
         "tracedecay_unused_imports",
@@ -104,7 +100,6 @@ pub(super) fn def_unused_imports() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_unmounted_files() -> ToolDefinition {
     def(
         "tracedecay_unmounted_files",
@@ -156,7 +151,6 @@ pub(super) fn def_unmounted_files() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_rank() -> ToolDefinition {
     def(
         "tracedecay_rank",
@@ -193,7 +187,6 @@ pub(super) fn def_rank() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_largest() -> ToolDefinition {
     def_object(
         "tracedecay_largest",
@@ -207,7 +200,6 @@ pub(super) fn def_largest() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_coupling() -> ToolDefinition {
     def(
         "tracedecay_coupling",
@@ -234,7 +226,6 @@ pub(super) fn def_coupling() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_inheritance_depth() -> ToolDefinition {
     def_path_limit_tool(
         "tracedecay_inheritance_depth",
@@ -245,7 +236,6 @@ pub(super) fn def_inheritance_depth() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_distribution() -> ToolDefinition {
     def_object(
         "tracedecay_distribution",
@@ -262,7 +252,6 @@ pub(super) fn def_distribution() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_recursion() -> ToolDefinition {
     def_path_limit_tool(
         "tracedecay_recursion",
@@ -273,7 +262,6 @@ pub(super) fn def_recursion() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_complexity() -> ToolDefinition {
     def_object(
         "tracedecay_complexity",
@@ -287,7 +275,6 @@ pub(super) fn def_complexity() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_doc_coverage() -> ToolDefinition {
     def_path_limit_tool(
         "tracedecay_doc_coverage",
@@ -298,7 +285,6 @@ pub(super) fn def_doc_coverage() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_god_class() -> ToolDefinition {
     def_path_limit_tool(
         "tracedecay_god_class",
@@ -309,7 +295,6 @@ pub(super) fn def_god_class() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_port_status(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_port_status",
@@ -319,7 +304,6 @@ pub(super) fn def_port_status(input_schema: Value) -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_port_order(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_port_order",
@@ -329,7 +313,6 @@ pub(super) fn def_port_order(input_schema: Value) -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_simplify_scan() -> ToolDefinition {
     def(
         "tracedecay_simplify_scan",
@@ -349,7 +332,6 @@ pub(super) fn def_simplify_scan() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_gini() -> ToolDefinition {
     def_object(
         "tracedecay_gini",
@@ -372,7 +354,6 @@ pub(super) fn def_gini() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_dependency_depth() -> ToolDefinition {
     def_path_limit_tool(
         "tracedecay_dependency_depth",
@@ -383,7 +364,6 @@ pub(super) fn def_dependency_depth() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_health() -> ToolDefinition {
     def_path_flag_tool(
         "tracedecay_health",
@@ -395,7 +375,6 @@ pub(super) fn def_health() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_redundancy(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_redundancy",
@@ -405,7 +384,6 @@ pub(super) fn def_redundancy(input_schema: Value) -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_dsm() -> ToolDefinition {
     def(
         "tracedecay_dsm",
@@ -432,7 +410,6 @@ pub(super) fn def_dsm() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_todos(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_todos",
@@ -444,7 +421,6 @@ pub(super) fn def_todos(input_schema: Value) -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_unsafe_patterns() -> ToolDefinition {
     def(
         "tracedecay_unsafe_patterns",

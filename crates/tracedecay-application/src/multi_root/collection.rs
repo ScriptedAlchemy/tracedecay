@@ -21,7 +21,6 @@ pub struct MultiRootCollectionSelectorV1 {
     default_collection: Option<ScopeSetId>,
 }
 
-#[hotpath::measure_all]
 impl MultiRootCollectionSelectorV1 {
     pub fn new(
         explicit_target: Option<ScopeSetId>,
@@ -53,7 +52,6 @@ pub enum MultiRootCollectionUnavailableV1 {
     AuthorityUnavailable { detail: String },
 }
 
-#[hotpath::measure_all]
 impl MultiRootCollectionUnavailableV1 {
     /// Human-readable reason carried on the wire capability projection.
     pub fn reason(&self) -> String {
@@ -86,7 +84,6 @@ pub enum MultiRootCollectionResolutionV1 {
     },
 }
 
-#[hotpath::measure_all]
 impl MultiRootCollectionResolutionV1 {
     /// Maps one persisted scope-set read for `target`.
     ///

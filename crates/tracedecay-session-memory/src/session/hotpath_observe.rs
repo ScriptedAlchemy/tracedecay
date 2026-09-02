@@ -9,7 +9,6 @@ use tracedecay_application::retrieval::SessionRetrievalBudgetStageV1;
 /// Count one bounded session-retrieval budget stage. Keys stay static; the
 /// stage is never a dynamic label.
 #[inline]
-#[hotpath::measure]
 pub(crate) fn session_retrieval_budget_stage(stage: SessionRetrievalBudgetStageV1) {
     match stage {
         SessionRetrievalBudgetStageV1::RequestResultLimit => {

@@ -16,7 +16,6 @@ pub struct SemanticNativeProfileRequirementsV1 {
 }
 
 /// Derive execution requirements from the checked-in workload profile.
-#[hotpath::measure]
 pub fn native_profile_requirements(
     workload: &CandidateWorkloadV1,
     profile_id: &str,
@@ -31,7 +30,6 @@ pub fn native_profile_requirements(
     Ok(requirements_for_profile(profile))
 }
 
-#[hotpath::measure]
 pub(super) fn requirements_for_profile(
     profile: &ProfileSpecV1,
 ) -> SemanticNativeProfileRequirementsV1 {

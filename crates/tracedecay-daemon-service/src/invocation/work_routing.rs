@@ -24,7 +24,6 @@ pub struct DaemonWorkProposalRoutingAuthorityV1 {
     configuration_digest: ManifestDigest,
 }
 
-#[hotpath::measure_all]
 impl DaemonWorkProposalRoutingAuthorityV1 {
     pub fn mount(
         scope: ResolvedScope,

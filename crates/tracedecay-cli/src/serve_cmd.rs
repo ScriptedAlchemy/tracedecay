@@ -15,7 +15,6 @@ use tracedecay_domain::errors::Result;
 /// contain `$` are not misclassified. A matching value is overwhelmingly more
 /// likely to be an unexpanded host template than a real directory name, so
 /// callers treat it as "no path given".
-#[hotpath::measure]
 pub fn unexpanded_template_variable(path: &str) -> Option<&str> {
     let mut search_from = 0;
     while let Some(offset) = path[search_from..].find("${") {
@@ -30,7 +29,6 @@ pub fn unexpanded_template_variable(path: &str) -> Option<&str> {
     None
 }
 
-#[hotpath::measure]
 fn plausible_template_contents(contents: &str) -> bool {
     // Variable name, optionally followed by a `:`-introduced modifier
     // (e.g. `${workspaceFolder:-/tmp/fallback}`); only the name is validated.
@@ -50,7 +48,6 @@ fn plausible_template_contents(contents: &str) -> bool {
 /// value is discarded with a stderr warning so daemon routing can fall back
 /// to project discovery and MCP initialize roots without treating the literal
 /// template as a project path.
-#[hotpath::measure]
 pub fn sanitize_serve_path_arg(path: Option<String>) -> Option<String> {
     let raw = path?;
     let Some(variable) = unexpanded_template_variable(&raw) else {
@@ -82,7 +79,6 @@ pub async fn run_serve(path_arg: Option<String>, timings: bool) -> Result<()> {
 /// database. A running daemon is the sole database owner for this serve
 /// process; it performs the open (and the same config-gated git auto-init)
 /// after receiving the handshake.
-#[hotpath::measure]
 fn proxy_serve_handshake(
     path_arg: Option<String>,
     original_cwd: Option<&Path>,
@@ -153,7 +149,6 @@ fn proxy_serve_handshake(
 /// The scope prefix for a serve session: the relative path from the project
 /// root to the directory serve was launched from, when the latter is inside
 /// the project.
-#[hotpath::measure]
 fn serve_scope_prefix(original_cwd: Option<&Path>, project_root: &Path) -> Option<String> {
     original_cwd.and_then(|cwd| {
         cwd.strip_prefix(project_root)

@@ -15,7 +15,6 @@ use crate::work::{exact_sql_statement, exact_sql_text, registered_work_query};
 
 type PortError = WorkProductEventPortErrorV1;
 
-#[hotpath::measure]
 pub(super) fn publish_in_transaction(
     transaction: &crate::exact_sql::ExactSqlTransaction,
     context: &WorkProductPortContextV1,

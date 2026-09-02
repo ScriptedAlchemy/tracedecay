@@ -45,12 +45,10 @@ const OBSERVATION_ROW_AUDIT_VIOLATIONS: &[&str] = &[
     "committed observation contains invalid authority JSON",
 ];
 
-#[hotpath::measure]
 pub(super) fn observation_row_audit_covers(invariant: &Invariant) -> bool {
     OBSERVATION_ROW_AUDIT_VIOLATIONS.contains(&invariant.violation)
 }
 
-#[hotpath::measure]
 fn classify_invariant_row_audit(invariant: &Invariant) -> Option<InvariantRowAuditCategory> {
     invariant.audit_query.as_ref()?;
     if observation_row_audit_covers(invariant) {
@@ -64,7 +62,6 @@ fn classify_invariant_row_audit(invariant: &Invariant) -> Option<InvariantRowAud
     }
 }
 
-#[hotpath::measure]
 fn bounded_row_audit_invariants() -> impl Iterator<Item = &'static Invariant> {
     INVARIANTS.iter().filter(|invariant| {
         classify_invariant_row_audit(invariant) == Some(InvariantRowAuditCategory::Bounded)
@@ -93,14 +90,12 @@ pub(super) async fn query_has_rows(
         .map_err(|error| global_db_operation_error(OPERATION, error))
 }
 
-#[hotpath::measure]
 pub(super) fn authority_violation(
     message: impl Into<String>,
 ) -> tracedecay_domain::errors::TraceDecayError {
     global_db_operation_message(OPERATION, message)
 }
 
-#[hotpath::measure]
 pub(super) fn decode_authority_json<T: DeserializeOwned>(
     json: &str,
     authority: &str,
@@ -109,7 +104,6 @@ pub(super) fn decode_authority_json<T: DeserializeOwned>(
         .map_err(|error| authority_violation(format!("invalid {authority}: {error}")))
 }
 
-#[hotpath::measure]
 pub(super) fn encode_authority_json<T: Serialize>(
     value: &T,
     authority: &str,

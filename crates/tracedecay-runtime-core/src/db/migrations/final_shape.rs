@@ -18,7 +18,6 @@ type SchemaInventory = BTreeMap<String, SchemaObject>;
 static EXPECTED_FINAL_SHAPE: LazyLock<std::result::Result<SchemaInventory, String>> =
     LazyLock::new(build_expected_final_shape);
 
-#[hotpath::measure]
 fn build_expected_final_shape() -> std::result::Result<SchemaInventory, String> {
     let connection = rusqlite::Connection::open_in_memory()
         .map_err(|error| format!("failed to open canonical in-memory schema: {error}"))?;
@@ -57,7 +56,6 @@ fn build_expected_final_shape() -> std::result::Result<SchemaInventory, String> 
     read_rusqlite_inventory(&connection)
 }
 
-#[hotpath::measure]
 fn read_rusqlite_inventory(
     connection: &rusqlite::Connection,
 ) -> std::result::Result<SchemaInventory, String> {
@@ -150,7 +148,6 @@ async fn read_inventory(conn: &impl QueryExecutor) -> Result<SchemaInventory> {
     Ok(inventory)
 }
 
-#[hotpath::measure]
 fn database_error(message: String) -> TraceDecayError {
     TraceDecayError::Database {
         message,
@@ -158,7 +155,6 @@ fn database_error(message: String) -> TraceDecayError {
     }
 }
 
-#[hotpath::measure]
 fn reset_required(reason: impl Into<String>) -> TraceDecayError {
     TraceDecayError::reset_required(
         "SQLite store",

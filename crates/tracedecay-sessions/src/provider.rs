@@ -18,7 +18,6 @@ pub enum SessionProvider {
     Hermes,
 }
 
-#[hotpath::measure_all]
 impl SessionProvider {
     pub const ALL: [Self; 11] = [
         Self::Claude,
@@ -105,7 +104,6 @@ pub const EXPECTED_MESSAGE_SEARCH_PROVIDER: &str =
 /// padding. URL-safe `-` is accepted for compatibility with derived directory
 /// names. The selected engine requires canonical padding and zero trailing
 /// bits, so malformed names fail closed.
-#[hotpath::measure]
 pub fn decode_kiro_workspace_path(name: &str) -> Option<PathBuf> {
     let trimmed = name.trim_end_matches('_');
     if trimmed.is_empty() {
@@ -129,7 +127,6 @@ pub enum ProviderScope {
     One(SessionProvider),
 }
 
-#[hotpath::measure_all]
 impl ProviderScope {
     pub fn parse_optional(value: Option<&str>) -> Result<Self, String> {
         match value.map(str::trim).filter(|provider| !provider.is_empty()) {

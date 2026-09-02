@@ -55,7 +55,6 @@ struct SessionSyncTaskShutdownV1 {
     tasks: Vec<SessionSyncTaskV1>,
 }
 
-#[hotpath::measure_all]
 impl SessionSyncTaskShutdownV1 {
     fn take(registry: &Arc<Mutex<Vec<SessionSyncTaskV1>>>) -> Self {
         let tasks = {
@@ -126,7 +125,6 @@ impl Default for DaemonSessionSyncService {
     }
 }
 
-#[hotpath::measure_all]
 impl DaemonSessionSyncService {
     #[hotpath::skip]
     async fn execute_request_admitted(
@@ -1046,7 +1044,6 @@ pub mod test_harness {
     }
 }
 
-#[hotpath::measure_all]
 impl DaemonSessionSyncService {
     fn observed_interruption(
         &self,
@@ -1094,14 +1091,12 @@ impl DaemonSessionSyncService {
     }
 }
 
-#[hotpath::measure]
 fn sleep_until_deadline(deadline: &tracedecay_application::Deadline) -> impl Future<Output = ()> {
     let remaining_micros = deadline.expires_at.0.saturating_sub(now_micros().0);
     let remaining = u64::try_from(remaining_micros).unwrap_or(0);
     tokio::time::sleep(Duration::from_micros(remaining))
 }
 
-#[hotpath::measure]
 fn journal_prefix(scope: &SessionSyncScopeV1) -> String {
     let profile_id = scope.profile_id().as_str();
     let project_id = scope.project_id().as_str();
@@ -1112,7 +1107,6 @@ fn journal_prefix(scope: &SessionSyncScopeV1) -> String {
     )
 }
 
-#[hotpath::measure]
 fn import_scope_key(scope: &SessionSyncScopeV1) -> String {
     format!(
         "p{}:{}.r{}:{}",
@@ -1123,7 +1117,6 @@ fn import_scope_key(scope: &SessionSyncScopeV1) -> String {
     )
 }
 
-#[hotpath::measure]
 fn completed_profile_sweep_covers(
     sweep_started_at: Option<&UtcMicros>,
     admitted_at: UtcMicros,
@@ -1131,7 +1124,6 @@ fn completed_profile_sweep_covers(
     sweep_started_at.is_some_and(|sweep_started_at| *sweep_started_at >= admitted_at)
 }
 
-#[hotpath::measure]
 fn source_coverage(
     store_scope: &str,
     coverage: tracedecay_sessions::runtime::IngestPassCoverage,
@@ -1157,12 +1149,10 @@ fn source_coverage(
     }
 }
 
-#[hotpath::measure]
 fn journal_key(scope: &SessionSyncScopeV1, key: &IdempotencyKey) -> String {
     format!("{}{}", journal_prefix(scope), key.as_str())
 }
 
-#[hotpath::measure]
 fn decode_matching_journal(
     encoded: &str,
     request: &SessionSyncRequestV1,
@@ -1178,7 +1168,6 @@ fn decode_matching_journal(
     Ok(journal)
 }
 
-#[hotpath::measure]
 fn completion_termination(
     requested: Option<OperationTermination>,
     committed: bool,
@@ -1197,26 +1186,22 @@ fn completion_termination(
     }
 }
 
-#[hotpath::measure]
 fn saturating_usize_to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
 
-#[hotpath::measure]
 fn contract_error(error: impl std::fmt::Display) -> tracedecay_domain::errors::TraceDecayError {
     tracedecay_domain::errors::TraceDecayError::Config {
         message: error.to_string(),
     }
 }
 
-#[hotpath::measure]
 fn store_error(error: impl std::fmt::Display) -> tracedecay_domain::errors::TraceDecayError {
     tracedecay_domain::errors::TraceDecayError::Config {
         message: format!("session sync journal store failed: {error}"),
     }
 }
 
-#[hotpath::measure]
 fn journal_decode_error(
     error: impl std::fmt::Display,
 ) -> tracedecay_domain::errors::TraceDecayError {
@@ -1225,7 +1210,6 @@ fn journal_decode_error(
     }
 }
 
-#[hotpath::measure]
 fn journal_encode_error(
     error: impl std::fmt::Display,
 ) -> tracedecay_domain::errors::TraceDecayError {

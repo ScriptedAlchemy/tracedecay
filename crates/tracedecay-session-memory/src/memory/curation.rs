@@ -83,7 +83,6 @@ pub struct ProjectMemoryCurationMutationTarget {
     expected_last_event_id: FactEventId,
 }
 
-#[hotpath::measure_all]
 impl ProjectMemoryCurationMutationTarget {
     pub fn new(fact_id: FactId, expected_last_event_id: FactEventId) -> Self {
         Self {
@@ -117,7 +116,6 @@ pub struct ProjectMemoryFactMutationTarget {
     expected_last_event_id: Option<FactEventId>,
 }
 
-#[hotpath::measure_all]
 impl ProjectMemoryFactMutationTarget {
     pub fn new(fact_id: FactId, expected_last_event_id: Option<FactEventId>) -> Self {
         Self {
@@ -139,7 +137,6 @@ impl ProjectMemoryFactMutationTarget {
     }
 }
 
-#[hotpath::measure_all]
 impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     /// Settles one already-canonical curation batch against its exact receipt.
     #[hotpath::measure(label = "usecases.memory.curation", future = true)]
@@ -628,7 +625,6 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     }
 }
 
-#[hotpath::measure]
 fn committed_add_fact_id(
     command: &ProjectMemoryFactAddCommandV1,
 ) -> Result<FactId, MemoryApplicationError> {
@@ -641,7 +637,6 @@ fn committed_add_fact_id(
     .map_err(Into::into)
 }
 
-#[hotpath::measure]
 fn curation_child_operation_id(
     outer_operation_id: &ProvenanceId,
     operation_index: usize,
@@ -655,7 +650,6 @@ fn curation_child_operation_id(
     .map_err(MemoryApplicationError::from)
 }
 
-#[hotpath::measure]
 fn update_command(
     owner: &FactOwnerV1,
     target: ProjectMemoryFactMutationTarget,
@@ -673,7 +667,6 @@ fn update_command(
     .map_err(MemoryApplicationError::from)
 }
 
-#[hotpath::measure]
 fn remove_command(
     owner: &FactOwnerV1,
     target: ProjectMemoryFactMutationTarget,
@@ -689,7 +682,6 @@ fn remove_command(
     .map_err(MemoryApplicationError::from)
 }
 
-#[hotpath::measure]
 fn merge_command(
     owner: &FactOwnerV1,
     winner: ProjectMemoryFactMutationTarget,
@@ -715,7 +707,6 @@ fn merge_command(
     .map_err(MemoryApplicationError::from)
 }
 
-#[hotpath::measure]
 fn fact_identity(
     owner: &FactOwnerV1,
     fact_id: FactId,
@@ -723,7 +714,6 @@ fn fact_identity(
     ProjectMemoryFactIdV1::new(owner.clone(), fact_id).map_err(Into::into)
 }
 
-#[hotpath::measure]
 fn merge_target(
     owner: &FactOwnerV1,
     target: ProjectMemoryFactMutationTarget,
@@ -741,7 +731,6 @@ fn merge_target(
     .map_err(MemoryApplicationError::from)
 }
 
-#[hotpath::measure]
 fn sanitize_merge_content(
     merged_content: Option<String>,
 ) -> Result<Option<String>, MemoryApplicationError> {
@@ -762,7 +751,6 @@ fn sanitize_merge_content(
     }
 }
 
-#[hotpath::measure]
 fn curation_evidence(
     owner: &FactOwnerV1,
     mut evidence_facts: Vec<ProjectMemoryCurationMutationTarget>,
@@ -788,7 +776,6 @@ fn curation_evidence(
     .map_err(MemoryApplicationError::from)
 }
 
-#[hotpath::measure]
 fn merge_outcome_matches_command(
     command: &ProjectMemoryFactMergeCommandV1,
     outcome: &ProjectMemoryFactMergeOutcomeV1,
@@ -804,7 +791,6 @@ fn merge_outcome_matches_command(
         && outcome.content_updated() == command.merged_content().is_some()
 }
 
-#[hotpath::measure]
 fn canonicalize_review_evidence(
     owner: &FactOwnerV1,
     evidence: &mut [ProjectMemoryCurationMutationTarget],

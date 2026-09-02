@@ -70,7 +70,6 @@ mod workflow_command;
 use cli::*;
 use tracedecay::daemon::StderrTracingDefault;
 
-#[hotpath::measure]
 pub(crate) fn current_unix_timestamp() -> i64 {
     tracedecay::tracedecay::current_timestamp()
 }
@@ -85,7 +84,6 @@ pub(crate) struct Spinner {
     interactive: bool,
 }
 
-#[hotpath::measure_all]
 impl Spinner {
     pub(crate) fn new() -> Self {
         let message = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
@@ -202,7 +200,6 @@ const DEFAULT_MAX_DAEMON_CPU_THREADS: usize = 16;
 const DAEMON_CPU_THREADS_ENV: &str = "TRACEDECAY_DAEMON_CPU_THREADS";
 const RAYON_NUM_THREADS_ENV: &str = "RAYON_NUM_THREADS";
 
-#[hotpath::measure]
 fn async_worker_threads() -> usize {
     std::thread::available_parallelism()
         .map_or(1, usize::from)
@@ -214,7 +211,6 @@ fn async_worker_threads() -> usize {
 /// profile-scoped worker plan is installed, using the host width is the safe
 /// upper bound for any later exact plan. The result is host-bounded: it is at
 /// most `available + MIN_SERVING_BLOCKING_RESERVE`.
-#[hotpath::measure]
 fn tokio_blocking_thread_limit() -> usize {
     let available = std::thread::available_parallelism().map_or(1, usize::from);
     let effective = tracedecay::code_index::parallelism::installed_worker_status()
@@ -223,7 +219,6 @@ fn tokio_blocking_thread_limit() -> usize {
     tokio_blocking_thread_limit_from(available, effective)
 }
 
-#[hotpath::measure]
 fn tokio_blocking_thread_limit_from(available: usize, effective_workers: usize) -> usize {
     let available = available.max(1);
     let effective_workers = effective_workers.clamp(1, available);
@@ -256,7 +251,6 @@ mod blocking_thread_limit_tests {
     }
 }
 
-#[hotpath::measure]
 fn daemon_cpu_threads_from(
     available: usize,
     configured: Option<(&str, &str)>,
@@ -273,7 +267,6 @@ fn daemon_cpu_threads_from(
     }
 }
 
-#[hotpath::measure]
 fn is_daemon_run(command: Option<&Commands>) -> bool {
     matches!(
         command,
@@ -283,7 +276,6 @@ fn is_daemon_run(command: Option<&Commands>) -> bool {
     )
 }
 
-#[hotpath::measure]
 fn install_daemon_cpu_pool(command: Option<&Commands>) -> tracedecay_domain::errors::Result<()> {
     if !is_daemon_run(command) {
         return Ok(());
@@ -319,7 +311,6 @@ enum CommandOutcome {
     Exit(i32),
 }
 
-#[hotpath::measure]
 fn process_exit_code(code: i32) -> ExitCode {
     ExitCode::from(u8::try_from(code).unwrap_or(1))
 }
@@ -371,7 +362,6 @@ fn hotpath_requires_protocol_safe_output(
 }
 
 #[cfg(feature = "hotpath")]
-#[hotpath::measure]
 fn configure_hotpath_output(args: &[std::ffi::OsString]) -> Result<(), String> {
     let hook_protocol = hook_capture_cmd::is_hook_protocol_invocation(args);
     if hook_protocol {
@@ -439,7 +429,6 @@ fn configure_hotpath_output(args: &[std::ffi::OsString]) -> Result<(), String> {
 }
 
 #[cfg(feature = "hotpath")]
-#[hotpath::measure]
 fn hotpath_guard() -> hotpath::HotpathGuard {
     // The CPU report section autospawns an external `hotpath-samply`/`samply`
     // profiler that SIGSTOPs this process while it attaches perf sampling and
@@ -460,7 +449,6 @@ struct ProcessHotpathGuard {
 }
 
 #[cfg(feature = "hotpath")]
-#[hotpath::measure_all]
 impl ProcessHotpathGuard {
     #[hotpath::measure(label = "cli.hotpath.install_shutdown_finalizer")]
     fn install(guard: hotpath::HotpathGuard) -> Result<Self, String> {
@@ -491,7 +479,6 @@ impl Drop for ProcessHotpathGuard {
     }
 }
 
-#[hotpath::measure]
 fn main() -> ExitCode {
     let args = std::env::args_os().collect::<Vec<_>>();
     #[cfg(feature = "hotpath")]
@@ -545,7 +532,6 @@ fn main() -> ExitCode {
     }
 }
 
-#[hotpath::measure]
 fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
     // This binary is the sole generator of source provenance and the embedded
     // dashboard bundle; the composition library reads both through this
@@ -663,7 +649,6 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
 /// Hooks are silent on stderr unless `RUST_LOG` says otherwise: their host
 /// owns that stream and reads unexpected output as a hook failure. Every other
 /// command keeps the crate default of `warn`.
-#[hotpath::measure]
 fn stderr_tracing_default(command: Option<&Commands>) -> StderrTracingDefault {
     match command {
         Some(command) if CommandFamily::for_command(command) == CommandFamily::Hook => {
@@ -673,7 +658,6 @@ fn stderr_tracing_default(command: Option<&Commands>) -> StderrTracingDefault {
     }
 }
 
-#[hotpath::measure]
 fn render_dynamic_command_help(args: &[String]) -> bool {
     let command_args = args.get(1..).unwrap_or_default();
     let is_tool_command_help = matches!(
@@ -845,7 +829,6 @@ enum CommandFamily {
     Knowledge,
 }
 
-#[hotpath::measure_all]
 impl CommandFamily {
     #[cfg(feature = "hotpath")]
     fn as_profile_label(self) -> &'static str {
@@ -940,7 +923,6 @@ impl CommandFamily {
     }
 }
 
-#[hotpath::measure]
 fn validate_host_bundle_options(
     command: &Commands,
     family: CommandFamily,
@@ -1036,7 +1018,6 @@ fn validate_host_bundle_options(
     Ok(())
 }
 
-#[hotpath::measure]
 fn is_full_component_set_adoption(command: &Commands, host_bundle: &HostBundleCliOptions) -> bool {
     host_bundle.component.is_none()
         && host_bundle.yes
@@ -1842,7 +1823,6 @@ enum CommandStartupPolicy {
     SkipAll,
 }
 
-#[hotpath::measure_all]
 impl CommandStartupPolicy {
     fn for_command(command: &Commands) -> Self {
         if hook_capture_cmd::is_native_hook_command(command) {

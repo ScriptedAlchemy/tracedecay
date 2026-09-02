@@ -27,7 +27,6 @@ pub struct AuthorizedActor {
     pub actor_id: ActorId,
 }
 
-#[hotpath::measure_all]
 impl AuthorizedActor {
     pub fn validate(&self) -> Result<(), ConfigurationError> {
         self.actor_id
@@ -44,7 +43,6 @@ pub struct ConfigurationMutationAuthority {
     pub receipt: ConfigurationMutationGrantReceiptV1,
 }
 
-#[hotpath::measure_all]
 impl ConfigurationMutationAuthority {
     pub fn actor(&self) -> AuthorizedActor {
         AuthorizedActor {
@@ -95,7 +93,6 @@ pub enum DirectConfigurationMutation {
     },
 }
 
-#[hotpath::measure_all]
 impl DirectConfigurationMutation {
     pub fn touched_keys(&self) -> Result<BTreeSet<SettingKey>, ConfigurationError> {
         match self {
@@ -152,7 +149,6 @@ impl DirectConfigurationMutation {
     }
 }
 
-#[hotpath::measure]
 pub fn configuration_layer_scope_digest(
     layer: &ConfigurationLayerIdV1,
 ) -> Result<ManifestDigest, ConfigurationError> {
@@ -172,7 +168,6 @@ impl fmt::Debug for CredentialWriteHandleV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl CredentialWriteHandleV1 {
     pub fn new(value: impl Into<String>) -> Result<Self, ConfigurationError> {
         let value = value.into();
@@ -250,7 +245,6 @@ pub enum ConfigurationError {
     Unavailable,
 }
 
-#[hotpath::measure_all]
 impl ConfigurationError {
     pub fn validation(error: impl fmt::Display) -> Self {
         Self::Validation(error.to_string())

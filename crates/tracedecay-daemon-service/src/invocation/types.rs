@@ -113,7 +113,6 @@ impl Default for HookOrchestrationTaskOwnerV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl HookOrchestrationTaskOwnerV1 {
     fn reap_finished(&mut self) {
         let tasks = std::mem::take(&mut self.tasks);
@@ -146,7 +145,6 @@ pub struct BoundedHookOrchestratorV1 {
     task_owner: StdMutex<HookOrchestrationTaskOwnerV1>,
 }
 
-#[hotpath::measure_all]
 impl BoundedHookOrchestratorV1 {
     pub fn new<F, Fut>(max_concurrent: usize, work: F) -> Option<Arc<Self>>
     where
@@ -421,7 +419,6 @@ type HookOrchestrationRegistryKey = ([u8; 16], [u8; 16]);
 type HookOrchestrationRegistry =
     StdMutex<BTreeMap<HookOrchestrationRegistryKey, Weak<BoundedHookOrchestratorV1>>>;
 
-#[hotpath::measure]
 fn hook_orchestration_registry() -> &'static HookOrchestrationRegistry {
     static REGISTRY: OnceLock<HookOrchestrationRegistry> = OnceLock::new();
     REGISTRY.get_or_init(|| StdMutex::new(BTreeMap::new()))
@@ -430,7 +427,6 @@ fn hook_orchestration_registry() -> &'static HookOrchestrationRegistry {
 /// Publishes one project's hook orchestrator under its authenticated hook
 /// locators. A different live incumbent keeps the key: admission must never
 /// route one project's boundaries at another project's cycle owner.
-#[hotpath::measure]
 pub fn register_hook_orchestration_runtime(
     hook_project_id: [u8; 16],
     hook_worktree_id: [u8; 16],
@@ -451,7 +447,6 @@ pub fn register_hook_orchestration_runtime(
 /// Removes exactly the given orchestrator's registration; a different live
 /// runtime under the same locator pair is left untouched so a rolled-back
 /// setup can never unregister its successor.
-#[hotpath::measure]
 pub fn unregister_hook_orchestration_runtime(
     hook_project_id: [u8; 16],
     hook_worktree_id: [u8; 16],
@@ -471,7 +466,6 @@ pub fn unregister_hook_orchestration_runtime(
 /// Production hook-orchestration entry. Returns the portable
 /// [`HookOrchestrationAdmissionV1`] so MCP handlers do not name daemon
 /// admission types.
-#[hotpath::measure]
 pub fn admit_registered_hook_orchestration(
     envelope: HookEventEnvelopeV2,
     binding: HookScopeBindingV1,
@@ -512,7 +506,6 @@ pub struct SwitchableFeedbackCycleRuntimeV1 {
     current: RwLock<Arc<dyn FeedbackCycleRuntimePort>>,
 }
 
-#[hotpath::measure]
 pub(super) fn observe_accepted_feedback_cycle_terminal(
     observations: &Arc<dyn FeedbackObservationEmitterV1 + Send + Sync>,
     project_id: &ProjectId,
@@ -550,7 +543,6 @@ pub struct UnavailableFeedbackCycleRuntimeV1 {
     observations: Arc<dyn FeedbackObservationEmitterV1 + Send + Sync>,
 }
 
-#[hotpath::measure_all]
 impl UnavailableFeedbackCycleRuntimeV1 {
     pub fn new(
         project_id: ProjectId,
@@ -582,7 +574,6 @@ impl FeedbackCycleRuntimePort for UnavailableFeedbackCycleRuntimeV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl SwitchableFeedbackCycleRuntimeV1 {
     pub fn new(current: Arc<dyn FeedbackCycleRuntimePort>) -> Self {
         Self {
@@ -649,7 +640,6 @@ pub struct RegisteredWorkRuntime {
         Option<super::work::workflow_fan_out::WorkflowFanOutRecoveryOwnerV1>,
 }
 
-#[hotpath::measure_all]
 impl RegisteredWorkRuntime {
     /// Cancel every retained background recovery owner without awaiting.
     ///
@@ -689,7 +679,6 @@ pub struct RegisteredFeedbackRuntime {
     pub(super) runtime: Arc<FeedbackRuntime>,
 }
 
-#[hotpath::measure_all]
 impl RegisteredFeedbackRuntime {
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn new(project_id: ProjectId, runtime: Arc<FeedbackRuntime>) -> Self {
@@ -722,7 +711,6 @@ pub struct RegisteredCallableCodeRuntime {
     pub(super) authorization: Arc<dyn CallableCodeAuthorizationSourcePort>,
 }
 
-#[hotpath::measure_all]
 impl RegisteredCallableCodeRuntime {
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn new(
@@ -743,7 +731,6 @@ pub struct InvocationProjectRuntimeIdentityV1 {
     project_root: PathBuf,
 }
 
-#[hotpath::measure_all]
 impl InvocationProjectRuntimeIdentityV1 {
     pub fn new(profile_id: UserProfileId, project_id: ProjectId, project_root: PathBuf) -> Self {
         Self {
@@ -792,7 +779,6 @@ pub struct RegisteredConfigurationRuntime {
     >,
 }
 
-#[hotpath::measure_all]
 impl RegisteredConfigurationRuntime {
     pub fn semantic_evaluation_workers(
         &self,
@@ -823,7 +809,6 @@ struct LspLeaseTask {
     handle: tokio::task::JoinHandle<()>,
 }
 
-#[hotpath::measure_all]
 impl LspLeaseTask {
     #[hotpath::skip]
     async fn stop(self) -> Result<(), DaemonInvocationProblem> {
@@ -869,7 +854,6 @@ pub struct LspLeaseTaskRegistry {
     state: StdMutex<LspLeaseTaskRegistryState>,
 }
 
-#[hotpath::measure_all]
 impl LspLeaseTaskRegistry {
     #[hotpath::skip]
     pub async fn start<F>(
@@ -1037,7 +1021,6 @@ pub struct AuthorizedDaemonLspWorkspace {
     pub factories: Vec<(AdmittedRoot, Arc<DaemonLspSessionFactory>)>,
 }
 
-#[hotpath::measure_all]
 impl DaemonLspInvocationOwner {
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn new(factory: Arc<DaemonLspSessionFactory>) -> Self {

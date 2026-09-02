@@ -19,7 +19,6 @@ pub struct ProjectMemoryFactCurationEvidenceV1 {
     reason: String,
 }
 
-#[hotpath::measure_all]
 impl ProjectMemoryFactCurationEvidenceV1 {
     pub fn new(
         owner: &FactOwnerV1,
@@ -105,17 +104,14 @@ curation_mutation!(
     remove_command_owner
 );
 
-#[hotpath::measure]
 fn update_command_owner(command: &ProjectMemoryFactUpdateCommandV1) -> &FactOwnerV1 {
     command.target().owner()
 }
 
-#[hotpath::measure]
 fn remove_command_owner(command: &ProjectMemoryFactRemoveCommandV1) -> &FactOwnerV1 {
     command.target().owner()
 }
 
-#[hotpath::measure_all]
 impl ProjectMemoryFactCurationUpdateV1 {
     pub(in crate::memory::project_memory) fn validate_review_cas(&self) -> FactStoreResult<()> {
         self.command.expected_last_event_id().ok_or_else(|| {
@@ -127,7 +123,6 @@ impl ProjectMemoryFactCurationUpdateV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl ProjectMemoryFactCurationRemoveV1 {
     pub(in crate::memory::project_memory) fn validate_review_cas(&self) -> FactStoreResult<()> {
         self.command.expected_last_event_id().ok_or_else(|| {

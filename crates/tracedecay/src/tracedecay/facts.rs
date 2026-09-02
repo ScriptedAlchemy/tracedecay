@@ -15,7 +15,6 @@ use tracedecay_session_memory::memory::memory_application_error;
 
 use super::TraceDecay;
 
-#[hotpath::measure]
 fn project_memory_owner_from_layout_id(project_id: Option<&str>) -> Result<FactOwnerV1> {
     let project_id = project_id.ok_or_else(|| TraceDecayError::Config {
         message: "active project has no authoritative project_id for memory".to_string(),
@@ -27,7 +26,6 @@ fn project_memory_owner_from_layout_id(project_id: Option<&str>) -> Result<FactO
     Ok(FactOwnerV1::Project { project_id })
 }
 
-#[hotpath::measure_all]
 impl TraceDecay {
     /// Returns the only project-memory owner accepted by core routes.
     ///

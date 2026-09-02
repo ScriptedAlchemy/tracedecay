@@ -48,7 +48,6 @@ use super::{
 };
 use crate::semantic_runtime::SemanticGraphExecutionAuthorityV1;
 
-#[hotpath::measure_all]
 impl GraphVectorGenerationStoreV1 {
     pub(super) fn semantic_stage_plan(
         &self,
@@ -937,7 +936,6 @@ pub(super) fn transition_state<'a>(
     Ok(state)
 }
 
-#[hotpath::measure_all]
 impl GraphVectorGenerationStoreV1 {
     fn push_required_generation(
         &self,

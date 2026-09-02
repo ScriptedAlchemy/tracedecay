@@ -279,7 +279,6 @@ async fn retired_sqlite_projection_object(conn: &impl QueryExecutor) -> Result<O
         })
 }
 
-#[hotpath::measure]
 fn unsupported_schema_version(current: u32) -> TraceDecayError {
     TraceDecayError::reset_required(
         "SQLite store",

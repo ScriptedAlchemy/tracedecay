@@ -1,4 +1,3 @@
-#[hotpath::measure]
 fn delimiter_span_contains(line: &str, start: usize, delimiter: u8) -> bool {
     let bytes = line.as_bytes();
     let mut cursor = 0;
@@ -29,7 +28,6 @@ fn delimiter_span_contains(line: &str, start: usize, delimiter: u8) -> bool {
     false
 }
 
-#[hotpath::measure]
 fn rust_char_literal_at(line: &str, start: usize) -> bool {
     let bytes = line.as_bytes();
     let mut cursor = 0;
@@ -62,7 +60,6 @@ fn rust_char_literal_at(line: &str, start: usize) -> bool {
     false
 }
 
-#[hotpath::measure]
 pub(crate) fn string_literal_at(line: &str, start: usize, path: &str) -> bool {
     delimiter_span_contains(line, start, b'"')
         || if path.ends_with(".rs") {
@@ -73,7 +70,6 @@ pub(crate) fn string_literal_at(line: &str, start: usize, path: &str) -> bool {
         || (!path.ends_with(".rs") && delimiter_span_contains(line, start, b'`'))
 }
 
-#[hotpath::measure]
 pub(crate) fn is_valid_identifier(name: &str, path: &str) -> bool {
     let javascript = [".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"]
         .into_iter()

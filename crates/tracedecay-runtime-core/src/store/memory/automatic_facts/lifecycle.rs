@@ -82,7 +82,6 @@ async fn automatic_fact_receipt_for_digest_tx(
         .map_err(FactStoreError::from)
 }
 
-#[hotpath::measure]
 fn automatic_fact_receipt_apply_id(
     receipt: &ProjectMemoryOperationReceiptV1,
 ) -> FactStoreResult<ProvenanceId> {

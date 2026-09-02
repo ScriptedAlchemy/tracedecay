@@ -2,7 +2,6 @@
 ///
 /// This list is the sole Reader authority. Root `MCP_TOOL_BINDINGS` derives
 /// `RegisteredProjectAccess::Reader` from these names at construction.
-#[hotpath::measure]
 pub fn registered_project_reader_tool_names() -> Vec<&'static str> {
     REGISTERED_PROJECT_READER_TOOL_NAMES.to_vec()
 }

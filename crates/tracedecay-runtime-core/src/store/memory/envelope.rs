@@ -47,7 +47,6 @@ pub(super) struct ProjectMemoryOperationReceiptV1 {
     pub(super) receipt: Value,
 }
 
-#[hotpath::measure]
 pub(super) fn project_memory_digest(material: Value) -> FactStoreResult<String> {
     let encoded = to_json(&material, "serialize project-memory request digest")?;
     Ok(sha256_hex(encoded.as_bytes()))
@@ -155,7 +154,6 @@ pub(super) async fn project_memory_record_operation_receipt_tx(
     Ok(())
 }
 
-#[hotpath::measure]
 pub(super) fn project_memory_receipt_u64(
     receipt: &Value,
     field: &'static str,
@@ -168,7 +166,6 @@ pub(super) fn project_memory_receipt_u64(
     })
 }
 
-#[hotpath::measure_all]
 impl DatabaseFactStore<'_> {
     #[hotpath::skip]
     pub(super) async fn project_memory_read<T>(

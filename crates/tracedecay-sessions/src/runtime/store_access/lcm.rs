@@ -16,7 +16,6 @@ use crate::runtime::SessionMessageRecord;
 
 use super::super::registered_db::{SessionRegisteredDb, SessionStoreAccess, SessionWriteTxn};
 
-#[hotpath::measure_all]
 impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
     #[hotpath::skip]
     pub async fn lcm_read_snapshot(&self) -> Result<DatabaseEngineReadSnapshot, LcmError> {

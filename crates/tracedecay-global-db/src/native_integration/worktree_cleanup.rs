@@ -13,7 +13,6 @@ use super::GlobalDbNativeIntegrationStore;
 use super::store::{decode, encode, invalid, invalid_domain, text, unavailable};
 use crate::sqlite_persist::{commit_outcome, replay_if_equal, require_single_cas_row};
 
-#[hotpath::measure_all]
 impl GlobalDbNativeIntegrationStore<'_> {
     #[hotpath::measure(
         future = true,
@@ -301,7 +300,6 @@ where
     Ok(Some((record, receipt)))
 }
 
-#[hotpath::measure]
 fn optional_receipt(
     row: &Row,
 ) -> NativeIntegrationStoreResult<Option<NativeWorktreeCleanupReceiptV1>> {
@@ -337,7 +335,6 @@ where
         .map_err(unavailable)
 }
 
-#[hotpath::measure]
 fn cleanup_transition_matches(
     current: &NativeWorktreeCleanupTransactionV1,
     expected_phase_revision: u64,
@@ -364,13 +361,11 @@ fn cleanup_transition_matches(
         )
 }
 
-#[hotpath::measure]
 fn revision_i64(revision: u64) -> NativeIntegrationStoreResult<i64> {
     i64::try_from(revision)
         .map_err(|_| invalid("native worktree cleanup revision exceeds SQLite range"))
 }
 
-#[hotpath::measure]
 fn phase_code(phase: NativeWorktreeCleanupPhaseV1) -> &'static str {
     match phase {
         NativeWorktreeCleanupPhaseV1::Prepared => "prepared",
@@ -380,7 +375,6 @@ fn phase_code(phase: NativeWorktreeCleanupPhaseV1) -> &'static str {
     }
 }
 
-#[hotpath::measure]
 fn outcome_code(outcome: NativeWorktreeCleanupOutcomeV1) -> &'static str {
     match outcome {
         NativeWorktreeCleanupOutcomeV1::Removed => "removed",

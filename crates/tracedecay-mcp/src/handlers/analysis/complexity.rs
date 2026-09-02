@@ -86,7 +86,6 @@ pub async fn handle_complexity(
     ))
 }
 
-#[hotpath::measure]
 fn analysis_score(
     symbol: &VerifiedAnalysisSymbol,
     fan_in: &HashMap<SymbolOccurrenceId, u64>,

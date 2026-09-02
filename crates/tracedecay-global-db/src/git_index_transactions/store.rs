@@ -36,7 +36,6 @@ pub struct GitIndexPreviewInputGcResult {
     pub next_expiry: Option<UtcMicros>,
 }
 
-#[hotpath::measure_all]
 impl<'db> GlobalDbGitIndexTransactionStore<'db> {
     #[hotpath::skip]
     pub const fn new(db: &'db RegisteredGlobalDb) -> Self {
@@ -950,7 +949,6 @@ where
     Ok(records)
 }
 
-#[hotpath::measure]
 fn decode_record(row: &Row) -> GitIndexTransactionStoreResult<GitIndexTransactionRecordV1> {
     let stored_idempotency_key = text(row, 0, "transaction idempotency key")?;
     let stored_input_digest = text(row, 1, "transaction input digest")?;
@@ -1145,7 +1143,6 @@ where
     Ok(transactions)
 }
 
-#[hotpath::measure]
 fn journal_transition_matches(
     current: &GitIndexTransactionJournalV1,
     expected_phase_epoch: u64,
@@ -1164,13 +1161,11 @@ fn journal_transition_matches(
         && current.started_at == replacement.started_at
 }
 
-#[hotpath::measure]
 fn phase_epoch_i64(phase_epoch: u64) -> GitIndexTransactionStoreResult<i64> {
     i64::try_from(phase_epoch)
         .map_err(|_| invalid("git index transaction phase epoch exceeds SQLite range"))
 }
 
-#[hotpath::measure]
 fn operation_code(operation: tracedecay_domain::GitIndexTransactionOperationV1) -> &'static str {
     match operation {
         tracedecay_domain::GitIndexTransactionOperationV1::StageHunks => "stage_hunks",
@@ -1179,7 +1174,6 @@ fn operation_code(operation: tracedecay_domain::GitIndexTransactionOperationV1) 
     }
 }
 
-#[hotpath::measure]
 fn phase_code(phase: GitIndexJournalPhaseV1) -> &'static str {
     match phase {
         GitIndexJournalPhaseV1::Prepared => "prepared",
@@ -1193,7 +1187,6 @@ fn phase_code(phase: GitIndexJournalPhaseV1) -> &'static str {
     }
 }
 
-#[hotpath::measure]
 fn receipt_outcome_code(outcome: GitIndexReceiptOutcomeV1) -> &'static str {
     match outcome {
         GitIndexReceiptOutcomeV1::Committed => "committed",
@@ -1202,23 +1195,19 @@ fn receipt_outcome_code(outcome: GitIndexReceiptOutcomeV1) -> &'static str {
     }
 }
 
-#[hotpath::measure]
 fn encode<T: serde::Serialize>(value: &T) -> GitIndexTransactionStoreResult<String> {
     serde_json::to_string(value).map_err(|error| invalid(error.to_string()))
 }
 
-#[hotpath::measure]
 fn decode<T: serde::de::DeserializeOwned>(value: &str) -> GitIndexTransactionStoreResult<T> {
     serde_json::from_str(value).map_err(|error| invalid(error.to_string()))
 }
 
-#[hotpath::measure]
 fn text(row: &Row, column: i32, field: &'static str) -> GitIndexTransactionStoreResult<String> {
     row.get::<String>(column)
         .map_err(|error| invalid(format!("read {field}: {error}")))
 }
 
-#[hotpath::measure]
 fn optional_text(
     row: &Row,
     column: i32,
@@ -1228,18 +1217,15 @@ fn optional_text(
         .map_err(|error| invalid(format!("read {field}: {error}")))
 }
 
-#[hotpath::measure]
 fn invalid(message: impl Into<String>) -> GitIndexTransactionStoreError {
     GitIndexTransactionStoreError::InvalidData(message.into())
 }
 
 #[allow(clippy::needless_pass_by_value)]
-#[hotpath::measure]
 fn invalid_domain(error: tracedecay_domain::DomainError) -> GitIndexTransactionStoreError {
     GitIndexTransactionStoreError::InvalidData(error.to_string())
 }
 
-#[hotpath::measure]
 fn unavailable(error: impl std::fmt::Display) -> GitIndexTransactionStoreError {
     GitIndexTransactionStoreError::unavailable(error)
 }

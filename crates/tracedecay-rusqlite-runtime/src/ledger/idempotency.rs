@@ -72,7 +72,6 @@ pub(super) fn disposition(
     Ok(LedgerDisposition::Replay(record.receipt))
 }
 
-#[hotpath::measure]
 pub(crate) fn lookup_receipt(
     transaction: &impl LedgerTransaction,
     binding: &StoreRuntimeBindingV1,
@@ -109,7 +108,6 @@ pub(super) fn insert(
     Ok(())
 }
 
-#[hotpath::measure]
 fn load(
     transaction: &impl LedgerTransaction,
     binding: &StoreRuntimeBindingV1,
@@ -137,7 +135,6 @@ fn load(
     Ok(Some(record))
 }
 
-#[hotpath::measure]
 fn decode_row(
     row: &Row<'_>,
     binding: &StoreRuntimeBindingV1,

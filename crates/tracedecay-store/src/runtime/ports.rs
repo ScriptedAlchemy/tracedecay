@@ -57,7 +57,6 @@ pub struct RuntimeSubmitRequestV1 {
     control: RuntimeRequestControlV1,
 }
 
-#[hotpath::measure_all]
 impl RuntimeSubmitRequestV1 {
     pub fn new(
         envelope: RepositoryOperationEnvelopeV1,
@@ -143,7 +142,6 @@ pub enum RuntimeSubmitOutcomeV1 {
     },
 }
 
-#[hotpath::measure_all]
 impl RuntimeSubmitOutcomeV1 {
     pub fn validate_for(
         &self,
@@ -287,7 +285,6 @@ pub enum RuntimeReadOperationV1 {
     Repository { op: RepositoryReadOperationV1 },
 }
 
-#[hotpath::measure_all]
 impl RuntimeReadOperationV1 {
     pub const MAX_GRAPH_QUERY_BYTES: usize = 16_384;
     pub const MAX_GRAPH_SEARCH_RESULTS: u32 = 1_000;
@@ -357,7 +354,6 @@ struct RuntimeReadRequestWireV1 {
     control: RuntimeRequestControlV1,
 }
 
-#[hotpath::measure_all]
 impl RuntimeReadRequestV1 {
     pub fn new(
         binding: StoreRuntimeBindingV1,
@@ -532,7 +528,6 @@ struct RuntimeReadOutcomeWireV1 {
     coverage: RuntimeReadCoverageV1,
 }
 
-#[hotpath::measure_all]
 impl RuntimeReadOutcomeV1 {
     pub fn new(
         value: Option<RuntimeReadResultV1>,
@@ -591,7 +586,6 @@ impl<'de> Deserialize<'de> for RuntimeReadOutcomeV1 {
     }
 }
 
-#[hotpath::measure]
 fn validate_read_coverage(
     request: &RuntimeReadRequestV1,
     response: &RuntimeReadCoverageV1,
@@ -657,7 +651,6 @@ fn validate_read_coverage(
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_read_value(
     request: &RuntimeReadRequestV1,
     value: &RuntimeReadResultV1,
@@ -780,7 +773,6 @@ fn validate_read_value(
     }
 }
 
-#[hotpath::measure]
 fn required_vector(
     request: &RuntimeReadRequestV1,
 ) -> Result<FrozenWatermarkVectorV1, StorageRuntimeContractErrorV1> {
@@ -805,7 +797,6 @@ fn required_vector(
     }
 }
 
-#[hotpath::measure]
 fn coverage_observes(coverage: &RuntimeReadCoverageV1, watermark: &ShardWatermarkV1) -> bool {
     match coverage {
         RuntimeReadCoverageV1::Latest {
@@ -820,7 +811,6 @@ fn coverage_observes(coverage: &RuntimeReadCoverageV1, watermark: &ShardWatermar
     }
 }
 
-#[hotpath::measure]
 fn binding_matches_watermark(
     binding: &StoreRuntimeBindingV1,
     watermark: &ShardWatermarkV1,
@@ -830,7 +820,6 @@ fn binding_matches_watermark(
         && binding.authority_epoch == watermark.authority_epoch
 }
 
-#[hotpath::measure]
 fn validate_probe(
     control: &RuntimeRequestControlV1,
     probe: &dyn RuntimeRequestProbeV1,
@@ -848,7 +837,6 @@ fn validate_probe(
     Ok(())
 }
 
-#[hotpath::measure]
 fn read_interruption(
     probe: &dyn RuntimeRequestProbeV1,
 ) -> Result<Option<RuntimeReadOutcomeV1>, StorageRuntimeContractErrorV1> {
@@ -926,7 +914,6 @@ pub trait StorageRuntimeReadPort: Send + Sync {
 
 // Keep the single-shard requirement helper explicit so adapter migrations do
 // not infer a vector from mutable ambient runtime state.
-#[hotpath::measure]
 pub fn single_shard_required_coverage_v1(
     binding: &StoreRuntimeBindingV1,
     commit_sequence: CommitSequenceV1,

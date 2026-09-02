@@ -18,7 +18,6 @@ pub(crate) struct PublishedCodeIndexWorkspaceDocuments {
     project_root: Option<PathBuf>,
 }
 
-#[hotpath::measure_all]
 impl PublishedCodeIndexWorkspaceDocuments {
     pub(crate) fn new(
         registry: CodeIndexSchedulerRegistryV1,

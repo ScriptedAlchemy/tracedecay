@@ -13,7 +13,6 @@ pub struct RetainedExactSqlCapability {
     _guard: Arc<dyn Send + Sync>,
 }
 
-#[hotpath::measure_all]
 impl RetainedExactSqlCapability {
     /// Retains an exact handle together with the client guard that authorized
     /// its use. Callers must supply that guard explicitly; there is no

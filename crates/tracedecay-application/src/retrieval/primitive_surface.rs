@@ -19,7 +19,6 @@ pub enum PrimitiveSemanticModeV1 {
     StrictSemantic,
 }
 
-#[hotpath::measure_all]
 impl PrimitiveSemanticModeV1 {
     #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
@@ -37,7 +36,6 @@ pub enum ContextModeV1 {
     Plan,
 }
 
-#[hotpath::measure_all]
 impl ContextModeV1 {
     #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
@@ -252,7 +250,6 @@ pub struct ContextResultV1 {
     pub verified_graph_evidence: Option<PrimitiveUnavailableEvidenceV1>,
 }
 
-#[hotpath::measure_all]
 impl ContextResultV1 {
     pub fn with_memory_graph_coverage(
         mut self,

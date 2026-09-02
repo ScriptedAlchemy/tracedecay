@@ -3,7 +3,6 @@ pub(in crate::daemon) struct MaintenanceTaskTermination {
     finished: tokio::sync::watch::Sender<bool>,
 }
 
-#[hotpath::measure_all]
 impl MaintenanceTaskTermination {
     pub(in crate::daemon) fn pending() -> Self {
         let (finished, _) = tokio::sync::watch::channel(false);

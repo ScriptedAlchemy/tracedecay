@@ -118,7 +118,6 @@ const NATIVE_CAPTURE_COMMANDS: &[(&str, NativeHookCaptureSourceV1)] = &[
     ),
 ];
 
-#[hotpath::measure]
 pub(crate) fn try_run(args: &[OsString]) -> Option<i32> {
     let command = args.get(1)?.to_str()?;
     // Native callbacks must never enter normal CLI startup: that path owns
@@ -154,19 +153,16 @@ pub(crate) fn is_native_hook_command(command: &Commands) -> bool {
     matches!(command, Commands::HookPreToolUse) || capture_source_for_command(command).is_some()
 }
 
-#[hotpath::measure]
 pub(crate) fn capture_source_for_command(command: &Commands) -> Option<NativeHookCaptureSourceV1> {
     capture_command_name(command).and_then(capture_source_from_name)
 }
 
-#[hotpath::measure]
 fn capture_source_from_name(command: &str) -> Option<NativeHookCaptureSourceV1> {
     NATIVE_CAPTURE_COMMANDS
         .iter()
         .find_map(|(name, source)| (*name == command).then_some(*source))
 }
 
-#[hotpath::measure]
 fn native_response_command_from_name(command: &str) -> bool {
     matches!(
         command,
@@ -186,7 +182,6 @@ fn native_response_command_from_name(command: &str) -> bool {
     )
 }
 
-#[hotpath::measure]
 fn capture_command_name(command: &Commands) -> Option<&'static str> {
     match command {
         Commands::HookPromptSubmit => Some("hook-prompt-submit"),
@@ -220,7 +215,6 @@ fn capture_command_name(command: &Commands) -> Option<&'static str> {
     }
 }
 
-#[hotpath::measure]
 pub(crate) fn run_native_capture(source: NativeHookCaptureSourceV1) -> i32 {
     let payload = match read_bounded_stdin() {
         Ok(payload) => payload,
@@ -321,7 +315,6 @@ pub(crate) fn run_native_capture(source: NativeHookCaptureSourceV1) -> i32 {
     }
 }
 
-#[hotpath::measure]
 fn native_hook_delivery_settlement(
     source: NativeHookCaptureSourceV1,
     material: tracedecay_hooks::NativeEnvelopeMaterialV1,
@@ -367,7 +360,6 @@ fn native_hook_delivery_settlement(
     })
 }
 
-#[hotpath::measure]
 fn read_bounded_stdin() -> Result<Vec<u8>, ()> {
     let bound = tracedecay_hooks::MAX_HOOK_PAYLOAD_BYTES;
     let mut payload = Vec::with_capacity(bound);
@@ -379,7 +371,6 @@ fn read_bounded_stdin() -> Result<Vec<u8>, ()> {
     (payload.len() <= bound).then_some(payload).ok_or(())
 }
 
-#[hotpath::measure]
 fn current_time() -> Option<UtcMicros> {
     let elapsed = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
     let micros = i64::try_from(elapsed.as_micros()).ok()?;

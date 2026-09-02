@@ -21,7 +21,6 @@ pub struct DaemonLspSessionClient {
     next_request: ConnectionLocalRequestSequence,
 }
 
-#[hotpath::measure_all]
 impl DaemonLspSessionClient {
     #[hotpath::measure(label = "daemon.client.lsp.open", future = true)]
     pub async fn open(
@@ -250,7 +249,6 @@ impl DaemonLspSessionClient {
     }
 }
 
-#[hotpath::measure]
 fn invocation_outcome_error(outcome: crate::contract::DaemonInvocationOutcome) -> InvocationError {
     match outcome {
         crate::contract::DaemonInvocationOutcome::ApplicationProblem { problem } => {

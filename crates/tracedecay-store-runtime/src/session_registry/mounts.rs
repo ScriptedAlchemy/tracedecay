@@ -209,7 +209,6 @@ impl DaemonSessionRuntimeRegistryV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl DaemonSessionRuntimeRegistryV1 {
     /// Mints one independently counted registered-session client and its
     /// matching graph client. The owner map retains neither issuance.

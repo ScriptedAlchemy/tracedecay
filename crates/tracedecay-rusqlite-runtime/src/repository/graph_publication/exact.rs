@@ -129,7 +129,6 @@ pub struct GraphPublicationExactSqlStorage {
     _retained_guard: Arc<ErasedExactSqlRetainedGuard>,
 }
 
-#[hotpath::measure_all]
 impl GraphPublicationExactSqlStorage {
     pub fn from_authorized_handle(handle: ExactSqlHandle) -> GraphPublicationStoreResultV1<Self> {
         Self::from_authorized_handle_with_guard(handle, ())
@@ -161,7 +160,6 @@ impl GraphPublicationExactSqlStorage {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn authoritative_verified_head_in_transaction(
     transaction: &ExactSqlTransaction,
     projection: &GraphProjectionIdentityV1,
@@ -170,7 +168,6 @@ pub(super) fn authoritative_verified_head_in_transaction(
     read_head(transaction, &encoded)
 }
 
-#[hotpath::measure]
 pub(super) fn active_replay_in_transaction(
     transaction: &ExactSqlTransaction,
     key: &GraphPublicationKeyV1,
@@ -179,7 +176,6 @@ pub(super) fn active_replay_in_transaction(
     read_exact(transaction, &encoded, key)
 }
 
-#[hotpath::measure]
 pub(crate) fn retire_replay_in_transaction(
     transaction: &ExactSqlTransaction,
     request: &GraphPublicationReplayRetirementV1,
@@ -302,7 +298,6 @@ pub(crate) fn retire_replay_in_transaction(
     Ok(GraphReplayRetirementOutcomeV1::Retired(tombstone))
 }
 
-#[hotpath::measure]
 pub(crate) fn discard_pending_replay_in_transaction(
     transaction: &ExactSqlTransaction,
     request: &GraphPendingReplayDiscardV1,
@@ -361,7 +356,6 @@ pub(crate) fn discard_pending_replay_in_transaction(
     Ok(GraphPendingReplayDiscardOutcomeV1::Discarded(replay))
 }
 
-#[hotpath::measure]
 pub(crate) fn append_replay_in_transaction(
     transaction: &ExactSqlTransaction,
     publication: &GraphPublicationReplayV1,

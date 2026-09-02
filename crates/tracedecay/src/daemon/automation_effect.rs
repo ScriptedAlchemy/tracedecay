@@ -108,7 +108,6 @@ pub(crate) struct ReusedSchedulerSkipStartError {
     _guard: AutomationRunSettlementGuard,
 }
 
-#[hotpath::measure_all]
 impl ReusedSchedulerSkipStartError {
     pub(crate) fn into_error(self) -> tracedecay_domain::errors::TraceDecayError {
         self.error
@@ -121,7 +120,6 @@ impl std::fmt::Display for ReusedSchedulerSkipStartError {
     }
 }
 
-#[hotpath::measure_all]
 impl<T: Send + 'static> RetainedSettlementWaiter<Result<T>> {
     #[hotpath::skip]
     pub(crate) async fn wait(self) -> Result<T> {
@@ -307,7 +305,6 @@ pub(crate) struct RetainedSettlementPairWaiter {
     second_submission_error: Option<tracedecay_domain::errors::TraceDecayError>,
 }
 
-#[hotpath::measure_all]
 impl RetainedSettlementPairWaiter {
     #[hotpath::skip]
     pub(crate) async fn wait(
@@ -338,7 +335,6 @@ pub(crate) struct DeferredSettlementPairSubmission<T> {
     waiter: Option<RetainedSettlementPairWaiter>,
 }
 
-#[hotpath::measure_all]
 impl<T> DeferredSettlementPairSubmission<T> {
     pub(crate) fn take_payload(&mut self) -> Result<T> {
         self.payload
@@ -385,7 +381,6 @@ impl<T> DeferredSettlementPairSubmission<T> {
     }
 }
 
-#[hotpath::measure]
 fn submit_pair_request(
     sender: Option<SyncSender<DeferredSettlementRequest>>,
     request: DeferredSettlementRequest,
@@ -403,7 +398,6 @@ fn submit_pair_request(
     })
 }
 
-#[hotpath::measure]
 fn receive_pair_request(
     receiver: Receiver<DeferredSettlementRequest>,
 ) -> DeferredSettlementRequest {
@@ -413,7 +407,6 @@ fn receive_pair_request(
     }
 }
 
-#[hotpath::measure]
 fn pair_join_result(owned: Result<RetainedPairOwnerOutcome>) -> Result<DeferredSettlementOutcome> {
     let owned = owned?;
     Ok(owned.outcome)
@@ -444,7 +437,6 @@ struct RetainedAbandonment {
     reservation_abandoned: bool,
 }
 
-#[hotpath::measure]
 fn ledger_record_matches_result(
     record: &AutomationRunLedgerRecord,
     result: &AutomationRunResultV1,
@@ -469,7 +461,6 @@ fn ledger_record_matches_result(
     }
 }
 
-#[hotpath::measure]
 fn agent_task_kind(task: AutomationTaskV1) -> AgentTaskKind {
     match task {
         AutomationTaskV1::MemoryCurator => AgentTaskKind::MemoryCurator,
@@ -495,7 +486,6 @@ pub(crate) enum AutomationEffectAdmission {
 /// Bounded admission-decision census: every prepared automation effect
 /// settles into exactly one of these outcomes, so a run that never executed
 /// is diagnosable from counters instead of log archaeology.
-#[hotpath::measure]
 fn observe_admission_decision(admission: &AutomationEffectAdmission) {
     match admission {
         AutomationEffectAdmission::Execute(_) => {
@@ -513,7 +503,6 @@ fn observe_admission_decision(admission: &AutomationEffectAdmission) {
     }
 }
 
-#[hotpath::measure]
 pub(crate) fn pinned_automation_configuration_digest(
     revision: &ConfigurationRevisionId,
     behavior: &ManifestDigest,
@@ -527,7 +516,6 @@ pub(crate) fn pinned_automation_configuration_digest(
     ))
 }
 
-#[hotpath::measure_all]
 impl AutomationEffectAuthority {
     pub(crate) fn start_retained_automation_settlement<T, P, R>(
         self,
@@ -1913,7 +1901,6 @@ impl AutomationEffectAuthority {
     }
 }
 
-#[hotpath::measure]
 fn settle_bound_owner(
     state: RetainedBoundSettlement,
 ) -> Result<RetainedOwnerValue<(AutomationSettledTerminal, AutomationRunLedgerRecord)>> {
@@ -1975,7 +1962,6 @@ fn settle_bound_owner_with_budget(
     }
 }
 
-#[hotpath::measure]
 fn settle_bound_once(state: &mut RetainedBoundSettlement) -> Result<()> {
     if state.publication.is_none() {
         #[cfg(test)]
@@ -2063,7 +2049,6 @@ fn settle_bound_once(state: &mut RetainedBoundSettlement) -> Result<()> {
     Ok(())
 }
 
-#[hotpath::measure]
 fn classify_bound_settlement(
     state: &RetainedBoundSettlement,
 ) -> Result<DurableSettlementClassification> {
@@ -2075,7 +2060,6 @@ fn classify_bound_settlement(
     )
 }
 
-#[hotpath::measure]
 fn cleanup_bound_terminal(state: &RetainedBoundSettlement) {
     if let Some(publication) = state.publication.as_ref()
         && let Err(error) =
@@ -2104,7 +2088,6 @@ fn cleanup_bound_terminal(state: &RetainedBoundSettlement) {
     }
 }
 
-#[hotpath::measure]
 fn complete_bound_settlement(
     state: RetainedBoundSettlement,
 ) -> RetainedOwnerValue<(AutomationSettledTerminal, AutomationRunLedgerRecord)> {
@@ -2135,7 +2118,6 @@ fn complete_bound_settlement(
     }
 }
 
-#[hotpath::measure]
 fn observe_automation_ledger(
     observer: Option<AutomationLedgerObserver>,
     ledger: &AutomationRunLedgerRecord,
@@ -2150,14 +2132,12 @@ fn observe_automation_ledger(
     }
 }
 
-#[hotpath::measure]
 fn settle_direct_owner(
     state: RetainedDirectSettlement,
 ) -> Result<RetainedOwnerValue<AutomationSettledTerminal>> {
     settle_direct_owner_with_budget(state, RETAINED_SETTLEMENT_RETRY_BUDGET)
 }
 
-#[hotpath::measure]
 fn settle_direct_owner_with_budget(
     mut state: RetainedDirectSettlement,
     budget: Duration,
@@ -2208,7 +2188,6 @@ fn settle_direct_owner_with_budget(
     }
 }
 
-#[hotpath::measure]
 fn settle_direct_once(state: &mut RetainedDirectSettlement) -> Result<()> {
     state.terminal = persist_terminal_blocking(
         &state.authority.journal_path,
@@ -2219,7 +2198,6 @@ fn settle_direct_once(state: &mut RetainedDirectSettlement) -> Result<()> {
     Ok(())
 }
 
-#[hotpath::measure]
 fn cleanup_direct_terminal(state: &RetainedDirectSettlement) {
     if let Err(error) = recovery_index::remove_pending_blocking(
         &state.authority.dashboard_root,
@@ -2233,7 +2211,6 @@ fn cleanup_direct_terminal(state: &RetainedDirectSettlement) {
     }
 }
 
-#[hotpath::measure]
 fn complete_direct_settlement(
     state: RetainedDirectSettlement,
 ) -> RetainedOwnerValue<AutomationSettledTerminal> {
@@ -2256,12 +2233,10 @@ fn complete_direct_settlement(
     }
 }
 
-#[hotpath::measure]
 fn abandon_retained_owner(state: RetainedAbandonment) -> Result<RetainedOwnerValue<()>> {
     abandon_retained_owner_with_budget(state, RETAINED_SETTLEMENT_RETRY_BUDGET)
 }
 
-#[hotpath::measure]
 fn abandon_retained_owner_with_budget(
     mut state: RetainedAbandonment,
     budget: Duration,
@@ -2313,7 +2288,6 @@ fn abandon_retained_owner_with_budget(
     }
 }
 
-#[hotpath::measure]
 fn abandon_retained_once(state: &mut RetainedAbandonment) -> Result<()> {
     if !state.reservation_abandoned {
         if let Err(error) =
@@ -2389,7 +2363,6 @@ async fn reservation_conflict_admission(
     Ok(AutomationEffectAdmission::Conflict)
 }
 
-#[hotpath::measure]
 fn validate_retirement_binding(
     admission: &DurableAutomationAdmission,
     classified: Option<&retirement::RetirementBinding>,
