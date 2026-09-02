@@ -100,6 +100,7 @@ pub enum HostProjectRegistrationPathV1 {
     ClaudeProjectDirectory,
     CursorProjectDirectory,
     CodexProjectDirectory,
+    DevinProjectDirectory,
     HermesProjectDirectory,
     KiroProjectDirectory,
     KimiProjectDirectory,
@@ -113,6 +114,7 @@ impl HostProjectRegistrationPathV1 {
             Self::ClaudeProjectDirectory => Some(".claude"),
             Self::CursorProjectDirectory => Some(".cursor"),
             Self::CodexProjectDirectory => Some(".codex"),
+            Self::DevinProjectDirectory => Some(".devin"),
             Self::HermesProjectDirectory => Some(".hermes"),
             Self::KiroProjectDirectory => Some(".kiro"),
             Self::KimiProjectDirectory => Some(".kimi-code"),
@@ -188,7 +190,7 @@ impl HostKindV1 {
             // and Copilot publishes no third-party hook surface at all, so
             // persisting a hook key for any of them would name a spool no event
             // can ever reach.
-            Self::ClineFamily | Self::Gemini | Self::Copilot => None,
+            Self::DevinLocal | Self::ClineFamily | Self::Gemini | Self::Copilot => None,
             Self::Cline => Some(NativeHostIdentityV1::Cline),
             Self::RooCode => Some(NativeHostIdentityV1::RooCode),
             Self::Kilo => Some(NativeHostIdentityV1::Kilo),
@@ -209,7 +211,7 @@ pub fn host_descriptor_v1(host: HostKindV1) -> HostDescriptorV1 {
     use HostHookMappingV1::{Native, NotApplicable};
     use HostProjectRegistrationPathV1::{
         ClaudeProjectDirectory, CodexProjectDirectory, CursorProjectDirectory,
-        HermesProjectDirectory, KimiProjectDirectory, KiroProjectDirectory,
+        DevinProjectDirectory, HermesProjectDirectory, KimiProjectDirectory, KiroProjectDirectory,
         OpenCodeProjectDirectory,
     };
 
@@ -250,6 +252,15 @@ pub fn host_descriptor_v1(host: HostKindV1) -> HostDescriptorV1 {
             ManagedEmbedded,
             Managed,
             CodexProjectDirectory,
+        ),
+        HostKindV1::DevinLocal => (
+            "devin",
+            "devin-local",
+            NotApplicable,
+            vec![ContextMcp],
+            ManagedEmbedded,
+            Managed,
+            DevinProjectDirectory,
         ),
         HostKindV1::Hermes => (
             "hermes",

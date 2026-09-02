@@ -51,6 +51,9 @@ pub fn require_component_capabilities(
         // the same capability matrix every other host is judged by instead of
         // through a missing match arm that would silently fall to `&[Mcp]`.
         (HostKindV1::Copilot, Core) => &[Hooks, Mcp],
+        // Devin Local's supported first-party route is its independent
+        // `mcpServers.tracedecay` registration; it has no Core surface.
+        (HostKindV1::DevinLocal, Core) => return Err(HostBundleError::UnsupportedCapability),
         (_, ContextMcp | OperatorMcp) => &[Mcp],
         (HostKindV1::CursorDesktop, Agent) => &[NativeDiagnostics],
         (HostKindV1::OpenCode, Agent) => &[Cli],
