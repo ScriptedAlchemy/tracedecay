@@ -50,10 +50,9 @@ use tokio::time::{Instant, timeout_at};
 use tracedecay::application_surface::{
     ApplicationSurfaceAdapterError, ApplicationSurfaceInvocationResult,
     normalize_application_tool_args, observe_surface_argument_rejection,
-    parse_application_surface_request, resolve_catalog_tool_binding,
+    parse_application_surface_request,
 };
 use tracedecay::daemon::{DaemonHandshake, call_default_tool_awaiting_project_open};
-use tracedecay::mcp::tools::LegacyToolCompatibilityOwner;
 use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_application::{CancellationSignal, Deadline};
 use tracedecay_daemon_protocol::RequestedOutputFormat;
@@ -64,15 +63,20 @@ use tracedecay_mcp::{
     render_tool_cli_help, short_tool_name,
 };
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
-use tracedecay_tool_catalog::BindingSurface;
 
 use crate::cli::dispatch::resolve_cli_application_surface;
 use crate::commands::{recover_truncated_mcp_result, reject_truncation_envelope};
 
 mod args;
-use args::{ParsedInvocation, canonical_tool_name, nearest_tool_name, parse_invocation};
+use args::{
+    ParsedInvocation, canonical_tool_name, nearest_tool_name, parse_invocation,
+    parse_whole_payload_invocation,
+};
 #[cfg(test)]
-use args::{edit_distance, finalize_arrays, parse_invocation_with_stdin};
+use args::{
+    edit_distance, finalize_arrays, parse_invocation_with_stdin,
+    parse_whole_payload_invocation_with_stdin,
+};
 #[cfg(test)]
 use serde_json::Map;
 
@@ -162,6 +166,36 @@ fn run_inner(
             let requested_name = name.as_deref().map(canonical_tool_name);
             hotpath::val!("cli.tool.name").set(&requested_name.as_deref().unwrap_or("list"));
         }
+        if let Some(canonical) = name.as_deref().map(canonical_tool_name)
+            && let Some(operation) = ApplicationSurfaceOperation::from_tool_name(&canonical)
+            && let Some(parsed) = parse_whole_payload_invocation(&args)?
+        {
+            let ParsedInvocation {
+                tool_args,
+                project: parsed_project,
+                raw_json,
+                dry_run: _,
+                show_help: _,
+            } = parsed;
+            let explicit_project = project.or(parsed_project);
+            let deadline = Instant::now()
+                .checked_add(tool_command_deadline()?)
+                .ok_or_else(tool_deadline_range_error)?;
+            let (request, requested_format) =
+                cli_surface_invocation(&canonical, tool_args, raw_json).map_err(|error| {
+                    TraceDecayError::Config {
+                        message: error.to_string(),
+                    }
+                })?;
+            return dispatch_cli_application_surface(
+                operation,
+                request,
+                DaemonToolDispatch::project_scoped(explicit_project, &canonical).project_path,
+                requested_format,
+                deadline,
+            )
+            .await;
+        }
         let defs = get_tool_definitions().map_err(|error| {
             TraceDecayError::project_route(
                 "mcp.catalog_discovery_unavailable",
@@ -233,32 +267,12 @@ fn run_inner(
             )
             .await;
         }
-        // Catalog-declared operations must pass the same binding resolver as the
-        // typed application surfaces before entering the retained compatibility
-        // owner. Operations with no catalog contract remain explicitly owned by
-        // the root MCP handler migration, rather than an unclassified fallback.
-        let _catalog_binding = resolve_catalog_tool_binding(BindingSurface::Cli, &def.name)
-            .map_err(|error| TraceDecayError::Config {
-                message: error.to_string(),
-            })?;
-        let compatibility_owned =
-            LegacyToolCompatibilityOwner::admits(&def.name).map_err(|error| {
-                TraceDecayError::project_route(
-                    "mcp.catalog_discovery_unavailable",
-                    false,
-                    format!("MCP tool discovery is unavailable: {error}"),
-                )
-            })?;
-        if internal_def.is_none() && !compatibility_owned {
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "{} does not own {}: {}",
-                    LegacyToolCompatibilityOwner::OWNER,
-                    def.name,
-                    LegacyToolCompatibilityOwner::REASON
-                ),
-            });
-        }
+        // Finding `def` in the host-filtered MCP definitions is the retained
+        // compatibility owner's admission authority. This point is reachable
+        // only after both typed application-operation branches above rejected
+        // the name, so composing the application catalog again can only return
+        // `None`; rebuilding a second advertised-name set likewise repeats the
+        // exact membership check that selected `def`.
         dispatch_compatibility_tool(
             DaemonToolDispatch::for_tool(explicit_project, &def.name, &tool_args),
             &def.name,

@@ -9,6 +9,7 @@
 //! reads answer `application.surface.unavailable` /
 //! `not_found_or_not_authorized` from a checkout the operator is standing in.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -84,6 +85,36 @@ impl SurfaceOutcome {
             .and_then(|problem| problem.get("code"))
             .and_then(Value::as_str)
             .map(str::to_owned)
+    }
+}
+
+#[test]
+fn tool_dry_run_reads_piped_args_in_either_order() {
+    let home = TempDir::new().expect("isolated home");
+    let project = TempDir::new().expect("working directory");
+    for trailing_args in [["--args", "-", "--dry-run"], ["--dry-run", "--args", "-"]] {
+        let mut command = tracedecay_command_with_home(home.path());
+        command
+            .current_dir(project.path())
+            .args(["tool", "storage_status"])
+            .args(trailing_args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().expect("tool dry-run should spawn");
+        child
+            .stdin
+            .take()
+            .expect("piped stdin")
+            .write_all(b"{}")
+            .expect("write tool arguments");
+        let output = child.wait_with_output().expect("collect tool dry-run");
+        assert!(
+            output.status.success(),
+            "tool dry-run {trailing_args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "{}");
     }
 }
 

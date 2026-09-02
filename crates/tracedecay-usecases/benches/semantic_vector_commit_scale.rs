@@ -23,6 +23,9 @@
 use std::fmt::Write as _;
 use std::time::Instant;
 
+#[path = "hotpath_coverage.rs"]
+mod hotpath_coverage;
+
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::projection::{
     ChunkProjectionDecisionV1, build_batch_receipt, expected_request_digest,
@@ -214,7 +217,14 @@ fn report(label: &str, batch: usize, rows: usize, started: &Instant) {
     );
 }
 
+const COMMIT_SWEEP_LABEL: &str = "usecases.semantic.commit_scale.sweep";
+const EXPECTED_HOTPATH_LABELS: &[&str] = &[COMMIT_SWEEP_LABEL];
+const _: () = assert!(!EXPECTED_HOTPATH_LABELS.is_empty());
+
 fn main() {
+    // First statement on purpose: may set Hotpath environment for the guard,
+    // which is sound only before any other thread exists.
+    let coverage = hotpath_coverage::init("tracedecay-semantic-vector-commit-scale");
     let chunks = env_scale("TD_SCALE_CHUNKS", 120_000);
     let dimensions = env_scale("TD_SCALE_DIMS", 768);
     let batch_len = env_scale("TD_SCALE_BATCH", 512);
@@ -247,50 +257,52 @@ fn main() {
     report("begin", 0, 0, &started);
     let mut committed_rows = 0_usize;
     let mut publication = None;
-    for batch_index in 0..batch_count {
-        let start = batch_index * batch_len;
-        let len = batch_len.min(chunks - start);
-        let prepared = prepared_batch(&embedding, &generation, start, len, dimensions);
-        match pattern.as_str() {
-            "adapter" => {
-                // Mirror of `commit_batch_records`: decide against the
-                // unmodified machine (the durable append happens between the
-                // halves in production), apply in place, then attempt the
-                // per-batch publication probe.
-                let staged_commit = match state
-                    .validate_batch(&build, checkpoint.as_ref(), &prepared)
-                    .expect("bench batch validates")
-                {
-                    BatchCommitDecisionV1::Replay(_) => panic!("bench batches never replay"),
-                    BatchCommitDecisionV1::Commit(staged_commit) => staged_commit,
-                };
-                checkpoint = Some(
-                    state
-                        .apply_batch(&build, staged_commit)
-                        .expect("bench batch commits"),
-                );
-                publication = match state.publish_generation(&build) {
-                    Ok(publication) => Some(publication),
-                    Err(_) => None,
-                };
+    hotpath::measure_block!(COMMIT_SWEEP_LABEL, {
+        for batch_index in 0..batch_count {
+            let start = batch_index * batch_len;
+            let len = batch_len.min(chunks - start);
+            let prepared = prepared_batch(&embedding, &generation, start, len, dimensions);
+            match pattern.as_str() {
+                "adapter" => {
+                    // Mirror of `commit_batch_records`: decide against the
+                    // unmodified machine (the durable append happens between the
+                    // halves in production), apply in place, then attempt the
+                    // per-batch publication probe.
+                    let staged_commit = match state
+                        .validate_batch(&build, checkpoint.as_ref(), &prepared)
+                        .expect("bench batch validates")
+                    {
+                        BatchCommitDecisionV1::Replay(_) => panic!("bench batches never replay"),
+                        BatchCommitDecisionV1::Commit(staged_commit) => staged_commit,
+                    };
+                    checkpoint = Some(
+                        state
+                            .apply_batch(&build, staged_commit)
+                            .expect("bench batch commits"),
+                    );
+                    publication = match state.publish_generation(&build) {
+                        Ok(publication) => Some(publication),
+                        Err(_) => None,
+                    };
+                }
+                "machine" => {
+                    checkpoint = Some(
+                        state
+                            .commit_batch(&build, checkpoint.as_ref(), prepared)
+                            .expect("bench batch commits"),
+                    );
+                }
+                other => panic!("unknown TD_COMMIT_PATTERN {other:?}"),
             }
-            "machine" => {
-                checkpoint = Some(
-                    state
-                        .commit_batch(&build, checkpoint.as_ref(), prepared)
-                        .expect("bench batch commits"),
-                );
+            committed_rows += len;
+            if (batch_index + 1) % report_every == 0 {
+                report("commit", batch_index + 1, committed_rows, &started);
             }
-            other => panic!("unknown TD_COMMIT_PATTERN {other:?}"),
         }
-        committed_rows += len;
-        if (batch_index + 1) % report_every == 0 {
-            report("commit", batch_index + 1, committed_rows, &started);
+        if pattern == "machine" {
+            publication = Some(state.publish_generation(&build).expect("bench publication"));
         }
-    }
-    if pattern == "machine" {
-        publication = Some(state.publish_generation(&build).expect("bench publication"));
-    }
+    });
     let publication = publication.expect("bench run publishes");
     report("published", batch_count, committed_rows, &started);
     let generation_rows = state
@@ -301,4 +313,5 @@ fn main() {
     assert_eq!(generation_rows, chunks, "published corpus is complete");
     drop(state);
     report("dropped", batch_count, committed_rows, &started);
+    hotpath_coverage::finish(coverage, EXPECTED_HOTPATH_LABELS);
 }

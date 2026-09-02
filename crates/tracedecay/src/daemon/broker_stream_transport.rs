@@ -277,9 +277,7 @@ impl BrokerStreamTransport {
     ) {
         loop {
             if accepted_any_request.load(std::sync::atomic::Ordering::Acquire)
-                && active_requests
-                    .lock()
-                    .is_ok_and(|active| active.is_empty())
+                && active_requests.lock().is_ok_and(|active| active.is_empty())
             {
                 return;
             }

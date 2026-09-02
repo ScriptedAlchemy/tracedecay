@@ -187,6 +187,11 @@ impl Drop for Spinner {
 /// an explicit stack size gives every platform the same headroom.
 const ASYNC_STACK_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ASYNC_WORKER_THREADS: usize = 16;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AsyncRuntimeFlavor {
+    CurrentThread,
+    MultiThread,
+}
 #[cfg(feature = "hotpath")]
 const HOTPATH_OUTPUT_FORMAT_ENV: &str = "HOTPATH_OUTPUT_FORMAT";
 #[cfg(feature = "hotpath")]
@@ -204,6 +209,17 @@ fn async_worker_threads() -> usize {
     std::thread::available_parallelism()
         .map_or(1, usize::from)
         .clamp(1, MAX_ASYNC_WORKER_THREADS)
+}
+
+fn async_runtime_flavor(command: Option<&Commands>) -> AsyncRuntimeFlavor {
+    match command {
+        // `tool` is a one-shot daemon client. A multi-thread runtime eagerly
+        // starts up to 16 workers even though the command drives one socket
+        // request and exits; the current thread already has a fixed 16 MiB
+        // stack and Tokio's blocking pool remains available when needed.
+        Some(Commands::Tool { .. }) => AsyncRuntimeFlavor::CurrentThread,
+        _ => AsyncRuntimeFlavor::MultiThread,
+    }
 }
 
 /// Keep enough bounded blocking workers to run every admitted background CPU
@@ -541,8 +557,11 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
     // the composition root. Must precede argument parsing: hook, install, and
     // ingest paths all read these slots, and an unregistered slot fails quietly
     // (no LCM redaction, no memory injection, zero turn costs) rather than
-    // loudly.
-    tracedecay::register_runtime_ports()?;
+    // loudly. The agent-host MCP catalog is the one exception: assembling all
+    // schemas costs hundreds of milliseconds and `tool` resolves its selected
+    // operation directly, so that port is installed only after parsing proves
+    // another command needs the eager catalog check.
+    tracedecay::register_runtime_ports_without_mcp_tool_catalog();
     let args: Vec<String> = std::env::args().collect();
     #[cfg(feature = "hotpath")]
     if let Some(command) = args.get(1) {
@@ -563,7 +582,7 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
     };
     #[cfg(feature = "hotpath")]
     let command_name = command_profile_label(&matches);
-    let cli = match Cli::from_arg_matches(&matches) {
+    let mut cli = match Cli::from_arg_matches(&matches) {
         Ok(cli) => cli,
         Err(error) => {
             let code = error.exit_code();
@@ -571,6 +590,10 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
             return Ok(CommandOutcome::Exit(code));
         }
     };
+    normalize_tool_reserved_global_flags(&mut cli);
+    if requires_eager_mcp_tool_catalog(cli.command.as_ref()) {
+        tracedecay::agents::register_mcp_tool_catalog_ports()?;
+    }
     if let Some(Commands::Daemon {
         action:
             DaemonAction::Run {
@@ -603,18 +626,29 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
         "daemon_cpu_pool_install",
         install_daemon_cpu_pool(cli.command.as_ref())
     )?;
-    let worker_threads = async_worker_threads();
+    let runtime_flavor = async_runtime_flavor(cli.command.as_ref());
+    let worker_threads = match runtime_flavor {
+        AsyncRuntimeFlavor::CurrentThread => 1,
+        AsyncRuntimeFlavor::MultiThread => async_worker_threads(),
+    };
     let blocking_threads = tokio_blocking_thread_limit();
     let runtime = hotpath::measure_block!("tokio_runtime_build", {
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .worker_threads(worker_threads)
-            .max_blocking_threads(blocking_threads)
-            .thread_stack_size(ASYNC_STACK_BYTES)
-            .build()
-            .map_err(|e| tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("failed to start async runtime: {e}"),
-            })
+        let build = match runtime_flavor {
+            AsyncRuntimeFlavor::CurrentThread => tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .max_blocking_threads(blocking_threads)
+                .thread_stack_size(ASYNC_STACK_BYTES)
+                .build(),
+            AsyncRuntimeFlavor::MultiThread => tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .worker_threads(worker_threads)
+                .max_blocking_threads(blocking_threads)
+                .thread_stack_size(ASYNC_STACK_BYTES)
+                .build(),
+        };
+        build.map_err(|e| tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!("failed to start async runtime: {e}"),
+        })
     })?;
     #[cfg(feature = "hotpath")]
     {
@@ -1942,6 +1976,24 @@ fn should_skip_agent_install_check(command: &Commands) -> bool {
 
 fn is_local_install_command(command: &Commands) -> bool {
     matches!(command, Commands::Install { local: true, .. })
+}
+
+fn requires_eager_mcp_tool_catalog(command: Option<&Commands>) -> bool {
+    !matches!(command, Some(Commands::Tool { .. }))
+}
+
+fn normalize_tool_reserved_global_flags(cli: &mut Cli) {
+    if !cli.dry_run {
+        return;
+    }
+    let Some(Commands::Tool { args, .. }) = cli.command.as_mut() else {
+        return;
+    };
+    // Clap recognizes the lifecycle-global `--dry-run` before a tool's first
+    // trailing argument. Return it to the tool parser so the documented
+    // reserved flag has the same meaning on either side of `--args`.
+    args.push("--dry-run".to_owned());
+    cli.dry_run = false;
 }
 
 #[cfg(test)]
