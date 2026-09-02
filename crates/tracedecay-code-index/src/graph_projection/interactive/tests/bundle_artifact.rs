@@ -2,6 +2,9 @@
 //! install as a ready catalog identical to the one the projection warm scan
 //! builds, and a foreign or corrupt artifact must be a typed refusal.
 
+use std::io::{self, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use tracedecay_graph_db::NeverCancelled;
 
 use super::*;
@@ -16,6 +19,48 @@ fn encoded_fixture_artifact() -> Vec<u8> {
     write_interactive_catalog_artifact(&manifest, &mut bytes, &NeverCancelled)
         .expect("encode catalog artifact");
     bytes
+}
+
+struct CancelAfterArtifactOutputStarts<'a>(&'a AtomicBool);
+
+impl GraphCancellation for CancelAfterArtifactOutputStarts<'_> {
+    fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+struct CancellingWriter<'a> {
+    output_started: &'a AtomicBool,
+    bytes_written: usize,
+}
+
+impl Write for CancellingWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.bytes_written += bytes.len();
+        self.output_started.store(true, Ordering::Release);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn artifact_rows_stream_and_observe_cancellation_after_output_starts() {
+    let manifest = production_manifest();
+    let output_started = AtomicBool::new(false);
+    let cancellation = CancelAfterArtifactOutputStarts(&output_started);
+    let mut writer = CancellingWriter {
+        output_started: &output_started,
+        bytes_written: 0,
+    };
+
+    let error = write_interactive_catalog_artifact(&manifest, &mut writer, &cancellation)
+        .expect_err("streamed artifact emission must stop after cancellation");
+
+    assert_eq!(error, CodeGraphProjectionError::Cancelled);
+    assert!(writer.bytes_written > 0, "artifact output never started");
 }
 
 /// Measurement harness, not a regression gate. Prices the catalog-at-seal
