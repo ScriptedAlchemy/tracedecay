@@ -278,7 +278,7 @@ async fn assert_initialized_route_is_rmcp<R, W>(
         lifecycle.begin_draining();
     }
     let served = tokio::time::timeout(PHASE_TIMEOUT, server_task)
-    .await
+        .await
         .expect("cancelled RMCP route did not terminate after the response gate was released");
     served
         .expect("join production RMCP connection")

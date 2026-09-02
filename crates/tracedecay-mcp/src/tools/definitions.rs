@@ -386,6 +386,16 @@ pub fn get_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogE
 fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogError> {
     #[cfg(test)]
     MAXIMAL_DEFINITION_BUILDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    // The dynamic registries have no shared mutable authority and dominate
+    // cold catalog construction. Build the application-backed definitions on
+    // this thread while the three independent extension registries assemble.
+    let observatory_worker =
+        spawn_definition_worker("tracedecay-catalog-observatory", observatory_definitions)?;
+    let work_worker = spawn_definition_worker("tracedecay-catalog-work", work::work_definitions)?;
+    let workflow_worker = spawn_definition_worker(
+        "tracedecay-catalog-workflow",
+        workflow::workflow_definitions,
+    )?;
     let application_registry = tracedecay_application::mcp_executable_binding_registry()
         .map_err(|error| McpCatalogError::Initialization(error.to_string()))?;
     let request_schema = |operation: &'static str| {
@@ -568,14 +578,44 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
     ];
     definitions.extend(configuration_definitions());
     definitions.extend(context_scout_control_definitions());
-    definitions.extend(observatory_definitions()?);
-    definitions.extend(work::work_definitions()?);
-    definitions.extend(workflow::workflow_definitions()?);
+    let observatory = observatory_worker.join().map_err(|_| {
+        McpCatalogError::Initialization(
+            "observatory tool catalog worker terminated unexpectedly".to_owned(),
+        )
+    })??;
+    let work = work_worker.join().map_err(|_| {
+        McpCatalogError::Initialization(
+            "work tool catalog worker terminated unexpectedly".to_owned(),
+        )
+    })??;
+    let workflow = workflow_worker.join().map_err(|_| {
+        McpCatalogError::Initialization(
+            "workflow tool catalog worker terminated unexpectedly".to_owned(),
+        )
+    })??;
+    definitions.extend(observatory);
+    definitions.extend(work);
+    definitions.extend(workflow);
     definitions.extend(native_worktree::native_worktree_definitions());
     add_registered_project_selector_properties(&mut definitions);
     add_lcm_storage_scope_property(&mut definitions);
     add_format_property(&mut definitions)?;
     Ok(definitions)
+}
+
+fn spawn_definition_worker(
+    name: &'static str,
+    worker: impl FnOnce() -> Result<Vec<ToolDefinition>, McpCatalogError> + Send + 'static,
+) -> Result<std::thread::JoinHandle<Result<Vec<ToolDefinition>, McpCatalogError>>, McpCatalogError>
+{
+    std::thread::Builder::new()
+        .name(name.to_owned())
+        .spawn(worker)
+        .map_err(|error| {
+            McpCatalogError::Initialization(format!(
+                "failed to start {name} tool catalog worker: {error}"
+            ))
+        })
 }
 
 pub fn retain_host_available_tool_definitions(definitions: &mut Vec<ToolDefinition>) {

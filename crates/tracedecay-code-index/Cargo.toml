@@ -121,7 +121,9 @@ tree-sitter = "0.26"
 # Profiling benches: built only under the opt-in `hotpath` feature so a
 # default `cargo bench` / `cargo test --all-targets` never compiles hotpath
 # instrumentation. Run with `cargo bench -p tracedecay-code-index
-# --features hotpath --bench <name>`.
+# --features hotpath --bench <name>`. A `--no-default-features` retained-parse
+# reproduction must keep `hotpath` selected (for example
+# `--features lite,hotpath`) or Cargo cannot select the target.
 [[bench]]
 name = "code_index_chunks"
 harness = false

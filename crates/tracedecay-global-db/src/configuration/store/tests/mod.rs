@@ -20,8 +20,9 @@ use tracedecay_domain::configuration::{
     ConfigurationLayerIdV1, ConfigurationMutationEffectV1, ConfigurationMutationGrantReceiptV1,
     ConfigurationMutationOperationV1, ConfigurationMutationSinkV1, DIAGNOSTICS_PREWARM_SETTING_KEY,
     ProtectedChange, ProtectedChangePlan, RedactedConfigurationChangeV1,
-    SOURCE_BINDINGS_SETTING_KEY, ScopeControlOperationV1, ScopeSourceBinding, SettingKey,
-    SourceBindingId, SourceKindV1, WORK_TOPOLOGY_POLICY_SETTING_KEY,
+    SOURCE_BINDINGS_SETTING_KEY, SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY, ScopeControlOperationV1,
+    ScopeSourceBinding, SettingKey, SourceBindingId, SourceKindV1,
+    WORK_TOPOLOGY_POLICY_SETTING_KEY,
 };
 use tracedecay_domain::{
     AccessPolicyDigest, ActorId, LocatorDigest, ProjectId, UtcMicros, canonical_sha256,
@@ -59,6 +60,66 @@ fn incomplete_snapshot_requires_reset_instead_of_default_repair() {
     provenance.remove(&missing_key);
     let incomplete = ConfigurationSnapshotV1::new(effective_values, provenance).unwrap();
     assert!(validate_snapshot_registry_completeness(&incomplete).is_err());
+}
+
+#[tokio::test]
+async fn linked_worktree_default_converges_into_existing_snapshot() {
+    let (_directory, runtime, root) = global_setup().await;
+    let key = SettingKey::new(SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY).unwrap();
+    let mut effective_values = root.snapshot.effective_values.clone();
+    let mut provenance = root.snapshot.provenance.clone();
+    effective_values.remove(&key);
+    provenance.remove(&key);
+    let historical_snapshot = ConfigurationSnapshotV1::new(effective_values, provenance).unwrap();
+    let db = runtime
+        .registered_database(HostAdmissionScope::Project)
+        .unwrap();
+    let transaction = db.begin_write_transaction().await.unwrap();
+    transaction
+        .execute_batch(
+            "DROP TRIGGER configuration_revisions_immutable_update;
+             DROP TRIGGER configuration_entries_immutable_delete;",
+        )
+        .await
+        .unwrap();
+    transaction
+        .execute(
+            "DELETE FROM configuration_entries WHERE revision_id = ?1 AND key = ?2",
+            tracedecay_runtime_core::db::engine::params![root.revision_id.as_str(), key.as_str()],
+        )
+        .await
+        .unwrap();
+    transaction
+        .execute(
+            "UPDATE configuration_revisions
+             SET snapshot_id = ?2,
+                 effective_behavior_digest = ?3,
+                 resolution_provenance_digest = ?4
+             WHERE revision_id = ?1",
+            tracedecay_runtime_core::db::engine::params![
+                root.revision_id.as_str(),
+                historical_snapshot.snapshot_id.as_str(),
+                historical_snapshot.effective_behavior_digest.as_str(),
+                historical_snapshot.resolution_provenance_digest.as_str()
+            ],
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    let store = GlobalDbConfigurationControlStore::new_registered(db);
+
+    let converged = store
+        .converge_registered_additive_defaults(&root.revision_id, UtcMicros(2))
+        .await
+        .unwrap();
+
+    assert_ne!(converged.revision_id, root.revision_id);
+    assert_eq!(
+        converged.snapshot.effective_values.get(&key),
+        Some(&ConfigurationValueV1::Boolean(false))
+    );
+    assert!(converged.snapshot.provenance.contains_key(&key));
+    validate_snapshot_registry_completeness(&converged.snapshot).unwrap();
 }
 
 async fn count(connection: &Connection, table: &str) -> i64 {

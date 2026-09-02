@@ -138,6 +138,11 @@ pub fn normalize_application_tool_args(
     tool_name: &str,
     mut args: Value,
 ) -> Result<NormalizedApplicationToolArgs, ApplicationSurfaceAdapterError> {
+    if let Some(format) = args.get("format")
+        && !matches!(format.as_str(), Some("markdown" | "json"))
+    {
+        return Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest);
+    }
     let requested_format = requested_output_format(&args);
     if let Some(object) = args.as_object_mut() {
         for key in SURFACE_TRANSPORT_ARGUMENT_KEYS {

@@ -137,6 +137,8 @@ jobs:
           python3 .release-automation/scripts/test-resolve-release-source-profile.py
           python3 .release-automation/scripts/test-package-release-archive.py
           python3 .release-automation/scripts/test-prepare-release-runtime.py
+          bash .release-automation/scripts/test-check-distribution-clean-source.sh
+          bash .release-automation/scripts/test-check-distribution-snapshot.sh
 
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:

@@ -149,7 +149,13 @@ pub fn repository_identity_root(dir: &Path) -> Option<PathBuf> {
 
 /// Returns whether `dir` resolves to a linked worktree root.
 pub fn is_linked_worktree(dir: &Path) -> bool {
-    git_worktree_root(dir).is_some_and(|root| root.join(".git").is_file())
+    let Ok(repository) = crate::git_repository::GitRepositoryAuthority::discover(dir) else {
+        return false;
+    };
+    repository.worktree_root().is_some_and(|root| {
+        realpath(dir).is_some_and(|canonical_dir| root == canonical_dir)
+            && repository.git_dir() != repository.common_dir()
+    })
 }
 
 pub(crate) fn is_detached_linked_worktree(dir: &Path) -> bool {
@@ -408,6 +414,56 @@ mod tests {
             crate::branch::current_branch(&worktree).as_deref(),
             Some("feature")
         );
+    }
+
+    #[test]
+    fn linked_worktree_classification_uses_git_identity() {
+        let tmp = tempdir().unwrap();
+        let main = tmp.path().join("main");
+        let linked = tmp.path().join("linked");
+        fs::create_dir_all(&main).unwrap();
+        run_git(&main, &["init", "--quiet"]);
+        fs::write(main.join("README.md"), "hi").unwrap();
+        run_git(&main, &["add", "."]);
+        run_git(
+            &main,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--quiet",
+                "-m",
+                "init",
+            ],
+        );
+        run_git(
+            &main,
+            &["worktree", "add", "--detach", linked.to_str().unwrap()],
+        );
+
+        assert!(!is_linked_worktree(&main));
+        assert!(is_linked_worktree(&linked));
+    }
+
+    #[test]
+    fn separate_git_dir_primary_is_not_a_linked_worktree() {
+        let tmp = tempdir().unwrap();
+        let worktree = tmp.path().join("checkout");
+        let git_dir = tmp.path().join("repository.git");
+        fs::create_dir_all(&worktree).unwrap();
+        run_git(
+            &worktree,
+            &[
+                "init",
+                "--quiet",
+                "--separate-git-dir",
+                git_dir.to_str().unwrap(),
+            ],
+        );
+
+        assert!(!is_linked_worktree(&worktree));
     }
 
     #[test]
