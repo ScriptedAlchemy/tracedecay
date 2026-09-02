@@ -262,13 +262,12 @@ async fn init_test_project(project: &Path) -> (MountedProductionProject, ()) {
         ProductionProjectCompositionHarnessV1::open(isolation_root, [project.to_path_buf()])
             .await
             .expect("production graph-analysis composition");
-    (
-        MountedProductionProject {
-            harness,
-            project_root: project.to_path_buf(),
-        },
-        (),
-    )
+    let mounted = MountedProductionProject {
+        harness,
+        project_root: project.to_path_buf(),
+    };
+    wait_for_current_graph(&mounted).await;
+    (mounted, ())
 }
 
 #[tokio::test]

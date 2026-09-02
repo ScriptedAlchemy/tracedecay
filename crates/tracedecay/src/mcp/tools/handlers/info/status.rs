@@ -152,6 +152,7 @@ fn attach_full_branch_status(
     retrieval_serving: &CodeIndexRetrievalServingV1,
 ) {
     let branch_diagnostics = cg.branch_diagnostics();
+    output["branch_diagnostics"] = json!(&branch_diagnostics);
     if let Some(open_branch) = branch_diagnostics.open_active_branch.as_deref() {
         output["active_branch"] = json!(open_branch);
     }

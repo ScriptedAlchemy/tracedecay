@@ -292,9 +292,8 @@ async fn test_move_symbol_apply_moves_and_rerun_errors_cleanly() {
     let p2 = move_payload(&result2);
     assert_eq!(p2["success"], false, "re-run should refuse: {p2}");
     assert_eq!(
-        result2.value["isError"], true,
-        "re-run should mark the transported MCP result as an error: {}",
-        result2.value
+        p2["effect"]["receipt"]["outcome"], "failed",
+        "re-run should retain a durable failed receipt: {p2}"
     );
 }
 
@@ -638,7 +637,10 @@ async fn test_move_symbol_symlink_escape_refuses() {
     assert_eq!(payload["success"], false, "payload: {payload}");
     assert_eq!(payload["failed"], true, "payload: {payload}");
     assert_eq!(payload["replayed"], false, "payload: {payload}");
-    assert_eq!(result.value["isError"], true, "result: {}", result.value);
+    assert_eq!(
+        payload["effect"]["receipt"]["outcome"], "failed",
+        "containment refusal should retain a durable failed receipt: {payload}"
+    );
     assert_eq!(
         fs::read_to_string(project.join("src/pricing.rs")).unwrap(),
         before
@@ -806,6 +808,11 @@ async fn test_move_symbol_non_utf8_destination_refuses() {
     )
     .unwrap();
     let (cg, _env) = init_test_project(project).await;
+    let server = cg
+        .harness
+        .server(&cg.project_root)
+        .expect("production project server");
+    warm_code_index_search(&server, "movable").await;
 
     // Write an existing destination with invalid UTF-8 bytes AFTER indexing so
     // the indexer never has to parse it.

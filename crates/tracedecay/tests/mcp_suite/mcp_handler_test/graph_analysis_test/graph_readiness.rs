@@ -26,9 +26,22 @@ pub(super) async fn wait_for_current_graph(host: &impl AnalysisToolHost) {
             .expect("typed project status while awaiting the current graph");
             let status: Value = serde_json::from_str(extract_text(&status.value))
                 .expect("typed project status JSON");
-            match status["code_index_freshness"]["status"].as_str() {
-                Some("current") => break,
-                Some("warming") => tokio::task::yield_now().await,
+            let freshness = &status["code_index_freshness"];
+            let serving = &freshness["worktree"]["code_graph_serving"];
+            match (
+                freshness["status"].as_str(),
+                serving["state"].as_str(),
+                serving["reason"].as_str(),
+            ) {
+                (Some("current"), Some("ready"), _) => break,
+                (Some("warming"), _, _)
+                | (_, Some("pending"), _)
+                | (_, Some("unavailable"), Some("generation_unavailable")) => {
+                    tokio::task::yield_now().await;
+                }
+                (_, Some("refused"), _) | (_, _, Some("activation_disabled")) => {
+                    panic!("graph readiness was refused: {status}");
+                }
                 actual => panic!("graph readiness became {actual:?}: {status}"),
             }
         }

@@ -5,6 +5,7 @@
 //! to raw `rg` —
 //! `tracedecay_search` only matches symbol *names*, not file *content*.
 
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
@@ -18,6 +19,7 @@ use tracedecay_code_index::grep_search::{
     MAX_LINE_BYTES, search_tree_with_cancel,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_graph_query::{CodeGraphSymbolSummaryV1, VerifiedGraphQuery};
 
 use crate::ToolResult;
 use crate::handlers::run_bounded_search;
@@ -30,6 +32,8 @@ const MAX_RESULTS_CAP: usize = 200;
 const DEFAULT_MAX_RESULTS: usize = 50;
 /// Hard cap on `context_lines`.
 const MAX_CONTEXT_LINES: usize = 3;
+/// Maximum graph symbols inspected while enriching one bounded grep response.
+const MAX_ENRICHMENT_SYMBOLS: usize = 500_000;
 /// A single bounded content-search hit.
 struct GrepHit {
     file: String,
@@ -37,6 +41,8 @@ struct GrepHit {
     text: String,
     before: Vec<String>,
     after: Vec<String>,
+    symbol: Option<String>,
+    node_id: Option<String>,
 }
 
 impl From<GrepSearchHit> for GrepHit {
@@ -47,6 +53,8 @@ impl From<GrepSearchHit> for GrepHit {
             text: hit.text,
             before: hit.before,
             after: hit.after,
+            symbol: None,
+            node_id: None,
         }
     }
 }
@@ -54,6 +62,7 @@ impl From<GrepSearchHit> for GrepHit {
 #[hotpath::measure(future = true, label = "mcp.search.grep.total")]
 pub async fn handle_grep(
     project_root: &Path,
+    graph: std::result::Result<&VerifiedGraphQuery, &TraceDecayError>,
     args: Value,
     scope_prefix: Option<&str>,
     deadline: Option<tracedecay_application::Deadline>,
@@ -134,14 +143,22 @@ pub async fn handle_grep(
     let truncated = scan.truncated || hits.len() > max_results;
     hits.truncate(max_results);
 
+    let graph_error = match graph {
+        Ok(graph) => {
+            enrich_hits_from_graph(graph, &mut hits)?;
+            None
+        }
+        Err(error) => Some(error),
+    };
     let touched_files = unique_file_paths(hits.iter().map(|hit| hit.file.as_str()));
-    let output_value = build_output_value(
+    let mut output_value = build_output_value(
         &hits,
         truncated,
         scan.files_scanned,
         scan.lines_examined,
         scan.omissions,
     );
+    output_value["graph_enrichment"] = graph_enrichment_value(&hits, graph_error);
 
     let text = hotpath::measure_block!(
         "mcp.search.grep.render",
@@ -158,6 +175,91 @@ pub async fn handle_grep(
     ))
 }
 
+#[hotpath::measure]
+fn enrich_hits_from_graph(graph: &VerifiedGraphQuery, hits: &mut [GrepHit]) -> Result<()> {
+    let paths = hits
+        .iter()
+        .map(|hit| hit.file.clone())
+        .collect::<HashSet<_>>();
+    let page = graph.symbols_in_logical_files_page(
+        &paths,
+        None,
+        MAX_ENRICHMENT_SYMBOLS,
+        MAX_ENRICHMENT_SYMBOLS,
+    )?;
+    if page.has_more {
+        return Err(TraceDecayError::project_route(
+            "verified-grep-enrichment-budget-exhausted",
+            false,
+            "grep hit enrichment exceeded its verified graph symbol budget",
+        ));
+    }
+    let mut symbols_by_file = HashMap::<String, Vec<CodeGraphSymbolSummaryV1>>::new();
+    for symbol in page.symbols {
+        if let Some(path) = symbol
+            .binding
+            .as_ref()
+            .and_then(|binding| binding.logical_path.as_ref())
+        {
+            symbols_by_file
+                .entry(path.clone())
+                .or_default()
+                .push(symbol);
+        }
+    }
+    for hit in hits {
+        let Some(symbols) = symbols_by_file.get(&hit.file) else {
+            continue;
+        };
+        let enclosing = symbols
+            .iter()
+            .filter_map(|symbol| {
+                let metadata = symbol.metadata.as_ref()?;
+                let start = metadata.start_line.checked_add(1)?;
+                let end = start.checked_add(metadata.line_span.checked_sub(1)?)?;
+                (start <= hit.line && hit.line <= end).then_some((symbol, metadata))
+            })
+            .min_by(|(left, left_metadata), (right, right_metadata)| {
+                left_metadata
+                    .line_span
+                    .cmp(&right_metadata.line_span)
+                    .then_with(|| right_metadata.start_line.cmp(&left_metadata.start_line))
+                    .then_with(|| left.occurrence.cmp(&right.occurrence))
+            });
+        if let Some((symbol, metadata)) = enclosing {
+            hit.symbol = Some(metadata.simple_name.clone());
+            hit.node_id = Some(symbol.occurrence.as_str().to_owned());
+        }
+    }
+    Ok(())
+}
+
+#[hotpath::measure]
+fn graph_enrichment_value(hits: &[GrepHit], error: Option<&TraceDecayError>) -> Value {
+    if let Some(error) = error {
+        return match error.project_route_context() {
+            Some((reason_code, retryable, detail)) => json!({
+                "status": "unavailable",
+                "reason_code": reason_code,
+                "retryable": retryable,
+                "detail": detail,
+            }),
+            None => json!({
+                "status": "unavailable",
+                "reason_code": "verified-code-graph-read-unavailable",
+                "retryable": false,
+                "detail": error.to_string(),
+            }),
+        };
+    }
+    json!({
+        "status": "complete",
+        "enriched": hits.iter().filter(|hit| hit.node_id.is_some()).count(),
+        "returned": hits.len(),
+    })
+}
+
+#[hotpath::measure]
 fn grep_metadata(
     lines_examined: usize,
     returned: usize,
@@ -225,6 +327,12 @@ fn build_output_value(
             if !hit.after.is_empty() {
                 item["after"] = json!(hit.after);
             }
+            if let Some(symbol) = &hit.symbol {
+                item["symbol"] = json!(symbol);
+            }
+            if let Some(node_id) = &hit.node_id {
+                item["node_id"] = json!(node_id);
+            }
             item
         })
         .collect();
@@ -266,6 +374,15 @@ fn render_grep_md(
         for line in &hit.after {
             md.line(&format!("    {line}"));
         }
+        if let (Some(symbol), Some(node_id)) = (&hit.symbol, &hit.node_id) {
+            md.line(&format!("  _Enclosing symbol: `{symbol}` (`{node_id}`)_"));
+        }
+    }
+    if hits.iter().any(|hit| hit.node_id.is_some()) {
+        md.blank();
+        md.line(
+            "_Use `tracedecay_body` with a result's `node_id` to read the verified enclosing symbol._",
+        );
     }
 
     md.blank();

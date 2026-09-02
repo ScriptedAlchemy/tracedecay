@@ -312,8 +312,12 @@ async fn test_rename_symbol_stale_tree_refuses_before_writing() {
         "source drift must terminate before the effect: {p}"
     );
     assert_eq!(
-        p["effect"]["payload"]["failed"], true,
-        "source drift must retain a typed pre-effect failure: {p}"
+        p["effect"]["receipt"]["outcome"], "failed",
+        "source drift must retain a failed durable receipt: {p}"
+    );
+    assert_eq!(
+        p["effect"]["payload"]["success"], false,
+        "source drift must retain the denied operation outcome: {p}"
     );
 
     // Nothing was written: the moved tree is exactly as the human left it.

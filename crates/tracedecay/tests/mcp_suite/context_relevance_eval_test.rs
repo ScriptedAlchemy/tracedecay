@@ -32,8 +32,7 @@ use serde_json::{Value, json};
 
 use crate::support::{
     extract_real_server_text, handle_real_server_tool_call,
-    production_composition_fixture_with_sources, wait_for_code_index_generation,
-    wait_for_current_graph, warm_code_index_search,
+    production_composition_fixture_with_sources, warm_code_index_search,
 };
 
 const TOP_K: usize = 5;
@@ -46,9 +45,7 @@ async fn context_eval_fixture_scores_real_queries() {
         .harness
         .server(&production.project_root)
         .expect("production project server");
-    wait_for_current_graph(&server).await;
     warm_code_index_search(&server, "authenticate").await;
-    wait_for_code_index_generation(&server, "authenticate").await;
 
     let fixture: Value = serde_json::from_str(include_str!(
         "../../../../tests/fixtures/context_eval_labeled.json"
