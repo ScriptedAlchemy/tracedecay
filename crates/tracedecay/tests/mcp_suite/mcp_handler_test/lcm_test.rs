@@ -1705,52 +1705,6 @@ async fn lcm_expand_real_service_rechecks_terminal_anchor_states() {
         ],
     )
     .await;
-    let project_id = cg
-        .store_layout()
-        .identity
-        .project_id
-        .clone()
-        .expect("test project id");
-    // Register through the graph's own retained runtime. That runtime is the
-    // registry the MCP server's LCM service reads, and its profile root is the
-    // isolated standalone test profile the graph database actually lives under
-    // — the ambient profile root is a different identity that holds neither.
-    let registry = open_active_project_session_db(&cg).await;
-    let project = registry
-        .upsert_code_project(&project_id, cg.project_root(), None, None, None)
-        .await
-        .expect("register test project");
-    let serving_db_relpath = registry
-        .profile_relative_path_for_test(&cg.db_path())
-        .expect("test graph database must be under the registry profile root")
-        .to_string_lossy()
-        .into_owned();
-    let store = registry
-        .upsert_store_instance(tracedecay_global_db::StoreInstanceUpsert {
-            store_id: format!("store_{project_id}"),
-            project_id: project.project_id.clone(),
-            store_kind: "code_project".to_string(),
-            storage_mode: "profile_sharded".to_string(),
-            store_relpath: serving_db_relpath.clone(),
-            manifest_relpath: None,
-            last_verified_at: Some(1),
-            last_write_at: Some(1),
-        })
-        .await
-        .expect("register test project store");
-    registry
-        .upsert_graph_scope(tracedecay_global_db::GraphScopeUpsert {
-            graph_scope_id: format!("scope_{project_id}"),
-            project_id: project.project_id,
-            store_id: store.store_id,
-            branch_name: "test".to_string(),
-            db_relpath: serving_db_relpath,
-            parent_scope_id: None,
-            last_synced_at: Some(1),
-            writable: true,
-        })
-        .await
-        .expect("register test graph scope");
     let server = real_mcp_server(cg).await;
     let initial = handle_real_server_tool_call(
         &server,
@@ -1880,52 +1834,6 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
     )
     .await
     .expect("external payload must receive a canonical summary attestation");
-    let project_id = cg
-        .store_layout()
-        .identity
-        .project_id
-        .clone()
-        .expect("test project id");
-    // Register through the graph's own retained runtime. That runtime is the
-    // registry the MCP server's LCM service reads, and its profile root is the
-    // isolated standalone test profile the graph database actually lives under
-    // — the ambient profile root is a different identity that holds neither.
-    let registry = open_active_project_session_db(&cg).await;
-    let project = registry
-        .upsert_code_project(&project_id, cg.project_root(), None, None, None)
-        .await
-        .expect("register test project");
-    let serving_db_relpath = registry
-        .profile_relative_path_for_test(&cg.db_path())
-        .expect("test graph database must be under the registry profile root")
-        .to_string_lossy()
-        .into_owned();
-    let store = registry
-        .upsert_store_instance(tracedecay_global_db::StoreInstanceUpsert {
-            store_id: format!("store_{project_id}"),
-            project_id: project.project_id.clone(),
-            store_kind: "code_project".to_string(),
-            storage_mode: "profile_sharded".to_string(),
-            store_relpath: serving_db_relpath.clone(),
-            manifest_relpath: None,
-            last_verified_at: Some(1),
-            last_write_at: Some(1),
-        })
-        .await
-        .expect("register test project store");
-    registry
-        .upsert_graph_scope(tracedecay_global_db::GraphScopeUpsert {
-            graph_scope_id: format!("scope_{project_id}"),
-            project_id: project.project_id,
-            store_id: store.store_id,
-            branch_name: "test".to_string(),
-            db_relpath: serving_db_relpath,
-            parent_scope_id: None,
-            last_synced_at: Some(1),
-            writable: true,
-        })
-        .await
-        .expect("register test graph scope");
     let payload_storage_root = cg
         .db_path()
         .parent()

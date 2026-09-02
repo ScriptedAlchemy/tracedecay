@@ -275,6 +275,19 @@ impl DirectRetainedSessionPortV1 {
                 )
             })
             .await??;
+        if result.status == RetainedOutcomeStatusV1::Unavailable {
+            let detail = result.error.as_ref().map_or_else(
+                || "workflow index unavailable".to_owned(),
+                |error| {
+                    format!(
+                        "{}: {}",
+                        error.reason.as_deref().unwrap_or(error.code.as_str()),
+                        error.message
+                    )
+                },
+            );
+            return Err(RetainedSurfaceExecutionErrorV1::unavailable(detail));
+        }
         evidence_outcome(
             context,
             RetainedSurfaceOperation::Workflows,
