@@ -219,6 +219,7 @@ tracedecay install --agent gemini      # Gemini CLI
 tracedecay install --agent hermes      # Hermes Agent
 tracedecay install --agent copilot     # GitHub Copilot CLI
 tracedecay install --agent cursor      # Cursor
+tracedecay install --agent devin       # Devin
 tracedecay install --agent kiro        # AWS Kiro
 tracedecay install --agent kimi        # Kimi Code CLI
 ```
@@ -231,6 +232,9 @@ MCP registration or native plugin tools, with permissions where available.
 
 - Hermes installs one native user plugin through Hermes' plugin API.
 - Cursor installs a local plugin in `~/.cursor/plugins/local/tracedecay` that bundles MCP, hooks, and the tracedecay rule.
+- Devin registers the `tracedecay serve` stdio MCP server in
+  `~/.config/devin/mcp_config.json`, preserving other Devin MCP entries and
+  leaving Devin's permission policy unchanged.
 - Codex uses Codex's plugin source, marketplace, and installed-cache flow: TraceDecay stages the source bundle and marketplace entry, then drives `codex plugin add tracedecay@personal` to install Codex's cache from that source. The plugin owns MCP, hooks, and skills. TraceDecay does not write `~/.codex/AGENTS.md`, `~/.codex/hooks.json`, or `[hooks.state]` trust hashes — Codex still asks you to trust new command hooks via `/hooks`.
 - Kimi Code CLI stages its plugin source at `~/.tracedecay/host-bundle-stage/kimi/tracedecay`; run the printed `/plugins install <staged-path>` command in Kimi Code, then rerun TraceDecay so it can record the staged source. Kimi owns `~/.kimi-code/plugins/installed.json` and its managed/cache paths.
 
@@ -300,6 +304,22 @@ The install is idempotent — safe to run again after upgrading tracedecay. You'
 Each install writes or stages the active profile's host integration; it does
 not create per-repository host configuration. The host's workspace/session
 context selects the active TraceDecay project at runtime.
+
+Devin supports both profile-wide and project installation:
+
+```bash
+tracedecay install --agent devin
+tracedecay install --local --agent devin
+```
+
+The first command writes Devin's user MCP registry at
+`~/.config/devin/mcp_config.json`. The second writes the repository's
+`.devin/mcp_config.json`. Both register the exact stdio entry accepted by
+Devin's `mcp add` command: the resolved `tracedecay` executable, `serve` as its
+argument, and `transport: "stdio"`. Existing Devin MCP servers and unrelated
+configuration remain intact. Restart Devin after installing, updating, or
+removing the integration. See [Devin integration](DEVIN-INTEGRATION.md) for
+the config locations and lifecycle details.
 
 Cursor install is plugin-based:
 
