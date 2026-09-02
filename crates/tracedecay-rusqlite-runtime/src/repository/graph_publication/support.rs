@@ -88,7 +88,6 @@ pub(super) fn begin(
     }
 }
 
-#[hotpath::measure]
 pub(super) fn ensure_owner(
     handle: &ExactSqlHandle,
     projection: &GraphProjectionIdentityV1,
@@ -96,7 +95,6 @@ pub(super) fn ensure_owner(
     ensure_shard_owner(handle, &projection.shard_id)
 }
 
-#[hotpath::measure]
 pub(super) fn ensure_shard_owner(
     handle: &ExactSqlHandle,
     shard_id: &StoreShardIdV1,
@@ -167,7 +165,6 @@ pub(super) fn commit(transaction: ExactSqlTransaction) -> GraphPublicationStoreR
         .map_err(|_| GraphPublicationStoreErrorV1::Infrastructure)
 }
 
-#[hotpath::measure]
 pub(super) fn rollback<T>(
     transaction: ExactSqlTransaction,
     value: T,
@@ -178,7 +175,6 @@ pub(super) fn rollback<T>(
         .map_err(|_| GraphPublicationStoreErrorV1::Infrastructure)
 }
 
-#[hotpath::measure]
 pub(super) fn rollback_error<T>(
     transaction: ExactSqlTransaction,
     error: GraphPublicationStoreErrorV1,
@@ -189,7 +185,6 @@ pub(super) fn rollback_error<T>(
     Err(error)
 }
 
-#[hotpath::measure]
 pub(super) fn statement(
     sql: impl Into<String>,
     params: Vec<ExactSqlValue>,
@@ -198,7 +193,6 @@ pub(super) fn statement(
         .map_err(|_| GraphPublicationStoreErrorV1::Infrastructure)
 }
 
-#[hotpath::measure]
 pub(super) fn execute(
     transaction: &ExactSqlTransaction,
     sql: &str,
@@ -209,7 +203,6 @@ pub(super) fn execute(
         .map_err(|_| GraphPublicationStoreErrorV1::Infrastructure)
 }
 
-#[hotpath::measure]
 pub(super) fn query(
     authority: &impl ExactQueryAuthority,
     sql: String,
@@ -221,7 +214,6 @@ pub(super) fn query(
         .map_err(|_| GraphPublicationStoreErrorV1::Infrastructure)
 }
 
-#[hotpath::measure]
 pub(super) fn read_exact(
     transaction: &impl ExactQueryAuthority,
     encoded: &EncodedProjection,
@@ -251,7 +243,6 @@ pub(super) fn read_exact(
     )
 }
 
-#[hotpath::measure]
 pub(super) fn read_exact_metadata(
     transaction: &impl ExactQueryAuthority,
     encoded: &EncodedProjection,
@@ -284,7 +275,6 @@ pub(super) fn read_exact_metadata(
     rows.pop().map(decode_metadata_row).transpose()
 }
 
-#[hotpath::measure]
 pub(super) fn read_exact_tombstone(
     transaction: &impl ExactQueryAuthority,
     encoded: &EncodedProjection,
@@ -311,7 +301,6 @@ pub(super) fn read_exact_tombstone(
     )
 }
 
-#[hotpath::measure]
 pub(super) fn read_tombstone_conflicts(
     transaction: &impl ExactQueryAuthority,
     encoded: &EncodedProjection,
@@ -339,7 +328,6 @@ pub(super) fn read_tombstone_conflicts(
         .collect()
 }
 
-#[hotpath::measure]
 pub(super) fn read_projection_page(
     transaction: &impl ExactQueryAuthority,
     request: &GraphPublicationProjectionPageRequestV1,
@@ -390,7 +378,6 @@ pub(super) fn read_projection_page(
     .collect()
 }
 
-#[hotpath::measure]
 pub(super) fn read_first_conflict_sequence(
     transaction: &impl ExactQueryAuthority,
     encoded: &EncodedProjection,
@@ -420,7 +407,6 @@ pub(super) fn read_first_conflict_sequence(
     rows.pop().map(|row| integer_at(&row, 0)).transpose()
 }
 
-#[hotpath::measure]
 pub(super) fn read_conflicts(
     transaction: &impl ExactQueryAuthority,
     encoded: &EncodedProjection,
@@ -451,7 +437,6 @@ pub(super) fn read_conflicts(
         .collect()
 }
 
-#[hotpath::measure]
 pub(super) fn read_head(
     transaction: &impl ExactQueryAuthority,
     encoded: &EncodedProjection,
@@ -506,7 +491,6 @@ pub(super) fn read_head(
     Ok(Some(head))
 }
 
-#[hotpath::measure]
 pub(super) fn read_pending(
     transaction: &impl ExactQueryAuthority,
     encoded: &EncodedProjection,
@@ -525,7 +509,6 @@ pub(super) fn read_pending(
     )
 }
 
-#[hotpath::measure]
 pub(super) fn read_pending_sequence(
     transaction: &impl ExactQueryAuthority,
     encoded: &EncodedProjection,
@@ -573,7 +556,6 @@ pub(super) fn read_pending_sequence(
         .transpose()
 }
 
-#[hotpath::measure]
 pub(super) fn read_by_sequence(
     transaction: &impl ExactQueryAuthority,
     sequence: i64,
@@ -595,7 +577,6 @@ pub(super) fn read_by_sequence(
     )
 }
 
-#[hotpath::measure]
 pub(super) fn replay_metadata_page(
     transaction: &impl ExactQueryAuthority,
     encoded: &EncodedProjection,
@@ -638,7 +619,6 @@ pub(super) fn replay_metadata_page(
         .collect()
 }
 
-#[hotpath::measure]
 pub(super) fn read_replays_by_sequences(
     transaction: &impl ExactQueryAuthority,
     sequences: &[i64],
@@ -682,7 +662,6 @@ pub(super) fn read_replays_by_sequences(
         .collect()
 }
 
-#[hotpath::measure]
 pub(super) fn insert_verified_dependencies(
     transaction: &ExactSqlTransaction,
     owner: &GraphPublicationReplayRecordV1,
@@ -760,7 +739,6 @@ pub(super) fn insert_verified_dependencies(
     Ok(())
 }
 
-#[hotpath::measure]
 pub(super) fn has_active_inbound_dependencies(
     transaction: &impl ExactQueryAuthority,
     dependency_sequence: tracedecay_store::GraphPublicationSequenceV1,
@@ -889,7 +867,6 @@ pub(super) fn read_tombstones_by_sequences(
 /// A sequence whose replay row was already deleted by cleanup finalization
 /// is simply absent from the map, matching what the per-sequence
 /// [`read_retained_source`] would have returned as `None`.
-#[hotpath::measure]
 fn read_retained_sources_batch(
     transaction: &impl ExactQueryAuthority,
     sequences: &[i64],
@@ -921,7 +898,6 @@ fn read_retained_sources_batch(
     Ok(sources)
 }
 
-#[hotpath::measure]
 fn sqlite_sequence_from_u64(value: u64) -> GraphPublicationStoreResultV1<i64> {
     i64::try_from(value).map_err(|_| {
         GraphPublicationStoreErrorV1::InvalidRequest(StorageRuntimeContractErrorV1::LimitExceeded {
@@ -932,7 +908,6 @@ fn sqlite_sequence_from_u64(value: u64) -> GraphPublicationStoreResultV1<i64> {
     })
 }
 
-#[hotpath::measure]
 fn read_dependencies(
     transaction: &impl ExactQueryAuthority,
     sequence: i64,
@@ -1003,7 +978,6 @@ fn read_dependencies(
 /// with a runaway dependency count is still caught (and still bounded to
 /// `MAX_GRAPH_REPLAY_DIRECT_DEPENDENCIES_V1 + 1` rows read for that owner)
 /// rather than only being caught once all of its rows are buffered.
-#[hotpath::measure]
 fn read_dependencies_batch(
     transaction: &impl ExactQueryAuthority,
     sequences: &[i64],
@@ -1086,7 +1060,6 @@ fn read_dependencies_batch(
     Ok(dependencies_by_owner)
 }
 
-#[hotpath::measure]
 fn read_retained_source(
     transaction: &impl ExactQueryAuthority,
     sequence: i64,
@@ -1107,7 +1080,6 @@ fn read_retained_source(
     rows.pop().map(|mut row| blob_at(&mut row, 0)).transpose()
 }
 
-#[hotpath::measure]
 pub(super) fn one_replay(
     transaction: &impl ExactQueryAuthority,
     mut rows: Vec<ExactSqlRow>,
@@ -1122,7 +1094,6 @@ pub(super) fn one_replay(
         .transpose()
 }
 
-#[hotpath::measure]
 pub(super) fn one_tombstone(
     transaction: &impl ExactQueryAuthority,
     mut rows: Vec<ExactSqlRow>,
@@ -1137,7 +1108,6 @@ pub(super) fn one_tombstone(
         .transpose()
 }
 
-#[hotpath::measure]
 pub(super) fn decode_row(
     transaction: &impl ExactQueryAuthority,
     row: ExactSqlRow,
@@ -1151,7 +1121,6 @@ pub(super) fn decode_row(
 /// instead of querying for them. Lets a caller batch-fetch dependencies for
 /// a whole replay set (see [`read_dependencies_batch`]) and then decode
 /// each row without an additional per-row query.
-#[hotpath::measure]
 fn decode_row_with_dependencies(
     mut row: ExactSqlRow,
     dependencies: Vec<GraphDependencyGenerationIdentityV1>,
@@ -1177,7 +1146,6 @@ fn decode_row_with_dependencies(
     )
 }
 
-#[hotpath::measure]
 pub(super) fn decode_tombstone_row(
     transaction: &impl ExactQueryAuthority,
     row: ExactSqlRow,
@@ -1194,7 +1162,6 @@ pub(super) fn decode_tombstone_row(
 /// retained source and dependency set instead of querying for them, so a
 /// batched page fetch (see [`read_tombstones_by_sequences`]) decodes each
 /// row without additional per-row queries.
-#[hotpath::measure]
 fn decode_tombstone_row_with(
     mut row: ExactSqlRow,
     canonical_replay_source: Option<Vec<u8>>,
@@ -1221,7 +1188,6 @@ fn decode_tombstone_row_with(
     )
 }
 
-#[hotpath::measure]
 pub(super) fn decode_metadata_row(
     mut row: ExactSqlRow,
 ) -> GraphPublicationStoreResultV1<ReplayMetadata> {
@@ -1239,7 +1205,6 @@ pub(super) fn decode_metadata_row(
     })
 }
 
-#[hotpath::measure]
 pub(super) fn exactly_one(
     mut rows: Vec<ExactSqlRow>,
     subject: &str,
@@ -1254,7 +1219,6 @@ pub(super) fn exactly_one(
         .ok_or_else(|| GraphPublicationStoreErrorV1::Corrupt(format!("{subject} row disappeared")))
 }
 
-#[hotpath::measure]
 pub(super) fn value_at(
     row: &ExactSqlRow,
     index: usize,
@@ -1264,7 +1228,6 @@ pub(super) fn value_at(
     })
 }
 
-#[hotpath::measure]
 pub(super) fn integer_at(row: &ExactSqlRow, index: usize) -> GraphPublicationStoreResultV1<i64> {
     match value_at(row, index)? {
         ExactSqlValue::Integer(value) => Ok(*value),
@@ -1274,7 +1237,6 @@ pub(super) fn integer_at(row: &ExactSqlRow, index: usize) -> GraphPublicationSto
     }
 }
 
-#[hotpath::measure]
 pub(super) fn optional_integer_at(
     row: &ExactSqlRow,
     index: usize,
@@ -1288,7 +1250,6 @@ pub(super) fn optional_integer_at(
     }
 }
 
-#[hotpath::measure]
 pub(super) fn text_at(
     row: &mut ExactSqlRow,
     index: usize,
@@ -1304,7 +1265,6 @@ pub(super) fn text_at(
     }
 }
 
-#[hotpath::measure]
 pub(super) fn optional_text_at(
     row: &mut ExactSqlRow,
     index: usize,
@@ -1321,7 +1281,6 @@ pub(super) fn optional_text_at(
     }
 }
 
-#[hotpath::measure]
 pub(super) fn blob_at(
     row: &mut ExactSqlRow,
     index: usize,
@@ -1337,12 +1296,10 @@ pub(super) fn blob_at(
     }
 }
 
-#[hotpath::measure]
 pub(super) fn text(value: impl Into<String>) -> ExactSqlValue {
     ExactSqlValue::Text(value.into())
 }
 
-#[hotpath::measure]
 pub(super) fn optional_text(value: Option<String>) -> ExactSqlValue {
     value.map_or(ExactSqlValue::Null, ExactSqlValue::Text)
 }

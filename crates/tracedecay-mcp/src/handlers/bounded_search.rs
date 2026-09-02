@@ -13,7 +13,6 @@ static SEARCH_SCAN_SEMAPHORE: LazyLock<Arc<Semaphore>> =
 
 pub(crate) struct CancelSearchOnDrop(Arc<AtomicBool>);
 
-#[hotpath::measure_all]
 impl CancelSearchOnDrop {
     #[cfg(test)]
     pub(crate) fn new(cancelled: Arc<AtomicBool>) -> Self {
@@ -130,7 +129,6 @@ where
     }
 }
 
-#[hotpath::measure]
 fn search_budget(
     tool_name: &str,
     deadline: Option<&tracedecay_application::Deadline>,
@@ -150,7 +148,6 @@ fn search_budget(
     }
 }
 
-#[hotpath::measure]
 fn search_cancelled_error(tool_name: &str) -> TraceDecayError {
     TraceDecayError::project_route(
         "source_search_cancelled",

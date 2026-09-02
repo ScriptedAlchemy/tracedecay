@@ -70,7 +70,6 @@ pub struct ClaudeObservationIngestStats {
     projected_session_ids: BTreeSet<String>,
 }
 
-#[hotpath::measure_all]
 impl ClaudeObservationIngestStats {
     #[must_use]
     fn merge(mut self, other: Self) -> Self {
@@ -178,7 +177,6 @@ pub enum ClaudeObservationIngestError {
     },
 }
 
-#[hotpath::measure_all]
 impl ClaudeObservationIngestError {
     pub(crate) fn accumulated_stats(&self) -> Option<&ClaudeObservationIngestStats> {
         match self {
@@ -197,7 +195,6 @@ impl ClaudeObservationIngestError {
     }
 }
 
-#[hotpath::measure]
 fn terminal_error_after_progress(
     stats: ClaudeObservationIngestStats,
     error: ClaudeObservationIngestError,
@@ -249,7 +246,6 @@ enum ScannedSegment {
     Skipped(ClaudeSkippedFrame),
 }
 
-#[hotpath::measure_all]
 impl ScannedSegment {
     fn start(&self) -> u64 {
         match self {
@@ -274,7 +270,6 @@ impl ScannedSegment {
 }
 
 /// Converts a durable observation cursor into a provider scanner cursor.
-#[hotpath::measure]
 pub fn scanner_cursor(cursor: Option<&ClaudeSourceCursorV1>) -> StoredCursor {
     cursor.map_or_else(StoredCursor::default, |cursor| StoredCursor {
         position: cursor.byte_offset(),
@@ -283,7 +278,6 @@ pub fn scanner_cursor(cursor: Option<&ClaudeSourceCursorV1>) -> StoredCursor {
     })
 }
 
-#[hotpath::measure]
 fn cursor_at(
     source: &ClaudeSourceIdentityV1,
     scope: &ObservationScopeV1,
@@ -299,7 +293,6 @@ fn cursor_at(
     )
 }
 
-#[hotpath::measure]
 fn expected_cursor_for_frame(
     actual: Option<&ClaudeSourceCursorV1>,
     source: &ClaudeSourceIdentityV1,
@@ -318,7 +311,6 @@ fn expected_cursor_for_frame(
     Ok(actual.cloned())
 }
 
-#[hotpath::measure]
 fn cursor_after_receipt(
     actual: Option<ClaudeSourceCursorV1>,
     committed: &ClaudeSourceCursorV1,
@@ -336,7 +328,6 @@ fn cursor_after_receipt(
 
 /// Builds the admission request for one framed record, consuming the frame's
 /// parsed payload.
-#[hotpath::measure]
 fn build_claude_capture_request(
     frame: &mut ClaudeSourceFrame,
     expected_cursor: Option<ClaudeSourceCursorV1>,
@@ -491,7 +482,6 @@ enum SourcePreparation {
     Ready(Box<PreparedSource>),
 }
 
-#[hotpath::measure]
 fn scan_stats(coverage: ClaudeFrameCoverage, read_through: u64) -> ClaudeObservationIngestStats {
     let start_offset = match coverage {
         ClaudeFrameCoverage::Complete { start_offset, .. }
@@ -504,7 +494,6 @@ fn scan_stats(coverage: ClaudeFrameCoverage, read_through: u64) -> ClaudeObserva
     }
 }
 
-#[hotpath::measure]
 fn deferred_source_stats(source_bytes_scanned: u64) -> ClaudeObservationIngestStats {
     ClaudeObservationIngestStats {
         deferred_sources: 1,
@@ -513,7 +502,6 @@ fn deferred_source_stats(source_bytes_scanned: u64) -> ClaudeObservationIngestSt
     }
 }
 
-#[hotpath::measure]
 fn scanned_segments(
     frames: Vec<ClaudeSourceFrame>,
     skipped_frames: Vec<ClaudeSkippedFrame>,
@@ -1028,7 +1016,6 @@ where
 
 /// Folds windowed-phase committed stats into a replay failure so terminal
 /// errors keep reporting every durable effect of this source pass.
-#[hotpath::measure]
 fn merge_committed_into_error(
     committed: ClaudeObservationIngestStats,
     error: ClaudeObservationIngestError,
@@ -1082,7 +1069,6 @@ pub async fn drain_projection_queue<A: HostAdmission + ?Sized>(
     })
 }
 
-#[hotpath::measure]
 fn frontier_store_error(
     operation: &'static str,
     error: impl std::fmt::Debug,

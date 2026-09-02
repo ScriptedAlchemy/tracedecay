@@ -473,7 +473,7 @@ fn build_identity() -> BuildIdentity {
         tree: command_output("git", &["rev-parse", "HEAD^{tree}"]),
         dirty: !command_output("git", &["status", "--porcelain"]).is_empty(),
         profile: "release",
-        command: "cargo bench -p tracedecay-code-index --no-default-features --features lite --bench retained_parse",
+        command: "cargo bench -p tracedecay-code-index --no-default-features --features lite,hotpath --bench retained_parse",
     }
 }
 

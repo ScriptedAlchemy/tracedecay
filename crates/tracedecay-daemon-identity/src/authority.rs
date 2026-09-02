@@ -26,7 +26,6 @@ mod windows_acl;
 
 const RECORD_FILE: &str = "daemon-authority.json";
 
-#[hotpath::measure]
 fn deserialize_endpoint<'de, D>(deserializer: D) -> std::result::Result<DaemonEndpoint, D::Error>
 where
     D: Deserializer<'de>,
@@ -86,7 +85,6 @@ pub struct DaemonAuthority {
     endpoint_bound: bool,
 }
 
-#[hotpath::measure_all]
 impl DaemonAuthority {
     #[hotpath::measure(label = "daemon.engine.authority.acquire")]
     pub fn acquire(profile_root: &Path, endpoint: &DaemonEndpoint, version: &str) -> Result<Self> {
@@ -302,7 +300,6 @@ pub fn current_record(profile_root: &Path) -> Result<Option<DaemonAuthorityRecor
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn validate_existing_profile_root(path: &Path) -> Result<bool> {
     match windows_acl::validate_directory_path(path) {
         Ok(()) => Ok(true),
@@ -311,7 +308,6 @@ fn validate_existing_profile_root(path: &Path) -> Result<bool> {
     }
 }
 
-#[hotpath::measure]
 fn authority_state_root(profile_root: &Path) -> PathBuf {
     #[cfg(windows)]
     {
@@ -326,7 +322,6 @@ fn authority_state_root(profile_root: &Path) -> PathBuf {
 /// Absolutizes `path`, canonicalizes through its deepest existing ancestor,
 /// then collapses `.`/`..` so the daemon's recorded identity paths are
 /// comparable byte-for-byte.
-#[hotpath::measure]
 pub fn canonical_identity_path(path: &Path) -> Result<PathBuf> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
@@ -342,7 +337,6 @@ pub fn canonical_identity_path(path: &Path) -> Result<PathBuf> {
     Ok(collapse_relative_components(&canonical))
 }
 
-#[hotpath::measure]
 fn canonical_endpoint(endpoint: &DaemonEndpoint) -> Result<DaemonEndpoint> {
     match endpoint {
         #[cfg(unix)]
@@ -359,7 +353,6 @@ fn canonical_endpoint(endpoint: &DaemonEndpoint) -> Result<DaemonEndpoint> {
     }
 }
 
-#[hotpath::measure]
 fn read_record_if_present(path: &Path) -> Result<Option<DaemonAuthorityRecord>> {
     #[cfg(windows)]
     let mut file = match windows_acl::open_private_file(path) {
@@ -386,7 +379,6 @@ fn read_record_if_present(path: &Path) -> Result<Option<DaemonAuthorityRecord>> 
         })
 }
 
-#[hotpath::measure]
 fn write_record(path: &Path, record: &DaemonAuthorityRecord) -> Result<()> {
     let temporary = path.with_extension(format!("json.{}.tmp", record.process_run_id));
     let bytes = serde_json::to_vec_pretty(record).map_err(|error| TraceDecayError::Config {
@@ -401,7 +393,6 @@ fn write_record(path: &Path, record: &DaemonAuthorityRecord) -> Result<()> {
     restrict_file(path)
 }
 
-#[hotpath::measure]
 fn open_private_lock(path: &Path) -> Result<File> {
     #[cfg(windows)]
     {
@@ -427,7 +418,6 @@ fn open_private_lock(path: &Path) -> Result<File> {
 }
 
 #[cfg(unix)]
-#[hotpath::measure]
 fn restrict_directory(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -436,7 +426,6 @@ fn restrict_directory(path: &Path) -> Result<()> {
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn restrict_directory(path: &Path) -> Result<()> {
     windows_acl::validate_private_directory(path)
         .map_err(|error| config_io("validate private", path, &error))
@@ -444,13 +433,11 @@ fn restrict_directory(path: &Path) -> Result<()> {
 
 #[cfg(all(not(unix), not(windows)))]
 #[allow(clippy::unnecessary_wraps)] // Preserve parity with Unix permission enforcement.
-#[hotpath::measure]
 fn restrict_directory(_path: &Path) -> Result<()> {
     Ok(())
 }
 
 #[cfg(unix)]
-#[hotpath::measure]
 fn restrict_file(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -459,7 +446,6 @@ fn restrict_file(path: &Path) -> Result<()> {
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn restrict_file(path: &Path) -> Result<()> {
     windows_acl::validate_private_file(path)
         .map_err(|error| config_io("validate private", path, &error))
@@ -467,12 +453,10 @@ fn restrict_file(path: &Path) -> Result<()> {
 
 #[cfg(all(not(unix), not(windows)))]
 #[allow(clippy::unnecessary_wraps)] // Preserve parity with Unix permission enforcement.
-#[hotpath::measure]
 fn restrict_file(_path: &Path) -> Result<()> {
     Ok(())
 }
 
-#[hotpath::measure]
 fn is_lock_contended(error: &std::io::Error) -> bool {
     if error.kind() == std::io::ErrorKind::WouldBlock {
         return true;
@@ -485,7 +469,6 @@ fn is_lock_contended(error: &std::io::Error) -> bool {
     false
 }
 
-#[hotpath::measure]
 fn new_auth_token() -> Result<String> {
     let mut bytes = [0_u8; 32];
     getrandom::getrandom(&mut bytes).map_err(|error| TraceDecayError::Config {
@@ -495,7 +478,6 @@ fn new_auth_token() -> Result<String> {
 }
 
 #[cfg(unix)]
-#[hotpath::measure]
 fn remove_if_present(path: &Path) -> Result<()> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
@@ -504,7 +486,6 @@ fn remove_if_present(path: &Path) -> Result<()> {
     }
 }
 
-#[hotpath::measure]
 fn config_io(operation: &str, path: &Path, error: &std::io::Error) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!("failed to {operation} '{}': {error}", path.display()),

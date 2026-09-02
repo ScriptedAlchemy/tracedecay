@@ -7,7 +7,6 @@ use super::required_object_schema;
 
 type DiscoveryResult<T> = Result<T, crate::McpCatalogError>;
 
-#[hotpath::measure]
 pub(super) fn canonical_application_request_schema(
     registry: &ExecutableBindingRegistryV1,
     operation: &'static str,
@@ -21,7 +20,6 @@ pub(super) fn canonical_application_request_schema(
         .ok_or_else(invalid_terminal_application_discovery)
 }
 
-#[hotpath::measure]
 fn invalid_terminal_application_discovery() -> crate::McpCatalogError {
     tracedecay_tool_catalog::CatalogValidationError::InvalidValue {
         field: "terminal application MCP executable binding",
@@ -30,7 +28,6 @@ fn invalid_terminal_application_discovery() -> crate::McpCatalogError {
     .into()
 }
 
-#[hotpath::measure]
 pub(super) fn closed_object_schema(
     properties: serde_json::Value,
     required: &[&str],

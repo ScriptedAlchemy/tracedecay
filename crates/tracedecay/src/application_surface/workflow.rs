@@ -18,7 +18,6 @@ use super::{ApplicationSurfaceAdapterError, invoke_registered_http};
 use tracedecay_daemon_protocol::DaemonInvocationExecutor;
 use tracedecay_daemon_protocol::{WorkflowApplicationInvocation, WorkflowApplicationOutcome};
 
-#[hotpath::measure]
 pub(super) fn router_with_executor(
     executor: Arc<dyn DaemonInvocationExecutor>,
 ) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
@@ -28,7 +27,6 @@ pub(super) fn router_with_executor(
     ))
 }
 
-#[hotpath::measure]
 pub(super) fn validate_catalog_bindings() -> Result<(), ApplicationSurfaceAdapterError> {
     let registry = tracedecay_application::workflow_executable_binding_registry()
         .map_err(ApplicationSurfaceAdapterError::CatalogValidation)?;

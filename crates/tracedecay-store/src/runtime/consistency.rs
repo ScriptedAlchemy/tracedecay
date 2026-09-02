@@ -30,7 +30,6 @@ pub struct ShardWatermarkV1 {
     pub commit_sequence: CommitSequenceV1,
 }
 
-#[hotpath::measure_all]
 impl ShardWatermarkV1 {
     pub fn same_history_as(&self, other: &Self) -> bool {
         self.shard_id == other.shard_id
@@ -50,7 +49,6 @@ impl ShardWatermarkV1 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FrozenWatermarkVectorV1(BTreeMap<StoreShardIdV1, ShardWatermarkV1>);
 
-#[hotpath::measure_all]
 impl FrozenWatermarkVectorV1 {
     pub fn new(
         watermarks: impl IntoIterator<Item = ShardWatermarkV1>,
@@ -123,7 +121,6 @@ pub struct SnapshotLeaseV1 {
     pub expires_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl SnapshotLeaseV1 {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
         if self.expires_at <= self.acquired_at {
@@ -199,7 +196,6 @@ struct FrozenWatermarkCoverageWireV1 {
     observed: Vec<ShardWatermarkV1>,
 }
 
-#[hotpath::measure_all]
 impl FrozenWatermarkCoverageV1 {
     pub fn new(
         required: FrozenWatermarkVectorV1,

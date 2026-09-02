@@ -27,6 +27,9 @@ on:
       - crates/tracedecay-runtime-core/src/git_repository/**
       - crates/tracedecay-runtime-core/tests/git_repository_authority*.rs
       - crates/tracedecay-runtime-core/benches/git_repository_authority.rs
+      - crates/tracedecay-runtime-core/Cargo.toml
+      - Cargo.toml
+      - Cargo.lock
       - .github/workflows/hotpath-runtime-core.yml
   workflow_dispatch:
 

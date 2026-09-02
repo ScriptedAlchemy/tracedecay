@@ -61,7 +61,6 @@ pub(super) async fn resume_remote_account_deletion_for_boot(
 /// Terminal receipt census for the deletion lane: settling, partial, and
 /// denied terminals count alongside success so interrupted deletions are
 /// visible in counters, not only in per-request receipts.
-#[hotpath::measure]
 fn observe_remote_deletion_receipt(receipt: &RemoteDeletionReceipt) {
     match receipt.status {
         RemoteDeletionStatus::Deleted => {
@@ -133,7 +132,6 @@ pub(super) struct RemoteDeletionReceipt {
     pub(super) failure: Option<RemoteDeletionFailure>,
 }
 
-#[hotpath::measure_all]
 impl RemoteDeletionReceipt {
     pub(super) fn pending(
         target: RemoteDeletionReceiptTarget,
@@ -254,7 +252,6 @@ pub(super) struct RemoteDeletionExecutionError {
     pub(super) source: tracedecay_domain::errors::TraceDecayError,
 }
 
-#[hotpath::measure_all]
 impl RemoteDeletionExecutionError {
     pub(super) fn new(
         mut receipt: RemoteDeletionReceipt,
@@ -335,7 +332,6 @@ async fn parse_remote_deletion_request(
     serde_json::from_slice(&body).map_err(|_| RemoteDeletionReceipt::invalid_request())
 }
 
-#[hotpath::measure]
 fn has_json_content_type(headers: &HeaderMap) -> bool {
     headers
         .get(CONTENT_TYPE)

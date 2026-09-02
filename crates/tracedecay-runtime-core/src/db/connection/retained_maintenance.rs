@@ -4,7 +4,6 @@ use super::{
     database_checkpoint_probe, database_health,
 };
 
-#[hotpath::measure_all]
 impl Database {
     pub fn close(self) {
         drop(self);

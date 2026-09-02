@@ -239,7 +239,6 @@ pub(super) fn validate_semantic_native_batch(
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_embedding_admission(
     plan: &SemanticVectorStagePlan,
     target: &ProjectionKeyV1,
@@ -265,7 +264,6 @@ fn validate_embedding_admission(
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_projection_receipt(
     plan: &SemanticVectorStagePlan,
     stage: &SemanticVectorStageBatchReceipt,
@@ -375,7 +373,6 @@ fn validate_projection_receipt(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure]
 fn validate_vector_effect(
     effect: &GraphEntity,
     generation: &str,
@@ -430,7 +427,6 @@ fn validate_vector_effect(
     }
 }
 
-#[hotpath::measure]
 fn validate_tombstone_effect(
     effect: &GraphEntity,
     generation: &str,
@@ -467,7 +463,6 @@ fn require_relation<'a>(
     Ok(())
 }
 
-#[hotpath::measure]
 fn require_labels(entity: &GraphEntity, expected: &[&str]) -> Result<(), GraphDbError> {
     let actual = entity
         .labels
@@ -482,7 +477,6 @@ fn require_labels(entity: &GraphEntity, expected: &[&str]) -> Result<(), GraphDb
     }
 }
 
-#[hotpath::measure]
 fn require_properties(entity: &GraphEntity, expected: &[&str]) -> Result<(), GraphDbError> {
     let actual = entity
         .properties
@@ -505,7 +499,6 @@ fn property<'a>(entity: &'a GraphEntity, name: &str) -> Result<&'a GraphProperty
         .ok_or(GraphDbError::conflict("native_contract.property"))
 }
 
-#[hotpath::measure]
 fn require_string(entity: &GraphEntity, name: &str, expected: &str) -> Result<(), GraphDbError> {
     match property(entity, name)? {
         GraphProperty::String(actual) if actual == expected => Ok(()),
@@ -513,7 +506,6 @@ fn require_string(entity: &GraphEntity, name: &str, expected: &str) -> Result<()
     }
 }
 
-#[hotpath::measure]
 fn require_i64(entity: &GraphEntity, name: &str, expected: i64) -> Result<(), GraphDbError> {
     match property(entity, name)? {
         GraphProperty::I64(actual) if *actual == expected => Ok(()),
@@ -521,7 +513,6 @@ fn require_i64(entity: &GraphEntity, name: &str, expected: i64) -> Result<(), Gr
     }
 }
 
-#[hotpath::measure]
 fn require_nonnegative_i64(entity: &GraphEntity, name: &str) -> Result<(), GraphDbError> {
     match property(entity, name)? {
         GraphProperty::I64(actual) if *actual >= 0 => Ok(()),
@@ -531,7 +522,6 @@ fn require_nonnegative_i64(entity: &GraphEntity, name: &str) -> Result<(), Graph
     }
 }
 
-#[hotpath::measure]
 fn require_bytes(entity: &GraphEntity, name: &str) -> Result<(), GraphDbError> {
     match property(entity, name)? {
         GraphProperty::Bytes(_) => Ok(()),
@@ -550,7 +540,6 @@ fn decode_bytes<T: serde::de::DeserializeOwned>(
     }
 }
 
-#[hotpath::measure]
 fn decode_generation_receipt(
     entity: &GraphEntity,
 ) -> Result<ProjectionBatchReceiptV1, GraphDbError> {

@@ -68,7 +68,6 @@ pub enum SemanticNativeStageResultV1<T> {
     },
 }
 
-#[hotpath::measure_all]
 impl<T> SemanticNativeStageResultV1<T> {
     #[hotpath::skip]
     pub const fn is_pending(&self) -> bool {
@@ -363,7 +362,6 @@ pub fn evaluate_native_query(
     })
 }
 
-#[hotpath::measure]
 fn validate_profile_binding(
     profile: &ProfileSpecV1,
     fusion: &FusionProfile,
@@ -392,7 +390,6 @@ fn validate_profile_binding(
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_fallback_lanes(
     lanes: &[CompositionLaneInput],
 ) -> Result<(), SemanticNativeEvaluationErrorV1> {
@@ -409,7 +406,6 @@ fn validate_fallback_lanes(
     Ok(())
 }
 
-#[hotpath::measure]
 fn canonical_fallback_bytes(
     fallback: &QueryFallbackSubpayload,
 ) -> Result<Vec<u8>, SemanticNativeEvaluationErrorV1> {
@@ -465,7 +461,6 @@ fn compose_ablation(
     })
 }
 
-#[hotpath::measure]
 fn ablated_profile(profile: &FusionProfile, admitted: &BTreeSet<RetrieverKind>) -> FusionProfile {
     let mut profile = profile.clone();
     profile
@@ -587,7 +582,6 @@ fn evaluate_semantic(
     }
 }
 
-#[hotpath::measure]
 fn composition_lane_candidate_count(lane: &CompositionLaneInput) -> u64 {
     match &lane.outcome {
         RetrieverOutcome::Complete(batch) | RetrieverOutcome::Partial { value: batch, .. } => {
@@ -602,7 +596,6 @@ fn composition_lane_candidate_count(lane: &CompositionLaneInput) -> u64 {
     }
 }
 
-#[hotpath::measure]
 fn rerank_stage_measurement(
     rerank: &SemanticRerankComparisonV1,
 ) -> SemanticNativeStageResultV1<SemanticNativeStageMeasurementV1> {
@@ -628,12 +621,10 @@ fn rerank_stage_measurement(
     }
 }
 
-#[hotpath::measure]
 fn elapsed_micros(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
-#[hotpath::measure]
 fn exact_flat_oracle(
     batch: &RetrieverBatch<CodeSemanticEvidenceV1>,
 ) -> Result<SemanticExactFlatOracleV1, SemanticNativeEvaluationErrorV1> {
@@ -817,7 +808,6 @@ impl DeterministicLocalRerankExecutorV1 for BorrowedRerankExecutorV1<'_> {
     }
 }
 
-#[hotpath::measure]
 fn pending_rerank(
     off: Vec<RankedCandidate>,
     reason: SemanticNativePendingReasonV1,
@@ -829,7 +819,6 @@ fn pending_rerank(
     }
 }
 
-#[hotpath::measure]
 fn pending_rerank_outcome(
     off: Vec<RankedCandidate>,
     fallback: Vec<RankedCandidate>,
@@ -940,7 +929,6 @@ pub struct SemanticNativeResourceProvenanceV1 {
     pub measurement_method: String,
 }
 
-#[hotpath::measure_all]
 impl SemanticNativeResourceSampleV1 {
     fn is_complete(&self) -> bool {
         self.incomplete_reason().is_none()
@@ -1170,7 +1158,6 @@ pub struct SemanticNativeResourceEvidenceV1 {
     pub samples: BTreeMap<String, SemanticNativeStageResultV1<SemanticNativeResourceSampleV1>>,
 }
 
-#[hotpath::measure_all]
 impl SemanticNativeResourceEvidenceV1 {
     /// Validate exact scale and preserve pending measurements without filling
     /// any absent observation.

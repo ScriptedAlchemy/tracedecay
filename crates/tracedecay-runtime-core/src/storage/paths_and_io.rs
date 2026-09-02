@@ -18,7 +18,6 @@ use super::{
     StoreManifest, inject_durable_atomic_write_fault, inject_durable_namespace_sync_fault,
 };
 
-#[hotpath::measure_all]
 impl StoreManifest {
     pub(crate) fn from_layout(layout: &StoreLayout) -> Self {
         Self {
@@ -35,7 +34,6 @@ impl StoreManifest {
     }
 }
 
-#[hotpath::measure_all]
 impl ActiveProjectContext {
     pub fn new(layout: StoreLayout, scope_id: GraphScopeId) -> Self {
         let query_target = QueryTarget {
@@ -49,7 +47,6 @@ impl ActiveProjectContext {
     }
 }
 
-#[hotpath::measure_all]
 impl ProjectPath {
     pub fn resolve(project_root: &Path, path: &Path) -> Result<Self> {
         validate_no_nul(path)?;
@@ -104,7 +101,6 @@ impl ProjectPath {
     }
 }
 
-#[hotpath::measure_all]
 impl StoreArtifactPath {
     pub fn resolve(store_root: &Path, relpath: &Path) -> Result<Self> {
         validate_no_nul(relpath)?;
@@ -138,7 +134,6 @@ impl StoreArtifactPath {
     }
 }
 
-#[hotpath::measure_all]
 impl PrivateStoreIo {
     /// Creates or validates one owner-private leaf below an existing store
     /// authority. Unlike `create_dir_all`, this never manufactures ancestors.
@@ -407,7 +402,6 @@ impl PrivateStoreIo {
     }
 }
 
-#[hotpath::measure]
 fn sync_parent_directory(path: &Path) -> io::Result<()> {
     let parent = path
         .parent()
@@ -416,7 +410,6 @@ fn sync_parent_directory(path: &Path) -> io::Result<()> {
     tracedecay_private_fs::framed_log::sync_directory(parent, DirectorySyncPolicy::Strict)
 }
 
-#[hotpath::measure]
 fn missing_directories(path: &Path) -> io::Result<Vec<PathBuf>> {
     if path.as_os_str().is_empty() {
         return Err(invalid_input(
@@ -440,7 +433,6 @@ fn missing_directories(path: &Path) -> io::Result<Vec<PathBuf>> {
 }
 
 #[cfg(unix)]
-#[hotpath::measure]
 fn platform_create_dir_all_durable(path: &Path) -> io::Result<()> {
     let missing = missing_directories(path)?;
     let Some(highest_missing) = missing.last() else {
@@ -461,7 +453,6 @@ fn platform_create_dir_all_durable(path: &Path) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn platform_create_dir_all_durable(path: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
 
@@ -529,7 +520,6 @@ fn platform_create_dir_all_durable(path: &Path) -> io::Result<()> {
 }
 
 #[cfg(not(any(unix, windows)))]
-#[hotpath::measure]
 fn platform_create_dir_all_durable(path: &Path) -> io::Result<()> {
     let missing = missing_directories(path)?;
     if missing.is_empty() {
@@ -542,7 +532,6 @@ fn platform_create_dir_all_durable(path: &Path) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn unique_private_staging_directory(parent: &Path) -> io::Result<PathBuf> {
     for _ in 0..16 {
         let mut entropy = [0_u8; 16];
@@ -564,7 +553,6 @@ fn unique_private_staging_directory(parent: &Path) -> io::Result<PathBuf> {
 }
 
 #[cfg(unix)]
-#[hotpath::measure]
 fn platform_remove_file_durable(path: &Path) -> io::Result<bool> {
     match fs::remove_file(path) {
         Ok(()) => {
@@ -580,7 +568,6 @@ fn platform_remove_file_durable(path: &Path) -> io::Result<bool> {
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn platform_remove_file_durable(path: &Path) -> io::Result<bool> {
     use std::os::windows::ffi::OsStrExt;
 
@@ -645,7 +632,6 @@ fn platform_remove_file_durable(path: &Path) -> io::Result<bool> {
 }
 
 #[cfg(not(any(unix, windows)))]
-#[hotpath::measure]
 fn platform_remove_file_durable(path: &Path) -> io::Result<bool> {
     if !path.try_exists()? {
         return Ok(false);
@@ -656,7 +642,6 @@ fn platform_remove_file_durable(path: &Path) -> io::Result<bool> {
     ))
 }
 
-#[hotpath::measure]
 pub fn reject_symlink_components(path: &Path, subject: &str) -> io::Result<()> {
     let is_absolute = path.is_absolute();
     let mut current = PathBuf::new();
@@ -691,19 +676,16 @@ pub fn reject_symlink_components(path: &Path, subject: &str) -> io::Result<()> {
     Ok(())
 }
 
-#[hotpath::measure]
 fn invalid_input(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
 }
 
-#[hotpath::measure]
 fn path_parent(path: &Path) -> &Path {
     path.parent().unwrap_or_else(|| Path::new(""))
 }
 
 /// Sibling `<file>.lock` path used to serialize appends without locking the
 /// data file's own handle. Shared with the automation run ledger writer.
-#[hotpath::measure]
 pub fn append_lock_path(path: &Path) -> PathBuf {
     let mut lock_name = path
         .file_name()
@@ -740,7 +722,6 @@ pub fn append_lock_path(path: &Path) -> PathBuf {
 // data region being written. This rationale lives here once; call sites point
 // back to it rather than restating it.
 
-#[hotpath::measure]
 pub(super) fn open_lock_file(lock_path: &Path, private: bool) -> io::Result<fs::File> {
     if let Some(parent) = lock_path.parent() {
         fs::create_dir_all(parent)?;
@@ -768,7 +749,6 @@ pub(super) fn open_lock_file(lock_path: &Path, private: bool) -> io::Result<fs::
 /// success, or `None` when another process/thread already holds it (the caller
 /// then skips its critical section). See the sidecar-lock module note above for
 /// the read+write-handle rationale.
-#[hotpath::measure]
 pub fn try_acquire_sidecar_lock(lock_path: &Path) -> io::Result<Option<fs::File>> {
     let file = open_lock_file(lock_path, false)?;
     match file.try_lock_exclusive() {
@@ -783,12 +763,10 @@ pub fn try_acquire_sidecar_lock(lock_path: &Path) -> io::Result<Option<fs::File>
 /// Blocking sidecar lock acquisition. Returns the held lock file once the
 /// exclusive lock is granted. See the sidecar-lock module note above for the
 /// read+write-handle rationale.
-#[hotpath::measure]
 pub fn acquire_sidecar_lock_blocking(lock_path: &Path) -> io::Result<fs::File> {
     acquire_lock_file_blocking(lock_path, false)
 }
 
-#[hotpath::measure]
 fn acquire_lock_file_blocking(lock_path: &Path, private: bool) -> io::Result<fs::File> {
     let file = open_lock_file(lock_path, private)?;
     file.lock_exclusive()?;
@@ -799,7 +777,6 @@ fn acquire_lock_file_blocking(lock_path: &Path, private: bool) -> io::Result<fs:
 /// append lock. When `private`, the data file is created owner-only and both
 /// the data and lock paths are symlink-checked (the private-store contract);
 /// otherwise a plain create+append handle is used (the automation run ledger).
-#[hotpath::measure]
 pub(crate) fn append_line_locked(path: &Path, line: &str, private: bool) -> io::Result<()> {
     let lock_path = append_lock_path(path);
     if private {
@@ -820,7 +797,6 @@ pub(crate) fn append_line_locked(path: &Path, line: &str, private: bool) -> io::
     Ok(())
 }
 
-#[hotpath::measure]
 fn append_line_plain(path: &Path, line: &str) -> io::Result<()> {
     let mut file = fs::OpenOptions::new()
         .create(true)
@@ -836,7 +812,6 @@ fn append_line_plain(path: &Path, line: &str) -> io::Result<()> {
 /// (32), and `ERROR_LOCK_VIOLATION` (33). The retries total well under ~250ms
 /// and the final error is always propagated. On non-Windows platforms `op`
 /// runs exactly once.
-#[hotpath::measure]
 pub fn retry_transient_file_op<F>(mut op: F) -> io::Result<()>
 where
     F: FnMut() -> io::Result<()>,
@@ -863,13 +838,11 @@ where
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn is_transient_windows_file_error(err: &io::Error) -> bool {
     matches!(err.raw_os_error(), Some(5 | 32 | 33))
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn transient_file_backoff(attempt: u32) -> std::time::Duration {
     // Base 10, 20, 40, 80 ms (sum 150 ms across the 4 retries) plus a small
     // jitter derived from the wall clock to de-correlate contending writers.
@@ -880,12 +853,10 @@ fn transient_file_backoff(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_millis(base + jitter)
 }
 
-#[hotpath::measure]
 pub(super) fn relative_to_data_root(path: &Path, data_root: &Path) -> PathBuf {
     path.strip_prefix(data_root).unwrap_or(path).to_path_buf()
 }
 
-#[hotpath::measure_all]
 impl StoreLayout {
     pub(super) fn new(
         identity: ProjectIdentity,
@@ -927,14 +898,12 @@ impl StoreLayout {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn validate_enrollment_marker(marker: &EnrollmentMarker, path: &Path) -> Result<()> {
     validate_project_id(&marker.project_id).map_err(|message| TraceDecayError::Config {
         message: format!("invalid enrollment marker '{}': {message}", path.display()),
     })
 }
 
-#[hotpath::measure]
 pub fn validate_project_id(project_id: &str) -> std::result::Result<(), &'static str> {
     if project_id.is_empty() {
         return Err("project_id must not be empty");
@@ -955,7 +924,6 @@ pub fn validate_project_id(project_id: &str) -> std::result::Result<(), &'static
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_no_nul(path: &Path) -> Result<()> {
     if path.as_os_str().as_encoded_bytes().contains(&0) {
         return Err(TraceDecayError::Config {
@@ -965,7 +933,6 @@ fn validate_no_nul(path: &Path) -> Result<()> {
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_normal_components(path: &Path, allow_absolute: bool) -> Result<()> {
     if path.as_os_str().is_empty() || has_current_dir_segment(path) {
         return Err(TraceDecayError::Config {
@@ -989,7 +956,6 @@ fn validate_normal_components(path: &Path, allow_absolute: bool) -> Result<()> {
     Ok(())
 }
 
-#[hotpath::measure]
 fn has_current_dir_segment(path: &Path) -> bool {
     let text = path.to_string_lossy();
     text == "."
@@ -1002,7 +968,6 @@ fn has_current_dir_segment(path: &Path) -> bool {
 }
 
 #[cfg(unix)]
-#[hotpath::measure]
 pub fn set_private_dir_permissions(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -1011,13 +976,11 @@ pub fn set_private_dir_permissions(path: &Path) -> std::io::Result<()> {
 
 #[cfg(not(unix))]
 #[allow(clippy::unnecessary_wraps)] // Keep platform implementations signature-compatible.
-#[hotpath::measure]
 pub fn set_private_dir_permissions(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
 #[cfg(unix)]
-#[hotpath::measure]
 fn apply_private_create_mode(options: &mut fs::OpenOptions) {
     use std::os::unix::fs::OpenOptionsExt;
 
@@ -1025,5 +988,4 @@ fn apply_private_create_mode(options: &mut fs::OpenOptions) {
 }
 
 #[cfg(not(unix))]
-#[hotpath::measure]
 fn apply_private_create_mode(_options: &mut fs::OpenOptions) {}

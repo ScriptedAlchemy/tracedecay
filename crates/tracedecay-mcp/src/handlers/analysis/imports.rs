@@ -1,6 +1,6 @@
 //! `tracedecay_unused_imports` — `use`-statement identifiers weighed against identifier spans in the rest of the file.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use serde_json::{Value, json};
@@ -23,7 +23,6 @@ use crate::tools::render;
 ///   `foo::{a, nested::b}`  → a, b
 ///   `foo::{self, bar}`     → foo, bar   (self brings the module in)
 ///   `foo::*`               → (empty, glob — handled separately)
-#[hotpath::measure]
 fn identifiers_from_use_path(path: &str) -> Vec<String> {
     let trimmed = path.trim().trim_end_matches(';').trim();
     if trimmed.ends_with('*') {
@@ -71,7 +70,6 @@ fn identifiers_from_use_path(path: &str) -> Vec<String> {
     }
 }
 
-#[hotpath::measure]
 fn push_identifier(out: &mut Vec<String>, item: &str, parent: &str) {
     let item = item.trim();
     if item.is_empty() {
@@ -104,7 +102,6 @@ fn push_identifier(out: &mut Vec<String>, item: &str, parent: &str) {
 
 /// Resolves a single use-tree segment (no `::`) into the identifier it
 /// brings into scope, accounting for `as` aliases.
-#[hotpath::measure]
 fn identifier_from_segment(seg: &str) -> String {
     let seg = seg.trim().trim_end_matches(';').trim();
     if seg.is_empty() {
@@ -140,21 +137,35 @@ const UNUSED_IMPORTS_MAX_LIMIT: usize = 500;
 /// cursor rather than reporting a short list as the whole truth.
 const UNUSED_IMPORTS_FILE_BUDGET: usize = 400;
 
+#[derive(Clone, Copy)]
+struct IdentifierSpan {
+    first_line: u32,
+    last_line: u32,
+}
+
 /// Indexes every identifier in a masked source once, so each import's
-/// reference check is a set lookup instead of a full-file scan.
+/// reference check is a map lookup instead of a full-file scan.
 #[hotpath::measure]
-fn identifiers_in_source(source: &str) -> HashSet<String> {
-    let mut identifiers = HashSet::new();
-    for line in source.lines() {
-        identifiers.extend(identifiers_in_line(line));
+fn identifier_spans(source: &str) -> HashMap<String, IdentifierSpan> {
+    let mut spans: HashMap<String, IdentifierSpan> = HashMap::new();
+    for (line_index, line) in source.lines().enumerate() {
+        let line_index = line_index as u32;
+        for identifier in identifiers_in_line(line) {
+            spans
+                .entry(identifier)
+                .and_modify(|span| span.last_line = line_index)
+                .or_insert(IdentifierSpan {
+                    first_line: line_index,
+                    last_line: line_index,
+                });
+        }
     }
-    identifiers
+    spans
 }
 
 /// Splits a masked source line into whole identifier tokens (boundaries are
 /// any non-`[A-Za-z0-9_]` char or the line ends), so `Map` never matches
 /// inside `HashMap`.
-#[hotpath::measure]
 fn identifiers_in_line(line: &str) -> Vec<String> {
     let mut identifiers = Vec::new();
     let mut current = String::new();
@@ -313,7 +324,7 @@ fn unused_imports_in_file(project_root: &Path, file_path: &str) -> Result<Vec<Va
     let masked =
         tracedecay_code_extraction::source_mask::masked_rust_source(&source);
     let referenced_identifiers =
-        identifiers_in_source(&without_use_declarations(masked, &source, &use_nodes)?);
+        identifier_spans(&without_use_declarations(masked, &source, &use_nodes)?);
 
     let mut unused = Vec::new();
     for use_node in use_nodes
@@ -329,7 +340,7 @@ fn unused_imports_in_file(project_root: &Path, file_path: &str) -> Result<Vec<Va
         // partially-used group is missed and the literal `{a, b as c}` is
         // treated as one identifier that matches nothing.
         for identifier in identifiers_from_use_path(&use_node.name) {
-            if !referenced_identifiers.contains(&identifier) {
+            if !referenced_identifiers.contains_key(&identifier) {
                 unused.push(json!({
                     "id": &use_node.id,
                     "name": &use_node.name,

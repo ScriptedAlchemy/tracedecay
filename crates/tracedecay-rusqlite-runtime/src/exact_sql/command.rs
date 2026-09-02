@@ -62,7 +62,6 @@ const BEGIN_BUSY_ATTEMPT_BUDGET: u8 = 64;
 /// wait into a single population whose mean and p95 describe neither. Keep the
 /// names distinct: the split is what says whether a slow begin was blocked by
 /// SQLite or merely by the worker being busy with something else.
-#[hotpath::measure]
 pub(super) fn begin_transaction_with_busy_retry<'connection>(
     connection: &'connection Connection,
     behavior: TransactionBehavior,
@@ -119,7 +118,6 @@ pub(super) fn retry_busy_begin<T>(
     }
 }
 
-#[hotpath::measure]
 fn sqlite_busy_or_locked(error: &rusqlite::Error) -> bool {
     matches!(
         error,
@@ -359,7 +357,6 @@ pub(crate) fn run_writer_command(
     }
 }
 
-#[hotpath::measure]
 pub(crate) fn reject_writer_command(command: WriterCommand) {
     match command {
         WriterCommand::Dispatch { reply, .. } => {
@@ -378,7 +375,6 @@ pub(crate) fn reject_writer_command(command: WriterCommand) {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure]
 fn run_transaction(
     transaction: Transaction<'_>,
     receiver: Receiver<TransactionCommand>,
@@ -675,7 +671,6 @@ enum TransactionTerminal {
     },
 }
 
-#[hotpath::measure_all]
 impl TransactionCompletion {
     fn abandoned(
         attachments: Vec<ExactSqlAttachment>,

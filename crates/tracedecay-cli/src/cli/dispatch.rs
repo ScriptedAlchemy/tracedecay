@@ -68,7 +68,6 @@ pub async fn resolve_cli_application_surface(
 
 /// Delay before re-sending the same CLI application request when its typed
 /// pre-admission problem explicitly directs an after-delay retry.
-#[hotpath::measure]
 pub(crate) fn surface_retry_delay(result: &ApplicationSurfaceInvocationResult) -> Option<Duration> {
     const DEFAULT_SURFACE_RETRY_DELAY: Duration = Duration::from_millis(250);
     let envelope = result.result.as_ref().err()?;

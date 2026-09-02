@@ -20,14 +20,12 @@ static RETAINED_MCP_COMPOSITION: OnceLock<
     std::result::Result<ApplicationCatalogComposition<()>, String>,
 > = OnceLock::new();
 
-#[hotpath::measure]
 fn retained_catalog_error(error: impl std::fmt::Display) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!("retained application catalog is unavailable: {error}"),
     }
 }
 
-#[hotpath::measure]
 pub(super) fn retained_mcp_composition() -> Result<&'static ApplicationCatalogComposition<()>> {
     RETAINED_MCP_COMPOSITION
         .get_or_init(|| compose_application_catalog(()).map_err(|error| error.to_string()))
@@ -77,7 +75,6 @@ fn retained_mcp_binding(operation: RetainedSurfaceOperation) -> Result<BindingId
         .ok_or_else(|| retained_catalog_error("retained MCP binding identity is unavailable"))
 }
 
-#[hotpath::measure]
 pub(crate) fn retained_mcp_operation(
     tool_name: &str,
     arguments: &Value,

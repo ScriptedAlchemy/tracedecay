@@ -23,13 +23,11 @@ use tracedecay_application::git::{
 use super::{def, def_rw};
 use crate::ToolDefinition;
 
-#[hotpath::measure]
 fn request_schema<T: JsonSchema>() -> serde_json::Value {
     let generator = SchemaSettings::default().for_deserialize().into_generator();
     generator.into_root_schema_for::<T>().into()
 }
 
-#[hotpath::measure]
 pub(super) fn def_stack_snapshot() -> ToolDefinition {
     def(
         "tracedecay_stack_snapshot",
@@ -41,7 +39,6 @@ pub(super) fn def_stack_snapshot() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_preflight_native_integration() -> ToolDefinition {
     def(
         "tracedecay_preflight_native_integration",
@@ -54,7 +51,6 @@ pub(super) fn def_preflight_native_integration() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_approve_native_integration() -> ToolDefinition {
     def_rw(
         "tracedecay_approve_native_integration",
@@ -67,7 +63,6 @@ pub(super) fn def_approve_native_integration() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_apply_native_integration() -> ToolDefinition {
     def_rw(
         "tracedecay_apply_native_integration",
@@ -80,7 +75,6 @@ pub(super) fn def_apply_native_integration() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_native_integration_status() -> ToolDefinition {
     def(
         "tracedecay_native_integration_status",
@@ -91,7 +85,6 @@ pub(super) fn def_native_integration_status() -> ToolDefinition {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn def_cancel_native_integration() -> ToolDefinition {
     def_rw(
         "tracedecay_cancel_native_integration",

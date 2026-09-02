@@ -59,7 +59,6 @@ const LOOKUP_IDENTIFIER_MAX_BYTES: usize = 256;
 /// Collapse whitespace and cap a failure reason to
 /// [`FAILURE_REASON_MAX_CHARS`] characters (never argument bodies — callers
 /// must derive `reason` from response/error text only).
-#[hotpath::measure]
 pub(super) fn bounded_failure_reason(reason: &str) -> String {
     let collapsed: String = reason.split_whitespace().collect::<Vec<_>>().join(" ");
     if collapsed.chars().count() <= FAILURE_REASON_MAX_CHARS {
@@ -71,13 +70,11 @@ pub(super) fn bounded_failure_reason(reason: &str) -> String {
 
 /// Stable short hash for high-cardinality or private identifiers. Never
 /// embeds the raw value — only `h:` + truncated SHA-256 hex.
-#[hotpath::measure]
 fn hashed_cardinality_label(value: &str) -> String {
     let digest = sha256_hex(value.as_bytes());
     format!("h:{}", &digest[..CARDINALITY_LABEL_HASH_CHARS])
 }
 
-#[hotpath::measure]
 fn optional_hashed_label(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
@@ -85,12 +82,10 @@ fn optional_hashed_label(value: Option<&str>) -> Option<String> {
         .map(hashed_cardinality_label)
 }
 
-#[hotpath::measure]
 fn optional_hashed_path(path: Option<&Path>) -> Option<String> {
     path.map(|path| hashed_cardinality_label(&path.display().to_string()))
 }
 
-#[hotpath::measure]
 fn bounded_lookup_identifier(value: Option<&str>) -> Option<String> {
     value
         .filter(|value| {
@@ -106,7 +101,6 @@ fn bounded_lookup_identifier(value: Option<&str>) -> Option<String> {
 /// One durable spool sequence represents one admitted host event. Identical
 /// envelopes intentionally receive distinct sequences, so the sequence—not
 /// route/session content—is the non-lossy analytics idempotency identity.
-#[hotpath::measure]
 fn hook_route_idempotency_key(project_root: &Path, admission_seq: u64) -> String {
     hashed_cardinality_label(&format!(
         "hook_route_v1|{}|{admission_seq}",
@@ -114,7 +108,6 @@ fn hook_route_idempotency_key(project_root: &Path, admission_seq: u64) -> String
     ))
 }
 
-#[hotpath::measure]
 pub(super) fn mcp_tool_analytics_event(input: McpToolAnalyticsEvent<'_>) -> AnalyticsEventInsert {
     let category = tracedecay_agent_hosts::task_classifier::classify(&[input.tool_name], &[]);
     let mut metadata = json!({
@@ -183,7 +176,6 @@ pub(super) fn mcp_tool_analytics_event(input: McpToolAnalyticsEvent<'_>) -> Anal
 /// hook boundary and remain byte-identical for joins. Command bodies and
 /// receipt payloads are never included. `admission_seq` is the per-admission
 /// idempotency identity.
-#[hotpath::measure]
 pub(super) fn hook_route_analytics_event(
     project_root: &std::path::Path,
     event: &HookEvent,
@@ -225,7 +217,6 @@ pub(super) fn hook_route_analytics_event(
     })
 }
 
-#[hotpath::measure]
 fn append_tool_response_analytics(
     tool_name: &str,
     arguments: &Value,

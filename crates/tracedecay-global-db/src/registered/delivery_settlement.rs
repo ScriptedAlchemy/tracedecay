@@ -49,7 +49,6 @@ pub enum WorkAttemptDeliveryCensusReadV1 {
     ExceededBound { observed_at_least: usize },
 }
 
-#[hotpath::measure_all]
 impl RegisteredGlobalDb {
     /// Reads the current census of every delivery fan-out that was explicitly
     /// bound to `work_attempt`. The query is authorization-scoped by project,
@@ -431,7 +430,6 @@ impl RegisteredGlobalDb {
     }
 }
 
-#[hotpath::measure]
 fn decode_source_receipt_attempt(
     row: &tracedecay_runtime_core::db::engine::Row,
     offset: i32,
@@ -481,7 +479,6 @@ fn decode_source_receipt_attempt(
     Ok(attempt)
 }
 
-#[hotpath::measure]
 fn validate_project_and_attempt(
     project_id: &str,
     attempt: &DeliverySettlementAttemptV1,
@@ -494,7 +491,6 @@ fn validate_project_and_attempt(
         .map_err(|error| format!("invalid delivery attempt: {error}"))
 }
 
-#[hotpath::measure]
 fn validate_source_receipt_ref(source_receipt_ref: &str) -> Result<(), String> {
     if source_receipt_ref.is_empty()
         || source_receipt_ref.len() > 256
@@ -688,7 +684,6 @@ struct StoredDeliveryAttempt {
     census: Option<DeliverySettlementCensusV1>,
 }
 
-#[hotpath::measure_all]
 impl StoredDeliveryAttempt {
     fn into_settlement(self) -> Result<DeliverySettlementV1, String> {
         let settlement = DeliverySettlementV1 {
@@ -862,7 +857,6 @@ async fn read_pending_delivery_census(
     Ok(census)
 }
 
-#[hotpath::measure]
 fn work_attempt_binding_digest(
     work_attempt: &WorkAttemptIdentityV1,
 ) -> Result<tracedecay_domain::ManifestDigest, String> {
@@ -873,7 +867,6 @@ fn work_attempt_binding_digest(
     .map_err(|error| format!("failed to digest Work delivery binding: {error}"))
 }
 
-#[hotpath::measure]
 fn decode_stored_work_attempt_binding(
     payload: Option<String>,
     digest: Option<String>,
@@ -892,7 +885,6 @@ fn decode_stored_work_attempt_binding(
     }
 }
 
-#[hotpath::measure]
 fn decode_work_attempt_delivery_census(
     row: &tracedecay_runtime_core::db::engine::Row,
     expected_attempt: &WorkAttemptIdentityV1,
@@ -964,7 +956,6 @@ fn decode_work_attempt_delivery_census(
     Ok(census)
 }
 
-#[hotpath::measure]
 fn decode_count(
     row: &tracedecay_runtime_core::db::engine::Row,
     index: i32,
@@ -987,7 +978,6 @@ const fn surface_name(surface: DeliverySurfaceFamilyV1) -> &'static str {
     }
 }
 
-#[hotpath::measure]
 fn parse_surface(value: &str) -> Result<DeliverySurfaceFamilyV1, String> {
     match value {
         "hook" => Ok(DeliverySurfaceFamilyV1::Hook),
@@ -1011,7 +1001,6 @@ const fn event_class_name(event_class: DeliveryEventClassV1) -> &'static str {
     }
 }
 
-#[hotpath::measure]
 fn parse_event_class(value: &str) -> Result<DeliveryEventClassV1, String> {
     match value {
         "operation_accepted" => Ok(DeliveryEventClassV1::OperationAccepted),
@@ -1032,7 +1021,6 @@ const fn outcome_name(outcome: DeliverySettlementOutcomeV1) -> &'static str {
     }
 }
 
-#[hotpath::measure]
 fn parse_outcome(value: &str) -> Result<DeliverySettlementOutcomeV1, String> {
     match value {
         "delivered" => Ok(DeliverySettlementOutcomeV1::Delivered),
@@ -1054,7 +1042,6 @@ const fn drop_reason_name(reason: DeliveryDropReasonV1) -> &'static str {
     }
 }
 
-#[hotpath::measure]
 fn parse_drop_reason(value: &str) -> Result<DeliveryDropReasonV1, String> {
     match value {
         "backpressure" => Ok(DeliveryDropReasonV1::Backpressure),

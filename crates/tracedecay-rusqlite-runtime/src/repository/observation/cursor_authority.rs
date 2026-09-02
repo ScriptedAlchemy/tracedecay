@@ -41,7 +41,6 @@ pub const COMMIT_SOURCE_CURSOR_SQL: &str =
 /// id. Any other row retained under the coverage key is a cursor-advance
 /// collision.
 #[must_use]
-#[hotpath::measure]
 pub fn cursor_advance_ledger_row_matches(
     stored: Option<&(String, Option<String>)>,
     reason: &str,

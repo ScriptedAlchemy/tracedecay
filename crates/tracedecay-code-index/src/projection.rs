@@ -46,7 +46,6 @@ pub struct ProjectionSinkReceiptV1 {
     publication: PublicationDigestTrustV1,
 }
 
-#[hotpath::measure_all]
 impl ProjectionSinkReceiptV1 {
     pub fn unverified(receipt: ProjectionBatchReceiptV1) -> Self {
         Self {
@@ -77,7 +76,6 @@ pub struct ProjectionReceiptBuilderV1<'a> {
     evidence: &'a ProjectionRequestEvidenceV1,
 }
 
-#[hotpath::measure_all]
 impl ProjectionReceiptBuilderV1<'_> {
     pub fn build(
         self,
@@ -123,7 +121,6 @@ pub struct ProjectionPublicationHandoffV1 {
     receipt: ProjectionBatchReceiptV1,
 }
 
-#[hotpath::measure_all]
 impl ProjectionPublicationHandoffV1 {
     pub fn request(&self) -> &ProjectionBatchRequestV1 {
         &self.request
@@ -208,7 +205,6 @@ pub fn project_for_publication<S: CodeChunkProjectionSink>(
 
 /// Verify the incoming request and expand a projection-key replay, returning
 /// the request alongside its recomputed canonical digest.
-#[hotpath::measure]
 fn expand_projection_key_replay(
     mut request: ProjectionBatchRequestV1,
 ) -> Result<(ProjectionBatchRequestV1, ManifestDigest), ProjectionReceiptErrorV1> {
@@ -277,7 +273,6 @@ fn expand_projection_key_replay(
     Ok((request, expanded_request_digest))
 }
 
-#[hotpath::measure]
 fn request_is_true_noop(request: &ProjectionBatchRequestV1) -> bool {
     changeset_is_noop(&request.changes)
         && request.previous_projection_key.as_ref() == Some(&request.target_projection_key)

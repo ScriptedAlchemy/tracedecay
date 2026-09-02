@@ -12,7 +12,6 @@ const PR_CONTEXT_MAX_CHANGED_FILES: usize = 20_000;
 /// naming the real problem. Require a HEAD reference (present even in a
 /// freshly initialized repository with no commits) so a non-repository
 /// project reports the typed open failure.
-#[hotpath::measure]
 fn open_project_repository(
     project_root: &std::path::Path,
 ) -> std::result::Result<gix::Repository, String> {
@@ -72,7 +71,6 @@ fn resolve_pr_comparison_commit(
     }
 }
 
-#[hotpath::measure]
 fn exact_reference_commit(
     repo: &gix::Repository,
     full_name: &str,
@@ -95,7 +93,6 @@ fn exact_reference_commit(
 }
 
 /// Diff two git refs and return changed file paths with coarse status.
-#[hotpath::measure]
 pub(super) fn git_diff_file_changes(
     project_root: &std::path::Path,
     from_ref: &str,
@@ -182,7 +179,6 @@ fn ensure_pr_ancestry_bounded(
     Ok(())
 }
 
-#[hotpath::measure]
 fn check_git_pr_cancelled(
     cancelled: &(impl Fn() -> bool + ?Sized),
 ) -> std::result::Result<(), String> {
@@ -302,7 +298,6 @@ fn git_diff_file_changes_controlled(
     Ok(changed)
 }
 
-#[hotpath::measure]
 pub(super) fn default_pr_base_ref(project_root: &std::path::Path) -> String {
     tracedecay_runtime_core::branch::detect_default_branch(project_root)
         .unwrap_or_else(|| "main".to_string())

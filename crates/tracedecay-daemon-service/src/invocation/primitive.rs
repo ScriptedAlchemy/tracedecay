@@ -323,7 +323,6 @@ pub(super) async fn execute_callable_code(
     }
 }
 
-#[hotpath::measure]
 fn invalid_callable_code_request(wire_request_id: String) -> DaemonInvocationResponse {
     application_problem(
         wire_request_id,
@@ -338,7 +337,6 @@ fn invalid_callable_code_request(wire_request_id: String) -> DaemonInvocationRes
     )
 }
 
-#[hotpath::measure]
 pub fn callable_code_request_context(
     scope: &ResolvedScope,
     access: &ProjectSourceAccessSnapshot,
@@ -440,7 +438,6 @@ pub fn callable_code_request_context(
     })
 }
 
-#[hotpath::measure]
 fn callable_code_response<T: Serialize>(
     wire_request_id: String,
     registered_scope: &ResolvedScope,
@@ -866,7 +863,6 @@ enum ContextScoutActivationReconciliationError {
     ObservationUnavailable,
 }
 
-#[hotpath::measure_all]
 impl ContextScoutActivationReconciliationError {
     #[hotpath::skip]
     const fn code(self) -> &'static str {
@@ -947,7 +943,6 @@ pub struct DaemonPrimitiveRuntimeRegistrar {
     service: DaemonInvocationService,
 }
 
-#[hotpath::measure_all]
 impl DaemonPrimitiveRuntimeRegistrar {
     pub fn new(service: &DaemonInvocationService) -> Self {
         Self {

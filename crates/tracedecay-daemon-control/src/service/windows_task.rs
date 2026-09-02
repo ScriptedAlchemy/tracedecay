@@ -418,22 +418,18 @@ impl DaemonControlApi for NativeDaemonControl {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn task_name() -> Result<String> {
     Ok(TaskIdentity::current()?.task_name)
 }
 
-#[hotpath::measure]
 pub(super) fn task_path() -> Result<PathBuf> {
     Ok(PathBuf::from(TaskIdentity::current()?.task_path))
 }
 
-#[hotpath::measure]
 pub(super) fn render_task_xml(spec: &DaemonServiceSpec) -> Result<String> {
     render_task_xml_for(spec, &TaskIdentity::current()?)
 }
 
-#[hotpath::measure]
 fn render_task_xml_for(spec: &DaemonServiceSpec, identity: &TaskIdentity) -> Result<String> {
     validate_task_remote_tls(spec.remote_tls.as_ref())?;
     let profile_root = match &spec.data_dir_override {
@@ -508,7 +504,6 @@ fn render_task_xml_for(spec: &DaemonServiceSpec, identity: &TaskIdentity) -> Res
     ))
 }
 
-#[hotpath::measure]
 fn windows_path_text<'a>(path: &'a Path, description: &str) -> Result<&'a str> {
     path.to_str().ok_or_else(|| TraceDecayError::Config {
         message: format!(
@@ -518,7 +513,6 @@ fn windows_path_text<'a>(path: &'a Path, description: &str) -> Result<&'a str> {
     })
 }
 
-#[hotpath::measure]
 fn fully_qualified_windows_path(path: &Path, description: &str) -> Result<PathBuf> {
     #[cfg(windows)]
     {
@@ -557,7 +551,6 @@ fn fully_qualified_windows_path(path: &Path, description: &str) -> Result<PathBu
     }
 }
 
-#[hotpath::measure]
 fn validate_task_command_text(command: &str) -> Result<()> {
     const TASK_COMMAND_UTF16_LIMIT: usize = 260;
     let length = command.encode_utf16().count();
@@ -571,7 +564,6 @@ fn validate_task_command_text(command: &str) -> Result<()> {
     Ok(())
 }
 
-#[hotpath::measure]
 pub(super) fn profile_root_from_task_xml(xml: &str) -> Option<PathBuf> {
     let arguments = xml_element_text(xml, "Arguments")?;
     let arguments = xml_unescape(arguments);
@@ -588,7 +580,6 @@ pub(super) fn profile_root_from_task_xml(xml: &str) -> Option<PathBuf> {
     None
 }
 
-#[hotpath::measure]
 pub(super) fn remote_tls_from_task_xml(xml: &str) -> Result<Option<crate::RemoteBrainTlsConfig>> {
     let Some(arguments) = xml_element_text(xml, "Arguments") else {
         return Ok(None);
@@ -654,7 +645,6 @@ pub(super) fn remote_tls_from_task_xml(xml: &str) -> Result<Option<crate::Remote
     Ok(remote_tls)
 }
 
-#[hotpath::measure]
 fn validate_task_remote_tls(remote_tls: Option<&crate::RemoteBrainTlsConfig>) -> Result<()> {
     let Some(remote_tls) = remote_tls else {
         return Ok(());
@@ -688,7 +678,6 @@ fn validate_task_remote_tls(remote_tls: Option<&crate::RemoteBrainTlsConfig>) ->
     Ok(())
 }
 
-#[hotpath::measure]
 pub(super) fn materialize_service_spec_after_quiescence(
     spec: &DaemonServiceSpec,
 ) -> Result<DaemonServiceSpec> {
@@ -719,7 +708,6 @@ pub(super) fn materialize_service_spec_after_quiescence(
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn scoop_service_source(executable: &Path, package_id: WindowsPackageId) -> Result<PathBuf> {
     if executable
         .parent()
@@ -753,7 +741,6 @@ fn scoop_service_source(executable: &Path, package_id: WindowsPackageId) -> Resu
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn local_runtime_layout(package_id: WindowsPackageId) -> Result<ServiceRuntimeLayout> {
     let local_app_data = std::env::var_os("LOCALAPPDATA")
         .filter(|value| !value.is_empty())
@@ -766,7 +753,6 @@ fn local_runtime_layout(package_id: WindowsPackageId) -> Result<ServiceRuntimeLa
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn ensure_private_runtime_layout(layout: &ServiceRuntimeLayout) -> Result<()> {
     let local_app_data =
         layout
@@ -793,7 +779,6 @@ fn ensure_private_runtime_layout(layout: &ServiceRuntimeLayout) -> Result<()> {
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn atomic_copy_private_executable(source: &Path, destination: &Path) -> Result<()> {
     use std::io::{Read, Write};
     use std::sync::atomic::Ordering;
@@ -855,7 +840,6 @@ fn atomic_copy_private_executable(source: &Path, destination: &Path) -> Result<(
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn windows_paths_equal(left: &Path, right: &Path) -> Result<bool> {
     let left = windows_path_text(left, "path comparison")?;
     let right = windows_path_text(right, "path comparison")?;
@@ -863,34 +847,28 @@ fn windows_paths_equal(left: &Path, right: &Path) -> Result<bool> {
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn secure_path_error(operation: &str, path: &Path, error: std::io::Error) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!("{operation} '{}': {error}", path.display()),
     }
 }
 
-#[hotpath::measure]
 pub(super) fn task_exists() -> Result<bool> {
     with_platform_api(|api| Ok(api.snapshot()?.is_some()))
 }
 
-#[hotpath::measure]
 pub(super) fn service_state() -> Result<DaemonServiceState> {
     with_platform_api(|api| Ok(state_from_snapshot(api.snapshot()?)))
 }
 
-#[hotpath::measure]
 pub(super) fn register_task_xml(xml: &str) -> Result<()> {
     with_platform_api(|api| register_task_xml_with(api, xml))
 }
 
-#[hotpath::measure]
 pub(super) fn registered_task_xml() -> Result<Option<String>> {
     with_platform_api(|api| api.registered_xml())
 }
 
-#[hotpath::measure]
 pub(super) fn apply_state(state: DaemonServiceState, expected_version: &str) -> Result<()> {
     #[cfg(any(windows, test))]
     {
@@ -957,12 +935,10 @@ pub(super) fn delete() -> Result<()> {
     with_platform_api(delete_with)
 }
 
-#[hotpath::measure]
 pub(super) fn rollback_new_registration() -> Result<()> {
     with_platform_api(|api| rollback_registration_with(api, None, None))
 }
 
-#[hotpath::measure]
 pub(super) fn prepare_scoop_package_service(
     package_id: &str,
     state_file: &Path,
@@ -985,7 +961,6 @@ pub(super) fn prepare_scoop_package_service(
     }
 }
 
-#[hotpath::measure]
 pub(super) fn restore_scoop_package_service(
     package_id: &str,
     state_file: &Path,
@@ -1009,7 +984,6 @@ pub(super) fn restore_scoop_package_service(
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn prepare_scoop_package_service_windows(
     package_id: WindowsPackageId,
     state_file: &Path,
@@ -1079,7 +1053,6 @@ fn prepare_scoop_package_service_windows(
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn restore_scoop_package_service_windows(
     package_id: WindowsPackageId,
     state_file: &Path,
@@ -1198,7 +1171,6 @@ fn restore_scoop_package_service_windows(
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn verify_restored_task(
     api: &mut dyn TaskSchedulerApi,
     state: &ScoopServiceState,
@@ -1235,7 +1207,6 @@ fn verify_restored_task(
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn current_package_identity(package_id: WindowsPackageId) -> Result<TaskIdentity> {
     let user_sid =
         tracedecay_runtime_core::windows_security::current_user_sid_string().map_err(|error| {
@@ -1247,7 +1218,6 @@ fn current_package_identity(package_id: WindowsPackageId) -> Result<TaskIdentity
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn validate_state_file_path(state_file: &Path, layout: &ServiceRuntimeLayout) -> Result<()> {
     let state_file = fully_qualified_windows_path(state_file, "Scoop state file")?;
     if windows_paths_equal(&state_file, &layout.state_file)? {
@@ -1263,7 +1233,6 @@ fn validate_state_file_path(state_file: &Path, layout: &ServiceRuntimeLayout) ->
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn write_scoop_state(state_file: &Path, state: &ScoopServiceState) -> Result<()> {
     use std::sync::atomic::Ordering;
 
@@ -1287,7 +1256,6 @@ fn write_scoop_state(state_file: &Path, state: &ScoopServiceState) -> Result<()>
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn read_scoop_state(state_file: &Path) -> Result<Option<ScoopServiceState>> {
     let file = match tracedecay_runtime_core::windows_security::open_private_file(state_file) {
         Ok(file) => file,
@@ -1311,7 +1279,6 @@ fn read_scoop_state(state_file: &Path) -> Result<Option<ScoopServiceState>> {
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn remove_scoop_state(state_file: &Path) -> Result<()> {
     tracedecay_runtime_core::windows_security::validate_private_file(state_file).map_err(
         |error| {
@@ -1328,7 +1295,6 @@ fn remove_scoop_state(state_file: &Path) -> Result<()> {
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn remove_private_runtime_executable(executable: &Path) -> Result<()> {
     match tracedecay_runtime_core::windows_security::validate_private_file(executable) {
         Ok(()) => std::fs::remove_file(executable).map_err(|error| {
@@ -1348,14 +1314,12 @@ fn remove_private_runtime_executable(executable: &Path) -> Result<()> {
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn is_foreign_task_error(error: &TraceDecayError) -> bool {
     error
         .to_string()
         .contains("refusing to manage scheduled task")
 }
 
-#[hotpath::measure]
 fn register_task_xml_with(api: &mut dyn TaskSchedulerApi, xml: &str) -> Result<()> {
     let previous = api.snapshot()?;
     let previous_xml = api.registered_xml()?;
@@ -1378,7 +1342,6 @@ fn register_task_xml_with(api: &mut dyn TaskSchedulerApi, xml: &str) -> Result<(
     Ok(())
 }
 
-#[hotpath::measure]
 fn rollback_registration_with(
     api: &mut dyn TaskSchedulerApi,
     previous: Option<TaskSnapshot>,
@@ -1420,7 +1383,6 @@ fn rollback_registration_with(
     rollback_result
 }
 
-#[hotpath::measure]
 fn restore_registered_snapshot_with(
     api: &mut dyn TaskSchedulerApi,
     previous: TaskSnapshot,
@@ -1498,7 +1460,6 @@ fn apply_state_with(api: &mut dyn TaskSchedulerApi, desired: DaemonServiceState)
     Ok(())
 }
 
-#[hotpath::measure]
 fn restore_enablement_with(api: &mut dyn TaskSchedulerApi, enabled: bool) -> Result<()> {
     if api
         .snapshot()?
@@ -1724,7 +1685,6 @@ fn wait_for_task_state_with(
     })
 }
 
-#[hotpath::measure]
 fn restore_snapshot_with(api: &mut dyn TaskSchedulerApi, previous: TaskSnapshot) -> Result<()> {
     let restore_result = (|| -> Result<()> {
         let current = api
@@ -1781,7 +1741,6 @@ fn deactivate_with(api: &mut dyn TaskSchedulerApi) -> Result<()> {
     Ok(())
 }
 
-#[hotpath::measure]
 fn delete_with(api: &mut dyn TaskSchedulerApi) -> Result<()> {
     if api.snapshot()?.is_some() {
         api.delete()?;
@@ -1789,7 +1748,6 @@ fn delete_with(api: &mut dyn TaskSchedulerApi) -> Result<()> {
     Ok(())
 }
 
-#[hotpath::measure]
 fn state_from_snapshot(snapshot: Option<TaskSnapshot>) -> DaemonServiceState {
     match snapshot {
         None => DaemonServiceState::Missing,
@@ -1840,7 +1798,6 @@ fn task_snapshot_from_scheduler_state(scheduler_state: i32, enabled: bool) -> Re
     Ok(TaskSnapshot { running, enabled })
 }
 
-#[hotpath::measure]
 fn combine_task_operations(
     operation: &str,
     primary: Result<()>,
@@ -1857,14 +1814,12 @@ fn combine_task_operations(
     }
 }
 
-#[hotpath::measure]
 fn missing_task(operation: &str) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!("cannot {operation} TraceDecay daemon task: task is not registered"),
     }
 }
 
-#[hotpath::measure]
 fn xml_escape(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
@@ -1880,7 +1835,6 @@ fn xml_escape(value: &str) -> String {
     escaped
 }
 
-#[hotpath::measure]
 fn xml_unescape(value: &str) -> String {
     value
         .replace("&quot;", "\"")
@@ -1890,7 +1844,6 @@ fn xml_unescape(value: &str) -> String {
         .replace("&amp;", "&")
 }
 
-#[hotpath::measure]
 fn xml_element_text<'a>(xml: &'a str, element: &str) -> Option<&'a str> {
     let opening = format!("<{element}>");
     let closing = format!("</{element}>");
@@ -2034,7 +1987,6 @@ fn quote_windows_argument(argument: &str) -> String {
     quoted
 }
 
-#[hotpath::measure]
 fn windows_argument_tokens(arguments: &str) -> Result<Vec<String>> {
     let characters: Vec<char> = arguments.chars().collect();
     let mut tokens = Vec::new();
@@ -2094,7 +2046,6 @@ fn windows_argument_tokens(arguments: &str) -> Result<Vec<String>> {
     Ok(tokens)
 }
 
-#[hotpath::measure]
 fn with_platform_api<T>(
     operation: impl FnOnce(&mut dyn TaskSchedulerApi) -> Result<T>,
 ) -> Result<T> {
@@ -2113,7 +2064,6 @@ fn with_platform_api<T>(
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn with_platform_api_for_package<T>(
     package_id: WindowsPackageId,
     operation: impl FnOnce(&mut dyn TaskSchedulerApi) -> Result<T>,

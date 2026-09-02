@@ -34,7 +34,6 @@ pub struct SessionTemporalCapabilitiesV1 {
     capabilities: BTreeSet<SessionTemporalCapabilityV1>,
 }
 
-#[hotpath::measure_all]
 impl SessionTemporalCapabilitiesV1 {
     pub fn new(capabilities: impl IntoIterator<Item = SessionTemporalCapabilityV1>) -> Self {
         Self {
@@ -69,7 +68,6 @@ pub struct SessionFrozenWatermarksV1 {
     cursor_key: Option<SignedCursorKeyRefV1>,
 }
 
-#[hotpath::measure_all]
 impl SessionFrozenWatermarksV1 {
     #[hotpath::skip]
     pub const fn new(
@@ -133,7 +131,6 @@ pub struct SessionTemporalSnapshotV1 {
     capabilities: SessionTemporalCapabilitiesV1,
 }
 
-#[hotpath::measure_all]
 impl SessionTemporalSnapshotV1 {
     pub fn new(
         session_id: SessionId,
@@ -173,7 +170,6 @@ pub struct SessionTemporalSnapshotRequestV1 {
     session_id: SessionId,
 }
 
-#[hotpath::measure_all]
 impl SessionTemporalSnapshotRequestV1 {
     pub fn new(session_id: SessionId) -> Self {
         Self { session_id }
@@ -213,7 +209,6 @@ pub enum SessionTemporalDigestInvalidReasonV1 {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SessionTemporalDigestV1(DataVersionDigest);
 
-#[hotpath::measure_all]
 impl SessionTemporalDigestV1 {
     /// `sha512:` plus 128 lowercase hexadecimal digits.
     pub const MAX_LEN: usize = 135;
@@ -320,7 +315,6 @@ pub enum SessionStoreError {
     },
 }
 
-#[hotpath::measure_all]
 impl SessionStoreError {
     /// Map only adapter/infrastructure failures to `Storage`; semantic and
     /// contract failures should be returned unchanged.
@@ -394,7 +388,6 @@ pub(super) trait SessionTemporalOperation {
     const CAPABILITY: SessionTemporalCapabilityV1;
 }
 
-#[hotpath::measure_all]
 impl<Operation> SessionTemporalOperationPermit<Operation> {
     pub(super) fn grant(capabilities: &SessionTemporalCapabilitiesV1) -> SessionStoreResult<Self>
     where
@@ -486,7 +479,6 @@ declare_session_temporal_operation!(
     SessionRefreshReceiptReadPermit,
     SessionTemporalCapabilityV1::RefreshProgressPersistence
 );
-#[hotpath::measure]
 pub(super) fn require_snapshot_session(
     session_id: &SessionId,
     snapshot: &SessionTemporalSnapshotV1,
@@ -498,7 +490,6 @@ pub(super) fn require_snapshot_session(
     Ok(())
 }
 
-#[hotpath::measure]
 pub(super) fn require_capability(
     snapshot: &SessionTemporalSnapshotV1,
     capability: SessionTemporalCapabilityV1,
@@ -506,7 +497,6 @@ pub(super) fn require_capability(
     require_declared_capability(snapshot.capabilities(), capability)
 }
 
-#[hotpath::measure]
 pub(super) fn require_declared_capability(
     capabilities: &SessionTemporalCapabilitiesV1,
     capability: SessionTemporalCapabilityV1,
@@ -517,7 +507,6 @@ pub(super) fn require_declared_capability(
     Ok(())
 }
 
-#[hotpath::measure]
 pub(super) fn require_newer_generation(
     candidate: SessionProjectionGenerationV1,
     active: SessionProjectionGenerationV1,

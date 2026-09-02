@@ -17,13 +17,11 @@ pub(super) const PROJECT_MEMORY_READ_OPERATION: &str = "read project memory fact
 
 pub(super) const PROJECT_MEMORY_WRITE_OPERATION: &str = "write project memory facts";
 
-#[hotpath::measure]
 pub(super) fn nonnegative_u64(value: i64, field: &'static str) -> FactStoreResult<u64> {
     u64::try_from(value)
         .map_err(|_| storage_message(QUERY_OPERATION, format!("{field} must be non-negative")))
 }
 
-#[hotpath::measure]
 pub(super) fn project_memory_category_label(category: FactCategoryV1) -> &'static str {
     match category {
         FactCategoryV1::General => "general",
@@ -35,7 +33,6 @@ pub(super) fn project_memory_category_label(category: FactCategoryV1) -> &'stati
     }
 }
 
-#[hotpath::measure]
 pub(super) fn project_memory_now() -> FactStoreResult<UtcMicros> {
     let elapsed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -49,7 +46,6 @@ pub(super) fn project_memory_now() -> FactStoreResult<UtcMicros> {
     Ok(UtcMicros(micros))
 }
 
-#[hotpath::measure]
 pub(super) fn ensure_project_memory_read_active(
     read_control: &FactReadControl,
 ) -> FactStoreResult<()> {
@@ -60,7 +56,6 @@ pub(super) fn ensure_project_memory_read_active(
     }
 }
 
-#[hotpath::measure]
 pub(super) fn project_memory_event_time(now: UtcMicros, offset: i64) -> FactStoreResult<UtcMicros> {
     now.0.checked_add(offset).map(UtcMicros).ok_or_else(|| {
         storage_message(
@@ -77,7 +72,6 @@ pub(super) struct OwnerKey {
     pub(super) json: String,
 }
 
-#[hotpath::measure_all]
 impl OwnerKey {
     pub(super) fn new(owner: &FactOwnerV1) -> FactStoreResult<Self> {
         let (kind, project_id) = match owner {
@@ -92,7 +86,6 @@ impl OwnerKey {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn storage_error(
     operation: &'static str,
     source: impl Error + Send + Sync + 'static,
@@ -103,7 +96,6 @@ pub(super) fn storage_error(
     }
 }
 
-#[hotpath::measure]
 pub(super) fn storage_message(
     operation: &'static str,
     message: impl Into<String>,
@@ -111,7 +103,6 @@ pub(super) fn storage_message(
     storage_error(operation, std::io::Error::other(message.into()))
 }
 
-#[hotpath::measure]
 pub(super) fn identity_collision<T>(kind: &'static str, id: &str) -> FactStoreResult<T> {
     Err(storage_message(
         COMMIT_OPERATION,
@@ -119,7 +110,6 @@ pub(super) fn identity_collision<T>(kind: &'static str, id: &str) -> FactStoreRe
     ))
 }
 
-#[hotpath::measure]
 pub(super) fn to_json<T: Serialize + ?Sized>(
     value: &T,
     operation: &'static str,
@@ -127,7 +117,6 @@ pub(super) fn to_json<T: Serialize + ?Sized>(
     serde_json::to_string(value).map_err(|error| storage_error(operation, error))
 }
 
-#[hotpath::measure]
 pub(super) fn from_json<T: DeserializeOwned>(
     value: &str,
     operation: &'static str,
@@ -135,7 +124,6 @@ pub(super) fn from_json<T: DeserializeOwned>(
     serde_json::from_str(value).map_err(|error| storage_error(operation, error))
 }
 
-#[hotpath::measure]
 pub(super) fn row_string(
     row: &crate::db::engine::Row,
     index: i32,
@@ -145,7 +133,6 @@ pub(super) fn row_string(
         .map_err(|error| storage_error(operation, error))
 }
 
-#[hotpath::measure]
 pub(super) fn row_optional_string(
     row: &crate::db::engine::Row,
     index: i32,
@@ -155,7 +142,6 @@ pub(super) fn row_optional_string(
         .map_err(|error| storage_error(operation, error))
 }
 
-#[hotpath::measure]
 pub(super) fn row_i64(
     row: &crate::db::engine::Row,
     index: i32,
@@ -165,7 +151,6 @@ pub(super) fn row_i64(
         .map_err(|error| storage_error(operation, error))
 }
 
-#[hotpath::measure]
 pub(super) fn row_optional_i64(
     row: &crate::db::engine::Row,
     index: i32,
@@ -175,7 +160,6 @@ pub(super) fn row_optional_i64(
         .map_err(|error| storage_error(operation, error))
 }
 
-#[hotpath::measure]
 pub(super) fn row_optional_f64(
     row: &crate::db::engine::Row,
     index: i32,
@@ -185,7 +169,6 @@ pub(super) fn row_optional_f64(
         .map_err(|error| storage_error(operation, error))
 }
 
-#[hotpath::measure]
 pub(super) fn row_f64(
     row: &crate::db::engine::Row,
     index: i32,
@@ -211,7 +194,6 @@ pub(super) async fn row_exists(
         .is_some())
 }
 
-#[hotpath::measure]
 pub(super) fn payload_access_label(state: PayloadAccessState) -> &'static str {
     match state {
         PayloadAccessState::Eligible => "eligible",
@@ -224,7 +206,6 @@ pub(super) fn payload_access_label(state: PayloadAccessState) -> &'static str {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn parse_payload_access(value: &str) -> FactStoreResult<PayloadAccessState> {
     match value {
         "eligible" => Ok(PayloadAccessState::Eligible),
@@ -241,7 +222,6 @@ pub(super) fn parse_payload_access(value: &str) -> FactStoreResult<PayloadAccess
     }
 }
 
-#[hotpath::measure]
 pub(super) fn requires_payload_purge(access: PayloadAccessState) -> bool {
     matches!(
         access,

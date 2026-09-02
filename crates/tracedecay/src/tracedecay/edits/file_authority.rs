@@ -29,7 +29,6 @@ pub(in crate::tracedecay) struct SourceEditFileAuthority {
     name: OsString,
 }
 
-#[hotpath::measure_all]
 impl SourceEditFileAuthority {
     #[hotpath::measure(label = "edits.file_authority.open")]
     pub(in crate::tracedecay) fn open(project_root: &Path, relative: &Path) -> Result<Self> {
@@ -328,7 +327,6 @@ impl SourceEditFileAuthority {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn read_source_edit_candidate(
     project_root: &Path,
     relative: &Path,
@@ -336,7 +334,6 @@ pub(super) fn read_source_edit_candidate(
     SourceEditFileAuthority::open(project_root, relative)?.read_optional()
 }
 
-#[hotpath::measure]
 fn sync_source_edit_directory(directory: &Dir) -> Result<()> {
     #[cfg(windows)]
     {

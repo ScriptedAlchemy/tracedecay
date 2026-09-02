@@ -11,7 +11,6 @@ pub struct RemoteSpoolKeyV1 {
     pub(super) key: LessSafeKey,
 }
 
-#[hotpath::measure_all]
 impl RemoteSpoolKeyV1 {
     pub fn from_secret_bytes(
         revision: u64,
@@ -61,7 +60,6 @@ pub struct CredentialDerivedSpoolKeyringV1 {
     key: Arc<RemoteSpoolKeyV1>,
 }
 
-#[hotpath::measure_all]
 impl CredentialDerivedSpoolKeyringV1 {
     pub fn from_secret_bytes(
         revision: u64,

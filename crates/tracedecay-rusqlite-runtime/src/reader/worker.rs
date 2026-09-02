@@ -177,7 +177,6 @@ pub(crate) struct SpawnedWorker {
     pub opened_file_identity: u64,
 }
 
-#[hotpath::measure_all]
 impl WorkerClient {
     pub fn begin(&self) -> Result<(), ReaderWorkerError> {
         let (reply, receive) = mpsc::sync_channel(1);
@@ -393,7 +392,6 @@ impl WorkerClient {
     }
 }
 
-#[hotpath::measure]
 pub(crate) fn spawn<E: ReaderQueryExecutor>(
     locator: ExistingReaderLocator,
     mut executor: E,
@@ -460,7 +458,6 @@ pub(crate) fn spawn<E: ReaderQueryExecutor>(
     })
 }
 
-#[hotpath::measure]
 fn run<E: ReaderQueryExecutor>(
     mut connection: Connection,
     receiver: Receiver<WorkerCommand>,
@@ -507,7 +504,6 @@ fn run<E: ReaderQueryExecutor>(
     }
 }
 
-#[hotpath::measure]
 fn run_snapshot<E: ReaderQueryExecutor>(
     transaction: Transaction<'_>,
     commands: Receiver<SnapshotCommand>,
@@ -624,7 +620,6 @@ fn run_snapshot<E: ReaderQueryExecutor>(
     false
 }
 
-#[hotpath::measure]
 fn shrink_connection_memory(connection: &Connection) -> Result<(), ReaderWorkerError> {
     connection
         .execute_batch("PRAGMA shrink_memory")
@@ -635,7 +630,6 @@ fn shrink_connection_memory(connection: &Connection) -> Result<(), ReaderWorkerE
         })
 }
 
-#[hotpath::measure]
 fn interruption(probe: &dyn RuntimeRequestProbeV1) -> Option<UnavailableReasonV1> {
     probe.interruption().map(|interruption| match interruption {
         RuntimeInterruptionV1::Cancelled => UnavailableReasonV1::Cancelled,

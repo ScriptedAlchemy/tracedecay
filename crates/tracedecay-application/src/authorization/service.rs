@@ -24,7 +24,6 @@ pub struct AuthorizationAdmission {
     source_proof: SourceAuthorizationProofV1,
 }
 
-#[hotpath::measure_all]
 impl AuthorizationAdmission {
     pub fn receipt(&self) -> &AuthorityReceipt {
         &self.receipt

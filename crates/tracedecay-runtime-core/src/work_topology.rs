@@ -37,7 +37,6 @@ pub struct WorkTopologyProjectionV1 {
     pub tasks: Vec<WorkProjection>,
 }
 
-#[hotpath::measure_all]
 impl WorkTopologyProjectionV1 {
     #[hotpath::measure(label = "runtime_core.work.topology_from_events")]
     pub fn from_events(events: &[WorkEvent]) -> Result<Self, WorkTopologyError> {
@@ -160,7 +159,6 @@ impl From<GraphDbError> for WorkTopologyError {
     }
 }
 
-#[hotpath::measure]
 pub fn work_topology_projection_identity(
     namespace: GraphNamespace,
 ) -> Result<GraphProjectionIdentity, WorkTopologyError> {
@@ -170,7 +168,6 @@ pub fn work_topology_projection_identity(
     ))
 }
 
-#[hotpath::measure]
 pub fn work_topology_generation_id(
     projection: &WorkTopologyProjectionV1,
     projector_revision: &GraphProjectorRevision,
@@ -185,7 +182,6 @@ pub fn work_topology_generation_id(
     GraphGenerationId::new(format!("work-topology:{}", digest.as_str())).map_err(Into::into)
 }
 
-#[hotpath::measure]
 pub fn work_topology_namespace(
     authority: &WorkAuthority,
 ) -> Result<GraphNamespace, WorkTopologyError> {
@@ -194,7 +190,6 @@ pub fn work_topology_namespace(
     GraphNamespace::new(format!("work-topology:{}", digest.as_str())).map_err(Into::into)
 }
 
-#[hotpath::measure]
 pub fn work_topology_idempotency_key(
     projection: &WorkTopologyProjectionV1,
     projector_revision: &GraphProjectorRevision,
@@ -203,7 +198,6 @@ pub fn work_topology_idempotency_key(
     GraphIdempotencyKey::new(format!("publish:{}", generation.as_str())).map_err(Into::into)
 }
 
-#[hotpath::measure]
 pub fn build_work_topology_manifest_checked(
     identity: GraphProjectionIdentity,
     projection: &WorkTopologyProjectionV1,
@@ -272,7 +266,6 @@ impl fmt::Debug for WorkTopologyStore {
     }
 }
 
-#[hotpath::measure_all]
 impl WorkTopologyStore {
     #[hotpath::measure(label = "runtime_core.work.publish")]
     pub fn publish_from_events(
@@ -482,7 +475,6 @@ impl WorkTopologyStore {
     }
 }
 
-#[hotpath::measure]
 fn validate_acyclic(
     tasks: &[WorkProjection],
     task_ids: &BTreeSet<TaskId>,
@@ -508,7 +500,6 @@ fn validate_acyclic(
     Ok(())
 }
 
-#[hotpath::measure]
 fn visit_acyclic(
     task_id: &TaskId,
     dependencies: &BTreeMap<TaskId, BTreeSet<TaskId>>,
@@ -529,7 +520,6 @@ fn visit_acyclic(
     Ok(())
 }
 
-#[hotpath::measure]
 fn longest_dependency_path(
     task_id: &TaskId,
     projections: &BTreeMap<TaskId, WorkProjection>,
@@ -554,7 +544,6 @@ fn longest_dependency_path(
     Ok(best)
 }
 
-#[hotpath::measure]
 fn task_entity(
     task_id: TaskId,
     projection: Option<&WorkProjection>,
@@ -575,7 +564,6 @@ fn task_entity(
     GraphEntity::new(task_entity_id(&task_id)?, labels, properties).map_err(Into::into)
 }
 
-#[hotpath::measure]
 fn dependency_relation(
     projection: &GraphProjectionIdentity,
     task_id: &TaskId,
@@ -594,7 +582,6 @@ fn dependency_relation(
     .map_err(Into::into)
 }
 
-#[hotpath::measure]
 fn deserialize_optional_record(
     entity: &GraphEntity,
 ) -> Result<Option<WorkProjection>, WorkTopologyError> {
@@ -614,7 +601,6 @@ fn deserialize_optional_record(
         .map_err(|error| WorkTopologyError::Corrupt(error.to_string()))
 }
 
-#[hotpath::measure]
 fn task_id_from_ref(
     snapshot: &VerifiedGraphSnapshot,
     reference: &GraphEntityRef,
@@ -635,12 +621,10 @@ fn task_id_from_ref(
     TaskId::new(value.clone()).map_err(|error| WorkTopologyError::Corrupt(error.to_string()))
 }
 
-#[hotpath::measure]
 fn task_entity_id(task_id: &TaskId) -> Result<GraphEntityId, WorkTopologyError> {
     GraphEntityId::new(stable_identity("task", task_id.as_str())).map_err(Into::into)
 }
 
-#[hotpath::measure]
 fn validate_budget(max_depth: usize, max_results: usize) -> Result<(), WorkTopologyError> {
     if max_depth == 0 || max_results == 0 {
         Err(WorkTopologyError::Contract(
@@ -651,7 +635,6 @@ fn validate_budget(max_depth: usize, max_results: usize) -> Result<(), WorkTopol
     }
 }
 
-#[hotpath::measure]
 fn check_cancelled(cancellation: &dyn GraphCancellation) -> Result<(), WorkTopologyError> {
     if cancellation.is_cancelled() {
         Err(WorkTopologyError::Cancelled)
@@ -660,7 +643,6 @@ fn check_cancelled(cancellation: &dyn GraphCancellation) -> Result<(), WorkTopol
     }
 }
 
-#[hotpath::measure]
 fn stable_identity(kind: &str, value: &str) -> String {
     let mut digest = Sha256::new();
     digest.update(kind.as_bytes());
@@ -669,7 +651,6 @@ fn stable_identity(kind: &str, value: &str) -> String {
     format!("{kind}:{}", hex::encode(digest.finalize()))
 }
 
-#[hotpath::measure]
 fn serialize(value: &impl Serialize) -> Result<Vec<u8>, WorkTopologyError> {
     serde_json::to_vec(value).map_err(|error| WorkTopologyError::Contract(error.to_string()))
 }

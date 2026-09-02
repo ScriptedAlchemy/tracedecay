@@ -75,7 +75,6 @@ struct GitTopologyMetadataV1 {
     worktree_occupancies: Vec<GitWorktreeOccupancyV1>,
 }
 
-#[hotpath::measure_all]
 impl GitTopologyProjectionV1 {
     pub fn validate(&self) -> Result<(), GitTopologyProjectionError> {
         self.repository
@@ -173,7 +172,6 @@ impl From<GraphDbError> for GitTopologyProjectionError {
     }
 }
 
-#[hotpath::measure]
 pub fn git_topology_projection_identity(
     namespace: GraphNamespace,
 ) -> Result<GraphProjectionIdentity, GitTopologyProjectionError> {
@@ -183,7 +181,6 @@ pub fn git_topology_projection_identity(
     ))
 }
 
-#[hotpath::measure]
 pub fn git_topology_namespace(
     repository: &RepositoryId,
 ) -> Result<GraphNamespace, GitTopologyProjectionError> {
@@ -195,7 +192,6 @@ pub fn git_topology_namespace(
     GraphNamespace::new(format!("git-scope:{}", digest.as_str())).map_err(Into::into)
 }
 
-#[hotpath::measure]
 pub fn git_topology_ref_watermark(
     repository: &RepositoryId,
     head: &GitHeadStateV1,
@@ -216,7 +212,6 @@ pub fn git_topology_ref_watermark(
     .map_err(|error| GitTopologyProjectionError::Contract(error.to_string()))
 }
 
-#[hotpath::measure]
 pub fn git_topology_generation_id(
     projection: &GitTopologyProjectionV1,
     projector_revision: &GraphProjectorRevision,
@@ -231,7 +226,6 @@ pub fn git_topology_generation_id(
     GraphGenerationId::new(format!("git-topology:{}", digest.as_str())).map_err(Into::into)
 }
 
-#[hotpath::measure]
 pub fn git_topology_idempotency_key(
     projection: &GitTopologyProjectionV1,
     projector_revision: &GraphProjectorRevision,
@@ -240,7 +234,6 @@ pub fn git_topology_idempotency_key(
     GraphIdempotencyKey::new(format!("publish:{}", generation.as_str())).map_err(Into::into)
 }
 
-#[hotpath::measure]
 pub fn build_git_topology_manifest_checked(
     identity: GraphProjectionIdentity,
     projection: &GitTopologyProjectionV1,
@@ -352,7 +345,6 @@ impl fmt::Debug for GitTopologyProjectionStore {
     }
 }
 
-#[hotpath::measure_all]
 impl GitTopologyProjectionStore {
     pub fn from_verified_snapshot(
         snapshot: VerifiedGraphSnapshot,
@@ -578,7 +570,6 @@ impl GitTopologyProjectionStore {
     }
 }
 
-#[hotpath::measure]
 fn validate_budget(max_depth: usize, max_results: usize) -> Result<(), GitTopologyProjectionError> {
     if max_depth == 0 || max_results == 0 {
         Err(GitTopologyProjectionError::Contract(
@@ -589,7 +580,6 @@ fn validate_budget(max_depth: usize, max_results: usize) -> Result<(), GitTopolo
     }
 }
 
-#[hotpath::measure]
 fn validate_refs(refs: &[GitTopologyRefV1]) -> Result<(), GitTopologyProjectionError> {
     for reference in refs {
         reference
@@ -611,7 +601,6 @@ fn validate_refs(refs: &[GitTopologyRefV1]) -> Result<(), GitTopologyProjectionE
     Ok(())
 }
 
-#[hotpath::measure]
 fn metadata_entity(
     projection: &GitTopologyProjectionV1,
 ) -> Result<GraphEntity, GitTopologyProjectionError> {
@@ -633,7 +622,6 @@ fn metadata_entity(
     .map_err(Into::into)
 }
 
-#[hotpath::measure]
 fn read_metadata(
     snapshot: &VerifiedGraphSnapshot,
     cancellation: Arc<dyn GraphCancellation>,
@@ -678,7 +666,6 @@ fn read_metadata(
     Ok(metadata)
 }
 
-#[hotpath::measure]
 fn commit_entity(
     oid: GitOidV1,
     commit: Option<&GitCommitMetadataV1>,
@@ -699,7 +686,6 @@ fn commit_entity(
     GraphEntity::new(commit_entity_id(&oid)?, labels, properties).map_err(Into::into)
 }
 
-#[hotpath::measure]
 fn ref_entity(reference: &GitTopologyRefV1) -> Result<GraphEntity, GitTopologyProjectionError> {
     GraphEntity::new(
         ref_entity_id(&reference.reference)?,
@@ -712,7 +698,6 @@ fn ref_entity(reference: &GitTopologyRefV1) -> Result<GraphEntity, GitTopologyPr
     .map_err(Into::into)
 }
 
-#[hotpath::measure]
 fn parent_relation(
     projection: &GraphProjectionIdentity,
     commit: &GitOidV1,
@@ -732,7 +717,6 @@ fn parent_relation(
     .map_err(Into::into)
 }
 
-#[hotpath::measure]
 fn ref_target_relation(
     projection: &GraphProjectionIdentity,
     reference: &GitTopologyRefV1,
@@ -751,22 +735,18 @@ fn ref_target_relation(
     .map_err(Into::into)
 }
 
-#[hotpath::measure]
 fn commit_entity_id(oid: &GitOidV1) -> Result<GraphEntityId, GitTopologyProjectionError> {
     GraphEntityId::new(stable_identity("commit", oid.as_str())).map_err(Into::into)
 }
 
-#[hotpath::measure]
 fn ref_entity_id(reference: &RefId) -> Result<GraphEntityId, GitTopologyProjectionError> {
     GraphEntityId::new(stable_identity("ref", reference.as_str())).map_err(Into::into)
 }
 
-#[hotpath::measure]
 fn metadata_entity_id() -> Result<GraphEntityId, GitTopologyProjectionError> {
     GraphEntityId::new(stable_identity("metadata", GIT_PROJECTION)).map_err(Into::into)
 }
 
-#[hotpath::measure]
 fn stable_identity(kind: &str, value: &str) -> String {
     let mut digest = Sha256::new();
     digest.update(kind.as_bytes());
@@ -775,7 +755,6 @@ fn stable_identity(kind: &str, value: &str) -> String {
     format!("{kind}:{}", hex::encode(digest.finalize()))
 }
 
-#[hotpath::measure]
 fn serialize(value: &impl Serialize) -> Result<Vec<u8>, GitTopologyProjectionError> {
     serde_json::to_vec(value)
         .map_err(|error| GitTopologyProjectionError::Contract(error.to_string()))

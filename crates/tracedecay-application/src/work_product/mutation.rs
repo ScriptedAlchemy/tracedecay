@@ -686,7 +686,6 @@ where
     }
 }
 
-#[hotpath::measure]
 fn mutation_receipt(
     commit: WorkProductEventCommitV1,
     replayed: bool,
@@ -700,7 +699,6 @@ fn mutation_receipt(
     })
 }
 
-#[hotpath::measure]
 fn canonical_work_product_mutation_digest(
     actor: &ActorId,
     authorized_scope: &AuthorizedWorkProductScopeV1,
@@ -724,7 +722,6 @@ fn canonical_work_product_mutation_digest(
     .map_err(|_| WorkProductApplicationErrorV1::InvalidRequest)
 }
 
-#[hotpath::measure]
 fn canonicalize_mutation_evidence(
     mutation: &mut WorkProductMutationIdentityV1,
 ) -> Result<(), WorkProductApplicationErrorV1> {
@@ -745,7 +742,6 @@ fn canonicalize_mutation_evidence(
     Ok(())
 }
 
-#[hotpath::measure]
 fn mutation_source_watermark(
     authority: &WorkProductExpectedAuthorityV1,
 ) -> Result<WorkProductSourceWatermarkV1, WorkProductApplicationErrorV1> {
@@ -760,7 +756,6 @@ fn mutation_source_watermark(
     }
 }
 
-#[hotpath::measure]
 fn mutation_expected_graph_version(
     authority: &WorkProductExpectedAuthorityV1,
 ) -> Option<WorkGraphVersionV1> {
@@ -772,7 +767,6 @@ fn mutation_expected_graph_version(
     }
 }
 
-#[hotpath::measure]
 fn validate_change_request(
     change: &WorkGraphChangeV1,
     expected_graph_version: WorkGraphVersionV1,
@@ -802,7 +796,6 @@ fn validate_change_request(
     Ok(())
 }
 
-#[hotpath::measure]
 fn event_draft(
     context: &RequestContext,
     authorized_scope: &AuthorizedWorkProductScopeV1,
@@ -834,7 +827,6 @@ fn event_draft(
     })
 }
 
-#[hotpath::measure]
 fn selected_relations(
     selection: &WorkProductSelectionScopeV1,
 ) -> Vec<tracedecay_domain::WorkProductAuthorizedRelationScopeV1> {
@@ -843,7 +835,6 @@ fn selected_relations(
         .map_or_else(Vec::new, |relations| relations.iter().cloned().collect())
 }
 
-#[hotpath::measure]
 fn authorize_and_admit(
     context: &RequestContext,
     binding: &WorkProductBindingV1,
@@ -859,7 +850,6 @@ fn authorize_and_admit(
     }
 }
 
-#[hotpath::measure]
 fn map_owner_error(error: WorkProductOwnerAuthorizationErrorV1) -> WorkProductApplicationErrorV1 {
     match error {
         WorkProductOwnerAuthorizationErrorV1::NotAuthorized => {
@@ -871,7 +861,6 @@ fn map_owner_error(error: WorkProductOwnerAuthorizationErrorV1) -> WorkProductAp
     }
 }
 
-#[hotpath::measure]
 fn map_event_error(error: WorkProductEventPortErrorV1) -> WorkProductApplicationErrorV1 {
     match error {
         WorkProductEventPortErrorV1::NotFoundOrNotAuthorized => {
@@ -891,7 +880,6 @@ fn map_event_error(error: WorkProductEventPortErrorV1) -> WorkProductApplication
     }
 }
 
-#[hotpath::measure]
 fn validate_replayed_event(
     event: &WorkProductEventV1,
     context: &WorkProductPortContextV1,
@@ -933,7 +921,6 @@ fn validate_replayed_event(
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_appended_event(
     event: &WorkProductEventV1,
     draft: &WorkProductEventDraftV1,

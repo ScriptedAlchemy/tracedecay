@@ -203,7 +203,6 @@ pub(in super::super) async fn delete_staged_commit(
         == 1)
 }
 
-#[hotpath::measure]
 fn checked_limit(limit: usize) -> Result<i64, GitCorrelationError> {
     if !(1..=MAX_STAGED_PAGE_ROWS).contains(&limit) {
         return Err(GitCorrelationError::InvalidArgument(format!(
@@ -217,7 +216,6 @@ fn checked_limit(limit: usize) -> Result<i64, GitCorrelationError> {
     })
 }
 
-#[hotpath::measure]
 fn checked_boundary(boundary: u8) -> Result<i64, GitCorrelationError> {
     match boundary {
         0 | 1 => Ok(i64::from(boundary)),
@@ -227,7 +225,6 @@ fn checked_boundary(boundary: u8) -> Result<i64, GitCorrelationError> {
     }
 }
 
-#[hotpath::measure]
 fn staged_span_from_row(row: &Row) -> Result<GitHistoryStagedSpanRow, GitCorrelationError> {
     let stored_boundary: i64 = row.get(2)?;
     let boundary = u8::try_from(stored_boundary).map_err(|_| {
@@ -251,7 +248,6 @@ fn staged_span_from_row(row: &Row) -> Result<GitHistoryStagedSpanRow, GitCorrela
     })
 }
 
-#[hotpath::measure]
 fn staged_commit_from_row(row: &Row) -> Result<GitHistoryStagedCommitRow, GitCorrelationError> {
     Ok(GitHistoryStagedCommitRow {
         key: GitHistoryProgressKey {

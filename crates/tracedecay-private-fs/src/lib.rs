@@ -20,7 +20,6 @@ pub struct PrivateFileCreationFailure {
     file: Option<File>,
 }
 
-#[hotpath::measure_all]
 impl PrivateFileCreationFailure {
     pub(crate) fn before_creation(error: io::Error) -> Self {
         Self { error, file: None }

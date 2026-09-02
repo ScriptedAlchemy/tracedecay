@@ -20,7 +20,6 @@ use tracedecay_session_temporal_store::operations as session_temporal_operations
 use tracedecay_session_temporal_store::seed_session_relation_projection;
 use tracedecay_session_temporal_store::store::execution_control_graph_cancellation;
 
-#[hotpath::measure]
 fn check_execution(control: &ExecutionControl) -> Result<(), LcmError> {
     control.checkpoint().map_err(|error| match error {
         TemporalPortError::Cancelled => LcmError::Cancelled,
@@ -32,7 +31,6 @@ fn check_execution(control: &ExecutionControl) -> Result<(), LcmError> {
     })
 }
 
-#[hotpath::measure_all]
 impl RegisteredGlobalDb {
     #[hotpath::skip]
     pub(super) async fn lcm_read_snapshot(

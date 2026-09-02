@@ -19,7 +19,6 @@ use crate::{
     SafeDiagnostic,
 };
 
-#[hotpath::measure]
 pub fn work_duplicate_adjudication_input_digest(
     command: &WorkDuplicateAdjudicationCommandV1,
 ) -> Result<ManifestDigest, tracedecay_domain::research::DomainError> {
@@ -52,7 +51,6 @@ pub struct PrepareWorkDuplicateAdjudicationRequestV1 {
     pub reason: String,
 }
 
-#[hotpath::measure]
 pub fn prepare_work_duplicate_adjudication(
     request: PrepareWorkDuplicateAdjudicationRequestV1,
     evidence: WorkDuplicateAdjudicationEvidenceV1,
@@ -121,7 +119,6 @@ pub enum WorkDuplicateAttemptClassificationReadV1 {
     },
 }
 
-#[hotpath::measure_all]
 impl WorkDuplicateAttemptClassificationReadV1 {
     #[hotpath::skip]
     pub const fn complete(&self) -> Option<&WorkDuplicateAttemptClassificationV1> {
@@ -147,7 +144,6 @@ pub enum WorkDuplicateAdjudicationAppendOutcomeV1 {
     Replayed(WorkDuplicateAdjudicationReceiptV1),
 }
 
-#[hotpath::measure_all]
 impl WorkDuplicateAdjudicationAppendOutcomeV1 {
     #[hotpath::skip]
     pub const fn receipt(&self) -> &WorkDuplicateAdjudicationReceiptV1 {
@@ -328,7 +324,6 @@ where
     }
 }
 
-#[hotpath::measure]
 fn classify_complete_attempt_relations(
     authority: &WorkAuthority,
     work_generation: ProjectionGenerationId,
@@ -407,7 +402,6 @@ fn classify_complete_attempt_relations(
     }
 }
 
-#[hotpath::measure]
 fn admit(context: &RequestContext, observed_at: UtcMicros) -> Result<(), ApplicationProblem> {
     match context.admission_at(observed_at) {
         RequestAdmission::Admitted => Ok(()),
@@ -416,7 +410,6 @@ fn admit(context: &RequestContext, observed_at: UtcMicros) -> Result<(), Applica
     }
 }
 
-#[hotpath::measure]
 fn invalid_problem() -> ApplicationProblem {
     ApplicationProblem::InvalidRequest {
         diagnostic: SafeDiagnostic {
@@ -428,7 +421,6 @@ fn invalid_problem() -> ApplicationProblem {
     }
 }
 
-#[hotpath::measure]
 fn storage_problem(error: WorkDuplicateAdjudicationStorageErrorV1) -> ApplicationProblem {
     match error {
         WorkDuplicateAdjudicationStorageErrorV1::NotFoundOrNotAuthorized => {

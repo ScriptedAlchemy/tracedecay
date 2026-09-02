@@ -12,7 +12,6 @@ pub(crate) struct StagedGenerationV1 {
     pub(crate) lineage: Vec<SymbolLineageCandidateV1>,
 }
 
-#[hotpath::measure]
 pub(crate) fn staged_generation(
     generation_id: CodeGenerationId,
     mut files: Vec<Arc<FileGenerationArtifactsV1>>,
@@ -59,7 +58,6 @@ pub(crate) fn staged_generation(
 /// index. The same registry instance shape is used by intake, generation
 /// sealing, and capability emission, so capability pins cannot disagree with
 /// the generation's language revision set.
-#[hotpath::measure]
 pub(crate) fn registry_for_snapshot(
     snapshot: &SanitizedCodeSnapshotV1,
 ) -> Result<StaticLanguageRegistry, CodeIndexProductionErrorV1> {
@@ -91,7 +89,6 @@ pub(crate) fn registry_for_snapshot(
         .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))
 }
 
-#[hotpath::measure]
 pub(crate) fn captured_files(
     snapshot: &SanitizedCodeSnapshotV1,
     captured: Vec<CodeIndexCapturedFileV1>,
@@ -126,7 +123,6 @@ pub(crate) fn captured_files(
     Ok(captured_files)
 }
 
-#[hotpath::measure]
 pub(crate) fn coverage_summary(
     snapshot: &SanitizedCodeSnapshotV1,
     files: &[Arc<FileGenerationArtifactsV1>],
@@ -161,7 +157,6 @@ pub(crate) fn coverage_summary(
     coverage
 }
 
-#[hotpath::measure]
 pub(crate) fn projection_request(
     active: Option<&CodeIndexPublishedGenerationV1>,
     increment: Option<&crate::generations::GenerationIncrementPlanV1>,
@@ -192,7 +187,6 @@ pub(crate) fn projection_request(
     Ok(request)
 }
 
-#[hotpath::measure]
 pub(crate) fn edge_order(
     left: &CanonicalRelationEdgeV1,
     right: &CanonicalRelationEdgeV1,
@@ -213,7 +207,6 @@ pub(crate) fn edge_order(
         ))
 }
 
-#[hotpath::measure]
 pub(crate) fn collect_edge_evidence<T>(
     files: &[T],
 ) -> (Vec<CanonicalRelationEdgeV1>, Vec<CodeIndexEdgeAbstentionV1>)
@@ -246,7 +239,6 @@ where
 /// defines a compatible candidate (local ambiguity or suppression owns those).
 /// Everything else stays truthfully unresolved. Bound edges carry the
 /// `NameResolved` authority class, not `SyntaxExact`.
-#[hotpath::measure]
 fn resolve_cross_file_references<T>(files: &[T]) -> Vec<CanonicalRelationEdgeV1>
 where
     T: AsRef<FileGenerationArtifactsV1>,

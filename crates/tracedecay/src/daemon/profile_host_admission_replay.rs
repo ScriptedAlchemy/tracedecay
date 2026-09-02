@@ -144,7 +144,6 @@ impl Drop for ProfileHostAdmissionReplayRegistry {
     }
 }
 
-#[hotpath::measure_all]
 impl ProfileHostAdmissionReplayRegistry {
     #[hotpath::skip]
     pub(super) async fn ensure_bootstrap(
@@ -604,7 +603,6 @@ impl ProfileHostAdmissionBootstrapWorker {
     }
 }
 
-#[hotpath::measure]
 fn bootstrap_error_disposition(error: &tracedecay_domain::errors::TraceDecayError) -> (&str, bool) {
     if error.reset_required_context().is_some() {
         ("reset_required", false)
@@ -617,7 +615,6 @@ fn bootstrap_error_disposition(error: &tracedecay_domain::errors::TraceDecayErro
     }
 }
 
-#[hotpath::measure_all]
 impl ProfileHostAdmissionCancellation {
     fn new() -> Self {
         Self {
@@ -644,7 +641,6 @@ impl ProfileHostAdmissionCancellation {
     }
 }
 
-#[hotpath::measure_all]
 impl ProfileHostAdmissionReplayWorker {
     fn new(
         broker: &SharedHostAdmissionBroker,
@@ -827,7 +823,6 @@ impl ProfileHostAdmissionReplayWorker {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn profile_replay_backoff(attempt: u32) -> Duration {
     replay_backoff(attempt, REPLAY_BACKOFF_SHIFT_CAP)
 }

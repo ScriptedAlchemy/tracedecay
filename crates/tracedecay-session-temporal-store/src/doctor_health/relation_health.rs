@@ -20,7 +20,6 @@ const RELATION_HEALTH_QUERY_LIMIT: i64 = MAX_RELATION_HEALTH_PROJECTIONS as i64 
 const MAX_RELATION_HEALTH_ENTITIES: usize = 100_000;
 const MAX_RELATION_HEALTH_RELATIONS: usize = 100_000;
 
-#[hotpath::measure_all]
 impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     #[hotpath::measure(future = true, label = "session_temporal.query.relation_health")]
     pub(super) async fn with_relation_graph_health(
@@ -180,7 +179,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     }
 }
 
-#[hotpath::measure]
 fn relation_error_finding(
     error: &SessionRelationError,
 ) -> (SessionTemporalHealthFindingKind, bool) {
@@ -252,7 +250,6 @@ async fn stale_summary_closure_count(
     stale_summary_difference_count(&expected_stale, &availability)
 }
 
-#[hotpath::measure]
 fn expected_stale_summary_ids(summaries: &[SummaryRelationNode]) -> BTreeSet<&str> {
     let mut reverse_dependencies = BTreeMap::<&str, Vec<&str>>::new();
     for summary in summaries {
@@ -280,7 +277,6 @@ fn expected_stale_summary_ids(summaries: &[SummaryRelationNode]) -> BTreeSet<&st
     expected_stale
 }
 
-#[hotpath::measure]
 fn stale_summary_difference_count(
     expected_stale: &BTreeSet<&str>,
     availability: &BTreeMap<String, String>,

@@ -14,7 +14,6 @@ use super::{DispatchCatalogBinding, McpToolDispatchGroup};
 /// registry already owns its complete operation set and lifecycle contracts.
 /// Keeping one handwritten row per operation here would create a second source
 /// of names that could drift from the mounted Work surface.
-#[hotpath::measure]
 pub(crate) fn work_operation_for_tool(tool_name: &str) -> Option<tracedecay_api::WorkOperation> {
     let operation_key = tool_name.strip_prefix("tracedecay_work_")?;
     tracedecay_api::WorkOperation::ALL
@@ -27,7 +26,6 @@ pub(crate) fn work_operation_for_tool(tool_name: &str) -> Option<tracedecay_api:
 /// The Work executable registry is the source of effects, cancellation,
 /// idempotency, and deadlines. MCP owns only the `tracedecay_work_` transport
 /// prefix; it must not recreate those lifecycle contracts in a second table.
-#[hotpath::measure]
 pub(super) fn work_executable_binding_for_tool(
     tool_name: &str,
 ) -> Result<Option<ExecutableBindingV1>, super::super::dispatch::McpDispatchMetadataError> {
@@ -52,7 +50,6 @@ pub(super) fn work_executable_binding_for_tool(
 /// Resolves the registry once and looks each operation up in it, rather than
 /// re-fetching the registry per operation through
 /// [`work_executable_binding_for_tool`].
-#[hotpath::measure]
 pub(super) fn dispatch_catalog_bindings()
 -> Result<Vec<DispatchCatalogBinding>, super::super::dispatch::McpDispatchMetadataError> {
     let registry = tracedecay_application::work_executable_binding_registry()

@@ -28,7 +28,6 @@ pub struct GitHistoryBudget {
     pub objects: usize,
 }
 
-#[hotpath::measure_all]
 impl GitHistoryBudget {
     fn for_max_count(max_count: u32) -> Self {
         let commits = (max_count.max(1) as usize)
@@ -67,7 +66,6 @@ pub struct GitRepositoryHistory {
     pub termination: GitHistoryTermination,
 }
 
-#[hotpath::measure_all]
 impl GitRepositoryAuthority {
     /// Bounded in-process commit traversal.
     pub fn history(
@@ -220,7 +218,6 @@ impl GitRepositoryAuthority {
     }
 }
 
-#[hotpath::measure]
 fn commit_metadata(commit: &gix::Commit<'_>) -> Result<GitCommitMetadataV1, GitRepositoryError> {
     let decoded = commit
         .decode()
@@ -261,7 +258,6 @@ fn commit_metadata(commit: &gix::Commit<'_>) -> Result<GitCommitMetadataV1, GitR
     })
 }
 
-#[hotpath::measure]
 fn commit_touches_path(
     commit: &gix::Commit<'_>,
     path: &mut String,
@@ -398,7 +394,6 @@ fn commit_touches_path(
     })
 }
 
-#[hotpath::measure]
 fn tree_entry(
     tree: &gix::Tree<'_>,
     path: &str,
@@ -420,7 +415,6 @@ struct PathRead {
     termination: Option<GitHistoryTermination>,
 }
 
-#[hotpath::measure_all]
 impl PathRead {
     fn stopped(termination: GitHistoryTermination) -> Self {
         Self {
@@ -430,7 +424,6 @@ impl PathRead {
     }
 }
 
-#[hotpath::measure]
 fn unreadable_history(
     object: Option<String>,
     error: impl std::fmt::Display,
@@ -441,7 +434,6 @@ fn unreadable_history(
     }
 }
 
-#[hotpath::measure]
 fn charge_nested_path(
     path: &str,
     tree_count: usize,
@@ -468,7 +460,6 @@ fn charge_nested_path(
     None
 }
 
-#[hotpath::measure]
 fn bounded_tree_inventory(
     tree: &gix::Tree<'_>,
     budget: GitHistoryBudget,
@@ -495,7 +486,6 @@ struct BoundedTreeVisitor<'a> {
     termination: Option<GitHistoryTermination>,
 }
 
-#[hotpath::measure_all]
 impl BoundedTreeVisitor<'_> {
     fn visit(&mut self, tree: bool) -> gix::traverse::tree::visit::Action {
         if self.cancellation.is_cancelled() {

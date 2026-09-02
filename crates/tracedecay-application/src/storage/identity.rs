@@ -36,7 +36,6 @@ application_identifier!(
 #[serde(transparent)]
 pub struct StorageByteSizeV1(pub u64);
 
-#[hotpath::measure_all]
 impl StorageByteSizeV1 {
     pub const ZERO: Self = Self(0);
 
@@ -63,7 +62,6 @@ impl StorageByteSizeV1 {
 #[serde(transparent)]
 pub struct FreePageRatioV1(f64);
 
-#[hotpath::measure_all]
 impl FreePageRatioV1 {
     /// Compute the ratio from a freelist-page count and a total page count. A
     /// zero page count yields a zero ratio (an empty store carries no bloat),

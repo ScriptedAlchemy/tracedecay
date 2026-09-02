@@ -6,7 +6,6 @@ use tracedecay_daemon_protocol::{DaemonClientIdentity, DaemonHandshake, MovedSto
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::config::{global_db_path, user_data_dir};
 
-#[hotpath::measure]
 fn current_daemon_client_identity() -> Result<DaemonClientIdentity> {
     let profile_root = user_data_dir().ok_or_else(|| TraceDecayError::Config {
         message: "could not determine TraceDecay user data directory".to_string(),
@@ -19,7 +18,6 @@ fn current_daemon_client_identity() -> Result<DaemonClientIdentity> {
 
 /// Handshake for this process's current client identity and caller-supplied
 /// binary version.
-#[hotpath::measure]
 pub fn handshake_for_current_client(
     client_version: &str,
     project_path: Option<PathBuf>,

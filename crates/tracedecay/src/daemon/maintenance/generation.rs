@@ -119,7 +119,6 @@ pub(in crate::daemon) async fn run_project_generation_maintenance(
 
 /// Cancelled and degraded ticks are recorded too: a maintenance lane that
 /// silently retries forever is exactly the waste being diagnosed.
-#[hotpath::measure]
 fn finalize_generation_outcome(
     outcome: MaintenanceTickOutcome,
     cancellation: &tracedecay_session_memory::context::CancellationToken,

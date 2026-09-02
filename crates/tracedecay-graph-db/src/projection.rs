@@ -81,7 +81,6 @@ opaque_id!(SourceGeneration);
 opaque_id!(GraphWatermark);
 opaque_id!(GraphGenerationId);
 
-#[hotpath::measure]
 fn validate_opaque(kind: &str, value: &str) -> Result<(), GraphDbError> {
     if value.is_empty() {
         return Err(GraphDbError::invalid(format!("{kind} must not be empty")));
@@ -106,7 +105,6 @@ pub struct GraphVector {
     pub metric: VectorMetric,
 }
 
-#[hotpath::measure_all]
 impl GraphVector {
     pub fn new(
         values: Vec<f32>,
@@ -159,7 +157,6 @@ pub enum GraphProperty {
     Vector(GraphVector),
 }
 
-#[hotpath::measure_all]
 impl GraphProperty {
     fn validate(&self) -> Result<(), GraphDbError> {
         match self {
@@ -191,7 +188,6 @@ pub struct GraphEntity {
     pub properties: BTreeMap<GraphPropertyName, GraphProperty>,
 }
 
-#[hotpath::measure_all]
 impl GraphEntity {
     pub fn new(
         identity: GraphEntityId,
@@ -222,7 +218,6 @@ pub struct GraphRelation {
     pub properties: BTreeMap<GraphPropertyName, GraphProperty>,
 }
 
-#[hotpath::measure_all]
 impl GraphRelation {
     pub fn new(
         identity: GraphRelationId,
@@ -255,7 +250,6 @@ pub enum GraphMutation {
     DeleteRelation(GraphRelationId),
 }
 
-#[hotpath::measure_all]
 impl GraphMutation {
     pub(crate) fn sort_key(&self) -> (u8, &str) {
         match self {
@@ -298,7 +292,6 @@ impl fmt::Debug for GraphWriteBatch {
     }
 }
 
-#[hotpath::measure_all]
 impl GraphWriteBatch {
     pub fn new(
         namespace: GraphNamespace,
@@ -447,7 +440,6 @@ struct CheckedProjectionDigestWriter<'a> {
     failure: Option<GraphDbError>,
 }
 
-#[hotpath::measure_all]
 impl CheckedProjectionDigestWriter<'_> {
     fn finish(mut self) -> Result<(), GraphDbError> {
         if let Some(error) = self.failure.take() {
@@ -501,7 +493,6 @@ impl Write for CheckedProjectionDigestWriter<'_> {
     }
 }
 
-#[hotpath::measure]
 fn normalize_mutations(mutations: &mut Vec<GraphMutation>) -> Result<(), GraphDbError> {
     for mutation in mutations.iter() {
         mutation.validate()?;
@@ -523,7 +514,6 @@ fn normalize_mutations(mutations: &mut Vec<GraphMutation>) -> Result<(), GraphDb
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_labels(labels: &BTreeSet<GraphLabel>) -> Result<(), GraphDbError> {
     if labels.len() > MAX_GRAPH_ENTITY_LABELS {
         return Err(GraphDbError::budget_exhausted_count(
@@ -549,7 +539,6 @@ fn validate_labels(labels: &BTreeSet<GraphLabel>) -> Result<(), GraphDbError> {
     Ok(())
 }
 
-#[hotpath::measure]
 fn validate_properties(
     properties: &BTreeMap<GraphPropertyName, GraphProperty>,
 ) -> Result<(), GraphDbError> {
@@ -588,7 +577,6 @@ pub(crate) fn graph_properties_live_bytes(
     Ok(bytes)
 }
 
-#[hotpath::measure]
 fn property_payload_bytes(property: &GraphProperty) -> Option<usize> {
     match property {
         GraphProperty::Bool(_) => Some(std::mem::size_of::<bool>()),

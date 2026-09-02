@@ -23,7 +23,6 @@ use super::super::administrative_effect::administrative_command_effect;
 use super::super::current_micros;
 use super::{RegisteredWorkRuntime, application_problem};
 
-#[hotpath::measure]
 pub(super) fn offer_work_blocked_interval_receipts(
     producer: Option<&tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
     canonical_project_scope: &str,
@@ -49,7 +48,6 @@ pub(super) fn offer_work_blocked_interval_receipts(
 /// caller. Absence and denial share the concealed
 /// `not_found_or_not_authorized` answer so that probing an owner cannot reveal
 /// which of the two it is.
-#[hotpath::measure]
 pub(super) fn work_product_problem(error: WorkProductApplicationErrorV1) -> ApplicationProblem {
     match error {
         WorkProductApplicationErrorV1::NotAuthorized
@@ -130,7 +128,6 @@ pub(super) fn work_product_problem(error: WorkProductApplicationErrorV1) -> Appl
 /// execution persists transitions. The authority and scope are exactly the
 /// registered runtime's; only the deadline is the runtime's own, because the
 /// provider process outlives the request that started it.
-#[hotpath::measure]
 pub(crate) fn work_background_context(
     registered: &RegisteredWorkRuntime,
     identity: &tracedecay_domain::WorkAttemptIdentityV1,
@@ -164,7 +161,6 @@ pub(crate) fn work_background_context(
 /// A retained producer drain has no attempt identity to mint. It uses the
 /// registered Work actor/grant context, so its durable receipt scans cannot
 /// alias a caller request or an attempt execution.
-#[hotpath::measure]
 pub(crate) fn work_blocked_interval_recovery_context(
     actor: &ActorId,
     grant: &CapabilityGrantSnapshot,
@@ -190,7 +186,6 @@ pub(crate) fn work_blocked_interval_recovery_context(
 /// Maps a verified Work topology failure to the typed application problem the
 /// attempt-list read reports. Absence of any Work events is the only
 /// non-error state: it names an empty scope, not a failing authority.
-#[hotpath::measure]
 pub(super) fn work_topology_problem(
     error: WorkTopologyError,
 ) -> Result<tracedecay_application::WorkAttemptTopologyStateV1, ApplicationProblem> {
@@ -224,7 +219,6 @@ pub(super) fn work_topology_problem(
     }
 }
 
-#[hotpath::measure]
 pub(super) fn work_topology_unavailable_problem(message: &str) -> ApplicationProblem {
     ApplicationProblem::unavailable(SafeDiagnostic {
         code: "work.topology_unavailable".to_owned(),
@@ -232,7 +226,6 @@ pub(super) fn work_topology_unavailable_problem(message: &str) -> ApplicationPro
     })
 }
 
-#[hotpath::measure]
 pub(super) fn work_projection_problem(error: WorkProjectionApplicationError) -> ApplicationProblem {
     match error {
         WorkProjectionApplicationError::Admission(problem) => problem,
@@ -263,7 +256,6 @@ pub(super) fn work_projection_problem(error: WorkProjectionApplicationError) -> 
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure]
 pub(super) fn complete_work_read<T>(
     registered: &RegisteredWorkRuntime,
     request_id: String,
@@ -313,7 +305,6 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure]
 pub(super) fn complete_work_effect<T>(
     registered: &RegisteredWorkRuntime,
     request_id: String,
@@ -365,7 +356,6 @@ where
 /// A completed Work command effect: the shared administrative receipt shape
 /// with every digest domain namespaced under the `work` family token.
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure]
 pub(super) fn work_command_effect<T>(
     registered: &RegisteredWorkRuntime,
     context: &RequestContext,
@@ -394,7 +384,6 @@ where
     )
 }
 
-#[hotpath::measure]
 pub(crate) fn work_request_context(
     registered: &RegisteredWorkRuntime,
     request_id: &str,
@@ -427,7 +416,6 @@ pub(crate) fn work_request_context(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure]
 pub(super) fn work_evidence_packet<T>(
     registered: &RegisteredWorkRuntime,
     context: &RequestContext,
@@ -497,7 +485,6 @@ where
     })
 }
 
-#[hotpath::measure]
 pub(super) fn work_effect<T>(
     terminal: &WorkflowEffectTerminalV1,
     result: Option<T>,
@@ -560,7 +547,6 @@ where
     )?))
 }
 
-#[hotpath::measure]
 fn workflow_effect_terminal_observation(
     termination: EffectTermination,
     observed_at: UtcMicros,

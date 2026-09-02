@@ -64,7 +64,6 @@ struct GraphBackupArtifact {
     sha256: String,
 }
 
-#[hotpath::measure_all]
 impl GraphDb {
     /// Creates a verified full backup of the closed graph store at `source`
     /// into the new directory `destination`.
@@ -215,7 +214,6 @@ impl GraphDb {
     }
 }
 
-#[hotpath::measure]
 fn create_staged_full(
     database: &GraphDb,
     cancellation: &dyn GraphCancellation,
@@ -260,7 +258,6 @@ fn create_staged_full(
     Ok(receipt(&manifest, &bytes))
 }
 
-#[hotpath::measure]
 fn restore_to_staging(
     backup_root: &Path,
     staging: &Path,
@@ -290,7 +287,6 @@ struct VerifiedBackup {
     receipt: GraphBackupReceipt,
 }
 
-#[hotpath::measure]
 fn load_verified(backup_root: &Path) -> Result<VerifiedBackup, GraphDbError> {
     let root = backup_root
         .canonicalize()
@@ -327,7 +323,6 @@ fn load_verified(backup_root: &Path) -> Result<VerifiedBackup, GraphDbError> {
     })
 }
 
-#[hotpath::measure]
 fn validate_manifest(manifest: &GraphBackupManifest) -> Result<(), GraphDbError> {
     if manifest.schema_version != MANIFEST_SCHEMA_VERSION
         || manifest.graph_format_version == 0
@@ -357,7 +352,6 @@ fn validate_manifest(manifest: &GraphBackupManifest) -> Result<(), GraphDbError>
     Ok(())
 }
 
-#[hotpath::measure]
 fn collect_artifacts(root: &Path) -> Result<Vec<GraphBackupArtifact>, GraphDbError> {
     let mut files = Vec::new();
     collect_files(root, root, &mut files)?;
@@ -389,7 +383,6 @@ fn collect_artifacts(root: &Path) -> Result<Vec<GraphBackupArtifact>, GraphDbErr
         .collect()
 }
 
-#[hotpath::measure]
 fn collect_files(root: &Path, path: &Path, files: &mut Vec<PathBuf>) -> Result<(), GraphDbError> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| unavailable_io("inspect graph backup artifact", path, error))?;
@@ -421,7 +414,6 @@ fn collect_files(root: &Path, path: &Path, files: &mut Vec<PathBuf>) -> Result<(
     Ok(())
 }
 
-#[hotpath::measure]
 fn verify_artifact(root: &Path, artifact: &GraphBackupArtifact) -> Result<(), GraphDbError> {
     let path = root.join(&artifact.logical_path);
     let metadata = fs::symlink_metadata(&path).map_err(|error| GraphDbError::Corrupt {
@@ -445,7 +437,6 @@ fn verify_artifact(root: &Path, artifact: &GraphBackupArtifact) -> Result<(), Gr
     Ok(())
 }
 
-#[hotpath::measure]
 fn receipt(manifest: &GraphBackupManifest, bytes: &[u8]) -> GraphBackupReceipt {
     GraphBackupReceipt {
         graph_format_version: manifest.graph_format_version,
@@ -455,7 +446,6 @@ fn receipt(manifest: &GraphBackupManifest, bytes: &[u8]) -> GraphBackupReceipt {
     }
 }
 
-#[hotpath::measure]
 fn validate_new_directory(destination: &Path) -> Result<(PathBuf, String), GraphDbError> {
     if destination
         .try_exists()
@@ -478,7 +468,6 @@ fn validate_new_directory(destination: &Path) -> Result<(PathBuf, String), Graph
     Ok((parent, file_name))
 }
 
-#[hotpath::measure]
 fn validate_destination(destination: &Path) -> Result<PathBuf, GraphDbError> {
     if destination.extension().and_then(|value| value.to_str()) != Some("grafeo") {
         return Err(GraphDbError::invalid(
@@ -508,7 +497,6 @@ fn validate_destination(destination: &Path) -> Result<PathBuf, GraphDbError> {
     Ok(destination)
 }
 
-#[hotpath::measure]
 fn staging_file(destination: &Path, kind: &str) -> Result<PathBuf, GraphDbError> {
     let parent = destination.parent().ok_or_else(|| {
         GraphDbError::invalid("graph restore destination must have a parent directory")
@@ -523,7 +511,6 @@ fn staging_file(destination: &Path, kind: &str) -> Result<PathBuf, GraphDbError>
     )))
 }
 
-#[hotpath::measure]
 fn publish_file(staging: &Path, destination: &Path) -> Result<(), GraphDbError> {
     match fs::hard_link(staging, destination) {
         Ok(()) => {}
@@ -558,7 +545,6 @@ fn publish_file(staging: &Path, destination: &Path) -> Result<(), GraphDbError> 
     })
 }
 
-#[hotpath::measure]
 fn rollback_linked_publication(
     staging: &Path,
     destination: &Path,
@@ -579,19 +565,16 @@ fn rollback_linked_publication(
     }
 }
 
-#[hotpath::measure]
 fn remove_backup_staging(staging: &Path) {
     let _ = fs::remove_dir_all(staging);
 }
 
-#[hotpath::measure]
 fn remove_restore_staging(staging: &Path) {
     let _ = fs::remove_file(staging);
     let sidecar = PathBuf::from(format!("{}.wal", staging.display()));
     let _ = fs::remove_dir_all(sidecar);
 }
 
-#[hotpath::measure]
 fn create_private_directory(path: &Path) -> Result<(), GraphDbError> {
     fs::create_dir(path)
         .map_err(|error| unavailable_io("create graph backup staging directory", path, error))?;
@@ -604,7 +587,6 @@ fn create_private_directory(path: &Path) -> Result<(), GraphDbError> {
     Ok(())
 }
 
-#[hotpath::measure]
 fn write_new_synced(path: &Path, bytes: &[u8]) -> Result<(), GraphDbError> {
     let mut options = OpenOptions::new();
     options.create_new(true).write(true);
@@ -622,7 +604,6 @@ fn write_new_synced(path: &Path, bytes: &[u8]) -> Result<(), GraphDbError> {
         .map_err(|error| unavailable_io("sync graph backup manifest", path, error))
 }
 
-#[hotpath::measure]
 fn sha256_file(path: &Path) -> Result<String, GraphDbError> {
     let mut file = File::open(path)
         .map_err(|error| unavailable_io("open graph backup artifact", path, error))?;
@@ -640,14 +621,12 @@ fn sha256_file(path: &Path) -> Result<String, GraphDbError> {
     Ok(encode_lowercase_hex(&digest.finalize()))
 }
 
-#[hotpath::measure]
 fn sync_file(path: &Path) -> Result<(), GraphDbError> {
     File::open(path)
         .and_then(|file| file.sync_all())
         .map_err(|error| unavailable_io("sync graph backup artifact", path, error))
 }
 
-#[hotpath::measure]
 fn sync_parent(path: &Path) -> Result<(), GraphDbError> {
     let parent = path.parent().ok_or_else(|| {
         GraphDbError::invalid("durable graph artifact must have a parent directory")
@@ -655,7 +634,6 @@ fn sync_parent(path: &Path) -> Result<(), GraphDbError> {
     sync_directory(parent)
 }
 
-#[hotpath::measure]
 fn sync_directory(path: &Path) -> Result<(), GraphDbError> {
     tracedecay_private_fs::framed_log::sync_directory(
         path,
@@ -664,7 +642,6 @@ fn sync_directory(path: &Path) -> Result<(), GraphDbError> {
     .map_err(|error| unavailable_io("sync graph backup directory", path, error))
 }
 
-#[hotpath::measure]
 fn unavailable_io(operation: &str, path: &Path, error: std::io::Error) -> GraphDbError {
     GraphDbError::unavailable(format!("{operation} '{}': {error}", path.display()))
 }

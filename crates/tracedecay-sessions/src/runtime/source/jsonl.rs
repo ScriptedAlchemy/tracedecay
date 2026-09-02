@@ -56,7 +56,6 @@ pub enum JsonlFrameDeferral {
     },
 }
 
-#[hotpath::measure_all]
 impl JsonlFrameDeferral {
     pub fn offset(self) -> u64 {
         match self {
@@ -106,7 +105,6 @@ struct JsonlNativeFileIdentity {
 }
 
 #[cfg(unix)]
-#[hotpath::measure]
 fn jsonl_native_file_identity(
     _file: &std::fs::File,
     metadata: &std::fs::Metadata,
@@ -125,7 +123,6 @@ struct JsonlNativeFileIdentity {
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn jsonl_native_file_identity(
     file: &std::fs::File,
     _metadata: &std::fs::Metadata,
@@ -144,7 +141,6 @@ struct JsonlNativeFileIdentity {
 }
 
 #[cfg(not(any(unix, windows)))]
-#[hotpath::measure]
 fn jsonl_native_file_identity(
     _file: &std::fs::File,
     metadata: &std::fs::Metadata,
@@ -168,7 +164,6 @@ struct JsonlFileChangeToken {
 }
 
 #[cfg(unix)]
-#[hotpath::measure]
 fn jsonl_file_change_token(metadata: &std::fs::Metadata) -> JsonlFileChangeToken {
     JsonlFileChangeToken {
         mtime_seconds: metadata.mtime(),
@@ -179,7 +174,6 @@ fn jsonl_file_change_token(metadata: &std::fs::Metadata) -> JsonlFileChangeToken
 }
 
 #[cfg(unix)]
-#[hotpath::measure_all]
 impl JsonlFileChangeToken {
     /// The data-modification half of the token.
     ///
@@ -200,7 +194,6 @@ struct JsonlFileChangeToken {
 }
 
 #[cfg(windows)]
-#[hotpath::measure]
 fn jsonl_file_change_token(metadata: &std::fs::Metadata) -> JsonlFileChangeToken {
     JsonlFileChangeToken {
         last_write_time: metadata.last_write_time(),
@@ -208,7 +201,6 @@ fn jsonl_file_change_token(metadata: &std::fs::Metadata) -> JsonlFileChangeToken
 }
 
 #[cfg(windows)]
-#[hotpath::measure_all]
 impl JsonlFileChangeToken {
     /// See the Unix definition: this platform's token is already
     /// data-modification only, so the whole token is the data stamp.
@@ -224,7 +216,6 @@ struct JsonlFileChangeToken {
 }
 
 #[cfg(not(any(unix, windows)))]
-#[hotpath::measure]
 fn jsonl_file_change_token(metadata: &std::fs::Metadata) -> JsonlFileChangeToken {
     JsonlFileChangeToken {
         modified_nanos: metadata
@@ -236,7 +227,6 @@ fn jsonl_file_change_token(metadata: &std::fs::Metadata) -> JsonlFileChangeToken
 }
 
 #[cfg(not(any(unix, windows)))]
-#[hotpath::measure_all]
 impl JsonlFileChangeToken {
     /// See the Unix definition: this platform's token is already
     /// data-modification only, so the whole token is the data stamp.
@@ -278,7 +268,6 @@ struct BoundedLatestProofCache<N, P> {
     admissions: BinaryHeap<CacheAdmission<N>>,
 }
 
-#[hotpath::measure_all]
 impl<N: Copy + Eq + Ord + Hash, P: Copy + Eq> BoundedLatestProofCache<N, P> {
     fn new(capacity: usize) -> Self {
         Self {
@@ -334,7 +323,6 @@ impl<N: Copy + Eq + Ord + Hash, P: Copy + Eq> BoundedLatestProofCache<N, P> {
     }
 }
 
-#[hotpath::measure]
 fn stable_cache_priority(value: &impl Hash) -> u64 {
     let mut hasher = DefaultHasher::new();
     value.hash(&mut hasher);
@@ -344,7 +332,6 @@ fn stable_cache_priority(value: &impl Hash) -> u64 {
 type UnchangedGenerationCache =
     BoundedLatestProofCache<JsonlNativeFileIdentity, UnchangedGenerationCacheKey>;
 
-#[hotpath::measure]
 fn unchanged_generation_cache() -> &'static Mutex<UnchangedGenerationCache> {
     static CACHE: std::sync::OnceLock<Mutex<UnchangedGenerationCache>> = std::sync::OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(BoundedLatestProofCache::new(UNCHANGED_GENERATION_CACHE_CAP)))
@@ -420,7 +407,6 @@ fn unchanged_generation_cache_hit(key: UnchangedGenerationCacheKey) -> bool {
         .unwrap_or(false)
 }
 
-#[hotpath::measure]
 fn remember_unchanged_generation(key: UnchangedGenerationCacheKey) {
     let Ok(mut cache) = unchanged_generation_cache().lock() else {
         return;
@@ -428,7 +414,6 @@ fn remember_unchanged_generation(key: UnchangedGenerationCacheKey) {
     cache.insert(key.native_identity, key);
 }
 
-#[hotpath::measure]
 fn unchanged_generation_cache_key(
     file: &std::fs::File,
     metadata: &std::fs::Metadata,
@@ -453,13 +438,11 @@ fn unchanged_generation_cache_key(
 }
 
 #[cfg(unix)]
-#[hotpath::measure]
 fn trusted_jsonl_cache_change_token(metadata: &std::fs::Metadata) -> Option<JsonlFileChangeToken> {
     Some(jsonl_file_change_token(metadata))
 }
 
 #[cfg(not(unix))]
-#[hotpath::measure]
 fn trusted_jsonl_cache_change_token(_metadata: &std::fs::Metadata) -> Option<JsonlFileChangeToken> {
     None
 }
@@ -560,7 +543,6 @@ pub enum RawJsonlFrame {
     BudgetExhausted { byte_len: u64, oversized: bool },
 }
 
-#[hotpath::measure_all]
 impl RawJsonlFrame {
     fn byte_len(self) -> u64 {
         match self {
@@ -578,7 +560,6 @@ struct ResumeDigest {
     hasher: Sha256,
 }
 
-#[hotpath::measure_all]
 impl ResumeDigest {
     fn new() -> Self {
         let mut hasher = Sha256::new();
@@ -603,7 +584,6 @@ impl ResumeDigest {
     }
 }
 
-#[hotpath::measure]
 fn digest_prefix_u64(digest: sha2::digest::Output<Sha256>) -> u64 {
     let [
         first,
@@ -619,7 +599,6 @@ fn digest_prefix_u64(digest: sha2::digest::Output<Sha256>) -> u64 {
     u64::from_be_bytes([first, second, third, fourth, fifth, sixth, seventh, eighth])
 }
 
-#[hotpath::measure]
 fn jsonl_prefix_digest(
     file: &mut MeasuredJsonlFile<'_>,
     extent: u64,
@@ -648,7 +627,6 @@ fn jsonl_prefix_digest(
 /// Memoized [`bounded_jsonl_snapshot_fingerprint`]: the hash walks the whole
 /// extent, so callers compute it at most once per scan and only on paths that
 /// actually consume it.
-#[hotpath::measure]
 fn memoized_jsonl_snapshot_fingerprint(
     cache: &mut Option<u64>,
     hashed_bytes: &mut u64,
@@ -664,7 +642,6 @@ fn memoized_jsonl_snapshot_fingerprint(
     Ok(fingerprint)
 }
 
-#[hotpath::measure]
 fn bounded_jsonl_snapshot_fingerprint(
     file: &mut MeasuredJsonlFile<'_>,
     extent: u64,
@@ -704,7 +681,6 @@ const MAX_JSONL_REPLACEMENT_GENERATIONS: u32 = 64;
 /// Deterministic replacement marker for `counter`-th rewrite of `file_identity`.
 ///
 /// Never zero: the resume check reads zero as "identity unknown".
-#[hotpath::measure]
 fn replacement_jsonl_generation(file_identity: u64, counter: u32) -> u64 {
     let mut hasher = Sha256::new();
     hasher.update(b"tracedecay-jsonl-replacement-generation-v1");
@@ -713,7 +689,6 @@ fn replacement_jsonl_generation(file_identity: u64, counter: u32) -> u64 {
     digest_prefix_u64(hasher.finalize()).max(1)
 }
 
-#[hotpath::measure]
 fn replacement_generation_counter(file_identity: u64, generation: u64) -> Option<u32> {
     if generation == 0 || generation == file_identity {
         return None;
@@ -723,20 +698,17 @@ fn replacement_generation_counter(file_identity: u64, generation: u64) -> Option
 }
 
 /// Whether `generation` was minted for a rewritten generation of this file.
-#[hotpath::measure]
 pub(super) fn is_replacement_jsonl_generation(file_identity: u64, generation: u64) -> bool {
     replacement_generation_counter(file_identity, generation).is_some()
 }
 
 /// Marker for the generation that replaces the one `previous_generation` names.
-#[hotpath::measure]
 fn next_replacement_jsonl_generation(file_identity: u64, previous_generation: u64) -> u64 {
     let counter = replacement_generation_counter(file_identity, previous_generation)
         .map_or(1, |counter| counter % MAX_JSONL_REPLACEMENT_GENERATIONS + 1);
     replacement_jsonl_generation(file_identity, counter)
 }
 
-#[hotpath::measure]
 fn rewritten_jsonl_generation(
     previous: JsonlResumeState,
     file_identity: u64,
@@ -766,7 +738,6 @@ pub struct RawJsonlFrameReader<R> {
     max_record_bytes: usize,
 }
 
-#[hotpath::measure_all]
 impl<R: BufRead> RawJsonlFrameReader<R> {
     pub fn new(reader: R, max_record_bytes: usize) -> Self {
         Self {
@@ -903,7 +874,6 @@ struct RawJsonlScanRequest {
 /// nominal batch cap: a capped read finishes at most one bounded complete record
 /// that crosses the cap, then leaves the remaining backlog for a later call.
 /// This guarantees cursor progress without allowing a second record past the cap.
-#[hotpath::measure]
 pub fn stream_new_jsonl(
     path: &Path,
     prev: StoredCursor,
@@ -1079,7 +1049,6 @@ pub fn try_stream_new_jsonl_raw_strict(
     try_stream_new_jsonl_raw_strict_with_resume(path, prev, max_new_bytes, max_record_bytes, None)
 }
 
-#[hotpath::measure]
 pub fn try_stream_new_jsonl_raw_strict_with_resume(
     path: &Path,
     prev: StoredCursor,
@@ -1101,7 +1070,6 @@ pub fn try_stream_new_jsonl_raw_strict_with_resume(
     )
 }
 
-#[hotpath::measure]
 fn try_stream_new_jsonl_raw_with_policy(
     path: &Path,
     prev: StoredCursor,
@@ -1160,7 +1128,6 @@ struct PreparedJsonlScan<'a> {
     validated_prefix: Option<(u64, ResumeDigest)>,
 }
 
-#[hotpath::measure_all]
 impl<'a> PreparedJsonlScan<'a> {
     fn capture(
         path: &Path,
@@ -1421,7 +1388,6 @@ struct RawJsonlBatchScanner<'a> {
     deferred: Option<JsonlFrameDeferral>,
 }
 
-#[hotpath::measure_all]
 impl<'a> RawJsonlBatchScanner<'a> {
     fn start(
         path: &Path,
@@ -1824,7 +1790,6 @@ impl<'a> RawJsonlBatchScanner<'a> {
     }
 }
 
-#[hotpath::measure]
 fn try_stream_new_jsonl_raw_from_file(
     path: &Path,
     file: std::fs::File,

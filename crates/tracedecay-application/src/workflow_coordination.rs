@@ -50,7 +50,6 @@ pub enum WorkflowDefinitionLifecycleState {
     Rejected,
 }
 
-#[hotpath::measure_all]
 impl WorkflowDefinitionLifecycleState {
     #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
@@ -103,7 +102,6 @@ const RETIRE_FROM_ACTIVE: &[WorkflowDefinitionLifecycleState] =
 const REJECT_FROM_OPEN: &[WorkflowDefinitionLifecycleState] =
     &[WorkflowDefinitionLifecycleState::Rejected];
 
-#[hotpath::measure_all]
 impl WorkflowLifecycleOperation {
     #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
@@ -669,7 +667,6 @@ where
     }
 }
 
-#[hotpath::measure]
 pub fn prepare_workflow_definition_registration(
     context: &RequestContext,
     definition: WorkflowDefinition,
@@ -683,7 +680,6 @@ pub fn prepare_workflow_definition_registration(
     Ok(definition)
 }
 
-#[hotpath::measure]
 fn coordination_authority_error(
     error: WorkflowDefinitionAuthorityError,
 ) -> WorkflowCoordinationError {
@@ -704,7 +700,6 @@ pub struct TaskHandoffToken {
     secret: BearerTokenSecret,
 }
 
-#[hotpath::measure_all]
 impl TaskHandoffToken {
     pub fn new(secret: String) -> Result<Self, TaskHandoffError> {
         Ok(Self {
@@ -742,7 +737,6 @@ pub struct TaskHandoffScope {
     to_actor_id: ActorId,
 }
 
-#[hotpath::measure_all]
 impl TaskHandoffScope {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -879,7 +873,6 @@ pub struct TaskHandoffGrant {
     frontier_digest: ManifestDigest,
 }
 
-#[hotpath::measure_all]
 impl TaskHandoffGrant {
     pub fn new(
         scope: TaskHandoffScope,
@@ -1207,7 +1200,6 @@ where
     }
 }
 
-#[hotpath::measure]
 pub fn prepare_task_handoff_issue(
     context: &RequestContext,
     scope: TaskHandoffScope,
@@ -1227,7 +1219,6 @@ pub fn prepare_task_handoff_issue(
     TaskHandoffGrant::new(scope, token.digest()?, issued_at, expires_at, frontier)
 }
 
-#[hotpath::measure]
 pub fn prepare_task_handoff_redeem(
     context: &RequestContext,
     token: &TaskHandoffToken,
@@ -1242,14 +1233,12 @@ pub fn prepare_task_handoff_redeem(
     token.digest()
 }
 
-#[hotpath::measure]
 fn handoff_scope_matches_context(context: &RequestContext, scope: &TaskHandoffScope) -> bool {
     scope.project_id() == &context.scope().project_id
         && scope.repository_id() == &context.scope().repository_id
         && scope.worktree_id() == &context.scope().worktree_id
 }
 
-#[hotpath::measure]
 fn handoff_authority_error(error: TaskHandoffAuthorityError) -> TaskHandoffError {
     match error {
         TaskHandoffAuthorityError::Conflict => TaskHandoffError::Conflict,

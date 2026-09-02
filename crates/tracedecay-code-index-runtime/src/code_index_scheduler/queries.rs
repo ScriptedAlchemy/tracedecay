@@ -130,7 +130,6 @@ static CALLABLE_CODE_SORT_CONTRACT: LazyLock<SortContractId> = LazyLock::new(|| 
     SortContractId::new(CALLABLE_CODE_SORT).unwrap_or_else(|_| panic!("static sort id"))
 });
 
-#[hotpath::measure]
 fn empty_callable_page() -> PageState {
     PageState {
         sort_contract_id: CALLABLE_CODE_SORT_CONTRACT.clone(),
@@ -171,7 +170,6 @@ pub fn callable_query_normalization_revision() -> QueryNormalizationRevision {
         .unwrap_or_else(|_| panic!("static normalization revision"))
 }
 
-#[hotpath::measure]
 fn is_unpinned_latest(generation: &CodeGenerationId) -> bool {
     generation.as_str() == UNPINNED_LATEST_GENERATION_SENTINEL
 }
@@ -242,7 +240,6 @@ pub fn semantic_mcp_reason(
     }
 }
 
-#[hotpath::measure_all]
 impl CodeIndexSchedulerRegistryV1 {
     /// Compose real exact/lexical/graph lane outcomes only through the
     /// accepted profile and query/cursor key authority mounted for this exact
@@ -549,7 +546,6 @@ where
     T::try_from(value.into()).map_err(|error| error.to_string())
 }
 
-#[hotpath::measure]
 fn retrieval_budget(page_size: u32) -> RetrievalBudget {
     RetrievalBudget {
         max_candidates_per_lane: page_size,
@@ -560,7 +556,6 @@ fn retrieval_budget(page_size: u32) -> RetrievalBudget {
     }
 }
 
-#[hotpath::measure]
 fn prepared_routing_bindings(
     context: &RetrievalPortContext<'_>,
     temporal_mode: TemporalModeV1,
@@ -595,19 +590,16 @@ pub fn maximum_retrieval_budget() -> RetrievalBudget {
 
 type CallableCodeCursorError = PreparedQueryErrorV1;
 
-#[hotpath::measure]
 fn query_finished_at() -> UtcMicros {
     current_utc_micros().unwrap_or(UtcMicros(0))
 }
 
-#[hotpath::measure]
 fn generation_resolution_wait_from_remaining(remaining: Duration) -> Duration {
     remaining
         .saturating_sub(GENERATION_RESOLUTION_SETTLEMENT_MARGIN)
         .min(MAX_GENERATION_RESOLUTION_WAIT)
 }
 
-#[hotpath::measure]
 fn remaining_generation_resolution_wait(request: &RequestContext) -> Option<Duration> {
     let now = current_utc_micros().ok()?;
     if request.admission_at(now) != RequestAdmission::Admitted {
@@ -618,7 +610,6 @@ fn remaining_generation_resolution_wait(request: &RequestContext) -> Option<Dura
     Some(generation_resolution_wait_from_remaining(remaining))
 }
 
-#[hotpath::measure]
 fn base_request(
     context: &RetrievalPortContext<'_>,
     latest: &LatestCompleteCodeIndexV1,
@@ -655,7 +646,6 @@ fn base_request(
     })
 }
 
-#[hotpath::measure]
 fn text_base_request(
     context: &RetrievalPortContext<'_>,
     latest: &LatestCodeTextGenerationV1,
@@ -833,12 +823,10 @@ fn bounded_result<T>(
     }
 }
 
-#[hotpath::measure]
 fn path_is_in_code_query_scope(path: &str, scope: &tracedecay_application::CodeQueryScope) -> bool {
     tracedecay_runtime_core::path_scope::path_matches_scope(path, scope.path_prefix.as_deref())
 }
 
-#[hotpath::measure]
 fn relation_edge_kind_name(kind: RelationEdgeKindV1) -> &'static str {
     match kind {
         RelationEdgeKindV1::Calls => "calls",
@@ -853,7 +841,6 @@ fn relation_edge_kind_name(kind: RelationEdgeKindV1) -> &'static str {
     }
 }
 
-#[hotpath::measure]
 fn ascii_contains_ignore_case(haystack: &str, needle_lower: &str) -> bool {
     if needle_lower.is_empty() {
         return true;
@@ -864,7 +851,6 @@ fn ascii_contains_ignore_case(haystack: &str, needle_lower: &str) -> bool {
         .any(|window| window.eq_ignore_ascii_case(needle_lower.as_bytes()))
 }
 
-#[hotpath::measure]
 fn ascii_starts_with_ignore_case(haystack: &str, needle_lower: &str) -> bool {
     haystack
         .as_bytes()
@@ -903,7 +889,6 @@ pub struct GenerationRecordIndexV1 {
 /// The final `::` segment of a qualified name, or the whole name when it has
 /// none. `rsplit` always yields at least one item, so the fallback only
 /// satisfies the type.
-#[hotpath::measure]
 fn last_qualified_segment(qualified_name: &str) -> &str {
     qualified_name.rsplit("::").next().unwrap_or(qualified_name)
 }
@@ -924,7 +909,6 @@ fn sorted_positions_for<'a>(
     &order[start..end]
 }
 
-#[hotpath::measure_all]
 impl GenerationRecordIndexV1 {
     pub fn build(
         generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
@@ -1245,7 +1229,6 @@ impl NativeRecordReadPortV1 for TextArtifactNativeRecordReadPortV1 {
     }
 }
 
-#[hotpath::measure]
 fn application_occurrence(record: NativeCodeOccurrenceV1) -> CodeOccurrenceRecord {
     CodeOccurrenceRecord {
         file: record.file,
@@ -1256,7 +1239,6 @@ fn application_occurrence(record: NativeCodeOccurrenceV1) -> CodeOccurrenceRecor
     }
 }
 
-#[hotpath::measure]
 fn application_exact_record(record: NativeExactRecordV1) -> ExactOccurrenceRecord {
     ExactOccurrenceRecord {
         occurrence: application_occurrence(record.occurrence),
@@ -1265,7 +1247,6 @@ fn application_exact_record(record: NativeExactRecordV1) -> ExactOccurrenceRecor
     }
 }
 
-#[hotpath::measure]
 fn application_lexical_record(record: NativeLexicalRecordV1) -> LexicalOccurrenceRecord {
     LexicalOccurrenceRecord {
         occurrence: application_occurrence(record.occurrence),
@@ -1275,7 +1256,6 @@ fn application_lexical_record(record: NativeLexicalRecordV1) -> LexicalOccurrenc
     }
 }
 
-#[hotpath::measure]
 fn application_symbol_record(record: NativeSymbolRecordV1) -> SymbolPrimitiveRecord {
     SymbolPrimitiveRecord {
         node_id: record.occurrence.as_str().to_owned(),
@@ -1293,7 +1273,6 @@ fn application_symbol_record(record: NativeSymbolRecordV1) -> SymbolPrimitiveRec
     }
 }
 
-#[hotpath::measure]
 fn application_graph_record(record: NativeGraphRecordV1) -> SymbolRelationRecord {
     SymbolRelationRecord {
         symbol: application_symbol_record(record.symbol),
@@ -1307,7 +1286,6 @@ fn application_graph_record(record: NativeGraphRecordV1) -> SymbolRelationRecord
     }
 }
 
-#[hotpath::measure]
 fn symbol_record(
     latest: &LatestCompleteCodeIndexV1,
     symbol: &SymbolOccurrenceId,
@@ -1320,7 +1298,6 @@ fn symbol_record(
         .map(application_symbol_record)
 }
 
-#[hotpath::measure]
 fn symbol_record_by_id(
     latest: &LatestCompleteCodeIndexV1,
     symbol: &SymbolOccurrenceId,
@@ -1473,7 +1450,6 @@ macro_rules! resolve_start_symbol {
     }};
 }
 
-#[hotpath::measure_all]
 impl CodeIndexSchedulerRegistryV1 {
     async fn prepare_callable_query(
         &self,
@@ -1687,7 +1663,6 @@ fn finish_query_with_coverage<T: serde::Serialize>(
     }
 }
 
-#[hotpath::measure]
 fn relation_records(
     latest: &LatestCompleteCodeIndexV1,
     start: &SymbolOccurrenceId,
@@ -1751,7 +1726,6 @@ fn relation_records(
     records
 }
 
-#[hotpath::measure]
 fn retrieval_failure_omission(reason: &RetrievalFailure) -> OmissionReason {
     match reason {
         RetrievalFailure::AuthorityUnavailable { .. } => OmissionReason::Unavailable,
@@ -1943,7 +1917,6 @@ where
     }
 }
 
-#[hotpath::measure]
 fn application_budget_usage(usage: RetrievalBudgetUsage) -> OperationBudgetUsage {
     OperationBudgetUsage {
         units_consumed: usage

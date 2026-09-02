@@ -7,7 +7,6 @@ pub(super) use tracedecay_sessions::runtime::store_access::{
     require_expected_offset, set_parse_offset,
 };
 
-#[hotpath::measure_all]
 impl RegisteredGlobalDb {
     #[hotpath::skip]
     pub async fn upsert_session(&self, session: &SessionRecord) -> bool {

@@ -257,7 +257,6 @@ pub(super) fn acquire_graph_replay_pool_lock_checked(
     GraphReplayPoolLockV1::acquire_exclusive(pool_root, deadline, is_cancelled)
 }
 
-#[hotpath::measure_all]
 impl GraphReplayPoolLockV1 {
     fn acquire_exclusive(
         pool_root: &Path,

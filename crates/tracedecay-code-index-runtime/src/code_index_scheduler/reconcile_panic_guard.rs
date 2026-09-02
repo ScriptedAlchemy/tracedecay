@@ -68,7 +68,6 @@ impl Default for ReconcilePanicGuardV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl ReconcilePanicGuardV1 {
     #[hotpath::skip]
     pub const fn new() -> Self {
@@ -302,7 +301,6 @@ impl Default for ReconcileCapacityRetryV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl ReconcileCapacityRetryV1 {
     #[hotpath::skip]
     pub const fn new() -> Self {

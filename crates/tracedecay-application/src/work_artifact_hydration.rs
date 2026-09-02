@@ -243,7 +243,6 @@ where
     }
 }
 
-#[hotpath::measure]
 fn storage_problem(error: WorkAttemptStorageError) -> ApplicationProblem {
     match error {
         WorkAttemptStorageError::NotFoundOrNotAuthorized => {
@@ -265,7 +264,6 @@ fn storage_problem(error: WorkAttemptStorageError) -> ApplicationProblem {
     }
 }
 
-#[hotpath::measure]
 fn stale_cursor_problem() -> ApplicationProblem {
     ApplicationProblem::stale(SafeDiagnostic {
         code: "application.work-artifact-hydration.stale-cursor".to_owned(),
@@ -275,7 +273,6 @@ fn stale_cursor_problem() -> ApplicationProblem {
     })
 }
 
-#[hotpath::measure]
 fn page_contract_problem() -> ApplicationProblem {
     ApplicationProblem::unavailable(SafeDiagnostic {
         code: "application.work-artifact-hydration.page-inconsistent".to_owned(),
@@ -283,7 +280,6 @@ fn page_contract_problem() -> ApplicationProblem {
     })
 }
 
-#[hotpath::measure]
 fn invalid_problem(code: &str, message: &str) -> ApplicationProblem {
     ApplicationProblem::InvalidRequest {
         diagnostic: SafeDiagnostic {

@@ -35,7 +35,6 @@ pub(super) struct BackupSnapshotV1 {
     pub(super) destination_sha256: [u8; 32],
 }
 
-#[hotpath::measure]
 pub(super) fn read_json_manifest<T: DeserializeOwned>(
     path: &Path,
 ) -> Result<T, RemoteRecoveryPhysicalEffectErrorV1> {
@@ -59,7 +58,6 @@ pub(super) fn read_json_manifest<T: DeserializeOwned>(
     serde_json::from_slice(&bytes).map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)
 }
 
-#[hotpath::measure]
 pub(super) fn converge_interrupted_restore(
     destination: &Path,
     staging: &Path,
@@ -90,7 +88,6 @@ pub(super) fn converge_interrupted_restore(
     Ok(true)
 }
 
-#[hotpath::measure]
 pub(super) fn validate_isolated_restore(
     path: &Path,
 ) -> Result<(), RemoteRecoveryPhysicalEffectErrorV1> {
@@ -138,18 +135,15 @@ pub(super) fn validate_isolated_restore(
     Ok(())
 }
 
-#[hotpath::measure]
 pub(super) fn sqlite_identity(path: &Path) -> Result<u64, RemoteRecoveryPhysicalEffectErrorV1> {
     tracedecay_runtime_core::db::sqlite_generation_identity(path)
         .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)
 }
 
-#[hotpath::measure]
 pub(super) fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
 
-#[hotpath::measure]
 pub(super) fn digest_bytes(
     digest: &ManifestDigest,
 ) -> Result<[u8; 32], RemoteRecoveryPhysicalEffectErrorV1> {
@@ -164,7 +158,6 @@ pub(super) fn digest_bytes(
         .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)
 }
 
-#[hotpath::measure]
 pub(super) fn digest_from_bytes(
     digest: [u8; 32],
 ) -> Result<ManifestDigest, RemoteRecoveryPhysicalEffectErrorV1> {
@@ -172,7 +165,6 @@ pub(super) fn digest_from_bytes(
         .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)
 }
 
-#[hotpath::measure]
 pub(super) fn classify_runtime_error(error: String) -> RemoteRecoveryPhysicalEffectErrorV1 {
     if error.contains("cancel") {
         RemoteRecoveryPhysicalEffectErrorV1::Cancelled
@@ -183,7 +175,6 @@ pub(super) fn classify_runtime_error(error: String) -> RemoteRecoveryPhysicalEff
     }
 }
 
-#[hotpath::measure]
 pub(super) fn safe_digest_suffix(
     digest: &ManifestDigest,
 ) -> Result<&str, RemoteRecoveryPhysicalEffectErrorV1> {
@@ -193,7 +184,6 @@ pub(super) fn safe_digest_suffix(
         .ok_or(RemoteRecoveryPhysicalEffectErrorV1::Corruption)
 }
 
-#[hotpath::measure]
 pub(super) fn sha256_file(path: &Path) -> Result<[u8; 32], RemoteRecoveryPhysicalEffectErrorV1> {
     let mut file =
         std::fs::File::open(path).map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Unavailable)?;

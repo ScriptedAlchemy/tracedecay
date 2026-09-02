@@ -34,7 +34,6 @@ pub struct RemoteBrainTlsConfig {
     private_key: PathBuf,
 }
 
-#[hotpath::measure_all]
 impl RemoteBrainTlsConfig {
     pub fn from_optional_parts(
         listen: Option<SocketAddr>,

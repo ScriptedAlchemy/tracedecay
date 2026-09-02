@@ -41,7 +41,6 @@ pub struct PreparedQueryBindingsV1 {
     query_binding_digest: ManifestDigest,
 }
 
-#[hotpath::measure_all]
 impl PreparedQueryBindingsV1 {
     pub fn new(
         operation: impl Into<String>,
@@ -118,7 +117,6 @@ struct PreparedQueryRequestBindingV1 {
     freshness_digest: FreshnessVectorDigest,
 }
 
-#[hotpath::measure_all]
 impl PreparedQueryRequestBindingV1 {
     fn from_request(request: &RetrievalRequest) -> Self {
         Self {
@@ -140,7 +138,6 @@ pub struct PreparedQueryV1 {
     cursor: Option<AuthenticatedPreparedQueryCursorV1>,
 }
 
-#[hotpath::measure_all]
 impl PreparedQueryV1 {
     pub fn prepare(
         authority: Arc<QueryAuthorityV1>,
@@ -251,7 +248,6 @@ impl PreparedQueryV1 {
     }
 }
 
-#[hotpath::measure]
 pub fn authenticate_prepared_query_cursor_for_routing(
     authority: &QueryAuthorityV1,
     bindings: &PreparedQueryRoutingBindingsV1,
@@ -288,7 +284,6 @@ pub fn authenticate_prepared_query_cursor_for_routing(
     })
 }
 
-#[hotpath::measure]
 pub fn route_authenticated_prepared_query_cursor<F, Fut>(
     authority: &QueryAuthorityV1,
     bindings: &PreparedQueryRoutingBindingsV1,
@@ -308,7 +303,6 @@ where
     Ok(effect(routing.generation))
 }
 
-#[hotpath::measure]
 fn authenticate_cursor(
     authority: &QueryAuthorityV1,
     request: &RetrievalRequest,
@@ -329,7 +323,6 @@ fn authenticate_cursor(
     Ok(cursor)
 }
 
-#[hotpath::measure]
 fn routing_request(
     request_binding: &PreparedQueryRequestBindingV1,
     authentication: &QueryDigest,
@@ -355,7 +348,6 @@ fn routing_request(
     }
 }
 
-#[hotpath::measure]
 fn map_authority_error(error: QueryAuthorityErrorV1) -> PreparedQueryErrorV1 {
     match error {
         QueryAuthorityErrorV1::QueryAuthentication(QueryDigestAuthenticationError::KeyRevoked) => {
@@ -369,7 +361,6 @@ fn map_authority_error(error: QueryAuthorityErrorV1) -> PreparedQueryErrorV1 {
     }
 }
 
-#[hotpath::measure]
 fn cursor_authentication_payload_bytes(
     payload: &PreparedQueryCursorPayloadV1,
 ) -> Result<Vec<u8>, PreparedQueryErrorV1> {
@@ -405,7 +396,6 @@ fn cursor_authentication_payload_bytes(
     .map_err(|_| PreparedQueryErrorV1::Unavailable)
 }
 
-#[hotpath::measure]
 fn encode_cursor(
     payload: PreparedQueryCursorPayloadV1,
     authentication: QueryDigest,
@@ -421,7 +411,6 @@ fn encode_cursor(
     ))
 }
 
-#[hotpath::measure]
 fn decode_cursor(
     encoded: &str,
 ) -> Result<AuthenticatedPreparedQueryCursorV1, PreparedQueryErrorV1> {
@@ -442,7 +431,6 @@ fn decode_cursor(
     Ok(cursor)
 }
 
-#[hotpath::measure]
 fn require_unexpired(
     cursor: &AuthenticatedPreparedQueryCursorV1,
     now: UtcMicros,

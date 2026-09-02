@@ -22,7 +22,6 @@ use super::state_db::{
     try_ingest_user_state_db_bounded_with_admission,
 };
 
-#[hotpath::measure]
 fn new_sweep_budget(max_new_bytes: Option<u64>) -> IngestByteBudget {
     IngestByteBudget::bounded(max_new_bytes.unwrap_or(DEFAULT_HERMES_SWEEP_BYTES))
 }
@@ -30,12 +29,10 @@ fn new_sweep_budget(max_new_bytes: Option<u64>) -> IngestByteBudget {
 /// Default Hermes profile homes under the resolved user home.
 ///
 /// Missing home is a typed absence (`None`), never an empty successful sweep.
-#[hotpath::measure]
 fn hermes_homes() -> Option<Vec<PathBuf>> {
     hermes_homes_from(crate::runtime::home_dir())
 }
 
-#[hotpath::measure]
 fn hermes_homes_from(home: Option<PathBuf>) -> Option<Vec<PathBuf>> {
     Some(vec![home?.join(".hermes")])
 }
@@ -490,7 +487,6 @@ pub(super) struct HermesProfileSource {
     pub profile: Option<String>,
 }
 
-#[hotpath::measure]
 fn all_profile_sources(hermes_homes: &[PathBuf]) -> Vec<HermesProfileSource> {
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
@@ -522,7 +518,6 @@ fn all_profile_sources(hermes_homes: &[PathBuf]) -> Vec<HermesProfileSource> {
     out
 }
 
-#[hotpath::measure]
 fn candidate_state_dbs(hermes_homes: &[PathBuf], project_root: &Path) -> Vec<HermesProfileSource> {
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
@@ -571,7 +566,6 @@ fn candidate_state_dbs(hermes_homes: &[PathBuf], project_root: &Path) -> Vec<Her
     out
 }
 
-#[hotpath::measure]
 fn source_is_candidate_for_project(source: &HermesProfileSource, project_root: &Path) -> bool {
     if source
         .legacy_project_pin

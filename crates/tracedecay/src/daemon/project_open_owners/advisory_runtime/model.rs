@@ -30,7 +30,6 @@ pub(crate) struct ProjectOpenDependentOwnerState {
         Option<Arc<DaemonLspSessionFactory>>,
 }
 
-#[hotpath::measure]
 pub(super) fn advisory_monotonic_deadline(
     deadline: &Deadline,
     observed_at: UtcMicros,
@@ -45,7 +44,6 @@ pub(super) fn advisory_monotonic_deadline(
     )
 }
 
-#[hotpath::measure]
 pub(super) fn advisory_monotonic_deadline_from_remaining(
     observed_at: Instant,
     remaining: Duration,

@@ -23,7 +23,6 @@ pub struct GitHubStackSignalExpandSurfaceRequest {
     pub expected_watermark_id: Option<StackDeliveryWatermarkId>,
 }
 
-#[hotpath::measure_all]
 impl GitHubStackSignalExpandSurfaceRequest {
     pub fn into_application_request(
         self,
@@ -48,7 +47,6 @@ pub struct GitHubStackSignalExpandRequestV1 {
     expected_watermark_id: Option<StackDeliveryWatermarkId>,
 }
 
-#[hotpath::measure_all]
 impl GitHubStackSignalExpandRequestV1 {
     pub fn context(&self) -> &RequestContext {
         &self.context
@@ -80,7 +78,6 @@ pub struct GitHubStackSignalEvidenceRefV1 {
     pub observed_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl GitHubStackSignalEvidenceRefV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -138,7 +135,6 @@ pub enum GitHubStackSignalExpandSurfaceResultV1 {
     },
 }
 
-#[hotpath::measure_all]
 impl GitHubStackSignalExpandSurfaceResultV1 {
     #[hotpath::skip]
     pub const fn unavailable(reason: GitHubStackSignalExpandUnavailableV1) -> Self {
@@ -169,7 +165,6 @@ pub enum GitHubStackSignalExpandPortError {
     Cancelled,
 }
 
-#[hotpath::measure_all]
 impl GitHubStackSignalExpandPortError {
     #[hotpath::skip]
     pub const fn into_surface_result(self) -> GitHubStackSignalExpandSurfaceResultV1 {

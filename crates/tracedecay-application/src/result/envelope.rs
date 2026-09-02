@@ -50,7 +50,6 @@ impl<'de> Deserialize<'de> for ResultContractRef {
     }
 }
 
-#[hotpath::measure_all]
 impl ResultContractRef {
     pub fn new(
         schema_id: SchemaId,
@@ -103,7 +102,6 @@ pub struct ApplicationEnvelope<T> {
     pub outcome: ApplicationOutcome<T>,
 }
 
-#[hotpath::measure_all]
 impl<T> ApplicationEnvelope<T> {
     pub fn evidence(
         contract: ResultContractRef,
@@ -429,7 +427,6 @@ where
     }
 }
 
-#[hotpath::measure_all]
 impl ApplicationProblemRecord {
     fn new(
         request_id: RequestId,
@@ -647,7 +644,6 @@ impl<'de> Deserialize<'de> for ApplicationProblemEnvelope {
     }
 }
 
-#[hotpath::measure_all]
 impl ApplicationProblemEnvelope {
     pub fn new(
         contract: ResultContractRef,

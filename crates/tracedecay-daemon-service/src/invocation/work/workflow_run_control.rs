@@ -24,7 +24,6 @@ use super::workflow_fan_out::reconcile_workflow_fan_out;
 /// pinned against a different environment is a typed staleness denial, and a
 /// registry that cannot place the definition's entry step denies admission
 /// before any event is journaled.
-#[hotpath::measure]
 pub(super) fn start_workflow_run(
     registered: &RegisteredWorkRuntime,
     services: &tracedecay_usecases::work::RegisteredWorkflowApplicationServicesV1,
@@ -224,7 +223,6 @@ pub(super) fn start_workflow_run(
     )
 }
 
-#[hotpath::measure]
 pub(super) fn apply_workflow_run_command(
     services: &tracedecay_usecases::work::RegisteredWorkflowApplicationServicesV1,
     run_id: &tracedecay_domain::RunId,
@@ -251,7 +249,6 @@ pub(super) fn apply_workflow_run_command(
 /// Requests cooperative cancellation and, when no step is still running,
 /// immediately reconciles the run to its terminal `Cancelled` state under a
 /// command identity derived from the caller's, so replays settle identically.
-#[hotpath::measure]
 pub(super) fn cancel_workflow_run(
     registered: &RegisteredWorkRuntime,
     services: &tracedecay_usecases::work::RegisteredWorkflowApplicationServicesV1,
@@ -310,7 +307,6 @@ pub(super) fn cancel_workflow_run(
     )
 }
 
-#[hotpath::measure]
 pub(super) fn workflow_run_problem(
     error: tracedecay_application::WorkflowRunServiceError,
 ) -> DaemonInvocationProblem {
@@ -327,7 +323,6 @@ pub(super) fn workflow_run_problem(
     }
 }
 
-#[hotpath::measure]
 pub(super) fn workflow_coordination_problem(
     error: tracedecay_application::WorkflowCoordinationError,
 ) -> DaemonInvocationProblem {
@@ -355,7 +350,6 @@ pub(super) fn workflow_coordination_problem(
     }
 }
 
-#[hotpath::measure]
 pub(super) fn workflow_run_storage_problem(
     error: tracedecay_application::WorkflowRunStorageError,
 ) -> DaemonInvocationProblem {
@@ -376,7 +370,6 @@ pub(super) fn workflow_run_storage_problem(
     }
 }
 
-#[hotpath::measure]
 fn workflow_placement_problem(
     error: tracedecay_application::WorkflowProviderPlacementError,
 ) -> DaemonInvocationProblem {
@@ -393,7 +386,6 @@ fn workflow_placement_problem(
     }
 }
 
-#[hotpath::measure]
 fn workflow_topology_problem(error: WorkflowTopologyError) -> DaemonInvocationProblem {
     match error {
         WorkflowTopologyError::Contract(_) => DaemonInvocationProblem::InvalidRequest,

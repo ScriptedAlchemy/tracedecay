@@ -29,7 +29,6 @@ pub(crate) enum GrafeoMemoryPhase {
     Recovered,
 }
 
-#[hotpath::measure_all]
 impl GrafeoMemoryPhase {
     #[cfg(feature = "hotpath")]
     #[hotpath::skip]
@@ -46,7 +45,6 @@ impl GrafeoMemoryPhase {
     }
 }
 
-#[hotpath::measure_all]
 impl HydrationSource {
     #[cfg(any(feature = "hotpath", test, feature = "test-helpers"))]
     #[hotpath::skip]

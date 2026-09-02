@@ -28,7 +28,6 @@ pub(super) struct MemoryGraphSource {
     pub(super) relations: BTreeSet<SourceRelation>,
 }
 
-#[hotpath::measure]
 pub(super) fn build_manifest(
     owner: &FactOwnerV1,
     projection: GraphProjectionIdentity,
@@ -117,7 +116,6 @@ pub(super) fn build_manifest(
 /// Read paths that only need to compare a verified snapshot's generation
 /// against the canonical source derive it here instead of materializing the
 /// whole entity/relation manifest.
-#[hotpath::measure]
 pub(super) fn generation_for_watermark(
     owner: &FactOwnerV1,
     watermark: &GraphWatermark,
@@ -126,7 +124,6 @@ pub(super) fn generation_for_watermark(
         .map_err(|error| graph_error(owner, error))
 }
 
-#[hotpath::measure]
 pub(super) fn source_watermark(
     owner: &FactOwnerV1,
     source: &MemoryGraphSource,
@@ -152,7 +149,6 @@ pub(super) fn source_watermark(
     .map_err(|error| graph_error(owner, error))
 }
 
-#[hotpath::measure]
 pub(super) fn ensure_source_read_active(
     read_control: Option<&FactReadControl>,
 ) -> FactStoreResult<()> {
@@ -162,13 +158,11 @@ pub(super) fn ensure_source_read_active(
     Ok(())
 }
 
-#[hotpath::measure]
 fn hash_source_component(hasher: &mut Sha256, value: &str) {
     hasher.update((value.len() as u64).to_be_bytes());
     hasher.update(value.as_bytes());
 }
 
-#[hotpath::measure]
 fn insert_projection_entity(
     entities: &mut BTreeSet<GraphEntityId>,
     entity: GraphEntityId,
@@ -183,7 +177,6 @@ fn insert_projection_entity(
     Ok(())
 }
 
-#[hotpath::measure]
 fn label_for_entity(identity: &str) -> Result<&'static str, tracedecay_graph_db::GraphDbError> {
     if identity.starts_with("memory-fact:") {
         Ok("memory-fact-reference")

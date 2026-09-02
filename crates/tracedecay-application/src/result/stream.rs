@@ -12,7 +12,6 @@ use super::{OperationReceipt, OperationTermination};
 #[serde(transparent)]
 pub struct ResumeToken(String);
 
-#[hotpath::measure_all]
 impl ResumeToken {
     pub fn new(value: impl Into<String>) -> Result<Self, ApplicationContractError> {
         let value = value.into();
@@ -67,7 +66,6 @@ pub struct StreamGap {
     pub frontier: StreamFrontier,
 }
 
-#[hotpath::measure_all]
 impl StreamGap {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         if self.first_missing_sequence > self.last_missing_sequence
@@ -89,7 +87,6 @@ pub struct StreamTermination {
     pub receipt: OperationReceipt,
 }
 
-#[hotpath::measure_all]
 impl StreamTermination {
     pub fn completed(receipt: OperationReceipt) -> Self {
         Self {
@@ -118,7 +115,6 @@ pub enum StreamEventKind<T> {
     Terminal(StreamTermination),
 }
 
-#[hotpath::measure_all]
 impl<T> StreamEventKind<T> {
     fn is_terminal(&self) -> bool {
         matches!(self, Self::Terminal(_))
@@ -133,7 +129,6 @@ pub struct StreamEvent<T> {
     pub kind: StreamEventKind<T>,
 }
 
-#[hotpath::measure_all]
 impl<T> StreamEvent<T> {
     pub fn item(sequence: u64, value: T) -> Result<Self, ApplicationContractError> {
         Ok(Self {

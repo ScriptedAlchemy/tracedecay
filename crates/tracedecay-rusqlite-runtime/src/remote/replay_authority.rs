@@ -13,7 +13,6 @@ pub struct RemoteQueryAuthoritySnapshotV1 {
     pub writer: RemoteWriterAuthorityV1,
 }
 
-#[hotpath::measure_all]
 impl RemoteSqliteStorageV1 {
     /// Loads the current query authority from this exact registered RemoteNode
     /// store. The returned snapshot contains no locator or storage handle.

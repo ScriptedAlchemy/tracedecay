@@ -38,7 +38,6 @@ pub(crate) struct RmcpSelectedProjectResponseAuthority {
     >,
 }
 
-#[hotpath::measure_all]
 impl RmcpSelectedProjectResponseAuthority {
     fn request_key(id: &Value) -> tracedecay_domain::errors::Result<String> {
         if id.is_null() {
@@ -127,7 +126,6 @@ pub(crate) struct RmcpWorkDeliverySettlement {
     connection_scope: String,
 }
 
-#[hotpath::measure_all]
 impl RmcpWorkDeliverySettlement {
     pub(crate) fn new(
         recorder: Option<
@@ -271,7 +269,6 @@ impl Drop for RmcpQueueDepthGuard {
     }
 }
 
-#[hotpath::measure_all]
 impl RmcpConnectionAdapter {
     pub(crate) fn new(
         server: Arc<McpServer>,
@@ -566,12 +563,10 @@ impl ServerHandler for RmcpConnectionAdapter {
     }
 }
 
-#[hotpath::measure]
 fn rmcp_error(error: JsonRpcError) -> ErrorData {
     ErrorData::new(ErrorCode(error.code), error.message, error.data)
 }
 
-#[hotpath::measure]
 fn project_server_retired_error() -> ErrorData {
     ErrorData::internal_error(
         "tool project route failed: project server was retired",

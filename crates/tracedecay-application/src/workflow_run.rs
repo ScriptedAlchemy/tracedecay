@@ -44,7 +44,6 @@ pub enum WorkflowRunAppendOutcome {
     Replayed(WorkflowRunProjection),
 }
 
-#[hotpath::measure_all]
 impl WorkflowRunAppendOutcome {
     pub fn into_projection(self) -> WorkflowRunProjection {
         match self {
@@ -272,7 +271,6 @@ where
 /// with the same weight as completed ones. The run's wall lifetime spans
 /// daemon restarts through the journal, so a per-transition counter — not an
 /// in-process RAII lifetime — is the truthful application-layer record.
-#[hotpath::measure]
 fn observe_run_status_entered(projection: &WorkflowRunProjection) {
     #[cfg(feature = "hotpath")]
     {
@@ -305,7 +303,6 @@ const WORKFLOW_ARTIFACT_PAYLOAD_DIGEST_DOMAIN: &[u8] =
 ///
 /// The framed hash always yields a canonical `sha256:`-tagged digest, so the
 /// only failure is the (unreachable) digest-shape rejection, reported typed.
-#[hotpath::measure]
 pub fn workflow_artifact_payload_digest(
     bytes: &[u8],
 ) -> Result<ManifestDigest, WorkflowArtifactStoreError> {
@@ -342,7 +339,6 @@ pub struct WorkflowArtifactPayload {
     bytes: Vec<u8>,
 }
 
-#[hotpath::measure_all]
 impl WorkflowArtifactPayload {
     pub fn new(
         artifact: WorkArtifactRefV1,

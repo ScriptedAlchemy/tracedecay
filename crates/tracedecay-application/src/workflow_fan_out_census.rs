@@ -268,7 +268,6 @@ pub fn derive_workflow_fan_out_census(
     Ok(census)
 }
 
-#[hotpath::measure]
 fn classify_work_projection(
     children: &[&tracedecay_domain::WorkflowFanOutChildPlanV1],
     snapshot: Option<&WorkProjectionSnapshotV1>,
@@ -347,7 +346,6 @@ fn classify_work_projection(
     ))
 }
 
-#[hotpath::measure]
 fn useful_width(
     previous: Option<&WorkflowFanOutCensusV1>,
     current: &[tracedecay_domain::WorkflowAttemptFrontierV1],
@@ -415,7 +413,6 @@ fn useful_width(
     )
 }
 
-#[hotpath::measure]
 fn readiness_widths(
     projection: &WorkflowRunProjection,
     attempts: &BTreeMap<WorkAttemptIdentityV1, &WorkAttemptV1>,
@@ -456,7 +453,6 @@ fn readiness_widths(
     ))
 }
 
-#[hotpath::measure]
 fn provider_capacities(
     projection: &WorkflowRunProjection,
     work_snapshot: Option<&WorkProjectionSnapshotV1>,
@@ -564,7 +560,6 @@ fn provider_capacities(
     Ok(WorkflowProviderCapacityEvidenceV1::Known { providers })
 }
 
-#[hotpath::measure]
 fn attempt_is_live(attempt: &WorkAttemptV1) -> bool {
     matches!(
         attempt.state(),
@@ -575,7 +570,6 @@ fn attempt_is_live(attempt: &WorkAttemptV1) -> bool {
     )
 }
 
-#[hotpath::measure]
 fn attempt_active_in_interval(
     attempt: &WorkAttemptV1,
     interval_started_at: UtcMicros,
@@ -587,7 +581,6 @@ fn attempt_active_in_interval(
         })
 }
 
-#[hotpath::measure]
 fn classify_execution_topology(
     projection: &WorkflowRunProjection,
 ) -> WorkflowExecutionTopologyEvidenceV1 {
@@ -663,7 +656,6 @@ fn classify_execution_topology(
     }
 }
 
-#[hotpath::measure]
 fn singleton<T: Copy + Ord>(values: &BTreeSet<T>) -> Option<T> {
     if values.len() == 1 {
         values.iter().next().copied()
@@ -672,7 +664,6 @@ fn singleton<T: Copy + Ord>(values: &BTreeSet<T>) -> Option<T> {
     }
 }
 
-#[hotpath::measure]
 fn durations(
     projection: &WorkflowRunProjection,
     observed_at: UtcMicros,
@@ -740,7 +731,6 @@ fn durations(
     ))
 }
 
-#[hotpath::measure]
 fn critical_path(
     step_id: WorkflowStepId,
     projection: &WorkflowRunProjection,
@@ -767,7 +757,6 @@ fn critical_path(
     Some(total)
 }
 
-#[hotpath::measure]
 fn duration_between(start: UtcMicros, end: UtcMicros) -> Result<u64, WorkflowFanOutCensusError> {
     let delta = end
         .0
@@ -776,7 +765,6 @@ fn duration_between(start: UtcMicros, end: UtcMicros) -> Result<u64, WorkflowFan
     u64::try_from(delta).map_err(|_| WorkflowFanOutCensusError::InvalidInput)
 }
 
-#[hotpath::measure]
 fn exact_or_partial_count(
     observed: usize,
     exact: bool,
@@ -790,7 +778,6 @@ fn exact_or_partial_count(
     })
 }
 
-#[hotpath::measure]
 fn attempt_matches_work_snapshot(
     attempt: &WorkAttemptV1,
     snapshot: Option<&WorkProjectionSnapshotV1>,
@@ -805,7 +792,6 @@ fn attempt_matches_work_snapshot(
     })
 }
 
-#[hotpath::measure]
 fn count(value: usize) -> Result<u16, WorkflowFanOutCensusError> {
     u16::try_from(value).map_err(|_| WorkflowFanOutCensusError::CountOverflow)
 }

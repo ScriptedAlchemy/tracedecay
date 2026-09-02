@@ -49,7 +49,6 @@ use super::{
 /// daemon, never the request.
 
 /// The local read bound for a request whose caller deadline is `request_deadline`.
-#[hotpath::measure]
 pub fn daemon_tool_response_bound(request_deadline: Instant) -> Result<Instant> {
     request_deadline
         .checked_add(DAEMON_TOOL_RESPONSE_GRACE)
@@ -66,7 +65,6 @@ pub fn daemon_tool_response_bound(request_deadline: Instant) -> Result<Instant> 
 /// budget at send time keeps the two clocks independent and makes a re-send
 /// (project-open retry) carry the correctly shrunken budget rather than the
 /// original one.
-#[hotpath::measure]
 fn wire_request_deadline_micros(request_deadline: Instant) -> tracedecay_domain::UtcMicros {
     let remaining = request_deadline.saturating_duration_since(Instant::now());
     let now = tracedecay_application::clock::now_micros();
@@ -167,7 +165,6 @@ pub(crate) async fn write_daemon_preamble(
     Ok(())
 }
 
-#[hotpath::measure]
 pub(crate) fn default_available_socket_path() -> Result<PathBuf> {
     let socket_path = default_socket_path()?;
     #[cfg(unix)]
@@ -185,7 +182,6 @@ pub(crate) fn default_available_socket_path() -> Result<PathBuf> {
     }
 }
 
-#[hotpath::measure]
 pub(crate) fn is_transient_daemon_connect_error(kind: std::io::ErrorKind) -> bool {
     matches!(
         kind,
@@ -195,12 +191,10 @@ pub(crate) fn is_transient_daemon_connect_error(kind: std::io::ErrorKind) -> boo
     )
 }
 
-#[hotpath::measure]
 pub(crate) fn is_saturated_daemon_connect_error(kind: std::io::ErrorKind) -> bool {
     kind == std::io::ErrorKind::WouldBlock
 }
 
-#[hotpath::measure]
 pub(crate) fn daemon_connect_failure_advice(kind: std::io::ErrorKind) -> &'static str {
     if is_saturated_daemon_connect_error(kind) {
         "The daemon is up but not accepting connections — likely overloaded. Retry shortly, or check `tracedecay daemon status`."
@@ -457,7 +451,6 @@ pub async fn call_tool_within(
     .await
 }
 
-#[hotpath::measure]
 fn is_project_open_retryable_error(error: &TraceDecayError) -> bool {
     error_message_is_project_open_retryable(&error.to_string())
 }
@@ -571,7 +564,6 @@ pub async fn call_default_tool_awaiting_project_open(
 /// Extracts the single JSON payload from an MCP tool result while ignoring
 /// human-facing notice blocks.
 #[doc(hidden)]
-#[hotpath::measure]
 pub fn tool_json_payload(
     result: &serde_json::Value,
     tool_name: &str,

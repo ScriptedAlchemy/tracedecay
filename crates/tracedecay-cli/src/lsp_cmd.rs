@@ -129,7 +129,6 @@ async fn detach_stdio_bridge(
         .map_err(lsp_invocation_error)
 }
 
-#[hotpath::measure]
 fn finish_stdio_bridge(
     bridge_result: tracedecay_domain::errors::Result<()>,
     detach_result: tracedecay_domain::errors::Result<()>,
@@ -167,7 +166,6 @@ async fn read_initialize_binding<R: tokio::io::AsyncRead + Unpin>(
     initialize_binding(&frame)
 }
 
-#[hotpath::measure]
 fn initialize_binding(frame: &str) -> tracedecay_domain::errors::Result<InitializeBinding> {
     let mut request: Value = serde_json::from_str(frame).map_err(|_| {
         bridge_config_error("lsp bridge without --project requires a valid initialize request")
@@ -286,7 +284,6 @@ fn initialize_binding(frame: &str) -> tracedecay_domain::errors::Result<Initiali
     })
 }
 
-#[hotpath::measure]
 fn canonical_file_uri_path(uri: &str) -> tracedecay_domain::errors::Result<PathBuf> {
     let uri = url::Url::parse(uri)
         .map_err(|_| bridge_config_error("LSP workspace root must be a valid file URI"))?;
@@ -301,7 +298,6 @@ fn canonical_file_uri_path(uri: &str) -> tracedecay_domain::errors::Result<PathB
     canonicalize_workspace_root(&path)
 }
 
-#[hotpath::measure]
 fn canonicalize_workspace_root(path: &Path) -> tracedecay_domain::errors::Result<PathBuf> {
     let canonical = path.canonicalize().map_err(|error| {
         bridge_config_error(format!(
@@ -404,7 +400,6 @@ async fn reconnect_session(
         .map_err(lsp_invocation_error)
 }
 
-#[hotpath::measure]
 fn lsp_request_control() -> Result<(Deadline, CancellationSignal), InvocationError> {
     let sequence = LSP_BRIDGE_CONTROL_SEQUENCE
         .next_string("lsp-bridge.")
@@ -422,7 +417,6 @@ fn lsp_request_control() -> Result<(Deadline, CancellationSignal), InvocationErr
     Ok((deadline, cancellation))
 }
 
-#[hotpath::measure]
 fn lsp_invocation_error(error: InvocationError) -> tracedecay_domain::errors::TraceDecayError {
     let message = match error {
         InvocationError::Cancelled => "LSP gateway request was cancelled".to_owned(),
@@ -442,7 +436,6 @@ fn lsp_invocation_error(error: InvocationError) -> tracedecay_domain::errors::Tr
     tracedecay_domain::errors::TraceDecayError::Config { message }
 }
 
-#[hotpath::measure]
 fn bridge_error(
     phase: &str,
     error: impl std::fmt::Debug,
@@ -452,14 +445,12 @@ fn bridge_error(
     }
 }
 
-#[hotpath::measure]
 fn bridge_config_error(message: impl Into<String>) -> tracedecay_domain::errors::TraceDecayError {
     tracedecay_domain::errors::TraceDecayError::Config {
         message: message.into(),
     }
 }
 
-#[hotpath::measure]
 fn print_lsp_servers(json: bool) -> tracedecay_domain::errors::Result<()> {
     let adapters = lsp_adapters::builtin_adapters();
     if json {
@@ -471,7 +462,6 @@ fn print_lsp_servers(json: bool) -> tracedecay_domain::errors::Result<()> {
     Ok(())
 }
 
-#[hotpath::measure]
 fn lsp_server_row(adapter: &lsp_adapters::LspAdapterDefinition) -> Value {
     serde_json::json!({
         "language": adapter.language,
@@ -485,7 +475,6 @@ fn lsp_server_row(adapter: &lsp_adapters::LspAdapterDefinition) -> Value {
     })
 }
 
-#[hotpath::measure]
 fn print_lsp_servers_table(adapters: &[lsp_adapters::LspAdapterDefinition]) {
     println!(
         "{:<14} {:<12} {:<28} install",

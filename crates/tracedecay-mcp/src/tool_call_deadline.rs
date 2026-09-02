@@ -25,7 +25,6 @@ pub const TOOL_CALL_DEADLINE_META_KEY: &str = "tracedecay/deadline-micros";
 
 /// The `_meta` object a client attaches to `tools/call` params.
 #[must_use]
-#[hotpath::measure]
 pub fn tool_call_deadline_meta(expires_at: UtcMicros) -> Value {
     json!({ TOOL_CALL_DEADLINE_META_KEY: expires_at.0 })
 }
@@ -35,7 +34,6 @@ pub fn tool_call_deadline_meta(expires_at: UtcMicros) -> Value {
 /// An unparseable or non-integer value is *not* a deadline: it is dropped, and
 /// the daemon falls back to the tool's canonical ceiling exactly as before.
 #[must_use]
-#[hotpath::measure]
 pub fn caller_tool_call_deadline(params: Option<&Value>) -> Option<Deadline> {
     let micros = params?
         .get("_meta")?

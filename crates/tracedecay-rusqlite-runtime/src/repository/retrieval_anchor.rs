@@ -11,7 +11,6 @@ use super::support::{decode, encode, idempotent_insert, invalid};
 #[derive(Clone, Default)]
 pub struct RetrievalAnchorExecutor;
 
-#[hotpath::measure_all]
 impl RetrievalAnchorExecutor {
     pub fn execute_disposition_write(
         &mut self,
@@ -161,7 +160,6 @@ impl RetrievalAnchorExecutor {
     }
 }
 
-#[hotpath::measure]
 fn read_anchor(
     connection: &rusqlite::Connection,
     anchor_id: &RetrievalAnchorId,
@@ -198,7 +196,6 @@ fn read_anchor(
         .transpose()
 }
 
-#[hotpath::measure]
 fn current_state(
     connection: &rusqlite::Connection,
     anchor_id: &RetrievalAnchorId,
@@ -209,7 +206,6 @@ fn current_state(
         .map(|record| record.map(|record| record.state()))
 }
 
-#[hotpath::measure]
 fn current_record(
     connection: &rusqlite::Connection,
     anchor_id: &RetrievalAnchorId,
@@ -262,7 +258,6 @@ fn current_record(
         .transpose()
 }
 
-#[hotpath::measure]
 fn read_derivatives(
     connection: &rusqlite::Connection,
     anchor_id: &RetrievalAnchorId,
@@ -311,7 +306,6 @@ fn read_derivatives(
 // must never disagree about what an anchor's history permits. Only the refusal
 // wording in this module is local, and it is observable, so it stays.
 
-#[hotpath::measure]
 fn transition_allowed(
     current: Option<AnchorDispositionStateV1>,
     next: AnchorDispositionStateV1,
@@ -319,7 +313,6 @@ fn transition_allowed(
     AnchorDispositionStateV1::transition_allowed(current, next)
 }
 
-#[hotpath::measure]
 fn suppresses_derivatives(state: AnchorDispositionStateV1) -> bool {
     state.suppresses_derivatives()
 }

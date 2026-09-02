@@ -26,7 +26,6 @@ pub enum GitStateChangeRequestV1 {
     IdentityMismatch,
 }
 
-#[hotpath::measure_all]
 impl CodeIndexSchedulerRegistryV1 {
     /// Route a watcher freshness probe without blocking the watcher thread on
     /// the async registry map. Structural identity is checked before the probe

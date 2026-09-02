@@ -5,7 +5,6 @@
 //! call site; they never fabricate scan, sort, or transaction work.
 
 #[inline(always)]
-#[hotpath::measure]
 pub(crate) fn record_snapshot_admissions(count: u64) {
     #[cfg(feature = "hotpath")]
     hotpath::gauge!("global_db.snapshot_admissions").inc(count);
@@ -14,7 +13,6 @@ pub(crate) fn record_snapshot_admissions(count: u64) {
 }
 
 #[inline(always)]
-#[hotpath::measure]
 pub(crate) fn record_transaction_rows(count: u64) {
     #[cfg(feature = "hotpath")]
     hotpath::gauge!("global_db.transaction_rows").inc(count);

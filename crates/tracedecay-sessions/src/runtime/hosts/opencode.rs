@@ -99,7 +99,6 @@ enum OpenCodeScanKind {
     Rewrite,
 }
 
-#[hotpath::measure_all]
 impl OpenCodeScanKind {
     #[hotpath::skip]
     const fn frontier_key(self) -> &'static str {
@@ -200,7 +199,6 @@ impl SnapshotAdmissionRecord for OpenCodeRecord {
     }
 }
 
-#[hotpath::measure_all]
 impl OpenCodeSource {
     pub fn new_for_project(project_root: &Path) -> Option<Self> {
         let home = crate::runtime::home_dir()?;
@@ -273,7 +271,6 @@ impl OpenCodeSource {
     }
 }
 
-#[hotpath::measure_all]
 impl OpenCodeScanSource {
     pub(super) fn scope_matcher(&self) -> TranscriptScopeMatcher {
         match &self.scope {
@@ -532,7 +529,6 @@ pub(crate) async fn capture_opencode_observations(
     Ok(outcome)
 }
 
-#[hotpath::measure]
 fn scan_reference_page(
     source: &OpenCodeScanSource,
     scan_kind: OpenCodeScanKind,
@@ -548,7 +544,6 @@ fn scan_reference_page(
     }
 }
 
-#[hotpath::measure]
 fn scan_message_reference_page(
     source: &OpenCodeScanSource,
     cursor: OpenCodePageCursor,
@@ -708,7 +703,6 @@ fn scan_message_reference_page(
     ))
 }
 
-#[hotpath::measure]
 fn materialize_reference_page(
     source: &OpenCodeScanSource,
     references: Vec<OpenCodeMessageRef>,
@@ -763,7 +757,6 @@ fn materialize_reference_page(
     ))
 }
 
-#[hotpath::measure]
 fn load_record(
     connection: &Connection,
     reference: &OpenCodeMessageRef,
@@ -828,7 +821,6 @@ struct LoadedParts {
     deferred: bool,
 }
 
-#[hotpath::measure]
 fn load_parts(
     connection: &Connection,
     message_id: &str,
@@ -882,7 +874,6 @@ fn load_parts(
     Ok(LoadedParts { values, deferred })
 }
 
-#[hotpath::measure]
 pub(super) fn open_scan_connection(
     source: &OpenCodeScanSource,
     budget: &mut HostScanBudget,
@@ -895,7 +886,6 @@ pub(super) fn open_scan_connection(
         .map_err(|error| scan_error("open immutable database", &source.source_path, error))
 }
 
-#[hotpath::measure]
 pub(super) fn install_progress_handler(
     connection: &Connection,
     database_path: &Path,
@@ -917,7 +907,6 @@ pub(super) fn install_progress_handler(
         })
 }
 
-#[hotpath::measure]
 fn stable_native_id(native: &str, payload: &[u8]) -> String {
     format!(
         "opencode.message.{}",
@@ -928,7 +917,6 @@ fn stable_native_id(native: &str, payload: &[u8]) -> String {
     )
 }
 
-#[hotpath::measure]
 fn sql_bytes(
     row: &Row<'_>,
     index: usize,
@@ -945,7 +933,6 @@ fn sql_bytes(
     }
 }
 
-#[hotpath::measure]
 pub(super) fn sql_text(
     row: &Row<'_>,
     index: usize,
@@ -965,7 +952,6 @@ pub(super) fn sql_text(
     }
 }
 
-#[hotpath::measure]
 fn outcome_for_scan_evidence(evidence: HostScanEvidence) -> OpenCodeCaptureOutcome {
     OpenCodeCaptureOutcome {
         deferred_by_byte_cap: evidence.is_deferred(),
@@ -977,7 +963,6 @@ fn outcome_for_scan_evidence(evidence: HostScanEvidence) -> OpenCodeCaptureOutco
     }
 }
 
-#[hotpath::measure]
 fn opencode_data_dir(home: &Path) -> PathBuf {
     if cfg!(target_os = "macos") {
         home.join("Library/Application Support/opencode")
@@ -988,7 +973,6 @@ fn opencode_data_dir(home: &Path) -> PathBuf {
     }
 }
 
-#[hotpath::measure]
 fn scan_error(
     operation: &'static str,
     path: &Path,

@@ -18,7 +18,6 @@ pub(super) const FILE_LABEL: &str = "CodeFile";
 pub(super) const IMPORT_LABEL: &str = "CodeImport";
 pub(super) const FILE_IMPORT_EDGE_KIND: &str = "CodeFileContainsImport";
 
-#[hotpath::measure]
 pub(super) fn stable_identity(kind: &str, value: &str) -> String {
     let mut digest = Sha256::new();
     digest.update(kind.as_bytes());
@@ -27,14 +26,12 @@ pub(super) fn stable_identity(kind: &str, value: &str) -> String {
     format!("{kind}:{}", hex::encode(digest.finalize()))
 }
 
-#[hotpath::measure]
 pub(super) fn file_entity_id(
     file: &FileOccurrenceId,
 ) -> Result<GraphEntityId, CodeGraphProjectionError> {
     GraphEntityId::new(stable_identity("file", file.as_str())).map_err(Into::into)
 }
 
-#[hotpath::measure]
 pub(super) fn import_entity_id(
     import: &CodeIndexImportEvidenceV1,
 ) -> Result<GraphEntityId, CodeGraphProjectionError> {
@@ -42,7 +39,6 @@ pub(super) fn import_entity_id(
         .map_err(Into::into)
 }
 
-#[hotpath::measure]
 pub(super) fn file_import_relation_id(
     import: &CodeIndexImportEvidenceV1,
 ) -> Result<GraphRelationId, CodeGraphProjectionError> {
@@ -52,7 +48,6 @@ pub(super) fn file_import_relation_id(
 
 /// Same relation identity with the import entity id already derived, so a
 /// caller that just computed it does not serialize and hash the import again.
-#[hotpath::measure]
 pub(super) fn file_import_relation_id_with(
     import: &CodeIndexImportEvidenceV1,
     import_id: &GraphEntityId,
@@ -68,12 +63,10 @@ pub(super) fn file_import_relation_id_with(
     .map_err(Into::into)
 }
 
-#[hotpath::measure]
 pub(super) fn serialize(value: &impl Serialize) -> Result<Vec<u8>, CodeGraphProjectionError> {
     serde_json::to_vec(value).map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))
 }
 
-#[hotpath::measure]
 pub(super) fn deserialize_property<T>(
     entity: &GraphEntity,
     name: &str,
@@ -96,7 +89,6 @@ where
         .map_err(|error| CodeGraphProjectionError::Corrupt(error.to_string()))
 }
 
-#[hotpath::measure]
 pub(super) fn has_label(entity: &GraphEntity, label: &str) -> bool {
     entity
         .labels

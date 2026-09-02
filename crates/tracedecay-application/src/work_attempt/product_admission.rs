@@ -42,7 +42,6 @@ pub(crate) struct CurrentWorkProductAttemptGraphV1 {
     pub(crate) graph: tracedecay_domain::WorkProductGraphV1,
 }
 
-#[hotpath::measure]
 pub(crate) fn admit_product_attempt_request(
     context: &RequestContext,
     binding: &WorkProductBindingV1,
@@ -58,7 +57,6 @@ pub(crate) fn admit_product_attempt_request(
     }
 }
 
-#[hotpath::measure]
 pub(crate) fn replayed_attempt_matches_command(
     context: &RequestContext,
     command: &StartWorkAttemptCommand,
@@ -87,7 +85,6 @@ pub(crate) fn replayed_attempt_matches_command(
 /// Reads the current verified product graph under the exact relation scope
 /// resolved for this request. The caller cannot select a different profile or
 /// repository relation for attempt admission.
-#[hotpath::measure]
 pub(crate) fn current_work_product_attempt_graph<S>(
     storage: &S,
     context: &RequestContext,
@@ -141,7 +138,6 @@ where
     })
 }
 
-#[hotpath::measure]
 pub(crate) fn accepted_attempt_draft(
     product: &CurrentWorkProductAttemptGraphV1,
     revisions: &WorkProductRevisionPinsV1,
@@ -193,7 +189,6 @@ pub(crate) fn accepted_attempt_draft(
     })
 }
 
-#[hotpath::measure]
 pub(crate) fn product_attempt_projection_binding(
     product: &CurrentWorkProductAttemptGraphV1,
     accepted_proposal: tracedecay_domain::ProposalId,
@@ -208,7 +203,6 @@ pub(crate) fn product_attempt_projection_binding(
     .map_err(contract_problem)
 }
 
-#[hotpath::measure]
 pub(crate) fn product_admission_problem(
     error: WorkProductAttemptAdmissionErrorV1,
 ) -> ApplicationProblem {
@@ -413,19 +407,16 @@ where
     }
 }
 
-#[hotpath::measure]
 fn admission_binding_graph_version(
     attempt: &WorkAttemptV1,
 ) -> tracedecay_domain::WorkGraphVersionV1 {
     attempt.projection_binding().graph_version()
 }
 
-#[hotpath::measure]
 fn command_requested_route(command: &StartWorkAttemptCommand) -> WorkProviderRouteV1 {
     command.execution_snapshot.route().clone()
 }
 
-#[hotpath::measure]
 fn mint_product_lease<S>(
     storage: &S,
     authority: &WorkAuthority,
@@ -448,7 +439,6 @@ where
     WorkLeaseFenceV1::new(lease_id, epoch).map_err(contract_problem)
 }
 
-#[hotpath::measure]
 fn start_command_id(identity: &WorkAttemptIdentityV1) -> Result<WorkCommandId, ApplicationProblem> {
     let digest = canonical_sha256(&(WORK_PRODUCT_START_COMMAND_DOMAIN, identity))
         .map_err(|_| invalid_start_problem())?;
@@ -459,7 +449,6 @@ fn start_command_id(identity: &WorkAttemptIdentityV1) -> Result<WorkCommandId, A
     .map_err(|_| invalid_start_problem())
 }
 
-#[hotpath::measure]
 fn owner_problem(error: WorkProductOwnerAuthorizationErrorV1) -> ApplicationProblem {
     match error {
         WorkProductOwnerAuthorizationErrorV1::NotAuthorized => not_found_problem(),
@@ -472,7 +461,6 @@ fn owner_problem(error: WorkProductOwnerAuthorizationErrorV1) -> ApplicationProb
     }
 }
 
-#[hotpath::measure]
 fn product_problem(error: WorkProductApplicationErrorV1) -> ApplicationProblem {
     match error {
         WorkProductApplicationErrorV1::NotAuthorized
@@ -528,7 +516,6 @@ fn product_problem(error: WorkProductApplicationErrorV1) -> ApplicationProblem {
     }
 }
 
-#[hotpath::measure]
 fn invalid_start_problem() -> ApplicationProblem {
     ApplicationProblem::InvalidRequest {
         diagnostic: crate::SafeDiagnostic {

@@ -21,7 +21,6 @@ pub(super) enum DriverFailure {
     Error(StorageRuntimeErrorV1),
 }
 
-#[hotpath::measure_all]
 impl DriverFailure {
     pub(super) fn result(&self, request: &RuntimeSubmitRequestV1) -> RequestResult {
         match self {
@@ -43,7 +42,6 @@ impl DriverFailure {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn driver_failure(error: rusqlite::Error, operation: &'static str) -> DriverFailure {
     if matches!(error, rusqlite::Error::SqliteFailure(ref failure, _)
         if matches!(failure.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked))
@@ -54,7 +52,6 @@ pub(super) fn driver_failure(error: rusqlite::Error, operation: &'static str) ->
     }
 }
 
-#[hotpath::measure]
 pub(super) fn saturation(
     request: &RuntimeSubmitRequestV1,
     scope: SaturationScopeV1,
@@ -66,14 +63,12 @@ pub(super) fn saturation(
     }
 }
 
-#[hotpath::measure]
 pub(super) fn missing_authority() -> RuntimeSubmitOutcomeV1 {
     RuntimeSubmitOutcomeV1::Unavailable {
         reason: UnavailableReasonV1::MissingAuthority,
     }
 }
 
-#[hotpath::measure]
 pub(super) fn interruption_outcome(
     request: &RuntimeSubmitRequestV1,
     probe: &dyn RuntimeRequestProbeV1,
@@ -92,7 +87,6 @@ pub(super) fn interruption_outcome(
     }
 }
 
-#[hotpath::measure]
 pub(super) fn binding_outcome(
     binding: &StoreRuntimeBindingV1,
     request: &RuntimeSubmitRequestV1,
@@ -111,7 +105,6 @@ pub(super) fn binding_outcome(
     )
 }
 
-#[hotpath::measure]
 pub(super) fn idempotency_outcome(
     request: &RuntimeSubmitRequestV1,
     receipt: StoreCommitReceiptV1,
@@ -139,7 +132,6 @@ pub(super) fn idempotency_outcome(
     }
 }
 
-#[hotpath::measure]
 pub(super) fn committed_outcome(
     item: &AcceptedRequest,
     receipt: StoreCommitReceiptV1,
@@ -161,7 +153,6 @@ pub(super) fn committed_outcome(
     Ok(outcome)
 }
 
-#[hotpath::measure]
 pub(super) fn validate_probe(
     request: &RuntimeSubmitRequestV1,
     probe: &dyn RuntimeRequestProbeV1,
@@ -179,26 +170,22 @@ pub(super) fn validate_probe(
     Ok(())
 }
 
-#[hotpath::measure]
 pub(super) fn invalid_response(error: StorageRuntimeContractErrorV1) -> StorageRuntimeErrorV1 {
     infrastructure(format!(
         "typed writer persistence returned an invalid receipt: {error}"
     ))
 }
 
-#[hotpath::measure]
 pub(super) fn infrastructure(operation: impl Into<String>) -> StorageRuntimeErrorV1 {
     StorageRuntimeErrorV1::Infrastructure {
         operation: operation.into(),
     }
 }
 
-#[hotpath::measure]
 pub(super) fn is_corrupt(error: &StorageRuntimeErrorV1) -> bool {
     matches!(error, StorageRuntimeErrorV1::Corrupt { .. })
 }
 
-#[hotpath::measure]
 pub(super) fn micros(duration: Duration) -> u64 {
     u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
 }

@@ -43,7 +43,6 @@ pub struct WorkGraphReadRequestV1 {
     pub observed_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl WorkGraphReadRequestV1 {
     #[hotpath::skip]
     pub const fn current(selection: WorkProductSelectionScopeV1, observed_at: UtcMicros) -> Self {
@@ -148,7 +147,6 @@ pub struct WorkGraphVersionEntryV1 {
     projections: WorkProductProjectionBundleV1,
 }
 
-#[hotpath::measure_all]
 impl WorkGraphVersionEntryV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -275,7 +273,6 @@ pub enum WorkGraphSelectionCoverageV1 {
     },
 }
 
-#[hotpath::measure_all]
 impl WorkGraphSelectionCoverageV1 {
     #[hotpath::skip]
     pub const fn is_partial(&self) -> bool {
@@ -336,7 +333,6 @@ pub struct WorkGraphTimelineV1 {
     coverage: WorkGraphTimelineCoverageV1,
 }
 
-#[hotpath::measure_all]
 impl WorkGraphTimelineV1 {
     pub fn complete(
         entries: Vec<WorkGraphVersionEntryV1>,
@@ -445,7 +441,6 @@ pub enum WorkGraphReadV1 {
     },
 }
 
-#[hotpath::measure_all]
 impl WorkGraphReadV1 {
     #[hotpath::skip]
     pub const fn authorized_scope(&self) -> &AuthorizedWorkProductScopeV1 {
@@ -607,7 +602,6 @@ where
     }
 }
 
-#[hotpath::measure]
 pub(crate) fn validate_result(
     request: &WorkGraphReadRequestV1,
     authorized_scope: &AuthorizedWorkProductScopeV1,

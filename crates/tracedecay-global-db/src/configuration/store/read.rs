@@ -10,7 +10,6 @@ use super::{
     ConfigurationStoreError, ConfigurationStoreResult, QueryExecutor, Row, SettingKey, UtcMicros,
     invalid_store_data, params, unavailable_store,
 };
-#[hotpath::measure]
 fn decode_snapshot_entry(
     value: &str,
 ) -> ConfigurationStoreResult<StoredConfigurationSnapshotEntryV1> {
@@ -26,7 +25,6 @@ fn decode_snapshot_entry(
     Ok(entry)
 }
 
-#[hotpath::measure]
 fn snapshot_from_entries(
     entries: Vec<(String, i64, String)>,
     expected_snapshot_id: &str,
@@ -77,7 +75,6 @@ fn snapshot_from_entries(
     Ok(snapshot)
 }
 
-#[hotpath::measure]
 pub(super) fn validate_snapshot_registry_completeness(
     snapshot: &ConfigurationSnapshotV1,
 ) -> ConfigurationStoreResult<()> {
@@ -86,7 +83,6 @@ pub(super) fn validate_snapshot_registry_completeness(
     validate_snapshot_registry_completeness_with_registry(snapshot, &registry)
 }
 
-#[hotpath::measure]
 pub(super) fn validate_snapshot_registry_completeness_with_registry(
     snapshot: &ConfigurationSnapshotV1,
     registry: &ConfigurationRegistry,
@@ -153,7 +149,6 @@ pub(super) async fn snapshot_from_executor(
     )
 }
 
-#[hotpath::measure]
 fn decode_revision_metadata(row: &Row) -> ConfigurationStoreResult<StoredRevisionMetadata> {
     Ok(StoredRevisionMetadata {
         revision_id: row.get::<String>(0).map_err(|error| {
@@ -183,7 +178,6 @@ fn decode_revision_metadata(row: &Row) -> ConfigurationStoreResult<StoredRevisio
     })
 }
 
-#[hotpath::measure]
 fn revision_from_metadata(
     metadata: StoredRevisionMetadata,
     snapshot: ConfigurationSnapshotV1,

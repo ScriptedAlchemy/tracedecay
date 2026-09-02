@@ -42,7 +42,6 @@ pub struct WorkAttemptCapacityV1 {
     concurrency: TopologyConcurrencyPolicyV1,
 }
 
-#[hotpath::measure_all]
 impl WorkAttemptCapacityV1 {
     pub fn new(
         global_active: u64,
@@ -170,7 +169,6 @@ where
     }
 }
 
-#[hotpath::measure]
 fn capacity_query_problem() -> ApplicationProblem {
     invalid_problem(
         "application.work-attempt.invalid-capacity-query",

@@ -177,7 +177,6 @@ use workflow_family::handle_workflow;
 /// Returns the tool result and touched file paths, or an error if the tool
 /// name is unknown or the handler fails. The optional `server_stats` value
 /// is included in `tracedecay_status` responses when provided.
-#[hotpath::measure]
 fn ensure_mcp_dispatch_available(tool_name: &str) -> Result<()> {
     if INTERNAL_DAEMON_TOOL_NAMES.contains(&tool_name) {
         return Ok(());
@@ -384,7 +383,6 @@ impl Default for ToolCallRegistryOptions<'_> {
     }
 }
 
-#[hotpath::measure_all]
 impl<'a> ToolCallRegistryOptions<'a> {
     pub fn with_session_authorities(session_authorities: SessionAuthorities<'a>) -> Self {
         Self {
@@ -394,7 +392,6 @@ impl<'a> ToolCallRegistryOptions<'a> {
     }
 }
 
-#[hotpath::measure]
 pub fn handle_tool_call_with_registry_options<'a>(
     cg: &'a TraceDecay,
     tool_name: &'a str,
@@ -763,7 +760,6 @@ pub fn handle_tool_call_with_registry_options<'a>(
 /// Coarse human duration between a generation's seal time and now, for the
 /// freshness trailer. A routine rebuild window reads in seconds or minutes; a
 /// wedged route reads in hours or days.
-#[hotpath::measure]
 fn seated_generation_age_label(sealed_at: tracedecay_domain::UtcMicros) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -782,7 +778,6 @@ fn seated_generation_age_label(sealed_at: tracedecay_domain::UtcMicros) -> Strin
 }
 
 /// The single rejection every dispatch group returns for a name it does not own.
-#[hotpath::measure]
 fn unknown_tool_error(tool_name: &str) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!("unknown tool: {tool_name}"),
@@ -808,7 +803,6 @@ fn mcp_tool_hotpath_identity(
     }
 }
 
-#[hotpath::measure]
 fn classify_mcp_tool_dispatch_group(
     tool_name: &str,
     application_invocation_executor_available: bool,
@@ -840,7 +834,6 @@ fn classify_mcp_tool_dispatch_group(
 /// deadline the catalog-owned git reads already carry. Asking the canonical
 /// binding table keeps that horizon from drifting into a separate name list
 /// that a newly added git tool would silently miss.
-#[hotpath::measure]
 pub(crate) fn tool_dispatches_git_reads(tool_name: &str) -> bool {
     dispatch_group_for_tool(tool_name) == Some(McpToolDispatchGroup::Git)
 }

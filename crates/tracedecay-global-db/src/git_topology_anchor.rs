@@ -18,7 +18,6 @@ pub struct RegisteredGitTopologyAnchorAuthorityV2 {
     database: RegisteredGlobalDbLeaseV1,
 }
 
-#[hotpath::measure_all]
 impl RegisteredGitTopologyAnchorAuthorityV2 {
     pub fn new(database: RegisteredGlobalDbLeaseV1) -> Self {
         Self { database }
@@ -200,7 +199,6 @@ async fn read_records(
     Ok(records)
 }
 
-#[hotpath::measure]
 fn decode_record(
     anchor_json: &str,
     owner_json: &str,
@@ -219,7 +217,6 @@ fn decode_record(
     Ok(record)
 }
 
-#[hotpath::measure]
 fn binding_matches_owner(database: &RegisteredGlobalDb, owner: &ObservationScopeV1) -> bool {
     matches!(
         (&database.binding().shard_id.scope, owner),
@@ -233,7 +230,6 @@ fn binding_matches_owner(database: &RegisteredGlobalDb, owner: &ObservationScope
     )
 }
 
-#[hotpath::measure]
 fn map_database_error(
     error: tracedecay_domain::errors::TraceDecayError,
 ) -> GitTopologyAnchorAuthorityErrorV2 {
@@ -244,7 +240,6 @@ fn map_database_error(
     }
 }
 
-#[hotpath::measure]
 fn map_engine_error(
     error: tracedecay_runtime_core::db::engine::Error,
 ) -> GitTopologyAnchorAuthorityErrorV2 {

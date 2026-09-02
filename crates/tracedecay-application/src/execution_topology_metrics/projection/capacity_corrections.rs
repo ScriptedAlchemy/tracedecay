@@ -36,7 +36,6 @@ enum ExecutionTopologyCapacityCorrectionCandidateV1 {
     },
 }
 
-#[hotpath::measure_all]
 impl ExecutionTopologyEvidenceV1 {
     pub(in crate::execution_topology_metrics) fn reduce_capacity_correction_carry(
         &self,
@@ -70,7 +69,6 @@ impl ExecutionTopologyEvidenceV1 {
     }
 }
 
-#[hotpath::measure]
 fn protected_reference(
     domain: &str,
     reference: &str,
@@ -80,7 +78,6 @@ fn protected_reference(
         .map_err(|_| ExecutionTopologyRollupStateErrorV1::IncompatibleState)
 }
 
-#[hotpath::measure_all]
 impl ExecutionTopologyCapacityCorrectionCarryV1 {
     pub(in crate::execution_topology_metrics) fn validate(
         &self,
@@ -201,7 +198,6 @@ impl ExecutionTopologyCapacityCorrectionCarryV1 {
     }
 }
 
-#[hotpath::measure]
 fn protected_reference_is_valid(reference: &str) -> bool {
     reference.len() == 71
         && reference.starts_with("sha256:")
@@ -210,7 +206,6 @@ fn protected_reference_is_valid(reference: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-#[hotpath::measure_all]
 impl ExecutionTopologyCapacityRollupV1 {
     pub(in crate::execution_topology_metrics) fn with_carry_applied(
         &self,
@@ -225,7 +220,6 @@ impl ExecutionTopologyCapacityRollupV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl ExecutionTopologyCapacityCorrectionCandidateV1 {
     fn reference_and_time(&self) -> (&str, i64) {
         match self {
@@ -240,7 +234,6 @@ impl ExecutionTopologyCapacityCorrectionCandidateV1 {
     }
 }
 
-#[hotpath::measure]
 fn apply_candidates(
     capacity: &mut ExecutionTopologyCapacityRollupV1,
     candidates: &[ExecutionTopologyCapacityCorrectionCandidateV1],
@@ -276,7 +269,6 @@ fn apply_candidates(
     capacity.absorb_conflict_rows(&predictions, &outcomes);
 }
 
-#[hotpath::measure]
 fn absorb_duplicate_candidate(
     target: &mut BTreeMap<(String, u64), (Option<DuplicateRowV1>, i64)>,
     reference: &str,
@@ -298,7 +290,6 @@ fn absorb_duplicate_candidate(
     }
 }
 
-#[hotpath::measure]
 fn absorb_outcome_candidate(
     target: &mut BTreeMap<String, ConflictOutcomeRowV1>,
     reference: &str,

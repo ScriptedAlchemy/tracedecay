@@ -27,7 +27,6 @@ use super::source_records::{
 };
 use super::{ClaudeSource, PROVIDER, claude_subagent_identity};
 
-#[hotpath::measure]
 pub(super) fn fold_scanned_frames(
     source: &ClaudeSource,
     scan: &ClaudeSourceFrameScan,
@@ -148,7 +147,6 @@ pub(super) fn fold_scanned_frames(
     })
 }
 
-#[hotpath::measure]
 fn envelope_native_content(record: &Value) -> Option<Value> {
     let envelope =
         serde_json::from_value::<tracedecay_domain::CanonicalObservationEnvelopeV1>(record.clone())

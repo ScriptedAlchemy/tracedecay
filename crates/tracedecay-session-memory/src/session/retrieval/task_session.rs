@@ -53,7 +53,6 @@ pub(super) enum SessionExecutionAdmissionFailure {
     Cancelled,
 }
 
-#[hotpath::measure_all]
 impl SessionExecutionAdmissionFailure {
     pub(super) fn into_outcome<T>(self) -> SessionRetrievalOutcome<T> {
         match self {
@@ -187,7 +186,6 @@ where
     }
 }
 
-#[hotpath::measure]
 fn map_authorization_failure(error: SessionAuthorizationError) -> SessionExecutionAdmissionFailure {
     match error {
         SessionAuthorizationError::WrongScope
@@ -291,7 +289,6 @@ where
     }
 }
 
-#[hotpath::measure]
 fn task_session_admission_failure(
     failure: SessionExecutionAdmissionFailure,
 ) -> TaskSessionRetrievalOutcomeV1 {
@@ -307,7 +304,6 @@ fn task_session_admission_failure(
     }
 }
 
-#[hotpath::measure]
 fn map_task_session_callback_error(
     error: TaskSessionSelectionCallbackErrorV1,
 ) -> TaskSessionRetrievalOutcomeV1 {
@@ -321,7 +317,6 @@ fn map_task_session_callback_error(
     }
 }
 
-#[hotpath::measure]
 fn map_task_session_execution_error(
     error: SessionTemporalExecutionError,
 ) -> TaskSessionRetrievalOutcomeV1 {

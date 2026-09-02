@@ -40,7 +40,6 @@ pub enum SemanticQueryDecisionV1 {
     RejectUnavailable,
 }
 
-#[hotpath::measure_all]
 impl SemanticQueryDecisionV1 {
     pub const EXECUTE_WITH_FALLBACK: Self = Self::ExecuteSemantic {
         on_abstention: SemanticAbstentionDispositionV1::UseFallback,
@@ -79,7 +78,6 @@ pub struct CompleteSemanticGenerationV1 {
     capability_manifest_digest: ManifestDigest,
 }
 
-#[hotpath::measure_all]
 impl CompleteSemanticGenerationV1 {
     pub fn new(
         projection_key: ProjectionKeyV1,
@@ -132,7 +130,6 @@ pub struct SemanticCalibrationProfileV1 {
     pub minimum_margin_micros: u64,
 }
 
-#[hotpath::measure_all]
 impl SemanticCalibrationProfileV1 {
     pub fn validate(&self) -> Result<(), SemanticAbstentionV1> {
         self.cohort_digest
@@ -213,7 +210,6 @@ pub enum SemanticQueryServiceOutcomeV1 {
     },
 }
 
-#[hotpath::measure_all]
 impl SemanticQueryServiceOutcomeV1 {
     pub fn fallback(&self) -> &Arc<QueryFallbackSubpayload> {
         match self {
@@ -393,19 +389,16 @@ where
     }
 }
 
-#[hotpath::measure]
 fn observe_semantic_composition_failure(error: &FusionStageError) {
     hotpath::gauge!("query.lane.semantic.failure.service_composition").inc(1_u64);
     observe_semantic_composition_error(error);
 }
 
-#[hotpath::measure]
 pub(super) fn observe_semantic_execution_composition_failure(error: &FusionStageError) {
     hotpath::gauge!("query.lane.semantic.failure.execution_composition").inc(1_u64);
     observe_semantic_composition_error(error);
 }
 
-#[hotpath::measure]
 fn observe_semantic_composition_error(error: &FusionStageError) {
     match error {
         FusionStageError::RequiredLaneUnavailable => {
@@ -437,7 +430,6 @@ fn observe_semantic_composition_error(error: &FusionStageError) {
     }
 }
 
-#[hotpath::measure]
 fn index_abstention(state: SemanticIndexStateV1) -> SemanticAbstentionV1 {
     match state {
         SemanticIndexStateV1::Unavailable => SemanticAbstentionV1::IndexUnavailable,
@@ -449,7 +441,6 @@ fn index_abstention(state: SemanticIndexStateV1) -> SemanticAbstentionV1 {
     }
 }
 
-#[hotpath::measure]
 fn preflight_calibration(
     request: &SemanticRetrievalRequestV1<'_>,
     calibration: &SemanticCalibrationProfileV1,
@@ -464,7 +455,6 @@ fn preflight_calibration(
     Ok(())
 }
 
-#[hotpath::measure]
 fn evaluate_calibration(
     request: &SemanticRetrievalRequestV1<'_>,
     batch: &RetrieverBatch<CodeSemanticEvidenceV1>,

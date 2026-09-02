@@ -39,7 +39,6 @@ pub struct PageRequest {
     pub cursor: Option<OpaqueCursor>,
 }
 
-#[hotpath::measure_all]
 impl PageRequest {
     pub fn first(page_size: u32) -> Result<Self, ApplicationContractError> {
         Self::new(page_size, None)
@@ -90,7 +89,6 @@ pub struct RetrievalRequestMeta {
     pub order: RetrievalOrder,
 }
 
-#[hotpath::measure_all]
 impl RetrievalRequestMeta {
     pub fn current(page: PageRequest, projection: ResultProjection, order: RetrievalOrder) -> Self {
         Self {
@@ -110,7 +108,6 @@ pub struct SymbolSearchRequest {
     pub meta: RetrievalRequestMeta,
 }
 
-#[hotpath::measure_all]
 impl SymbolSearchRequest {
     pub fn new(
         query: EphemeralSanitizedQueryViewV1,

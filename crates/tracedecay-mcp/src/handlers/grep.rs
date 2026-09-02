@@ -306,7 +306,6 @@ fn grep_metadata(
     (coverage, omissions)
 }
 
-#[hotpath::measure]
 fn build_output_value(
     hits: &[GrepHit],
     truncated: bool,
@@ -350,7 +349,6 @@ fn build_output_value(
     })
 }
 
-#[hotpath::measure]
 fn render_grep_md(
     hits: &[GrepHit],
     truncated: bool,
@@ -400,7 +398,6 @@ fn render_grep_md(
     md.render()
 }
 
-#[hotpath::measure]
 fn append_partial_coverage_md(md: &mut Md, omissions: GrepScanOmissionsV1) {
     if omissions.oversized_files > 0 {
         let noun = if omissions.oversized_files == 1 {

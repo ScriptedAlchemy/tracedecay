@@ -31,7 +31,6 @@ pub const USER_INGEST_CODEX_HISTORY_EPOCH_KEY: &str =
     "tracedecay-internal:user-ingest-codex-history-epoch:v2";
 
 /// Production bounds for transcript multi-source passes (discovery/queue/work).
-#[hotpath::measure]
 pub(super) fn default_ingest_pass_bounds() -> IngestPassBounds {
     let jsonl_bytes = u64::try_from(MAX_JSONL_RECORD_BYTES)
         .unwrap_or(u64::MAX)
@@ -48,7 +47,6 @@ pub(super) fn default_ingest_pass_bounds() -> IngestPassBounds {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn merge_project_provider_backpressure(
     coverage: IngestPassCoverage,
     source_units: u64,
@@ -96,7 +94,6 @@ pub(super) const USER_CATCH_UP_PROVIDERS: &[SessionProvider] = &[
     SessionProvider::Vibe,
 ];
 
-#[hotpath::measure]
 pub(super) fn plan_provider_rotation_admission(
     selected_count: usize,
     frontier: u64,
@@ -109,7 +106,6 @@ pub(super) fn plan_provider_rotation_admission(
     plan_round_robin_admission(selected_count, frontier, admitted_limit)
 }
 
-#[hotpath::measure]
 pub(super) fn finish_user_provider_coverage(
     coverage: IngestPassCoverage,
     selected: usize,

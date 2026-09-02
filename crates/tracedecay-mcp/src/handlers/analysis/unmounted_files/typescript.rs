@@ -92,7 +92,6 @@ struct AliasRule {
     targets: Vec<PathBuf>,
 }
 
-#[hotpath::measure_all]
 impl AliasRule {
     /// The paths `specifier` expands to under this rule, if it matches.
     fn expand(&self, specifier: &str) -> Vec<PathBuf> {
@@ -117,7 +116,6 @@ impl AliasRule {
 
 /// Walks every discovered npm package's import graph and reports the source
 /// files no entry point reaches.
-#[hotpath::measure]
 pub(super) fn audit(files: &ProjectFiles) -> EcosystemAudit {
     let project_root = files.root();
     let manifest_paths = files.named("package.json");
@@ -193,7 +191,6 @@ pub(super) fn audit(files: &ProjectFiles) -> EcosystemAudit {
 /// A nested package is a claim boundary exactly as a nested `Cargo.toml` is —
 /// an outer package must never be blamed for, nor credited with, a file that
 /// belongs to an inner one.
-#[hotpath::measure]
 fn deepest_package_dir<'a>(dirs: &'a [PathBuf], file: &Path) -> Option<&'a Path> {
     dirs.iter()
         .filter(|dir| file.starts_with(dir))
@@ -318,7 +315,6 @@ fn node_package(
 
 /// Every string value anywhere inside a JSON value — how `exports` and `bin`
 /// name files without a fixed shape.
-#[hotpath::measure]
 fn collect_string_leaves(value: Option<&Value>, out: &mut Vec<String>) {
     match value {
         Some(Value::String(text)) => out.push(text.clone()),
@@ -338,7 +334,6 @@ fn collect_string_leaves(value: Option<&Value>, out: &mut Vec<String>) {
 
 /// A file tooling loads on sight: `vite.config.ts`, `postcss.config.mjs`,
 /// `eslint.config.js`, and friends.
-#[hotpath::measure]
 fn is_config_file(file: &Path) -> bool {
     let Some(name) = file.file_name().and_then(|name| name.to_str()) else {
         return false;
@@ -348,7 +343,6 @@ fn is_config_file(file: &Path) -> bool {
 
 /// Roots a test runner, a framework, or the type system starts from without
 /// anyone declaring them.
-#[hotpath::measure]
 fn is_conventional_entry(package_dir: &Path, file: &Path) -> bool {
     let Some(name) = file.file_name().and_then(|name| name.to_str()) else {
         return false;
@@ -411,7 +405,6 @@ fn is_conventional_entry(package_dir: &Path, file: &Path) -> bool {
 
 /// `compilerOptions.paths` rules, `baseUrl` directories, and `files` entries
 /// from every `tsconfig*.json` beside the manifest.
-#[hotpath::measure]
 fn tsconfig_declarations(dir: &Path) -> (Vec<AliasRule>, Vec<PathBuf>, Vec<String>) {
     let mut aliases = Vec::new();
     let mut base_urls = Vec::new();
@@ -476,14 +469,12 @@ fn tsconfig_declarations(dir: &Path) -> (Vec<AliasRule>, Vec<PathBuf>, Vec<Strin
 }
 
 /// Parses a tsconfig, which is JSON with comments in practice.
-#[hotpath::measure]
 fn read_jsonc(path: &Path) -> Option<Value> {
     let text = std::fs::read_to_string(path).ok()?;
     serde_json::from_str::<Value>(&strip_json_comments(&text)).ok()
 }
 
 /// Removes `//` and `/* … */` comments without touching string contents.
-#[hotpath::measure]
 fn strip_json_comments(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
@@ -532,7 +523,6 @@ fn strip_json_comments(text: &str) -> String {
 ///
 /// Used only on config files, where the alternative is executing someone's
 /// build configuration to learn which file it names as an entry.
-#[hotpath::measure]
 fn string_literals(source: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut chars = source.chars().peekable();
@@ -595,7 +585,6 @@ fn walk_imports(package: &NodePackage, mounted: &mut HashSet<PathBuf>) {
 /// `require(…)`, and dynamic `import(…)` — are read off the same tree-sitter
 /// grammar the extractor uses, because the extractor does not emit them as
 /// import evidence today.
-#[hotpath::measure]
 fn module_specifiers(file: &Path, source: &str) -> Vec<String> {
     let logical_path = file.to_string_lossy().into_owned();
     let mut specifiers = TypeScriptExtractor
@@ -613,7 +602,6 @@ fn module_specifiers(file: &Path, source: &str) -> Vec<String> {
     specifiers
 }
 
-#[hotpath::measure]
 fn parse_typescript(file: &Path, source: &str) -> Option<tree_sitter::Tree> {
     let key = match file.extension().and_then(|ext| ext.to_str()) {
         Some("tsx") => "tsx",
@@ -626,7 +614,6 @@ fn parse_typescript(file: &Path, source: &str) -> Option<tree_sitter::Tree> {
     parser.parse(source, None)
 }
 
-#[hotpath::measure]
 fn collect_reexports_and_calls(source: &str, node: Node<'_>, out: &mut Vec<String>) {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
@@ -661,7 +648,6 @@ fn collect_reexports_and_calls(source: &str, node: Node<'_>, out: &mut Vec<Strin
     }
 }
 
-#[hotpath::measure]
 fn unquote(text: &str) -> Option<String> {
     let text = text.trim();
     for quote in ['"', '\'', '`'] {
@@ -676,7 +662,6 @@ fn unquote(text: &str) -> Option<String> {
 }
 
 /// The files a specifier may name, from the importing file's position.
-#[hotpath::measure]
 fn resolve_specifier(package: &NodePackage, from: &Path, specifier: &str) -> Vec<PathBuf> {
     // `./x?raw`, `./x?url` — bundler query suffixes name the same file.
     let specifier = specifier.split(['?', '#']).next().unwrap_or(specifier);
@@ -711,7 +696,6 @@ fn resolve_specifier(package: &NodePackage, from: &Path, specifier: &str) -> Vec
 ///
 /// Only ever tried after the literal path failed to resolve to a walked file,
 /// so it cannot override a real one.
-#[hotpath::measure]
 fn source_behind_build_output(package_dir: &Path, specifier: &str) -> Vec<PathBuf> {
     const OUTPUT_DIRS: [&str; 7] = ["dist", "lib", "build", "out", "es", "esm", "cjs"];
     let trimmed = specifier.trim_start_matches("./");
@@ -725,7 +709,6 @@ fn source_behind_build_output(package_dir: &Path, specifier: &str) -> Vec<PathBu
 }
 
 /// Resolves one relative specifier against `base`.
-#[hotpath::measure]
 fn resolve_relative(base: &Path, specifier: &str) -> Vec<PathBuf> {
     if specifier.trim_start_matches("./").is_empty() {
         // `./` and `` both name the directory itself, whose `index` is the
@@ -738,7 +721,6 @@ fn resolve_relative(base: &Path, specifier: &str) -> Vec<PathBuf> {
 /// Node/TypeScript file resolution for one candidate path: the file itself, the
 /// TypeScript source behind a `.js` specifier, an added extension, or the
 /// directory's `index`.
-#[hotpath::measure]
 fn resolve_existing(candidate: &Path) -> Vec<PathBuf> {
     let candidate = normalized(candidate);
     let mut out = Vec::new();
@@ -771,7 +753,6 @@ fn resolve_existing(candidate: &Path) -> Vec<PathBuf> {
     out
 }
 
-#[hotpath::measure]
 fn has_source_extension(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
@@ -784,7 +765,6 @@ fn has_source_extension(path: &Path) -> bool {
 
 /// Whether the specifier names a JavaScript file, whose TypeScript source may
 /// be what is actually on disk.
-#[hotpath::measure]
 fn names_javascript(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())

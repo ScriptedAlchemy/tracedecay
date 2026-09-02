@@ -72,7 +72,6 @@ pub struct GraphLaneRequest {
     pub budget: RetrievalBudget,
 }
 
-#[hotpath::measure_all]
 impl GraphLaneRequest {
     pub fn validate(&self) -> Result<(), RetrievalPortError> {
         self.base.budget.validate().map_err(contract_error)?;
@@ -170,7 +169,6 @@ impl LaneBoundEvidence for GraphLaneEvidence {
     }
 }
 
-#[hotpath::measure_all]
 impl GraphLaneEvidence {
     /// Return the ordered symbol-occurrence IDs represented by this path.
     /// The first ID is the seed and each following ID is one traversed edge's
@@ -270,7 +268,6 @@ pub struct GraphLane<P> {
     evidence: P,
 }
 
-#[hotpath::measure_all]
 impl<P> GraphLane<P> {
     pub fn new(evidence: P) -> Self {
         Self { evidence }
@@ -404,7 +401,6 @@ where
     }
 }
 
-#[hotpath::measure]
 fn compare_graph_candidates(
     left: &(CompactCandidate, GraphLaneEvidence),
     right: &(CompactCandidate, GraphLaneEvidence),
@@ -425,7 +421,6 @@ fn compare_graph_candidates(
         })
 }
 
-#[hotpath::measure]
 fn check_graph_control(
     request: &GraphLaneRequest,
     control: &dyn GraphExecutionControl,
@@ -443,7 +438,6 @@ fn check_graph_control(
     Ok(())
 }
 
-#[hotpath::measure]
 fn graph_checkpoint_digest(
     request: &GraphLaneRequest,
     candidates: &[CompactCandidate],

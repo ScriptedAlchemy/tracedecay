@@ -28,7 +28,6 @@ pub(super) struct UseStatement {
 
 /// Collects identifier tokens from source text (Rust identifier rules). Used to
 /// test whether the moved body references a given symbol name.
-#[hotpath::measure]
 pub(super) fn body_identifiers(text: &str) -> HashSet<String> {
     let mut out = HashSet::new();
     let mut cur = String::new();
@@ -49,7 +48,6 @@ pub(super) fn body_identifiers(text: &str) -> HashSet<String> {
 
 /// True when `s` is a non-empty Rust-style identifier (does not start with a
 /// digit).
-#[hotpath::measure]
 fn is_identifier(s: &str) -> bool {
     matches!(s.chars().next(), Some(c) if c == '_' || c.is_ascii_alphabetic())
 }
@@ -60,7 +58,6 @@ fn is_identifier(s: &str) -> bool {
 /// span several physical lines are captured whole and `use` tokens inside
 /// comments or strings are never matched; falls back to a line scan only when
 /// the Rust grammar is unavailable.
-#[hotpath::measure]
 pub(super) fn parse_use_statements(source: &str) -> Vec<UseStatement> {
     match parse_use_statements_ts(source) {
         Some(stmts) => stmts,
@@ -74,7 +71,6 @@ pub(super) fn parse_use_statements(source: &str) -> Vec<UseStatement> {
 /// change meaning after a move, so they require an explicit hint instead of
 /// auto-insertion. A source `pub use` is reduced to a private `use`: the moved
 /// body needs the binding, not a new public re-export from the destination.
-#[hotpath::measure]
 pub(super) fn portable_dependency_import(statement: &str) -> Option<String> {
     let trimmed = statement.trim();
     let (path, was_public) = trimmed
@@ -99,7 +95,6 @@ pub(super) fn portable_dependency_import(statement: &str) -> Option<String> {
 /// Tree-sitter path: collect every `use_declaration` node (top-level and inside
 /// `mod` blocks) and parse its full byte-range text. Returns `None` when the
 /// grammar cannot be loaded so the caller can fall back to the line scan.
-#[hotpath::measure]
 fn parse_use_statements_ts(source: &str) -> Option<Vec<UseStatement>> {
     let mut parser = Parser::new();
     let language = tracedecay_code_extraction::ts_provider::try_language("rust").ok()?;
@@ -112,7 +107,6 @@ fn parse_use_statements_ts(source: &str) -> Option<Vec<UseStatement>> {
 
 /// Recursive pre-order walk collecting `use_declaration` nodes into parsed
 /// [`UseStatement`]s.
-#[hotpath::measure]
 fn collect_use_declarations(node: TsNode<'_>, src: &[u8], out: &mut Vec<UseStatement>) {
     if node.kind() == "use_declaration" {
         if let Ok(text) = node.utf8_text(src)
@@ -141,7 +135,6 @@ fn collect_use_declarations(node: TsNode<'_>, src: &[u8], out: &mut Vec<UseState
 
 /// Fallback line scan (grammar unavailable): one physical line per statement.
 /// Misses multi-line grouped imports but never fails the move.
-#[hotpath::measure]
 fn parse_use_statements_linescan(source: &str) -> Vec<UseStatement> {
     let mut out = Vec::new();
     for (idx, raw) in source.lines().enumerate() {
@@ -160,7 +153,6 @@ fn parse_use_statements_linescan(source: &str) -> Vec<UseStatement> {
 /// Parses the bindings out of a single `use` statement's text (possibly
 /// multi-line). Accepts `use ...;` and `pub use ...;`. Returns `None` for lines
 /// that are not a complete `use` statement or that bring nothing into scope.
-#[hotpath::measure]
 fn parse_use_bindings(stmt_text: &str) -> Option<(bool, Vec<UseLeaf>)> {
     let line = stmt_text.trim();
     let after_use = line
@@ -189,7 +181,6 @@ fn parse_use_bindings(stmt_text: &str) -> Option<(bool, Vec<UseLeaf>)> {
 
 /// The in-code binding for a single `use` path segment (`a::b::C` -> `C`,
 /// `a::C as D` -> `D`). Returns `None` for globs and empty items.
-#[hotpath::measure]
 fn leaf_binding(item: &str) -> Option<String> {
     let item = item.trim();
     if item.is_empty() || item == "*" || item.ends_with("::*") {

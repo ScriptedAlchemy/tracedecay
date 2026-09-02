@@ -53,7 +53,6 @@ pub struct PhysicalRuntimeSnapshot {
     pub memory_estimate_bytes: Option<u64>,
 }
 
-#[hotpath::measure_all]
 impl PhysicalRuntimeSnapshot {
     #[hotpath::skip]
     pub const fn is_drained(self) -> bool {
@@ -269,7 +268,6 @@ pub struct PublishedShardRuntime {
     attachment: Box<dyn PhysicalRuntimeAttachment>,
 }
 
-#[hotpath::measure_all]
 impl PublishedShardRuntime {
     pub fn new(
         runtime: crate::store_runtime::shard::ShardRuntime,
@@ -309,7 +307,6 @@ impl fmt::Debug for PublishedShardRuntime {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn attachment_failure(
     operation: &'static str,
     message: impl Into<String>,

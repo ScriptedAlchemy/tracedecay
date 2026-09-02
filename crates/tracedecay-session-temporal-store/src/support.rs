@@ -13,7 +13,6 @@ use tracedecay_store::{
 pub(crate) const UNIX_TIMESTAMP_MILLIS_THRESHOLD: i64 = 1_000_000_000_000;
 
 #[inline(always)]
-#[hotpath::measure]
 pub(crate) fn record_snapshot_admissions(count: u64) {
     #[cfg(feature = "hotpath")]
     hotpath::gauge!("session_temporal.observe.snapshot_admissions").inc(count);
@@ -22,7 +21,6 @@ pub(crate) fn record_snapshot_admissions(count: u64) {
 }
 
 #[inline(always)]
-#[hotpath::measure]
 pub(crate) fn record_output_sessions(count: u64) {
     #[cfg(feature = "hotpath")]
     hotpath::gauge!("session_temporal.observe.output_sessions").inc(count);
@@ -33,7 +31,6 @@ pub(crate) fn record_output_sessions(count: u64) {
 /// Same composition as the observation-projection derive path: canonical
 /// envelopes go through store authority; legacy Claude records use the public
 /// sessions mapper. Kept here so this crate does not depend on global-db.
-#[hotpath::measure]
 pub(crate) fn derive_projection(
     observation: &DurableObservationV1,
 ) -> ProjectionStoreResult<ObservationProjection> {
@@ -46,14 +43,12 @@ pub(crate) fn derive_projection(
     }
 }
 
-#[hotpath::measure]
 fn decode_canonical_envelope(
     payload: &serde_json::Value,
 ) -> Result<CanonicalObservationEnvelopeV1, serde_json::Error> {
     serde::Deserialize::deserialize(payload)
 }
 
-#[hotpath::measure]
 fn derive_claude_projection(
     observation: &DurableObservationV1,
 ) -> ProjectionStoreResult<ObservationProjection> {

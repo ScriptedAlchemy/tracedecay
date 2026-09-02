@@ -10,7 +10,6 @@ use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use super::{ToolCallRegistryOptions, analytics};
 use tracedecay_mcp::ToolResult;
 
-#[hotpath::measure]
 fn admitted_control(
     options: &ToolCallRegistryOptions<'_>,
     operation: &'static str,

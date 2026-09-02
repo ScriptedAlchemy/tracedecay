@@ -48,7 +48,6 @@ use use_parsing::{UseLeaf, body_identifiers, parse_use_statements, portable_depe
 const MAX_MOVE_SYMBOLS_PER_FILE: usize = 10_000;
 const MAX_MOVE_CALLERS: usize = 100_000;
 
-#[hotpath::measure_all]
 impl TraceDecay {
     /// Moves a resolved symbol from its current file to `dest_file`.
     ///

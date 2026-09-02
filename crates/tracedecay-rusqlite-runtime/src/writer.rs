@@ -71,7 +71,6 @@ pub struct CheckpointHandle {
     pressure: watch::Receiver<CheckpointPressure>,
 }
 
-#[hotpath::measure_all]
 impl CheckpointHandle {
     pub fn binding(&self) -> &StoreRuntimeBindingV1 {
         &self.binding
@@ -169,7 +168,6 @@ pub struct CheckpointRequest {
     probe: Arc<dyn RuntimeRequestProbeV1>,
 }
 
-#[hotpath::measure_all]
 impl CheckpointRequest {
     pub fn new(blockers: CheckpointBlockers, probe: Arc<dyn RuntimeRequestProbeV1>) -> Self {
         Self { blockers, probe }
@@ -186,7 +184,6 @@ pub struct MaintenanceCheckpointRequest {
     blockers: CheckpointBlockers,
 }
 
-#[hotpath::measure_all]
 impl MaintenanceCheckpointRequest {
     pub fn new(
         mode: MaintenanceCheckpointMode,
@@ -218,7 +215,6 @@ pub struct CheckpointTicket {
     response: oneshot::Receiver<Result<CheckpointResult, CheckpointError<RusqliteCheckpointError>>>,
 }
 
-#[hotpath::measure_all]
 impl CheckpointTicket {
     #[hotpath::skip]
     pub async fn wait(self) -> Result<CheckpointOutcome, CheckpointControlError> {
@@ -266,7 +262,6 @@ impl fmt::Display for CheckpointControlError {
 
 impl Error for CheckpointControlError {}
 
-#[hotpath::measure]
 fn checkpoint_control_error(
     error: CheckpointError<RusqliteCheckpointError>,
 ) -> CheckpointControlError {
@@ -290,7 +285,6 @@ pub struct ExistingWriterLocator {
     opened_database: Option<Arc<OpenedDatabaseFile>>,
 }
 
-#[hotpath::measure_all]
 impl ExistingWriterLocator {
     pub fn new(
         binding: StoreRuntimeBindingV1,
@@ -502,7 +496,6 @@ pub enum WriterState {
     Faulted = 4,
 }
 
-#[hotpath::measure_all]
 impl WriterState {
     fn load(state: &AtomicU8) -> Self {
         match state.load(Ordering::Acquire) {
@@ -544,7 +537,6 @@ pub struct PersistentWriter {
     opened_file_identity: Option<u64>,
 }
 
-#[hotpath::measure_all]
 impl PersistentWriter {
     pub fn start<E>(
         locator: ExistingWriterLocator,
@@ -988,7 +980,6 @@ impl Drop for PersistentWriter {
     }
 }
 
-#[hotpath::measure]
 fn admission_limits(config: &AdmissionConfigV1) -> Result<Limits, WriterStartError> {
     Limits::new(
         Capacity {

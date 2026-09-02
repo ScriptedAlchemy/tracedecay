@@ -40,7 +40,6 @@ const ATTACHMENT_DRAIN_POLL: Duration = Duration::from_millis(5);
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RepositoryPhysicalAttachmentFactory;
 
-#[hotpath::measure_all]
 impl RepositoryPhysicalAttachmentFactory {
     #[hotpath::measure(label = "rusqlite.attachment.attach_read_only")]
     pub fn attach_read_only(
@@ -294,7 +293,6 @@ enum AttachmentWorkerStartStage {
     AfterReaders,
 }
 
-#[hotpath::measure]
 fn repository_start_failure(
     opened_database: OpenedDatabaseFile,
     database_path: &std::path::Path,
@@ -351,7 +349,6 @@ struct RepositoryRuntimePhysicalState {
     close_failure: Option<String>,
 }
 
-#[hotpath::measure_all]
 impl RepositoryRuntimePhysicalAttachment {
     pub fn binding(&self) -> StoreRuntimeBindingV1 {
         self.lock_state().binding.clone()
@@ -894,7 +891,6 @@ impl ReaderQueryExecutor for RepositoryRuntimeReadExecutor {
     }
 }
 
-#[hotpath::measure]
 fn infrastructure(operation: impl Into<String>) -> StorageRuntimeErrorV1 {
     StorageRuntimeErrorV1::Infrastructure {
         operation: operation.into(),

@@ -8,7 +8,6 @@ const MAX_ENTITY_CHARS: usize = 80;
 /// Hard upper bound on an entity's word count for the same reason.
 const MAX_ENTITY_WORDS: usize = 6;
 
-#[hotpath::measure]
 pub fn normalize_entity(entity: &str) -> String {
     entity
         .trim_matches(|c: char| {
@@ -19,7 +18,6 @@ pub fn normalize_entity(entity: &str) -> String {
         .join(" ")
 }
 
-#[hotpath::measure]
 pub fn extract_entities(text: &str) -> Vec<String> {
     let mut matches = Vec::new();
 
@@ -60,7 +58,6 @@ pub fn extract_entities(text: &str) -> Vec<String> {
 ///    sentence punctuation (`.`, `;`, `—`, unbalanced parens, ...) or exceeding
 ///    the length caps is rejected — that is what a mangled multi-sentence
 ///    fragment looks like, and it must never become an "entity".
-#[hotpath::measure]
 fn is_valid_entity(entity: &str) -> bool {
     if entity.is_empty() || entity.chars().count() > MAX_ENTITY_CHARS {
         return false;
@@ -86,7 +83,6 @@ fn is_valid_entity(entity: &str) -> bool {
 
 /// Characters allowed inside a non-code phrase-entity word: letters, digits,
 /// intra-word hyphen/underscore, and apostrophe (for names like "O'Neil").
-#[hotpath::measure]
 fn is_entity_word_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '\'')
 }
@@ -94,7 +90,6 @@ fn is_entity_word_char(ch: char) -> bool {
 /// A single token that is trusted verbatim as an entity: a file path, a
 /// `::`-qualified Rust symbol, a `snake_case` / `camelCase` identifier, or a
 /// `tracedecay_*` tool name.
-#[hotpath::measure]
 fn is_code_like_token(token: &str) -> bool {
     is_file_path(token)
         || is_rust_symbol(token)
@@ -102,7 +97,6 @@ fn is_code_like_token(token: &str) -> bool {
         || is_code_identifier(token)
 }
 
-#[hotpath::measure]
 fn extract_quoted(text: &str, delimiter: char) -> Vec<(usize, String)> {
     let mut results = Vec::new();
     let mut start = None;
@@ -145,7 +139,6 @@ fn extract_quoted(text: &str, delimiter: char) -> Vec<(usize, String)> {
     results
 }
 
-#[hotpath::measure]
 fn extract_aliases(text: &str) -> Vec<(usize, String)> {
     let lower = text.to_ascii_lowercase();
     [" aka ", " a.k.a. ", " also known as "]
@@ -166,7 +159,6 @@ fn extract_aliases(text: &str) -> Vec<(usize, String)> {
         .collect()
 }
 
-#[hotpath::measure]
 fn take_entity_phrase(text: &str) -> String {
     let trimmed_start = text.len() - text.trim_start().len();
     let remaining = &text[trimmed_start..];
@@ -190,7 +182,6 @@ fn take_entity_phrase(text: &str) -> String {
     normalize_entity(&remaining[..end])
 }
 
-#[hotpath::measure]
 fn extract_code_tokens(text: &str) -> Vec<(usize, String)> {
     token_spans(text)
         .into_iter()
@@ -205,7 +196,6 @@ fn extract_code_tokens(text: &str) -> Vec<(usize, String)> {
         .collect()
 }
 
-#[hotpath::measure]
 fn extract_capitalized_names(text: &str) -> Vec<(usize, String)> {
     let mut results = Vec::new();
     let mut current = Vec::new();
@@ -227,7 +217,6 @@ fn extract_capitalized_names(text: &str) -> Vec<(usize, String)> {
     results
 }
 
-#[hotpath::measure]
 fn push_capitalized_sequence(
     results: &mut Vec<(usize, String)>,
     start_index: usize,
@@ -272,7 +261,6 @@ fn push_capitalized_sequence(
     push_single_capitalized(results, start_index, &words[0]);
 }
 
-#[hotpath::measure]
 fn push_single_capitalized(results: &mut Vec<(usize, String)>, index: usize, word: &str) {
     if word.is_empty() || is_non_entity_leading_word(word) || is_common_sentence_word(word) {
         return;
@@ -286,7 +274,6 @@ fn push_single_capitalized(results: &mut Vec<(usize, String)>, index: usize, wor
 /// exact-string list, so inflected forms such as "Prefers" / "Using" / "Avoided"
 /// no longer leak through and swallow the entity that follows them.
 /// (Retrieval-quality Risk A: the old list matched "Prefer"/"Use" only.)
-#[hotpath::measure]
 fn is_non_entity_leading_word(token: &str) -> bool {
     const LEADING_VERB_FORMS: &[&str] = &[
         "add",
@@ -355,7 +342,6 @@ fn is_non_entity_leading_word(token: &str) -> bool {
 /// verbs, prepositions, ...). These are not entities; capturing them would add
 /// noise that pollutes entity-graph retrieval (Risk G). Intentionally
 /// conservative — ambiguous proper nouns such as the month "May" are excluded.
-#[hotpath::measure]
 fn is_common_sentence_word(token: &str) -> bool {
     const COMMON_WORDS: &[&str] = &[
         // articles
@@ -496,7 +482,6 @@ fn is_common_sentence_word(token: &str) -> bool {
     COMMON_WORDS.contains(&token.to_ascii_lowercase().as_str())
 }
 
-#[hotpath::measure]
 fn token_spans(text: &str) -> Vec<(usize, &str)> {
     let mut spans = Vec::new();
     let mut offset = 0;
@@ -512,7 +497,6 @@ fn token_spans(text: &str) -> Vec<(usize, &str)> {
     spans
 }
 
-#[hotpath::measure]
 fn clean_code_token(token: &str) -> String {
     let cleaned = token
         .trim_matches(|c: char| {
@@ -535,14 +519,12 @@ fn clean_code_token(token: &str) -> String {
     }
 }
 
-#[hotpath::measure]
 fn clean_name_token(token: &str) -> String {
     token
         .trim_matches(|c: char| c.is_ascii_punctuation() && c != '-' && c != '_')
         .to_string()
 }
 
-#[hotpath::measure]
 fn is_file_path(token: &str) -> bool {
     // Unambiguous leading path prefixes: "/etc/config", "./x", "../x", "~/x",
     // and their Windows backslash forms.
@@ -587,7 +569,6 @@ fn is_file_path(token: &str) -> bool {
 /// underscore or an internal lower→upper "hump" — so plain words (`Postgres`,
 /// `database`) are left to the capitalized-name path instead of being force
 /// captured here.
-#[hotpath::measure]
 fn is_code_identifier(token: &str) -> bool {
     if token.chars().count() < 2 {
         return false;
@@ -607,7 +588,6 @@ fn is_code_identifier(token: &str) -> bool {
     has_underscore || has_camel_hump
 }
 
-#[hotpath::measure]
 fn is_rust_symbol(token: &str) -> bool {
     token.contains("::")
         && token
@@ -617,7 +597,6 @@ fn is_rust_symbol(token: &str) -> bool {
 
 /// Returns true for `tracedecay_*` MCP tool names found in stored session
 /// messages.
-#[hotpath::measure]
 fn is_tracedecay_tool(token: &str) -> bool {
     let normalized = token.replace('-', "_").to_ascii_lowercase();
     normalized.starts_with("tracedecay_")
@@ -626,7 +605,6 @@ fn is_tracedecay_tool(token: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
 }
 
-#[hotpath::measure]
 fn is_capitalized_word(token: &str) -> bool {
     let mut chars = token.chars();
     let Some(first) = chars.next() else {

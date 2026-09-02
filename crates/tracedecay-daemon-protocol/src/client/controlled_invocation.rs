@@ -16,7 +16,6 @@ use crate::connection::{DAEMON_CONNECT_DOWN, DAEMON_CONNECT_SATURATED};
 /// diagnostic. Every other transport failure — a closed connection after the
 /// request was written, a stalled response, a refused handshake — keeps the
 /// indeterminate [`DaemonInvocationError::Unavailable`].
-#[hotpath::measure]
 fn classify_invoke_transport_error(
     error: tracedecay_domain::errors::TraceDecayError,
 ) -> DaemonInvocationError {
@@ -31,7 +30,6 @@ fn classify_invoke_transport_error(
     }
 }
 
-#[hotpath::measure_all]
 impl DaemonInvocationClient {
     #[hotpath::measure(label = "daemon.client.invoke_controlled", future = true)]
     pub async fn invoke_controlled(

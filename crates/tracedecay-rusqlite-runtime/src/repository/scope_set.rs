@@ -49,7 +49,6 @@ pub enum AuthorizedScopeSetStoreError {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AuthorizedScopeSetExecutor;
 
-#[hotpath::measure_all]
 impl AuthorizedScopeSetExecutor {
     /// Install the isolated schema into a test or migration-owned connection.
     pub fn install_schema(connection: &Connection) -> Result<(), AuthorizedScopeSetStoreError> {
@@ -148,7 +147,6 @@ pub struct AuthorizedScopeSetSqliteStorage {
     retained: RetainedExactSqlCapability,
 }
 
-#[hotpath::measure_all]
 impl AuthorizedScopeSetSqliteStorage {
     #[must_use]
     pub fn from_retained_exact_sql(retained: RetainedExactSqlCapability) -> Self {
@@ -225,7 +223,6 @@ impl AuthorizedScopeSetSqliteStorage {
     }
 }
 
-#[hotpath::measure]
 fn registered_read_statement(
     scope_set_id: &ScopeSetId,
 ) -> Result<ExactSqlStatement, AuthorizedScopeSetStoreError> {
@@ -238,7 +235,6 @@ fn registered_read_statement(
     )?)
 }
 
-#[hotpath::measure]
 fn decode_registered_rows(
     rows: Vec<ExactSqlRow>,
 ) -> Result<Option<AuthorizedScopeSet>, AuthorizedScopeSetStoreError> {
@@ -269,7 +265,6 @@ fn decode_registered_rows(
     Ok(Some(scope_set))
 }
 
-#[hotpath::measure]
 fn read_record(
     connection: &Connection,
     scope_set_id: &ScopeSetId,
@@ -302,7 +297,6 @@ fn read_record(
     .transpose()
 }
 
-#[hotpath::measure]
 fn read_revision(
     connection: &Connection,
     scope_set_id: &ScopeSetId,
@@ -318,7 +312,6 @@ fn read_revision(
         .transpose()
 }
 
-#[hotpath::measure]
 fn decode_record(
     record: AuthorizedScopeSetRecordV1,
 ) -> Result<AuthorizedScopeSet, AuthorizedScopeSetStoreError> {
@@ -336,7 +329,6 @@ fn decode_record(
     Ok(set)
 }
 
-#[hotpath::measure]
 fn revision_to_i64(revision: ScopeSetRevision) -> Result<i64, AuthorizedScopeSetStoreError> {
     i64::try_from(revision.get()).map_err(|_| {
         AuthorizedScopeSetStoreError::InvalidData(
@@ -345,7 +337,6 @@ fn revision_to_i64(revision: ScopeSetRevision) -> Result<i64, AuthorizedScopeSet
     })
 }
 
-#[hotpath::measure]
 fn revision_from_i64(revision: i64) -> Result<ScopeSetRevision, AuthorizedScopeSetStoreError> {
     u64::try_from(revision)
         .map_err(|_| {

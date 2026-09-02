@@ -38,7 +38,6 @@ pub struct AdvisoryFindingValidityWindowV1 {
     pub expires_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl AdvisoryFindingValidityWindowV1 {
     fn validate_for(self, observed_at: UtcMicros) -> Result<(), ApplicationContractError> {
         if observed_at.0 > self.valid_at.0 || self.valid_at.0 >= self.expires_at.0 {
@@ -55,7 +54,6 @@ pub struct AdvisoryFindingContributionBatchV1 {
     pub findings: Vec<FeedbackFindingV1>,
 }
 
-#[hotpath::measure_all]
 impl AdvisoryFindingContributionBatchV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         for finding in &self.findings {
@@ -241,7 +239,6 @@ impl AdvisoryFindingContributorV1 for ProximityContributionV1 {
     }
 }
 
-#[hotpath::measure]
 fn validated_batch(
     provider_state: ProviderEvaluationStateV1,
     findings: Vec<FeedbackFindingV1>,

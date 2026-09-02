@@ -223,7 +223,6 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 11] = [
 /// below.
 const REGISTERED_FEEDBACK_HANDLER_SPECS: [usize; 11] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 
-#[hotpath::measure]
 pub fn feedback_surface_catalog_contribution()
 -> Result<CatalogContributionV1, ApplicationContractError> {
     let handlers = feedback_surface_handler_descriptors()?;
@@ -232,7 +231,6 @@ pub fn feedback_surface_catalog_contribution()
 
 /// Daemon-owned public HTTP bindings for every feedback operation mounted by
 /// the complete application router.
-#[hotpath::measure]
 pub fn feedback_http_executable_binding_registry()
 -> Result<ExecutableBindingRegistryV1, ApplicationContractError> {
     let contribution = feedback_surface_catalog_contribution()?;
@@ -304,7 +302,6 @@ pub fn feedback_http_executable_binding_registry()
     Ok(ExecutableBindingRegistryV1::new(bindings)?)
 }
 
-#[hotpath::measure]
 fn feedback_surface_catalog_contribution_for_handlers(
     handlers: &[ApplicationHandlerDescriptor],
 ) -> Result<CatalogContributionV1, ApplicationContractError> {
@@ -351,7 +348,6 @@ fn feedback_surface_catalog_contribution_for_handlers(
 /// request because the admitted project scope selects the retained run. Each
 /// registered pair is the exact payload type that its mounted runtime
 /// serializes.
-#[hotpath::measure]
 fn feedback_executable_schemas(
     contribution: &CatalogContributionV1,
 ) -> Result<Vec<ExecutableSchemaAuthority>, ApplicationContractError> {
@@ -409,7 +405,6 @@ fn feedback_executable_schemas(
     Ok(schemas)
 }
 
-#[hotpath::measure]
 fn feedback_executable_schema<Request, Response>(
     contribution: &CatalogContributionV1,
     capability: &str,
@@ -436,7 +431,6 @@ where
     )?)
 }
 
-#[hotpath::measure]
 pub fn feedback_surface_handler_descriptors()
 -> Result<Vec<ApplicationHandlerDescriptor>, ApplicationContractError> {
     REGISTERED_FEEDBACK_HANDLER_SPECS
@@ -452,7 +446,6 @@ pub fn feedback_surface_handler_descriptors()
         .collect()
 }
 
-#[hotpath::measure]
 pub fn feedback_surface_operation(
     name: &str,
 ) -> Result<Option<ApplicationOperation>, ApplicationContractError> {
@@ -464,7 +457,6 @@ pub fn feedback_surface_operation(
 }
 
 /// Exact feedback-read operation set consumed by `FeedbackReadService`.
-#[hotpath::measure]
 pub fn feedback_read_operations() -> Result<FeedbackReadOperationsV1, ApplicationContractError> {
     FeedbackReadOperationsV1::new(
         application_operation(&FEEDBACK_SPECS[0])?,
@@ -474,7 +466,6 @@ pub fn feedback_read_operations() -> Result<FeedbackReadOperationsV1, Applicatio
     )
 }
 
-#[hotpath::measure]
 fn capability(
     spec: &FeedbackSurfaceSpec,
     capability_id: CapabilityId,
@@ -552,7 +543,6 @@ fn capability(
     })?)
 }
 
-#[hotpath::measure]
 fn handler_descriptor(
     spec: &FeedbackSurfaceSpec,
 ) -> Result<ApplicationHandlerDescriptor, ApplicationContractError> {
@@ -564,7 +554,6 @@ fn handler_descriptor(
     )
 }
 
-#[hotpath::measure]
 fn application_operation(
     spec: &FeedbackSurfaceSpec,
 ) -> Result<ApplicationOperation, ApplicationContractError> {
@@ -577,7 +566,6 @@ fn application_operation(
     ))
 }
 
-#[hotpath::measure]
 fn schema(id: &str) -> Result<SchemaRef, ApplicationContractError> {
     Ok(SchemaRef::new(SchemaId::new(id)?, 1)?)
 }

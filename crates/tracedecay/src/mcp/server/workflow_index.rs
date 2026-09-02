@@ -22,7 +22,6 @@ use tracedecay_sessions::runtime::workflow_index::{
 /// Keeps the workflow index's own error text, so a read failure still reads the
 /// same way after the boundary moved.
 #[allow(clippy::needless_pass_by_value)] // used with `.map_err(workflow_error)`
-#[hotpath::measure]
 fn workflow_error(err: WorkflowIndexError) -> WorkflowReadError {
     WorkflowReadError::new(err.to_string())
 }
@@ -33,7 +32,6 @@ pub(crate) struct DaemonWorkflowIndexReadService {
     database: RegisteredGlobalDbLeaseV1,
 }
 
-#[hotpath::measure_all]
 impl DaemonWorkflowIndexReadService {
     #[hotpath::skip]
     pub(crate) const fn new(database: RegisteredGlobalDbLeaseV1) -> Self {

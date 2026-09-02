@@ -48,7 +48,6 @@ pub(crate) async fn refresh_generated_plugins() -> tracedecay_domain::errors::Re
 /// `integration_id_for_host` is many-to-one (CursorCloud and CursorDesktop both
 /// map to `cursor`), so an id counts as canonical when ANY host behind it has a
 /// non-empty default component set — the transaction owns that id's artifacts.
-#[hotpath::measure]
 fn host_owns_canonical_component_set(agent_id: &str) -> bool {
     tracedecay::agents::host_bundle_v2::stock_host_kinds()
         .into_iter()
@@ -58,7 +57,6 @@ fn host_owns_canonical_component_set(agent_id: &str) -> bool {
         })
 }
 
-#[hotpath::measure]
 fn refresh_generated_plugins_at(
     integrations: Vec<Box<dyn tracedecay::agents::AgentIntegration>>,
     home: &Path,
@@ -134,7 +132,6 @@ fn refresh_generated_plugins_at(
 
 /// Rewrites and restarts the installed daemon service, returning the service
 /// path and its socket, or `None` when no service is installed.
-#[hotpath::measure]
 fn refresh_daemon_service(
     previous_state: daemon_control::DaemonServiceState,
 ) -> tracedecay_domain::errors::Result<Option<(PathBuf, PathBuf)>> {
@@ -150,7 +147,6 @@ fn refresh_daemon_service(
     refresh_daemon_service_with_spec(previous_state, &spec)
 }
 
-#[hotpath::measure]
 fn refresh_daemon_service_with_spec(
     previous_state: daemon_control::DaemonServiceState,
     spec: &daemon_control::DaemonServiceSpec,
@@ -167,7 +163,6 @@ fn refresh_daemon_service_with_spec(
     )
 }
 
-#[hotpath::measure]
 fn print_daemon_transport_location(socket_path: &Path) {
     if cfg!(windows) {
         if let Some(profile_root) = socket_path.parent() {
@@ -179,7 +174,6 @@ fn print_daemon_transport_location(socket_path: &Path) {
     }
 }
 
-#[hotpath::measure]
 fn refresh_daemon_service_after_update(
     previous_state: daemon_control::DaemonServiceState,
 ) -> tracedecay_domain::errors::Result<()> {
@@ -241,7 +235,6 @@ where
     refresh(daemon_control::DaemonServiceState::RunningEnabled)
 }
 
-#[hotpath::measure]
 pub(crate) fn restart_daemon_service() -> tracedecay_domain::errors::Result<()> {
     let guard = daemon_control::QuiescedDaemonLifecycle::acquire_with_timeout(
         "daemon restart",
@@ -286,7 +279,6 @@ pub(crate) fn restart_daemon_service() -> tracedecay_domain::errors::Result<()> 
     }
 }
 
-#[hotpath::measure]
 fn tracedecay_home_dir() -> tracedecay_domain::errors::Result<PathBuf> {
     tracedecay::agents::home_dir().ok_or_else(|| {
         tracedecay_domain::errors::TraceDecayError::Config {
@@ -295,7 +287,6 @@ fn tracedecay_home_dir() -> tracedecay_domain::errors::Result<PathBuf> {
     })
 }
 
-#[hotpath::measure]
 pub(crate) fn tracedecay_bin_on_path() -> tracedecay_domain::errors::Result<String> {
     tracedecay::agents::which_tracedecay().ok_or_else(|| {
         tracedecay_domain::errors::TraceDecayError::Config {
@@ -304,25 +295,21 @@ pub(crate) fn tracedecay_bin_on_path() -> tracedecay_domain::errors::Result<Stri
     })
 }
 
-#[hotpath::measure]
 fn tracedecay_bin_for_generated_artifacts() -> tracedecay_domain::errors::Result<String> {
     current_tracedecay_exe().map_or_else(tracedecay_bin_on_path, Ok)
 }
 
-#[hotpath::measure]
 fn current_tracedecay_exe() -> Option<String> {
     let current = std::env::current_exe().ok()?;
     current_tracedecay_exe_from(Some(&current))
 }
 
-#[hotpath::measure]
 fn current_tracedecay_exe_from(current: Option<&Path>) -> Option<String> {
     let current = current?;
     let stem = current.file_stem()?.to_str()?;
     (stem == "tracedecay").then(|| normalize_bin_path(current))
 }
 
-#[hotpath::measure]
 fn normalize_bin_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
@@ -349,7 +336,6 @@ pub(crate) enum RefreshPolicy {
 /// daemon validating the binary that actually starts. A tolerated
 /// ([`RefreshPolicy::AfterInstall`]) refresh failure does not erase that
 /// version: the new binary is installed regardless.
-#[hotpath::measure]
 pub(crate) fn run_install_then_refresh<U, P>(
     policy: RefreshPolicy,
     upgrade: U,
@@ -433,7 +419,6 @@ fn run_update_flow(
     )
 }
 
-#[hotpath::measure]
 fn combine_operation_and_restore<T>(
     operation: &str,
     operation_result: tracedecay_domain::errors::Result<T>,
@@ -499,13 +484,11 @@ fn prepare_post_update_lease(
 
 /// The binary to re-exec for `post-update`: freshly installed when reported,
 /// otherwise the currently running binary.
-#[hotpath::measure]
 fn post_update_binary(installed: Option<&Path>) -> tracedecay_domain::errors::Result<String> {
     let current = std::env::current_exe().ok();
     post_update_binary_from(installed, current.as_deref()).map_or_else(tracedecay_bin_on_path, Ok)
 }
 
-#[hotpath::measure]
 fn post_update_binary_from(installed: Option<&Path>, current: Option<&Path>) -> Option<String> {
     installed
         .filter(|path| path.exists())
@@ -513,7 +496,6 @@ fn post_update_binary_from(installed: Option<&Path>, current: Option<&Path>) -> 
         .or_else(|| current_tracedecay_exe_from(current))
 }
 
-#[hotpath::measure]
 fn run_post_update_subcommand(
     no_reinstall: bool,
     installed: Option<&Path>,
@@ -557,7 +539,6 @@ pub(crate) enum ReinstallOutcome {
 /// Partitions per-agent reinstall results into a [`ReinstallOutcome`]. A pure
 /// helper so the outcome logic is unit-testable without touching the real
 /// filesystem or agent registry.
-#[hotpath::measure]
 pub(crate) fn partition_reinstall_results(
     results: Vec<(
         String,
@@ -589,7 +570,6 @@ pub(crate) fn partition_reinstall_results(
 /// treat a failed save as advisory report the error, while `tracedecay
 /// reinstall` surfaces it because its explicit lifecycle result was not
 /// durably recorded.
-#[hotpath::measure]
 pub(crate) fn record_completed_reinstall_pass(
     config: &mut UserConfig,
 ) -> tracedecay_domain::errors::Result<()> {
@@ -613,7 +593,6 @@ pub(crate) fn record_completed_reinstall_pass(
 /// only record a completed full refresh when every agent that remains tracked
 /// was actually installed by this very pass. An empty tracked set is trivially
 /// covered: there is nothing left to refresh.
-#[hotpath::measure]
 pub(crate) fn install_pass_covers_tracked_agents(
     tracked: &[String],
     refreshed: &std::collections::BTreeSet<String>,
@@ -740,7 +719,6 @@ async fn run_post_update_mutations(
 /// shipped (or a body update applied since the last activation) still lands as
 /// a real, host-loadable `SKILL.md`. Fork-protected and best-effort: a failure
 /// here never fails the update.
-#[hotpath::measure]
 fn reconcile_materialized_managed_skills_after_update() {
     let Ok(profile_root) = tracedecay_runtime_core::storage::default_profile_root() else {
         return;

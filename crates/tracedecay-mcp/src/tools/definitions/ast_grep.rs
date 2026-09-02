@@ -15,7 +15,6 @@ pub struct AstGrepDiagnostics {
     pub message: String,
 }
 
-#[hotpath::measure]
 fn ast_grep_output_text(output: &std::process::Output) -> String {
     let mut text = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -29,7 +28,6 @@ fn ast_grep_output_text(output: &std::process::Output) -> String {
     text
 }
 
-#[hotpath::measure]
 fn parse_version_component(component: &str) -> Option<u64> {
     let digits = component
         .chars()
@@ -38,7 +36,6 @@ fn parse_version_component(component: &str) -> Option<u64> {
     (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
 }
 
-#[hotpath::measure]
 fn parse_ast_grep_version(text: &str) -> Option<(String, (u64, u64, u64))> {
     for token in text.split_whitespace() {
         let token = token
@@ -57,7 +54,6 @@ fn parse_ast_grep_version(text: &str) -> Option<(String, (u64, u64, u64))> {
     None
 }
 
-#[hotpath::measure]
 fn ast_grep_diagnostics_uncached() -> AstGrepDiagnostics {
     let version_output = match crate::host_cli::ast_grep_command()
         .arg("--version")
@@ -135,14 +131,12 @@ fn ast_grep_diagnostics_uncached() -> AstGrepDiagnostics {
     }
 }
 
-#[hotpath::measure]
 pub fn ast_grep_diagnostics() -> &'static AstGrepDiagnostics {
     use std::sync::OnceLock;
     static DIAGNOSTICS: OnceLock<AstGrepDiagnostics> = OnceLock::new();
     DIAGNOSTICS.get_or_init(ast_grep_diagnostics_uncached)
 }
 
-#[hotpath::measure]
 pub fn ast_grep_diagnostics_json() -> Value {
     let diagnostics = ast_grep_diagnostics();
     json!({
@@ -160,14 +154,12 @@ pub fn ast_grep_diagnostics_json() -> Value {
 /// Returns true when the external `ast-grep` binary is on PATH and responds to
 /// `--version`. Result is cached after the first check so we don't fork a
 /// subprocess on every `tools/list` request.
-#[hotpath::measure]
 pub fn ast_grep_available() -> bool {
     ast_grep_diagnostics().rewrite_available
 }
 
 /// Returns true when the external `ast-grep` CLI supports `outline` JSON output
 /// with the flags introduced in ast-grep 0.44.
-#[hotpath::measure]
 pub fn ast_grep_outline_available() -> bool {
     ast_grep_diagnostics().outline_available
 }

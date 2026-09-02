@@ -60,7 +60,6 @@ struct ProjectMemorySearchWhy {
     retrieval_count: u64,
 }
 
-#[hotpath::measure_all]
 impl ProjectMemorySearchWhy {
     fn render(&self) -> String {
         format!(
@@ -76,7 +75,6 @@ impl ProjectMemorySearchWhy {
     }
 }
 
-#[hotpath::measure]
 fn project_memory_search_scores(
     query_tokens: &[String],
     encoder: &HolographicEncoder,
@@ -127,7 +125,6 @@ fn project_memory_search_scores(
 /// The comparator and the cursor predicate are one unit and must stay that
 /// way: a cursor is only resumable against the exact order it was cut from, so
 /// every paged canonical search shares this single definition.
-#[hotpath::measure]
 fn rank_and_seek(
     ranked: &mut Vec<(ProjectMemoryFactSearchHitV1, UtcMicros)>,
     after: Option<&ProjectMemoryFactSearchCursorV1>,
@@ -458,7 +455,6 @@ async fn project_memory_graph_assist(
     })
 }
 
-#[hotpath::measure]
 pub(super) fn project_memory_graph_degradation(
     error: &FactStoreError,
 ) -> Option<ProjectMemoryFactSearchGraphDegradationV1> {
@@ -695,7 +691,6 @@ impl From<&ProjectMemoryFactRetrievalReceiptV1> for ProjectMemoryFactRetrievalRe
     }
 }
 
-#[hotpath::measure]
 fn invalid_project_memory_retrieval_receipt() -> FactStoreError {
     FactStoreError::Contract(DomainError::NonCanonical {
         field: "project memory fact retrieval operation receipt",

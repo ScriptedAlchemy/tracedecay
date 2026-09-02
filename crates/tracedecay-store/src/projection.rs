@@ -32,7 +32,6 @@ pub struct ProjectionProvenance {
     receipt: SanitizationReceiptRefV1,
 }
 
-#[hotpath::measure_all]
 impl ProjectionProvenance {
     fn for_observation(observation: &DurableObservationV1) -> ProjectionStoreResult<Self> {
         Ok(Self {
@@ -83,7 +82,6 @@ pub enum ProjectionSkipReason {
     SanitizationRefused,
 }
 
-#[hotpath::measure_all]
 impl ProjectionSkipReason {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -117,7 +115,6 @@ pub enum ObservationProjection {
     Skipped(ProjectionSkipReason),
 }
 
-#[hotpath::measure_all]
 impl ObservationProjection {
     pub fn message(&self) -> Option<&SessionMessageProjection> {
         match self {
@@ -269,7 +266,6 @@ impl PartialEq for SessionMessageProjection {
 
 impl Eq for SessionMessageProjection {}
 
-#[hotpath::measure_all]
 impl SessionMessageProjection {
     pub fn session(&self) -> &SessionRecord {
         &self.session
@@ -300,7 +296,6 @@ impl SessionMessageProjection {
     }
 }
 
-#[hotpath::measure]
 fn message_output_digest(
     session: &SessionRecord,
     message: &SessionMessageRecord,
@@ -360,7 +355,6 @@ impl PartialEq for WorkflowFactProjection {
 
 impl Eq for WorkflowFactProjection {}
 
-#[hotpath::measure_all]
 impl WorkflowFactProjection {
     fn new(
         provenance: ProjectionProvenance,
@@ -398,7 +392,6 @@ impl WorkflowFactProjection {
     }
 }
 
-#[hotpath::measure]
 fn workflow_fact_output_digest(
     session: &SessionRecord,
     fact: &WorkflowFactRecord,
@@ -439,7 +432,6 @@ pub struct ProjectionCheckpoint {
     last_sequence: u64,
 }
 
-#[hotpath::measure_all]
 impl ProjectionCheckpoint {
     pub fn new(last_sequence: u64) -> Self {
         Self { last_sequence }
@@ -470,7 +462,6 @@ pub struct ProjectedObservation {
     output_count: usize,
 }
 
-#[hotpath::measure_all]
 impl ProjectedObservation {
     pub fn new(checkpoint: ProjectionCheckpoint, output_count: usize) -> Self {
         Self {
@@ -488,7 +479,6 @@ impl ProjectedObservation {
     }
 }
 
-#[hotpath::measure_all]
 impl ProjectionPersistOutcome {
     pub fn checkpoint(&self) -> &ProjectionCheckpoint {
         match self {
@@ -518,7 +508,6 @@ pub enum ProjectionPredecessorConvergence {
     RebuildRequired(ProjectionRebuildOutcome),
 }
 
-#[hotpath::measure_all]
 impl ProjectionPredecessorConvergence {
     pub fn rebuild(&self) -> Option<&ProjectionRebuildOutcome> {
         match self {
@@ -528,7 +517,6 @@ impl ProjectionPredecessorConvergence {
     }
 }
 
-#[hotpath::measure_all]
 impl ProjectionRebuildOutcome {
     pub fn new(
         checkpoint: ProjectionCheckpoint,
@@ -624,7 +612,6 @@ pub enum ProjectionStoreError {
     },
 }
 
-#[hotpath::measure_all]
 impl ProjectionStoreError {
     pub fn durable_detail(&self) -> String {
         let mut detail = self.to_string();

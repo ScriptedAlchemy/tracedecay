@@ -26,7 +26,6 @@ const DEFAULT_TODO_KINDS: &[&str] = &[
 
 /// True if `text` contains `marker` as a standalone uppercase word
 /// (case-insensitive, surrounded by non-alphanumeric characters or string ends).
-#[hotpath::measure]
 fn contains_marker_word(text: &str, marker: &str) -> Option<usize> {
     let lower = text.to_ascii_lowercase();
     let marker_lower = marker.to_ascii_lowercase();

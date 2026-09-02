@@ -60,7 +60,6 @@ pub struct WorkEvidenceExpansionV1 {
     observed_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl WorkEvidenceExpansionV1 {
     pub fn new(
         link: TaskEvidenceLinkV1,
@@ -390,7 +389,6 @@ where
 // enter through the mounted mutation path (`DecideWorkProposalRequestV1`
 // in `mutation.rs`).
 
-#[hotpath::measure]
 fn authorize_port_context<A: WorkProductOwnerAuthorizationPortV1>(
     context: &RequestContext,
     binding: &WorkProductBindingV1,
@@ -429,7 +427,6 @@ fn authorize_port_context<A: WorkProductOwnerAuthorizationPortV1>(
     ))
 }
 
-#[hotpath::measure]
 fn selected_relations(
     selection: &WorkProductSelectionScopeV1,
 ) -> Vec<tracedecay_domain::WorkProductAuthorizedRelationScopeV1> {
@@ -438,7 +435,6 @@ fn selected_relations(
         .map_or_else(Vec::new, |relations| relations.iter().cloned().collect())
 }
 
-#[hotpath::measure]
 fn evidence_is_canonical_within_limit(evidence: &WorkTaskEvidenceV1, limit: u32) -> bool {
     if evidence.links().len() > limit as usize
         || evidence.validate().is_err()
@@ -458,7 +454,6 @@ fn evidence_is_canonical_within_limit(evidence: &WorkTaskEvidenceV1, limit: u32)
     .is_ok_and(|canonical| canonical == *evidence)
 }
 
-#[hotpath::measure]
 fn task_evidence_link_is_canonical(link: &TaskEvidenceLinkV1) -> bool {
     TaskEvidenceLinkV1::new(
         link.link_id().clone(),
@@ -471,7 +466,6 @@ fn task_evidence_link_is_canonical(link: &TaskEvidenceLinkV1) -> bool {
     .is_ok_and(|canonical| canonical == *link)
 }
 
-#[hotpath::measure]
 fn map_evidence_error(error: WorkEvidenceReadPortErrorV1) -> WorkProductApplicationErrorV1 {
     match error {
         WorkEvidenceReadPortErrorV1::NotFoundOrNotAuthorized => {

@@ -21,7 +21,6 @@ pub struct FeedbackAdvisoryCycleSurfaceRequestV1 {
     pub document_uri: String,
 }
 
-#[hotpath::measure_all]
 impl FeedbackAdvisoryCycleSurfaceRequestV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         if self.document_uri.is_empty()

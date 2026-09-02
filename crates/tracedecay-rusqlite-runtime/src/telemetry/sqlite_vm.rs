@@ -16,7 +16,6 @@ thread_local! {
     }) };
 }
 
-#[hotpath::measure]
 pub(crate) fn observe_statement(statement: &Statement<'_>) {
     let delta = SqliteVmSnapshot {
         fullscan_steps: take_status(statement, StatementStatus::FullscanStep),
@@ -26,17 +25,14 @@ pub(crate) fn observe_statement(statement: &Statement<'_>) {
     OBSERVED.with(|cell| cell.set(cell.get().saturating_add(delta)));
 }
 
-#[hotpath::measure]
 pub(crate) fn take_observed_vm() -> SqliteVmSnapshot {
     OBSERVED.with(|cell| cell.replace(SqliteVmSnapshot::default()))
 }
 
-#[hotpath::measure]
 fn take_status(statement: &Statement<'_>, status: StatementStatus) -> u64 {
     i32_to_u64(statement.reset_status(status))
 }
 
-#[hotpath::measure]
 fn i32_to_u64(value: i32) -> u64 {
     u64::try_from(value.max(0)).unwrap_or(u64::MAX)
 }

@@ -23,7 +23,6 @@ struct ProfileAuthorityPinToken {
     token: u64,
 }
 
-#[hotpath::measure_all]
 impl ProfileAuthorityPin {
     pub fn binding(&self) -> &StoreRuntimeBindingV1 {
         &self.inner.binding
@@ -89,7 +88,6 @@ pub enum StoreRuntimeAccessMode {
     ReadWrite,
 }
 
-#[hotpath::measure_all]
 impl StoreRuntimeOpenRequest {
     pub fn new_authorized(
         shard_id: StoreShardIdV1,
@@ -192,7 +190,6 @@ pub enum ProfileAuthorityPinResult {
     Rejected(StoreRuntimeRegistryFailure),
 }
 
-#[hotpath::measure_all]
 impl StoreRuntimeRegistry {
     #[hotpath::measure(label = "runtime_core.registry.lease_acquire")]
     pub fn acquire_lease(&self, lease: RuntimeLeaseV1) -> StoreRuntimeLeaseAcquireResult {
@@ -367,7 +364,6 @@ impl StoreRuntimeRegistry {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn validate_profile_authority(
     registry: &StoreRuntimeRegistry,
     state: &RegistryState,
@@ -418,7 +414,6 @@ pub(super) fn validate_profile_authority(
     require_ready_profile_runtime(state, actual)
 }
 
-#[hotpath::measure]
 fn require_ready_profile_runtime(
     state: &RegistryState,
     binding: &StoreRuntimeBindingV1,

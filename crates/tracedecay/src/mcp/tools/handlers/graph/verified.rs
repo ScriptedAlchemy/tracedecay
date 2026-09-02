@@ -140,7 +140,6 @@ pub(super) fn append_verified_plan_context(
     Ok(())
 }
 
-#[hotpath::measure]
 fn field_str<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
     value.get(key).and_then(Value::as_str).ok_or_else(|| {
         graph_symbol_corrupt(format!(
@@ -149,7 +148,6 @@ fn field_str<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
     })
 }
 
-#[hotpath::measure]
 fn field_i64(value: &Value, key: &str) -> Result<i64> {
     value.get(key).and_then(Value::as_i64).ok_or_else(|| {
         graph_symbol_corrupt(format!(

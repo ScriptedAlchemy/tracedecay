@@ -39,7 +39,6 @@ pub(super) struct ComposedSemanticActivationV1 {
     pub(super) rollback_profile_id: Option<String>,
 }
 
-#[hotpath::measure_all]
 impl DaemonInvocationService {
     #[allow(clippy::too_many_arguments)]
     #[hotpath::measure(label = "daemon.service.semantic.activate", future = true)]
@@ -262,7 +261,6 @@ impl DaemonInvocationService {
 
 /// Map the model lifecycle onto the material an activation needs, or the
 /// typed refusal naming the state that blocks it.
-#[hotpath::measure]
 pub(super) fn semantic_activation_material(
     lifecycle: Option<&SemanticModelLifecycleStatusV1>,
 ) -> Result<InstalledSemanticModelMaterialV1, ApplicationProblem> {
@@ -296,7 +294,6 @@ pub(super) fn semantic_activation_material(
     }
 }
 
-#[hotpath::measure]
 fn lifecycle_state_label(state: &SemanticModelLifecycleStateV1) -> &'static str {
     match state {
         SemanticModelLifecycleStateV1::SelectedNotDownloaded { .. } => "selected_not_downloaded",
@@ -310,7 +307,6 @@ fn lifecycle_state_label(state: &SemanticModelLifecycleStateV1) -> &'static str 
     }
 }
 
-#[hotpath::measure]
 fn semantic_activation_model_problem(message: &str) -> ApplicationProblem {
     ApplicationProblem::unavailable(SafeDiagnostic {
         code: "semantic_activation.model_not_installed".to_owned(),
@@ -323,7 +319,6 @@ fn semantic_activation_model_problem(message: &str) -> ApplicationProblem {
 /// Everything except the profile selection is preserved. The rollback slot
 /// only ever holds a selection that differs from the new active one, because
 /// the configuration contract rejects `active_profile == rollback_profile`.
-#[hotpath::measure]
 pub(super) fn compose_activated_semantic_config(
     current: &SemanticConfig,
     evaluated_profile_id: &str,

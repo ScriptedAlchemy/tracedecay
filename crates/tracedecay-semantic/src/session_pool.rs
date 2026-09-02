@@ -69,7 +69,6 @@ struct LoadInterruptionSignalV1 {
     state: AtomicU8,
 }
 
-#[hotpath::measure_all]
 impl LoadInterruptionSignalV1 {
     /// Record the first interruption; later signals keep the original cause.
     fn fire(&self, interruption: SemanticExecutionInterruptionV1) {
@@ -319,7 +318,6 @@ impl<S> Default for PoolState<S> {
     }
 }
 
-#[hotpath::measure_all]
 impl<S> PoolState<S> {
     fn idle_sessions(&self) -> usize {
         self.idle.values().map(Vec::len).sum()
@@ -356,7 +354,6 @@ struct PoolInner<R: EmbeddingRuntime, C: MonotonicClock> {
     wakeups: Condvar,
 }
 
-#[hotpath::measure_all]
 impl<R: EmbeddingRuntime, C: MonotonicClock> PoolInner<R, C> {
     fn lock_state(&self) -> MutexGuard<'_, PoolState<R::Session>> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
@@ -378,7 +375,6 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> Clone for SessionPool<R, C> {
     }
 }
 
-#[hotpath::measure_all]
 impl<R, C> SessionPool<R, C>
 where
     R: EmbeddingRuntime + Send + Sync + 'static,
@@ -1030,7 +1026,6 @@ pub struct PooledSession<R: EmbeddingRuntime, C: MonotonicClock> {
     resident_bytes: u64,
 }
 
-#[hotpath::measure_all]
 impl<R: EmbeddingRuntime, C: MonotonicClock> PooledSession<R, C> {
     pub fn identity(&self) -> &SessionIdentityV1 {
         &self.identity

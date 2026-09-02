@@ -273,7 +273,6 @@ pub enum RegisteredRetainedRequestContextError {
     Runtime(TraceDecayError),
 }
 
-#[hotpath::measure]
 fn retained_request_admission_problem(admission: RequestAdmission) -> Option<ApplicationProblem> {
     match admission {
         RequestAdmission::Admitted => None,
@@ -356,7 +355,6 @@ impl Default for DaemonInvocationService {
     }
 }
 
-#[hotpath::measure_all]
 impl DaemonInvocationService {
     pub fn with_code_index_schedulers(
         code_index_schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,

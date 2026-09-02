@@ -292,7 +292,6 @@ pub struct WorkAttemptEvidenceRecordV1 {
     pub observed_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl WorkAttemptEvidenceRecordV1 {
     pub fn digest(&self) -> Result<ManifestDigest, ApplicationProblem> {
         canonical_sha256(&(WORK_ATTEMPT_EVIDENCE_DOMAIN, self)).map_err(|_| {
@@ -1025,7 +1024,6 @@ where
 /// wall clock stays with the daemon's `future = true` run span; this is the
 /// per-transition decision record the flat aggregation cannot infer from
 /// entry-point call counts alone.
-#[hotpath::measure]
 fn observe_attempt_state_entered(previous: &WorkAttemptV1, next: &WorkAttemptV1) {
     #[cfg(feature = "hotpath")]
     {
@@ -1061,7 +1059,6 @@ fn observe_attempt_state_entered(previous: &WorkAttemptV1, next: &WorkAttemptV1)
 /// Refuses a caller-provided execution snapshot that does not agree with the
 /// registered topology authority. Both ordinary and synthesis admission call
 /// this before a provider lease can be observed by the daemon.
-#[hotpath::measure]
 pub fn require_registered_work_topology(
     snapshot: &WorkExecutionSnapshot,
     registered_topology: &WorkTopologyPolicyV1,
@@ -1075,7 +1072,6 @@ pub fn require_registered_work_topology(
     ))
 }
 
-#[hotpath::measure]
 fn terminal_for_outcome(
     outcome: &WorkAttemptProviderOutcomeV1,
     digest: ManifestDigest,
@@ -1106,7 +1102,6 @@ fn terminal_for_outcome(
     }
 }
 
-#[hotpath::measure]
 fn cancellation_request(state: &WorkCancellationStateV1) -> Option<&WorkCancellationRequestV1> {
     match state {
         WorkCancellationStateV1::None => None,
@@ -1118,7 +1113,6 @@ fn cancellation_request(state: &WorkCancellationStateV1) -> Option<&WorkCancella
     }
 }
 
-#[hotpath::measure]
 fn admit(context: &RequestContext, observed_at: UtcMicros) -> Result<(), ApplicationProblem> {
     match context.admission_at(observed_at) {
         RequestAdmission::Admitted => Ok(()),

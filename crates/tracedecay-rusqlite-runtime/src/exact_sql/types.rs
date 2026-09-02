@@ -20,7 +20,6 @@ pub enum ExactSqlValue {
     Blob(Vec<u8>),
 }
 
-#[hotpath::measure_all]
 impl ExactSqlValue {
     pub(super) fn into_rusqlite(self) -> Value {
         match self {
@@ -67,7 +66,6 @@ pub struct ExactSqlStatement {
     pub params: Vec<ExactSqlValue>,
 }
 
-#[hotpath::measure_all]
 impl ExactSqlStatement {
     pub fn new(sql: String, params: Vec<ExactSqlValue>) -> Result<Self, ExactSqlError> {
         let statement = Self { sql, params };
@@ -108,7 +106,6 @@ pub struct ExactSqlAttachment {
     database_name: String,
 }
 
-#[hotpath::measure_all]
 impl ExactSqlAttachment {
     pub fn new(
         filename: impl Into<String>,
@@ -137,7 +134,6 @@ impl ExactSqlAttachment {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn valid_database_name(value: &str) -> bool {
     let mut chars = value.chars();
     chars
@@ -189,7 +185,6 @@ pub(crate) enum SqlRequest {
     ExecuteBatch(String),
 }
 
-#[hotpath::measure_all]
 impl SqlRequest {
     pub(super) fn intent(&self) -> ExactSqlWriteIntent {
         match self {

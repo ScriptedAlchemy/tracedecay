@@ -25,7 +25,6 @@ use tracedecay_domain::canonical_text::{canonical_framed_sha256, sha256_hex};
 /// silently mint colliding ids. The framing is the domain's
 /// [`canonical_framed_sha256`] with the first part as the domain separator,
 /// so derived ids already on disk are unchanged.
-#[hotpath::measure]
 pub(crate) fn length_prefixed_sha256_hex(parts: &[&[u8]]) -> String {
     match parts.split_first() {
         Some((domain, rest)) => canonical_framed_sha256(domain, rest),

@@ -29,7 +29,6 @@ struct PackedNgramPage {
     sorted: bool,
 }
 
-#[hotpath::measure_all]
 impl PackedNgramPage {
     fn try_new(capacity: usize) -> Result<Self, String> {
         debug_assert!((1..=NGRAM_PAGE_ENTRY_CAPACITY).contains(&capacity));
@@ -80,7 +79,6 @@ impl PackedNgramPage {
     }
 }
 
-#[hotpath::measure_all]
 impl ByteNgramPostings {
     pub(super) fn insert_document(
         &mut self,
@@ -301,7 +299,6 @@ pub(super) struct ByteNgramBudget {
     maximum_bytes: usize,
 }
 
-#[hotpath::measure_all]
 impl ByteNgramBudget {
     #[hotpath::skip]
     pub(super) const fn new(maximum_bytes: usize) -> Self {
@@ -361,7 +358,6 @@ impl ByteNgramBudget {
     }
 }
 
-#[hotpath::measure]
 fn pack_byte_ngram(bytes: &[u8]) -> u32 {
     debug_assert!((1..=3).contains(&bytes.len()));
     bytes
@@ -372,17 +368,14 @@ fn pack_byte_ngram(bytes: &[u8]) -> u32 {
         })
 }
 
-#[hotpath::measure]
 fn pack_posting(ngram: u32, document: u32) -> u64 {
     (u64::from(ngram) << 32) | u64::from(document)
 }
 
-#[hotpath::measure]
 fn unpack_ngram(posting: u64) -> u32 {
     (posting >> 32) as u32
 }
 
-#[hotpath::measure]
 fn unpack_document(posting: u64) -> u32 {
     posting as u32
 }

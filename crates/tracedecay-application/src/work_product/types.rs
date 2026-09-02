@@ -70,7 +70,6 @@ pub struct AuthorizedWorkProductScopeV1 {
     selection: WorkProductSelectionScopeV1,
 }
 
-#[hotpath::measure_all]
 impl AuthorizedWorkProductScopeV1 {
     pub fn new(
         owner_brain_id: BrainId,
@@ -151,7 +150,6 @@ pub struct WorkProductBindingV1 {
     use_case_id: UseCaseId,
 }
 
-#[hotpath::measure_all]
 impl WorkProductBindingV1 {
     #[hotpath::skip]
     pub const fn new(capability_id: CapabilityId, use_case_id: UseCaseId) -> Self {
@@ -182,7 +180,6 @@ pub struct VerifiedWorkGraphVersionV1 {
     recovered_graph_digest: ManifestDigest,
 }
 
-#[hotpath::measure_all]
 impl VerifiedWorkGraphVersionV1 {
     pub fn new(
         graph_version: WorkGraphVersionV1,
@@ -235,7 +232,6 @@ pub struct WorkProductPortContextV1 {
     observed_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl WorkProductPortContextV1 {
     pub(crate) fn from_request(
         context: &RequestContext,

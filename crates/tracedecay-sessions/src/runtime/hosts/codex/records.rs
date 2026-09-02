@@ -22,7 +22,6 @@ const TOOL_EVENT_PREVIEW_BYTES: usize = 2000;
 
 /// Map one rollout line to a provider-neutral message, or `None` for non-message
 /// events (`response_item`, tool calls, token counts, …).
-#[hotpath::measure]
 pub(super) fn message_from_line(
     record: &Value,
     meta: &CodexMeta,
@@ -75,7 +74,6 @@ pub(super) fn message_from_line(
     })
 }
 
-#[hotpath::measure]
 pub(super) fn response_item_goal_context_from_line(
     record: &Value,
     meta: &CodexMeta,
@@ -114,7 +112,6 @@ pub(super) fn response_item_goal_context_from_line(
     ))
 }
 
-#[hotpath::measure]
 pub(super) fn response_item_tool_event_from_line(
     record: &Value,
     meta: &CodexMeta,
@@ -187,7 +184,6 @@ pub(super) fn response_item_tool_event_from_line(
     })
 }
 
-#[hotpath::measure]
 pub(super) fn response_item_tool_name(payload: &Value, response_item_type: &str) -> Option<String> {
     payload
         .get("name")
@@ -200,7 +196,6 @@ pub(super) fn response_item_tool_name(payload: &Value, response_item_type: &str)
         })
 }
 
-#[hotpath::measure]
 fn response_item_tool_call_text(
     response_item_type: &str,
     tool_name: Option<&str>,
@@ -226,7 +221,6 @@ fn response_item_tool_call_text(
 /// Byte length of a tool call's arguments payload (`arguments`/`input`/`action`,
 /// whichever is present) after compact serialization. Returns `None` when the
 /// item carries no argument payload.
-#[hotpath::measure]
 fn response_item_arguments_bytes(payload: &Value) -> Option<usize> {
     payload
         .get("arguments")
@@ -236,7 +230,6 @@ fn response_item_arguments_bytes(payload: &Value) -> Option<usize> {
         .map(|arguments| arguments.len())
 }
 
-#[hotpath::measure]
 fn response_item_tool_output_text(payload: &Value, output: Option<&str>) -> Option<String> {
     let call_id = payload
         .get("call_id")
@@ -252,14 +245,12 @@ fn response_item_tool_output_text(payload: &Value, output: Option<&str>) -> Opti
     ))
 }
 
-#[hotpath::measure]
 fn response_item_reasoning_summary_text(payload: &Value) -> Option<String> {
     let summary = payload.get("summary")?;
     let text = collect_response_item_text(summary);
     (!text.trim().is_empty()).then(|| format!("Codex reasoning summary:\n{text}"))
 }
 
-#[hotpath::measure]
 fn compact_response_item_value(value: &Value) -> String {
     value.as_str().map_or_else(
         || serde_json::to_string(value).unwrap_or_else(|_| value.to_string()),
@@ -267,7 +258,6 @@ fn compact_response_item_value(value: &Value) -> String {
     )
 }
 
-#[hotpath::measure]
 pub(super) fn response_item_tool_metadata(
     response_item_type: &str,
     payload: &Value,
@@ -322,7 +312,6 @@ pub(super) fn response_item_tool_metadata(
     Value::Object(metadata)
 }
 
-#[hotpath::measure]
 fn goal_context_message(
     meta: &CodexMeta,
     model: Option<&str>,
@@ -349,7 +338,6 @@ fn goal_context_message(
     }
 }
 
-#[hotpath::measure]
 pub(super) fn collect_response_item_text(value: &Value) -> String {
     match value {
         Value::String(text) => text.clone(),
@@ -374,7 +362,6 @@ pub(super) fn collect_response_item_text(value: &Value) -> String {
     }
 }
 
-#[hotpath::measure]
 pub(super) fn timestamp_from_record(record: &Value) -> Option<i64> {
     record
         .get("timestamp")
@@ -383,7 +370,6 @@ pub(super) fn timestamp_from_record(record: &Value) -> Option<i64> {
         .map(|secs| secs as i64)
 }
 
-#[hotpath::measure]
 pub(super) fn compacted_summary_from_line(
     record: &Value,
     meta: &CodexMeta,
@@ -479,7 +465,6 @@ pub(super) fn compacted_summary_from_line(
     })
 }
 
-#[hotpath::measure]
 fn message_metadata(payload: &Value, goal_context: Option<&CodexGoalContext>) -> Value {
     let mut metadata = serde_json::Map::new();
     metadata.insert(

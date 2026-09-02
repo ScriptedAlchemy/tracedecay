@@ -38,7 +38,6 @@ enum DashboardLcmRequestAdmissionErrorV1 {
     Unavailable(&'static str),
 }
 
-#[hotpath::measure_all]
 impl DashboardLcmRequestAdmissionErrorV1 {
     #[hotpath::skip]
     const fn read_state_and_reason(self) -> (DashboardLcmReadStateV1, &'static str) {
@@ -65,7 +64,6 @@ pub(crate) struct DashboardLcmReadAdapter {
     project_id: String,
 }
 
-#[hotpath::measure_all]
 impl DashboardLcmReadAdapter {
     pub(crate) fn new(
         retrieval: Arc<dyn SessionApplicationRetrievalPortV1>,
@@ -669,7 +667,6 @@ impl DashboardLcmReadAdapter {
     }
 }
 
-#[hotpath::measure]
 fn cursor_manifest_not_ready(
     kind: tracedecay_domain::CursorManifestLimitKindV1,
 ) -> (DashboardLcmReadStateV1, &'static str) {
@@ -741,7 +738,6 @@ impl DashboardLcmReadPortV1 for DashboardLcmReadAdapter {
     }
 }
 
-#[hotpath::measure]
 fn not_ready(state: DashboardLcmReadStateV1, reason: &str) -> DashboardLcmReadOutcomeV1 {
     DashboardLcmReadOutcomeV1::NotReady {
         state,
@@ -749,13 +745,11 @@ fn not_ready(state: DashboardLcmReadStateV1, reason: &str) -> DashboardLcmReadOu
     }
 }
 
-#[hotpath::measure]
 fn wrong_scope_not_ready() -> DashboardLcmReadOutcomeV1 {
     let (state, reason) = wrong_scope_error();
     not_ready(state, reason)
 }
 
-#[hotpath::measure]
 fn wrong_scope_error() -> (DashboardLcmReadStateV1, &'static str) {
     (
         DashboardLcmReadStateV1::Unavailable,
@@ -763,7 +757,6 @@ fn wrong_scope_error() -> (DashboardLcmReadStateV1, &'static str) {
     )
 }
 
-#[hotpath::measure]
 fn initial_cursor(request: &DashboardLcmReadRequestV1) -> Option<String> {
     match request {
         DashboardLcmReadRequestV1::Search { cursor, .. }
@@ -774,7 +767,6 @@ fn initial_cursor(request: &DashboardLcmReadRequestV1) -> Option<String> {
     }
 }
 
-#[hotpath::measure]
 fn retrieval_query(
     request: &DashboardLcmReadRequestV1,
     cursor: Option<String>,

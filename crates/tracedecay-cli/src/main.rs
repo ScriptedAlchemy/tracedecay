@@ -70,7 +70,6 @@ mod workflow_command;
 use cli::*;
 use tracedecay::daemon::StderrTracingDefault;
 
-#[hotpath::measure]
 pub(crate) fn current_unix_timestamp() -> i64 {
     tracedecay::tracedecay::current_timestamp()
 }
@@ -85,7 +84,6 @@ pub(crate) struct Spinner {
     interactive: bool,
 }
 
-#[hotpath::measure_all]
 impl Spinner {
     pub(crate) fn new() -> Self {
         let message = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
@@ -189,6 +187,11 @@ impl Drop for Spinner {
 /// an explicit stack size gives every platform the same headroom.
 const ASYNC_STACK_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ASYNC_WORKER_THREADS: usize = 16;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AsyncRuntimeFlavor {
+    CurrentThread,
+    MultiThread,
+}
 #[cfg(feature = "hotpath")]
 const HOTPATH_OUTPUT_FORMAT_ENV: &str = "HOTPATH_OUTPUT_FORMAT";
 #[cfg(feature = "hotpath")]
@@ -202,11 +205,21 @@ const DEFAULT_MAX_DAEMON_CPU_THREADS: usize = 16;
 const DAEMON_CPU_THREADS_ENV: &str = "TRACEDECAY_DAEMON_CPU_THREADS";
 const RAYON_NUM_THREADS_ENV: &str = "RAYON_NUM_THREADS";
 
-#[hotpath::measure]
 fn async_worker_threads() -> usize {
     std::thread::available_parallelism()
         .map_or(1, usize::from)
         .clamp(1, MAX_ASYNC_WORKER_THREADS)
+}
+
+fn async_runtime_flavor(command: Option<&Commands>) -> AsyncRuntimeFlavor {
+    match command {
+        // `tool` is a one-shot daemon client. A multi-thread runtime eagerly
+        // starts up to 16 workers even though the command drives one socket
+        // request and exits; the current thread already has a fixed 16 MiB
+        // stack and Tokio's blocking pool remains available when needed.
+        Some(Commands::Tool { .. }) => AsyncRuntimeFlavor::CurrentThread,
+        _ => AsyncRuntimeFlavor::MultiThread,
+    }
 }
 
 /// Keep enough bounded blocking workers to run every admitted background CPU
@@ -214,7 +227,6 @@ fn async_worker_threads() -> usize {
 /// profile-scoped worker plan is installed, using the host width is the safe
 /// upper bound for any later exact plan. The result is host-bounded: it is at
 /// most `available + MIN_SERVING_BLOCKING_RESERVE`.
-#[hotpath::measure]
 fn tokio_blocking_thread_limit() -> usize {
     let available = std::thread::available_parallelism().map_or(1, usize::from);
     let effective = tracedecay::code_index::parallelism::installed_worker_status()
@@ -223,7 +235,6 @@ fn tokio_blocking_thread_limit() -> usize {
     tokio_blocking_thread_limit_from(available, effective)
 }
 
-#[hotpath::measure]
 fn tokio_blocking_thread_limit_from(available: usize, effective_workers: usize) -> usize {
     let available = available.max(1);
     let effective_workers = effective_workers.clamp(1, available);
@@ -256,7 +267,6 @@ mod blocking_thread_limit_tests {
     }
 }
 
-#[hotpath::measure]
 fn daemon_cpu_threads_from(
     available: usize,
     configured: Option<(&str, &str)>,
@@ -273,7 +283,6 @@ fn daemon_cpu_threads_from(
     }
 }
 
-#[hotpath::measure]
 fn is_daemon_run(command: Option<&Commands>) -> bool {
     matches!(
         command,
@@ -283,7 +292,6 @@ fn is_daemon_run(command: Option<&Commands>) -> bool {
     )
 }
 
-#[hotpath::measure]
 fn install_daemon_cpu_pool(command: Option<&Commands>) -> tracedecay_domain::errors::Result<()> {
     if !is_daemon_run(command) {
         return Ok(());
@@ -319,7 +327,6 @@ enum CommandOutcome {
     Exit(i32),
 }
 
-#[hotpath::measure]
 fn process_exit_code(code: i32) -> ExitCode {
     ExitCode::from(u8::try_from(code).unwrap_or(1))
 }
@@ -371,7 +378,6 @@ fn hotpath_requires_protocol_safe_output(
 }
 
 #[cfg(feature = "hotpath")]
-#[hotpath::measure]
 fn configure_hotpath_output(args: &[std::ffi::OsString]) -> Result<(), String> {
     let hook_protocol = hook_capture_cmd::is_hook_protocol_invocation(args);
     if hook_protocol {
@@ -439,7 +445,6 @@ fn configure_hotpath_output(args: &[std::ffi::OsString]) -> Result<(), String> {
 }
 
 #[cfg(feature = "hotpath")]
-#[hotpath::measure]
 fn hotpath_guard() -> hotpath::HotpathGuard {
     // The CPU report section autospawns an external `hotpath-samply`/`samply`
     // profiler that SIGSTOPs this process while it attaches perf sampling and
@@ -460,7 +465,6 @@ struct ProcessHotpathGuard {
 }
 
 #[cfg(feature = "hotpath")]
-#[hotpath::measure_all]
 impl ProcessHotpathGuard {
     #[hotpath::measure(label = "cli.hotpath.install_shutdown_finalizer")]
     fn install(guard: hotpath::HotpathGuard) -> Result<Self, String> {
@@ -491,7 +495,6 @@ impl Drop for ProcessHotpathGuard {
     }
 }
 
-#[hotpath::measure]
 fn main() -> ExitCode {
     let args = std::env::args_os().collect::<Vec<_>>();
     #[cfg(feature = "hotpath")]
@@ -545,7 +548,6 @@ fn main() -> ExitCode {
     }
 }
 
-#[hotpath::measure]
 fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
     // This binary is the sole generator of source provenance and the embedded
     // dashboard bundle; the composition library reads both through this
@@ -555,8 +557,11 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
     // the composition root. Must precede argument parsing: hook, install, and
     // ingest paths all read these slots, and an unregistered slot fails quietly
     // (no LCM redaction, no memory injection, zero turn costs) rather than
-    // loudly.
-    tracedecay::register_runtime_ports()?;
+    // loudly. The agent-host MCP catalog is the one exception: assembling all
+    // schemas costs hundreds of milliseconds and `tool` resolves its selected
+    // operation directly, so that port is installed only after parsing proves
+    // another command needs the eager catalog check.
+    tracedecay::register_runtime_ports_without_mcp_tool_catalog();
     let args: Vec<String> = std::env::args().collect();
     #[cfg(feature = "hotpath")]
     if let Some(command) = args.get(1) {
@@ -577,7 +582,7 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
     };
     #[cfg(feature = "hotpath")]
     let command_name = command_profile_label(&matches);
-    let cli = match Cli::from_arg_matches(&matches) {
+    let mut cli = match Cli::from_arg_matches(&matches) {
         Ok(cli) => cli,
         Err(error) => {
             let code = error.exit_code();
@@ -585,6 +590,10 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
             return Ok(CommandOutcome::Exit(code));
         }
     };
+    normalize_tool_reserved_global_flags(&mut cli);
+    if requires_eager_mcp_tool_catalog(cli.command.as_ref()) {
+        tracedecay::agents::register_mcp_tool_catalog_ports()?;
+    }
     if let Some(Commands::Daemon {
         action:
             DaemonAction::Run {
@@ -617,18 +626,29 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
         "daemon_cpu_pool_install",
         install_daemon_cpu_pool(cli.command.as_ref())
     )?;
-    let worker_threads = async_worker_threads();
+    let runtime_flavor = async_runtime_flavor(cli.command.as_ref());
+    let worker_threads = match runtime_flavor {
+        AsyncRuntimeFlavor::CurrentThread => 1,
+        AsyncRuntimeFlavor::MultiThread => async_worker_threads(),
+    };
     let blocking_threads = tokio_blocking_thread_limit();
     let runtime = hotpath::measure_block!("tokio_runtime_build", {
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .worker_threads(worker_threads)
-            .max_blocking_threads(blocking_threads)
-            .thread_stack_size(ASYNC_STACK_BYTES)
-            .build()
-            .map_err(|e| tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("failed to start async runtime: {e}"),
-            })
+        let build = match runtime_flavor {
+            AsyncRuntimeFlavor::CurrentThread => tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .max_blocking_threads(blocking_threads)
+                .thread_stack_size(ASYNC_STACK_BYTES)
+                .build(),
+            AsyncRuntimeFlavor::MultiThread => tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .worker_threads(worker_threads)
+                .max_blocking_threads(blocking_threads)
+                .thread_stack_size(ASYNC_STACK_BYTES)
+                .build(),
+        };
+        build.map_err(|e| tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!("failed to start async runtime: {e}"),
+        })
     })?;
     #[cfg(feature = "hotpath")]
     {
@@ -663,7 +683,6 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
 /// Hooks are silent on stderr unless `RUST_LOG` says otherwise: their host
 /// owns that stream and reads unexpected output as a hook failure. Every other
 /// command keeps the crate default of `warn`.
-#[hotpath::measure]
 fn stderr_tracing_default(command: Option<&Commands>) -> StderrTracingDefault {
     match command {
         Some(command) if CommandFamily::for_command(command) == CommandFamily::Hook => {
@@ -673,7 +692,6 @@ fn stderr_tracing_default(command: Option<&Commands>) -> StderrTracingDefault {
     }
 }
 
-#[hotpath::measure]
 fn render_dynamic_command_help(args: &[String]) -> bool {
     let command_args = args.get(1..).unwrap_or_default();
     let is_tool_command_help = matches!(
@@ -845,7 +863,6 @@ enum CommandFamily {
     Knowledge,
 }
 
-#[hotpath::measure_all]
 impl CommandFamily {
     #[cfg(feature = "hotpath")]
     fn as_profile_label(self) -> &'static str {
@@ -940,7 +957,6 @@ impl CommandFamily {
     }
 }
 
-#[hotpath::measure]
 fn validate_host_bundle_options(
     command: &Commands,
     family: CommandFamily,
@@ -1036,7 +1052,6 @@ fn validate_host_bundle_options(
     Ok(())
 }
 
-#[hotpath::measure]
 fn is_full_component_set_adoption(command: &Commands, host_bundle: &HostBundleCliOptions) -> bool {
     host_bundle.component.is_none()
         && host_bundle.yes
@@ -1842,7 +1857,6 @@ enum CommandStartupPolicy {
     SkipAll,
 }
 
-#[hotpath::measure_all]
 impl CommandStartupPolicy {
     fn for_command(command: &Commands) -> Self {
         if hook_capture_cmd::is_native_hook_command(command) {
@@ -1962,6 +1976,24 @@ fn should_skip_agent_install_check(command: &Commands) -> bool {
 
 fn is_local_install_command(command: &Commands) -> bool {
     matches!(command, Commands::Install { local: true, .. })
+}
+
+fn requires_eager_mcp_tool_catalog(command: Option<&Commands>) -> bool {
+    !matches!(command, Some(Commands::Tool { .. }))
+}
+
+fn normalize_tool_reserved_global_flags(cli: &mut Cli) {
+    if !cli.dry_run {
+        return;
+    }
+    let Some(Commands::Tool { args, .. }) = cli.command.as_mut() else {
+        return;
+    };
+    // Clap recognizes the lifecycle-global `--dry-run` before a tool's first
+    // trailing argument. Return it to the tool parser so the documented
+    // reserved flag has the same meaning on either side of `--args`.
+    args.push("--dry-run".to_owned());
+    cli.dry_run = false;
 }
 
 #[cfg(test)]

@@ -21,7 +21,6 @@ pub struct RuntimeWriteAuthorityError {
     message: String,
 }
 
-#[hotpath::measure_all]
 impl RuntimeWriteAuthorityError {
     pub fn denied(message: impl Into<String>) -> Self {
         Self {

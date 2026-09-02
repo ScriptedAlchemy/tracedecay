@@ -16,7 +16,6 @@ use super::sqlite::{
     effective_sqlite_cap, epoch_ms_to_secs, max_composer_record_bytes,
 };
 
-#[hotpath::measure]
 fn read_varint(bytes: &[u8], start: usize) -> Option<(u64, usize)> {
     let mut result: u64 = 0;
     let mut shift = 0u32;
@@ -43,7 +42,6 @@ fn read_varint(bytes: &[u8], start: usize) -> Option<(u64, usize)> {
 /// Extract length-delimited field-1 entries that are exactly 32 bytes long and
 /// hex-encode them — the content-addressed child ids of a DAG node blob. A
 /// light protobuf scanner that skips unrelated fields by wire type.
-#[hotpath::measure]
 pub(super) fn protobuf_child_refs(bytes: &[u8]) -> Option<Vec<String>> {
     let mut refs = Vec::new();
     let mut i = 0usize;
@@ -98,7 +96,6 @@ pub(super) fn protobuf_child_refs(bytes: &[u8]) -> Option<Vec<String>> {
 }
 
 /// A JSON message leaf is a JSON object carrying a `role` field.
-#[hotpath::measure]
 fn store_blob_message(bytes: &[u8]) -> Option<(String, Value)> {
     let value = serde_json::from_slice::<Value>(bytes).ok()?;
     let role = value.get("role").and_then(Value::as_str)?.to_string();
@@ -175,7 +172,6 @@ pub(super) async fn read_store_meta_bounded(
         .unwrap_or(BoundedSqliteValue::Corrupt)
 }
 
-#[hotpath::measure]
 fn read_store_meta_bounded_sync(
     conn: &rusqlite::Connection,
     remaining: Option<u64>,

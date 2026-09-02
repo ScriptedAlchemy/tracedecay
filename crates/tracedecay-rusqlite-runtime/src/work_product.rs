@@ -78,7 +78,6 @@ pub(crate) struct WorkProductPublishedVersionV1 {
     pub(crate) recovered_graph_digest: String,
 }
 
-#[hotpath::measure]
 pub(crate) fn owner_params(scope: &AuthorizedWorkProductScopeV1) -> Vec<ExactSqlValue> {
     vec![
         ExactSqlValue::Text(scope.owner_brain_id().as_str().to_owned()),
@@ -97,7 +96,6 @@ pub(crate) fn owner_params(scope: &AuthorizedWorkProductScopeV1) -> Vec<ExactSql
 /// An event this returns `false` for is *outside* the selection. It is not a
 /// defect in the journal and it does not invalidate the events that are inside:
 /// see [`covered_prefix`] for what a reader does with it.
-#[hotpath::measure]
 pub(crate) fn selection_covers(
     selection: &WorkProductSelectionScopeV1,
     event: &WorkProductEventV1,
@@ -129,7 +127,6 @@ pub(crate) fn selection_covers(
 /// selection to exist at all, and that graph never existed under this
 /// selection. Every event from the first uncovered one onward is therefore
 /// counted as excluded, whatever scopes it named itself.
-#[hotpath::measure]
 pub(crate) fn covered_prefix(
     selection: &WorkProductSelectionScopeV1,
     mut journal: Vec<WorkProductJournalEntryV1>,
@@ -172,7 +169,6 @@ pub(crate) struct CoveredJournalV1 {
 /// Load the covered slice of the owner's journal and the versions readable from
 /// it. `None` is an undecodable store, which every caller turns into a typed
 /// unavailability rather than into an empty graph.
-#[hotpath::measure]
 pub(crate) fn load_covered_journal(
     source: &impl RegisteredWorkQuery,
     scope: &AuthorizedWorkProductScopeV1,
@@ -199,7 +195,6 @@ pub(crate) fn load_covered_journal(
 ///
 /// `None` means the stored rows could not be decoded at all, which every caller
 /// turns into a typed unavailability rather than into an empty journal.
-#[hotpath::measure]
 pub(crate) fn load_journal(
     source: &impl RegisteredWorkQuery,
     scope: &AuthorizedWorkProductScopeV1,
@@ -228,7 +223,6 @@ pub(crate) fn load_journal(
 /// The owner's journal tail: the sequence and result version a new append must
 /// follow. `Some(None)` is an owner with no journal at all.
 #[allow(clippy::type_complexity)]
-#[hotpath::measure]
 pub(crate) fn load_journal_tail(
     source: &impl RegisteredWorkQuery,
     scope: &AuthorizedWorkProductScopeV1,
@@ -254,7 +248,6 @@ pub(crate) fn load_journal_tail(
 }
 
 /// Load every verified graph version this owner has published, oldest first.
-#[hotpath::measure]
 pub(crate) fn load_published_versions(
     source: &impl RegisteredWorkQuery,
     scope: &AuthorizedWorkProductScopeV1,
@@ -294,7 +287,6 @@ pub(crate) fn load_published_versions(
 /// here and never partially folded: the caller turns it into a typed
 /// unavailability, because a graph folded from part of its history is a
 /// falsified graph, not a degraded one.
-#[hotpath::measure]
 pub(crate) fn fold_graph(
     journal: &[WorkProductJournalEntryV1],
     through_sequence: WorkProductEventSequenceV1,
@@ -320,13 +312,11 @@ pub(crate) fn fold_graph(
 }
 
 /// The exact digest a verified version records for a folded graph.
-#[hotpath::measure]
 pub(crate) fn recovered_graph_digest(graph: &WorkProductGraphV1) -> Option<ManifestDigest> {
     canonical_sha256(&(WORK_PRODUCT_GRAPH_DIGEST_DOMAIN, graph)).ok()
 }
 
 /// Rebuild the verified version identity for one published row.
-#[hotpath::measure]
 pub(crate) fn verified_version(
     published: &WorkProductPublishedVersionV1,
     event: &WorkProductEventV1,

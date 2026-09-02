@@ -21,7 +21,6 @@ pub(super) struct DependencyAnalysis {
 
 /// Hints when the moved span carries a `#[cfg(...)]` gate the destination might
 /// not satisfy.
-#[hotpath::measure]
 pub(super) fn cfg_context_hints(moved_text: &str, dest_rel: &str) -> Vec<MoveHint> {
     let mut out = Vec::new();
     for (idx, raw) in moved_text.lines().enumerate() {
@@ -54,7 +53,6 @@ pub(super) fn cfg_context_hints(moved_text: &str, dest_rel: &str) -> Vec<MoveHin
 /// sites will now import it back from the destination — can form a two-way
 /// module dependency. Evidence is the destination's own `use` lines. Skipped
 /// when the source lives at the crate root (`crate`), where the signal is noise.
-#[hotpath::measure]
 pub(super) fn cycle_risk_hints(
     dest_original: &str,
     dest_rel: &str,
@@ -87,7 +85,6 @@ pub(super) fn cycle_risk_hints(
 
 /// True when a `use` statement's path begins at `module` (exact module or a
 /// `module::…` descendant), respecting `::` boundaries.
-#[hotpath::measure]
 fn use_targets_module(use_stmt: &str, module: &str) -> bool {
     let line = use_stmt.trim();
     let Some(after) = line

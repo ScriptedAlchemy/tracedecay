@@ -5,7 +5,6 @@ use tracedecay_lsp::{
     ContextProjectionKind, GatewayCapabilities, SemanticCapability, TRACEDECAY_CONTEXT_REVISION,
 };
 
-#[hotpath::measure]
 pub(super) fn production_lsp_registration(
     admitted_providers: &[AdmittedLspProvider],
 ) -> (Vec<String>, GatewayCapabilities) {

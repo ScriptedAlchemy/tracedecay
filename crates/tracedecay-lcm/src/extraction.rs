@@ -30,7 +30,6 @@ struct LcmProvidedSummaryRouteEnvelope {
     pre_compaction_extraction: Option<LcmExtractionResult>,
 }
 
-#[hotpath::measure]
 pub fn build_extraction_request(
     session_id: &str,
     source_range: &LcmSummarySourceRange,
@@ -48,7 +47,6 @@ pub fn build_extraction_request(
     })
 }
 
-#[hotpath::measure]
 pub fn split_summary_route(route: Option<&str>) -> (Option<String>, Option<LcmExtractionResult>) {
     let route = route.and_then(non_empty).map(str::to_string);
     let Some(route) = route else {
@@ -71,7 +69,6 @@ pub fn split_summary_route(route: Option<&str>) -> (Option<String>, Option<LcmEx
     (Some(route), None)
 }
 
-#[hotpath::measure]
 pub fn summary_metadata_extraction(
     extraction_result: Option<&LcmExtractionResult>,
     condensation: bool,
@@ -89,7 +86,6 @@ pub fn summary_metadata_extraction(
     json!({ "status": "not_requested" })
 }
 
-#[hotpath::measure]
 fn serialize_messages(messages: &[LcmSummarySourceMessage]) -> String {
     messages
         .iter()
@@ -104,7 +100,6 @@ fn serialize_messages(messages: &[LcmSummarySourceMessage]) -> String {
         .join("\n\n")
 }
 
-#[hotpath::measure]
 fn non_empty(value: &str) -> Option<&str> {
     let trimmed = value.trim();
     if trimmed.is_empty() {

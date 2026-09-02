@@ -104,7 +104,6 @@ enum RescanInput {
     PayloadUnavailable,
 }
 
-#[hotpath::measure_all]
 impl RegisteredGlobalDb {
     /// Rescans every persisted LCM raw-message body under the current
     /// detector revision, remediating hits through the canonical ingest path.
@@ -411,7 +410,6 @@ impl RegisteredGlobalDb {
 /// Returns whether the current detector would change this row's served body
 /// or provider metadata. A payload the detector refuses to re-evaluate fails
 /// the rescan with a typed error instead of passing as clean.
-#[hotpath::measure]
 fn requires_remediation(text: &str, provider_metadata: Option<&str>) -> Result<bool, LcmError> {
     let sanitization =
         sanitize_lcm_payload_text(text).map_err(|error| LcmError::SanitizationRefused {
@@ -432,7 +430,6 @@ fn requires_remediation(text: &str, provider_metadata: Option<&str>) -> Result<b
 /// Whole-message external rows never persisted provider metadata (their
 /// stored metadata is the payload envelope ingest builds fresh), so they
 /// re-ingest with none — exactly what ingest produced the first time.
-#[hotpath::measure]
 fn stored_provider_metadata(row: &RescanRow) -> Result<Option<String>, LcmError> {
     if row.storage_kind == LcmStorageKind::External {
         return Ok(None);

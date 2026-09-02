@@ -41,7 +41,6 @@ pub(super) const PROJECT_CATCH_UP_PROVIDERS: &[SessionProvider] = &[
 
 const MAX_CODEX_SOURCE_FAILURES_PER_PASS: usize = 8;
 
-#[hotpath::measure]
 fn cursor_composer_run_outcome(
     composer: &cursor_composer::CursorComposerSweepOutcome,
     error: Option<&crate::runtime::source::TranscriptIngestError>,
@@ -65,7 +64,6 @@ fn cursor_composer_run_outcome(
     outcome
 }
 
-#[hotpath::measure]
 fn merge_cursor_sweep_outcome(
     outcome: &mut ProviderRunOutcome,
     session_ids: &mut BTreeSet<String>,
@@ -86,7 +84,6 @@ fn merge_cursor_sweep_outcome(
     ));
 }
 
-#[hotpath::measure]
 fn claude_provider_run_outcome(
     stats: &claude_observation::ClaudeObservationIngestStats,
     error: Option<&claude_observation::ClaudeObservationIngestError>,
@@ -111,7 +108,6 @@ fn claude_provider_run_outcome(
     outcome
 }
 
-#[hotpath::measure]
 fn codex_source_failure_saturates_pass(failure_count: usize, retryable: bool) -> bool {
     retryable || failure_count >= MAX_CODEX_SOURCE_FAILURES_PER_PASS
 }
@@ -132,7 +128,6 @@ pub(super) struct ProjectProviderRunResult {
     pub(super) claude_projected_session_ids: BTreeSet<String>,
 }
 
-#[hotpath::measure_all]
 impl ProjectProviderRunResult {
     fn provider(outcome: ProviderRunOutcome) -> Self {
         Self {
@@ -149,7 +144,6 @@ impl ProjectProviderRunResult {
     }
 }
 
-#[hotpath::measure_all]
 impl<'a> ProjectProviderRun<'a> {
     /// Provider-run chokepoint: boxes the whole per-provider ingest future so
     /// the project catch-up loop inherits a bounded debug poll frame and no

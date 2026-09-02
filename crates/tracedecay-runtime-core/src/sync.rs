@@ -5,7 +5,6 @@ use tracedecay_domain::canonical_text::sha256_hex;
 /// Read a source file to a UTF-8 string, transparently handling UTF-16 LE/BE
 /// (detected via BOM). Returns an IO error only when the file genuinely cannot
 /// be read or decoded.
-#[hotpath::measure]
 pub fn read_source_file(path: &Path) -> std::io::Result<String> {
     let bytes = read_file_bytes(path)?;
 
@@ -49,7 +48,6 @@ pub fn read_source_file(path: &Path) -> std::io::Result<String> {
 /// readable file must not be lost to that window — retry briefly before
 /// giving up. Other platforms read directly: `PermissionDenied` there is a
 /// real ACL problem that retrying cannot fix.
-#[hotpath::measure]
 fn read_file_bytes(path: &Path) -> std::io::Result<Vec<u8>> {
     const RETRY_DELAYS_MS: [u64; 4] = [10, 20, 40, 80];
     if !cfg!(windows) {
@@ -73,7 +71,6 @@ fn read_file_bytes(path: &Path) -> std::io::Result<Vec<u8>> {
 /// the file: `ERROR_SHARING_VIOLATION` (32) and `ERROR_LOCK_VIOLATION` (33)
 /// map through as raw OS errors, while Defender-style scans surface as plain
 /// `PermissionDenied` (`ERROR_ACCESS_DENIED`, os error 5).
-#[hotpath::measure]
 fn is_transient_windows_file_lock(err: &std::io::Error) -> bool {
     const ERROR_SHARING_VIOLATION: i32 = 32;
     const ERROR_LOCK_VIOLATION: i32 = 33;
@@ -84,7 +81,6 @@ fn is_transient_windows_file_lock(err: &std::io::Error) -> bool {
 }
 
 /// Get filesystem mtime (seconds since epoch) and size for pre-filter.
-#[hotpath::measure]
 pub fn file_stat(path: &Path) -> Option<(i64, u64)> {
     let meta = std::fs::metadata(path).ok()?;
     let mtime = meta.modified().ok()?;
@@ -93,7 +89,6 @@ pub fn file_stat(path: &Path) -> Option<(i64, u64)> {
 }
 
 /// Compute SHA-256 content hash of file content.
-#[hotpath::measure]
 pub fn content_hash(content: &str) -> String {
     sha256_hex(content.as_bytes())
 }

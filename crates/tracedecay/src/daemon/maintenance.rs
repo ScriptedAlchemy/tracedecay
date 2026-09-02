@@ -3,7 +3,8 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(any(feature = "hotpath", test))]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -67,7 +68,6 @@ pub(super) struct GuardedStoreTelemetryPort {
     table_watermarks: Arc<std::sync::Mutex<Option<BTreeMap<TableNameV1, TableWatermark>>>>,
 }
 
-#[hotpath::measure_all]
 impl GuardedStoreTelemetryPort {
     fn new(
         handle: DatabaseStorageTelemetryHandle,
@@ -209,7 +209,6 @@ impl StoreSizeTelemetryPort for GuardedStoreTelemetryPort {
     }
 }
 
-#[hotpath::measure]
 fn compare_table_growth(
     store: &StoreKeyV1,
     current_tables: BTreeMap<TableNameV1, StorageByteSizeV1>,
@@ -279,7 +278,6 @@ fn compare_table_growth(
     }
 }
 
-#[hotpath::measure]
 fn telemetry_interruption(
     context: &RequestContext,
 ) -> Option<tracedecay_store::UnavailableReasonV1> {
@@ -305,6 +303,26 @@ pub(super) struct StoreTelemetrySamplingRegistry {
     semantic_vector_retention:
         Arc<std::sync::Mutex<HashMap<PathBuf, SemanticVectorRetentionProgressV1>>>,
     graph_replay_release: Arc<std::sync::Mutex<HashMap<PathBuf, GraphReplayReleaseProgressV1>>>,
+    /// Last by-design retention operator line per lane and project. A
+    /// persistent unavailable-by-design condition logs once, then counts on
+    /// [`daemon.git.maintenance.retention_quiet_total`]; a state change or a
+    /// genuine anomaly emits again.
+    retention_operator_log: Arc<std::sync::Mutex<HashMap<RetentionOperatorLogKeyV1, String>>>,
+    loud_retention_this_tick: Arc<AtomicBool>,
+}
+
+/// Operator-log lane for the once-then-quiet retention pin.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(super) enum RetentionOperatorLogLaneV1 {
+    Semantic,
+    CodeGeneration,
+    Tick,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct RetentionOperatorLogKeyV1 {
+    lane: RetentionOperatorLogLaneV1,
+    scope: PathBuf,
 }
 
 /// Longest run of short-cadence ticks a project's graph-replay release
@@ -343,7 +361,6 @@ pub(super) struct SemanticVectorRetentionBacklogV1 {
     pub(super) cancelled: u64,
 }
 
-#[hotpath::measure_all]
 impl SemanticVectorRetentionBacklogV1 {
     pub(super) fn from_receipt(
         receipt: &tracedecay_store::SemanticVectorProjectCensusReceipt,
@@ -371,7 +388,6 @@ pub(super) enum SemanticVectorRetentionCensusOutcome {
     ReceiptIdentityMismatch,
 }
 
-#[hotpath::measure_all]
 impl SemanticVectorRetentionCensusOutcome {
     #[hotpath::skip]
     pub(super) const fn as_failure_label(self) -> Option<&'static str> {
@@ -412,7 +428,6 @@ struct SemanticVectorRetentionProgressV1 {
     semantic_unseated: bool,
 }
 
-#[hotpath::measure_all]
 impl StoreTelemetrySamplingRegistry {
     pub(super) fn register_port<E>(
         &self,
@@ -485,6 +500,10 @@ impl StoreTelemetrySamplingRegistry {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(path);
+        self.retention_operator_log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|key, _| key.scope != path);
     }
 
     pub(super) fn release_retained_handles_for_shutdown(&self) {
@@ -500,6 +519,12 @@ impl StoreTelemetrySamplingRegistry {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
+        self.retention_operator_log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        self.loud_retention_this_tick
+            .store(false, Ordering::Release);
     }
 
     pub(super) fn semantic_vector_retention_cursor(
@@ -522,6 +547,12 @@ impl StoreTelemetrySamplingRegistry {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .retain(|project, _| active_projects.contains(project));
+        self.retention_operator_log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|key, _| {
+                key.scope.as_os_str().is_empty() || active_projects.contains(&key.scope)
+            });
     }
 
     /// Whether this tick may attempt the graph-replay release reconcile.
@@ -602,6 +633,111 @@ impl StoreTelemetrySamplingRegistry {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(project_root)
             .and_then(|state| state.cursor.clone())
+    }
+
+    /// Open a fresh per-tick loud-vs-quiet window before any retention pass
+    /// emits. A genuine anomaly during the tick keeps the tick line loud.
+    pub(super) fn begin_retention_tick_log_window(&self) {
+        self.loud_retention_this_tick
+            .store(false, Ordering::Release);
+    }
+
+    /// Mark that this tick emitted a genuine retention anomaly. By-design
+    /// unavailable pins stay quiet; this forces the tick summary to stay loud.
+    pub(super) fn mark_loud_retention_log(&self) {
+        self.loud_retention_this_tick.store(true, Ordering::Release);
+    }
+
+    /// Whether this (lane, scope, detail) pair should emit an operator line.
+    ///
+    /// Identical repeats of a persistent by-design condition increment
+    /// `daemon.git.maintenance.retention_quiet_total` and stay silent. A
+    /// changed detail logs again.
+    pub(super) fn admit_by_design_retention_log(
+        &self,
+        lane: RetentionOperatorLogLaneV1,
+        scope: &Path,
+        detail: &str,
+    ) -> bool {
+        let key = RetentionOperatorLogKeyV1 {
+            lane,
+            scope: scope.to_path_buf(),
+        };
+        let mut states = self
+            .retention_operator_log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if states.get(&key).map(String::as_str) == Some(detail) {
+            hotpath::gauge!("daemon.git.maintenance.retention_quiet_total").inc(1_u64);
+            return false;
+        }
+        states.insert(key, detail.to_owned());
+        true
+    }
+
+    pub(super) fn clear_by_design_retention_log(
+        &self,
+        lane: RetentionOperatorLogLaneV1,
+        scope: &Path,
+    ) {
+        let key = RetentionOperatorLogKeyV1 {
+            lane,
+            scope: scope.to_path_buf(),
+        };
+        self.retention_operator_log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&key);
+    }
+
+    /// Emit `retention_degraded` once per by-design state, or every time for
+    /// a genuine anomaly. Repeat by-design ticks count on the quiet gauge.
+    pub(super) fn emit_retention_degraded(
+        &self,
+        project_root: &Path,
+        pass: &'static str,
+        failure: &str,
+    ) {
+        let lane = match pass {
+            "semantic_vector_generations" => RetentionOperatorLogLaneV1::Semantic,
+            "code_generations" => RetentionOperatorLogLaneV1::CodeGeneration,
+            _ => {
+                self.mark_loud_retention_log();
+                super::log_daemon_event(
+                    "retention_degraded",
+                    &[("pass", pass.to_owned()), ("failure", failure.to_owned())],
+                );
+                return;
+            }
+        };
+        if retention_failure_is_by_design(lane, failure) {
+            if !self.admit_by_design_retention_log(lane, project_root, failure) {
+                return;
+            }
+        } else {
+            self.mark_loud_retention_log();
+            self.clear_by_design_retention_log(lane, project_root);
+        }
+        super::log_daemon_event(
+            "retention_degraded",
+            &[("pass", pass.to_owned()), ("failure", failure.to_owned())],
+        );
+    }
+
+    /// Whether the tick summary line should be written. Repeated by-design
+    /// `retry` ticks stay quiet; a loud anomaly or an outcome change logs.
+    pub(super) fn admit_retention_tick_log(&self, outcome: MaintenanceTickOutcome) -> bool {
+        let detail = format!("{}:{}", outcome.succeeded(), outcome.label());
+        let loud = self.loud_retention_this_tick.load(Ordering::Acquire);
+        if matches!(outcome, MaintenanceTickOutcome::Retry) && !loud {
+            return self.admit_by_design_retention_log(
+                RetentionOperatorLogLaneV1::Tick,
+                Path::new(""),
+                &detail,
+            );
+        }
+        self.clear_by_design_retention_log(RetentionOperatorLogLaneV1::Tick, Path::new(""));
+        true
     }
 
     pub(super) fn record_semantic_vector_retention_failure(&self, project_root: &Path) {
@@ -767,7 +903,23 @@ impl StoreTelemetrySamplingRegistry {
     }
 }
 
-#[hotpath::measure]
+/// Persistent by-design retention conditions log once, then count on gauges.
+/// Corrupt, reset, denied, and cancelled failures stay loud every attempt.
+pub(super) fn retention_failure_is_by_design(
+    lane: RetentionOperatorLogLaneV1,
+    failure: &str,
+) -> bool {
+    match lane {
+        RetentionOperatorLogLaneV1::Semantic => {
+            failure == "configuration_inventory_unavailable" || failure.starts_with("unavailable:")
+        }
+        RetentionOperatorLogLaneV1::CodeGeneration => {
+            failure.starts_with("vector_inventory_offline:")
+        }
+        RetentionOperatorLogLaneV1::Tick => false,
+    }
+}
+
 fn storage_telemetry_request_context(
     scope: ResolvedScope,
 ) -> Result<RequestContext, ApplicationContractError> {
@@ -836,7 +988,6 @@ pub(in crate::daemon) enum MaintenanceContinuation {
     CodeGenerationRetention,
 }
 
-#[hotpath::measure_all]
 impl MaintenanceContinuation {
     /// Two phases asking to continue collapse to the one whose continuation
     /// tick still advances both: a code-generation continuation re-runs the
@@ -861,7 +1012,6 @@ pub(in crate::daemon) enum MaintenanceTickOutcome {
     Retry,
 }
 
-#[hotpath::measure_all]
 impl MaintenanceTickOutcome {
     pub(in crate::daemon) fn is_complete(self) -> bool {
         self == Self::Complete
@@ -922,7 +1072,6 @@ pub(super) struct MaintenanceCadence {
     in_flight: bool,
 }
 
-#[hotpath::measure_all]
 impl MaintenanceCadence {
     pub(super) fn new(interval: Duration) -> Self {
         Self {
@@ -955,7 +1104,6 @@ impl MaintenanceCadence {
 
 struct MaintenanceLifecycleInstrumentation;
 
-#[hotpath::measure_all]
 impl MaintenanceLifecycleInstrumentation {
     fn new() -> Self {
         #[cfg(any(feature = "hotpath", test))]
@@ -1004,7 +1152,6 @@ struct MaintenancePhaseInstrumentation {
     continuation: Option<MaintenanceContinuation>,
 }
 
-#[hotpath::measure_all]
 impl MaintenancePhaseInstrumentation {
     fn new(continuation: Option<MaintenanceContinuation>) -> Self {
         match continuation {
@@ -1086,7 +1233,6 @@ pub(super) struct ColdStoreCursorV1 {
     pub(super) after_project_id: Option<String>,
 }
 
-#[hotpath::measure]
 fn next_cold_store_cursor(
     previous: Option<&str>,
     project_ids: &[String],
@@ -1112,7 +1258,6 @@ pub(super) enum MaintenanceStoreOutcomeV1 {
     Cancelled,
 }
 
-#[hotpath::measure_all]
 impl MaintenanceStoreOutcomeV1 {
     fn was_processed(self) -> bool {
         self == Self::Processed
@@ -1176,7 +1321,6 @@ enum MaintenanceStoreWork {
     Graph(Arc<crate::tracedecay::TraceDecay>),
 }
 
-#[hotpath::measure_all]
 impl MaintenanceStoreWork {
     fn database_path(&self) -> &Path {
         match self {
@@ -1194,7 +1338,6 @@ impl MaintenanceStoreWork {
 /// `ceil(len / budget)` consecutive ticks, every store is processed at least
 /// once — nothing that should be reclaimed is starved forever — while any
 /// single tick touches no more than `budget` stores.
-#[hotpath::measure]
 fn select_store_window(
     keys: &[String],
     after: Option<&str>,
@@ -1216,7 +1359,6 @@ fn select_store_window(
     (indices, next)
 }
 
-#[hotpath::measure]
 fn cursor_after_attempted_units(
     keys: &[String],
     window: &[usize],
@@ -1231,7 +1373,6 @@ fn cursor_after_attempted_units(
         .or_else(|| prior.map(str::to_owned))
 }
 
-#[hotpath::measure_all]
 impl MaintenanceCoordinator {
     #[hotpath::skip]
     pub(super) async fn spawn(
@@ -1336,6 +1477,9 @@ impl MaintenanceCoordinator {
         // periodic loop, so it is where a slow RSS climb toward the
         // admission limit becomes visible between full telemetry snapshots.
         record_process_resident_memory_gauge();
+        administration
+            .store_telemetry_sampling()
+            .begin_retention_tick_log_window();
         let session_databases = if continuation.is_none() {
             administration.mounted_registered_session_databases().await
         } else {
@@ -1574,26 +1718,29 @@ impl MaintenanceCoordinator {
         } else if self.cancellation.is_cancelled() {
             metrics.last_outcome = Some(MaintenanceStoreOutcomeV1::Cancelled);
         }
-        super::log_daemon_event(
-            "retention_maintenance_tick",
-            &[
-                ("succeeded", outcome.succeeded().to_string()),
-                ("outcome", outcome.label().to_owned()),
-                ("processed_stores", metrics.processed_stores.to_string()),
-                // The lifetime total reads like a queue depth on a live tail
-                // (a busy writer makes it "climb every tick"); the per-tick
-                // count is the actual deferral pressure of this tick.
-                ("deferred_stores_tick", deferred.to_string()),
-                ("deferred_stores", metrics.deferred_stores.to_string()),
-                ("unavailable_stores", metrics.unavailable_stores.to_string()),
-                ("reclaimed_bytes", metrics.reclaimed_bytes.to_string()),
-                ("telemetry_samples", telemetry_sampling.observed.to_string()),
-                (
-                    "telemetry_unavailable",
-                    telemetry_sampling.unavailable.to_string(),
-                ),
-            ],
-        );
+        let tick_fields = [
+            ("succeeded", outcome.succeeded().to_string()),
+            ("outcome", outcome.label().to_owned()),
+            ("processed_stores", metrics.processed_stores.to_string()),
+            // The lifetime total reads like a queue depth on a live tail
+            // (a busy writer makes it "climb every tick"); the per-tick
+            // count is the actual deferral pressure of this tick.
+            ("deferred_stores_tick", deferred.to_string()),
+            ("deferred_stores", metrics.deferred_stores.to_string()),
+            ("unavailable_stores", metrics.unavailable_stores.to_string()),
+            ("reclaimed_bytes", metrics.reclaimed_bytes.to_string()),
+            ("telemetry_samples", telemetry_sampling.observed.to_string()),
+            (
+                "telemetry_unavailable",
+                telemetry_sampling.unavailable.to_string(),
+            ),
+        ];
+        if administration
+            .store_telemetry_sampling()
+            .admit_retention_tick_log(outcome)
+        {
+            super::log_daemon_event("retention_maintenance_tick", &tick_fields);
+        }
         outcome
     }
 }
@@ -1610,7 +1757,6 @@ impl MaintenanceCoordinator {
 /// measurement says the process is over budget. There is exactly one reader
 /// here — the gauge and the admission cell consume the same sample.
 #[cfg(target_os = "linux")]
-#[hotpath::measure]
 fn record_process_resident_memory_gauge() {
     if let Some(bytes) =
         tracedecay_runtime_core::resident_memory::sampled_process_resident_bytes_v1()
@@ -1637,7 +1783,6 @@ fn record_process_resident_memory_gauge() {
 }
 
 #[cfg(not(target_os = "linux"))]
-#[hotpath::measure]
 fn record_process_resident_memory_gauge() {}
 
 #[derive(Debug)]
@@ -1781,7 +1926,6 @@ async fn run_cold_store_page(
     Ok(metrics)
 }
 
-#[hotpath::measure]
 fn classify_cold_store_state(
     cancelled: bool,
     manifest_readable: bool,
@@ -1798,20 +1942,17 @@ fn classify_cold_store_state(
     }
 }
 
-#[hotpath::measure]
 fn checkpoint_path(profile_root: &Path) -> PathBuf {
     profile_root
         .join(CHECKPOINT_DIRECTORY)
         .join(CHECKPOINT_FILE)
 }
 
-#[hotpath::measure]
 fn load_cursor(path: &Path) -> Option<ColdStoreCursorV1> {
     let bytes = std::fs::read(path).ok()?;
     serde_json::from_slice(&bytes).ok()
 }
 
-#[hotpath::measure]
 fn persist_cursor(path: &Path, cursor: &ColdStoreCursorV1) -> std::io::Result<()> {
     let parent = path
         .parent()
@@ -1825,7 +1966,6 @@ fn persist_cursor(path: &Path, cursor: &ColdStoreCursorV1) -> std::io::Result<()
     std::fs::rename(temporary, path)
 }
 
-#[hotpath::measure]
 pub(super) fn retention_maintenance_enabled(retention: &crate::config::RetentionConfig) -> bool {
     retention.session_lcm.enabled
         || retention.observation.enabled
@@ -1834,7 +1974,6 @@ pub(super) fn retention_maintenance_enabled(retention: &crate::config::Retention
         || retention.compaction.is_some()
 }
 
-#[hotpath::measure]
 pub(super) fn retention_window_secs(days: u64) -> i64 {
     i64::try_from(days)
         .ok()
@@ -1842,7 +1981,6 @@ pub(super) fn retention_window_secs(days: u64) -> i64 {
         .unwrap_or(i64::MAX)
 }
 
-#[hotpath::measure]
 pub(crate) fn now_secs_i64() -> Result<i64, &'static str> {
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1866,10 +2004,11 @@ mod tests {
     use super::{
         CadenceInstant, ColdStoreCursorV1, MAINTENANCE_FUTURES_ACTIVE,
         MAINTENANCE_STORE_PAGE_LIMIT, MaintenanceCadence, MaintenanceContinuation,
-        MaintenanceStoreOutcomeV1, MaintenanceTickOutcome, SemanticVectorRetentionCensusOutcome,
-        SemanticVectorRetentionReadV1, StoreTelemetrySamplingRegistry, TableGrowthObservation,
-        checkpoint_path, classify_cold_store_state, compare_table_growth,
-        cursor_after_attempted_units, load_cursor, next_cold_store_cursor, persist_cursor,
+        MaintenanceStoreOutcomeV1, MaintenanceTickOutcome, RetentionOperatorLogLaneV1,
+        SemanticVectorRetentionCensusOutcome, SemanticVectorRetentionReadV1,
+        StoreTelemetrySamplingRegistry, TableGrowthObservation, checkpoint_path,
+        classify_cold_store_state, compare_table_growth, cursor_after_attempted_units, load_cursor,
+        next_cold_store_cursor, persist_cursor, retention_failure_is_by_design,
         run_maintenance_loop, select_store_window,
     };
 
@@ -2020,6 +2159,78 @@ mod tests {
         registry.record_graph_replay_release_unhealthy(project);
         assert!(!registry.graph_replay_release_attempt_admitted(project));
         assert!(registry.graph_replay_release_attempt_admitted(project));
+    }
+
+    #[test]
+    fn by_design_retention_failures_are_the_unavailable_and_offline_lanes() {
+        assert!(retention_failure_is_by_design(
+            RetentionOperatorLogLaneV1::Semantic,
+            "unavailable:semantic retrieval is not calibrated",
+        ));
+        assert!(retention_failure_is_by_design(
+            RetentionOperatorLogLaneV1::Semantic,
+            "configuration_inventory_unavailable",
+        ));
+        assert!(!retention_failure_is_by_design(
+            RetentionOperatorLogLaneV1::Semantic,
+            "corrupt:index page",
+        ));
+        assert!(retention_failure_is_by_design(
+            RetentionOperatorLogLaneV1::CodeGeneration,
+            "vector_inventory_offline:vector_census_incomplete",
+        ));
+        assert!(!retention_failure_is_by_design(
+            RetentionOperatorLogLaneV1::CodeGeneration,
+            "graph_replay_pool_busy",
+        ));
+    }
+
+    #[test]
+    fn by_design_retention_logs_once_then_counts_on_the_quiet_gauge() {
+        let registry = StoreTelemetrySamplingRegistry::default();
+        let project = std::path::Path::new("/project");
+        let failure = "unavailable:semantic retrieval is not calibrated";
+
+        assert!(
+            registry.admit_by_design_retention_log(
+                RetentionOperatorLogLaneV1::Semantic,
+                project,
+                failure,
+            ),
+            "the first by-design state must log"
+        );
+        assert!(
+            !registry.admit_by_design_retention_log(
+                RetentionOperatorLogLaneV1::Semantic,
+                project,
+                failure,
+            ),
+            "an unchanged by-design state must stay quiet"
+        );
+        assert!(
+            registry.admit_by_design_retention_log(
+                RetentionOperatorLogLaneV1::Semantic,
+                project,
+                "unavailable:model missing",
+            ),
+            "a changed by-design reason must log again"
+        );
+
+        registry.mark_loud_retention_log();
+        registry.begin_retention_tick_log_window();
+        assert!(
+            registry.admit_retention_tick_log(MaintenanceTickOutcome::Retry),
+            "the first by-design retry tick must log"
+        );
+        assert!(
+            !registry.admit_retention_tick_log(MaintenanceTickOutcome::Retry),
+            "a repeated by-design retry tick must stay quiet"
+        );
+        registry.mark_loud_retention_log();
+        assert!(
+            registry.admit_retention_tick_log(MaintenanceTickOutcome::Retry),
+            "a genuine anomaly on the same tick must keep the tick line loud"
+        );
     }
 
     #[test]

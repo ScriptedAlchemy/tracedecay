@@ -11,7 +11,6 @@ pub struct RemoteStorageStatusSnapshotV1 {
     pub authority: CurrentRemoteAuthorityStateV1,
 }
 
-#[hotpath::measure_all]
 impl RemoteSqliteStorageV1 {
     pub fn status(
         &self,
@@ -63,7 +62,6 @@ impl RemoteSqliteStorageV1 {
 
 /// Loads the published authority state, treating an absent registry row as a
 /// typed `None` rather than a storage error.
-#[hotpath::measure]
 fn load_optional_authority_state(
     handle: &crate::exact_sql::ExactSqlHandle,
     brain_id: &BrainId,
@@ -90,7 +88,6 @@ pub struct RemoteRecoveryOperationalSnapshotV1 {
     pub recovery_required: bool,
 }
 
-#[hotpath::measure_all]
 impl RemoteSqliteStorageV1 {
     pub fn recovery_operational_snapshot(
         &self,
@@ -125,7 +122,6 @@ impl RemoteSqliteStorageV1 {
     }
 }
 
-#[hotpath::measure]
 fn count(
     row: &crate::exact_sql::ExactSqlRow,
     index: usize,

@@ -63,7 +63,6 @@ pub enum WorkAppendOutcome {
     Replayed(WorkProjection),
 }
 
-#[hotpath::measure_all]
 impl WorkAppendOutcome {
     pub fn into_projection(self) -> WorkProjection {
         match self {
@@ -104,7 +103,6 @@ pub struct WorkRoutingSnapshotV1 {
     pub human_override: Option<WorkRouteOverrideV1>,
 }
 
-#[hotpath::measure_all]
 impl WorkRoutingSnapshotV1 {
     /// Canonical order, so the evaluated input digest is a property of the
     /// authorized state and not of the order an adapter happened to return.
@@ -602,7 +600,6 @@ enum ProposalDisposition {
     Superseded,
 }
 
-#[hotpath::measure_all]
 impl ProposalDisposition {
     #[hotpath::skip]
     const fn operation(self) -> &'static str {
@@ -614,7 +611,6 @@ impl ProposalDisposition {
     }
 }
 
-#[hotpath::measure]
 pub(crate) fn work_authority(
     context: &RequestContext,
 ) -> Result<WorkAuthority, ApplicationProblem> {
@@ -628,7 +624,6 @@ pub(crate) fn work_authority(
     .map_err(domain_problem)
 }
 
-#[hotpath::measure]
 fn work_input_digest<T: Serialize>(value: &T) -> Result<ManifestDigest, ApplicationProblem> {
     canonical_sha256(value).map_err(|_| {
         invalid_problem(
@@ -638,7 +633,6 @@ fn work_input_digest<T: Serialize>(value: &T) -> Result<ManifestDigest, Applicat
     })
 }
 
-#[hotpath::measure]
 fn admit(context: &RequestContext, observed_at: UtcMicros) -> Result<(), ApplicationProblem> {
     match context.admission_at(observed_at) {
         RequestAdmission::Admitted => Ok(()),
@@ -647,12 +641,10 @@ fn admit(context: &RequestContext, observed_at: UtcMicros) -> Result<(), Applica
     }
 }
 
-#[hotpath::measure]
 fn rebuild(history: Vec<WorkEvent>) -> Result<WorkProjection, ApplicationProblem> {
     WorkProjection::rebuild(&history).map_err(domain_problem)
 }
 
-#[hotpath::measure]
 fn domain_problem(_error: WorkContractError) -> ApplicationProblem {
     invalid_problem(
         "application.work.invalid-history",
@@ -660,7 +652,6 @@ fn domain_problem(_error: WorkContractError) -> ApplicationProblem {
     )
 }
 
-#[hotpath::measure]
 fn storage_problem(error: WorkStorageError) -> ApplicationProblem {
     match error {
         WorkStorageError::NotFoundOrNotAuthorized => not_found_problem(),
@@ -679,12 +670,10 @@ fn storage_problem(error: WorkStorageError) -> ApplicationProblem {
     }
 }
 
-#[hotpath::measure]
 fn not_found_problem() -> ApplicationProblem {
     ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
 }
 
-#[hotpath::measure]
 fn invalid_problem(code: &str, message: &str) -> ApplicationProblem {
     ApplicationProblem::InvalidRequest {
         diagnostic: SafeDiagnostic {
@@ -696,7 +685,6 @@ fn invalid_problem(code: &str, message: &str) -> ApplicationProblem {
     }
 }
 
-#[hotpath::measure]
 fn conflict_problem(code: &str, message: &str) -> ApplicationProblem {
     ApplicationProblem::Conflict {
         diagnostic: SafeDiagnostic {

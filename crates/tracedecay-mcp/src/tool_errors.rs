@@ -8,12 +8,10 @@ use crate::response_handles::RESPONSE_RETRIEVE_TOOL;
 use crate::tools::ToolResult;
 use crate::transport::{ErrorCode, JsonRpcResponse};
 
-#[hotpath::measure]
 fn plain_text_tool_failure(text: &str) -> bool {
     text.starts_with("git error:") || text.starts_with("git diff failed:")
 }
 
-#[hotpath::measure]
 fn value_has_semantic_error(value: &Value) -> bool {
     value
         .get("content")
@@ -52,7 +50,6 @@ fn value_has_semantic_error(value: &Value) -> bool {
 /// the error rather than re-derived here. Failures raised without an
 /// authority behind them report the application-level default.
 #[must_use]
-#[hotpath::measure]
 pub fn structured_hook_error_data(error: &TraceDecayError) -> Option<Value> {
     let (reason_code, retryable, detail) = error.hook_runtime_context()?;
     let status = error
@@ -80,7 +77,6 @@ pub fn structured_hook_error_data(error: &TraceDecayError) -> Option<Value> {
 /// that sniffs the rendered response text for JSON failure shapes or known
 /// plain-text failure prefixes.
 #[must_use]
-#[hotpath::measure]
 pub fn tool_result_has_semantic_error(result: &ToolResult) -> bool {
     result
         .semantic_error()
@@ -95,7 +91,6 @@ pub fn tool_result_has_semantic_error(result: &ToolResult) -> bool {
 /// text heuristics. Callers must only invoke this once the result is already
 /// known to be a semantic failure — it does not itself re-check that.
 #[must_use]
-#[hotpath::measure]
 pub fn semantic_failure_reason(result: &ToolResult) -> Option<String> {
     if let Some(message) = result.failure_message() {
         return Some(message.to_string());
@@ -112,7 +107,6 @@ pub fn semantic_failure_reason(result: &ToolResult) -> Option<String> {
         .map(|text| text.trim_start().to_string())
 }
 
-#[hotpath::measure]
 pub fn mark_semantic_tool_error(result: &mut ToolResult) {
     if !tool_result_has_semantic_error(result) {
         return;
@@ -126,7 +120,6 @@ pub fn mark_semantic_tool_error(result: &mut ToolResult) {
 /// and application-surface layers. The boundary owns this translation so
 /// clients (and the catalog sweep) can read a truthful `kind` alongside the
 /// machine `code` instead of inferring from prose.
-#[hotpath::measure]
 fn project_route_problem_kind(reason_code: &str) -> Option<&'static str> {
     match reason_code {
         "tool_dispatch_deadline_exceeded" => Some("deadline_exceeded"),
@@ -146,7 +139,6 @@ fn project_route_problem_kind(reason_code: &str) -> Option<&'static str> {
 /// Map response-handle failures onto actionable JSON-RPC errors at the MCP
 /// boundary so clients can distinguish bad input from cache/runtime problems.
 #[must_use]
-#[hotpath::measure]
 pub fn tool_error_response(id: Value, tool_name: &str, error: &TraceDecayError) -> JsonRpcResponse {
     if let Some((reason_code, retryable, detail)) = error.project_route_context() {
         let code = if retryable {
@@ -316,7 +308,6 @@ pub fn tool_error_response(id: Value, tool_name: &str, error: &TraceDecayError) 
     )
 }
 
-#[hotpath::measure]
 fn hardcoded_internal_error_response(id: &Value, detail: &str) -> String {
     let id_json = serde_json::to_string(id).unwrap_or_else(|_| "null".to_string());
     let detail_json = serde_json::to_string(detail)
@@ -327,7 +318,6 @@ fn hardcoded_internal_error_response(id: &Value, detail: &str) -> String {
 }
 
 #[must_use]
-#[hotpath::measure]
 pub fn serialize_response_line(resp: &JsonRpcResponse) -> String {
     match serde_json::to_string(resp) {
         Ok(line) => line,

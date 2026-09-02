@@ -97,7 +97,6 @@ pub struct ServerStats {
     errors: AtomicU64,
 }
 
-#[hotpath::measure_all]
 impl ServerStats {
     fn new() -> Self {
         Self {
@@ -473,7 +472,6 @@ struct MountedProjectApplicationRetrievalV1 {
     service: Arc<dyn SessionApplicationRetrievalPortV1>,
 }
 
-#[hotpath::measure_all]
 impl MountedProjectApplicationRetrievalV1 {
     fn retrieval_for_scope(
         &self,
@@ -518,7 +516,6 @@ impl MountedProjectApplicationRetrievalV1 {
     }
 }
 
-#[hotpath::measure_all]
 impl McpServer {
     pub(crate) fn doctor_report_ready(&self) -> bool {
         self.dashboard_doctor_report_reader.is_some()
@@ -1466,7 +1463,6 @@ impl McpServer {
     }
 }
 
-#[hotpath::measure]
 fn json_rpc_request_id_string(id: &Value) -> Option<String> {
     match id {
         Value::String(id) => Some(id.clone()),
@@ -1475,7 +1471,6 @@ fn json_rpc_request_id_string(id: &Value) -> Option<String> {
     }
 }
 
-#[hotpath::measure]
 fn application_surface_request_id(id: &Value, connection_scope: &str) -> Option<String> {
     tracedecay_application::request_identity::mcp_connection_request_id(id, connection_scope)
         .map(|request_id| request_id.as_str().to_owned())

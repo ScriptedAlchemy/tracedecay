@@ -82,7 +82,6 @@ pub struct RestoreFreshnessWitnessV1 {
     pub ignored_source_paths: Vec<String>,
 }
 
-#[hotpath::measure_all]
 impl RestoreFreshnessWitnessV1 {
     fn witness_path(store_root: &Path) -> PathBuf {
         store_root.join(FRESHNESS_WITNESS_FILE_NAME)

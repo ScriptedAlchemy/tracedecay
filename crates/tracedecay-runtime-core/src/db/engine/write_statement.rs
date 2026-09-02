@@ -10,7 +10,6 @@ pub struct WriteStatement {
     exact: ExactSqlStatement,
 }
 
-#[hotpath::measure_all]
 impl WriteStatement {
     pub fn new<P>(sql: impl Into<String>, params: P) -> Result<Self>
     where

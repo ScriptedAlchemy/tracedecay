@@ -41,7 +41,6 @@ pub struct FeedbackBudgetUsage {
     pub cost_microunits: u64,
 }
 
-#[hotpath::measure_all]
 impl FeedbackBudgetUsage {
     fn validate_for(
         &self,
@@ -79,7 +78,6 @@ pub struct FeedbackCycleAdvisoryV1 {
     pub findings: Vec<FeedbackFindingV1>,
 }
 
-#[hotpath::measure_all]
 impl FeedbackCycleAdvisoryV1 {
     pub fn is_empty(&self) -> bool {
         self.providers.is_empty() && self.findings.is_empty()
@@ -156,7 +154,6 @@ pub struct FeedbackCycleExecutionRequest {
     pub control: FeedbackCycleControl,
 }
 
-#[hotpath::measure_all]
 impl FeedbackCycleExecutionRequest {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         self.input.validate()?;
@@ -203,7 +200,6 @@ struct FeedbackCycleProgress {
     dedupe_key: Option<FeedbackDedupeKeyV1>,
 }
 
-#[hotpath::measure]
 fn admitted_progress_mut(
     progress: &mut Option<FeedbackCycleProgress>,
 ) -> Result<&mut FeedbackCycleProgress, ApplicationContractError> {
@@ -214,7 +210,6 @@ fn admitted_progress_mut(
         })
 }
 
-#[hotpath::measure]
 fn resolved_runtime(
     progress: &FeedbackCycleProgress,
 ) -> Result<&FeedbackRuntimeStateV1, ApplicationContractError> {
@@ -226,7 +221,6 @@ fn resolved_runtime(
         })
 }
 
-#[hotpath::measure]
 fn resolved_impact_state(
     progress: &FeedbackCycleProgress,
 ) -> Result<FeedbackImpactStateV1, ApplicationContractError> {
@@ -290,7 +284,6 @@ enum FeedbackCycleStep {
     Complete(Box<FeedbackCycleExecutionResult>),
 }
 
-#[hotpath::measure_all]
 impl FeedbackCycleStep {
     fn continue_with(stage: FeedbackCycleStage) -> Self {
         Self::Continue(Box::new(stage))
@@ -1484,7 +1477,6 @@ enum FeedbackImpactResolution {
     TimedOut,
 }
 
-#[hotpath::measure]
 fn request_interruption(
     context: &RequestContext,
     request: &FeedbackCycleExecutionRequest,
@@ -1502,7 +1494,6 @@ fn request_interruption(
     }
 }
 
-#[hotpath::measure]
 fn is_recordable_completed_publication(termination: FeedbackCycleTerminationV1) -> bool {
     matches!(
         termination,
@@ -1510,7 +1501,6 @@ fn is_recordable_completed_publication(termination: FeedbackCycleTerminationV1) 
     )
 }
 
-#[hotpath::measure]
 fn scope_matches(context: &RequestContext, input: &FeedbackEvaluationInputV1) -> bool {
     let scope = context.scope();
     scope.project_id == input.request.scope.project_id
@@ -1522,7 +1512,6 @@ fn scope_matches(context: &RequestContext, input: &FeedbackEvaluationInputV1) ->
             .is_some_and(|reference| reference.as_str() == input.request.scope.branch_ref)
 }
 
-#[hotpath::measure]
 fn provider_matches_input(
     identity: &DiagnosticProviderIdentity,
     input: &FeedbackEvaluationInputV1,
@@ -1587,7 +1576,6 @@ struct ResolvedBaseline<'a> {
     state: FeedbackBaselineStateV1,
 }
 
-#[hotpath::measure]
 fn resolve_baselines<'a>(
     request: &FeedbackCycleExecutionRequest,
     runtime: &FeedbackRuntimeStateV1,
@@ -1655,7 +1643,6 @@ fn resolve_baselines<'a>(
     Ok(resolved)
 }
 
-#[hotpath::measure]
 fn collect_diagnostics(
     request: &FeedbackCycleExecutionRequest,
     results: &[DiagnosticProviderResult<Vec<FeedbackDiagnosticV1>>],
@@ -1780,7 +1767,6 @@ fn collect_diagnostics(
     Ok((states, findings))
 }
 
-#[hotpath::measure]
 fn overlay_diagnostic_matches_input(
     diagnostic: &tracedecay_domain::feedback::FeedbackSessionDiagnosticV1,
     input: &FeedbackEvaluationInputV1,
@@ -1801,7 +1787,6 @@ fn overlay_diagnostic_matches_input(
             .is_none_or(|symbol| diagnostic.symbol.as_ref() == Some(symbol))
 }
 
-#[hotpath::measure]
 fn diagnostic_matches_input(
     diagnostic: &GenerationDiagnosticV1,
     provider: &DiagnosticProviderIdentity,
@@ -1845,7 +1830,6 @@ fn diagnostic_matches_input(
         }
 }
 
-#[hotpath::measure]
 fn finding_lifecycle(diagnostic: &GenerationDiagnosticV1) -> FeedbackFindingLifecycleV1 {
     match &diagnostic.state {
         DiagnosticRecordStateV1::Current => FeedbackFindingLifecycleV1::Active,
@@ -1854,7 +1838,6 @@ fn finding_lifecycle(diagnostic: &GenerationDiagnosticV1) -> FeedbackFindingLife
     }
 }
 
-#[hotpath::measure]
 fn determine_termination(
     provider_states: &[ProviderEvaluationStateV1],
     baseline_states: &[FeedbackBaselineStateV1],
@@ -1904,7 +1887,6 @@ fn determine_termination(
     }
 }
 
-#[hotpath::measure]
 fn terminal_before_impact(
     provider_states: &[ProviderEvaluationStateV1],
     baseline_states: &[FeedbackBaselineStateV1],
@@ -1925,7 +1907,6 @@ fn terminal_before_impact(
 /// The shape every early terminal shares: the cycle stopped before it could
 /// produce impact or findings, so only the termination, the provider states,
 /// and how far the cycle got are known.
-#[hotpath::measure]
 fn early_terminal(
     termination: FeedbackCycleTerminationV1,
     provider_states: Vec<ProviderEvaluationStateV1>,
@@ -1943,7 +1924,6 @@ fn early_terminal(
     }
 }
 
-#[hotpath::measure]
 fn after_runtime_terminal(
     termination: FeedbackCycleTerminationV1,
     provider_states: Vec<ProviderEvaluationStateV1>,
@@ -1960,7 +1940,6 @@ fn after_runtime_terminal(
     )
 }
 
-#[hotpath::measure]
 fn after_runtime_terminal_with_baselines(
     termination: FeedbackCycleTerminationV1,
     provider_states: Vec<ProviderEvaluationStateV1>,
@@ -1981,7 +1960,6 @@ fn after_runtime_terminal_with_baselines(
     }
 }
 
-#[hotpath::measure]
 fn after_runtime_terminal_with_dedupe(
     termination: FeedbackCycleTerminationV1,
     provider_states: Vec<ProviderEvaluationStateV1>,

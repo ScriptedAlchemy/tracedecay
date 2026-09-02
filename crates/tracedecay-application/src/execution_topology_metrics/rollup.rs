@@ -98,7 +98,6 @@ pub enum ExecutionTopologyRollupRetentionV1 {
     Updated { fragment_json: String },
 }
 
-#[hotpath::measure_all]
 impl ExecutionTopologyBoundaryFragmentV1 {
     #[must_use]
     pub fn horizon(&self) -> &ObservabilityHorizonV1 {
@@ -125,7 +124,6 @@ enum FragmentRefV1<'a> {
     Boundary(&'a ExecutionTopologyBoundaryFragmentV1),
 }
 
-#[hotpath::measure_all]
 impl FragmentRefV1<'_> {
     fn horizon(&self) -> &ObservabilityHorizonV1 {
         match self {
@@ -187,7 +185,6 @@ impl FragmentRefV1<'_> {
     }
 }
 
-#[hotpath::measure_all]
 impl ExecutionTopologyRollupFragmentV1 {
     #[must_use]
     pub fn authorized_scope_ref(&self) -> &str {
@@ -271,7 +268,6 @@ impl ExecutionTopologyRollupFragmentV1 {
 
 /// Serializes one typed rollup fragment into the canonical bytes shared by
 /// application readers and persistence adapters.
-#[hotpath::measure]
 pub fn canonical_execution_topology_rollup_fragment_bytes(
     fragment: &ExecutionTopologyRollupFragmentV1,
 ) -> Result<Vec<u8>, ExecutionTopologyRollupErrorV1> {
@@ -281,7 +277,6 @@ pub fn canonical_execution_topology_rollup_fragment_bytes(
 /// Canonically validates and evaluates retention for one fragment document.
 /// Storage CAS-publishes `Updated` against the exact generation/content digest;
 /// it never parses or reinterprets the opaque reduced state itself.
-#[hotpath::measure]
 pub fn check_execution_topology_rollup_retention_json(
     fragment_json: &str,
     now_micros: i64,
@@ -395,7 +390,6 @@ pub fn build_execution_topology_boundary_fragment(
 /// Projects an exact requested horizon from complete, non-overlapping daily
 /// fragments. This convenience path accepts only persisted full UTC days.
 #[must_use]
-#[hotpath::measure]
 pub fn project_execution_topology_fragments(
     authorized_scope_ref: &str,
     requested_horizon: &ObservabilityHorizonV1,
@@ -531,14 +525,12 @@ pub fn project_execution_topology_fragments_with_boundaries(
     }
 }
 
-#[hotpath::measure]
 fn page_is_capped(page: &ObservabilityPageV1) -> bool {
     page.coverage == CoverageStateV1::Capped
         || page.next_watermark.is_some()
         || page.events.len() as u64 > u64::from(super::MAX_EXECUTION_TOPOLOGY_EVENTS_V1)
 }
 
-#[hotpath::measure]
 fn rollup_state_error(
     error: ExecutionTopologyRollupStateErrorV1,
 ) -> ExecutionTopologyRollupErrorV1 {
@@ -555,14 +547,12 @@ fn rollup_state_error(
     }
 }
 
-#[hotpath::measure]
 fn is_exact_utc_day(horizon: &ObservabilityHorizonV1) -> bool {
     horizon.until_micros.saturating_sub(horizon.since_micros) == UTC_DAY_MICROS_V1
         && horizon.since_micros.rem_euclid(UTC_DAY_MICROS_V1) == 0
         && horizon.until_micros.rem_euclid(UTC_DAY_MICROS_V1) == 0
 }
 
-#[hotpath::measure]
 fn is_partial_utc_day(horizon: &ObservabilityHorizonV1) -> bool {
     horizon.until_micros > horizon.since_micros
         && !is_exact_utc_day(horizon)
@@ -573,7 +563,6 @@ fn is_partial_utc_day(horizon: &ObservabilityHorizonV1) -> bool {
                 .div_euclid(UTC_DAY_MICROS_V1)
 }
 
-#[hotpath::measure]
 fn safe_local_cursor(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 512

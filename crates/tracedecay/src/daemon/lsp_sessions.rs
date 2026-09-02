@@ -10,7 +10,6 @@ use tracedecay_daemon_service::{
 
 use super::*;
 
-#[hotpath::measure]
 pub(super) fn invocation_lsp_session_transition(
     request: &DaemonInvocationRequest,
 ) -> Option<DaemonLspSessionAccess> {
@@ -21,7 +20,6 @@ pub(super) fn invocation_lsp_session_transition(
     }
 }
 
-#[hotpath::measure]
 pub(super) fn update_connection_lsp_sessions(
     sessions: &mut HashMap<String, DaemonLspSessionAccess>,
     transitioned: Option<&DaemonLspSessionAccess>,
@@ -56,7 +54,6 @@ pub(super) async fn cleanup_connection_lsp_sessions(
     }
 }
 
-#[hotpath::measure]
 pub(super) fn admitted_lsp_root_for_project_path(project_path: &Path) -> Option<AdmittedRoot> {
     url::Url::from_file_path(project_path)
         .ok()

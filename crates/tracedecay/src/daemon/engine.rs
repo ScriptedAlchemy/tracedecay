@@ -12,10 +12,10 @@ use tracedecay_code_index_runtime::{GitWatchSyncConfigV1, git_watch};
 use tracedecay_daemon_identity::profile_identity;
 
 #[cfg(unix)]
-#[hotpath::measure]
 fn git_watch_sync_config(config: &crate::config::SyncConfig) -> GitWatchSyncConfigV1 {
     GitWatchSyncConfigV1 {
         auto_watch: config.auto_watch,
+        watch_linked_worktrees: config.watch_linked_worktrees,
         watch_debounce_ms: config.watch_debounce_ms,
         watch_max_delay_ms: config.watch_max_delay_ms,
         watch_max_projects: config.watch_max_projects,
@@ -117,7 +117,6 @@ pub(super) async fn ensure_git_index_transactions_for_mutation_owners(
     .await
 }
 
-#[hotpath::measure]
 fn ensure_git_index_transactions_for_mutation_owners_inner<'a>(
     store_administration: &'a StoreAdministration,
     session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
@@ -188,7 +187,6 @@ pub(super) fn ensure_context_scout_owner_before_advertising(
 }
 
 #[cfg(unix)]
-#[hotpath::measure_all]
 impl DaemonEngine {
     pub(super) fn with_progress_producer_incarnation(mut self, producer_incarnation: u64) -> Self {
         self.invocation =
@@ -867,6 +865,12 @@ impl DaemonEngine {
             {
                 git_watch::GitWatcherAdmission::Ready
                 | git_watch::GitWatcherAdmission::Disabled => {}
+                git_watch::GitWatcherAdmission::LinkedWorktreeDisabled => {
+                    log_daemon_event(
+                        "git_watch_admission_rejected",
+                        &[("reason", "linked_worktree_disabled".to_string())],
+                    );
+                }
                 git_watch::GitWatcherAdmission::ShuttingDown => {
                     log_daemon_event(
                         "git_watch_admission_rejected",

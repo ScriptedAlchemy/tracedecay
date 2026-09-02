@@ -63,7 +63,6 @@ pub struct SqliteDoctorHealthLane {
     connection: Connection,
 }
 
-#[hotpath::measure_all]
 impl SqliteDoctorHealthLane {
     pub fn from_health_connection(binding: StoreRuntimeBindingV1, connection: Connection) -> Self {
         Self {
@@ -114,7 +113,6 @@ impl SqliteDoctorHealthLane {
     }
 }
 
-#[hotpath::measure]
 fn integrity_rows(
     connection: &Connection,
     pragma: &'static str,
@@ -135,7 +133,6 @@ fn integrity_rows(
     }
 }
 
-#[hotpath::measure]
 fn wal_health(connection: &Connection) -> Result<WalHealth, DoctorHealthError> {
     let journal_mode: String = connection
         .pragma_query_value(None, "journal_mode", |row| row.get(0))
@@ -177,7 +174,6 @@ fn wal_health(connection: &Connection) -> Result<WalHealth, DoctorHealthError> {
     })
 }
 
-#[hotpath::measure]
 fn nonnegative(value: i64, column: usize) -> Result<u64, DoctorHealthError> {
     u64::try_from(value).map_err(|error| DoctorHealthError {
         stage: "wal state",

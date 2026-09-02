@@ -64,12 +64,10 @@ pub(super) enum RenameGraphEvidenceLoadV1 {
     },
 }
 
-#[hotpath::measure]
 fn projection_error(error: CodeGraphProjectionError) -> TraceDecayError {
     map_code_graph_read_runtime_error(map_projection_error(error))
 }
 
-#[hotpath::measure]
 fn metadata(
     summary: &CodeGraphSymbolSummaryV1,
 ) -> Result<&tracedecay_code_index::lineage::LineageSymbolRecordV1> {
@@ -82,7 +80,6 @@ fn metadata(
     })
 }
 
-#[hotpath::measure]
 fn path_for<'a>(
     summary: &CodeGraphSymbolSummaryV1,
     paths: &'a BTreeMap<tracedecay_domain::FileOccurrenceId, String>,
@@ -103,7 +100,6 @@ fn path_for<'a>(
     })
 }
 
-#[hotpath::measure]
 fn source_span(summary: &CodeGraphSymbolSummaryV1) -> Result<SourceSpan> {
     summary
         .binding
@@ -118,7 +114,6 @@ fn source_span(summary: &CodeGraphSymbolSummaryV1) -> Result<SourceSpan> {
         })
 }
 
-#[hotpath::measure]
 fn declaration_site(
     summary: &CodeGraphSymbolSummaryV1,
     paths: &BTreeMap<tracedecay_domain::FileOccurrenceId, String>,
@@ -139,7 +134,6 @@ fn declaration_site(
     })
 }
 
-#[hotpath::measure]
 fn reference_site(
     edge: &CodeGraphSemanticEdgeV1,
     paths: &BTreeMap<tracedecay_domain::FileOccurrenceId, String>,
@@ -161,7 +155,6 @@ fn reference_site(
     })
 }
 
-#[hotpath::measure]
 fn looks_like_test(path: &str, name: &str) -> bool {
     let path = path.to_ascii_lowercase();
     path.starts_with("tests/")
@@ -175,7 +168,6 @@ fn looks_like_test(path: &str, name: &str) -> bool {
         || name.ends_with("_test")
 }
 
-#[hotpath::measure]
 fn looks_like_example(path: &str) -> bool {
     let path = path.to_ascii_lowercase();
     path.starts_with("examples/") || path.contains("/examples/")
@@ -197,7 +189,6 @@ fn neighbor_batches(
         .map_err(projection_error)
 }
 
-#[hotpath::measure]
 pub(super) fn declaration_kind(kind: &str, path: &str, name: &str) -> RenameSiteKindV1 {
     if looks_like_example(path) {
         return RenameSiteKindV1::Example;
@@ -216,7 +207,6 @@ pub(super) fn declaration_kind(kind: &str, path: &str, name: &str) -> RenameSite
     }
 }
 
-#[hotpath::measure]
 pub(super) fn relation_kind(edge: RelationEdgeKindV1, line: &str, path: &str) -> RenameSiteKindV1 {
     if looks_like_example(path) {
         return RenameSiteKindV1::Example;
@@ -242,7 +232,6 @@ pub(super) fn relation_kind(edge: RelationEdgeKindV1, line: &str, path: &str) ->
     }
 }
 
-#[hotpath::measure]
 pub(super) fn ensure_active(graph: &SourceEditGraphReadV1) -> Result<()> {
     if graph.cancellation().is_cancelled() {
         return Err(map_code_graph_read_runtime_error(

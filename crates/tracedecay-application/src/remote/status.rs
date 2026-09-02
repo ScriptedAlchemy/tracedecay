@@ -40,7 +40,6 @@ pub struct RemoteOperationalStatusV1 {
     pub observed_at: UtcMicros,
 }
 
-#[hotpath::measure_all]
 impl RemoteOperationalStatusV1 {
     /// Composes the canonical operational status from directly observed
     /// authority evidence, deriving the one readiness value that satisfies
@@ -141,7 +140,6 @@ where
     }
 }
 
-#[hotpath::measure_all]
 impl RemoteOperationalStatusReadV1 {
     /// Projects the Doctor operational read from the same observation, so the
     /// Doctor plane and the richer operator surfaces cannot disagree.
@@ -174,7 +172,6 @@ impl RemoteOperationalStatusReadV1 {
     }
 }
 
-#[hotpath::measure]
 fn invalid_status() -> ApplicationProblem {
     ApplicationProblem::Unavailable {
         classification: crate::ApplicationUnavailableClassV1::Authority,

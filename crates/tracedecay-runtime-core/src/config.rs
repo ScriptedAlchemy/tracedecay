@@ -27,18 +27,15 @@ pub const GLOBAL_DB_FILENAME: &str = "global.db";
 
 /// New runtime storage lives in the user-level profile shard. The project root
 /// only carries lightweight marker/config files under `.tracedecay/`.
-#[hotpath::measure]
 pub fn get_tracedecay_dir(project_root: &Path) -> PathBuf {
     project_root.join(TRACEDECAY_DIR)
 }
 
-#[hotpath::measure]
 pub fn active_data_dir_name(project_root: &Path) -> &'static str {
     let _ = project_root;
     TRACEDECAY_DIR
 }
 
-#[hotpath::measure]
 pub fn db_filename(data_dir: &Path) -> &'static str {
     let _ = data_dir;
     DB_FILENAME
@@ -49,20 +46,17 @@ pub fn db_filename(data_dir: &Path) -> &'static str {
 /// Normal runtime graph storage resolves through [`crate::storage::StoreLayout`]
 /// into the user profile shard; this helper is only for explicit marker checks
 /// and migration cleanup.
-#[hotpath::measure]
 pub fn get_project_db_path(project_root: &Path) -> PathBuf {
     get_tracedecay_dir(project_root).join(DB_FILENAME)
 }
 
 /// Returns true when the old repo-local `TraceDecay` graph DB exists at this root.
-#[hotpath::measure]
 pub fn has_project_database(project_root: &Path) -> bool {
     project_root.join(TRACEDECAY_DIR).join(DB_FILENAME).exists()
 }
 
 /// User-level data directory. Runtime storage is always rooted at
 /// `~/.tracedecay` unless `TRACEDECAY_DATA_DIR` explicitly overrides it.
-#[hotpath::measure]
 pub fn user_data_dir() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os(USER_DATA_DIR_ENV).filter(|path| !path.is_empty()) {
         return Some(nextest_isolated_user_data_dir(canonicalize_data_dir(
@@ -73,7 +67,6 @@ pub fn user_data_dir() -> Option<PathBuf> {
     Some(canonicalize_data_dir(home.join(TRACEDECAY_DIR)))
 }
 
-#[hotpath::measure]
 fn global_db_path_override() -> Option<PathBuf> {
     std::env::var_os(GLOBAL_DB_PATH_ENV)
         .filter(|path| !path.is_empty())
@@ -86,7 +79,6 @@ fn global_db_path_override() -> Option<PathBuf> {
 /// pins an explicit path. This is the same formula `tracedecay-global-db`
 /// previously owned; the helper lives here so handshake identity can resolve
 /// the path without taking that crate as a dependency.
-#[hotpath::measure]
 pub fn global_db_path() -> Option<PathBuf> {
     if let Some(path) = global_db_path_override() {
         return Some(path);
@@ -95,12 +87,10 @@ pub fn global_db_path() -> Option<PathBuf> {
 }
 
 /// True when `TRACEDECAY_GLOBAL_DB` pins the global DB to an explicit path.
-#[hotpath::measure]
 pub fn global_db_path_is_overridden() -> bool {
     global_db_path_override().is_some()
 }
 
-#[hotpath::measure]
 fn nextest_isolated_user_data_dir(path: PathBuf) -> PathBuf {
     use std::hash::{Hash, Hasher};
 
@@ -144,7 +134,6 @@ fn nextest_isolated_user_data_dir(path: PathBuf) -> PathBuf {
         .join(format!("{:016x}", hasher.finish()))
 }
 
-#[hotpath::measure]
 fn canonicalize_data_dir(path: PathBuf) -> PathBuf {
     if !path.is_absolute() {
         return path;
@@ -176,7 +165,6 @@ fn canonicalize_data_dir(path: PathBuf) -> PathBuf {
 /// `serve` forwards this routing metadata to the managed daemon. MCP
 /// `initialize` roots and registry aliases are resolved there; the proxy never
 /// opens a project or global database and has no in-process fallback.
-#[hotpath::measure]
 pub fn discover_project_root(start: &Path) -> Option<PathBuf> {
     let mut dir = start.to_path_buf();
     let worktree_root = crate::worktree::git_worktree_root(start);
@@ -204,7 +192,6 @@ pub fn discover_project_root(start: &Path) -> Option<PathBuf> {
 /// Filesystem roots and the current user profile commonly contain many
 /// repositories. Treating either as an implicit project can turn MCP startup
 /// freshness work into a full-machine or full-home traversal.
-#[hotpath::measure]
 pub fn is_ambient_project_root(path: &Path) -> bool {
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     canonical.parent().is_none()
@@ -215,7 +202,6 @@ pub fn is_ambient_project_root(path: &Path) -> bool {
             .map(|home| std::fs::canonicalize(&home).unwrap_or(home))
             .any(|home| home == canonical)
 }
-#[hotpath::measure]
 fn paths_same(left: &Path, right: &Path) -> bool {
     let left = std::fs::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
     let right = std::fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
@@ -235,7 +221,6 @@ static USER_DATA_DIR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(())
 
 /// Serializes tests (and benchmark harnesses) that mutate process-wide
 /// profile discovery variables.
-#[hotpath::measure]
 pub fn lock_user_data_dir_test_env() -> std::sync::MutexGuard<'static, ()> {
     USER_DATA_DIR_TEST_LOCK
         .lock()
