@@ -25,9 +25,12 @@ pub(crate) use invariants::{
 };
 pub use invariants::{
     ensure_authority_audit_checkpoint_schema, ensure_authority_invariant_schema,
-    ensure_authority_invariants, require_foreign_key_audit,
+    require_foreign_key_audit,
 };
-pub(crate) use invariants::{invariant_trigger_names_for_tables, invariant_trigger_sql_for_tables};
+pub(crate) use invariants::{
+    ensure_authority_invariants, ensure_fresh_authority_invariants,
+    invariant_trigger_names_for_tables, invariant_trigger_sql_for_tables,
+};
 pub use validation::validate_registry_schema_contract;
 pub(crate) use validation::{
     validate_authority_schema_contract, validate_released_v3_temporal_projection_receipt_contract,

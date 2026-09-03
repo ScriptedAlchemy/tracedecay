@@ -3,7 +3,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 
 #[cfg(any(test, feature = "test-helpers"))]
-use tokio::sync::{Notify, Semaphore};
+use tokio::sync::Notify;
+use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tracedecay_store::StoreShardIdV1;
 
@@ -16,6 +17,7 @@ use super::{
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RegisteredSchemaConvergenceStatus {
     Pending,
+    Running,
     Complete,
     Degraded { message: String },
 }
@@ -49,10 +51,13 @@ fn lock_registered_schema_convergence_statuses(
 pub(super) struct RegisteredSchemaConvergenceMaintenance {
     accepting: AtomicBool,
     foreground_project_opens: Arc<ForegroundProjectOpenState>,
+    concurrency: Arc<Semaphore>,
     statuses: Arc<StdMutex<RegisteredSchemaConvergenceStatuses>>,
     tasks: StdMutex<BTreeMap<StoreShardIdV1, JoinHandle<()>>>,
     #[cfg(any(test, feature = "test-helpers"))]
     schedule_count: std::sync::atomic::AtomicUsize,
+    #[cfg(any(test, feature = "test-helpers"))]
+    execution_count: Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(any(test, feature = "test-helpers"))]
     gate: StdMutex<Option<Arc<RegisteredSchemaConvergenceTestGateState>>>,
 }
@@ -109,10 +114,16 @@ impl RegisteredSchemaConvergenceMaintenance {
         Self {
             accepting: AtomicBool::new(true),
             foreground_project_opens: Arc::new(ForegroundProjectOpenState::default()),
+            // Convergence is paging and allocation heavy. One permit prevents
+            // multiple shards from competing with each other and LCM
+            // retention while ordinary per-shard reads and writes stay live.
+            concurrency: Arc::new(Semaphore::new(1)),
             statuses: Arc::new(StdMutex::new(BTreeMap::new())),
             tasks: StdMutex::new(BTreeMap::new()),
             #[cfg(any(test, feature = "test-helpers"))]
             schedule_count: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(any(test, feature = "test-helpers"))]
+            execution_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             #[cfg(any(test, feature = "test-helpers"))]
             gate: StdMutex::new(None),
         }
@@ -169,10 +180,33 @@ impl RegisteredSchemaConvergenceMaintenance {
             .clone();
         let statuses = Arc::clone(&self.statuses);
         let foreground_project_opens = Arc::clone(&self.foreground_project_opens);
+        let concurrency = Arc::clone(&self.concurrency);
+        #[cfg(any(test, feature = "test-helpers"))]
+        let execution_count = Arc::clone(&self.execution_count);
         let task_shard_id = shard_id.clone();
         let task = tokio::spawn(hotpath::future!(
             async move {
                 foreground_project_opens.wait_until_settled().await;
+                let permit = match concurrency.acquire_owned().await {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        lock_registered_schema_convergence_statuses(&statuses).insert(
+                            task_shard_id,
+                            RegisteredSchemaConvergenceStatus::Degraded {
+                                message: format!(
+                                    "registered schema convergence admission closed: {error}"
+                                ),
+                            },
+                        );
+                        return;
+                    }
+                };
+                lock_registered_schema_convergence_statuses(&statuses).insert(
+                    task_shard_id.clone(),
+                    RegisteredSchemaConvergenceStatus::Running,
+                );
+                #[cfg(any(test, feature = "test-helpers"))]
+                execution_count.fetch_add(1, Ordering::Relaxed);
                 #[cfg(any(test, feature = "test-helpers"))]
                 if let Some(gate) = gate {
                     gate.block().await;
@@ -193,6 +227,7 @@ impl RegisteredSchemaConvergenceMaintenance {
                     );
                 }
                 release_process_allocator_memory();
+                drop(permit);
                 let status = match result {
                     Ok(()) => {
                         crate::session_registry::log_store_runtime_event(
@@ -396,6 +431,13 @@ impl DaemonSessionRuntimeRegistryV1 {
     pub fn registered_schema_convergence_schedule_count_for_test(&self) -> usize {
         self.registered_schema_convergence
             .schedule_count
+            .load(Ordering::Relaxed)
+    }
+
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn registered_schema_convergence_execution_count_for_test(&self) -> usize {
+        self.registered_schema_convergence
+            .execution_count
             .load(Ordering::Relaxed)
     }
 }
