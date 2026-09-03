@@ -306,7 +306,6 @@ fn every_batch_of_a_rewritten_transcript_keeps_one_replacement_namespace() {
     )
     .unwrap();
 
-    let dispatch_models = DispatchModelCache::default();
     let first = parse_cursor_jsonl(
         &event,
         "session-redacted",
@@ -314,7 +313,6 @@ fn every_batch_of_a_rewritten_transcript_keeps_one_replacement_namespace() {
         StoredCursor::default(),
         None,
         false,
-        &dispatch_models,
     )
     .unwrap();
     assert_eq!(first.messages.len(), 1);
@@ -336,7 +334,6 @@ fn every_batch_of_a_rewritten_transcript_keeps_one_replacement_namespace() {
         first.new_cursor,
         Some(1),
         false,
-        &dispatch_models,
     )
     .unwrap();
     assert_eq!(head.messages.len(), 1);
@@ -350,7 +347,6 @@ fn every_batch_of_a_rewritten_transcript_keeps_one_replacement_namespace() {
         head.new_cursor,
         Some(1),
         false,
-        &dispatch_models,
     )
     .unwrap();
     assert_eq!(tail.messages.len(), 1);
