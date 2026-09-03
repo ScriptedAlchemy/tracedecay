@@ -1,6 +1,7 @@
 use super::schema_contract::{
     authority_invariant_triggers_intact, ensure_authority_audit_checkpoint_schema,
-    ensure_authority_invariant_schema, ensure_authority_invariants, require_foreign_key_audit,
+    ensure_authority_invariant_schema, ensure_authority_invariants,
+    ensure_fresh_authority_invariants, require_foreign_key_audit,
     restore_immutability_after_canonical_repair, suspend_immutability_for_canonical_repair,
     validate_authority_rows_exhaustive, validate_authority_schema_contract,
     validate_registry_schema_contract, validate_remote_deletion_schema_contract,
@@ -398,7 +399,13 @@ pub async fn ensure_registered_schema(
     installation: &RegisteredSchemaInstallationV1,
 ) -> tracedecay_domain::errors::Result<()> {
     let convergence = ensure_registered_schema_for_admission(installation).await?;
-    converge_registered_schema_on(installation, convergence).await
+    if !convergence.is_fresh {
+        return Err(global_db_operation_message(
+            "initialize registered global database schema",
+            "new registered schema installation was not classified fresh",
+        ));
+    }
+    ensure_fresh_authority_invariants(installation).await
 }
 
 #[derive(Clone, Copy)]
@@ -787,11 +794,7 @@ pub async fn converge_registered_schema(
     // guarded writes may proceed while these idempotent repairs advance.
     // Completed repairs survive interruption, while the trusted checkpoint is
     // still written only after every audit succeeds.
-    let transaction = database
-        .begin_bulk_write_transaction("converge registered global database authority schema")
-        .await?;
-    converge_registered_schema_on(&transaction, convergence).await?;
-    transaction.commit().await
+    converge_registered_schema_on(database, convergence).await
 }
 
 async fn converge_lcm_status_performance_indexes(
@@ -810,17 +813,12 @@ async fn converge_lcm_status_performance_indexes(
     Ok(())
 }
 
-#[hotpath::measure(future = true, label = "global_db.schema.persist.converge")]
+#[hotpath::measure(future = true, label = "global_db.schema.persist.converge_invariants")]
 async fn converge_registered_schema_on(
-    connection: &impl Executor,
+    database: &Database,
     convergence: RegisteredSchemaConvergence,
 ) -> tracedecay_domain::errors::Result<()> {
-    ensure_authority_invariants(
-        connection,
-        convergence.force_exhaustive,
-        convergence.is_fresh,
-    )
-    .await
+    ensure_authority_invariants(database, convergence.force_exhaustive, convergence.is_fresh).await
 }
 
 /// Synchronously converges an attached existing store's historical schema.
@@ -838,20 +836,17 @@ pub async fn converge_attached_registered_schema(
     database: &Database,
 ) -> tracedecay_domain::errors::Result<()> {
     converge_lcm_status_performance_indexes(database).await?;
-    let transaction = database
-        .begin_bulk_write_transaction("converge attached global database authority schema")
-        .await?;
-    let force_exhaustive = !authority_invariant_triggers_intact(&transaction).await?;
+    let force_exhaustive =
+        !authority_invariant_triggers_intact(&database.read_connection()).await?;
     converge_registered_schema_on(
-        &transaction,
+        database,
         RegisteredSchemaConvergence {
             force_exhaustive,
             is_fresh: false,
             lcm_status_performance_indexes: false,
         },
     )
-    .await?;
-    transaction.commit().await
+    .await
 }
 
 /// Verifies (or completes) an attached existing store's registered schema.

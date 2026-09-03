@@ -270,7 +270,7 @@ impl RegisteredGlobalDb {
         &self,
         convergence: super::schema_stages::RegisteredSchemaConvergence,
     ) -> tracedecay_domain::errors::Result<()> {
-        super::schema_stages::converge_registered_schema(&self.database, convergence).await
+        super::schema_stages::converge_registered_schema(self.runtime_database(), convergence).await
     }
 
     pub async fn release_connection_memory(&self) -> tracedecay_domain::errors::Result<()> {
@@ -656,6 +656,10 @@ impl RegisteredGlobalDb {
 
     pub fn db_path(&self) -> &Path {
         self.database.canonical_database_path()
+    }
+
+    pub(crate) fn runtime_database(&self) -> &Database {
+        &self.database
     }
 
     pub fn git_index_transaction_store(

@@ -8,7 +8,7 @@
 //! SQLite is bundled and allocates through libc, so Hotpath's counting
 //! allocator reports Rust-side allocations only.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use serde_json::Value;
 use tracedecay_domain::{
@@ -242,16 +242,13 @@ fn profile_large_registered_schema_convergence() {
     let read_bytes_before = proc_value("/proc/self/io", "read_bytes:");
     let hwm_before_kib = proc_value("/proc/self/status", "VmHWM:");
     let started = Instant::now();
-    let mut shard_elapsed = Vec::<Duration>::with_capacity(SHARD_COUNT);
     tokio.block_on(async {
         for runtime in &runtimes {
-            let shard_started = Instant::now();
             runtime
                 .profile_database()
                 .converge_schema(RegisteredSchemaConvergence::exhaustive_for_test())
                 .await
                 .expect("converge registered shard");
-            shard_elapsed.push(shard_started.elapsed());
         }
     });
     let elapsed = started.elapsed();
@@ -269,6 +266,11 @@ fn profile_large_registered_schema_convergence() {
         "global_db.schema.persist.converge",
     )
     .expect("outer convergence timing");
+    let step = matching_entry(
+        report_entries(&report, "functions_timing"),
+        "global_db.schema.persist.converge_step",
+    )
+    .expect("convergence step timing");
     println!("shards={SHARD_COUNT}");
     println!("rows_per_shard={ROWS_PER_SHARD}");
     println!("elapsed_ms={}", elapsed.as_millis());
@@ -278,15 +280,13 @@ fn profile_large_registered_schema_convergence() {
         hwm_after_kib.saturating_sub(hwm_before_kib)
     );
     println!("read_bytes={read_bytes}");
-    println!("write_transactions={SHARD_COUNT}");
     println!(
-        "max_writer_lane_hold_ms={}",
-        shard_elapsed
-            .iter()
-            .max()
-            .copied()
-            .unwrap_or_default()
-            .as_millis()
+        "write_transactions={}",
+        step["calls"].as_u64().expect("convergence step calls")
+    );
+    println!(
+        "max_writer_lane_hold={}",
+        step["p100"].as_str().expect("convergence step p100")
     );
     println!(
         "outer_p100={}",
