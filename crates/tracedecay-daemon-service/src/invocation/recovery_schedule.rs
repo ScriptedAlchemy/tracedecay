@@ -46,9 +46,7 @@ impl RecoveryFailureTrackerV1 {
             self.last_warned_at = 0;
             self.next_delay = INITIAL_RETRY_DELAY;
         }
-        if self.consecutive == 1
-            || self.consecutive.is_multiple_of(WARNING_EVERY_FAILURES)
-        {
+        if self.consecutive == 1 || self.consecutive.is_multiple_of(WARNING_EVERY_FAILURES) {
             let suppressed = self
                 .consecutive
                 .saturating_sub(self.last_warned_at)
@@ -76,6 +74,47 @@ impl RecoveryFailureTrackerV1 {
                 failed_attempts = self.consecutive,
                 suppressed,
                 "durable recovery resumed after repeated failures"
+            );
+        }
+        *self = Self::default();
+    }
+}
+
+#[derive(Default)]
+pub(super) struct RecoveryWarningTrackerV1 {
+    skipped: u64,
+    warning_events: u64,
+    last_warned_at: u64,
+}
+
+impl RecoveryWarningTrackerV1 {
+    pub(super) fn warn(&mut self, operation: &'static str, detail: &str) {
+        self.skipped = self.skipped.saturating_add(1);
+        if self.skipped == 1 || self.skipped.is_multiple_of(WARNING_EVERY_FAILURES) {
+            let suppressed = self
+                .skipped
+                .saturating_sub(self.last_warned_at)
+                .saturating_sub(1);
+            tracing::warn!(
+                operation,
+                error = detail,
+                skipped = self.skipped,
+                suppressed,
+                "durable recovery receipt skipped"
+            );
+            self.warning_events = self.warning_events.saturating_add(1);
+            self.last_warned_at = self.skipped;
+        }
+    }
+
+    pub(super) fn recover(&mut self, operation: &'static str) {
+        if self.skipped > 0 {
+            let suppressed = self.skipped.saturating_sub(self.warning_events);
+            tracing::info!(
+                operation,
+                skipped = self.skipped,
+                suppressed,
+                "durable recovery receipt validation resumed"
             );
         }
         *self = Self::default();
@@ -151,7 +190,9 @@ mod tests {
     use tracedecay_runtime_core::cancellation::CancellationToken;
     use tracing_subscriber::fmt::MakeWriter;
 
-    use super::{RecoveryFailureTrackerV1, RecoveryTriggerV1, run_recovery_loop};
+    use super::{
+        RecoveryFailureTrackerV1, RecoveryTriggerV1, RecoveryWarningTrackerV1, run_recovery_loop,
+    };
     use crate::invocation::types::WorkDurableWriteSignalV1;
 
     #[derive(Clone)]
@@ -424,6 +465,48 @@ mod tests {
         assert!(
             output.len() < 8_192,
             "rate-limited failure output was {} bytes",
+            output.len()
+        );
+    }
+
+    #[test]
+    fn skipped_receipt_logs_are_byte_and_event_bounded() {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .without_time()
+            .with_ansi(false)
+            .with_writer(CapturedWriter {
+                bytes: Arc::clone(&bytes),
+            })
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let mut warnings = RecoveryWarningTrackerV1::default();
+            for _ in 0..100 {
+                warnings.warn("fixture recovery", "invalid fixture receipt");
+            }
+            warnings.recover("fixture recovery");
+        });
+        let bytes = bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let output = String::from_utf8(bytes).expect("captured tracing is UTF-8");
+
+        assert_eq!(
+            output.matches("durable recovery receipt skipped").count(),
+            11
+        );
+        assert_eq!(
+            output
+                .matches("durable recovery receipt validation resumed")
+                .count(),
+            1
+        );
+        assert_eq!(output.matches("invalid fixture receipt").count(), 11);
+        assert!(
+            output.len() < 8_192,
+            "rate-limited skipped-receipt output was {} bytes",
             output.len()
         );
     }
