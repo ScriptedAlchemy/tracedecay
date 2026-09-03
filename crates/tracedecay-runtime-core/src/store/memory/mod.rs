@@ -27,7 +27,8 @@ use tracedecay_store::{
     ProjectMemoryFactPageV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactRemoveCommandV1,
     ProjectMemoryFactRemoveOutcomeV1, ProjectMemoryFactRetrievalCommandV1,
     ProjectMemoryFactRetrievalOutcomeV1, ProjectMemoryFactSearchPageV1,
-    ProjectMemoryFactSearchQuery, ProjectMemoryFactStore, ProjectMemoryFactUpdateCommandV1,
+    ProjectMemoryFactSearchQuery, ProjectMemoryFactStore, ProjectMemoryFactSupersedeCommandV1,
+    ProjectMemoryFactSupersedeOutcomeV1, ProjectMemoryFactUpdateCommandV1,
     ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryGraphPageV1, ProjectMemoryGraphQueryV1,
     ProjectMemoryGraphStore, ProjectMemoryMemoryStatusV1, ProjectMemoryPrivacyPurgeCursorV1,
     ProjectMemoryPrivacyPurgeReceiptV1, ProjectMemoryStoreRevisionV1, RetrievalAnchorQuery,
@@ -47,7 +48,7 @@ use crud::{
     query_current_facts_tx, query_fact_as_of_response_tx, query_fact_as_of_tx,
     query_fact_current_response_tx, query_fact_current_tx, query_fact_lineage_response_tx,
     query_fact_lineage_tx, record_project_memory_fact_feedback_tx, remove_project_memory_fact_tx,
-    update_project_memory_fact_tx,
+    supersede_project_memory_fact_tx, update_project_memory_fact_tx,
 };
 use curation::{apply_project_memory_fact_curation_tx, merge_project_memory_facts_tx};
 use dashboard::{
@@ -548,6 +549,26 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         .await
     }
 
+    #[hotpath::measure(label = "runtime_core.memory.supersede")]
+    async fn supersede_project_memory_fact(
+        &self,
+        request: ProjectMemoryFactSupersedeCommandV1,
+        write_control: &FactWriteControl,
+    ) -> FactStoreResult<ProjectMemoryFactSupersedeOutcomeV1> {
+        self.project_memory_write(
+            write_control,
+            |outcome: &ProjectMemoryFactSupersedeOutcomeV1| {
+                outcome.was_superseded() && !outcome.commit_replayed()
+            },
+            move |transaction| {
+                Box::pin(
+                    async move { supersede_project_memory_fact_tx(transaction, &request).await },
+                )
+            },
+        )
+        .await
+    }
+
     #[hotpath::skip]
     async fn record_project_memory_fact_feedback(
         &self,
@@ -1009,6 +1030,10 @@ impl ProjectMemoryFactStore for ProjectFactStore<'_> {
             request: ProjectMemoryFactRemoveCommandV1,
             write_control: &FactWriteControl,
         ) -> FactStoreResult<ProjectMemoryFactRemoveOutcomeV1>;
+        fn supersede_project_memory_fact(
+            request: ProjectMemoryFactSupersedeCommandV1,
+            write_control: &FactWriteControl,
+        ) -> FactStoreResult<ProjectMemoryFactSupersedeOutcomeV1>;
         fn record_project_memory_fact_feedback(
             request: ProjectMemoryFactFeedbackCommandV1,
             write_control: &FactWriteControl,

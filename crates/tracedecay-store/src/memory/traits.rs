@@ -24,7 +24,8 @@ use super::{
     ProjectMemoryFactPageV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactRemoveCommandV1,
     ProjectMemoryFactRemoveOutcomeV1, ProjectMemoryFactRetrievalCommandV1,
     ProjectMemoryFactRetrievalOutcomeV1, ProjectMemoryFactSearchPageV1,
-    ProjectMemoryFactSearchQuery, ProjectMemoryFactUpdateCommandV1,
+    ProjectMemoryFactSearchQuery, ProjectMemoryFactSupersedeCommandV1,
+    ProjectMemoryFactSupersedeOutcomeV1, ProjectMemoryFactUpdateCommandV1,
     ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryMemoryStatusV1,
     ProjectMemoryPrivacyPurgeCursorV1, ProjectMemoryPrivacyPurgeReceiptV1,
     ProjectMemoryStoreRevisionV1, RetrievalAnchorQuery, StoredFactV1,
@@ -175,6 +176,12 @@ pub trait ProjectMemoryFactStore: FactStore {
         request: ProjectMemoryFactRemoveCommandV1,
         write_control: &FactWriteControl,
     ) -> impl Future<Output = FactStoreResult<ProjectMemoryFactRemoveOutcomeV1>> + Send;
+
+    fn supersede_project_memory_fact(
+        &self,
+        request: ProjectMemoryFactSupersedeCommandV1,
+        write_control: &FactWriteControl,
+    ) -> impl Future<Output = FactStoreResult<ProjectMemoryFactSupersedeOutcomeV1>> + Send;
 
     fn record_project_memory_fact_feedback(
         &self,

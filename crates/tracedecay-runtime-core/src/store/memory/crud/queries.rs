@@ -14,8 +14,8 @@ use crate::db::build_qmark_placeholders;
 use crate::db::engine::{Value, params};
 use tracedecay_domain::{
     Confidence, CoverageUniverseKnowledgeV1, FactAssertionId, FactEventId, FactId,
-    FactLineageEventV1, FactOwnerV1, FactPayloadV1, PayloadAccessState, RetrievalAnchorRecordV2,
-    ShardDispositionV1, UtcMicros,
+    FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1, PayloadAccessState,
+    RetrievalAnchorRecordV2, ShardDispositionV1, UtcMicros,
 };
 use tracedecay_store::{
     CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1, FactCommitOutcome,
@@ -307,6 +307,71 @@ pub(in crate::store::memory) async fn query_fact_as_of_tx(
     if !observed_event {
         return Ok(None);
     }
+    stored_fact_from_projection_tx(snapshot, query.owner(), query.fact_id(), projection).await
+}
+
+pub(in crate::store::memory) async fn query_fact_before_supersession_tx(
+    snapshot: &Transaction<'_>,
+    owner: &FactOwnerV1,
+    fact_id: &FactId,
+) -> FactStoreResult<Option<StoredFactV1>> {
+    let owner_key = OwnerKey::new(owner)?;
+    let mut rows = snapshot
+        .query(
+            "SELECT event_json FROM memory_v2_lineage_events
+             WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3
+             ORDER BY occurred_at ASC, event_id ASC",
+            params![
+                fact_id.as_str(),
+                owner_key.kind,
+                owner_key.project_id.as_str(),
+            ],
+        )
+        .await
+        .map_err(|error| storage_error(QUERY_OPERATION, error))?;
+    let mut projection = Projection::empty()?;
+    let mut superseded = false;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage_error(QUERY_OPERATION, error))?
+    {
+        let event = from_json::<FactLineageEventV1>(
+            &row_string(&row, 0, QUERY_OPERATION)?,
+            QUERY_OPERATION,
+        )?;
+        if event.fact_id() != fact_id || event.owner() != owner {
+            return Err(storage_message(
+                QUERY_OPERATION,
+                "stored lineage event identity mismatch",
+            ));
+        }
+        if matches!(
+            event.kind(),
+            FactLineageEventKindV1::Curated {
+                action: tracedecay_domain::FactCurationActionV1::SupersededBy { .. },
+                ..
+            }
+        ) {
+            superseded = true;
+            break;
+        }
+        projection.apply(&event)?;
+    }
+    drop(rows);
+    if !superseded {
+        return Ok(None);
+    }
+    stored_fact_from_projection_tx(snapshot, owner, fact_id, projection).await
+}
+
+async fn stored_fact_from_projection_tx(
+    snapshot: &Transaction<'_>,
+    owner: &FactOwnerV1,
+    fact_id: &FactId,
+    projection: Projection,
+) -> FactStoreResult<Option<StoredFactV1>> {
+    let owner_key = OwnerKey::new(owner)?;
     let Some(active_assertion_id) = projection.active_assertion_id.clone() else {
         return Ok(None);
     };
@@ -316,7 +381,7 @@ pub(in crate::store::memory) async fn query_fact_as_of_tx(
         .ok_or(FactStoreError::EmptyBatch)?;
     let (payload, payload_access) = match projection.access {
         PayloadAccessState::Eligible => {
-            match load_assertion_payload_tx(snapshot, &owner, query.fact_id(), &active_assertion_id)
+            match load_assertion_payload_tx(snapshot, &owner_key, fact_id, &active_assertion_id)
                 .await?
             {
                 Some(payload) => (Some(payload), PayloadAccessState::Eligible),
@@ -330,8 +395,8 @@ pub(in crate::store::memory) async fn query_fact_as_of_tx(
         access => (None, access),
     };
     StoredFactV1::new(
-        query.fact_id().clone(),
-        query.owner().clone(),
+        fact_id.clone(),
+        owner.clone(),
         payload,
         payload_access,
         projection.trust,
