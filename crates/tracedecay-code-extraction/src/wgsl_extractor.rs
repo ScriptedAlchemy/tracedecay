@@ -15,19 +15,19 @@ use crate::types::{
 /// Extracts code graph nodes and edges from WGSL source files using tree-sitter.
 pub struct WgslExtractor;
 
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
     errors: Vec<String>,
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -39,7 +39,7 @@ impl ExtractionState {
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
         }
     }
@@ -62,10 +62,8 @@ impl ExtractionState {
         self.node_stack.last().map(|(_, id)| id.as_str())
     }
 
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
@@ -158,8 +156,10 @@ impl WgslExtractor {
         let Some(header) = find_direct_child_by_kind(node, "function_header") else {
             return;
         };
-        let name = find_direct_child_by_kind(header, "ident")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(header, "ident").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         // Collect stage attributes (@vertex, @fragment, @compute).
         let attrs = Self::collect_attributes(state, node);
@@ -179,7 +179,7 @@ impl WgslExtractor {
 
         let body = find_direct_child_by_kind(node, "compound_statement");
         let metrics = body
-            .map(|b| count_complexity(b, &C_COMPLEXITY, &state.source))
+            .map(|b| count_complexity(b, &C_COMPLEXITY, state.source))
             .unwrap_or_default();
 
         let graph_node = Node {
@@ -253,8 +253,10 @@ impl WgslExtractor {
     }
 
     fn visit_struct_decl(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "ident")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "ident").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -333,12 +335,12 @@ impl WgslExtractor {
         let end_column = node.end_position().column as u32;
         let sig = state.node_text(node);
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Field, &name, start_line);
+        let id = generate_node_id(&state.file_path, &NodeKind::Field, name, start_line);
 
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Field,
-            name,
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -378,7 +380,10 @@ impl WgslExtractor {
         // variable_ident_decl: ident (":" type_decl)?
         let name = find_descendant_by_kind(node, "variable_ident_decl")
             .and_then(|vid| find_direct_child_by_kind(vid, "ident"))
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+            .map_or_else(
+                || "<anonymous>".to_string(),
+                |n| state.node_text(n).to_string(),
+            );
 
         Self::emit_variable_node(state, node, name, NodeKind::Static);
     }
@@ -388,7 +393,10 @@ impl WgslExtractor {
         let name = find_descendant_by_kind(node, "variable_ident_decl")
             .and_then(|vid| find_direct_child_by_kind(vid, "ident"))
             .or_else(|| find_direct_child_by_kind(node, "ident"))
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+            .map_or_else(
+                || "<anonymous>".to_string(),
+                |n| state.node_text(n).to_string(),
+            );
 
         Self::emit_variable_node(state, node, name, NodeKind::Const);
     }
@@ -446,8 +454,10 @@ impl WgslExtractor {
 
     fn visit_type_alias(state: &mut ExtractionState, node: TsNode<'_>) {
         // type_alias_decl: "type" ident "=" type_decl
-        let name = find_direct_child_by_kind(node, "ident")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "ident").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -507,7 +517,7 @@ impl WgslExtractor {
                     let callee_name = state.node_text(callee);
                     state.unresolved_refs.push(UnresolvedRef {
                         from_node_id: fn_node_id.to_string(),
-                        reference_name: callee_name,
+                        reference_name: callee_name.to_string(),
                         reference_kind: EdgeKind::Calls,
                         line: child.start_position().row as u32,
                         column: child.start_position().column as u32,
