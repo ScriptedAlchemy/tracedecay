@@ -162,6 +162,7 @@ pub fn reconcile_committed_payload_drain(
     }
 }
 
+#[hotpath::measure(label = "sessions.lcm.payload.delete", future = true)]
 pub(super) async fn delete_external_payload_in_transaction(
     conn: &(impl Executor + ?Sized),
     storage_root: &Path,
@@ -182,6 +183,7 @@ pub(super) async fn delete_external_payload_in_transaction(
     Ok(prepared)
 }
 
+#[hotpath::measure(label = "sessions.lcm.payload.delete_prepare", future = true)]
 pub(super) async fn prepare_external_payload_delete_in_transaction_with_cache(
     conn: &(impl Executor + ?Sized),
     storage_root: &Path,
@@ -317,6 +319,7 @@ pub fn remove_committed_payload_file(
     )
 }
 
+#[hotpath::measure(label = "sessions.lcm.payload.remove_file")]
 pub fn remove_committed_payload_file_with<F>(
     storage_root: &Path,
     payload_ref: &str,
@@ -426,6 +429,7 @@ fn restore_quarantined_payload(
     fs::rename(quarantine, path).map_err(|error| LcmError::Io(error.to_string()))
 }
 
+#[hotpath::measure(label = "sessions.lcm.payload.fingerprint")]
 pub fn payload_file_fingerprint(
     dir: &Path,
     payload_ref: &str,
@@ -444,6 +448,7 @@ pub fn payload_file_fingerprint(
     ))
 }
 
+#[hotpath::measure(label = "sessions.lcm.payload.tombstone_placeholders", future = true)]
 async fn tombstone_residual_placeholders(
     conn: &(impl Executor + ?Sized),
     payload_ref: &str,
