@@ -92,7 +92,6 @@ impl GlslExtractor {
         .result
     }
 
-    #[hotpath::measure(label = "code_extraction.glsl.extract_tree")]
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -144,7 +143,6 @@ impl GlslExtractor {
         )
     }
 
-    #[hotpath::measure(label = "code_extraction.glsl.parse_source")]
     fn parse_source(source: &str) -> Result<Tree, String> {
         crate::ts_provider::parse_extractor_source("glsl", "GLSL", source)
     }
@@ -691,12 +689,10 @@ impl crate::LanguageExtractor for GlslExtractor {
         "GLSL"
     }
 
-    #[hotpath::measure(label = "code_extraction.glsl.extract")]
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         GlslExtractor::extract_source(file_path, source)
     }
 
-    #[hotpath::measure(label = "code_extraction.glsl.extract_parsed")]
     fn extract_parsed(
         &self,
         file_path: &str,

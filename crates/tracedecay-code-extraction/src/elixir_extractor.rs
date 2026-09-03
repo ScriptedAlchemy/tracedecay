@@ -80,7 +80,6 @@ impl ElixirExtractor {
         .result
     }
 
-    #[hotpath::measure(label = "code_extraction.elixir.extract_tree")]
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -132,7 +131,6 @@ impl ElixirExtractor {
         )
     }
 
-    #[hotpath::measure(label = "code_extraction.elixir.parse_source")]
     fn parse_source(source: &str) -> Result<Tree, String> {
         crate::ts_provider::parse_extractor_source("elixir", "Elixir", source)
     }
@@ -569,12 +567,10 @@ impl crate::LanguageExtractor for ElixirExtractor {
         "Elixir"
     }
 
-    #[hotpath::measure(label = "code_extraction.elixir.extract")]
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_elixir(file_path, source)
     }
 
-    #[hotpath::measure(label = "code_extraction.elixir.extract_parsed")]
     fn extract_parsed(
         &self,
         file_path: &str,

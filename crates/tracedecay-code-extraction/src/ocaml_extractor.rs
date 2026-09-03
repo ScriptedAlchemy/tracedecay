@@ -81,7 +81,6 @@ impl OcamlExtractor {
         .result
     }
 
-    #[hotpath::measure(label = "code_extraction.ocaml.extract_tree")]
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -133,7 +132,6 @@ impl OcamlExtractor {
         )
     }
 
-    #[hotpath::measure(label = "code_extraction.ocaml.parse_source")]
     fn parse_source(source: &str) -> Result<Tree, String> {
         crate::ts_provider::parse_extractor_source("ocaml", "OCaml", source)
     }
@@ -559,12 +557,10 @@ impl crate::LanguageExtractor for OcamlExtractor {
         "OCaml"
     }
 
-    #[hotpath::measure(label = "code_extraction.ocaml.extract")]
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_ocaml(file_path, source)
     }
 
-    #[hotpath::measure(label = "code_extraction.ocaml.extract_parsed")]
     fn extract_parsed(
         &self,
         file_path: &str,

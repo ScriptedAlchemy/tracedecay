@@ -105,7 +105,6 @@ impl PythonExtractor {
         .result
     }
 
-    #[hotpath::measure(label = "code_extraction.python.extract_tree")]
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -158,7 +157,6 @@ impl PythonExtractor {
     }
 
     /// Parse source code into a tree-sitter AST.
-    #[hotpath::measure(label = "code_extraction.python.parse_source")]
     fn parse_source(source: &str) -> Result<Tree, String> {
         crate::ts_provider::parse_extractor_source("python", "Python", source)
     }
@@ -906,12 +904,10 @@ impl crate::LanguageExtractor for PythonExtractor {
         "Python"
     }
 
-    #[hotpath::measure(label = "code_extraction.python.extract")]
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         PythonExtractor::extract_python(file_path, source)
     }
 
-    #[hotpath::measure(label = "code_extraction.python.extract_parsed")]
     fn extract_parsed(
         &self,
         file_path: &str,

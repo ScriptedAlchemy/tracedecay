@@ -88,7 +88,6 @@ impl HlslExtractor {
         .result
     }
 
-    #[hotpath::measure(label = "code_extraction.hlsl.extract_tree")]
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -139,7 +138,6 @@ impl HlslExtractor {
         )
     }
 
-    #[hotpath::measure(label = "code_extraction.hlsl.parse_source")]
     fn parse_source(source: &str) -> Result<Tree, String> {
         crate::ts_provider::parse_extractor_source("hlsl", "HLSL", source)
     }
@@ -636,12 +634,10 @@ impl crate::LanguageExtractor for HlslExtractor {
         "HLSL"
     }
 
-    #[hotpath::measure(label = "code_extraction.hlsl.extract")]
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         HlslExtractor::extract_source(file_path, source)
     }
 
-    #[hotpath::measure(label = "code_extraction.hlsl.extract_parsed")]
     fn extract_parsed(
         &self,
         file_path: &str,

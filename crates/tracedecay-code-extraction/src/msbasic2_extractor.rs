@@ -98,7 +98,6 @@ impl MsBasic2Extractor {
         .result
     }
 
-    #[hotpath::measure(label = "code_extraction.msbasic2.extract_tree")]
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -164,7 +163,6 @@ impl MsBasic2Extractor {
     }
 
     /// Parse source code into a tree-sitter AST.
-    #[hotpath::measure(label = "code_extraction.msbasic2.parse_source")]
     fn parse_source(source: &str) -> Result<Tree, String> {
         crate::ts_provider::parse_extractor_source("msbasic2", "MS BASIC 2.0", source)
     }
@@ -542,12 +540,10 @@ impl crate::LanguageExtractor for MsBasic2Extractor {
         "MS BASIC 2.0"
     }
 
-    #[hotpath::measure(label = "code_extraction.msbasic2.extract")]
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_msbasic2(file_path, source)
     }
 
-    #[hotpath::measure(label = "code_extraction.msbasic2.extract_parsed")]
     fn extract_parsed(
         &self,
         file_path: &str,

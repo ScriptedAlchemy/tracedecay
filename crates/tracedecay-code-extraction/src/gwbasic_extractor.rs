@@ -97,7 +97,6 @@ impl GwBasicExtractor {
         .result
     }
 
-    #[hotpath::measure(label = "code_extraction.gwbasic.extract_tree")]
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -166,7 +165,6 @@ impl GwBasicExtractor {
     }
 
     /// Parse source code into a tree-sitter AST.
-    #[hotpath::measure(label = "code_extraction.gwbasic.parse_source")]
     fn parse_source(source: &str) -> Result<Tree, String> {
         crate::ts_provider::parse_extractor_source("gwbasic", "GW-BASIC", source)
     }
@@ -637,12 +635,10 @@ impl crate::LanguageExtractor for GwBasicExtractor {
         "GW-BASIC"
     }
 
-    #[hotpath::measure(label = "code_extraction.gwbasic.extract")]
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_gwbasic(file_path, source)
     }
 
-    #[hotpath::measure(label = "code_extraction.gwbasic.extract_parsed")]
     fn extract_parsed(
         &self,
         file_path: &str,

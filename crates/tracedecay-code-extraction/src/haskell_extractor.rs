@@ -108,7 +108,6 @@ impl HaskellExtractor {
         .result
     }
 
-    #[hotpath::measure(label = "code_extraction.haskell.extract_tree")]
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -156,7 +155,6 @@ impl HaskellExtractor {
         )
     }
 
-    #[hotpath::measure(label = "code_extraction.haskell.parse_source")]
     fn parse_source(source: &str) -> Result<Tree, String> {
         crate::ts_provider::parse_extractor_source("haskell", "Haskell", source)
     }
@@ -371,12 +369,10 @@ impl crate::LanguageExtractor for HaskellExtractor {
         "Haskell"
     }
 
-    #[hotpath::measure(label = "code_extraction.haskell.extract")]
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_haskell(file_path, source)
     }
 
-    #[hotpath::measure(label = "code_extraction.haskell.extract_parsed")]
     fn extract_parsed(
         &self,
         file_path: &str,

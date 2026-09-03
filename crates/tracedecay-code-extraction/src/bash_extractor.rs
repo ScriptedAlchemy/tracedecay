@@ -92,7 +92,6 @@ impl BashExtractor {
         .result
     }
 
-    #[hotpath::measure(label = "code_extraction.bash.extract_tree")]
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -145,7 +144,6 @@ impl BashExtractor {
     }
 
     /// Parse source code into a tree-sitter AST.
-    #[hotpath::measure(label = "code_extraction.bash.parse_source")]
     fn parse_source(source: &str) -> Result<Tree, String> {
         crate::ts_provider::parse_extractor_source("bash", "Bash", source)
     }
@@ -432,12 +430,10 @@ impl crate::LanguageExtractor for BashExtractor {
         "Bash"
     }
 
-    #[hotpath::measure(label = "code_extraction.bash.extract")]
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_bash(file_path, source)
     }
 
-    #[hotpath::measure(label = "code_extraction.bash.extract_parsed")]
     fn extract_parsed(
         &self,
         file_path: &str,

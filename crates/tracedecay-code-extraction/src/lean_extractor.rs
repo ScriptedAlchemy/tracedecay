@@ -74,7 +74,6 @@ impl LeanExtractor {
         .result
     }
 
-    #[hotpath::measure(label = "code_extraction.lean.extract_tree")]
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -362,12 +361,10 @@ impl crate::LanguageExtractor for LeanExtractor {
         "Lean"
     }
 
-    #[hotpath::measure(label = "code_extraction.lean.extract")]
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_lean(file_path, source)
     }
 
-    #[hotpath::measure(label = "code_extraction.lean.extract_parsed")]
     fn extract_parsed(
         &self,
         file_path: &str,
