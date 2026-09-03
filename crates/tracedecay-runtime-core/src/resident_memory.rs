@@ -115,6 +115,23 @@ fn effective_memory_bytes_v1(total_memory_bytes: u64, cgroup_limit: Option<u64>)
     }
 }
 
+fn process_resident_memory_limit_v1(
+    total_memory_bytes: u64,
+    cgroup_limit: Option<u64>,
+    override_limit: Option<NonZeroU64>,
+) -> NonZeroU64 {
+    let automatic_limit = process_resident_memory_limit_for_system_v1(effective_memory_bytes_v1(
+        total_memory_bytes,
+        cgroup_limit,
+    ));
+    override_limit.map_or(automatic_limit, |override_limit| {
+        cgroup_limit.map_or(override_limit, |cgroup_limit| {
+            NonZeroU64::new(override_limit.get().min(cgroup_limit))
+                .unwrap_or(DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1)
+        })
+    })
+}
+
 /// Size the shared resident-allocation authority for this process.
 ///
 /// The automatic authority uses the lower of physical RAM and this process's
@@ -133,14 +150,11 @@ pub fn detected_process_resident_memory_limit_v1() -> NonZeroU64 {
     let cgroup_root = Path::new(CGROUP_V2_ROOT_V1);
     let cgroup_limit = cgroup_v2_memory_limit_v1(proc_self_cgroup, cgroup_root);
     let effective_memory_bytes = effective_memory_bytes_v1(total_memory_bytes, cgroup_limit);
-    let automatic_limit = process_resident_memory_limit_for_system_v1(effective_memory_bytes);
-    let limit =
-        process_resident_memory_limit_override_v1().map_or(automatic_limit, |override_limit| {
-            cgroup_limit.map_or(override_limit, |cgroup_limit| {
-                NonZeroU64::new(override_limit.get().min(cgroup_limit))
-                    .unwrap_or(DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1)
-            })
-        });
+    let limit = process_resident_memory_limit_v1(
+        total_memory_bytes,
+        cgroup_limit,
+        process_resident_memory_limit_override_v1(),
+    );
     hotpath::gauge!("resident_memory.system_total_bytes").set(total_memory_bytes as f64);
     hotpath::gauge!("resident_memory.effective_total_bytes").set(effective_memory_bytes as f64);
     if let Some(cgroup_limit) = cgroup_limit {

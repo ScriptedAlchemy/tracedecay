@@ -535,6 +535,16 @@ where
                         return code_index_scope_unavailable();
                     }
                 };
+                if schedulers.automatic_admission_for_scope(&scope)
+                    == Some(
+                        code_index_scheduler::CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled,
+                    )
+                {
+                    return code_index_search_unavailable(
+                        code_search::CodeIndexSearchUnavailableReasonV1::LinkedWorktreeDisabled,
+                        "linked_worktree_disabled",
+                    );
+                }
                 let admission = match admission_provider.admit_current(&scope) {
                     Ok(admission) => admission,
                     Err(error) => {
@@ -1249,4 +1259,168 @@ where
             label = "daemon.code_index.search"
         ))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::process::Command;
+    use std::sync::atomic::AtomicBool;
+
+    use tracedecay_application::ResolvedScope;
+    use tracedecay_domain::{AuthorizationRevision, PrincipalId, ProjectId};
+    use tracedecay_query::code_search::{
+        CodeIndexSearchAuthorityV1, CodeIndexSearchModeV1, CodeIndexSearchOutcomeV1,
+        CodeIndexSearchRequestV1, CodeIndexSearchUnavailableReasonV1,
+    };
+    use tracedecay_session_memory::context::CancellationToken;
+
+    use super::*;
+    use crate::mcp_admission::{
+        CodeIndexMcpAdmissionUnavailableV1, CodeIndexMcpReadAdmissionV1, CodeIndexMcpReadGrantV1,
+        CodeIndexScopeResolverV1, CodeIndexScopeUnavailableV1,
+    };
+
+    #[derive(Clone)]
+    struct FixedScopeResolver(ResolvedScope);
+
+    impl CodeIndexScopeResolverV1 for FixedScopeResolver {
+        fn resolved_scope_for_project(
+            &self,
+            _project_root: &Path,
+            _project_id: &ProjectId,
+        ) -> Result<ResolvedScope, CodeIndexScopeUnavailableV1> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[derive(Clone)]
+    struct UnreachableGrant;
+
+    impl CodeIndexMcpReadGrantV1 for UnreachableGrant {
+        fn authorize(
+            &self,
+            _scope: &ResolvedScope,
+            _authority: Option<&CodeIndexSearchAuthorityV1>,
+        ) -> Result<CodeIndexSearchAuthorityV1, CodeIndexMcpAdmissionUnavailableV1> {
+            panic!("linked-worktree policy must refuse before MCP read admission")
+        }
+
+        fn search_authority(&self) -> CodeIndexSearchAuthorityV1 {
+            CodeIndexSearchAuthorityV1 {
+                principal: PrincipalId::new("principal.unreachable").expect("principal"),
+                authorization_revision: AuthorizationRevision::new("authorization.unreachable")
+                    .expect("authorization revision"),
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    struct UnreachableAdmission;
+
+    impl CodeIndexMcpReadAdmissionV1 for UnreachableAdmission {
+        type Grant = UnreachableGrant;
+
+        fn route_is_registered(&self) -> bool {
+            true
+        }
+
+        fn admit_current(
+            &self,
+            _scope: &ResolvedScope,
+        ) -> Result<Self::Grant, CodeIndexMcpAdmissionUnavailableV1> {
+            panic!("linked-worktree policy must refuse before MCP read admission")
+        }
+    }
+
+    fn git(cwd: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git must run");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[tokio::test]
+    async fn linked_worktree_disabled_is_a_typed_search_state() {
+        let repository = tempfile::tempdir().expect("repository");
+        git(repository.path(), &["init", "-b", "main", "--quiet"]);
+        std::fs::write(repository.path().join("README.md"), "fixture\n").expect("fixture");
+        git(repository.path(), &["add", "README.md"]);
+        git(
+            repository.path(),
+            &[
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "user.name=Test",
+                "commit",
+                "--quiet",
+                "-m",
+                "fixture",
+            ],
+        );
+
+        let activation = Arc::new(
+            code_index_scheduler::CodeIndexActivationV1::new_with_admission(
+                repository.path(),
+                Arc::new(AtomicBool::new(true)),
+                CancellationToken::new(),
+                code_index_scheduler::CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled,
+                Arc::new(|| Box::pin(async { panic!("disabled activation must not mount") })),
+                Arc::new(|_| Box::pin(async { false })),
+            ),
+        );
+        let identity = activation.identity().expect("repository identity");
+        let project_id = ProjectId::new("project.linked-worktree-disabled").expect("project id");
+        let scope = ResolvedScope::new(
+            project_id.clone(),
+            identity.repository_id().clone(),
+            identity.worktree_id().clone(),
+            identity.head_ref().cloned(),
+        )
+        .expect("resolved scope");
+        let schedulers = code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1);
+        assert!(schedulers.register_activation(&scope, &activation));
+        let executor = code_index_search_executor(
+            schedulers,
+            project_id,
+            UnreachableAdmission,
+            FixedScopeResolver(scope),
+        );
+
+        let outcome = executor(CodeIndexSearchRequestV1 {
+            project_root: repository.path().to_path_buf(),
+            query: "fixture".to_owned(),
+            source_revision: None,
+            source_tree: None,
+            source_reference: None,
+            limit: 10,
+            cursor: None,
+            mode: CodeIndexSearchModeV1::FallbackAllowed,
+            authority: None,
+            deadline: None,
+            cancellation: None,
+        })
+        .await;
+
+        let CodeIndexSearchOutcomeV1::Unavailable(unavailable) = outcome else {
+            panic!("disabled linked-worktree search must be unavailable");
+        };
+        assert_eq!(
+            unavailable.reason,
+            CodeIndexSearchUnavailableReasonV1::LinkedWorktreeDisabled
+        );
+        assert_eq!(
+            unavailable.semantic,
+            code_search::CodeIndexSemanticStatusV1::Unavailable {
+                reason: "linked_worktree_disabled"
+            }
+        );
+    }
 }

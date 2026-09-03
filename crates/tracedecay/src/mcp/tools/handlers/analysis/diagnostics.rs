@@ -351,7 +351,9 @@ fn lsp_diagnostic_to_compiler_diagnostic(diagnostic: CodeDiagnostic) -> Diagnost
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod diagnostics_warming_tests {
-    use super::{diagnostics_prewarm_enabled, diagnostics_warming_result};
+    use super::{
+        diagnostics_prewarm_enabled, diagnostics_warming_result, session_correlation_health_json,
+    };
     use serde_json::{Value, json};
     use std::path::Path;
 
@@ -359,6 +361,15 @@ mod diagnostics_warming_tests {
     fn prewarm_follows_resolved_config_snapshot() {
         assert!(!diagnostics_prewarm_enabled(false));
         assert!(diagnostics_prewarm_enabled(true));
+    }
+
+    #[tokio::test]
+    async fn unavailable_session_correlation_is_explicitly_empty() {
+        let correlation = session_correlation_health_json(None).await;
+
+        assert_eq!(correlation["projection_available"], false);
+        assert_eq!(correlation["index_empty"], true);
+        assert_eq!(correlation["span_count"], 0);
     }
 
     #[test]
