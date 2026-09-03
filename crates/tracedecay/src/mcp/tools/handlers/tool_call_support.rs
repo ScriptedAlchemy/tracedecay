@@ -18,6 +18,9 @@ use super::support::registered_project_context;
 use tracedecay_mcp::ToolResult;
 use tracedecay_mcp::tools::render;
 
+const RETRIEVE_PAGE_HEADER_ALLOWANCE: usize = 2_048;
+const RETRIEVE_FRAME_RESERVED_BYTES: usize = 256;
+
 pub(in crate::mcp::tools) fn text_tool_result(text: &str) -> ToolResult {
     support::text_tool_result(text, Vec::new())
 }
@@ -94,10 +97,12 @@ pub(super) async fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<Too
     let object = args.as_object().ok_or_else(|| TraceDecayError::Config {
         message: "tracedecay_retrieve arguments must be an object".to_string(),
     })?;
-    if let Some(field) = object
-        .keys()
-        .find(|field| !matches!(field.as_str(), "handle" | "format" | "project_selector"))
-    {
+    if let Some(field) = object.keys().find(|field| {
+        !matches!(
+            field.as_str(),
+            "handle" | "format" | "project_selector" | "offset" | "max_chars"
+        )
+    }) {
         return Err(TraceDecayError::Config {
             message: format!("unknown tracedecay_retrieve argument `{field}`"),
         });
@@ -110,6 +115,18 @@ pub(super) async fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<Too
                     "missing required parameter: handle (copy the exact `handle` value from a truncated MCP response envelope)"
                         .to_string(),
             })?;
+    let offset = optional_usize_argument(args, "offset")?.unwrap_or(0);
+    let requested_max_chars = optional_usize_argument(args, "max_chars")?
+        .unwrap_or(tracedecay_mcp::MAX_RESPONSE_CHARS - RETRIEVE_PAGE_HEADER_ALLOWANCE);
+    if requested_max_chars == 0 {
+        return Err(TraceDecayError::project_route(
+            "response_handle_invalid_page_size",
+            false,
+            "tracedecay_retrieve max_chars must be at least 1",
+        ));
+    }
+    let max_chars = requested_max_chars
+        .min(tracedecay_mcp::MAX_RESPONSE_CHARS - RETRIEVE_PAGE_HEADER_ALLOWANCE);
     // The stored payload is by definition larger than the response cap, so
     // loading it back is real disk I/O that must not run inline on the async
     // dispatch worker.
@@ -130,31 +147,64 @@ pub(super) async fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<Too
     };
     let payload = match lookup {
         ResponseHandleLookup::Found(record) => {
-            // Retrieval never truncates: the stored content is by definition
-            // larger than the response cap, so neither output path may route
-            // through the truncating envelope again. Markdown (default)
-            // returns the stored text verbatim under a small header; JSON
-            // serializes the payload directly.
-            let text = if render::wants_json(args) {
-                json!({
-                    "handle": record.handle,
-                    "expired": false,
-                    "original_chars": record.original_chars(),
-                    "created_at": record.created_at,
-                    "expires_at": record.expires_at,
-                    "content": record.content,
-                })
-                .to_string()
-            } else {
-                format!(
-                    "## Retrieved Response\n**handle:** `{}` ({} chars, expires at {})\n\n{}",
-                    record.handle,
-                    record.original_chars(),
-                    record.expires_at,
-                    record.content,
-                )
-            };
-            return Ok(text_tool_result(&text));
+            let total_chars = record.original_chars();
+            if offset > total_chars {
+                return Err(TraceDecayError::project_route(
+                    "response_handle_offset_out_of_range",
+                    false,
+                    format!(
+                        "tracedecay_retrieve offset {offset} exceeds stored response length {total_chars}"
+                    ),
+                ));
+            }
+            let mut page_limit = max_chars;
+            loop {
+                let content = response_handle_page(&record.content, offset, page_limit);
+                let page_chars = content.chars().count();
+                let next = offset.saturating_add(page_chars);
+                let has_more = next < total_chars;
+                let next_offset = has_more.then_some(next);
+                let text = if render::wants_json(args) {
+                    json!({
+                        "handle": record.handle,
+                        "expired": false,
+                        "original_chars": total_chars,
+                        "total_chars": total_chars,
+                        "offset": offset,
+                        "next_offset": next_offset,
+                        "has_more": has_more,
+                        "created_at": record.created_at,
+                        "expires_at": record.expires_at,
+                        "content": content,
+                    })
+                    .to_string()
+                } else {
+                    format!(
+                        "## Retrieved Response\n**handle:** `{}` ({} chars, expires at {})\n**offset:** {}\n**next_offset:** {}\n**has_more:** {}\n\n{}",
+                        record.handle,
+                        total_chars,
+                        record.expires_at,
+                        offset,
+                        next_offset.map_or_else(|| "none".to_owned(), |value| value.to_string()),
+                        has_more,
+                        content,
+                    )
+                };
+                let result = text_tool_result(&text);
+                let frame = tracedecay_mcp::serialize_response_line(
+                    &tracedecay_mcp::transport::JsonRpcResponse::success(
+                        Value::Null,
+                        result.value.clone(),
+                    ),
+                );
+                let frame_budget =
+                    tracedecay_mcp::MAX_RESPONSE_CHARS - RETRIEVE_FRAME_RESERVED_BYTES;
+                if frame.len() <= frame_budget || page_limit == 1 || page_chars == 0 {
+                    return Ok(result);
+                }
+                let scaled = page_limit.saturating_mul(frame_budget) / frame.len();
+                page_limit = scaled.clamp(1, page_limit - 1);
+            }
         }
         ResponseHandleLookup::Missing => json!({
             "handle": handle,
@@ -183,4 +233,35 @@ pub(super) async fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<Too
         }),
     };
     Ok(support::tool_json(Some(cg.project_root()), args, &payload))
+}
+
+fn optional_usize_argument(args: &Value, field: &str) -> Result<Option<usize>> {
+    let Some(value) = args.get(field) else {
+        return Ok(None);
+    };
+    let value = value.as_u64().ok_or_else(|| TraceDecayError::Config {
+        message: format!("{field} must be a non-negative integer"),
+    })?;
+    usize::try_from(value)
+        .map(Some)
+        .map_err(|_| TraceDecayError::Config {
+            message: format!("{field} exceeds this platform's supported range"),
+        })
+}
+
+fn response_handle_page(content: &str, offset: usize, max_chars: usize) -> String {
+    if content.is_ascii() {
+        let end = offset.saturating_add(max_chars).min(content.len());
+        return content[offset..end].to_owned();
+    }
+    let start_byte = char_offset_to_byte(content, offset);
+    let end_byte = char_offset_to_byte(&content[start_byte..], max_chars) + start_byte;
+    content[start_byte..end_byte].to_owned()
+}
+
+fn char_offset_to_byte(content: &str, offset: usize) -> usize {
+    content
+        .char_indices()
+        .nth(offset)
+        .map_or(content.len(), |(index, _)| index)
 }

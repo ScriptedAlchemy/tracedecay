@@ -91,10 +91,20 @@ pub fn store_response_handle(
     content: &str,
     now: i64,
 ) -> Result<ResponseHandleRecord> {
-    let root = resolve_response_handle_root(project_root)?;
+    store_response_handle_owned(project_root.to_path_buf(), content.to_owned(), now)
+}
+
+pub fn store_response_handle_owned(
+    project_root: PathBuf,
+    content: String,
+    now: i64,
+) -> Result<ResponseHandleRecord> {
+    let root = resolve_response_handle_root(&project_root)?;
     PrivateStoreIo::create_dir_all_durable(&root)
         .map_err(|error| file_error(&root, "create durable directory", error))?;
-    store_response_handle_in_root(&root, content, now)
+    with_exclusive_lock(&root, || {
+        store_response_handle_locked_owned(&root, content, now)
+    })
 }
 
 fn store_response_handle_in_root(
@@ -110,17 +120,25 @@ fn store_response_handle_locked(
     content: &str,
     now: i64,
 ) -> Result<ResponseHandleRecord> {
-    let handle = response_handle_for(content);
+    store_response_handle_locked_owned(root, content.to_owned(), now)
+}
+
+fn store_response_handle_locked_owned(
+    root: &Path,
+    content: String,
+    now: i64,
+) -> Result<ResponseHandleRecord> {
+    let handle = response_handle_for(&content);
     let path = response_handle_path(root, &handle)?;
     let stored = StoredResponseHandleRecord {
         created_at: now,
         expires_at: now.saturating_add(RESPONSE_HANDLE_TTL_SECS),
-        content: content.to_owned(),
+        content,
     };
     let payload = serde_json::to_vec_pretty(&stored)?;
 
     let rollback_payload = match retrieve_from_root_locked(root, &handle, now) {
-        Ok(ResponseHandleLookup::Found(existing)) if existing.content == content => {
+        Ok(ResponseHandleLookup::Found(existing)) if existing.content == stored.content => {
             Some(serde_json::to_vec_pretty(&StoredResponseHandleRecord {
                 created_at: existing.created_at,
                 expires_at: existing.expires_at,

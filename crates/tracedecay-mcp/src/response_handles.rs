@@ -17,6 +17,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 // module keeps the MCP telemetry and adapters.
 pub use tracedecay_session_memory::response_handles::{
     RESPONSE_HANDLE_TTL_SECS, ResponseHandleLookup, ResponseHandleRecord,
+    store_response_handle_owned,
 };
 pub const RESPONSE_RETRIEVE_TOOL: &str = "tracedecay_retrieve";
 

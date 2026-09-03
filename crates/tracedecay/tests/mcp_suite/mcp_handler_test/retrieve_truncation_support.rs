@@ -5,6 +5,31 @@ pub(super) fn retrieve_json_arguments(handle: &str) -> Value {
 }
 
 #[cfg(feature = "test-transport")]
+pub(super) async fn retrieve_all_json_pages(
+    fixture: &crate::support::ProductionCompositionFixture,
+    handle: &str,
+) -> String {
+    let mut offset = 0usize;
+    let mut content = String::new();
+    loop {
+        let page = call_production_tool(
+            fixture,
+            "tracedecay_retrieve",
+            json!({"format": "json", "handle": handle, "offset": offset}),
+        )
+        .await;
+        let page: Value = serde_json::from_str(crate::support::extract_text(&page.value))
+            .expect("retrieve page JSON");
+        let page_content = page["content"].as_str().expect("retrieve page content");
+        content.push_str(page_content);
+        if !page["has_more"].as_bool().expect("retrieve has_more") {
+            return content;
+        }
+        offset = page["next_offset"].as_u64().expect("retrieve next_offset") as usize;
+    }
+}
+
+#[cfg(feature = "test-transport")]
 pub(super) async fn call_production_tool(
     fixture: &crate::support::ProductionCompositionFixture,
     tool_name: &str,
