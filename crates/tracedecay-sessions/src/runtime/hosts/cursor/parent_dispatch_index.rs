@@ -2,21 +2,35 @@
 //!
 //! The observation-admission path used to open each candidate parent and
 //! materialize every JSONL record as a `serde_json::Value` from byte zero on
-//! every subagent batch. This index keeps a verified byte cursor and the
-//! first-seen model per agent id so unchanged parents are only `stat`-ed,
-//! appends resume from the cursor, and truncate/inode replacement reset.
+//! every subagent batch. This index keeps a verified byte cursor, a
+//! nanosecond mtime, and a SHA-256 content anchor of the last
+//! `min(verified_cursor, 4 KiB)` bytes ending at that cursor.
+//!
+//! Lookup trusts the memoized map with no further I/O only when
+//! `(dev, ino, len, mtime_ns)` all match the last observed values. Any other
+//! change `pread`s the anchor window before the cursor is reused: an identity
+//! change, a shorter file, or an anchor mismatch resets from byte zero; an
+//! anchor match on a longer file scans only the delta; an anchor match at the
+//! same length refreshes the observed `(len, mtime_ns)` and serves. A
+//! same-length in-place rewrite is therefore undetectable only if it also
+//! preserves mtime to the nanosecond *and* the final 4 KiB of the verified
+//! region.
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
+#[cfg(not(unix))]
+use std::io::Read;
 use std::io::{BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock, PoisonError};
-use std::time::SystemTime;
 
+#[cfg(unix)]
+use std::os::unix::fs::FileExt;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tracedecay_store::cursor_dispatch::{
     cursor_dispatch_model, is_subagent_dispatch_tool, record_bytes_may_name_subagent_dispatch,
 };
@@ -32,6 +46,13 @@ use crate::runtime::source::{MAX_JSONL_RECORD_BYTES, RawJsonlFrame, RawJsonlFram
 /// Eviction only drops memoized (agent → model) maps; the next lookup
 /// rescans that parent from byte zero.
 const MAX_PARENT_ENTRIES: usize = 512;
+
+/// Trailing window hashed into each entry's content anchor.
+///
+/// Combined with nanosecond mtime, this is the rewrite detector: a same-length
+/// in-place rewrite is missed only when it also keeps `mtime_ns` and these
+/// final bytes unchanged.
+const ANCHOR_WINDOW_BYTES: u64 = 4096;
 
 const DISPATCH_AGENT_KEYS: &[&str] = &[
     "agent_id",
@@ -74,8 +95,6 @@ struct FileIdentity {
     dev: u64,
     #[cfg(unix)]
     ino: u64,
-    #[cfg(not(unix))]
-    created: Option<SystemTime>,
 }
 
 impl FileIdentity {
@@ -89,26 +108,104 @@ impl FileIdentity {
         }
         #[cfg(not(unix))]
         {
-            Self {
-                created: metadata.created().ok(),
-            }
+            let _ = metadata;
+            Self {}
         }
     }
 }
 
+fn file_mtime_ns(metadata: &std::fs::Metadata) -> u128 {
+    #[cfg(unix)]
+    {
+        let secs = metadata.mtime();
+        let nsec = metadata.mtime_nsec();
+        let secs = if secs < 0 { 0 } else { secs as u128 };
+        let nsec = if nsec < 0 { 0 } else { nsec as u128 };
+        secs.saturating_mul(1_000_000_000).saturating_add(nsec)
+    }
+    #[cfg(not(unix))]
+    {
+        metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0)
+    }
+}
+
+fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
+}
+
+fn empty_anchor() -> [u8; 32] {
+    sha256_bytes(&[])
+}
+
+fn read_anchor_window(path: &Path, verified_cursor: u64) -> std::io::Result<Vec<u8>> {
+    let window = verified_cursor.min(ANCHOR_WINDOW_BYTES);
+    if window == 0 {
+        return Ok(Vec::new());
+    }
+    let offset = verified_cursor - window;
+    let file = File::open(path)?;
+    let window_len = usize::try_from(window).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "parent dispatch anchor window exceeds usize",
+        )
+    })?;
+    let mut buf = vec![0_u8; window_len];
+    #[cfg(unix)]
+    {
+        let read = file.read_at(&mut buf, offset)?;
+        if read != window_len {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "short pread of parent dispatch anchor window",
+            ));
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let mut file = file;
+        file.seek(SeekFrom::Start(offset))?;
+        file.read_exact(&mut buf)?;
+    }
+    Ok(buf)
+}
+
+fn content_anchor(path: &Path, verified_cursor: u64) -> std::io::Result<[u8; 32]> {
+    Ok(sha256_bytes(&read_anchor_window(path, verified_cursor)?))
+}
+
+fn anchors_match(path: &Path, verified_cursor: u64, expected: [u8; 32]) -> bool {
+    content_anchor(path, verified_cursor).is_ok_and(|observed| observed == expected)
+}
+
 struct ParentDispatchEntry {
     identity: FileIdentity,
-    modified: Option<SystemTime>,
+    len: u64,
+    mtime_ns: u128,
     verified_cursor: u64,
+    anchor: [u8; 32],
     models: HashMap<String, String>,
 }
 
-impl ParentDispatchEntry {
-    fn must_reset(&self, identity: FileIdentity, len: u64, modified: Option<SystemTime>) -> bool {
-        self.identity != identity
-            || len < self.verified_cursor
-            || (len <= self.verified_cursor && (modified.is_none() || modified != self.modified))
-    }
+enum LookupPlan {
+    ServeCached { model: Option<String> },
+    RefreshObserved { model: Option<String> },
+    Scan { start: u64, reset: bool },
+}
+
+struct ScanCommit<'a> {
+    parent_path: &'a Path,
+    identity: FileIdentity,
+    len: u64,
+    mtime_ns: u128,
+    start: u64,
+    reset: bool,
+    agent_id: &'a str,
 }
 
 struct ParentDispatchIndex {
@@ -138,56 +235,144 @@ impl ParentDispatchIndex {
         };
         let identity = FileIdentity::from_metadata(&metadata);
         let len = metadata.len();
-        let modified = metadata.modified().ok();
-        let reset = self
-            .entries
-            .get(parent_path)
-            .is_none_or(|entry| entry.must_reset(identity, len, modified));
-        if reset {
-            self.insert_reset(parent_path, identity, modified);
-        } else if let Some(entry) = self.entries.get_mut(parent_path) {
-            entry.modified = modified;
+        let mtime_ns = file_mtime_ns(&metadata);
+        match self.plan_lookup(parent_path, identity, len, mtime_ns, agent_id) {
+            LookupPlan::ServeCached { model } => {
+                self.touch(parent_path);
+                (model, DispatchScanReceipt::EMPTY)
+            }
+            LookupPlan::RefreshObserved { model } => {
+                if let Some(entry) = self.entries.get_mut(parent_path) {
+                    entry.len = len;
+                    entry.mtime_ns = mtime_ns;
+                }
+                self.touch(parent_path);
+                (model, DispatchScanReceipt::EMPTY)
+            }
+            LookupPlan::Scan { start, reset } => {
+                if reset {
+                    self.insert_reset(parent_path, identity, len, mtime_ns);
+                }
+                self.touch(parent_path);
+                self.scan_and_commit(ScanCommit {
+                    parent_path,
+                    identity,
+                    len,
+                    mtime_ns,
+                    start,
+                    reset,
+                    agent_id,
+                })
+            }
         }
-        self.touch(parent_path);
+    }
 
-        let start = {
-            let Some(entry) = self.entries.get(parent_path) else {
-                return (None, DispatchScanReceipt::EMPTY);
+    fn plan_lookup(
+        &self,
+        parent_path: &Path,
+        identity: FileIdentity,
+        len: u64,
+        mtime_ns: u128,
+        agent_id: &str,
+    ) -> LookupPlan {
+        let Some(entry) = self.entries.get(parent_path) else {
+            return LookupPlan::Scan {
+                start: 0,
+                reset: true,
             };
+        };
+        if entry.identity == identity && entry.len == len && entry.mtime_ns == mtime_ns {
             if let Some(model) = entry.models.get(agent_id) {
-                return (Some(model.clone()), DispatchScanReceipt::EMPTY);
+                return LookupPlan::ServeCached {
+                    model: Some(model.clone()),
+                };
             }
             if len <= entry.verified_cursor {
-                return (None, DispatchScanReceipt::EMPTY);
+                return LookupPlan::ServeCached { model: None };
             }
-            entry.verified_cursor
+            // Unverified trailing bytes (a partial frame) must be re-read even
+            // when metadata is unchanged; the complete prefix stays trusted.
+            return LookupPlan::Scan {
+                start: entry.verified_cursor,
+                reset: false,
+            };
+        }
+        if entry.identity != identity || len < entry.verified_cursor {
+            return LookupPlan::Scan {
+                start: 0,
+                reset: true,
+            };
+        }
+        let cursor = entry.verified_cursor;
+        let expected = entry.anchor;
+        let cached = entry.models.get(agent_id).cloned();
+        if anchors_match(parent_path, cursor, expected) {
+            if len > cursor {
+                LookupPlan::Scan {
+                    start: cursor,
+                    reset: false,
+                }
+            } else {
+                LookupPlan::RefreshObserved { model: cached }
+            }
+        } else {
+            LookupPlan::Scan {
+                start: 0,
+                reset: true,
+            }
+        }
+    }
+
+    fn scan_and_commit(&mut self, scan: ScanCommit<'_>) -> (Option<String>, DispatchScanReceipt) {
+        let start = {
+            let Some(entry) = self.entries.get(scan.parent_path) else {
+                return (None, DispatchScanReceipt::EMPTY);
+            };
+            if !scan.reset {
+                if let Some(model) = entry.models.get(scan.agent_id) {
+                    return (Some(model.clone()), DispatchScanReceipt::EMPTY);
+                }
+                if scan.len <= entry.verified_cursor {
+                    return (None, DispatchScanReceipt::EMPTY);
+                }
+                entry.verified_cursor
+            } else {
+                scan.start
+            }
         };
 
-        let delta = match scan_parent_delta(parent_path, start, agent_id) {
+        let delta = match scan_parent_delta(scan.parent_path, start, scan.agent_id) {
             Ok(delta) => delta,
             Err(_) => {
-                self.forget(parent_path);
+                self.forget(scan.parent_path);
                 return (None, DispatchScanReceipt::EMPTY);
             }
         };
-        let Some(entry) = self.entries.get_mut(parent_path) else {
+        let anchor = match content_anchor(scan.parent_path, delta.verified_cursor) {
+            Ok(anchor) => anchor,
+            Err(_) => empty_anchor(),
+        };
+        let Some(entry) = self.entries.get_mut(scan.parent_path) else {
             return (
                 delta.transient_model,
                 DispatchScanReceipt {
                     bytes_parsed: delta.bytes_parsed,
                     records_parsed: delta.records_parsed,
-                    rescanned_from_zero: reset || start == 0,
+                    rescanned_from_zero: scan.reset || start == 0,
                 },
             );
         };
         for (id, model) in delta.models {
             entry.models.entry(id).or_insert(model);
         }
+        entry.identity = scan.identity;
         entry.verified_cursor = delta.verified_cursor;
-        entry.modified = modified;
+        entry.anchor = anchor;
+        entry.len = scan.len;
+        entry.mtime_ns = scan.mtime_ns;
         let model = entry
             .models
-            .get(agent_id)
+            .get(scan.agent_id)
             .cloned()
             .or(delta.transient_model);
         (
@@ -195,19 +380,21 @@ impl ParentDispatchIndex {
             DispatchScanReceipt {
                 bytes_parsed: delta.bytes_parsed,
                 records_parsed: delta.records_parsed,
-                rescanned_from_zero: reset || start == 0,
+                rescanned_from_zero: scan.reset || start == 0,
             },
         )
     }
 
-    fn insert_reset(&mut self, path: &Path, identity: FileIdentity, modified: Option<SystemTime>) {
+    fn insert_reset(&mut self, path: &Path, identity: FileIdentity, len: u64, mtime_ns: u128) {
         let existed = self.entries.contains_key(path);
         self.entries.insert(
             path.to_path_buf(),
             ParentDispatchEntry {
                 identity,
-                modified,
+                len,
+                mtime_ns,
                 verified_cursor: 0,
+                anchor: empty_anchor(),
                 models: HashMap::new(),
             },
         );
@@ -470,8 +657,6 @@ mod tests {
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    #[cfg(unix)]
-    use filetime::{FileTime, set_file_mtime};
     use serde_json::json;
     use tempfile::TempDir;
 
@@ -649,38 +834,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn same_length_same_second_rewrite_invalidates_stale_models() {
-        let layout = layout();
-        let old = dispatch_record("agent_id", "old-agent", "old-model");
-        let new = dispatch_record("agent_id", "new-agent", "new-model");
-        assert_eq!(old.len(), new.len(), "fixture must preserve file length");
-
-        write_lines(&layout.candidate_two, &[old]);
-        set_file_mtime(
-            &layout.candidate_two,
-            FileTime::from_unix_time(1_800_000_000, 100_000_000),
-        )
-        .unwrap();
-        assert_eq!(lookup(&layout, "old-agent").0.as_deref(), Some("old-model"));
-
-        write_lines(&layout.candidate_two, &[new]);
-        set_file_mtime(
-            &layout.candidate_two,
-            FileTime::from_unix_time(1_800_000_000, 200_000_000),
-        )
-        .unwrap();
-
-        let (stale, receipt) = lookup(&layout, "old-agent");
-        assert!(
-            stale.is_none(),
-            "same-length rewrite must drop stale models"
-        );
-        assert!(receipt.rescanned_from_zero);
-        assert_eq!(lookup(&layout, "new-agent").0.as_deref(), Some("new-model"));
-    }
-
     #[test]
     fn inode_replacement_rescans_from_zero_and_drops_stale_models() {
         let layout = layout();
@@ -701,6 +854,129 @@ mod tests {
         assert!(stale.is_none());
         assert!(receipt.rescanned_from_zero);
         assert_eq!(lookup(&layout, "new-agent").0.as_deref(), Some("new-model"));
+    }
+
+    fn rewrite_in_place(path: &std::path::Path, lines: &[String]) {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(path)
+            .unwrap();
+        for line in lines {
+            writeln!(file, "{line}").unwrap();
+        }
+        file.flush().unwrap();
+    }
+
+    fn bump_mtime_nanos_same_second(path: &std::path::Path, original: filetime::FileTime) {
+        let nanos = original.nanoseconds();
+        let bumped = if nanos < 999_999_999 { nanos + 1 } else { 0 };
+        filetime::set_file_mtime(
+            path,
+            filetime::FileTime::from_unix_time(original.unix_seconds(), bumped),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn same_length_in_place_rewrite_rescans_from_zero() {
+        let layout = layout();
+        write_lines(
+            &layout.candidate_two,
+            &[dispatch_record("agent_id", "rewrite-agent", "old-model")],
+        );
+        assert_eq!(
+            lookup(&layout, "rewrite-agent").0.as_deref(),
+            Some("old-model")
+        );
+        let original_mtime = filetime::FileTime::from_last_modification_time(
+            &fs::metadata(&layout.candidate_two).unwrap(),
+        );
+
+        rewrite_in_place(
+            &layout.candidate_two,
+            &[dispatch_record("agent_id", "rewrite-agent", "new-model")],
+        );
+        bump_mtime_nanos_same_second(&layout.candidate_two, original_mtime);
+
+        let (model, receipt) = lookup(&layout, "rewrite-agent");
+        assert_eq!(
+            model.as_deref(),
+            Some("new-model"),
+            "same-length in-place rewrite must drop the stale model"
+        );
+        assert!(
+            receipt.rescanned_from_zero,
+            "same-length rewrite must invalidate the verified cursor"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn same_length_same_second_rewrite_invalidates_stale_models() {
+        let layout = layout();
+        let old = dispatch_record("agent_id", "old-agent", "old-model");
+        let new = dispatch_record("agent_id", "new-agent", "new-model");
+        assert_eq!(old.len(), new.len(), "fixture must preserve file length");
+
+        write_lines(&layout.candidate_two, &[old]);
+        filetime::set_file_mtime(
+            &layout.candidate_two,
+            filetime::FileTime::from_unix_time(1_800_000_000, 100_000_000),
+        )
+        .unwrap();
+        assert_eq!(lookup(&layout, "old-agent").0.as_deref(), Some("old-model"));
+
+        write_lines(&layout.candidate_two, &[new]);
+        filetime::set_file_mtime(
+            &layout.candidate_two,
+            filetime::FileTime::from_unix_time(1_800_000_000, 200_000_000),
+        )
+        .unwrap();
+
+        let (stale, receipt) = lookup(&layout, "old-agent");
+        assert!(
+            stale.is_none(),
+            "same-length rewrite must drop stale models"
+        );
+        assert!(receipt.rescanned_from_zero);
+        assert_eq!(lookup(&layout, "new-agent").0.as_deref(), Some("new-model"));
+    }
+
+    #[test]
+    fn longer_in_place_rewrite_of_earlier_dispatch_rescans_from_zero() {
+        let layout = layout();
+        write_lines(
+            &layout.candidate_two,
+            &[
+                dispatch_record("agent_id", "rewrite-agent", "old-model"),
+                ordinary_record("kept-tail"),
+            ],
+        );
+        assert_eq!(
+            lookup(&layout, "rewrite-agent").0.as_deref(),
+            Some("old-model")
+        );
+
+        rewrite_in_place(
+            &layout.candidate_two,
+            &[
+                dispatch_record("agent_id", "rewrite-agent", "new-model"),
+                ordinary_record("kept-tail"),
+                ordinary_record("compaction-extra"),
+            ],
+        );
+
+        let (model, receipt) = lookup(&layout, "rewrite-agent");
+        assert_eq!(
+            model.as_deref(),
+            Some("new-model"),
+            "longer in-place rewrite must not treat a changed prefix as append-only"
+        );
+        assert!(
+            receipt.rescanned_from_zero,
+            "changed prefix must invalidate the verified cursor"
+        );
     }
 
     #[test]
