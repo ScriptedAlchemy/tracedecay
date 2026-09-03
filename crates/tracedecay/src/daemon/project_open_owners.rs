@@ -1573,62 +1573,6 @@ pub(super) async fn install_semantic_activation_runtime_owner(
     Ok(())
 }
 
-/// Complete semantic activation ownership once the production semantic runtime
-/// has been created by the code-index mount. Project-open registration runs
-/// before that deferred mount on a fresh store, so this hook closes the same
-/// authority graph at the runtime's actual readiness boundary.
-#[hotpath::measure(label = "daemon.project.activate.semantic_runtime", future = true)]
-pub(super) async fn install_semantic_activation_runtime_owner(
-    invocation: &DaemonInvocationState,
-    project_root: &Path,
-    configuration_runtime: Arc<tracedecay_configuration::ProjectConfigurationRuntime>,
-    scope: ResolvedScope,
-) -> Result<()> {
-    if configuration_runtime
-        .semantic_activation_coordinator()
-        .is_some()
-    {
-        return Ok(());
-    }
-    let inspector =
-        tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(project_root)
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "semantic production runtime is unavailable after code-index mount"
-                    .to_owned(),
-            })?;
-    let configuration_store =
-        tracedecay_usecases::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1::open(
-            configuration_runtime.registered_database(),
-            scope,
-        )
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("semantic retrieval configuration store unavailable: {error}"),
-        })?;
-    let observer = invocation
-        .query_activation_registrar(project_root, configuration_runtime.registered_database());
-    let lifecycle_events = inspector.verified_ready_events();
-    let owner = Arc::new(
-        tracedecay_usecases::semantic_runtime::ProductionSemanticActivationCoordinatorV1::new(
-            configuration_store,
-            configuration_runtime.configuration_store(),
-            inspector,
-            observer,
-        ),
-    );
-    configuration_runtime.install_semantic_runtime(Arc::clone(&owner))?;
-    let reconciler = Arc::new(
-        tracedecay_code_index_runtime::semantic_activation_reconciler::DaemonSemanticActivationReconcilerV1::spawn(
-            owner,
-            lifecycle_events,
-        ),
-    );
-    invocation
-        .configuration_runtime_registrar()
-        .install_semantic_activation_reconciler(project_root, reconciler)
-        .await?;
-    Ok(())
-}
-
 #[hotpath::measure(label = "daemon.project.activate.lsp", future = true)]
 async fn register_production_lsp_owner(
     invocation: &DaemonInvocationState,
