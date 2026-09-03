@@ -6,6 +6,88 @@ use std::path::Path;
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
+#[cfg(any(test, feature = "test-helpers"))]
+use std::collections::HashMap;
+#[cfg(any(test, feature = "test-helpers"))]
+use std::path::PathBuf;
+#[cfg(any(test, feature = "test-helpers"))]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(any(test, feature = "test-helpers"))]
+use std::sync::{LazyLock, Mutex};
+
+/// Counts live [`current_branch`] probes in test builds.
+///
+/// [`BranchMemo::resolved`] never increments this: it answers from a
+/// pre-seeded value and must not open git. A request that skips live
+/// resolution therefore reports zero here.
+#[cfg(any(test, feature = "test-helpers"))]
+static LIVE_BRANCH_RESOLUTIONS: AtomicU64 = AtomicU64::new(0);
+
+/// Per-root live probes so parallel suites do not share one process counter.
+#[cfg(any(test, feature = "test-helpers"))]
+static LIVE_BRANCH_RESOLUTIONS_BY_ROOT: LazyLock<Mutex<HashMap<PathBuf, u64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(any(test, feature = "test-helpers"))]
+fn live_branch_resolution_counts() -> std::sync::MutexGuard<'static, HashMap<PathBuf, u64>> {
+    LIVE_BRANCH_RESOLUTIONS_BY_ROOT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+fn record_live_branch_resolution(project_root: &Path) {
+    LIVE_BRANCH_RESOLUTIONS.fetch_add(1, Ordering::Relaxed);
+    let mut counts = live_branch_resolution_counts();
+    *counts.entry(project_root.to_path_buf()).or_insert(0) += 1;
+    if let Ok(canonical) = project_root.canonicalize()
+        && canonical != project_root
+    {
+        *counts.entry(canonical).or_insert(0) += 1;
+    }
+}
+
+/// Live [`current_branch`] probes observed since the last reset.
+#[cfg(any(test, feature = "test-helpers"))]
+#[must_use]
+pub fn live_branch_resolution_count_for_test() -> u64 {
+    LIVE_BRANCH_RESOLUTIONS.load(Ordering::Relaxed)
+}
+
+/// Live [`current_branch`] probes for one project root (and its canonical path).
+///
+/// Parallel tests share the process, so the global counter is not an isolation
+/// boundary. A fixture asserts against its own root.
+#[cfg(any(test, feature = "test-helpers"))]
+#[must_use]
+pub fn live_branch_resolution_count_for_root_for_test(root: &Path) -> u64 {
+    let counts = live_branch_resolution_counts();
+    if let Some(count) = counts.get(root) {
+        return *count;
+    }
+    root.canonicalize()
+        .ok()
+        .and_then(|canonical| counts.get(&canonical).copied())
+        .unwrap_or(0)
+}
+
+/// Clears the live-resolution probe counter.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn reset_live_branch_resolution_count_for_test() {
+    LIVE_BRANCH_RESOLUTIONS.store(0, Ordering::Relaxed);
+    live_branch_resolution_counts().clear();
+}
+
+/// Clears live-resolution probes recorded for one project root.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn reset_live_branch_resolution_count_for_root_for_test(root: &Path) {
+    let mut counts = live_branch_resolution_counts();
+    counts.remove(root);
+    if let Ok(canonical) = root.canonicalize() {
+        counts.remove(&canonical);
+    }
+}
+
 mod admin;
 mod tracking;
 
@@ -35,6 +117,10 @@ pub const BRANCH_LOCK_RETRY_INTERVAL: std::time::Duration = std::time::Duration:
 ///
 /// Returns `None` for detached HEAD or if the repository cannot be opened.
 pub fn current_branch(project_root: &Path) -> Option<String> {
+    #[cfg(any(test, feature = "test-helpers"))]
+    {
+        record_live_branch_resolution(project_root);
+    }
     crate::git_repository::GitRepositoryAuthority::discover(project_root)
         .ok()?
         .head()
@@ -283,5 +369,69 @@ mod branch_memo_tests {
         let memo = BranchMemo::new(temp.path());
         assert_eq!(memo.get(), None);
         assert_eq!(memo.get(), None);
+    }
+
+    /// A pre-seeded memo must not open git; only [`super::current_branch`]
+    /// (via an unresolved [`BranchMemo::get`]) is a live probe.
+    #[test]
+    fn resolved_memo_does_not_increment_the_live_probe_counter() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        super::reset_live_branch_resolution_count_for_root_for_test(temp.path());
+        let seeded = BranchMemo::resolved(temp.path(), Some("feature/pinned".to_owned()));
+        assert_eq!(seeded.get(), Some("feature/pinned"));
+        assert_eq!(
+            super::live_branch_resolution_count_for_root_for_test(temp.path()),
+            0
+        );
+
+        let unresolved = BranchMemo::new(temp.path());
+        assert_eq!(unresolved.get(), None);
+        assert_eq!(
+            super::live_branch_resolution_count_for_root_for_test(temp.path()),
+            1
+        );
+        assert_eq!(unresolved.get(), None);
+        assert_eq!(
+            super::live_branch_resolution_count_for_root_for_test(temp.path()),
+            1,
+            "a memo must resolve the live branch at most once"
+        );
+    }
+
+    #[test]
+    fn measure_live_probe_against_resolved_memo() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let root = temp.path();
+        let init = std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(root)
+            .status()
+            .expect("git init");
+        assert!(init.success(), "git init must succeed for a live probe");
+        let mut live = Vec::with_capacity(25);
+        for _ in 0..25 {
+            let started = std::time::Instant::now();
+            let _ = super::current_branch(root);
+            live.push(started.elapsed());
+        }
+        let memo = BranchMemo::resolved(root, Some("main".to_owned()));
+        let mut seeded = Vec::with_capacity(25);
+        for _ in 0..25 {
+            let started = std::time::Instant::now();
+            let _ = memo.get();
+            seeded.push(started.elapsed());
+        }
+        live.sort();
+        seeded.sort();
+        let report = format!(
+            "MEASURE #818 branch n=25 live_p50={:?} live_p95={:?} resolved_p50={:?} resolved_p95={:?}",
+            live[12], live[23], seeded[12], seeded[23]
+        );
+        println!("{report}");
+        std::fs::write(
+            std::env::temp_dir().join("td-mcp-818-measure.txt"),
+            report.as_bytes(),
+        )
+        .expect("write #818 measurement");
     }
 }

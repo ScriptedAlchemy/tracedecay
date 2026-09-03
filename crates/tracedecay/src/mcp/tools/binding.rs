@@ -19,14 +19,16 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
+use tracedecay_application::RetainedSurfaceOperation;
 use tracedecay_application::multi_root::{
     MultiRootApplicationOperation, multi_root_capability_manifest,
 };
 use tracedecay_tool_catalog::{
-    BindingSurface, CancellationContract, CancellationPoint, EffectClass, ExecutableBindingV1,
-    McpDeadlineContractV1, McpDispatchAvailability, McpDispatchCatalogV1,
-    McpDispatchContractInputV1, McpDispatchContractV1, McpDispatchUnavailableReason,
-    McpIdempotencyContract, McpInverseContract, McpInverseUnavailableReason, McpTerminalState,
+    ApplicationSurfaceOperation, BindingSurface, CancellationContract, CancellationPoint,
+    EffectClass, ExecutableBindingV1, McpDeadlineContractV1, McpDispatchAvailability,
+    McpDispatchCatalogV1, McpDispatchContractInputV1, McpDispatchContractV1,
+    McpDispatchUnavailableReason, McpIdempotencyContract, McpInverseContract,
+    McpInverseUnavailableReason, McpTerminalState,
 };
 
 mod work;
@@ -54,6 +56,171 @@ pub(crate) enum McpToolDispatchGroup {
     SessionWorkflow,
     Work,
     Workflow,
+}
+
+/// Whether a tool's authority depends on the live checked-out branch.
+///
+/// Kept internal: the `tracedecay/dispatch` contract has no field family for
+/// this policy, and advertising it would freeze a request-routing concern
+/// into the wire catalog.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BranchSensitivity {
+    /// Reads the code graph, project files, or git. Must detect a checkout
+    /// on the next request (today's `reopen_if_branch_drifted_memoized` path).
+    Sensitive,
+    /// Retained memory, configuration, work, and workflow authority. The
+    /// serving snapshot is enough; a live HEAD probe cannot change the answer.
+    Independent,
+}
+
+/// Classifies a dispatched tool's dependence on the live git branch.
+///
+/// Unknown and unlisted names are [`BranchSensitivity::Sensitive`] so a newly
+/// advertised tool keeps today's drift detection until it is classified.
+pub(crate) fn tool_branch_sensitivity(tool_name: &str) -> BranchSensitivity {
+    if let Some(operation) = ApplicationSurfaceOperation::from_tool_name(tool_name) {
+        return application_surface_branch_sensitivity(operation);
+    }
+    match dispatch_group_for_tool(tool_name) {
+        Some(
+            McpToolDispatchGroup::Graph
+            | McpToolDispatchGroup::Info
+            | McpToolDispatchGroup::Admin
+            | McpToolDispatchGroup::Analysis
+            | McpToolDispatchGroup::Git
+            | McpToolDispatchGroup::Edit
+            | McpToolDispatchGroup::Health
+            | McpToolDispatchGroup::MultiRoot
+            | McpToolDispatchGroup::ApplicationSurface,
+        ) => BranchSensitivity::Sensitive,
+        Some(
+            McpToolDispatchGroup::RetainedApplication
+            | McpToolDispatchGroup::Memory
+            | McpToolDispatchGroup::SessionWorkflow
+            | McpToolDispatchGroup::Work
+            | McpToolDispatchGroup::Workflow,
+        ) => BranchSensitivity::Independent,
+        None => {
+            if RetainedSurfaceOperation::from_tool_name(tool_name).is_some() {
+                BranchSensitivity::Independent
+            } else {
+                BranchSensitivity::Sensitive
+            }
+        }
+    }
+}
+
+fn application_surface_branch_sensitivity(
+    operation: ApplicationSurfaceOperation,
+) -> BranchSensitivity {
+    use ApplicationSurfaceOperation::{
+        AffectedTests, CallChain, CodeCallees, CodeCallers, CodeDeclaration, CodeDefinition,
+        CodeExactOccurrence, CodeFacets, CodeImplementations, CodePhraseSearch, CodeReferences,
+        CodeSignatureSearch, CodeSymbolSearch, CodeTimeline, CodeTypeDefinition, CodeTypeHierarchy,
+        ConfigurationAudit, ConfigurationBatch, ConfigurationExplain, ConfigurationGet,
+        ConfigurationList, ConfigurationObservedState, ConfigurationProtectedApply,
+        ConfigurationProtectedPreview, ConfigurationRollbackApply, ConfigurationRollbackPreview,
+        ConfigurationSet, ConfigurationUnset, ConfigurationWriteCredential, ContextScoutBudget,
+        ContextScoutCancel, ContextScoutCapability, ContextScoutClaim, ContextScoutDelivery,
+        ContextScoutExplain, ContextScoutFeedback, ContextScoutPause, ContextScoutRecent,
+        ContextScoutResume, ContextScoutStatus, DiagnosticsRead, FeedbackAdvisoryCycle,
+        FeedbackDiagnostics, FeedbackExpand, FeedbackGet, FeedbackImpact, FeedbackList,
+        FileDependents, FileMetadata, GitApply, GitBlame, GitDiff, GitHistory,
+        GitHubStackSignalExpand, GitHunks, GitPreview, GitStatus, HealthDelta, HealthRead,
+        ModuleApi, NativeIntegrationApply, NativeIntegrationApprove, NativeIntegrationCancel,
+        NativeIntegrationPreflight, NativeIntegrationStackSnapshot, NativeIntegrationStatus,
+        NativeIntegrationWorktreeConfirm, NativeIntegrationWorktreeInspect,
+        NativeIntegrationWorktreeInventory, NativeIntegrationWorktreeReconcile,
+        NativeIntegrationWorktreeRemove, ObservatoryRead, QualifiedName, SessionLookup, SourceBody,
+        SourceLines, SourceOutline, StorageStatus, TestResults,
+    };
+    match operation {
+        // Mixed ApplicationSurface group: these operations read configuration,
+        // host-integration lifecycle, session identity, store identity, or
+        // process observability — never the checkout, code graph, or files.
+        ConfigurationList
+        | ConfigurationExplain
+        | ConfigurationGet
+        | ConfigurationSet
+        | ConfigurationUnset
+        | ConfigurationBatch
+        | ConfigurationWriteCredential
+        | ConfigurationObservedState
+        | ConfigurationProtectedPreview
+        | ConfigurationProtectedApply
+        | ConfigurationRollbackPreview
+        | ConfigurationRollbackApply
+        | ConfigurationAudit
+        | ContextScoutStatus
+        | ContextScoutRecent
+        | ContextScoutExplain
+        | ContextScoutCapability
+        | ContextScoutBudget
+        | ContextScoutPause
+        | ContextScoutResume
+        | ContextScoutCancel
+        | ContextScoutClaim
+        | ContextScoutDelivery
+        | ContextScoutFeedback
+        | SessionLookup
+        | StorageStatus
+        | ObservatoryRead
+        | NativeIntegrationPreflight
+        | NativeIntegrationApprove
+        | NativeIntegrationApply
+        | NativeIntegrationStatus
+        | NativeIntegrationCancel => BranchSensitivity::Independent,
+        // Mixed ApplicationSurface group: git walks, worktree inventory, stack
+        // snapshots, code-graph reads, source-file bodies, health, diagnostics,
+        // and post-edit feedback all depend on the current checkout or graph.
+        GitStatus
+        | GitDiff
+        | GitHistory
+        | GitBlame
+        | GitHunks
+        | GitPreview
+        | GitApply
+        | GitHubStackSignalExpand
+        | NativeIntegrationStackSnapshot
+        | NativeIntegrationWorktreeInventory
+        | NativeIntegrationWorktreeInspect
+        | NativeIntegrationWorktreeConfirm
+        | NativeIntegrationWorktreeRemove
+        | NativeIntegrationWorktreeReconcile
+        | FeedbackDiagnostics
+        | FeedbackGet
+        | FeedbackExpand
+        | FeedbackList
+        | FeedbackImpact
+        | FeedbackAdvisoryCycle
+        | AffectedTests
+        | TestResults
+        | CodeExactOccurrence
+        | CodePhraseSearch
+        | CodeSymbolSearch
+        | CodeSignatureSearch
+        | CodeImplementations
+        | CodeTypeHierarchy
+        | CodeCallers
+        | CodeCallees
+        | CodeFacets
+        | CodeTimeline
+        | CodeDeclaration
+        | CodeDefinition
+        | CodeTypeDefinition
+        | CodeReferences
+        | QualifiedName
+        | CallChain
+        | FileDependents
+        | SourceLines
+        | SourceBody
+        | SourceOutline
+        | ModuleApi
+        | FileMetadata
+        | HealthRead
+        | HealthDelta
+        | DiagnosticsRead => BranchSensitivity::Sensitive,
+    }
 }
 
 /// How a tool may be pointed at a project other than the active one.
@@ -874,7 +1041,7 @@ pub(super) fn registered_project_reader_tool_names() -> Vec<&'static str> {
 #[cfg(test)]
 mod tests {
     use tracedecay_application::RetainedSurfaceOperation;
-    use tracedecay_tool_catalog::ApplicationSurfaceOperation;
+    use tracedecay_tool_catalog::{ApplicationSurfaceOperation, ProfileId};
 
     use super::*;
 
@@ -1154,5 +1321,169 @@ mod tests {
                 entry.name
             );
         }
+    }
+
+    fn expected_branch_sensitivity(tool_name: &str) -> BranchSensitivity {
+        if let Some(operation) = ApplicationSurfaceOperation::from_tool_name(tool_name) {
+            return expected_application_surface_branch_sensitivity(operation);
+        }
+        match dispatch_group_for_tool(tool_name) {
+            Some(
+                McpToolDispatchGroup::Graph
+                | McpToolDispatchGroup::Info
+                | McpToolDispatchGroup::Admin
+                | McpToolDispatchGroup::Analysis
+                | McpToolDispatchGroup::Git
+                | McpToolDispatchGroup::Edit
+                | McpToolDispatchGroup::Health
+                | McpToolDispatchGroup::MultiRoot
+                | McpToolDispatchGroup::ApplicationSurface,
+            ) => BranchSensitivity::Sensitive,
+            Some(
+                McpToolDispatchGroup::RetainedApplication
+                | McpToolDispatchGroup::Memory
+                | McpToolDispatchGroup::SessionWorkflow
+                | McpToolDispatchGroup::Work
+                | McpToolDispatchGroup::Workflow,
+            ) => BranchSensitivity::Independent,
+            None => {
+                if RetainedSurfaceOperation::from_tool_name(tool_name).is_some() {
+                    BranchSensitivity::Independent
+                } else {
+                    BranchSensitivity::Sensitive
+                }
+            }
+        }
+    }
+
+    fn expected_application_surface_branch_sensitivity(
+        operation: ApplicationSurfaceOperation,
+    ) -> BranchSensitivity {
+        use ApplicationSurfaceOperation::{
+            ConfigurationAudit, ConfigurationBatch, ConfigurationExplain, ConfigurationGet,
+            ConfigurationList, ConfigurationObservedState, ConfigurationProtectedApply,
+            ConfigurationProtectedPreview, ConfigurationRollbackApply,
+            ConfigurationRollbackPreview, ConfigurationSet, ConfigurationUnset,
+            ConfigurationWriteCredential, ContextScoutBudget, ContextScoutCancel,
+            ContextScoutCapability, ContextScoutClaim, ContextScoutDelivery, ContextScoutExplain,
+            ContextScoutFeedback, ContextScoutPause, ContextScoutRecent, ContextScoutResume,
+            ContextScoutStatus, NativeIntegrationApply, NativeIntegrationApprove,
+            NativeIntegrationCancel, NativeIntegrationPreflight, NativeIntegrationStatus,
+            ObservatoryRead, SessionLookup, StorageStatus,
+        };
+        // Independent allowlist for the mixed ApplicationSurface group. Every
+        // other catalogued operation reads the checkout, code graph, or files
+        // and must stay Sensitive (fail-safe).
+        match operation {
+            ConfigurationList
+            | ConfigurationExplain
+            | ConfigurationGet
+            | ConfigurationSet
+            | ConfigurationUnset
+            | ConfigurationBatch
+            | ConfigurationWriteCredential
+            | ConfigurationObservedState
+            | ConfigurationProtectedPreview
+            | ConfigurationProtectedApply
+            | ConfigurationRollbackPreview
+            | ConfigurationRollbackApply
+            | ConfigurationAudit
+            | ContextScoutStatus
+            | ContextScoutRecent
+            | ContextScoutExplain
+            | ContextScoutCapability
+            | ContextScoutBudget
+            | ContextScoutPause
+            | ContextScoutResume
+            | ContextScoutCancel
+            | ContextScoutClaim
+            | ContextScoutDelivery
+            | ContextScoutFeedback
+            | SessionLookup
+            | StorageStatus
+            | ObservatoryRead
+            | NativeIntegrationPreflight
+            | NativeIntegrationApprove
+            | NativeIntegrationApply
+            | NativeIntegrationStatus
+            | NativeIntegrationCancel => BranchSensitivity::Independent,
+            _ => BranchSensitivity::Sensitive,
+        }
+    }
+
+    fn advertised_tool_names(mode: tracedecay_mcp::ToolRegistryMode) -> Vec<String> {
+        use crate::mcp::tools::catalog_discovery::{
+            default_catalog_discovery_authority, get_catalog_filtered_tool_definitions_with_budget,
+        };
+        use tracedecay_mcp::{explore_call_budget, project_catalog_discovery_scope};
+
+        let profile_id = ProfileId::new(tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID)
+            .expect("default profile");
+        get_catalog_filtered_tool_definitions_with_budget(
+            0,
+            explore_call_budget(0),
+            &profile_id,
+            &default_catalog_discovery_authority().expect("default discovery authority"),
+            &project_catalog_discovery_scope(),
+            mode,
+        )
+        .expect("advertised tools")
+        .into_iter()
+        .map(|definition| definition.name)
+        .collect()
+    }
+
+    /// Every advertised tool has exactly one branch-sensitivity policy, and
+    /// that policy matches the group / surface rules (fail-safe Sensitive).
+    #[test]
+    fn advertised_tools_have_exactly_one_branch_sensitivity_policy() {
+        use std::collections::HashMap;
+        use tracedecay_mcp::ToolRegistryMode;
+
+        let mut policies = HashMap::new();
+        let mut advertised = 0usize;
+        for mode in [
+            ToolRegistryMode::DeterministicMaximal,
+            ToolRegistryMode::HostAvailable,
+        ] {
+            for name in advertised_tool_names(mode) {
+                advertised += 1;
+                let policy = tool_branch_sensitivity(&name);
+                assert!(
+                    matches!(
+                        policy,
+                        BranchSensitivity::Sensitive | BranchSensitivity::Independent
+                    ),
+                    "{name} must resolve to exactly one sensitivity policy"
+                );
+                if let Some(previous) = policies.insert(name.clone(), policy) {
+                    assert_eq!(
+                        previous, policy,
+                        "{name} must not change policy across registry modes"
+                    );
+                }
+                assert_eq!(
+                    policy,
+                    expected_branch_sensitivity(&name),
+                    "{name} sensitivity must follow its dispatch group or surface"
+                );
+            }
+        }
+        assert!(
+            advertised > 0,
+            "tools/list must advertise at least one tool in each registry mode"
+        );
+        assert!(
+            policies
+                .values()
+                .any(|policy| *policy == BranchSensitivity::Independent),
+            "the advertised set must include branch-independent memory/workflow tools"
+        );
+        assert!(
+            policies
+                .values()
+                .any(|policy| *policy == BranchSensitivity::Sensitive),
+            "the advertised set must include branch-sensitive graph/git/edit tools"
+        );
     }
 }
