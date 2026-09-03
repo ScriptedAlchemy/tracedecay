@@ -232,7 +232,7 @@ impl RuntimeTelemetryAggregate {
         self.writer_busy_events = self
             .writer_busy_events
             .saturating_add(entry.physical.writer_busy_events);
-        if let Some(writer) = entry.physical.writer {
+        if let Some(writer) = entry.physical.writer.as_ref() {
             self.writer_telemetry_shards = self.writer_telemetry_shards.saturating_add(1);
             self.offered_operations = self
                 .offered_operations
@@ -391,7 +391,7 @@ fn project_shard(
         health_reader_waiters: entry.physical.health_reader_waiters,
         leases: ShardRuntimeLeaseCounts::from_health(health),
         writer_busy_events: entry.physical.writer_busy_events,
-        writer: entry.physical.writer,
+        writer: entry.physical.writer.clone(),
         wal_bytes: entry.physical.wal_bytes,
         wal_budget: admission.wal.clone(),
         memory_estimate_bytes: entry.physical.memory_estimate_bytes,
@@ -588,6 +588,7 @@ mod tests {
                         error_events: 23,
                         health_lane_services: 29,
                         commit_sequence: tracedecay_store::CommitSequenceV1(31),
+                        ..PhysicalWriterRuntimeSnapshot::default()
                     }),
                     ..PhysicalRuntimeSnapshot::default()
                 },
@@ -600,6 +601,7 @@ mod tests {
         assert_eq!(
             shard
                 .writer
+                .as_ref()
                 .expect("writer telemetry remains explicitly present")
                 .deadline_exceeded_operations,
             4
@@ -607,6 +609,7 @@ mod tests {
         assert_eq!(
             shard
                 .writer
+                .as_ref()
                 .expect("writer telemetry remains explicitly present")
                 .cancelled_operations,
             3
