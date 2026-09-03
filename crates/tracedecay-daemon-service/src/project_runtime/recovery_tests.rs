@@ -88,10 +88,10 @@ async fn register_or_reconcile_cannot_republish_under_a_quiesced_root() {
         .expect("recovery quiescence");
 
     let rejected = registry
-        .register_or_reconcile::<Component, ProjectRuntimeRegistryError, _, _>(
+        .register_or_reconcile::<Component, ProjectRuntimeRegistryError, _, _, _>(
             project.clone(),
             |_| Ok(()),
-            || Ok(component(2)),
+            || async { Ok(component(2)) },
         )
         .await;
 
@@ -100,10 +100,10 @@ async fn register_or_reconcile_cannot_republish_under_a_quiesced_root() {
     assert!(registry.holds::<Component>(&retained).await);
     drop(quiescence);
     registry
-        .register_or_reconcile::<Component, ProjectRuntimeRegistryError, _, _>(
+        .register_or_reconcile::<Component, ProjectRuntimeRegistryError, _, _, _>(
             project.clone(),
             |_| Ok(()),
-            || Ok(component(3)),
+            || async { Ok(component(3)) },
         )
         .await
         .expect("publication resumes only after recovery releases the root");

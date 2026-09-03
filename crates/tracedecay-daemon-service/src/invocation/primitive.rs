@@ -935,6 +935,8 @@ pub enum DaemonPrimitiveRuntimeRegistrationError {
     AlreadyRegistered,
     #[error("the daemon project runtime registry is closed")]
     RegistryClosed,
+    #[error("a concurrent primitive runtime build failed: {detail}")]
+    ConcurrentBuildFailed { detail: String },
 }
 
 /// Central project-open registration for the owned primitive facade.
@@ -969,6 +971,9 @@ impl DaemonPrimitiveRuntimeRegistrar {
                 }
                 ProjectRuntimeRegistryError::Closed => {
                     DaemonPrimitiveRuntimeRegistrationError::RegistryClosed
+                }
+                ProjectRuntimeRegistryError::ConcurrentBuildFailed { detail } => {
+                    DaemonPrimitiveRuntimeRegistrationError::ConcurrentBuildFailed { detail }
                 }
             })?;
         Ok(dispatch)

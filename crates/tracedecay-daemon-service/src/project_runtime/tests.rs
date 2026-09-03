@@ -36,15 +36,49 @@ fn two_component_reservation() -> ProjectRuntimeReservation {
     reservation
 }
 
-#[derive(Debug, PartialEq, Eq)]
+async fn wait_for_registration_build_waiters<C>(
+    registry: &ProjectRuntimeRegistryV1,
+    project: &Path,
+    expected: usize,
+) where
+    C: ProjectRuntimeComponent,
+{
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let waiters = registry
+                .lock_runtimes()
+                .get(project)
+                .and_then(|runtime| runtime.registration_builds.get(&TypeId::of::<C>()))
+                .map_or(0, |reservation| reservation.outcome.receiver_count());
+            if waiters >= expected {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("concurrent registrations must park on the build reservation");
+}
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
 enum TestReconcileError {
+    #[error("registry closed")]
     RegistryClosed,
+    #[error("{0}")]
     Provider(&'static str),
+    #[error("concurrent build failed: {detail}")]
+    ConcurrentBuildFailed { detail: String },
 }
 
 impl From<ProjectRuntimeRegistryError> for TestReconcileError {
-    fn from(_: ProjectRuntimeRegistryError) -> Self {
-        Self::RegistryClosed
+    fn from(error: ProjectRuntimeRegistryError) -> Self {
+        match error {
+            ProjectRuntimeRegistryError::AlreadyRegistered
+            | ProjectRuntimeRegistryError::Closed => Self::RegistryClosed,
+            ProjectRuntimeRegistryError::ConcurrentBuildFailed { detail } => {
+                Self::ConcurrentBuildFailed { detail }
+            }
+        }
     }
 }
 
@@ -597,10 +631,10 @@ async fn reconciling_an_occupied_slot_never_builds_a_replacement() {
     let builds = AtomicUsize::new(0);
 
     let accepted = registry
-        .register_or_reconcile::<Component, TestReconcileError, _, _>(
+        .register_or_reconcile::<Component, TestReconcileError, _, _, _>(
             project.clone(),
             |_| Ok(()),
-            || {
+            || async {
                 builds.fetch_add(1, Ordering::SeqCst);
                 Ok(component(2))
             },
@@ -630,10 +664,10 @@ async fn reconciling_an_empty_slot_builds_once_and_keeps_the_build_error() {
     let project = root("alpha");
 
     let failed = registry
-        .register_or_reconcile::<Component, TestReconcileError, _, _>(
+        .register_or_reconcile::<Component, TestReconcileError, _, _, _>(
             project.clone(),
             |_| Ok(()),
-            || {
+            || async {
                 Err(TestReconcileError::Provider(
                     "the provider runtime would not open",
                 ))
@@ -652,10 +686,10 @@ async fn reconciling_an_empty_slot_builds_once_and_keeps_the_build_error() {
     );
 
     let built = registry
-        .register_or_reconcile::<Component, TestReconcileError, _, _>(
+        .register_or_reconcile::<Component, TestReconcileError, _, _, _>(
             project.clone(),
             |_| Ok(()),
-            || Ok(component(1)),
+            || async { Ok(component(1)) },
         )
         .await;
     assert_eq!(built, Ok(()));
@@ -669,6 +703,276 @@ async fn reconciling_an_empty_slot_builds_once_and_keeps_the_build_error() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stalled_registration_build_does_not_block_an_established_project() {
+    let registry = Arc::new(ProjectRuntimeRegistryV1::default());
+    let building = root("building");
+    let established = root("established");
+    registry
+        .publish(established.clone(), TestFirst(7))
+        .await
+        .expect("established project publication");
+    let (build_started, build_is_started) = tokio::sync::oneshot::channel();
+    let (continue_build, build_may_continue) = tokio::sync::oneshot::channel();
+    let building_registry = Arc::clone(&registry);
+    let registration = tokio::spawn(async move {
+        building_registry
+            .register_or_reconcile::<TestFirst, ProjectRuntimeRegistryError, _, _, _>(
+                building,
+                |_| Ok(()),
+                move || async move {
+                    build_started.send(()).expect("build-start receiver");
+                    build_may_continue.await.expect("continue-build sender");
+                    Ok(TestFirst(1))
+                },
+            )
+            .await
+    });
+    build_is_started
+        .await
+        .expect("registration builder started");
+
+    let reading_registry = Arc::clone(&registry);
+    let mut read = tokio::spawn(async move {
+        reading_registry.read_now::<TestFirst, _, _>(&established, |value| value.0)
+    });
+    let completed_while_building =
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut read)
+            .await
+            .ok();
+
+    continue_build
+        .send(())
+        .expect("registration builder receiver");
+    registration
+        .await
+        .expect("registration task")
+        .expect("registration result");
+    let read_completed_while_building = completed_while_building.is_some();
+    let read = match completed_while_building {
+        Some(read) => read,
+        None => read.await,
+    }
+    .expect("established-project read task");
+    assert_eq!(read, Some(7));
+    assert!(
+        read_completed_while_building,
+        "an unrelated established-project read must complete while another project's builder is stalled"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_failed_registrations_build_only_once() {
+    const REGISTRATIONS: usize = 8;
+
+    let registry = Arc::new(ProjectRuntimeRegistryV1::default());
+    let project = root("failed-wave");
+    let builds = Arc::new(AtomicUsize::new(0));
+    let barrier = Arc::new(tokio::sync::Barrier::new(REGISTRATIONS + 1));
+    let release_build = Arc::new(tokio::sync::Notify::new());
+    let (build_started, build_is_started) = tokio::sync::oneshot::channel();
+    let build_started = Arc::new(std::sync::Mutex::new(Some(build_started)));
+    let mut registrations = tokio::task::JoinSet::new();
+    for _ in 0..REGISTRATIONS {
+        let registry = Arc::clone(&registry);
+        let project = project.clone();
+        let builds = Arc::clone(&builds);
+        let barrier = Arc::clone(&barrier);
+        let release_build = Arc::clone(&release_build);
+        let build_started = Arc::clone(&build_started);
+        registrations.spawn(async move {
+            barrier.wait().await;
+            registry
+                .register_or_reconcile::<Component, TestReconcileError, _, _, _>(
+                    project,
+                    |_| Ok(()),
+                    || async move {
+                        builds.fetch_add(1, Ordering::SeqCst);
+                        if let Some(started) = build_started
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .take()
+                        {
+                            started.send(()).expect("build-start receiver");
+                        }
+                        release_build.notified().await;
+                        Err(TestReconcileError::Provider("fixture build failed"))
+                    },
+                )
+                .await
+        });
+    }
+    barrier.wait().await;
+    build_is_started.await.expect("one builder started");
+    wait_for_registration_build_waiters::<Component>(
+        registry.as_ref(),
+        &project,
+        REGISTRATIONS - 1,
+    )
+    .await;
+    release_build.notify_one();
+
+    let mut original_failures = 0;
+    let mut concurrent_failures = 0;
+    while let Some(result) = registrations.join_next().await {
+        match result.expect("registration task") {
+            Err(TestReconcileError::Provider("fixture build failed")) => {
+                original_failures += 1;
+            }
+            Err(TestReconcileError::ConcurrentBuildFailed { detail }) => {
+                assert_eq!(detail, "fixture build failed");
+                concurrent_failures += 1;
+            }
+            result => panic!("unexpected registration outcome: {result:?}"),
+        }
+    }
+    assert_eq!(original_failures, 1);
+    assert_eq!(concurrent_failures, REGISTRATIONS - 1);
+    assert_eq!(
+        builds.load(Ordering::SeqCst),
+        1,
+        "one failed build outcome must be handed to the whole concurrent wave"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_successful_registrations_build_only_once() {
+    const REGISTRATIONS: usize = 8;
+
+    let registry = Arc::new(ProjectRuntimeRegistryV1::default());
+    let project = root("successful-wave");
+    let builds = Arc::new(AtomicUsize::new(0));
+    let barrier = Arc::new(tokio::sync::Barrier::new(REGISTRATIONS + 1));
+    let release_build = Arc::new(tokio::sync::Notify::new());
+    let mut registrations = tokio::task::JoinSet::new();
+    for _ in 0..REGISTRATIONS {
+        let registry = Arc::clone(&registry);
+        let project = project.clone();
+        let builds = Arc::clone(&builds);
+        let barrier = Arc::clone(&barrier);
+        let release_build = Arc::clone(&release_build);
+        registrations.spawn(async move {
+            barrier.wait().await;
+            registry
+                .register_or_reconcile::<Component, TestReconcileError, _, _, _>(
+                    project,
+                    |incumbent| {
+                        assert_eq!(mark(incumbent), Some(11));
+                        Ok(())
+                    },
+                    || async move {
+                        builds.fetch_add(1, Ordering::SeqCst);
+                        release_build.notified().await;
+                        Ok(component(11))
+                    },
+                )
+                .await
+        });
+    }
+    barrier.wait().await;
+    wait_for_registration_build_waiters::<Component>(
+        registry.as_ref(),
+        &project,
+        REGISTRATIONS - 1,
+    )
+    .await;
+    release_build.notify_one();
+
+    let mut successes = 0;
+    while let Some(result) = registrations.join_next().await {
+        result
+            .expect("registration task")
+            .expect("joined registration succeeds");
+        successes += 1;
+    }
+    assert_eq!(successes, REGISTRATIONS);
+    assert_eq!(builds.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        registry
+            .get::<Component>(&project)
+            .await
+            .as_ref()
+            .and_then(mark),
+        Some(11)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelled_registration_preserves_other_components_and_wakes_waiters() {
+    let registry = Arc::new(ProjectRuntimeRegistryV1::default());
+    let project = root("cancelled-registration");
+    registry
+        .publish(project.clone(), TestFirst(9))
+        .await
+        .expect("existing component publication");
+    let (build_started, build_is_started) = tokio::sync::oneshot::channel();
+    let building_registry = Arc::clone(&registry);
+    let building_project = project.clone();
+    let builder = tokio::spawn(async move {
+        building_registry
+            .register_or_reconcile::<Component, TestReconcileError, _, _, _>(
+                building_project,
+                |_| Ok(()),
+                || async move {
+                    build_started.send(()).expect("build-start receiver");
+                    std::future::pending().await
+                },
+            )
+            .await
+    });
+    build_is_started
+        .await
+        .expect("registration builder started");
+
+    let waiting_registry = Arc::clone(&registry);
+    let waiting_project = project.clone();
+    let waiter = tokio::spawn(async move {
+        waiting_registry
+            .register_or_reconcile::<Component, TestReconcileError, _, _, _>(
+                waiting_project,
+                |_| Ok(()),
+                || async { Ok(component(3)) },
+            )
+            .await
+    });
+    wait_for_registration_build_waiters::<Component>(registry.as_ref(), &project, 1).await;
+    builder.abort();
+    assert!(
+        builder
+            .await
+            .expect_err("builder task must be cancelled")
+            .is_cancelled()
+    );
+    assert_eq!(
+        waiter.await.expect("waiter task"),
+        Err(TestReconcileError::ConcurrentBuildFailed {
+            detail: "project runtime component build was cancelled".to_owned(),
+        })
+    );
+    assert_eq!(
+        registry.get::<TestFirst>(&project).await,
+        Some(TestFirst(9))
+    );
+    assert!(!registry.holds::<Component>(&project).await);
+
+    registry
+        .register_or_reconcile::<Component, TestReconcileError, _, _, _>(
+            project.clone(),
+            |_| Ok(()),
+            || async { Ok(component(4)) },
+        )
+        .await
+        .expect("cancelled reservation releases the exact slot");
+    assert_eq!(
+        registry
+            .get::<Component>(&project)
+            .await
+            .as_ref()
+            .and_then(mark),
+        Some(4)
+    );
+}
+
 #[tokio::test]
 async fn a_refusing_reconcile_keeps_the_incumbent() {
     let registry = ProjectRuntimeRegistryV1::default();
@@ -679,14 +983,14 @@ async fn a_refusing_reconcile_keeps_the_incumbent() {
         .unwrap();
 
     let refused = registry
-        .register_or_reconcile::<Component, TestReconcileError, _, _>(
+        .register_or_reconcile::<Component, TestReconcileError, _, _, _>(
             project.clone(),
             |_| {
                 Err(TestReconcileError::Provider(
                     "a different authority is already registered",
                 ))
             },
-            || Ok(component(2)),
+            || async { Ok(component(2)) },
         )
         .await;
 
