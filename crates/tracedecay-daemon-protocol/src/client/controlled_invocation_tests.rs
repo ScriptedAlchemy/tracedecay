@@ -1,17 +1,24 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use super::{DaemonInvocationClient, InvocationCancellationPolicy};
+use super::{DaemonInvocationClient, DaemonLspSessionClient, InvocationCancellationPolicy};
 use crate::client_identity::DaemonClientIdentity;
 use crate::connection::DaemonConnection;
 use crate::contract::{
     CanonicalQualificationBlob, DaemonInvocationOutcome, DaemonInvocationPayload,
     DaemonInvocationProblem, DaemonInvocationRequest, DaemonInvocationResponse,
-    parse_daemon_invocation_cancellation_request,
+    DaemonLspSessionAccess, WorkApplicationInvocationV1,
+    parse_daemon_invocation_cancellation_request, parse_daemon_invocation_delivery_ack_request,
 };
 use crate::handshake::DaemonHandshake;
-use tracedecay_application::{CancellationContext, CancellationSignal, Deadline};
+use crate::lsp_wire::{FrameSend, LspSessionAccess, LspSessionCredential, LspSessionId};
+use tracedecay_application::{
+    CancellationContext, CancellationSignal, Deadline, WorkGraphReadRequestV1,
+    WorkProductSelectionScopeV1,
+};
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
@@ -29,14 +36,6 @@ fn deadline_after(duration: Duration) -> Deadline {
     Deadline::new(UtcMicros(now.0.saturating_add(delta))).expect("deadline")
 }
 
-/// Worst-case join: `invoke_controlled` may sleep the full remaining
-/// deadline before it starts the authoritative response grace. The test
-/// timeout must cover both, or a paused-clock auto-advance that fires the
-/// deadline first looks like an unbounded hang.
-fn authoritative_join_bound(deadline: Duration) -> Duration {
-    deadline + crate::connection::DAEMON_TOOL_RESPONSE_GRACE + Duration::from_secs(1)
-}
-
 fn invocation_request(request_id: &str, deadline: Deadline) -> DaemonInvocationRequest {
     let observed_at = now_micros();
     DaemonInvocationRequest::feedback(
@@ -45,6 +44,20 @@ fn invocation_request(request_id: &str, deadline: Deadline) -> DaemonInvocationR
         "feedback.remote-controlled-settlement".to_owned(),
         observed_at,
         deadline,
+        CancellationContext::active(format!("cancel.{request_id}")).expect("request cancellation"),
+    )
+}
+
+fn work_invocation_request(request_id: &str) -> DaemonInvocationRequest {
+    let observed_at = now_micros();
+    DaemonInvocationRequest::work_application(
+        request_id,
+        WorkApplicationInvocationV1::Views(WorkGraphReadRequestV1::current(
+            WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+            observed_at,
+        )),
+        observed_at,
+        deadline_after(Duration::from_secs(5)),
         CancellationContext::active(format!("cancel.{request_id}")).expect("request cancellation"),
     )
 }
@@ -110,8 +123,482 @@ async fn write_unavailable_response(
     writer.flush().await.expect("flush invocation response");
 }
 
+async fn measure_parallel_invocation_workload(
+    delayed_response: Duration,
+) -> (Duration, Duration, usize, usize) {
+    const DELAYED_ID: &str = "request.pool.delayed";
+    const SHORT_CALLS: usize = 32;
+    let (listener, endpoint) =
+        crate::transport::BrokerListener::bind(&crate::transport::default_loopback_endpoint())
+            .await
+            .expect("bind pooled invocation listener");
+    let accepts = Arc::new(AtomicUsize::new(0));
+    let server_accepts = Arc::clone(&accepts);
+    let (delayed_admitted, admitted) = tokio::sync::oneshot::channel();
+    let delayed_admitted = Arc::new(tokio::sync::Mutex::new(Some(delayed_admitted)));
+    let server = tokio::spawn(async move {
+        loop {
+            let stream = listener.accept().await.expect("accept pooled invocation");
+            server_accepts.fetch_add(1, Ordering::SeqCst);
+            let delayed_admitted = Arc::clone(&delayed_admitted);
+            tokio::spawn(async move {
+                let (reader, mut writer) = stream.into_split();
+                let mut lines = BufReader::new(reader).lines();
+                lines
+                    .next_line()
+                    .await
+                    .expect("read invocation handshake")
+                    .expect("invocation handshake");
+                while let Some(line) = lines.next_line().await.expect("read invocation") {
+                    let request: DaemonInvocationRequest =
+                        serde_json::from_str(&line).expect("typed invocation");
+                    if request.request_id == DELAYED_ID {
+                        if let Some(sender) = delayed_admitted.lock().await.take() {
+                            sender.send(()).expect("report delayed admission");
+                        }
+                        tokio::time::sleep(delayed_response).await;
+                    }
+                    write_unavailable_response(&mut writer, &request.request_id).await;
+                }
+            });
+        }
+    });
+    let client = invocation_client(endpoint, "client.pool.parallel");
+    let delayed_client = client.clone();
+    let delayed = tokio::spawn(async move {
+        delayed_client
+            .invoke(invocation_request(
+                DELAYED_ID,
+                deadline_after(delayed_response + Duration::from_secs(3)),
+            ))
+            .await
+    });
+    admitted.await.expect("delayed request admitted");
+
+    let monitor_done = Arc::new(AtomicBool::new(false));
+    let max_queued = Arc::new(AtomicUsize::new(0));
+    let monitor_client = client.clone();
+    let monitor_done_task = Arc::clone(&monitor_done);
+    let max_queued_task = Arc::clone(&max_queued);
+    let monitor = tokio::spawn(async move {
+        while !monitor_done_task.load(Ordering::Acquire) {
+            max_queued_task.fetch_max(
+                monitor_client.activity.queued.load(Ordering::Acquire),
+                Ordering::AcqRel,
+            );
+            tokio::task::yield_now().await;
+        }
+    });
+    let mut short_calls = tokio::task::JoinSet::new();
+    for ordinal in 0..SHORT_CALLS {
+        let short_client = client.clone();
+        short_calls.spawn(async move {
+            let started = std::time::Instant::now();
+            short_client
+                .invoke(invocation_request(
+                    &format!("request.pool.short.{ordinal}"),
+                    deadline_after(Duration::from_secs(3)),
+                ))
+                .await
+                .expect("short invocation");
+            started.elapsed()
+        });
+    }
+    let mut latencies = Vec::with_capacity(SHORT_CALLS);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while let Some(result) = short_calls.join_next().await {
+            latencies.push(result.expect("short invocation task"));
+        }
+    })
+    .await
+    .expect("short invocations were blocked behind the delayed request");
+    monitor_done.store(true, Ordering::Release);
+    monitor.await.expect("queue monitor");
+    delayed
+        .await
+        .expect("delayed invocation task")
+        .expect("delayed invocation response");
+    latencies.sort_unstable();
+    let p50 = latencies[SHORT_CALLS / 2];
+    let p95 = latencies[(SHORT_CALLS * 95 / 100).min(SHORT_CALLS - 1)];
+    let max_queue_depth = max_queued.load(Ordering::Acquire);
+    let accepted_connections = accepts.load(Ordering::SeqCst);
+    server.abort();
+    (p50, p95, max_queue_depth, accepted_connections)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn delayed_invocation_does_not_block_short_calls_and_pool_stays_bounded() {
+    let (p50, p95, max_queue_depth, accepted_connections) =
+        measure_parallel_invocation_workload(Duration::from_secs(2)).await;
+    println!("short-call p50={p50:?} p95={p95:?} max_queue_depth={max_queue_depth}");
+    assert!(
+        accepted_connections <= 8,
+        "the client pool exceeded its eight-connection admission bound"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "30-second connection-pool latency measurement"]
+async fn thirty_second_call_does_not_block_short_call_latency() {
+    let (p50, p95, max_queue_depth, accepted_connections) =
+        measure_parallel_invocation_workload(Duration::from_secs(30)).await;
+    println!(
+        "30-second workload short-call p50={p50:?} p95={p95:?} \
+         max_queue_depth={max_queue_depth} accepted_connections={accepted_connections}"
+    );
+    assert!(accepted_connections <= 8);
+}
+
+#[tokio::test(start_paused = true)]
+async fn delayed_response_opens_no_periodic_probe_connections() {
+    const REQUEST_ID: &str = "request.no-probe-connections";
+    let (listener, endpoint) =
+        crate::transport::BrokerListener::bind(&crate::transport::default_loopback_endpoint())
+            .await
+            .expect("bind delayed response listener");
+    let accepts = Arc::new(AtomicUsize::new(0));
+    let server_accepts = Arc::clone(&accepts);
+    let server = tokio::spawn(async move {
+        loop {
+            let stream = listener.accept().await.expect("accept delayed invocation");
+            server_accepts.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async move {
+                let (reader, mut writer) = stream.into_split();
+                let mut lines = BufReader::new(reader).lines();
+                let Some(_handshake) = lines.next_line().await.expect("read handshake") else {
+                    return;
+                };
+                let Some(line) = lines.next_line().await.expect("read invocation") else {
+                    return;
+                };
+                let request: DaemonInvocationRequest =
+                    serde_json::from_str(&line).expect("typed invocation");
+                tokio::time::sleep(Duration::from_secs(12)).await;
+                write_unavailable_response(&mut writer, &request.request_id).await;
+            });
+        }
+    });
+    let client = invocation_client(endpoint, "client.no-probe-connections");
+
+    client
+        .invoke(invocation_request(
+            REQUEST_ID,
+            deadline_after(Duration::from_secs(20)),
+        ))
+        .await
+        .expect("delayed invocation response");
+
+    assert_eq!(
+        accepts.load(Ordering::SeqCst),
+        1,
+        "response liveness polling must not create probe connections"
+    );
+    server.abort();
+}
+
 #[tokio::test]
-async fn concurrent_invocations_report_queue_and_settle_activity() {
+async fn work_delivery_ack_uses_the_response_connection() {
+    const REQUEST_ID: &str = "request.work.same-connection";
+    let (listener, endpoint) =
+        crate::transport::BrokerListener::bind(&crate::transport::default_loopback_endpoint())
+            .await
+            .expect("bind Work delivery listener");
+    let server = tokio::spawn(async move {
+        let stream = listener.accept().await.expect("accept Work invocation");
+        let (reader, mut writer) = stream.into_split();
+        let mut lines = BufReader::new(reader).lines();
+        lines
+            .next_line()
+            .await
+            .expect("read Work handshake")
+            .expect("Work handshake");
+        let request_line = lines
+            .next_line()
+            .await
+            .expect("read Work invocation")
+            .expect("Work invocation");
+        let request: DaemonInvocationRequest =
+            serde_json::from_str(&request_line).expect("typed Work invocation");
+        assert_eq!(request.request_id, REQUEST_ID);
+        write_unavailable_response(&mut writer, REQUEST_ID).await;
+
+        let ack_line = lines
+            .next_line()
+            .await
+            .expect("read Work delivery ACK")
+            .expect("Work delivery ACK");
+        let ack = parse_daemon_invocation_delivery_ack_request(&ack_line)
+            .expect("typed Work delivery ACK");
+        assert_eq!(ack.target_request_id(), REQUEST_ID);
+        let response = crate::contract::DaemonInvocationDeliveryAckResponse::accepted(REQUEST_ID);
+        writer
+            .write_all(
+                serde_json::to_string(&response)
+                    .expect("ACK response JSON")
+                    .as_bytes(),
+            )
+            .await
+            .expect("write ACK response");
+        writer.write_all(b"\n").await.expect("ACK response newline");
+        writer.flush().await.expect("flush ACK response");
+    });
+    let client = invocation_client(endpoint, "client.work.same-connection");
+
+    let result = client
+        .invoke_with_delivery(work_invocation_request(REQUEST_ID))
+        .await
+        .expect("Work invocation response");
+    let (_response, delivery) = result.into_parts();
+    delivery
+        .expect("Work delivery authority")
+        .acknowledge(
+            tracedecay_domain::DeliverySettlementOutcomeV1::Delivered,
+            None,
+        )
+        .await
+        .expect("Work delivery ACK");
+    server.await.expect("server task");
+}
+
+#[tokio::test]
+async fn dropping_unacknowledged_work_delivery_closes_its_connection() {
+    const REQUEST_ID: &str = "request.work.dropped-handle";
+    let (listener, endpoint) =
+        crate::transport::BrokerListener::bind(&crate::transport::default_loopback_endpoint())
+            .await
+            .expect("bind dropped Work delivery listener");
+    let (closed, connection_closed) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let stream = listener.accept().await.expect("accept Work invocation");
+        let (reader, mut writer) = stream.into_split();
+        let mut lines = BufReader::new(reader).lines();
+        lines
+            .next_line()
+            .await
+            .expect("read Work handshake")
+            .expect("Work handshake");
+        lines
+            .next_line()
+            .await
+            .expect("read Work invocation")
+            .expect("Work invocation");
+        write_unavailable_response(&mut writer, REQUEST_ID).await;
+        assert!(
+            lines
+                .next_line()
+                .await
+                .expect("read Work connection close")
+                .is_none(),
+            "an unacknowledged delivery handle must close instead of returning its connection"
+        );
+        closed.send(()).expect("report Work connection close");
+    });
+    let client = invocation_client(endpoint, "client.work.dropped-handle");
+
+    let result = client
+        .invoke_with_delivery(work_invocation_request(REQUEST_ID))
+        .await
+        .expect("Work invocation response");
+    let (_response, delivery) = result.into_parts();
+    drop(delivery.expect("Work delivery authority"));
+
+    tokio::time::timeout(Duration::from_secs(1), connection_closed)
+        .await
+        .expect("unacknowledged Work connection stayed open")
+        .expect("Work connection close signal");
+    server.await.expect("server task");
+}
+
+#[tokio::test]
+async fn lsp_session_pins_one_connection_through_detach() {
+    let (listener, endpoint) =
+        crate::transport::BrokerListener::bind(&crate::transport::default_loopback_endpoint())
+            .await
+            .expect("bind LSP session listener");
+    let accepts = Arc::new(AtomicUsize::new(0));
+    let server_accepts = Arc::clone(&accepts);
+    let server = tokio::spawn(async move {
+        let stream = listener.accept().await.expect("accept LSP session");
+        server_accepts.fetch_add(1, Ordering::SeqCst);
+        let (reader, mut writer) = stream.into_split();
+        let mut lines = BufReader::new(reader).lines();
+        lines
+            .next_line()
+            .await
+            .expect("read LSP handshake")
+            .expect("LSP handshake");
+        loop {
+            let line = lines
+                .next_line()
+                .await
+                .expect("read LSP invocation")
+                .expect("LSP invocation");
+            let request: DaemonInvocationRequest =
+                serde_json::from_str(&line).expect("typed LSP invocation");
+            let request_id = request.request_id.clone();
+            let (response, detached) = match request.payload {
+                DaemonInvocationPayload::LspOpen { .. } => {
+                    let access = LspSessionAccess::new(
+                        LspSessionId::new("session.pinned").expect("session id"),
+                        LspSessionCredential::new(vec![7; 32]).expect("session credential"),
+                    );
+                    (
+                        DaemonInvocationResponse::lsp_opened(
+                            request_id,
+                            DaemonLspSessionAccess::from_access(&access),
+                            60_000,
+                            None,
+                            None,
+                        ),
+                        false,
+                    )
+                }
+                DaemonInvocationPayload::LspFrame { .. } => (
+                    DaemonInvocationResponse::with_outcome(
+                        request_id,
+                        DaemonInvocationOutcome::LspFrameAccepted {
+                            backpressured: false,
+                            closed: false,
+                        },
+                    ),
+                    false,
+                ),
+                DaemonInvocationPayload::LspDetach { .. } => (
+                    DaemonInvocationResponse::with_outcome(
+                        request_id,
+                        DaemonInvocationOutcome::LspDetached,
+                    ),
+                    true,
+                ),
+                payload => panic!("unexpected LSP payload: {payload:?}"),
+            };
+            writer
+                .write_all(
+                    serde_json::to_string(&response)
+                        .expect("LSP response JSON")
+                        .as_bytes(),
+                )
+                .await
+                .expect("write LSP response");
+            writer.write_all(b"\n").await.expect("LSP response newline");
+            writer.flush().await.expect("flush LSP response");
+            if detached {
+                break;
+            }
+        }
+    });
+    let client = invocation_client(endpoint, "client.lsp.pinned");
+    let journey = async {
+        let mut session = DaemonLspSessionClient::open(
+            client,
+            "3.17",
+            None,
+            Vec::new(),
+            deadline_after(Duration::from_secs(2)),
+            CancellationSignal::active("cancel.lsp.open").expect("open cancellation"),
+        )
+        .await
+        .expect("open LSP session");
+        assert_eq!(
+            session
+                .try_send_client_frame(
+                    r#"{"jsonrpc":"2.0","method":"initialized"}"#,
+                    deadline_after(Duration::from_secs(2)),
+                    CancellationSignal::active("cancel.lsp.frame").expect("frame cancellation"),
+                )
+                .await
+                .expect("send LSP frame"),
+            FrameSend::Sent
+        );
+        session
+            .detach(
+                deadline_after(Duration::from_secs(2)),
+                CancellationSignal::active("cancel.lsp.detach").expect("detach cancellation"),
+            )
+            .await
+            .expect("detach LSP session");
+    };
+    tokio::time::timeout(Duration::from_secs(1), journey)
+        .await
+        .expect("LSP operations opened another connection");
+    server.await.expect("server task");
+    assert_eq!(accepts.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_hundred_invocations_use_at_most_eight_connections_without_leaks() {
+    const INVOCATIONS: usize = 200;
+    let (listener, endpoint) =
+        crate::transport::BrokerListener::bind(&crate::transport::default_loopback_endpoint())
+            .await
+            .expect("bind bounded pool listener");
+    let accepts = Arc::new(AtomicUsize::new(0));
+    let server_accepts = Arc::clone(&accepts);
+    let (stop, mut stopping) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut handlers = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                _ = &mut stopping => break,
+                accepted = listener.accept() => {
+                    let stream = accepted.expect("accept bounded pool connection");
+                    server_accepts.fetch_add(1, Ordering::SeqCst);
+                    handlers.spawn(async move {
+                        let (reader, mut writer) = stream.into_split();
+                        let mut lines = BufReader::new(reader).lines();
+                        lines
+                            .next_line()
+                            .await
+                            .expect("read bounded pool handshake")
+                            .expect("bounded pool handshake");
+                        while let Some(line) = lines.next_line().await.expect("read invocation") {
+                            let request: DaemonInvocationRequest =
+                                serde_json::from_str(&line).expect("typed invocation");
+                            write_unavailable_response(&mut writer, &request.request_id).await;
+                        }
+                    });
+                }
+            }
+        }
+        handlers.abort_all();
+        while handlers.join_next().await.is_some() {}
+    });
+    let client = invocation_client(endpoint, "client.pool.two-hundred");
+    let mut invocations = tokio::task::JoinSet::new();
+    for ordinal in 0..INVOCATIONS {
+        let invocation_client = client.clone();
+        invocations.spawn(async move {
+            invocation_client
+                .invoke(invocation_request(
+                    &format!("request.pool.bounded.{ordinal}"),
+                    deadline_after(Duration::from_secs(5)),
+                ))
+                .await
+        });
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(result) = invocations.join_next().await {
+            result
+                .expect("bounded invocation task")
+                .expect("bounded invocation response");
+        }
+    })
+    .await
+    .expect("bounded invocation workload timed out");
+
+    assert!(
+        accepts.load(Ordering::SeqCst) <= 8,
+        "accepted more than the pool capacity"
+    );
+    assert_eq!(client_activity(&client), (0, 0));
+    assert_eq!(client.pool.permits.available_permits(), 8);
+    stop.send(()).expect("stop bounded pool server");
+    server.await.expect("bounded pool server task");
+}
+
+#[tokio::test]
+async fn concurrent_invocations_report_parallel_activity() {
     const FIRST_ID: &str = "request.concurrent-first";
     const SECOND_ID: &str = "request.concurrent-second";
     let (listener, endpoint) =
@@ -144,7 +631,18 @@ async fn concurrent_invocations_report_queue_and_settle_activity() {
         first_release.await.expect("release first response");
         write_unavailable_response(&mut writer, FIRST_ID).await;
 
-        let second_line = lines
+        let second_stream = listener
+            .accept()
+            .await
+            .expect("accept second invocation connection");
+        let (second_reader, mut second_writer) = second_stream.into_split();
+        let mut second_lines = BufReader::new(second_reader).lines();
+        second_lines
+            .next_line()
+            .await
+            .expect("read second invocation handshake")
+            .expect("second invocation handshake");
+        let second_line = second_lines
             .next_line()
             .await
             .expect("read second invocation")
@@ -152,7 +650,7 @@ async fn concurrent_invocations_report_queue_and_settle_activity() {
         let second: DaemonInvocationRequest =
             serde_json::from_str(&second_line).expect("typed second invocation");
         assert_eq!(second.request_id, SECOND_ID);
-        write_unavailable_response(&mut writer, SECOND_ID).await;
+        write_unavailable_response(&mut second_writer, SECOND_ID).await;
     });
     let client = invocation_client(endpoint, "client.concurrent-activity");
     let first_client = client.clone();
@@ -177,12 +675,12 @@ async fn concurrent_invocations_report_queue_and_settle_activity() {
             .await
     });
     tokio::time::timeout(Duration::from_secs(1), async {
-        while client_activity(&client) != (1, 1) {
+        while client_activity(&client) != (0, 2) {
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("second invocation reported queued");
+    .expect("second invocation reported in flight");
 
     release_first.send(()).expect("release first response");
     first
@@ -566,32 +1064,28 @@ async fn remote_effect_without_authoritative_settlement_returns_reset_required()
         unsettled_client(REQUEST_ID, UnsettledControl::CancellationDelivered).await;
     let cancellation =
         CancellationSignal::active("cancel.remote-effect-no-settlement").expect("cancellation");
-    let cancel_after_admission = cancellation.clone();
-    let cancel = tokio::spawn(async move {
-        admitted.await.expect("request admission");
-        assert!(cancel_after_admission.cancel(now_micros()));
-    });
     let deadline = deadline_after(Duration::from_secs(10));
-
-    // The unsettled server never answers, so the join bound must outlive
-    // deadline-remaining plus the authoritative response grace. The paused
-    // clock auto-advances those sleeps only while every task is idle on
-    // loopback I/O that will never arrive, so the join is virtual.
-    let response = tokio::time::timeout(
-        authoritative_join_bound(Duration::from_secs(10)),
-        client.invoke_controlled(
-            invocation_request(REQUEST_ID, deadline.clone()),
-            deadline,
-            cancellation,
-            InvocationCancellationPolicy::AuthoritativeEffect,
-        ),
-    )
-    .await
-    .expect("authoritative join is bounded")
-    .expect("indeterminate settlement is typed");
+    let call_cancellation = cancellation.clone();
+    let call = tokio::spawn(async move {
+        client
+            .invoke_controlled(
+                invocation_request(REQUEST_ID, deadline.clone()),
+                deadline,
+                call_cancellation,
+                InvocationCancellationPolicy::AuthoritativeEffect,
+            )
+            .await
+    });
+    admitted.await.expect("request admission");
+    assert!(cancellation.cancel(now_micros()));
+    tokio::time::advance(crate::connection::DAEMON_TOOL_RESPONSE_GRACE + Duration::from_secs(1))
+        .await;
+    let response = call
+        .await
+        .expect("authoritative invocation task")
+        .expect("indeterminate settlement is typed");
 
     assert_authoritative_settlement(response);
-    cancel.await.expect("cancellation task");
     server.abort();
 }
 
@@ -602,30 +1096,28 @@ async fn remote_effect_cancel_delivery_failure_returns_reset_required() {
         unsettled_client(REQUEST_ID, UnsettledControl::CancellationConnectionRejected).await;
     let cancellation =
         CancellationSignal::active("cancel.remote-effect-delivery-failure").expect("cancellation");
-    let cancel_after_admission = cancellation.clone();
-    let cancel = tokio::spawn(async move {
-        admitted.await.expect("request admission");
-        assert!(cancel_after_admission.cancel(now_micros()));
-    });
     let deadline = deadline_after(Duration::from_secs(10));
-
-    // The paused clock virtualizes deadline-remaining plus response grace;
-    // see the no-settlement test above.
-    let response = tokio::time::timeout(
-        authoritative_join_bound(Duration::from_secs(10)),
-        client.invoke_controlled(
-            invocation_request(REQUEST_ID, deadline.clone()),
-            deadline,
-            cancellation,
-            InvocationCancellationPolicy::AuthoritativeEffect,
-        ),
-    )
-    .await
-    .expect("authoritative join is bounded after cancel delivery failure")
-    .expect("indeterminate settlement is typed");
+    let call_cancellation = cancellation.clone();
+    let call = tokio::spawn(async move {
+        client
+            .invoke_controlled(
+                invocation_request(REQUEST_ID, deadline.clone()),
+                deadline,
+                call_cancellation,
+                InvocationCancellationPolicy::AuthoritativeEffect,
+            )
+            .await
+    });
+    admitted.await.expect("request admission");
+    assert!(cancellation.cancel(now_micros()));
+    tokio::time::advance(crate::connection::DAEMON_TOOL_RESPONSE_GRACE + Duration::from_secs(1))
+        .await;
+    let response = call
+        .await
+        .expect("authoritative invocation task")
+        .expect("indeterminate settlement is typed");
 
     assert_authoritative_settlement(response);
-    cancel.await.expect("cancellation task");
     server.abort();
 }
 
