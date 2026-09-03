@@ -693,13 +693,11 @@ pub(super) fn encode_ngram_bitmap(
     layout: LexicalArtifactLayoutV1,
     bitmap: &RoaringBitmap,
 ) -> Result<Vec<u8>, CodeLexicalArtifactErrorV1> {
-    crate::hotpath_metrics::measure_frequent("query.artifact.ngram.encode_shard", || {
-        match layout {
-            LexicalArtifactLayoutV1::V10 | LexicalArtifactLayoutV1::V11 => {
-                encode_ngram_bitmap_v11(bitmap)
-            }
-            LexicalArtifactLayoutV1::V12 => encode_ngram_delta_varints_v12(bitmap),
+    crate::hotpath_metrics::measure_frequent("query.artifact.ngram.encode_shard", || match layout {
+        LexicalArtifactLayoutV1::V10 | LexicalArtifactLayoutV1::V11 => {
+            encode_ngram_bitmap_v11(bitmap)
         }
+        LexicalArtifactLayoutV1::V12 => encode_ngram_delta_varints_v12(bitmap),
     })
 }
 
@@ -781,13 +779,11 @@ pub(super) fn decode_ngram_bitmap(
     layout: LexicalArtifactLayoutV1,
     encoded: &[u8],
 ) -> Result<RoaringBitmap, CodeLexicalArtifactErrorV1> {
-    crate::hotpath_metrics::measure_frequent("query.artifact.ngram.decode_shard", || {
-        match layout {
-            LexicalArtifactLayoutV1::V10 | LexicalArtifactLayoutV1::V11 => {
-                decode_ngram_bitmap_v11(encoded)
-            }
-            LexicalArtifactLayoutV1::V12 => decode_ngram_delta_varints_v12(encoded),
+    crate::hotpath_metrics::measure_frequent("query.artifact.ngram.decode_shard", || match layout {
+        LexicalArtifactLayoutV1::V10 | LexicalArtifactLayoutV1::V11 => {
+            decode_ngram_bitmap_v11(encoded)
         }
+        LexicalArtifactLayoutV1::V12 => decode_ngram_delta_varints_v12(encoded),
     })
 }
 
