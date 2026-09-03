@@ -255,6 +255,8 @@ pub enum DaemonFeedbackRuntimeRegistrationError {
     AlreadyRegistered,
     #[error("the daemon project runtime registry is closed")]
     RegistryClosed,
+    #[error("a concurrent feedback runtime build failed: {detail}")]
+    ConcurrentBuildFailed { detail: String },
     #[error("the shared feedback runtime is not mounted for this project")]
     MissingRuntime,
     #[error("the switchable feedback-cycle route could not be published")]
@@ -276,6 +278,9 @@ impl From<FeedbackCyclePublicationError> for DaemonFeedbackRuntimeRegistrationEr
             FeedbackCyclePublicationError::Registry(ProjectRuntimeRegistryError::Closed) => {
                 Self::RegistryClosed
             }
+            FeedbackCyclePublicationError::Registry(
+                ProjectRuntimeRegistryError::ConcurrentBuildFailed { detail },
+            ) => Self::ConcurrentBuildFailed { detail },
             FeedbackCyclePublicationError::RouterUnavailable => Self::CyclePublication,
         }
     }
@@ -287,7 +292,7 @@ impl From<ProjectRuntimeAlreadyRegistered> for DaemonFeedbackRuntimeRegistration
     }
 }
 
-/// Maps the registry's two refusals into one per-runtime registration enum.
+/// Maps registry refusals into one per-runtime registration enum.
 /// Callers match on the per-runtime variants (and each carries its own error
 /// message), so the enums keep their own `AlreadyRegistered`/`RegistryClosed`
 /// shapes and only this mapping is shared.
@@ -295,16 +300,25 @@ pub(super) fn registry_registration_refusal<E>(
     error: ProjectRuntimeRegistryError,
     already_registered: E,
     registry_closed: E,
+    concurrent_build_failed: impl FnOnce(String) -> E,
 ) -> E {
     match error {
         ProjectRuntimeRegistryError::AlreadyRegistered => already_registered,
         ProjectRuntimeRegistryError::Closed => registry_closed,
+        ProjectRuntimeRegistryError::ConcurrentBuildFailed { detail } => {
+            concurrent_build_failed(detail)
+        }
     }
 }
 
 impl From<ProjectRuntimeRegistryError> for DaemonFeedbackRuntimeRegistrationError {
     fn from(error: ProjectRuntimeRegistryError) -> Self {
-        registry_registration_refusal(error, Self::AlreadyRegistered, Self::RegistryClosed)
+        registry_registration_refusal(
+            error,
+            Self::AlreadyRegistered,
+            Self::RegistryClosed,
+            |detail| Self::ConcurrentBuildFailed { detail },
+        )
     }
 }
 
@@ -317,6 +331,9 @@ impl From<ProjectRuntimeRegistryError> for TraceDecayError {
                 }
                 ProjectRuntimeRegistryError::Closed => {
                     "the daemon project runtime registry is closed".to_owned()
+                }
+                ProjectRuntimeRegistryError::ConcurrentBuildFailed { detail } => {
+                    format!("a concurrent project runtime component build failed: {detail}")
                 }
             },
         }
@@ -543,6 +560,8 @@ pub enum DaemonAdvisoryRuntimeRegistrationError {
     AlreadyRegistered,
     #[error("the daemon project runtime registry is closed")]
     RegistryClosed,
+    #[error("a concurrent advisory runtime build failed: {detail}")]
+    ConcurrentBuildFailed { detail: String },
     #[error("the shared feedback cycle must be registered before advisory")]
     MissingFeedbackRuntime,
     #[error("the advisory production authorities could not be opened")]
@@ -562,7 +581,12 @@ impl From<FeedbackCyclePublicationError> for DaemonAdvisoryRuntimeRegistrationEr
 
 impl From<ProjectRuntimeRegistryError> for DaemonAdvisoryRuntimeRegistrationError {
     fn from(error: ProjectRuntimeRegistryError) -> Self {
-        registry_registration_refusal(error, Self::AlreadyRegistered, Self::RegistryClosed)
+        registry_registration_refusal(
+            error,
+            Self::AlreadyRegistered,
+            Self::RegistryClosed,
+            |detail| Self::ConcurrentBuildFailed { detail },
+        )
     }
 }
 
@@ -998,7 +1022,7 @@ impl DaemonWorkRuntimeRegistrar {
                                 .to_owned(),
                     })
                 },
-                || {
+                || async {
                     let mut registered = RegisteredWorkRuntime {
                         database: database.clone(),
                         actor: actor.clone(),
@@ -1128,7 +1152,7 @@ impl DaemonRetainedRuntimeRegistrar {
                         })
                     }
                 },
-                || {
+                || async {
                     Ok(RegisteredRetainedRuntime {
                         scope: scope.clone(),
                         actor: actor.clone(),

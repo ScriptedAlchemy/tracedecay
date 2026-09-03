@@ -86,7 +86,7 @@ impl DaemonInvocationService {
                                 .to_owned(),
                     })
                 },
-                || {
+                || async {
                     // The producer and its store-keyed settlement recorder are
                     // acquired per exact registered-store authority: a linked
                     // root of an already-mounted store attaches an alias to
