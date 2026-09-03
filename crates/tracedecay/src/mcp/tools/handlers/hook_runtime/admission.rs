@@ -184,7 +184,9 @@ pub(crate) fn hook_v2_pending_work_envelopes(
     ) else {
         return Vec::new();
     };
-    let mut records = spool.expired_records(now);
+    let Ok(mut records) = spool.expired_records(now) else {
+        return Vec::new();
+    };
     if let Ok(batches) = spool.claim_replay_batches(now, 4) {
         for batch in batches {
             records.extend(batch.records);

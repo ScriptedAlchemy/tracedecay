@@ -625,7 +625,10 @@ fn hydration_detects_a_corrupted_checkpointed_frame() {
     records.sync_all().unwrap();
     drop(records);
 
-    assert_eq!(spool.pending_envelope(first.event_id), None);
+    assert_eq!(
+        spool.pending_envelope(first.event_id),
+        Err(HookSpoolError::MetadataCorrupted)
+    );
     assert_eq!(
         spool
             .append(numbered_envelope(3, 9), &binding(), UtcMicros(12))
@@ -640,6 +643,46 @@ fn hydration_detects_a_corrupted_checkpointed_frame() {
         spool.ensure_healthy(),
         Err(HookSpoolError::Corrupted { at_offset: 0 })
     ));
+}
+
+#[test]
+fn hydration_rejects_a_wrong_checkpoint_index_without_poisoning_records() {
+    let root = TestDir::new("checkpoint-hydration-index-mismatch");
+    let config = HookSpoolConfigV1::stock(HookHostV1::CursorDesktop);
+    let first = numbered_envelope(1, 9);
+    let envelopes = [first.clone(), numbered_envelope(2, 10)];
+    publish_checkpoint(&root.0, config, &envelopes);
+
+    let mut checkpoint = fs::read(checkpoint_path(&root.0)).unwrap();
+    let header_len = checkpoint_header_json_len(&checkpoint);
+    let queued_at = CHECKPOINT_HEADER_BYTES + 4 + header_len + 8;
+    checkpoint[queued_at..queued_at + 8].copy_from_slice(&UtcMicros(999).0.to_le_bytes());
+    let checksum_at = checkpoint.len() - FRAME_CHECKSUM_BYTES;
+    let checksum = frame_checksum(&checkpoint[..checksum_at]);
+    checkpoint[checksum_at..].copy_from_slice(&checksum);
+    fs::write(checkpoint_path(&root.0), checkpoint).unwrap();
+
+    let (mut spool, report) = HookSpoolV1::open(&root.0, config, UtcMicros(12)).unwrap();
+    assert_eq!(report.checkpoint_records, envelopes.len() as u32);
+    assert_eq!(report.scanned_records, 0);
+    assert_eq!(
+        spool.pending_envelope(first.event_id),
+        Err(HookSpoolError::MetadataCorrupted)
+    );
+    assert_eq!(
+        spool
+            .append(numbered_envelope(3, 11), &binding(), UtcMicros(12))
+            .unwrap_err(),
+        HookSpoolError::RecoveryRequired
+    );
+    drop(spool);
+
+    let (mut spool, report) = HookSpoolV1::open(&root.0, config, UtcMicros(13)).unwrap();
+    assert_eq!(report.checkpoint_records, 0);
+    assert_eq!(report.scanned_records, envelopes.len() as u32);
+    assert!(report.checkpoint_rewritten);
+    assert_eq!(report.corrupted_at_offset, None);
+    assert_eq!(spool.pending_envelope(first.event_id), Ok(Some(first)));
 }
 
 #[test]
@@ -1249,6 +1292,7 @@ fn quotas_are_never_evicted_and_expired_records_need_tombstones() {
     assert_eq!(
         spool
             .expired_records(UtcMicros(10 + MAX_SPOOL_AGE_MICROS + 1))
+            .unwrap()
             .len(),
         1
     );

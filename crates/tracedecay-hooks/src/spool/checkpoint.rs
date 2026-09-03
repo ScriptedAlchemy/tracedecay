@@ -395,9 +395,6 @@ pub(super) fn records_file_revision(
         return Ok(None);
     }
     let named = path.metadata().map_err(|_| HookSpoolError::Io)?;
-    if named.len() == 0 {
-        return Ok(None);
-    }
     let file = File::open(&path).map_err(|_| HookSpoolError::Io)?;
     let opened = file.metadata().map_err(|_| HookSpoolError::Io)?;
     let named_revision = revision_for_file(&file, &named)?;
@@ -410,11 +407,10 @@ pub(super) fn records_file_revision(
 
 #[cfg(unix)]
 pub(super) fn read_frame_at(
-    root: &Path,
+    file: &File,
     file_offset: u64,
     framed_len: u32,
 ) -> Result<Vec<u8>, HookSpoolError> {
-    let file = File::open(records_path(root)).map_err(|_| HookSpoolError::Io)?;
     let mut frame = vec![0u8; framed_len as usize];
     file.read_exact_at(&mut frame, file_offset)
         .map_err(|_| HookSpoolError::Io)?;
@@ -423,11 +419,10 @@ pub(super) fn read_frame_at(
 
 #[cfg(windows)]
 pub(super) fn read_frame_at(
-    root: &Path,
+    file: &File,
     file_offset: u64,
     framed_len: u32,
 ) -> Result<Vec<u8>, HookSpoolError> {
-    let file = File::open(records_path(root)).map_err(|_| HookSpoolError::Io)?;
     let mut frame = vec![0u8; framed_len as usize];
     let mut read = 0usize;
     while read < frame.len() {
@@ -447,7 +442,7 @@ pub(super) fn read_frame_at(
 
 #[cfg(not(any(unix, windows)))]
 pub(super) fn read_frame_at(
-    _root: &Path,
+    _file: &File,
     _file_offset: u64,
     _framed_len: u32,
 ) -> Result<Vec<u8>, HookSpoolError> {
@@ -520,12 +515,9 @@ fn valid_cached_records(
             None => return false,
         };
     }
-    match (records.is_empty(), revision) {
-        (true, None) => true,
-        (false, Some(revision)) => {
-            revision.length == end && revision.length <= config.limits.max_host_bytes
-        }
-        _ => false,
+    match revision {
+        Some(revision) => revision.length == end && revision.length <= config.limits.max_host_bytes,
+        None => records.is_empty(),
     }
 }
 
