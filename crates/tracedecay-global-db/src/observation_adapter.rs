@@ -1097,6 +1097,119 @@ impl PreparedObservationPersist {
     }
 }
 
+async fn persist_observation_writes(
+    store: &GlobalDbObservationStore,
+    writes: Vec<AnchoredObservationWrite>,
+    replay_peer_commit: bool,
+) -> ObservationStoreResult<Vec<ObservationBatchPersistOutcome>> {
+    if !replay_peer_commit {
+        return persist_observation_writes_once(store, writes).await;
+    }
+    // Same-rollout catch-up and hook ingest share one command digest, so the
+    // writer rejects the loser as a duplicate operation id until the winner
+    // commits. Re-preflight after each yield so that commit becomes a typed
+    // ExactDuplicate instead of authority_write_failed.
+    const PEER_PERSIST_ATTEMPTS: usize = 8;
+    let mut leftover = writes;
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let retry_writes = (attempt < PEER_PERSIST_ATTEMPTS).then(|| leftover.clone());
+        match persist_observation_writes_once(store, leftover).await {
+            Err(error)
+                if is_peer_persist_race(&error)
+                    && let Some(retry_writes) = retry_writes =>
+            {
+                tokio::task::yield_now().await;
+                leftover = retry_writes;
+            }
+            other => return other,
+        }
+    }
+}
+
+async fn persist_observation_writes_once(
+    store: &GlobalDbObservationStore,
+    writes: Vec<AnchoredObservationWrite>,
+) -> ObservationStoreResult<Vec<ObservationBatchPersistOutcome>> {
+    crate::hotpath_observe::record_transaction_rows(1);
+    let preflight = load_observation_preflight(&store.database, &writes).await?;
+    let mut batch_state = ObservationBatchState::from_preflight(&preflight);
+    let mut published_cursors =
+        HashMap::<(ClaudeSourceIdentityV1, ObservationScopeV1), ClaudeSourceCursorV1>::new();
+    let mut prepared = Vec::with_capacity(writes.len());
+    for write in writes {
+        let key = (
+            write.observation().source().clone(),
+            write.observation().scope().clone(),
+        );
+        let known_cursor = published_cursors.get(&key).cloned().map(Some);
+        let next_cursor = write.next_cursor().clone();
+        let item = store
+            .prepare_observation_persist(write, &preflight, &mut batch_state, known_cursor)
+            .await?;
+        published_cursors.insert(key, next_cursor);
+        prepared.push(item);
+    }
+    let mut outcomes: Vec<Option<ObservationBatchPersistOutcome>> =
+        Vec::with_capacity(prepared.len());
+    let mut submits = Vec::new();
+    let mut deferred_exact_duplicates = Vec::new();
+    for item in prepared {
+        match item {
+            PreparedObservationPersist::Ready(outcome) => outcomes.push(Some(*outcome)),
+            PreparedObservationPersist::Submit(write) => {
+                submits.push((outcomes.len(), *write));
+                outcomes.push(None);
+            }
+            PreparedObservationPersist::DeferredExactDuplicate(write) => {
+                deferred_exact_duplicates.push((outcomes.len(), *write));
+                outcomes.push(None);
+            }
+        }
+    }
+    if !submits.is_empty() {
+        let submitted = submit_observation_writes(
+            &store.database,
+            &store.runtime,
+            submits,
+            deferred_exact_duplicates,
+        )
+        .await?;
+        for (slot, outcome) in submitted {
+            outcomes[slot] = Some(outcome);
+        }
+    } else if !deferred_exact_duplicates.is_empty() {
+        return Err(runtime_storage_error(
+            "persist_observations",
+            "deferred duplicate has no preceding batch submission",
+        ));
+    }
+    outcomes
+        .into_iter()
+        .map(|outcome| {
+            outcome.ok_or_else(|| {
+                runtime_storage_error(
+                    "persist_observations",
+                    "batch slot was not settled by writer authority",
+                )
+            })
+        })
+        .collect()
+}
+
+fn is_peer_persist_race(error: &ObservationStoreError) -> bool {
+    match error {
+        ObservationStoreError::CursorConflict { .. } => true,
+        ObservationStoreError::Storage { source, .. } => {
+            let message = source.to_string();
+            message.contains("observation source cursor conflict")
+                || message.contains("duplicate operation id reached persistent writer")
+        }
+        _ => false,
+    }
+}
+
 impl ObservationStore for GlobalDbObservationStore {
     #[hotpath::skip]
     async fn persist_observation(
@@ -1132,75 +1245,9 @@ impl ObservationStore for GlobalDbObservationStore {
             "observation.admission.batch",
             writes = writes.len()
         );
-        async move {
-            crate::hotpath_observe::record_transaction_rows(1);
-            let preflight = load_observation_preflight(&self.database, &writes).await?;
-            let mut batch_state = ObservationBatchState::from_preflight(&preflight);
-            let mut published_cursors =
-                HashMap::<(ClaudeSourceIdentityV1, ObservationScopeV1), ClaudeSourceCursorV1>::new(
-                );
-            let mut prepared = Vec::with_capacity(writes.len());
-            for write in writes {
-                let key = (
-                    write.observation().source().clone(),
-                    write.observation().scope().clone(),
-                );
-                let known_cursor = published_cursors.get(&key).cloned().map(Some);
-                let next_cursor = write.next_cursor().clone();
-                let item = self
-                    .prepare_observation_persist(write, &preflight, &mut batch_state, known_cursor)
-                    .await?;
-                published_cursors.insert(key, next_cursor);
-                prepared.push(item);
-            }
-            let mut outcomes: Vec<Option<ObservationBatchPersistOutcome>> =
-                Vec::with_capacity(prepared.len());
-            let mut submits = Vec::new();
-            let mut deferred_exact_duplicates = Vec::new();
-            for item in prepared {
-                match item {
-                    PreparedObservationPersist::Ready(outcome) => outcomes.push(Some(*outcome)),
-                    PreparedObservationPersist::Submit(write) => {
-                        submits.push((outcomes.len(), *write));
-                        outcomes.push(None);
-                    }
-                    PreparedObservationPersist::DeferredExactDuplicate(write) => {
-                        deferred_exact_duplicates.push((outcomes.len(), *write));
-                        outcomes.push(None);
-                    }
-                }
-            }
-            if !submits.is_empty() {
-                let submitted = submit_observation_writes(
-                    &self.database,
-                    &self.runtime,
-                    submits,
-                    deferred_exact_duplicates,
-                )
-                .await?;
-                for (slot, outcome) in submitted {
-                    outcomes[slot] = Some(outcome);
-                }
-            } else if !deferred_exact_duplicates.is_empty() {
-                return Err(runtime_storage_error(
-                    "persist_observations",
-                    "deferred duplicate has no preceding batch submission",
-                ));
-            }
-            outcomes
-                .into_iter()
-                .map(|outcome| {
-                    outcome.ok_or_else(|| {
-                        runtime_storage_error(
-                            "persist_observations",
-                            "batch slot was not settled by writer authority",
-                        )
-                    })
-                })
-                .collect()
-        }
-        .instrument(span)
-        .await
+        persist_observation_writes(self, writes, true)
+            .instrument(span)
+            .await
     }
 
     #[hotpath::skip]
@@ -1843,7 +1890,23 @@ async fn dispatch_runtime_submit(
             }),
         )
         .await
-        .map_err(|error| runtime_storage_error(operation, format!("{error:?}")))
+        .map_err(|error| map_observation_submit_error(operation, error))
+}
+
+fn map_observation_submit_error(
+    operation: &'static str,
+    error: impl std::fmt::Debug,
+) -> ObservationStoreError {
+    let message = format!("{error:?}");
+    if message.contains("observation source cursor conflict")
+        || message.contains("duplicate operation id reached persistent writer")
+    {
+        return ObservationStoreError::CursorConflict {
+            expected: Box::new(None),
+            actual: Box::new(None),
+        };
+    }
+    runtime_storage_error(operation, message)
 }
 
 fn runtime_command_value(
