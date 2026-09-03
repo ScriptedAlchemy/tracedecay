@@ -12,6 +12,8 @@ use std::pin::Pin;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
+use serde::Serialize;
+
 use tracedecay_application::retrieval::{
     CodeFacetDimension, CodeFacetRecord, CodeFacetRequest, CodeLexicalField, CodeNavigationRequest,
     CodeTimelineRecord, CodeTimelineRequest, SymbolPrimitiveRecord, SymbolRelationRecord,
@@ -1598,6 +1600,92 @@ fn finish_generation_page<T: serde::Serialize>(
     )
 }
 
+/// Pages compact candidate keys through [`PreparedQueryV1::paginate_candidates`]
+/// and hydrates only the returned slice.
+#[allow(clippy::too_many_arguments)]
+fn finish_generation_candidate_page<K, T>(
+    prepared: &PreparedCallableQueryV1,
+    context: &RetrievalPortContext<'_>,
+    operation: &'static str,
+    query_binding_digest: ManifestDigest,
+    keys: Vec<K>,
+    hydrate: impl FnOnce(&[K]) -> Result<Vec<T>, PreparedQueryErrorV1>,
+    requested_page: &tracedecay_application::PageRequest,
+    page_label: &'static str,
+) -> RetrievalPortOutcome<CodeQueryPage<T>>
+where
+    K: Serialize,
+    T: Serialize,
+{
+    let eligible = keys.len() as u64;
+    let finished_at = query_finished_at();
+    let generation = prepared.latest.generation.manifest().generation_id.clone();
+    let bindings = PreparedQueryBindingsV1::new(
+        operation,
+        context.request.scope().scope_digest.clone(),
+        generation.clone(),
+        query_binding_digest,
+    );
+    let pagination = bindings.and_then(|bindings| {
+        prepared.query().paginate_candidates(
+            &bindings,
+            keys,
+            requested_page.page_size,
+            finished_at,
+            hydrate,
+        )
+    });
+    match pagination {
+        Ok(pagination) => {
+            let cursor_expires_at = pagination.expires_at;
+            let next_cursor = pagination
+                .next_cursor
+                .map(OpaqueCursor::new)
+                .transpose()
+                .map_err(|_| PreparedQueryErrorV1::Unavailable);
+            let Ok(next_cursor) = next_cursor else {
+                return rejected_cursor(finished_at, generation, PreparedQueryErrorV1::Unavailable);
+            };
+            let page = match CodeQueryPage::new(
+                generation.clone(),
+                pagination.items,
+                Some(pagination.total),
+                next_cursor,
+                None,
+            ) {
+                Ok(page) => page,
+                Err(error) => {
+                    tracing::warn!(
+                        operation,
+                        page_label,
+                        %error,
+                        "prepared candidate page failed the application contract"
+                    );
+                    return rejected_cursor(
+                        finished_at,
+                        generation,
+                        PreparedQueryErrorV1::Unavailable,
+                    );
+                }
+            };
+            bounded_result(
+                page,
+                tracedecay_domain::RetrieverCoverage {
+                    eligible,
+                    examined: eligible,
+                    excluded: 0,
+                    capped: 0,
+                    unknown: 0,
+                },
+                finished_at,
+                None,
+                cursor_expires_at,
+            )
+        }
+        Err(error) => rejected_cursor(finished_at, generation, error),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn finish_query_with_coverage<T: serde::Serialize>(
     prepared: &impl PreparedCallableQueryStateV1,
@@ -1663,19 +1751,56 @@ fn finish_query_with_coverage<T: serde::Serialize>(
     }
 }
 
-fn relation_records(
+/// Compact BFS identity for a relation neighborhood.
+///
+/// `depth` is the emitted one-based depth (`parent_depth + 1`), matching the
+/// `SymbolRelationRecord::depth` the hydrating path used to store.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub(crate) struct RelationKeyV1 {
+    pub occurrence: SymbolOccurrenceId,
+    pub edge_kind: RelationEdgeKindV1,
+    pub dispatch_from: Option<SymbolOccurrenceId>,
+    pub depth: u32,
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+mod relation_hydration_counters {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SYMBOL_PRIMITIVE_HYDRATIONS: AtomicU64 = AtomicU64::new(0);
+
+    pub fn record() {
+        SYMBOL_PRIMITIVE_HYDRATIONS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn take() -> u64 {
+        SYMBOL_PRIMITIVE_HYDRATIONS.swap(0, Ordering::Relaxed)
+    }
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn take_relation_symbol_hydrations() -> u64 {
+    relation_hydration_counters::take()
+}
+
+fn record_relation_symbol_hydration() {
+    #[cfg(any(test, feature = "test-helpers"))]
+    relation_hydration_counters::record();
+}
+
+pub(crate) fn relation_keys(
     latest: &LatestCompleteCodeIndexV1,
     start: &SymbolOccurrenceId,
     kinds: &[RelationEdgeKindV1],
     reverse: bool,
     maximum_depth: u32,
     scope: &tracedecay_application::CodeQueryScope,
-) -> Vec<SymbolRelationRecord> {
+) -> Vec<RelationKeyV1> {
     let index = latest.record_index();
     let edges = latest.generation.edges();
     let mut queue = VecDeque::from([(start.clone(), 0_u32)]);
     let mut visited = BTreeSet::from([start.clone()]);
-    let mut records = Vec::new();
+    let mut keys = Vec::new();
     while let Some((current, depth)) = queue.pop_front() {
         if depth >= maximum_depth {
             continue;
@@ -1704,26 +1829,45 @@ fn relation_records(
             if !path_is_in_code_query_scope(path, scope) {
                 continue;
             }
-            let Some(symbol) = symbol_record_by_id(latest, next) else {
-                continue;
-            };
-            records.push(SymbolRelationRecord {
-                symbol,
-                edge_kind: relation_edge_kind_name(edge.kind).to_owned(),
-                dispatch_via_trait: edge.kind == RelationEdgeKindV1::Implements,
+            keys.push(RelationKeyV1 {
+                occurrence: next.clone(),
+                edge_kind: edge.kind,
                 dispatch_from: (edge.kind == RelationEdgeKindV1::Implements)
-                    .then(|| current.as_str().to_owned()),
-                depth: Some(depth + 1),
+                    .then(|| current.clone()),
+                depth: depth + 1,
             });
             queue.push_back((next.clone(), depth + 1));
         }
     }
-    records.sort_by(|left, right| {
+    keys.sort_by(|left, right| {
         left.depth
             .cmp(&right.depth)
-            .then(left.symbol.node_id.cmp(&right.symbol.node_id))
+            .then(left.occurrence.cmp(&right.occurrence))
     });
-    records
+    keys
+}
+
+pub(crate) fn hydrate_relation_records(
+    latest: &LatestCompleteCodeIndexV1,
+    keys: &[RelationKeyV1],
+) -> Result<Vec<SymbolRelationRecord>, PreparedQueryErrorV1> {
+    keys.iter()
+        .map(|key| {
+            record_relation_symbol_hydration();
+            let symbol = symbol_record_by_id(latest, &key.occurrence)
+                .ok_or(PreparedQueryErrorV1::Unavailable)?;
+            Ok(SymbolRelationRecord {
+                symbol,
+                edge_kind: relation_edge_kind_name(key.edge_kind).to_owned(),
+                dispatch_via_trait: key.edge_kind == RelationEdgeKindV1::Implements,
+                dispatch_from: key
+                    .dispatch_from
+                    .as_ref()
+                    .map(|identity| identity.as_str().to_owned()),
+                depth: Some(key.depth),
+            })
+        })
+        .collect()
 }
 
 fn retrieval_failure_omission(reason: &RetrievalFailure) -> OmissionReason {
@@ -2446,10 +2590,10 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 .chain(index.last_segment_positions(symbols, selector))
                 .copied()
                 .collect::<BTreeSet<_>>();
-            let mut items = Vec::new();
+            let mut keys = Vec::new();
             for target_position in target_positions {
                 let target = &symbols[target_position];
-                items.extend(relation_records(
+                keys.extend(relation_keys(
                     &prepared.latest,
                     &target.occurrence,
                     &[RelationEdgeKindV1::Implements],
@@ -2458,14 +2602,16 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                     &request.scope,
                 ));
             }
-            items.sort_by(|left, right| left.symbol.node_id.cmp(&right.symbol.node_id));
-            items.dedup_by(|left, right| left.symbol.node_id == right.symbol.node_id);
-            finish_generation_page(
+            keys.sort_by(|left, right| left.occurrence.cmp(&right.occurrence));
+            keys.dedup_by(|left, right| left.occurrence == right.occurrence);
+            let latest = &prepared.latest;
+            finish_generation_candidate_page(
                 &prepared,
                 &context,
                 "code_implementations",
                 binding,
-                items,
+                keys,
+                |slice| hydrate_relation_records(latest, slice),
                 &request.meta.page,
                 "implementations",
             )
@@ -2493,7 +2639,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 )
             );
             let start = resolve_start_symbol!(prepared, request.node_id);
-            let relations = relation_records(
+            let keys = relation_keys(
                 &prepared.latest,
                 &start,
                 &[RelationEdgeKindV1::Implements, RelationEdgeKindV1::Extends],
@@ -2501,21 +2647,27 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 request.maximum_depth,
                 &request.scope,
             );
-            let items = relations
-                .into_iter()
-                .map(|relation| TypeHierarchyRecord {
-                    parent_node_id: request.node_id.clone(),
-                    edge_kind: relation.edge_kind,
-                    depth: relation.depth.unwrap_or(1),
-                    symbol: relation.symbol,
-                })
-                .collect::<Vec<_>>();
-            finish_generation_page(
+            let latest = &prepared.latest;
+            let parent_node_id = request.node_id.clone();
+            finish_generation_candidate_page(
                 &prepared,
                 &context,
                 "code_type_hierarchy",
                 binding,
-                items,
+                keys,
+                |slice| {
+                    hydrate_relation_records(latest, slice).map(|relations| {
+                        relations
+                            .into_iter()
+                            .map(|relation| TypeHierarchyRecord {
+                                parent_node_id: parent_node_id.clone(),
+                                edge_kind: relation.edge_kind,
+                                depth: relation.depth.unwrap_or(1),
+                                symbol: relation.symbol,
+                            })
+                            .collect()
+                    })
+                },
                 &request.meta.page,
                 "hierarchy entries",
             )
@@ -2544,7 +2696,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 )
             );
             let start = resolve_start_symbol!(prepared, request.node_id);
-            let items = relation_records(
+            let keys = relation_keys(
                 &prepared.latest,
                 &start,
                 &[RelationEdgeKindV1::Calls],
@@ -2552,12 +2704,14 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 request.maximum_depth,
                 &request.scope,
             );
-            finish_generation_page(
+            let latest = &prepared.latest;
+            finish_generation_candidate_page(
                 &prepared,
                 &context,
                 "code_callers",
                 binding,
-                items,
+                keys,
+                |slice| hydrate_relation_records(latest, slice),
                 &request.meta.page,
                 "callers",
             )
@@ -2585,7 +2739,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 )
             );
             let start = resolve_start_symbol!(prepared, request.node_id);
-            let relations = relation_records(
+            let keys = relation_keys(
                 &prepared.latest,
                 &start,
                 &[
@@ -2601,16 +2755,21 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 request.maximum_depth,
                 &request.scope,
             );
-            let items = relations
-                .into_iter()
-                .map(|relation| relation.symbol)
-                .collect::<Vec<_>>();
-            finish_generation_page(
+            let latest = &prepared.latest;
+            finish_generation_candidate_page(
                 &prepared,
                 &context,
                 "code_impact",
                 binding,
-                items,
+                keys,
+                |slice| {
+                    hydrate_relation_records(latest, slice).map(|relations| {
+                        relations
+                            .into_iter()
+                            .map(|relation| relation.symbol)
+                            .collect()
+                    })
+                },
                 &request.meta.page,
                 "symbols",
             )
@@ -2929,7 +3088,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 )
             );
             let start = resolve_start_symbol!(prepared, request.node_id);
-            let items = relation_records(
+            let keys = relation_keys(
                 &prepared.latest,
                 &start,
                 &[
@@ -2942,12 +3101,14 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 1,
                 &request.scope,
             );
-            finish_generation_page(
+            let latest = &prepared.latest;
+            finish_generation_candidate_page(
                 &prepared,
                 &context,
                 "code_references",
                 binding,
-                items,
+                keys,
+                |slice| hydrate_relation_records(latest, slice),
                 &request.meta.page,
                 "references",
             )
@@ -2987,17 +3148,31 @@ fn navigation_symbol_query<'a>(
             }
         }
         if resolve_type && items.is_empty() {
-            items.extend(
-                relation_records(
-                    &prepared.latest,
-                    &start,
-                    &[RelationEdgeKindV1::TypeOf],
-                    false,
-                    1,
-                    &request.scope,
-                )
-                .into_iter()
-                .map(|relation| relation.symbol),
+            let keys = relation_keys(
+                &prepared.latest,
+                &start,
+                &[RelationEdgeKindV1::TypeOf],
+                false,
+                1,
+                &request.scope,
+            );
+            let latest = &prepared.latest;
+            return finish_generation_candidate_page(
+                &prepared,
+                &context,
+                operation,
+                binding,
+                keys,
+                |slice| {
+                    hydrate_relation_records(latest, slice).map(|relations| {
+                        relations
+                            .into_iter()
+                            .map(|relation| relation.symbol)
+                            .collect()
+                    })
+                },
+                &request.meta.page,
+                "symbols",
             );
         }
         items.retain(|symbol| path_is_in_code_query_scope(&symbol.file, &request.scope));
