@@ -104,11 +104,12 @@ pub(super) fn daemon_protocol_state(
     socket_path: &Path,
     expected_version: &str,
 ) -> DaemonProtocolState {
-    daemon_protocol_state_with_timeout(
+    daemon_readiness_probe(
         socket_path,
         expected_version,
         std::time::Duration::from_secs(10),
     )
+    .1
 }
 
 #[cfg(not(unix))]
@@ -116,11 +117,12 @@ pub(super) fn daemon_protocol_state(
     transport_hint: &Path,
     expected_version: &str,
 ) -> DaemonProtocolState {
-    daemon_protocol_state_with_timeout(
+    daemon_readiness_probe(
         transport_hint,
         expected_version,
         std::time::Duration::from_secs(10),
     )
+    .1
 }
 
 #[hotpath::measure(label = "daemon.service.probe.protocol_state")]
@@ -129,7 +131,14 @@ pub(super) fn daemon_protocol_state_with_timeout(
     expected_version: &str,
     timeout: std::time::Duration,
 ) -> DaemonProtocolState {
-    match query_daemon_identity(transport_hint, expected_version, timeout) {
+    daemon_readiness_probe(transport_hint, expected_version, timeout).1
+}
+
+fn classify_daemon_protocol_identity(
+    identity: Result<(Option<String>, Option<String>)>,
+    expected_version: &str,
+) -> DaemonProtocolState {
+    match identity {
         Ok((name, version))
             if name.as_deref() == Some("tracedecay")
                 && version.as_deref() == Some(expected_version) =>
@@ -146,37 +155,111 @@ pub(super) fn daemon_protocol_state_with_timeout(
 }
 
 #[cfg(unix)]
-fn query_daemon_identity(
+#[hotpath::measure(label = "daemon.service.probe.readiness")]
+pub(super) fn daemon_readiness_probe(
     socket_path: &Path,
     expected_version: &str,
-    probe_timeout: std::time::Duration,
-) -> Result<(Option<String>, Option<String>)> {
-    let deadline = std::time::Instant::now() + probe_timeout;
-    // The first initialize after a restart can sit behind startup recovery
-    // on the daemon side; a sub-second read deadline misclassifies a busy,
-    // healthy daemon as unresponsive.
-    let connection = client_connection(socket_path)?;
-    let stream = StdUnixStream::connect(socket_path)?;
-    query_daemon_identity_stream(
+    timeout: std::time::Duration,
+) -> (DaemonSocketState, DaemonProtocolState) {
+    if !socket_path.exists() {
+        return (
+            DaemonSocketState::Missing,
+            DaemonProtocolState::Unresponsive(format!(
+                "TraceDecay daemon socket '{}' does not exist",
+                socket_path.display()
+            )),
+        );
+    }
+    let stream = match StdUnixStream::connect(socket_path) {
+        Ok(stream) => stream,
+        Err(error) => {
+            let socket_state = match error.kind() {
+                std::io::ErrorKind::ConnectionRefused => DaemonSocketState::Stale,
+                std::io::ErrorKind::PermissionDenied => DaemonSocketState::PresentNotAccessible,
+                _ => DaemonSocketState::PresentUnreachable,
+            };
+            return (
+                socket_state,
+                DaemonProtocolState::Unresponsive(error.to_string()),
+            );
+        }
+    };
+    let deadline = std::time::Instant::now() + timeout;
+    let connection = match client_connection(socket_path) {
+        Ok(connection) => connection,
+        Err(error) => {
+            return (
+                DaemonSocketState::Connectable,
+                DaemonProtocolState::Unresponsive(error.to_string()),
+            );
+        }
+    };
+    let identity = query_daemon_identity_stream(
         stream,
         connection.auth_token.as_deref(),
         expected_version,
         deadline,
+    );
+    (
+        DaemonSocketState::Connectable,
+        classify_daemon_protocol_identity(identity, expected_version),
     )
 }
 
 #[cfg(not(unix))]
-fn query_daemon_identity(
-    socket_path: &Path,
+#[hotpath::measure(label = "daemon.service.probe.readiness")]
+pub(super) fn daemon_readiness_probe(
+    transport_hint: &Path,
     expected_version: &str,
-    probe_timeout: std::time::Duration,
-) -> Result<(Option<String>, Option<String>)> {
-    let deadline = std::time::Instant::now() + probe_timeout;
-    let (address, auth_token, _) =
-        current_loopback_authority(socket_path)?.ok_or_else(missing_loopback_authority)?;
-    let remaining = remaining_probe_time(deadline, "daemon readiness probe")?;
-    let stream = StdTcpStream::connect_timeout(&address, remaining)?;
-    query_daemon_identity_stream(stream, Some(&auth_token), expected_version, deadline)
+    timeout: std::time::Duration,
+) -> (DaemonSocketState, DaemonProtocolState) {
+    let (address, auth_token, _) = match current_loopback_authority(transport_hint) {
+        Ok(Some(authority)) => authority,
+        Ok(None) => {
+            return (
+                DaemonSocketState::Missing,
+                DaemonProtocolState::Unresponsive(
+                    "TraceDecay daemon authority record is not available".to_owned(),
+                ),
+            );
+        }
+        Err(error) => {
+            return (
+                DaemonSocketState::PresentUnreachable,
+                DaemonProtocolState::Unresponsive(error.to_string()),
+            );
+        }
+    };
+    let deadline = std::time::Instant::now() + timeout;
+    let remaining = match remaining_probe_time(deadline, "daemon readiness probe") {
+        Ok(remaining) => remaining,
+        Err(error) => {
+            return (
+                DaemonSocketState::PresentUnreachable,
+                DaemonProtocolState::Unresponsive(error.to_string()),
+            );
+        }
+    };
+    let stream = match StdTcpStream::connect_timeout(&address, remaining) {
+        Ok(stream) => stream,
+        Err(error) => {
+            let socket_state = if error.kind() == std::io::ErrorKind::ConnectionRefused {
+                DaemonSocketState::Stale
+            } else {
+                DaemonSocketState::PresentUnreachable
+            };
+            return (
+                socket_state,
+                DaemonProtocolState::Unresponsive(error.to_string()),
+            );
+        }
+    };
+    let identity =
+        query_daemon_identity_stream(stream, Some(&auth_token), expected_version, deadline);
+    (
+        DaemonSocketState::Connectable,
+        classify_daemon_protocol_identity(identity, expected_version),
+    )
 }
 
 fn query_daemon_identity_stream(

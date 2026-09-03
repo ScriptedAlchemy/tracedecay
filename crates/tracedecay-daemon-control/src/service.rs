@@ -30,7 +30,7 @@ pub use probe::daemon_reachable;
 pub use unit_file::installed_service_socket_path;
 
 use probe::{
-    DaemonProtocolState, DaemonSocketState, daemon_protocol_state, daemon_socket_state,
+    DaemonProtocolState, DaemonSocketState, daemon_readiness_probe, daemon_socket_state,
     daemon_transport_display,
 };
 use runner::{ServicePlatform, ServiceRunner};
@@ -1416,11 +1416,17 @@ fn installed_service_status_snapshot(
     let unit = read_service_unit(&service_path)?;
     let socket_path = socket_path_from_unit_text(&unit).unwrap_or(default_socket_path()?);
     let actual = runner.service_state(&socket_path)?;
-    let socket_state = daemon_socket_state(&socket_path);
-    let protocol_state = if actual.is_running() {
-        daemon_protocol_state(&socket_path, expected_version)
+    let (socket_state, protocol_state) = if actual.is_running() {
+        daemon_readiness_probe(
+            &socket_path,
+            expected_version,
+            std::time::Duration::from_secs(10),
+        )
     } else {
-        DaemonProtocolState::NotRequired
+        (
+            daemon_socket_state(&socket_path),
+            DaemonProtocolState::NotRequired,
+        )
     };
     Ok((actual, socket_path, socket_state, protocol_state))
 }
