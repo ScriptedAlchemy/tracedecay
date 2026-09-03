@@ -953,6 +953,22 @@ impl DaemonConfigurationRuntimeRegistrar {
         );
         self.service
             .project_runtimes
+            .read::<RegisteredConfigurationRuntime, _, _>(project_root, |registered| {
+                registered
+                    .semantic_activation_reconciler
+                    .set(Arc::clone(&reconciler))
+                    .map_err(|_| TraceDecayError::Config {
+                        message: "semantic activation reconciler is already installed".to_owned(),
+                    })
+            })
+            .await
+            .ok_or_else(|| TraceDecayError::Config {
+                message:
+                    "semantic activation reconciler requires a registered configuration runtime"
+                        .to_owned(),
+            })??;
+        self.service
+            .project_runtimes
             .register(project_root.to_path_buf(), reconciler)
             .await
             .map_err(|_| TraceDecayError::Config {
