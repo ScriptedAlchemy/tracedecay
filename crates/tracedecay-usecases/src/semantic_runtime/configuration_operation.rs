@@ -236,6 +236,7 @@ impl SemanticEvaluationAuthorityPublicationV1 {
         self.accepted_profile.compatibility().semantic.as_ref()
     }
 
+    #[hotpath::measure(label = "usecases.semantic_config.commit_publication", future = true)]
     pub async fn commit(
         self,
         expected: &SemanticEvaluationPublicationSnapshotV1,
@@ -334,6 +335,7 @@ impl ProductionSemanticConfigurationOperationV1 {
     /// Validate and run the genuine checked-in direct evaluator without a
     /// publication capability. The returned qualification binds the opaque
     /// evaluator output to an unchanged mounted snapshot.
+    #[hotpath::measure(label = "usecases.semantic_config.qualify_profile", future = true)]
     pub async fn qualify_profile(
         snapshot_authority: &dyn SemanticEvaluationSnapshotPortV1,
         repo_root: &Path,
@@ -377,6 +379,7 @@ impl ProductionSemanticConfigurationOperationV1 {
 
     /// Publish only evidence from the reviewed native-qualification package.
     /// Genuine evaluation is intentionally exclusive to [`Self::qualify_profile`].
+    #[hotpath::measure(label = "usecases.semantic_config.evaluate_publish", future = true)]
     pub async fn evaluate_and_publish_profile(
         &self,
         snapshot_authority: &dyn SemanticEvaluationPublicationSnapshotPortV1,
@@ -415,6 +418,7 @@ impl ProductionSemanticConfigurationOperationV1 {
         })
     }
 
+    #[hotpath::measure(label = "usecases.semantic_config.activate", future = true)]
     pub async fn activate(
         &self,
         request: SemanticProtectedActivationOperationV1,
@@ -548,6 +552,7 @@ impl ProductionSemanticConfigurationOperationV1 {
         })
     }
 
+    #[hotpath::measure(label = "usecases.semantic_config.rollback", future = true)]
     pub async fn rollback(
         &self,
         request: SemanticProtectedRollbackOperationV1,
@@ -722,6 +727,7 @@ fn map_packaged_qualification_error(
     }
 }
 
+#[hotpath::measure(label = "usecases.semantic_config.prepare_activation")]
 fn prepare_semantic_activation_publication(
     snapshot: &SemanticEvaluationPublicationSnapshotV1,
     candidate: &SemanticEvaluationProfileCandidateV1,
@@ -1153,6 +1159,7 @@ fn candidate_matches_evaluated_material(
     }
 }
 
+#[hotpath::measure(label = "usecases.semantic_config.validate_snapshot")]
 fn validate_evaluation_snapshot(
     repo_root: &Path,
     snapshot: &SemanticEvaluationPublicationSnapshotV1,
@@ -1257,6 +1264,7 @@ pub struct SemanticAppliedRollbackV1 {
     pub configuration_receipt: ConfigurationMutationReceipt,
 }
 
+#[hotpath::measure(label = "usecases.semantic_config.read_state", future = true)]
 async fn current_configuration_state(
     runtime: &ProjectConfigurationRuntime,
 ) -> Result<ConfigurationCurrentStateV1, SemanticActivationCoordinationErrorV1> {
