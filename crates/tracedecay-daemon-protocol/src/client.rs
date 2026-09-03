@@ -6,12 +6,12 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::io::{AsyncWriteExt, BufReader, ReadHalf, WriteHalf};
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use tracedecay_application::{
     ApplicationEnvelope, ApplicationInvocation, ApplicationInvocationExecutor,
@@ -385,7 +385,7 @@ pub trait DaemonInvocationExecutor: ApplicationInvocationExecutor + Send + Sync 
 pub struct DaemonInvocationClient {
     connection: crate::connection::DaemonConnection,
     handshake: crate::handshake::DaemonHandshake,
-    state: Arc<AsyncMutex<Option<DaemonInvocationConnection>>>,
+    pool: Arc<DaemonInvocationConnectionPool>,
     activity: Arc<DaemonInvocationClientActivity>,
 }
 
@@ -453,6 +453,92 @@ struct DaemonInvocationConnection {
     writer: WriteHalf<crate::transport::BrokerStream>,
 }
 
+/// Keeps one client well below the daemon's 64-connection per-client
+/// admission ceiling while allowing useful request parallelism.
+const DAEMON_INVOCATION_CONNECTION_POOL_CAPACITY: usize = 8;
+
+struct DaemonInvocationConnectionPool {
+    idle: Mutex<Vec<DaemonInvocationConnection>>,
+    permits: Arc<Semaphore>,
+}
+
+impl DaemonInvocationConnectionPool {
+    fn shared() -> Arc<Self> {
+        Arc::new(Self {
+            idle: Mutex::new(Vec::with_capacity(
+                DAEMON_INVOCATION_CONNECTION_POOL_CAPACITY,
+            )),
+            permits: Arc::new(Semaphore::new(DAEMON_INVOCATION_CONNECTION_POOL_CAPACITY)),
+        })
+    }
+}
+
+struct InvocationConnectionLease {
+    pool: Arc<DaemonInvocationConnectionPool>,
+    connection: Option<DaemonInvocationConnection>,
+    permit: Option<OwnedSemaphorePermit>,
+    return_to_pool: bool,
+}
+
+impl InvocationConnectionLease {
+    fn connection_mut(
+        &mut self,
+    ) -> tracedecay_domain::errors::Result<&mut DaemonInvocationConnection> {
+        self.connection
+            .as_mut()
+            .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+                message: "daemon invocation connection lease is unavailable".to_owned(),
+            })
+    }
+
+    fn release_to_pool(&mut self) {
+        self.return_to_pool = true;
+    }
+}
+
+impl Drop for InvocationConnectionLease {
+    fn drop(&mut self) {
+        if self.return_to_pool
+            && let Some(connection) = self.connection.take()
+        {
+            self.pool
+                .idle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(connection);
+        }
+        drop(self.permit.take());
+    }
+}
+
+/// Response plus same-connection delivery settlement authority when required.
+pub struct DaemonInvocationResult {
+    response: crate::contract::DaemonInvocationResponse,
+    delivery: Option<DaemonInvocationDelivery>,
+}
+
+impl DaemonInvocationResult {
+    pub fn into_response(self) -> crate::contract::DaemonInvocationResponse {
+        self.response
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        crate::contract::DaemonInvocationResponse,
+        Option<DaemonInvocationDelivery>,
+    ) {
+        (self.response, self.delivery)
+    }
+}
+
+/// A Work delivery acknowledgement pinned to its response connection.
+pub struct DaemonInvocationDelivery {
+    lease: InvocationConnectionLease,
+    target_request_id: String,
+    connection: crate::connection::DaemonConnection,
+}
+
 /// Client-owned dispatch ceiling for native `FastEmbed` current+10x evaluation.
 ///
 /// The daemon honors this deadline on `semantic_evaluate_and_publish`; it is
@@ -474,7 +560,7 @@ impl DaemonInvocationClient {
         Self {
             connection,
             handshake,
-            state: Arc::new(AsyncMutex::new(None)),
+            pool: DaemonInvocationConnectionPool::shared(),
             activity: Arc::new(DaemonInvocationClientActivity::default()),
         }
     }
@@ -487,125 +573,185 @@ impl DaemonInvocationClient {
         Self {
             connection,
             handshake,
-            state: Arc::new(AsyncMutex::new(None)),
+            pool: DaemonInvocationConnectionPool::shared(),
             activity: Arc::new(DaemonInvocationClientActivity::default()),
         }
     }
 
-    #[hotpath::measure(label = "daemon.invocation.client", future = true)]
-    pub async fn invoke(
+    async fn checkout_connection(
         &self,
+    ) -> tracedecay_domain::errors::Result<(
+        InvocationConnectionLease,
+        DaemonInvocationClientActivityGuard,
+    )> {
+        let queued = self.activity.queued();
+        let permit = hotpath::future!(
+            Arc::clone(&self.pool.permits).acquire_owned(),
+            label = "daemon.invocation.client.queue_wait"
+        )
+        .await
+        .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
+            message: "daemon invocation connection pool is closed".to_owned(),
+        })?;
+        let in_flight = queued.into_in_flight();
+        let idle = self
+            .pool
+            .idle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop();
+        let connection = match idle {
+            Some(connection) => connection,
+            None => {
+                let stream = hotpath::future!(
+                    crate::connection::connect_to_daemon_connection(&self.connection),
+                    label = "daemon.invocation.client.connect"
+                )
+                .await?;
+                let (reader, mut writer) = stream.into_split();
+                hotpath::future!(
+                    crate::connection::write_daemon_preamble(
+                        &mut writer,
+                        &self.connection,
+                        &self.handshake
+                    ),
+                    label = "daemon.invocation.client.preamble"
+                )
+                .await?;
+                DaemonInvocationConnection {
+                    reader: BufReader::new(reader),
+                    writer,
+                }
+            }
+        };
+        Ok((
+            InvocationConnectionLease {
+                pool: Arc::clone(&self.pool),
+                connection: Some(connection),
+                permit: Some(permit),
+                return_to_pool: false,
+            },
+            in_flight,
+        ))
+    }
+
+    async fn invoke_on_connection(
+        &self,
+        lease: &mut InvocationConnectionLease,
         request: crate::contract::DaemonInvocationRequest,
     ) -> tracedecay_domain::errors::Result<crate::contract::DaemonInvocationResponse> {
         let request_id = request.request_id.clone();
         let request_label = request.operation().as_str();
-        let queued = self.activity.queued();
-        let mut state = hotpath::future!(
-            self.state.lock(),
-            label = "daemon.invocation.client.queue_wait"
+        let connection = lease.connection_mut()?;
+        let request_json = hotpath::measure_block!(
+            "daemon.invocation.client.request.encode",
+            serde_json::to_string(&request)
+        )?;
+        hotpath::gauge!("daemon.invocation.client.request.bytes").set(request_json.len() as f64);
+        hotpath::future!(
+            async {
+                connection.writer.write_all(request_json.as_bytes()).await?;
+                connection.writer.write_all(b"\n").await?;
+                connection.writer.flush().await
+            },
+            label = "daemon.invocation.client.request.write"
         )
-        .await;
-        let _in_flight = queued.into_in_flight();
-        if state.is_none() {
-            let stream = hotpath::future!(
-                crate::connection::connect_to_daemon_connection(&self.connection),
-                label = "daemon.invocation.client.connect"
-            )
-            .await?;
-            let (reader, mut writer) = stream.into_split();
-            hotpath::future!(
-                crate::connection::write_daemon_preamble(
-                    &mut writer,
-                    &self.connection,
-                    &self.handshake
-                ),
-                label = "daemon.invocation.client.preamble"
-            )
-            .await?;
-            *state = Some(DaemonInvocationConnection {
-                reader: BufReader::new(reader),
-                writer,
-            });
-        }
-        let result = async {
-            let connection = state.as_mut().ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-                message: "daemon invocation connection was not initialized".to_owned(),
-            })?;
-            let request_json = hotpath::measure_block!(
-                "daemon.invocation.client.request.encode",
-                serde_json::to_string(&request)
-            )?;
-            hotpath::gauge!("daemon.invocation.client.request.bytes")
-                .set(request_json.len() as f64);
-            hotpath::future!(
-                async {
-                    connection.writer.write_all(request_json.as_bytes()).await?;
-                    connection.writer.write_all(b"\n").await?;
-                    connection.writer.flush().await
-                },
-                label = "daemon.invocation.client.request.write"
-            )
-            .await?;
+        .await?;
 
-            let Some(line) = hotpath::future!(
-                crate::connection::next_daemon_response_line(
-                    &mut connection.reader,
-                    &self.connection,
-                    request_label,
-                    crate::connection::DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
+        let Some(line) = hotpath::future!(
+            crate::connection::next_daemon_response_line(
+                &mut connection.reader,
+                &self.connection,
+                request_label,
+                crate::connection::DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
+            ),
+            label = "daemon.invocation.client.response.wait"
+        )
+        .await?
+        else {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!(
+                    "daemon closed the invocation connection after '{request_label}' was sent; the outcome is unknown"
                 ),
-                label = "daemon.invocation.client.response.wait"
-            )
-            .await?
-            else {
+            });
+        };
+        hotpath::gauge!("daemon.invocation.client.response.bytes").set(line.len() as f64);
+        let response: crate::contract::DaemonInvocationResponse = match hotpath::measure_block!(
+            "daemon.invocation.client.response.decode",
+            serde_json::from_str(&line)
+        ) {
+            Ok(response) => response,
+            Err(_) => {
+                if let Some(refusal) = crate::handshake::DaemonHandshakeRefusal::from_line(&line) {
+                    return Err(handshake_refusal_error(&refusal, &self.handshake));
+                }
                 return Err(tracedecay_domain::errors::TraceDecayError::Config {
-                    message: format!(
-                        "daemon closed the invocation connection after '{request_label}' was sent; the outcome is unknown"
-                    ),
-                });
-            };
-            hotpath::gauge!("daemon.invocation.client.response.bytes").set(line.len() as f64);
-            let response: crate::contract::DaemonInvocationResponse =
-                match hotpath::measure_block!(
-                    "daemon.invocation.client.response.decode",
-                    serde_json::from_str(&line)
-                ) {
-                    Ok(response) => response,
-                    Err(_) => {
-                        // A daemon that refused the handshake answers with one
-                        // refusal frame instead of an invocation response.
-                        if let Some(refusal) =
-                            crate::handshake::DaemonHandshakeRefusal::from_line(&line)
-                        {
-                            return Err(handshake_refusal_error(&refusal, &self.handshake));
-                        }
-                        return Err(tracedecay_domain::errors::TraceDecayError::Config {
-                            message: "daemon returned an invalid invocation response".to_owned(),
-                        });
-                    }
-                };
-            if response.protocol != crate::contract::DAEMON_INVOCATION_PROTOCOL
-                || response.revision != crate::contract::DAEMON_INVOCATION_REVISION
-                || response.request_id != request_id
-            {
-                return Err(tracedecay_domain::errors::TraceDecayError::Config {
-                    message: "daemon invocation response did not match the request".to_owned(),
+                    message: "daemon returned an invalid invocation response".to_owned(),
                 });
             }
-            Ok(response)
+        };
+        if response.protocol != crate::contract::DAEMON_INVOCATION_PROTOCOL
+            || response.revision != crate::contract::DAEMON_INVOCATION_REVISION
+            || response.request_id != request_id
+        {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: "daemon invocation response did not match the request".to_owned(),
+            });
         }
-        .await;
-        if result.is_err() {
-            *state = None;
-        }
-        result.map_err(|error| {
+        Ok(response)
+    }
+
+    /// Invokes one request using a bounded shared connection pool.
+    ///
+    /// FIFO ordering is preserved on each checked-out connection. Concurrent
+    /// requests on different leases have no cross-connection ordering.
+    #[hotpath::skip]
+    pub async fn invoke(
+        &self,
+        request: crate::contract::DaemonInvocationRequest,
+    ) -> tracedecay_domain::errors::Result<crate::contract::DaemonInvocationResponse> {
+        self.invoke_with_delivery(request)
+            .await
+            .map(DaemonInvocationResult::into_response)
+    }
+
+    #[hotpath::measure(label = "daemon.invocation.client", future = true)]
+    pub async fn invoke_with_delivery(
+        &self,
+        request: crate::contract::DaemonInvocationRequest,
+    ) -> tracedecay_domain::errors::Result<DaemonInvocationResult> {
+        let request_id = request.request_id.clone();
+        let delivery_ack_required = request.delivery_ack_deadline().is_some();
+        let (mut lease, _in_flight) = self.checkout_connection().await.map_err(|error| {
             with_daemon_version_skew_context(error, &self.connection, &self.handshake)
-        })
+        })?;
+        let result = self.invoke_on_connection(&mut lease, request).await;
+        match result {
+            Ok(response) => {
+                let delivery = if delivery_ack_required {
+                    Some(DaemonInvocationDelivery {
+                        lease,
+                        target_request_id: request_id,
+                        connection: self.connection.clone(),
+                    })
+                } else {
+                    lease.release_to_pool();
+                    None
+                };
+                Ok(DaemonInvocationResult { response, delivery })
+            }
+            Err(error) => Err(with_daemon_version_skew_context(
+                error,
+                &self.connection,
+                &self.handshake,
+            )),
+        }
     }
 
     #[hotpath::skip]
-    pub async fn acknowledge_work_delivery(
-        &self,
+    async fn acknowledge_work_delivery_on_connection(
+        connection: &mut DaemonInvocationConnection,
+        daemon_connection: &crate::connection::DaemonConnection,
         target_request_id: &str,
         outcome: tracedecay_domain::DeliverySettlementOutcomeV1,
         reason: Option<tracedecay_domain::DeliveryDropReasonV1>,
@@ -632,20 +778,7 @@ impl DaemonInvocationClient {
             }
         };
         let request_id = target_request_id.to_owned();
-        let queued = self.activity.queued();
-        let mut state = hotpath::future!(
-            self.state.lock(),
-            label = "daemon.invocation.client.queue_wait"
-        )
-        .await;
-        let _in_flight = queued.into_in_flight();
         let result = async {
-            let connection = state.as_mut().ok_or_else(|| {
-                tracedecay_domain::errors::TraceDecayError::Config {
-                    message: "daemon invocation connection is unavailable for Work delivery acknowledgement"
-                        .to_owned(),
-                }
-            })?;
             connection
                 .writer
                 .write_all(serde_json::to_string(&request)?.as_bytes())
@@ -655,21 +788,25 @@ impl DaemonInvocationClient {
 
             let Some(line) = crate::connection::next_daemon_response_line(
                 &mut connection.reader,
-                &self.connection,
+                daemon_connection,
                 "invocation_delivery_ack",
                 crate::connection::DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
             )
             .await?
             else {
                 return Err(tracedecay_domain::errors::TraceDecayError::Config {
-                    message: "daemon closed the invocation connection before acknowledging Work delivery"
-                        .to_owned(),
+                    message:
+                        "daemon closed the invocation connection before acknowledging Work delivery"
+                            .to_owned(),
                 });
             };
             let response: crate::contract::DaemonInvocationDeliveryAckResponse =
-                serde_json::from_str(&line).map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
-                    message: "daemon returned an invalid Work delivery acknowledgement response"
-                        .to_owned(),
+                serde_json::from_str(&line).map_err(|_| {
+                    tracedecay_domain::errors::TraceDecayError::Config {
+                        message:
+                            "daemon returned an invalid Work delivery acknowledgement response"
+                                .to_owned(),
+                    }
                 })?;
             if !response.matches_request(&request_id) {
                 return Err(tracedecay_domain::errors::TraceDecayError::Config {
@@ -687,9 +824,6 @@ impl DaemonInvocationClient {
             Ok(())
         }
         .await;
-        if result.is_err() {
-            *state = None;
-        }
         result
     }
 
@@ -983,6 +1117,30 @@ impl DaemonInvocationClient {
         writer.write_all(b"\n").await?;
         writer.flush().await?;
         Ok(())
+    }
+}
+
+impl DaemonInvocationDelivery {
+    #[hotpath::skip]
+    pub async fn acknowledge(
+        mut self,
+        outcome: tracedecay_domain::DeliverySettlementOutcomeV1,
+        reason: Option<tracedecay_domain::DeliveryDropReasonV1>,
+    ) -> tracedecay_domain::errors::Result<()> {
+        let target_request_id = self.target_request_id.clone();
+        let daemon_connection = self.connection.clone();
+        let result = DaemonInvocationClient::acknowledge_work_delivery_on_connection(
+            self.lease.connection_mut()?,
+            &daemon_connection,
+            &target_request_id,
+            outcome,
+            reason,
+        )
+        .await;
+        if result.is_ok() {
+            self.lease.release_to_pool();
+        }
+        result
     }
 }
 

@@ -58,10 +58,11 @@ pub mod transport;
 
 pub use client::{
     AdapterInvocation, BindingResolution, BindingResolver, BoundInvocation, CanonicalInvocation,
-    CatalogBindingResolver, DaemonInvocationClient, DaemonInvocationError,
-    DaemonInvocationExecutor, DaemonInvocationExecutorFuture, DaemonLspSessionClient,
-    DispatchError, DispatchInput, DispatchedInvocation, InvocationCancellationPolicy,
-    InvocationControls, ResolvedBinding, SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS,
+    CatalogBindingResolver, DaemonInvocationClient, DaemonInvocationDelivery,
+    DaemonInvocationError, DaemonInvocationExecutor, DaemonInvocationExecutorFuture,
+    DaemonInvocationResult, DaemonLspSessionClient, DispatchError, DispatchInput,
+    DispatchedInvocation, InvocationCancellationPolicy, InvocationControls, ResolvedBinding,
+    SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS,
     SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS, ScopeSelector,
     SemanticEvaluationPublicationResultV1, SemanticEvaluationQualificationResultV1,
     application_delivery_route, application_response, deadline_remaining, handshake_refusal_error,
@@ -70,9 +71,9 @@ pub use client::{
 pub use client_identity::DaemonClientIdentity;
 pub use connection::{
     DAEMON_CONNECT_DOWN, DAEMON_CONNECT_SATURATED, DAEMON_RESPONSE_STALLED,
-    DAEMON_TOOL_HEALTH_CONNECT_TIMEOUT, DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
-    DAEMON_TOOL_RESPONSE_GRACE, DEFAULT_DAEMON_OPERATION_DEADLINE, DEFAULT_TOOL_REQUEST_DEADLINE,
-    DaemonConnection, DaemonLivenessProbe, MAX_TOOL_REQUEST_DEADLINE, TOOL_REQUEST_DEADLINE_ENV,
+    DAEMON_TOOL_LIVENESS_POLL_INTERVAL, DAEMON_TOOL_RESPONSE_GRACE,
+    DEFAULT_DAEMON_OPERATION_DEADLINE, DEFAULT_TOOL_REQUEST_DEADLINE, DaemonConnection,
+    DaemonLivenessProbe, MAX_TOOL_REQUEST_DEADLINE, TOOL_REQUEST_DEADLINE_ENV,
     connect_to_daemon_connection, daemon_connect_failure, daemon_response_stalled,
     daemon_response_stalled_during, daemon_tool_response_bound, next_daemon_response_line,
     tool_request_deadline, write_daemon_preamble,
