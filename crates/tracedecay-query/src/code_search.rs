@@ -214,6 +214,7 @@ impl CodeIndexSearchCoverageV1 {
 
     /// Build response coverage from the authenticated exact/lexical/graph
     /// fallback receipt instead of assuming every admitted lane completed.
+    #[hotpath::measure(label = "query.code_search.map_fallback_coverage")]
     pub fn from_fallback_lane_coverage(
         fallback: &BTreeMap<
             tracedecay_domain::RetrieverKind,
@@ -321,8 +322,12 @@ impl CodeIndexSearchCoverageV1 {
         reason: CodeIndexSearchUnavailableReasonV1,
     ) -> std::result::Result<Self, CodeIndexSearchUnavailableReasonV1> {
         if self.any_servable() {
+            if self.is_degraded() {
+                hotpath::gauge!("query.code_search.degraded_total").inc(1u64);
+            }
             Ok(self)
         } else {
+            hotpath::gauge!("query.code_search.unavailable_total").inc(1u64);
             Err(reason)
         }
     }

@@ -240,6 +240,7 @@ impl ExactAdmissionValidator for CentralExactAdmissionAuthorityV1 {
 }
 
 impl ExactAdmissionAuthority for CentralExactAdmissionAuthorityV1 {
+    #[hotpath::measure(label = "query.lane.exact.parse_literals")]
     fn parse_literals(
         &self,
         query_view: &EphemeralSanitizedQueryViewV1,
@@ -617,6 +618,7 @@ where
     /// admission authority, then rebuild the committed deterministic prefix:
     /// canonical order, sequential ordinals, deterministic fixed-point
     /// scores, typed coverage, budget cutoff, and a checkpoint digest.
+    #[hotpath::measure(label = "query.lane.exact.enforce_batch")]
     fn enforce_batch(
         &self,
         request: &ExactLaneRequest<'_>,
@@ -660,20 +662,23 @@ where
                         .map_err(contract_error)?;
                     // Only the central authority may mint a proof; re-admission
                     // binds this lane to proofs it can never construct itself.
-                    let minted = self
-                        .authority
-                        .admit(
-                            evidence.admission_proof.field,
-                            &evidence.admission_proof.original_bytes,
-                            &request.base,
-                        )
-                        .map_err(contract_error)?
-                        .ok_or_else(|| {
-                            RetrievalPortError::Contract(
-                                "the central exact admission authority rejected the proof literal"
-                                    .to_owned(),
+                    let minted = crate::hotpath_metrics::measure_frequent(
+                        "query.lane.exact.readmit_row",
+                        || {
+                            self.authority.admit(
+                                evidence.admission_proof.field,
+                                &evidence.admission_proof.original_bytes,
+                                &request.base,
                             )
-                        })?;
+                        },
+                    )
+                    .map_err(contract_error)?
+                    .ok_or_else(|| {
+                        RetrievalPortError::Contract(
+                            "the central exact admission authority rejected the proof literal"
+                                .to_owned(),
+                        )
+                    })?;
                     if minted != evidence.admission_proof {
                         return Err(RetrievalPortError::Contract(
                             "exact admission proof was not minted by the central authority"

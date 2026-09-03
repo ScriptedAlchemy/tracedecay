@@ -85,6 +85,7 @@ pub(crate) fn contract_error(error: impl std::fmt::Display) -> RetrievalPortErro
 /// the payload differs between lanes, so only the payload is a lane's
 /// business. Cursor bytes are ephemeral; live cursors minted before this
 /// encoding are rejected as a set mismatch.
+#[hotpath::measure(label = "query.lane.checkpoint_digest")]
 pub(crate) fn checkpoint_digest<T>(payload: &T) -> Result<CursorPayloadDigest, RetrievalPortError>
 where
     T: Serialize,
@@ -144,6 +145,20 @@ pub(crate) trait LaneBoundEvidence {
 /// this is the check every lane repeats before it applies its own admission
 /// rules, so it lives once and each lane supplies only its own wording.
 pub(crate) fn lane_bound_evidence<'batch, E>(
+    batch: &'batch RetrieverBatch<E>,
+    candidate: &CompactCandidate,
+    lane: RetrieverKind,
+    rejections: &LaneEvidenceRejections,
+) -> Result<&'batch E, RetrievalPortError>
+where
+    E: LaneBoundEvidence,
+{
+    crate::hotpath_metrics::measure_frequent("query.lane.bind_evidence", || {
+        lane_bound_evidence_inner(batch, candidate, lane, rejections)
+    })
+}
+
+fn lane_bound_evidence_inner<'batch, E>(
     batch: &'batch RetrieverBatch<E>,
     candidate: &CompactCandidate,
     lane: RetrieverKind,
