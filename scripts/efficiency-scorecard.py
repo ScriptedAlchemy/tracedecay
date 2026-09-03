@@ -551,7 +551,10 @@ class Sandbox:
                     os.killpg(daemon.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-                daemon.wait(timeout=5)
+                # SIGKILL cannot be ignored, but tearing down a multi-GB
+                # daemon can outlast a short bound and a timeout here would
+                # mask the run's own result from the caller's `finally`.
+                daemon.wait()
         self.socket.unlink(missing_ok=True)
 
     def daemon_alive(self) -> bool:
