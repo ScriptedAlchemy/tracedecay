@@ -48,6 +48,7 @@ use rusqlite::{Savepoint, Transaction};
 use tracedecay_store::RepositoryWritePayloadV1;
 
 use crate::StorageOperationExecutor;
+use crate::operation::StorageOperationError;
 
 pub use attachment::{
     RepositoryAttachmentStartError, RepositoryDispatchError, RepositoryPhysicalAttachmentFactory,
@@ -97,65 +98,90 @@ impl StorageOperationExecutor for ConcreteRepositoryWriteExecutor {
         savepoint: &Savepoint<'_>,
         payload: &RepositoryWritePayloadV1,
     ) -> rusqlite::Result<()> {
+        match self.execute_closed(savepoint, payload) {
+            Ok(()) => Ok(()),
+            Err(StorageOperationError::Native(error)) => Err(error),
+            Err(error) => Err(rusqlite::Error::InvalidParameterName(error.to_string())),
+        }
+    }
+
+    fn execute_closed(
+        &mut self,
+        savepoint: &Savepoint<'_>,
+        payload: &RepositoryWritePayloadV1,
+    ) -> Result<(), StorageOperationError> {
         match payload {
             RepositoryWritePayloadV1::Configuration(commit) => {
-                self.configuration.execute_write(savepoint, commit)
+                self.configuration.execute_write(savepoint, commit)?;
             }
             RepositoryWritePayloadV1::Fact(batch) => {
-                self.project.execute_fact_write(savepoint, batch)
+                self.project.execute_fact_write(savepoint, batch)?;
             }
             RepositoryWritePayloadV1::Observation(write) => {
-                self.project.execute_observation_write(savepoint, write)
+                self.project.execute_observation_write(savepoint, write)?;
             }
             RepositoryWritePayloadV1::ObservationBatch(writes) => {
-                self.project.execute_observation_batch(savepoint, writes)
+                self.project.execute_observation_batch(savepoint, writes)?;
             }
-            RepositoryWritePayloadV1::ObservationCursorAdvance(advance) => self
-                .project
-                .execute_observation_cursor_advance(savepoint, advance),
-            RepositoryWritePayloadV1::RemoteObservationReplay(write) => self
-                .project
-                .execute_remote_observation_replay(savepoint, write),
-            RepositoryWritePayloadV1::RemoteWriterFenceInstall(install) => self
-                .project
-                .execute_remote_writer_fence_install(savepoint, install),
+            RepositoryWritePayloadV1::ObservationCursorAdvance(advance) => {
+                self.project
+                    .execute_observation_cursor_advance(savepoint, advance)?;
+            }
+            RepositoryWritePayloadV1::RemoteObservationReplay(write) => {
+                self.project
+                    .execute_remote_observation_replay(savepoint, write)?;
+            }
+            RepositoryWritePayloadV1::RemoteWriterFenceInstall(install) => {
+                self.project
+                    .execute_remote_writer_fence_install(savepoint, install)?;
+            }
             RepositoryWritePayloadV1::Diagnostics(snapshot) => {
-                self.project.execute_diagnostic_write(savepoint, snapshot)
+                self.project.execute_diagnostic_write(savepoint, snapshot)?;
             }
-            RepositoryWritePayloadV1::DiagnosticSupersession(request) => self
-                .project
-                .execute_diagnostic_supersession(savepoint, request),
-            RepositoryWritePayloadV1::EvidenceAssembly(write) => self
-                .project
-                .execute_evidence_assembly_write(savepoint, write),
-            RepositoryWritePayloadV1::ExternalSource(commit) => self
-                .project
-                .execute_external_source_write(savepoint, commit),
-            RepositoryWritePayloadV1::ExternalSourceBatch(commits) => self
-                .project
-                .execute_external_source_batch(savepoint, commits),
-            RepositoryWritePayloadV1::ExternalSourceProjection(projection) => self
-                .project
-                .execute_external_source_projection_write(savepoint, projection),
-            RepositoryWritePayloadV1::ExternalSourceAcquisition(command) => self
-                .project
-                .execute_external_source_acquisition_write(savepoint, command),
-            RepositoryWritePayloadV1::RetrievalAnchorDisposition(record) => self
-                .project
-                .execute_retrieval_anchor_disposition_write(savepoint, record),
-            RepositoryWritePayloadV1::RetrievalAnchorDerivative(derivative) => self
-                .project
-                .execute_retrieval_anchor_derivative_write(savepoint, derivative),
+            RepositoryWritePayloadV1::DiagnosticSupersession(request) => {
+                self.project
+                    .execute_diagnostic_supersession(savepoint, request)?;
+            }
+            RepositoryWritePayloadV1::EvidenceAssembly(write) => {
+                self.project
+                    .execute_evidence_assembly_write(savepoint, write)?;
+            }
+            RepositoryWritePayloadV1::ExternalSource(commit) => {
+                self.project
+                    .execute_external_source_write(savepoint, commit)?;
+            }
+            RepositoryWritePayloadV1::ExternalSourceBatch(commits) => {
+                self.project
+                    .execute_external_source_batch(savepoint, commits)?;
+            }
+            RepositoryWritePayloadV1::ExternalSourceProjection(projection) => {
+                self.project
+                    .execute_external_source_projection_write(savepoint, projection)?;
+            }
+            RepositoryWritePayloadV1::ExternalSourceAcquisition(command) => {
+                self.project
+                    .execute_external_source_acquisition_write(savepoint, command)?;
+            }
+            RepositoryWritePayloadV1::RetrievalAnchorDisposition(record) => {
+                self.project
+                    .execute_retrieval_anchor_disposition_write(savepoint, record)?;
+            }
+            RepositoryWritePayloadV1::RetrievalAnchorDerivative(derivative) => {
+                self.project
+                    .execute_retrieval_anchor_derivative_write(savepoint, derivative)?;
+            }
             RepositoryWritePayloadV1::GitIndexTransaction(_)
             | RepositoryWritePayloadV1::EnqueueOutbox(_)
             | RepositoryWritePayloadV1::ApplyInbox(_)
             | RepositoryWritePayloadV1::AcknowledgeOutbox(_) => {
-                Err(rusqlite::Error::InvalidParameterName(format!(
+                return Err(rusqlite::Error::InvalidParameterName(format!(
                     "repository attachment does not own {}",
                     payload.name()
-                )))
+                ))
+                .into());
             }
         }
+        Ok(())
     }
 }
 

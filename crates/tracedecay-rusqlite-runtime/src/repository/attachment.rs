@@ -18,7 +18,7 @@ use tracedecay_store::{
 use crate::{
     CheckpointControlError, CheckpointOutcome, CheckpointRequest, ExistingWriterLocator,
     MaintenanceCheckpointRequest, OnlineBackupReceipt, PersistentWriter, RuntimeWriteAuthority,
-    RuntimeWriteAuthorityStage, WriterStartError, WriterState,
+    RuntimeWriteAuthorityStage, WriterActorError, WriterStartError, WriterState,
     connection::{OpenedDatabaseFile, OpenedDatabaseFileError},
     exact_sql::{ExactSqlError, ExactSqlHandle},
     reader::{
@@ -472,7 +472,12 @@ impl RepositoryRuntimePhysicalAttachment {
         writer
             .submit_authorized(request, probe, authority)
             .await
-            .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))
+            .map_err(|error| match error {
+                WriterActorError::StorageFailure(error) => {
+                    RepositoryDispatchError::WriterRuntime(error)
+                }
+                error => RepositoryDispatchError::Writer(error.to_string()),
+            })
     }
 
     #[hotpath::skip]
@@ -804,6 +809,7 @@ pub enum RepositoryDispatchError {
     Reader(ReaderAcquireError),
     ReaderWorker(String),
     Writer(String),
+    WriterRuntime(StorageRuntimeErrorV1),
 }
 
 impl fmt::Display for RepositoryDispatchError {
@@ -819,6 +825,7 @@ impl fmt::Display for RepositoryDispatchError {
             Self::Reader(error) => write!(formatter, "repository read failed: {error}"),
             Self::ReaderWorker(error) => write!(formatter, "repository snapshot failed: {error}"),
             Self::Writer(error) => write!(formatter, "repository write failed: {error}"),
+            Self::WriterRuntime(error) => write!(formatter, "repository write failed: {error}"),
         }
     }
 }
@@ -829,6 +836,7 @@ impl Error for RepositoryDispatchError {
             Self::Checkpoint(error) => Some(error),
             Self::Reader(error) => Some(error),
             Self::Closed | Self::ReaderWorker(_) | Self::Writer(_) => None,
+            Self::WriterRuntime(error) => Some(error),
         }
     }
 }

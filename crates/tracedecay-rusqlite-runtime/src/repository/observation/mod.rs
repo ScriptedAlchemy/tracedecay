@@ -7,14 +7,16 @@
 
 use rusqlite::{OptionalExtension, Savepoint, Transaction, params};
 use tracedecay_domain::{
-    CanonicalObservationIdV1, ObservationCollisionOutcomeV1, ProjectionGenerationId,
-    classify_observation_collision,
+    CanonicalObservationIdV1, ObservationCollisionOutcomeV1, ObservationSourceCursorV1,
+    ProjectionGenerationId, classify_observation_collision,
 };
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationCoverageReason, ObservationCursorAdvance,
     ObservationReadOperationV1, ObservationReadResultV1, ProjectionRebuildProgressV1,
     ProjectionRebuildStateV1, SESSION_MESSAGE_PROJECTOR_VERSION,
 };
+
+use crate::operation::StorageOperationError;
 
 use super::support::{decode, encode, invalid};
 
@@ -39,7 +41,7 @@ impl ObservationExecutor {
         &mut self,
         savepoint: &Savepoint<'_>,
         write: &AnchoredObservationWrite,
-    ) -> rusqlite::Result<()> {
+    ) -> Result<(), StorageOperationError> {
         let observation = write.observation();
         let source_json = encode(observation.source())?;
         let scope_json = encode(observation.scope())?;
@@ -89,7 +91,7 @@ impl ObservationExecutor {
                         advance = advance.with_resume_checkpoint(file_identity, resume_fingerprint);
                     }
                     (None, None) => {}
-                    _ => return Err(invalid("cursor resume checkpoint is incomplete")),
+                    _ => return Err(invalid("cursor resume checkpoint is incomplete").into()),
                 }
                 return self.execute_cursor_advance(savepoint, &advance);
             }
@@ -98,7 +100,7 @@ impl ObservationExecutor {
                 || stored_receipt_id != receipt_id
                 || stored_observation != *observation
             {
-                return Err(invalid("observation identity collision"));
+                return Err(invalid("observation identity collision").into());
             }
             let stored_receipt: String = savepoint.query_row(
                 "SELECT receipt_json FROM sanitization_receipts WHERE receipt_id = ?1",
@@ -106,7 +108,7 @@ impl ObservationExecutor {
                 |row| row.get(0),
             )?;
             if stored_receipt != receipt_json {
-                return Err(invalid("sanitization receipt identity collision"));
+                return Err(invalid("sanitization receipt identity collision").into());
             }
             verify_observation_authority(savepoint, write)?;
             return Ok(());
@@ -114,7 +116,10 @@ impl ObservationExecutor {
 
         let actual_cursor = read_cursor(savepoint, &source_json, &scope_json)?;
         if actual_cursor.as_ref() != write.expected_cursor() {
-            return Err(invalid("observation source cursor conflict"));
+            return Err(observation_source_cursor_conflict(
+                write.expected_cursor().cloned(),
+                actual_cursor,
+            ));
         }
 
         persist_sanitization_receipt(savepoint, receipt)?;
@@ -163,7 +168,7 @@ impl ObservationExecutor {
         &mut self,
         savepoint: &Savepoint<'_>,
         advance: &ObservationCursorAdvance,
-    ) -> rusqlite::Result<()> {
+    ) -> Result<(), StorageOperationError> {
         let source_json = encode(advance.next_cursor().source())?;
         let scope_json = encode(advance.next_cursor().scope())?;
         let actual_cursor = read_cursor(savepoint, &source_json, &scope_json)?;
@@ -171,10 +176,13 @@ impl ObservationExecutor {
             if cursor_advance_receipt_matches(savepoint, &source_json, &scope_json, advance)? {
                 return Ok(());
             }
-            return Err(invalid("source cursor advance identity collision"));
+            return Err(invalid("source cursor advance identity collision").into());
         }
         if actual_cursor.as_ref() != advance.expected_cursor() {
-            return Err(invalid("observation source cursor conflict"));
+            return Err(observation_source_cursor_conflict(
+                advance.expected_cursor().cloned(),
+                actual_cursor,
+            ));
         }
         if let Some(receipt) = advance.sanitization_receipt() {
             persist_sanitization_receipt(savepoint, receipt)?;
@@ -193,7 +201,7 @@ impl ObservationExecutor {
             ],
         )?;
         if !cursor_advance_receipt_matches(savepoint, &source_json, &scope_json, advance)? {
-            return Err(invalid("source cursor advance identity collision"));
+            return Err(invalid("source cursor advance identity collision").into());
         }
         savepoint.execute(
             COMMIT_SOURCE_CURSOR_SQL,
@@ -364,6 +372,16 @@ impl ObservationExecutor {
                 Ok(ObservationReadResultV1::ProjectionRebuildProgress(progress))
             }
         }
+    }
+}
+
+fn observation_source_cursor_conflict(
+    expected: Option<ObservationSourceCursorV1>,
+    actual: Option<ObservationSourceCursorV1>,
+) -> StorageOperationError {
+    StorageOperationError::ObservationSourceCursorConflict {
+        expected: Box::new(expected),
+        actual: Box::new(actual),
     }
 }
 

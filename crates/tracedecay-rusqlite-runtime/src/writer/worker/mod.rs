@@ -5,7 +5,7 @@
 //! parked, and [`rejection`] for settling work that will never run.
 
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     panic::{AssertUnwindSafe, catch_unwind},
     path::PathBuf,
     sync::{
@@ -23,7 +23,7 @@ use tokio::{
 };
 use tracedecay_store::{
     AdmissionConfigV1, OperationPriorityV1, RuntimeBatchCompatibilityV1, RuntimeInterruptionV1,
-    RuntimeRequestProbeV1, StoreRuntimeBindingV1,
+    RuntimeRequestProbeV1, StoreOperationIdV1, StoreRuntimeBindingV1,
 };
 
 #[cfg(not(any(unix, windows)))]
@@ -51,7 +51,7 @@ use super::{
     backup::{OnlineBackupCommand, run_online_backup},
     request::{
         AcceptedRequest, CheckpointCommand, CheckpointCommandKind, ExecutionBatch,
-        IncrementalVacuumCommand,
+        IncrementalVacuumCommand, SharedReply,
     },
     transaction::{BatchTiming, WriterReporting, process_batch},
 };
@@ -224,6 +224,7 @@ async fn dwell_for_batch(
     checkpoint_receiver: &mut mpsc::Receiver<CheckpointCommand>,
     shutdown_receiver: &mut mpsc::UnboundedReceiver<()>,
     queue: &mut FairQueue<AcceptedRequest>,
+    inflight: &mut HashMap<StoreOperationIdV1, SharedReply>,
     exact_sql_queue: &mut VecDeque<ExactSqlWriterCommand>,
     incremental_vacuum_queue: &mut VecDeque<IncrementalVacuumCommand>,
     online_backup_queue: &mut VecDeque<OnlineBackupCommand>,
@@ -267,7 +268,7 @@ async fn dwell_for_batch(
                 if !interrupted && pending.accepts(&item, true) {
                     let bytes = item.admission_bytes();
                     let probe = Arc::clone(&item.probe);
-                    if enqueue(queue, item, telemetry) {
+                    if enqueue(queue, inflight, item, telemetry) {
                         pending.window.admit(bytes);
                         pending.probes.push(probe);
                     }
@@ -277,7 +278,7 @@ async fn dwell_for_batch(
                         return;
                     }
                 } else {
-                    let _ = enqueue(queue, item, telemetry);
+                    let _ = enqueue(queue, inflight, item, telemetry);
                     return;
                 }
             }
@@ -285,6 +286,7 @@ async fn dwell_for_batch(
                 apply_wake(
                     wake,
                     queue,
+                    inflight,
                     exact_sql_queue,
                     incremental_vacuum_queue,
                     online_backup_queue,
@@ -461,6 +463,7 @@ impl Worker {
         runtime: Runtime,
     ) {
         let mut queue = FairQueue::default();
+        let mut inflight = HashMap::new();
         let mut exact_sql_queue = VecDeque::new();
         let mut incremental_vacuum_queue = VecDeque::new();
         let mut online_backup_queue = VecDeque::new();
@@ -478,6 +481,7 @@ impl Worker {
                 drain_ingress(
                     &mut self.receiver,
                     &mut queue,
+                    &mut inflight,
                     &self.telemetry,
                     &mut input_closed,
                 );
@@ -542,6 +546,7 @@ impl Worker {
                 apply_wake(
                     wake,
                     &mut queue,
+                    &mut inflight,
                     &mut exact_sql_queue,
                     &mut incremental_vacuum_queue,
                     &mut online_backup_queue,
@@ -602,6 +607,7 @@ impl Worker {
                     apply_wake(
                         wake,
                         &mut queue,
+                        &mut inflight,
                         &mut exact_sql_queue,
                         &mut incremental_vacuum_queue,
                         &mut online_backup_queue,
@@ -721,6 +727,7 @@ impl Worker {
                 apply_wake(
                     wake,
                     &mut queue,
+                    &mut inflight,
                     &mut exact_sql_queue,
                     &mut incremental_vacuum_queue,
                     &mut online_backup_queue,
@@ -747,7 +754,7 @@ impl Worker {
                     PendingBatchDwell::from_selected(&selected, &self.config, Instant::now())
             {
                 for item in selected {
-                    let _ = enqueue(&mut queue, item, &self.telemetry);
+                    let _ = enqueue(&mut queue, &mut inflight, item, &self.telemetry);
                 }
                 hotpath::measure_block!("rusqlite.writer.batch_dwell", {
                     runtime.block_on(dwell_for_batch(
@@ -759,6 +766,7 @@ impl Worker {
                         &mut self.checkpoint_receiver,
                         &mut self.shutdown_receiver,
                         &mut queue,
+                        &mut inflight,
                         &mut exact_sql_queue,
                         &mut incremental_vacuum_queue,
                         &mut online_backup_queue,
@@ -777,6 +785,22 @@ impl Worker {
                 cancel_waiting(&mut queue, &self.telemetry);
                 reject_unauthorized(&mut queue, &self.telemetry);
                 continue;
+            }
+            let executing: Vec<StoreOperationIdV1> = selected
+                .iter()
+                .map(|item| item.operation_id().clone())
+                .collect();
+            for item in &selected {
+                inflight.insert(item.operation_id().clone(), item.shared_reply());
+            }
+            if !input_closed {
+                drain_ingress(
+                    &mut self.receiver,
+                    &mut queue,
+                    &mut inflight,
+                    &self.telemetry,
+                    &mut input_closed,
+                );
             }
             let mut batches = build_batches(selected, &self.config).into_iter();
             while let Some(batch) = batches.next() {
@@ -797,7 +821,8 @@ impl Worker {
                 if checkpoint.hard_drain_required() {
                     for pending in batches {
                         for item in pending.items {
-                            let _ = enqueue(&mut queue, item, &self.telemetry);
+                            inflight.remove(item.operation_id());
+                            let _ = enqueue(&mut queue, &mut inflight, item, &self.telemetry);
                         }
                     }
                     hard_checkpoint_retry_due =
@@ -807,6 +832,18 @@ impl Worker {
                 if self.state.load(Ordering::Acquire) == WriterState::Faulted as u8 {
                     break;
                 }
+            }
+            if !input_closed {
+                drain_ingress(
+                    &mut self.receiver,
+                    &mut queue,
+                    &mut inflight,
+                    &self.telemetry,
+                    &mut input_closed,
+                );
+            }
+            for operation_id in executing {
+                inflight.remove(&operation_id);
             }
             prefer_auxiliary = true;
         }
@@ -1146,7 +1183,7 @@ fn build_batches(
 #[cfg(test)]
 mod auxiliary_scheduling_tests {
     use std::{
-        collections::VecDeque,
+        collections::{HashMap, VecDeque},
         sync::{
             Arc, Mutex,
             atomic::{AtomicBool, Ordering},
@@ -1160,12 +1197,12 @@ mod auxiliary_scheduling_tests {
     };
     use tracedecay_store::{
         OperationPriorityV1, RuntimeCancellationIdentityV1, RuntimeDeadlineV1,
-        RuntimeInterruptionV1, RuntimeRequestProbeV1,
+        RuntimeInterruptionV1, RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1, UnavailableReasonV1,
     };
 
     use crate::{
         RuntimeWriteAuthority, RuntimeWriteAuthorityError, RuntimeWriteAuthorityStage,
-        admission::{Admission, FairQueue},
+        admission::{Admission, FairQueue, QueueItem},
         telemetry::WriterTelemetry,
         test_support::{metadata, request as test_request},
     };
@@ -1256,6 +1293,130 @@ mod auxiliary_scheduling_tests {
         accepted
     }
 
+    fn accepted_request_with_reply(
+        operation: &str,
+        key: &str,
+    ) -> (
+        AcceptedRequest,
+        oneshot::Receiver<Result<RuntimeSubmitOutcomeV1, tracedecay_store::StorageRuntimeErrorV1>>,
+    ) {
+        let operation_metadata = metadata(operation, key, 'a');
+        let config = tracedecay_store::AdmissionConfigV1::default();
+        let admission = Admission::new(admission_limits(&config).expect("valid default limits"));
+        let permit = admission
+            .reserve(&operation_metadata)
+            .expect("fixture request fits admission");
+        let request = Arc::new(test_request(operation_metadata));
+        let probe = Arc::new(BatchProbe {
+            cancellation: request.control().cancellation.clone(),
+            deadline: request.control().deadline.clone(),
+            interruption: None,
+            isolated: false,
+            commit_started: AtomicBool::new(false),
+        });
+        let (reply, response) = oneshot::channel();
+        (
+            AcceptedRequest::new(
+                request,
+                probe,
+                Arc::new(UnrestrictedRuntimeWriteAuthority),
+                reply,
+                permit,
+            ),
+            response,
+        )
+    }
+
+    #[test]
+    fn duplicate_operation_attach_settles_both_requesters_with_the_same_outcome() {
+        let telemetry = WriterTelemetry::default();
+        let mut queue = FairQueue::default();
+        let mut inflight = HashMap::new();
+        let (leader, leader_rx) =
+            accepted_request_with_reply("operation.duplicate-attach", "key.duplicate-attach");
+        let (follower, follower_rx) =
+            accepted_request_with_reply("operation.duplicate-attach", "key.duplicate-attach");
+        assert!(enqueue(&mut queue, &mut inflight, leader, &telemetry));
+        assert!(enqueue(&mut queue, &mut inflight, follower, &telemetry));
+        let mut selected = queue.drain_fair();
+        assert_eq!(selected.len(), 1);
+        let outcome = RuntimeSubmitOutcomeV1::Unavailable {
+            reason: UnavailableReasonV1::Faulted,
+        };
+        selected
+            .pop()
+            .expect("queued leader")
+            .settle(Ok(outcome.clone()));
+        assert_eq!(
+            leader_rx.blocking_recv().expect("leader reply"),
+            Ok(outcome.clone())
+        );
+        assert_eq!(
+            follower_rx.blocking_recv().expect("follower reply"),
+            Ok(outcome)
+        );
+    }
+
+    #[test]
+    fn inflight_duplicate_attach_settles_both_requesters_with_the_same_outcome() {
+        let telemetry = WriterTelemetry::default();
+        let mut queue = FairQueue::default();
+        let mut inflight = HashMap::new();
+        let (leader, leader_rx) =
+            accepted_request_with_reply("operation.inflight-attach", "key.inflight-attach");
+        let (follower, follower_rx) =
+            accepted_request_with_reply("operation.inflight-attach", "key.inflight-attach");
+        assert!(enqueue(&mut queue, &mut inflight, leader, &telemetry));
+        let mut selected = queue.drain_fair();
+        assert_eq!(selected.len(), 1);
+        let executing = selected.pop().expect("dequeued leader");
+        inflight.insert(executing.operation_id().clone(), executing.shared_reply());
+        assert!(enqueue(&mut queue, &mut inflight, follower, &telemetry));
+        let outcome = RuntimeSubmitOutcomeV1::Unavailable {
+            reason: UnavailableReasonV1::Faulted,
+        };
+        executing.settle(Ok(outcome.clone()));
+        assert_eq!(
+            leader_rx.blocking_recv().expect("leader reply"),
+            Ok(outcome.clone())
+        );
+        assert_eq!(
+            follower_rx.blocking_recv().expect("follower reply"),
+            Ok(outcome)
+        );
+    }
+
+    #[test]
+    fn duplicate_operation_with_different_idempotency_is_rejected() {
+        let telemetry = WriterTelemetry::default();
+        let mut queue = FairQueue::default();
+        let mut inflight = HashMap::new();
+        let (leader, leader_rx) =
+            accepted_request_with_reply("operation.duplicate-conflict", "key.leader");
+        let (conflict, conflict_rx) =
+            accepted_request_with_reply("operation.duplicate-conflict", "key.conflict");
+        assert!(enqueue(&mut queue, &mut inflight, leader, &telemetry));
+        assert!(!enqueue(&mut queue, &mut inflight, conflict, &telemetry));
+        assert!(matches!(
+            conflict_rx.blocking_recv().expect("conflict reply"),
+            Err(tracedecay_store::StorageRuntimeErrorV1::DuplicateOperationInFlight {
+                operation_id
+            }) if operation_id == "operation.duplicate-conflict"
+        ));
+        let outcome = RuntimeSubmitOutcomeV1::Unavailable {
+            reason: UnavailableReasonV1::Faulted,
+        };
+        queue
+            .drain_fair()
+            .pop()
+            .expect("leader remains queued")
+            .settle(Ok(outcome.clone()));
+        assert_eq!(
+            leader_rx.blocking_recv().expect("leader reply"),
+            Ok(outcome)
+        );
+    }
+
     #[test]
     fn compatible_arrivals_within_window_share_one_execution_batch() {
         let enqueued_at = Instant::now();
@@ -1292,8 +1453,9 @@ mod auxiliary_scheduling_tests {
             .expect("first request opens a dwell window");
         let telemetry = WriterTelemetry::default();
         let mut queue = FairQueue::default();
+        let mut inflight = HashMap::new();
         for item in selected {
-            assert!(enqueue(&mut queue, item, &telemetry));
+            assert!(enqueue(&mut queue, &mut inflight, item, &telemetry));
         }
 
         let (write_tx, mut write_rx) = mpsc::channel(1);
@@ -1335,6 +1497,7 @@ mod auxiliary_scheduling_tests {
             &mut checkpoint_rx,
             &mut shutdown_rx,
             &mut queue,
+            &mut inflight,
             &mut exact_sql_queue,
             &mut vacuum_queue,
             &mut backup_queue,
