@@ -22,12 +22,13 @@ const FIRST_PARTY_COMPONENT_SCHEMA_VERSION: u16 = 1;
 /// Canonical hosts whose first-party component lifecycle can publish durable
 /// ownership receipts. Discovery-only and evidence-unadmitted hosts stay in
 /// `HostKindV1::ALL`, but never enter install/update/uninstall sweeps.
-pub const RECEIPT_BACKED_HOST_KINDS: [HostKindV1; 14] = [
+pub const RECEIPT_BACKED_HOST_KINDS: [HostKindV1; 15] = [
     HostKindV1::ClaudeCode,
     HostKindV1::CursorDesktop,
     HostKindV1::Codex,
     HostKindV1::Devin,
     HostKindV1::Zed,
+    HostKindV1::Antigravity,
     HostKindV1::Hermes,
     HostKindV1::Kiro,
     HostKindV1::KimiCode,
@@ -113,6 +114,7 @@ pub fn unsupported_host_component_set_reason(
         | HostKindV1::Codex
         | HostKindV1::Devin
         | HostKindV1::Zed
+        | HostKindV1::Antigravity
         | HostKindV1::CursorDesktop
         | HostKindV1::Hermes
         | HostKindV1::Kiro
@@ -142,7 +144,7 @@ pub fn unsupported_host_component_set_reason(
         // Identity admission precedes each host's native registration
         // authority. Until that authority lands, catalog selection must fail
         // as a typed unavailable set instead of succeeding with no artifacts.
-        HostKindV1::Antigravity | HostKindV1::Vibe => {
+        HostKindV1::Vibe => {
             Some(HostCapabilityUnavailableReasonV1::HostRegistrationUnsupported)
         }
     }
@@ -158,7 +160,9 @@ pub fn default_components(host: HostKindV1) -> Vec<HostBundleComponentV1> {
             HostBundleComponentV1::Core,
             HostBundleComponentV1::ContextMcp,
         ],
-        HostKindV1::Devin | HostKindV1::Zed => vec![HostBundleComponentV1::ContextMcp],
+        HostKindV1::Devin | HostKindV1::Zed | HostKindV1::Antigravity => {
+            vec![HostBundleComponentV1::ContextMcp]
+        }
         HostKindV1::CursorDesktop | HostKindV1::OpenCode => vec![
             HostBundleComponentV1::Core,
             HostBundleComponentV1::Agent,
@@ -185,10 +189,7 @@ pub fn default_components(host: HostKindV1) -> Vec<HostBundleComponentV1> {
         | HostKindV1::Kilo => {
             vec![HostBundleComponentV1::ContextMcp]
         }
-        HostKindV1::CursorCloud
-        | HostKindV1::ClineFamily
-        | HostKindV1::Antigravity
-        | HostKindV1::Vibe => Vec::new(),
+        HostKindV1::CursorCloud | HostKindV1::ClineFamily | HostKindV1::Vibe => Vec::new(),
     }
 }
 
@@ -637,6 +638,16 @@ fn component_assets(
             vec![(
                 "context-mcp.json",
                 r#"{"host":"zed","registration":"../settings.json","registrar":"tracedecay managed JSONC merge","route":"mcp","server":{"command":"__TRACEDECAY_BIN__","args":["serve"]}}"#,
+            )],
+        ),
+        // One Antigravity component owns both the IDE and CLI documents.
+        // The descriptor names both paths; activation publishes them under a
+        // shared rollback boundary before the receipt can become current.
+        (HostKindV1::Antigravity, HostBundleComponentV1::ContextMcp) => (
+            ".gemini/antigravity/tracedecay",
+            vec![(
+                "context-mcp.json",
+                r#"{"host":"antigravity","registrations":["../mcp_config.json","../../antigravity-cli/plugins/tracedecay.json"],"registrar":"tracedecay managed dual-document merge","route":"mcp","server":{"command":"__TRACEDECAY_BIN__","args":["serve"],"transport":"stdio"}}"#,
             )],
         ),
         (HostKindV1::RooCode, HostBundleComponentV1::ContextMcp) => (
