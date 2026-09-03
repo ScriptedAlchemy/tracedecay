@@ -72,10 +72,14 @@ pub fn is_subagent_dispatch_tool(name: &str) -> bool {
 /// Whether raw JSONL record bytes can name a subagent dispatch tool.
 ///
 /// The accepted names are plain ASCII identifiers. A JSON encoder never
-/// escapes them, so substring absence proves the record cannot name a
-/// dispatch tool. Comparison is case-insensitive to match
-/// [`is_subagent_dispatch_tool`].
+/// escapes them as ordinary strings, so substring absence proves the record
+/// cannot name a dispatch tool — unless the record contains a JSON unicode
+/// escape (`\u`), which can spell `task` as `"\u0074ask"`. Comparison is
+/// case-insensitive to match [`is_subagent_dispatch_tool`].
 pub fn record_bytes_may_name_subagent_dispatch(record: &[u8]) -> bool {
+    if record.windows(2).any(|window| window == br"\u") {
+        return true;
+    }
     SUBAGENT_DISPATCH_TOOLS
         .iter()
         .any(|name| contains_ignore_ascii_case(record, name.as_bytes()))
@@ -166,6 +170,22 @@ mod tests {
                 br#"{"role":"assistant","message":{"content":"hello"}}"#
             ),
             "ordinary assistant text must not look like a dispatch"
+        );
+        assert!(
+            record_bytes_may_name_subagent_dispatch(br#"{"name":"\u0074ask"}"#),
+            "a JSON unicode-escaped tool name must not be prefiltered away"
+        );
+    }
+
+    #[test]
+    fn unicode_escape_prevents_dispatch_prefilter() {
+        assert!(
+            record_bytes_may_name_subagent_dispatch(br#"{"name":"\u0074ask"}"#),
+            "escaped tool name `\\u0074ask` must pass the byte prefilter"
+        );
+        assert!(
+            record_bytes_may_name_subagent_dispatch(br#"{"text":"prefix \u0073uffix"}"#),
+            "any JSON unicode escape must fail-open the prefilter"
         );
     }
 
