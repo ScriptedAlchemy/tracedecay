@@ -27,8 +27,10 @@ pub(super) struct BranchAddRequest {
     branch: std::result::Result<String, String>,
 }
 
-pub(super) fn parse_branch_add_request(line: &str) -> Option<BranchAddRequest> {
-    let request = serde_json::from_str::<JsonRpcRequest>(line.trim()).ok()?;
+pub(super) fn parse_branch_add_request(
+    request: Option<&JsonRpcRequest>,
+) -> Option<BranchAddRequest> {
+    let request = request?;
     if request.method != "tools/call" {
         return None;
     }
@@ -47,7 +49,7 @@ pub(super) fn parse_branch_add_request(line: &str) -> Option<BranchAddRequest> {
         .map(str::to_string)
         .ok_or_else(|| "missing required parameter: branch".to_string());
     Some(BranchAddRequest {
-        id: request.id.unwrap_or(serde_json::Value::Null),
+        id: request.id.clone().unwrap_or(serde_json::Value::Null),
         branch,
     })
 }

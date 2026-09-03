@@ -1673,8 +1673,10 @@ pub(super) struct BranchAdminRequest {
         std::result::Result<tracedecay_runtime_core::branch::BranchAdminAction, String>,
 }
 
-pub(super) fn parse_branch_admin_request(line: &str) -> Option<BranchAdminRequest> {
-    let request = serde_json::from_str::<JsonRpcRequest>(line.trim()).ok()?;
+pub(super) fn parse_branch_admin_request(
+    request: Option<&JsonRpcRequest>,
+) -> Option<BranchAdminRequest> {
+    let request = request?;
     if request.method != "tools/call" {
         return None;
     }
@@ -1687,7 +1689,7 @@ pub(super) fn parse_branch_admin_request(line: &str) -> Option<BranchAdminReques
         .cloned()
         .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
     Some(BranchAdminRequest {
-        id: request.id.unwrap_or(serde_json::Value::Null),
+        id: request.id.clone().unwrap_or(serde_json::Value::Null),
         action: serde_json::from_value(arguments)
             .map_err(|error| format!("invalid branch administration arguments: {error}")),
     })
@@ -1799,9 +1801,14 @@ pub(super) async fn write_branch_admin_response(
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
-    use super::super::{ProjectRouteKey, StoreOwnerKey};
+    use super::super::{AuthenticatedFirstRequest, ProjectRouteKey, StoreOwnerKey};
     use super::*;
     use std::time::Duration;
+
+    fn parsed_branch_admin_request(line: String) -> Option<BranchAdminRequest> {
+        let request = AuthenticatedFirstRequest::new(line);
+        parse_branch_admin_request(request.parsed())
+    }
 
     fn write_future_spool_metadata(database_path: &Path) -> (PathBuf, Vec<u8>) {
         let file_name = database_path.file_name().unwrap().to_str().unwrap();
@@ -2197,8 +2204,8 @@ mod tests {
 
     #[test]
     fn branch_admin_parser_accepts_only_the_hidden_destructive_tool() {
-        let request = parse_branch_admin_request(
-            &serde_json::json!({
+        let request = parsed_branch_admin_request(
+            serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": 7,
                 "method": "tools/call",
@@ -2219,8 +2226,8 @@ mod tests {
         );
 
         assert!(
-            parse_branch_admin_request(
-                &serde_json::json!({
+            parsed_branch_admin_request(
+                serde_json::json!({
                     "jsonrpc": "2.0",
                     "id": 8,
                     "method": "tools/call",
@@ -2234,8 +2241,8 @@ mod tests {
 
     #[test]
     fn branch_admin_parser_preserves_invalid_arguments_for_error_response() {
-        let request = parse_branch_admin_request(
-            &serde_json::json!({
+        let request = parsed_branch_admin_request(
+            serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": "bad",
                 "method": "tools/call",

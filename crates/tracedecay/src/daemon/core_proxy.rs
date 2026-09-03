@@ -203,9 +203,23 @@ pub(crate) async fn proxy_transport_to_daemon_with_drain_bound(
 /// no tool of its own and takes the unnamed-tool default ceiling
 /// ([`tool_dispatch_ceiling`](crate::mcp::tools::handlers::tool_dispatch_ceiling)
 /// with an empty name), not a named catalog tool's possibly shorter deadline.
+struct DaemonProxyRequest<'a> {
+    raw: &'a str,
+    parsed: Option<JsonRpcRequest>,
+}
+
+impl<'a> DaemonProxyRequest<'a> {
+    fn new(raw: &'a str) -> Self {
+        Self {
+            raw,
+            parsed: serde_json::from_str(raw.trim()).ok(),
+        }
+    }
+}
+
 #[cfg(unix)]
-fn disconnect_drain_bound(line: &str) -> Duration {
-    let ceiling = request_tool_name(line)
+fn disconnect_drain_bound(request: &DaemonProxyRequest<'_>) -> Duration {
+    let ceiling = request_tool_name(request.parsed.as_ref())
         .and_then(|tool| crate::mcp::tools::binding::canonical_tool_dispatch_ceiling(&tool).ok())
         .unwrap_or_else(|| crate::mcp::tools::handlers::tool_dispatch_ceiling(""));
     ceiling.saturating_add(super::DAEMON_TOOL_RESPONSE_GRACE)
@@ -213,13 +227,14 @@ fn disconnect_drain_bound(line: &str) -> Duration {
 
 /// The tool a `tools/call` line names, or `None` for any other method.
 #[cfg(unix)]
-fn request_tool_name(line: &str) -> Option<String> {
-    let request = serde_json::from_str::<JsonRpcRequest>(line.trim()).ok()?;
+fn request_tool_name(request: Option<&JsonRpcRequest>) -> Option<String> {
+    let request = request?;
     if request.method != "tools/call" {
         return None;
     }
     request
-        .params?
+        .params
+        .as_ref()?
         .get("name")
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned)
@@ -304,23 +319,29 @@ async fn proxy_host_input_to_daemon(
                 }
             }
         };
-        reset_proxy_handshake_for_initialize(handshake, &mut routed_handshake, &line);
         if line.trim().is_empty() {
             continue;
         }
+        let request = DaemonProxyRequest::new(&line);
+        reset_proxy_handshake_for_initialize_request(
+            handshake,
+            &mut routed_handshake,
+            request.parsed.as_ref(),
+        );
 
         let result = {
-            let daemon_request = send_daemon_request_line_with_project_open_retry(
+            let daemon_request = send_daemon_request_with_project_open_retry(
                 socket_path,
                 &routed_handshake,
-                &line,
+                &request,
             );
             tokio::pin!(daemon_request);
             // The catalog-backed drain ceiling is only meaningful after the
             // owning client is gone. Computing it eagerly would stall every
             // live `tools/call` on catalog load before the daemon is even
             // contacted.
-            let disconnect_bound = || drain_bound.unwrap_or_else(|| disconnect_drain_bound(&line));
+            let disconnect_bound =
+                || drain_bound.unwrap_or_else(|| disconnect_drain_bound(&request));
             loop {
                 if *eof.borrow() {
                     break drain_daemon_request_after_disconnect(
@@ -356,7 +377,7 @@ async fn proxy_host_input_to_daemon(
                 }
             }
         };
-        let metadata = write_proxy_request_result(&line, result, writer).await?;
+        let metadata = write_proxy_request_result(&request, result, writer).await?;
         apply_proxy_initialize_metadata(&mut routed_handshake, metadata);
     }
 }
@@ -387,7 +408,21 @@ pub(crate) fn reset_proxy_handshake_for_initialize(
     handshake: &mut DaemonHandshake,
     line: &str,
 ) {
-    let Ok(request) = serde_json::from_str::<JsonRpcRequest>(line.trim()) else {
+    let request = DaemonProxyRequest::new(line);
+    reset_proxy_handshake_for_initialize_request(
+        base_handshake,
+        handshake,
+        request.parsed.as_ref(),
+    );
+}
+
+#[cfg(unix)]
+fn reset_proxy_handshake_for_initialize_request(
+    base_handshake: &DaemonHandshake,
+    handshake: &mut DaemonHandshake,
+    request: Option<&JsonRpcRequest>,
+) {
+    let Some(request) = request else {
         return;
     };
     if request.method != "initialize" {
@@ -526,15 +561,19 @@ pub(super) fn repository_discovery_deferred(
 
 #[cfg(unix)]
 async fn write_proxy_request_result(
-    line: &str,
+    request: &DaemonProxyRequest<'_>,
     result: Result<Vec<String>>,
     writer: &mut impl McpTransportWriter,
 ) -> Result<ProxyInitializeMetadata> {
     match result {
         Ok(responses) => {
-            let metadata = proxy_initialize_metadata(line, &responses);
-            if let Some(warning) = daemon_version_skew_warning(line, &responses, binary_version()?)
-            {
+            let metadata =
+                proxy_initialize_metadata_for_request(request.parsed.as_ref(), &responses);
+            if let Some(warning) = daemon_version_skew_warning_for_request(
+                request.parsed.as_ref(),
+                &responses,
+                binary_version()?,
+            ) {
                 eprintln!("[tracedecay] warning: {warning}");
             }
             for response in responses {
@@ -547,7 +586,7 @@ async fn write_proxy_request_result(
             Ok(metadata)
         }
         Err(err) => {
-            if let Some(response) = daemon_proxy_error_response(line, &err) {
+            if let Some(response) = daemon_proxy_error_response(request.parsed.as_ref(), &err) {
                 let json_line = serde_json::to_string(&response)?;
                 writer.write_line(&json_line).await?;
                 writer.write_line("\n").await?;
@@ -571,10 +610,11 @@ pub(crate) async fn send_daemon_request_line(
     handshake: &DaemonHandshake,
     line: &str,
 ) -> Result<Vec<String>> {
-    send_daemon_request_line_with_liveness_poll(
+    let request = DaemonProxyRequest::new(line);
+    send_daemon_request_with_liveness_poll(
         socket_path,
         handshake,
-        line,
+        &request,
         DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
         None,
     )
@@ -590,14 +630,24 @@ fn responses_are_project_open_retryable(responses: &[String]) -> bool {
             .is_some_and(json_rpc_error_is_project_open_retryable)
 }
 
-#[hotpath::measure(label = "daemon.engine.proxy.request_retry", future = true)]
+#[cfg(not(unix))]
 async fn send_daemon_request_line_with_project_open_retry(
     socket_path: &Path,
     handshake: &DaemonHandshake,
     line: &str,
 ) -> Result<Vec<String>> {
+    let request = DaemonProxyRequest::new(line);
+    send_daemon_request_with_project_open_retry(socket_path, handshake, &request).await
+}
+
+#[hotpath::measure(label = "daemon.engine.proxy.request_retry", future = true)]
+async fn send_daemon_request_with_project_open_retry(
+    socket_path: &Path,
+    handshake: &DaemonHandshake,
+    request: &DaemonProxyRequest<'_>,
+) -> Result<Vec<String>> {
     let deadline = Instant::now() + PROJECT_OPEN_RETRY_GRACE;
-    let mut responses = send_daemon_request_line(socket_path, handshake, line).await?;
+    let mut responses = send_daemon_request(socket_path, handshake, request).await?;
     while responses_are_project_open_retryable(&responses) {
         let Some(remaining) = deadline
             .checked_duration_since(Instant::now())
@@ -606,12 +656,11 @@ async fn send_daemon_request_line_with_project_open_retry(
             break;
         };
         tokio::time::sleep(remaining.min(PROJECT_OPEN_RETRY_INTERVAL)).await;
-        responses = send_daemon_request_line(socket_path, handshake, line).await?;
+        responses = send_daemon_request(socket_path, handshake, request).await?;
     }
     Ok(responses)
 }
 
-#[hotpath::measure(label = "daemon.engine.proxy.request", future = true)]
 pub(crate) async fn send_daemon_request_line_with_liveness_poll(
     socket_path: &Path,
     handshake: &DaemonHandshake,
@@ -619,9 +668,46 @@ pub(crate) async fn send_daemon_request_line_with_liveness_poll(
     liveness_poll_interval: Duration,
     client_deadline: Option<DaemonClientDeadline>,
 ) -> Result<Vec<String>> {
-    let request = serde_json::from_str::<JsonRpcRequest>(line).ok();
-    let request_id = request.as_ref().and_then(|request| request.id.clone());
+    let request = DaemonProxyRequest::new(line);
+    send_daemon_request_with_liveness_poll(
+        socket_path,
+        handshake,
+        &request,
+        liveness_poll_interval,
+        client_deadline,
+    )
+    .await
+}
+
+async fn send_daemon_request(
+    socket_path: &Path,
+    handshake: &DaemonHandshake,
+    request: &DaemonProxyRequest<'_>,
+) -> Result<Vec<String>> {
+    send_daemon_request_with_liveness_poll(
+        socket_path,
+        handshake,
+        request,
+        DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
+        None,
+    )
+    .await
+}
+
+#[hotpath::measure(label = "daemon.engine.proxy.request", future = true)]
+async fn send_daemon_request_with_liveness_poll(
+    socket_path: &Path,
+    handshake: &DaemonHandshake,
+    request: &DaemonProxyRequest<'_>,
+    liveness_poll_interval: Duration,
+    client_deadline: Option<DaemonClientDeadline>,
+) -> Result<Vec<String>> {
+    let request_id = request
+        .parsed
+        .as_ref()
+        .and_then(|request| request.id.clone());
     let request_label = request
+        .parsed
         .as_ref()
         .map_or("daemon request", |request| request.method.as_str())
         .to_string();
@@ -639,8 +725,8 @@ pub(crate) async fn send_daemon_request_line_with_liveness_poll(
 
     let write = async {
         write_daemon_preamble(&mut writer, &connection, handshake).await?;
-        writer.write_all(line.as_bytes()).await?;
-        if !line.ends_with('\n') {
+        writer.write_all(request.raw.as_bytes()).await?;
+        if !request.raw.ends_with('\n') {
             writer.write_all(b"\n").await?;
         }
         writer.flush().await?;
@@ -719,7 +805,15 @@ pub(crate) fn proxy_initialize_metadata(
     request_line: &str,
     responses: &[String],
 ) -> ProxyInitializeMetadata {
-    let Ok(request) = serde_json::from_str::<JsonRpcRequest>(request_line) else {
+    let request = DaemonProxyRequest::new(request_line);
+    proxy_initialize_metadata_for_request(request.parsed.as_ref(), responses)
+}
+
+fn proxy_initialize_metadata_for_request(
+    request: Option<&JsonRpcRequest>,
+    responses: &[String],
+) -> ProxyInitializeMetadata {
+    let Some(request) = request else {
         return ProxyInitializeMetadata::default();
     };
     if request.method != "initialize" {
@@ -750,14 +844,6 @@ pub(crate) fn proxy_initialize_metadata(
     metadata
 }
 
-#[cfg(unix)]
-fn daemon_version_from_initialize_response(
-    request_line: &str,
-    responses: &[String],
-) -> Option<String> {
-    proxy_initialize_metadata(request_line, responses).daemon_version
-}
-
 /// The warning to surface when the daemon behind an `initialize` response is
 /// running a different binary version than this client.
 #[cfg(unix)]
@@ -766,7 +852,16 @@ pub(crate) fn daemon_version_skew_warning(
     responses: &[String],
     client_version: &str,
 ) -> Option<String> {
-    let daemon_version = daemon_version_from_initialize_response(request_line, responses)?;
+    let request = DaemonProxyRequest::new(request_line);
+    daemon_version_skew_warning_for_request(request.parsed.as_ref(), responses, client_version)
+}
+
+fn daemon_version_skew_warning_for_request(
+    request: Option<&JsonRpcRequest>,
+    responses: &[String],
+    client_version: &str,
+) -> Option<String> {
+    let daemon_version = proxy_initialize_metadata_for_request(request, responses).daemon_version?;
     if daemon_version == client_version {
         return None;
     }
@@ -778,9 +873,12 @@ pub(crate) fn daemon_version_skew_warning(
 }
 
 #[cfg(unix)]
-fn daemon_proxy_error_response(line: &str, err: &TraceDecayError) -> Option<JsonRpcResponse> {
-    let request = serde_json::from_str::<JsonRpcRequest>(line).ok()?;
-    request.id.map(|id| {
+fn daemon_proxy_error_response(
+    request: Option<&JsonRpcRequest>,
+    err: &TraceDecayError,
+) -> Option<JsonRpcResponse> {
+    let request = request?;
+    request.id.clone().map(|id| {
         JsonRpcResponse::error(
             id,
             ErrorCode::InternalError,
@@ -883,7 +981,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn disconnect_drain_bound_always_outlives_the_daemon_dispatch_ceiling() {
-        use super::{disconnect_drain_bound, request_tool_name};
+        use super::{DaemonProxyRequest, disconnect_drain_bound, request_tool_name};
 
         let long = json!({
             "jsonrpc": "2.0", "id": 1, "method": "tools/call",
@@ -896,9 +994,13 @@ mod tests {
         })
         .to_string();
         let non_tool = json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/list" }).to_string();
+        let long = DaemonProxyRequest::new(&long);
+        let interactive = DaemonProxyRequest::new(&interactive);
+        let non_tool = DaemonProxyRequest::new(&non_tool);
 
         for line in [&long, &interactive] {
-            let tool = request_tool_name(line).expect("a tools/call names its tool");
+            let tool =
+                request_tool_name(line.parsed.as_ref()).expect("a tools/call names its tool");
             let ceiling = crate::mcp::tools::binding::canonical_tool_dispatch_ceiling(&tool)
                 .expect("every tool has a dispatch ceiling");
             assert!(
@@ -912,7 +1014,7 @@ mod tests {
         // `tracedecay_context`. The drain must outlive that resolved ceiling —
         // the longest bound that actually applies to this request — rather
         // than a hardcoded catalog value.
-        assert_eq!(request_tool_name(&non_tool), None);
+        assert_eq!(request_tool_name(non_tool.parsed.as_ref()), None);
         let unnamed_ceiling = crate::mcp::tools::handlers::tool_dispatch_ceiling("");
         assert!(
             disconnect_drain_bound(&non_tool) > unnamed_ceiling,

@@ -37,8 +37,10 @@ impl DoctorRuntimeRequest {
     }
 }
 
-pub(crate) fn doctor_runtime_request(request_line: &str) -> Option<DoctorRuntimeRequest> {
-    let request = serde_json::from_str::<JsonRpcRequest>(request_line.trim()).ok()?;
+pub(crate) fn doctor_runtime_request(
+    request: Option<&JsonRpcRequest>,
+) -> Option<DoctorRuntimeRequest> {
+    let request = request?;
     if request.method != "tools/call" {
         return None;
     }
@@ -68,7 +70,7 @@ pub(crate) fn doctor_runtime_request(request_line: &str) -> Option<DoctorRuntime
         return None;
     }
     Some(DoctorRuntimeRequest {
-        id: request.id.unwrap_or(serde_json::Value::Null),
+        id: request.id.clone().unwrap_or(serde_json::Value::Null),
         startup_health_only,
         doctor_report_requested,
     })
@@ -538,7 +540,7 @@ pub(super) async fn serve_core_doctor_runtime_request<T, Probe, ProbeFuture>(
     handshake: &DaemonHandshake,
     store_administration: &super::StoreAdministration,
     setup_activity: DaemonActivity,
-    first_request_line: &str,
+    first_request: &super::AuthenticatedFirstRequest,
     git_watcher_health: Option<serde_json::Value>,
     doctor_report_ready: Probe,
 ) -> Result<Option<DaemonActivity>>
@@ -547,7 +549,7 @@ where
     Probe: FnOnce() -> ProbeFuture,
     ProbeFuture: std::future::Future<Output = Result<bool>>,
 {
-    let Some(request) = doctor_runtime_request(first_request_line) else {
+    let Some(request) = doctor_runtime_request(first_request.parsed()) else {
         return Ok(Some(setup_activity));
     };
     let report_ready = if request.doctor_report_requested() {
@@ -583,7 +585,9 @@ mod doctor_runtime_route_tests {
         cold_doctor_runtime_value, doctor_runtime_coverage, doctor_runtime_request,
         serve_core_doctor_runtime_request,
     };
-    use crate::daemon::{DaemonHandshake, DaemonLifecycle, StoreAdministration};
+    use crate::daemon::{
+        AuthenticatedFirstRequest, DaemonHandshake, DaemonLifecycle, StoreAdministration,
+    };
     use crate::mcp::McpServer;
     use crate::mcp::server::McpServerConstructionContext;
     use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
@@ -598,6 +602,11 @@ mod doctor_runtime_route_tests {
     };
 
     static REGISTERED_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
+
+    fn parse_doctor_runtime_request(line: &str) -> Option<super::DoctorRuntimeRequest> {
+        let request = AuthenticatedFirstRequest::new(line.to_owned());
+        doctor_runtime_request(request.parsed())
+    }
 
     struct DoctorRouteTransport {
         lifecycle: DaemonLifecycle,
@@ -755,14 +764,14 @@ mod doctor_runtime_route_tests {
             },
         })
         .to_string();
-        let parsed = doctor_runtime_request(&request).expect("doctor runtime request");
+        let parsed = parse_doctor_runtime_request(&request).expect("doctor runtime request");
         assert_eq!(parsed.id, serde_json::json!(7));
         assert!(!parsed.startup_health_only);
         assert!(!parsed.doctor_report_requested());
         assert!(parsed.should_serve_from_core(true));
 
         let ordinary = request.replace("\"authority_audit\":true", "\"authority_audit\":false");
-        assert!(doctor_runtime_request(&ordinary).is_none());
+        assert!(parse_doctor_runtime_request(&ordinary).is_none());
 
         let startup = serde_json::json!({
             "jsonrpc": "2.0",
@@ -777,7 +786,8 @@ mod doctor_runtime_route_tests {
             },
         })
         .to_string();
-        let parsed = doctor_runtime_request(&startup).expect("startup health runtime request");
+        let parsed =
+            parse_doctor_runtime_request(&startup).expect("startup health runtime request");
         assert_eq!(parsed.id, serde_json::json!(8));
         assert!(parsed.startup_health_only);
         assert!(!parsed.doctor_report_requested());
@@ -786,7 +796,7 @@ mod doctor_runtime_route_tests {
     #[test]
     fn requested_doctor_report_uses_core_only_until_the_ready_owner_is_published() {
         let request = doctor_report_request_line();
-        let parsed = doctor_runtime_request(&request).expect("Doctor report request");
+        let parsed = parse_doctor_runtime_request(&request).expect("Doctor report request");
 
         assert!(parsed.doctor_report_requested());
         assert!(parsed.should_serve_from_core(false));
@@ -815,7 +825,7 @@ mod doctor_runtime_route_tests {
             },
         })
         .to_string();
-        let parsed = doctor_runtime_request(&request).expect("comprehensive Doctor request");
+        let parsed = parse_doctor_runtime_request(&request).expect("comprehensive Doctor request");
 
         assert!(!parsed.doctor_report_requested());
         for report_ready in [false, true] {
@@ -847,12 +857,13 @@ mod doctor_runtime_route_tests {
         };
         let store_administration = StoreAdministration::default();
 
+        let first_request = AuthenticatedFirstRequest::new(doctor_report_request_line());
         let outcome = serve_core_doctor_runtime_request(
             &mut transport,
             &handshake,
             &store_administration,
             setup_activity,
-            &doctor_report_request_line(),
+            &first_request,
             Some(serde_json::json!({
                 "status": "degraded",
                 "coverage": "degraded_poll",
@@ -896,12 +907,13 @@ mod doctor_runtime_route_tests {
         };
         let store_administration = StoreAdministration::default();
 
+        let first_request = AuthenticatedFirstRequest::new(doctor_report_request_line());
         let outcome = serve_core_doctor_runtime_request(
             &mut transport,
             &handshake,
             &store_administration,
             setup_activity,
-            &doctor_report_request_line(),
+            &first_request,
             None,
             || async { Ok(true) },
         )

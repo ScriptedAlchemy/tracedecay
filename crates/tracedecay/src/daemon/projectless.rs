@@ -514,8 +514,8 @@ pub(super) fn projectless_tool_call(
     Ok((tool_name, arguments))
 }
 
-pub(super) fn projectless_user_session_request(request_line: &str) -> bool {
-    let Ok(request) = serde_json::from_str::<JsonRpcRequest>(request_line.trim()) else {
+pub(super) fn projectless_user_session_request(request: Option<&JsonRpcRequest>) -> bool {
+    let Some(request) = request else {
         return false;
     };
     if request.method != "tools/call" {

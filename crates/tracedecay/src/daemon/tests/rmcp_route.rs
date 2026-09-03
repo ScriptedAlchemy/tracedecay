@@ -232,11 +232,21 @@ async fn assert_initialized_route_is_rmcp<R, W>(
         .await
         .expect("write handshake");
     writer.write_all(b"\n").await.expect("handshake newline");
-    write_line(&mut writer, &initialize_request()).await;
+    let first_request_line = format!(" \t{} ", initialize_request());
+    writer
+        .write_all(first_request_line.as_bytes())
+        .await
+        .expect("write initialize");
+    writer.write_all(b"\n").await.expect("initialize newline");
     let initialized = read_value(&mut reader, "initialize response timed out").await;
     assert_eq!(initialized["id"], json!(1));
     assert!(initialized.get("result").is_some(), "{initialized}");
     wait_for_mcp_routes(&handshake.client_instance_id, &[ObservedMcpRoute::Rmcp]).await;
+    assert_eq!(
+        first_request_replays(&handshake.client_instance_id),
+        vec![first_request_line],
+        "RMCP must receive the bounded first request byte-for-byte"
+    );
 
     let response_lifecycle = server.project_server_response_lifecycle();
     let response_gate = Arc::clone(response_lifecycle.response_gate());
@@ -330,13 +340,26 @@ async fn unix_production_route_selects_rmcp_only_after_initialize() {
         .await
         .expect("write legacy handshake");
     writer.write_all(b"\n").await.expect("handshake newline");
-    write_line(&mut writer, &blocked_tool_request(4)).await;
+    let first_request_line = format!(" \t{} ", blocked_tool_request(4));
+    writer
+        .write_all(first_request_line.as_bytes())
+        .await
+        .expect("write legacy first request");
+    writer
+        .write_all(b"\n")
+        .await
+        .expect("legacy request newline");
     write_line(&mut writer, &ping_request(5)).await;
     wait_for_mcp_routes(
         &fixture.handshake.client_instance_id,
         &[ObservedMcpRoute::Legacy],
     )
     .await;
+    assert_eq!(
+        first_request_replays(&fixture.handshake.client_instance_id),
+        vec![first_request_line],
+        "legacy transport must receive the bounded first request byte-for-byte"
+    );
     writer.shutdown().await.expect("shutdown legacy client");
     drop(gate);
     let responses = tokio::time::timeout(PHASE_TIMEOUT, read_to_eof(&mut reader))
@@ -449,13 +472,26 @@ async fn portable_production_route_selects_rmcp_after_initialize() {
         .await
         .expect("write portable legacy handshake");
     writer.write_all(b"\n").await.expect("handshake newline");
-    write_line(&mut writer, &blocked_tool_request(4)).await;
+    let first_request_line = format!(" \t{} ", blocked_tool_request(4));
+    writer
+        .write_all(first_request_line.as_bytes())
+        .await
+        .expect("write portable legacy first request");
+    writer
+        .write_all(b"\n")
+        .await
+        .expect("legacy request newline");
     write_line(&mut writer, &ping_request(5)).await;
     wait_for_mcp_routes(
         &fixture.handshake.client_instance_id,
         &[ObservedMcpRoute::Legacy],
     )
     .await;
+    assert_eq!(
+        first_request_replays(&fixture.handshake.client_instance_id),
+        vec![first_request_line],
+        "portable legacy transport must receive the bounded first request byte-for-byte"
+    );
     writer.shutdown().await.expect("shutdown legacy client");
     drop(gate);
     let responses = tokio::time::timeout(PHASE_TIMEOUT, read_to_eof(&mut reader))
@@ -469,6 +505,97 @@ async fn portable_production_route_selects_rmcp_after_initialize() {
         &responses,
         &[5, 4],
         "portable legacy transport must emit an independent ping before the blocked read",
+    );
+}
+
+#[cfg(unix)]
+async fn serve_counted_first_request(
+    engine: DaemonEngine,
+    handshake: &DaemonHandshake,
+    request: Value,
+    expected_route: ObservedMcpRoute,
+) {
+    register_mcp_route_observer(&handshake.client_instance_id);
+    let (server_stream, client_stream) =
+        tokio::net::UnixStream::pair().expect("connection churn socket pair");
+    let server_task = tokio::spawn(async move {
+        Box::pin(
+            super::super::connection_serving::serve_authenticated_socket_client_with_class(
+                tracedecay_daemon_protocol::BrokerStream::Unix(server_stream),
+                engine,
+                AUTH_TOKEN.to_owned(),
+                super::super::DaemonClientAdmissionClass::General,
+            ),
+        )
+        .await
+    });
+    let (reader, mut writer) = client_stream.into_split();
+    let mut reader = tokio::io::BufReader::new(reader);
+    let auth_preface = tracedecay_daemon_protocol::DaemonAuthPreface::new(AUTH_TOKEN)
+        .to_line()
+        .expect("churn auth preface");
+    writer
+        .write_all(auth_preface.as_bytes())
+        .await
+        .expect("write churn auth preface");
+    writer.write_all(b"\n").await.expect("auth newline");
+    writer
+        .write_all(handshake.to_line().expect("churn handshake").as_bytes())
+        .await
+        .expect("write churn handshake");
+    writer.write_all(b"\n").await.expect("handshake newline");
+    write_line(&mut writer, &request).await;
+    let response = read_value(&mut reader, "churn response timed out").await;
+    assert_eq!(response["id"], request["id"]);
+    wait_for_mcp_routes(&handshake.client_instance_id, &[expected_route]).await;
+    writer.shutdown().await.expect("shutdown churn client");
+    drop(reader);
+    tokio::time::timeout(PHASE_TIMEOUT, server_task)
+        .await
+        .expect("churn connection did not close")
+        .expect("join churn connection")
+        .expect("serve churn connection");
+}
+
+/// Connection-churn measurement kept ignored because the global test decode
+/// counter is intentionally process-wide and this assertion requires isolation.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "connection-churn decode measurement"]
+async fn connection_churn_decodes_each_authenticated_first_request_once() {
+    const CONNECTIONS_PER_TRANSPORT: usize = 25;
+    let fixture = rmcp_route_fixture("first-request-decode-churn").await;
+    super::super::reset_first_request_decode_count_for_test();
+
+    for ordinal in 0..CONNECTIONS_PER_TRANSPORT {
+        let mut handshake = fixture.handshake.clone();
+        handshake.client_instance_id = format!("{ordinal:032x}");
+        let mut request = initialize_request();
+        request["id"] = json!(ordinal + 1);
+        serve_counted_first_request(
+            fixture.engine.clone(),
+            &handshake,
+            request,
+            ObservedMcpRoute::Rmcp,
+        )
+        .await;
+    }
+    for ordinal in 0..CONNECTIONS_PER_TRANSPORT {
+        let mut handshake = fixture.handshake.clone();
+        handshake.client_instance_id = format!("{:032x}", ordinal + CONNECTIONS_PER_TRANSPORT);
+        serve_counted_first_request(
+            fixture.engine.clone(),
+            &handshake,
+            ping_request((ordinal + CONNECTIONS_PER_TRANSPORT + 1) as u64),
+            ObservedMcpRoute::Legacy,
+        )
+        .await;
+    }
+
+    assert_eq!(
+        super::super::first_request_decode_count_for_test(),
+        CONNECTIONS_PER_TRANSPORT * 2,
+        "each accepted connection must decode its first frame exactly once in daemon routing"
     );
 }
 
