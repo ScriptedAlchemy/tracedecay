@@ -113,7 +113,7 @@ async fn native_host_event_fixtures_execute_provider_admission_paths() {
             match state {
                 "supported" => assert_eq!(
                     actual,
-                    &serde_json::to_value(supported).unwrap(),
+                    &serde_json::to_value(&supported).unwrap(),
                     "{provider}/{state}"
                 ),
                 "unavailable" => assert_eq!(

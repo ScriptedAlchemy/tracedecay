@@ -5,9 +5,10 @@ use tracedecay_store::{
     FactReadControl, ProjectMemoryDashboardFactDetailQueryV1, ProjectMemoryDashboardFactDetailV1,
     ProjectMemoryDashboardMemoryOverviewQueryV1, ProjectMemoryDashboardMemoryOverviewV1,
     ProjectMemoryDashboardOplogEntryV1, ProjectMemoryDashboardOplogQueryV1,
-    ProjectMemoryDashboardVectorPointV1, ProjectMemoryDashboardVectorPointsQueryV1,
+    ProjectMemoryDashboardVectorPointsQueryV1, ProjectMemoryDashboardVectorSnapshotV1,
     ProjectMemoryFactFeedbackHistoryQueryV1, ProjectMemoryFactFeedbackHistoryV1,
     ProjectMemoryFactIdV1, ProjectMemoryFactStore, ProjectMemoryMemoryStatusV1,
+    ProjectMemoryStoreRevisionV1,
 };
 
 use super::MemoryApplication;
@@ -123,23 +124,36 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         self.project_memory_status(read_control).await
     }
 
-    /// Capped vector inputs for dashboard-side PCA and similarity.
+    /// Canonical store generation used to identify derived dashboard caches.
+    #[hotpath::measure(label = "usecases.memory.dashboard.store_revision", future = true)]
+    pub async fn dashboard_store_revision(
+        &self,
+        read_control: &FactReadControl,
+    ) -> Result<ProjectMemoryStoreRevisionV1, MemoryApplicationError> {
+        self.authority
+            .dashboard_project_memory_store_revision(self.owner.clone(), read_control)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Capped vector inputs and their same-snapshot store generation.
     #[hotpath::measure(label = "usecases.memory.dashboard.vectors", future = true)]
-    pub async fn dashboard_vector_points(
+    pub async fn dashboard_vector_snapshot(
         &self,
         search: Option<String>,
         limit: usize,
         read_control: &FactReadControl,
-    ) -> Result<Vec<ProjectMemoryDashboardVectorPointV1>, MemoryApplicationError> {
-        let points = self
+    ) -> Result<ProjectMemoryDashboardVectorSnapshotV1, MemoryApplicationError> {
+        let snapshot = self
             .authority
-            .dashboard_project_memory_vector_points(
+            .dashboard_project_memory_vector_snapshot(
                 ProjectMemoryDashboardVectorPointsQueryV1::new(self.owner.clone(), search, limit)?,
                 read_control,
             )
             .await?;
-        if points.len() > limit
-            || points
+        if snapshot.points().len() > limit
+            || snapshot
+                .points()
                 .iter()
                 .any(|point| point.fact.fact.owner() != &self.owner)
         {
@@ -147,7 +161,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
                 invariant: "dashboard vector point owner and bounds",
             });
         }
-        Ok(points)
+        Ok(snapshot)
     }
 
     #[hotpath::measure(label = "usecases.memory.dashboard.oplog", future = true)]

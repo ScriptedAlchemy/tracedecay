@@ -19,12 +19,13 @@ use tracedecay_store::{
 };
 
 use super::{ExistingReaderLocator, ReaderQueryExecutor, ReaderStartError, worker};
-use crate::CheckpointPressure;
+use crate::checkpoint::CheckpointBlockerSource;
 use crate::exact_sql::{
     ExactSqlError, ExactSqlReadSnapshot, ExactSqlRows, ExactSqlStatement, MemoryReleaseNoOpReason,
     MemoryReleaseOutcome,
 };
 use crate::telemetry::{ReaderAdmissionRecorder, ReaderAdmissionSnapshot};
+use crate::{CheckpointBlocker, CheckpointBlockers, CheckpointPressure};
 
 mod lease;
 mod outcome;
@@ -52,6 +53,51 @@ pub(super) const DEFERRED_SNAPSHOT_END_LIMIT: Duration = Duration::from_secs(2);
 /// deadline and reports `Saturated`. Background acquisitions therefore admit
 /// against `max_per_hot_shard` minus this reservation.
 pub(super) const FOREGROUND_RESERVED_GENERAL_WORKERS: u16 = 2;
+const MAX_CHECKPOINT_BLOCKERS: usize = 16;
+
+#[derive(Clone, Default)]
+pub(crate) struct ReaderCheckpointBlockers {
+    active: Arc<Mutex<BTreeMap<u64, Instant>>>,
+}
+
+impl ReaderCheckpointBlockers {
+    pub(super) fn begin(&self, reader_id: u64) -> bool {
+        self.active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(reader_id, Instant::now())
+            .is_none()
+    }
+
+    pub(super) fn finish(&self, reader_id: u64) {
+        self.active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&reader_id);
+    }
+}
+
+impl CheckpointBlockerSource for ReaderCheckpointBlockers {
+    fn checkpoint_blockers(&self) -> CheckpointBlockers {
+        let now = Instant::now();
+        let active = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let blockers = active
+            .iter()
+            .take(MAX_CHECKPOINT_BLOCKERS)
+            .map(|(reader_id, started)| CheckpointBlocker::PhysicalReader {
+                reader_id: *reader_id,
+                age: now.saturating_duration_since(*started),
+            })
+            .collect();
+        CheckpointBlockers {
+            blockers,
+            omitted: active.len().saturating_sub(MAX_CHECKPOINT_BLOCKERS),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ReaderLane {
@@ -273,6 +319,7 @@ pub(super) struct PoolInner<E: ReaderQueryExecutor> {
     idle_burst_retire: Duration,
     executor: E,
     checkpoint_pressure: Option<watch::Receiver<CheckpointPressure>>,
+    pub(super) checkpoint_blockers: ReaderCheckpointBlockers,
     pub(super) state: Mutex<PoolState>,
     pub(super) capacity_changed: Condvar,
     pub(super) admission: Arc<ReaderAdmissionRecorder>,
@@ -337,7 +384,13 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
         budget: ReaderBudgetV1,
         executor: E,
     ) -> Result<Self, ReaderStartError> {
-        Self::start_with_checkpoint_pressure(locator, budget, executor, None)
+        Self::start_with_checkpoint_control(
+            locator,
+            budget,
+            executor,
+            None,
+            ReaderCheckpointBlockers::default(),
+        )
     }
 
     pub(crate) fn start_with_checkpoint_pressure(
@@ -345,6 +398,22 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
         budget: ReaderBudgetV1,
         executor: E,
         checkpoint_pressure: Option<watch::Receiver<CheckpointPressure>>,
+    ) -> Result<Self, ReaderStartError> {
+        Self::start_with_checkpoint_control(
+            locator,
+            budget,
+            executor,
+            checkpoint_pressure,
+            ReaderCheckpointBlockers::default(),
+        )
+    }
+
+    pub(crate) fn start_with_checkpoint_control(
+        locator: ExistingReaderLocator,
+        budget: ReaderBudgetV1,
+        executor: E,
+        checkpoint_pressure: Option<watch::Receiver<CheckpointPressure>>,
+        checkpoint_blockers: ReaderCheckpointBlockers,
     ) -> Result<Self, ReaderStartError> {
         budget
             .validate()
@@ -356,6 +425,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
             budget,
             executor,
             checkpoint_pressure,
+            checkpoint_blockers,
             state: Mutex::new(PoolState {
                 lifecycle: ReaderPoolState::Ready,
                 health_admission_open: true,

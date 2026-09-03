@@ -7,6 +7,8 @@ use tracedecay_store::{
     SourceAcquisitionQueueCasV1, SourceCommitV1, SourceProjectionCommitV1,
 };
 
+use crate::operation::StorageOperationError;
+
 use super::remote::{
     install_writer_fence, persist_remote_observation_event, verify_and_seed_writer_fence,
 };
@@ -40,7 +42,7 @@ impl ProjectExecutor {
         &mut self,
         savepoint: &Savepoint<'_>,
         write: &AnchoredObservationWrite,
-    ) -> rusqlite::Result<()> {
+    ) -> Result<(), StorageOperationError> {
         self.observation.execute_write(savepoint, write)?;
         // Rows are staged and the enclosing transaction is still open: this is
         // the only place the daemon-crash harness can prove that killing a
@@ -61,7 +63,7 @@ impl ProjectExecutor {
         &mut self,
         savepoint: &Savepoint<'_>,
         writes: &[AnchoredObservationWrite],
-    ) -> rusqlite::Result<()> {
+    ) -> Result<(), StorageOperationError> {
         for write in writes {
             self.execute_observation_write(savepoint, write)?;
         }
@@ -73,10 +75,11 @@ impl ProjectExecutor {
         &mut self,
         savepoint: &Savepoint<'_>,
         write: &RemoteObservationReplayWriteV1,
-    ) -> rusqlite::Result<()> {
+    ) -> Result<(), StorageOperationError> {
         verify_and_seed_writer_fence(savepoint, write)?;
         self.execute_observation_write(savepoint, &write.observation)?;
-        persist_remote_observation_event(savepoint, write)
+        persist_remote_observation_event(savepoint, write)?;
+        Ok(())
     }
 
     pub fn execute_remote_writer_fence_install(
@@ -92,7 +95,7 @@ impl ProjectExecutor {
         &mut self,
         savepoint: &Savepoint<'_>,
         advance: &ObservationCursorAdvance,
-    ) -> rusqlite::Result<()> {
+    ) -> Result<(), StorageOperationError> {
         self.observation.execute_cursor_advance(savepoint, advance)
     }
 

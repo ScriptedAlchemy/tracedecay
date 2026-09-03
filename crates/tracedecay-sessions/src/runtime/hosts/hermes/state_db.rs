@@ -306,17 +306,17 @@ pub(super) fn select_new_messages_sql(
         title_os = sql_value_oversized(session_title_raw, value_max),
     );
     let row_fits_budget = "admitted.row_fits_budget != 0";
-    let session_id = sql_bounded_text("m.session_id", id_max, &row_fits_budget);
-    let role = sql_bounded_text("m.role", id_max, &row_fits_budget);
-    let content = sql_bounded_text("m.content", value_max, &row_fits_budget);
-    let reasoning = sql_bounded_text(reasoning_raw, value_max, &row_fits_budget);
-    let tool_name = sql_bounded_text(tool_name_raw, id_max, &row_fits_budget);
-    let tool_calls = sql_bounded_text(tool_calls_raw, value_max, &row_fits_budget);
-    let model = sql_bounded_text(session_model_raw, id_max, &row_fits_budget);
-    let parent_session_id = sql_bounded_text(parent_session_id_raw, id_max, &row_fits_budget);
-    let session_cwd = sql_bounded_text(session_cwd_raw, value_max, &row_fits_budget);
-    let session_source = sql_bounded_text(session_source_raw, id_max, &row_fits_budget);
-    let session_title = sql_bounded_text(session_title_raw, value_max, &row_fits_budget);
+    let session_id = sql_bounded_text("m.session_id", id_max, row_fits_budget);
+    let role = sql_bounded_text("m.role", id_max, row_fits_budget);
+    let content = sql_bounded_text("m.content", value_max, row_fits_budget);
+    let reasoning = sql_bounded_text(reasoning_raw, value_max, row_fits_budget);
+    let tool_name = sql_bounded_text(tool_name_raw, id_max, row_fits_budget);
+    let tool_calls = sql_bounded_text(tool_calls_raw, value_max, row_fits_budget);
+    let model = sql_bounded_text(session_model_raw, id_max, row_fits_budget);
+    let parent_session_id = sql_bounded_text(parent_session_id_raw, id_max, row_fits_budget);
+    let session_cwd = sql_bounded_text(session_cwd_raw, value_max, row_fits_budget);
+    let session_source = sql_bounded_text(session_source_raw, id_max, row_fits_budget);
+    let session_title = sql_bounded_text(session_title_raw, value_max, row_fits_budget);
     let timestamp = sql_bounded_number("m.timestamp");
     let session_started_at = sql_bounded_number(session_started_at);
     let session_ended_at = sql_bounded_number(session_ended_at);

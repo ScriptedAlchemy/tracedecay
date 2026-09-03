@@ -80,7 +80,7 @@ pub struct RuntimeRegistryShardSnapshot {
     pub eviction_blocker_count: u32,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeRegistryWriterSnapshot {
     pub offered_operations: u64,
     pub admitted_operations: u64,
@@ -96,6 +96,24 @@ pub struct RuntimeRegistryWriterSnapshot {
     pub error_events: u64,
     pub health_lane_services: u64,
     pub commit_sequence: u64,
+    pub checkpoint: RuntimeRegistryCheckpointSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeRegistryCheckpointSnapshot {
+    pub pressure: String,
+    pub outcome: Option<String>,
+    pub wal_bytes: Option<u64>,
+    pub blockers: Vec<RuntimeRegistryCheckpointBlockerSnapshot>,
+    pub blockers_omitted: usize,
+    pub hard_retry_wakes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeRegistryCheckpointBlockerSnapshot {
+    pub kind: String,
+    pub id: String,
+    pub age_ms: u64,
 }
 
 impl RuntimeRegistrySnapshot {
@@ -177,6 +195,7 @@ impl RuntimeRegistryShardSnapshot {
             writer_busy_events: telemetry.writer_busy_events,
             writer: telemetry
                 .writer
+                .as_ref()
                 .map(|writer| RuntimeRegistryWriterSnapshot {
                     offered_operations: writer.offered_operations,
                     admitted_operations: writer.admitted_operations,
@@ -192,6 +211,7 @@ impl RuntimeRegistryShardSnapshot {
                     error_events: writer.error_events,
                     health_lane_services: writer.health_lane_services,
                     commit_sequence: writer.commit_sequence.0,
+                    checkpoint: checkpoint_snapshot(writer),
                 }),
             queued_operations: telemetry.queued_operations,
             queued_bytes: telemetry.queued_bytes,
@@ -207,6 +227,82 @@ impl RuntimeRegistryShardSnapshot {
             idle_for_ms: telemetry.idle_for_ms,
             eviction_eligible: telemetry.eviction_eligible,
             eviction_blocker_count: telemetry.eviction_blocker_count,
+        }
+    }
+}
+
+fn checkpoint_snapshot(
+    writer: &tracedecay_runtime_core::store_runtime::registry::PhysicalWriterRuntimeSnapshot,
+) -> RuntimeRegistryCheckpointSnapshot {
+    use tracedecay_runtime_core::store_runtime::registry::{CheckpointOutcome, CheckpointPressure};
+
+    let outcome = writer
+        .checkpoint_status
+        .latest
+        .as_ref()
+        .map(|outcome| match outcome {
+            CheckpointOutcome::BelowSoft { .. } => "below_soft",
+            CheckpointOutcome::Complete { .. } => "complete",
+            CheckpointOutcome::Pending { .. } => "pending",
+            CheckpointOutcome::Interrupted { .. } => "interrupted",
+        })
+        .map(str::to_owned);
+    match &writer.checkpoint_pressure {
+        CheckpointPressure::Open => RuntimeRegistryCheckpointSnapshot {
+            pressure: "open".to_owned(),
+            outcome,
+            wal_bytes: checkpoint_outcome_wal_bytes(writer.checkpoint_status.latest.as_ref()),
+            blockers: Vec::new(),
+            blockers_omitted: 0,
+            hard_retry_wakes: writer.checkpoint_hard_retry_wakes,
+        },
+        CheckpointPressure::BlockGeneral { wal, blockers } => RuntimeRegistryCheckpointSnapshot {
+            pressure: "hard_drain".to_owned(),
+            outcome,
+            wal_bytes: Some(wal.bytes),
+            blockers: blockers
+                .blockers
+                .iter()
+                .map(checkpoint_blocker_snapshot)
+                .collect(),
+            blockers_omitted: blockers.omitted,
+            hard_retry_wakes: writer.checkpoint_hard_retry_wakes,
+        },
+    }
+}
+
+fn checkpoint_outcome_wal_bytes(
+    outcome: Option<&tracedecay_runtime_core::store_runtime::registry::CheckpointOutcome>,
+) -> Option<u64> {
+    use tracedecay_runtime_core::store_runtime::registry::CheckpointOutcome;
+
+    outcome.and_then(|outcome| match outcome {
+        CheckpointOutcome::BelowSoft { wal }
+        | CheckpointOutcome::Complete { wal, .. }
+        | CheckpointOutcome::Pending { wal, .. } => Some(wal.bytes),
+        CheckpointOutcome::Interrupted { wal, .. } => wal.map(|wal| wal.bytes),
+    })
+}
+
+fn checkpoint_blocker_snapshot(
+    blocker: &tracedecay_runtime_core::store_runtime::registry::CheckpointBlocker,
+) -> RuntimeRegistryCheckpointBlockerSnapshot {
+    use tracedecay_runtime_core::store_runtime::registry::CheckpointBlocker;
+
+    match blocker {
+        CheckpointBlocker::SnapshotLease { lease_id, age } => {
+            RuntimeRegistryCheckpointBlockerSnapshot {
+                kind: "snapshot_lease".to_owned(),
+                id: lease_id.as_str().to_owned(),
+                age_ms: u64::try_from(age.as_millis()).unwrap_or(u64::MAX),
+            }
+        }
+        CheckpointBlocker::PhysicalReader { reader_id, age } => {
+            RuntimeRegistryCheckpointBlockerSnapshot {
+                kind: "physical_reader".to_owned(),
+                id: reader_id.to_string(),
+                age_ms: u64::try_from(age.as_millis()).unwrap_or(u64::MAX),
+            }
         }
     }
 }
@@ -239,6 +335,11 @@ fn runtime_health_label(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+    use tracedecay_runtime_core::store_runtime::registry::PhysicalWriterRuntimeSnapshot;
+    use tracedecay_runtime_core::store_runtime::registry::{
+        CheckpointBlocker, CheckpointBlockers, CheckpointPressure, CheckpointWal,
+    };
     use tracedecay_store::{
         BrainId, ProjectId, StoreAuthorityEpochV1, StoreIncarnationV1, StoreRuntimeBindingV1,
         StoreShardIdV1, UserProfileId,
@@ -288,5 +389,37 @@ mod tests {
         assert!(value.get("shard").is_none());
         assert!(value["wal_bytes"].is_null());
         assert!(value["memory_estimate_bytes"].is_null());
+    }
+
+    #[test]
+    fn checkpoint_wire_names_live_hard_pressure_blockers_and_retries() {
+        let writer = PhysicalWriterRuntimeSnapshot {
+            checkpoint_pressure: CheckpointPressure::BlockGeneral {
+                wal: CheckpointWal {
+                    frames: 70_000,
+                    bytes: 286_720_000,
+                },
+                blockers: CheckpointBlockers {
+                    blockers: vec![CheckpointBlocker::PhysicalReader {
+                        reader_id: 7,
+                        age: Duration::from_millis(250),
+                    }],
+                    omitted: 2,
+                },
+            },
+            checkpoint_hard_retry_wakes: 3,
+            ..PhysicalWriterRuntimeSnapshot::default()
+        };
+
+        let snapshot = checkpoint_snapshot(&writer);
+
+        assert_eq!(snapshot.pressure, "hard_drain");
+        assert_eq!(snapshot.wal_bytes, Some(286_720_000));
+        assert_eq!(snapshot.blockers.len(), 1);
+        assert_eq!(snapshot.blockers[0].kind, "physical_reader");
+        assert_eq!(snapshot.blockers[0].id, "7");
+        assert_eq!(snapshot.blockers[0].age_ms, 250);
+        assert_eq!(snapshot.blockers_omitted, 2);
+        assert_eq!(snapshot.hard_retry_wakes, 3);
     }
 }

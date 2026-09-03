@@ -235,14 +235,6 @@ pub(super) async fn registered_project_context(
         })
 }
 
-/// Whether a selector names a path rather than a bare project name. This is
-/// pure syntax: it decides whether a selector may fall back to Git identity,
-/// and never consults the registry. Delegates to the canonical
-/// [`RegisteredGlobalDb::is_explicit_project_path_selector`].
-pub(super) fn is_explicit_project_path_selector(selector: &str) -> bool {
-    RegisteredGlobalDb::is_explicit_project_path_selector(selector)
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -251,9 +243,10 @@ mod tests {
 
     use super::{
         CONTEXT_MEMORY_ANALYTICS_KEY, decode_primitive_request, generic_tool_result,
-        is_explicit_project_path_selector, rendered_tool_result,
+        rendered_tool_result,
     };
     use tracedecay_application::retrieval::NodeSurfaceRequestV1;
+    use tracedecay_global_db::RegisteredGlobalDb;
 
     /// `generic_tool_result` must stay a pure spelling of the closure form it
     /// replaced at every call site — same bytes on both output formats, and the
@@ -349,9 +342,15 @@ mod tests {
 
     #[test]
     fn explicit_project_path_detection_is_syntax_only() {
-        assert!(is_explicit_project_path_selector("/workspace/project"));
-        assert!(is_explicit_project_path_selector("team/project"));
-        assert!(is_explicit_project_path_selector("."));
-        assert!(!is_explicit_project_path_selector("project"));
+        assert!(RegisteredGlobalDb::is_explicit_project_path_selector(
+            "/workspace/project"
+        ));
+        assert!(RegisteredGlobalDb::is_explicit_project_path_selector(
+            "team/project"
+        ));
+        assert!(RegisteredGlobalDb::is_explicit_project_path_selector("."));
+        assert!(!RegisteredGlobalDb::is_explicit_project_path_selector(
+            "project"
+        ));
     }
 }

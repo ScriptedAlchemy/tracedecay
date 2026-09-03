@@ -16,8 +16,9 @@ use tracedecay_store::{
     ProjectMemoryDashboardMemoryOverviewV1, ProjectMemoryDashboardNamedCountV1,
     ProjectMemoryDashboardOplogEntryV1, ProjectMemoryDashboardOplogQueryV1,
     ProjectMemoryDashboardVectorPointV1, ProjectMemoryDashboardVectorPointsQueryV1,
-    ProjectMemoryEntityIdV1, ProjectMemoryFactHistoryQueryV1, ProjectMemoryFactIdV1,
-    ProjectMemoryFactListQueryV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactV1,
+    ProjectMemoryDashboardVectorSnapshotV1, ProjectMemoryEntityIdV1,
+    ProjectMemoryFactHistoryQueryV1, ProjectMemoryFactIdV1, ProjectMemoryFactListQueryV1,
+    ProjectMemoryFactProjectionV1, ProjectMemoryFactV1, ProjectMemoryStoreRevisionV1,
 };
 
 use super::crud::{
@@ -576,11 +577,48 @@ async fn dashboard_vector_fact_ids_tx(
     Ok(fact_ids)
 }
 
-pub(super) async fn dashboard_project_memory_vector_points_tx(
+pub(super) async fn dashboard_project_memory_store_revision_tx(
+    transaction: &Transaction<'_>,
+    owner: &FactOwnerV1,
+    read_control: &FactReadControl,
+) -> FactStoreResult<ProjectMemoryStoreRevisionV1> {
+    ensure_project_memory_read_active(read_control)?;
+    let _owner = OwnerKey::new(owner)?;
+    let mut rows = transaction
+        .query(
+            "SELECT value FROM metadata
+             WHERE key = 'graph_transaction_generation'",
+            (),
+        )
+        .await
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
+    let generation = match rows
+        .next()
+        .await
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
+    {
+        Some(row) => row_string(&row, 0, PROJECT_MEMORY_READ_OPERATION)?
+            .parse::<u64>()
+            .map_err(|error| {
+                storage_message(
+                    PROJECT_MEMORY_READ_OPERATION,
+                    format!("canonical store generation is invalid: {error}"),
+                )
+            })?,
+        None => 0,
+    };
+    ensure_project_memory_read_active(read_control)?;
+    Ok(ProjectMemoryStoreRevisionV1::new(generation))
+}
+
+pub(super) async fn dashboard_project_memory_vector_snapshot_tx(
     transaction: &Transaction<'_>,
     query: &ProjectMemoryDashboardVectorPointsQueryV1,
     read_control: &FactReadControl,
-) -> FactStoreResult<Vec<ProjectMemoryDashboardVectorPointV1>> {
+) -> FactStoreResult<ProjectMemoryDashboardVectorSnapshotV1> {
+    let store_revision =
+        dashboard_project_memory_store_revision_tx(transaction, query.owner(), read_control)
+            .await?;
     let fact_ids = dashboard_vector_fact_ids_tx(transaction, query, read_control).await?;
     ensure_project_memory_read_active(read_control)?;
     let facts = load_project_memory_projections_controlled_tx(
@@ -592,7 +630,7 @@ pub(super) async fn dashboard_project_memory_vector_points_tx(
     .await?;
     ensure_project_memory_read_active(read_control)?;
     let encoder = HolographicEncoder::new();
-    facts
+    let points = facts
         .into_iter()
         .map(|projection| {
             ensure_project_memory_read_active(read_control)?;
@@ -624,7 +662,11 @@ pub(super) async fn dashboard_project_memory_vector_points_tx(
                 0,
             )
         })
-        .collect::<FactStoreResult<Vec<_>>>()
+        .collect::<FactStoreResult<Vec<_>>>()?;
+    Ok(ProjectMemoryDashboardVectorSnapshotV1::new(
+        store_revision,
+        points,
+    ))
 }
 
 fn dashboard_oplog_operation(kind: &FactLineageEventKindV1) -> &'static str {

@@ -132,7 +132,7 @@ impl RegisteredSchemaConvergenceMaintenance {
             .cloned()
     }
 
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     pub(super) fn defer(&self, shard_id: StoreShardIdV1) {
         lock_registered_schema_convergence_statuses(&self.statuses)
             .entry(shard_id)

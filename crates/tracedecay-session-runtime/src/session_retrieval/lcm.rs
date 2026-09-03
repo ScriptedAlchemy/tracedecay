@@ -30,6 +30,16 @@ use super::{
     message_search_digest, temporal_kernel_deadline,
 };
 
+struct LcmBindingWindow {
+    content_slice: Option<LcmContentSlice>,
+    source_limit: Option<usize>,
+}
+
+struct LcmDirectTarget {
+    anchor_id: Option<RetrievalAnchorId>,
+    binding: String,
+}
+
 impl DaemonSessionRetrievalService {
     fn lcm_authorization_binding(&self, provider: &str) -> String {
         encode_tagged_lowercase_hex(
@@ -49,8 +59,7 @@ impl DaemonSessionRetrievalService {
         session_id: &SessionId,
         target: &str,
         grain: RetrievalGrainV1,
-        content_slice: Option<LcmContentSlice>,
-        source_limit: Option<usize>,
+        window: LcmBindingWindow,
     ) -> String {
         let encoded = json!({
             "version": 1,
@@ -59,9 +68,9 @@ impl DaemonSessionRetrievalService {
             "session_id": session_id.as_str(),
             "target": target,
             "grain": grain.as_str(),
-            "content_offset": content_slice.map(|slice| slice.offset),
-            "content_limit": content_slice.map(|slice| slice.limit),
-            "source_limit": source_limit,
+            "content_offset": window.content_slice.map(|slice| slice.offset),
+            "content_limit": window.content_slice.map(|slice| slice.limit),
+            "source_limit": window.source_limit,
             "authorization": self.lcm_authorization_binding(provider),
         })
         .to_string();
@@ -122,8 +131,7 @@ impl DaemonSessionRetrievalService {
         grain: RetrievalGrainV1,
         temporal_mode: TemporalModeV1,
         retrieval_scope: SessionRetrievalScope,
-        direct_anchor: Option<RetrievalAnchorId>,
-        binding: String,
+        target: LcmDirectTarget,
     ) -> Option<SessionTemporalQuery> {
         let query = SessionTemporalQuery::new(
             session_id,
@@ -146,8 +154,8 @@ impl DaemonSessionRetrievalService {
         // hash-verify its whole payload before the caller slices content, so
         // it keeps the default execution limits; the LCM binding's budgets
         // admit them, and the response stays bounded by the context budget.
-        .with_compatibility_filter_digest(binding);
-        Some(match direct_anchor {
+        .with_compatibility_filter_digest(target.binding);
+        Some(match target.anchor_id {
             Some(anchor_id) => query.with_direct_anchor(anchor_id),
             None => query,
         })
@@ -193,8 +201,10 @@ impl DaemonSessionRetrievalService {
             command.session_id(),
             &lcm_describe_target_key(&target),
             command.grain(),
-            None,
-            None,
+            LcmBindingWindow {
+                content_slice: None,
+                source_limit: None,
+            },
         );
         let temporal_mode = if direct.is_some() {
             TemporalModeV1::Current
@@ -207,8 +217,10 @@ impl DaemonSessionRetrievalService {
             command.grain(),
             temporal_mode,
             SessionRetrievalScope::Session(command.session_id().clone()),
-            direct.as_ref().map(|direct| direct.anchor_id.clone()),
-            retrieval_binding,
+            LcmDirectTarget {
+                anchor_id: direct.as_ref().map(|direct| direct.anchor_id.clone()),
+                binding: retrieval_binding,
+            },
         ) else {
             return LcmDescribeServiceOutcome::Denied;
         };
@@ -382,8 +394,10 @@ impl DaemonSessionRetrievalService {
             command.session_id(),
             &Self::lcm_expand_target_key(&target),
             command.grain(),
-            Some(command.content_slice()),
-            command.source_limit(),
+            LcmBindingWindow {
+                content_slice: Some(command.content_slice()),
+                source_limit: command.source_limit(),
+            },
         );
         let retrieval_scope = if matches!(&target, LcmExpandTarget::RawMessage { .. })
             && direct.owner_session_id.as_str() != command.session_id().as_str()
@@ -398,8 +412,10 @@ impl DaemonSessionRetrievalService {
             command.grain(),
             TemporalModeV1::Current,
             retrieval_scope,
-            Some(direct.anchor_id.clone()),
-            retrieval_binding.clone(),
+            LcmDirectTarget {
+                anchor_id: Some(direct.anchor_id.clone()),
+                binding: retrieval_binding.clone(),
+            },
         ) else {
             return LcmExpandServiceOutcome::Denied;
         };

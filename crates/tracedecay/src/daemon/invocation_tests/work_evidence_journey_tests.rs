@@ -314,9 +314,11 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
                 .expect("session root identity"),
             database.binding().shard_id.clone(),
             project_id.clone(),
-            repository_id.clone(),
-            worktree_id.clone(),
-            BranchId::new("branch.work-evidence-journey").expect("branch identity"),
+            tracedecay_session_memory::context::ResolvedGitRoute::new(
+                repository_id.clone(),
+                worktree_id.clone(),
+                BranchId::new("branch.work-evidence-journey").expect("branch identity"),
+            ),
             project.display().to_string(),
         );
     let scope = retrieval_root

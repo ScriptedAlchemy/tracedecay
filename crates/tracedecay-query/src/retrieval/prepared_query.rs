@@ -169,12 +169,59 @@ impl PreparedQueryV1 {
     where
         T: Serialize,
     {
+        self.paginate_with(bindings, items, page_size, now, |items, start, end| {
+            Ok(items
+                .into_iter()
+                .skip(start)
+                .take(end.saturating_sub(start))
+                .collect())
+        })
+    }
+
+    /// Pages compact candidate keys and hydrates only the returned slice.
+    ///
+    /// `candidate_set_digest` is `canonical_sha256(&candidates)`. Cursors
+    /// issued by [`Self::paginate`] over fully hydrated records for these
+    /// operations will not match that digest and read as [`PreparedQueryErrorV1::Stale`].
+    /// That is acceptable: the cursor format is unreleased and generation-bound.
+    pub fn paginate_candidates<K, T>(
+        &self,
+        bindings: &PreparedQueryBindingsV1,
+        candidates: Vec<K>,
+        page_size: u32,
+        now: UtcMicros,
+        hydrate: impl FnOnce(&[K]) -> Result<Vec<T>, PreparedQueryErrorV1>,
+    ) -> Result<PreparedQueryPageV1<T>, PreparedQueryErrorV1>
+    where
+        K: Serialize,
+    {
+        self.paginate_with(
+            bindings,
+            candidates,
+            page_size,
+            now,
+            |candidates, start, end| hydrate(&candidates[start..end]),
+        )
+    }
+
+    fn paginate_with<K, T>(
+        &self,
+        bindings: &PreparedQueryBindingsV1,
+        candidates: Vec<K>,
+        page_size: u32,
+        now: UtcMicros,
+        materialize: impl FnOnce(Vec<K>, usize, usize) -> Result<Vec<T>, PreparedQueryErrorV1>,
+    ) -> Result<PreparedQueryPageV1<T>, PreparedQueryErrorV1>
+    where
+        K: Serialize,
+    {
         if page_size == 0 {
             return Err(PreparedQueryErrorV1::Invalid);
         }
-        let total = u64::try_from(items.len()).map_err(|_| PreparedQueryErrorV1::Unavailable)?;
+        let total =
+            u64::try_from(candidates.len()).map_err(|_| PreparedQueryErrorV1::Unavailable)?;
         let candidate_set_digest =
-            canonical_sha256(&items).map_err(|_| PreparedQueryErrorV1::Unavailable)?;
+            canonical_sha256(&candidates).map_err(|_| PreparedQueryErrorV1::Unavailable)?;
         let start = match &self.cursor {
             Some(cursor) => {
                 require_unexpired(cursor, now)?;
@@ -195,12 +242,12 @@ impl PreparedQueryV1 {
             }
             None => 0,
         };
-        if start > items.len() {
+        if start > candidates.len() {
             return Err(PreparedQueryErrorV1::Invalid);
         }
         let page_size = usize::try_from(page_size).map_err(|_| PreparedQueryErrorV1::Invalid)?;
-        let end = start.saturating_add(page_size).min(items.len());
-        let (next_cursor, expires_at) = if end < items.len() {
+        let end = start.saturating_add(page_size).min(candidates.len());
+        let (next_cursor, expires_at) = if end < candidates.len() {
             let expires_at = match &self.cursor {
                 Some(cursor) => cursor.payload.expires_at,
                 None => UtcMicros(
@@ -240,7 +287,7 @@ impl PreparedQueryV1 {
         let page_len = end.saturating_sub(start);
         hotpath::gauge!("query.stream.results").set(page_len);
         Ok(PreparedQueryPageV1 {
-            items: items.into_iter().skip(start).take(page_len).collect(),
+            items: materialize(candidates, start, end)?,
             total,
             next_cursor,
             expires_at,

@@ -1526,9 +1526,23 @@ mod tests {
         )
     }
 
-    #[tokio::test]
-    async fn completed_primary_search_is_not_retried_after_graph_admission() {
+    fn run_with_locked_user_data_dir(test: impl Future<Output = ()>) {
         let _env_lock = crate::config::lock_user_data_dir_test_env();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("locked user data test runtime")
+            .block_on(test);
+    }
+
+    #[test]
+    fn completed_primary_search_is_not_retried_after_graph_admission() {
+        run_with_locked_user_data_dir(
+            completed_primary_search_is_not_retried_after_graph_admission_case(),
+        );
+    }
+
+    async fn completed_primary_search_is_not_retried_after_graph_admission_case() {
         let dir = tempfile::TempDir::new().expect("single search attempt isolation");
         let _env = crate::mcp::tools::handlers::dispatch_test_support::SelectorEnv::new(dir.path());
         let project = dir.path().join("single-search-attempt");
@@ -1591,9 +1605,14 @@ mod tests {
         cg.close();
     }
 
-    #[tokio::test]
-    async fn generation_mismatch_retry_cannot_erase_a_complete_sparse_search() {
-        let _env_lock = crate::config::lock_user_data_dir_test_env();
+    #[test]
+    fn generation_mismatch_retry_cannot_erase_a_complete_sparse_search() {
+        run_with_locked_user_data_dir(
+            generation_mismatch_retry_cannot_erase_a_complete_sparse_search_case(),
+        );
+    }
+
+    async fn generation_mismatch_retry_cannot_erase_a_complete_sparse_search_case() {
         let dir = tempfile::TempDir::new().expect("generation mismatch isolation");
         let _env = crate::mcp::tools::handlers::dispatch_test_support::SelectorEnv::new(dir.path());
         let project = dir.path().join("generation-mismatch-search");

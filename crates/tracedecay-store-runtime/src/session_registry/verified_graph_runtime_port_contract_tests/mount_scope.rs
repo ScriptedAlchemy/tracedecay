@@ -92,18 +92,20 @@ async fn unbound_profile_memory_denies_graph_operations() {
     let profile_runtime = super::super::open_runtime(
         &fixture.registry.registry,
         fixture.registry.resolver.as_ref(),
-        profile_shard,
-        fixture.registry.incarnation,
-        Some(
-            fixture
-                .registry
-                .profile_authority_pin("open unbound profile-memory binding fixture")
-                .await
-                .expect("profile authority pin"),
+        super::super::StoreRuntimeOpenSpec::new(
+            profile_shard,
+            fixture.registry.incarnation,
+            Some(
+                fixture
+                    .registry
+                    .profile_authority_pin("open unbound profile-memory binding fixture")
+                    .await
+                    .expect("profile authority pin"),
+            ),
+            None,
+            true,
+            "open unbound profile-memory binding fixture",
         ),
-        None,
-        true,
-        "open unbound profile-memory binding fixture",
     )
     .await
     .expect("unbound profile-memory runtime");

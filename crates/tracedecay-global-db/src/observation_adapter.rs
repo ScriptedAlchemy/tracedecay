@@ -30,11 +30,12 @@ use tracedecay_store::{
     RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeReadCoverageV1,
     RuntimeReadOperationV1, RuntimeReadRequestV1, RuntimeReadResultV1, RuntimeRequestControlV1,
     RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1, RuntimeTransactionIdV1,
-    RuntimeTransactionScopeV1, StoreClientIdV1, StoreIdempotencyKeyV1, StoreOperationIdV1,
-    StoreOperationMetadataV1, StoredObservation, StoredObservationRowV1,
+    RuntimeTransactionScopeV1, StorageRuntimeErrorV1, StoreClientIdV1, StoreIdempotencyKeyV1,
+    StoreOperationIdV1, StoreOperationMetadataV1, StoredObservation, StoredObservationRowV1,
 };
 
 use tracedecay_runtime_core::db::{Database, DatabaseEngineReadSnapshot, DatabaseRuntimeClientV1};
+use tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRegistryFailure;
 use tracedecay_rusqlite_runtime::repository::observation_cursor_authority::{
     COMMIT_SOURCE_CURSOR_SQL, READ_CURSOR_ADVANCE_SQL, READ_SOURCE_CURSOR_SQL,
     RECORD_CURSOR_ADVANCE_SQL, cursor_advance_ledger_row_matches,
@@ -1843,7 +1844,22 @@ async fn dispatch_runtime_submit(
             }),
         )
         .await
-        .map_err(|error| runtime_storage_error(operation, format!("{error:?}")))
+        .map_err(|error| map_observation_submit_error(operation, error))
+}
+
+fn map_observation_submit_error(
+    operation: &'static str,
+    error: StoreRuntimeRegistryFailure,
+) -> ObservationStoreError {
+    match error {
+        StoreRuntimeRegistryFailure::StorageRuntime(error) => match *error {
+            StorageRuntimeErrorV1::ObservationSourceCursorConflict { expected, actual } => {
+                ObservationStoreError::CursorConflict { expected, actual }
+            }
+            error => runtime_storage_error(operation, error.to_string()),
+        },
+        error => runtime_storage_error(operation, format!("{error:?}")),
+    }
 }
 
 fn runtime_command_value(

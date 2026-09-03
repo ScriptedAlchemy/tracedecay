@@ -51,7 +51,7 @@ fn encode_compact_v11(row: &ArtifactRowV1) -> Result<Vec<u8>, CodeLexicalArtifac
         file_occurrence_id: row.anchor.file_occurrence_id.clone(),
         symbol_occurrence_id: row.anchor.symbol_occurrence_id.clone(),
         parent_chunk_id: row.anchor.parent_chunk_id.clone(),
-        source_span: row.anchor.source_span.clone(),
+        source_span: row.anchor.source_span,
         grain: row.anchor.grain,
         ordinal: row.anchor.ordinal,
         language_descriptor_revision: row.language_descriptor_revision.clone(),

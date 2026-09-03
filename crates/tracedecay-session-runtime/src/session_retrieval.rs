@@ -13,8 +13,6 @@ use tracedecay_domain::{
     ActorId, HydrationStateV1, ProjectId, RetrievalGrainV1, SessionId, TemporalCoverageCountsV1,
     TemporalModeV1,
 };
-#[cfg(any(test, feature = "test-helpers"))]
-use tracedecay_domain::{RepositoryId, WorktreeId};
 use tracedecay_session_memory::context::{
     BranchId, ProfileId, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
 };
@@ -339,9 +337,7 @@ impl DaemonSessionRetrievalRoot {
         root_id: SessionRootId,
         expected_runtime_shard: StoreShardIdV1,
         project_id: ProjectId,
-        repository_id: RepositoryId,
-        worktree_id: WorktreeId,
-        branch_id: BranchId,
+        git_route: ResolvedGitRoute,
         authorized_root: String,
     ) -> Self {
         let identity = ResolvedSessionIdentity::for_project(
@@ -349,7 +345,7 @@ impl DaemonSessionRetrievalRoot {
             project_id.clone(),
             store_id,
             root_id,
-            ResolvedGitRoute::new(repository_id, worktree_id, branch_id),
+            git_route,
         );
         Self {
             store_scope: SessionRetrievalStoreScope::Project,

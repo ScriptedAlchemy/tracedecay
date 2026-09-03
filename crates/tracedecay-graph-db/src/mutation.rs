@@ -146,20 +146,20 @@ fn apply_in_transaction(
         .mutations
         .iter()
         .any(|mutation| matches!(mutation, GraphMutation::UpsertRelation(_)));
-    let entity_capacity = tracks_relation_endpoints
-        .then(|| {
-            batch
-                .mutations
-                .iter()
-                .filter(|mutation| {
-                    matches!(
-                        mutation,
-                        GraphMutation::DeleteEntity(_) | GraphMutation::UpsertEntity(_)
-                    )
-                })
-                .count()
-        })
-        .unwrap_or(0);
+    let entity_capacity = if tracks_relation_endpoints {
+        batch
+            .mutations
+            .iter()
+            .filter(|mutation| {
+                matches!(
+                    mutation,
+                    GraphMutation::DeleteEntity(_) | GraphMutation::UpsertEntity(_)
+                )
+            })
+            .count()
+    } else {
+        0
+    };
     let mut entity_nodes =
         HashMap::<&str, Option<grafeo_common::types::NodeId>>::with_capacity(entity_capacity);
     for mutation in &batch.mutations {

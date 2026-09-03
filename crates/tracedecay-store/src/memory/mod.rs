@@ -31,8 +31,8 @@ pub use project_memory::{
     ProjectMemoryDashboardMemoryOverviewQueryV1, ProjectMemoryDashboardMemoryOverviewV1,
     ProjectMemoryDashboardNamedCountV1, ProjectMemoryDashboardOplogEntryV1,
     ProjectMemoryDashboardOplogQueryV1, ProjectMemoryDashboardVectorPointV1,
-    ProjectMemoryDashboardVectorPointsQueryV1, ProjectMemoryEntityIdV1,
-    ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddDispositionV1,
+    ProjectMemoryDashboardVectorPointsQueryV1, ProjectMemoryDashboardVectorSnapshotV1,
+    ProjectMemoryEntityIdV1, ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddDispositionV1,
     ProjectMemoryFactAddMaterialV1, ProjectMemoryFactAddOutcomeV1,
     ProjectMemoryFactContradictionPageV1, ProjectMemoryFactContradictionQueryV1,
     ProjectMemoryFactContradictionV1, ProjectMemoryFactCurationAddV1,
@@ -56,7 +56,7 @@ pub use project_memory::{
     ProjectMemoryFactSnapshotV1, ProjectMemoryFactUnavailableV1, ProjectMemoryFactUpdateCommandV1,
     ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryFactUpdatePatchV1, ProjectMemoryFactV1,
     ProjectMemoryPrivacyPurgeCursorV1, ProjectMemoryPrivacyPurgeReceiptV1,
-    derive_project_memory_fact_curation_child_operation_id,
+    ProjectMemoryStoreRevisionV1, derive_project_memory_fact_curation_child_operation_id,
 };
 pub use queries::{
     CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1, FactContradictionStateV1,
