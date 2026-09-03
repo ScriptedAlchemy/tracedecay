@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde_json::{Map, Value as JsonValue, json};
@@ -6,7 +7,7 @@ use tracedecay_domain::{ComponentVersion, SanitizationReceiptV1, SanitizerDispos
 pub use crate::retrieval_content::derived_text_for_index;
 pub use crate::retrieval_content::derived_text_for_snippet;
 use crate::retrieval_content::projected_content_hash;
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, Value, params};
 use tracedecay_runtime_core::privacy::{
     LCM_PAYLOAD_SANITIZER_VERSION_V1, LcmPayloadSanitizationV1, PrivacyDetectorV1,
     bind_sanitized_lcm_payload_text, quarantine_lcm_payload_text, sanitize_lcm_payload_text,
@@ -27,6 +28,8 @@ pub const RAW_MESSAGE_METADATA_SELECT_COLUMNS: &str =
     "provider, message_id, session_id, store_id, role, ordinal,
                     timestamp, NULL AS content, content_hash, storage_kind, payload_ref,
                     '' AS snippet_text, legacy_source, legacy_truncated, metadata_json";
+/// Two variables per identity stay below SQLite's default 999-variable ceiling.
+const RAW_MESSAGE_IDENTITY_BATCH_SIZE: usize = 400;
 
 pub fn raw_message_metadata_from_row(row: &Row) -> Result<LcmRawMessageMetadata, LcmError> {
     let storage_kind_text: String = row.get(9)?;
@@ -162,6 +165,58 @@ pub async fn load_raw_message_by_identity(
     hotpath::measure_block!("sessions.lcm.hydrate.redact", {
         verified_raw_message_from_row(&row).map(Some)
     })
+}
+
+pub(crate) async fn load_raw_messages_by_identity(
+    conn: &(impl QueryExecutor + ?Sized),
+    identities: &[(String, String)],
+) -> Result<Vec<LcmRawMessage>, LcmError> {
+    let mut loaded = BTreeMap::new();
+    for chunk in identities.chunks(RAW_MESSAGE_IDENTITY_BATCH_SIZE) {
+        let mut values = Vec::with_capacity(chunk.len() * 2);
+        let predicate = chunk
+            .iter()
+            .enumerate()
+            .map(|(offset, (provider, message_id))| {
+                values.push(Value::Text(provider.clone()));
+                values.push(Value::Text(message_id.clone()));
+                let provider_param = offset * 2 + 1;
+                let message_param = provider_param + 1;
+                format!("(provider = ?{provider_param} AND message_id = ?{message_param})")
+            })
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let sql = format!(
+            "SELECT {RAW_MESSAGE_SELECT_COLUMNS}
+             FROM lcm_raw_messages
+             WHERE {predicate}"
+        );
+        let rows = hotpath::future!(
+            conn.query(&sql, values),
+            label = "sessions.lcm.hydrate.fetch"
+        )
+        .await?;
+        let mut rows = rows;
+        while let Some(row) = rows.next().await? {
+            let raw = hotpath::measure_block!("sessions.lcm.hydrate.redact", {
+                verified_raw_message_from_row(&row)
+            })?;
+            let identity = (raw.provider.clone(), raw.message_id.clone());
+            if loaded.insert(identity, raw).is_some() {
+                return Err(LcmError::Db(
+                    "duplicate raw messages for provider/message identity".to_string(),
+                ));
+            }
+        }
+    }
+    identities
+        .iter()
+        .map(|identity| {
+            loaded
+                .remove(identity)
+                .ok_or(LcmError::SummarySourceNotOwnedBySession)
+        })
+        .collect()
 }
 
 pub async fn load_raw_message_by_store_id(
