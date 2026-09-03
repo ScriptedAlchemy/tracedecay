@@ -2077,16 +2077,14 @@ fn portable_inventory_keeps_partial_progress_across_cancelled_pages() {
     }
     let cancellation = CancellationToken::new();
     let deadline = MonotonicDeadline::at(Instant::now() + Duration::from_secs(1));
-    let (_, cursor) = super::unregistered_page::read_project_directory_page(
-        &profile_root,
-        None,
-        1,
-        &cancellation,
-        deadline,
-    )
-    .unwrap()
-    .expect("first bounded portable page completes");
-    let cursor = cursor.expect("a bounded first chunk leaves durable continuation work");
+    let interrupted = || cancellation.is_cancelled() || deadline.is_elapsed_at(Instant::now());
+    let page =
+        super::unregistered_page::read_project_directory_page(&profile_root, None, 1, &interrupted)
+            .unwrap()
+            .expect("first bounded portable page completes");
+    let cursor = page
+        .next_cursor
+        .expect("a bounded first chunk leaves durable continuation work");
     let inventory_path = std::fs::read_dir(
         profile_root
             .join("maintenance")
@@ -2101,13 +2099,13 @@ fn portable_inventory_keeps_partial_progress_across_cancelled_pages() {
 
     let cancelled = CancellationToken::new();
     cancelled.cancel();
+    let interrupted = || cancelled.is_cancelled() || deadline.is_elapsed_at(Instant::now());
     assert!(
         super::unregistered_page::read_project_directory_page(
             &profile_root,
             Some(&cursor),
             1,
-            &cancelled,
-            deadline,
+            &interrupted,
         )
         .unwrap()
         .is_none()
@@ -2116,37 +2114,38 @@ fn portable_inventory_keeps_partial_progress_across_cancelled_pages() {
 
     super::unregistered_page::forget_portable_inventory_builder_for_test(&inventory_path);
 
-    let (_, hydration_cursor) = super::unregistered_page::read_project_directory_page(
+    let interrupted = || cancellation.is_cancelled() || deadline.is_elapsed_at(Instant::now());
+    let hydration_page = super::unregistered_page::read_project_directory_page(
         &profile_root,
         Some(&cursor),
         1,
-        &cancellation,
-        deadline,
+        &interrupted,
     )
     .unwrap()
     .expect("restart hydrates the durable portable inventory in a bounded slice");
-    let hydration_cursor =
-        hydration_cursor.expect("partial inventory remains resumable after restart");
-    let (_, replay_cursor) = super::unregistered_page::read_project_directory_page(
+    let hydration_cursor = hydration_page
+        .next_cursor
+        .expect("partial inventory remains resumable after restart");
+    let replay_page = super::unregistered_page::read_project_directory_page(
         &profile_root,
         Some(&hydration_cursor),
         1,
-        &cancellation,
-        deadline,
+        &interrupted,
     )
     .unwrap()
     .expect("restart replays only a bounded source slice");
-    let replay_cursor = replay_cursor.expect("replay keeps a typed continuation cursor");
-    let (_, resumed_cursor) = super::unregistered_page::read_project_directory_page(
+    let replay_cursor = replay_page
+        .next_cursor
+        .expect("replay keeps a typed continuation cursor");
+    let resumed_page = super::unregistered_page::read_project_directory_page(
         &profile_root,
         Some(&replay_cursor),
         1,
-        &cancellation,
-        deadline,
+        &interrupted,
     )
     .unwrap()
     .expect("later page resumes the portable inventory");
-    assert!(resumed_cursor.is_some());
+    assert!(resumed_page.next_cursor.is_some());
     assert!(
         std::fs::read(&inventory_path).unwrap().len() > partial.len(),
         "a later bounded page appends rather than replacing durable partial progress"
@@ -2171,16 +2170,14 @@ fn portable_inventory_repairs_torn_header_before_restart_resume() {
     }
     let cancellation = CancellationToken::new();
     let deadline = MonotonicDeadline::at(Instant::now() + Duration::from_secs(1));
-    let (_, cursor) = super::unregistered_page::read_project_directory_page(
-        &profile_root,
-        None,
-        1,
-        &cancellation,
-        deadline,
-    )
-    .unwrap()
-    .expect("first bounded page creates a resumable inventory");
-    let cursor = cursor.expect("the first source slice remains incomplete");
+    let interrupted = || cancellation.is_cancelled() || deadline.is_elapsed_at(Instant::now());
+    let page =
+        super::unregistered_page::read_project_directory_page(&profile_root, None, 1, &interrupted)
+            .unwrap()
+            .expect("first bounded page creates a resumable inventory");
+    let cursor = page
+        .next_cursor
+        .expect("the first source slice remains incomplete");
     let inventory_path = std::fs::read_dir(
         profile_root
             .join("maintenance")
@@ -2194,18 +2191,17 @@ fn portable_inventory_repairs_torn_header_before_restart_resume() {
     std::fs::write(&inventory_path, b"v2:").unwrap();
     super::unregistered_page::forget_portable_inventory_builder_for_test(&inventory_path);
 
-    let (resumed, next_cursor) = super::unregistered_page::read_project_directory_page(
+    let resumed = super::unregistered_page::read_project_directory_page(
         &profile_root,
         Some(&cursor),
         1,
-        &cancellation,
-        deadline,
+        &interrupted,
     )
     .unwrap()
     .expect("a torn header is replaced before restart resume");
 
-    assert_eq!(resumed.len(), 1);
-    assert!(next_cursor.is_some());
+    assert_eq!(resumed.entries.len(), 1);
+    assert!(resumed.next_cursor.is_some());
     let signature = cursor.split(':').nth(1).unwrap();
     assert!(
         std::fs::read(&inventory_path)
@@ -2233,16 +2229,14 @@ fn portable_inventory_truncates_torn_final_entry_before_restart_resume() {
     }
     let cancellation = CancellationToken::new();
     let deadline = MonotonicDeadline::at(Instant::now() + Duration::from_secs(1));
-    let (_, cursor) = super::unregistered_page::read_project_directory_page(
-        &profile_root,
-        None,
-        1,
-        &cancellation,
-        deadline,
-    )
-    .unwrap()
-    .expect("first bounded page creates partial inventory");
-    let cursor = cursor.expect("the inventory has unscanned source entries");
+    let interrupted = || cancellation.is_cancelled() || deadline.is_elapsed_at(Instant::now());
+    let page =
+        super::unregistered_page::read_project_directory_page(&profile_root, None, 1, &interrupted)
+            .unwrap()
+            .expect("first bounded page creates partial inventory");
+    let cursor = page
+        .next_cursor
+        .expect("the inventory has unscanned source entries");
     let inventory_path = std::fs::read_dir(
         profile_root
             .join("maintenance")
@@ -2280,8 +2274,7 @@ fn portable_inventory_truncates_torn_final_entry_before_restart_resume() {
         &profile_root,
         Some(&cursor),
         64,
-        &cancellation,
-        deadline,
+        &interrupted,
     )
     .unwrap()
     .expect("restart resumes after trimming the torn final record");
@@ -2324,38 +2317,39 @@ fn portable_inventory_sidecar_writer_lock_serializes_concurrent_advances() {
     let worker_profile_root = profile_root.clone();
     let worker = std::thread::spawn(move || {
         let cancellation = CancellationToken::new();
+        let deadline = MonotonicDeadline::at(Instant::now() + Duration::from_secs(1));
+        let interrupted = || cancellation.is_cancelled() || deadline.is_elapsed_at(Instant::now());
         started_tx.send(()).unwrap();
         super::unregistered_page::read_project_directory_page(
             &worker_profile_root,
             None,
             1,
-            &cancellation,
-            MonotonicDeadline::at(Instant::now() + Duration::from_secs(1)),
+            &interrupted,
         )
     });
     started_rx.recv().unwrap();
-    let (work, retry_cursor) = worker
+    let page = worker
         .join()
         .unwrap()
         .unwrap()
         .expect("a contending writer must return an incomplete retry page");
-    assert!(work.is_empty());
+    assert!(page.entries.is_empty());
     assert_eq!(
-        retry_cursor,
+        page.next_cursor,
         Some(format!("portable-v2:{signature}:0")),
         "a second process-equivalent writer must yield with an opaque retry cursor"
     );
     drop(writer_lock);
 
-    let cancellation = CancellationToken::new();
+    let mut entries_scanned = 0usize;
     assert_eq!(
         super::unregistered_page::advance_portable_inventory(
             &projects_dir,
             &inventory,
             &signature,
             8,
-            &cancellation,
-            MonotonicDeadline::at(Instant::now() + Duration::from_secs(1)),
+            &mut entries_scanned,
+            &|| false,
         )
         .unwrap(),
         Some(true)

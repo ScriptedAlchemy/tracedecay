@@ -2,6 +2,7 @@
 //! keeps its identity and stays resolvable from its former root.
 
 use std::cell::Cell;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use tracedecay_runtime_core::db::engine::{
@@ -561,5 +562,34 @@ async fn project_path_listing_orders_recency_then_project_id_deterministically()
             super::canonical_project_path(&roots[1].1),
             super::canonical_project_path(&roots[0].1),
         ]
+    );
+}
+
+#[tokio::test]
+async fn dashboard_membership_returns_only_requested_registered_projects() {
+    let harness = RegisteredGlobalDbHarness::open("dashboard-project-membership").await;
+    let storage_root = harness
+        .registered
+        .db_path()
+        .parent()
+        .expect("registered database storage root");
+    for project_id in ["project-a", "project-c"] {
+        let root = storage_root.join(project_id);
+        std::fs::create_dir_all(&root).expect("create membership project root");
+        register(&harness.registered, project_id, &root).await;
+    }
+
+    let requested = vec![
+        "project-a".to_owned(),
+        "project-b".to_owned(),
+        "project-c".to_owned(),
+    ];
+    assert_eq!(
+        harness
+            .registered
+            .registered_code_project_ids(&requested)
+            .await
+            .expect("read project registration membership"),
+        HashSet::from(["project-a".to_owned(), "project-c".to_owned()])
     );
 }
