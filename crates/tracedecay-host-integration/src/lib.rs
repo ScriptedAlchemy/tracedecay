@@ -163,6 +163,20 @@ pub fn stock_host_registration_evidence(host: HostKindV1) -> Vec<HostRegistratio
                 starts_analyzer: false,
             },
         ]),
+        HostKindV1::Devin => evidence.extend([
+            HostRegistrationEvidenceV1 {
+                route: Hook,
+                state: Unavailable(CheckedInEvidenceMissing),
+                evidence_ref: "https://docs.devin.ai/work-with-devin/mcp",
+                starts_analyzer: false,
+            },
+            HostRegistrationEvidenceV1 {
+                route: Mcp,
+                state: Supported,
+                evidence_ref: "https://docs.devin.ai/cli/extensibility/mcp/configuration",
+                starts_analyzer: false,
+            },
+        ]),
         HostKindV1::Hermes => evidence.extend([
             HostRegistrationEvidenceV1 {
                 route: Hook,
@@ -537,6 +551,7 @@ pub fn stock_host_native_fixture_evidence_from_embedded_assets(
             &["saved_edit", "post_tool_use"][..],
         ),
         HostKindV1::CursorCloud
+        | HostKindV1::Devin
         | HostKindV1::ClineFamily
         | HostKindV1::Cline
         | HostKindV1::RooCode
