@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use super::super::util::{SQLITE_IN_BATCH_SIZE, sql_in_placeholders};
 use super::*;
 
+#[hotpath::measure(label = "sessions.lcm.describe.raw_overviews", future = true)]
 pub(super) async fn raw_message_overviews(
     conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
@@ -39,6 +40,7 @@ pub(super) async fn raw_message_overviews(
     Ok(overviews)
 }
 
+#[hotpath::measure(label = "sessions.lcm.describe.summary_overviews", future = true)]
 pub(super) async fn summary_overviews(
     conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
@@ -74,6 +76,7 @@ pub(super) async fn summary_overviews(
     Ok(overviews)
 }
 
+#[hotpath::measure(label = "sessions.lcm.describe.summary_node", future = true)]
 pub(super) async fn describe_summary_node(
     conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
@@ -113,6 +116,7 @@ enum DescribeSource {
     Summary { node_id: String },
 }
 
+#[hotpath::measure(label = "sessions.lcm.describe.sources", future = true)]
 async fn describe_summary_sources(
     conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
@@ -265,6 +269,7 @@ async fn load_describe_summary_nodes(
     Ok(out)
 }
 
+#[hotpath::measure(label = "sessions.lcm.describe.external_payload", future = true)]
 pub(super) async fn describe_external_payload(
     conn: &(impl QueryExecutor + ?Sized),
     provider: &str,

@@ -76,6 +76,7 @@ pub(super) fn pending_payload_delete_key(payload_ref: &str) -> String {
     format!("{PENDING_PAYLOAD_DELETE_PREFIX}{payload_ref}")
 }
 
+#[hotpath::measure(label = "sessions.lcm.gc.stage_delete", future = true)]
 pub async fn stage_payload_delete(
     conn: &(impl Executor + ?Sized),
     payload_ref: &str,
@@ -113,6 +114,7 @@ pub async fn drain_pending_payload_delete_in_transaction(
     )
 }
 
+#[hotpath::measure(label = "sessions.lcm.gc.drain_pending_deletes", future = true)]
 async fn drain_pending_payload_deletes_matching(
     conn: &(impl Executor + ?Sized),
     storage_root: &Path,
@@ -256,6 +258,7 @@ struct MetadataProbe {
 /// probe. Chunked at [`util::SQLITE_IN_BATCH_SIZE`] so an unbounded tombstone
 /// backlog cannot exceed SQLite's bind-variable limit; an empty input issues no
 /// query at all.
+#[hotpath::measure(label = "sessions.lcm.gc.probe_pending_metadata", future = true)]
 async fn probe_metadata_rows(
     conn: &(impl Executor + ?Sized),
     payload_refs: &[String],
