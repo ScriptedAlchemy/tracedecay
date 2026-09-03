@@ -137,11 +137,12 @@ export function GenerationAnchor() { return 2; }
     let sparse = search_payload(&server, json!({"query": "SparseWidget", "limit": 5})).await;
     assert!(
         sparse["results"].as_array().is_some_and(|results| {
-            results
-                .iter()
-                .any(|result| result["display"]["path"] == "src/app.ts")
+            results.iter().any(|result| {
+                result["display"]["name"] == "SparseWidgetHelper"
+                    && result["display"]["path"] == "src/app.ts"
+            })
         }),
-        "the successful sparse lexical result must be preserved: {sparse}"
+        "the successful sparse lexical symbol result must be preserved: {sparse}"
     );
     assert_eq!(
         hint_candidates(&sparse),
