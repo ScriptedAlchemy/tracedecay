@@ -5,7 +5,12 @@ use tracedecay_domain::UtcMicros;
 
 use tracedecay_daemon_protocol::DaemonInvocationProblem;
 
+use super::super::recovery_schedule::run_recovery_loop;
 use super::RegisteredWorkRuntime;
+
+/// The durable-write signal is the prompt path. This interval reconciles
+/// writes from previous processes and notification loss after restarts.
+const SAFETY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
 pub(super) fn persist_workflow_fan_out_census(
     registered: &RegisteredWorkRuntime,
@@ -188,6 +193,10 @@ fn try_persist_workflow_fan_out_census(
                 &census,
             )
             .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+            // `persist_census` is the canonical durable write; wake recovery
+            // before optional observability enqueue so a later enqueue error
+            // cannot hide the pending record.
+            registered.durable_write_signal.bump();
             census
         }
     };
@@ -429,6 +438,7 @@ impl WorkflowFanOutCensusObservationRecoveryOwnerV1 {
         database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         project_id: tracedecay_domain::ProjectId,
         producer: Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
+        signal: tokio::sync::watch::Receiver<u64>,
     ) -> Result<Self, tracedecay_application::ApplicationContractError> {
         if producer.identity().authorized_scope_ref != project_id.as_str() {
             return Err(tracedecay_application::ApplicationContractError::Domain(
@@ -437,85 +447,25 @@ impl WorkflowFanOutCensusObservationRecoveryOwnerV1 {
         }
         let cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
         let worker_cancellation = cancellation.clone();
+        let task_cancellation = worker_cancellation.clone();
         let task = tokio::spawn(async move {
-            loop {
-                let read_database = database.clone();
-                let mut read = tokio::task::spawn_blocking(move || {
-                    read_pending_census_observations(&read_database)
-                });
-                let observations = tokio::select! {
-                    biased;
-                    () = worker_cancellation.cancelled() => {
-                        read.abort();
-                        return;
+            run_recovery_loop(
+                signal,
+                worker_cancellation,
+                SAFETY_INTERVAL,
+                "Workflow fan-out census recovery",
+                move |_| {
+                    let database = database.clone();
+                    let project_id = project_id.clone();
+                    let producer = Arc::clone(&producer);
+                    let cancellation = task_cancellation.clone();
+                    async move {
+                        recover_pending_census_once(database, project_id, producer, cancellation)
+                            .await
                     }
-                    result = &mut read => match result {
-                        Ok(Ok(observations)) => observations,
-                        Ok(Err(error)) => {
-                            tracing::warn!(?error, "pending workflow census recovery read failed");
-                            Vec::new()
-                        }
-                        Err(error) => {
-                            tracing::warn!(?error, "pending workflow census recovery worker failed");
-                            Vec::new()
-                        }
-                    },
-                };
-                if !observations.is_empty() {
-                    let Ok(envelopes) =
-                        pending_census_envelopes(&producer, &project_id, &observations)
-                    else {
-                        tracing::warn!("pending workflow census envelope is invalid");
-                        tokio::select! {
-                            biased;
-                            () = worker_cancellation.cancelled() => return,
-                            () = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
-                        }
-                        continue;
-                    };
-                    let emission = producer.emit_owner_facts(envelopes);
-                    tokio::pin!(emission);
-                    let emission = tokio::select! {
-                        biased;
-                        () = worker_cancellation.cancelled() => return,
-                        outcome = &mut emission => outcome,
-                    };
-                    match emission {
-                        Ok(_) => {
-                            let mark_database = database.clone();
-                            let mut mark = tokio::task::spawn_blocking(move || {
-                                mark_durable_census_observations(&mark_database, &observations)
-                            });
-                            let marked = tokio::select! {
-                            biased;
-                            () = worker_cancellation.cancelled() => {
-                                mark.abort();
-                                return;
-                            }
-                                result = &mut mark => result,
-                            };
-                            match marked {
-                                Ok(Ok(())) => {}
-                                Ok(Err(error)) => tracing::warn!(
-                                    ?error,
-                                    "workflow census durable marker remains pending"
-                                ),
-                                Err(error) => {
-                                    tracing::warn!(?error, "workflow census marker worker failed");
-                                }
-                            }
-                        }
-                        Err(error) => {
-                            tracing::warn!(?error, "pending workflow census durable claim failed");
-                        }
-                    }
-                }
-                tokio::select! {
-                    biased;
-                    () = worker_cancellation.cancelled() => return,
-                    () = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
-                }
-            }
+                },
+            )
+            .await;
         });
         Ok(Self {
             inner: Arc::new(WorkflowFanOutCensusObservationRecoveryInnerV1 {
@@ -547,6 +497,66 @@ impl WorkflowFanOutCensusObservationRecoveryOwnerV1 {
         {
             tracing::warn!(%error, "workflow census recovery shutdown failed");
         }
+    }
+}
+
+async fn recover_pending_census_once(
+    database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+    project_id: tracedecay_domain::ProjectId,
+    producer: Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
+    cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
+) -> Result<(), String> {
+    let read_database = database.clone();
+    let mut read =
+        tokio::task::spawn_blocking(move || read_pending_census_observations(&read_database));
+    let observations = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => {
+            read.abort();
+            read.await
+                .map_err(|error| format!("cancelled pending read worker did not join: {error}"))?
+                .map_err(|error| {
+                    format!("cancelled pending read completed with failure: {error:?}")
+                })?;
+            return Ok(());
+        }
+        result = &mut read => result
+            .map_err(|error| format!("pending read worker failed: {error}"))?
+            .map_err(|error| format!("pending read failed: {error:?}"))?,
+    };
+    if observations.is_empty() {
+        return Ok(());
+    }
+    let envelopes = pending_census_envelopes(&producer, &project_id, &observations)
+        .map_err(|error| format!("pending envelope is invalid: {error}"))?;
+    let emission = producer.emit_owner_facts(envelopes);
+    tokio::pin!(emission);
+    tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Ok(()),
+        outcome = &mut emission => outcome
+            .map_err(|error| format!("durable claim failed: {error:?}"))?,
+    };
+    let mark_database = database.clone();
+    let mut mark = tokio::task::spawn_blocking(move || {
+        mark_durable_census_observations(&mark_database, &observations)
+    });
+    tokio::select! {
+        biased;
+        () = cancellation.cancelled() => {
+            mark.abort();
+            mark.await
+                .map_err(|error| {
+                    format!("cancelled durable marker worker did not join: {error}")
+                })?
+                .map_err(|error| {
+                    format!("cancelled durable marker completed with failure: {error:?}")
+                })?;
+            Ok(())
+        }
+        result = &mut mark => result
+            .map_err(|error| format!("durable marker worker failed: {error}"))?
+            .map_err(|error| format!("durable marker remains pending: {error:?}")),
     }
 }
 

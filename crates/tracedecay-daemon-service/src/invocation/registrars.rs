@@ -1023,6 +1023,8 @@ impl DaemonWorkRuntimeRegistrar {
                     })
                 },
                 || async {
+                    let durable_write_signal =
+                        super::types::WorkDurableWriteSignalV1::default();
                     let mut registered = RegisteredWorkRuntime {
                         database: database.clone(),
                         actor: actor.clone(),
@@ -1033,12 +1035,14 @@ impl DaemonWorkRuntimeRegistrar {
                         work_topology_policy: work_topology_policy.clone(),
                         proposal_routing: proposal_routing.clone(),
                         evidence_retrieval: evidence_retrieval.clone(),
+                        durable_write_signal: durable_write_signal.clone(),
                         blocked_interval_observation_recovery:
                             super::work_blocked_interval_recovery::WorkBlockedIntervalObservationRecoveryOwnerV1::mount(
                                 database.clone(),
                                 actor.clone(),
                                 grant.clone(),
                                 Arc::clone(&observability_producer),
+                                durable_write_signal.subscribe(),
                             )
                             .map_err(|error| TraceDecayError::Config {
                                 message: format!(
@@ -1050,6 +1054,7 @@ impl DaemonWorkRuntimeRegistrar {
                                 database.clone(),
                                 grant.scope.project_id.clone(),
                                 Arc::clone(&observability_producer),
+                                durable_write_signal.subscribe(),
                             )
                             .map_err(|error| TraceDecayError::Config {
                                 message: format!(

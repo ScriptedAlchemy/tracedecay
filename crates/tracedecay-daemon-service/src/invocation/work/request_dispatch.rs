@@ -865,6 +865,7 @@ pub(super) async fn dispatch_work_application(
                     WorkApplicationOutcomeV1::PauseRun,
                 );
                 offer_work_blocked_interval_receipts(
+                    &registered.durable_write_signal,
                     observability_producer.as_deref(),
                     context.scope().project_id.as_str(),
                     &open_receipts,
@@ -895,6 +896,7 @@ pub(super) async fn dispatch_work_application(
                     WorkApplicationOutcomeV1::ResumeRun,
                 );
                 offer_work_blocked_interval_receipts(
+                    &registered.durable_write_signal,
                     observability_producer.as_deref(),
                     context.scope().project_id.as_str(),
                     &settled_receipts,

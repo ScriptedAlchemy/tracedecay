@@ -21,10 +21,14 @@ use tracedecay_usecases::observability::{
     BoundedObservabilityProducerV1, work_blocked_interval_observation_envelope,
 };
 
+use super::recovery_schedule::run_recovery_loop;
 use super::work_blocked_interval_recovery_context;
 
 const RECOVERY_PAGE_LIMIT: u32 = 32;
-const RECOVERY_INTERVAL: Duration = Duration::from_secs(5);
+/// A restart scan provides prompt recovery; this interval is only a backstop
+/// for writes committed by older processes that could not emit this process's
+/// in-memory signal.
+const SAFETY_INTERVAL: Duration = Duration::from_secs(60);
 
 enum RecoveryFailureV1 {
     Database(tracedecay_domain::errors::TraceDecayError),
@@ -66,6 +70,7 @@ impl WorkBlockedIntervalObservationRecoveryOwnerV1 {
         actor: ActorId,
         grant: CapabilityGrantSnapshot,
         producer: Arc<BoundedObservabilityProducerV1>,
+        signal: tokio::sync::watch::Receiver<u64>,
     ) -> Result<Self, ApplicationContractError> {
         if producer.identity().authorized_scope_ref != grant.scope.project_id.as_str() {
             return Err(ApplicationContractError::Domain(
@@ -84,6 +89,7 @@ impl WorkBlockedIntervalObservationRecoveryOwnerV1 {
             database,
             context,
             producer,
+            signal,
             worker_cancellation,
         ));
         Ok(Self {
@@ -141,100 +147,93 @@ async fn run_recovery(
     database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     context: RequestContext,
     producer: Arc<BoundedObservabilityProducerV1>,
+    signal: tokio::sync::watch::Receiver<u64>,
     cancellation: CancellationToken,
 ) {
-    loop {
-        let read_database = database.clone();
-        let read_context = context.clone();
-        let mut read = tokio::task::spawn_blocking(move || {
-            read_pending_receipts(&read_database, &read_context)
-        });
-        let receipts = tokio::select! {
-            biased;
-            () = cancellation.cancelled() => {
-                read.abort();
-                return;
-            }
-            result = &mut read => match result {
-                Ok(Ok(receipts)) => receipts,
-                Ok(Err(error)) => {
-                    tracing::warn!(%error, "Work blocked-interval recovery scan failed");
-                    Vec::new()
-                }
-                Err(error) => {
-                    tracing::warn!(?error, "Work blocked-interval recovery scan worker failed");
-                    Vec::new()
-                }
-            },
-        };
+    let scan_cancellation = cancellation.clone();
+    run_recovery_loop(
+        signal,
+        cancellation,
+        SAFETY_INTERVAL,
+        "Work blocked-interval recovery",
+        move |_| {
+            let database = database.clone();
+            let context = context.clone();
+            let producer = Arc::clone(&producer);
+            let cancellation = scan_cancellation.clone();
+            async move { recover_once(database, context, producer, cancellation).await }
+        },
+    )
+    .await;
+}
 
-        for receipt in receipts {
-            if !receipt.is_settled() {
-                tracing::warn!(
-                    "Work blocked-interval recovery refused an unsettled source receipt"
-                );
-                continue;
-            }
-            let envelope = match work_blocked_interval_observation_envelope(
-                producer.as_ref(),
-                context.scope().project_id.as_str(),
-                &receipt,
-            ) {
-                Ok(envelope) => envelope,
-                Err(error) => {
-                    tracing::warn!(
-                        error,
-                        "Work blocked-interval recovery refused an invalid source receipt"
-                    );
-                    continue;
-                }
-            };
-            let emission = producer.emit_owner_fact(envelope);
-            tokio::pin!(emission);
-            let emission = tokio::select! {
-                biased;
-                () = cancellation.cancelled() => return,
-                outcome = &mut emission => outcome,
-            };
-            if let Err(error) = emission {
-                tracing::warn!(
-                    ?error,
-                    "Work blocked-interval durable observability claim failed"
-                );
-                continue;
-            }
-
-            let mark_database = database.clone();
-            let mark_context = context.clone();
-            let mut mark = tokio::task::spawn_blocking(move || {
-                mark_receipt_durable(&mark_database, &mark_context, &receipt)
-            });
-            let marked = tokio::select! {
-                biased;
-                () = cancellation.cancelled() => {
-                    mark.abort();
-                    return;
-                }
-                result = &mut mark => result,
-            };
-            match marked {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => tracing::warn!(
-                    %error,
-                    "Work blocked-interval exact source marker remains pending"
-                ),
-                Err(error) => {
-                    tracing::warn!(?error, "Work blocked-interval source marker worker failed");
-                }
-            }
+async fn recover_once(
+    database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+    context: RequestContext,
+    producer: Arc<BoundedObservabilityProducerV1>,
+    cancellation: CancellationToken,
+) -> Result<(), String> {
+    let read_database = database.clone();
+    let read_context = context.clone();
+    let mut read =
+        tokio::task::spawn_blocking(move || read_pending_receipts(&read_database, &read_context));
+    let receipts = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => {
+            read.abort();
+            read.await
+                .map_err(|error| format!("cancelled scan worker did not join: {error}"))?
+                .map_err(|error| format!("cancelled scan completed with failure: {error}"))?;
+            return Ok(());
         }
+        result = &mut read => result
+            .map_err(|error| format!("scan worker failed: {error}"))?
+            .map_err(|error| format!("scan failed: {error}"))?,
+    };
 
+    for receipt in receipts {
+        if !receipt.is_settled() {
+            return Err("source receipt is not settled".to_owned());
+        }
+        let envelope = work_blocked_interval_observation_envelope(
+            producer.as_ref(),
+            context.scope().project_id.as_str(),
+            &receipt,
+        )
+        .map_err(|error| format!("source receipt is invalid: {error}"))?;
+        let emission = producer.emit_owner_fact(envelope);
+        tokio::pin!(emission);
         tokio::select! {
             biased;
-            () = cancellation.cancelled() => return,
-            () = tokio::time::sleep(RECOVERY_INTERVAL) => {}
+            () = cancellation.cancelled() => return Ok(()),
+            outcome = &mut emission => {
+                outcome
+                    .map_err(|error| format!("durable observability claim failed: {error:?}"))?;
+            }
+        }
+
+        let mark_database = database.clone();
+        let mark_context = context.clone();
+        let mut mark = tokio::task::spawn_blocking(move || {
+            mark_receipt_durable(&mark_database, &mark_context, &receipt)
+        });
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => {
+                mark.abort();
+                mark.await
+                    .map_err(|error| format!("cancelled marker worker did not join: {error}"))?
+                    .map_err(|error| {
+                        format!("cancelled marker completed with failure: {error}")
+                    })?;
+                return Ok(());
+            }
+            result = &mut mark => result
+                .map_err(|error| format!("source marker worker failed: {error}"))?
+                .map_err(|error| format!("exact source marker remains pending: {error}"))?,
         }
     }
+    Ok(())
 }
 
 fn read_pending_receipts(
