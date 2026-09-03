@@ -29,6 +29,11 @@ impl SemanticModelLifecyclePublicationIdentityV1 {
     pub fn state(&self) -> &SemanticModelLifecycleStateV1 {
         &self.state
     }
+
+    pub fn same_target(&self, other: &Self) -> bool {
+        self.state == other.state
+            && self.verified_ready_artifact_digest == other.verified_ready_artifact_digest
+    }
 }
 
 /// A Send-safe read lease over the canonical lifecycle state. Dropping the
@@ -97,8 +102,9 @@ impl LifecyclePublicationGateV1 {
         verified_ready: &watch::Sender<SemanticLifecycleVerifiedReadyEventV1>,
     ) -> Result<SemanticModelLifecycleEvaluationPublicationLeaseV1, ModelLifecycleErrorV1> {
         let mut guard = self.read();
+        let current = lifecycle_publication_identity(&guard, verified_ready)?;
         if guard.evaluation_publication_writers_waiting != 0
-            || lifecycle_publication_identity(&guard, verified_ready)? != expected.clone()
+            || !current.same_target(expected)
         {
             return Err(ModelLifecycleErrorV1::Rejected);
         }

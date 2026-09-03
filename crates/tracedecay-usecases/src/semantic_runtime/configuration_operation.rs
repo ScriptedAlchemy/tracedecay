@@ -381,16 +381,16 @@ impl ProductionSemanticConfigurationOperationV1 {
             rejected_with_context("semantic qualification preparation failed", error)
         })?;
 
-        if snapshot_authority.current().await.map_err(|error| {
+        let after = snapshot_authority.current().await.map_err(|error| {
             rejected_with_context("post-evaluation snapshot recheck failed", error)
-        })? != before
-        {
+        })?;
+        if !same_evaluation_target(&before, &after) {
             return Err(SemanticActivationCoordinationErrorV1::Conflict);
         }
 
         Ok(SemanticEvaluatedProfileQualificationV1 {
             evaluation,
-            snapshot: before,
+            snapshot: after,
             candidate: qualification_candidate,
         })
     }
@@ -409,8 +409,13 @@ impl ProductionSemanticConfigurationOperationV1 {
     ) -> Result<SemanticEvaluatedProfilePublicationV1, SemanticActivationCoordinationErrorV1> {
         let qualification = Self::qualify_profile(snapshot_authority, repo_root, candidate)
             .await
-            .map_err(|error| {
-                rejected_with_context("semantic profile qualification failed", error)
+            .map_err(|error| match error {
+                SemanticActivationCoordinationErrorV1::Conflict => {
+                    SemanticActivationCoordinationErrorV1::RejectedDetail(
+                        "qualification target changed".to_owned(),
+                    )
+                }
+                error => rejected_with_context("semantic profile qualification failed", error),
             })?;
         let before = qualification.snapshot().clone();
         let candidate = qualification.candidate().clone();
@@ -420,10 +425,10 @@ impl ProductionSemanticConfigurationOperationV1 {
                 rejected_with_context("semantic publication preparation failed", error)
             })?;
 
-        if snapshot_authority.current().await.map_err(|error| {
+        let prepublication = snapshot_authority.current().await.map_err(|error| {
             rejected_with_context("pre-publication snapshot recheck failed", error)
-        })? != before
-        {
+        })?;
+        if !same_evaluation_target(&before, &prepublication) {
             return Err(SemanticActivationCoordinationErrorV1::Conflict);
         }
 
@@ -436,13 +441,20 @@ impl ProductionSemanticConfigurationOperationV1 {
             query_fallback: prepared.query_fallback,
         };
         snapshot_authority
-            .publish_if_current(&before, publication)
+            .publish_if_current(&prepublication, publication)
             .await
-            .map_err(|error| rejected_with_context("semantic publication commit failed", error))?;
+            .map_err(|error| match error {
+                SemanticActivationCoordinationErrorV1::Conflict => {
+                    SemanticActivationCoordinationErrorV1::RejectedDetail(
+                        "publication target changed".to_owned(),
+                    )
+                }
+                error => rejected_with_context("semantic publication commit failed", error),
+            })?;
         Ok(SemanticEvaluatedProfilePublicationV1 {
             report: prepared.report,
             accepted_profile: prepared.accepted_profile,
-            snapshot: before,
+            snapshot: prepublication,
         })
     }
 
@@ -672,6 +684,31 @@ fn rejected_with_context(
         }
         error => error,
     }
+}
+
+fn same_evaluation_target(
+    before: &SemanticEvaluationPublicationSnapshotV1,
+    after: &SemanticEvaluationPublicationSnapshotV1,
+) -> bool {
+    let same_lifecycle = match (
+        &before.semantic_lifecycle_verification,
+        &after.semantic_lifecycle_verification,
+    ) {
+        (Some(before), Some(after)) => before.same_target_identity(after),
+        (None, None) => true,
+        _ => false,
+    };
+    before.project_root == after.project_root
+        && before.scope == after.scope
+        && before.code_generation == after.code_generation
+        && before.code_source_manifest_digest == after.code_source_manifest_digest
+        && before.code_snapshot_digest == after.code_snapshot_digest
+        && before.code_capability_manifest_digest == after.code_capability_manifest_digest
+        && before.semantic_source_generation == after.semantic_source_generation
+        && before.semantic_source_manifest_digest == after.semantic_source_manifest_digest
+        && before.vector_generation_id == after.vector_generation_id
+        && same_lifecycle
+        && before.runtime == after.runtime
 }
 
 fn log_semantic_activation_failure(

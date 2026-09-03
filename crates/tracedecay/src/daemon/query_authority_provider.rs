@@ -303,7 +303,12 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
                 Ok(())
             }
             .await;
-            if observed.is_err() {
+            if let Err(error) = &observed {
+                tracing::warn!(
+                    project_root = %project_root.display(),
+                    error = ?error,
+                    "committed semantic query activation could not publish serving authorities"
+                );
                 let cache_generation = active_semantic_generation
                     .as_ref()
                     .or(rollback_semantic_generation.as_ref());

@@ -1493,7 +1493,9 @@ impl SemanticEvaluationPublicationSnapshotPortV1
                     ))
                     .await?;
                 let Some(_code_lease) = code_lease else {
-                    return Err(SemanticActivationCoordinationErrorV1::Conflict);
+                    return Err(SemanticActivationCoordinationErrorV1::RejectedDetail(
+                        "semantic publication code snapshot changed".to_owned(),
+                    ));
                 };
                 let semantic_lifecycle_verification =
                     expected.semantic_lifecycle_verification.clone();
@@ -1536,7 +1538,11 @@ impl SemanticEvaluationPublicationSnapshotPortV1
                                 label = "daemon.semantic.evaluation.publish.vector_lease"
                             ))
                             .await?
-                            .map_err(|_| SemanticActivationCoordinationErrorV1::Conflict)?,
+                            .map_err(|_| {
+                                SemanticActivationCoordinationErrorV1::RejectedDetail(
+                                    "semantic publication vector snapshot changed".to_owned(),
+                                )
+                            })?,
                     ),
                     None => None,
                 };
@@ -1558,7 +1564,15 @@ impl SemanticEvaluationPublicationSnapshotPortV1
                         },
                         label = "daemon.semantic.evaluation.publish.lifecycle_lease"
                     ));
-                    Some(await_semantic_task(&self.snapshot.control, &mut acquisition).await?)
+                    Some(
+                        await_semantic_task(&self.snapshot.control, &mut acquisition)
+                            .await
+                            .map_err(|_| {
+                                SemanticActivationCoordinationErrorV1::RejectedDetail(
+                                    "semantic publication lifecycle snapshot changed".to_owned(),
+                                )
+                            })?,
+                    )
                 } else {
                     None
                 };

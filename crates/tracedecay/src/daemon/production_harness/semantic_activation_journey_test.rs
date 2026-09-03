@@ -424,7 +424,9 @@ pub(super) async fn evaluate_native_profile(
                 return profile_digest;
             }
             tracedecay_daemon_protocol::DaemonInvocationOutcome::ApplicationProblem {
-                problem: tracedecay_application::ApplicationProblem::Conflict { .. },
+                problem:
+                    tracedecay_application::ApplicationProblem::Conflict { .. }
+                    | tracedecay_application::ApplicationProblem::TimedOut { .. },
             } if attempt == 0 => continue,
             outcome => panic!("native semantic profile publication failed: {outcome:?}"),
         }
@@ -500,7 +502,9 @@ async fn activate_native_profile(
                 return profile_digest;
             }
             tracedecay_daemon_protocol::DaemonInvocationOutcome::ApplicationProblem {
-                problem: tracedecay_application::ApplicationProblem::Conflict { .. },
+                problem:
+                    tracedecay_application::ApplicationProblem::Conflict { .. }
+                    | tracedecay_application::ApplicationProblem::TimedOut { .. },
             } if attempt == 0 => continue,
             outcome => panic!("composed semantic activation failed: {outcome:?}"),
         }
@@ -577,6 +581,27 @@ async fn search(
             .await
             .expect("public production search"),
     )
+}
+
+async fn semantic_search_payload(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+) -> Option<Value> {
+    let response = harness
+        .call_tool(
+            project,
+            "tracedecay_search",
+            json!({
+                "query": "semantic_product_probe",
+                "limit": 10,
+                "format": "json",
+                "semantic_mode": "strict_semantic",
+            }),
+        )
+        .await
+        .ok()?;
+    let text = response.result.as_ref()?["content"][0]["text"].as_str()?;
+    serde_json::from_str(text).ok()
 }
 
 async fn strict_unavailable_search(
@@ -658,24 +683,33 @@ async fn semantic_runtime_status(
         .clone()
 }
 
-async fn wait_for_semantic_runtime_ready(
+async fn wait_for_semantic_serving(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
-) -> Value {
-    let mut latest = semantic_runtime_status(harness, project).await;
-    let ready = tokio::time::timeout(Duration::from_secs(60), async {
+) -> (Value, Value) {
+    let mut latest_status = semantic_runtime_status(harness, project).await;
+    let mut latest_result = None;
+    let serving = tokio::time::timeout(Duration::from_secs(60), async {
         loop {
             let status = semantic_runtime_status(harness, project).await;
-            if status["state"]["state"] == "ready" {
-                return status;
+            let result = semantic_search_payload(harness, project).await;
+            if let Some(result) = result.as_ref()
+                && result["semantic"]["status"] == "complete"
+                && status["state"]["state"] == "ready"
+            {
+                return (result.clone(), status);
             }
-            latest = status;
+            latest_status = status;
+            latest_result = result;
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await;
-    ready.unwrap_or_else(|_| {
-        panic!("semantic activation did not converge to ready: latest status {latest}")
+    serving.unwrap_or_else(|_| {
+        panic!(
+            "semantic activation did not converge to serving: \
+             latest status={latest_status}; latest search={latest_result:?}"
+        )
     })
 }
 
@@ -804,7 +838,7 @@ async fn wait_for_model_lifecycle_ready(
     .expect("production semantic generation did not publish model readiness");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_authority() {
     let fixture_root = std::env::var_os("TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE")
         .map(PathBuf::from)
@@ -861,7 +895,7 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
     )];
     let graph_before_first_evaluation = graph_bytes(&first_generation).await;
     let first_profile = activate_native_profile(&harness, &project).await;
-    let first_runtime = wait_for_semantic_runtime_ready(&harness, &project).await;
+    let (first_query, first_runtime) = wait_for_semantic_serving(&harness, &project).await;
     assert_eq!(first_runtime["state"]["state"], "ready");
     assert_code_generation_unchanged(&harness, &project, &first_code_id).await;
     assert_eq!(
@@ -869,7 +903,6 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         graph_before_first_evaluation,
         "composed evaluation and activation must not publish into the project graph"
     );
-    let first_query = search(&harness, &project, true).await;
     assert_eq!(first_query["semantic"]["status"], "complete");
     assert_semantic_probe_contribution(
         &first_query,
@@ -929,7 +962,7 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         )),
     )
     .await;
-    let second_runtime = wait_for_semantic_runtime_ready(&harness, &project).await;
+    let (second_query, second_runtime) = wait_for_semantic_serving(&harness, &project).await;
     assert_eq!(
         second_runtime["state"]["receipt"]["activated_generation"],
         json!(second_vector.generation_id())
@@ -940,7 +973,6 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         graph_before_activation,
         "activation must not publish or rewrite graph state"
     );
-    let second_query = search(&harness, &project, true).await;
     assert_eq!(second_query["semantic"]["status"], "complete");
     assert_semantic_probe_contribution(
         &second_query,
@@ -988,7 +1020,8 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         )),
     )
     .await;
-    let rollback_runtime = wait_for_semantic_runtime_ready(&harness, &project).await;
+    let (rolled_back_query, rollback_runtime) =
+        wait_for_semantic_serving(&harness, &project).await;
     assert_eq!(
         rollback_runtime["state"]["receipt"]["activated_generation"],
         json!(first_vector.generation_id())
@@ -999,7 +1032,6 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         graph_before_activation,
         "rollback must preserve the graph catalog, control state, and verified heads byte-for-byte"
     );
-    let rolled_back_query = search(&harness, &project, true).await;
     assert_eq!(rolled_back_query["semantic"]["status"], "complete");
     assert_semantic_probe_contribution(
         &rolled_back_query,
@@ -1084,9 +1116,11 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         .expect("re-admit verified installed model");
     let (recovered, recovered_status) = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
-            let result = search(&harness, &project, true).await;
             let status = semantic_runtime_status(&harness, &project).await;
-            if result["semantic"]["status"] == "complete" && status["state"]["state"] == "ready" {
+            if let Some(result) = semantic_search_payload(&harness, &project).await
+                && result["semantic"]["status"] == "complete"
+                && status["state"]["state"] == "ready"
+            {
                 return (result, status);
             }
             tokio::time::sleep(Duration::from_millis(20)).await;

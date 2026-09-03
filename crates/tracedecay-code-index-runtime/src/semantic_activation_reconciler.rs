@@ -83,8 +83,7 @@ impl DaemonSemanticActivationReconcilerV1 {
                             }
                             Ok(Err(
                                 SemanticActivationCoordinationErrorV1::Rejected
-                                | SemanticActivationCoordinationErrorV1::RejectedDetail(_)
-                                | SemanticActivationCoordinationErrorV1::Conflict,
+                                | SemanticActivationCoordinationErrorV1::RejectedDetail(_),
                             )) => {
                                 hotpath::gauge!(
                                     "daemon.semantic.activation_reconciler.reobserve.refused_total"
@@ -94,7 +93,8 @@ impl DaemonSemanticActivationReconcilerV1 {
                             }
                             Ok(Err(
                                 SemanticActivationCoordinationErrorV1::Unavailable
-                                | SemanticActivationCoordinationErrorV1::Runtime(_),
+                                | SemanticActivationCoordinationErrorV1::Runtime(_)
+                                | SemanticActivationCoordinationErrorV1::Conflict,
                             ))
                             | Err(_) => {
                                 hotpath::gauge!(

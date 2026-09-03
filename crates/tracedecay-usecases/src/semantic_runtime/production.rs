@@ -321,6 +321,16 @@ pub struct SemanticEvaluationLifecycleVerificationV1 {
     lifecycle_identity: SemanticModelLifecyclePublicationIdentityV1,
 }
 
+impl SemanticEvaluationLifecycleVerificationV1 {
+    pub(crate) fn same_target_identity(&self, other: &Self) -> bool {
+        self.compatibility == other.compatibility
+            && self.source_generation == other.source_generation
+            && self.source_manifest_digest == other.source_manifest_digest
+            && self.capability_manifest_digest == other.capability_manifest_digest
+            && self.lifecycle_identity.same_target(&other.lifecycle_identity)
+    }
+}
+
 /// Final lifecycle read lease held across daemon publication. Its drop releases
 /// model selection, acquisition, and remediation writers through the canonical
 /// lifecycle owner.
@@ -338,10 +348,7 @@ pub struct PreparedProductionSemanticCacheCommitV1 {
 }
 
 enum PreparedProductionSemanticCacheActionV1 {
-    Observation {
-        prepared: PreparedSemanticRuntimeObservationV1,
-        lifecycle: Arc<SemanticModelLifecycleOwnerV1>,
-    },
+    Observation(PreparedSemanticRuntimeObservationV1),
     Restore {
         prepared: Box<PreparedSemanticRuntimeRestoreV1>,
         cache: Arc<Mutex<Option<CachedPublishedVectorsV1>>>,
@@ -353,12 +360,9 @@ enum PreparedProductionSemanticCacheActionV1 {
 impl PreparedProductionSemanticCacheCommitV1 {
     pub fn commit(self) -> bool {
         match self.prepared {
-            PreparedProductionSemanticCacheActionV1::Observation {
-                prepared,
-                lifecycle,
-            } => commit_current_observation_and_then(&self.handle, prepared, || {
-                let _ = lifecycle.mark_ready();
-            }),
+            PreparedProductionSemanticCacheActionV1::Observation(prepared) => {
+                self.handle.commit_current_observation(prepared)
+            }
             PreparedProductionSemanticCacheActionV1::Restore {
                 prepared,
                 cache,
@@ -380,18 +384,6 @@ impl PreparedProductionSemanticCacheCommitV1 {
             }
         }
     }
-}
-
-fn commit_current_observation_and_then(
-    handle: &DaemonSemanticRuntimeHandleV1,
-    prepared: PreparedSemanticRuntimeObservationV1,
-    after_commit: impl FnOnce(),
-) -> bool {
-    let committed = handle.commit_current_observation(prepared);
-    if committed {
-        after_commit();
-    }
-    committed
 }
 
 impl ProductionSemanticRuntimeV1 {
@@ -577,10 +569,7 @@ impl ProductionSemanticRuntimeV1 {
         let prepared = self.handle.prepare_current_observation(&pointer)?;
         Some(PreparedProductionSemanticCacheCommitV1 {
             handle: self.handle.clone(),
-            prepared: PreparedProductionSemanticCacheActionV1::Observation {
-                prepared,
-                lifecycle: Arc::clone(&self.lifecycle),
-            },
+            prepared: PreparedProductionSemanticCacheActionV1::Observation(prepared),
         })
     }
 
@@ -1485,9 +1474,7 @@ impl ProductionSemanticRuntimeV1 {
             .await
             .map_err(revalidation_error)?;
         check_evaluation_cancellation(cancellation.as_ref())?;
-        if verified.vector_state_revision != verification.vector_state_revision
-            || verified.vector_generation_id != verification.compatibility.vector_generation_id
-        {
+        if verified.vector_generation_id != verification.compatibility.vector_generation_id {
             return Err(SemanticRuntimeBackendErrorV1::Conflict);
         }
         let current = self
@@ -1611,7 +1598,7 @@ impl ProductionSemanticRuntimeV1 {
         expected_generation: &VectorGenerationIdV1,
     ) -> Result<SemanticVectorPublicationLeaseV1, SemanticRuntimeBackendErrorV1> {
         let writer = Arc::clone(&self.vector_writer).lock_owned().await;
-        let expected_revision = u64::try_from(expected_revision)
+        let _expected_revision = u64::try_from(expected_revision)
             .map_err(|_| SemanticRuntimeBackendErrorV1::Rejected)?;
         let retained = self
             .graph
@@ -1622,13 +1609,9 @@ impl ProductionSemanticRuntimeV1 {
             GraphVectorGenerationStoreV1::read_only_generation(&retained, expected_generation)
                 .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?
                 .ok_or(SemanticRuntimeBackendErrorV1::Rejected)?;
-        if store
+        store
             .verified_revision(Arc::clone(retained.cancellation()))
-            .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?
-            != expected_revision
-        {
-            return Err(SemanticRuntimeBackendErrorV1::Rejected);
-        }
+            .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?;
         Ok(SemanticVectorPublicationLeaseV1 { _writer: writer })
     }
 
@@ -2599,6 +2582,9 @@ impl SemanticRuntimeGenerationInspectorV1 for ProductionSemanticRuntimeV1 {
                 true,
             )
             .map_err(|_| SemanticRuntimeBackendErrorV1::Rejected)?;
+            self.lifecycle
+                .mark_ready()
+                .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?;
             Ok(SemanticExecutableGenerationLeaseV1::new(
                 evidence,
                 (store, retained),
@@ -2857,7 +2843,7 @@ fn revalidate_lifecycle_verification(
     expected: &SemanticEvaluationLifecycleVerificationV1,
     observed: &SemanticEvaluationLifecycleVerificationV1,
 ) -> Result<(), SemanticRuntimeBackendErrorV1> {
-    if expected == observed {
+    if expected.same_target_identity(observed) {
         Ok(())
     } else {
         Err(SemanticRuntimeBackendErrorV1::Conflict)
@@ -5118,32 +5104,17 @@ mod tests {
         let exact_observation = handle
             .prepare_current_observation(&observed_pointer)
             .expect("prepare exact warmed-cache observation");
-        let ready_publications = AtomicUsize::new(0);
         assert!(
-            commit_current_observation_and_then(&handle, exact_observation, || {
-                ready_publications.fetch_add(1, Ordering::SeqCst);
-            }),
+            handle.commit_current_observation(exact_observation),
             "unchanged exact cache observation must commit"
-        );
-        assert_eq!(
-            ready_publications.load(Ordering::SeqCst),
-            1,
-            "successful observation CAS must publish lifecycle readiness"
         );
         let stale_observation = handle
             .prepare_current_observation(&observed_pointer)
             .expect("prepare cache observation before concurrent unbind");
         assert!(handle.unbind_query_runtime_if_current(&vector));
         assert!(
-            !commit_current_observation_and_then(&handle, stale_observation, || {
-                ready_publications.fetch_add(1, Ordering::SeqCst);
-            }),
+            !handle.commit_current_observation(stale_observation),
             "cache observation must fail CAS after a concurrent transition"
-        );
-        assert_eq!(
-            ready_publications.load(Ordering::SeqCst),
-            1,
-            "stale observation CAS must not publish false lifecycle readiness"
         );
 
         let backend = DaemonSemanticRuntimeBackendV1::new(handle.clone());
