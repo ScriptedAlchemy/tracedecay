@@ -29,12 +29,12 @@ use crate::types::{
 
 pub struct QuintExtractor;
 
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     errors: Vec<String>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     file_node_id: String,
     timestamp: u64,
     /// Nested scopes. The first entry is the file; subsequent entries are
@@ -44,8 +44,8 @@ struct ExtractionState {
     scope_stack: Vec<(String, String, u32)>,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -56,19 +56,19 @@ impl ExtractionState {
             edges: Vec::new(),
             errors: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             file_node_id,
             timestamp,
             scope_stack: Vec::new(),
         }
     }
 
-    fn node_str(&self, node: TsNode<'_>) -> &str {
-        node.utf8_text(&self.source).unwrap_or("<invalid utf8>")
+    fn node_str(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        self.node_str(node).to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        self.node_str(node)
     }
 }
 
@@ -143,14 +143,14 @@ impl TokenWalker {
             }
             "identifier" => {
                 if let Some((parts, _)) = self.import_collect.as_mut() {
-                    parts.push(state.node_text(child));
+                    parts.push(state.node_text(child).to_string());
                 } else if let Some(pending) = self.pending.take() {
                     let name = state.node_text(child);
-                    let id = QuintExtractor::emit_node(state, child, pending, &name);
+                    let id = QuintExtractor::emit_node(state, child, pending, name);
                     if matches!(pending, PendingKind::Module) {
                         let qualified = match state.scope_stack.last() {
                             Some((qualified_name, _, _)) => format!("{qualified_name}::{name}"),
-                            None => name.clone(),
+                            None => name.to_string(),
                         };
                         self.pending_open = Some((qualified, id));
                     }
@@ -228,7 +228,7 @@ impl QuintExtractor {
         )
     }
 
-    fn initialize_state(file_path: &str, source: &str) -> ExtractionState {
+    fn initialize_state<'s>(file_path: &str, source: &'s str) -> ExtractionState<'s> {
         let mut state = ExtractionState::new(file_path, source);
         let file_node = Node {
             id: state.file_node_id.clone(),

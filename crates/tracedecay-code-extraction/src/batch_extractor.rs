@@ -14,7 +14,7 @@ use crate::types::{
 pub struct BatchExtractor;
 
 /// Internal state used during AST traversal.
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
@@ -22,12 +22,12 @@ struct ExtractionState {
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -39,7 +39,7 @@ impl ExtractionState {
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
         }
     }
@@ -64,10 +64,8 @@ impl ExtractionState {
     }
 
     /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
@@ -285,7 +283,7 @@ impl BatchExtractor {
             .strip_prefix("set ")
             .or_else(|| text.strip_prefix("SET "))
             .or_else(|| text.strip_prefix("Set "))
-            .unwrap_or(&text);
+            .unwrap_or(text);
 
         // Handle /a, /p options
         let after_opts = if after_set.starts_with("/a ")
@@ -415,7 +413,7 @@ impl BatchExtractor {
         if node.kind() == "call_stmt" {
             let text = state.node_text(node);
             // Parse the callee: "call :LabelName ..." → "LabelName"
-            if let Some(callee) = Self::parse_call_target(&text) {
+            if let Some(callee) = Self::parse_call_target(text) {
                 state.unresolved_refs.push(UnresolvedRef {
                     from_node_id: fn_node_id.to_string(),
                     reference_name: callee,

@@ -19,7 +19,7 @@ mod types;
 pub struct CppExtractor;
 
 /// Internal state used during AST traversal.
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
@@ -27,7 +27,7 @@ struct ExtractionState {
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
     /// Current access specifier visibility inside a class/struct body.
     access_specifier: Visibility,
@@ -35,8 +35,8 @@ struct ExtractionState {
     class_depth: usize,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -48,7 +48,7 @@ impl ExtractionState {
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
             access_specifier: Visibility::Private,
             class_depth: 0,
@@ -77,15 +77,15 @@ impl ExtractionState {
     /// Borrowed text of a tree-sitter node, sliced straight from the source.
     /// Use for signature extraction on nodes with bodies so the (possibly
     /// huge) body is never materialized into an owned `String`.
-    fn node_str(&self, node: TsNode<'_>) -> &str {
-        node.utf8_text(&self.source).unwrap_or("<invalid utf8>")
+    fn node_str(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 
     /// Source slice from `node.start_byte()` up to `end_byte`.
     ///
     /// Callers pass a body child's start so the (possibly huge) body is
     /// never even borrowed as a `&str`, let alone copied.
-    fn text_before(&self, node: TsNode<'_>, end_byte: usize) -> &str {
+    fn text_before(&self, node: TsNode<'_>, end_byte: usize) -> &'s str {
         let start = node.start_byte();
         let end = end_byte.min(self.source.len()).max(start);
         std::str::from_utf8(&self.source[start..end]).unwrap_or("<invalid utf8>")

@@ -19,7 +19,7 @@ use crate::types::{
 pub struct GlslExtractor;
 
 /// Internal state used during AST traversal.
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
@@ -27,12 +27,12 @@ struct ExtractionState {
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -44,7 +44,7 @@ impl ExtractionState {
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
         }
     }
@@ -67,10 +67,8 @@ impl ExtractionState {
         self.node_stack.last().map(|(_, id)| id.as_str())
     }
 
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
@@ -184,7 +182,7 @@ impl GlslExtractor {
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &NodeKind::Function, &name, start_line);
-        let metrics = count_complexity(node, &C_COMPLEXITY, &state.source);
+        let metrics = count_complexity(node, &C_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -231,7 +229,7 @@ impl GlslExtractor {
         if let Some(declarator) = find_descendant_by_kind(node, "function_declarator")
             && let Some(ident) = find_direct_child_by_kind(declarator, "identifier")
         {
-            return Some(state.node_text(ident));
+            return Some(state.node_text(ident).to_string());
         }
         None
     }
@@ -385,24 +383,24 @@ impl GlslExtractor {
         // init_declarator: `int x = 0;`
         if let Some(init_decl) = find_direct_child_by_kind(node, "init_declarator") {
             if let Some(ident) = find_direct_child_by_kind(init_decl, "identifier") {
-                return Some(state.node_text(ident));
+                return Some(state.node_text(ident).to_string());
             }
             // array declarator: `float arr[3] = ...`
             if let Some(arr) = find_direct_child_by_kind(init_decl, "array_declarator")
                 && let Some(ident) = find_direct_child_by_kind(arr, "identifier")
             {
-                return Some(state.node_text(ident));
+                return Some(state.node_text(ident).to_string());
             }
         }
         // Direct identifier: `uniform vec3 lightPos;`
         if let Some(ident) = find_direct_child_by_kind(node, "identifier") {
-            return Some(state.node_text(ident));
+            return Some(state.node_text(ident).to_string());
         }
         // Array declarator without init: `in vec2 texCoords[];`
         if let Some(arr) = find_direct_child_by_kind(node, "array_declarator")
             && let Some(ident) = find_direct_child_by_kind(arr, "identifier")
         {
-            return Some(state.node_text(ident));
+            return Some(state.node_text(ident).to_string());
         }
         None
     }
@@ -412,8 +410,10 @@ impl GlslExtractor {
             return;
         }
 
-        let name = find_direct_child_by_kind(node, "type_identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "type_identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -535,26 +535,28 @@ impl GlslExtractor {
     fn find_field_name(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
         // field_identifier is used in struct field declarations
         if let Some(fi) = find_direct_child_by_kind(node, "field_identifier") {
-            return Some(state.node_text(fi));
+            return Some(state.node_text(fi).to_string());
         }
         if let Some(ident) = find_direct_child_by_kind(node, "identifier") {
-            return Some(state.node_text(ident));
+            return Some(state.node_text(ident).to_string());
         }
         // Array field: `float values[4];`
         if let Some(arr) = find_direct_child_by_kind(node, "array_declarator") {
             if let Some(fi) = find_direct_child_by_kind(arr, "field_identifier") {
-                return Some(state.node_text(fi));
+                return Some(state.node_text(fi).to_string());
             }
             if let Some(ident) = find_direct_child_by_kind(arr, "identifier") {
-                return Some(state.node_text(ident));
+                return Some(state.node_text(ident).to_string());
             }
         }
         None
     }
 
     fn visit_preproc_def(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -604,7 +606,10 @@ impl GlslExtractor {
     fn visit_preproc_include(state: &mut ExtractionState, node: TsNode<'_>) {
         let include_path = find_direct_child_by_kind(node, "string_literal")
             .or_else(|| find_direct_child_by_kind(node, "system_lib_string"))
-            .map_or_else(|| "<unknown>".to_string(), |n| state.node_text(n));
+            .map_or_else(
+                || "<unknown>".to_string(),
+                |n| state.node_text(n).to_string(),
+            );
 
         let line = node.start_position().row as u32;
         let column = node.start_position().column as u32;
@@ -623,7 +628,7 @@ impl GlslExtractor {
 
     fn extract_call_sites(state: &mut ExtractionState, node: TsNode<'_>, fn_node_id: &str) {
         extract_call_expression_sites(
-            &state.source,
+            state.source,
             &state.file_path,
             &mut state.unresolved_refs,
             node,
@@ -632,7 +637,7 @@ impl GlslExtractor {
     }
 
     fn extract_docstring(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        docstring_from_preceding_comments(&state.source, node, clean_c_comment)
+        docstring_from_preceding_comments(state.source, node, clean_c_comment)
     }
 
     /// Check if a declaration has a GLSL storage qualifier (uniform, in, out, etc.)

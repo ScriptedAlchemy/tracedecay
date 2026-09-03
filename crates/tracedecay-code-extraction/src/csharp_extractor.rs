@@ -14,7 +14,7 @@ use crate::types::{
 pub struct CSharpExtractor;
 
 /// Internal state used during AST traversal.
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
@@ -22,14 +22,14 @@ struct ExtractionState {
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
     /// Track nesting depth to distinguish inner classes from top-level classes.
     class_depth: usize,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -41,7 +41,7 @@ impl ExtractionState {
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
             class_depth: 0,
         }
@@ -67,10 +67,8 @@ impl ExtractionState {
     }
 
     /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
@@ -256,10 +254,10 @@ impl CSharpExtractor {
         let path = text
             .trim()
             .strip_prefix("using ")
-            .unwrap_or(&text)
+            .unwrap_or(text)
             .trim()
             .strip_prefix("static ")
-            .unwrap_or(text.trim().strip_prefix("using ").unwrap_or(&text).trim())
+            .unwrap_or(text.trim().strip_prefix("using ").unwrap_or(text).trim())
             .trim_end_matches(';')
             .trim()
             .to_string();
@@ -587,7 +585,7 @@ impl CSharpExtractor {
                 loop {
                     let child = cursor.node();
                     if child.kind() == "identifier" {
-                        return state.node_text(child);
+                        return state.node_text(child).to_string();
                     }
                     if !cursor.goto_next_sibling() {
                         break;
@@ -662,7 +660,7 @@ impl CSharpExtractor {
         };
 
         let id = generate_node_id(&state.file_path, &kind, &name, start_line);
-        let metrics = count_complexity(node, &CSHARP_COMPLEXITY, &state.source);
+        let metrics = count_complexity(node, &CSHARP_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -719,7 +717,7 @@ impl CSharpExtractor {
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &NodeKind::Constructor, &name, start_line);
-        let metrics = count_complexity(node, &CSHARP_COMPLEXITY, &state.source);
+        let metrics = count_complexity(node, &CSHARP_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -783,7 +781,7 @@ impl CSharpExtractor {
 
         let type_str = node
             .child_by_field_name("type")
-            .map(|n| state.node_text(n))
+            .map(|n| state.node_text(n).to_string())
             .unwrap_or_default();
         let sig = format!("{type_str} {name}");
 
@@ -879,7 +877,10 @@ impl CSharpExtractor {
                             }
                             None
                         })
-                        .map_or_else(|| state.node_text(child), |n| state.node_text(n));
+                        .map_or_else(
+                            || state.node_text(child).to_string(),
+                            |n| state.node_text(n).to_string(),
+                        );
 
                     let qualified_name = format!("{}::{}", state.qualified_prefix(), field_name);
                     let id = generate_node_id(
@@ -1018,7 +1019,7 @@ impl CSharpExtractor {
             end_line,
             start_column,
             end_column,
-            signature: Some(signature_text),
+            signature: Some(signature_text.to_string()),
             docstring: None,
             visibility,
             is_async: false,
@@ -1178,7 +1179,8 @@ impl CSharpExtractor {
 
     /// Extract the name of a node by looking for a "name" field child.
     fn extract_name(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        node.child_by_field_name("name").map(|n| state.node_text(n))
+        node.child_by_field_name("name")
+            .map(|n| state.node_text(n).to_string())
     }
 
     /// Try to extract a `qualified_name` child for namespace declarations.
@@ -1188,7 +1190,7 @@ impl CSharpExtractor {
             loop {
                 let child = cursor.node();
                 if child.kind() == "qualified_name" || child.kind() == "identifier" {
-                    return Some(state.node_text(child));
+                    return Some(state.node_text(child).to_string());
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -1202,7 +1204,7 @@ impl CSharpExtractor {
     fn extract_event_name(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
         // Try the "name" field first
         if let Some(name_node) = node.child_by_field_name("name") {
-            return Some(state.node_text(name_node));
+            return Some(state.node_text(name_node).to_string());
         }
         // For event_field_declaration, look for variable_declaration > variable_declarator
         let mut cursor = node.walk();
@@ -1216,7 +1218,7 @@ impl CSharpExtractor {
                             let ic = inner.node();
                             if ic.kind() == "variable_declarator" {
                                 if let Some(name_node) = ic.child_by_field_name("name") {
-                                    return Some(state.node_text(name_node));
+                                    return Some(state.node_text(name_node).to_string());
                                 }
                                 // Try identifier child
                                 let mut deep = ic.walk();
@@ -1224,14 +1226,14 @@ impl CSharpExtractor {
                                     loop {
                                         let dc = deep.node();
                                         if dc.kind() == "identifier" {
-                                            return Some(state.node_text(dc));
+                                            return Some(state.node_text(dc).to_string());
                                         }
                                         if !deep.goto_next_sibling() {
                                             break;
                                         }
                                     }
                                 }
-                                return Some(state.node_text(ic));
+                                return Some(state.node_text(ic).to_string());
                             }
                             if !inner.goto_next_sibling() {
                                 break;
@@ -1255,7 +1257,7 @@ impl CSharpExtractor {
                 let child = cursor.node();
                 if child.kind() == "modifier" {
                     let text = state.node_text(child);
-                    match text.as_str() {
+                    match text {
                         "public" => return Visibility::Pub,
                         "private" => return Visibility::Private,
                         "internal" => return Visibility::PubCrate,
@@ -1411,7 +1413,7 @@ impl CSharpExtractor {
 
                     state.unresolved_refs.push(UnresolvedRef {
                         from_node_id: type_id.to_string(),
-                        reference_name: type_name,
+                        reference_name: type_name.to_string(),
                         reference_kind: edge_kind,
                         line: child.start_position().row as u32,
                         column: child.start_position().column as u32,
@@ -1523,7 +1525,7 @@ impl CSharpExtractor {
     /// Extract the attribute name from an attribute node.
     fn extract_attribute_name(state: &ExtractionState, node: TsNode<'_>) -> String {
         if let Some(name_node) = node.child_by_field_name("name") {
-            return state.node_text(name_node);
+            return state.node_text(name_node).to_string();
         }
         // Fallback: find the first named child that is an identifier
         let mut cursor = node.walk();
@@ -1531,7 +1533,7 @@ impl CSharpExtractor {
             loop {
                 let child = cursor.node();
                 if child.kind() == "identifier" || child.kind() == "qualified_name" {
-                    return state.node_text(child);
+                    return state.node_text(child).to_string();
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -1646,21 +1648,21 @@ impl CSharpExtractor {
     fn extract_invocation_name(state: &ExtractionState, node: TsNode<'_>) -> String {
         // invocation_expression: function + argument_list
         if let Some(func_node) = node.child_by_field_name("function") {
-            return state.node_text(func_node);
+            return state.node_text(func_node).to_string();
         }
         // Fallback: first child
         if let Some(first) = node.child(0)
             && first.kind() != "argument_list"
         {
-            return state.node_text(first);
+            return state.node_text(first).to_string();
         }
-        state.node_text(node)
+        state.node_text(node).to_string()
     }
 
     /// Extract the type name from an `object_creation_expression`.
     fn extract_object_creation_type(state: &ExtractionState, node: TsNode<'_>) -> String {
         if let Some(type_node) = node.child_by_field_name("type") {
-            return state.node_text(type_node);
+            return state.node_text(type_node).to_string();
         }
         // Fallback: look for type identifier children.
         let mut cursor = node.walk();
@@ -1672,7 +1674,7 @@ impl CSharpExtractor {
                         || child.kind() == "generic_name"
                         || child.kind() == "qualified_name")
                 {
-                    return state.node_text(child);
+                    return state.node_text(child).to_string();
                 }
                 if !cursor.goto_next_sibling() {
                     break;

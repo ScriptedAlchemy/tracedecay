@@ -21,7 +21,7 @@ use crate::types::{
 pub struct QBasicExtractor;
 
 /// Internal state used during AST traversal.
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
@@ -29,12 +29,12 @@ struct ExtractionState {
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -46,7 +46,7 @@ impl ExtractionState {
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
         }
     }
@@ -71,10 +71,8 @@ impl ExtractionState {
     }
 
     /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
@@ -243,13 +241,13 @@ impl QBasicExtractor {
         let start_column = line.start_position().column as u32;
         let end_column = line.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Const, &name, start_line);
+        let id = generate_node_id(&state.file_path, &NodeKind::Const, name, start_line);
         let text = state.node_text(line);
 
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Const,
-            name,
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -309,12 +307,12 @@ impl QBasicExtractor {
         let start_column = line.start_position().column as u32;
         let end_column = line.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Field, &name, start_line);
+        let id = generate_node_id(&state.file_path, &NodeKind::Field, name, start_line);
 
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Field,
-            name,
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -365,14 +363,14 @@ impl QBasicExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let struct_id = generate_node_id(&state.file_path, &NodeKind::Struct, &name, start_line);
+        let struct_id = generate_node_id(&state.file_path, &NodeKind::Struct, name, start_line);
         let text = state.node_text(node);
         let signature = text.lines().next().unwrap_or("").trim().to_string();
 
         let graph_node = Node {
             id: struct_id.clone(),
             kind: NodeKind::Struct,
-            name: name.clone(),
+            name: name.to_string(),
             qualified_name: qualified_name.clone(),
             file_path: state.file_path.clone(),
             start_line,
@@ -407,7 +405,7 @@ impl QBasicExtractor {
         }
 
         // Extract type_member children as Field nodes.
-        state.node_stack.push((name, struct_id.clone()));
+        state.node_stack.push((name.to_string(), struct_id.clone()));
         let mut child_cursor = node.walk();
         if child_cursor.goto_first_child() {
             loop {
@@ -435,13 +433,13 @@ impl QBasicExtractor {
         let start_column = member.start_position().column as u32;
         let end_column = member.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Field, &name, start_line);
+        let id = generate_node_id(&state.file_path, &NodeKind::Field, name, start_line);
         let text = state.node_text(member);
 
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Field,
-            name,
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -491,7 +489,7 @@ impl QBasicExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let fn_id = generate_node_id(&state.file_path, &NodeKind::Function, &name, start_line);
+        let fn_id = generate_node_id(&state.file_path, &NodeKind::Function, name, start_line);
 
         // Build signature from the first line of text.
         let text = state.node_text(node);
@@ -499,7 +497,7 @@ impl QBasicExtractor {
 
         // Count complexity using the generic counter.
         let metrics = if node.child_count() > 0 {
-            count_complexity(node, &QBASIC_COMPLEXITY, &state.source)
+            count_complexity(node, &QBASIC_COMPLEXITY, state.source)
         } else {
             ComplexityMetrics::default()
         };
@@ -507,7 +505,7 @@ impl QBasicExtractor {
         let graph_node = Node {
             id: fn_id.clone(),
             kind: NodeKind::Function,
-            name: name.clone(),
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -540,7 +538,7 @@ impl QBasicExtractor {
             });
         }
 
-        state.node_stack.push((name, fn_id.clone()));
+        state.node_stack.push((name.to_string(), fn_id.clone()));
         Self::walk_for_calls(state, node);
         state.node_stack.pop();
     }
@@ -561,13 +559,13 @@ impl QBasicExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let fn_id = generate_node_id(&state.file_path, &NodeKind::Function, &name, start_line);
+        let fn_id = generate_node_id(&state.file_path, &NodeKind::Function, name, start_line);
 
         let text = state.node_text(node);
         let signature = text.lines().next().unwrap_or("").trim().to_string();
 
         let metrics = if node.child_count() > 0 {
-            count_complexity(node, &QBASIC_COMPLEXITY, &state.source)
+            count_complexity(node, &QBASIC_COMPLEXITY, state.source)
         } else {
             ComplexityMetrics::default()
         };
@@ -575,7 +573,7 @@ impl QBasicExtractor {
         let graph_node = Node {
             id: fn_id.clone(),
             kind: NodeKind::Function,
-            name: name.clone(),
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -608,7 +606,7 @@ impl QBasicExtractor {
             });
         }
 
-        state.node_stack.push((name, fn_id.clone()));
+        state.node_stack.push((name.to_string(), fn_id.clone()));
         Self::walk_for_calls(state, node);
         state.node_stack.pop();
     }
@@ -628,7 +626,7 @@ impl QBasicExtractor {
 
         state.unresolved_refs.push(UnresolvedRef {
             from_node_id,
-            reference_name: target_name,
+            reference_name: target_name.to_string(),
             reference_kind: EdgeKind::Calls,
             line: call_stmt.start_position().row as u32,
             column: call_stmt.start_position().column as u32,

@@ -14,19 +14,19 @@ use crate::types::{
 pub struct ProtoExtractor;
 
 /// Internal state used during AST traversal.
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     errors: Vec<String>,
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -37,7 +37,7 @@ impl ExtractionState {
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
         }
     }
@@ -62,10 +62,8 @@ impl ExtractionState {
     }
 
     /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
@@ -161,7 +159,10 @@ impl ProtoExtractor {
         // package -> fullIdent -> ident
         let name = find_direct_child_by_kind(node, "fullIdent")
             .and_then(|fi| find_direct_child_by_kind(fi, "ident"))
-            .map_or_else(|| "<unknown>".to_string(), |n| state.node_text(n));
+            .map_or_else(
+                || "<unknown>".to_string(),
+                |n| state.node_text(n).to_string(),
+            );
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -281,7 +282,10 @@ impl ProtoExtractor {
         // message -> messageName -> ident, messageBody -> (field | message | oneof | enum | ...)
         let name = find_direct_child_by_kind(node, "messageName")
             .and_then(|mn| find_direct_child_by_kind(mn, "ident"))
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+            .map_or_else(
+                || "<anonymous>".to_string(),
+                |n| state.node_text(n).to_string(),
+            );
 
         let docstring = Self::extract_docstring(state, node);
         let start_line = node.start_position().row as u32;
@@ -360,14 +364,17 @@ impl ProtoExtractor {
         // field -> type, fieldName -> ident, `=`, fieldNumber -> intLit
         let name = find_direct_child_by_kind(node, "fieldName")
             .and_then(|fn_node| find_direct_child_by_kind(fn_node, "ident"))
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+            .map_or_else(
+                || "<anonymous>".to_string(),
+                |n| state.node_text(n).to_string(),
+            );
 
         let type_text = find_direct_child_by_kind(node, "type")
-            .map_or_else(|| "unknown".to_string(), |n| state.node_text(n));
+            .map_or_else(|| "unknown".to_string(), |n| state.node_text(n).to_string());
 
         let field_number = find_direct_child_by_kind(node, "fieldNumber")
             .and_then(|fn_node| find_direct_child_by_kind(fn_node, "intLit"))
-            .map_or_else(|| "?".to_string(), |n| state.node_text(n));
+            .map_or_else(|| "?".to_string(), |n| state.node_text(n).to_string());
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -419,7 +426,10 @@ impl ProtoExtractor {
         // enum -> enumName -> ident, enumBody -> enumField*
         let name = find_direct_child_by_kind(node, "enumName")
             .and_then(|en| find_direct_child_by_kind(en, "ident"))
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+            .map_or_else(
+                || "<anonymous>".to_string(),
+                |n| state.node_text(n).to_string(),
+            );
 
         let docstring = Self::extract_docstring(state, node);
         let start_line = node.start_position().row as u32;
@@ -492,11 +502,13 @@ impl ProtoExtractor {
     /// Extract an enum variant (enumField).
     fn visit_enum_field(state: &mut ExtractionState, node: TsNode<'_>) {
         // enumField -> ident, intLit
-        let name = find_direct_child_by_kind(node, "ident")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "ident").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let value = find_direct_child_by_kind(node, "intLit")
-            .map_or_else(|| "?".to_string(), |n| state.node_text(n));
+            .map_or_else(|| "?".to_string(), |n| state.node_text(n).to_string());
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -548,7 +560,10 @@ impl ProtoExtractor {
         // service -> serviceName -> ident, rpc*
         let name = find_direct_child_by_kind(node, "serviceName")
             .and_then(|sn| find_direct_child_by_kind(sn, "ident"))
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+            .map_or_else(
+                || "<anonymous>".to_string(),
+                |n| state.node_text(n).to_string(),
+            );
 
         let docstring = Self::extract_docstring(state, node);
         let start_line = node.start_position().row as u32;
@@ -621,7 +636,10 @@ impl ProtoExtractor {
         // rpc -> rpcName -> ident, enumMessageType (request), enumMessageType (response)
         let name = find_direct_child_by_kind(node, "rpcName")
             .and_then(|rn| find_direct_child_by_kind(rn, "ident"))
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+            .map_or_else(
+                || "<anonymous>".to_string(),
+                |n| state.node_text(n).to_string(),
+            );
 
         let docstring = Self::extract_docstring(state, node);
         let start_line = node.start_position().row as u32;
@@ -698,14 +716,17 @@ impl ProtoExtractor {
         // oneof_field -> type, fieldName -> ident, `=`, fieldNumber -> intLit.
         let name = find_direct_child_by_kind(node, "fieldName")
             .and_then(|fn_node| find_direct_child_by_kind(fn_node, "ident"))
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+            .map_or_else(
+                || "<anonymous>".to_string(),
+                |n| state.node_text(n).to_string(),
+            );
 
         let type_text = find_direct_child_by_kind(node, "type")
-            .map_or_else(|| "unknown".to_string(), |n| state.node_text(n));
+            .map_or_else(|| "unknown".to_string(), |n| state.node_text(n).to_string());
 
         let field_number = find_direct_child_by_kind(node, "fieldNumber")
             .and_then(|fn_node| find_direct_child_by_kind(fn_node, "intLit"))
-            .map_or_else(|| "?".to_string(), |n| state.node_text(n));
+            .map_or_else(|| "?".to_string(), |n| state.node_text(n).to_string());
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;

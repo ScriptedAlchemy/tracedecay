@@ -15,7 +15,7 @@ use crate::types::{
 pub struct PhpExtractor;
 
 /// Internal state used during AST traversal.
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
@@ -23,14 +23,14 @@ struct ExtractionState {
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
     /// Depth of class nesting. > 0 means we are inside a class/interface/trait.
     class_depth: usize,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -42,7 +42,7 @@ impl ExtractionState {
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
             class_depth: 0,
         }
@@ -68,10 +68,8 @@ impl ExtractionState {
     }
 
     /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
@@ -183,8 +181,10 @@ impl PhpExtractor {
 
     /// Extract a top-level function definition.
     fn visit_function(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "name")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "name").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let visibility = Visibility::Pub;
         let signature = Some(Self::extract_function_signature(state, node));
@@ -195,12 +195,12 @@ impl PhpExtractor {
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &NodeKind::Function, &name, start_line);
-        let metrics = count_complexity(node, &PHP_COMPLEXITY, &state.source);
+        let metrics = count_complexity(node, &PHP_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Function,
-            name: name.clone(),
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -242,8 +242,10 @@ impl PhpExtractor {
 
     /// Extract a class method declaration.
     fn visit_method(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "name")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "name").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let visibility = Self::extract_visibility(state, node);
         let signature = Some(Self::extract_function_signature(state, node));
@@ -254,12 +256,12 @@ impl PhpExtractor {
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &NodeKind::Method, &name, start_line);
-        let metrics = count_complexity(node, &PHP_COMPLEXITY, &state.source);
+        let metrics = count_complexity(node, &PHP_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Method,
-            name: name.clone(),
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -301,8 +303,10 @@ impl PhpExtractor {
 
     /// Extract a class declaration.
     fn visit_class(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "name")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "name").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let visibility = Visibility::Pub;
         let docstring = Self::extract_docstring(state, node);
@@ -317,7 +321,7 @@ impl PhpExtractor {
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Class,
-            name: name.clone(),
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -365,8 +369,10 @@ impl PhpExtractor {
 
     /// Extract an interface declaration.
     fn visit_interface(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "name")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "name").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let visibility = Visibility::Pub;
         let docstring = Self::extract_docstring(state, node);
@@ -380,7 +386,7 @@ impl PhpExtractor {
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Trait,
-            name: name.clone(),
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -424,8 +430,10 @@ impl PhpExtractor {
 
     /// Extract a trait declaration.
     fn visit_trait(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "name")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "name").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let visibility = Visibility::Pub;
         let docstring = Self::extract_docstring(state, node);
@@ -439,7 +447,7 @@ impl PhpExtractor {
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Trait,
-            name: name.clone(),
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -483,8 +491,10 @@ impl PhpExtractor {
 
     /// Extract an enum declaration.
     fn visit_enum(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "name")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "name").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let visibility = Visibility::Pub;
         let docstring = Self::extract_docstring(state, node);
@@ -498,7 +508,7 @@ impl PhpExtractor {
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Enum,
-            name: name.clone(),
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -561,8 +571,10 @@ impl PhpExtractor {
 
     /// Extract an enum case as an `EnumVariant`.
     fn visit_enum_case(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "name")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "name").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -574,7 +586,7 @@ impl PhpExtractor {
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::EnumVariant,
-            name: name.clone(),
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -610,8 +622,10 @@ impl PhpExtractor {
 
     /// Extract a namespace definition.
     fn visit_namespace(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "namespace_name")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "namespace_name").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let visibility = Visibility::Pub;
         let start_line = node.start_position().row as u32;
@@ -624,7 +638,7 @@ impl PhpExtractor {
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Module,
-            name: name.clone(),
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -680,7 +694,7 @@ impl PhpExtractor {
                     }
                     "qualified_name" | "name" => {
                         let name = state.node_text(child);
-                        Self::create_use_node(state, &name, node);
+                        Self::create_use_node(state, name, node);
                     }
                     _ => {}
                 }
@@ -695,7 +709,10 @@ impl PhpExtractor {
     fn visit_use_clause(state: &mut ExtractionState, clause: TsNode<'_>, use_node: TsNode<'_>) {
         let name = find_direct_child_by_kind(clause, "qualified_name")
             .or_else(|| find_direct_child_by_kind(clause, "name"))
-            .map_or_else(|| state.node_text(clause), |n| state.node_text(n));
+            .map_or_else(
+                || state.node_text(clause).to_string(),
+                |n| state.node_text(n).to_string(),
+            );
         Self::create_use_node(state, &name, use_node);
     }
 
@@ -703,7 +720,7 @@ impl PhpExtractor {
     fn visit_use_group(state: &mut ExtractionState, group: TsNode<'_>, use_node: TsNode<'_>) {
         // The group has a prefix and individual clauses.
         let prefix = find_direct_child_by_kind(group, "namespace_name")
-            .map(|n| state.node_text(n))
+            .map(|n| state.node_text(n).to_string())
             .unwrap_or_default();
 
         let mut cursor = group.walk();
@@ -713,7 +730,10 @@ impl PhpExtractor {
                 if child.kind() == "namespace_use_clause" {
                     let item = find_direct_child_by_kind(child, "name")
                         .or_else(|| find_direct_child_by_kind(child, "qualified_name"))
-                        .map_or_else(|| state.node_text(child), |n| state.node_text(n));
+                        .map_or_else(
+                            || state.node_text(child).to_string(),
+                            |n| state.node_text(n).to_string(),
+                        );
                     let full_name = if prefix.is_empty() {
                         item
                     } else {
@@ -802,8 +822,10 @@ impl PhpExtractor {
 
     /// Extract a single const element.
     fn visit_const_element(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "name")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "name").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -815,7 +837,7 @@ impl PhpExtractor {
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Const,
-            name: name.clone(),
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -860,10 +882,12 @@ impl PhpExtractor {
                 let child = cursor.node();
                 if child.kind() == "property_element" || child.kind() == "variable_name" {
                     let name = if child.kind() == "property_element" {
-                        find_direct_child_by_kind(child, "variable_name")
-                            .map_or_else(|| state.node_text(child), |n| state.node_text(n))
+                        find_direct_child_by_kind(child, "variable_name").map_or_else(
+                            || state.node_text(child).to_string(),
+                            |n| state.node_text(n).to_string(),
+                        )
                     } else {
-                        state.node_text(child)
+                        state.node_text(child).to_string()
                     };
                     let name = name.trim_start_matches('$').to_string();
 
@@ -878,7 +902,7 @@ impl PhpExtractor {
                     let graph_node = Node {
                         id: id.clone(),
                         kind: NodeKind::Field,
-                        name: name.clone(),
+                        name: name.to_string(),
                         qualified_name,
                         file_path: state.file_path.clone(),
                         start_line,
@@ -960,7 +984,7 @@ impl PhpExtractor {
         if let Some(base_clause) = find_direct_child_by_kind(node, "base_clause") {
             let base_name = find_direct_child_by_kind(base_clause, "qualified_name")
                 .or_else(|| find_direct_child_by_kind(base_clause, "name"))
-                .map(|n| state.node_text(n));
+                .map(|n| state.node_text(n).to_string());
             if let Some(name) = base_name {
                 let line = base_clause.start_position().row as u32;
                 let column = base_clause.start_position().column as u32;
@@ -989,7 +1013,7 @@ impl PhpExtractor {
                         let column = child.start_position().column as u32;
                         state.unresolved_refs.push(UnresolvedRef {
                             from_node_id: class_id.to_string(),
-                            reference_name: iface_name,
+                            reference_name: iface_name.to_string(),
                             reference_kind: EdgeKind::Implements,
                             line,
                             column,
@@ -1048,7 +1072,7 @@ impl PhpExtractor {
                 if child.kind() == "comment" {
                     let text = state.node_text(child);
                     if text.trim_start().starts_with("/**") {
-                        last_comment = Some(Self::strip_doc_comment(&text));
+                        last_comment = Some(Self::strip_doc_comment(text));
                     } else {
                         // Non-doc comment resets the docstring candidate.
                         last_comment = None;
@@ -1094,7 +1118,7 @@ impl PhpExtractor {
                             let callee_name = state.node_text(callee);
                             state.unresolved_refs.push(UnresolvedRef {
                                 from_node_id: fn_node_id.to_string(),
-                                reference_name: callee_name,
+                                reference_name: callee_name.to_string(),
                                 reference_kind: EdgeKind::Calls,
                                 line: child.start_position().row as u32,
                                 column: child.start_position().column as u32,
@@ -1108,7 +1132,7 @@ impl PhpExtractor {
                         // The method name is the "name" field child.
                         let method_name = child
                             .child_by_field_name("name")
-                            .map(|n| state.node_text(n));
+                            .map(|n| state.node_text(n).to_string());
                         if let Some(name) = method_name {
                             state.unresolved_refs.push(UnresolvedRef {
                                 from_node_id: fn_node_id.to_string(),
@@ -1125,11 +1149,11 @@ impl PhpExtractor {
                         // ClassName::method()
                         let method_name = child
                             .child_by_field_name("name")
-                            .map(|n| state.node_text(n));
+                            .map(|n| state.node_text(n).to_string());
                         if let Some(name) = method_name {
                             state.unresolved_refs.push(UnresolvedRef {
                                 from_node_id: fn_node_id.to_string(),
-                                reference_name: name,
+                                reference_name: name.to_string(),
                                 reference_kind: EdgeKind::Calls,
                                 line: child.start_position().row as u32,
                                 column: child.start_position().column as u32,
@@ -1265,14 +1289,14 @@ impl PhpExtractor {
     fn extract_attribute_name(state: &ExtractionState, node: TsNode<'_>) -> String {
         // PHP attributes have a "name" or "qualified_name" child.
         if let Some(name) = find_direct_child_by_kind(node, "name") {
-            return state.node_text(name);
+            return state.node_text(name).to_string();
         }
         if let Some(qn) = find_direct_child_by_kind(node, "qualified_name") {
-            return state.node_text(qn);
+            return state.node_text(qn).to_string();
         }
         // Fallback: full text before '('
         let text = state.node_text(node);
-        text.split('(').next().unwrap_or(&text).trim().to_string()
+        text.split('(').next().unwrap_or(text).trim().to_string()
     }
 
     /// Build the final `ExtractionResult` from the accumulated state.
