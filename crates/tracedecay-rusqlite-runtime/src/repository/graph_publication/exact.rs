@@ -242,6 +242,95 @@ pub(crate) fn retire_replay_in_transaction(
     if has_active_inbound_dependencies(transaction, replay.sequence)? {
         return Ok(GraphReplayRetirementOutcomeV1::Conflict);
     }
+    tombstone_retired_replay(transaction, encoded, request, &replay)
+}
+
+pub(crate) fn retire_verified_head_replay_in_transaction(
+    transaction: &ExactSqlTransaction,
+    request: &GraphPublicationReplayRetirementV1,
+    expected_head: &GraphVerifiedHeadV1,
+) -> GraphPublicationStoreResultV1<GraphReplayRetirementOutcomeV1> {
+    request.validate()?;
+    let encoded = EncodedProjection::new(&request.key.projection)?;
+    let retired_conflicts = read_tombstone_conflicts(transaction, &encoded, &request.key)?;
+    if let Some(retired) = retired_conflicts
+        .iter()
+        .find(|retired| retired.key == request.key)
+    {
+        return Ok(if retired.retirement() == *request {
+            GraphReplayRetirementOutcomeV1::ExactReplay(retired.clone())
+        } else {
+            GraphReplayRetirementOutcomeV1::Conflict
+        });
+    }
+    if !retired_conflicts.is_empty() {
+        return Ok(GraphReplayRetirementOutcomeV1::Conflict);
+    }
+    let conflicts = read_conflicts(transaction, &encoded, &request.key)?;
+    let Some(replay) = conflicts
+        .iter()
+        .find(|replay| replay.publication.key == request.key)
+        .cloned()
+    else {
+        return Ok(if conflicts.is_empty() {
+            GraphReplayRetirementOutcomeV1::Missing
+        } else {
+            GraphReplayRetirementOutcomeV1::Conflict
+        });
+    };
+    if replay.publication.input_digest != request.input_digest
+        || replay.publication.dependency_generation_closure_digest
+            != request.dependency_generation_closure_digest
+        || replay.publication.direct_dependency_generations != request.direct_dependency_generations
+        || replay.publication.expected_prior_head != request.expected_prior_head
+        || replay.publication.expected_recovered_digest != request.expected_recovered_digest
+        || replay.publication.canonical_replay_source_digest
+            != request.canonical_replay_source_digest
+    {
+        return Ok(GraphReplayRetirementOutcomeV1::Conflict);
+    }
+    let Some(head) = read_head(transaction, &encoded)? else {
+        return Ok(GraphReplayRetirementOutcomeV1::Conflict);
+    };
+    if head != *expected_head || head.sequence != replay.sequence {
+        return Ok(GraphReplayRetirementOutcomeV1::Conflict);
+    }
+    if let Some(pending) = read_pending(transaction, &encoded, Some(&head))? {
+        return Ok(GraphReplayRetirementOutcomeV1::PendingReplay { pending });
+    }
+    if has_active_inbound_dependencies(transaction, replay.sequence)? {
+        return Ok(GraphReplayRetirementOutcomeV1::Conflict);
+    }
+    let changed = execute(
+        transaction,
+        "DELETE FROM graph_verified_heads_v1
+         WHERE shard_id = ?1 AND namespace = ?2 AND projection = ?3
+           AND replay_sequence = ?4",
+        vec![
+            text(encoded.shard_id.clone()),
+            text(encoded.namespace.clone()),
+            text(encoded.projection.clone()),
+            ExactSqlValue::Integer(sequence_to_i64(replay.sequence)?),
+        ],
+    )?
+    .changed_rows;
+    if changed != 1 {
+        return Err(GraphPublicationStoreErrorV1::Corrupt(
+            "verified graph head moved during head retirement".to_owned(),
+        ));
+    }
+    tombstone_retired_replay(transaction, encoded, request, &replay)
+}
+
+/// Tombstone one replay whose retirement guards already passed: the durable
+/// retired identity, its dependency closure moved to the tombstone ledger,
+/// and the live dependency edges removed, in the caller's transaction.
+fn tombstone_retired_replay(
+    transaction: &ExactSqlTransaction,
+    encoded: EncodedProjection,
+    request: &GraphPublicationReplayRetirementV1,
+    replay: &GraphPublicationReplayRecordV1,
+) -> GraphPublicationStoreResultV1<GraphReplayRetirementOutcomeV1> {
     let tombstone = GraphPublicationReplayTombstoneV1::new(
         replay.sequence,
         request.clone(),
@@ -624,6 +713,39 @@ impl GraphPublicationStoreV1 for GraphPublicationExactSqlStorage {
         ensure_owner(&self.handle, &request.key.projection)?;
         let transaction = begin(&self.handle, context)?;
         let outcome = match retire_replay_in_transaction(&transaction, request) {
+            Ok(outcome) => outcome,
+            Err(error) => return rollback_error(transaction, error),
+        };
+        if let Err(error) = ensure_not_interrupted(context) {
+            return rollback_error(transaction, error);
+        }
+        if matches!(outcome, GraphReplayRetirementOutcomeV1::Retired(_)) {
+            if let Err(error) = begin_replay_retirement_commit(context) {
+                return rollback_error(transaction, error);
+            }
+            commit(transaction)?;
+            Ok(outcome)
+        } else {
+            rollback(transaction, outcome)
+        }
+    }
+
+    #[hotpath::measure(label = "rusqlite.graph_publication.retire_verified_head_replay")]
+    fn retire_verified_head_replay(
+        &mut self,
+        request: &GraphPublicationReplayRetirementV1,
+        expected_head: &GraphVerifiedHeadV1,
+        context: &GraphPublicationOperationContextV1<'_>,
+    ) -> GraphPublicationStoreResultV1<GraphReplayRetirementOutcomeV1> {
+        request.validate()?;
+        ensure_not_interrupted(context)?;
+        ensure_owner(&self.handle, &request.key.projection)?;
+        let transaction = begin(&self.handle, context)?;
+        let outcome = match retire_verified_head_replay_in_transaction(
+            &transaction,
+            request,
+            expected_head,
+        ) {
             Ok(outcome) => outcome,
             Err(error) => return rollback_error(transaction, error),
         };

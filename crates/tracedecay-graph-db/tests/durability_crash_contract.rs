@@ -31,7 +31,8 @@ use tracedecay_store::{
     GraphPublicationOperationContextV1, GraphPublicationProjectionPageRequestV1,
     GraphPublicationProjectionPageV1, GraphPublicationReplayLookupV1,
     GraphPublicationReplayPageRequestV1, GraphPublicationReplayPageV1,
-    GraphPublicationReplayRecordV1, GraphPublicationReplayRetirementV1, GraphPublicationReplayV1,
+    GraphPublicationReplayRecordV1, GraphPublicationReplayRetirementV1,
+    GraphPublicationReplayTombstoneV1, GraphPublicationReplayV1,
     GraphPublicationRetiredCleanupPageRequestV1, GraphPublicationRetiredCleanupPageV1,
     GraphPublicationSequenceV1, GraphPublicationStoreErrorV1, GraphPublicationStoreResultV1,
     GraphPublicationStoreV1, GraphReplayAppendOutcomeV1, GraphReplayRetirementOutcomeV1,
@@ -115,6 +116,7 @@ fn control_and_probe() -> (RuntimeRequestControlV1, Probe) {
 struct RelationalAuthority {
     next_sequence: u64,
     records: BTreeMap<GraphPublicationKeyV1, GraphPublicationReplayRecordV1>,
+    retired: BTreeMap<GraphPublicationKeyV1, GraphPublicationReplayTombstoneV1>,
     pending: BTreeMap<GraphProjectionIdentityV1, GraphPublicationReplayRecordV1>,
     heads: BTreeMap<GraphProjectionIdentityV1, GraphVerifiedHeadV1>,
     /// Simulates the process dying exactly at the relational linearization
@@ -172,9 +174,12 @@ impl GraphPublicationStoreV1 for RelationalAuthority {
         key: &GraphPublicationKeyV1,
         _context: &GraphPublicationOperationContextV1,
     ) -> GraphPublicationStoreResultV1<GraphPublicationReplayLookupV1> {
-        Ok(match self.records.get(key) {
-            Some(record) => GraphPublicationReplayLookupV1::Active(record.clone()),
-            None => GraphPublicationReplayLookupV1::Missing,
+        Ok(if let Some(record) = self.records.get(key) {
+            GraphPublicationReplayLookupV1::Active(record.clone())
+        } else if let Some(tombstone) = self.retired.get(key) {
+            GraphPublicationReplayLookupV1::Retired(tombstone.clone())
+        } else {
+            GraphPublicationReplayLookupV1::Missing
         })
     }
 
@@ -192,6 +197,57 @@ impl GraphPublicationStoreV1 for RelationalAuthority {
         _context: &GraphPublicationOperationContextV1,
     ) -> GraphPublicationStoreResultV1<GraphReplayRetirementOutcomeV1> {
         unreachable!("durability crash contract never retires a replay")
+    }
+
+    fn retire_verified_head_replay(
+        &mut self,
+        request: &GraphPublicationReplayRetirementV1,
+        expected_head: &GraphVerifiedHeadV1,
+        _context: &GraphPublicationOperationContextV1,
+    ) -> GraphPublicationStoreResultV1<GraphReplayRetirementOutcomeV1> {
+        if let Some(tombstone) = self.retired.get(&request.key) {
+            return Ok(if tombstone.retirement() == *request {
+                GraphReplayRetirementOutcomeV1::ExactReplay(tombstone.clone())
+            } else {
+                GraphReplayRetirementOutcomeV1::Conflict
+            });
+        }
+        let Some(record) = self.records.get(&request.key).cloned() else {
+            return Ok(GraphReplayRetirementOutcomeV1::Missing);
+        };
+        if record.publication.input_digest != request.input_digest
+            || record.publication.dependency_generation_closure_digest
+                != request.dependency_generation_closure_digest
+            || record.publication.direct_dependency_generations
+                != request.direct_dependency_generations
+            || record.publication.expected_prior_head != request.expected_prior_head
+            || record.publication.expected_recovered_digest != request.expected_recovered_digest
+            || record.publication.canonical_replay_source_digest
+                != request.canonical_replay_source_digest
+        {
+            return Ok(GraphReplayRetirementOutcomeV1::Conflict);
+        }
+        let Some(head) = self.heads.get(&request.key.projection) else {
+            return Ok(GraphReplayRetirementOutcomeV1::Conflict);
+        };
+        if head != expected_head || head.sequence != record.sequence {
+            return Ok(GraphReplayRetirementOutcomeV1::Conflict);
+        }
+        if let Some(pending) = self.pending.get(&request.key.projection) {
+            return Ok(GraphReplayRetirementOutcomeV1::PendingReplay {
+                pending: pending.clone(),
+            });
+        }
+        let tombstone = GraphPublicationReplayTombstoneV1::new(
+            record.sequence,
+            request.clone(),
+            Some(record.publication.canonical_replay_source.clone()),
+        )
+        .map_err(GraphPublicationStoreErrorV1::InvalidRequest)?;
+        self.heads.remove(&request.key.projection);
+        self.records.remove(&request.key);
+        self.retired.insert(request.key.clone(), tombstone.clone());
+        Ok(GraphReplayRetirementOutcomeV1::Retired(tombstone))
     }
 
     fn discard_pending_replay(
