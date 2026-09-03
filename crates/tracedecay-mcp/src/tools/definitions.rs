@@ -50,6 +50,7 @@ use edit::*;
 use git::*;
 use github_stack::*;
 use graph::*;
+pub use graph::{SEARCH_MAX_LEXICAL_ANCHOR_BYTES, SEARCH_MAX_LEXICAL_ANCHORS};
 use lcm::*;
 use memory::*;
 use multi_root::*;
