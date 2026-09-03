@@ -1516,15 +1516,9 @@ async fn register_semantic_activation_owner(
     graph
         .configuration_runtime()
         .install_semantic_runtime(Arc::clone(&owner))?;
-    let reconciler = Arc::new(
-        tracedecay_code_index_runtime::semantic_activation_reconciler::DaemonSemanticActivationReconcilerV1::spawn(
-            owner,
-            lifecycle_events,
-        ),
-    );
     invocation
         .configuration_runtime_registrar()
-        .install_semantic_activation_reconciler(project_root, reconciler)
+        .install_semantic_activation_reconciler(project_root, owner, lifecycle_events)
         .await?;
     Ok(())
 }
@@ -1572,15 +1566,9 @@ pub(super) async fn install_semantic_activation_runtime_owner(
         ),
     );
     configuration_runtime.install_semantic_runtime(Arc::clone(&owner))?;
-    let reconciler = Arc::new(
-        tracedecay_code_index_runtime::semantic_activation_reconciler::DaemonSemanticActivationReconcilerV1::spawn(
-            owner,
-            lifecycle_events,
-        ),
-    );
     invocation
         .configuration_runtime_registrar()
-        .install_semantic_activation_reconciler(project_root, reconciler)
+        .install_semantic_activation_reconciler(project_root, owner, lifecycle_events)
         .await?;
     Ok(())
 }
