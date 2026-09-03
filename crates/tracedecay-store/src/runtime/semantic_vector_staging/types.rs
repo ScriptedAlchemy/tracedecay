@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{collections::HashSet, fmt};
 
 use serde::{Deserialize, Deserializer, Serialize};
 use tracedecay_domain::VectorGenerationIdV1;
@@ -55,6 +55,25 @@ macro_rules! canonical_id {
             }
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn semantic_vector_batch_identity_index_rejects_duplicates() {
+        let first = SemanticVectorChunkId::new("chunk.semantic.first").expect("first chunk id");
+        let second = SemanticVectorChunkId::new("chunk.semantic.second").expect("second chunk id");
+
+        validate_unique_chunk_ids([&first, &second].into_iter()).expect("unique chunk ids");
+        assert!(matches!(
+            validate_unique_chunk_ids([&first, &second, &first].into_iter()),
+            Err(StorageRuntimeContractErrorV1::NonCanonical {
+                field: "semantic vector batch chunk identity"
+            })
+        ));
+    }
 }
 
 macro_rules! sha256_digest {
@@ -543,6 +562,20 @@ impl SemanticVectorStageChunkReceipt {
     }
 }
 
+fn validate_unique_chunk_ids<'a>(
+    chunk_ids: impl Iterator<Item = &'a SemanticVectorChunkId>,
+) -> Result<(), StorageRuntimeContractErrorV1> {
+    let mut seen = HashSet::with_capacity(MAX_SEMANTIC_VECTOR_STAGE_CHUNKS_PER_BATCH);
+    for chunk_id in chunk_ids {
+        if !seen.insert(chunk_id) {
+            return Err(StorageRuntimeContractErrorV1::NonCanonical {
+                field: "semantic vector batch chunk identity",
+            });
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SemanticVectorStageBatchReceipt {
@@ -608,15 +641,7 @@ impl SemanticVectorStageBatchReceipt {
                 });
             }
         }
-        if self.chunks.iter().enumerate().any(|(index, chunk)| {
-            self.chunks[..index]
-                .iter()
-                .any(|prior| prior.chunk_id == chunk.chunk_id)
-        }) {
-            return Err(StorageRuntimeContractErrorV1::NonCanonical {
-                field: "semantic vector batch chunk identity",
-            });
-        }
+        validate_unique_chunk_ids(self.chunks.iter().map(|chunk| &chunk.chunk_id))?;
         let expected_digest = Self::compute_digest(
             &self.key,
             &self.expected_checkpoint_digest,

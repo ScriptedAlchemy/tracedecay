@@ -277,7 +277,11 @@ impl HookEventEnvelopeV2 {
 /// bytes. This is the only constructor those fields may use: a producer or
 /// consumer copy that drifts makes envelope matching fail closed with no error.
 pub fn envelope_identity_hash16(domain: &str, value: &str) -> [u8; 16] {
-    let digest = Sha256::digest(format!("{domain}:{value}").as_bytes());
+    let mut digest = Sha256::new();
+    digest.update(domain.as_bytes());
+    digest.update(b":");
+    digest.update(value.as_bytes());
+    let digest = digest.finalize();
     let mut output = [0; 16];
     output.copy_from_slice(&digest[..16]);
     output

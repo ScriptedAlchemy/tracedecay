@@ -1,4 +1,5 @@
 use super::super::util;
+use super::scope::LcmScopeSql;
 use super::*;
 
 // Future lifetime so suspension inside the query executor (writer lease /
@@ -11,38 +12,7 @@ pub async fn load_session(
 ) -> Result<LcmLoadSessionPage, LcmError> {
     let limit = clamp_limit(request.limit);
     let fetch_limit = limit.saturating_add(1);
-    let mut values = vec![
-        Value::Text(request.provider.clone()),
-        Value::Text(request.provider.clone()),
-        Value::Text(request.session_id.clone()),
-        Value::Integer(request.after_store_id.unwrap_or(0)),
-    ];
-    let mut role_clause = String::new();
-    let roles = normalized_strings(&request.roles);
-    if !roles.is_empty() {
-        let placeholders = util::sql_in_placeholders(roles.len());
-        role_clause = format!(" AND role IN ({placeholders})");
-        values.extend(roles.into_iter().map(Value::Text));
-    }
-    values.push(request.start_time.map_or(Value::Null, Value::Integer));
-    values.push(request.start_time.map_or(Value::Null, Value::Integer));
-    values.push(request.end_time.map_or(Value::Null, Value::Integer));
-    values.push(request.end_time.map_or(Value::Null, Value::Integer));
-    values.push(Value::Integer(fetch_limit as i64));
-    let sql = format!(
-        "SELECT provider, message_id, session_id, store_id, role, ordinal,
-                timestamp, content, content_hash, storage_kind, payload_ref,
-                snippet_text, legacy_source, legacy_truncated, metadata_json
-         FROM lcm_raw_messages
-         WHERE (? = 'all' OR provider = ?)
-           AND session_id = ?
-           AND store_id > ?
-           {role_clause}
-           AND (? IS NULL OR timestamp >= ?)
-           AND (? IS NULL OR timestamp <= ?)
-         ORDER BY store_id
-         LIMIT ?"
-    );
+    let (sql, values) = load_session_query(&request, fetch_limit);
     let fetched = hotpath::future!(
         async {
             let mut rows = conn.query(&sql, values).await?;
@@ -80,6 +50,45 @@ pub async fn load_session(
         messages,
         next_cursor,
     })
+}
+
+fn load_session_query(request: &LcmLoadSessionRequest, fetch_limit: usize) -> (String, Vec<Value>) {
+    let scope = LcmScopeSql::new(
+        "provider",
+        "session_id",
+        &request.provider,
+        Some(&request.session_id),
+    );
+    let scope_clause = scope.where_clause();
+    let mut values = scope.into_values();
+    values.push(Value::Integer(request.after_store_id.unwrap_or(0)));
+    let mut role_clause = String::new();
+    let roles = normalized_strings(&request.roles);
+    if !roles.is_empty() {
+        let placeholders = util::sql_in_placeholders(roles.len());
+        role_clause = format!(" AND role IN ({placeholders})");
+        values.extend(roles.into_iter().map(Value::Text));
+    }
+    values.push(request.start_time.map_or(Value::Null, Value::Integer));
+    values.push(request.start_time.map_or(Value::Null, Value::Integer));
+    values.push(request.end_time.map_or(Value::Null, Value::Integer));
+    values.push(request.end_time.map_or(Value::Null, Value::Integer));
+    values.push(Value::Integer(fetch_limit as i64));
+    let sql = format!(
+        "SELECT provider, message_id, session_id, store_id, role, ordinal,
+                timestamp, content, content_hash, storage_kind, payload_ref,
+                snippet_text, legacy_source, legacy_truncated, metadata_json
+         FROM lcm_raw_messages
+         {scope}
+           AND store_id > ?
+           {role_clause}
+           AND (? IS NULL OR timestamp >= ?)
+           AND (? IS NULL OR timestamp <= ?)
+         ORDER BY store_id
+         LIMIT ?",
+        scope = scope_clause
+    );
+    (sql, values)
 }
 
 /// Lists sessions in the raw LCM store ordered by most recent ingested activity.
@@ -322,5 +331,67 @@ fn load_message_from_raw(
         legacy_source,
         legacy_truncated,
         metadata_json,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+    use tracedecay_runtime_core::db::engine::{TestConnection, params_from_iter};
+
+    use super::*;
+
+    async fn test_lcm_connection() -> (TempDir, TestConnection) {
+        let directory = TempDir::new().expect("session database tempdir");
+        let conn = TestConnection::open(&directory.path().join("sessions.db"));
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                provider TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                project_key TEXT NOT NULL,
+                project_path TEXT NOT NULL,
+                PRIMARY KEY(provider, session_id)
+            );",
+        )
+        .await
+        .expect("create session table");
+        schema::ensure_lcm_schema(&conn)
+            .await
+            .expect("create LCM schema");
+        (directory, conn)
+    }
+
+    #[tokio::test]
+    async fn load_session_provider_scope_uses_composite_session_order_index() {
+        let (_directory, conn) = test_lcm_connection().await;
+        let request = LcmLoadSessionRequest {
+            provider: "cursor".to_owned(),
+            session_id: "session-a".to_owned(),
+            after_store_id: None,
+            limit: 20,
+            roles: Vec::new(),
+            start_time: None,
+            end_time: None,
+            content_slice: None,
+        };
+        let (sql, values) = load_session_query(&request, request.limit.saturating_add(1));
+        let mut rows = conn
+            .query(
+                &format!("EXPLAIN QUERY PLAN {sql}"),
+                params_from_iter(values),
+            )
+            .await
+            .expect("explain load-session query");
+        let mut plan = Vec::new();
+        while let Some(row) = rows.next().await.expect("read plan row") {
+            plan.push(row.get::<String>(3).expect("plan detail"));
+        }
+
+        assert!(
+            plan.iter()
+                .any(|line| line.contains("idx_lcm_raw_session_order")),
+            "provider-scoped restore must seek the composite session-order index:\n{}",
+            plan.join("\n")
+        );
     }
 }

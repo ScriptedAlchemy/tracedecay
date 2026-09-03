@@ -834,10 +834,74 @@ fn load_host_lifecycle_user_config() -> tracedecay_domain::errors::Result<UserCo
 }
 
 pub(crate) async fn handle_project_local_lifecycle_command(
-    _agent_id: String,
-    _operation: HostBundleCliOperation,
+    agent_id: String,
+    operation: HostBundleCliOperation,
 ) -> tracedecay_domain::errors::Result<()> {
-    Err(project_local_host_lifecycle_unavailable())
+    if agent_id != "devin" {
+        return Err(project_local_host_lifecycle_unavailable());
+    }
+    let home = tracedecay::agents::home_dir().ok_or_else(|| {
+        tracedecay_domain::errors::TraceDecayError::Config {
+            message: "could not determine home directory".to_string(),
+        }
+    })?;
+    let tracedecay_bin = tracedecay::agents::which_tracedecay().ok_or_else(|| {
+        tracedecay_domain::errors::TraceDecayError::Config {
+            message: "tracedecay not found on PATH. Install the checksummed GitHub release:\n  \
+                      https://github.com/ScriptedAlchemy/tracedecay/releases/latest"
+                .to_string(),
+        }
+    })?;
+    let project_path = std::env::current_dir().map_err(|error| {
+        tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!("could not determine project directory: {error}"),
+        }
+    })?;
+    let integration = tracedecay::agents::get_integration(&agent_id)?;
+    if !integration.supports_local_install() {
+        return Err(project_local_host_lifecycle_unavailable());
+    }
+    let context = tracedecay::agents::InstallContext {
+        home: home.clone(),
+        tracedecay_bin,
+        tool_permissions: tracedecay::agents::expected_tool_perms(),
+        project_root: Some(project_path.clone()),
+        dashboard: false,
+    };
+    let components = [tracedecay::agents::host_bundle_v2::HostBundleComponentV1::ContextMcp];
+    let _registration_paths = integration.project_host_component_registration_paths(
+        &components,
+        &home,
+        &project_path,
+    )?;
+    match operation {
+        HostBundleCliOperation::Install
+        | HostBundleCliOperation::Update
+        | HostBundleCliOperation::Repair => {
+            prepare_native_activation_if_needed(integration.as_ref(), &context)?;
+            integration.activate_project_host_component_registration(
+                &components,
+                &context,
+                &project_path,
+            )?;
+            eprintln!(
+                "\x1b[32m+\x1b[0m {} project MCP registration",
+                integration.name()
+            );
+        }
+        HostBundleCliOperation::Uninstall => {
+            integration.deactivate_project_host_component_registration(
+                &components,
+                &context,
+                &project_path,
+            )?;
+            eprintln!(
+                "\x1b[31m-\x1b[0m {} project MCP registration",
+                integration.name()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn project_local_host_lifecycle_unavailable() -> tracedecay_domain::errors::TraceDecayError {
@@ -2653,7 +2717,11 @@ pub(crate) async fn handle_install_command(
 ) -> tracedecay_domain::errors::Result<()> {
     validate_codex_automation_flags(agent.as_deref(), automation)?;
     if local {
-        return Err(project_local_host_lifecycle_unavailable());
+        let agent_id = agent.ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+            message: "`tracedecay install --local` requires `--agent devin`".to_string(),
+        })?;
+        return handle_project_local_lifecycle_command(agent_id, HostBundleCliOperation::Install)
+            .await;
     }
     let home = tracedecay::agents::home_dir().ok_or_else(|| {
         tracedecay_domain::errors::TraceDecayError::Config {

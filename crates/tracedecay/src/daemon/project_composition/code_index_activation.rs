@@ -71,6 +71,8 @@ pub(super) fn code_index_activation_mount(
                 if cancellation.is_cancelled() || !route_registered.load(Ordering::Acquire) {
                     return Err("project route was revoked before code-index mount".to_owned());
                 }
+                let query_project_id = project_id.clone();
+                let query_graph_runtime = Arc::clone(&graph_runtime);
                 // Order-sensitive: subscribing before the mount is what keeps the
                 // first generation publication observable by the waiter below.
                 let publications = invocation
@@ -105,6 +107,8 @@ pub(super) fn code_index_activation_mount(
                     invocation: invocation.clone(),
                     publications,
                     project_root: project_root.clone(),
+                    project_id: query_project_id,
+                    graph_runtime: query_graph_runtime,
                     profile_id: profile_id.clone(),
                     scope: scope.clone(),
                     route_registered: Arc::clone(&route_registered),
@@ -124,6 +128,8 @@ struct QueryAuthorityWaitInputs {
     publications:
         tokio::sync::broadcast::Receiver<code_index_scheduler::CodeIndexGenerationPublishedV1>,
     project_root: PathBuf,
+    project_id: tracedecay_domain::ProjectId,
+    graph_runtime: Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
     profile_id: tracedecay_domain::configuration::UserProfileId,
     scope: tracedecay_application::ResolvedScope,
     route_registered: Arc<AtomicBool>,
@@ -140,6 +146,8 @@ fn spawn_query_authority_when_generation_ready(inputs: QueryAuthorityWaitInputs)
         invocation: authority_invocation,
         mut publications,
         project_root: authority_project,
+        project_id: authority_project_id,
+        graph_runtime: authority_graph_runtime,
         profile_id: authority_profile_id,
         scope: authority_scope,
         route_registered: authority_route_registered,
@@ -208,7 +216,7 @@ fn spawn_query_authority_when_generation_ready(inputs: QueryAuthorityWaitInputs)
             }
             let mut awaiting_generation_logged = false;
             loop {
-                let outcome = tokio::select! {
+                let configured = tokio::select! {
                     biased;
                     () = authority_cancellation.cancelled() => return,
                     outcome = authority_invocation.mount_query_authority_for_project(
@@ -216,6 +224,41 @@ fn spawn_query_authority_when_generation_ready(inputs: QueryAuthorityWaitInputs)
                         &authority_profile_id,
                         &authority_scope,
                     ) => outcome,
+                };
+                let outcome = match configured {
+                    Err(
+                        error @ (QueryRuntimeMountErrorV1::Provider(_)
+                        | QueryRuntimeMountErrorV1::AuthorityMissing
+                        | QueryRuntimeMountErrorV1::Authority(
+                            tracedecay_query::retrieval::QueryAuthorityErrorV1::AuthorityUnavailable,
+                        )),
+                    ) => {
+                        // A fresh profile has no evaluated optional authority. The
+                        // post-seat owner must therefore install the checked-in core
+                        // policy from this project's durable cursor-key authority;
+                        // otherwise a ready generation remains unqueryable forever.
+                        match authority_graph_runtime
+                            .mounted_project_sessions(&authority_project_id)
+                            .await
+                        {
+                            Some(session_db) => {
+                                match session_db.load_session_cursor_key_provider_result().await {
+                                    Ok(cursor_keys) => {
+                                        authority_invocation
+                                            .mount_core_query_authority_for_project(
+                                                &authority_project,
+                                                &authority_scope,
+                                                &cursor_keys,
+                                            )
+                                            .await
+                                    }
+                                    Err(_) => Err(QueryRuntimeMountErrorV1::KeyUnavailable),
+                                }
+                            }
+                            None => Err(error),
+                        }
+                    }
+                    outcome => outcome,
                 };
                 if authority_cancellation.is_cancelled()
                     || !authority_route_registered.load(Ordering::Acquire)
@@ -225,10 +268,7 @@ fn spawn_query_authority_when_generation_ready(inputs: QueryAuthorityWaitInputs)
                 match outcome {
                     Err(error @ QueryRuntimeMountErrorV1::GenerationUnavailable) => {
                         if !awaiting_generation_logged {
-                            log_query_authority_activation_outcome(
-                                &authority_project,
-                                Err(error),
-                            );
+                            log_query_authority_activation_outcome(&authority_project, Err(error));
                             awaiting_generation_logged = true;
                         }
                         tokio::select! {
@@ -292,25 +332,6 @@ fn log_query_authority_activation_outcome(
                 ],
             );
         }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::daemon) enum QueryAuthorityActivationLogV1 {
-    Mounted,
-    AwaitingGeneration,
-    Degraded,
-}
-
-pub(in crate::daemon) fn classify_query_authority_activation_outcome(
-    outcome: &std::result::Result<(), QueryRuntimeMountErrorV1>,
-) -> QueryAuthorityActivationLogV1 {
-    match outcome {
-        Ok(()) => QueryAuthorityActivationLogV1::Mounted,
-        Err(QueryRuntimeMountErrorV1::GenerationUnavailable) => {
-            QueryAuthorityActivationLogV1::AwaitingGeneration
-        }
-        Err(_) => QueryAuthorityActivationLogV1::Degraded,
     }
 }
 
@@ -394,30 +415,8 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
 
-    use tempfile::TempDir;
-    use tracedecay_code_index_runtime::code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1;
-
     use super::*;
-
-    #[test]
-    fn pre_seat_generation_gap_is_typed_status_not_degraded() {
-        assert_eq!(
-            classify_query_authority_activation_outcome(&Ok(())),
-            QueryAuthorityActivationLogV1::Mounted
-        );
-        assert_eq!(
-            classify_query_authority_activation_outcome(&Err(
-                QueryRuntimeMountErrorV1::GenerationUnavailable
-            )),
-            QueryAuthorityActivationLogV1::AwaitingGeneration
-        );
-        assert_eq!(
-            classify_query_authority_activation_outcome(&Err(
-                QueryRuntimeMountErrorV1::KeyUnavailable
-            )),
-            QueryAuthorityActivationLogV1::Degraded
-        );
-    }
+    use tempfile::TempDir;
 
     fn git(root: &Path, arguments: &[&str]) {
         let status = Command::new(

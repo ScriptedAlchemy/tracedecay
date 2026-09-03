@@ -923,6 +923,10 @@ async fn shutdown_production_project_harness(mut resources: ProductionProjectHar
         .store_administration
         .join_project_server_retirements()
         .await;
+    resources
+        .http_application_registry
+        .drain_project_routes_for_shutdown()
+        .await;
     let servers = hotpath::future!(
         detach_project_servers(&resources.store_administration),
         label = "daemon.harness.detach"

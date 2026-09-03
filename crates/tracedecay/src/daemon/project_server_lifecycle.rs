@@ -25,7 +25,11 @@ pub(super) async fn cancel_retained_session_history(store_administration: &Store
 pub(super) async fn shutdown_project_servers(
     deadline: tokio::time::Instant,
     store_administration: &StoreAdministration,
+    http_application_registry: &super::http_application::DaemonHttpApplicationRegistry,
 ) -> ShutdownTaskReceipt {
+    http_application_registry
+        .drain_project_routes_for_shutdown()
+        .await;
     let (detached, mut receipt) =
         match tokio::time::timeout_at(deadline, detach_project_servers(store_administration)).await
         {
@@ -395,6 +399,7 @@ mod shutdown_owner_tests {
             let receipt = shutdown_project_servers(
                 tokio::time::Instant::now() + Duration::from_secs(5),
                 &administration,
+                &super::super::http_application::DaemonHttpApplicationRegistry::default(),
             )
             .await;
             assert!(
