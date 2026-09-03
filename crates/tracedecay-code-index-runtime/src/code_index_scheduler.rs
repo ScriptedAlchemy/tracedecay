@@ -1076,7 +1076,8 @@ impl DaemonCodeIndexPublicationStoreV1 {
         &self,
         digest: &ManifestDigest,
         expected_size: u64,
-    ) -> Result<Vec<u8>, CodeIndexProductionErrorV1> {
+        buffer: &mut Vec<u8>,
+    ) -> Result<(), CodeIndexProductionErrorV1> {
         let digest_hex = digest.as_str().strip_prefix("sha256:").ok_or_else(|| {
             CodeIndexProductionErrorV1::Contract("sealed segment digest is not sha256".to_owned())
         })?;
@@ -1093,11 +1094,15 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 "sealed generation segment identity does not match its manifest".to_owned(),
             ));
         }
-        std::fs::read(path).map_err(|error| {
-            CodeIndexProductionErrorV1::Contract(format!(
-                "sealed generation segment read failed: {error}"
-            ))
-        })
+        buffer.clear();
+        File::open(path)
+            .and_then(|mut file| file.read_to_end(buffer))
+            .map(|_| ())
+            .map_err(|error| {
+                CodeIndexProductionErrorV1::Contract(format!(
+                    "sealed generation segment read failed: {error}"
+                ))
+            })
     }
 
     #[hotpath::measure(label = "code_index.generation.validate_partitioned_manifest")]
@@ -1158,7 +1163,9 @@ impl DaemonCodeIndexPublicationStoreV1 {
         }
         CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
             &manifest,
-            |digest, expected_size| self.read_partitioned_segment(digest, expected_size),
+            |digest, expected_size, buffer| {
+                self.read_partitioned_segment(digest, expected_size, buffer)
+            },
         )
     }
 
@@ -3004,9 +3011,9 @@ impl DaemonCodeTextArtifactStoreV1 {
                     manifest,
                     &manifest_bytes,
                     identity.digest.clone(),
-                    |digest, expected_size| {
+                    |digest, expected_size, buffer| {
                         self.publication
-                            .read_partitioned_segment(digest, expected_size)
+                            .read_partitioned_segment(digest, expected_size, buffer)
                     },
                     TEXT_ARTIFACT_PAGE_CHUNKS_V1,
                     TEXT_ARTIFACT_PAGE_BYTES_V1,
@@ -3071,9 +3078,9 @@ impl DaemonCodeTextArtifactStoreV1 {
                     manifest,
                     &manifest_bytes,
                     identity.digest.clone(),
-                    |digest, expected_size| {
+                    |digest, expected_size, buffer| {
                         self.publication
-                            .read_partitioned_segment(digest, expected_size)
+                            .read_partitioned_segment(digest, expected_size, buffer)
                     },
                     TEXT_ARTIFACT_PAGE_CHUNKS_V1,
                     TEXT_ARTIFACT_PAGE_BYTES_V1,

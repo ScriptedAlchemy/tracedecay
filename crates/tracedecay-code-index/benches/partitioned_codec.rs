@@ -405,14 +405,13 @@ fn encode_once(
 fn decode_and_open(fixture: &EncodedFixture) -> Result<(), CodeIndexProductionErrorV1> {
     let decoded = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
         &fixture.manifest,
-        |digest, _| {
-            fixture
-                .segments
-                .get(digest.as_str())
-                .cloned()
-                .ok_or_else(|| {
-                    CodeIndexProductionErrorV1::Contract("benchmark segment is missing".to_owned())
-                })
+        |digest, _, buffer| {
+            let bytes = fixture.segments.get(digest.as_str()).ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract("benchmark segment is missing".to_owned())
+            })?;
+            buffer.clear();
+            buffer.extend_from_slice(bytes);
+            Ok(())
         },
     )?
     .ok_or_else(|| {
@@ -425,14 +424,13 @@ fn decode_and_open(fixture: &EncodedFixture) -> Result<(), CodeIndexProductionEr
         Cursor::new(Vec::<u8>::new()),
         &fixture.manifest,
         source_digest,
-        |digest, _| {
-            fixture
-                .segments
-                .get(digest.as_str())
-                .cloned()
-                .ok_or_else(|| {
-                    CodeIndexProductionErrorV1::Contract("benchmark segment is missing".to_owned())
-                })
+        |digest, _, buffer| {
+            let bytes = fixture.segments.get(digest.as_str()).ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract("benchmark segment is missing".to_owned())
+            })?;
+            buffer.clear();
+            buffer.extend_from_slice(bytes);
+            Ok(())
         },
         256,
         1024 * 1024,
