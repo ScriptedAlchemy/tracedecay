@@ -1,9 +1,16 @@
 use super::*;
 use crate::daemon::ProductionProjectCompositionHarnessV1;
-use crate::daemon::{ProjectServerRequirement, project_server_requirement};
+use crate::daemon::{
+    AuthenticatedFirstRequest, ProjectServerRequirement, project_server_requirement,
+};
 use std::process::Command;
 #[cfg(unix)]
 use tracedecay_domain::errors::TraceDecayError;
+
+fn requirement_for(line: String) -> ProjectServerRequirement {
+    let request = AuthenticatedFirstRequest::new(line);
+    project_server_requirement(request.parsed())
+}
 use tracedecay_mcp::JsonRpcResponse;
 #[cfg(unix)]
 use tracedecay_session_memory::context::CancellationToken;
@@ -66,14 +73,8 @@ fn hook_runtime_reset_counter_only_requires_core_publication() {
     })
     .to_string();
 
-    assert_eq!(
-        project_server_requirement(&reset),
-        ProjectServerRequirement::Core
-    );
-    assert_eq!(
-        project_server_requirement(&status),
-        ProjectServerRequirement::Core
-    );
+    assert_eq!(requirement_for(reset), ProjectServerRequirement::Core);
+    assert_eq!(requirement_for(status), ProjectServerRequirement::Core);
 }
 
 #[test]
@@ -95,7 +96,7 @@ fn hook_runtime_ingest_waits_for_registered_project_authority_publication() {
     .to_string();
 
     assert_eq!(
-        project_server_requirement(&ingest),
+        requirement_for(ingest),
         ProjectServerRequirement::RegisteredHostIngest
     );
 }
@@ -119,7 +120,7 @@ fn hook_runtime_missing_malformed_or_unknown_action_waits_for_registration() {
         .to_string();
 
         assert_eq!(
-            project_server_requirement(&request),
+            requirement_for(request),
             ProjectServerRequirement::RegisteredHostIngest
         );
     }
@@ -135,7 +136,7 @@ fn hook_event_waits_for_registered_project_authority_publication() {
     .to_string();
 
     assert_eq!(
-        project_server_requirement(&hook_event),
+        requirement_for(hook_event),
         ProjectServerRequirement::RegisteredHostIngest
     );
 }

@@ -72,6 +72,50 @@ const PROJECT_OPEN_UNREPAIRABLE_RETRY_BACKOFF: Duration = Duration::from_mins(5)
 const PROJECT_OPEN_FAILURE_RETRY_HINT: &str =
     "project route open is backed off after an invariant rejection";
 
+/// One authenticated connection's bounded first request.
+///
+/// Routing shares the parsed JSON-RPC view, while the selected transport
+/// consumes the byte-exact raw line and performs its own authoritative decode.
+pub(super) struct AuthenticatedFirstRequest {
+    raw: String,
+    parsed: Option<JsonRpcRequest>,
+}
+
+impl AuthenticatedFirstRequest {
+    pub(super) fn new(raw: String) -> Self {
+        hotpath::gauge!("daemon.engine.first_request.decode").inc(1_u64);
+        #[cfg(test)]
+        FIRST_REQUEST_DECODE_COUNT.fetch_add(1, Ordering::Relaxed);
+        let parsed = serde_json::from_str(raw.trim()).ok();
+        Self { raw, parsed }
+    }
+
+    pub(super) fn raw(&self) -> &str {
+        &self.raw
+    }
+
+    pub(super) fn parsed(&self) -> Option<&JsonRpcRequest> {
+        self.parsed.as_ref()
+    }
+
+    pub(super) fn into_raw(self) -> String {
+        self.raw
+    }
+}
+
+#[cfg(test)]
+static FIRST_REQUEST_DECODE_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(super) fn reset_first_request_decode_count_for_test() {
+    FIRST_REQUEST_DECODE_COUNT.store(0, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(super) fn first_request_decode_count_for_test() -> usize {
+    FIRST_REQUEST_DECODE_COUNT.load(Ordering::Relaxed)
+}
+
 /// How long a client rides out a project open that has not finished yet.
 ///
 /// A cold project open (create/migrate DBs, config runtime, first index) takes
