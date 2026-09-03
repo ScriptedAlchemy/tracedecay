@@ -20,7 +20,7 @@ use super::{
 
 pub(crate) const DEFAULT_MAX_REPLAY_RECORDS_PER_PASS: usize = 64;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DurableHostAdmission {
     pub seq: u64,
     pub outcome: HostAdmissionOutcome,
@@ -468,7 +468,7 @@ mod tests {
             HostAdmissionOutcome::retained_backpressured("daemon_backpressure"),
             HostAdmissionOutcome::retained_backpressured("admission_cancelled"),
         ] {
-            assert_eq!(runtime.acknowledge(admitted.seq, outcome), outcome);
+            assert_eq!(runtime.acknowledge(admitted.seq, outcome.clone()), outcome);
             assert_eq!(runtime.pending_count(), 1);
         }
 

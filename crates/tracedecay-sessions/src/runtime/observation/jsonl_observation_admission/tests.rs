@@ -783,7 +783,7 @@ impl HostAdmission for SeamSpyAdmission {
     ) -> AdmissionFuture<'a, CaptureObservationOutcome> {
         Box::pin(async move {
             self.capture_calls.fetch_add(1, Ordering::Relaxed);
-            if let Some(outcome) = *self.scripted_capture_error.lock().unwrap() {
+            if let Some(outcome) = self.scripted_capture_error.lock().unwrap().clone() {
                 return Err(outcome);
             }
             self.inner.capture_observation(request).await
@@ -798,7 +798,7 @@ impl HostAdmission for SeamSpyAdmission {
             if let Some(outcome) = self.scripted_batch_error.lock().unwrap().take() {
                 return Err(outcome);
             }
-            if let Some(outcome) = *self.scripted_capture_error.lock().unwrap() {
+            if let Some(outcome) = self.scripted_capture_error.lock().unwrap().clone() {
                 // Fail the window without counting here so sequential
                 // fallback still visits each frame exactly once.
                 return Err(outcome);
@@ -949,6 +949,7 @@ async fn commit_failures_block_typed_and_never_cover_past() {
                 provider: "codex",
                 reason: surfaced,
                 retryable: false,
+                ..
             } => assert_eq!(surfaced, reason),
             other => panic!("commit failure must stay a typed admission block, got {other:?}"),
         }
@@ -984,6 +985,7 @@ async fn retryable_admission_failures_keep_their_own_verdict() {
                 provider: "codex",
                 reason: "cursor_conflict",
                 retryable: true,
+                ..
             }
         ),
         "retryable races must not be laundered into a terminal record verdict: {error:?}"
