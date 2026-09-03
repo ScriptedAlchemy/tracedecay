@@ -111,6 +111,13 @@ pub enum LexicalRouteErrorV1 {
 #[serde(transparent)]
 pub struct LexicalAnchorV1(String);
 
+/// The admitted lexical lane batch plus the per-anchor route matches that
+/// produced it.
+type MergedLexicalBatch = (
+    RetrieverBatch<LexicalLaneEvidence>,
+    BTreeMap<RetrievalAnchorId, Vec<LexicalRouteMatchV1>>,
+);
+
 impl LexicalAnchorV1 {
     fn validate(value: &str, index: usize) -> Result<(), LexicalRouteErrorV1> {
         if value.is_empty() {
@@ -316,7 +323,7 @@ pub fn preferred_symbol_tokens(query: &str) -> Vec<String> {
 /// identifier-shaped (for example a trailing `.` or a numeric segment).
 fn trailing_symbol_name(token: &str) -> Option<&str> {
     token
-        .rsplit(|character| character == ':' || character == '.')
+        .rsplit([':', '.'])
         .find(|segment| !segment.is_empty())
         .filter(|segment| {
             segment
@@ -601,13 +608,7 @@ impl MergedRoutes {
         self,
         generation: &CodeGenerationId,
         cap: usize,
-    ) -> Result<
-        (
-            RetrieverBatch<LexicalLaneEvidence>,
-            BTreeMap<RetrievalAnchorId, Vec<LexicalRouteMatchV1>>,
-        ),
-        RetrievalPortError,
-    > {
+    ) -> Result<MergedLexicalBatch, RetrievalPortError> {
         let mut admitted: Vec<MergedCandidate> = self.by_occurrence.into_values().collect();
         // The lane's canonical order: recomputed score descending, then
         // occurrence identity, then evidence anchor. Route execution order

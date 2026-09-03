@@ -285,7 +285,7 @@ fn pair(
 fn lane_batch(
     mut pairs: Vec<(CompactCandidate, LexicalLaneEvidence)>,
 ) -> RetrieverBatch<LexicalLaneEvidence> {
-    pairs.sort_by(|left, right| right.0.raw_score.cmp(&left.0.raw_score));
+    pairs.sort_by_key(|pair| std::cmp::Reverse(pair.0.raw_score));
     let mut candidates = Vec::new();
     let mut evidence_by_occurrence = BTreeMap::new();
     for (ordinal, (mut candidate, evidence)) in pairs.into_iter().enumerate() {
