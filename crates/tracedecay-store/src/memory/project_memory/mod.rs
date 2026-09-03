@@ -9,7 +9,7 @@ use tracedecay_domain::{
 use super::queries::{MAX_CURRENT_LIMIT, MAX_LINEAGE_LIMIT};
 use super::{
     FactLineageCursor, FactStoreError, FactStoreResult, MAX_PROJECT_MEMORY_SEARCH_BYTES,
-    ProjectMemoryFactStatusV1, ProjectMemoryFactTelemetryV1, validate_owned_fact_id,
+    ProjectMemoryFactStatusV1, ProjectMemoryFactTelemetryV1, StoredFactV1, validate_owned_fact_id,
 };
 
 mod automatic_facts;
@@ -38,7 +38,8 @@ pub use curation::{
     ProjectMemoryFactFeedbackOutcomeV1, ProjectMemoryFactLinkV1, ProjectMemoryFactMergeCommandV1,
     ProjectMemoryFactMergeOutcomeV1, ProjectMemoryFactMergeTargetV1,
     ProjectMemoryFactNormalizeTagsV1, ProjectMemoryFactRemoveCommandV1,
-    ProjectMemoryFactRemoveOutcomeV1, ProjectMemoryFactUpdateCommandV1,
+    ProjectMemoryFactRemoveOutcomeV1, ProjectMemoryFactSupersedeCommandV1,
+    ProjectMemoryFactSupersedeOutcomeV1, ProjectMemoryFactUpdateCommandV1,
     ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryFactUpdatePatchV1,
     derive_project_memory_fact_curation_child_operation_id,
 };
@@ -309,6 +310,7 @@ pub struct ProjectMemoryFactHistoryV1 {
     fact_id: FactId,
     events: Vec<FactLineageEventV1>,
     next_after: Option<FactLineageCursor>,
+    retired_fact: Option<StoredFactV1>,
 }
 
 /// Durable result of one owner-scoped sweep over superseded assertion
@@ -446,7 +448,16 @@ impl ProjectMemoryFactHistoryV1 {
             fact_id,
             events,
             next_after,
+            retired_fact: None,
         })
+    }
+
+    pub fn with_retired_fact(mut self, retired_fact: StoredFactV1) -> FactStoreResult<Self> {
+        if retired_fact.owner() != &self.owner || retired_fact.fact_id() != &self.fact_id {
+            return Err(FactStoreError::FactMismatch);
+        }
+        self.retired_fact = Some(retired_fact);
+        Ok(self)
     }
 
     pub fn validate_for_owner(&self, owner: &FactOwnerV1) -> FactStoreResult<()> {
@@ -466,6 +477,9 @@ impl ProjectMemoryFactHistoryV1 {
     }
     pub fn next_after(&self) -> Option<&FactLineageCursor> {
         self.next_after.as_ref()
+    }
+    pub fn retired_fact(&self) -> Option<&StoredFactV1> {
+        self.retired_fact.as_ref()
     }
 }
 

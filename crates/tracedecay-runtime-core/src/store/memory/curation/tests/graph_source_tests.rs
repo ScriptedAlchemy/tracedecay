@@ -47,8 +47,11 @@ async fn graph_source_rejects_an_eligible_fact_without_its_active_payload() {
     ));
 }
 
+/// A superseded fact keeps an eligible payload and no active assertion
+/// (#727). The canonical source keeps it as an entity so lineage edges stay
+/// rooted, but it projects no active-assertion or mention relations.
 #[tokio::test]
-async fn graph_source_rejects_an_eligible_fact_without_an_active_assertion() {
+async fn graph_source_keeps_a_superseded_fact_as_an_entity_without_relations() {
     let fixture = Fixture::new("link-graph-missing-assertion").await;
     let fact = fixture.seed("missing-assertion", 10).await;
     let transaction = fixture
@@ -70,17 +73,19 @@ async fn graph_source_rejects_an_eligible_fact_without_an_active_assertion() {
     transaction
         .commit()
         .await
-        .expect("commit assertion corruption");
+        .expect("commit assertion retirement");
 
-    assert!(matches!(
-        relation_kinds_from_canonical_source_for_test(
-            &fixture.db,
-            &fixture.owner,
-            &accepting_read_control(),
-        )
-        .await,
-        Err(FactStoreError::PayloadAccessMismatch)
-    ));
+    let kinds = relation_kinds_from_canonical_source_for_test(
+        &fixture.db,
+        &fixture.owner,
+        &accepting_read_control(),
+    )
+    .await
+    .expect("a retired assertion is a legitimate source state, not corruption");
+    assert!(
+        kinds.is_empty(),
+        "a superseded fact projects no lineage relations of its own: {kinds:?}"
+    );
 }
 
 #[tokio::test]

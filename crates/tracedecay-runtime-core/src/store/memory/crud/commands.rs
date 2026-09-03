@@ -6,8 +6,9 @@ use super::super::envelope::{
     project_memory_record_operation_receipt_tx,
 };
 use super::super::primitives::{
-    OwnerKey, PROJECT_MEMORY_WRITE_OPERATION, project_memory_category_label,
-    project_memory_event_time, project_memory_now, row_exists, storage_error, storage_message,
+    OwnerKey, PROJECT_MEMORY_WRITE_OPERATION, from_json, project_memory_category_label,
+    project_memory_event_time, project_memory_now, row_exists, row_string, storage_error,
+    storage_message,
 };
 use super::super::projection::load_project_memory_projection_tx;
 use super::add::{ProjectMemoryAddClassification, classify_project_memory_add_tx};
@@ -21,16 +22,17 @@ use crate::db::engine::params;
 use crate::db::tombstone_fact_derivatives_tx;
 use serde_json::{Value, json};
 use tracedecay_domain::{
-    ActorId, Confidence, FactAssertionId, FactAssertionKindV1, FactAssertionV1, FactEventId,
-    FactId, FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1,
-    PayloadAccessState, UtcMicros,
+    ActorId, Confidence, FactAssertionId, FactAssertionKindV1, FactAssertionV1,
+    FactCurationActionV1, FactEventId, FactId, FactLineageEventKindV1, FactLineageEventV1,
+    FactOwnerV1, FactPayloadV1, PayloadAccessState, UtcMicros,
 };
 use tracedecay_store::{
     FactCommitReceipt, FactStoreError, FactStoreResult, FactWriteBatch,
     ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddOutcomeV1,
     ProjectMemoryFactContentDigestQueryV1, ProjectMemoryFactFeedbackActionV1,
     ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactRemoveCommandV1,
-    ProjectMemoryFactRemoveOutcomeV1, ProjectMemoryFactUpdateCommandV1,
+    ProjectMemoryFactRemoveOutcomeV1, ProjectMemoryFactSupersedeCommandV1,
+    ProjectMemoryFactSupersedeOutcomeV1, ProjectMemoryFactUpdateCommandV1,
     ProjectMemoryFactUpdateOutcomeV1, StoredFactV1,
 };
 
@@ -182,6 +184,78 @@ fn project_memory_removal_batch(
         Vec::new(),
         Some(expected_last_event_id),
     )
+}
+
+fn project_memory_supersession_batch(
+    request: &ProjectMemoryFactSupersedeCommandV1,
+    expected_last_event_id: FactEventId,
+    now: UtcMicros,
+) -> FactStoreResult<FactWriteBatch> {
+    let event = FactLineageEventV1::new(
+        request.target().fact_id().clone(),
+        request.target().owner().clone(),
+        FactLineageEventKindV1::Curated {
+            action: FactCurationActionV1::SupersededBy {
+                fact_id: request.superseded_by().fact_id().clone(),
+            },
+            evidence_ids: Vec::new(),
+        },
+        now,
+        request.actor().cloned(),
+    )?;
+    FactWriteBatch::new(
+        request.target().fact_id().clone(),
+        request.target().owner().clone(),
+        None,
+        vec![event],
+        Vec::new(),
+        Vec::new(),
+        Some(expected_last_event_id),
+    )
+}
+
+async fn project_memory_current_superseded_by_tx(
+    transaction: &Transaction<'_>,
+    target: &ProjectMemoryFactIdV1,
+    last_event_id: &FactEventId,
+) -> FactStoreResult<Option<FactId>> {
+    let owner = OwnerKey::new(target.owner())?;
+    let mut rows = transaction
+        .query(
+            "SELECT event_json
+             FROM memory_v2_lineage_events
+             WHERE event_id = ?1 AND fact_id = ?2
+               AND owner_kind = ?3 AND project_id = ?4",
+            params![
+                last_event_id.as_str(),
+                target.fact_id().as_str(),
+                owner.kind,
+                owner.project_id.as_str(),
+            ],
+        )
+        .await
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
+    else {
+        return Err(FactStoreError::InvalidCommitReceipt);
+    };
+    let event = from_json::<FactLineageEventV1>(
+        &row_string(&row, 0, PROJECT_MEMORY_WRITE_OPERATION)?,
+        PROJECT_MEMORY_WRITE_OPERATION,
+    )?;
+    if event.fact_id() != target.fact_id() || event.owner() != target.owner() {
+        return Err(FactStoreError::InvalidCommitReceipt);
+    }
+    match event.kind() {
+        FactLineageEventKindV1::Curated {
+            action: FactCurationActionV1::SupersededBy { fact_id },
+            ..
+        } => Ok(Some(fact_id.clone())),
+        _ => Ok(None),
+    }
 }
 
 pub(super) fn commit_receipt_json(outcome: &'static str, receipt: &FactCommitReceipt) -> Value {
@@ -843,6 +917,167 @@ pub(in crate::store::memory) async fn remove_project_memory_fact_tx(
     ProjectMemoryFactRemoveOutcomeV1::removed(
         fact,
         remaining_fact_count,
+        canonical_receipt,
+        replayed,
+    )
+}
+
+async fn project_memory_replay_supersede_tx(
+    transaction: &Transaction<'_>,
+    owner: &FactOwnerV1,
+    receipt: &ProjectMemoryOperationReceiptV1,
+) -> FactStoreResult<ProjectMemoryFactSupersedeOutcomeV1> {
+    let outcome = receipt
+        .receipt
+        .get("outcome")
+        .and_then(Value::as_str)
+        .ok_or(FactStoreError::InvalidCommitReceipt)?;
+    if outcome == "not_found" {
+        return Ok(ProjectMemoryFactSupersedeOutcomeV1::NotFound);
+    }
+    let fact_id = receipt
+        .fact_id
+        .clone()
+        .ok_or(FactStoreError::InvalidCommitReceipt)?;
+    let successor = receipt
+        .receipt
+        .get("superseded_by")
+        .and_then(Value::as_str)
+        .ok_or(FactStoreError::InvalidCommitReceipt)
+        .and_then(|value| FactId::new(value.to_owned()).map_err(FactStoreError::from))?;
+    let target = ProjectMemoryFactIdV1::new(owner.clone(), fact_id)?;
+    let superseded_by = ProjectMemoryFactIdV1::new(owner.clone(), successor)?;
+    match outcome {
+        "already_superseded" => {
+            ProjectMemoryFactSupersedeOutcomeV1::already_superseded(&target, &superseded_by)
+        }
+        "superseded" => ProjectMemoryFactSupersedeOutcomeV1::superseded(
+            &target,
+            &superseded_by,
+            project_memory_commit_receipt_from_operation_tx(transaction, owner, receipt).await?,
+            true,
+        ),
+        _ => Err(FactStoreError::InvalidCommitReceipt),
+    }
+}
+
+pub(in crate::store::memory) async fn supersede_project_memory_fact_tx(
+    transaction: &Transaction<'_>,
+    request: &ProjectMemoryFactSupersedeCommandV1,
+) -> FactStoreResult<ProjectMemoryFactSupersedeOutcomeV1> {
+    let request_digest = project_memory_digest(json!({
+        "fact_id": request.target().fact_id().as_str(),
+        "superseded_by": request.superseded_by().fact_id().as_str(),
+        "expected_last_event_id": request.expected_last_event_id().map(FactEventId::as_str),
+        "actor": request.actor().map(ActorId::as_str),
+    }))?;
+    if let Some(receipt) = project_memory_lookup_operation_receipt_tx(
+        transaction,
+        request.target().owner(),
+        request.operation_id(),
+        "curation",
+        &request_digest,
+    )
+    .await?
+    {
+        return project_memory_replay_supersede_tx(transaction, request.target().owner(), &receipt)
+            .await;
+    }
+
+    let now = project_memory_now()?;
+    let owner = OwnerKey::new(request.target().owner())?;
+    let Some(current) =
+        load_current_projection(transaction, &owner, request.target().fact_id()).await?
+    else {
+        project_memory_record_operation_receipt_tx(
+            transaction,
+            request.target().owner(),
+            request.operation_id(),
+            "curation",
+            &request_digest,
+            None,
+            None,
+            &json!({"outcome": "not_found"}),
+            now,
+        )
+        .await?;
+        return Ok(ProjectMemoryFactSupersedeOutcomeV1::NotFound);
+    };
+    if current.active_assertion_id.is_none() {
+        let last_event_id = current
+            .last_event_id
+            .as_ref()
+            .ok_or(FactStoreError::InvalidCommitReceipt)?;
+        let existing =
+            project_memory_current_superseded_by_tx(transaction, request.target(), last_event_id)
+                .await?
+                .ok_or(FactStoreError::PayloadAccessMismatch)?;
+        if &existing != request.superseded_by().fact_id() {
+            return Err(FactStoreError::SupersededByOther {
+                superseded_by: existing,
+            });
+        }
+        project_memory_record_operation_receipt_tx(
+            transaction,
+            request.target().owner(),
+            request.operation_id(),
+            "curation",
+            &request_digest,
+            Some(request.target().fact_id()),
+            None,
+            &json!({
+                "outcome": "already_superseded",
+                "superseded_by": existing.as_str(),
+            }),
+            now,
+        )
+        .await?;
+        return ProjectMemoryFactSupersedeOutcomeV1::already_superseded(
+            request.target(),
+            request.superseded_by(),
+        );
+    }
+    if current.access != PayloadAccessState::Eligible {
+        return Err(FactStoreError::FactUnavailable {
+            fact_id: request.target().fact_id().clone(),
+        });
+    }
+
+    let successor = load_current_projection(transaction, &owner, request.superseded_by().fact_id())
+        .await?
+        .ok_or_else(|| FactStoreError::FactNotFound {
+            fact_id: request.superseded_by().fact_id().clone(),
+        })?;
+    if successor.active_assertion_id.is_none() || successor.access != PayloadAccessState::Eligible {
+        return Err(FactStoreError::FactUnavailable {
+            fact_id: request.superseded_by().fact_id().clone(),
+        });
+    }
+
+    let expected_last_event_id = request
+        .expected_last_event_id()
+        .cloned()
+        .or(current.last_event_id)
+        .ok_or(FactStoreError::InvalidCommitReceipt)?;
+    let batch = project_memory_supersession_batch(request, expected_last_event_id, now)?;
+    let (canonical_receipt, replayed) = commit_batch_tx(transaction, &batch).await?;
+    let mut receipt_json = commit_receipt_json("superseded", &canonical_receipt);
+    receipt_json["superseded_by"] = json!(request.superseded_by().fact_id().as_str());
+    project_memory_record_operation_receipt_tx(
+        transaction,
+        request.target().owner(),
+        request.operation_id(),
+        "curation",
+        &request_digest,
+        Some(request.target().fact_id()),
+        Some(canonical_receipt.last_event_id()),
+        &receipt_json,
+        now,
+    )
+    .await?;
+    ProjectMemoryFactSupersedeOutcomeV1::superseded(
+        request.target(),
+        request.superseded_by(),
         canonical_receipt,
         replayed,
     )

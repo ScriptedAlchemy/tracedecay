@@ -16,6 +16,7 @@ use tracedecay_store::{
     FactAsOfResponseV1, FactCommitReceipt, FactContradictionStateV1, FactCurrentResponseV1,
     FactLineageCursor, FactLineageResponseV1, FactQueryCoverageV1, FactStoreResult,
     ProjectMemoryAutomationRunReceiptsV1, ProjectMemoryFactIdV1,
+    ProjectMemoryFactSupersedeCommandV1, ProjectMemoryFactSupersedeOutcomeV1,
 };
 
 use super::*;
@@ -341,6 +342,15 @@ impl ProjectMemoryFactStore for FakeAuthority {
         _write_control: &FactWriteControl,
     ) -> FactStoreResult<ProjectMemoryFactRemoveOutcomeV1> {
         self.authority_calls.lock().unwrap().push("remove");
+        Err(authority_fixture_error())
+    }
+
+    async fn supersede_project_memory_fact(
+        &self,
+        _request: ProjectMemoryFactSupersedeCommandV1,
+        _write_control: &FactWriteControl,
+    ) -> FactStoreResult<ProjectMemoryFactSupersedeOutcomeV1> {
+        self.authority_calls.lock().unwrap().push("supersede");
         Err(authority_fixture_error())
     }
 

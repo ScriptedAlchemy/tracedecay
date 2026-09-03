@@ -32,7 +32,7 @@ mod tests;
 
 pub(super) use self::commands::{
     add_project_memory_fact_tx, load_mutable_project_memory_fact_tx, remove_project_memory_fact_tx,
-    update_project_memory_fact_tx,
+    supersede_project_memory_fact_tx, update_project_memory_fact_tx,
 };
 use self::commands::{
     commit_receipt_json, project_memory_commit_receipt_from_operation_tx,
@@ -61,6 +61,6 @@ pub(super) use self::project::{
 pub(super) use self::queries::{
     fact_response_metadata_tx, get_retrieval_anchor_tx, load_current_fact_tx,
     query_current_facts_tx, query_fact_as_of_response_tx, query_fact_as_of_tx,
-    query_fact_current_response_tx, query_fact_current_tx, query_fact_lineage_controlled_tx,
-    query_fact_lineage_response_tx, query_fact_lineage_tx,
+    query_fact_before_supersession_tx, query_fact_current_response_tx, query_fact_current_tx,
+    query_fact_lineage_controlled_tx, query_fact_lineage_response_tx, query_fact_lineage_tx,
 };

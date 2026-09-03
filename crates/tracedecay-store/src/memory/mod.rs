@@ -53,10 +53,12 @@ pub use project_memory::{
     ProjectMemoryFactSearchFilterV1, ProjectMemoryFactSearchGraphCoverageV1,
     ProjectMemoryFactSearchGraphDegradationV1, ProjectMemoryFactSearchHitV1,
     ProjectMemoryFactSearchKindV1, ProjectMemoryFactSearchPageV1, ProjectMemoryFactSearchScoresV1,
-    ProjectMemoryFactSnapshotV1, ProjectMemoryFactUnavailableV1, ProjectMemoryFactUpdateCommandV1,
-    ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryFactUpdatePatchV1, ProjectMemoryFactV1,
-    ProjectMemoryPrivacyPurgeCursorV1, ProjectMemoryPrivacyPurgeReceiptV1,
-    ProjectMemoryStoreRevisionV1, derive_project_memory_fact_curation_child_operation_id,
+    ProjectMemoryFactSnapshotV1, ProjectMemoryFactSupersedeCommandV1,
+    ProjectMemoryFactSupersedeOutcomeV1, ProjectMemoryFactUnavailableV1,
+    ProjectMemoryFactUpdateCommandV1, ProjectMemoryFactUpdateOutcomeV1,
+    ProjectMemoryFactUpdatePatchV1, ProjectMemoryFactV1, ProjectMemoryPrivacyPurgeCursorV1,
+    ProjectMemoryPrivacyPurgeReceiptV1, ProjectMemoryStoreRevisionV1,
+    derive_project_memory_fact_curation_child_operation_id,
 };
 pub use queries::{
     CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1, FactContradictionStateV1,

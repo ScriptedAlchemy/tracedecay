@@ -9,7 +9,10 @@ use super::super::projection::{
     load_project_memory_projection_controlled_tx, load_project_memory_projection_tx,
     load_project_memory_projections_controlled_tx, load_project_memory_projections_tx,
 };
-use super::{DEFAULT_TRUST, commit_fact_tx, content_digest, query_fact_lineage_controlled_tx};
+use super::{
+    DEFAULT_TRUST, commit_fact_tx, content_digest, query_fact_before_supersession_tx,
+    query_fact_lineage_controlled_tx,
+};
 use crate::db::DatabaseMemoryTransaction as Transaction;
 use crate::db::engine::params;
 use crate::privacy::{
@@ -343,12 +346,24 @@ pub(in crate::store::memory) async fn project_memory_fact_history_controlled_tx(
         query.limit(),
     )?;
     let events = query_fact_lineage_controlled_tx(transaction, &lineage, read_control).await?;
-    let history = ProjectMemoryFactHistoryV1::new(
+    let mut history = ProjectMemoryFactHistoryV1::new(
         query.target().owner().clone(),
         query.target().fact_id().clone(),
         events,
         None,
     )?;
+    // A superseded fact leaves the current views but stays queryable through
+    // this explicit historical path: the projection as of its supersession
+    // event, payload and trust as stored.
+    if let Some(retired) = query_fact_before_supersession_tx(
+        transaction,
+        query.target().owner(),
+        query.target().fact_id(),
+    )
+    .await?
+    {
+        history = history.with_retired_fact(retired)?;
+    }
     ensure_project_memory_read_active(read_control)?;
     Ok(history)
 }
