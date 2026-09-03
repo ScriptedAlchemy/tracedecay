@@ -26,6 +26,10 @@ use runtime_test_support::{
     reader_runtime_fixture, run, writer, writer_runtime_fixture,
 };
 
+#[cfg(feature = "hotpath")]
+#[path = "../../../tests/hotpath_report_support.rs"]
+mod hotpath_report_support;
+
 /// Drives the measured writer, ledger, and reader hot paths once.
 ///
 /// The workload mirrors the acceptance suites: an authorized submit lands in
@@ -101,45 +105,12 @@ const EXPECTED_MEASURE_LABELS: &[&str] = &[
 #[cfg(feature = "hotpath")]
 #[test]
 fn measured_hot_paths_emit_a_hotpath_report() {
-    // Guard construction binds a localhost metrics server unless disabled.
-    // Tests must not open sockets, and parallel test processes would race on
-    // the port. SAFETY: this binary holds exactly one test, so nothing else
-    // reads or writes the environment concurrently — the same ordering the
-    // `tracedecay-index-bench` entrypoint relies on.
-    if std::env::var_os("HOTPATH_METRICS_SERVER_OFF").is_none() {
-        unsafe {
-            std::env::set_var("HOTPATH_METRICS_SERVER_OFF", "1");
-        }
-    }
-    let report_dir = tempfile::tempdir().expect("create hotpath report directory");
-    let report_path = report_dir.path().join("hotpath-coverage.json");
-    // The default report keeps only the top functions by share of runtime;
-    // cheap-but-covered measures must not fall off the end of the table.
-    let guard = hotpath::HotpathGuardBuilder::new("rusqlite-runtime-hotpath-coverage")
-        .format(hotpath::Format::Json)
-        .output_path(&report_path)
-        .functions_limit(512)
-        .build();
-
-    exercise_measured_hot_paths();
-
-    // The report is written when the guard drops; it must observe the whole
-    // workload above.
-    drop(guard);
-
-    let report = std::fs::read_to_string(&report_path).expect("read hotpath JSON report");
-    let parsed: serde_json::Value =
-        serde_json::from_str(&report).expect("hotpath report is valid JSON");
-    assert!(
-        parsed.is_object(),
-        "hotpath report should be a JSON object, got: {parsed}"
+    hotpath_report_support::assert_hotpath_report(
+        "rusqlite-runtime-hotpath-coverage",
+        "functions-timing",
+        EXPECTED_MEASURE_LABELS,
+        exercise_measured_hot_paths,
     );
-    for label in EXPECTED_MEASURE_LABELS {
-        assert!(
-            report.contains(label),
-            "hotpath report is missing measure label {label:?}; report: {report}"
-        );
-    }
 }
 
 #[cfg(not(feature = "hotpath"))]

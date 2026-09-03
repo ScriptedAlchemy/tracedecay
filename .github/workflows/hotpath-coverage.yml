@@ -1,17 +1,15 @@
-# Coverage lanes for the hotpath instrumentation already present in the
-# storage slice (tracedecay-rusqlite-runtime, tracedecay-global-db).
+# Runtime coverage for the production Hotpath probes exercised by focused
+# storage, session, LCM, capture, and temporal-query journeys.
 #
 # Two lanes, same test set:
 #   1. feature off  — every `#[hotpath::measure]` macro must stay a no-op;
 #   2. `--features hotpath` — the `hotpath_coverage` tests wrap a real
 #      workload in a HotpathGuard and assert the JSON report carries the
-#      crates' existing measure labels, so the lane fails if the measures
-#      stop firing.
+#      crates' exact existing measure labels.
 #
-# hotpath stays opt-in: nothing here touches `default` or `production`
-# feature sets, and the metrics HTTP server is disabled at the job boundary
-# (see .github/workflows/hotpath-profile.yml, which owns the separate
-# index-bench profiling lane and is unaffected by this workflow).
+# Cargo's resolved feature graph proves that the default package graphs keep
+# collection disabled. No manifest source parsing or fixed-port ownership
+# assertion stands in for that contract.
 name: hotpath-coverage
 
 on:
@@ -26,10 +24,18 @@ permissions:
   contents: read
 
 env:
-  # Hotpath binds a localhost metrics server by default; tests disable it
-  # themselves before building a guard, and this makes that explicit at the
-  # job boundary too.
+  CARGO_TERM_COLOR: always
   HOTPATH_METRICS_SERVER_OFF: "1"
+  HOTPATH_COVERAGE_PACKAGES: >-
+    tracedecay-rusqlite-runtime
+    tracedecay-global-db
+    tracedecay-sessions
+    tracedecay-session-memory
+    tracedecay-session-runtime
+    tracedecay-session-temporal-store
+    tracedecay-lcm
+    tracedecay-capture
+    tracedecay-temporal-query
 
 jobs:
   slice-tests:
@@ -56,15 +62,46 @@ jobs:
           kache init --no-service
           echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
 
-      # `test-helpers` only unlocks the registered-store harness the
-      # coverage test drives; it gates no production code.
-      - name: Slice tests (hotpath off)
+      - name: Default package graphs exclude Hotpath collection
+        shell: bash
         run: |
-          cargo test -p tracedecay-rusqlite-runtime -p tracedecay-global-db \
-            --locked --features tracedecay-global-db/test-helpers
+          read -ra packages <<< "$HOTPATH_COVERAGE_PACKAGES"
+          for package in "${packages[@]}"; do
+            graph="$(
+              cargo tree -p "$package" -e features -f '{p} {f}' \
+                --prefix none --locked | sort -u
+            )"
+            printf '%s\n' "$graph" | grep '^hotpath v'
+            if grep -Eq '^hotpath v[^ ]+ .*hotpath' <<< "$graph"; then
+              echo "::error::$package default graph enables Hotpath collection"
+              exit 1
+            fi
+          done
 
-      - name: Slice tests (hotpath on)
+      # `test-helpers` only unlocks the registered-store fixture used by the
+      # global-db journey; it gates no production code.
+      - name: Runtime journeys (hotpath off)
+        shell: bash
         run: |
-          cargo test -p tracedecay-rusqlite-runtime -p tracedecay-global-db \
-            --locked --features \
-            tracedecay-rusqlite-runtime/hotpath,tracedecay-global-db/hotpath,tracedecay-global-db/test-helpers
+          read -ra packages <<< "$HOTPATH_COVERAGE_PACKAGES"
+          package_args=()
+          for package in "${packages[@]}"; do
+            package_args+=(-p "$package")
+          done
+          cargo test --locked "${package_args[@]}" \
+            --features tracedecay-global-db/test-helpers \
+            --test hotpath_coverage -- --test-threads=1
+
+      - name: Runtime journeys (hotpath on)
+        shell: bash
+        run: |
+          read -ra packages <<< "$HOTPATH_COVERAGE_PACKAGES"
+          package_args=()
+          feature_names=(tracedecay-global-db/test-helpers)
+          for package in "${packages[@]}"; do
+            package_args+=(-p "$package")
+            feature_names+=("$package/hotpath")
+          done
+          features="$(IFS=,; echo "${feature_names[*]}")"
+          cargo test --locked "${package_args[@]}" --features "$features" \
+            --test hotpath_coverage -- --test-threads=1
