@@ -850,8 +850,10 @@ fn replay_envelope_if_pending(
     let Ok((mut spool, _)) = HookSpoolV1::open(root, HookSpoolConfigV1::stock(host), now) else {
         return PendingEnvelopeV1::Unavailable;
     };
-    let Some(queued) = spool.pending_envelope(retry.event_id) else {
-        return PendingEnvelopeV1::Missing;
+    let queued = match spool.pending_envelope(retry.event_id) {
+        Ok(Some(queued)) => queued,
+        Ok(None) => return PendingEnvelopeV1::Missing,
+        Err(_) => return PendingEnvelopeV1::Unavailable,
     };
     if queued.validate(binding).is_err() {
         return PendingEnvelopeV1::Unavailable;
