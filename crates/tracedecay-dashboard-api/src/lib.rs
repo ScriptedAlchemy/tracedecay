@@ -12,6 +12,10 @@
 //! `/api/capabilities` advertises which current TraceDecay authorities are
 //! mounted for the selected project.
 
+#[cfg(all(test, feature = "hotpath-alloc"))]
+#[global_allocator]
+static HOTPATH_ALLOCATOR: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
+
 pub use tracedecay_application::request_identity;
 pub(crate) use tracedecay_graph_query as graph;
 pub use tracedecay_usecases as application;
@@ -117,6 +121,7 @@ mod projects;
 mod read_model;
 mod request_deadline;
 mod savings_api;
+mod snapshot_cache;
 use tracedecay_session_memory::provider_pricing as savings_pricing;
 pub mod scope;
 mod settings_api;
@@ -2033,6 +2038,18 @@ async fn capabilities(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod authority_tests {
     use super::*;
+    use std::future::Future;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+    use tracedecay_domain::{Confidence, FactCategoryV1, ProvenanceId};
+    use tracedecay_runtime_core::privacy::{
+        MemoryFactSanitizationV1, sanitize_memory_fact_payload,
+    };
+    use tracedecay_runtime_core::store::DatabaseFactStore;
+    use tracedecay_store::{
+        FactWriteControl, ProjectMemoryFactAddDispositionV1, ProjectMemoryFactAddMaterialV1,
+        ProjectMemoryFactStore,
+    };
 
     #[test]
     fn automation_run_routes_receive_the_backend_sized_deadline_budget() {
@@ -2361,6 +2378,392 @@ mod authority_tests {
                 _temporary: temporary,
             }
         }
+
+        async fn add_vector_fact(&self, index: usize) {
+            let checksum = (index as u64).wrapping_mul(1_000_003);
+            let content = format!(
+                "cachetoken{index} archive vector checksum{checksum:016x} payload{:016x}",
+                checksum.rotate_left(17)
+            );
+            let entity = format!("CacheEntity{index}");
+            let metadata = json!({"fixture": "dashboard-cache-freshness", "index": index});
+            let payload = json!({
+                "content": content,
+                "category": "project",
+                "tags": ["dashboard-cache"],
+                "entities": [entity],
+                "metadata": metadata,
+            });
+            let receipt = match sanitize_memory_fact_payload(payload.clone())
+                .expect("sanitize dashboard cache fixture")
+            {
+                MemoryFactSanitizationV1::Durable {
+                    payload: sanitized,
+                    receipt,
+                } => {
+                    assert_eq!(sanitized, payload);
+                    receipt
+                }
+                MemoryFactSanitizationV1::Quarantined => {
+                    panic!("dashboard cache fixture must remain durable")
+                }
+            };
+            let command = ProjectMemoryFactAddMaterialV1::new(
+                self.state.memory_owner.clone(),
+                content,
+                FactCategoryV1::Project,
+                None,
+                vec!["dashboard-cache".to_owned()],
+                vec![entity],
+                metadata,
+                receipt,
+                None,
+                Confidence::new(0.8).expect("dashboard cache fixture trust"),
+                None,
+            )
+            .and_then(|material| {
+                material.into_command(
+                    ProvenanceId::new(format!("dashboard.cache.seed.{index}"))
+                        .expect("dashboard cache fixture operation"),
+                )
+            })
+            .expect("dashboard cache add command");
+            let outcome = DatabaseFactStore::new(&self.state.mem_db)
+                .add_project_memory_fact(
+                    command,
+                    &FactWriteControl::new(Arc::new(|| false), Arc::new(|| true)),
+                )
+                .await
+                .expect("add dashboard cache fixture fact");
+            assert_eq!(
+                outcome.disposition(),
+                ProjectMemoryFactAddDispositionV1::Added
+            );
+        }
+
+        async fn add_vector_facts(&self, count: usize) {
+            for index in 0..count {
+                self.add_vector_fact(index).await;
+            }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct HeartbeatMeasurement {
+        p95_lateness_micros: u128,
+        max_lateness_micros: u128,
+    }
+
+    fn percentile_micros(samples: &[Duration], percentile: usize) -> u128 {
+        if samples.is_empty() {
+            return 0;
+        }
+        let mut micros = samples.iter().map(Duration::as_micros).collect::<Vec<_>>();
+        micros.sort_unstable();
+        let rank = micros.len().saturating_mul(percentile).div_ceil(100);
+        micros[rank.saturating_sub(1).min(micros.len() - 1)]
+    }
+
+    async fn with_tokio_heartbeat<T>(future: impl Future<Output = T>) -> (T, HeartbeatMeasurement) {
+        let stop = Arc::new(AtomicBool::new(false));
+        let heartbeat_stop = Arc::clone(&stop);
+        let heartbeat = tokio::spawn(async move {
+            let interval = Duration::from_millis(1);
+            let mut lateness = Vec::new();
+            while !heartbeat_stop.load(Ordering::Acquire) {
+                let started = Instant::now();
+                tokio::time::sleep(interval).await;
+                lateness.push(started.elapsed().saturating_sub(interval));
+            }
+            lateness
+        });
+        tokio::task::yield_now().await;
+        let result = future.await;
+        stop.store(true, Ordering::Release);
+        let lateness = heartbeat.await.expect("heartbeat task");
+        (
+            result,
+            HeartbeatMeasurement {
+                p95_lateness_micros: percentile_micros(&lateness, 95),
+                max_lateness_micros: lateness.iter().map(Duration::as_micros).max().unwrap_or(0),
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn unchanged_projection_hits_cache_before_vector_rows() {
+        let fixture = DashboardStateFixture::open("project.dashboard-projection-cache").await;
+        let control = tracedecay_store::FactReadControl::new(Arc::new(|| false));
+
+        let first = memory_service::projection_payload(&fixture.state, "", 2_000, &control).await;
+        let second = memory_service::projection_payload(&fixture.state, "", 2_000, &control).await;
+
+        assert_eq!(first["scan"]["cache_state"], "miss");
+        assert_eq!(second["scan"]["cache_state"], "hit");
+        assert_eq!(second["scan"]["vector_rows_read"], 0);
+    }
+
+    #[tokio::test]
+    async fn unchanged_similarity_hits_cache_before_vector_rows() {
+        let fixture = DashboardStateFixture::open("project.dashboard-similarity-cache").await;
+        let control = tracedecay_store::FactReadControl::new(Arc::new(|| false));
+
+        let first = memory_service::similarity_payload(&fixture.state, 0.5, 100, &control).await;
+        let second = memory_service::similarity_payload(&fixture.state, 0.5, 100, &control).await;
+
+        assert_eq!(first["scan"]["cache_state"], "miss");
+        assert_eq!(second["scan"]["cache_state"], "hit");
+        assert_eq!(second["scan"]["vector_rows_read"], 0);
+    }
+
+    #[tokio::test]
+    async fn store_write_refreshes_projection_and_similarity_once() {
+        let fixture = DashboardStateFixture::open("project.dashboard-cache-freshness").await;
+        let control = tracedecay_store::FactReadControl::new(Arc::new(|| false));
+
+        let projection_before =
+            memory_service::projection_payload(&fixture.state, "", 2_000, &control).await;
+        let similarity_before =
+            memory_service::similarity_payload(&fixture.state, 0.5, 100, &control).await;
+        fixture.add_vector_fact(1).await;
+        let projection_after =
+            memory_service::projection_payload(&fixture.state, "", 2_000, &control).await;
+        let similarity_after =
+            memory_service::similarity_payload(&fixture.state, 0.5, 100, &control).await;
+        let projection_warm =
+            memory_service::projection_payload(&fixture.state, "", 2_000, &control).await;
+        let similarity_warm =
+            memory_service::similarity_payload(&fixture.state, 0.5, 100, &control).await;
+
+        assert_eq!(projection_before["points"].as_array().unwrap().len(), 0);
+        assert_eq!(similarity_before["count"], 0);
+        assert_eq!(projection_after["scan"]["cache_state"], "miss");
+        assert_eq!(projection_after["scan"]["vector_rows_read"], 1);
+        assert_eq!(projection_after["points"].as_array().unwrap().len(), 1);
+        assert_eq!(similarity_after["scan"]["cache_state"], "miss");
+        assert_eq!(similarity_after["scan"]["vector_rows_read"], 1);
+        assert_eq!(similarity_after["count"], 1);
+        assert_eq!(projection_warm["scan"]["cache_state"], "hit");
+        assert_eq!(projection_warm["scan"]["vector_rows_read"], 0);
+        assert_eq!(similarity_warm["scan"]["cache_state"], "hit");
+        assert_eq!(similarity_warm["scan"]["vector_rows_read"], 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "manual cache measurement; seeds bounded stores and prints operation counts"]
+    async fn measure_projection_and_similarity_cache_costs() {
+        const COLD_RUNS: usize = 5;
+        const WARM_RUNS: usize = 20;
+
+        #[cfg(feature = "hotpath-alloc")]
+        let allocation_report_dir = tempfile::tempdir().expect("allocation report directory");
+        #[cfg(feature = "hotpath-alloc")]
+        let allocation_report_path = allocation_report_dir.path().join("allocations.json");
+        #[cfg(feature = "hotpath-alloc")]
+        let allocation_guard =
+            hotpath::HotpathGuardBuilder::new("dashboard-derived-cache-measurement")
+                .report("functions-alloc")
+                .format(hotpath::Format::Json)
+                .output_path(&allocation_report_path)
+                .functions_limit(0)
+                .build();
+
+        println!(
+            "caps: projection={} similarity={}; cold_runs={} warm_runs={}",
+            memory_service::projection_point_cap(),
+            memory_analysis::SIMILARITY_FACT_CAP,
+            COLD_RUNS,
+            WARM_RUNS,
+        );
+        println!(
+            "| rows | operation | cold p50 us | cold p95 us | warm p50 us | warm p95 us | cold rows read | warm rows read | heartbeat cold p95/max us | heartbeat warm p95/max us |"
+        );
+        println!("|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|");
+
+        for row_count in [1_000_usize, 2_000] {
+            let mut fixtures = Vec::with_capacity(COLD_RUNS);
+            for run in 0..COLD_RUNS {
+                let fixture = DashboardStateFixture::open(&format!(
+                    "project.dashboard-cache-measurement-{row_count}-{run}"
+                ))
+                .await;
+                fixture.add_vector_facts(row_count).await;
+                fixtures.push(fixture);
+            }
+            let control = tracedecay_store::FactReadControl::new(Arc::new(|| false));
+
+            let mut projection_cold = Vec::with_capacity(COLD_RUNS);
+            let mut projection_cold_rows = Vec::with_capacity(COLD_RUNS);
+            let mut similarity_cold = Vec::with_capacity(COLD_RUNS);
+            let mut similarity_cold_rows = Vec::with_capacity(COLD_RUNS);
+            let mut similarity_cold_heartbeat = None;
+            for (index, fixture) in fixtures.iter().enumerate() {
+                let started = Instant::now();
+                let projection = hotpath::future!(
+                    memory_service::projection_payload(
+                        &fixture.state,
+                        "",
+                        memory_service::projection_point_cap(),
+                        &control,
+                    ),
+                    label = "dashboard.measure.projection_cold"
+                )
+                .await;
+                projection_cold.push(started.elapsed());
+                projection_cold_rows.push(
+                    projection["scan"]["vector_rows_read"]
+                        .as_u64()
+                        .expect("projection cold row count"),
+                );
+                assert_eq!(projection["scan"]["cache_state"], "miss");
+
+                let started = Instant::now();
+                let (similarity, heartbeat) = if index == 0 {
+                    let (payload, heartbeat) = with_tokio_heartbeat(hotpath::future!(
+                        memory_service::similarity_payload(&fixture.state, 0.5, 100, &control,),
+                        label = "dashboard.measure.similarity_cold"
+                    ))
+                    .await;
+                    (payload, Some(heartbeat))
+                } else {
+                    (
+                        hotpath::future!(
+                            memory_service::similarity_payload(&fixture.state, 0.5, 100, &control,),
+                            label = "dashboard.measure.similarity_cold"
+                        )
+                        .await,
+                        None,
+                    )
+                };
+                similarity_cold.push(started.elapsed());
+                similarity_cold_rows.push(
+                    similarity["scan"]["vector_rows_read"]
+                        .as_u64()
+                        .expect("similarity cold row count"),
+                );
+                assert_eq!(similarity["scan"]["cache_state"], "miss");
+                if heartbeat.is_some() {
+                    similarity_cold_heartbeat = heartbeat;
+                }
+            }
+
+            let warm_fixture = &fixtures[0];
+            let mut projection_warm = Vec::with_capacity(WARM_RUNS);
+            let mut projection_warm_rows = Vec::with_capacity(WARM_RUNS);
+            for _ in 0..WARM_RUNS {
+                let started = Instant::now();
+                let projection = hotpath::future!(
+                    memory_service::projection_payload(
+                        &warm_fixture.state,
+                        "",
+                        memory_service::projection_point_cap(),
+                        &control,
+                    ),
+                    label = "dashboard.measure.projection_warm"
+                )
+                .await;
+                projection_warm.push(started.elapsed());
+                projection_warm_rows.push(
+                    projection["scan"]["vector_rows_read"]
+                        .as_u64()
+                        .expect("projection warm row count"),
+                );
+                assert_eq!(projection["scan"]["cache_state"], "hit");
+            }
+
+            let ((similarity_warm, similarity_warm_rows), similarity_warm_heartbeat) =
+                with_tokio_heartbeat(async {
+                    let mut timings = Vec::with_capacity(WARM_RUNS);
+                    let mut rows = Vec::with_capacity(WARM_RUNS);
+                    for _ in 0..WARM_RUNS {
+                        let started = Instant::now();
+                        let similarity = hotpath::future!(
+                            memory_service::similarity_payload(
+                                &warm_fixture.state,
+                                0.5,
+                                100,
+                                &control,
+                            ),
+                            label = "dashboard.measure.similarity_warm"
+                        )
+                        .await;
+                        timings.push(started.elapsed());
+                        rows.push(
+                            similarity["scan"]["vector_rows_read"]
+                                .as_u64()
+                                .expect("similarity warm row count"),
+                        );
+                        assert_eq!(similarity["scan"]["cache_state"], "hit");
+                    }
+                    (timings, rows)
+                })
+                .await;
+            let cold_heartbeat =
+                similarity_cold_heartbeat.expect("cold similarity heartbeat measurement");
+
+            assert!(
+                projection_warm_rows.iter().all(|rows| *rows == 0),
+                "warm projection must perform zero vector-row reads"
+            );
+            assert!(
+                similarity_warm_rows.iter().all(|rows| *rows == 0),
+                "warm similarity must perform zero vector-row reads"
+            );
+            println!(
+                "| {row_count} | projection | {} | {} | {} | {} | {} | 0 | - | - |",
+                percentile_micros(&projection_cold, 50),
+                percentile_micros(&projection_cold, 95),
+                percentile_micros(&projection_warm, 50),
+                percentile_micros(&projection_warm, 95),
+                projection_cold_rows.iter().max().copied().unwrap_or(0),
+            );
+            println!(
+                "| {row_count} | similarity | {} | {} | {} | {} | {} | 0 | {}/{} | {}/{} |",
+                percentile_micros(&similarity_cold, 50),
+                percentile_micros(&similarity_cold, 95),
+                percentile_micros(&similarity_warm, 50),
+                percentile_micros(&similarity_warm, 95),
+                similarity_cold_rows.iter().max().copied().unwrap_or(0),
+                cold_heartbeat.p95_lateness_micros,
+                cold_heartbeat.max_lateness_micros,
+                similarity_warm_heartbeat.p95_lateness_micros,
+                similarity_warm_heartbeat.max_lateness_micros,
+            );
+        }
+
+        println!(
+            "10k/50k stores omitted: canonical fixture seeding commits each fact through the production write authority; both dashboard vector reads are already capped at 2000 rows."
+        );
+
+        #[cfg(feature = "hotpath-alloc")]
+        {
+            drop(allocation_guard);
+            let report: hotpath::json::JsonReport = serde_json::from_slice(
+                &std::fs::read(&allocation_report_path).expect("read allocation report"),
+            )
+            .expect("parse allocation report");
+            let allocations = report.functions_alloc.expect("function allocation report");
+            println!("| allocation scope | calls | average bytes | total bytes |");
+            println!("|---|---:|---:|---:|");
+            for label in [
+                "dashboard_api.memory.projection_compute",
+                "dashboard_api.memory.similarity_compute",
+            ] {
+                let entry = allocations
+                    .data
+                    .iter()
+                    .find(|entry| entry.name == label)
+                    .unwrap_or_else(|| panic!("missing allocation entry for {label}"));
+                println!(
+                    "| {label} | {} | {} | {} |",
+                    entry.calls, entry.avg, entry.total
+                );
+            }
+        }
+        #[cfg(not(feature = "hotpath-alloc"))]
+        println!(
+            "allocations: rerun this ignored test with --features hotpath-alloc to activate the workspace counting allocator"
+        );
     }
 
     #[tokio::test]

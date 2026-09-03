@@ -49,7 +49,8 @@ pub use dashboard::{
     ProjectMemoryDashboardMemoryOverviewQueryV1, ProjectMemoryDashboardMemoryOverviewV1,
     ProjectMemoryDashboardNamedCountV1, ProjectMemoryDashboardOplogEntryV1,
     ProjectMemoryDashboardOplogQueryV1, ProjectMemoryDashboardVectorPointV1,
-    ProjectMemoryDashboardVectorPointsQueryV1,
+    ProjectMemoryDashboardVectorPointsQueryV1, ProjectMemoryDashboardVectorSnapshotV1,
+    ProjectMemoryStoreRevisionV1,
 };
 pub use search::{
     MAX_PROJECT_MEMORY_SEARCH_SCORE_MILLIONTHS, ProjectMemoryFactContradictionPageV1,
