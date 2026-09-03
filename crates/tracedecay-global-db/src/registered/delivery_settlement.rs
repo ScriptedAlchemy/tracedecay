@@ -54,7 +54,7 @@ impl RegisteredGlobalDb {
     /// bound to `work_attempt`. The query is authorization-scoped by project,
     /// keyed by a canonical identity digest, and capped before any data leaves
     /// the reader. It never derives a Work identity from `owner_event_id`.
-    #[hotpath::skip]
+    #[hotpath::measure(future = true, label = "global_db.delivery_settlement.query.censuses")]
     pub async fn work_attempt_delivery_censuses(
         &self,
         project_id: &str,
@@ -123,7 +123,7 @@ impl RegisteredGlobalDb {
     /// Durably records one concrete recipient at the completion boundary that
     /// observed it. Callers choose whether that boundary is pre-write or
     /// post-hoc and must describe their timing truthfully.
-    #[hotpath::skip]
+    #[hotpath::measure(future = true, label = "global_db.delivery_settlement.persist.begin")]
     pub async fn begin_delivery_attempt(
         &self,
         project_id: &str,
@@ -135,7 +135,10 @@ impl RegisteredGlobalDb {
 
     /// Durably binds an opaque source acknowledgement token to the exact
     /// admitted recipient in the same transaction as attempt admission.
-    #[hotpath::skip]
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.delivery_settlement.persist.begin_receipted"
+    )]
     pub async fn begin_receipted_delivery_attempt(
         &self,
         project_id: &str,
@@ -212,7 +215,10 @@ impl RegisteredGlobalDb {
 
     /// Resolves a project-scoped source acknowledgement token to the exact
     /// durable attempt admitted for it. Unknown tokens remain a typed absence.
-    #[hotpath::skip]
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.delivery_settlement.query.source_receipt"
+    )]
     pub async fn delivery_attempt_for_source_receipt(
         &self,
         project_id: &str,
@@ -288,7 +294,10 @@ impl RegisteredGlobalDb {
     /// Reads one bounded due page of pending opaque source receipts. This is
     /// an indexed deadline scan; callers advance durable state by settling the
     /// returned exact attempts and may repeat until the page is empty.
-    #[hotpath::skip]
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.delivery_settlement.query.pending_due"
+    )]
     pub async fn pending_receipted_delivery_attempts_due(
         &self,
         project_id: &str,
@@ -354,7 +363,7 @@ impl RegisteredGlobalDb {
 
     /// CASes an admitted recipient to one immutable terminal outcome and
     /// returns the exact bounded surface census from the same transaction.
-    #[hotpath::skip]
+    #[hotpath::measure(future = true, label = "global_db.delivery_settlement.persist.settle")]
     pub async fn settle_delivery_attempt(
         &self,
         project_id: &str,
