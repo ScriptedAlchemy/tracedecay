@@ -1023,16 +1023,6 @@ pub struct AuthorizedDaemonLspWorkspace {
 
 impl DaemonLspInvocationOwner {
     #[cfg(any(test, feature = "test-helpers"))]
-    pub fn new(factory: Arc<DaemonLspSessionFactory>) -> Self {
-        Self::for_test_project(
-            factory,
-            UserProfileId::new("profile.test.lsp").expect("test LSP profile"),
-            ProjectId::new("project.test.lsp").expect("test LSP project"),
-            PathBuf::from("/test/lsp"),
-        )
-    }
-
-    #[cfg(any(test, feature = "test-helpers"))]
     pub fn for_test_project(
         factory: Arc<DaemonLspSessionFactory>,
         profile_id: UserProfileId,
@@ -1053,12 +1043,14 @@ impl DaemonLspInvocationOwner {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
     pub fn with_scope_grant(mut self, scope_grant: CapabilityGrantSnapshot) -> Self {
         self.scope_grant = Some(scope_grant);
         self
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
     pub fn with_delivery_settlements(
         mut self,
         delivery_settlements: Arc<

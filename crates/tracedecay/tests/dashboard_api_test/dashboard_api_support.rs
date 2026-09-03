@@ -166,8 +166,10 @@ fn spawn_dashboard_server_with_runner(
                 cg.clone(),
                 authority,
                 project_graphs,
-                "127.0.0.1",
-                port,
+                dashboard::DashboardTestEndpointV1 {
+                    host: "127.0.0.1",
+                    port,
+                },
                 tracedecay::product_runtime::register_fixture_product_runtime().build_version(),
                 dashboard::spa_router(tracedecay::product_runtime::FIXTURE_DASHBOARD_ASSETS),
                 async move {

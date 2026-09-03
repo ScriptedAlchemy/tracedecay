@@ -1,5 +1,5 @@
 use std::ffi::{OsStr, OsString};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[cfg(unix)]
 use std::io::{BufRead, Write};
@@ -8,6 +8,8 @@ use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
 use std::os::unix::net::UnixListener;
 #[cfg(target_os = "linux")]
+use std::path::Path;
+#[cfg(target_os = "linux")]
 use std::process::Command;
 #[cfg(target_os = "linux")]
 use std::sync::Arc;
@@ -15,9 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::TempDir;
 
-#[cfg(target_os = "linux")]
-use super::runner::ServiceRunner;
-use super::runner::{LaunchctlFailureMode, LaunchdCommand};
+use super::runner::{LaunchctlFailureMode, LaunchdCommand, ServiceRunner};
 use super::{DaemonServiceSpec, DaemonServiceState};
 use tracedecay_daemon_protocol::SOCKET_ENV;
 use tracedecay_runtime_core::config::{

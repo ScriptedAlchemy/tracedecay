@@ -392,7 +392,7 @@ impl MessageSearchInput {
             ProviderScope::parse_optional(request.provider.as_deref()).map_err(|error| {
                 tracedecay_application::SafeDiagnostic::new(
                     "application.retained.message-search-provider-invalid",
-                    error.to_string(),
+                    error.clone(),
                 )
                 .map_or(
                     RetainedSurfaceExecutionErrorV1::InvalidRequest,

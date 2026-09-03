@@ -170,12 +170,14 @@ impl DaemonSessionRuntimeRegistryV1 {
                     open_runtime(
                         &self.registry,
                         self.resolver.as_ref(),
-                        shard_id.clone(),
-                        self.incarnation,
-                        Some(pin),
-                        Some(authority),
-                        matches!(&access, DatabaseAccessMode::ReadWrite),
-                        "mount project graph store",
+                        super::StoreRuntimeOpenSpec::new(
+                            shard_id.clone(),
+                            self.incarnation,
+                            Some(pin),
+                            Some(authority),
+                            matches!(&access, DatabaseAccessMode::ReadWrite),
+                            "mount project graph store",
+                        ),
                     ),
                     label = "daemon.store.project_graph.open"
                 )

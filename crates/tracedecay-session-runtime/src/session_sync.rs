@@ -108,6 +108,14 @@ pub enum SessionSyncWorkResult {
     Interrupted(work::SessionSyncInterruption),
 }
 
+struct SessionSyncTerminalMaterial {
+    termination: OperationTermination,
+    stats: SessionSyncStatsV1,
+    coverage: Vec<SessionSyncSourceCoverageV1>,
+    source_frontiers: Vec<SessionSyncSourceFrontierV1>,
+    failure_codes: Vec<String>,
+}
+
 impl Default for DaemonSessionSyncService {
     fn default() -> Self {
         Self {
@@ -581,11 +589,13 @@ impl DaemonSessionSyncService {
                     .persist_terminal(
                         &context,
                         &key,
-                        termination,
-                        stats,
-                        coverage,
-                        source_frontiers,
-                        failure_codes,
+                        SessionSyncTerminalMaterial {
+                            termination,
+                            stats,
+                            coverage,
+                            source_frontiers,
+                            failure_codes,
+                        },
                     )
                     .await
                     .is_ok()
@@ -628,11 +638,13 @@ impl DaemonSessionSyncService {
         self.persist_terminal(
             context,
             key,
-            termination,
-            journal.stats,
-            journal.coverage,
-            journal.source_frontiers,
-            Vec::new(),
+            SessionSyncTerminalMaterial {
+                termination,
+                stats: journal.stats,
+                coverage: journal.coverage,
+                source_frontiers: journal.source_frontiers,
+                failure_codes: Vec::new(),
+            },
         )
         .await
     }
@@ -642,12 +654,15 @@ impl DaemonSessionSyncService {
         &self,
         context: &SessionSyncProjectContext,
         key: &str,
-        termination: OperationTermination,
-        stats: SessionSyncStatsV1,
-        coverage: Vec<SessionSyncSourceCoverageV1>,
-        source_frontiers: Vec<SessionSyncSourceFrontierV1>,
-        failure_codes: Vec<String>,
+        material: SessionSyncTerminalMaterial,
     ) -> tracedecay_domain::errors::Result<SessionSyncJournalV1> {
+        let SessionSyncTerminalMaterial {
+            termination,
+            stats,
+            coverage,
+            source_frontiers,
+            failure_codes,
+        } = material;
         self.update_journal(context, key, |journal| {
             if journal.status == SessionSyncJournalStatusV1::Complete {
                 return;

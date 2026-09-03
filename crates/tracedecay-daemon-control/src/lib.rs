@@ -1,4 +1,4 @@
-//! OS service lifecycle and readiness control for the TraceDecay daemon.
+//! OS service lifecycle and readiness control for the `TraceDecay` daemon.
 //!
 //! This crate owns the generated systemd, launchd, and Windows service
 //! definitions together with install, stop, restore, and authenticated

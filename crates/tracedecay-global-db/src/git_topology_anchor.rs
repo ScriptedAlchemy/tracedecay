@@ -204,7 +204,7 @@ fn decode_record(
     owner_json: &str,
     projection_generation: &str,
 ) -> Result<RetrievalAnchorRecordV2, GitTopologyAnchorAuthorityErrorV2> {
-    let record = serde_json::from_str::<RetrievalAnchorRecordV2>(&anchor_json)
+    let record = serde_json::from_str::<RetrievalAnchorRecordV2>(anchor_json)
         .map_err(|_| GitTopologyAnchorAuthorityErrorV2::ResetRequired)?;
     record
         .validate()

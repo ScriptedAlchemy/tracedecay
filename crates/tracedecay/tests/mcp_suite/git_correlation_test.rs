@@ -114,11 +114,7 @@ async fn record_span(runtime: &HostAdmissionTestRuntimeV1, observation: &SpanObs
         .unwrap_or_else(|e| panic!("record span: {e}"));
 }
 
-async fn call(
-    server: &McpServer,
-    tool: &str,
-    mut args: Value,
-) -> Value {
+async fn call(server: &McpServer, tool: &str, mut args: Value) -> Value {
     if let Some(obj) = args.as_object_mut() {
         obj.entry("format".to_string())
             .or_insert_with(|| json!("json"));

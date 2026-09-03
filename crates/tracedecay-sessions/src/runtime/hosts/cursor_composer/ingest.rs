@@ -521,7 +521,7 @@ impl CursorComposerSource {
                     byte_budget.defer();
                     continue;
                 }
-                let Some(generation) = state_generation.clone() else {
+                let Some(generation) = state_generation else {
                     continue;
                 };
                 let mut session_accepted = false;

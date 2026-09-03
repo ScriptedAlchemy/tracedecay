@@ -989,7 +989,7 @@ impl McpServer {
                     }
                     std::fs::metadata(project_root.join(relative))
                         .ok()
-                        .filter(|metadata| metadata.is_file())
+                        .filter(std::fs::Metadata::is_file)
                         .map(|metadata| metadata.len() / 4)
                 })
                 .fold(0_u64, u64::saturating_add)

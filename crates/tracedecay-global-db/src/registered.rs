@@ -228,12 +228,14 @@ impl RegisteredGlobalDbLeaseV1 {
 pub struct RegisteredGlobalDb {
     database: Database,
     project_graph: Arc<OnceLock<VerifiedGraphRuntimeWeakProxyV1>>,
-    session_relation_graph: RwLock<Option<(
-        tracedecay_session_temporal_store::relations::SessionRelationScope,
-        tracedecay_graph_db::GraphDbLeaseV1,
-        StoreRuntimeBindingV1,
-        VerifiedStoreLocatorV1,
-    )>>,
+    session_relation_graph: RwLock<
+        Option<(
+            tracedecay_session_temporal_store::relations::SessionRelationScope,
+            tracedecay_graph_db::GraphDbLeaseV1,
+            StoreRuntimeBindingV1,
+            VerifiedStoreLocatorV1,
+        )>,
+    >,
 }
 
 impl RegisteredGlobalDb {

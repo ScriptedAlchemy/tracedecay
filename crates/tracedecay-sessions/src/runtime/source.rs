@@ -595,7 +595,7 @@ enum PreparedTranscriptFile {
         path: PathBuf,
         loaded: LoadedTranscriptCursor,
         previous: TranscriptCursorCheckpoint,
-        parsed: ParsedTranscript,
+        parsed: Box<ParsedTranscript>,
     },
 }
 
@@ -627,7 +627,7 @@ fn prepare_loaded_transcript(
         path,
         loaded,
         previous,
-        parsed,
+        parsed: Box::new(parsed),
     })
 }
 
@@ -653,7 +653,7 @@ async fn persist_prepared_transcript<S: TranscriptIngestStore>(
         project_root,
         loaded,
         &previous,
-        parsed,
+        *parsed,
     )
     .await
 }

@@ -281,7 +281,7 @@ pub use result::{
 };
 pub use retained_receipts::{
     PreparedRetainedEffect, authority_receipt, effective_memory_deadline, evidence_outcome,
-    measured_budget, memory_expiry_partial, prepare_retained_effect, retained_effect_outcome,
+    measured_budget, memory_expiry_partial, prepare_retained_effect,
     session_refresh_effect_outcome,
 };
 pub use retained_surfaces::{

@@ -306,8 +306,7 @@ fn unused_imports_in_file(project_root: &Path, file_path: &str) -> Result<Vec<Va
     if use_nodes.is_empty() {
         return Ok(Vec::new());
     }
-    let masked =
-        tracedecay_code_extraction::source_mask::masked_rust_source(&source);
+    let masked = tracedecay_code_extraction::source_mask::masked_rust_source(&source);
     let referenced_identifiers =
         identifiers_in_source(&without_use_declarations(masked, &source, &use_nodes)?);
 
@@ -344,11 +343,7 @@ fn unused_imports_in_file(project_root: &Path, file_path: &str) -> Result<Vec<Va
 /// Tree-sitter columns are byte offsets, matching the UTF-8 source slices.
 /// Exact ranges preserve real code after a same-line declaration.
 #[hotpath::measure]
-fn without_use_declarations(
-    masked: String,
-    source: &str,
-    use_nodes: &[&Node],
-) -> Result<String> {
+fn without_use_declarations(masked: String, source: &str, use_nodes: &[&Node]) -> Result<String> {
     let mut line_starts = vec![0usize];
     for (offset, byte) in source.bytes().enumerate() {
         if byte == b'\n' {
@@ -396,7 +391,7 @@ mod tests {
         fs::create_dir_all(project.path().join("src")).expect("create source directory");
         fs::write(
             project.path().join("src/lib.rs"),
-            r#"use std::collections::{
+            r"use std::collections::{
     HashMap,
     HashSet as Set,
     BTreeMap,
@@ -406,7 +401,7 @@ mod tests {
 pub fn used() -> (HashMap<u32, u32>, Set<u32>) {
     (HashMap::new(), Set::new())
 }
-"#,
+",
         )
         .expect("write source");
 
