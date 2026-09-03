@@ -3230,6 +3230,7 @@ fn sqlite_file_size(connection: &Connection) -> Result<u64, CodeLexicalArtifactE
     })
 }
 
+#[hotpath::measure(label = "query.artifact.create.schema")]
 fn create_schema(
     connection: &Connection,
     layout: LexicalArtifactLayoutV1,
@@ -4352,6 +4353,7 @@ fn finish_section(
 /// counting/replaying every staged page on each bounded finalization wake.
 /// The final section receipts validate the full source-page cardinality before
 /// a sealed artifact is published.
+#[hotpath::measure(label = "query.artifact.finalization.source_chain_verify")]
 fn verify_staged_source_chain(
     connection: &Connection,
     source: &VerifiedSealedLexicalSourceReceiptV1,
