@@ -778,53 +778,46 @@ impl DaemonInvocationClient {
             }
         };
         let request_id = target_request_id.to_owned();
-        let result = async {
-            connection
-                .writer
-                .write_all(serde_json::to_string(&request)?.as_bytes())
-                .await?;
-            connection.writer.write_all(b"\n").await?;
-            connection.writer.flush().await?;
+        connection
+            .writer
+            .write_all(serde_json::to_string(&request)?.as_bytes())
+            .await?;
+        connection.writer.write_all(b"\n").await?;
+        connection.writer.flush().await?;
 
-            let Some(line) = crate::connection::next_daemon_response_line(
-                &mut connection.reader,
-                daemon_connection,
-                "invocation_delivery_ack",
-                crate::connection::DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
-            )
-            .await?
-            else {
-                return Err(tracedecay_domain::errors::TraceDecayError::Config {
-                    message:
-                        "daemon closed the invocation connection before acknowledging Work delivery"
-                            .to_owned(),
-                });
-            };
-            let response: crate::contract::DaemonInvocationDeliveryAckResponse =
-                serde_json::from_str(&line).map_err(|_| {
-                    tracedecay_domain::errors::TraceDecayError::Config {
-                        message:
-                            "daemon returned an invalid Work delivery acknowledgement response"
-                                .to_owned(),
-                    }
-                })?;
-            if !response.matches_request(&request_id) {
-                return Err(tracedecay_domain::errors::TraceDecayError::Config {
-                    message: "daemon Work delivery acknowledgement did not match the request"
+        let Some(line) = crate::connection::next_daemon_response_line(
+            &mut connection.reader,
+            daemon_connection,
+            "invocation_delivery_ack",
+            crate::connection::DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
+        )
+        .await?
+        else {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message:
+                    "daemon closed the invocation connection before acknowledging Work delivery"
                         .to_owned(),
-                });
-            }
-            if let Some(reason) = response.rejection_reason() {
-                return Err(tracedecay_domain::errors::TraceDecayError::Config {
-                    message: format!(
-                        "daemon rejected the Work delivery acknowledgement: {reason:?}"
-                    ),
-                });
-            }
-            Ok(())
+            });
+        };
+        let response: crate::contract::DaemonInvocationDeliveryAckResponse =
+            serde_json::from_str(&line).map_err(|_| {
+                tracedecay_domain::errors::TraceDecayError::Config {
+                    message: "daemon returned an invalid Work delivery acknowledgement response"
+                        .to_owned(),
+                }
+            })?;
+        if !response.matches_request(&request_id) {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: "daemon Work delivery acknowledgement did not match the request"
+                    .to_owned(),
+            });
         }
-        .await;
-        result
+        if let Some(reason) = response.rejection_reason() {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!("daemon rejected the Work delivery acknowledgement: {reason:?}"),
+            });
+        }
+        Ok(())
     }
 
     #[hotpath::skip]
