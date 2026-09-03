@@ -401,7 +401,14 @@ pub(crate) async fn ensure_authority_invariants(
     authority_invariant_step(
         provider,
         "repair observation projection frontier",
-        async |conn| repair_projection_frontier(conn, checkpoint.projection_checkpoint).await,
+        async |conn| {
+            repair_projection_frontier(conn, checkpoint.projection_checkpoint).await?;
+            if exhaustive {
+                validate_invariant_rows(conn).await
+            } else {
+                validate_mutable_invariant_rows(conn).await
+            }
+        },
     )
     .await?;
     let projection_start = AuditCheckpoint {
@@ -455,44 +462,31 @@ pub(crate) async fn ensure_authority_invariants(
         .await?
     };
 
-    if exhaustive {
-        // A writer between committed pages can only append above a captured
-        // watermark: admission-critical triggers guard that row immediately,
-        // and this pass's later pages or the next bounded suffix pass audits
-        // it. Only the final step below turns the in-progress marker trusted.
-        if force_exhaustive {
-            loop {
-                match authority_invariant_step(
-                    provider,
-                    "audit global database foreign key table",
-                    async |conn| audit_next_foreign_key_table(conn).await,
-                )
-                .await?
-                {
-                    ForeignKeyAuditStep::Continue => {}
-                    ForeignKeyAuditStep::Complete => break,
-                    ForeignKeyAuditStep::Violation => {
-                        return Err(global_db_operation_message(
-                            OPERATION,
-                            "global database contains a foreign-key violation",
-                        ));
-                    }
+    if exhaustive && force_exhaustive {
+        loop {
+            match authority_invariant_step(
+                provider,
+                "audit global database foreign key table",
+                async |conn| audit_next_foreign_key_table(conn).await,
+            )
+            .await?
+            {
+                ForeignKeyAuditStep::Continue => {}
+                ForeignKeyAuditStep::Complete => break,
+                ForeignKeyAuditStep::Violation => {
+                    return Err(global_db_operation_message(
+                        OPERATION,
+                        "global database contains a foreign-key violation",
+                    ));
                 }
             }
         }
-        authority_invariant_step(
-            provider,
-            "validate exhaustive invariant rows",
-            async |conn| validate_invariant_rows(conn).await,
-        )
-        .await?;
-    } else {
-        authority_invariant_step(provider, "validate bounded invariant rows", async |conn| {
-            validate_mutable_invariant_rows(conn).await
-        })
-        .await?;
     }
 
+    // A writer between committed pages can only append above a captured
+    // watermark: admission-critical triggers guard that row immediately, and
+    // this pass's later pages or the next bounded suffix pass audits it. Only
+    // the final step below turns the in-progress marker trusted.
     let mut checkpoint = checkpoint;
     checkpoint.bounded_passes_since_exhaustive = if exhaustive {
         0
