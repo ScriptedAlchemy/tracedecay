@@ -856,12 +856,7 @@ impl McpServer {
         } = context;
         let file_token_map = HashMap::new();
         let response_handle_project_root = cg.project_root().to_path_buf();
-        let persisted_tokens_saved = match hotpath::future!(
-            cg.get_tokens_saved(),
-            label = "mcp.server.read_tokens_baseline"
-        )
-        .await
-        {
+        let persisted_tokens_saved = match cg.get_tokens_saved().await {
             Ok(persisted) => Some(persisted),
             Err(error) => {
                 tracing::warn!(
