@@ -131,6 +131,7 @@ pub enum GenerationDiagnosticJoinErrorV1 {
 
 impl GenerationDiagnosticJoinV1 {
     /// Join Plan-35 records to one exact clean generation.
+    #[hotpath::measure(label = "code_index.diagnostics.join")]
     pub fn join(
         generation: &CodeGenerationManifestV1,
         snapshot: &ValidatedCodeSnapshotV1,
