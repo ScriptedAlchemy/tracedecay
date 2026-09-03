@@ -76,6 +76,16 @@ const ANTIGRAVITY_CONFIGS: &[(&str, &[u8])] = &[
 "#,
     ),
 ];
+const VIBE_CONFIGS: &[(&str, &[u8])] = &[
+    (
+        ".vibe/config.toml",
+        b"# operator comment\n[[mcp_servers]]\nname = \"foreign\"\ntransport = \"stdio\"\ncommand = \"foreign-bin\"\nargs = [\"serve\"]\n",
+    ),
+    (
+        ".vibe/prompts/cli.md",
+        b"# Operator instructions\n\nKeep this text.\n",
+    ),
+];
 const HERMES_CONFIGS: &[(&str, &[u8])] = &[
     (
         ".hermes/config.yaml",
@@ -179,6 +189,7 @@ fn host_case(host: HostKindV1) -> HostCase {
         HostKindV1::Devin => DEVIN_CONFIGS,
         HostKindV1::Zed => ZED_CONFIGS,
         HostKindV1::Antigravity => ANTIGRAVITY_CONFIGS,
+        HostKindV1::Vibe => VIBE_CONFIGS,
         HostKindV1::Hermes => HERMES_CONFIGS,
         HostKindV1::Kiro => KIRO_CONFIGS,
         HostKindV1::KimiCode => &[],
@@ -289,6 +300,30 @@ fn assert_success(host: &str, phase: &str, output: Output) {
 }
 
 fn assert_documented_mcp_registration(case: HostCase, cli: &IsolatedCli) {
+    if case.host == HostKindV1::Vibe {
+        let config = fs::read_to_string(cli.home.path().join(".vibe/config.toml")).unwrap();
+        let config: toml::Value = toml::from_str(&config).unwrap();
+        let servers = config["mcp_servers"].as_array().unwrap();
+        assert!(
+            servers
+                .iter()
+                .any(|server| server["name"].as_str() == Some("foreign"))
+        );
+        let entry = servers
+            .iter()
+            .find(|server| server["name"].as_str() == Some("tracedecay"))
+            .unwrap();
+        assert_eq!(
+            entry["command"].as_str(),
+            cli.bin_dir.join("tracedecay").to_str()
+        );
+        assert_eq!(entry["transport"].as_str(), Some("stdio"));
+        assert_eq!(entry["args"].as_array().unwrap()[0].as_str(), Some("serve"));
+        let prompt = fs::read_to_string(cli.home.path().join(".vibe/prompts/cli.md")).unwrap();
+        assert!(prompt.contains("Keep this text."));
+        assert!(prompt.contains("## Prefer tracedecay MCP tools"));
+        return;
+    }
     let (relative, root) = match case.host {
         HostKindV1::Cline => (".cline/mcp.json", "mcpServers"),
         HostKindV1::Devin => (".config/devin/mcp_config.json", "mcpServers"),
@@ -640,6 +675,7 @@ fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
         HostKindV1::Devin,
         HostKindV1::Zed,
         HostKindV1::Antigravity,
+        HostKindV1::Vibe,
         HostKindV1::Hermes,
     ] {
         let case = host_case(host);
@@ -877,6 +913,42 @@ fn production_cli_installs_zed_project_mcp_without_touching_siblings() {
         config["context_servers"]["tracedecay"]["args"],
         serde_json::json!(["serve"])
     );
+}
+
+#[test]
+fn production_cli_installs_vibe_project_components_without_touching_siblings() {
+    let cli = IsolatedCli::new();
+    let config = cli.project.path().join(".vibe/config.toml");
+    let prompt = cli.project.path().join(".vibe/prompts/cli.md");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    fs::create_dir_all(prompt.parent().unwrap()).unwrap();
+    fs::write(
+        &config,
+        b"[[mcp_servers]]\nname = \"foreign\"\ncommand = \"foreign-bin\"\n",
+    )
+    .unwrap();
+    fs::write(&prompt, b"# Project instructions\n\nKeep this text.\n").unwrap();
+
+    assert_success(
+        "vibe",
+        "project install",
+        cli.run(&["install", "--agent", "vibe", "--local"]),
+    );
+
+    let config = fs::read_to_string(&config).unwrap();
+    assert!(config.contains("name = \"foreign\"\ncommand = \"foreign-bin\""));
+    assert!(config.contains("name = \"tracedecay\""));
+    assert!(
+        config.contains(
+            cli.bin_dir
+                .join("tracedecay")
+                .to_str()
+                .expect("UTF-8 test path")
+        )
+    );
+    let prompt = fs::read_to_string(&prompt).unwrap();
+    assert!(prompt.contains("Keep this text."));
+    assert!(prompt.contains("## Prefer tracedecay MCP tools"));
 }
 
 #[test]
