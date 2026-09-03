@@ -5,8 +5,8 @@ use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 
 use super::super::{global_db_operation_error, global_db_operation_message};
 use super::definitions::{
-    Column, INDEXES, Index, REGISTRY_TABLE_NAMES, SESSION_TEMPORAL_PROJECTION_RECEIPTS_V3, TABLES,
-    Table,
+    Column, INDEX_DESCENDING_COLUMNS, INDEXES, Index, REGISTRY_TABLE_NAMES,
+    SESSION_TEMPORAL_PROJECTION_RECEIPTS_V3, TABLES, Table,
 };
 use super::pragma::{
     ActualColumn, ActualForeignKey, ActualIndex, ActualTableMetadata, read_table_metadata,
@@ -223,11 +223,24 @@ fn index_matches(actual: &ActualIndex, expected: &Index) -> bool {
             .columns
             .iter()
             .zip(expected.columns)
-            .all(|(actual, expected)| {
+            .all(|(actual, expected_column)| {
                 actual.cid >= 0
-                    && !actual.descending
+                    && actual.descending
+                        == expected
+                            .name
+                            .and_then(|name| {
+                                INDEX_DESCENDING_COLUMNS
+                                    .iter()
+                                    .find(|(index, _)| index.eq_ignore_ascii_case(name))
+                                    .map(|(_, columns)| *columns)
+                            })
+                            .is_some_and(|columns| {
+                                columns
+                                    .iter()
+                                    .any(|column| column.eq_ignore_ascii_case(expected_column))
+                            })
                     && actual.collation.eq_ignore_ascii_case("BINARY")
-                    && actual.name.eq_ignore_ascii_case(expected)
+                    && actual.name.eq_ignore_ascii_case(expected_column)
             })
 }
 
