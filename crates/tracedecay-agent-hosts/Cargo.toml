@@ -116,6 +116,7 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7.19", default-features = false }
 gix = { version = "=0.86.0", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
 toml = "1"
+toml_edit = "0.25"
 tracing = "0.1"
 url = "2"
 yaml-edit = { version = "0.2.3", default-features = false }

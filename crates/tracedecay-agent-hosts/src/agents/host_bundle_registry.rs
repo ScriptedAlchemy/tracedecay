@@ -22,13 +22,14 @@ const FIRST_PARTY_COMPONENT_SCHEMA_VERSION: u16 = 1;
 /// Canonical hosts whose first-party component lifecycle can publish durable
 /// ownership receipts. Discovery-only and evidence-unadmitted hosts stay in
 /// `HostKindV1::ALL`, but never enter install/update/uninstall sweeps.
-pub const RECEIPT_BACKED_HOST_KINDS: [HostKindV1; 15] = [
+pub const RECEIPT_BACKED_HOST_KINDS: [HostKindV1; 16] = [
     HostKindV1::ClaudeCode,
     HostKindV1::CursorDesktop,
     HostKindV1::Codex,
     HostKindV1::Devin,
     HostKindV1::Zed,
     HostKindV1::Antigravity,
+    HostKindV1::Vibe,
     HostKindV1::Hermes,
     HostKindV1::Kiro,
     HostKindV1::KimiCode,
@@ -115,6 +116,7 @@ pub fn unsupported_host_component_set_reason(
         | HostKindV1::Devin
         | HostKindV1::Zed
         | HostKindV1::Antigravity
+        | HostKindV1::Vibe
         | HostKindV1::CursorDesktop
         | HostKindV1::Hermes
         | HostKindV1::Kiro
@@ -141,12 +143,6 @@ pub fn unsupported_host_component_set_reason(
         HostKindV1::ClineFamily => {
             Some(HostCapabilityUnavailableReasonV1::CheckedInEvidenceMissing)
         }
-        // Identity admission precedes each host's native registration
-        // authority. Until that authority lands, catalog selection must fail
-        // as a typed unavailable set instead of succeeding with no artifacts.
-        HostKindV1::Vibe => {
-            Some(HostCapabilityUnavailableReasonV1::HostRegistrationUnsupported)
-        }
     }
 }
 
@@ -163,6 +159,10 @@ pub fn default_components(host: HostKindV1) -> Vec<HostBundleComponentV1> {
         HostKindV1::Devin | HostKindV1::Zed | HostKindV1::Antigravity => {
             vec![HostBundleComponentV1::ContextMcp]
         }
+        HostKindV1::Vibe => vec![
+            HostBundleComponentV1::ContextMcp,
+            HostBundleComponentV1::Core,
+        ],
         HostKindV1::CursorDesktop | HostKindV1::OpenCode => vec![
             HostBundleComponentV1::Core,
             HostBundleComponentV1::Agent,
@@ -189,7 +189,7 @@ pub fn default_components(host: HostKindV1) -> Vec<HostBundleComponentV1> {
         | HostKindV1::Kilo => {
             vec![HostBundleComponentV1::ContextMcp]
         }
-        HostKindV1::CursorCloud | HostKindV1::ClineFamily | HostKindV1::Vibe => Vec::new(),
+        HostKindV1::CursorCloud | HostKindV1::ClineFamily => Vec::new(),
     }
 }
 
@@ -648,6 +648,20 @@ fn component_assets(
             vec![(
                 "context-mcp.json",
                 r#"{"host":"antigravity","registrations":["../mcp_config.json","../../antigravity-cli/plugins/tracedecay.json"],"registrar":"tracedecay managed dual-document merge","route":"mcp","server":{"command":"__TRACEDECAY_BIN__","args":["serve"],"transport":"stdio"}}"#,
+            )],
+        ),
+        (HostKindV1::Vibe, HostBundleComponentV1::ContextMcp) => (
+            ".vibe/tracedecay",
+            vec![(
+                "context-mcp.json",
+                r#"{"host":"vibe","registration":"../config.toml","registrar":"tracedecay managed TOML merge","route":"mcp","server":{"name":"tracedecay","transport":"stdio","command":"__TRACEDECAY_BIN__","args":["serve"]}}"#,
+            )],
+        ),
+        (HostKindV1::Vibe, HostBundleComponentV1::Core) => (
+            ".vibe/tracedecay",
+            vec![(
+                "core.json",
+                r#"{"host":"vibe","registration":"../prompts/cli.md","registrar":"tracedecay managed prompt rules","route":"prompt"}"#,
             )],
         ),
         (HostKindV1::RooCode, HostBundleComponentV1::ContextMcp) => (
