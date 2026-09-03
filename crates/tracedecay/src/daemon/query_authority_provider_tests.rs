@@ -9,10 +9,10 @@ use tempfile::TempDir;
 use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationSnapshotId};
 use tracedecay_domain::{
     CalibrationProfileId, ChunkerRevision, CodeGenerationId, ComponentRevision, DiversityPolicy,
-    EmbeddingDeviceClassV1, EmbeddingMetricV1, EmbeddingNormalizationV1, EmbeddingPoolingV1,
-    EmbeddingPrecisionV1, EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1,
-    FreshnessVectorDigest, FusionProfile, ManifestDigest, ProjectId, RetrievalBudget, UtcMicros,
-    VectorGenerationIdV1, canonical_sha256,
+    EmbeddingDeviceClassV1, EmbeddingDocumentCompositionV1, EmbeddingMetricV1,
+    EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingProjectionKeyV1,
+    EmbeddingTruncationSideV1, FreshnessVectorDigest, FusionProfile, ManifestDigest, ProjectId,
+    RetrievalBudget, UtcMicros, VectorGenerationIdV1, canonical_sha256,
 };
 use tracedecay_domain::{
     EphemeralSanitizedQueryViewV1, PrincipalId, QueryNormalizationRevision, RepositoryId,
@@ -183,6 +183,7 @@ fn semantic_pins() -> SemanticCompatibilityPinsV1 {
         config_digest: digest('c'),
         query_instruction_digest: None,
         document_instruction_digest: None,
+        document_composition: EmbeddingDocumentCompositionV1::SanitizedText,
         pooling: EmbeddingPoolingV1::Mean,
         truncation_side: EmbeddingTruncationSideV1::Right,
         truncation_length: 128,

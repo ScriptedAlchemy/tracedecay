@@ -32,10 +32,11 @@ use tracedecay_code_index::projection::{
 };
 use tracedecay_domain::{
     AdmittedEmbeddingProjectionKeyV1, ChangedCodeChunkSetV1, ChangedCodeChunkV1, ChunkerRevision,
-    CodeGenerationId, CodeSearchChunkId, ContentDigest, EmbeddingDeviceClassV1, EmbeddingMetricV1,
-    EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingProjectionKeyV1,
-    EmbeddingTruncationSideV1, ManifestDigest, PrivacyDomainId, ProjectionBatchRequestV1,
-    ProjectionOperationV1, ProjectionOutcomeV1, ProjectionReplayReasonV1,
+    CodeGenerationId, CodeSearchChunkId, ContentDigest, EmbeddingDeviceClassV1,
+    EmbeddingDocumentCompositionV1, EmbeddingMetricV1, EmbeddingNormalizationV1,
+    EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1,
+    ManifestDigest, PrivacyDomainId, ProjectionBatchRequestV1, ProjectionOperationV1,
+    ProjectionOutcomeV1, ProjectionReplayReasonV1,
 };
 use tracedecay_semantic::projector::{
     PreparedVectorGenerationV1, ProjectedChunkVectorV1, vector_output_digest,
@@ -79,6 +80,7 @@ fn embedding_key(dimensions: u32) -> AdmittedEmbeddingProjectionKeyV1 {
         config_digest: fixed_digest(3),
         query_instruction_digest: Some(fixed_digest(4)),
         document_instruction_digest: Some(fixed_digest(5)),
+        document_composition: EmbeddingDocumentCompositionV1::SanitizedText,
         pooling: EmbeddingPoolingV1::Mean,
         truncation_side: EmbeddingTruncationSideV1::Right,
         truncation_length: 512,

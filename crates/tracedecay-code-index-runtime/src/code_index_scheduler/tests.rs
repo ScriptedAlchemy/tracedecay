@@ -10234,6 +10234,7 @@ async fn configured_jina_lifecycle_publishes_and_restores_semantic_generation() 
             max_sequence_length: 512,
             load_deadline_ms: 180_000,
         },
+        tracedecay_domain::EmbeddingDocumentCompositionV1::SanitizedText,
     );
 
     assert!(runtime.schedule_saved_generation(Arc::clone(&latest.generation)));
@@ -10275,6 +10276,7 @@ async fn configured_jina_lifecycle_publishes_and_restores_semantic_generation() 
             max_sequence_length: 512,
             load_deadline_ms: 180_000,
         },
+        tracedecay_domain::EmbeddingDocumentCompositionV1::SanitizedText,
     );
     assert!(
         restarted

@@ -351,6 +351,7 @@ pub(super) fn compose_activated_semantic_config(
             active_profile: Some(active),
             rollback_profile: rollback,
             resources: current.resources,
+            document_composition: current.document_composition,
         },
         rollback_profile_id,
     }
@@ -455,6 +456,7 @@ mod tests {
             active_profile: Some(selection("hybrid-conservative", 'b')),
             rollback_profile: None,
             resources: tracedecay_semantic_contracts::SemanticResourceCeilings::default(),
+            document_composition: tracedecay_domain::EmbeddingDocumentCompositionV1::SanitizedText,
         };
         let composed = compose_activated_semantic_config(
             &current,
@@ -493,6 +495,7 @@ mod tests {
             active_profile: Some(selection("hybrid-conservative", 'c')),
             rollback_profile: None,
             resources: tracedecay_semantic_contracts::SemanticResourceCeilings::default(),
+            document_composition: tracedecay_domain::EmbeddingDocumentCompositionV1::SanitizedText,
         };
         let composed = compose_activated_semantic_config(
             &current,
@@ -517,6 +520,7 @@ mod tests {
             active_profile: None,
             rollback_profile: Some(selection("hybrid-aggressive", 'd')),
             resources: tracedecay_semantic_contracts::SemanticResourceCeilings::default(),
+            document_composition: tracedecay_domain::EmbeddingDocumentCompositionV1::SanitizedText,
         };
         let composed = compose_activated_semantic_config(
             &current,

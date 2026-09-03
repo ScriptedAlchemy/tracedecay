@@ -5,17 +5,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tracedecay_domain::{
     CalibrationProfileId, ChunkerRevision, CodeGenerationId, CodeSearchChunkId, CompactCandidate,
-    ComponentRevision, DiversityPolicy, EdgeAuthorityV1, EmbeddingDeviceClassV1, EmbeddingMetricV1,
-    EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingProjectionKeyV1,
-    EmbeddingTruncationSideV1, EvidenceRole, ExactAdmissionProof, ExactAdmissionRuleRevision,
-    ExactFieldV1, ExactTechnicalTermKindV1, FileOccurrenceId, FixedPointScore,
-    FreshnessCompatibilityV1, FusionProfile, ManifestDigest, PrincipalId, RelationEdgeKindV1,
-    RetrievalAnchorId, RetrievalBudget, RetrievalBudgetUsage, RetrievalCursorKeyId,
-    RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverBatch, RetrieverCoverage,
-    RetrieverKind, RetrieverOutcome, ScoreDomainCalibrationV1, ScoreDomainId,
-    SemanticSearchIndexProfileV1, SingleRootScopeV1, SourceFreshness, SourceOccurrenceId,
-    SourceSpan, SymbolOccurrenceId, TemporalModeV1, UtcMicros, VectorGenerationIdV1,
-    VectorWatermark,
+    ComponentRevision, DiversityPolicy, EdgeAuthorityV1, EmbeddingDeviceClassV1,
+    EmbeddingDocumentCompositionV1, EmbeddingMetricV1, EmbeddingNormalizationV1,
+    EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1,
+    EvidenceRole, ExactAdmissionProof, ExactAdmissionRuleRevision, ExactFieldV1,
+    ExactTechnicalTermKindV1, FileOccurrenceId, FixedPointScore, FreshnessCompatibilityV1,
+    FusionProfile, ManifestDigest, PrincipalId, RelationEdgeKindV1, RetrievalAnchorId,
+    RetrievalBudget, RetrievalBudgetUsage, RetrievalCursorKeyId, RetrievalRequest, RetrievalScope,
+    RetrievalSnapshot, RetrieverBatch, RetrieverCoverage, RetrieverKind, RetrieverOutcome,
+    ScoreDomainCalibrationV1, ScoreDomainId, SemanticSearchIndexProfileV1, SingleRootScopeV1,
+    SourceFreshness, SourceOccurrenceId, SourceSpan, SymbolOccurrenceId, TemporalModeV1, UtcMicros,
+    VectorGenerationIdV1, VectorWatermark,
 };
 use tracedecay_query::retrieval::exact::{ExactLaneEvidence, ExactLiteralV1};
 use tracedecay_query::retrieval::fusion::RetrievalCursorKeyringV1;
@@ -191,6 +191,7 @@ fn semantic_evidence() -> CodeSemanticEvidenceV1 {
         config_digest: digest('3'),
         query_instruction_digest: Some(digest('4')),
         document_instruction_digest: Some(digest('5')),
+        document_composition: EmbeddingDocumentCompositionV1::SanitizedText,
         pooling: EmbeddingPoolingV1::Mean,
         truncation_side: EmbeddingTruncationSideV1::Right,
         truncation_length: 128,

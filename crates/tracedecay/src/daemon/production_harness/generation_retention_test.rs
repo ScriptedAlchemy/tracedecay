@@ -10,9 +10,10 @@ use tracedecay_application::doctor::{
 };
 use tracedecay_domain::{
     AdmittedEmbeddingProjectionKeyV1, ChangedCodeChunkSetV1, ChangedCodeChunkV1, ChunkerRevision,
-    CodeGenerationId, CodeSearchChunkId, ContentDigest, EmbeddingDeviceClassV1, EmbeddingMetricV1,
-    EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingProjectionKeyV1,
-    EmbeddingTruncationSideV1, PrivacyDomainId, ProjectionBatchRequestV1, ProjectionReplayReasonV1,
+    CodeGenerationId, CodeSearchChunkId, ContentDigest, EmbeddingDeviceClassV1,
+    EmbeddingDocumentCompositionV1, EmbeddingMetricV1, EmbeddingNormalizationV1,
+    EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1,
+    PrivacyDomainId, ProjectionBatchRequestV1, ProjectionReplayReasonV1,
 };
 use tracedecay_graph_db::NeverCancelled;
 use tracedecay_semantic::projector::{PreparedVectorGenerationV1, ProjectedChunkVectorV1};
@@ -72,6 +73,7 @@ fn admitted_embedding() -> AdmittedEmbeddingProjectionKeyV1 {
         config_digest: digest('3'),
         query_instruction_digest: None,
         document_instruction_digest: None,
+        document_composition: EmbeddingDocumentCompositionV1::SanitizedText,
         pooling: EmbeddingPoolingV1::Mean,
         truncation_side: EmbeddingTruncationSideV1::Right,
         truncation_length: 512,
@@ -535,6 +537,7 @@ async fn set_semantic_disabled(harness: &ProductionProjectCompositionHarnessV1, 
                 active_profile: None,
                 rollback_profile: None,
                 resources: SemanticResourceCeilings::default(),
+                document_composition: EmbeddingDocumentCompositionV1::SanitizedText,
             })
             .expect("disabled semantic runtime JSON"),
         ),

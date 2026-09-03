@@ -6,6 +6,7 @@
 
 use super::*;
 use tracedecay_code_index_runtime::code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1;
+use tracedecay_domain::EmbeddingDocumentCompositionV1;
 use tracedecay_semantic_contracts::SemanticResourceCeilings;
 
 /// Inputs the deferred mount closure re-clones on every activation attempt.
@@ -19,6 +20,7 @@ pub(super) struct CodeIndexActivationMountInputs {
     pub(super) semantic_runtime: tracedecay_semantic::DaemonSemanticRuntimeHandleV1,
     pub(super) semantic_lifecycle: Option<Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1>>,
     pub(super) semantic_resources: SemanticResourceCeilings,
+    pub(super) semantic_document_composition: EmbeddingDocumentCompositionV1,
     pub(super) native_graph_activation: bool,
     pub(super) scope: tracedecay_application::ResolvedScope,
     pub(super) route_registered: Arc<AtomicBool>,
@@ -43,6 +45,7 @@ pub(super) fn code_index_activation_mount(
         semantic_runtime,
         semantic_lifecycle,
         semantic_resources,
+        semantic_document_composition,
         native_graph_activation,
         scope,
         route_registered,
@@ -85,6 +88,7 @@ pub(super) fn code_index_activation_mount(
                     Some(&semantic_runtime),
                     semantic_lifecycle,
                     Some(semantic_resources),
+                    semantic_document_composition,
                     native_graph_activation,
                     graph_runtime,
                     graph_publication_database,

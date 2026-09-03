@@ -5,9 +5,9 @@ use std::sync::{
 };
 use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationSnapshotId};
 use tracedecay_domain::{
-    ChunkerRevision, ComponentRevision, EmbeddingDeviceClassV1, EmbeddingMetricV1,
-    EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingProjectionKeyV1,
-    EmbeddingTruncationSideV1, PrivacyDomainId,
+    ChunkerRevision, ComponentRevision, EmbeddingDeviceClassV1, EmbeddingDocumentCompositionV1,
+    EmbeddingMetricV1, EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1,
+    EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1, PrivacyDomainId,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros, VectorGenerationIdV1};
 use tracedecay_semantic_contracts::SemanticFallbackReasonV1;
@@ -74,6 +74,7 @@ fn compatibility(digest_byte: char) -> SemanticCompatibilityPinsV1 {
             .expect("config digest"),
         query_instruction_digest: None,
         document_instruction_digest: None,
+        document_composition: EmbeddingDocumentCompositionV1::SanitizedText,
         pooling: EmbeddingPoolingV1::Mean,
         truncation_side: EmbeddingTruncationSideV1::Right,
         truncation_length: 128,

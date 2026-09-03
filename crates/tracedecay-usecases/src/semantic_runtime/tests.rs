@@ -370,8 +370,8 @@ async fn startup_observes_indexing_without_waiting_for_semantic_activation() {
 
 mod config_backend_tests {
     use tracedecay_domain::{
-        ChunkerRevision, ComponentRevision, EmbeddingDeviceClassV1, EmbeddingMetricV1,
-        EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1,
+        ChunkerRevision, ComponentRevision, EmbeddingDeviceClassV1, EmbeddingDocumentCompositionV1,
+        EmbeddingMetricV1, EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1,
         EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1, PrivacyDomainId, UtcMicros,
     };
 
@@ -410,6 +410,7 @@ mod config_backend_tests {
             config_digest: digest('3'),
             query_instruction_digest: None,
             document_instruction_digest: None,
+            document_composition: EmbeddingDocumentCompositionV1::SanitizedText,
             pooling: EmbeddingPoolingV1::Mean,
             truncation_side: EmbeddingTruncationSideV1::Right,
             truncation_length: 128,

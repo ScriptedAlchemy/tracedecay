@@ -21,8 +21,9 @@ use thiserror::Error;
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::{
     AdmittedEmbeddingProjectionKeyV1, ChunkerRevision, ComponentRevision, EmbeddingDeviceClassV1,
-    EmbeddingMetricV1, EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1,
-    EmbeddingTruncationSideV1, ManifestDigest, SemanticSearchIndexKeyV1,
+    EmbeddingDocumentCompositionV1, EmbeddingMetricV1, EmbeddingNormalizationV1,
+    EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingTruncationSideV1, ManifestDigest,
+    SemanticSearchIndexKeyV1,
 };
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, atomic_write};
 
@@ -114,6 +115,14 @@ pub struct NativeQualificationModelKeyV1 {
     pub config_digest: ManifestDigest,
     pub query_instruction_digest: Option<ManifestDigest>,
     pub document_instruction_digest: Option<ManifestDigest>,
+    /// Same wire rule as the projection key: absent means `SanitizedText`, so
+    /// qualification blobs published before compositions existed still decode
+    /// to the composition they measured.
+    #[serde(
+        default,
+        skip_serializing_if = "EmbeddingDocumentCompositionV1::is_sanitized_text"
+    )]
+    pub document_composition: EmbeddingDocumentCompositionV1,
     pub pooling: EmbeddingPoolingV1,
     pub truncation_side: EmbeddingTruncationSideV1,
     pub truncation_length: u32,
@@ -139,6 +148,7 @@ impl NativeQualificationModelKeyV1 {
             config_digest: projection.config_digest.clone(),
             query_instruction_digest: projection.query_instruction_digest.clone(),
             document_instruction_digest: projection.document_instruction_digest.clone(),
+            document_composition: projection.document_composition,
             pooling: projection.pooling,
             truncation_side: projection.truncation_side,
             truncation_length: projection.truncation_length,

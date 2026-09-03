@@ -13,12 +13,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use tracedecay_domain::{
     ChangedCodeChunkSetV1, ChangedCodeChunkV1, CodeGenerationId, CodeSearchChunkV1,
-    CompactCandidate, ComponentRevision, EvidenceRole, FixedPointScore, LogicalEvidenceId,
-    ManifestDigest, ProjectionBatchRequestV1, ProjectionOperationV1, ProjectionReplayReasonV1,
-    QueryFallbackSubpayload, RetrievalAnchorId, RetrievalCursorKeyId, RetrieverBatch,
-    RetrieverKind, RetrieverOutcome, ScoreDomainId, SemanticSearchIndexKeyV1,
-    SemanticSearchIndexKindV1, SemanticSearchIndexProfileV1, SourceOccurrenceId,
-    VectorGenerationIdV1, WorktreeId, canonical_sha256,
+    CompactCandidate, ComponentRevision, EmbeddingDocumentCompositionV1, EvidenceRole,
+    FixedPointScore, LogicalEvidenceId, ManifestDigest, ProjectionBatchRequestV1,
+    ProjectionOperationV1, ProjectionReplayReasonV1, QueryFallbackSubpayload, RetrievalAnchorId,
+    RetrievalCursorKeyId, RetrieverBatch, RetrieverKind, RetrieverOutcome, ScoreDomainId,
+    SemanticSearchIndexKeyV1, SemanticSearchIndexKindV1, SemanticSearchIndexProfileV1,
+    SourceOccurrenceId, VectorGenerationIdV1, WorktreeId, canonical_sha256,
 };
 use tracedecay_policy::retrieval_selection::{
     RetrievalAvailabilityV1, RetrievalRequirementV1, RetrievalSelectionV1, select_retrieval,
@@ -46,6 +46,9 @@ pub use application_status::{
     prefer_lifecycle_over_generic_unavailable, resolve_semantic_application_status,
 };
 use publication_failure::SemanticPublicationFailureRecorderV1;
+use tracedecay_code_index::embedding_document::{
+    EmbeddingDocumentComposerV1, EmbeddingSymbolContextIndexV1,
+};
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 use tracedecay_code_index::projection::expected_request_digest;
 use tracedecay_graph_db::GraphCancellation;
@@ -163,6 +166,7 @@ where
         generation.manifest().generation_id.clone(),
         generation.projection().request().clone(),
         generation.chunks().chunks().to_vec(),
+        embedding_documents(generation),
         SEMANTIC_EMBEDS_PER_COMMIT,
         load_artifact,
         // This helper owns no staged build, so it never resumes and its
@@ -178,6 +182,18 @@ where
     handle.schedule_generation(request)
 }
 
+/// The symbol-context authority that composes one published generation's
+/// embedding documents. It is the generation's own sealed symbol index, so
+/// header content is parser evidence from the same sanitized bytes as the
+/// chunks it accompanies.
+fn embedding_documents(
+    generation: &CodeIndexPublishedGenerationV1,
+) -> Arc<EmbeddingDocumentComposerV1> {
+    Arc::new(EmbeddingDocumentComposerV1::new(
+        EmbeddingSymbolContextIndexV1::from_generation_symbols(generation.symbols()),
+    ))
+}
+
 /// Daemon-owned production bridge from lifecycle-ready model bytes to the
 /// persistent vector store and exact process-local query cache.
 #[derive(Clone)]
@@ -189,6 +205,9 @@ pub struct ProductionSemanticRuntimeV1 {
     code_index_store_root: PathBuf,
     lifecycle: Arc<SemanticModelLifecycleOwnerV1>,
     resources: SemanticResourceCeilings,
+    /// Configured embedding-document composition; with `resources` it fixes
+    /// the projection key every production and evaluator projection mints.
+    document_composition: EmbeddingDocumentCompositionV1,
     vector_read_cache: Arc<Mutex<Option<CachedPublishedVectorsV1>>>,
 }
 
@@ -384,6 +403,7 @@ impl ProductionSemanticRuntimeV1 {
         graph: Arc<dyn SemanticVectorGraphProviderV1>,
         lifecycle: Arc<SemanticModelLifecycleOwnerV1>,
         resources: SemanticResourceCeilings,
+        document_composition: EmbeddingDocumentCompositionV1,
     ) -> Self {
         let code_index_store_root = database
             .database_path()
@@ -396,6 +416,7 @@ impl ProductionSemanticRuntimeV1 {
             code_index_store_root,
             lifecycle,
             resources,
+            document_composition,
         )
     }
 
@@ -405,6 +426,7 @@ impl ProductionSemanticRuntimeV1 {
         code_index_store_root: PathBuf,
         lifecycle: Arc<SemanticModelLifecycleOwnerV1>,
         resources: SemanticResourceCeilings,
+        document_composition: EmbeddingDocumentCompositionV1,
     ) -> Self {
         Self {
             handle,
@@ -413,6 +435,7 @@ impl ProductionSemanticRuntimeV1 {
             code_index_store_root,
             lifecycle,
             resources,
+            document_composition,
             vector_read_cache: Arc::new(Mutex::new(None)),
         }
     }
@@ -470,6 +493,7 @@ impl ProductionSemanticRuntimeV1 {
             &self.lifecycle,
             generation.manifest(),
             self.resources,
+            self.document_composition,
         )?;
         let source_manifest_digest =
             semantic_source_manifest_digest(generation.projection().request());
@@ -524,8 +548,14 @@ impl ProductionSemanticRuntimeV1 {
         let lifecycle = Arc::clone(&self.lifecycle);
         let manifest = generation.manifest().clone();
         let resources = self.resources;
+        let document_composition = self.document_composition;
         let artifact = tokio::task::spawn_blocking(move || {
-            LoadedSemanticArtifactV1::from_lifecycle(&lifecycle, &manifest, resources)
+            LoadedSemanticArtifactV1::from_lifecycle(
+                &lifecycle,
+                &manifest,
+                resources,
+                document_composition,
+            )
         })
         .await
         .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)??;
@@ -646,6 +676,7 @@ impl ProductionSemanticRuntimeV1 {
             &self.lifecycle,
             generation.manifest(),
             self.resources,
+            self.document_composition,
         )?;
         let artifact_digest = artifact
             .projection()
@@ -660,6 +691,7 @@ impl ProductionSemanticRuntimeV1 {
             artifact,
             request,
             generation.chunks().chunks(),
+            embedding_documents(generation),
             evaluation_projection_resources(execution),
             projection_batch_cache.as_ref(),
             SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
@@ -719,12 +751,14 @@ impl ProductionSemanticRuntimeV1 {
             &self.lifecycle,
             generation.manifest(),
             self.resources,
+            self.document_composition,
         )?;
         let started = std::time::Instant::now();
         let prepared = prepare_semantic_evaluation_projection(
             artifact,
             request,
             &chunks,
+            embedding_documents(generation),
             evaluation_projection_resources(self.resources),
             current.projection_batch_cache.as_ref(),
             SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
@@ -1018,6 +1052,7 @@ impl ProductionSemanticRuntimeV1 {
             &self.lifecycle,
             sources.deletion.manifest(),
             self.resources,
+            self.document_composition,
         )?;
         let cancellation_projection = cancellation_artifact.projection().clone();
         let cancellation_request =
@@ -1084,6 +1119,7 @@ impl ProductionSemanticRuntimeV1 {
             cancellation_artifact,
             cancellation_request.clone(),
             &cancellation_chunks,
+            embedding_documents(sources.deletion),
             evaluation_projection_resources(self.resources).max_sessions,
             self.resources.max_resident_bytes,
             clean.projection_batch_cache.as_ref(),
@@ -1213,6 +1249,7 @@ impl ProductionSemanticRuntimeV1 {
             &self.lifecycle,
             generation.manifest(),
             self.resources,
+            self.document_composition,
         )?;
         let projection = artifact.projection().clone();
         let request = semantic_projection_request(generation, &projection, current)?;
@@ -1238,6 +1275,7 @@ impl ProductionSemanticRuntimeV1 {
             artifact,
             request,
             &chunks,
+            embedding_documents(generation),
             evaluation_projection_resources(self.resources),
             projection_batch_cache.as_ref(),
             SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
@@ -1709,6 +1747,7 @@ impl ProductionSemanticRuntimeV1 {
             &self.lifecycle,
             generation.manifest(),
             self.resources,
+            self.document_composition,
         ) {
             Ok(projection) => {
                 crate::hotpath_observe::semantic_candidate_chunks(
@@ -1788,6 +1827,8 @@ impl ProductionSemanticRuntimeV1 {
         let base_generation = None;
         let manifest = generation.manifest().clone();
         let resources = self.resources;
+        let document_composition = self.document_composition;
+        let documents = embedding_documents(&generation);
         let total_units = request.changes.added_or_changed.len().max(1) as u64;
         // The plan is decided from the whole request before any batch runs, so
         // splitting the run never moves the generation identity: the plan's
@@ -1853,12 +1894,14 @@ impl ProductionSemanticRuntimeV1 {
             target_generation,
             request,
             canonical_chunks,
+            documents,
             SEMANTIC_EMBEDS_PER_COMMIT,
             move || {
                 LoadedSemanticArtifactV1::from_lifecycle(
                     &load_handles.lifecycle,
                     &manifest,
                     resources,
+                    document_composition,
                 )
             },
             move || async move {
@@ -4001,6 +4044,7 @@ pub struct SavedGenerationScheduleHookParametersV1 {
     pub graph: Arc<dyn SemanticVectorGraphProviderV1>,
     pub lifecycle: Arc<SemanticModelLifecycleOwnerV1>,
     pub resources: SemanticResourceCeilings,
+    pub document_composition: EmbeddingDocumentCompositionV1,
     pub fair_scheduler: DaemonGlobalSemanticProjectionSchedulerV1,
 }
 
@@ -4020,6 +4064,7 @@ pub fn production_saved_generation_schedule_hook(
         graph,
         lifecycle,
         resources,
+        document_composition,
         fair_scheduler,
     } = parameters;
     let runtime = Arc::new(ProductionSemanticRuntimeV1::new_with_code_index_store_root(
@@ -4028,6 +4073,7 @@ pub fn production_saved_generation_schedule_hook(
         code_index_store_root,
         lifecycle,
         resources,
+        document_composition,
     ));
     project_semantic_production_runtimes()
         .lock()
@@ -4146,6 +4192,17 @@ mod tests {
 
     fn source_generation(value: char) -> CodeGenerationId {
         CodeGenerationId::new(format!("code-generation.{value}")).expect("source generation")
+    }
+
+    fn documents(value: char) -> Arc<EmbeddingDocumentComposerV1> {
+        let index = tracedecay_code_index::lineage::GenerationSymbolIndexV1::new(
+            source_generation(value),
+            Vec::new(),
+        )
+        .expect("empty symbol index");
+        Arc::new(EmbeddingDocumentComposerV1::new(
+            EmbeddingSymbolContextIndexV1::from_generation_symbols(&index),
+        ))
     }
 
     fn vector_generation(value: char) -> VectorGenerationIdV1 {
@@ -4931,6 +4988,7 @@ mod tests {
             source_generation('a'),
             projection_request('a'),
             Vec::new(),
+            documents('a'),
             SEMANTIC_EMBEDS_PER_COMMIT,
             move || {
                 let _ = started_tx.send(());

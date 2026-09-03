@@ -239,11 +239,12 @@ mod tests {
     use tracedecay_domain::{
         BoundedSanitizedText, ChangedCodeChunkSetV1, ChangedCodeChunkV1, ChunkerRevision,
         CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, ContentDigest,
-        EmbeddingDeviceClassV1, EmbeddingMetricV1, EmbeddingNormalizationV1, EmbeddingPoolingV1,
-        EmbeddingPrecisionV1, EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1,
-        FileOccurrenceId, LanguageDescriptorRevision, ManifestDigest, PolicyRevisionId,
-        PrivacyDomainId, ProjectionReplayReasonV1, SanitizerRevision, SensitivityDecision,
-        SensitivityLevelV1, SourceSpan,
+        EmbeddingDeviceClassV1, EmbeddingDocumentCompositionV1, EmbeddingMetricV1,
+        EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1,
+        EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1, FileOccurrenceId,
+        LanguageDescriptorRevision, ManifestDigest, PolicyRevisionId, PrivacyDomainId,
+        ProjectionReplayReasonV1, SanitizerRevision, SensitivityDecision, SensitivityLevelV1,
+        SourceSpan,
     };
 
     fn id<T>(value: &str) -> T
@@ -269,6 +270,7 @@ mod tests {
             config_digest: digest('3'),
             query_instruction_digest: Some(digest('4')),
             document_instruction_digest: Some(digest('5')),
+            document_composition: EmbeddingDocumentCompositionV1::SanitizedText,
             pooling: EmbeddingPoolingV1::Mean,
             truncation_side: EmbeddingTruncationSideV1::Right,
             truncation_length: 512,

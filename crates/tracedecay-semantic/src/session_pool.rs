@@ -1119,9 +1119,9 @@ pub mod test_support {
     use super::super::fastembed_adapter::AdmittedProjectionArtifactV1;
     use tracedecay_domain::{
         ChunkerRevision, EmbeddingDeviceClassV1, EmbeddingDeviceClassV1 as DeviceClassV1,
-        EmbeddingMetricV1, EmbeddingMetricV1 as SemanticMetricV1, EmbeddingNormalizationV1,
-        EmbeddingNormalizationV1 as ManifestNormalizationV1, EmbeddingPoolingV1,
-        EmbeddingPoolingV1 as ManifestPoolingV1, EmbeddingPrecisionV1,
+        EmbeddingDocumentCompositionV1, EmbeddingMetricV1, EmbeddingMetricV1 as SemanticMetricV1,
+        EmbeddingNormalizationV1, EmbeddingNormalizationV1 as ManifestNormalizationV1,
+        EmbeddingPoolingV1, EmbeddingPoolingV1 as ManifestPoolingV1, EmbeddingPrecisionV1,
         EmbeddingPrecisionV1 as ManifestPrecisionV1, EmbeddingProjectionKeyV1,
         EmbeddingTruncationSideV1, EmbeddingTruncationSideV1 as TruncationSideV1, ManifestDigest,
         PrivacyDomainId,
@@ -1289,6 +1289,7 @@ pub mod test_support {
                 .document_instruction_digest
                 .as_ref()
                 .map(manifest_digest),
+            document_composition: EmbeddingDocumentCompositionV1::SanitizedText,
             pooling: EmbeddingPoolingV1::Mean,
             truncation_side: EmbeddingTruncationSideV1::Right,
             truncation_length: 512,
@@ -1330,6 +1331,19 @@ pub mod test_support {
         let mut projection = projection_for(&artifact);
         projection.privacy_domain = domain_id::<PrivacyDomainId>(&format!("privacy.{domain}"));
         projection.privacy_key_epoch = key_epoch;
+        let projection = projection.admit().expect("valid projection fixture");
+        AdmittedProjectionArtifactV1::admit(&artifact, &projection)
+            .expect("matching projection and artifact")
+    }
+
+    /// The same fixture artifact under a caller-chosen embedding-document
+    /// composition; only the projection key differs from [`authority`].
+    pub fn authority_with_document_composition(
+        composition: EmbeddingDocumentCompositionV1,
+    ) -> AdmittedProjectionArtifactV1 {
+        let artifact = admitted_artifact();
+        let mut projection = projection_for(&artifact);
+        projection.document_composition = composition;
         let projection = projection.admit().expect("valid projection fixture");
         AdmittedProjectionArtifactV1::admit(&artifact, &projection)
             .expect("matching projection and artifact")

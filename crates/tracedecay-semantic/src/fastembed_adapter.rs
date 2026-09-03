@@ -62,9 +62,10 @@ use tracedecay_domain::EmbeddingPrecisionV1;
 #[cfg(any(test, feature = "semantic-fastembed", feature = "semantic-model2vec"))]
 use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_domain::{
-    AdmittedEmbeddingProjectionKeyV1, ChunkerRevision, EmbeddingDeviceClassV1, EmbeddingMetricV1,
-    EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingProjectionKeyV1,
-    EmbeddingTruncationSideV1, ManifestDigest, PrivacyDomainId,
+    AdmittedEmbeddingProjectionKeyV1, ChunkerRevision, EmbeddingDeviceClassV1,
+    EmbeddingDocumentCompositionV1, EmbeddingMetricV1, EmbeddingNormalizationV1,
+    EmbeddingPoolingV1, EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1, ManifestDigest,
+    PrivacyDomainId,
 };
 use tracedecay_semantic_contracts::{
     ArtifactMemberRoleV1, ArtifactProfileKindV1, SemanticResourceCeilings, Sha256DigestHex,
@@ -520,6 +521,7 @@ impl AdmittedProjectionArtifactV1 {
         privacy_domain: PrivacyDomainId,
         privacy_key_epoch: u64,
         resources: SemanticResourceCeilings,
+        document_composition: EmbeddingDocumentCompositionV1,
     ) -> Result<Self, EmbedError> {
         let projection = Self::lifecycle_projection(
             model,
@@ -527,6 +529,7 @@ impl AdmittedProjectionArtifactV1 {
             privacy_domain,
             privacy_key_epoch,
             resources,
+            document_composition,
         )?;
         let member = |role: &str| {
             model.members.get(role).ok_or_else(|| {
@@ -594,6 +597,7 @@ impl AdmittedProjectionArtifactV1 {
         privacy_domain: PrivacyDomainId,
         privacy_key_epoch: u64,
         resources: SemanticResourceCeilings,
+        document_composition: EmbeddingDocumentCompositionV1,
     ) -> Result<AdmittedEmbeddingProjectionKeyV1, EmbedError> {
         let member = |role: &str| {
             model.members.get(role).ok_or_else(|| {
@@ -633,6 +637,7 @@ impl AdmittedProjectionArtifactV1 {
             config_digest: manifest_digest(&config.sha256)?,
             query_instruction_digest: None,
             document_instruction_digest: None,
+            document_composition,
             pooling: EmbeddingPoolingV1::Mean,
             truncation_side: EmbeddingTruncationSideV1::Right,
             truncation_length: model.max_length.min(resources.max_sequence_length),
@@ -1740,7 +1745,9 @@ pub(crate) mod lifecycle_test_support {
     use std::collections::BTreeMap;
 
     use sha2::{Digest, Sha256};
-    use tracedecay_domain::{ChunkerRevision, EmbeddingPrecisionV1, PrivacyDomainId};
+    use tracedecay_domain::{
+        ChunkerRevision, EmbeddingDocumentCompositionV1, EmbeddingPrecisionV1, PrivacyDomainId,
+    };
     use tracedecay_semantic_contracts::SemanticResourceCeilings;
 
     use super::super::model_catalog::{
@@ -1972,6 +1979,7 @@ pub(crate) mod lifecycle_test_support {
                 max_sequence_length: 128,
                 load_deadline_ms: 1_000,
             },
+            EmbeddingDocumentCompositionV1::SanitizedText,
         )
     }
 }
@@ -2099,6 +2107,7 @@ mod tests {
             config_digest: digest('c'),
             query_instruction_digest: Some(digest('d')),
             document_instruction_digest: Some(digest('e')),
+            document_composition: EmbeddingDocumentCompositionV1::SanitizedText,
             pooling: EmbeddingPoolingV1::Mean,
             truncation_side: EmbeddingTruncationSideV1::Right,
             truncation_length: 512,
