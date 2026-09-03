@@ -53,6 +53,7 @@ impl std::fmt::Debug for ResolvedProjectRoute {
     }
 }
 
+#[hotpath::measure(label = "mcp.project_route.resolve_registered", future = true)]
 pub(crate) async fn resolve_registered_project_route(
     context: ProjectRegistryContext,
     requested_path: &Path,
@@ -194,6 +195,7 @@ impl HookProjectRouteCache {
     /// Evicts cached routes for a tombstoned project. The cached server lease
     /// is weak, but retaining the identity would make every later request fail
     /// against a retired project instead of allowing a newly resolved route.
+    #[hotpath::measure(label = "mcp.project_route.forget_project")]
     pub(crate) fn forget_project(
         &mut self,
         profile_id: &tracedecay_domain::UserProfileId,
@@ -240,6 +242,7 @@ impl HookProjectRouteCache {
             .or(event.cwd.as_deref())
     }
 
+    #[hotpath::measure(label = "mcp.project_route.observe_route")]
     pub(crate) fn observe_workspace_route(
         &mut self,
         event: &hook_events::HookEvent,
@@ -279,6 +282,7 @@ impl HookProjectRouteCache {
         }
     }
 
+    #[hotpath::measure(label = "mcp.project_route.select_route")]
     pub(crate) fn workspace_route_for_arguments(
         &self,
         arguments: &Value,
@@ -395,6 +399,7 @@ impl SharedHookProjectRouteCache {
         )
     }
 
+    #[hotpath::measure(label = "mcp.project_route.snapshot_cache")]
     pub(crate) fn snapshot(&self) -> tracedecay_domain::errors::Result<HookProjectRouteCache> {
         let state = self
             .inner
@@ -405,6 +410,7 @@ impl SharedHookProjectRouteCache {
         Ok(cache)
     }
 
+    #[hotpath::measure(label = "mcp.project_route.store_cache")]
     pub(crate) fn store(
         &self,
         cache: &HookProjectRouteCache,
@@ -419,6 +425,7 @@ impl SharedHookProjectRouteCache {
     /// Refresh `target` from the shared cache with one clone under the lock,
     /// skipped entirely while `target` already carries the current shared
     /// generation (route updates are rare relative to tool calls).
+    #[hotpath::measure(label = "mcp.project_route.refresh_cache")]
     pub(crate) fn refresh_into(
         &self,
         target: &mut HookProjectRouteCache,
@@ -437,6 +444,7 @@ impl SharedHookProjectRouteCache {
         Ok(())
     }
 
+    #[hotpath::measure(label = "mcp.project_route.forget_project_shared")]
     pub(crate) fn forget_project(
         &self,
         profile_id: &tracedecay_domain::UserProfileId,
@@ -460,6 +468,7 @@ pub(crate) fn arguments_have_structural_route_identity(arguments: &Value) -> boo
     mcp_route_thread_id(arguments).is_some() || mcp_analytics_session_id(arguments).is_some()
 }
 
+#[hotpath::measure(label = "mcp.project_route.protect_structural_ids")]
 pub(crate) fn protect_tool_structural_ids(arguments: &mut Value) -> Result<(), ()> {
     const STRUCTURAL_ID_KEYS: &[&str] = &[
         "session_id",
