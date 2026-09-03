@@ -81,7 +81,6 @@ impl FSharpExtractor {
         .result
     }
 
-    #[hotpath::measure(label = "code_extraction.fsharp.extract_tree")]
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -133,7 +132,6 @@ impl FSharpExtractor {
         )
     }
 
-    #[hotpath::measure(label = "code_extraction.fsharp.parse_source")]
     fn parse_source(source: &str) -> Result<Tree, String> {
         crate::ts_provider::parse_extractor_source("fsharp", "F#", source)
     }
@@ -547,12 +545,10 @@ impl crate::LanguageExtractor for FSharpExtractor {
         "F#"
     }
 
-    #[hotpath::measure(label = "code_extraction.fsharp.extract")]
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_fsharp(file_path, source)
     }
 
-    #[hotpath::measure(label = "code_extraction.fsharp.extract_parsed")]
     fn extract_parsed(
         &self,
         file_path: &str,

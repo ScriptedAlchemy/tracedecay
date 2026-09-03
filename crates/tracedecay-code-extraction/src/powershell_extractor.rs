@@ -91,7 +91,6 @@ impl PowerShellExtractor {
         .result
     }
 
-    #[hotpath::measure(label = "code_extraction.powershell.extract_tree")]
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -144,7 +143,6 @@ impl PowerShellExtractor {
     }
 
     /// Parse source code into a tree-sitter AST.
-    #[hotpath::measure(label = "code_extraction.powershell.parse_source")]
     fn parse_source(source: &str) -> Result<Tree, String> {
         crate::ts_provider::parse_extractor_source("powershell", "PowerShell", source)
     }
@@ -505,12 +503,10 @@ impl crate::LanguageExtractor for PowerShellExtractor {
         "PowerShell"
     }
 
-    #[hotpath::measure(label = "code_extraction.powershell.extract")]
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_powershell(file_path, source)
     }
 
-    #[hotpath::measure(label = "code_extraction.powershell.extract_parsed")]
     fn extract_parsed(
         &self,
         file_path: &str,

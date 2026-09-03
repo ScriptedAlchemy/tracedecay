@@ -565,7 +565,6 @@ where
     /// The loop is a pure function of the policy, the retained cap, and the
     /// row counts the port answers; cancellation and the deadline are observed
     /// before every pass and every row, and budget usage counts every pass.
-    #[hotpath::measure(label = "query.lane.semantic.ann_rescore")]
     fn retrieve_ann_exact_rescore(
         &self,
         request: &SemanticRetrievalRequestV1<'_>,
@@ -740,7 +739,6 @@ where
     }
 
     /// Exact-flat scan: visit and exactly score every published row.
-    #[hotpath::measure(label = "query.lane.semantic.exact_flat")]
     fn retrieve_exact_flat(
         &self,
         request: &SemanticRetrievalRequestV1<'_>,
@@ -867,7 +865,6 @@ where
     /// coverage accounting, exhaustion claims, and executed search differ.
     /// Evidence is bound here rather than at retention because the ANN
     /// execution facts are known only once the recall loop has stopped.
-    #[hotpath::measure(label = "query.lane.semantic.assemble")]
     fn assemble_ranked_batch(
         &self,
         request: &SemanticRetrievalRequestV1<'_>,
@@ -960,12 +957,10 @@ where
                 self.control,
             )));
         }
-        let query = match hotpath::measure_block!("query.lane.semantic.embed_query", {
-            self.embedder.embed_query(SemanticQueryEmbeddingRequestV1 {
-                query_digest: &request.query_digest,
-                query_view: request.query_view,
-                projection: request.projection,
-            })
+        let query = match self.embedder.embed_query(SemanticQueryEmbeddingRequestV1 {
+            query_digest: &request.query_digest,
+            query_view: request.query_view,
+            projection: request.projection,
         }) {
             Ok(query) => query,
             Err(error) => {

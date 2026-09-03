@@ -87,7 +87,6 @@ impl ProtoExtractor {
         .result
     }
 
-    #[hotpath::measure(label = "code_extraction.proto.extract_tree")]
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -140,7 +139,6 @@ impl ProtoExtractor {
     }
 
     /// Parse source code into a tree-sitter AST.
-    #[hotpath::measure(label = "code_extraction.proto.parse_source")]
     fn parse_source(source: &str) -> Result<Tree, String> {
         crate::ts_provider::parse_extractor_source("protobuf", "Protobuf", source)
     }
@@ -820,12 +818,10 @@ impl crate::LanguageExtractor for ProtoExtractor {
         "Protobuf"
     }
 
-    #[hotpath::measure(label = "code_extraction.proto.extract")]
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_proto(file_path, source)
     }
 
-    #[hotpath::measure(label = "code_extraction.proto.extract_parsed")]
     fn extract_parsed(
         &self,
         file_path: &str,

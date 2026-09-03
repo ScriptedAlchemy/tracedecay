@@ -48,10 +48,6 @@ pub(super) async fn resolve_message_anchor(
 }
 
 /// Resolves through the message's occurrence in the active temporal generation.
-#[hotpath::measure(
-    future = true,
-    label = "session_temporal.publication.anchor_occurrence"
-)]
 async fn resolve_materialized_occurrence(
     conn: &impl crate::handle::SessionTemporalExec,
     provider: &str,
@@ -129,10 +125,6 @@ async fn resolve_materialized_occurrence(
 
 /// Resolves through the durable observation authority, which retains the
 /// exact-observation anchor before any generation materializes the occurrence.
-#[hotpath::measure(
-    future = true,
-    label = "session_temporal.publication.anchor_observation"
-)]
 async fn resolve_canonical_observation(
     conn: &impl crate::handle::SessionTemporalExec,
     provider: &str,

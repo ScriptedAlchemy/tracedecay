@@ -164,6 +164,12 @@ impl GraphDbRegistry {
         Ok(VerifiedGraphSnapshot::new_direct_sealed(database, lease))
     }
 
+    /// Retire one replay after its sealed code generation has been deleted.
+    ///
+    /// A matching per-generation projection head is reclaimable because the
+    /// deleted code index generation can no longer republish it. Pending
+    /// publication, dependency, live-snapshot, known-generation, direct-sealed
+    /// reader, and concurrent-retirement guards still retain the native rows.
     #[hotpath::measure(label = "graph_db.replay_pool.retire", impl_type = "GraphDbRegistry")]
     pub fn retire_one_code_generation_replay(
         &self,
@@ -206,6 +212,7 @@ impl GraphDbRegistry {
         }
 
         let mut retained = BTreeSet::new();
+        let mut heads = BTreeMap::new();
         let mut candidates = Vec::new();
         let mut retired_cleanup = Vec::new();
         let mut sealed_digest_mismatch = false;
@@ -214,7 +221,7 @@ impl GraphDbRegistry {
                 .verified_head(&projection, context)
                 .map_err(map_publication_error)?
             {
-                retained.insert(locator_from_key(&head.key)?);
+                heads.insert(locator_from_key(&head.key)?, head);
             }
             if let Some(pending) = authority
                 .pending_replay(&projection, context)
@@ -329,6 +336,16 @@ impl GraphDbRegistry {
                 "publication.retire_one_code_generation_replay",
             ));
         }
+        let candidate_locators = candidates
+            .iter()
+            .map(|(locator, _, _)| locator.clone())
+            .collect::<BTreeSet<_>>();
+        retained.extend(
+            heads
+                .keys()
+                .filter(|locator| !candidate_locators.contains(*locator))
+                .cloned(),
+        );
         if candidates.is_empty() {
             for (locator, _) in retired_cleanup {
                 database.delete_generation_contents(&locator, &|| {
@@ -340,10 +357,23 @@ impl GraphDbRegistry {
         let selected = {
             let mut state = database.wait_verified_generations_write()?;
             for head in state.heads.values() {
-                retain_lease_closure(head, &mut retained);
+                if candidate_locators.contains(&head.locator) && Arc::strong_count(head) == 1 {
+                    // Once the code index deletes a per-generation head, the
+                    // registry's installed pointer is not reader liveness.
+                    // Its dependency closure remains protected; any snapshot
+                    // clone raises the count and retains the whole lease.
+                    for dependency in head.dependencies.values() {
+                        retain_lease_closure(dependency, &mut retained);
+                    }
+                } else {
+                    retain_lease_closure(head, &mut retained);
+                }
             }
             for (locator, weak) in &state.known {
-                if weak.upgrade().is_some() {
+                let installed_candidate_without_reader = candidate_locators.contains(locator)
+                    && weak.strong_count() == 1
+                    && state.heads.values().any(|head| head.locator == *locator);
+                if !installed_candidate_without_reader && weak.upgrade().is_some() {
                     retained.insert(locator.clone());
                 }
             }
@@ -391,7 +421,12 @@ impl GraphDbRegistry {
                 return Err(GraphDbError::invalid(error.to_string()));
             }
         };
-        let retirement_outcome = match authority.retire_replay(&retirement, context) {
+        let selected_head = heads.get(&locator);
+        let retirement_outcome = match selected_head {
+            Some(head) => authority.retire_verified_head_replay(&retirement, head, context),
+            None => authority.retire_replay(&retirement, context),
+        };
+        let retirement_outcome = match retirement_outcome {
             Ok(outcome) => outcome,
             Err(error) => {
                 clear_retiring_fence(&database, &locator)?;
@@ -401,6 +436,15 @@ impl GraphDbRegistry {
         match retirement_outcome {
             GraphReplayRetirementOutcomeV1::Retired(_)
             | GraphReplayRetirementOutcomeV1::ExactReplay(_) => {
+                if selected_head.is_some() {
+                    tracing::info!(
+                        event = "graph_replay_head_retired",
+                        generation = generation.as_str(),
+                        graph_generation = %locator.generation,
+                        replay_sequence = replay.sequence.get(),
+                        "verified per-generation graph replay head retired"
+                    );
+                }
                 // Retirement is the linearization point. A failure after it
                 // may leak derived bytes, but cannot destroy the source of an
                 // active relational replay.
@@ -1966,6 +2010,15 @@ mod historical_publication_reuse_tests {
         fn retire_replay(
             &mut self,
             _request: &GraphPublicationReplayRetirementV1,
+            _context: &GraphPublicationOperationContextV1,
+        ) -> GraphPublicationStoreResultV1<GraphReplayRetirementOutcomeV1> {
+            Err(GraphPublicationStoreErrorV1::Infrastructure)
+        }
+
+        fn retire_verified_head_replay(
+            &mut self,
+            _request: &GraphPublicationReplayRetirementV1,
+            _expected_head: &GraphVerifiedHeadV1,
             _context: &GraphPublicationOperationContextV1,
         ) -> GraphPublicationStoreResultV1<GraphReplayRetirementOutcomeV1> {
             Err(GraphPublicationStoreErrorV1::Infrastructure)

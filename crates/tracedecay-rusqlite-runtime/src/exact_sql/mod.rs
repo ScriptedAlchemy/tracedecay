@@ -335,7 +335,6 @@ impl ExactSqlHandle {
     }
 
     /// Checkpoints and truncates the WAL on the serialized writer connection.
-    #[hotpath::measure(label = "rusqlite.exact_sql.checkpoint_wal_truncate")]
     pub fn checkpoint_wal_truncate(&self) -> Result<ExactSqlRows, ExactSqlError> {
         let (reply, response) = mpsc::sync_channel(1);
         self.writer
@@ -366,7 +365,6 @@ impl ExactSqlHandle {
     /// anything reports a typed no-op instead of [`ExactSqlError::WriterUnavailable`];
     /// a reader release that *errored* is never a no-op — it propagates so
     /// the maintenance caller's degraded log fires.
-    #[hotpath::measure(label = "rusqlite.exact_sql.release_memory")]
     pub fn release_connection_memory(&self) -> Result<MemoryReleaseOutcome, ExactSqlError> {
         let readers = (self.release_reader_memory)()?;
         let writer = if self.writer.is_some() {
@@ -383,7 +381,6 @@ impl ExactSqlHandle {
     }
 
     /// Enables incremental auto-vacuum through its fixed maintenance rebuild.
-    #[hotpath::measure(label = "rusqlite.exact_sql.repair_auto_vacuum")]
     pub fn repair_incremental_auto_vacuum(&self) -> Result<(), ExactSqlError> {
         let (reply, response) = mpsc::sync_channel(1);
         self.writer
@@ -631,7 +628,6 @@ impl ExactSqlTransaction {
         }
     }
 
-    #[hotpath::measure(label = "rusqlite.exact_sql.txn_commit")]
     pub fn commit(mut self) -> Result<ExactSqlCommitReceipt, ExactSqlError> {
         let sender = self
             .commands
@@ -646,7 +642,6 @@ impl ExactSqlTransaction {
             .map_err(|_| transaction_terminal_error(&self.expired))?
     }
 
-    #[hotpath::measure(label = "rusqlite.exact_sql.txn_rollback")]
     pub fn rollback(mut self) -> Result<ExactSqlRollbackReceipt, ExactSqlError> {
         let sender = self
             .commands
@@ -665,7 +660,6 @@ impl ExactSqlTransaction {
         self.dispatch_with_policy(request, ExecutionPolicy::Bounded)
     }
 
-    #[hotpath::measure(label = "rusqlite.exact_sql.txn_dispatch")]
     fn dispatch_with_policy(
         &self,
         request: SqlRequest,
@@ -829,7 +823,6 @@ fn execute_statement(
     })
 }
 
-#[hotpath::measure(label = "rusqlite.exact_sql.attach_db")]
 fn attach_database(
     connection: &Connection,
     attachment: &ExactSqlAttachment,
@@ -858,7 +851,6 @@ fn attach_database(
     )
 }
 
-#[hotpath::measure(label = "rusqlite.exact_sql.detach_db")]
 fn detach_database(
     connection: &Connection,
     database_name: &str,
@@ -886,7 +878,6 @@ fn detach_database(
     )
 }
 
-#[hotpath::measure(label = "rusqlite.exact_sql.execute_batch")]
 fn execute_batch(connection: &Connection, sql: &str) -> Result<ExactSqlBatchResult, ExactSqlError> {
     let before = connection.total_changes();
     connection

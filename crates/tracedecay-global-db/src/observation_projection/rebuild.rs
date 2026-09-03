@@ -373,10 +373,6 @@ fn projection_retry_delay_micros(attempt_count: u32) -> i64 {
         .min(PROJECTION_RETRY_MAX_MICROS)
 }
 
-#[hotpath::measure(
-    future = true,
-    label = "global_db.observation_projection.persist.retry"
-)]
 async fn persist_projection_retry_on_database(
     database: &Database,
     observation_id: &CanonicalObservationIdV1,
@@ -407,10 +403,6 @@ async fn persist_projection_retry_on_database(
         .map_err(|error| storage("commit projection retry transaction", error))
 }
 
-#[hotpath::measure(
-    future = true,
-    label = "global_db.observation_projection.persist.rejection"
-)]
 async fn persist_projection_rejection_on_database(
     database: &Database,
     observation_id: &CanonicalObservationIdV1,

@@ -136,7 +136,6 @@ impl CppExtractor {
         .result
     }
 
-    #[hotpath::measure(label = "code_extraction.cpp.extract_tree")]
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -189,7 +188,6 @@ impl CppExtractor {
     }
 
     /// Parse source code into a tree-sitter AST.
-    #[hotpath::measure(label = "code_extraction.cpp.parse_source")]
     fn parse_source(source: &str) -> Result<Tree, String> {
         crate::ts_provider::parse_extractor_source("cpp", "C++", source)
     }
@@ -602,12 +600,10 @@ impl crate::LanguageExtractor for CppExtractor {
         "C++"
     }
 
-    #[hotpath::measure(label = "code_extraction.cpp.extract")]
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         CppExtractor::extract_source(file_path, source)
     }
 
-    #[hotpath::measure(label = "code_extraction.cpp.extract_parsed")]
     fn extract_parsed(
         &self,
         file_path: &str,

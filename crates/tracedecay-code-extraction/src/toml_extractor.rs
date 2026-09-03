@@ -65,7 +65,6 @@ impl TomlExtractor {
         .result
     }
 
-    #[hotpath::measure(label = "code_extraction.toml.extract_tree")]
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -299,12 +298,10 @@ impl crate::LanguageExtractor for TomlExtractor {
         "TOML"
     }
 
-    #[hotpath::measure(label = "code_extraction.toml.extract")]
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_toml(file_path, source)
     }
 
-    #[hotpath::measure(label = "code_extraction.toml.extract_parsed")]
     fn extract_parsed(
         &self,
         file_path: &str,

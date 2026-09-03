@@ -247,7 +247,11 @@ pub(crate) fn record_hydration_source(source: HydrationSource) {
 /// builds and never on graph query paths.
 #[inline(always)]
 #[cfg(feature = "hotpath")]
-pub(crate) fn record_grafeo_memory(database: &grafeo_engine::GrafeoDB, phase: GrafeoMemoryPhase) {
+pub(crate) fn record_grafeo_memory(
+    database: &grafeo_engine::GrafeoDB,
+    phase: GrafeoMemoryPhase,
+    container: &str,
+) {
     let usage = hotpath::measure_block!("graph_db.memory.census", database.memory_usage());
     hotpath::val!("graph_db.memory.phase").set(&phase.as_str());
     hotpath::gauge!("graph_db.memory.total_bytes").set(usage.total_bytes as f64);
@@ -260,6 +264,22 @@ pub(crate) fn record_grafeo_memory(database: &grafeo_engine::GrafeoDB, phase: Gr
         .set(usage.buffer_manager.budget_bytes as f64);
     hotpath::gauge!("graph_db.memory.buffer_allocated_bytes")
         .set(usage.buffer_manager.allocated_bytes as f64);
+    // Measurement-build only: gauges keep the last census, so a daemon with
+    // several resident engines needs each census on the operator log to
+    // attribute retained bytes per container.
+    tracing::info!(
+        event = "graph_engine_memory_census",
+        phase = phase.as_str(),
+        container,
+        total_bytes = usage.total_bytes,
+        store_bytes = usage.store.total_bytes,
+        index_bytes = usage.indexes.total_bytes,
+        mvcc_bytes = usage.mvcc.total_bytes,
+        cache_bytes = usage.caches.total_bytes,
+        string_pool_bytes = usage.string_pool.total_bytes,
+        buffer_allocated_bytes = usage.buffer_manager.allocated_bytes,
+        "grafeo memory census"
+    );
 }
 
 #[cfg(any(test, feature = "test-helpers"))]

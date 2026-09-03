@@ -207,6 +207,7 @@ impl GraphPublicationStoreV1 for RelationalAuthority {
         let mut projections = self
             .records
             .keys()
+            .chain(self.retired.keys())
             .map(|key| key.projection.clone())
             .filter(|projection| {
                 projection.shard_id == request.shard_id
@@ -270,6 +271,60 @@ impl GraphPublicationStoreV1 for RelationalAuthority {
             Some(record.publication.canonical_replay_source.clone()),
         )
         .map_err(GraphPublicationStoreErrorV1::InvalidRequest)?;
+        self.records.remove(&request.key);
+        self.retired.insert(request.key.clone(), tombstone.clone());
+        if let Some(interruption) = &self.cancel_after_retire {
+            interruption.store(1, Ordering::SeqCst);
+        }
+        Ok(GraphReplayRetirementOutcomeV1::Retired(tombstone))
+    }
+
+    fn retire_verified_head_replay(
+        &mut self,
+        request: &GraphPublicationReplayRetirementV1,
+        expected_head: &GraphVerifiedHeadV1,
+        _context: &GraphPublicationOperationContextV1,
+    ) -> GraphPublicationStoreResultV1<GraphReplayRetirementOutcomeV1> {
+        if let Some(tombstone) = self.retired.get(&request.key) {
+            return Ok(if tombstone.retirement() == *request {
+                GraphReplayRetirementOutcomeV1::ExactReplay(tombstone.clone())
+            } else {
+                GraphReplayRetirementOutcomeV1::Conflict
+            });
+        }
+        let Some(record) = self.records.get(&request.key).cloned() else {
+            return Ok(GraphReplayRetirementOutcomeV1::Missing);
+        };
+        if record.publication.input_digest != request.input_digest
+            || record.publication.dependency_generation_closure_digest
+                != request.dependency_generation_closure_digest
+            || record.publication.direct_dependency_generations
+                != request.direct_dependency_generations
+            || record.publication.expected_prior_head != request.expected_prior_head
+            || record.publication.expected_recovered_digest != request.expected_recovered_digest
+            || record.publication.canonical_replay_source_digest
+                != request.canonical_replay_source_digest
+        {
+            return Ok(GraphReplayRetirementOutcomeV1::Conflict);
+        }
+        let Some(head) = self.heads.get(&request.key.projection) else {
+            return Ok(GraphReplayRetirementOutcomeV1::Conflict);
+        };
+        if head != expected_head || head.sequence != record.sequence {
+            return Ok(GraphReplayRetirementOutcomeV1::Conflict);
+        }
+        if let Some(pending) = self.pending.get(&request.key.projection) {
+            return Ok(GraphReplayRetirementOutcomeV1::PendingReplay {
+                pending: pending.clone(),
+            });
+        }
+        let tombstone = GraphPublicationReplayTombstoneV1::new(
+            record.sequence,
+            request.clone(),
+            Some(record.publication.canonical_replay_source.clone()),
+        )
+        .map_err(GraphPublicationStoreErrorV1::InvalidRequest)?;
+        self.heads.remove(&request.key.projection);
         self.records.remove(&request.key);
         self.retired.insert(request.key.clone(), tombstone.clone());
         if let Some(interruption) = &self.cancel_after_retire {
@@ -481,6 +536,46 @@ fn manifest(
         GraphWatermark::new(format!("watermark:{generation}")).unwrap(),
         dependencies,
         vec![entity("entity:shared", marker)],
+        relations,
+    )
+    .unwrap()
+}
+
+fn populated_manifest(
+    projection: GraphProjectionIdentity,
+    generation: &str,
+    marker: &str,
+) -> GraphGenerationManifest {
+    let entities = ["one", "two", "three"]
+        .into_iter()
+        .map(|suffix| entity(&format!("entity:{suffix}"), marker))
+        .collect::<Vec<_>>();
+    let relations = [("one", "two"), ("two", "three")]
+        .into_iter()
+        .map(|(from, to)| {
+            GraphGenerationRelation::new(
+                GraphRelationId::new(format!("relation:{from}:{to}")).unwrap(),
+                GraphEntityRef::new(
+                    projection.clone(),
+                    GraphEntityId::new(format!("entity:{from}")).unwrap(),
+                ),
+                GraphEntityRef::new(
+                    projection.clone(),
+                    GraphEntityId::new(format!("entity:{to}")).unwrap(),
+                ),
+                GraphRelationKind::new("next").unwrap(),
+                BTreeMap::new(),
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    GraphGenerationManifest::new(
+        projection,
+        GraphGenerationId::new(generation).unwrap(),
+        SourceGeneration::new(format!("source:{generation}")).unwrap(),
+        GraphWatermark::new(format!("watermark:{generation}")).unwrap(),
+        Vec::new(),
+        entities,
         relations,
     )
     .unwrap()
@@ -977,6 +1072,322 @@ fn retired_replay_survives_native_delete_failure_until_restart_cleanup_finalizes
             .expect("retired identity remains durable")
             .canonical_replay_source
             .is_none()
+    );
+}
+
+#[test]
+fn deleted_code_generation_head_projection_retires_and_frees_native_rows() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let g1_projection = projection("retirement-head", "g1");
+    let g2_projection = projection("retirement-head", "g2");
+    let g3_projection = projection("retirement-head", "g3");
+    let g1 = populated_manifest(g1_projection.clone(), "graph-g1", "g1");
+    let g2 = populated_manifest(g2_projection.clone(), "graph-g2", "g2");
+    let g3 = populated_manifest(g3_projection.clone(), "graph-g3", "g3");
+    let g1_generation = CodeGenerationId::new("code-generation.g1").unwrap();
+    let g2_generation = CodeGenerationId::new("code-generation.g2").unwrap();
+    let g3_generation = CodeGenerationId::new("code-generation.g3").unwrap();
+    let g1_digest = SealedGraphStateDigest::try_from(format!("sha256:{}", "1".repeat(64))).unwrap();
+    let g2_digest = SealedGraphStateDigest::try_from(format!("sha256:{}", "2".repeat(64))).unwrap();
+    let g3_digest = SealedGraphStateDigest::try_from(format!("sha256:{}", "3".repeat(64))).unwrap();
+
+    let g1_record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &g1,
+        "publish:head-g1",
+        None,
+        '1',
+    );
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let g1_commit = registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &g1_record.publication.key,
+            None,
+        )
+        .unwrap();
+    let g1_head = g1_commit.head.clone();
+    drop(g1_commit);
+    let g1_sealed = g1
+        .relational_sealed_replay(
+            registered.binding.shard_id.clone(),
+            GraphIdempotencyKey::new("publish:head-g1").unwrap(),
+            digest('1'),
+            None,
+            SealedCodeGenerationReplay {
+                repository: RepositoryId::new("repository.retirement-head").unwrap(),
+                generation: g1_generation.clone(),
+                sealed_state_digest: g1_digest.clone(),
+                projector_revision: GraphProjectorRevision::try_from(
+                    "projector.retirement-head".to_owned(),
+                )
+                .unwrap(),
+            },
+            &|| Ok(()),
+        )
+        .unwrap();
+    authority.records.insert(
+        g1_record.publication.key.clone(),
+        GraphPublicationReplayRecordV1::new(g1_record.sequence, g1_sealed).unwrap(),
+    );
+
+    let g2_record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &g2,
+        "publish:head-g2",
+        None,
+        '2',
+    );
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let g2_commit = registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &g2_record.publication.key,
+            None,
+        )
+        .unwrap();
+    let g2_head = g2_commit.head.clone();
+    drop(g2_commit);
+    let g2_sealed = g2
+        .relational_sealed_replay(
+            registered.binding.shard_id.clone(),
+            GraphIdempotencyKey::new("publish:head-g2").unwrap(),
+            digest('2'),
+            None,
+            SealedCodeGenerationReplay {
+                repository: RepositoryId::new("repository.retirement-head").unwrap(),
+                generation: g2_generation.clone(),
+                sealed_state_digest: g2_digest.clone(),
+                projector_revision: GraphProjectorRevision::try_from(
+                    "projector.retirement-head".to_owned(),
+                )
+                .unwrap(),
+            },
+            &|| Ok(()),
+        )
+        .unwrap();
+    authority.records.insert(
+        g2_record.publication.key.clone(),
+        GraphPublicationReplayRecordV1::new(g2_record.sequence, g2_sealed).unwrap(),
+    );
+
+    let g3_record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &g3,
+        "publish:head-g3",
+        None,
+        '3',
+    );
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let g3_commit = registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &g3_record.publication.key,
+            None,
+        )
+        .unwrap();
+    let g3_head = g3_commit.head.clone();
+    drop(g3_commit);
+    let g3_sealed = g3
+        .relational_sealed_replay(
+            registered.binding.shard_id.clone(),
+            GraphIdempotencyKey::new("publish:head-g3").unwrap(),
+            digest('3'),
+            None,
+            SealedCodeGenerationReplay {
+                repository: RepositoryId::new("repository.retirement-head").unwrap(),
+                generation: g3_generation.clone(),
+                sealed_state_digest: g3_digest.clone(),
+                projector_revision: GraphProjectorRevision::try_from(
+                    "projector.retirement-head".to_owned(),
+                )
+                .unwrap(),
+            },
+            &|| Ok(()),
+        )
+        .unwrap();
+    authority.records.insert(
+        g3_record.publication.key.clone(),
+        GraphPublicationReplayRecordV1::new(g3_record.sequence, g3_sealed).unwrap(),
+    );
+
+    let wrong_digest =
+        SealedGraphStateDigest::try_from(format!("sha256:{}", "9".repeat(64))).unwrap();
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    assert!(matches!(
+        registered.registry.retire_one_code_generation_replay(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &g1_generation,
+            &wrong_digest,
+        ),
+        Err(GraphDbError::Conflict { .. })
+    ));
+    assert_eq!(
+        authority.heads.get(&g1_record.publication.key.projection),
+        Some(&g1_head)
+    );
+
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    assert!(matches!(
+        registered
+            .registry
+            .retire_one_code_generation_replay(
+                registration(registered.binding.clone(), temp.path()),
+                &mut authority,
+                &context,
+                &g1_generation,
+                &g1_digest,
+            )
+            .unwrap(),
+        GraphReplayCollectionOutcome::Retired(_)
+    ));
+    assert!(
+        !authority
+            .heads
+            .contains_key(&g1_record.publication.key.projection)
+    );
+    assert!(authority.retired.contains_key(&g1_record.publication.key));
+    assert!(matches!(
+        registered.registry.verified_generation_snapshot(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &g1_record.publication.key,
+        ),
+        Err(GraphDbError::Conflict { .. })
+    ));
+    for (identity, marker) in [(&g2_projection, "g2"), (&g3_projection, "g3")] {
+        let snapshot = registered
+            .registry
+            .verified_snapshot(
+                registration(registered.binding.clone(), temp.path()),
+                identity,
+            )
+            .unwrap();
+        let actual = snapshot
+            .entity(
+                &GraphEntityRef::new(identity.clone(), GraphEntityId::new("entity:one").unwrap()),
+                Arc::new(TestCancellation),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            actual
+                .properties
+                .get(&GraphPropertyName::new("marker").unwrap()),
+            Some(&GraphProperty::String(marker.to_owned()))
+        );
+    }
+
+    let g2_snapshot = registered
+        .registry
+        .verified_snapshot(
+            registration(registered.binding.clone(), temp.path()),
+            &g2_projection,
+        )
+        .unwrap();
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    assert_eq!(
+        registered.registry.retire_one_code_generation_replay(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &g2_generation,
+            &g2_digest,
+        ),
+        Ok(GraphReplayCollectionOutcome::Retained)
+    );
+    assert_eq!(
+        authority.heads.get(&g2_record.publication.key.projection),
+        Some(&g2_head)
+    );
+    drop(g2_snapshot);
+    assert!(matches!(
+        registered
+            .registry
+            .retire_one_code_generation_replay(
+                registration(registered.binding.clone(), temp.path()),
+                &mut authority,
+                &context,
+                &g2_generation,
+                &g2_digest,
+            )
+            .unwrap(),
+        GraphReplayCollectionOutcome::Retired(_)
+    ));
+
+    let g3_pending_manifest =
+        populated_manifest(g3_projection.clone(), "graph-g3-pending", "g3-pending");
+    stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &g3_pending_manifest,
+        "publish:head-g3-pending",
+        Some(g3_head.clone()),
+        '4',
+    );
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    assert_eq!(
+        registered.registry.retire_one_code_generation_replay(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &g3_generation,
+            &g3_digest,
+        ),
+        Ok(GraphReplayCollectionOutcome::Retained)
+    );
+    assert_eq!(
+        authority.heads.get(&g3_record.publication.key.projection),
+        Some(&g3_head)
+    );
+
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    assert!(
+        registered
+            .registry
+            .finalize_one_code_generation_replay_cleanup(
+                registration(registered.binding.clone(), temp.path()),
+                &mut authority,
+                &context,
+                &g1_generation,
+                &g1_digest,
+            )
+            .unwrap()
+    );
+    assert_eq!(
+        registered.registry.retire_one_code_generation_replay(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &g1_generation,
+            &g1_digest,
+        ),
+        Ok(GraphReplayCollectionOutcome::Absent)
     );
 }
 

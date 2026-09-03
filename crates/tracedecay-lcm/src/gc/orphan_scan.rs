@@ -7,7 +7,6 @@ use tracedecay_runtime_core::db::engine::Executor;
 use super::super::util;
 use super::{LcmError, LcmGcConfig, LcmGcReport, payload, stage_payload_delete};
 
-#[hotpath::measure(label = "sessions.lcm.gc.orphan_preview")]
 pub(super) fn preview_orphan_files(
     dir: &Path,
     metadata_refs: &BTreeSet<String>,
@@ -108,7 +107,6 @@ where
     candidates
 }
 
-#[hotpath::measure(label = "sessions.lcm.gc.orphan_stage", future = true)]
 pub(super) async fn stage_orphan_files(
     conn: &(impl Executor + ?Sized),
     dir: &Path,

@@ -119,7 +119,6 @@ impl LanguageExtractor for SvelteExtractor {
         crate::hotpath_observe::measure_language(|| Cow::Owned(Self::mask_non_script(source)))
     }
 
-    #[hotpath::measure(label = "code_extraction.svelte.extract")]
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_svelte(file_path, source)
     }
@@ -136,7 +135,6 @@ impl LanguageExtractor for SvelteExtractor {
         )
     }
 
-    #[hotpath::measure(label = "code_extraction.svelte.extract_parsed")]
     fn extract_parsed(
         &self,
         file_path: &str,

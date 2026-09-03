@@ -281,7 +281,6 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
         Ok(())
     }
 
-    #[hotpath::measure(label = "rusqlite.reader_lease.finish_snapshot")]
     fn finish_snapshot(&mut self) {
         if !self.snapshot_active {
             return;

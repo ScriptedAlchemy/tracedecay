@@ -1,12 +1,18 @@
-# Coverage lanes for the hotpath instrumentation already present in the
-# storage slice (tracedecay-rusqlite-runtime, tracedecay-global-db).
+# Coverage lanes for the hotpath instrumentation already present in two
+# slices:
+#   * storage — tracedecay-rusqlite-runtime, tracedecay-global-db
+#     (`slice-tests`)
+#   * sessions/lcm/capture/temporal-query — tracedecay-sessions,
+#     tracedecay-session-memory, tracedecay-session-runtime,
+#     tracedecay-session-temporal-store, tracedecay-lcm, tracedecay-capture,
+#     tracedecay-temporal-query (`sessions-slice-tests`)
 #
-# Two lanes, same test set:
+# Each job runs two lanes of the same test set:
 #   1. feature off  — every `#[hotpath::measure]` macro must stay a no-op;
-#   2. `--features hotpath` — the `hotpath_coverage` tests wrap a real
-#      workload in a HotpathGuard and assert the JSON report carries the
-#      crates' existing measure labels, so the lane fails if the measures
-#      stop firing.
+#   2. `--features <crate>/hotpath` — the `hotpath_coverage` tests wrap a
+#      real workload in a HotpathGuard and assert the JSON report carries
+#      the crates' existing measure labels, so the lane fails if the
+#      measures stop firing.
 #
 # hotpath stays opt-in: nothing here touches `default` or `production`
 # feature sets, and the metrics HTTP server is disabled at the job boundary
@@ -68,3 +74,42 @@ jobs:
           cargo test -p tracedecay-rusqlite-runtime -p tracedecay-global-db \
             --locked --features \
             tracedecay-rusqlite-runtime/hotpath,tracedecay-global-db/hotpath,tracedecay-global-db/test-helpers
+
+  sessions-slice-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: kache compiler cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/kache
+            ~/.cache/kache
+          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: kache-${{ runner.os }}-
+      - name: Enable kache
+        shell: bash
+        run: |
+          command -v kache >/dev/null 2>&1 || cargo install kache --locked
+          kache init --no-service
+          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
+
+      - name: Sessions slice tests (hotpath off)
+        run: |
+          cargo test -p tracedecay-sessions -p tracedecay-session-memory \
+            -p tracedecay-session-runtime -p tracedecay-session-temporal-store \
+            -p tracedecay-lcm -p tracedecay-capture -p tracedecay-temporal-query \
+            --locked
+
+      - name: Sessions slice tests (hotpath on)
+        run: |
+          cargo test -p tracedecay-sessions -p tracedecay-session-memory \
+            -p tracedecay-session-runtime -p tracedecay-session-temporal-store \
+            -p tracedecay-lcm -p tracedecay-capture -p tracedecay-temporal-query \
+            --locked --features \
+            tracedecay-sessions/hotpath,tracedecay-session-memory/hotpath,tracedecay-session-runtime/hotpath,tracedecay-session-temporal-store/hotpath,tracedecay-lcm/hotpath,tracedecay-capture/hotpath,tracedecay-temporal-query/hotpath

@@ -59,7 +59,6 @@ pub struct GlobalDbCursorKeyProvider {
     authenticators: Vec<(SignedCursorKeyRefV1, InMemoryCursorAuthenticator)>,
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.cursor_key.provision")]
 pub(super) async fn ensure_active_session_cursor_key_in_transaction(
     transaction: &impl crate::handle::SessionTemporalExec,
 ) -> SessionStoreResult<SignedCursorKeyRefV1> {
@@ -196,7 +195,7 @@ pub(super) async fn ensure_active_session_cursor_key_in_transaction(
 }
 
 impl GlobalDbCursorKeyProvider {
-    #[hotpath::measure(future = true, label = "session_temporal.cursor_key.load_active")]
+    #[hotpath::skip]
     pub async fn from_registered_active(
         read: &DatabaseEngineReadSnapshot,
     ) -> Result<Self, GlobalDbCursorKeyProviderError> {
@@ -256,7 +255,7 @@ impl GlobalDbCursorKeyProvider {
         Self::from_registered_key_ref_at(read, expected, now_micros().0).await
     }
 
-    #[hotpath::measure(future = true, label = "session_temporal.cursor_key.load")]
+    #[hotpath::skip]
     async fn from_registered_key_ref_at(
         read: &DatabaseEngineReadSnapshot,
         expected: SignedCursorKeyRefV1,
@@ -312,7 +311,6 @@ impl GlobalDbCursorKeyProvider {
             authenticators,
         })
     }
-    #[hotpath::measure(label = "session_temporal.cursor_key.keyring")]
     pub fn retrieval_keyring(
         &self,
         privacy_domain: PrivacyDomainId,

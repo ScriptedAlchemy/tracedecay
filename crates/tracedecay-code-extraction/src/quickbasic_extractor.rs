@@ -24,12 +24,10 @@ impl crate::LanguageExtractor for QuickBasicExtractor {
         "QuickBASIC"
     }
 
-    #[hotpath::measure(label = "code_extraction.quickbasic.extract")]
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         QBasicExtractor::extract_qbasic(file_path, source)
     }
 
-    #[hotpath::measure(label = "code_extraction.quickbasic.extract_parsed")]
     fn extract_parsed(
         &self,
         file_path: &str,

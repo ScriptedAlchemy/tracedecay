@@ -138,6 +138,14 @@ pub(crate) type CodeIndexReconcileSink =
 pub(crate) type CodeIndexFreshnessProbeSink =
     Arc<dyn Fn(PathBuf) -> CodeIndexHookNotifyFuture + Send + Sync + 'static>;
 
+pub(crate) type DiagnosticsChangeGenerationFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Option<u64>> + Send + 'static>>;
+
+/// Read bridge to the mounted scheduler's monotonic workspace-change epoch.
+/// Direct servers leave it absent and diagnostics use traversal recovery.
+pub(crate) type DiagnosticsChangeGenerationResolver =
+    Arc<dyn Fn(PathBuf) -> DiagnosticsChangeGenerationFuture + Send + Sync + 'static>;
+
 /// Type-erased bridge from a tool handler to the daemon-owned code-index
 /// generation authority. The daemon constructs this from its cloneable
 /// `CodeIndexSchedulerRegistryV1`; direct (non-daemon) servers leave it `None`,
@@ -330,6 +338,7 @@ pub struct McpServer {
     code_index_hook_sink: Option<CodeIndexHookSink>,
     code_index_reconcile_sink: Option<CodeIndexReconcileSink>,
     code_index_freshness_probe_sink: Option<CodeIndexFreshnessProbeSink>,
+    diagnostics_change_generation: Option<DiagnosticsChangeGenerationResolver>,
     /// Daemon-owned bridge to the code-index generation authority, the single
     /// mint for `file.daemon.<digest>` file identity and the generation every
     /// diagnostic producer must publish under. `None` for direct servers.
@@ -473,6 +482,7 @@ struct MountedProjectApplicationRetrievalV1 {
 }
 
 impl MountedProjectApplicationRetrievalV1 {
+    #[hotpath::measure(label = "mcp.server.retrieval_scope_check")]
     fn retrieval_for_scope(
         &self,
         expected_scope: &tracedecay_application::ResolvedScope,
@@ -791,7 +801,7 @@ impl McpServer {
         context
     }
 
-    #[hotpath::skip]
+    #[hotpath::measure(label = "mcp.server.construct", future = true)]
     pub(crate) async fn new_with_context(context: McpServerConstructionContext) -> Arc<Self> {
         let McpServerConstructionContext {
             cg,
@@ -825,6 +835,7 @@ impl McpServer {
             code_index_hook_sink,
             code_index_reconcile_sink,
             code_index_freshness_probe_sink,
+            diagnostics_change_generation,
             code_index_publication_identity,
             code_index_search_executor,
             code_index_branch_diff_executor,
@@ -890,12 +901,15 @@ impl McpServer {
         let worktree_mismatch = {
             let project_root = cg.project_root().to_path_buf();
             let scope_prefix = scope_prefix.clone();
-            tokio::task::spawn_blocking(move || {
-                tracedecay_runtime_core::worktree::detect_scoped_worktree_index_mismatch(
-                    &project_root,
-                    scope_prefix.as_deref(),
-                )
-            })
+            hotpath::future!(
+                tokio::task::spawn_blocking(move || {
+                    tracedecay_runtime_core::worktree::detect_scoped_worktree_index_mismatch(
+                        &project_root,
+                        scope_prefix.as_deref(),
+                    )
+                }),
+                label = "mcp.server.detect_worktree_mismatch"
+            )
             .await
             .ok()
             .flatten()
@@ -1094,6 +1108,7 @@ impl McpServer {
             code_index_hook_sink,
             code_index_reconcile_sink,
             code_index_freshness_probe_sink,
+            diagnostics_change_generation,
             code_index_publication_identity,
             code_index_search_executor,
             code_index_branch_diff_executor,
@@ -1204,7 +1219,7 @@ impl McpServer {
         self.scope_prefix.as_deref()
     }
 
-    #[hotpath::skip]
+    #[hotpath::measure(label = "mcp.server.reconcile_automation", future = true)]
     pub(crate) async fn reconcile_automation_scheduler(
         &self,
     ) -> tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome {
@@ -1282,6 +1297,7 @@ impl McpServer {
         self.project_application_retrieval.is_some()
     }
 
+    #[hotpath::measure(label = "mcp.server.mount_work_evidence")]
     pub(crate) fn work_evidence_retrieval(
         &self,
         expected_scope: &tracedecay_application::ResolvedScope,
@@ -1319,6 +1335,7 @@ impl McpServer {
         }
     }
 
+    #[hotpath::measure(label = "mcp.server.mount_retained_surfaces")]
     pub(crate) fn retained_surface_ports(
         &self,
         project_root: &Path,
@@ -1359,7 +1376,7 @@ impl McpServer {
         self.cg.read().await.clone()
     }
 
-    #[hotpath::skip]
+    #[hotpath::measure(label = "mcp.server.stats_snapshot", future = true)]
     pub async fn server_stats_json(&self) -> Value {
         let uptime = self.stats.started_at.elapsed();
         let total_requests = self.stats.total_requests.load(Ordering::Relaxed);

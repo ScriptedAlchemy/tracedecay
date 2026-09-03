@@ -13,7 +13,6 @@ use super::{LCM_SCAN_PAGE_ROWS, LcmError};
 
 static BACKUP_NONCE: AtomicU64 = AtomicU64::new(0);
 
-#[hotpath::measure(label = "sessions.lcm.maintenance.backup", future = true)]
 pub(super) async fn backup_database(
     db_path: &Path,
     storage_root: &Path,
@@ -112,7 +111,6 @@ pub(super) async fn payload_metadata_refs_for_scope(
 /// Collects payload-metadata references through `rowid` keyset pages: the
 /// whole `lcm_external_payloads` table exceeds what the `SQLite` runtime will
 /// materialize for one query on a long-lived profile.
-#[hotpath::measure(label = "sessions.lcm.maintenance.scan_payload_refs", future = true)]
 async fn payload_metadata_refs(
     conn: &(impl QueryExecutor + ?Sized),
     provider: &str,

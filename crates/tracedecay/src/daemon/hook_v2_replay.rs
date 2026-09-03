@@ -155,7 +155,7 @@ where
 
     // Age-expired records are terminal regardless of binding state: the spool
     // keeps them durable precisely until the daemon says otherwise.
-    for record in spool.expired_records(now) {
+    for record in spool.expired_records(now).ok()? {
         if acknowledge(
             &mut spool,
             &record,
