@@ -94,7 +94,6 @@ fn executable_digest_cache() -> &'static Mutex<HashMap<ExecutableDigestCacheKey,
 /// port itself honours, so the identity tracks the binary that would actually
 /// be spawned rather than a nominal default. Envelope hashing stays
 /// [`canonical_sha256`]; hasher failures are `config_error` results.
-#[hotpath::measure(label = "automation_runtime.backend_identity.derive")]
 pub fn backend_identity(config: &AutomationConfig) -> Result<String> {
     // `canonical_sha256` is the crate's one identity primitive: key-ordered,
     // whitespace-free, and already used to derive the configuration identity
@@ -130,7 +129,6 @@ fn backend_executable_identity(config: &AutomationConfig) -> Option<Value> {
     }
 }
 
-#[hotpath::measure(label = "automation_runtime.backend_identity.resolve_executable")]
 fn codex_executable_identity(spec: &str) -> Value {
     match locate_backend_executable(spec) {
         Ok(Some(path)) => opened_executable_identity(spec, &path)
@@ -248,7 +246,6 @@ fn opened_file_revision(_file: &File, _metadata: &Metadata) -> Option<OpenedFile
     None
 }
 
-#[hotpath::measure(label = "automation_runtime.backend_identity.digest_executable")]
 fn cached_executable_content_digest(
     revision: &OpenedFileRevision,
     path: &Path,
