@@ -1,12 +1,10 @@
 use serde_json::Value;
 use tracedecay_application::{
-    APPLICATION_DEFAULT_PROFILE_ID, ApplicationProblemKind, ApplicationResult, CancellationSignal,
-    Deadline, InvocationTarget, RequestId, RetainedSurfaceOperation,
+    ApplicationProblemKind, ApplicationResult, CancellationSignal, Deadline, InvocationTarget,
+    RequestId, RetainedSurfaceOperation,
 };
 use tracedecay_domain::UtcMicros;
-use tracedecay_tool_catalog::{
-    ApplicationSurfaceOperation, BindingId, BindingSurface, ProfileId, SurfaceOperationName,
-};
+use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingId};
 
 use crate::application_surface::{
     ApplicationSurfaceInvocationResult, NormalizedApplicationToolArgs,
@@ -44,42 +42,8 @@ pub(super) fn complete_retained_protocol_controls(
     deadline: Option<Deadline>,
     cancellation: Option<CancellationSignal>,
 ) -> Result<Option<(Deadline, CancellationSignal)>> {
-    let application_operation = tracedecay_application::retained_surface_application_operation(
-        operation,
-    )
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("could not resolve retained application deadline: {error}"),
-    })?;
-    let profile_id = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).map_err(|error| {
-        TraceDecayError::Config {
-            message: format!("could not resolve retained application profile: {error}"),
-        }
-    })?;
-    let operation_name =
-        SurfaceOperationName::new(operation.as_str()).map_err(|error| TraceDecayError::Config {
-            message: format!("could not resolve retained application operation: {error}"),
-        })?;
-    let capability = super::retained_catalog::retained_mcp_composition()?
-        .snapshot()
-        .resolve_binding(
-            &profile_id,
-            BindingSurface::Mcp,
-            &operation_name,
-            1,
-            &std::collections::BTreeSet::new(),
-        )
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "retained MCP application deadline authority is unavailable".to_owned(),
-        })?;
-    if capability.capability_id() != application_operation.capability_id()
-        || capability.use_case_id() != application_operation.use_case_id()
-    {
-        return Err(TraceDecayError::Config {
-            message: "retained MCP deadline authority resolved a different application operation"
-                .to_owned(),
-        });
-    }
-    let ceiling = std::time::Duration::from_millis(capability.deadline().maximum_millis());
+    let binding = super::retained_catalog::retained_mcp_binding(operation)?;
+    let ceiling = std::time::Duration::from_millis(binding.maximum_millis());
     complete_protocol_controls_with_ceiling(ceiling, request_id, deadline, cancellation)
 }
 
@@ -316,7 +280,7 @@ fn render_result_parts(
 pub(super) fn render_retained_result(
     project_root: Option<&std::path::Path>,
     operation: RetainedSurfaceOperation,
-    binding_id: BindingId,
+    binding_id: &BindingId,
     result: ApplicationResult<tracedecay_application::retained_surfaces::RetainedSurfaceResultV1>,
     requested_format: RequestedOutputFormat,
 ) -> Result<tracedecay_mcp::ToolResult> {
@@ -328,7 +292,7 @@ pub(super) fn render_retained_result(
     render_result_parts(
         project_root,
         operation.as_str(),
-        &binding_id,
+        binding_id,
         &result,
         requested_format,
     )
