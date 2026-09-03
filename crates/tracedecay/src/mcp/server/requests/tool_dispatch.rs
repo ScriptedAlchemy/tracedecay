@@ -97,6 +97,10 @@ impl McpServer {
 
     #[cfg(feature = "test-transport")]
     #[doc(hidden)]
+    // The request identity, deadline, and cancellation below are static
+    // literals that cannot fail to parse; this entry point exists only for
+    // the test transport.
+    #[cfg_attr(not(test), allow(clippy::expect_used))]
     #[hotpath::skip]
     pub async fn call_tool_for_test(
         &self,
