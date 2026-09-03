@@ -28,6 +28,9 @@ pub const DEFAULT_MAX_CHANGED_RANGES: usize = 256;
 /// Parsing is synchronous, but every invocation has a cooperative deadline.
 pub const DEFAULT_MAX_PARSE_TIME: Duration = Duration::from_millis(250);
 
+#[cfg(test)]
+static MINIMAL_EDIT_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// Exact authority for source retained by one parser.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ParseDocumentIdentity {
@@ -425,7 +428,7 @@ impl RetainedParseDocument {
         edits: &[ParseInputEdit],
         new_source: impl Into<String>,
     ) -> Result<ParseReport, ParseError> {
-        self.apply_edits_normalized(next_identity, edits, new_source.into(), None)
+        self.apply_edits_normalized(next_identity, edits, new_source.into(), None, None)
     }
 
     pub fn apply_edits_prepared(
@@ -437,7 +440,7 @@ impl RetainedParseDocument {
     ) -> Result<ParseReport, ParseError> {
         let new_source = new_source.into();
         let new_parsed_source = normalize_parsed_source(&new_source, new_parsed_source.into());
-        self.apply_edits_normalized(next_identity, edits, new_source, new_parsed_source)
+        self.apply_edits_normalized(next_identity, edits, new_source, new_parsed_source, None)
     }
 
     fn apply_edits_normalized(
@@ -446,6 +449,7 @@ impl RetainedParseDocument {
         edits: &[ParseInputEdit],
         new_source: String,
         new_parsed_source: Option<String>,
+        source_edit: Option<ParseInputEdit>,
     ) -> Result<ParseReport, ParseError> {
         if !self.identity.identifies_same_document(&next_identity) {
             crate::hotpath_observe::record_retained_parse_abstention(
@@ -495,7 +499,7 @@ impl RetainedParseDocument {
             });
         }
 
-        let source_edit = minimal_edit(&self.source, &new_source);
+        let source_edit = source_edit.unwrap_or_else(|| minimal_edit(&self.source, &new_source));
         let mut edited_tree = self.tree.clone();
         for edit in edits {
             edited_tree.edit(&(*edit).into());
@@ -575,10 +579,22 @@ impl RetainedParseDocument {
             if self.parsed_source != new_parsed_source {
                 return self.replace_normalized(next_identity, new_source, new_parsed_source);
             }
-            return self.apply_edits_normalized(next_identity, &[], new_source, new_parsed_source);
+            return self.apply_edits_normalized(
+                next_identity,
+                &[],
+                new_source,
+                new_parsed_source,
+                None,
+            );
         }
         let edit = minimal_edit(&self.source, &new_source);
-        self.apply_edits_normalized(next_identity, &[edit], new_source, new_parsed_source)
+        self.apply_edits_normalized(
+            next_identity,
+            &[edit],
+            new_source,
+            new_parsed_source,
+            Some(edit),
+        )
     }
 
     /// Parse a whole-document replacement without consulting the prior tree.
@@ -790,6 +806,9 @@ fn validate_edits(
 }
 
 fn minimal_edit(before: &str, after: &str) -> ParseInputEdit {
+    #[cfg(test)]
+    MINIMAL_EDIT_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
     let before_bytes = before.as_bytes();
     let after_bytes = after.as_bytes();
     let mut prefix = before_bytes
@@ -896,6 +915,54 @@ fn extraction_ranges(
         left.start_byte == right.start_byte && left.end_byte == right.end_byte
     });
     expanded
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::Ordering;
+
+    use super::*;
+
+    fn id<T>(value: &str) -> T
+    where
+        T: TryFrom<String>,
+        T::Error: std::fmt::Debug,
+    {
+        T::try_from(value.to_owned()).expect("valid test identity")
+    }
+
+    fn identity(commit: &str, tree: &str) -> ParseDocumentIdentity {
+        ParseDocumentIdentity::Repository {
+            project_id: id("project.incremental-minimal-edit"),
+            repository_id: id("repository.incremental-minimal-edit"),
+            worktree_id: Some(id("worktree.incremental-minimal-edit")),
+            reference: Some(id("refs/heads/main")),
+            commit: Some(id(commit)),
+            tree: Some(id(tree)),
+            dirty: RepositoryDirtyStateV1::Dirty,
+            logical_path: "src/lib.rs".to_owned(),
+        }
+    }
+
+    #[test]
+    fn reparse_computes_the_minimal_edit_once() {
+        let before = "fn unchanged() {}\nfn edited() -> u32 { 1 }\n";
+        let after = "fn unchanged() {}\nfn edited() -> u32 { 123 }\n";
+        let (mut document, _) = RetainedParseDocument::open(
+            identity("commit-a", "tree-a"),
+            "rust",
+            before,
+            ParseLimits::default(),
+        )
+        .expect("initial parse");
+        MINIMAL_EDIT_CALLS.store(0, Ordering::Relaxed);
+
+        document
+            .reparse(identity("commit-b", "tree-b"), after)
+            .expect("incremental reparse");
+
+        assert_eq!(MINIMAL_EDIT_CALLS.load(Ordering::Relaxed), 1);
+    }
 }
 
 fn is_attached_leading_syntax(kind: &str) -> bool {
