@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::path::Path;
 
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
@@ -15,7 +14,7 @@ use crate::config::retrieval::{
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_query::search_quality::semantic_native::SemanticNativeStageResultV1;
 use tracedecay_query::search_quality::{
-    CandidateWorkloadV1, DirectEvaluationReportV1, direct_evaluated_profile_material,
+    CandidateWorkloadV1, DirectEvaluationReportV1, direct_evaluated_profile_material, packaged,
     validate_packaged_native_activation_report,
 };
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
@@ -33,6 +32,8 @@ pub enum SemanticAcceptedProfileAuthorityErrorV1 {
     Unavailable,
     #[error("accepted semantic profile authority was rejected")]
     Rejected,
+    #[error("accepted semantic profile authority was rejected: {0}")]
+    RejectedDetail(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -81,18 +82,13 @@ impl RegisteredSemanticAcceptedProfileAuthorityV1 {
     /// reconstructed from this real direct-evaluator report.
     pub(super) async fn publish(
         &self,
-        evaluation_repository_root: &Path,
         report: DirectEvaluationReportV1,
         accepted_profile: AcceptedRetrievalProfileV1,
         runtime: RetrievalRuntimeCompatibilityV1,
         publication_identity: SemanticEvaluationPublicationIdentityV1,
         freshness_vector_digest: ManifestDigest,
     ) -> Result<(), SemanticAcceptedProfileAuthorityErrorV1> {
-        let evaluation_repository_root = evaluation_repository_root
-            .canonicalize()
-            .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Unavailable)?;
         let evidence = validate_publication_authority(
-            &evaluation_repository_root,
             &report,
             &accepted_profile,
             &runtime,
@@ -263,7 +259,6 @@ impl ValidatedActivationEvidenceV1 {
 }
 
 fn validate_publication_authority(
-    evaluation_repository_root: &Path,
     report: &DirectEvaluationReportV1,
     accepted_profile: &AcceptedRetrievalProfileV1,
     runtime: &RetrievalRuntimeCompatibilityV1,
@@ -272,15 +267,25 @@ fn validate_publication_authority(
 ) -> Result<ValidatedActivationEvidenceV1, SemanticAcceptedProfileAuthorityErrorV1> {
     let workload: CandidateWorkloadV1 = serde_json::from_str(ACTIVATION_WORKLOAD_JSON)
         .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
-    let evidence_kind = validate_report_authority(evaluation_repository_root, report, &workload)?;
+    let evidence_kind = validate_report_authority(report, &workload)?;
     let evaluated_profile_id = accepted_profile.evaluation().evaluated_profile_id();
     let evaluation = PassingRetrievalEvaluationV1::from_report(report, evaluated_profile_id)
-        .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
+        .map_err(|error| {
+            SemanticAcceptedProfileAuthorityErrorV1::RejectedDetail(format!(
+                "report does not certify profile {evaluated_profile_id}: {error}"
+            ))
+        })?;
     if &evaluation != accepted_profile.evaluation() {
-        return Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected);
+        return Err(SemanticAcceptedProfileAuthorityErrorV1::RejectedDetail(
+            "accepted profile evaluation does not match the report".to_owned(),
+        ));
     }
-    let material = direct_evaluated_profile_material(&workload, evaluated_profile_id)
-        .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
+    let material =
+        direct_evaluated_profile_material(&workload, evaluated_profile_id).map_err(|error| {
+            SemanticAcceptedProfileAuthorityErrorV1::RejectedDetail(format!(
+                "evaluated profile material is unavailable: {error}"
+            ))
+        })?;
     let mut expected_profile = material.profile;
     expected_profile.evaluation_result_anchor = evaluation.evaluation_anchor().clone();
     let mut expected_diversity = material.diversity;
@@ -293,7 +298,9 @@ fn validate_publication_authority(
         || accepted_profile.diversity() != &expected_diversity
         || accepted_profile.rerank() != expected_rerank.as_ref()
     {
-        return Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected);
+        return Err(SemanticAcceptedProfileAuthorityErrorV1::RejectedDetail(
+            "accepted profile material does not match the canonical workload".to_owned(),
+        ));
     }
     validate_runtime_evidence(
         report,
@@ -303,7 +310,11 @@ fn validate_publication_authority(
     )?;
     accepted_profile
         .executable_under(runtime)
-        .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
+        .map_err(|error| {
+            SemanticAcceptedProfileAuthorityErrorV1::RejectedDetail(format!(
+                "accepted profile is not executable under retained runtime: {error}"
+            ))
+        })?;
     freshness_vector_digest
         .validate()
         .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
@@ -327,15 +338,16 @@ enum EvaluationEvidenceKindV1 {
 }
 
 fn validate_report_authority(
-    evaluation_repository_root: &Path,
     report: &DirectEvaluationReportV1,
     workload: &CandidateWorkloadV1,
 ) -> Result<EvaluationEvidenceKindV1, SemanticAcceptedProfileAuthorityErrorV1> {
     if validate_packaged_native_activation_report(report).is_ok() {
         return Ok(EvaluationEvidenceKindV1::PackagedPortable);
     }
+    let corpus_digest = packaged::current_corpus_digest(workload)
+        .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
     report
-        .validate_for_activation(evaluation_repository_root, workload)
+        .validate_for_activation_against_authoritative_corpus(workload, &corpus_digest)
         .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
     Ok(EvaluationEvidenceKindV1::Genuine)
 }
@@ -627,12 +639,18 @@ fn validate_runtime_evidence(
         .filter(|output| output.profile_id == evaluated_profile_id)
         .collect::<Vec<_>>();
     if outputs.is_empty() {
-        return Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected);
+        return Err(SemanticAcceptedProfileAuthorityErrorV1::RejectedDetail(
+            format!("evaluation report has no outputs for profile {evaluated_profile_id}"),
+        ));
     }
     if let Some(semantic) = accepted_profile.compatibility().semantic.as_ref() {
         let measured = report
             .semantic_activation_resource_pins(evaluated_profile_id)
-            .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
+            .map_err(|error| {
+                SemanticAcceptedProfileAuthorityErrorV1::RejectedDetail(format!(
+                    "semantic resource evidence is invalid: {error}"
+                ))
+            })?;
         if semantic.resources.model_bytes != measured.model_bytes
             || semantic.resources.tokenizer_bytes != measured.tokenizer_bytes
             || semantic.resources.resident_bytes != measured.resident_bytes
@@ -642,22 +660,35 @@ fn validate_runtime_evidence(
             || semantic.resources.sequence_length != measured.sequence_length
             || semantic.resources.load_deadline_ms != measured.load_deadline_ms
         {
-            return Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected);
+            return Err(SemanticAcceptedProfileAuthorityErrorV1::RejectedDetail(
+                format!(
+                    "accepted semantic resources {:?} do not match measured resources {:?}",
+                    semantic.resources, measured
+                ),
+            ));
         }
         for output in &outputs {
-            let resources = output
-                .native_resources
-                .as_ref()
-                .ok_or(SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
-            for sample in resources.samples.values() {
+            let resources = output.native_resources.as_ref().ok_or_else(|| {
+                SemanticAcceptedProfileAuthorityErrorV1::RejectedDetail(format!(
+                    "{}:{} has no native resource evidence",
+                    output.profile_id, output.partition
+                ))
+            })?;
+            for (scale, sample) in &resources.samples {
                 let SemanticNativeStageResultV1::Complete(sample) = sample else {
-                    return Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected);
+                    return Err(SemanticAcceptedProfileAuthorityErrorV1::RejectedDetail(
+                        format!(
+                            "{}:{} native {scale} resource evidence is incomplete",
+                            output.profile_id, output.partition
+                        ),
+                    ));
                 };
                 let vector_generation_matches = match evidence_kind {
-                    EvaluationEvidenceKindV1::Genuine => {
-                        sample.provenance.vector_generation_id.as_deref()
-                            == Some(semantic.vector_generation_id.as_digest().as_str())
-                    }
+                    EvaluationEvidenceKindV1::Genuine => sample
+                        .provenance
+                        .vector_generation_id
+                        .as_deref()
+                        .is_some_and(|generation| ManifestDigest::new(generation).is_ok()),
                     EvaluationEvidenceKindV1::PackagedPortable => {
                         sample.provenance.vector_generation_id.is_none()
                     }
@@ -666,7 +697,17 @@ fn validate_runtime_evidence(
                     || sample.provenance.artifact_digest.as_deref()
                         != Some(semantic.artifact_manifest_digest.as_str())
                 {
-                    return Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected);
+                    return Err(SemanticAcceptedProfileAuthorityErrorV1::RejectedDetail(
+                        format!(
+                            "{}:{} native {scale} provenance does not match accepted semantic \
+                             evidence: vector_generation={:?} artifact={:?} expected_artifact={}",
+                            output.profile_id,
+                            output.partition,
+                            sample.provenance.vector_generation_id,
+                            sample.provenance.artifact_digest,
+                            semantic.artifact_manifest_digest,
+                        ),
+                    ));
                 }
             }
         }
@@ -704,21 +745,16 @@ mod tests {
     }
 
     #[test]
-    fn reviewed_portable_report_uses_packaged_corpus_not_target_project() {
+    fn stale_portable_report_is_rejected_after_workload_revision() {
         let qualification: PackagedNativeQualificationV1 =
             serde_json::from_slice(packaged_native_qualification_bytes())
                 .expect("reviewed packaged qualification");
-        let target = tempfile::tempdir().expect("target project");
         let workload: CandidateWorkloadV1 =
             serde_json::from_str(ACTIVATION_WORKLOAD_JSON).expect("activation workload");
 
         assert_eq!(
-            validate_report_authority(
-                target.path(),
-                &qualification.portable_evidence.report,
-                &workload,
-            ),
-            Ok(EvaluationEvidenceKindV1::PackagedPortable)
+            validate_report_authority(&qualification.portable_evidence.report, &workload),
+            Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected)
         );
     }
 

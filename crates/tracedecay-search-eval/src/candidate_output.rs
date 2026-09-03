@@ -31,7 +31,7 @@ use tracedecay_code_index::production::{
     CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
     CodeIndexGenerationScopeV1, CodeIndexProductionConfigV1, CodeIndexProductionOwnerV1,
     CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
-    CodeIndexRepositoryParseIdentityV1,
+    CodeIndexRepositoryParseIdentityV1, DAEMON_CODE_INDEX_CHUNKER_REVISION,
 };
 use tracedecay_code_index::projection::{
     ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -1992,8 +1992,8 @@ fn publish_corpus_with_scale(
         policy_revision: id::<PolicyRevisionId>("policy.candidate.v1")?,
         // Must match the daemon production code-index projection identity so
         // evaluate-and-publish can activate the same embedding projection the
-        // mounted journey pins (`chunker.daemon.v2` / `privacy.local-code-index`).
-        chunker_revision: id::<ChunkerRevision>("chunker.daemon.v2")?,
+        // mounted journey pins.
+        chunker_revision: id::<ChunkerRevision>(DAEMON_CODE_INDEX_CHUNKER_REVISION)?,
         privacy_domain: id::<PrivacyDomainId>("privacy.local-code-index")?,
         privacy_key_epoch: 1,
         max_snapshot_age_micros: None,
@@ -3041,6 +3041,11 @@ mod tests {
             .expect("publish corpus");
 
         for chunk in published.generation.chunks().chunks() {
+            assert_eq!(
+                chunk.chunker_revision.as_str(),
+                DAEMON_CODE_INDEX_CHUNKER_REVISION,
+                "native evaluation corpus must use the current daemon chunker identity"
+            );
             let chunk_occurrence = format!("code-chunk:{}", chunk.id.as_str());
             assert!(
                 published.occurrence_map.contains_key(&chunk_occurrence),
