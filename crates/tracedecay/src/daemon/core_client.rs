@@ -17,13 +17,11 @@ use tracedecay_framing::{
     WIRE_RECORD_TOO_LARGE, is_wire_oversized_io_error, read_bounded_mcp_line,
 };
 
+pub(crate) use tracedecay_daemon_protocol::DAEMON_TOOL_LIVENESS_POLL_INTERVAL;
 pub use tracedecay_daemon_protocol::{
     DAEMON_CONNECT_DOWN, DAEMON_CONNECT_SATURATED, DAEMON_RESPONSE_STALLED,
     DAEMON_TOOL_RESPONSE_GRACE, DEFAULT_TOOL_REQUEST_DEADLINE, MAX_TOOL_REQUEST_DEADLINE,
     TOOL_REQUEST_DEADLINE_ENV, tool_request_deadline,
-};
-pub(crate) use tracedecay_daemon_protocol::{
-    DAEMON_TOOL_HEALTH_CONNECT_TIMEOUT, DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
 };
 
 #[cfg(unix)]
@@ -90,25 +88,7 @@ pub(crate) async fn ensure_daemon_connection_live(
     request_label: &str,
 ) -> Result<()> {
     connection.ensure_authority_current(request_label)?;
-
-    timeout(
-        DAEMON_TOOL_HEALTH_CONNECT_TIMEOUT,
-        BrokerStream::connect(&connection.endpoint),
-    )
-    .await
-    .map_err(|_| TraceDecayError::Config {
-        message: format!(
-            "daemon health check timed out at '{}' while request '{request_label}' was awaiting a response; the request was already sent and was not retried",
-            connection.endpoint
-        ),
-    })?
-    .map(|_| ())
-    .map_err(|error| TraceDecayError::Config {
-        message: format!(
-            "daemon became unreachable at '{}' while request '{request_label}' was awaiting a response: {error}; the request was already sent and was not retried",
-            connection.endpoint
-        ),
-    })
+    Ok(())
 }
 
 #[hotpath::measure(label = "daemon.core.next_response", future = true)]

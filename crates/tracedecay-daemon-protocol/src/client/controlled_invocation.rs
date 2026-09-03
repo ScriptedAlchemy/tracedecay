@@ -3,10 +3,18 @@
 use std::time::Duration;
 
 use super::{
-    CancellationSignal, CancellationStage, DaemonInvocationClient, DaemonInvocationError, Deadline,
-    InvocationCancellationPolicy, deadline_remaining, wait_for_cancellation,
+    CancellationSignal, CancellationStage, DaemonInvocationClient, DaemonInvocationError,
+    DaemonInvocationResult, Deadline, InvocationCancellationPolicy, InvocationConnectionLease,
+    deadline_remaining, wait_for_cancellation, with_daemon_version_skew_context,
 };
 use crate::connection::{DAEMON_CONNECT_DOWN, DAEMON_CONNECT_SATURATED};
+
+enum ControlledConnectionOutcome {
+    Completed(tracedecay_domain::errors::Result<crate::contract::DaemonInvocationResponse>),
+    Cancelled,
+    TimedOut,
+    Indeterminate,
+}
 
 /// Classify one transport-level invoke failure for controlled callers.
 ///
@@ -16,7 +24,7 @@ use crate::connection::{DAEMON_CONNECT_DOWN, DAEMON_CONNECT_SATURATED};
 /// diagnostic. Every other transport failure — a closed connection after the
 /// request was written, a stalled response, a refused handshake — keeps the
 /// indeterminate [`DaemonInvocationError::Unavailable`].
-fn classify_invoke_transport_error(
+pub(super) fn classify_invoke_transport_error(
     error: tracedecay_domain::errors::TraceDecayError,
 ) -> DaemonInvocationError {
     match error.project_route_context() {
@@ -31,9 +39,49 @@ fn classify_invoke_transport_error(
 }
 
 impl DaemonInvocationClient {
-    #[hotpath::measure(label = "daemon.client.invoke_controlled", future = true)]
-    pub async fn invoke_controlled(
+    pub(super) async fn checkout_connection_controlled(
         &self,
+        deadline: &Deadline,
+        cancellation: &CancellationSignal,
+    ) -> Result<
+        (
+            InvocationConnectionLease,
+            super::DaemonInvocationClientActivityGuard,
+        ),
+        DaemonInvocationError,
+    > {
+        if cancellation.is_cancelled() {
+            return Err(DaemonInvocationError::Cancelled {
+                stage: CancellationStage::BeforeAdmission,
+            });
+        }
+        let remaining = deadline_remaining(deadline).ok_or(DaemonInvocationError::TimedOut {
+            stage: CancellationStage::BeforeAdmission,
+        })?;
+        let checkout = self.checkout_connection();
+        tokio::pin!(checkout);
+        let cancellation_wait = wait_for_cancellation(cancellation.clone());
+        tokio::pin!(cancellation_wait);
+        tokio::select! {
+            result = &mut checkout => result.map_err(|error| {
+                classify_invoke_transport_error(with_daemon_version_skew_context(
+                    error,
+                    &self.connection,
+                    &self.handshake,
+                ))
+            }),
+            () = &mut cancellation_wait => Err(DaemonInvocationError::Cancelled {
+                stage: CancellationStage::BeforeAdmission,
+            }),
+            () = tokio::time::sleep(remaining) => Err(DaemonInvocationError::TimedOut {
+                stage: CancellationStage::BeforeAdmission,
+            }),
+        }
+    }
+
+    pub(super) async fn invoke_controlled_on_connection(
+        &self,
+        lease: &mut InvocationConnectionLease,
         request: crate::contract::DaemonInvocationRequest,
         deadline: Deadline,
         cancellation: CancellationSignal,
@@ -48,87 +96,125 @@ impl DaemonInvocationClient {
             stage: CancellationStage::BeforeAdmission,
         })?;
         let target_request_id = request.request_id.clone();
-        let client = self.clone();
-        tokio::spawn(async move {
-            let stage = match policy {
-                InvocationCancellationPolicy::ReadOnly => CancellationStage::DuringRead,
-                InvocationCancellationPolicy::AuthoritativeEffect => {
-                    CancellationStage::EffectInFlight
-                }
+        let stage = match policy {
+            InvocationCancellationPolicy::ReadOnly => CancellationStage::DuringRead,
+            InvocationCancellationPolicy::AuthoritativeEffect => CancellationStage::EffectInFlight,
+        };
+        let outcome = {
+            let invocation = self.invoke_on_connection(lease, request);
+            tokio::pin!(invocation);
+            let cancellation_wait = wait_for_cancellation(cancellation);
+            tokio::pin!(cancellation_wait);
+            let interrupted = tokio::select! {
+                result = &mut invocation => ControlledConnectionOutcome::Completed(result),
+                () = &mut cancellation_wait => ControlledConnectionOutcome::Cancelled,
+                () = tokio::time::sleep(remaining) => ControlledConnectionOutcome::TimedOut,
             };
-            let outcome = {
-                let invocation = client.invoke(request);
-                tokio::pin!(invocation);
-                let cancellation_wait = wait_for_cancellation(cancellation);
-                tokio::pin!(cancellation_wait);
-                let timed_out = tokio::select! {
-                    result = &mut invocation => return result.map_err(classify_invoke_transport_error),
-                    () = &mut cancellation_wait => false,
-                    () = tokio::time::sleep(remaining) => true,
-                };
-                let _ = tokio::time::timeout(
-                    Duration::from_millis(250),
-                    client.cancel_invocation(&target_request_id),
-                )
-                .await;
-                match policy {
-                    InvocationCancellationPolicy::ReadOnly if timed_out => {
-                        Err(DaemonInvocationError::TimedOut { stage })
-                    }
-                    InvocationCancellationPolicy::ReadOnly => {
-                        Err(DaemonInvocationError::Cancelled { stage })
-                    }
-                    InvocationCancellationPolicy::AuthoritativeEffect => {
-                        // An authoritative effect settles itself; keep reading
-                        // over the same response grace the daemon's own
-                        // clients use so its real terminal (e.g. a
-                        // `PartialEffect` with a committed receipt) is the
-                        // one reported, exactly as `settle_in_process_invocation`
-                        // does. A transport failure after the cancel attempt
-                        // is the same indeterminate state as an unanswered
-                        // grace: the effect may have committed, so a
-                        // retry-inviting `Unavailable` would be untruthful.
-                        match tokio::time::timeout(
-                            crate::connection::DAEMON_TOOL_RESPONSE_GRACE,
-                            &mut invocation,
-                        )
-                        .await
-                        {
-                            Ok(Ok(response)) => Ok(response),
-                            Ok(Err(_)) | Err(_) => Ok(
-                                crate::contract::DaemonInvocationResponse::problem(
-                                    target_request_id,
-                                    crate::contract::DaemonInvocationProblem::ResetRequired,
-                                ),
-                            ),
+            match interrupted {
+                ControlledConnectionOutcome::Completed(result) => {
+                    ControlledConnectionOutcome::Completed(result)
+                }
+                interrupted @ (ControlledConnectionOutcome::Cancelled
+                | ControlledConnectionOutcome::TimedOut) => {
+                    let authoritative_settlement_deadline =
+                        tokio::time::Instant::now() + crate::connection::DAEMON_TOOL_RESPONSE_GRACE;
+                    let _ = tokio::time::timeout(
+                        Duration::from_millis(250),
+                        self.cancel_invocation(&target_request_id),
+                    )
+                    .await;
+                    match policy {
+                        InvocationCancellationPolicy::ReadOnly => interrupted,
+                        InvocationCancellationPolicy::AuthoritativeEffect => {
+                            match tokio::time::timeout_at(
+                                authoritative_settlement_deadline,
+                                &mut invocation,
+                            )
+                            .await
+                            {
+                                Ok(result) => ControlledConnectionOutcome::Completed(result),
+                                Err(_) => ControlledConnectionOutcome::Indeterminate,
+                            }
                         }
                     }
                 }
-            };
-            let indeterminate_effect = matches!(
-                &outcome,
-                Ok(crate::contract::DaemonInvocationResponse {
-                    outcome:
-                        crate::contract::DaemonInvocationOutcome::Problem {
-                            problem: crate::contract::DaemonInvocationProblem::ResetRequired,
-                        },
-                    ..
-                })
-            );
-            if matches!(
-                outcome,
-                Err(
-                    DaemonInvocationError::Cancelled { .. }
-                        | DaemonInvocationError::TimedOut { .. }
-                )
-            ) || indeterminate_effect
-            {
-                *client.state.lock().await = None;
+                ControlledConnectionOutcome::Indeterminate => {
+                    ControlledConnectionOutcome::Indeterminate
+                }
             }
-            outcome
-        })
-        .await
-        .map_err(|_| DaemonInvocationError::Unavailable)?
+        };
+        match outcome {
+            ControlledConnectionOutcome::Completed(Ok(response)) => Ok(response),
+            ControlledConnectionOutcome::Completed(Err(error)) => {
+                lease.connection.take();
+                Err(classify_invoke_transport_error(error))
+            }
+            ControlledConnectionOutcome::Cancelled => {
+                lease.connection.take();
+                Err(DaemonInvocationError::Cancelled { stage })
+            }
+            ControlledConnectionOutcome::TimedOut => {
+                lease.connection.take();
+                Err(DaemonInvocationError::TimedOut { stage })
+            }
+            ControlledConnectionOutcome::Indeterminate => {
+                lease.connection.take();
+                Ok(crate::contract::DaemonInvocationResponse::problem(
+                    target_request_id,
+                    crate::contract::DaemonInvocationProblem::ResetRequired,
+                ))
+            }
+        }
+    }
+
+    #[hotpath::measure(label = "daemon.client.invoke_controlled", future = true)]
+    pub async fn invoke_controlled(
+        &self,
+        request: crate::contract::DaemonInvocationRequest,
+        deadline: Deadline,
+        cancellation: CancellationSignal,
+        policy: InvocationCancellationPolicy,
+    ) -> Result<crate::contract::DaemonInvocationResponse, DaemonInvocationError> {
+        self.invoke_controlled_with_delivery(request, deadline, cancellation, policy)
+            .await
+            .map(DaemonInvocationResult::into_response)
+    }
+
+    #[hotpath::measure(label = "daemon.client.invoke_controlled.delivery", future = true)]
+    pub async fn invoke_controlled_with_delivery(
+        &self,
+        request: crate::contract::DaemonInvocationRequest,
+        deadline: Deadline,
+        cancellation: CancellationSignal,
+        policy: InvocationCancellationPolicy,
+    ) -> Result<DaemonInvocationResult, DaemonInvocationError> {
+        if cancellation.is_cancelled() {
+            return Err(DaemonInvocationError::Cancelled {
+                stage: CancellationStage::BeforeAdmission,
+            });
+        }
+        deadline_remaining(&deadline).ok_or(DaemonInvocationError::TimedOut {
+            stage: CancellationStage::BeforeAdmission,
+        })?;
+        let target_request_id = request.request_id.clone();
+        let delivery_ack_required = request.delivery_ack_deadline().is_some();
+        let (mut lease, _in_flight) = self
+            .checkout_connection_controlled(&deadline, &cancellation)
+            .await?;
+        let response = self
+            .invoke_controlled_on_connection(&mut lease, request, deadline, cancellation, policy)
+            .await?;
+        let delivery = if delivery_ack_required && lease.connection.is_some() {
+            Some(super::DaemonInvocationDelivery {
+                lease,
+                target_request_id,
+                connection: self.connection.clone(),
+            })
+        } else {
+            lease.release_to_pool();
+            None
+        };
+        Ok(DaemonInvocationResult { response, delivery })
     }
 }
 

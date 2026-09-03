@@ -31,7 +31,7 @@ use tracedecay_tool_catalog::OperationId;
 
 use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_daemon_protocol::{
-    DaemonInvocationClient, InvocationCancellationPolicy, invocation_now_micros,
+    DaemonInvocationDelivery, InvocationCancellationPolicy, invocation_now_micros,
 };
 use tracedecay_daemon_protocol::{
     DaemonInvocationOutcome, DaemonInvocationProblem, DaemonInvocationRequest,
@@ -64,17 +64,15 @@ impl WorkCliResponse {
 
 /// Authenticated terminal delivery handle for one daemon Work response.
 pub struct WorkCliDelivery {
-    client: DaemonInvocationClient,
-    target_request_id: String,
+    delivery: DaemonInvocationDelivery,
 }
 
 impl WorkCliDelivery {
     /// Acknowledge only after the caller's output write and flush succeeded.
     #[hotpath::skip]
-    pub async fn acknowledge_delivered(&self) -> Result<()> {
-        self.client
-            .acknowledge_work_delivery(
-                &self.target_request_id,
+    pub async fn acknowledge_delivered(self) -> Result<()> {
+        self.delivery
+            .acknowledge(
                 tracedecay_domain::DeliverySettlementOutcomeV1::Delivered,
                 None,
             )
@@ -85,12 +83,11 @@ impl WorkCliDelivery {
     /// boundary fails. This must never be converted into Delivered.
     #[hotpath::skip]
     pub async fn acknowledge_dropped(
-        &self,
+        self,
         reason: tracedecay_domain::DeliveryDropReasonV1,
     ) -> Result<()> {
-        self.client
-            .acknowledge_work_delivery(
-                &self.target_request_id,
+        self.delivery
+            .acknowledge(
                 tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
                 Some(reason),
             )
@@ -382,8 +379,8 @@ pub async fn invoke_work_cli_with_delivery(
     let handshake =
         tracedecay::daemon::handshake_for_current_client(Some(project_root), None, false, false)?;
     let client = tracedecay_daemon_identity::invocation_client_for_current(handshake)?;
-    let response = match client
-        .invoke_controlled(
+    let result = match client
+        .invoke_controlled_with_delivery(
             request,
             deadline,
             cancellation,
@@ -391,7 +388,7 @@ pub async fn invoke_work_cli_with_delivery(
         )
         .await
     {
-        Ok(response) => response,
+        Ok(result) => result,
         Err(error) => {
             return Ok(WorkCliResponse::without_delivery(Err(work_problem(
                 result_contract,
@@ -400,6 +397,7 @@ pub async fn invoke_work_cli_with_delivery(
             )?)));
         }
     };
+    let (response, delivery) = result.into_parts();
     let delivery_eligible = match &response.outcome {
         DaemonInvocationOutcome::WorkApplication { outcome, .. }
             if work_outcome_matches(operation, outcome) =>
@@ -408,7 +406,6 @@ pub async fn invoke_work_cli_with_delivery(
         }
         _ => false,
     };
-    let delivery_request_id = request_id.as_str().to_owned();
     let outcome = match response.outcome {
         DaemonInvocationOutcome::WorkApplication { scope, outcome }
             if work_outcome_matches(operation, &outcome) =>
@@ -437,13 +434,17 @@ pub async fn invoke_work_cli_with_delivery(
             }),
         )?),
     };
-    Ok(WorkCliResponse {
-        outcome,
-        delivery: delivery_eligible.then(|| WorkCliDelivery {
-            client,
-            target_request_id: delivery_request_id,
-        }),
-    })
+    let delivery = if delivery_eligible {
+        Some(WorkCliDelivery {
+            delivery: delivery.ok_or_else(|| TraceDecayError::Config {
+                message: "daemon Work response omitted its connection-bound delivery authority"
+                    .to_owned(),
+            })?,
+        })
+    } else {
+        None
+    };
+    Ok(WorkCliResponse { outcome, delivery })
 }
 
 fn work_delivery_is_eligible(operation: WorkOperation, outcome: &WorkApplicationOutcomeV1) -> bool {
