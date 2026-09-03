@@ -100,6 +100,9 @@ impl std::fmt::Display for DaemonProtocolState {
 }
 
 #[hotpath::measure(label = "daemon.service.probe.protocol_state")]
+// Only the Windows task path and the update-restore tests probe with an
+// explicit timeout since readiness unified on one authenticated connection.
+#[cfg(any(test, windows))]
 pub(super) fn daemon_protocol_state_with_timeout(
     transport_hint: &Path,
     expected_version: &str,
@@ -147,8 +150,11 @@ pub(super) fn daemon_readiness_probe(
     let connection = match client_connection(socket_path) {
         Ok(connection) => connection,
         Err(error) => {
+            // The client identity could not be resolved, so nothing has been
+            // connected yet: report the socket's observed state instead of
+            // asserting it is connectable.
             return (
-                DaemonSocketState::Connectable,
+                daemon_socket_state(socket_path),
                 DaemonProtocolState::Unresponsive(error.to_string()),
             );
         }
