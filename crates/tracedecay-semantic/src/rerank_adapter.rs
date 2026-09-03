@@ -551,7 +551,7 @@ impl ProductionCodeRerankAuthorityV1 {
         self.executor.as_ref()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "semantic-fastembed"))]
     pub(crate) fn executor_handle(&self) -> &Arc<dyn MountedRerankExecutorV1> {
         &self.executor
     }
