@@ -28,9 +28,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tracedecay_store::{
-    AdmissionConfigV1, RuntimeMaintenanceStateV1, StoreAuthorityEpochV1, StoreIncarnationV1,
-    StoreRuntimeBindingV1, StoreRuntimeRegistryPublicationV1, StoreShardIdV1, StoreShardScopeV1,
-    VerifiedStoreLocatorV1,
+    AdmissionConfigV1, RuntimeMaintenanceStateV1, StorageRuntimeErrorV1, StoreAuthorityEpochV1,
+    StoreIncarnationV1, StoreRuntimeBindingV1, StoreRuntimeRegistryPublicationV1, StoreShardIdV1,
+    StoreShardScopeV1, VerifiedStoreLocatorV1,
 };
 
 use super::shard::ShardRuntime;
@@ -1345,6 +1345,7 @@ pub enum StoreRuntimeRegistryFailure {
         operation: &'static str,
         message: String,
     },
+    StorageRuntime(Box<StorageRuntimeErrorV1>),
     PhysicalRuntimeNotDrained {
         snapshot: Box<PhysicalRuntimeSnapshot>,
     },

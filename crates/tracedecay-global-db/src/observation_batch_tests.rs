@@ -798,3 +798,45 @@ async fn persist_observations_keeps_cursor_cas_collision_and_file_identity() {
     assert_eq!(cursor.file_identity(), Some(0xfeed_face));
     assert_eq!(cursor.resume_fingerprint(), Some(0xcafe_babe));
 }
+
+#[tokio::test]
+async fn persist_observations_recovers_a_peer_commit_as_exact_duplicate() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let session_id = SessionId::new("session.observation-batch.peer-commit").unwrap();
+    let writes = sequential_writes(&session_id, 1);
+    let left_store = store.clone();
+    let right_store = store.clone();
+    let left_writes = writes.clone();
+    let right_writes = writes;
+    let (left, right) = tokio::join!(
+        left_store.persist_observations(left_writes),
+        right_store.persist_observations(right_writes),
+    );
+    let left = left.expect("concurrent persist must not surface Storage");
+    let right = right.expect("concurrent persist must not surface Storage");
+    assert_eq!(left.len(), 1);
+    assert_eq!(right.len(), 1);
+    let persist_class = |outcome: &ObservationPersistOutcome| match outcome {
+        ObservationPersistOutcome::Committed(_) => "committed",
+        ObservationPersistOutcome::ExactDuplicate(_) => "exact_duplicate",
+        ObservationPersistOutcome::CoveredDuplicate(_) => "covered_duplicate",
+    };
+    let left_class = persist_class(left[0].outcome());
+    let right_class = persist_class(right[0].outcome());
+    let attached = left_class == right_class;
+    let serialized_replay = matches!(
+        (left_class, right_class),
+        ("committed", "exact_duplicate" | "covered_duplicate")
+            | ("exact_duplicate" | "covered_duplicate", "committed")
+    );
+    assert!(
+        attached || serialized_replay,
+        "identical peer submits must attach to one writer outcome or serialize as commit+replay, got {left:?} / {right:?}"
+    );
+}
