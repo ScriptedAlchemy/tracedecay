@@ -172,7 +172,6 @@ impl StaticLanguageRegistry {
     }
 
     /// Build the registry from an existing extraction registry.
-    #[hotpath::measure(label = "code_index.languages.build_registry")]
     pub fn from_extraction_registry(
         extractors: &tracedecay_code_extraction::LanguageRegistry,
     ) -> Self {
@@ -245,7 +244,6 @@ impl StaticLanguageRegistry {
     }
 
     /// Try to build a registry from explicit canonical descriptors.
-    #[hotpath::measure(label = "code_index.languages.index_descriptors")]
     pub fn try_from_descriptors(
         mut descriptors: Vec<LanguageDescriptorV1>,
     ) -> Result<Self, DomainError> {

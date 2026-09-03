@@ -64,7 +64,6 @@ pub(super) struct IgnoredSourceRosterV1 {
 }
 
 impl IgnoredSourceRosterV1 {
-    #[hotpath::measure(label = "code_index.ignored_sources.admit")]
     pub(super) fn admit(
         snapshot: &SanitizedCodeSnapshotV1,
         repository_parse_identity: &CodeIndexRepositoryParseIdentityV1,
@@ -77,7 +76,6 @@ impl IgnoredSourceRosterV1 {
         Ok(roster)
     }
 
-    #[hotpath::measure(label = "code_index.ignored_sources.restore")]
     pub(super) fn restore(
         snapshot: &SanitizedCodeSnapshotV1,
         repository_parse_identity: &CodeIndexRepositoryParseIdentityV1,
