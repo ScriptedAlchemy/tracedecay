@@ -4,9 +4,15 @@
 //! worker never spins, and [`select_auxiliary_work`] is the round-robin that
 //! keeps maintenance from starving product writes.
 
-use std::{collections::VecDeque, future::poll_fn, pin::Pin, task::Poll};
+use std::{
+    collections::{HashMap, VecDeque},
+    future::poll_fn,
+    pin::Pin,
+    task::Poll,
+};
 
 use tokio::sync::mpsc;
+use tracedecay_store::{StorageRuntimeErrorV1, StoreOperationIdV1};
 
 use crate::{
     admission::{FairQueue, QueueItem},
@@ -16,8 +22,7 @@ use crate::{
 
 use super::super::{
     backup::OnlineBackupCommand,
-    request::{AcceptedRequest, CheckpointCommand, IncrementalVacuumCommand},
-    settlement::infrastructure,
+    request::{AcceptedRequest, CheckpointCommand, IncrementalVacuumCommand, SharedReply},
 };
 pub(super) enum WorkerWake {
     Write(Option<AcceptedRequest>),
@@ -91,6 +96,7 @@ pub(super) async fn wait_for_work(
 pub(super) fn apply_wake(
     wake: WorkerWake,
     queue: &mut FairQueue<AcceptedRequest>,
+    inflight: &mut HashMap<StoreOperationIdV1, SharedReply>,
     exact_sql_queue: &mut VecDeque<ExactSqlWriterCommand>,
     incremental_vacuum_queue: &mut VecDeque<IncrementalVacuumCommand>,
     online_backup_queue: &mut VecDeque<OnlineBackupCommand>,
@@ -104,7 +110,7 @@ pub(super) fn apply_wake(
 ) {
     match wake {
         WorkerWake::Write(Some(item)) => {
-            let _ = enqueue(queue, item, telemetry);
+            let _ = enqueue(queue, inflight, item, telemetry);
         }
         WorkerWake::Write(None) => *input_closed = true,
         WorkerWake::ExactSql(command) => match *command {
@@ -198,13 +204,14 @@ pub(super) fn select_auxiliary_work(
 pub(super) fn drain_ingress(
     receiver: &mut mpsc::Receiver<AcceptedRequest>,
     queue: &mut FairQueue<AcceptedRequest>,
+    inflight: &mut HashMap<StoreOperationIdV1, SharedReply>,
     telemetry: &WriterTelemetry,
     input_closed: &mut bool,
 ) {
     loop {
         match receiver.try_recv() {
             Ok(item) => {
-                let _ = enqueue(queue, item, telemetry);
+                let _ = enqueue(queue, inflight, item, telemetry);
             }
             Err(mpsc::error::TryRecvError::Empty) => break,
             Err(mpsc::error::TryRecvError::Disconnected) => {
@@ -217,19 +224,48 @@ pub(super) fn drain_ingress(
 
 pub(super) fn enqueue(
     queue: &mut FairQueue<AcceptedRequest>,
+    inflight: &mut HashMap<StoreOperationIdV1, SharedReply>,
     item: AcceptedRequest,
     telemetry: &WriterTelemetry,
 ) -> bool {
+    let operation_id = item.operation_id().clone();
+    let admission_bytes = item.admission_bytes();
+    if let Some(leader) = queue.get_mut(&operation_id) {
+        if leader.matches_follower(&item) {
+            leader.attach_follower(item);
+            telemetry.released(1, admission_bytes);
+            return true;
+        }
+        return reject_duplicate(item, operation_id, telemetry);
+    }
+    if let Some(hub) = inflight.get(&operation_id) {
+        if !hub.matches(&item) {
+            return reject_duplicate(item, operation_id, telemetry);
+        }
+        if hub.can_attach(&item) {
+            hub.attach_request(item);
+            telemetry.released(1, admission_bytes);
+            return true;
+        }
+    }
     if let Err(item) = queue.push(item) {
-        let result = Err(infrastructure(
-            "duplicate operation id reached persistent writer",
-        ));
-        telemetry.released(1, item.admission_bytes());
-        telemetry.completed(&result);
-        item.settle(result);
-        return false;
+        return reject_duplicate(item, operation_id, telemetry);
     }
     true
+}
+
+fn reject_duplicate(
+    item: AcceptedRequest,
+    operation_id: StoreOperationIdV1,
+    telemetry: &WriterTelemetry,
+) -> bool {
+    let result = Err(StorageRuntimeErrorV1::DuplicateOperationInFlight {
+        operation_id: operation_id.as_str().to_owned(),
+    });
+    telemetry.released(1, item.admission_bytes());
+    telemetry.completed(&result);
+    item.settle(result);
+    false
 }
 
 #[cfg(test)]

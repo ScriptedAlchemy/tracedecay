@@ -42,7 +42,7 @@ pub use checkpoint::{
     CheckpointKind, CheckpointOutcome, CheckpointPressure, CheckpointStatus, CheckpointWal,
     MaintenanceCheckpointMode,
 };
-pub use operation::StorageOperationExecutor;
+pub use operation::{StorageOperationError, StorageOperationExecutor};
 pub use telemetry::{
     ReaderAdmissionSnapshot, SqliteStoreSizeTelemetryPort, SqliteVmSnapshot, WalCheckpointSample,
     WalCheckpointSnapshot, WriterBatchMetrics, WriterBatchTotals, WriterClientServiceSnapshot,
