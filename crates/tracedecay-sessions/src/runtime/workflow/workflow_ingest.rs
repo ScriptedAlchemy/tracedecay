@@ -19,7 +19,7 @@ use crate::runtime::snapshot_observation::{
 };
 use crate::runtime::source::{
     MAX_JSONL_RECORD_BYTES, RawJsonlFrame, RawJsonlFrameReader, TranscriptDiscoveryBounds,
-    collect_files_with_ext_bounded, path_byte_len,
+    collect_files_with_ext_bounded, path_byte_len, run_blocking_transcript_section,
 };
 use crate::runtime::workflow_index::WorkflowIngestSink;
 use crate::runtime::workflow_index::{WorkflowAgent, WorkflowRun, WorkflowStatus};
@@ -52,6 +52,13 @@ struct DiscoveredRun {
     agents_dir: PathBuf,
 }
 
+struct PreparedRun {
+    source_run_id: String,
+    run_mtime: i64,
+    workflow_run: WorkflowRun,
+    agents: Vec<WorkflowAgent>,
+}
+
 /// Fail-open at every level: a store that cannot be read, a project whose home
 /// cannot be resolved, or an individual malformed run all degrade to "ingest
 /// less", never an error. Returns the number of runs and agents upserted.
@@ -65,6 +72,27 @@ pub async fn ingest_workflow_runs_with_sink<S: WorkflowIngestSink>(
     project_root: &Path,
     projects_dir: &Path,
 ) -> WorkflowIngestStats {
+    ingest_workflow_runs_with_sink_and_discover(
+        sink,
+        project_id,
+        project_root,
+        projects_dir,
+        discover_runs,
+    )
+    .await
+}
+
+async fn ingest_workflow_runs_with_sink_and_discover<S, D>(
+    sink: &S,
+    project_id: &ProjectId,
+    project_root: &Path,
+    projects_dir: &Path,
+    discover: D,
+) -> WorkflowIngestStats
+where
+    S: WorkflowIngestSink,
+    D: FnOnce(&Path) -> Vec<DiscoveredRun>,
+{
     if !sink.matches_project_sessions_authority(project_id) {
         tracing::warn!(
             %project_id,
@@ -80,36 +108,40 @@ pub async fn ingest_workflow_runs_with_sink<S: WorkflowIngestSink>(
     let mut stats = WorkflowIngestStats::default();
     let mut max_mtime = watermark;
 
-    // Resolve the fixed project-side git identity once; every in-window run's
-    // membership test reuses it instead of re-resolving the same project root.
-    let project_matcher = ProjectRootMatcher::new(project_root);
-
-    for run in discover_runs(projects_dir) {
-        let run_mtime = newest_mtime(&run);
-        if run_mtime > 0 && run_mtime <= watermark {
+    let (project_matcher, discovered) = hotpath::measure_block!(
+        "sessions.workflow_ingest.discover_blocking",
+        run_blocking_transcript_section(|| {
+            // Resolve the fixed project-side git identity once; every
+            // in-window run's membership test reuses it instead of
+            // re-resolving the same project root.
+            (
+                ProjectRootMatcher::new(project_root),
+                discover(projects_dir),
+            )
+        })
+    );
+    for run in discovered {
+        let prepared = hotpath::measure_block!(
+            "sessions.workflow_ingest.prepare_run_blocking",
+            run_blocking_transcript_section(|| {
+                prepare_discovered_run(run, &project_matcher, watermark)
+            })
+        );
+        let Some(prepared) = prepared else {
             continue;
+        };
+        if prepared.run_mtime > max_mtime {
+            max_mtime = prepared.run_mtime;
         }
 
-        // Scope to this project by the owning session's recorded cwd. A run
-        // whose parent thread began in another project is skipped without
-        // touching the DB — the same per-session cwd filter ClaudeSource uses.
-        // This filter also gates the watermark: `discover_runs` walks every
-        // project on the machine, but the watermark is persisted per-store, so
-        // only in-scope runs may advance it. Letting an out-of-project run raise
-        // this store's watermark could push it past a still-changing target run
-        // and strand that run (e.g. a Running run never re-ingested once it
-        // completes).
-        if !run_belongs_to_project(&run, &project_matcher) {
-            continue;
-        }
-        if run_mtime > max_mtime {
-            max_mtime = run_mtime;
-        }
-
-        match ingest_one_run(sink, &run).await {
+        match persist_prepared_run(sink, &prepared).await {
             Ok(run_stats) => stats = stats.merge(run_stats),
             Err(err) => {
-                tracing::debug!(run_id = %run.run_id, error = %err, "skipping workflow run");
+                tracing::debug!(
+                    run_id = %prepared.source_run_id,
+                    error = %err,
+                    "skipping workflow run"
+                );
             }
         }
     }
@@ -122,6 +154,51 @@ pub async fn ingest_workflow_runs_with_sink<S: WorkflowIngestSink>(
     }
 
     stats
+}
+
+fn prepare_discovered_run(
+    run: DiscoveredRun,
+    project_matcher: &ProjectRootMatcher,
+    watermark: i64,
+) -> Option<PreparedRun> {
+    let run_mtime = newest_mtime(&run);
+    if run_mtime > 0 && run_mtime <= watermark {
+        return None;
+    }
+
+    // Scope to this project by the owning session's recorded cwd. A run whose
+    // parent thread began in another project is skipped without touching the
+    // DB — the same per-session cwd filter ClaudeSource uses. This filter also
+    // gates the watermark: discovery walks every project on the machine, but
+    // the watermark is persisted per-store, so only in-scope runs may advance
+    // it. Letting an out-of-project run raise this store's watermark could push
+    // it past a still-changing target run and strand that run.
+    if !run_belongs_to_project(&run, project_matcher) {
+        return None;
+    }
+
+    let (mut workflow_run, mut agents) = match run.meta_path.as_deref().and_then(read_run_meta) {
+        // Finished (or at least meta-written) run: authoritative roster from
+        // `workflowProgress[]`.
+        Some(meta) => parse_run_from_meta(&run.run_id, &run.parent_session_id, &meta),
+        // In-progress / orphan dir with no meta json yet: synthesize a Running
+        // run and derive the roster from journal.jsonl + present agent files.
+        None => parse_run_from_dir(&run.run_id, &run.parent_session_id, &run.agents_dir),
+    };
+
+    for agent in &mut agents {
+        enrich_agent_from_transcript(agent, &run.agents_dir);
+    }
+    if workflow_run.agent_count == 0 {
+        workflow_run.agent_count = i64::try_from(agents.len()).unwrap_or(i64::MAX);
+    }
+
+    Some(PreparedRun {
+        source_run_id: run.run_id,
+        run_mtime,
+        workflow_run,
+        agents,
+    })
 }
 
 /// Discover every workflow run under `projects_dir` by walking
@@ -289,34 +366,17 @@ fn agent_transcripts(agents_dir: &Path) -> Vec<PathBuf> {
     paths
 }
 
-/// Parse one discovered run and upsert its run row plus every agent row.
-#[hotpath::measure(label = "sessions.workflow_ingest.ingest_run", future = true)]
-async fn ingest_one_run<S: WorkflowIngestSink>(
+/// Upsert one prepared run plus every agent row.
+#[hotpath::measure(label = "sessions.workflow_ingest.persist_run", future = true)]
+async fn persist_prepared_run<S: WorkflowIngestSink>(
     sink: &S,
-    run: &DiscoveredRun,
+    prepared: &PreparedRun,
 ) -> Result<WorkflowIngestStats, crate::runtime::workflow_index::WorkflowIndexError> {
-    let (mut workflow_run, mut agents) = match run.meta_path.as_deref().and_then(read_run_meta) {
-        // Finished (or at least meta-written) run: authoritative roster from
-        // `workflowProgress[]`.
-        Some(meta) => parse_run_from_meta(&run.run_id, &run.parent_session_id, &meta),
-        // In-progress / orphan dir with no meta json yet: synthesize a Running
-        // run and derive the roster from journal.jsonl + present agent files.
-        None => parse_run_from_dir(&run.run_id, &run.parent_session_id, &run.agents_dir),
-    };
-
-    // Enrich each agent from its transcript (path, tokens, session id, times)
-    // and reconcile the run-level agent count with what we actually recorded.
-    for agent in &mut agents {
-        enrich_agent_from_transcript(agent, &run.agents_dir);
-    }
-    if workflow_run.agent_count == 0 {
-        workflow_run.agent_count = i64::try_from(agents.len()).unwrap_or(i64::MAX);
-    }
-
-    sink.upsert_workflow_run(&workflow_run, &agents).await?;
+    sink.upsert_workflow_run(&prepared.workflow_run, &prepared.agents)
+        .await?;
     Ok(WorkflowIngestStats {
         runs_ingested: 1,
-        agents_ingested: agents.len() as u64,
+        agents_ingested: prepared.agents.len() as u64,
     })
 }
 
