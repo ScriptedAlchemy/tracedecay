@@ -263,7 +263,7 @@ impl CursorComposerSource {
             .await
     }
 
-    #[hotpath::skip]
+    #[hotpath::measure(label = "sessions.hosts.cursor.composer_sweep", future = true)]
     async fn ingest_with_context(
         &self,
         context: &ComposerIngestContext<'_, '_>,
@@ -338,7 +338,7 @@ impl CursorComposerSource {
         Ok(outcome.finished(byte_budget.consumed(), byte_budget.deferred()))
     }
 
-    #[hotpath::skip]
+    #[hotpath::measure(label = "sessions.hosts.cursor.composer_state_vscdb", future = true)]
     async fn ingest_state_vscdb(
         &self,
         context: &ComposerIngestContext<'_, '_>,
@@ -785,7 +785,7 @@ impl CursorComposerSource {
         }
     }
 
-    #[hotpath::skip]
+    #[hotpath::measure(label = "sessions.hosts.cursor.composer_chat_stores", future = true)]
     async fn ingest_chat_store_dbs(
         &self,
         context: &ComposerIngestContext<'_, '_>,
@@ -813,7 +813,7 @@ impl CursorComposerSource {
         }
     }
 
-    #[hotpath::skip]
+    #[hotpath::measure(label = "sessions.hosts.cursor.composer_store_db", future = true)]
     async fn ingest_one_store_db(
         &self,
         context: &ComposerIngestContext<'_, '_>,

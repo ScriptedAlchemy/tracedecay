@@ -662,6 +662,7 @@ pub async fn try_ingest_cursor_user_transcript_event_capped_with_registered_root
     .await
 }
 
+#[hotpath::measure(label = "sessions.hosts.cursor.ingest_user_event_capped", future = true)]
 pub async fn try_ingest_cursor_user_transcript_event_capped_with_admission(
     event_json: &str,
     admission: &dyn HostAdmission,
@@ -805,6 +806,7 @@ pub(in crate::runtime) async fn try_ingest_cursor_user_sweep_capped_with_session
     .await
 }
 
+#[hotpath::measure(label = "sessions.hosts.cursor.sweep_admit", future = true)]
 async fn admit_cursor_sweep_observations_with_session_ids(
     source: &CursorSweepSource,
     project_root: &Path,
@@ -991,6 +993,7 @@ impl TranscriptSource for CursorSweepSource {
         "cursor"
     }
 
+    #[hotpath::measure(label = "sessions.hosts.cursor.sweep_discover")]
     fn transcript_paths(&self, project_root: &Path) -> Vec<PathBuf> {
         if let Some(registered_slugs) = &self.user_registered_slugs {
             let Ok(entries) = std::fs::read_dir(&self.cursor_projects_dir) else {
@@ -1310,6 +1313,7 @@ fn parent_dispatch_model_for_subagent(
     None
 }
 
+#[hotpath::measure(label = "sessions.hosts.cursor.dispatch_model_scan")]
 fn dispatch_model_for_agent(path: &Path, agent_id: &str) -> Option<String> {
     let file = File::open(path).ok()?;
     let mut frames = RawJsonlFrameReader::new(BufReader::new(file), MAX_JSONL_RECORD_BYTES);
