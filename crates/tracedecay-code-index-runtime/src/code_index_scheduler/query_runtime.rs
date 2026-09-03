@@ -118,13 +118,9 @@ pub async fn mount_core_query_authority_on_project_open(
     scope: &ResolvedScope,
     cursor_keys: &tracedecay_session_temporal_store::GlobalDbCursorKeyProvider,
 ) -> Result<(), QueryRuntimeMountErrorV1> {
-    let authority = prepare_core_query_authority_on_project_open(
-        registry,
-        project_root,
-        scope,
-        cursor_keys,
-    )
-    .await?;
+    let authority =
+        prepare_core_query_authority_on_project_open(registry, project_root, scope, cursor_keys)
+            .await?;
     registry
         .mount_query_authority(project_root, scope, authority)
         .await
@@ -141,13 +137,9 @@ pub async fn mount_core_query_authority_for_committed_fallback_on_project_open(
     expected_revision: &ConfigurationRevisionId,
     cursor_keys: &tracedecay_session_temporal_store::GlobalDbCursorKeyProvider,
 ) -> Result<(), QueryRuntimeMountErrorV1> {
-    let authority = prepare_core_query_authority_on_project_open(
-        registry,
-        project_root,
-        scope,
-        cursor_keys,
-    )
-    .await?;
+    let authority =
+        prepare_core_query_authority_on_project_open(registry, project_root, scope, cursor_keys)
+            .await?;
     registry
         .mount_query_authority_for_committed_fallback(
             project_root,
