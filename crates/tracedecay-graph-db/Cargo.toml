@@ -172,6 +172,11 @@ harness = false
 required-features = ["test-helpers"]
 
 [[bench]]
+name = "vector_commit_refresh"
+harness = false
+required-features = ["test-helpers"]
+
+[[bench]]
 name = "replay_after_mismatch"
 harness = false
 required-features = ["test-helpers"]
