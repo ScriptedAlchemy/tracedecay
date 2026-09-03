@@ -165,7 +165,7 @@ impl GraphDb {
             }
             None => GenerationMarkers::detached(),
         };
-        let opened = open_validated_graph(&validated)?;
+        let opened = open_validated_graph(&validated, GraphEngineOpenSite::Eager)?;
         let graph = Arc::new(Self {
             inner: Arc::new(Inner {
                 database: RwLock::new(Some(opened.database)),
@@ -1070,6 +1070,7 @@ impl GraphDb {
                 message: error.to_string(),
             });
         }
+        self.log_engine_released("close");
         // The container is closed and synced, so its identity is now the one
         // the next open will observe. Publishing the marker here -- and only
         // here -- is what makes the record bind the final bytes rather than
@@ -1104,6 +1105,24 @@ impl GraphDb {
         } else {
             Ok(())
         }
+    }
+
+    fn container_label(&self) -> String {
+        container_label(
+            self.inner
+                .reopen
+                .as_ref()
+                .and_then(|reopen| reopen.config.path.as_deref()),
+        )
+    }
+
+    fn log_engine_released(&self, reason: &'static str) {
+        tracing::info!(
+            event = "graph_engine_released",
+            reason,
+            container = %self.container_label(),
+            "native graph engine released"
+        );
     }
 
     /// Releases a lazily mounted native engine while retaining its exact
@@ -1141,6 +1160,7 @@ impl GraphDb {
                 message: error.to_string(),
             });
         }
+        self.log_engine_released("hibernate");
         if let Err(error) = self.inner.markers.publish() {
             let _ = error;
         }
@@ -1494,7 +1514,8 @@ impl GraphDb {
             let Some(database) = guard.as_ref() else {
                 return;
             };
-            crate::hotpath_observe::record_grafeo_memory(database, phase);
+            let container = self.container_label();
+            crate::hotpath_observe::record_grafeo_memory(database, phase, &container);
         }
         #[cfg(not(feature = "hotpath"))]
         let _ = phase;
@@ -1591,6 +1612,7 @@ impl GraphDb {
         .map_err(|_| GraphDbError::unavailable("graph state lock is poisoned"))
     }
 
+    #[hotpath::measure(label = "graph_db.runtime.ensure_opened", impl_type = "GraphDb")]
     pub(crate) fn ensure_opened(&self) -> Result<(), GraphDbError> {
         if self
             .inner
@@ -1625,7 +1647,7 @@ impl GraphDb {
                 )
             })?;
         validated.preexisting_store = persistent_store_state == PersistentGraphStoreState::Existing;
-        let opened = match open_validated_graph(&validated) {
+        let opened = match open_validated_graph(&validated, GraphEngineOpenSite::LazyFirstUse) {
             Ok(opened) => opened,
             Err(GraphDbError::Corrupt { message })
                 if persistent_store_state == PersistentGraphStoreState::Existing =>
@@ -1636,7 +1658,7 @@ impl GraphDb {
                 match crate::store_quarantine::recover_deterministically_corrupt_container_with(
                     path,
                     &message,
-                    &|| open_validated_graph(&validated),
+                    &|| open_validated_graph(&validated, GraphEngineOpenSite::LazyFirstUse),
                 )? {
                     crate::store_quarantine::CorruptStoreRecovery::Reopened(opened) => opened,
                     crate::store_quarantine::CorruptStoreRecovery::Quarantined {
@@ -1645,7 +1667,8 @@ impl GraphDb {
                         self.inner.markers.mark_container_mutated();
                         let mut fresh = validated.clone();
                         fresh.preexisting_store = false;
-                        let opened = open_validated_graph(&fresh)?;
+                        let opened =
+                            open_validated_graph(&fresh, GraphEngineOpenSite::LazyFirstUse)?;
                         tracing::info!(
                             event = "store_rebuilt_after_quarantine",
                             container = %path.display(),
@@ -1742,19 +1765,64 @@ impl GraphDb {
     }
 }
 
-fn open_validated_graph(validated: &ValidatedOpen) -> Result<OpenedGraphState, GraphDbError> {
+/// Which runtime path materialized a native engine. Operator-visible on the
+/// `graph_engine_opened` event so a resident-memory investigation can tell an
+/// eager owner open from a lazy first-use open of the same container.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GraphEngineOpenSite {
+    Eager,
+    LazyFirstUse,
+}
+
+/// In-memory engines have no container path; the label keeps the operator log
+/// field present so open/release events pair up per engine.
+fn container_label(path: Option<&std::path::Path>) -> String {
+    path.map(|path| path.display().to_string())
+        .unwrap_or_else(|| "memory".to_owned())
+}
+
+impl GraphEngineOpenSite {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Eager => "eager",
+            Self::LazyFirstUse => "lazy_first_use",
+        }
+    }
+}
+
+fn open_validated_graph(
+    validated: &ValidatedOpen,
+    site: GraphEngineOpenSite,
+) -> Result<OpenedGraphState, GraphDbError> {
     // The engine call is where a persistent open pays for corpus size:
     // grafeo replays the whole serialized LPG block log through the live
     // mutation path, rebuilds every catalog-listed property index with a
     // full node scan each, and replays any sidecar WAL an unclean
     // shutdown left behind. The phases after it are O(labels), not
     // O(rows), so this span is what a slow open decomposes into first.
+    let container_bytes = validated
+        .config
+        .path
+        .as_deref()
+        .and_then(|path| std::fs::metadata(path).ok())
+        .map(|metadata| metadata.len());
+    let engine_started = std::time::Instant::now();
     let database = hotpath::measure_block!(
         "graph_db.generation.open.engine",
         GrafeoDB::with_config(validated.config.clone())
             .map_err(|error| map_open_error(error, validated.preexisting_store))
     )?;
+    let engine_elapsed_ms = engine_started.elapsed().as_millis();
     crate::recovery::record_open_corpus_gauges(&database);
+    tracing::info!(
+        event = "graph_engine_opened",
+        site = site.as_str(),
+        container = %container_label(validated.config.path.as_deref()),
+        container_bytes,
+        preexisting = validated.preexisting_store,
+        engine_elapsed_ms = engine_elapsed_ms as u64,
+        "native graph engine opened"
+    );
     validate_or_initialize_format(&database, validated)?;
     let state = hotpath::measure_block!(
         "graph_db.generation.open.state",
