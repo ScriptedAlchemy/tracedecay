@@ -373,7 +373,7 @@ fn decode_verified_seal(
         }
         tracedecay_code_index::production::CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
             &manifest,
-            |digest, expected_size| {
+            |digest, expected_size, buffer| {
                 (check)().map_err(|error| {
                     tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(
                         error.to_string(),
@@ -398,11 +398,15 @@ fn decode_verified_seal(
                         ),
                     );
                 }
-                std::fs::read(&segment_path).map_err(|error| {
-                    tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(
-                        format!("sealed generation segment read failed: {error}"),
-                    )
-                })
+                buffer.clear();
+                File::open(&segment_path)
+                    .and_then(|mut file| file.read_to_end(buffer))
+                    .map(|_| ())
+                    .map_err(|error| {
+                        tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(
+                            format!("sealed generation segment read failed: {error}"),
+                        )
+                    })
             },
         )
         .map_err(|error| GraphDbError::Corrupt {
@@ -499,7 +503,7 @@ fn verify_checked_seal_bundle(
     })?;
     tracedecay_code_index::production::CodeIndexPublishedGenerationV1::verify_partitioned_sealed(
         &manifest,
-        |digest, expected_size| {
+        |digest, expected_size, buffer| {
             (check)().map_err(|error| {
                 tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(
                     error.to_string(),
@@ -523,11 +527,15 @@ fn verify_checked_seal_bundle(
                     ),
                 );
             }
-            std::fs::read(segment_path).map_err(|error| {
-                tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(format!(
-                    "sealed generation segment read failed: {error}"
-                ))
-            })
+            buffer.clear();
+            File::open(segment_path)
+                .and_then(|mut file| file.read_to_end(buffer))
+                .map(|_| ())
+                .map_err(|error| {
+                    tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(
+                        format!("sealed generation segment read failed: {error}"),
+                    )
+                })
         },
     )
     .map_err(|error| GraphDbError::Corrupt {

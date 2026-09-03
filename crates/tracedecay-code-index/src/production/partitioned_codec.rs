@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::{Read, Seek};
 
 use serde::{Deserialize, Serialize};
@@ -112,12 +112,36 @@ struct PartitionedGenerationEvidenceV1 {
     projection_receipt: ProjectionBatchReceiptV1,
 }
 
+#[derive(Serialize)]
+struct PartitionedGenerationEvidenceRefV1<'a> {
+    lineage: &'a [SymbolLineageCandidateV1],
+    projection_request: &'a ProjectionBatchRequestV1,
+    projection_receipt: &'a ProjectionBatchReceiptV1,
+}
+
 #[derive(Clone, Copy)]
 enum IdentityFieldV1 {
     Other,
     Generation,
     FileOccurrence,
     SymbolOccurrence,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum SymbolOccurrenceOrderV1<'a> {
+    Stable {
+        identity: &'a str,
+        occurrence: &'a str,
+    },
+    Remaining(&'a str),
+}
+
+impl<'a> SymbolOccurrenceOrderV1<'a> {
+    fn occurrence(self) -> &'a str {
+        match self {
+            Self::Stable { occurrence, .. } | Self::Remaining(occurrence) => occurrence,
+        }
+    }
 }
 
 fn identity_field(key: &str) -> IdentityFieldV1 {
@@ -165,14 +189,14 @@ fn chunk_identity_field(key: &str) -> bool {
     matches!(key, "chunk_id" | "chunk_ids" | "parent_chunk_id")
 }
 
-fn collect_symbol_occurrences(
-    value: &Value,
+fn collect_symbol_occurrences<'a>(
+    value: &'a Value,
     field: IdentityFieldV1,
-    occurrences: &mut BTreeSet<String>,
+    occurrences: &mut BTreeSet<SymbolOccurrenceOrderV1<'a>>,
 ) {
     match value {
         Value::String(value) if matches!(field, IdentityFieldV1::SymbolOccurrence) => {
-            occurrences.insert(value.clone());
+            occurrences.insert(SymbolOccurrenceOrderV1::Remaining(value));
         }
         Value::Array(values) => {
             for value in values {
@@ -193,7 +217,7 @@ fn normalize_identity_fields(
     field: IdentityFieldV1,
     generation_id: &str,
     file_occurrence_id: &str,
-    symbol_keys: &BTreeMap<String, u32>,
+    symbol_keys: &HashMap<&str, u32>,
 ) {
     match value {
         Value::String(identity) => match field {
@@ -204,7 +228,7 @@ fn normalize_identity_fields(
                 *identity = FILE_OCCURRENCE_ID_MARKER.to_owned();
             }
             IdentityFieldV1::SymbolOccurrence => {
-                if let Some(key) = symbol_keys.get(identity) {
+                if let Some(key) = symbol_keys.get(identity.as_str()) {
                     *identity = format!("{SYMBOL_OCCURRENCE_ID_MARKER_PREFIX}{key}");
                 }
             }
@@ -304,19 +328,19 @@ fn normalize_evidence_identities(
     value: &mut Value,
     key: Option<&str>,
     generation_id: &str,
-    symbol_markers: &BTreeMap<String, String>,
-    chunk_markers: &BTreeMap<String, String>,
+    symbol_markers: &HashMap<&str, String>,
+    chunk_markers: &HashMap<&str, String>,
 ) {
     match value {
         Value::String(identity) => {
             if key.is_some_and(generation_identity_field) && identity == generation_id {
                 *identity = GENERATION_ID_MARKER.to_owned();
             } else if key.is_some_and(symbol_identity_field) {
-                if let Some(marker) = symbol_markers.get(identity) {
+                if let Some(marker) = symbol_markers.get(identity.as_str()) {
                     *identity = marker.clone();
                 }
             } else if key.is_some_and(chunk_identity_field)
-                && let Some(marker) = chunk_markers.get(identity)
+                && let Some(marker) = chunk_markers.get(identity.as_str())
             {
                 *identity = marker.clone();
             }
@@ -351,8 +375,8 @@ fn restore_evidence_identities(
     value: &mut Value,
     key: Option<&str>,
     generation_id: &str,
-    symbol_identities: &BTreeMap<String, String>,
-    chunk_identities: &BTreeMap<String, String>,
+    symbol_identities: &HashMap<String, String>,
+    chunk_identities: &HashMap<String, String>,
 ) -> Result<(), CodeIndexProductionErrorV1> {
     match value {
         Value::String(identity) => {
@@ -403,6 +427,57 @@ fn restore_evidence_identities(
     Ok(())
 }
 
+fn collect_evidence_identity_markers(
+    value: &Value,
+    key: Option<&str>,
+    symbol_markers: &mut HashSet<String>,
+    chunk_markers: &mut HashSet<String>,
+) {
+    match value {
+        Value::String(identity) => {
+            if key.is_some_and(symbol_identity_field)
+                && identity.starts_with(SYMBOL_OCCURRENCE_ID_MARKER_PREFIX)
+                && !symbol_markers.contains(identity.as_str())
+            {
+                symbol_markers.insert(identity.clone());
+            } else if key.is_some_and(chunk_identity_field)
+                && identity.starts_with(CHUNK_ID_MARKER_PREFIX)
+                && !chunk_markers.contains(identity.as_str())
+            {
+                chunk_markers.insert(identity.clone());
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_evidence_identity_markers(value, key, symbol_markers, chunk_markers);
+            }
+        }
+        Value::Object(values) => {
+            for (key, value) in values {
+                collect_evidence_identity_markers(value, Some(key), symbol_markers, chunk_markers);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn parse_evidence_marker(
+    marker: &str,
+    prefix: &str,
+    invalid_message: &'static str,
+) -> Result<(usize, usize), CodeIndexProductionErrorV1> {
+    marker
+        .strip_prefix(prefix)
+        .and_then(|key| key.split_once(':'))
+        .and_then(|(file_key, item_key)| {
+            Some((
+                file_key.parse::<usize>().ok()?,
+                item_key.parse::<usize>().ok()?,
+            ))
+        })
+        .ok_or_else(|| CodeIndexProductionErrorV1::Contract(invalid_message.to_owned()))
+}
+
 fn encode_file_segment(
     generation_id: &CodeGenerationId,
     file: &FileGenerationArtifactsV1,
@@ -419,50 +494,43 @@ fn encode_file_segment(
         ))
     })?;
     let file_occurrence_id = file.extraction.file_occurrence_id.clone();
-    let mut occurrences = BTreeSet::new();
-    collect_symbol_occurrences(&value, IdentityFieldV1::Other, &mut occurrences);
-    let mut stable_symbols = file
-        .artifacts
-        .symbols
+    // One borrowed ordering authority preserves the shipped assignment:
+    // stable symbols sort by (identity, occurrence) first, then every
+    // remaining DOM occurrence sorts by occurrence. Deduplication happens
+    // before the final identities become the borrowed O(1) lookup authority.
+    let mut ordered_occurrences = BTreeSet::new();
+    ordered_occurrences.extend(file.artifacts.symbols.iter().map(|symbol| {
+        SymbolOccurrenceOrderV1::Stable {
+            identity: symbol.identity.as_str(),
+            occurrence: symbol.occurrence.as_str(),
+        }
+    }));
+    collect_symbol_occurrences(&value, IdentityFieldV1::Other, &mut ordered_occurrences);
+    let mut symbol_occurrences = Vec::with_capacity(ordered_occurrences.len());
+    let mut known_occurrences = HashSet::with_capacity(ordered_occurrences.len());
+    for ordered in ordered_occurrences {
+        let occurrence = ordered.occurrence();
+        if !known_occurrences.insert(occurrence) {
+            continue;
+        }
+        let identity = SymbolOccurrenceId::new(occurrence.to_owned())
+            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        symbol_occurrences.push(identity);
+    }
+    drop(known_occurrences);
+    let symbol_keys = symbol_occurrences
         .iter()
-        .map(|symbol| {
-            (
-                symbol.identity.as_str().to_owned(),
-                symbol.occurrence.as_str().to_owned(),
-            )
-        })
-        .collect::<Vec<_>>();
-    stable_symbols.sort();
-    let mut ordered_occurrences = stable_symbols
-        .into_iter()
-        .map(|(_, occurrence)| occurrence)
-        .collect::<Vec<_>>();
-    let known_occurrences = ordered_occurrences.iter().cloned().collect::<BTreeSet<_>>();
-    ordered_occurrences.extend(
-        occurrences
-            .into_iter()
-            .filter(|occurrence| !known_occurrences.contains(occurrence)),
-    );
-    let symbol_occurrences = ordered_occurrences
-        .iter()
-        .map(|occurrence| {
-            SymbolOccurrenceId::new(occurrence.clone())
-                .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let symbol_keys = ordered_occurrences
-        .into_iter()
         .enumerate()
         .map(|(key, occurrence)| {
             u32::try_from(key)
-                .map(|key| (occurrence, key))
+                .map(|key| (occurrence.as_str(), key))
                 .map_err(|_| {
                     CodeIndexProductionErrorV1::Contract(
                         "sealed file segment symbol key exceeds u32".to_owned(),
                     )
                 })
         })
-        .collect::<Result<BTreeMap<_, _>, _>>()?;
+        .collect::<Result<HashMap<_, _>, _>>()?;
     normalize_identity_fields(
         &mut value,
         IdentityFieldV1::Other,
@@ -487,7 +555,7 @@ fn encode_file_segment(
             .and_then(|artifacts| artifacts.get_mut(field))
             .and_then(Value::as_array_mut)
         {
-            rows.sort_by_key(Value::to_string);
+            rows.sort_by_cached_key(Value::to_string);
         }
     }
     let bytes = serde_json::to_vec(&PartitionedFileSegmentV1 {
@@ -573,40 +641,59 @@ fn encode_generation_evidence(
     generation: &CodeIndexPublishedGenerationV1,
     file_segments: &[PartitionedFileSegmentDescriptorV1],
 ) -> Result<(PartitionedComponentDescriptorV1, Vec<u8>), CodeIndexProductionErrorV1> {
-    let mut evidence = serde_json::to_value(PartitionedGenerationEvidenceV1 {
-        lineage: generation.lineage.clone(),
-        projection_request: generation.projection.request().clone(),
-        projection_receipt: generation.projection.receipt().clone(),
+    let mut evidence = serde_json::to_value(PartitionedGenerationEvidenceRefV1 {
+        lineage: &generation.lineage,
+        projection_request: generation.projection.request(),
+        projection_receipt: generation.projection.receipt(),
     })
     .map_err(|error| {
         CodeIndexProductionErrorV1::Contract(format!(
             "sealed generation evidence serialization failed: {error}"
         ))
     })?;
-    let mut symbol_markers = BTreeMap::new();
-    let mut chunk_markers = BTreeMap::new();
+    let file_index = generation_file_index(
+        generation
+            .files
+            .iter()
+            .map(|file| &file.extraction.file_occurrence_id),
+    )?;
+    let symbol_capacity = file_segments
+        .iter()
+        .map(|descriptor| descriptor.symbol_occurrences.len())
+        .sum();
+    let chunk_capacity = generation
+        .files
+        .iter()
+        .map(|file| file.artifacts.chunks.chunks.len())
+        .sum();
+    let mut symbol_markers = HashMap::with_capacity(symbol_capacity);
+    let mut chunk_markers = HashMap::with_capacity(chunk_capacity);
     for descriptor in file_segments {
         for (symbol_key, occurrence) in descriptor.symbol_occurrences.iter().enumerate() {
             symbol_markers.insert(
-                occurrence.as_str().to_owned(),
+                occurrence.as_str(),
                 format!(
                     "{SYMBOL_OCCURRENCE_ID_MARKER_PREFIX}{}:{symbol_key}",
                     descriptor.file_key
                 ),
             );
         }
-        let file = generation
-            .files
-            .iter()
-            .find(|file| file.extraction.file_occurrence_id == descriptor.file_occurrence_id)
+        let file_key = file_index
+            .get(&descriptor.file_occurrence_id)
+            .copied()
             .ok_or_else(|| {
                 CodeIndexProductionErrorV1::Contract(
                     "sealed evidence file is absent from its generation".to_owned(),
                 )
             })?;
+        let file = generation.files.get(file_key).ok_or_else(|| {
+            CodeIndexProductionErrorV1::Contract(
+                "sealed evidence file is absent from its generation".to_owned(),
+            )
+        })?;
         for (chunk_key, chunk) in file.artifacts.chunks.chunks.iter().enumerate() {
             chunk_markers.insert(
-                chunk.id.as_str().to_owned(),
+                chunk.id.as_str(),
                 format!(
                     "{CHUNK_ID_MARKER_PREFIX}{}:{chunk_key}",
                     descriptor.file_key
@@ -671,32 +758,49 @@ fn decode_generation_evidence(
             "sealed generation evidence decoding failed: {error}"
         ))
     })?;
-    let mut symbol_identities = BTreeMap::new();
-    let mut chunk_identities = BTreeMap::new();
-    for descriptor in file_segments {
-        for (symbol_key, occurrence) in descriptor.symbol_occurrences.iter().enumerate() {
-            symbol_identities.insert(
-                format!(
-                    "{SYMBOL_OCCURRENCE_ID_MARKER_PREFIX}{}:{symbol_key}",
-                    descriptor.file_key
-                ),
-                occurrence.as_str().to_owned(),
-            );
-        }
-        let file = files.get(descriptor.file_key as usize).ok_or_else(|| {
+    let mut referenced_symbols = HashSet::new();
+    let mut referenced_chunks = HashSet::new();
+    collect_evidence_identity_markers(
+        &evidence,
+        None,
+        &mut referenced_symbols,
+        &mut referenced_chunks,
+    );
+    let mut symbol_identities = HashMap::with_capacity(referenced_symbols.len());
+    for marker in referenced_symbols {
+        let (file_key, symbol_key) = parse_evidence_marker(
+            &marker,
+            SYMBOL_OCCURRENCE_ID_MARKER_PREFIX,
+            "sealed generation evidence contains an invalid symbol key",
+        )?;
+        let occurrence = file_segments
+            .get(file_key)
+            .and_then(|descriptor| descriptor.symbol_occurrences.get(symbol_key))
+            .ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract(
+                    "sealed generation evidence contains an invalid symbol key".to_owned(),
+                )
+            })?;
+        symbol_identities.insert(marker, occurrence.as_str().to_owned());
+    }
+    let mut chunk_identities = HashMap::with_capacity(referenced_chunks.len());
+    for marker in referenced_chunks {
+        let (file_key, chunk_key) = parse_evidence_marker(
+            &marker,
+            CHUNK_ID_MARKER_PREFIX,
+            "sealed generation evidence contains an invalid chunk key",
+        )?;
+        let file = files.get(file_key).ok_or_else(|| {
             CodeIndexProductionErrorV1::Contract(
-                "sealed evidence file key is outside its generation".to_owned(),
+                "sealed generation evidence contains an invalid chunk key".to_owned(),
             )
         })?;
-        for (chunk_key, chunk) in file.artifacts.chunks.chunks.iter().enumerate() {
-            chunk_identities.insert(
-                format!(
-                    "{CHUNK_ID_MARKER_PREFIX}{}:{chunk_key}",
-                    descriptor.file_key
-                ),
-                chunk.id.as_str().to_owned(),
-            );
-        }
+        let chunk = file.artifacts.chunks.chunks.get(chunk_key).ok_or_else(|| {
+            CodeIndexProductionErrorV1::Contract(
+                "sealed generation evidence contains an invalid chunk key".to_owned(),
+            )
+        })?;
+        chunk_identities.insert(marker, chunk.id.as_str().to_owned());
     }
     restore_evidence_identities(
         &mut evidence,
@@ -785,6 +889,20 @@ fn snapshot_file_keys<'a>(
     Ok(keys)
 }
 
+fn generation_file_index<'a>(
+    file_occurrences: impl Iterator<Item = &'a FileOccurrenceId>,
+) -> Result<HashMap<&'a FileOccurrenceId, usize>, CodeIndexProductionErrorV1> {
+    let mut index = HashMap::new();
+    for (file_key, occurrence) in file_occurrences.enumerate() {
+        if index.insert(occurrence, file_key).is_some() {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed generation repeats a file occurrence".to_owned(),
+            ));
+        }
+    }
+    Ok(index)
+}
+
 impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
     pub fn open_partitioned_sealed(
         reader: R,
@@ -793,7 +911,8 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         mut read_segment: impl FnMut(
             &ManifestDigest,
             u64,
-        ) -> Result<Vec<u8>, CodeIndexProductionErrorV1>,
+            &mut Vec<u8>,
+        ) -> Result<(), CodeIndexProductionErrorV1>,
         maximum_page_chunks: usize,
         maximum_page_bytes: usize,
     ) -> Result<Option<Self>, CodeIndexProductionErrorV1> {
@@ -801,12 +920,18 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             return Ok(None);
         };
         let mut files = Vec::with_capacity(generation.file_segments.len());
+        let mut segment = Vec::new();
         for descriptor in &generation.file_segments {
-            let bytes = read_segment(&descriptor.segment_digest, descriptor.segment_size_bytes)?;
+            segment.clear();
+            read_segment(
+                &descriptor.segment_digest,
+                descriptor.segment_size_bytes,
+                &mut segment,
+            )?;
             files.push(decode_file_segment(
                 descriptor,
                 &generation.manifest.generation_id,
-                &bytes,
+                &segment,
             )?);
         }
         let files = restore_file_pages(files)?;
@@ -990,27 +1115,36 @@ impl CodeIndexPublishedGenerationV1 {
         mut read_segment: impl FnMut(
             &ManifestDigest,
             u64,
-        ) -> Result<Vec<u8>, CodeIndexProductionErrorV1>,
+            &mut Vec<u8>,
+        ) -> Result<(), CodeIndexProductionErrorV1>,
     ) -> Result<Option<Self>, CodeIndexProductionErrorV1> {
         let Some(generation) = parse_partitioned_manifest(bytes)? else {
             return Ok(None);
         };
         let mut files = Vec::with_capacity(generation.file_segments.len());
+        let mut segment = Vec::new();
         for descriptor in &generation.file_segments {
-            let bytes = read_segment(&descriptor.segment_digest, descriptor.segment_size_bytes)?;
+            segment.clear();
+            read_segment(
+                &descriptor.segment_digest,
+                descriptor.segment_size_bytes,
+                &mut segment,
+            )?;
             files.push(decode_file_segment(
                 descriptor,
                 &generation.manifest.generation_id,
-                &bytes,
+                &segment,
             )?);
         }
-        let evidence_bytes = read_segment(
+        segment.clear();
+        read_segment(
             &generation.generation_evidence.segment_digest,
             generation.generation_evidence.segment_size_bytes,
+            &mut segment,
         )?;
         let evidence = decode_generation_evidence(
             &generation.generation_evidence,
-            &evidence_bytes,
+            &segment,
             &generation.manifest.generation_id,
             &generation.file_segments,
             &files,
@@ -1077,13 +1211,16 @@ impl CodeIndexPublishedGenerationV1 {
         mut read_segment: impl FnMut(
             &ManifestDigest,
             u64,
-        ) -> Result<Vec<u8>, CodeIndexProductionErrorV1>,
+            &mut Vec<u8>,
+        ) -> Result<(), CodeIndexProductionErrorV1>,
     ) -> Result<bool, CodeIndexProductionErrorV1> {
         let Some(identities) = Self::partitioned_segment_identities(bytes)? else {
             return Ok(false);
         };
+        let mut segment = Vec::new();
         for identity in identities {
-            let segment = read_segment(&identity.digest, identity.size_bytes)?;
+            segment.clear();
+            read_segment(&identity.digest, identity.size_bytes, &mut segment)?;
             let actual_size = u64::try_from(segment.len()).map_err(|_| {
                 CodeIndexProductionErrorV1::Contract(
                     "sealed generation segment length exceeds u64".to_owned(),
@@ -1115,5 +1252,18 @@ mod tests {
 
         assert_eq!(keys.get(&first), Some(&0));
         assert_eq!(keys.get(&second), Some(&1));
+    }
+
+    #[test]
+    fn generation_file_index_maps_occurrences_once() {
+        let first = FileOccurrenceId::new("file.partitioned.first").expect("first file identity");
+        let second =
+            FileOccurrenceId::new("file.partitioned.second").expect("second file identity");
+
+        let index =
+            generation_file_index([&first, &second].into_iter()).expect("generation file index");
+
+        assert_eq!(index.get(&first), Some(&0));
+        assert_eq!(index.get(&second), Some(&1));
     }
 }
