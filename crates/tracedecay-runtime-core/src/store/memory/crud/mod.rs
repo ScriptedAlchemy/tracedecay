@@ -46,9 +46,10 @@ pub(super) use self::feedback::{
     project_memory_fact_feedback_history_tx, record_project_memory_fact_feedback_tx,
 };
 use self::lineage::{
-    Projection, ensure_event_references, ensure_fact_identity, event_exists, event_matches,
-    insert_event, load_current_projection, payload_is_purged_projection,
-    publish_current_projection, receipt_outcome,
+    Projection, ensure_event_references, ensure_fact_identity,
+    ensure_supersession_endpoints_available, event_exists, event_matches, insert_event,
+    load_current_projection, payload_is_purged_projection, publish_current_projection,
+    receipt_outcome,
 };
 use self::project::active_fact_count_tx;
 pub(super) use self::project::{
