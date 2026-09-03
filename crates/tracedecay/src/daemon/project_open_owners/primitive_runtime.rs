@@ -72,5 +72,12 @@ pub(super) async fn open_and_register_project_primitive_runtime(
                     .to_owned(),
             })
         }
+        Err(DaemonPrimitiveRuntimeRegistrationError::ConcurrentBuildFailed { detail }) => {
+            Err(TraceDecayError::Config {
+                message: format!(
+                    "project-open primitive runtime registration failed after a concurrent build: {detail}"
+                ),
+            })
+        }
     }
 }
