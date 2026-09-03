@@ -498,6 +498,17 @@ pub(crate) fn incoming_relations_truncated(
     )
 }
 
+/// How [`ordered_relation_ids`] admits a start's neighborhood.
+enum RelationIdIndexMode {
+    /// Walk every incident edge, sort, and publish the epoch index.
+    CacheFull,
+    /// Complete-adjacency read. A cache hit refuses when `len` exceeds
+    /// `remaining`. A cache miss walks at most `remaining + 1` edges (the
+    /// same `admitted` accounting as [`directed_relations`]) and never
+    /// inserts on overflow.
+    Refuse { remaining: usize, budget: usize },
+}
+
 #[allow(clippy::too_many_arguments)]
 fn directed_relation_ids(
     database: &GrafeoDB,
@@ -519,51 +530,53 @@ fn directed_relation_ids(
     check_batch_request(starts, cancellation)?;
     let mut admitted = 0_usize;
     let mut results = Vec::with_capacity(starts.len());
-    let mut truncated = false;
     for start in starts {
         if cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
         }
-        if truncated {
-            results.push(Vec::new());
-            continue;
-        }
-        let ids = ordered_relation_ids(
-            database,
-            namespace,
-            start,
-            relation_kinds,
-            incoming,
-            cancellation,
-            ensure_projection_readable,
-            label_keys_cache,
-            adjacency_ids,
-        )?;
-        let page = match after {
-            Some(_) | None if overflow == RelationFanoutOverflow::Truncate => {
-                page_ids(&ids, after, max_relations)
-            }
-            _ => ids.iter().cloned().collect::<Vec<_>>(),
-        };
         match overflow {
+            RelationFanoutOverflow::Truncate => {
+                // Paged consumers document a `limit` per start. Do not share
+                // a total cap across the batch — that would turn later starts
+                // into empty pages with no truncation signal.
+                let ids = ordered_relation_ids(
+                    database,
+                    namespace,
+                    start,
+                    relation_kinds,
+                    incoming,
+                    cancellation,
+                    ensure_projection_readable,
+                    label_keys_cache,
+                    adjacency_ids,
+                    RelationIdIndexMode::CacheFull,
+                )?;
+                results.push(page_ids(&ids, after, max_relations));
+            }
             RelationFanoutOverflow::Refuse => {
+                let remaining = max_relations.saturating_sub(admitted);
+                let ids = ordered_relation_ids(
+                    database,
+                    namespace,
+                    start,
+                    relation_kinds,
+                    incoming,
+                    cancellation,
+                    ensure_projection_readable,
+                    label_keys_cache,
+                    adjacency_ids,
+                    RelationIdIndexMode::Refuse {
+                        remaining,
+                        budget: max_relations,
+                    },
+                )?;
                 admitted = admitted
-                    .checked_add(page.len())
+                    .checked_add(ids.len())
                     .ok_or_else(|| read_budget(max_relations))?;
                 if admitted > max_relations {
                     return Err(read_budget(max_relations));
                 }
-                results.push(page);
-            }
-            RelationFanoutOverflow::Truncate => {
-                let remaining = max_relations.saturating_sub(admitted);
-                let mut page = page;
-                if page.len() > remaining {
-                    page.truncate(remaining);
-                    truncated = true;
-                }
-                admitted = admitted.saturating_add(page.len());
-                results.push(page);
+                results.push(ids.iter().cloned().collect());
             }
         }
     }
@@ -584,28 +597,75 @@ fn ordered_relation_ids(
     ) -> Result<(), GraphDbError>,
     label_keys_cache: &LabelKeyCache,
     adjacency_ids: &AdjacencyIdIndexCache,
+    mode: RelationIdIndexMode,
 ) -> Result<Arc<[GraphRelationId]>, GraphDbError> {
     let key = AdjacencyIndexKey::new(namespace, start, incoming, relation_kinds);
     if let Some(ids) = adjacency_ids.get(&key)? {
         crate::hotpath_observe::record_adjacency_index_hit();
+        if let RelationIdIndexMode::Refuse { remaining, budget } = mode
+            && ids.len() > remaining
+        {
+            return Err(read_budget(budget));
+        }
         return Ok(ids);
     }
+    let collected = collect_relation_ids(
+        database,
+        namespace,
+        start,
+        relation_kinds,
+        incoming,
+        cancellation,
+        ensure_projection_readable,
+        label_keys_cache,
+        mode,
+    )?;
     crate::hotpath_observe::record_adjacency_index_build();
+    adjacency_ids.insert(key, Arc::<[GraphRelationId]>::from(collected))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_relation_ids(
+    database: &GrafeoDB,
+    namespace: &GraphNamespace,
+    start: &GraphEntityId,
+    relation_kinds: &BTreeSet<GraphRelationKind>,
+    incoming: bool,
+    cancellation: &dyn GraphCancellation,
+    ensure_projection_readable: &dyn Fn(
+        &GraphNamespace,
+        &GraphProjectionId,
+    ) -> Result<(), GraphDbError>,
+    label_keys_cache: &LabelKeyCache,
+    mode: RelationIdIndexMode,
+) -> Result<Vec<GraphRelationId>, GraphDbError> {
     let store = database.graph_store();
     let projected =
         relation_projection_cached(Arc::clone(&store), relation_kinds, label_keys_cache)?;
     let Some(node) = optional_node_for_entity(store.as_ref(), namespace, start)? else {
-        return adjacency_ids.insert(key, Arc::<[GraphRelationId]>::from(Vec::new()));
+        return Ok(Vec::new());
     };
     let direction = if incoming {
         Direction::Incoming
     } else {
         Direction::Outgoing
     };
+    let refuse_remaining = match mode {
+        RelationIdIndexMode::CacheFull => None,
+        RelationIdIndexMode::Refuse { remaining, budget } => Some((remaining, budget)),
+    };
     let mut ids = Vec::new();
+    let mut last_approved_projection: Option<GraphProjectionId> = None;
     for (_, edge) in projected.edges_from(node, direction) {
         if cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
+        }
+        if let Some((remaining, budget)) = refuse_remaining {
+            // Same stop as [`directed_relations`]: the next raw edge would
+            // exceed the remaining batch budget. Do not decode it.
+            if ids.len() >= remaining {
+                return Err(read_budget(budget));
+            }
         }
         let stored = store.get_edge(edge).ok_or_else(|| GraphDbError::Corrupt {
             message: "outgoing relation references a missing native edge".to_owned(),
@@ -616,13 +676,15 @@ fn ordered_relation_ids(
                 message: "relation kind escaped its projection filter".to_owned(),
             });
         }
-        let _ = (&decoded.from, &decoded.to);
-        ensure_projection_readable(namespace, &decoded.projection)?;
+        if last_approved_projection.as_ref() != Some(&decoded.projection) {
+            ensure_projection_readable(namespace, &decoded.projection)?;
+            last_approved_projection = Some(decoded.projection);
+        }
         ids.push(decoded.identity);
     }
     ids.sort();
     ids.dedup();
-    adjacency_ids.insert(key, Arc::<[GraphRelationId]>::from(ids))
+    Ok(ids)
 }
 
 fn relation_projection_cached(
