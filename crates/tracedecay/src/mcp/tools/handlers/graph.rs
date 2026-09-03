@@ -91,6 +91,24 @@ async fn execute_code_index_search(
     }
 }
 
+const IGNORED_DEPENDENCY_GENERATION_ADVANCED: &str =
+    "application.symbol-graph.ignored-dependency-generation-advanced";
+
+fn preserve_complete_search_after_lazy_admission(result: Result<()>) -> Result<()> {
+    match result {
+        Err(error)
+            if error
+                .project_route_context()
+                .is_some_and(|(reason_code, _, _)| {
+                    reason_code == IGNORED_DEPENDENCY_GENERATION_ADVANCED
+                }) =>
+        {
+            Ok(())
+        }
+        result => result,
+    }
+}
+
 fn semantic_status_value(
     mode: crate::mcp::server::CodeIndexSearchModeV1,
     status: &crate::mcp::server::CodeIndexSemanticStatusV1,
@@ -280,24 +298,31 @@ where
     }
     match outcome {
         crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(complete) => {
-            let graph = bind_verified_graph_to_search(graph, &complete.code_generation);
             let graph = if lazy_indexing_requested && complete.ordered_candidates.is_empty() {
+                // Explicit ignored-dependency admission is generation-checked
+                // by the canonical admission port against the graph's own
+                // active generation. It must therefore inspect the verified
+                // graph before binding optional enrichment to the text-search
+                // generation: text can truthfully serve one generation while
+                // graph activation has already advanced to its successor.
                 let graph = graph?;
-                hotpath::future!(
-                    dependency_hints::admit_verified_ignored_dependency(
-                        ignored_dependency_admission,
-                        &graph,
-                        query,
-                        scope_prefix,
-                        deadline.as_ref(),
-                        cancellation.as_ref()
-                    ),
-                    label = "mcp.graph.search.admit"
-                )
-                .await?;
-                Ok(graph)
+                preserve_complete_search_after_lazy_admission(
+                    hotpath::future!(
+                        dependency_hints::admit_verified_ignored_dependency(
+                            ignored_dependency_admission,
+                            &graph,
+                            query,
+                            scope_prefix,
+                            deadline.as_ref(),
+                            cancellation.as_ref()
+                        ),
+                        label = "mcp.graph.search.admit"
+                    )
+                    .await,
+                )?;
+                bind_verified_graph_to_search(Ok(graph), &complete.code_generation)
             } else {
-                graph
+                bind_verified_graph_to_search(graph, &complete.code_generation)
             };
             let mut results = Vec::with_capacity(complete.ordered_candidates.len());
             let mut graph_evidence = SearchGraphEvidence::new(graph.as_ref());
@@ -1373,6 +1398,32 @@ pub(super) async fn handle_rename_preview(
 mod tests {
     use super::*;
     use tracedecay_application::memory::FactSearchHitV1;
+
+    #[test]
+    fn complete_search_preserves_generation_advance_but_not_stale_admission() {
+        let advanced = TraceDecayError::project_route(
+            IGNORED_DEPENDENCY_GENERATION_ADVANCED,
+            true,
+            "new generation published",
+        );
+        assert!(preserve_complete_search_after_lazy_admission(Err(advanced)).is_ok());
+
+        let stale = TraceDecayError::project_route(
+            "application.symbol-graph.ignored-dependency-generation-stale",
+            true,
+            "source generation is stale",
+        );
+        let error = preserve_complete_search_after_lazy_admission(Err(stale))
+            .expect_err("stale admission must remain a typed retrieval failure");
+        assert!(matches!(
+            error.project_route_context(),
+            Some((
+                "application.symbol-graph.ignored-dependency-generation-stale",
+                true,
+                _
+            ))
+        ));
+    }
 
     fn completed_sparse_search() -> crate::mcp::server::CodeIndexSearchOutcomeV1 {
         completed_sparse_search_for_generation("generation.mcp-verified-graph-fixture.1")
