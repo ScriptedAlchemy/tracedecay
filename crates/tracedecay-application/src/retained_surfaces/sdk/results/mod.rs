@@ -51,18 +51,18 @@ pub use memory::{
     MemoryStatusResultV1, MemoryStatusV1, TrustHistoryEntryV1,
 };
 pub use session::{
-    ClosedUtcIntervalV1, CorrelationIndexV1, GitScopeV1, HydrationStateResultV1,
-    MessageSearchFreshnessV1, MessageSearchHitV1, MessageSearchResultV1, MessageSearchRootV1,
-    MessageSearchSkipV1, RetainedNextActionV1, RetrievalWorkerStatusV1, SessionCorrelationHitV1,
-    SessionCoverageIntervalV1, SessionCoverageModeV1, SessionCoverageReasonV1,
-    SessionCoverageRequestV1, SessionCoverageStateV1, SessionMessageV1, SessionRecordV1,
-    SessionRefreshBeginResultV1, SessionRefreshCancelResultV1, SessionRefreshFrontierResultV1,
-    SessionRefreshProgressV1, SessionRefreshReceiptV1, SessionRefreshResultV1,
-    SessionRefreshStatusResultV1, SessionRefreshTerminalStateResultV1, SessionSourceCoverageV1,
-    SessionsForResultV1, TemporalCoverageV1, TemporalExplanationV1, TemporalFreshnessV1,
-    TemporalMetadataV1, TemporalOmissionV1, TemporalWatermarksV1, ValidCoverageIntervalV1,
-    WorkflowAgentV1, WorkflowCoverageV1, WorkflowQueryModeV1, WorkflowRunV1, WorkflowStatusV1,
-    WorkflowsResultV1,
+    ClosedUtcIntervalV1, CorrelationIndexCountModeV1, CorrelationIndexV1, GitScopeV1,
+    HydrationStateResultV1, MessageSearchFreshnessV1, MessageSearchHitV1, MessageSearchResultV1,
+    MessageSearchRootV1, MessageSearchSkipV1, RetainedNextActionV1, RetrievalWorkerStatusV1,
+    SessionCorrelationHitV1, SessionCoverageIntervalV1, SessionCoverageModeV1,
+    SessionCoverageReasonV1, SessionCoverageRequestV1, SessionCoverageStateV1, SessionMessageV1,
+    SessionRecordV1, SessionRefreshBeginResultV1, SessionRefreshCancelResultV1,
+    SessionRefreshFrontierResultV1, SessionRefreshProgressV1, SessionRefreshReceiptV1,
+    SessionRefreshResultV1, SessionRefreshStatusResultV1, SessionRefreshTerminalStateResultV1,
+    SessionSourceCoverageV1, SessionsForResultV1, TemporalCoverageV1, TemporalExplanationV1,
+    TemporalFreshnessV1, TemporalMetadataV1, TemporalOmissionV1, TemporalWatermarksV1,
+    ValidCoverageIntervalV1, WorkflowAgentV1, WorkflowCoverageV1, WorkflowQueryModeV1,
+    WorkflowRunV1, WorkflowStatusV1, WorkflowsResultV1,
 };
 
 use schemars::JsonSchema;

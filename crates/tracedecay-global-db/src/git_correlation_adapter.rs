@@ -19,11 +19,11 @@ use crate::{
 use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use tracedecay_sessions::runtime::git_correlation::{
     AUTO_BACKFILL_WATERMARK_KEY, BackfillOptions, BoundedBackfillOutcome, BoundedGitControl,
-    CommitRelationFilter, CommitSessionRecord, CorrelationIndexHealth, DEFAULT_SPAN_MERGE_GAP_SECS,
-    GitCorrelationError, GitCorrelationSessionStore, GitEvidenceProjectionStore,
-    SessionGitCorrelationHit, SessionsForQuery, SpanObservation, git_evidence_projection_identity,
-    publish_transcript_graph_evidence, read_meta_value, recover_git_evidence_projection,
-    run_bounded_history_index_page,
+    CommitRelationFilter, CommitSessionRecord, CorrelationIndexHealth, CorrelationIndexPresence,
+    DEFAULT_SPAN_MERGE_GAP_SECS, GitCorrelationError, GitCorrelationSessionStore,
+    GitEvidenceProjectionStore, SessionGitCorrelationHit, SessionsForQuery, SpanObservation,
+    git_evidence_projection_identity, publish_transcript_graph_evidence, read_meta_value,
+    recover_git_evidence_projection, run_bounded_history_index_page,
 };
 #[cfg(any(test, feature = "test-helpers"))]
 use tracedecay_sessions::runtime::git_correlation::{
@@ -243,6 +243,41 @@ where
                 commit_count: 0,
                 backfill_watermark,
             },
+        })
+    }
+
+    /// Executes the query and derives bounded presence from the same recovered
+    /// projection. This avoids a second projection recovery solely to compute
+    /// exact counts before every `sessions_for` read.
+    #[hotpath::measure(
+        label = "global_db.git_correlation.sessions_for_with_presence",
+        future = true
+    )]
+    pub async fn sessions_for_with_relation_and_presence(
+        &self,
+        query: &SessionsForQuery,
+        relation: CommitRelationFilter,
+    ) -> Result<(Vec<SessionGitCorrelationHit>, CorrelationIndexPresence), GitCorrelationError>
+    {
+        let snapshot = self.read_snapshot().await?;
+        let backfill_watermark = read_meta_value(&snapshot, AUTO_BACKFILL_WATERMARK_KEY).await?;
+        Ok(match self.git_evidence_projection()? {
+            Some(store) => {
+                let presence = store.presence(backfill_watermark);
+                let results = store.sessions_for_with_relation(query, relation);
+                (results, presence)
+            }
+            None => (
+                Vec::new(),
+                CorrelationIndexPresence {
+                    projection_available: false,
+                    generation: None,
+                    source_watermark: None,
+                    spans_present: false,
+                    commits_present: false,
+                    backfill_watermark,
+                },
+            ),
         })
     }
 

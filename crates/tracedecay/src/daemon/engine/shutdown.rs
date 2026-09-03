@@ -248,7 +248,12 @@ impl DaemonEngine {
         &self,
         deadline: tokio::time::Instant,
     ) -> ShutdownTaskReceipt {
-        shutdown_project_servers(deadline, &self.store_administration).await
+        shutdown_project_servers(
+            deadline,
+            &self.store_administration,
+            &self.http_application_registry,
+        )
+        .await
     }
 
     #[cfg(test)]

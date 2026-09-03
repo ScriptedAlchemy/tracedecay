@@ -307,6 +307,7 @@ impl RegisteredSessionOwnerV1 {
         let Some(relation_graph) = relation_graph else {
             return Err(self);
         };
+        self.database.detach_session_relation_graph();
         let SessionGraphOwnerV1 {
             graph,
             store_target,
@@ -333,6 +334,7 @@ impl RegisteredSessionOwnerV1 {
             return None;
         };
         let owner = owner.take()?;
+        self.database.detach_session_relation_graph();
         Some((
             owner.graph.binding().clone(),
             owner.graph.verified_locator().clone(),
@@ -421,6 +423,46 @@ impl ProjectRuntimeOwnerRegistryV1 {
                 return Ok(());
             }
             notified.await;
+        }
+    }
+
+    async fn wait_for_serving_session_graph(&self, project_id: &ProjectId) -> Result<()> {
+        self.wait_for_session_graph(project_id).await?;
+        let entries = self.lock().map_err(|_| {
+            session_registry_error(
+                "admit project session relation graph for serving",
+                "project runtime owner map lock is poisoned".to_owned(),
+            )
+        })?;
+        let Some(ProjectRuntimeOwnerStateV1::Ready(owners)) = entries.get(project_id) else {
+            return Err(TraceDecayError::project_route(
+                "project_session_graph_unavailable",
+                true,
+                "Project session runtime is not ready for retrieval serving",
+            ));
+        };
+        let Some(sessions) = owners.sessions.as_ref() else {
+            return Err(TraceDecayError::project_route(
+                "project_session_graph_unavailable",
+                true,
+                "Project session runtime has no relation graph owner",
+            ));
+        };
+        let attached = matches!(
+            &*sessions
+                .relation_graph
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            SessionGraphAttachmentStateV1::Attached { owner: Some(_) }
+        );
+        if attached {
+            Ok(())
+        } else {
+            Err(TraceDecayError::project_route(
+                "project_session_graph_unavailable",
+                true,
+                sessions.graph_unavailable_reason(),
+            ))
         }
     }
 
@@ -3039,6 +3081,21 @@ impl DaemonSessionRuntimeRegistryV1 {
     #[hotpath::measure(label = "daemon.session_registry.settle_project_graph", future = true)]
     pub async fn settle_project_session_graph(&self, project_id: &ProjectId) -> Result<()> {
         self.project_owners.wait_for_session_graph(project_id).await
+    }
+
+    /// Waits for the project's background relation-graph open and requires an
+    /// attached owner before a retrieval-capable surface is published.
+    #[hotpath::measure(
+        label = "daemon.session_registry.settle_project_graph_for_serving",
+        future = true
+    )]
+    pub async fn settle_project_session_graph_for_serving(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<()> {
+        self.project_owners
+            .wait_for_serving_session_graph(project_id)
+            .await
     }
 
     pub fn install_session_sync_service(

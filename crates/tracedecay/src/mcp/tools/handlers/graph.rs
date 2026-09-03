@@ -257,18 +257,26 @@ where
         scope_prefix.is_some(),
     )
     .await;
-    if graph.is_ok()
-        && matches!(
-            &outcome,
-            crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(complete)
-                if scope_prefix.is_some()
-                    || dependency_hints::should_check_external_import_hint(
-                        complete.ordered_candidates.len(),
-                        limit,
-                    )
-        )
-    {
-        outcome = execute_code_index_search(search_executor, search_request).await;
+    let refresh_after_generation_mismatch = matches!(
+        (&outcome, &graph),
+        (
+            crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(complete),
+            Ok(graph),
+        ) if graph.generation().as_str() != complete.code_generation
+            && (scope_prefix.is_some()
+                || dependency_hints::should_check_external_import_hint(
+                    complete.ordered_candidates.len(),
+                    limit,
+                ))
+    );
+    if refresh_after_generation_mismatch {
+        let refreshed = execute_code_index_search(search_executor, search_request).await;
+        if matches!(
+            refreshed,
+            crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(_)
+        ) {
+            outcome = refreshed;
+        }
     }
     match outcome {
         crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(complete) => {
@@ -1365,6 +1373,240 @@ pub(super) async fn handle_rename_preview(
 mod tests {
     use super::*;
     use tracedecay_application::memory::FactSearchHitV1;
+
+    fn completed_sparse_search() -> crate::mcp::server::CodeIndexSearchOutcomeV1 {
+        completed_sparse_search_for_generation("generation.mcp-verified-graph-fixture.1")
+    }
+
+    fn completed_sparse_search_for_generation(
+        generation: &str,
+    ) -> crate::mcp::server::CodeIndexSearchOutcomeV1 {
+        let candidate = tracedecay_domain::RankedCandidate {
+            candidate: tracedecay_domain::FusedCandidate {
+                anchor_id: tracedecay_domain::RetrievalAnchorId::new(
+                    "code-symbol:sparse-lexical-widget",
+                )
+                .expect("sparse lexical candidate anchor"),
+                logical_evidence_id: tracedecay_domain::LogicalEvidenceId::new(
+                    "logical.sparse-lexical-widget",
+                )
+                .expect("sparse lexical candidate logical evidence"),
+                occurrences: Vec::new(),
+                exact_class: ExactClass::Approximate,
+                utility_micros: 1,
+                contributions: Vec::new(),
+                freshness: Vec::new(),
+                decisions: Vec::new(),
+            },
+            final_ordinal: 0,
+        };
+        let fallback_coverage = tracedecay_domain::RetrieverKind::QUERY_FALLBACK_LANES
+            .into_iter()
+            .map(|lane| (lane, tracedecay_domain::PublicRetrieverStatus::Complete))
+            .collect();
+        let query_fallback = tracedecay_domain::QueryFallbackSubpayload::new(
+            tracedecay_domain::FusionProfileId::new("profile.sparse-search")
+                .expect("sparse search profile"),
+            vec![candidate.clone()],
+            fallback_coverage,
+            Vec::new(),
+            None,
+        )
+        .expect("canonical sparse lexical fallback payload");
+        let anchor = candidate.candidate.anchor_id.clone();
+        let semantic = crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+            reason: "semantic_generation_warming",
+        };
+        crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(
+            crate::mcp::server::CodeIndexSearchCompletedV1 {
+                code_generation: generation.to_owned(),
+                ordered_candidates: vec![candidate],
+                query_fallback: std::sync::Arc::new(query_fallback),
+                display_by_anchor: HashMap::from([(
+                    anchor,
+                    crate::mcp::server::CodeIndexSearchDisplayV1 {
+                        name: "SparseLexicalWidget".to_owned(),
+                        qualified_name: "crate::SparseLexicalWidget".to_owned(),
+                        kind: "function".to_owned(),
+                        path: "src/lib.rs".to_owned(),
+                    },
+                )]),
+                coverage: crate::mcp::server::CodeIndexSearchCoverageV1::fused(&semantic),
+                semantic,
+                next_cursor: None,
+            },
+        )
+    }
+
+    fn unavailable_search() -> crate::mcp::server::CodeIndexSearchOutcomeV1 {
+        crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
+            crate::mcp::server::CodeIndexSearchUnavailableV1 {
+                code_generation: Some("generation.mcp-verified-graph-fixture.1".to_owned()),
+                reason:
+                    crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+                    reason: "search_attempt_repeated",
+                },
+                coverage: crate::mcp::server::CodeIndexSearchCoverageV1::unavailable(
+                    "search_attempt_repeated",
+                ),
+            },
+        )
+    }
+
+    fn search_test_options<'a>(
+        cg: &TraceDecay,
+        executor: crate::mcp::server::CodeIndexSearchExecutor,
+    ) -> crate::mcp::tools::handlers::ToolCallRegistryOptions<'a> {
+        crate::mcp::tools::handlers::dispatch_test_support::verified_graph_options(
+            cg,
+            crate::mcp::tools::handlers::ToolCallRegistryOptions {
+                code_index_search_executor: Some(executor),
+                code_index_search_authority: Some(crate::mcp::server::CodeIndexSearchAuthorityV1 {
+                    principal: tracedecay_domain::PrincipalId::new("principal.search-attempt-test")
+                        .expect("search attempt principal"),
+                    authorization_revision: tracedecay_domain::AuthorizationRevision::new(
+                        "authorization.search-attempt-test",
+                    )
+                    .expect("search attempt authorization revision"),
+                }),
+                ..crate::mcp::tools::handlers::ToolCallRegistryOptions::default()
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn completed_primary_search_is_not_retried_after_graph_admission() {
+        let _env_lock = crate::config::lock_user_data_dir_test_env();
+        let dir = tempfile::TempDir::new().expect("single search attempt isolation");
+        let _env = crate::mcp::tools::handlers::dispatch_test_support::SelectorEnv::new(dir.path());
+        let project = dir.path().join("single-search-attempt");
+        std::fs::create_dir_all(project.join("src")).expect("create search attempt sources");
+        std::fs::write(
+            project.join("src/lib.rs"),
+            "pub fn SparseLexicalWidget() {}\n",
+        )
+        .expect("write search attempt fixture");
+        let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            &project,
+            "project.single-search-attempt",
+        )
+        .await
+        .expect("registered search attempt fixture");
+
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = std::sync::Arc::clone(&calls);
+        let executor: crate::mcp::server::CodeIndexSearchExecutor =
+            std::sync::Arc::new(move |_| {
+                let attempt = observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Box::pin(async move {
+                    if attempt == 0 {
+                        completed_sparse_search()
+                    } else {
+                        unavailable_search()
+                    }
+                })
+            });
+        let options = search_test_options(&cg, executor);
+
+        let result = crate::mcp::tools::handlers::handle_tool_call_with_registry_options(
+            &cg,
+            "tracedecay_search",
+            json!({
+                "query": "SparseLexicalWidget",
+                "limit": 5,
+                "format": "json",
+            }),
+            None,
+            None,
+            options,
+        )
+        .await
+        .expect("first complete search outcome must remain authoritative");
+        let payload: Value = serde_json::from_str(
+            result.value["content"][0]["text"]
+                .as_str()
+                .expect("single-attempt search JSON text"),
+        )
+        .expect("single-attempt search JSON payload");
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(payload["results"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            payload["results"][0]["display"]["name"],
+            "SparseLexicalWidget"
+        );
+        assert!(payload["status"].is_null());
+        cg.close();
+    }
+
+    #[tokio::test]
+    async fn generation_mismatch_retry_cannot_erase_a_complete_sparse_search() {
+        let _env_lock = crate::config::lock_user_data_dir_test_env();
+        let dir = tempfile::TempDir::new().expect("generation mismatch isolation");
+        let _env = crate::mcp::tools::handlers::dispatch_test_support::SelectorEnv::new(dir.path());
+        let project = dir.path().join("generation-mismatch-search");
+        std::fs::create_dir_all(project.join("src")).expect("create mismatch search sources");
+        std::fs::write(
+            project.join("src/lib.rs"),
+            "pub fn SparseLexicalWidget() {}\n",
+        )
+        .expect("write mismatch search fixture");
+        let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            &project,
+            "project.generation-mismatch-search",
+        )
+        .await
+        .expect("registered mismatch search fixture");
+
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = std::sync::Arc::clone(&calls);
+        let executor: crate::mcp::server::CodeIndexSearchExecutor =
+            std::sync::Arc::new(move |_| {
+                let attempt = observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Box::pin(async move {
+                    if attempt == 0 {
+                        completed_sparse_search_for_generation("generation.search-before-graph")
+                    } else {
+                        unavailable_search()
+                    }
+                })
+            });
+        let options = search_test_options(&cg, executor);
+
+        let result = crate::mcp::tools::handlers::handle_tool_call_with_registry_options(
+            &cg,
+            "tracedecay_search",
+            json!({
+                "query": "SparseLexicalWidget",
+                "limit": 5,
+                "format": "json",
+            }),
+            None,
+            None,
+            options,
+        )
+        .await
+        .expect("failed refresh must preserve the first complete search");
+        let payload: Value = serde_json::from_str(
+            result.value["content"][0]["text"]
+                .as_str()
+                .expect("generation mismatch JSON text"),
+        )
+        .expect("generation mismatch JSON payload");
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+        assert_eq!(payload["results"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            payload["results"][0]["display"]["name"],
+            "SparseLexicalWidget"
+        );
+        assert_eq!(
+            payload["verified_graph_evidence"]["reason_code"],
+            "verified-code-graph-generation-mismatch"
+        );
+        cg.close();
+    }
 
     fn context_memory_hit(content: String) -> FactSearchHitV1 {
         serde_json::from_value(json!({
