@@ -114,12 +114,6 @@ pub(crate) fn captured_files(
             return Err(CodeIndexInputErrorV1::DuplicateCapturedFile);
         }
     }
-    if present
-        .keys()
-        .any(|file_occurrence_id| !captured_files.contains_key(file_occurrence_id))
-    {
-        return Err(CodeIndexInputErrorV1::MissingCapturedFile);
-    }
     Ok(captured_files)
 }
 
