@@ -397,6 +397,7 @@ fn reservation_claim_is_live(path: &Path) -> bool {
         .is_some()
 }
 
+#[hotpath::measure(label = "automation_runtime.effect_journal.read_source_bindings")]
 pub fn retained_source_bindings(
     path: &Path,
 ) -> Result<(Option<RetirementBinding>, Option<String>)> {
@@ -504,10 +505,12 @@ fn reserve_or_replay_with_index_and_writer(
 }
 }
 
+#[hotpath::measure(label = "automation_runtime.effect_journal.read_record")]
 pub fn read_indexed_record_blocking(path: &Path) -> Result<Option<DurableAutomationRecord>> {
     with_journal_lock(path, || read_stabilized_record(path))
 }
 
+#[hotpath::measure(label = "automation_runtime.effect_journal.read_terminal")]
 pub fn read_indexed_terminal_blocking(path: &Path) -> Result<Option<AutomationSettledTerminal>> {
     with_journal_lock(path, || {
         let Some(record) = read_stabilized_record(path)? else {
@@ -544,6 +547,7 @@ impl DurableSettlementClassification {
 }
 
 /// Revalidates the exact intended settlement without changing journal state.
+#[hotpath::measure(label = "automation_runtime.effect_journal.classify_settlement")]
 pub fn classify_durable_settlement_blocking(
     path: &Path,
     requested: &DurableAutomationAdmission,
@@ -620,6 +624,7 @@ fn classify_durable_settlement_with_stabilizer(
 /// order used by binding and makes the state check atomic with subsequent
 /// cleanup: a writer cannot stage and bind `Prepared` between this check and
 /// deletion.
+#[hotpath::measure(label = "automation_runtime.effect_journal.check_unbound_cleanup")]
 pub fn unbound_reserved_cleanup_is_safe_blocking(
     path: &Path,
     expected: &DurableAutomationAdmission,
@@ -774,6 +779,7 @@ pub fn persist_prepared_terminal_blocking(
 /// matching `Prepared` (or already promoted `Terminal`) proves the binding was
 /// durable despite the surfaced I/O/readback error; `Reserved` proves no
 /// journal binding and leaves the spool for recovery cleanup.
+#[hotpath::measure(label = "automation_runtime.effect_journal.replay_exact_binding")]
 pub fn replay_exact_binding_after_error_blocking(
     path: &Path,
     requested: &DurableAutomationAdmission,

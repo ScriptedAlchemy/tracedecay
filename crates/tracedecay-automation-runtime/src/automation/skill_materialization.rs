@@ -305,6 +305,7 @@ fn is_reserved_support_path(relative: &Path) -> bool {
 /// file under `dir` except `SKILL.md`, the manifest/pending sidecars, and
 /// `*.new` staging), returned sorted by relative path to mirror the ordering
 /// [`ManagedSkill::materialized_package_hash`] hashes support files in.
+#[hotpath::measure(label = "automation_runtime.skill_materialization.scan_support_files")]
 fn collect_on_disk_support_files(dir: &Path) -> Result<Vec<(PathBuf, Vec<u8>)>> {
     fn walk(base: &Path, dir: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) -> Result<()> {
         let entries = match fs::read_dir(dir) {
@@ -347,6 +348,7 @@ fn collect_on_disk_support_files(dir: &Path) -> Result<Vec<(PathBuf, Vec<u8>)>> 
 /// does, and — when the result matches the recorded hash — returns a re-derived
 /// manifest proving the package is pristine (safe to treat as owned). Returns
 /// `Ok(None)` when the file is missing, has no content-hash, or has drifted.
+#[hotpath::measure(label = "automation_runtime.skill_materialization.recompute_package")]
 fn recompute_on_disk_package(
     dir: &Path,
     provenance: &FileProvenance,
@@ -1468,6 +1470,7 @@ fn skills_for_scope(skills: &[ManagedSkill], scope: &MaterializationScope) -> Ve
 /// and `project_root` (project): a scope is eligible when its host config
 /// directory (`.claude` / `.codex`) is present, so we never create a host
 /// integration the user has not opted into.
+#[hotpath::measure(label = "automation_runtime.skill_materialization.detect_scopes")]
 pub fn detect_scopes(home: &Path, project_root: &Path) -> Vec<MaterializationScope> {
     let mut scopes = Vec::new();
     for host in MaterializationHost::all() {
