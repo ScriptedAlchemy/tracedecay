@@ -4272,9 +4272,10 @@ impl CodeIndexSchedulerRegistryV1 {
                 "query activation scope does not match the mounted worktree".to_owned(),
             ));
         }
+        let mut exact_retry = false;
         if let Some(desired_epoch) = worktree.query_activation_epoch {
             let advances = epoch > desired_epoch;
-            let exact_retry = epoch == desired_epoch
+            exact_retry = epoch == desired_epoch
                 && worktree.query_activation_revision.as_ref() == Some(result_revision)
                 && worktree.query_activation_transition_digest.as_ref() == Some(transition_digest)
                 && worktree.query_activation_redundancy.as_ref() == Some(prepared_redundancy);
@@ -4301,12 +4302,19 @@ impl CodeIndexSchedulerRegistryV1 {
         worktree.query_activation_epoch = Some(epoch);
         worktree.query_activation_transition_digest = Some(transition_digest.clone());
         worktree.query_activation_redundancy = Some(prepared_redundancy.clone());
-        worktree.semantic_query_authority = None;
-        tracedecay_usecases::semantic_runtime::commit_project_semantic_redundancy_authority_under_gate(
-            project_root,
-            prepared_redundancy,
-            false,
-        );
+        // A same-transition retry revalidates the already committed pair. Keep
+        // that pair callable until the replacement is ready; otherwise the
+        // recovery wake creates a false calibration-unavailable window after
+        // public status has already reported Ready. A newer transition still
+        // revokes the old semantic authority before doing any fallible work.
+        if !exact_retry {
+            worktree.semantic_query_authority = None;
+            tracedecay_usecases::semantic_runtime::commit_project_semantic_redundancy_authority_under_gate(
+                project_root,
+                prepared_redundancy,
+                false,
+            );
+        }
         Ok(QueryActivationAttemptV1 {
             revision: result_revision.clone(),
             token: worktree.query_activation_attempt,
