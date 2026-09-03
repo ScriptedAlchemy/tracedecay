@@ -12,7 +12,6 @@ use super::support::{decode, encode, idempotent_insert, invalid};
 pub struct RetrievalAnchorExecutor;
 
 impl RetrievalAnchorExecutor {
-    #[hotpath::measure(label = "rusqlite.retrieval_anchor.disposition_write")]
     pub fn execute_disposition_write(
         &mut self,
         savepoint: &Savepoint<'_>,
@@ -76,7 +75,6 @@ impl RetrievalAnchorExecutor {
         Ok(())
     }
 
-    #[hotpath::measure(label = "rusqlite.retrieval_anchor.derivative_write")]
     pub fn execute_derivative_write(
         &mut self,
         savepoint: &Savepoint<'_>,
@@ -114,7 +112,6 @@ impl RetrievalAnchorExecutor {
         )
     }
 
-    #[hotpath::measure(label = "rusqlite.retrieval_anchor.read")]
     pub fn execute_read(
         &mut self,
         snapshot: &Transaction<'_>,
@@ -209,7 +206,6 @@ fn current_state(
         .map(|record| record.map(|record| record.state()))
 }
 
-#[hotpath::measure(label = "rusqlite.retrieval_anchor.current_record")]
 fn current_record(
     connection: &rusqlite::Connection,
     anchor_id: &RetrievalAnchorId,

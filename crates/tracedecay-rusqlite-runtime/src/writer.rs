@@ -839,7 +839,7 @@ impl PersistentWriter {
         Ok(outcome)
     }
 
-    #[hotpath::measure(label = "rusqlite.writer.bounded_incremental_vacuum", future = true)]
+    #[hotpath::skip]
     pub async fn bounded_incremental_vacuum(
         &self,
         max_pages: u32,
@@ -902,7 +902,7 @@ impl PersistentWriter {
             .await
     }
 
-    #[hotpath::measure(label = "rusqlite.writer.enqueue_online_backup", future = true)]
+    #[hotpath::skip]
     async fn enqueue_online_backup(
         &self,
         destination: PathBuf,
