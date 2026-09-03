@@ -23,10 +23,19 @@ def load_scorecard() -> ModuleType:
 
 
 class FakeStatusObserver:
-    def __init__(self, payloads: list[dict | None]) -> None:
+    def __init__(
+        self,
+        payloads: list[dict | None],
+        *,
+        become_unusable: bool = False,
+        log_path: Path | None = None,
+    ) -> None:
         self.payloads = iter(payloads)
         self.request_count = 0
         self.close_count = 0
+        self.usable = True
+        self.become_unusable = become_unusable
+        self.log_path = log_path or Path("/tmp/fake-status-observer.log")
 
     def __enter__(self) -> FakeStatusObserver:
         return self
@@ -36,19 +45,38 @@ class FakeStatusObserver:
 
     def status_payload(self) -> dict | None:
         self.request_count += 1
-        return next(self.payloads)
+        payload = next(self.payloads)
+        if self.become_unusable:
+            self.usable = False
+        return payload
 
 
 class FakeSandbox:
-    def __init__(self, payloads: list[dict | None]) -> None:
-        self.observer = FakeStatusObserver(payloads)
+    def __init__(
+        self,
+        payloads: list[dict | None] | None = None,
+        *,
+        observers: list[FakeStatusObserver] | None = None,
+    ) -> None:
+        if observers is not None:
+            self._observers = list(observers)
+            self.observer = observers[0]
+        else:
+            self.observer = FakeStatusObserver(payloads or [])
+            self._observers = [self.observer]
+        self._next_observer = 0
         self.observer_process_count = 0
         self.observer_connection_count = 0
 
     def open_status_observer(self) -> FakeStatusObserver:
+        if self._next_observer >= len(self._observers):
+            raise AssertionError("unexpected extra status observer")
+        observer = self._observers[self._next_observer]
+        self._next_observer += 1
+        self.observer = observer
         self.observer_process_count += 1
         self.observer_connection_count += 1
-        return self.observer
+        return observer
 
     def daemon_alive(self) -> bool:
         return True
@@ -104,6 +132,59 @@ class ScorecardStatusObserverTests(unittest.TestCase):
         self.assertEqual(sandbox.observer_connection_count, 1)
         self.assertEqual(sandbox.observer.request_count, 1)
         self.assertEqual(sandbox.observer.close_count, 1)
+
+    def test_wait_reopens_unusable_observer_and_returns_identical_terminal_payload(
+        self,
+    ) -> None:
+        scorecard = load_scorecard()
+        terminal = {"code_index_freshness": {"status": "current"}, "sentinel": [1, 2, 3]}
+        first = FakeStatusObserver([None], become_unusable=True)
+        second = FakeStatusObserver([terminal])
+        sandbox = FakeSandbox(observers=[first, second])
+
+        with (
+            mock.patch.object(
+                scorecard.time, "monotonic", side_effect=[10.0, 10.1, 10.2]
+            ),
+            mock.patch.object(scorecard.time, "time", side_effect=[100.0, 101.0]),
+            mock.patch.object(scorecard.time, "sleep"),
+        ):
+            _wall, payload, _observed_at = scorecard.wait_for(
+                sandbox, "cold_index", 30.0, scorecard.freshness_current
+            )
+
+        self.assertIs(payload, terminal)
+        self.assertEqual(sandbox.observer_process_count, 2)
+        self.assertEqual(sandbox.observer_connection_count, 2)
+        self.assertEqual(first.request_count, 1)
+        self.assertEqual(second.request_count, 1)
+        self.assertEqual(first.close_count, 1)
+        self.assertEqual(second.close_count, 1)
+        self.assertFalse(first.usable)
+        self.assertTrue(second.usable)
+
+    def test_wait_timeout_mentions_unusable_observer_stderr_log(self) -> None:
+        scorecard = load_scorecard()
+        log_path = Path("/tmp/status-observer-unusable.log")
+        sandbox = FakeSandbox(
+            observers=[FakeStatusObserver([None], become_unusable=True, log_path=log_path)]
+        )
+
+        with (
+            mock.patch.object(scorecard.time, "monotonic", side_effect=[10.0, 10.6]),
+            mock.patch.object(scorecard.time, "time", return_value=100.0),
+        ):
+            with self.assertRaisesRegex(
+                scorecard.PhaseFailure,
+                (
+                    r"daemon_restart: not ready within 0\.5s "
+                    r"\(last freshness: unanswered\); "
+                    r"last observer unusable, stderr: /tmp/status-observer-unusable\.log"
+                ),
+            ):
+                scorecard.wait_for(
+                    sandbox, "daemon_restart", 0.5, scorecard.freshness_current
+                )
 
 
 class ScorecardVerdictTests(unittest.TestCase):
