@@ -558,9 +558,69 @@ pub(crate) fn decode_relation(locator: &Node, edge: &Edge) -> Result<GraphRelati
     .map_err(|error| persisted_validation_error("relation", error))
 }
 
+/// Identity-only relation decode: namespace, projection, kind, endpoints, and
+/// identity. Skips [`decode_graph_properties`] so an ID fan-out does not pay
+/// property allocation for rows the caller will discard.
+pub(crate) struct DecodedRelationIdentity {
+    pub identity: GraphRelationId,
+    pub projection: GraphProjectionId,
+    pub kind: GraphRelationKind,
+    pub from: GraphEntityId,
+    pub to: GraphEntityId,
+}
+
+pub(crate) fn decode_relation_identity(
+    edge: &Edge,
+    namespace: &GraphNamespace,
+) -> Result<DecodedRelationIdentity, GraphDbError> {
+    crate::hotpath_observe::record_relation_identity_decode();
+    let stored_namespace =
+        required_string(edge.get_property(NAMESPACE_PROPERTY), "relation namespace")?;
+    if stored_namespace != namespace.as_str() {
+        return Err(GraphDbError::Corrupt {
+            message: "outgoing relation belongs to a foreign namespace".to_owned(),
+        });
+    }
+    let projection = GraphProjectionId::new(required_string(
+        edge.get_property(PROJECTION_PROPERTY),
+        "relation projection",
+    )?)
+    .map_err(|error| persisted_validation_error("relation projection", error))?;
+    let kind = relation_kind_from_type(edge.edge_type.as_str())?;
+    let scalar_kind = required_string(edge.get_property(RELATION_KIND_PROPERTY), "relation kind")?;
+    if kind.as_str() != scalar_kind {
+        return Err(GraphDbError::Corrupt {
+            message: "traversal relation native type and kind disagree".to_owned(),
+        });
+    }
+    let identity = GraphRelationId::new(required_string(
+        edge.get_property(RELATION_ID_PROPERTY),
+        "relation identity",
+    )?)
+    .map_err(|error| persisted_validation_error("relation identity", error))?;
+    let from = GraphEntityId::new(required_string(
+        edge.get_property(RELATION_FROM_PROPERTY),
+        "relation source",
+    )?)
+    .map_err(|error| persisted_validation_error("relation source", error))?;
+    let to = GraphEntityId::new(required_string(
+        edge.get_property(RELATION_TO_PROPERTY),
+        "relation target",
+    )?)
+    .map_err(|error| persisted_validation_error("relation target", error))?;
+    Ok(DecodedRelationIdentity {
+        identity,
+        projection,
+        kind,
+        from,
+        to,
+    })
+}
+
 pub(crate) fn decode_graph_properties(
     properties: impl IntoIterator<Item = (impl AsRef<str>, Value)>,
 ) -> Result<BTreeMap<GraphPropertyName, GraphProperty>, GraphDbError> {
+    crate::hotpath_observe::record_property_decode();
     let mut decoded = BTreeMap::new();
     let mut decoded_bytes = 0usize;
     for (key, value) in properties {
@@ -779,6 +839,7 @@ pub(crate) fn has_native_label(node: &Node, label: &str) -> bool {
 /// which would silently widen the projection to the whole store.
 #[hotpath::measure(label = "graph_db.schema.label_keys")]
 pub(crate) fn label_keys(store: &dyn GraphStore, label: &str) -> Vec<String> {
+    crate::hotpath_observe::record_label_universe_scan();
     let keys: Vec<String> = store
         .all_labels()
         .into_iter()
