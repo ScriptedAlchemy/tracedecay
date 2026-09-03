@@ -174,7 +174,6 @@ pub struct GenerationSymbolIndexV1 {
 impl GenerationSymbolIndexV1 {
     /// Build the index, sorting records into canonical occurrence order and
     /// rejecting duplicate occurrences.
-    #[hotpath::measure(label = "code_index.lineage.index_symbols")]
     pub fn new(
         generation_id: CodeGenerationId,
         mut symbols: Vec<Arc<LineageSymbolRecordV1>>,
@@ -228,7 +227,6 @@ impl SymbolLineageResolver {
     /// Resolve lineage candidates for every current symbol against the prior
     /// generation. Candidates are returned in canonical current-occurrence
     /// order; each prior symbol is consumed at most once.
-    #[hotpath::measure(label = "code_index.lineage.resolve")]
     pub fn resolve(
         &self,
         prior: &GenerationSymbolIndexV1,

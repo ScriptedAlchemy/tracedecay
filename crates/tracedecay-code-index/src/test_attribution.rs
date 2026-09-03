@@ -57,7 +57,6 @@ struct TestAttributionEvidenceDigestInput<'a> {
 }
 
 impl TestAttributionWatermarkV1 {
-    #[hotpath::measure(label = "code_index.test_attribution.digest_evidence")]
     pub fn recompute_evidence_digest(
         &self,
         attributions: &[GenerationTestAttributionV1],
@@ -182,7 +181,6 @@ pub enum GenerationTestJoinErrorV1 {
 
 impl GenerationTestJoinV1 {
     /// Join canonical test-attribution records to one exact code generation.
-    #[hotpath::measure(label = "code_index.test_attribution.join")]
     pub fn join(
         generation: &CodeGenerationManifestV1,
         snapshot: &ValidatedCodeSnapshotV1,

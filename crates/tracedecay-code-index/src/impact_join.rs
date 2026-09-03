@@ -82,7 +82,6 @@ pub enum GenerationImpactJoinErrorV1 {
 }
 
 impl GenerationImpactJoinV1 {
-    #[hotpath::measure(label = "code_index.impact.join")]
     pub fn join(
         generation: &CodeGenerationManifestV1,
         snapshot: &ValidatedCodeSnapshotV1,

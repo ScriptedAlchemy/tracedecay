@@ -85,7 +85,6 @@ enum Partition {
 
 /// The canonical request digest: every request field except the digest
 /// itself, under the request domain separator.
-#[hotpath::measure(label = "code_index.receipts.digest_request")]
 pub fn expected_request_digest(
     request: &ProjectionBatchRequestV1,
 ) -> Result<ManifestDigest, DomainError> {
@@ -218,7 +217,6 @@ pub(crate) fn build_batch_receipt_verified(
     build_batch_receipt_with(request, Some(evidence), decisions)
 }
 
-#[hotpath::measure(label = "code_index.receipts.build_batch")]
 fn build_batch_receipt_with(
     request: &ProjectionBatchRequestV1,
     evidence: Option<&ProjectionRequestEvidenceV1>,
@@ -320,7 +318,6 @@ pub(crate) fn verify_batch_receipt_verified(
     verify_batch_receipt_with(request, Some(evidence), batch, publication)
 }
 
-#[hotpath::measure(label = "code_index.receipts.verify_batch")]
 fn verify_batch_receipt_with(
     request: &ProjectionBatchRequestV1,
     evidence: Option<&ProjectionRequestEvidenceV1>,

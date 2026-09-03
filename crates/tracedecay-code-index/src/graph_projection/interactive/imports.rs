@@ -14,7 +14,6 @@ use crate::chunks::CodeIndexImportEvidenceV1;
 impl CodeGraphInteractiveReader {
     /// Returns parser-backed bare-module type imports whose module specifier or
     /// imported name contains `query` under ASCII case folding.
-    #[hotpath::measure(label = "code_index.graph.scan_import_candidates")]
     pub fn external_type_import_candidates(
         &self,
         query: &str,
