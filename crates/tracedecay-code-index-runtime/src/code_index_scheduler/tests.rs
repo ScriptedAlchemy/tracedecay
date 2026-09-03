@@ -67,7 +67,9 @@ use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLaneRequest,
 };
 use tracedecay_query::retrieval::fusion::RetrievalCursorKeyringV1;
-use tracedecay_query::retrieval::lexical::LexicalLaneRequest;
+use tracedecay_query::retrieval::lexical::{
+    LexicalLaneRequest, LexicalRouteKindV1, LexicalRoutingV1,
+};
 use tracedecay_query::retrieval::rerank::{
     BoundedRerankRuntimeV1, DeterministicLocalRerankExecutorV1, LocalRerankFailureV1,
     LocalRerankInputV1, LocalRerankPermitV1, RerankExecutionControlV1,
@@ -5852,6 +5854,7 @@ async fn core_query_profile_composes_live_code_index_lanes() {
             graph_max_depth: 1,
             page_size: 10,
             cursor: None,
+            lexical_routing: LexicalRoutingV1::query_only(),
         },
     );
     let executed = registry
@@ -5865,6 +5868,207 @@ async fn core_query_profile_composes_live_code_index_lanes() {
     assert!(
         !executed.served_stale,
         "a ready generation serves the fresh path and is never marked stale"
+    );
+    assert_eq!(
+        executed.lexical_routes.routes,
+        vec![LexicalRouteKindV1::Query],
+        "a plain query runs exactly the query route"
+    );
+    assert!(executed.lexical_routes.matches_by_anchor.is_empty());
+    registry.shutdown().await;
+}
+
+/// Build the core-authority search policy with caller lexical routing.
+fn routed_core_search_request(
+    query: &str,
+    lexical_routing: LexicalRoutingV1,
+) -> super::query_runtime::QuerySearchExecutionRequestV1 {
+    let mut request = core_search_request(query);
+    request.lexical_routing = lexical_routing;
+    request
+}
+
+/// The qualified symbol name behind each composed candidate, in rank order;
+/// `None` for file-grain chunk anchors.
+fn ranked_symbol_names(
+    executed: &super::query_runtime::ExecutedQuerySearchV1,
+    latest: &super::LatestCompleteCodeIndexV1,
+) -> Vec<Option<String>> {
+    let symbols = latest.generation.symbols();
+    executed
+        .authorized
+        .fallback
+        .ordered_candidates
+        .iter()
+        .map(|ranked| {
+            let anchor = ranked.candidate.anchor_id.as_str();
+            let occurrence = anchor.strip_prefix("code-symbol:")?;
+            let symbol = symbols
+                .symbols
+                .iter()
+                .find(|symbol| symbol.occurrence.as_str() == occurrence)
+                .unwrap_or_else(|| panic!("anchor {anchor} names a published symbol"));
+            Some(symbol.qualified_name.clone())
+        })
+        .collect()
+}
+
+fn ranks_symbol(names: &[Option<String>], suffix: &str) -> bool {
+    names.iter().flatten().any(|name| name.ends_with(suffix))
+}
+
+/// A lexical anchor is its own ranked route: a symbol the natural-language
+/// query never reaches enters the composed page with evidence naming the
+/// anchor, and the query-only page is unchanged.
+#[tokio::test]
+async fn lexical_anchor_route_ranks_the_anchored_symbol_with_named_evidence() {
+    // The file path must not repeat the query term: path postings would
+    // otherwise reach every symbol in the file and blur the anchor's effect.
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn allocate_inventory() {}\n\npub fn reserve_stock() {}\n\npub fn ship_order() {}\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+    let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
+
+    // Whole query terms match whole indexed tokens and query subtokens match
+    // the subtoken field, so this multi-token query reaches
+    // `allocate_inventory` (whole term + subtokens) and nothing in
+    // `reserve_stock`'s vocabulary.
+    let query = "allocate_inventory callers";
+    let query_only = registry
+        .execute_query_search(&scope, core_search_request(query))
+        .await
+        .expect("query-only search composes");
+    let query_only_names = ranked_symbol_names(&query_only, &latest);
+    assert!(
+        ranks_symbol(&query_only_names, "allocate_inventory"),
+        "the natural-language query reaches allocate_inventory: {query_only_names:?}"
+    );
+    assert!(
+        !ranks_symbol(&query_only_names, "reserve_stock"),
+        "the natural-language query alone never reaches reserve_stock: {query_only_names:?}"
+    );
+
+    let routing =
+        LexicalRoutingV1::new(vec!["reserve_stock".to_owned()], false).expect("one valid anchor");
+    let anchored = registry
+        .execute_query_search(&scope, routed_core_search_request(query, routing))
+        .await
+        .expect("anchored search composes");
+    let anchored_names = ranked_symbol_names(&anchored, &latest);
+    assert!(
+        ranks_symbol(&anchored_names, "reserve_stock"),
+        "the anchor route adds reserve_stock to the composed page: {anchored_names:?}"
+    );
+    assert!(
+        ranks_symbol(&anchored_names, "allocate_inventory"),
+        "the query route still contributes: {anchored_names:?}"
+    );
+    assert_eq!(anchored.lexical_routes.routes.len(), 2);
+    let anchor_kind = anchored.lexical_routes.routes[1].clone();
+    assert!(
+        matches!(&anchor_kind, LexicalRouteKindV1::Anchor { anchor } if anchor.as_str() == "reserve_stock"),
+        "{anchor_kind:?}"
+    );
+    let reserve = anchored
+        .authorized
+        .fallback
+        .ordered_candidates
+        .iter()
+        .zip(&anchored_names)
+        .find(|(_, name)| {
+            name.as_deref()
+                .is_some_and(|name| name.ends_with("reserve_stock"))
+        })
+        .map(|(ranked, _)| ranked)
+        .expect("reserve_stock is ranked");
+    let matches = anchored
+        .lexical_routes
+        .matches_by_anchor
+        .get(&reserve.candidate.anchor_id)
+        .expect("the anchored candidate carries route evidence");
+    assert!(
+        matches
+            .iter()
+            .any(|route_match| route_match.route == anchor_kind
+                && route_match
+                    .matched_terms
+                    .iter()
+                    .any(|term| term == "reserve_stock")),
+        "the evidence names the anchor that ranked the hit: {matches:?}"
+    );
+    registry.shutdown().await;
+}
+
+/// `prefer_symbol` adds a deterministic symbol-name route built from the
+/// query's identifier-shaped tokens; a query with no such token adds nothing.
+#[tokio::test]
+async fn preferred_symbol_route_is_derived_from_query_identifiers() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn allocate_inventory() {}\n\npub fn reserve_stock() {}\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+    let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
+
+    let routing = LexicalRoutingV1::new(Vec::new(), true).expect("prefer_symbol routing");
+    let preferred = registry
+        .execute_query_search(
+            &scope,
+            routed_core_search_request("explain the function reserve_stock", routing.clone()),
+        )
+        .await
+        .expect("preferred-symbol search composes");
+    assert_eq!(
+        preferred.lexical_routes.routes,
+        vec![
+            LexicalRouteKindV1::Query,
+            LexicalRouteKindV1::PreferredSymbol {
+                tokens: vec!["reserve_stock".to_owned()],
+            },
+        ],
+        "stoplisted query words never become symbol tokens"
+    );
+    let names = ranked_symbol_names(&preferred, &latest);
+    let reserve = preferred
+        .authorized
+        .fallback
+        .ordered_candidates
+        .iter()
+        .zip(&names)
+        .find(|(_, name)| {
+            name.as_deref()
+                .is_some_and(|name| name.ends_with("reserve_stock"))
+        })
+        .map(|(ranked, _)| ranked)
+        .expect("reserve_stock is ranked");
+    let matches = preferred
+        .lexical_routes
+        .matches_by_anchor
+        .get(&reserve.candidate.anchor_id)
+        .expect("the symbol-name hit carries route evidence");
+    assert!(
+        matches.iter().any(|route_match| matches!(
+            route_match.route,
+            LexicalRouteKindV1::PreferredSymbol { .. }
+        )),
+        "{matches:?}"
+    );
+
+    let no_identifiers = registry
+        .execute_query_search(
+            &scope,
+            routed_core_search_request("what is the type of a", routing),
+        )
+        .await
+        .expect("a query without identifiers still composes");
+    assert_eq!(
+        no_identifiers.lexical_routes.routes,
+        vec![LexicalRouteKindV1::Query],
+        "no identifier-shaped token means no preferred-symbol route"
     );
     registry.shutdown().await;
 }
@@ -5979,6 +6183,7 @@ fn core_search_request(query: &str) -> super::query_runtime::QuerySearchExecutio
             graph_max_depth: 1,
             page_size: 10,
             cursor: None,
+            lexical_routing: LexicalRoutingV1::query_only(),
         },
     )
 }

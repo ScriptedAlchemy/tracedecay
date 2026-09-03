@@ -11,6 +11,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::retrieval::lexical::{LexicalRouteReceiptV1, LexicalRoutingV1};
+
 /// Search policy crossing the MCP/daemon boundary. The daemon owns profile,
 /// generation, query-MAC, and semantic calibration authority.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,6 +41,10 @@ pub struct CodeIndexSearchRequestV1 {
     pub limit: usize,
     pub cursor: Option<tracedecay_domain::RetrievalCursor>,
     pub mode: CodeIndexSearchModeV1,
+    /// Additive lexical routes (caller anchors, preferred-symbol route). A
+    /// cursor continuation must repeat the routing that produced its frozen
+    /// candidate set; a different routing is a typed cursor set mismatch.
+    pub lexical_routing: LexicalRoutingV1,
     /// MCP→executor admission envelope. The type-erased
     /// [`CodeIndexSearchExecutor`] authenticates this value; keep it on the
     /// request even when local analysis cannot see through `Arc<dyn Fn…>`.
@@ -357,6 +363,10 @@ pub struct CodeIndexSearchCompletedV1 {
     /// participates in ranking identity, so a warm response carries the same
     /// candidates, fallback bytes, and cursor it always did.
     pub coverage: CodeIndexSearchCoverageV1,
+    /// Which lexical routes ran and, when additive routes were requested,
+    /// which route ranked each candidate. Presentation metadata outside the
+    /// canonical bytes, like `display_by_anchor`.
+    pub lexical_routes: LexicalRouteReceiptV1,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

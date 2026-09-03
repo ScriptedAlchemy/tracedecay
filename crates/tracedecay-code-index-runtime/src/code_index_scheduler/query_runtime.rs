@@ -28,7 +28,8 @@ use tracedecay_query::retrieval::graph::{
     GraphExecutionControl, GraphLaneRequest, GraphLaneRetriever,
 };
 use tracedecay_query::retrieval::lexical::{
-    LexicalLaneEvidence, LexicalLaneRequest, lexical_query_parts,
+    LexicalLaneEvidence, LexicalLaneRequest, LexicalRouteOutcomeV1, LexicalRoutePlanV1,
+    LexicalRouteReceiptV1, LexicalRoutingV1, merge_lexical_routes,
 };
 use tracedecay_query::retrieval::{
     AuthorizedQueryFallbackV1, QueryAuthorityErrorV1, QueryAuthorityV1, RawRetrievalRequestV1,
@@ -316,6 +317,7 @@ pub struct QuerySearchExecutionRequestV1 {
     pub graph_max_depth: u32,
     pub page_size: usize,
     pub cursor: Option<RetrievalCursor>,
+    pub lexical_routing: LexicalRoutingV1,
 }
 
 impl QuerySearchExecutionRequestV1 {
@@ -334,6 +336,7 @@ impl QuerySearchExecutionRequestV1 {
             graph_max_depth: policy.graph_max_depth,
             page_size: policy.page_size,
             cursor: policy.cursor,
+            lexical_routing: policy.lexical_routing,
         }
     }
 }
@@ -352,6 +355,8 @@ pub struct QuerySearchExecutionPolicyV1 {
     pub graph_max_depth: u32,
     pub page_size: usize,
     pub cursor: Option<RetrievalCursor>,
+    /// Additive lexical routes requested by the caller; query-only by default.
+    pub lexical_routing: LexicalRoutingV1,
 }
 
 pub struct ExecutedQuerySearchV1 {
@@ -363,6 +368,9 @@ pub struct ExecutedQuerySearchV1 {
     /// for `generation`; freshness is not. Callers must report the lanes as
     /// `CodeIndexLaneStatusV1::Stale` rather than complete.
     pub served_stale: bool,
+    /// The lexical routes that ran and the per-candidate route evidence when
+    /// additive routes were requested.
+    pub lexical_routes: LexicalRouteReceiptV1,
 }
 
 #[derive(Debug, Error)]
@@ -675,22 +683,40 @@ where
             budget: request.budget,
         })
     })?;
-    let lexical_parts = lexical_query_parts(query_view.as_str())?;
-    let lexical = hotpath::measure_block!("daemon.code_index.query.lane.lexical", {
-        owners.retrieve_lexical(&LexicalLaneRequest {
-            base: request.clone(),
-            query_view,
-            generation: generation.clone(),
-            whole_terms: lexical_parts.whole_terms,
-            subtokens: lexical_parts.subtokens,
-            phrases: lexical_parts.phrases,
-            field_filters: Vec::new(),
-            fuzzy_budget: input.fuzzy_budget,
-            lexical_profile_revision: input.lexical_profile_revision,
-            score_domain: input.lexical_score_domain,
-            budget: request.budget,
-        })
-    })?;
+    // Every lexical route (the query plus each caller anchor and the optional
+    // preferred-symbol route) runs through the same lane against the same
+    // pinned generation; the merge below is what composition admits as the
+    // single lexical lane input.
+    let route_plan = LexicalRoutePlanV1::plan(query_view.as_str(), &input.lexical_routing)?;
+    let (lexical, lexical_routes) =
+        hotpath::measure_block!("daemon.code_index.query.lane.lexical", {
+            let mut route_outcomes = Vec::with_capacity(route_plan.routes().len());
+            for route in route_plan.routes() {
+                let outcome = owners.retrieve_lexical(&LexicalLaneRequest {
+                    base: request.clone(),
+                    query_view,
+                    generation: generation.clone(),
+                    whole_terms: route.parts.whole_terms.clone(),
+                    subtokens: route.parts.subtokens.clone(),
+                    phrases: route.parts.phrases.clone(),
+                    field_filters: route.field_filters.clone(),
+                    fuzzy_budget: input.fuzzy_budget,
+                    lexical_profile_revision: input.lexical_profile_revision.clone(),
+                    score_domain: input.lexical_score_domain.clone(),
+                    budget: request.budget,
+                })?;
+                route_outcomes.push(LexicalRouteOutcomeV1 {
+                    kind: route.kind.clone(),
+                    outcome,
+                });
+            }
+            merge_lexical_routes(
+                &generation,
+                &request.budget,
+                &request.budget,
+                route_outcomes,
+            )
+        })?;
     let graph_seeds = graph_seeds_from_outcomes(&exact, &lexical);
     let graph = hotpath::measure_block!("daemon.code_index.query.lane.graph", {
         // Graph retrieval requires at least one seed. An empty seed list is
@@ -775,6 +801,7 @@ where
         authorized,
         sanitized,
         served_stale,
+        lexical_routes,
     })
 }
 

@@ -58,6 +58,63 @@ pub struct ContextSurfaceRequestV1 {
     pub memory_limit: Option<u32>,
     pub memory_min_trust: Option<f64>,
     pub semantic_mode: Option<PrimitiveSemanticModeV1>,
+    /// Exact identifiers or technical terms ranked through the lexical lane as
+    /// additional routes fused with the task text. Bounded and validated by
+    /// the retrieval kernel; a violation is a typed request rejection.
+    pub lexical_anchors: Option<Vec<String>>,
+    /// Add a symbol-name lexical route for the identifier-shaped words of the
+    /// task text.
+    pub prefer_symbol: Option<bool>,
+}
+
+/// Whether the served code generation is known current at serve time.
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrimitiveFreshnessStateV1 {
+    Fresh,
+    PossiblyStale,
+}
+
+impl PrimitiveFreshnessStateV1 {
+    #[hotpath::skip]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Fresh => "fresh",
+            Self::PossiblyStale => "possibly_stale",
+        }
+    }
+}
+
+/// The indexing state behind a `possibly_stale` verdict: the served
+/// generation, the scheduler's latest sealed generation, its staleness-ladder
+/// state, and the lanes that answered from an older generation. `summary` is
+/// the one-line rendering agents read.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrimitiveIndexingStateV1 {
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub served_generation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_generation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staleness_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rebuild_in_flight: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stale_lanes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Freshness verdict carried by every search and context response. `indexing`
+/// is present exactly when the state is `possibly_stale`.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrimitiveSearchFreshnessV1 {
+    pub state: PrimitiveFreshnessStateV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexing: Option<PrimitiveIndexingStateV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -233,6 +290,9 @@ pub struct PrimitiveSearchCoverageV1 {
 pub struct ContextResultV1 {
     pub task: String,
     pub mode: ContextModeV1,
+    /// Freshness of the served code generation, derived from the typed lane
+    /// coverage and the daemon scheduler's worktree state.
+    pub freshness: PrimitiveSearchFreshnessV1,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code_generation: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -546,8 +606,9 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        ContextModeV1, ContextResultV1, PrimitiveLaneCompleteV1, PrimitiveLaneStatusV1,
-        PrimitiveRecallV1, PrimitiveSearchCoverageV1,
+        ContextModeV1, ContextResultV1, ContextSurfaceRequestV1, PrimitiveFreshnessStateV1,
+        PrimitiveIndexingStateV1, PrimitiveLaneCompleteV1, PrimitiveLaneStatusV1,
+        PrimitiveRecallV1, PrimitiveSearchCoverageV1, PrimitiveSearchFreshnessV1,
     };
     use crate::memory::{FactSearchGraphCoverageV1, FactSearchGraphDegradationV1};
 
@@ -555,6 +616,10 @@ mod tests {
         ContextResultV1 {
             task: "explain memory".to_owned(),
             mode: ContextModeV1::Explore,
+            freshness: PrimitiveSearchFreshnessV1 {
+                state: PrimitiveFreshnessStateV1::Fresh,
+                indexing: None,
+            },
             code_generation: Some("generation.test".to_owned()),
             search_matches: vec![],
             symbols: vec![],
@@ -627,5 +692,56 @@ mod tests {
         assert!(schema["required"].as_array().is_none_or(|required| {
             !required.contains(&Value::String("memory_graph_coverage".to_owned()))
         }));
+    }
+
+    #[test]
+    fn context_contract_carries_freshness_and_lexical_routing() {
+        let request: ContextSurfaceRequestV1 = serde_json::from_value(json!({
+            "task": "how is stock reserved",
+            "lexical_anchors": ["reserve_stock"],
+            "prefer_symbol": true,
+        }))
+        .expect("context request decodes routing fields");
+        assert_eq!(
+            request.lexical_anchors.as_deref(),
+            Some(&["reserve_stock".to_owned()][..])
+        );
+        assert_eq!(request.prefer_symbol, Some(true));
+
+        let fresh = serde_json::to_value(context_result()).expect("context result serializes");
+        assert_eq!(fresh["freshness"], json!({"state": "fresh"}));
+
+        let mut stale = context_result();
+        stale.freshness = PrimitiveSearchFreshnessV1 {
+            state: PrimitiveFreshnessStateV1::PossiblyStale,
+            indexing: Some(PrimitiveIndexingStateV1 {
+                summary: "state=refreshing".to_owned(),
+                served_generation: Some("generation.old".to_owned()),
+                latest_generation: Some("generation.new".to_owned()),
+                staleness_state: Some("refreshing".to_owned()),
+                rebuild_in_flight: Some(true),
+                stale_lanes: vec!["lexical".to_owned()],
+                reason: None,
+            }),
+        };
+        let stale = serde_json::to_value(stale).expect("context result serializes");
+        assert_eq!(stale["freshness"]["state"], "possibly_stale");
+        assert_eq!(
+            stale["freshness"]["indexing"]["summary"],
+            "state=refreshing"
+        );
+        assert_eq!(
+            stale["freshness"]["indexing"]["stale_lanes"],
+            json!(["lexical"])
+        );
+
+        let schema = serde_json::to_value(schema_for!(ContextResultV1))
+            .expect("context result schema serializes");
+        assert!(
+            schema["required"]
+                .as_array()
+                .is_some_and(|required| required.contains(&Value::String("freshness".to_owned()))),
+            "freshness is part of every context result"
+        );
     }
 }
