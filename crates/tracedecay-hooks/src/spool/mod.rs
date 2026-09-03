@@ -33,12 +33,14 @@ mod meta;
 mod replay;
 mod types;
 
+#[cfg(test)]
+use checkpoint::{CHECKPOINT_ENTRY_BYTES, CHECKPOINT_HEADER_BYTES, CHECKPOINT_MAGIC};
 use checkpoint::{
     CHECKPOINT_REWRITE_BYTE_THRESHOLD, CHECKPOINT_REWRITE_FRAME_THRESHOLD, CheckpointAnchorV1,
-    RecordsFileRevisionV1, read_checkpoint, read_transition, records_file_revision,
+    RecordsFileRevisionV1, read_checkpoint, read_frame_at, read_transition, records_file_revision,
     write_checkpoint, write_transition,
 };
-use types::{AcknowledgedSequenceV1, HookSpoolMetaV1, SpoolIntegrityV1};
+use types::{AcknowledgedSequenceV1, HookSpoolMetaV1, PendingRecordV1, SpoolIntegrityV1};
 pub use types::{
     HookReplayBatchV1, HookSpoolAckDispositionV1, HookSpoolAckV1, HookSpoolConfigV1,
     HookSpoolError, HookSpoolLimitsV1, HookSpoolOpenReportV1, HookSpoolRecordV1,
@@ -61,7 +63,8 @@ use replay::{
 const SPOOL_MAGIC: &[u8; 4] = b"TDH2";
 const SPOOL_FORMAT_VERSION: u16 = 1;
 const SPOOL_META_VERSION: u16 = 1;
-const CHECKPOINT_FORMAT_VERSION: u16 = 1;
+// Member filenames retain the spool layout generation; this header version owns the body shape.
+const CHECKPOINT_FORMAT_VERSION: u16 = 2;
 const FRAME_LENGTH_BYTES: usize = 4;
 const FRAME_HEADER_BYTES: usize = 4 + 2 + 8 + 8 + 32 + 4;
 const FRAME_CHECKSUM_BYTES: usize = framed_log::CHECKSUM_BYTES;
@@ -91,9 +94,8 @@ pub struct HookSpoolV1 {
     meta: HookSpoolMetaV1,
     checkpoint: Option<CheckpointAnchorV1>,
     observed_records_revision: Option<RecordsFileRevisionV1>,
-    pending: Vec<HookSpoolRecordV1>,
+    pending: Vec<PendingRecordV1>,
     pending_by_session: BTreeMap<[u8; 32], (u32, u64)>,
-    pending_by_event: BTreeMap<[u8; 16], usize>,
     physical_len: u64,
     round_robin_after: Option<[u8; 32]>,
     replay_claims: BTreeMap<[u8; 32], [u8; 16]>,
@@ -209,8 +211,17 @@ impl HookSpoolV1 {
         validate_meta(&meta, config.limits, config.host)?;
         let current_revision = records_file_revision(&root)?;
         let cached_checkpoint = read_checkpoint(&root, config)?;
+        let checkpoint_bytes = cached_checkpoint
+            .as_ref()
+            .map_or(0, |checkpoint| checkpoint.bytes);
+        let mut checkpoint_records = 0u32;
+        let mut checkpoint_highest_sequence = None;
         let (mut scan, reusable_checkpoint) = match cached_checkpoint {
             Some(checkpoint) if checkpoint.records_revision == current_revision => {
+                checkpoint_records = u32::try_from(checkpoint.records.len())
+                    .map_err(|_| HookSpoolError::MetadataCorrupted)?;
+                checkpoint_highest_sequence =
+                    checkpoint.records.last().map(|record| record.sequence);
                 let validated_end = checkpoint
                     .records_revision
                     .as_ref()
@@ -237,6 +248,10 @@ impl HookSpoolV1 {
                         && transition.current_revision.length >= validated_end
                 });
                 if transition_matches {
+                    checkpoint_records = u32::try_from(checkpoint.records.len())
+                        .map_err(|_| HookSpoolError::MetadataCorrupted)?;
+                    checkpoint_highest_sequence =
+                        checkpoint.records.last().map(|record| record.sequence);
                     let anchor = CheckpointAnchorV1 {
                         records_revision: checkpoint.records_revision.clone(),
                         checksum: checkpoint.checksum,
@@ -289,8 +304,19 @@ impl HookSpoolV1 {
         let mut checkpoint_rewritten = false;
         let checkpoint = if matches!(meta.integrity, SpoolIntegrityV1::Healthy) {
             let unreconciled_meta = meta.clone();
-            reconcile_append_intent(&mut meta, &scan.records, config.host)?;
-            validate_meta_against_records(&meta, &scan.records, config.limits)?;
+            if meta.append_intent.as_ref().is_some_and(|intent| {
+                checkpoint_highest_sequence.is_some_and(|highest| intent.sequence <= highest)
+            }) {
+                return Err(HookSpoolError::MetadataCorrupted);
+            }
+            let suffix_at = usize::try_from(checkpoint_records)
+                .map_err(|_| HookSpoolError::MetadataCorrupted)?;
+            reconcile_append_intent(&mut meta, &scan.records[suffix_at..], config.host)?;
+            validate_meta_against_records(
+                &meta,
+                scan.records.iter().map(|record| record.sequence),
+                config.limits,
+            )?;
             if meta_was_missing || meta != unreconciled_meta {
                 write_meta(&root, &meta)?;
             }
@@ -315,13 +341,14 @@ impl HookSpoolV1 {
             })
             .collect::<Vec<_>>();
         let pending_by_session = usage_by_session(&pending, config.limits)?;
-        let pending_by_event = pending_event_index(&pending);
         let report = HookSpoolOpenReportV1 {
             pending_records: u32::try_from(pending.len()).map_err(|_| HookSpoolError::SpoolFull)?,
             pending_bytes: pending_by_session.values().map(|(_, bytes)| *bytes).sum(),
             committed_through: meta.committed_through,
             next_sequence: meta.next_sequence,
             scanned_records: scan.scanned_records,
+            checkpoint_records,
+            checkpoint_bytes,
             checkpoint_rewritten,
             truncated_partial_tail_bytes,
             corrupted_at_offset: match meta.integrity {
@@ -347,7 +374,6 @@ impl HookSpoolV1 {
             observed_records_revision,
             pending,
             pending_by_session,
-            pending_by_event,
             physical_len: scan.physical_len,
             round_robin_after,
             replay_claims: BTreeMap::new(),
@@ -374,11 +400,18 @@ impl HookSpoolV1 {
     /// Return the durable pending envelope for an exact provider event ID.
     /// Callers use this only to preserve a prior transport attempt's envelope
     /// on retry; it does not grant replay or acknowledgement authority.
-    pub fn pending_envelope(&self, event_id: [u8; 16]) -> Option<HookEventEnvelopeV2> {
-        self.pending_by_event
-            .get(&event_id)
-            .and_then(|&index| self.pending.get(index))
-            .map(|record| record.envelope.clone())
+    pub fn pending_envelope(&mut self, event_id: [u8; 16]) -> Option<HookEventEnvelopeV2> {
+        let index = self
+            .pending
+            .iter()
+            .position(|record| record.event_id == event_id)?;
+        match self.hydrate(index) {
+            Ok(record) => Some(record.envelope),
+            Err(_) => {
+                self.recovery_required = true;
+                None
+            }
+        }
     }
 
     /// Append one validated envelope. An exact pending `event_id` duplicate
@@ -407,10 +440,14 @@ impl HookSpoolV1 {
         if encoded.is_empty() || encoded.len() > MAX_HOOK_PAYLOAD_BYTES {
             return Err(HookSpoolError::RecordTooLarge);
         }
-        if let Some(&index) = self.pending_by_event.get(&envelope.event_id) {
-            let existing = &self.pending[index];
+        if let Some(index) = self
+            .pending
+            .iter()
+            .position(|record| record.event_id == envelope.event_id)
+        {
+            let existing = self.hydrate(index)?;
             return if existing.envelope == envelope {
-                Ok(existing.clone())
+                Ok(existing)
             } else {
                 Err(HookSpoolError::EventIdConflict)
             };
@@ -440,7 +477,7 @@ impl HookSpoolV1 {
             self.recovery_required = true;
             return Err(error);
         }
-        let record = decode_complete_frame(&frame, 0, self.config.host)?;
+        let record = decode_complete_frame(&frame, self.physical_len, self.config.host)?;
         let mut committed_meta = self.meta.clone();
         committed_meta.next_sequence = sequence
             .checked_add(1)
@@ -452,7 +489,7 @@ impl HookSpoolV1 {
         }
         self.meta = committed_meta;
         self.physical_len = self.physical_len.saturating_add(frame_len);
-        self.note_pending(&record)?;
+        self.note_pending(&record, self.physical_len.saturating_sub(frame_len))?;
         let Some(checkpoint) = self.checkpoint.as_ref() else {
             self.recovery_required = true;
             return Err(HookSpoolError::RecoveryRequired);
@@ -499,11 +536,19 @@ impl HookSpoolV1 {
             if selected.len() == session_cap || self.replay_claims.contains_key(&session) {
                 continue;
             }
-            let records = batch_for_session(&self.pending, session, now)?;
-            if records.is_empty() {
+            let indices = batch_for_session(&self.pending, session, now)?;
+            if indices.is_empty() {
                 continue;
             }
-            let byte_count = records.iter().map(|record| record.framed_len).sum::<u32>();
+            let byte_count = indices.iter().try_fold(0u32, |bytes, index| {
+                bytes
+                    .checked_add(self.pending[*index].framed_len)
+                    .ok_or(HookSpoolError::ReplayBatchExceeded)
+            })?;
+            let mut records = Vec::with_capacity(indices.len());
+            for index in indices {
+                records.push(self.hydrate(index)?);
+            }
             let claim_id = next_token();
             selected.push((
                 session,
@@ -565,13 +610,24 @@ impl HookSpoolV1 {
 
     /// List records whose maximum transport age has elapsed. They remain
     /// durable until the daemon supplies a terminal tombstone acknowledgement.
-    pub fn expired_records(&self, now: UtcMicros) -> Vec<HookSpoolRecordV1> {
-        let expired = self
+    pub fn expired_records(&mut self, now: UtcMicros) -> Vec<HookSpoolRecordV1> {
+        let indices = self
             .pending
             .iter()
-            .filter(|record| is_expired(record, now))
-            .cloned()
+            .enumerate()
+            .filter(|(_, record)| is_expired(record, now))
+            .map(|(index, _)| index)
             .collect::<Vec<_>>();
+        let mut expired = Vec::with_capacity(indices.len());
+        for index in indices {
+            match self.hydrate(index) {
+                Ok(record) => expired.push(record),
+                Err(_) => {
+                    self.recovery_required = true;
+                    return Vec::new();
+                }
+            }
+        }
         hotpath::gauge!("hooks.spool.expired.frame_count").set(expired.len());
         expired
     }
@@ -618,7 +674,6 @@ impl HookSpoolV1 {
         write_meta(&self.root, &next_meta)?;
         self.meta = next_meta;
         self.pending.remove(index);
-        self.forget_pending_event(removed.envelope.event_id, index);
         self.release_usage(&removed);
         #[cfg(feature = "hotpath")]
         {
@@ -644,6 +699,43 @@ impl HookSpoolV1 {
             self.compact_pending()?;
         }
         Ok(true)
+    }
+
+    fn hydrate(&mut self, index: usize) -> Result<HookSpoolRecordV1, HookSpoolError> {
+        if records_file_revision(&self.root)? != self.observed_records_revision {
+            self.recovery_required = true;
+            return Err(HookSpoolError::MetadataCorrupted);
+        }
+        let entry = self
+            .pending
+            .get(index)
+            .cloned()
+            .ok_or(HookSpoolError::MetadataCorrupted)?;
+        if let Some(record) = entry.to_record() {
+            return Ok(record);
+        }
+        let frame = match read_frame_at(&self.root, entry.file_offset, entry.framed_len) {
+            Ok(frame) => frame,
+            Err(error) => {
+                self.recovery_required = true;
+                return Err(error);
+            }
+        };
+        let record = match decode_complete_frame(&frame, entry.file_offset, self.config.host) {
+            Ok(record) if entry.matches_record(&record) => record,
+            Ok(_) | Err(_) => return self.fail_corrupted(entry.file_offset),
+        };
+        self.pending[index].envelope = Some(record.envelope.clone());
+        Ok(record)
+    }
+
+    fn fail_corrupted<T>(&mut self, at_offset: u64) -> Result<T, HookSpoolError> {
+        self.meta.integrity = SpoolIntegrityV1::Corrupted { at_offset };
+        if let Err(error) = write_meta(&self.root, &self.meta) {
+            self.recovery_required = true;
+            return Err(error);
+        }
+        Err(HookSpoolError::Corrupted { at_offset })
     }
 
     fn ensure_append_capacity(
@@ -709,20 +801,23 @@ impl HookSpoolV1 {
         Ok(())
     }
 
-    fn note_pending(&mut self, record: &HookSpoolRecordV1) -> Result<(), HookSpoolError> {
+    fn note_pending(
+        &mut self,
+        record: &HookSpoolRecordV1,
+        file_offset: u64,
+    ) -> Result<(), HookSpoolError> {
         let entry = self
             .pending_by_session
             .entry(record.protected_session_id)
             .or_default();
         entry.0 = entry.0.checked_add(1).ok_or(HookSpoolError::SpoolFull)?;
         entry.1 = entry.1.saturating_add(u64::from(record.framed_len));
-        self.pending_by_event
-            .insert(record.envelope.event_id, self.pending.len());
-        self.pending.push(record.clone());
+        self.pending
+            .push(PendingRecordV1::from_record(record, file_offset));
         Ok(())
     }
 
-    fn release_usage(&mut self, record: &HookSpoolRecordV1) {
+    fn release_usage(&mut self, record: &PendingRecordV1) {
         if let Some(entry) = self
             .pending_by_session
             .get_mut(&record.protected_session_id)
@@ -742,34 +837,43 @@ impl HookSpoolV1 {
             .sum()
     }
 
-    fn forget_pending_event(&mut self, event_id: [u8; 16], removed_index: usize) {
-        self.pending_by_event.remove(&event_id);
-        for index in self.pending_by_event.values_mut() {
-            if *index > removed_index {
-                *index -= 1;
-            }
-        }
-    }
-
     #[hotpath::measure(label = "hooks.spool.compact")]
     fn compact_pending(&mut self) -> Result<(), HookSpoolError> {
         self.ensure_healthy()?;
+        if records_file_revision(&self.root)? != self.observed_records_revision {
+            self.recovery_required = true;
+            return Err(HookSpoolError::MetadataCorrupted);
+        }
+        let maximum =
+            usize::try_from(self.config.limits.max_host_bytes).map_err(|_| HookSpoolError::Io)?;
+        let source = match read_bounded(&records_path(&self.root), maximum)? {
+            Some(source) => source,
+            None if self.pending.is_empty() => Vec::new(),
+            None => return self.fail_corrupted(0),
+        };
         let mut bytes = Vec::with_capacity(self.pending_bytes() as usize);
         let mut offset = 0u64;
         let mut rebuilt = Vec::with_capacity(self.pending.len());
-        for record in &self.pending {
-            let payload = canonical_json_bytes(&record.envelope)
+        for entry in self.pending.clone() {
+            let start = usize::try_from(entry.file_offset)
                 .map_err(|_| HookSpoolError::MetadataCorrupted)?;
-            let frame = encode_frame(
-                record.sequence,
-                record.queued_at,
-                record.protected_session_id,
-                &payload,
-            )?;
-            let rebuilt_record = decode_complete_frame(&frame, offset, self.config.host)?;
-            offset = offset.saturating_add(frame.len() as u64);
-            bytes.extend_from_slice(&frame);
-            rebuilt.push(rebuilt_record);
+            let end = start
+                .checked_add(
+                    usize::try_from(entry.framed_len)
+                        .map_err(|_| HookSpoolError::MetadataCorrupted)?,
+                )
+                .ok_or(HookSpoolError::MetadataCorrupted)?;
+            let Some(frame) = source.get(start..end) else {
+                return self.fail_corrupted(entry.file_offset);
+            };
+            let record = match decode_complete_frame(frame, entry.file_offset, self.config.host) {
+                Ok(record) if entry.matches_record(&record) => record,
+                Ok(_) | Err(_) => return self.fail_corrupted(entry.file_offset),
+            };
+            let rebuilt_entry = PendingRecordV1::from_record(&record, offset);
+            offset = offset.saturating_add(u64::from(entry.framed_len));
+            bytes.extend_from_slice(frame);
+            rebuilt.push(rebuilt_entry);
         }
         hotpath::measure_block!("hooks.spool.fsync.compact", {
             shared_atomic_write(
@@ -790,7 +894,6 @@ impl HookSpoolV1 {
         self.pending = rebuilt;
         self.observed_records_revision = checkpoint.records_revision.clone();
         self.checkpoint = Some(checkpoint);
-        self.pending_by_event = pending_event_index(&self.pending);
         self.physical_len = offset;
         hotpath::gauge!("hooks.spool.compact.frame_count").set(self.pending.len());
         hotpath::gauge!("hooks.spool.compact.bytes").set(self.physical_len);
@@ -890,14 +993,6 @@ fn ensure_root(root: &Path) -> Result<(), HookSpoolError> {
     hotpath::measure_block!("hooks.spool.fsync.directory", {
         shared_sync_directory(root, DIRECTORY_POLICY).map_err(|_| HookSpoolError::Io)
     })
-}
-
-fn pending_event_index(pending: &[HookSpoolRecordV1]) -> BTreeMap<[u8; 16], usize> {
-    pending
-        .iter()
-        .enumerate()
-        .map(|(index, record)| (record.envelope.event_id, index))
-        .collect()
 }
 
 fn validate_regular_or_missing(path: &Path) -> Result<bool, HookSpoolError> {
