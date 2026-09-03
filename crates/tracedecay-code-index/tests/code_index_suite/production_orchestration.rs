@@ -2789,14 +2789,41 @@ fn partitioned_codec_preserves_pre_change_bytes_and_round_trips() {
         "a file or evidence segment changed bytes"
     );
 
-    let restored =
-        CodeIndexPublishedGenerationV1::decode_partitioned_sealed(&manifest, |digest, _| {
-            segments.get(digest.as_str()).cloned().ok_or_else(|| {
+    let buffer_address = Cell::new(None);
+    let segment_reads = Cell::new(0_usize);
+    let largest_segment = Cell::new(0_usize);
+    let buffer_capacity = Cell::new(0_usize);
+    let restored = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+        &manifest,
+        |digest, _, buffer| {
+            let address = buffer as *const Vec<u8>;
+            if let Some(first_address) = buffer_address.get() {
+                assert_eq!(
+                    address, first_address,
+                    "every segment read must receive the same caller-owned Vec"
+                );
+            } else {
+                buffer_address.set(Some(address));
+            }
+            let bytes = segments.get(digest.as_str()).ok_or_else(|| {
                 CodeIndexProductionErrorV1::Contract("golden segment is missing".to_owned())
-            })
-        })
-        .expect("pre-change partitioned bytes decode")
-        .expect("revision seven partitioned manifest");
+            })?;
+            largest_segment.set(largest_segment.get().max(bytes.len()));
+            buffer.clear();
+            buffer.extend_from_slice(bytes);
+            buffer_capacity.set(buffer.capacity());
+            segment_reads.set(segment_reads.get() + 1);
+            Ok(())
+        },
+    )
+    .expect("pre-change partitioned bytes decode")
+    .expect("revision seven partitioned manifest");
+    assert_eq!(segment_reads.get(), PARTITIONED_PRE_CHANGE_SEGMENTS.len());
+    assert!(
+        buffer_capacity.get() >= largest_segment.get()
+            && buffer_capacity.get() <= largest_segment.get().next_power_of_two(),
+        "the reusable allocation must be bounded by the largest segment"
+    );
     assert_eq!(
         restored.encode_sealed().expect("restored generation seals"),
         expected.encode_sealed().expect("expected generation seals"),
