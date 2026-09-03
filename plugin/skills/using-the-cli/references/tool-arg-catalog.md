@@ -127,6 +127,26 @@ tracedecay tool gini --args '{"metric":"fan_in","scope":"file"}'
 `metric` is one of: `complexity | lines | fan_in | fan_out | members`. `scope`
 is `file | symbol`. An invalid enum value is rejected with the allowed list.
 
+### Hybrid search with anchors — `lexical_anchors` (array of strings)
+
+```bash
+tracedecay tool search --args - <<'JSON'
+{
+  "query": "how is stock reserved during checkout",
+  "lexical_anchors": ["reserve_stock", "InventoryLedger::commit"],
+  "prefer_symbol": true
+}
+JSON
+```
+
+`lexical_anchors` are exact identifiers/terms ranked through the lexical
+lane as additional routes fused with the query (at most 8, one
+whitespace-free term each, no repeats; violations are typed rejections).
+`prefer_symbol` adds a symbol-name route for the identifier-shaped words of
+the query. Both are accepted by `search` and `context`. Every response opens
+with `freshness: fresh | possibly_stale`; `possibly_stale` is followed by one
+`indexing:` line.
+
 ### Cross-project queries — `project_selector` (object)
 
 `search`, `context`, `callers`, and other read tools accept
@@ -162,8 +182,8 @@ flags are fine. Parameter names below are the MCP argument names in kebab-case.
 
 | Tool | Required flags | Common optional flags |
 |---|---|---|
-| `search` | `--query` | `--limit`, `--format` |
-| `context` | `--task` | `--include-code`, `--max-nodes`, `--mode` |
+| `search` | `--query` | `--limit`, `--format`, `--prefer-symbol`, `--lexical-anchors a --lexical-anchors b` (or `a,b`; max 8 one-term anchors) |
+| `context` | `--task` | `--include-code`, `--max-nodes`, `--mode`, `--prefer-symbol`, `--lexical-anchors` |
 | `body` | `--symbol` | `--limit` |
 | `callers` / `callees` | `--node-id` (from a prior search/context hit) | `--max-depth` |
 | `impact` | `--node-id` | `--max-depth` |

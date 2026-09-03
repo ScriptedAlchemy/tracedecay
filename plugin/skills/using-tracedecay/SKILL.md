@@ -44,7 +44,8 @@ errors or times out, the same tool runs as `tracedecay tool <name> --args '<json
 | The moment you are in | Do this instead |
 |---|---|
 | About to grep/rg a literal string, regex, or config key | `tracedecay_grep` — skill: `tracedecay:exploring-code` |
-| About to search for a symbol or concept, or open/Read a source file | `tracedecay_search` / `tracedecay_context`; read via outline→body→read slices — `tracedecay:exploring-code` |
+| About to search for a symbol or concept, or open/Read a source file | `tracedecay_search` / `tracedecay_context` (pass known identifiers as `lexical_anchors`, set `prefer_symbol` when the question names symbols); read via outline→body→read slices — `tracedecay:exploring-code` |
+| Wondering whether search results are current | Read the `freshness:` line that opens every `tracedecay_search` / `tracedecay_context` response; `possibly_stale` carries one `indexing:` line. No `tracedecay_status` preflight — `tracedecay:exploring-code` |
 | User names another repo/project/workspace, sibling checkout, or cross-repo/cross-project context | `tracedecay_project_list` / `tracedecay_project_search` → `tracedecay_project_context`; pass `project_id`, `project_path`, or `project_selector` to `tracedecay_context`, `tracedecay_search`, and `tracedecay_message_search` |
 | "Who calls X" / "what does X call" / "trace this" | `tracedecay:tracing-functions` |
 | Wondering what breaks or which tests to run | `tracedecay:assessing-impact` |
@@ -76,7 +77,7 @@ errors or times out, the same tool runs as `tracedecay tool <name> --args '<json
 | "I'll use gh to get the PR diff" | `pr_context` computes changed symbols + dependents + tests from the local graph — offline. gh is for comments/CI only. |
 | "I made one context call; now I'll bash around" | One call is discovery, not license. Stay on the skill's ladder; pass `seen_node_ids` forward and narrow — don't switch to grep. |
 | "I'll jot this in MEMORY.md" | Durable facts go to `fact_store` (add) — searchable, trust-ranked, cross-session. MEMORY.md is not memory. |
-| "The index might be stale — I should sync first" | Hooks auto-sync on every session and edit. Never run manual sync; if results look stale, check `tracedecay_status` and report it. |
+| "The index might be stale — I should sync first" | Hooks auto-sync on every session and edit. Never run manual sync; every search/context response opens with a `freshness:` verdict — `possibly_stale` names the indexing state inline, so report that instead of preflighting `tracedecay_status`. |
 | "The MCP call might fail / just failed" | `tracedecay tool <name>` always works. Transport ≠ capability. |
 | "This is a simple lookup" | Simple lookups are exactly what the graph is for. |
 | "I already know this codebase" | The graph is fresher than your memory. Check it. |
