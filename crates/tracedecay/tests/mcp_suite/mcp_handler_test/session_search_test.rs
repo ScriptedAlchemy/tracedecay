@@ -310,13 +310,12 @@ async fn production_codex_hook_ingest_survives_message_search_reopen() {
     assert!(commit.success(), "git commit must succeed");
     write_production_codex_rollout(&home, &project);
 
-    let harness =
-        ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
-            &isolation,
-            [project.clone()],
-        )
-        .await
-        .expect("production composition harness");
+    let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+        &isolation,
+        [project.clone()],
+    )
+    .await
+    .expect("production composition harness");
     let response = harness
         .call_tool(
             &project,
@@ -357,13 +356,12 @@ async fn production_codex_hook_ingest_survives_message_search_reopen() {
 
     harness.shutdown().await;
 
-    let restarted =
-        ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
-            &isolation,
-            [project.clone()],
-        )
-        .await
-        .expect("reopen production composition");
+    let restarted = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+        &isolation,
+        [project.clone()],
+    )
+    .await
+    .expect("reopen production composition");
     let resumed = production_codex_message_search(&restarted, &project).await;
     assert!(
         resumed["results"]

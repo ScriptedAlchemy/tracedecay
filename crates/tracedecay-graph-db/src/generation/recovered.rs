@@ -199,7 +199,7 @@ struct EncodedProofChunk {
 }
 
 impl EncodedProofChunk {
-        fn with_rows(rows: usize) -> Self {
+    fn with_rows(rows: usize) -> Self {
         Self {
             buffer: Vec::new(),
             frame_ends: Vec::with_capacity(rows),
@@ -208,7 +208,7 @@ impl EncodedProofChunk {
 
     /// Appends one frame in exactly the layout `write_frame` streams:
     /// `tag_len | tag | byte_len | bytes`, lengths big-endian u64.
-        fn push_frame(&mut self, tag: &str, bytes: &[u8]) -> Result<(), GraphDbError> {
+    fn push_frame(&mut self, tag: &str, bytes: &[u8]) -> Result<(), GraphDbError> {
         let (tag_len, byte_len) = frame_length_headers(tag, bytes)?;
         self.buffer.extend_from_slice(&tag_len);
         self.buffer.extend_from_slice(tag.as_bytes());
