@@ -21,9 +21,9 @@ use tracedecay_code_index::{
         CodeIndexProductionConfigV1, CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1,
         CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
         CodeIndexRepositoryParseIdentityV1, SEALED_GENERATION_FORMAT_REVISION_V1,
-        SharedPhysicalCodeArtifactPoolV1, VerifiedSealedLexicalPageReadV1,
-        VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalPageV1,
-        sealed_generation_payload_digest,
+        SealedGenerationSegmentKindV1, SharedPhysicalCodeArtifactPoolV1,
+        VerifiedSealedLexicalPageReadV1, VerifiedSealedLexicalPageSourceV1,
+        VerifiedSealedLexicalPageV1, sealed_generation_payload_digest,
     },
     projection::{
         ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -2623,4 +2623,199 @@ fn parallel_and_sequential_decodes_are_byte_identical() {
 #[ignore = "sealed-decode measurement harness; run one width per process, see fn docs"]
 fn sealed_decode_width_probe() {
     parallel_equivalence::run_sealed_decode_width_probe();
+}
+
+fn partitioned_codec_request(beta_value: u64, sealed_at: i64) -> CodeIndexBuildRequestV1 {
+    let sources = [
+        (
+            "file.partitioned.alpha",
+            "src/alpha.rs",
+            "pub struct Alpha;\nimpl Alpha { pub fn call(&self) -> u64 { crate::beta::beta() } }\n",
+        ),
+        (
+            "file.partitioned.beta",
+            "src/beta.rs",
+            if beta_value == 1 {
+                "pub fn beta() -> u64 { 1 }\n"
+            } else {
+                "pub fn beta() -> u64 { 2 }\n"
+            },
+        ),
+        (
+            "file.partitioned.unresolved",
+            "src/unresolved.rs",
+            "pub fn unresolved() { missing_external(); }\n",
+        ),
+    ];
+    let mut identity = Sha256::new();
+    let mut files = Vec::new();
+    let mut captured_files = Vec::new();
+    let mut receipts = Vec::new();
+    for (index, (occurrence, logical_path, source)) in sources.into_iter().enumerate() {
+        identity.update(logical_path.as_bytes());
+        identity.update([0]);
+        identity.update(source.as_bytes());
+        let file_occurrence_id = id::<FileOccurrenceId>(occurrence);
+        files.push(SanitizedCodeFileV1 {
+            file_occurrence_id: file_occurrence_id.clone(),
+            logical_path: logical_path.to_owned(),
+            language: Some(id::<LanguageId>("rust")),
+            content_digest: content_digest(source.as_bytes()),
+            disposition: SnapshotFileDispositionV1::Present,
+        });
+        captured_files.push(CodeIndexCapturedFileV1 {
+            file_occurrence_id,
+            sanitized_bytes: Arc::from(source.as_bytes()),
+            sensitivity_level: tracedecay_domain::SensitivityLevelV1::Public,
+        });
+        receipts.push(id::<SanitizationReceiptId>(&format!(
+            "receipt.partitioned.{index}"
+        )));
+    }
+    CodeIndexBuildRequestV1 {
+        snapshot: SanitizedCodeSnapshotV1 {
+            repository: id::<RepositoryId>("repository.production"),
+            worktree: None,
+            reference: None,
+            source_revision: None,
+            sanitizer_revision: id::<SanitizerRevision>("sanitizer.v1"),
+            sanitization_receipts: receipts,
+            content_identity: content_digest(&identity.finalize()),
+            captured_at: UtcMicros(1_000_000),
+            files,
+        },
+        captured_files,
+        changed_files: if beta_value == 1 {
+            BTreeSet::new()
+        } else {
+            BTreeSet::from(["src/beta.rs".to_owned()])
+        },
+        invalidations: BTreeSet::new(),
+        ignored_source_admissions: Vec::new(),
+        repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
+            tree: None,
+            dirty: RepositoryDirtyStateV1::Dirty,
+        },
+        sealed_at: UtcMicros(sealed_at),
+        target_projection_key: projection_key(),
+    }
+}
+
+fn partitioned_codec_fixture() -> (
+    CodeIndexPublishedGenerationV1,
+    Vec<u8>,
+    BTreeMap<String, Vec<u8>>,
+) {
+    let store = SharedPublicationStore::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
+        .expect("partitioned fixture owner");
+    let first = owner
+        .build_and_publish(partitioned_codec_request(1, 1_100_000), &ActiveControl)
+        .expect("partitioned parent generation");
+    let mut segments = BTreeMap::new();
+    let parent_manifest = first
+        .encode_partitioned_sealed(|digest, bytes| {
+            segments.insert(digest.as_str().to_owned(), bytes.to_vec());
+            Ok(())
+        })
+        .expect("partitioned parent encoding");
+    let second = owner
+        .build_and_publish(partitioned_codec_request(2, 1_200_000), &ActiveControl)
+        .expect("partitioned child generation");
+    let mut child_file_segments = 0;
+    let manifest = second
+        .encode_partitioned_sealed_with_parent(Some(&parent_manifest), |kind, digest, bytes| {
+            if kind == SealedGenerationSegmentKindV1::File {
+                child_file_segments += 1;
+            }
+            segments.insert(digest.as_str().to_owned(), bytes.to_vec());
+            Ok(())
+        })
+        .expect("partitioned child encoding");
+    assert!(
+        child_file_segments < second.snapshot().files.len(),
+        "the child fixture must reuse at least one parent file segment"
+    );
+    assert!(
+        !second.lineage().is_empty(),
+        "the child fixture needs lineage"
+    );
+    assert!(
+        !second.edges().is_empty(),
+        "the child fixture needs edge evidence"
+    );
+    (second.as_ref().clone(), manifest, segments)
+}
+
+const PARTITIONED_PRE_CHANGE_STATE_DIGEST: &str =
+    "sha256:289ecade2216e49bf0f40c7de9be09c21685200423c894530804569b6963609e";
+const PARTITIONED_PRE_CHANGE_SEGMENTS: &[(&str, u64)] = &[
+    (
+        "sha256:462ca12853ede4c82969ef6cc161dedc0952b5b7ef85dcf23b125adddb25ecf8",
+        12_312,
+    ),
+    (
+        "sha256:5cea7a47c6160776faa037dc1a530e5cecd38440d4833f8ebaf60a86e7535ea7",
+        4_923,
+    ),
+    (
+        "sha256:cc82022dad2a1bfc50f483df6a1433962ffd454b70d63a73b6ddd7ebaee2cf12",
+        5_123,
+    ),
+    (
+        "sha256:d1b83239d4010ac53b635c2d7c4bef3d1be9aa2e59d8f09d0404d28c1d00e8ab",
+        19_548,
+    ),
+];
+
+#[test]
+fn partitioned_codec_preserves_pre_change_bytes_and_round_trips() {
+    let (expected, manifest, segments) = partitioned_codec_fixture();
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&manifest).expect("partitioned manifest JSON");
+    assert_eq!(
+        envelope["state_digest"], PARTITIONED_PRE_CHANGE_STATE_DIGEST,
+        "the canonical manifest payload bytes changed"
+    );
+    let identities = CodeIndexPublishedGenerationV1::partitioned_segment_identities(&manifest)
+        .expect("partitioned segment identities parse")
+        .expect("revision seven partitioned manifest");
+    assert_eq!(
+        identities
+            .iter()
+            .map(|identity| (identity.digest.as_str(), identity.size_bytes))
+            .collect::<Vec<_>>(),
+        PARTITIONED_PRE_CHANGE_SEGMENTS,
+        "a file or evidence segment changed bytes"
+    );
+
+    let restored =
+        CodeIndexPublishedGenerationV1::decode_partitioned_sealed(&manifest, |digest, _| {
+            segments.get(digest.as_str()).cloned().ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract("golden segment is missing".to_owned())
+            })
+        })
+        .expect("pre-change partitioned bytes decode")
+        .expect("revision seven partitioned manifest");
+    assert_eq!(
+        restored.encode_sealed().expect("restored generation seals"),
+        expected.encode_sealed().expect("expected generation seals"),
+        "historical decode must restore the same typed generation"
+    );
+
+    let mut reencoded_segments = BTreeMap::new();
+    let reencoded_manifest = restored
+        .encode_partitioned_sealed(|digest, bytes| {
+            reencoded_segments.insert(digest.as_str().to_owned(), bytes.to_vec());
+            Ok(())
+        })
+        .expect("restored partitioned generation re-encodes");
+    assert_eq!(reencoded_manifest, manifest);
+    for (digest, _) in PARTITIONED_PRE_CHANGE_SEGMENTS {
+        assert_eq!(
+            reencoded_segments.get(*digest),
+            segments.get(*digest),
+            "round-trip segment {digest} changed bytes"
+        );
+    }
 }
