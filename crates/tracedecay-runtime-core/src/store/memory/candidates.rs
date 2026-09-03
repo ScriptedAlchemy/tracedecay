@@ -66,6 +66,26 @@ fn project_memory_fts_query(tokens: &[String]) -> Option<String> {
     })
 }
 
+fn project_memory_candidate_tokens(
+    query: &ProjectMemoryFactSearchQuery,
+) -> FactStoreResult<Vec<String>> {
+    let text = query
+        .query()
+        .ok_or_else(|| storage_message(PROJECT_MEMORY_READ_OPERATION, "search query is missing"))?;
+    let mut tokens = project_memory_tokens(text);
+    if let Some(vocabulary) = query.canonical_vocabulary() {
+        for alias in vocabulary
+            .expanded_aliases(text)
+            .map_err(FactStoreError::from)?
+        {
+            tokens.extend(project_memory_tokens(&alias));
+        }
+        tokens.sort_unstable();
+        tokens.dedup();
+    }
+    Ok(tokens)
+}
+
 fn project_memory_escape_like(value: &str) -> String {
     value
         .replace('\\', "\\\\")
@@ -109,10 +129,7 @@ async fn project_memory_fts_candidates_tx(
     read_control: &FactReadControl,
 ) -> FactStoreResult<Vec<(FactId, f64)>> {
     ensure_project_memory_read_active(read_control)?;
-    let text = query
-        .query()
-        .ok_or_else(|| storage_message(PROJECT_MEMORY_READ_OPERATION, "search query is missing"))?;
-    let Some(fts_query) = project_memory_fts_query(&project_memory_tokens(text)) else {
+    let Some(fts_query) = project_memory_fts_query(&project_memory_candidate_tokens(query)?) else {
         return Ok(Vec::new());
     };
     let mut values = project_memory_candidate_values(query, min_trust)?;
@@ -179,7 +196,7 @@ async fn project_memory_entity_candidates_tx(
     let text = query
         .query()
         .ok_or_else(|| storage_message(PROJECT_MEMORY_READ_OPERATION, "search query is missing"))?;
-    let mut terms = project_memory_tokens(text);
+    let mut terms = project_memory_candidate_tokens(query)?;
     let normalized = normalize_entity(text).to_ascii_lowercase();
     if !normalized.is_empty() {
         terms.push(normalized);

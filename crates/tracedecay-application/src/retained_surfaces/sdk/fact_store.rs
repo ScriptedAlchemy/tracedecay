@@ -5,7 +5,7 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tracedecay_domain::{FactEventId, FactId};
+use tracedecay_domain::{FactCanonicalVocabularyV1, FactEventId, FactId};
 
 use super::{
     FactCategoryV1, FactMetadataV1, FactReadOptionsV1, FactSearchCursorV1, MemoryScopeV1,
@@ -49,6 +49,8 @@ pub struct FactStoreSearchRequestV1 {
     pub options: FactReadOptionsV1,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after: Option<FactSearchCursorV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_vocabulary: Option<FactCanonicalVocabularyV1>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]

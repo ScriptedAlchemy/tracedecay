@@ -1,6 +1,6 @@
 use tracedecay_domain::{
-    Confidence, DomainError, FactCategoryV1, FactId, FactOwnerV1, ManifestDigest, ProvenanceId,
-    UtcMicros, canonical_sha256,
+    Confidence, DomainError, FactCategoryV1, FactId, FactOwnerV1, FactVocabularyProjectionV1,
+    ManifestDigest, ProvenanceId, UtcMicros, canonical_sha256,
 };
 
 use super::super::queries::{MAX_CURRENT_LIMIT, validate_limit};
@@ -147,6 +147,7 @@ pub struct ProjectMemoryFactSearchScoresV1 {
     jaccard_score_millionths: u32,
     holographic_score_millionths: u32,
     trust_score_millionths: u32,
+    canonical_vocabulary_score_millionths: u32,
 }
 
 impl ProjectMemoryFactSearchScoresV1 {
@@ -157,12 +158,31 @@ impl ProjectMemoryFactSearchScoresV1 {
         holographic_score_millionths: u32,
         trust_score_millionths: u32,
     ) -> FactStoreResult<Self> {
+        Self::with_canonical_vocabulary_score(
+            score_millionths,
+            fts_score_millionths,
+            jaccard_score_millionths,
+            holographic_score_millionths,
+            trust_score_millionths,
+            0,
+        )
+    }
+
+    pub fn with_canonical_vocabulary_score(
+        score_millionths: u32,
+        fts_score_millionths: u32,
+        jaccard_score_millionths: u32,
+        holographic_score_millionths: u32,
+        trust_score_millionths: u32,
+        canonical_vocabulary_score_millionths: u32,
+    ) -> FactStoreResult<Self> {
         if score_millionths > MAX_PROJECT_MEMORY_SEARCH_SCORE_MILLIONTHS
             || [
                 fts_score_millionths,
                 jaccard_score_millionths,
                 holographic_score_millionths,
                 trust_score_millionths,
+                canonical_vocabulary_score_millionths,
             ]
             .into_iter()
             .any(|value| value > 1_000_000)
@@ -177,6 +197,7 @@ impl ProjectMemoryFactSearchScoresV1 {
             jaccard_score_millionths,
             holographic_score_millionths,
             trust_score_millionths,
+            canonical_vocabulary_score_millionths,
         })
     }
 
@@ -194,6 +215,9 @@ impl ProjectMemoryFactSearchScoresV1 {
     }
     pub fn trust_score_millionths(self) -> u32 {
         self.trust_score_millionths
+    }
+    pub fn canonical_vocabulary_score_millionths(self) -> u32 {
+        self.canonical_vocabulary_score_millionths
     }
 }
 
@@ -227,6 +251,7 @@ pub struct ProjectMemoryFactSearchHitV1 {
     fact: ProjectMemoryFactV1,
     scores: ProjectMemoryFactSearchScoresV1,
     why: Option<String>,
+    canonical_vocabulary_projection: Option<FactVocabularyProjectionV1>,
 }
 
 impl ProjectMemoryFactSearchHitV1 {
@@ -235,6 +260,15 @@ impl ProjectMemoryFactSearchHitV1 {
         scores: ProjectMemoryFactSearchScoresV1,
         why: Option<String>,
     ) -> FactStoreResult<Self> {
+        Self::with_canonical_vocabulary_projection(fact, scores, why, None)
+    }
+
+    pub fn with_canonical_vocabulary_projection(
+        fact: ProjectMemoryFactV1,
+        scores: ProjectMemoryFactSearchScoresV1,
+        why: Option<String>,
+        canonical_vocabulary_projection: Option<FactVocabularyProjectionV1>,
+    ) -> FactStoreResult<Self> {
         if why.as_ref().is_some_and(|value| {
             value.trim().is_empty() || value.len() > MAX_PROJECT_MEMORY_REASON_BYTES
         }) {
@@ -242,7 +276,12 @@ impl ProjectMemoryFactSearchHitV1 {
                 field: "project memory fact search why",
             }));
         }
-        Ok(Self { fact, scores, why })
+        Ok(Self {
+            fact,
+            scores,
+            why,
+            canonical_vocabulary_projection,
+        })
     }
 
     pub fn fact(&self) -> &ProjectMemoryFactV1 {
@@ -256,6 +295,9 @@ impl ProjectMemoryFactSearchHitV1 {
     }
     pub fn why(&self) -> Option<&str> {
         self.why.as_deref()
+    }
+    pub fn canonical_vocabulary_projection(&self) -> Option<&FactVocabularyProjectionV1> {
+        self.canonical_vocabulary_projection.as_ref()
     }
 }
 

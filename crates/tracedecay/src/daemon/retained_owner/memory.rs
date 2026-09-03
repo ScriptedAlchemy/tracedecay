@@ -664,12 +664,13 @@ async fn search_on_db(
     configuration_digest: &ManifestDigest,
 ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
     let memory = memory_application(database, owner.clone())?;
-    let query = memory_mapping::search_query(
+    let query = memory_mapping::search_query_with_vocabulary(
         owner.clone(),
         ProjectMemoryFactSearchKindV1::Search,
         Some(request.query.clone()),
         &request.options,
         request.after.as_ref(),
+        request.canonical_vocabulary.clone(),
     )?;
     let logical_effect = memory_mapping::search_logical_effect(&owner, request)?;
     let request_id = context.request_context.request_id().as_str();

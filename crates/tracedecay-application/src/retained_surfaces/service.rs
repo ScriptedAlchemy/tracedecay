@@ -815,6 +815,7 @@ mod tests {
             query: "retained fixture".to_owned(),
             options: FactReadOptionsV1::default(),
             after: None,
+            canonical_vocabulary: None,
         })
     }
 

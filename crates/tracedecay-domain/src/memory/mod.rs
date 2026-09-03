@@ -7,6 +7,7 @@
 mod fact;
 mod lineage;
 mod relation;
+mod vocabulary;
 
 pub use fact::{
     FactAssertionKindV1, FactAssertionV1, FactCategoryV1, FactEvidenceRefV1,
@@ -16,6 +17,10 @@ pub use fact::{
 pub use lineage::{FactCurationActionV1, FactLineageEventKindV1, FactLineageEventV1};
 pub use relation::{
     FactRelationKindV1, FactRelationProvenanceV1, FactRelationV1, ProjectMemoryGraphRelationKindV1,
+};
+pub use vocabulary::{
+    FactCanonicalConceptV1, FactCanonicalVocabularyProvenanceV1, FactCanonicalVocabularyV1,
+    FactVocabularyProjectionV1,
 };
 
 use serde::Serialize;

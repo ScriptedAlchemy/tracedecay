@@ -9,7 +9,10 @@ use crate::db::engine::Value;
 use crate::db::{Database, DatabaseMemoryTransaction as Transaction};
 use serde::{Deserialize, Serialize};
 
-use tracedecay_domain::{Confidence, DomainError, FactId, FactOwnerV1, ProvenanceId, UtcMicros};
+use tracedecay_domain::{
+    Confidence, DomainError, FactCanonicalVocabularyV1, FactId, FactOwnerV1,
+    FactVocabularyProjectionV1, ProvenanceId, UtcMicros,
+};
 use tracedecay_store::{
     FactReadControl, FactStoreError, FactStoreResult, MAX_PROJECT_MEMORY_GRAPH_RELATIONS,
     ProjectMemoryFactContradictionPageV1, ProjectMemoryFactContradictionQueryV1,
@@ -41,10 +44,12 @@ use super::projection::{
     load_project_memory_projections_controlled_tx, load_project_memory_projections_tx,
 };
 use super::scoring::{
-    project_memory_combined_score, project_memory_fact_tokens, project_memory_fts_component,
+    project_memory_canonical_vocabulary_score, project_memory_combined_score,
+    project_memory_combined_score_with_canonical_vocabulary, project_memory_fact_tokens,
+    project_memory_fact_tokens_with_vocabulary, project_memory_fts_component,
     project_memory_holographic_error, project_memory_holographic_score, project_memory_jaccard,
     project_memory_millionths, project_memory_score_millionths, project_memory_temporal_decay,
-    project_memory_term_coverage, project_memory_tokens,
+    project_memory_term_coverage, project_memory_tokens, project_memory_tokens_with_vocabulary,
 };
 use crate::memory::encoding::{HolographicEncoder, HolographicQueryVector};
 
@@ -55,6 +60,7 @@ struct ProjectMemorySearchWhy {
     coverage: f64,
     jaccard: f64,
     holographic: f64,
+    canonical_vocabulary: Option<f64>,
     trust: f64,
     temporal_decay: f64,
     retrieval_count: u64,
@@ -62,15 +68,31 @@ struct ProjectMemorySearchWhy {
 
 impl ProjectMemorySearchWhy {
     fn render(&self) -> String {
-        format!(
-            "fts={:.3}, coverage={:.3}, jaccard={:.3}, holographic={:.3}, trust={:.3}, temporal_decay={:.3}, retrieval_count={}",
-            self.fts,
-            self.coverage,
-            self.jaccard,
-            self.holographic,
-            self.trust,
-            self.temporal_decay,
-            self.retrieval_count,
+        self.canonical_vocabulary.map_or_else(
+            || {
+                format!(
+                    "fts={:.3}, coverage={:.3}, jaccard={:.3}, holographic={:.3}, trust={:.3}, temporal_decay={:.3}, retrieval_count={}",
+                    self.fts,
+                    self.coverage,
+                    self.jaccard,
+                    self.holographic,
+                    self.trust,
+                    self.temporal_decay,
+                    self.retrieval_count,
+                )
+            },
+            |canonical_vocabulary| {
+                format!(
+                    "fts={:.3}, coverage={:.3}, jaccard={:.3}, holographic={:.3}, canonical_vocabulary={canonical_vocabulary:.3}, trust={:.3}, temporal_decay={:.3}, retrieval_count={}",
+                    self.fts,
+                    self.coverage,
+                    self.jaccard,
+                    self.holographic,
+                    self.trust,
+                    self.temporal_decay,
+                    self.retrieval_count,
+                )
+            },
         )
     }
 }
@@ -79,43 +101,73 @@ fn project_memory_search_scores(
     query_tokens: &[String],
     encoder: &HolographicEncoder,
     query_vector: &HolographicQueryVector,
+    vocabulary: Option<&FactCanonicalVocabularyV1>,
+    query_projection: Option<&FactVocabularyProjectionV1>,
     normalized_bm25: f64,
     fact: &ProjectMemoryFactV1,
     now: UtcMicros,
-) -> FactStoreResult<(ProjectMemoryFactSearchScoresV1, ProjectMemorySearchWhy)> {
-    let fact_tokens = project_memory_fact_tokens(fact);
+) -> FactStoreResult<(
+    ProjectMemoryFactSearchScoresV1,
+    ProjectMemorySearchWhy,
+    Option<FactVocabularyProjectionV1>,
+)> {
+    let fact_tokens = project_memory_fact_tokens_with_vocabulary(fact, vocabulary)?;
     let coverage = project_memory_term_coverage(query_tokens, &fact_tokens);
     let fts = project_memory_fts_component(normalized_bm25, coverage);
     let jaccard = project_memory_jaccard(query_tokens, &fact_tokens);
     let holographic = project_memory_holographic_score(encoder, query_vector, fact)?;
+    let fact_projection = vocabulary
+        .map(|vocabulary| vocabulary.project(fact.content()))
+        .transpose()
+        .map_err(FactStoreError::from)?;
+    let canonical_vocabulary = query_projection
+        .zip(fact_projection.as_ref())
+        .map_or(0.0, |(query, fact)| {
+            project_memory_canonical_vocabulary_score(query, fact)
+        });
     let trust = fact.trust().as_f64();
     let temporal_decay = project_memory_temporal_decay(fact.telemetry().updated_at(), now);
     let retrieval_count = fact.telemetry().retrieval_count();
-    let score = project_memory_combined_score(
-        fts,
-        jaccard,
-        holographic,
-        trust,
-        temporal_decay,
-        retrieval_count,
-    );
+    let score = if vocabulary.is_some() {
+        project_memory_combined_score_with_canonical_vocabulary(
+            fts,
+            jaccard,
+            holographic,
+            canonical_vocabulary,
+            trust,
+            temporal_decay,
+            retrieval_count,
+        )
+    } else {
+        project_memory_combined_score(
+            fts,
+            jaccard,
+            holographic,
+            trust,
+            temporal_decay,
+            retrieval_count,
+        )
+    };
     Ok((
-        ProjectMemoryFactSearchScoresV1::new(
+        ProjectMemoryFactSearchScoresV1::with_canonical_vocabulary_score(
             project_memory_score_millionths(score),
             project_memory_millionths(fts),
             project_memory_millionths(jaccard),
             project_memory_millionths(holographic),
             project_memory_millionths(trust),
+            project_memory_millionths(canonical_vocabulary),
         )?,
         ProjectMemorySearchWhy {
             fts,
             coverage,
             jaccard,
             holographic,
+            canonical_vocabulary: vocabulary.is_some().then_some(canonical_vocabulary),
             trust,
             temporal_decay,
             retrieval_count,
         },
+        fact_projection,
     ))
 }
 
@@ -211,20 +263,27 @@ async fn project_memory_rank_facts_tx(
             let text = query.query().ok_or_else(|| {
                 storage_message(PROJECT_MEMORY_READ_OPERATION, "search query is missing")
             })?;
-            let tokens = project_memory_tokens(text);
+            let vocabulary = query.canonical_vocabulary();
+            let tokens = project_memory_tokens_with_vocabulary(text, vocabulary)?;
+            let query_projection = vocabulary
+                .map(|vocabulary| vocabulary.project(text))
+                .transpose()
+                .map_err(FactStoreError::from)?;
             let encoder = HolographicEncoder::new();
             let query_vector = encoder
-                .encode_fact(text, &tokens)
+                .encode_fact(text, &project_memory_tokens(text))
                 .map_err(project_memory_holographic_error)?;
             let query_vector = encoder
                 .prepare_query(&query_vector)
                 .map_err(project_memory_holographic_error)?;
             for fact in facts.drain(..) {
                 ensure_project_memory_read_active(read_control)?;
-                let (scores, why) = project_memory_search_scores(
+                let (scores, why, canonical_vocabulary_projection) = project_memory_search_scores(
                     &tokens,
                     &encoder,
                     &query_vector,
+                    vocabulary,
+                    query_projection.as_ref(),
                     fts_scores.get(fact.fact_id()).copied().unwrap_or(0.0),
                     &fact,
                     now,
@@ -232,6 +291,7 @@ async fn project_memory_rank_facts_tx(
                 if !tokens.is_empty()
                     && scores.fts_score_millionths() == 0
                     && scores.jaccard_score_millionths() == 0
+                    && scores.canonical_vocabulary_score_millionths() == 0
                 {
                     continue;
                 }
@@ -244,7 +304,12 @@ async fn project_memory_rank_facts_tx(
                 }
                 let updated_at = fact.telemetry().updated_at();
                 ranked.push((
-                    ProjectMemoryFactSearchHitV1::new(fact, scores, Some(why.render()))?,
+                    ProjectMemoryFactSearchHitV1::with_canonical_vocabulary_projection(
+                        fact,
+                        scores,
+                        Some(why.render()),
+                        canonical_vocabulary_projection,
+                    )?,
                     updated_at,
                 ));
             }

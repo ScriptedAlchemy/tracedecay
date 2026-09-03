@@ -23,7 +23,8 @@ use tracedecay_application::retained_surfaces::{
     TrustHistoryEntryV1,
 };
 use tracedecay_domain::{
-    ActorId, Confidence, FactIdentitySourceV1, FactOwnerV1, PayloadAccessState, ProvenanceId,
+    ActorId, Confidence, FactCanonicalVocabularyV1, FactIdentitySourceV1, FactOwnerV1,
+    PayloadAccessState, ProvenanceId,
 };
 use tracedecay_store::{
     FactCommitReceipt, FactStoreError, ProjectMemoryFactAddDispositionV1,
@@ -214,6 +215,7 @@ pub fn search_logical_effect(
         confidence(Some(request.options.min_trust.unwrap_or(0.3)))?,
         fact_limit(request.options.limit)?,
         &request.after,
+        &request.canonical_vocabulary,
     ))
     .map_err(|error| {
         RetainedSurfaceExecutionErrorV1::unavailable(format!(
@@ -304,6 +306,17 @@ pub fn search_query(
     options: &FactReadOptionsV1,
     after: Option<&FactSearchCursorV1>,
 ) -> Result<ProjectMemoryFactSearchQuery, RetainedSurfaceExecutionErrorV1> {
+    search_query_with_vocabulary(owner, kind, query, options, after, None)
+}
+
+pub fn search_query_with_vocabulary(
+    owner: FactOwnerV1,
+    kind: ProjectMemoryFactSearchKindV1,
+    query: Option<String>,
+    options: &FactReadOptionsV1,
+    after: Option<&FactSearchCursorV1>,
+    canonical_vocabulary: Option<FactCanonicalVocabularyV1>,
+) -> Result<ProjectMemoryFactSearchQuery, RetainedSurfaceExecutionErrorV1> {
     let filter = ProjectMemoryFactSearchFilterV1::new(
         options.category,
         confidence(options.min_trust)?,
@@ -320,13 +333,14 @@ pub fn search_query(
         })
         .transpose()
         .map_err(map_store_error)?;
-    ProjectMemoryFactSearchQuery::with_filter(
+    ProjectMemoryFactSearchQuery::with_filter_and_vocabulary(
         owner,
         kind,
         query,
         filter,
         after,
         fact_limit(options.limit)?,
+        canonical_vocabulary,
     )
     .map_err(map_store_error)
 }
@@ -615,8 +629,12 @@ fn search_hit(
             jaccard_score_millionths: scores.jaccard_score_millionths(),
             holographic_score_millionths: scores.holographic_score_millionths(),
             trust_score_millionths: scores.trust_score_millionths(),
+            canonical_vocabulary_score_millionths: (scores.canonical_vocabulary_score_millionths()
+                > 0)
+            .then(|| scores.canonical_vocabulary_score_millionths()),
         },
         why: hit.why().map(str::to_owned),
+        canonical_vocabulary_projection: hit.canonical_vocabulary_projection().cloned(),
     })
 }
 
@@ -1148,6 +1166,7 @@ mod tests {
             query: "canonical identity".to_owned(),
             options: FactReadOptionsV1::default(),
             after: None,
+            canonical_vocabulary: None,
         };
         let mut explicitly_routed = direct.clone();
         explicitly_routed.options.memory_scope = Some(MemoryScopeV1::Project);

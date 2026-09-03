@@ -8,7 +8,10 @@ use crate::memory::encoding::{
     HolographicEncoder, HolographicEncodingError, HolographicQueryVector,
 };
 
-use tracedecay_domain::{FactAssertionId, FactId, FactOwnerV1, UtcMicros};
+use tracedecay_domain::{
+    FactAssertionId, FactCanonicalVocabularyV1, FactId, FactOwnerV1, FactVocabularyProjectionV1,
+    UtcMicros,
+};
 use tracedecay_store::{
     FactStoreError, FactStoreResult, MAX_PROJECT_MEMORY_SEARCH_SCORE_MILLIONTHS,
     ProjectMemoryFactV1,
@@ -17,6 +20,7 @@ use tracedecay_store::{
 const FTS_SCORE_WEIGHT: f64 = 0.40;
 const JACCARD_SCORE_WEIGHT: f64 = 0.30;
 const HOLOGRAPHIC_SCORE_WEIGHT: f64 = 0.30;
+const CANONICAL_VOCABULARY_SCORE_WEIGHT: f64 = 0.30;
 const RETRIEVAL_REINFORCEMENT_WEIGHT: f64 = 0.02;
 const RETRIEVAL_REINFORCEMENT_CAP: f64 = 0.50;
 
@@ -64,6 +68,53 @@ pub(super) fn project_memory_fact_tokens(fact: &ProjectMemoryFactV1) -> Vec<Stri
     tokens.sort_unstable();
     tokens.dedup();
     tokens
+}
+
+pub(super) fn project_memory_tokens_with_vocabulary(
+    text: &str,
+    vocabulary: Option<&FactCanonicalVocabularyV1>,
+) -> FactStoreResult<Vec<String>> {
+    let mut tokens = project_memory_tokens(text);
+    if let Some(vocabulary) = vocabulary {
+        tokens.extend(
+            vocabulary
+                .project(text)
+                .map_err(FactStoreError::from)?
+                .concepts()
+                .iter()
+                .cloned(),
+        );
+        tokens.sort_unstable();
+        tokens.dedup();
+    }
+    Ok(tokens)
+}
+
+pub(super) fn project_memory_fact_tokens_with_vocabulary(
+    fact: &ProjectMemoryFactV1,
+    vocabulary: Option<&FactCanonicalVocabularyV1>,
+) -> FactStoreResult<Vec<String>> {
+    let mut tokens = project_memory_fact_tokens(fact);
+    if let Some(vocabulary) = vocabulary {
+        tokens.extend(
+            vocabulary
+                .project(fact.content())
+                .map_err(FactStoreError::from)?
+                .concepts()
+                .iter()
+                .cloned(),
+        );
+        tokens.sort_unstable();
+        tokens.dedup();
+    }
+    Ok(tokens)
+}
+
+pub(super) fn project_memory_canonical_vocabulary_score(
+    query: &FactVocabularyProjectionV1,
+    fact: &FactVocabularyProjectionV1,
+) -> f64 {
+    project_memory_jaccard(query.concepts(), fact.concepts())
 }
 
 pub(super) fn project_memory_term_coverage(query: &[String], fact: &[String]) -> f64 {
@@ -242,6 +293,37 @@ pub(super) fn project_memory_combined_score(
         FTS_SCORE_WEIGHT,
         jaccard.mul_add(JACCARD_SCORE_WEIGHT, holographic * HOLOGRAPHIC_SCORE_WEIGHT),
     );
+    project_memory_weighted_relevance_score(relevance, trust, temporal_decay, retrieval_count)
+}
+
+pub(super) fn project_memory_combined_score_with_canonical_vocabulary(
+    fts: f64,
+    jaccard: f64,
+    holographic: f64,
+    canonical_vocabulary: f64,
+    trust: f64,
+    temporal_decay: f64,
+    retrieval_count: u64,
+) -> f64 {
+    let relevance = fts.mul_add(
+        FTS_SCORE_WEIGHT,
+        jaccard.mul_add(
+            JACCARD_SCORE_WEIGHT,
+            holographic.mul_add(
+                HOLOGRAPHIC_SCORE_WEIGHT,
+                canonical_vocabulary * CANONICAL_VOCABULARY_SCORE_WEIGHT,
+            ),
+        ),
+    );
+    project_memory_weighted_relevance_score(relevance, trust, temporal_decay, retrieval_count)
+}
+
+fn project_memory_weighted_relevance_score(
+    relevance: f64,
+    trust: f64,
+    temporal_decay: f64,
+    retrieval_count: u64,
+) -> f64 {
     let usage_boost = 1.0
         + (RETRIEVAL_REINFORCEMENT_WEIGHT * (retrieval_count as f64).ln_1p())
             .min(RETRIEVAL_REINFORCEMENT_CAP);

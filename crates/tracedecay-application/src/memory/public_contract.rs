@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
-    FactAssertionId, FactEventId, FactId, LocatorDigest, ProjectId, ProvenanceId,
-    RetrievalAnchorId, UtcMicros,
+    FactAssertionId, FactEventId, FactId, FactVocabularyProjectionV1, LocatorDigest, ProjectId,
+    ProvenanceId, RetrievalAnchorId, UtcMicros,
 };
 
 pub use tracedecay_domain::FactCategoryV1;
@@ -114,6 +114,8 @@ pub struct FactSearchScoresV1 {
     pub jaccard_score_millionths: u32,
     pub holographic_score_millionths: u32,
     pub trust_score_millionths: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_vocabulary_score_millionths: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -122,6 +124,8 @@ pub struct FactSearchHitV1 {
     pub fact: FactV1,
     pub scores: FactSearchScoresV1,
     pub why: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_vocabulary_projection: Option<FactVocabularyProjectionV1>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

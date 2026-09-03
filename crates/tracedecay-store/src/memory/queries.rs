@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
-    Confidence, DomainError, FactCategoryV1, FactEventId, FactId, FactLineageEventV1, FactOwnerV1,
-    LocatorDigest, RetrievalAnchorId, UtcMicros,
+    Confidence, DomainError, FactCanonicalVocabularyV1, FactCategoryV1, FactEventId, FactId,
+    FactLineageEventV1, FactOwnerV1, LocatorDigest, RetrievalAnchorId, UtcMicros,
 };
 
 use super::{
@@ -437,6 +437,7 @@ pub struct ProjectMemoryFactSearchQuery {
     filter: ProjectMemoryFactSearchFilterV1,
     after: Option<ProjectMemoryFactSearchCursorV1>,
     limit: usize,
+    canonical_vocabulary: Option<FactCanonicalVocabularyV1>,
 }
 
 impl ProjectMemoryFactSearchQuery {
@@ -465,8 +466,26 @@ impl ProjectMemoryFactSearchQuery {
         after: Option<ProjectMemoryFactSearchCursorV1>,
         limit: usize,
     ) -> FactStoreResult<Self> {
+        Self::with_filter_and_vocabulary(owner, kind, query, filter, after, limit, None)
+    }
+
+    pub fn with_filter_and_vocabulary(
+        owner: FactOwnerV1,
+        kind: ProjectMemoryFactSearchKindV1,
+        query: Option<String>,
+        filter: ProjectMemoryFactSearchFilterV1,
+        after: Option<ProjectMemoryFactSearchCursorV1>,
+        limit: usize,
+        canonical_vocabulary: Option<FactCanonicalVocabularyV1>,
+    ) -> FactStoreResult<Self> {
         owner.validate()?;
         kind.validate()?;
+        if canonical_vocabulary.is_some() && !matches!(&kind, ProjectMemoryFactSearchKindV1::Search)
+        {
+            return Err(FactStoreError::Contract(DomainError::NonCanonical {
+                field: "fact canonical vocabulary search kind",
+            }));
+        }
         if let Some(query) = &query {
             if query.trim().is_empty() || query.len() > MAX_PROJECT_MEMORY_SEARCH_BYTES {
                 return Err(FactStoreError::Contract(DomainError::NonCanonical {
@@ -492,6 +511,7 @@ impl ProjectMemoryFactSearchQuery {
             filter,
             after,
             limit,
+            canonical_vocabulary,
         })
     }
 
@@ -512,6 +532,9 @@ impl ProjectMemoryFactSearchQuery {
     }
     pub fn limit(&self) -> usize {
         self.limit
+    }
+    pub fn canonical_vocabulary(&self) -> Option<&FactCanonicalVocabularyV1> {
+        self.canonical_vocabulary.as_ref()
     }
 }
 

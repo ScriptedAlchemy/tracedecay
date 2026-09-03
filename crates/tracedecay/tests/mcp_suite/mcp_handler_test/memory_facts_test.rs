@@ -299,6 +299,101 @@ async fn fact_search_ranks_exact_operational_evidence_and_tracks_once() {
 }
 
 #[tokio::test]
+async fn fact_search_uses_canonical_vocabulary_without_rewriting_fact_content() {
+    let cg = setup_project().await;
+    let authoritative = "The release failed because the credential was absent.";
+    let added = invoke_production_tool(
+        &cg,
+        "tracedecay_fact_store_add",
+        json!({
+            "content": authoritative,
+            "category": "decision",
+            "trust": 0.99,
+            "source_label": "canonical-vocabulary-regression"
+        }),
+    )
+    .await
+    .expect("store authoritative fact");
+    let fact_id = available_fact(&committed_add_result(&added)["fact"])["fact_id"]
+        .as_str()
+        .expect("stored fact identity")
+        .to_owned();
+
+    let query = "The production rollout broke due to a missing secret.";
+    let lexical_only = invoke_production_tool(
+        &cg,
+        "tracedecay_fact_store_search",
+        json!({"query": query, "min_trust": 0.0, "limit": 5}),
+    )
+    .await
+    .expect("search without vocabulary");
+    let lexical_score = lexical_only["hits"]
+        .as_array()
+        .and_then(|hits| hits.first())
+        .and_then(|hit| hit["scores"]["score_millionths"].as_u64())
+        .expect("the baseline search must expose its score");
+
+    let recalled = invoke_production_tool(
+        &cg,
+        "tracedecay_fact_store_search",
+        json!({
+            "query": query,
+            "min_trust": 0.0,
+            "limit": 5,
+            "canonical_vocabulary": {
+                "revision": "component.memory-vocabulary.issue-482.v1",
+                "provenance": {
+                    "kind": "maintained",
+                    "provenance_id": "provenance.memory-vocabulary.issue-482"
+                },
+                "concepts": [
+                    {
+                        "canonical": "missing_credential",
+                        "aliases": ["missing secret", "credential absent"]
+                    },
+                    {
+                        "canonical": "deployment_failure",
+                        "aliases": ["rollout broke", "release failed"]
+                    }
+                ]
+            }
+        }),
+    )
+    .await
+    .expect("search with canonical vocabulary");
+
+    let hit = recalled["hits"]
+        .as_array()
+        .and_then(|hits| {
+            hits.iter()
+                .find(|hit| hit["fact"]["fact_id"].as_str() == Some(fact_id.as_str()))
+        })
+        .unwrap_or_else(|| panic!("canonical vocabulary must recall the paraphrase: {recalled}"));
+    assert_eq!(hit["fact"]["content"], authoritative);
+    assert_eq!(
+        hit["canonical_vocabulary_projection"]["concepts"],
+        json!(["deployment_failure", "missing_credential"])
+    );
+    assert_eq!(
+        hit["canonical_vocabulary_projection"]["vocabulary_revision"],
+        "component.memory-vocabulary.issue-482.v1"
+    );
+    assert!(
+        hit["scores"]["canonical_vocabulary_score_millionths"]
+            .as_u64()
+            .is_some_and(|score| score > 0),
+        "the canonical score must be visible on the production wire: {hit}"
+    );
+    assert!(
+        hit["scores"]["score_millionths"]
+            .as_u64()
+            .is_some_and(|score| score > lexical_score),
+        "canonical overlap must improve the paraphrase score: baseline={lexical_score}, hit={hit}"
+    );
+    close_test_graph(cg).await;
+}
+
+#[tokio::test]
 async fn memory_fact_store_add_search_update_and_remove() {
     let cg = setup_project().await;
 
