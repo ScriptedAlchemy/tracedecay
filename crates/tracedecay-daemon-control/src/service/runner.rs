@@ -393,11 +393,16 @@ fn required_service_program(program: &str, lifecycle: &str, candidate: &Path) ->
             ),
         });
     }
-    canonical_service_program_candidate(program, lifecycle, candidate)?
-        .ok_or_else(|| service_program_unavailable(program, lifecycle))
+    canonical_service_program_candidate(
+        program,
+        lifecycle,
+        candidate,
+        NonExecutableCandidate::Reject,
+    )?
+    .ok_or_else(|| service_program_unavailable(program, lifecycle))
 }
 
-fn require_service_program_on_path(
+pub(super) fn require_service_program_on_path(
     program: &str,
     lifecycle: &str,
     path_var: Option<&std::ffi::OsStr>,
@@ -407,19 +412,29 @@ fn require_service_program_on_path(
     };
     for directory in std::env::split_paths(path_var) {
         let candidate = directory.join(program);
-        if let Some(canonical) =
-            canonical_service_program_candidate(program, lifecycle, &candidate)?
-        {
+        if let Some(canonical) = canonical_service_program_candidate(
+            program,
+            lifecycle,
+            &candidate,
+            NonExecutableCandidate::Skip,
+        )? {
             return Ok(canonical);
         }
     }
     Err(service_program_unavailable(program, lifecycle))
 }
 
+#[derive(Clone, Copy)]
+enum NonExecutableCandidate {
+    Reject,
+    Skip,
+}
+
 fn canonical_service_program_candidate(
     program: &str,
     lifecycle: &str,
     candidate: &Path,
+    non_executable: NonExecutableCandidate,
 ) -> Result<Option<PathBuf>> {
     let metadata = match std::fs::metadata(candidate) {
         Ok(metadata) if !metadata.is_file() => return Ok(None),
@@ -428,12 +443,15 @@ fn canonical_service_program_candidate(
         Err(error) => return Err(TraceDecayError::Io(error)),
     };
     if !service_program_is_executable(&metadata) {
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "{program} candidate '{}' exists but is not executable for {lifecycle}",
-                candidate.display()
-            ),
-        });
+        return match non_executable {
+            NonExecutableCandidate::Reject => Err(TraceDecayError::Config {
+                message: format!(
+                    "{program} candidate '{}' exists but is not executable for {lifecycle}",
+                    candidate.display()
+                ),
+            }),
+            NonExecutableCandidate::Skip => Ok(None),
+        };
     }
     match std::fs::canonicalize(candidate) {
         Ok(canonical) => Ok(Some(canonical)),
