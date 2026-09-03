@@ -134,6 +134,7 @@ lite = ["tracedecay/lite"]
 medium = ["tracedecay/medium"]
 full = ["tracedecay/full"]
 semantic-fastembed = ["tracedecay/semantic-fastembed"]
+semantic-model2vec = ["tracedecay/semantic-model2vec"]
 # Opt-in GPU execution providers for the embedded FastEmbed/ORT runtime.
 # Still requires `TRACEDECAY_EMBED_EXECUTION_PROVIDER=coreml|cuda` at runtime;
 # compiling the feature in alone changes nothing.

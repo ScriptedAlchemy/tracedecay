@@ -252,6 +252,7 @@ production = [
     "lite",
     "full",
     "semantic-fastembed",
+    "semantic-model2vec",
     "graph-sealed-store",
 ]
 
@@ -361,6 +362,15 @@ semantic-fastembed = [
     "tracedecay-semantic/semantic-fastembed",
     "tracedecay-usecases/semantic-fastembed",
     "tracedecay-code-index-runtime/semantic-fastembed",
+]
+# SEMANTIC Model2Vec static-embedding backend: a safetensors token table
+# mean-pooled in-process, no ONNX Runtime. Selected per model by the catalog
+# entry's declared backend; ships in `production` alongside FastEmbed so the
+# cataloged `PotionCode16MV2` selection is servable, not merely listed.
+semantic-model2vec = [
+    "tracedecay-semantic/semantic-model2vec",
+    "tracedecay-usecases/semantic-model2vec",
+    "tracedecay-code-index-runtime/semantic-model2vec",
 ]
 # Opt-in GPU execution providers for the FastEmbed/ORT runtime (owner
 # request: CoreML on macOS, CUDA on Linux). Not part of `production`; a
