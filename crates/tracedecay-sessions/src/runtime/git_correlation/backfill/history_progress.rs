@@ -21,6 +21,7 @@ pub(super) const fn initial_reflog_content_chain() -> &'static str {
     INITIAL_REFLOG_CONTENT_CHAIN
 }
 
+#[hotpath::measure(label = "sessions.git_correlation.history_schema", future = true)]
 pub(in super::super) async fn install_final_schema(
     conn: &(impl Executor + ?Sized),
 ) -> Result<(), GitCorrelationError> {
@@ -275,6 +276,7 @@ pub(super) struct GitHistorySeenRow {
     pub oid: String,
 }
 
+#[hotpath::measure(label = "sessions.git_correlation.history_progress_read", future = true)]
 pub(super) async fn read_progress(
     conn: &(impl QueryExecutor + ?Sized),
     key: GitHistoryProgressKey,
@@ -300,6 +302,7 @@ pub(super) async fn read_progress(
         .transpose()
 }
 
+#[hotpath::measure(label = "sessions.git_correlation.history_progress_oldest", future = true)]
 pub(super) async fn read_oldest_progress(
     conn: &(impl QueryExecutor + ?Sized),
 ) -> Result<Option<GitHistoryProgressRow>, GitCorrelationError> {
@@ -326,6 +329,7 @@ pub(super) async fn read_oldest_progress(
 }
 
 /// Inserts a new exact progress row without replacing an existing source seal.
+#[hotpath::measure(label = "sessions.git_correlation.history_progress_insert", future = true)]
 pub(super) async fn insert_progress(
     conn: &(impl Executor + ?Sized),
     progress: &GitHistoryProgressRow,
@@ -357,6 +361,7 @@ pub(super) async fn insert_progress(
 }
 
 /// Advances only mutable cursor fields when both generation and source seal match.
+#[hotpath::measure(label = "sessions.git_correlation.history_progress_cas", future = true)]
 pub(super) async fn compare_and_swap_progress(
     conn: &(impl Executor + ?Sized),
     expected_generation: u64,
@@ -548,6 +553,7 @@ pub(super) async fn read_segment(
 }
 
 /// Inserts a segment or updates only its mutable flags when its sealed shape matches.
+#[hotpath::measure(label = "sessions.git_correlation.history_segment_upsert", future = true)]
 pub(super) async fn upsert_segment(
     conn: &(impl Executor + ?Sized),
     segment: &GitHistorySegmentRow,
@@ -581,6 +587,7 @@ pub(super) async fn upsert_segment(
     Ok(changed == 1)
 }
 
+#[hotpath::measure(label = "sessions.git_correlation.history_pending_page", future = true)]
 pub(super) async fn read_pending_page(
     conn: &(impl QueryExecutor + ?Sized),
     key: GitHistoryProgressKey,

@@ -133,6 +133,7 @@ pub(super) fn finish_user_provider_coverage(
     }
 }
 
+#[hotpath::measure(label = "sessions.ingest.frontier_read", future = true)]
 pub(super) async fn read_ingest_frontier<S: TranscriptIngestStore>(
     store: &S,
     key: &str,
@@ -143,6 +144,7 @@ pub(super) async fn read_ingest_frontier<S: TranscriptIngestStore>(
     }
 }
 
+#[hotpath::measure(label = "sessions.ingest.frontier_write", future = true)]
 pub(super) async fn write_ingest_frontier<S: TranscriptIngestStore>(
     store: &S,
     key: &str,
@@ -166,6 +168,7 @@ pub(super) async fn write_ingest_frontier<S: TranscriptIngestStore>(
         .is_ok()
 }
 
+#[hotpath::measure(label = "sessions.ingest.codex_frontier_read", future = true)]
 pub(super) async fn read_codex_discovery_frontier<S: TranscriptIngestStore>(
     store: &S,
 ) -> TranscriptIngestResult<CodexDiscoveryFrontier> {
@@ -178,6 +181,7 @@ pub(super) async fn read_codex_discovery_frontier<S: TranscriptIngestStore>(
     CodexDiscoveryFrontier::from_parse_offsets(stored, epoch)
 }
 
+#[hotpath::measure(label = "sessions.ingest.codex_frontier_write", future = true)]
 pub(super) async fn write_codex_discovery_frontier<S: TranscriptIngestStore>(
     store: &S,
     expected: CodexDiscoveryFrontier,

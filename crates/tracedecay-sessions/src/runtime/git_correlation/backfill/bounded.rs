@@ -122,6 +122,7 @@ pub struct BoundedBackfillOutcome {
     pub interruption: Option<BoundedBackfillInterruption>,
 }
 
+#[hotpath::measure(label = "sessions.git_correlation.backfill.bounded_page", future = true)]
 pub async fn run_bounded_history_index_page<S>(
     session_store: &S,
     opts: &BackfillOptions,
@@ -409,6 +410,7 @@ pub(super) enum StreamGitEvidenceOutcome {
     Skip(BackfillSkipReason),
 }
 
+#[hotpath::measure(label = "sessions.git_correlation.backfill.stream_evidence", future = true)]
 async fn stream_git_evidence<S: GitCorrelationSessionStore>(
     session_store: &S,
     row: &SessionActivityRow,
@@ -519,6 +521,7 @@ async fn stream_git_evidence<S: GitCorrelationSessionStore>(
     resume_git_evidence(session_store, key, opts, control, stats, committed).await
 }
 
+#[hotpath::measure(label = "sessions.git_correlation.backfill.resume_evidence", future = true)]
 async fn resume_git_evidence<S: GitCorrelationSessionStore>(
     session_store: &S,
     key: GitHistoryProgressKey,
@@ -626,6 +629,7 @@ async fn resume_git_evidence<S: GitCorrelationSessionStore>(
     }
 }
 
+#[hotpath::measure(label = "sessions.git_correlation.backfill.dry_run", future = true)]
 async fn dry_run_native_history(
     project_path: &std::path::Path,
     window_start: i64,
@@ -807,6 +811,7 @@ async fn dry_run_segment(
     Ok(emitted)
 }
 
+#[hotpath::measure(label = "sessions.git_correlation.backfill.frontier_persist", future = true)]
 async fn persist_frontier<S: GitCorrelationSessionStore>(
     session_store: &S,
     candidate: GitHistoryIndexFrontier,
