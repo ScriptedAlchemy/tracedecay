@@ -25,10 +25,6 @@ struct CommittedCursorCandidate {
 /// `observation_projection::rebuild::read_observation_frontier` for why a
 /// caller doing further reads or writes on the same connection depends on
 /// that.
-#[hotpath::measure(
-    future = true,
-    label = "global_db.schema_contract.repair.read_frontier"
-)]
 async fn read_observation_frontier(
     conn: &impl QueryExecutor,
 ) -> tracedecay_domain::errors::Result<i64> {
