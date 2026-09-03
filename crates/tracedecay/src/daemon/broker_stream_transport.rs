@@ -1136,14 +1136,17 @@ mod peer_close_tests {
         let cancelled =
             serde_json::from_str::<serde_json::Value>(&line).expect("cancellation response JSON");
         assert_eq!(
-            cancelled["id"],
-            serde_json::json!(2),
-            "the cancelled request must receive its own typed terminal"
-        );
-        assert_eq!(
-            cancelled["error"]["data"]["reason_code"],
-            serde_json::json!("request_cancelled"),
-            "the client must observe a typed cancellation reason"
+            cancelled,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "error": {
+                    "code": -32800,
+                    "message": "MCP request cancelled",
+                    "data": {"reason_code": "request_cancelled"},
+                },
+            }),
+            "the cancelled request must receive its own exact typed terminal",
         );
 
         drop(transport);
