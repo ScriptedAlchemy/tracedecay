@@ -86,7 +86,7 @@ pub use lexical_page_source::{
     VerifiedSealedTextGenerationMetadataV1,
 };
 mod partitioned_codec;
-pub use partitioned_codec::SealedGenerationSegmentIdentityV1;
+pub use partitioned_codec::{SealedGenerationSegmentIdentityV1, SealedGenerationSegmentKindV1};
 mod sealed_codec;
 pub use sealed_codec::{
     MAX_SEALED_CODE_GENERATION_BYTES_V1, SEALED_GENERATION_FORMAT_REVISION_V1,
@@ -558,6 +558,41 @@ impl FileGenerationArtifactsV1 {
                 artifacts,
                 exact_authority,
             })
+        })
+    }
+
+    fn rematerialize_carried_forward(
+        &self,
+        config: &CodeIndexProductionConfigV1,
+        scope: &CodeIndexGenerationScopeV1,
+        generation_id: &CodeGenerationId,
+        file: &SanitizedCodeFileV1,
+    ) -> Result<Self, ChunkingFailureV1> {
+        if self.authority.project_id != config.project_id
+            || self.authority.repository_id != config.repository
+            || self.authority.worktree_id != scope.worktree
+            || self.authority.reference != scope.reference
+            || self.authority.logical_path != file.logical_path
+            || self.authority.content_digest != file.content_digest
+            || self.extraction.content_digest != file.content_digest
+            || self.extraction.file_occurrence_id != file.file_occurrence_id
+        {
+            return Err(ChunkingFailureV1::GenerationMismatch);
+        }
+        let artifacts = self
+            .artifacts
+            .rematerialize_for_generation(generation_id.clone(), file.file_occurrence_id.clone())?;
+        let exact_authority = self
+            .exact_authority
+            .rematerialize_for_generation(&self.artifacts.chunks, &artifacts.chunks)?;
+        let mut extraction = self.extraction.clone();
+        extraction.generation_id = generation_id.clone();
+        extraction.file_occurrence_id = file.file_occurrence_id.clone();
+        Ok(Self {
+            authority: self.authority.clone(),
+            extraction,
+            artifacts,
+            exact_authority,
         })
     }
 }
@@ -1938,6 +1973,7 @@ where
             .iter()
             .map(|file| (file.file_occurrence_id.clone(), file))
             .collect::<BTreeMap<_, _>>();
+        let scope = CodeIndexGenerationScopeV1::for_snapshot(&capability.snapshot().snapshot);
         let config = &self.config;
         let physical_artifacts = &self.physical_artifacts;
         let retained_parses = &self.retained_parses;
@@ -1969,22 +2005,33 @@ where
                                     "increment plan refers to a missing current file".to_owned(),
                                 )
                             })?;
-                        let captured = captured_files
-                            .get(file_occurrence_id)
-                            .ok_or(CodeIndexInputErrorV1::MissingCapturedFile)?;
-                        let receipt_bound = intake
-                            .bind_file(
-                                capability,
-                                &config.project_id,
-                                ValidatedCodeFileV1 {
-                                    generation_id: manifest.generation_id.clone(),
-                                    file: (**current_file).clone(),
-                                    snapshot_digest: capability.snapshot().intake_digest.clone(),
-                                    sanitized_bytes: captured.sanitized_bytes.to_vec(),
-                                },
+                        let carried = if let Some(captured) = captured_files.get(file_occurrence_id)
+                        {
+                            let receipt_bound = intake
+                                .bind_file(
+                                    capability,
+                                    &config.project_id,
+                                    ValidatedCodeFileV1 {
+                                        generation_id: manifest.generation_id.clone(),
+                                        file: (**current_file).clone(),
+                                        snapshot_digest: capability
+                                            .snapshot()
+                                            .intake_digest
+                                            .clone(),
+                                        sanitized_bytes: captured.sanitized_bytes.to_vec(),
+                                    },
+                                )
+                                .map_err(CodeIndexProductionErrorV1::Intake)?;
+                            prior.rematerialize_for_file(&receipt_bound)
+                        } else {
+                            prior.rematerialize_carried_forward(
+                                config,
+                                &scope,
+                                &manifest.generation_id,
+                                current_file,
                             )
-                            .map_err(CodeIndexProductionErrorV1::Intake)?;
-                        if let Ok(artifact) = prior.rematerialize_for_file(&receipt_bound) {
+                        };
+                        if let Ok(artifact) = carried {
                             crate::hotpath_observe::add_reused_parses(1);
                             Ok(IncrementFileMaterializationV1::CarryForward(Arc::new(
                                 artifact,

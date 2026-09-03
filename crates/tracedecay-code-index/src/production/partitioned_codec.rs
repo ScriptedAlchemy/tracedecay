@@ -43,6 +43,12 @@ pub struct SealedGenerationSegmentIdentityV1 {
     pub size_bytes: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SealedGenerationSegmentKindV1 {
+    File,
+    GenerationEvidence,
+}
+
 #[derive(Serialize)]
 struct PartitionedPublishedGenerationRefV1<'a> {
     format_revision: u32,
@@ -825,7 +831,44 @@ impl CodeIndexPublishedGenerationV1 {
             &[u8],
         ) -> Result<(), CodeIndexProductionErrorV1>,
     ) -> Result<Vec<u8>, CodeIndexProductionErrorV1> {
+        self.encode_partitioned_sealed_with_parent(None, |_, digest, bytes| {
+            publish_segment(digest, bytes)
+        })
+    }
+
+    pub fn encode_partitioned_sealed_with_parent(
+        &self,
+        parent_manifest_bytes: Option<&[u8]>,
+        mut publish_segment: impl FnMut(
+            SealedGenerationSegmentKindV1,
+            &ManifestDigest,
+            &[u8],
+        ) -> Result<(), CodeIndexProductionErrorV1>,
+    ) -> Result<Vec<u8>, CodeIndexProductionErrorV1> {
         self.validate()?;
+        let parent = parent_manifest_bytes
+            .map(parse_partitioned_manifest)
+            .transpose()?
+            .flatten();
+        if let Some(parent) = parent.as_ref()
+            && self.manifest.parent_generation.as_ref() != Some(&parent.manifest.generation_id)
+        {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed segment reuse parent does not match the generation manifest".to_owned(),
+            ));
+        }
+        let parent_segments = parent
+            .as_ref()
+            .map(|parent| {
+                parent
+                    .snapshot
+                    .files
+                    .iter()
+                    .zip(&parent.file_segments)
+                    .map(|(file, descriptor)| (&file.file_occurrence_id, (file, descriptor)))
+                    .collect::<HashMap<_, _>>()
+            })
+            .unwrap_or_default();
         let file_keys = snapshot_file_keys(
             self.snapshot
                 .files
@@ -842,14 +885,60 @@ impl CodeIndexPublishedGenerationV1 {
                         "sealed generation file is absent from its snapshot".to_owned(),
                     )
                 })?;
+            let current_snapshot_file = self.snapshot.files.get(key as usize).ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract(
+                    "sealed generation file key is outside its snapshot".to_owned(),
+                )
+            })?;
+            let reused = parent_segments
+                .get(&current_snapshot_file.file_occurrence_id)
+                .and_then(|(prior_file, prior_descriptor)| {
+                    (*prior_file == current_snapshot_file).then_some(())?;
+                    let symbol_occurrences = prior_descriptor
+                        .symbol_occurrences
+                        .iter()
+                        .map(|occurrence| {
+                            crate::chunks::rematerialized_symbol_occurrence_id(
+                                &self.manifest.generation_id,
+                                &file.extraction.file_occurrence_id,
+                                occurrence,
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                        .ok()?;
+                    let rematerialized = symbol_occurrences.iter().collect::<BTreeSet<_>>();
+                    file.artifacts
+                        .symbols
+                        .iter()
+                        .all(|symbol| rematerialized.contains(&symbol.occurrence))
+                        .then(|| PartitionedFileSegmentDescriptorV1 {
+                            file_key: key,
+                            segment_digest: prior_descriptor.segment_digest.clone(),
+                            segment_size_bytes: prior_descriptor.segment_size_bytes,
+                            file_occurrence_id: file.extraction.file_occurrence_id.clone(),
+                            symbol_occurrences,
+                        })
+                });
+            if let Some(descriptor) = reused {
+                file_segments.push(descriptor);
+                continue;
+            }
             let (descriptor, bytes) = encode_file_segment(&self.manifest.generation_id, file, key)?;
-            publish_segment(&descriptor.segment_digest, &bytes)?;
+            publish_segment(
+                SealedGenerationSegmentKindV1::File,
+                &descriptor.segment_digest,
+                &bytes,
+            )?;
             file_segments.push(descriptor);
         }
         file_segments.sort_by_key(|segment| segment.file_key);
         let (generation_evidence, evidence_bytes) =
             encode_generation_evidence(self, &file_segments)?;
-        publish_segment(&generation_evidence.segment_digest, &evidence_bytes)?;
+        publish_segment(
+            SealedGenerationSegmentKindV1::GenerationEvidence,
+            &generation_evidence.segment_digest,
+            &evidence_bytes,
+        )?;
         let generation = PartitionedPublishedGenerationRefV1 {
             format_revision: SEALED_GENERATION_FORMAT_REVISION_V1,
             manifest: &self.manifest,

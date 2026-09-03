@@ -7,7 +7,7 @@ use std::pin::Pin;
 #[cfg(feature = "hotpath")]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -2996,17 +2996,16 @@ pub struct DaemonSessionRuntimeRegistryV1 {
         >,
     >,
     project_owners: ProjectRuntimeOwnerRegistryV1,
-    /// One set of graph-publication locks per code shard. The seat pass and
-    /// the background reconcile can both activate the same sealed generation,
-    /// and unserialized they race the graph database into Conflicts that burn
-    /// the whole activation window: the flight table dedupes same-key
-    /// publishers while the serving gate covers only the short
-    /// storage-ordered slices. The locks live here because the retained code
-    /// graph runtime itself is minted fresh per activation call.
+    /// One set of graph-publication locks per project publication shard.
+    /// Every worktree/branch scope of a project stages into the one shared
+    /// staging store, so corpus-sized builds must serialize on the project
+    /// shard rather than on `code_shard`. Entries are weak: a cell lives only
+    /// while a retained runtime holds it. The locks live here because the
+    /// retained code graph runtime itself is minted fresh per activation call.
     code_graph_publication_gates: StdMutex<
         BTreeMap<
             tracedecay_store::StoreShardIdV1,
-            Arc<code_graph::CodeGraphShardPublicationLocksV1>,
+            Weak<code_graph::CodeGraphShardPublicationLocksV1>,
         >,
     >,
     registered_schema_convergence: RegisteredSchemaConvergenceMaintenance,

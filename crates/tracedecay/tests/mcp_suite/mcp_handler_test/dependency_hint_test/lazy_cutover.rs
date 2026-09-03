@@ -151,9 +151,17 @@ async fn search_explicit_lazy_admission_advances_generation_then_retry_finds_dep
         "limit": 5,
         "lazy_index_ignored_dependencies": true
     });
-    let first =
-        handle_real_server_tool_call_raw(&server, "tracedecay_search", arguments.clone()).await;
-    assert_generation_advanced_retry(&first);
+    let first = search_payload(&server, arguments.clone()).await;
+    assert_eq!(
+        first["results"],
+        json!([]),
+        "generation-advancing admission must preserve the successful lexical result: {first}"
+    );
+    assert_eq!(
+        code_generation(&first),
+        code_generation(&before),
+        "the current response remains bound to the generation that produced its lexical result"
+    );
 
     let retry = wait_for_search_payload(&server, arguments.clone()).await;
     assert_ne!(
