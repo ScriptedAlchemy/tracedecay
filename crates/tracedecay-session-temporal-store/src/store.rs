@@ -69,7 +69,7 @@ impl<'a, D: SessionTemporalRegisteredDb + Sync> GlobalDbSessionTemporalStore<'a,
         SessionTemporalAccess::new(self.db)
     }
 
-    #[hotpath::measure(future = true, label = "session_temporal.store.persist_refresh_batch")]
+    #[hotpath::skip]
     pub async fn persist_session_refresh_projection_batch(
         &self,
         progress: SessionRefreshProgressV1,
@@ -83,10 +83,7 @@ impl<'a, D: SessionTemporalRegisteredDb + Sync> GlobalDbSessionTemporalStore<'a,
             .await
     }
 
-    #[hotpath::measure(
-        future = true,
-        label = "session_temporal.store.persist_refresh_batch_controlled"
-    )]
+    #[hotpath::skip]
     pub async fn persist_session_refresh_projection_batch_controlled(
         &self,
         progress: SessionRefreshProgressV1,
@@ -105,7 +102,7 @@ impl<'a, D: SessionTemporalRegisteredDb + Sync> GlobalDbSessionTemporalStore<'a,
             .await
     }
 
-    #[hotpath::measure(future = true, label = "session_temporal.store.refresh_recovery")]
+    #[hotpath::skip]
     pub async fn session_refresh_recovery(
         &self,
         session_id: &tracedecay_domain::SessionId,
@@ -115,7 +112,7 @@ impl<'a, D: SessionTemporalRegisteredDb + Sync> GlobalDbSessionTemporalStore<'a,
             .await
     }
 
-    #[hotpath::measure(future = true, label = "session_temporal.store.refresh_running")]
+    #[hotpath::skip]
     pub async fn running_session_refreshes(
         &self,
     ) -> SessionStoreResult<Vec<SessionRefreshRecoveryV1>> {

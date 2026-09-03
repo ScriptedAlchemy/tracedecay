@@ -104,7 +104,6 @@ impl<'a> TemporalSqlRead<'a> {
         Self::Registered(read)
     }
 
-    #[hotpath::measure(future = true, label = "session_temporal.sql.query")]
     pub(super) async fn query<P>(&self, sql: &str, params: P) -> engine::Result<TemporalSqlRows>
     where
         P: engine::IntoParams,
