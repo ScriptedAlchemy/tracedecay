@@ -160,7 +160,9 @@ pub fn production_embedding_runtime_factory()
 
 #[cfg(test)]
 mod tests {
-    use tracedecay_domain::{ChunkerRevision, EmbeddingPrecisionV1, PrivacyDomainId};
+    use tracedecay_domain::{
+        ChunkerRevision, EmbeddingDocumentCompositionV1, EmbeddingPrecisionV1, PrivacyDomainId,
+    };
     use tracedecay_semantic_contracts::{
         DEFAULT_FASTEMBED_MODEL_ID, MODEL2VEC_POTION_CODE_16M_V2_MODEL_ID, SemanticResourceCeilings,
     };
@@ -198,6 +200,7 @@ mod tests {
                 PrivacyDomainId::new("privacy.project-a".to_owned()).expect("privacy"),
                 7,
                 resources,
+                EmbeddingDocumentCompositionV1::SanitizedText,
             )
             .expect("production projection")
         };
