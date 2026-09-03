@@ -99,32 +99,6 @@ impl std::fmt::Display for DaemonProtocolState {
     }
 }
 
-#[cfg(unix)]
-pub(super) fn daemon_protocol_state(
-    socket_path: &Path,
-    expected_version: &str,
-) -> DaemonProtocolState {
-    daemon_readiness_probe(
-        socket_path,
-        expected_version,
-        std::time::Duration::from_secs(10),
-    )
-    .1
-}
-
-#[cfg(not(unix))]
-pub(super) fn daemon_protocol_state(
-    transport_hint: &Path,
-    expected_version: &str,
-) -> DaemonProtocolState {
-    daemon_readiness_probe(
-        transport_hint,
-        expected_version,
-        std::time::Duration::from_secs(10),
-    )
-    .1
-}
-
 #[hotpath::measure(label = "daemon.service.probe.protocol_state")]
 pub(super) fn daemon_protocol_state_with_timeout(
     transport_hint: &Path,
@@ -170,6 +144,15 @@ pub(super) fn daemon_readiness_probe(
             )),
         );
     }
+    let connection = match client_connection(socket_path) {
+        Ok(connection) => connection,
+        Err(error) => {
+            return (
+                DaemonSocketState::Connectable,
+                DaemonProtocolState::Unresponsive(error.to_string()),
+            );
+        }
+    };
     let stream = match StdUnixStream::connect(socket_path) {
         Ok(stream) => stream,
         Err(error) => {
@@ -185,15 +168,6 @@ pub(super) fn daemon_readiness_probe(
         }
     };
     let deadline = std::time::Instant::now() + timeout;
-    let connection = match client_connection(socket_path) {
-        Ok(connection) => connection,
-        Err(error) => {
-            return (
-                DaemonSocketState::Connectable,
-                DaemonProtocolState::Unresponsive(error.to_string()),
-            );
-        }
-    };
     let identity = query_daemon_identity_stream(
         stream,
         connection.auth_token.as_deref(),
