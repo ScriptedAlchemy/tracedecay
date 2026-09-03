@@ -52,6 +52,7 @@ pub(crate) fn lifecycle_error_class(error: &ModelLifecycleErrorV1) -> &'static s
         ModelLifecycleErrorV1::DownloadFailed
         | ModelLifecycleErrorV1::DownloadFailedWithReason(_) => "download_failed",
         ModelLifecycleErrorV1::VerificationFailed => "verification_failed",
+        ModelLifecycleErrorV1::RerankerUnavailable => "reranker_unavailable",
         ModelLifecycleErrorV1::InstallFailed => "install_failed",
         ModelLifecycleErrorV1::WorkerJoinFailed => "worker_join_failed",
         ModelLifecycleErrorV1::Cancelled => "cancelled",

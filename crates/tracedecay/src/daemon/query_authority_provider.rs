@@ -9,6 +9,7 @@ use std::fmt;
 use std::sync::{Arc, RwLock};
 
 use thiserror::Error;
+use tokio::task;
 use tracedecay_application::ResolvedScope;
 use tracedecay_domain::{
     ComponentRevision, ManifestDigest, PrivacyDomainId, RetrievalAnchorId, RetrieverKind,
@@ -271,15 +272,20 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
                         &generation.manifest().privacy_domain,
                     )
                     .map_err(map_update_observer_error)?;
-                let semantic_authority = semantic_enabled
-                    .then(|| {
+                let semantic_authority = if semantic_enabled {
+                    let committed = committed.clone();
+                    let authority = task::spawn_blocking(move || {
                         tracedecay_code_index_runtime::code_index_scheduler::semantic_query_runtime::SemanticQueryAuthorityV1::from_committed(
-                            committed.clone(),
+                            committed,
                         )
                     })
-                    .transpose()
-                    .map_err(|_| RetrievalProfileActivationObserverErrorV1::Rejected)?
-                    .map(Arc::new);
+                    .await
+                    .map_err(|_| RetrievalProfileActivationObserverErrorV1::Unavailable)?
+                    .map_err(|_| RetrievalProfileActivationObserverErrorV1::Rejected)?;
+                    Some(Arc::new(authority))
+                } else {
+                    None
+                };
                 let prepared_view =
                     tracedecay_code_index_runtime::PreparedQueryActivationViewV1 {
                         scope: prepared.scope().clone(),

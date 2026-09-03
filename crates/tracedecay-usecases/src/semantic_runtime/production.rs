@@ -2822,6 +2822,7 @@ fn lifecycle_publication_error(
         | tracedecay_semantic::ModelLifecycleErrorV1::DownloadFailed
         | tracedecay_semantic::ModelLifecycleErrorV1::DownloadFailedWithReason(_)
         | tracedecay_semantic::ModelLifecycleErrorV1::VerificationFailed
+        | tracedecay_semantic::ModelLifecycleErrorV1::RerankerUnavailable
         | tracedecay_semantic::ModelLifecycleErrorV1::InstallFailed
         | tracedecay_semantic::ModelLifecycleErrorV1::WorkerJoinFailed
         | tracedecay_semantic::ModelLifecycleErrorV1::ArtifactImport(_) => {

@@ -1,3 +1,6 @@
+type ResidentRerankerSlotV1 =
+    Arc<Mutex<Option<Arc<super::rerank_adapter::FastEmbedRerankExecutorV1>>>>;
+
 /// Owns selection, background acquisition, and remediation for one data root.
 pub struct SemanticModelLifecycleOwnerV1 {
     root: PathBuf,
@@ -8,6 +11,7 @@ pub struct SemanticModelLifecycleOwnerV1 {
     worker: Mutex<AcquisitionWorkerStateV1>,
     acquisition: Arc<AcquisitionControlV1>,
     verified_ready: watch::Sender<SemanticLifecycleVerifiedReadyEventV1>,
+    resident_rerankers: Mutex<HashMap<Sha256DigestHex, ResidentRerankerSlotV1>>,
 }
 struct LifecycleInner {
     durable: DurableLifecycleV1,
@@ -249,6 +253,7 @@ impl SemanticModelLifecycleOwnerV1 {
             worker: Mutex::new(AcquisitionWorkerStateV1::default()),
             acquisition: Arc::new(AcquisitionControlV1::default()),
             verified_ready,
+            resident_rerankers: Mutex::new(HashMap::new()),
         };
         let durable = owner.inner.read().durable.clone();
         owner.reconcile_embedding_artifact_leases(&durable, current_unix_seconds()?)?;
@@ -329,8 +334,33 @@ impl SemanticModelLifecycleOwnerV1 {
                 current_unix_seconds()?,
             )
             .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
-        super::rerank_adapter::ProductionCodeRerankAuthorityV1::from_admitted(artifact, pins)
-            .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)
+        let slot = {
+            let mut residents = self
+                .resident_rerankers
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            Arc::clone(
+                residents
+                    .entry(digest)
+                    .or_insert_with(|| Arc::new(Mutex::new(None))),
+            )
+        };
+        let mut resident = slot.lock().unwrap_or_else(PoisonError::into_inner);
+        let executor = match resident.as_ref() {
+            Some(executor) => Arc::clone(executor),
+            None => {
+                let executor =
+                    super::rerank_adapter::warm_reranker_executor(artifact, pins.clone())
+                        .map_err(map_reranker_admission_error)?;
+                *resident = Some(Arc::clone(&executor));
+                executor
+            }
+        };
+        Ok(
+            super::rerank_adapter::ProductionCodeRerankAuthorityV1::from_warmed(
+                pins, executor,
+            ),
+        )
     }
 
     pub fn import_local_reranker_artifact(
@@ -381,14 +411,15 @@ impl SemanticModelLifecycleOwnerV1 {
             .artifact_store
             .admit_for_runtime_by_digest(&record.artifact_digest, &environment)
             .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
-        super::rerank_adapter::ProductionCodeRerankAuthorityV1::from_admitted(admitted, pins)
-            .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
+        super::rerank_adapter::admit_reranker_artifact(admitted, pins)
+            .map_err(map_reranker_admission_error)?;
         self.artifact_store.activate_artifact_with_rollback(
             &record.artifact_digest,
             RERANKER_ACTIVE_LEASE_ID_V1,
             RERANKER_ROLLBACK_LEASE_ID_V1,
             now_unix,
         )?;
+        self.retain_active_reranker(&record.artifact_digest);
         self.reranker_artifact_status()
     }
 
@@ -424,7 +455,15 @@ impl SemanticModelLifecycleOwnerV1 {
             RERANKER_ROLLBACK_LEASE_ID_V1,
             now_unix,
         )?;
+        self.retain_active_reranker(&rollback);
         self.reranker_artifact_status()
+    }
+
+    fn retain_active_reranker(&self, active_digest: &Sha256DigestHex) {
+        self.resident_rerankers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|digest, _| digest == active_digest);
     }
 
     pub fn mounted_shared() -> Option<Arc<Self>> {
@@ -1173,6 +1212,20 @@ impl SemanticModelLifecycleOwnerV1 {
             &self.inner,
             &self.verified_ready,
         )
+    }
+}
+
+fn map_reranker_admission_error(
+    error: super::rerank_adapter::RerankArtifactAdmissionErrorV1,
+) -> ModelLifecycleErrorV1 {
+    match error {
+        super::rerank_adapter::RerankArtifactAdmissionErrorV1::IncompatiblePins
+        | super::rerank_adapter::RerankArtifactAdmissionErrorV1::IncompatibleArtifact => {
+            ModelLifecycleErrorV1::VerificationFailed
+        }
+        super::rerank_adapter::RerankArtifactAdmissionErrorV1::Unavailable => {
+            ModelLifecycleErrorV1::RerankerUnavailable
+        }
     }
 }
 
