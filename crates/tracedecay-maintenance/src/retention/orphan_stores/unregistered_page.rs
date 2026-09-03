@@ -1,14 +1,11 @@
 //! Bounded, resumable census and collection of unregistered project leaves.
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 use std::collections::HashMap;
 use std::collections::HashSet;
 #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
 use std::ffi::{CStr, OsString};
 use std::path::Path;
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
@@ -752,14 +749,12 @@ pub(super) fn read_project_directory_page(
     }
 }
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 #[derive(Clone, PartialEq, Eq)]
 struct PortableDirectoryCursor {
     signature: String,
     offset: u64,
 }
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 pub(super) fn portable_inventory_path(profile_root: &Path, signature: &str) -> std::path::PathBuf {
     profile_root
         .join("maintenance")
@@ -767,7 +762,6 @@ pub(super) fn portable_inventory_path(profile_root: &Path, signature: &str) -> s
         .join(format!("{signature}.log"))
 }
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 pub(super) fn portable_directory_signature(directory: &Path) -> std::io::Result<String> {
     let metadata = directory.metadata()?;
     let modified = metadata
@@ -782,7 +776,6 @@ pub(super) fn portable_directory_signature(directory: &Path) -> std::io::Result<
     ))
 }
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 fn parse_portable_directory_cursor(value: &str) -> Option<PortableDirectoryCursor> {
     let mut fields = value.split(':');
     let version = fields.next()?;
@@ -796,20 +789,16 @@ fn parse_portable_directory_cursor(value: &str) -> Option<PortableDirectoryCurso
     })
 }
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 fn format_portable_directory_cursor(signature: String, offset: u64) -> String {
     format!("portable-v2:{signature}:{offset}")
 }
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 const PORTABLE_INVENTORY_TAIL_RECOVERY_BYTES: u64 = 64 * 1024;
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 fn portable_inventory_header(signature: &str) -> String {
     format!("v2:{signature}\n")
 }
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 fn portable_inventory_matches(path: &Path, signature: &str) -> bool {
     use std::io::Read;
 
@@ -822,13 +811,11 @@ fn portable_inventory_matches(path: &Path, signature: &str) -> bool {
     reader.read_exact(&mut header).is_ok() && header == expected
 }
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 pub(super) fn portable_inventory_entry_is_valid(name: &str) -> bool {
     quarantined_project_id(name).is_some()
         || tracedecay_runtime_core::storage::validate_project_id(name).is_ok()
 }
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 fn clear_portable_inventory_complete(inventory: &Path) -> std::io::Result<()> {
     match std::fs::remove_file(portable_inventory_complete_path(inventory)) {
         Ok(()) => Ok(()),
@@ -837,7 +824,6 @@ fn clear_portable_inventory_complete(inventory: &Path) -> std::io::Result<()> {
     }
 }
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 fn portable_inventory_temporary_path(
     inventory: &Path,
 ) -> tracedecay_domain::errors::Result<std::path::PathBuf> {
@@ -857,7 +843,6 @@ fn portable_inventory_temporary_path(
     Ok(parent.join(format!(".{name}.{}.{}.tmp", std::process::id(), sequence)))
 }
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 fn ensure_portable_inventory_header(
     inventory: &Path,
     signature: &str,
@@ -886,7 +871,6 @@ fn ensure_portable_inventory_header(
 /// A newline commits one appended record. Only the bounded final suffix is
 /// inspected: an interrupted append is truncated back to the last committed
 /// record before either hydration or another append can observe it.
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 fn recover_portable_inventory_tail(inventory: &Path, signature: &str) -> std::io::Result<()> {
     use std::io::{Read, Seek, SeekFrom};
 
@@ -921,18 +905,15 @@ fn recover_portable_inventory_tail(inventory: &Path, signature: &str) -> std::io
     file.sync_all()
 }
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 fn portable_inventory_complete_path(inventory: &Path) -> std::path::PathBuf {
     inventory.with_extension("complete")
 }
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 fn portable_inventory_is_complete(inventory: &Path) -> bool {
     std::fs::symlink_metadata(portable_inventory_complete_path(inventory))
         .is_ok_and(|metadata| metadata.file_type().is_file() && !metadata.file_type().is_symlink())
 }
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 fn mark_portable_inventory_complete(inventory: &Path) -> std::io::Result<()> {
     let marker = portable_inventory_complete_path(inventory);
     let mut options = std::fs::OpenOptions::new();
@@ -944,7 +925,6 @@ fn mark_portable_inventory_complete(inventory: &Path) -> std::io::Result<()> {
     }
 }
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 struct PortableInventoryBuilder {
     source: std::fs::ReadDir,
     /// A restart hydrates this set from the durable log in bounded slices
@@ -955,12 +935,10 @@ struct PortableInventoryBuilder {
     complete: bool,
 }
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 static PORTABLE_INVENTORY_BUILDERS: OnceLock<
     Mutex<HashMap<std::path::PathBuf, PortableInventoryBuilder>>,
 > = OnceLock::new();
 
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 static PORTABLE_INVENTORY_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[cfg(all(
@@ -983,6 +961,25 @@ pub(super) fn advance_portable_inventory(
     raw_entry_limit: usize,
     cancellation: &CancellationToken,
     deadline: MonotonicDeadline,
+) -> tracedecay_domain::errors::Result<Option<bool>> {
+    let mut source_entry_visits = 0;
+    advance_portable_inventory_inner(
+        projects_dir,
+        inventory,
+        signature,
+        raw_entry_limit,
+        &mut source_entry_visits,
+        || UnregisteredSweepCompletionV1::interrupted(cancellation, deadline).is_some(),
+    )
+}
+
+fn advance_portable_inventory_inner(
+    projects_dir: &Path,
+    inventory: &Path,
+    signature: &str,
+    raw_entry_limit: usize,
+    source_entry_visits: &mut usize,
+    mut interrupted: impl FnMut() -> bool,
 ) -> tracedecay_domain::errors::Result<Option<bool>> {
     use std::io::{BufRead, Write};
 
@@ -1064,8 +1061,9 @@ pub(super) fn advance_portable_inventory(
     let mut budget = raw_entry_limit;
     let mut completed = false;
     let mut append_error = None;
+    let mut scan_error = None;
     while budget > 0 {
-        if UnregisteredSweepCompletionV1::interrupted(cancellation, deadline).is_some() {
+        if interrupted() {
             return Ok(None);
         }
         if let Some(hydration) = builder.hydration.as_mut() {
@@ -1095,12 +1093,36 @@ pub(super) fn advance_portable_inventory(
             completed = true;
             break;
         };
+        *source_entry_visits = source_entry_visits.saturating_add(1);
         budget = budget.saturating_sub(1);
-        let Ok(entry) = entry else {
-            continue;
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                scan_error = Some(format!(
+                    "read unregistered project-directory inventory stream: {error}"
+                ));
+                break;
+            }
         };
-        let Ok(name) = entry.file_name().into_string() else {
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) => {
+                scan_error = Some(format!(
+                    "inspect unregistered project-directory inventory entry: {error}"
+                ));
+                break;
+            }
+        };
+        if !file_type.is_dir() {
             continue;
+        }
+        let name = match entry.file_name().into_string() {
+            Ok(name) => name,
+            Err(_) => {
+                scan_error =
+                    Some("unregistered project-directory inventory entry is not UTF-8".to_owned());
+                break;
+            }
         };
         if portable_inventory_entry_is_valid(&name) && !builder.known.contains(&name) {
             let append = (|| {
@@ -1120,6 +1142,10 @@ pub(super) fn advance_portable_inventory(
             builder.known.insert(name);
         }
     }
+    if let Some(message) = scan_error {
+        builders.remove(inventory);
+        return Err(tracedecay_domain::errors::TraceDecayError::Config { message });
+    }
     if let Some(error) = append_error {
         builders.remove(inventory);
         return Err(tracedecay_domain::errors::TraceDecayError::Config {
@@ -1135,4 +1161,146 @@ pub(super) fn advance_portable_inventory(
         builders.remove(inventory);
     }
     Ok(Some(completed))
+}
+
+pub(crate) struct ProjectDirectoryInventoryPage {
+    pub directories: Vec<(String, std::path::PathBuf)>,
+    pub next_cursor: Option<String>,
+    pub source_entry_visits: usize,
+}
+
+/// Reads a page from the canonical durable project-directory inventory.
+///
+/// A first page completes the inventory before returning so its opaque cursor
+/// remains deterministic across cancellation and unrelated directory changes.
+/// Resume never reconstructs a missing or unreadable inventory from current
+/// filesystem state.
+pub(crate) fn read_complete_project_directory_inventory_page(
+    profile_root: &Path,
+    cursor: Option<&str>,
+    limit: usize,
+) -> tracedecay_domain::errors::Result<ProjectDirectoryInventoryPage> {
+    use std::io::{BufRead, Seek};
+
+    let projects_dir = profile_root.join("projects");
+    let limit = limit.max(1);
+    let (saved, source_entry_visits) = if let Some(cursor) = cursor {
+        let saved = parse_portable_directory_cursor(cursor).ok_or_else(|| {
+            tracedecay_domain::errors::TraceDecayError::Config {
+                message: "invalid project-directory inventory cursor".to_owned(),
+            }
+        })?;
+        (saved, 0)
+    } else {
+        let signature = match portable_directory_signature(&projects_dir) {
+            Ok(signature) => signature,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ProjectDirectoryInventoryPage {
+                    directories: Vec::new(),
+                    next_cursor: None,
+                    source_entry_visits: 0,
+                });
+            }
+            Err(error) => {
+                return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                    message: format!("inspect project-directory inventory source: {error}"),
+                });
+            }
+        };
+        let inventory = portable_inventory_path(profile_root, &signature);
+        let mut source_entry_visits = 0;
+        let complete = advance_portable_inventory_inner(
+            &projects_dir,
+            &inventory,
+            &signature,
+            usize::MAX,
+            &mut source_entry_visits,
+            || false,
+        )?
+        .unwrap_or(false);
+        if !complete {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: "project-directory inventory writer is unavailable".to_owned(),
+            });
+        }
+        (
+            PortableDirectoryCursor {
+                offset: portable_inventory_header(&signature).len() as u64,
+                signature,
+            },
+            source_entry_visits,
+        )
+    };
+    let inventory = portable_inventory_path(profile_root, &saved.signature);
+    if !portable_inventory_matches(&inventory, &saved.signature)
+        || !portable_inventory_is_complete(&inventory)
+    {
+        return Err(tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!(
+                "project-directory inventory is missing or unreadable: {}",
+                inventory.display()
+            ),
+        });
+    }
+    let header_len = portable_inventory_header(&saved.signature).len() as u64;
+    if saved.offset < header_len {
+        return Err(tracedecay_domain::errors::TraceDecayError::Config {
+            message: "project-directory inventory cursor precedes its header".to_owned(),
+        });
+    }
+    let file = std::fs::File::open(&inventory).map_err(|error| {
+        tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!("open project-directory inventory page: {error}"),
+        }
+    })?;
+    let mut reader = std::io::BufReader::new(file);
+    reader
+        .seek(std::io::SeekFrom::Start(saved.offset))
+        .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!("seek project-directory inventory cursor: {error}"),
+        })?;
+    let mut directories = Vec::with_capacity(limit);
+    for _ in 0..limit {
+        let mut name = String::new();
+        let bytes = reader.read_line(&mut name).map_err(|error| {
+            tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!("read project-directory inventory page: {error}"),
+            }
+        })?;
+        if bytes == 0 {
+            break;
+        }
+        let name = name.trim_end_matches(['\r', '\n']).to_owned();
+        if !portable_inventory_entry_is_valid(&name) {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: "project-directory inventory contains an invalid entry".to_owned(),
+            });
+        }
+        directories.push((name.clone(), projects_dir.join(name)));
+    }
+    let next_offset = reader.stream_position().map_err(|error| {
+        tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!("checkpoint project-directory inventory cursor: {error}"),
+        }
+    })?;
+    let mut probe = String::new();
+    let has_more = reader.read_line(&mut probe).map_err(|error| {
+        tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!("probe project-directory inventory continuation: {error}"),
+        }
+    })? != 0;
+    if has_more {
+        let name = probe.trim_end_matches(['\r', '\n']);
+        if !portable_inventory_entry_is_valid(name) {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: "project-directory inventory continuation is invalid".to_owned(),
+            });
+        }
+    }
+    Ok(ProjectDirectoryInventoryPage {
+        directories,
+        next_cursor: has_more
+            .then(|| format_portable_directory_cursor(saved.signature, next_offset)),
+        source_entry_visits,
+    })
 }
