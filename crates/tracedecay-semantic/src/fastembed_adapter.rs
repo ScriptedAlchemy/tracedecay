@@ -1803,11 +1803,11 @@ pub(crate) mod lifecycle_test_support {
         // of two or 100.0, all exactly representable.
         fn f16_bits(value: f32) -> u16 {
             match value {
-                v if v == 0.0 => 0x0000,
-                v if v == 1.0 => 0x3C00,
-                v if v == 2.0 => 0x4000,
-                v if v == 4.0 => 0x4400,
-                v if v == 100.0 => 0x5640,
+                0.0 => 0x0000,
+                1.0 => 0x3C00,
+                2.0 => 0x4000,
+                4.0 => 0x4400,
+                100.0 => 0x5640,
                 other => panic!("fixture value {other} has no tabulated fp16 encoding"),
             }
         }

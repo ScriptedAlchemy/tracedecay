@@ -553,7 +553,7 @@ impl EmbeddingRuntime for Model2VecEmbeddingRuntime {
                 key.truncation_length as usize,
             )
         )
-        .inspect_err(|failure| crate::hotpath_observe::record_embed_error(failure))?;
+        .inspect_err(crate::hotpath_observe::record_embed_error)?;
         check_execution_authority(interruption)?;
         crate::hotpath_observe::record_model_state("ready");
         Ok(Model2VecEmbeddingSession {
@@ -598,7 +598,7 @@ impl EmbeddingSession for Model2VecEmbeddingSession {
             let (values, truncated) = self
                 .model
                 .embed(text)
-                .inspect_err(|failure| crate::hotpath_observe::record_embed_error(failure))?;
+                .inspect_err(crate::hotpath_observe::record_embed_error)?;
             truncated_texts += usize::from(truncated);
             let vector = EmbeddingVectorV1 {
                 values,
