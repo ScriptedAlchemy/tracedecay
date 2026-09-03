@@ -21,7 +21,7 @@ use std::time::Instant;
 use serde::Serialize;
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay_sessions::runtime::cursor::parent_dispatch_model_for_subagent;
+use tracedecay_sessions::runtime::cursor::parent_dispatch_model_for_subagent_with_receipt;
 
 const PARENT_SESSION_ID: &str = "P";
 const AGENT_ID: &str = "X";
@@ -30,7 +30,9 @@ const RECORD_COUNT: usize = 5_000;
 const TARGET_PARENT_BYTES: u64 = 20 * 1024 * 1024;
 const LOOKUPS: usize = 512;
 const PADDING_TOKEN: &str = "cursor-dispatch-harness-pad";
+#[cfg(any(feature = "hotpath", feature = "hotpath-alloc"))]
 const BLOCKING_LABEL: &str = "sessions.hosts.cursor.dispatch_model_blocking";
+#[cfg(any(feature = "hotpath", feature = "hotpath-alloc"))]
 const SCAN_LABEL: &str = "sessions.hosts.cursor.dispatch_model_scan";
 
 #[cfg(feature = "hotpath-alloc")]
@@ -46,40 +48,45 @@ struct Fixture {
 }
 
 fn main() {
-    let report_path = configure_hotpath();
-    #[cfg(any(feature = "hotpath", feature = "hotpath-alloc"))]
-    let guard = hotpath::HotpathGuardBuilder::new("cursor-dispatch-model")
-        .format(hotpath::Format::Json)
-        .output_path(&report_path)
-        .functions_limit(512)
-        .build();
-
-    let mut report = run_harness();
-
-    #[cfg(any(feature = "hotpath", feature = "hotpath-alloc"))]
-    {
-        drop(guard);
-        report["hotpath_report_path"] = json!(report_path.display().to_string());
-        if let Ok(text) = fs::read_to_string(&report_path) {
-            if let Ok(parsed) = serde_json::from_str::<Value>(&text) {
-                report["hotpath"] = extract_hotpath_labels(&parsed);
-                report["hotpath_elapsed"] = parsed
-                    .get("elapsed_time")
-                    .or_else(|| parsed.get("elapsed_time_millis"))
-                    .cloned()
-                    .unwrap_or(Value::Null);
-            } else {
-                report["hotpath_report_parse_error"] = json!(true);
-            }
-        }
-    }
-
+    let report = run_measured_harness();
     println!(
         "{}",
         serde_json::to_string_pretty(&report).expect("serialize harness report")
     );
 }
 
+#[cfg(any(feature = "hotpath", feature = "hotpath-alloc"))]
+fn run_measured_harness() -> Value {
+    let report_path = configure_hotpath();
+    let guard = hotpath::HotpathGuardBuilder::new("cursor-dispatch-model")
+        .format(hotpath::Format::Json)
+        .output_path(&report_path)
+        .functions_limit(512)
+        .build();
+    let mut report = run_harness();
+    drop(guard);
+    report["hotpath_report_path"] = json!(report_path.display().to_string());
+    if let Ok(text) = fs::read_to_string(&report_path) {
+        if let Ok(parsed) = serde_json::from_str::<Value>(&text) {
+            report["hotpath"] = extract_hotpath_labels(&parsed);
+            report["hotpath_elapsed"] = parsed
+                .get("elapsed_time")
+                .or_else(|| parsed.get("elapsed_time_millis"))
+                .cloned()
+                .unwrap_or(Value::Null);
+        } else {
+            report["hotpath_report_parse_error"] = json!(true);
+        }
+    }
+    report
+}
+
+#[cfg(not(any(feature = "hotpath", feature = "hotpath-alloc")))]
+fn run_measured_harness() -> Value {
+    run_harness()
+}
+
+#[cfg(any(feature = "hotpath", feature = "hotpath-alloc"))]
 fn configure_hotpath() -> PathBuf {
     if std::env::var_os("HOTPATH_METRICS_SERVER_OFF").is_none() {
         // SAFETY: this binary is single-threaded until `main` starts the
@@ -143,6 +150,9 @@ struct LookupBatch {
     model: Option<String>,
     lookups: usize,
     wall_ms: u128,
+    bytes_parsed: u64,
+    records_parsed: u64,
+    rescanned_from_zero: u64,
 }
 
 fn lookup_once(child_path: &Path) -> LookupBatch {
@@ -152,15 +162,32 @@ fn lookup_once(child_path: &Path) -> LookupBatch {
 fn measure_repeated_lookups(child_path: &Path, lookups: usize) -> LookupBatch {
     let started = Instant::now();
     let mut model = None;
+    let mut bytes_parsed = 0_u64;
+    let mut records_parsed = 0_u64;
+    let mut rescanned_from_zero = 0_u64;
     for _ in 0..lookups {
-        model = hotpath::measure_block!(BLOCKING_LABEL, {
-            parent_dispatch_model_for_subagent(child_path, PARENT_SESSION_ID, AGENT_ID)
-        });
+        let (found, receipt) = hotpath::measure_block!(
+            "sessions.hosts.cursor.dispatch_model_blocking",
+            parent_dispatch_model_for_subagent_with_receipt(
+                child_path,
+                PARENT_SESSION_ID,
+                AGENT_ID,
+            )
+        );
+        model = found;
+        bytes_parsed = bytes_parsed.saturating_add(receipt.bytes_parsed);
+        records_parsed = records_parsed.saturating_add(receipt.records_parsed);
+        if receipt.rescanned_from_zero {
+            rescanned_from_zero = rescanned_from_zero.saturating_add(1);
+        }
     }
     LookupBatch {
         model,
         lookups,
         wall_ms: started.elapsed().as_millis(),
+        bytes_parsed,
+        records_parsed,
+        rescanned_from_zero,
     }
 }
 
@@ -267,12 +294,14 @@ fn measure_inode_replacement() -> Value {
     })
 }
 
+#[cfg(any(feature = "hotpath", feature = "hotpath-alloc"))]
 fn extract_hotpath_labels(report: &Value) -> Value {
     let mut labels = serde_json::Map::new();
     collect_labeled_metrics(report, &mut labels);
     Value::Object(labels)
 }
 
+#[cfg(any(feature = "hotpath", feature = "hotpath-alloc"))]
 fn collect_labeled_metrics(value: &Value, labels: &mut serde_json::Map<String, Value>) {
     match value {
         Value::Object(map) => {

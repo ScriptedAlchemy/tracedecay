@@ -35,7 +35,10 @@ pub const CURSOR_MODEL_KEYS: &[&str] = &[
 const DISPATCH_TEXT_KEYS: &[&str] = &["description", "prompt", "subagent_type"];
 
 /// Tool names that denote a subagent dispatch, compared case-insensitively.
-const SUBAGENT_DISPATCH_TOOLS: &[&str] = &["task", "subagent"];
+///
+/// Public so transcript scanners can apply the same vocabulary as a cheap
+/// byte prefilter before materializing a JSON value.
+pub const SUBAGENT_DISPATCH_TOOLS: &[&str] = &["task", "subagent"];
 
 /// First non-blank model name on `value` among the accepted spellings.
 ///
@@ -66,6 +69,27 @@ pub fn is_subagent_dispatch_tool(name: &str) -> bool {
     SUBAGENT_DISPATCH_TOOLS.contains(&name.as_str())
 }
 
+/// Whether raw JSONL record bytes can name a subagent dispatch tool.
+///
+/// The accepted names are plain ASCII identifiers. A JSON encoder never
+/// escapes them, so substring absence proves the record cannot name a
+/// dispatch tool. Comparison is case-insensitive to match
+/// [`is_subagent_dispatch_tool`].
+pub fn record_bytes_may_name_subagent_dispatch(record: &[u8]) -> bool {
+    SUBAGENT_DISPATCH_TOOLS
+        .iter()
+        .any(|name| contains_ignore_ascii_case(record, name.as_bytes()))
+}
+
+fn contains_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return false;
+    }
+    haystack
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
 /// Dispatch description, prompt, and subagent type joined in that order.
 ///
 /// Each key is read from the `input` payload first and from the item second, so
@@ -92,6 +116,7 @@ mod tests {
 
     use super::{
         cursor_dispatch_model, cursor_model_string, dispatch_text, is_subagent_dispatch_tool,
+        record_bytes_may_name_subagent_dispatch,
     };
 
     #[test]
@@ -126,6 +151,22 @@ mod tests {
             "an input payload without a model falls back to the item"
         );
         assert_eq!(cursor_dispatch_model(&json!({})), None);
+    }
+
+    #[test]
+    fn record_bytes_prefilter_matches_dispatch_tool_names_case_insensitively() {
+        assert!(record_bytes_may_name_subagent_dispatch(
+            br#"{"name":"Task","input":{}}"#
+        ));
+        assert!(record_bytes_may_name_subagent_dispatch(
+            br#"{"name":"SUBAGENT"}"#
+        ));
+        assert!(
+            !record_bytes_may_name_subagent_dispatch(
+                br#"{"role":"assistant","message":{"content":"hello"}}"#
+            ),
+            "ordinary assistant text must not look like a dispatch"
+        );
     }
 
     #[test]
