@@ -337,6 +337,19 @@ enum EvaluationEvidenceKindV1 {
     PackagedPortable,
 }
 
+fn runtime_vector_generation_matches(
+    evidence_kind: EvaluationEvidenceKindV1,
+    observed: Option<&str>,
+    expected: &VectorGenerationIdV1,
+) -> bool {
+    match evidence_kind {
+        EvaluationEvidenceKindV1::Genuine => {
+            observed == Some(expected.as_digest().as_str())
+        }
+        EvaluationEvidenceKindV1::PackagedPortable => observed.is_none(),
+    }
+}
+
 fn validate_report_authority(
     report: &DirectEvaluationReportV1,
     workload: &CandidateWorkloadV1,
@@ -683,16 +696,11 @@ fn validate_runtime_evidence(
                         ),
                     ));
                 };
-                let vector_generation_matches = match evidence_kind {
-                    EvaluationEvidenceKindV1::Genuine => sample
-                        .provenance
-                        .vector_generation_id
-                        .as_deref()
-                        .is_some_and(|generation| ManifestDigest::new(generation).is_ok()),
-                    EvaluationEvidenceKindV1::PackagedPortable => {
-                        sample.provenance.vector_generation_id.is_none()
-                    }
-                };
+                let vector_generation_matches = runtime_vector_generation_matches(
+                    evidence_kind,
+                    sample.provenance.vector_generation_id.as_deref(),
+                    &semantic.vector_generation_id,
+                );
                 if !vector_generation_matches
                     || sample.provenance.artifact_digest.as_deref()
                         != Some(semantic.artifact_manifest_digest.as_str())
@@ -756,6 +764,28 @@ mod tests {
             validate_report_authority(&qualification.portable_evidence.report, &workload),
             Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected)
         );
+    }
+
+    #[test]
+    fn genuine_runtime_evidence_rejects_foreign_vector_generation() {
+        let expected = VectorGenerationIdV1::new(digest('a'));
+        let foreign = VectorGenerationIdV1::new(digest('b'));
+
+        assert!(runtime_vector_generation_matches(
+            EvaluationEvidenceKindV1::Genuine,
+            Some(expected.as_digest().as_str()),
+            &expected,
+        ));
+        assert!(!runtime_vector_generation_matches(
+            EvaluationEvidenceKindV1::Genuine,
+            Some(foreign.as_digest().as_str()),
+            &expected,
+        ));
+        assert!(runtime_vector_generation_matches(
+            EvaluationEvidenceKindV1::PackagedPortable,
+            None,
+            &expected,
+        ));
     }
 
     fn retained_bindings() -> AcceptedProfileValidationBindingsV1 {
