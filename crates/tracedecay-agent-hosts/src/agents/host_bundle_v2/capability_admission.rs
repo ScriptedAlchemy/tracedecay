@@ -60,14 +60,10 @@ pub fn require_component_capabilities(
         (HostKindV1::Zed | HostKindV1::Antigravity, Core) => {
             return Err(HostBundleError::UnsupportedCapability);
         }
-        (
-            HostKindV1::Zed | HostKindV1::Antigravity | HostKindV1::Vibe,
-            ContextMcp,
-        ) => &[Mcp],
-        (
-            HostKindV1::Zed | HostKindV1::Antigravity | HostKindV1::Vibe,
-            Agent | OperatorMcp,
-        ) => return Err(HostBundleError::UnsupportedCapability),
+        (HostKindV1::Zed | HostKindV1::Antigravity | HostKindV1::Vibe, ContextMcp) => &[Mcp],
+        (HostKindV1::Zed | HostKindV1::Antigravity | HostKindV1::Vibe, Agent | OperatorMcp) => {
+            return Err(HostBundleError::UnsupportedCapability);
+        }
         (_, ContextMcp | OperatorMcp) => &[Mcp],
         (HostKindV1::CursorDesktop, Agent) => &[NativeDiagnostics],
         (HostKindV1::OpenCode, Agent) => &[Cli],

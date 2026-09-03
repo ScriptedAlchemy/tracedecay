@@ -165,13 +165,13 @@ fn activation_and_registration_never_invent_unsupported_routes() {
 
     let zed = HostKindV1::Zed.descriptor();
     assert_eq!(zed.components(), &[HostComponentV1::ContextMcp]);
-    assert_eq!(zed.project_registration_path().relative_path(), Some(".zed"));
+    assert_eq!(
+        zed.project_registration_path().relative_path(),
+        Some(".zed")
+    );
 
     let antigravity = HostKindV1::Antigravity.descriptor();
-    assert_eq!(
-        antigravity.components(),
-        &[HostComponentV1::ContextMcp]
-    );
+    assert_eq!(antigravity.components(), &[HostComponentV1::ContextMcp]);
     assert_eq!(
         antigravity.project_registration_path(),
         HostProjectRegistrationPathV1::Unavailable

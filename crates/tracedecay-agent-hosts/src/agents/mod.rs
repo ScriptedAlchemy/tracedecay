@@ -35,6 +35,7 @@ pub mod prompt_rules;
 mod text_file_transaction;
 pub(crate) use text_file_transaction::{
     TextFileMutation, update_config_file_transactionally, update_text_file_transactionally,
+    update_two_config_files_transactionally,
 };
 pub(crate) mod retired_memory_digest;
 pub mod roo_code;

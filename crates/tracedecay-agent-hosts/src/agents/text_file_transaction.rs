@@ -451,6 +451,152 @@ pub(crate) fn update_config_file_transactionally<T>(
     update_file_transactionally(path, MutationBackup::BackupExisting, update)
 }
 
+/// Mutate two structured host documents as one rollback boundary.
+///
+/// Both path locks and both byte snapshots are acquired before either publish.
+/// If the second publish fails, the first is restored from its exact snapshot
+/// while both locks remain held. This is intentionally a two-file primitive:
+/// Antigravity is the only host contract with one component registration
+/// spanning two independently discovered documents.
+pub(crate) fn update_two_config_files_transactionally<T>(
+    first_path: &Path,
+    second_path: &Path,
+    update: impl FnOnce(&str, &str) -> Result<(T, TextFileMutation, TextFileMutation)>,
+) -> Result<T> {
+    if first_path == second_path {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "two-file host config transaction repeats {}",
+                first_path.display()
+            ),
+        });
+    }
+    let (lower, upper) = if first_path < second_path {
+        (first_path, second_path)
+    } else {
+        (second_path, first_path)
+    };
+    let _locks = [lock_host_file_write(lower)?, lock_host_file_write(upper)?];
+    let first_snapshot =
+        capture_host_file_snapshot(first_path).map_err(|error| TraceDecayError::Config {
+            message: format!("failed to read {}: {error}", first_path.display()),
+        })?;
+    let second_snapshot =
+        capture_host_file_snapshot(second_path).map_err(|error| TraceDecayError::Config {
+            message: format!("failed to read {}: {error}", second_path.display()),
+        })?;
+    let first_existing = snapshot_utf8(first_path, &first_snapshot)?;
+    let second_existing = snapshot_utf8(second_path, &second_snapshot)?;
+    let (output, first_mutation, second_mutation) = update(first_existing, second_existing)?;
+    let first_backup = mutation_backup(first_path, &first_snapshot, &first_mutation)?;
+    let second_backup = mutation_backup(second_path, &second_snapshot, &second_mutation)?;
+    let expected_first = mutation_result_bytes(&first_snapshot, &first_mutation);
+    apply_file_mutation(
+        first_path,
+        &first_snapshot,
+        &first_mutation,
+        first_backup.as_deref(),
+    )?;
+    if let Err(second_error) = apply_file_mutation(
+        second_path,
+        &second_snapshot,
+        &second_mutation,
+        second_backup.as_deref(),
+    ) {
+        return match restore_group_snapshot(first_path, &first_snapshot, expected_first.as_deref())
+        {
+            Ok(()) => Err(second_error),
+            Err(rollback_error) => Err(TraceDecayError::Config {
+                message: format!(
+                    "{second_error}; failed to roll back {}: {rollback_error}",
+                    first_path.display()
+                ),
+            }),
+        };
+    }
+    Ok(output)
+}
+
+fn snapshot_utf8<'a>(path: &Path, snapshot: &'a HostFileSnapshot) -> Result<&'a str> {
+    match snapshot.contents() {
+        Some(contents) => std::str::from_utf8(contents).map_err(|error| TraceDecayError::Config {
+            message: format!("failed to read {} as UTF-8: {error}", path.display()),
+        }),
+        None => Ok(""),
+    }
+}
+
+fn mutation_backup(
+    path: &Path,
+    snapshot: &HostFileSnapshot,
+    mutation: &TextFileMutation,
+) -> Result<Option<std::path::PathBuf>> {
+    if matches!(mutation, TextFileMutation::Unchanged)
+        || matches!(snapshot, HostFileSnapshot::Missing)
+    {
+        Ok(None)
+    } else {
+        super::backup_config_file(path)
+    }
+}
+
+fn mutation_result_bytes(
+    snapshot: &HostFileSnapshot,
+    mutation: &TextFileMutation,
+) -> Option<Vec<u8>> {
+    match mutation {
+        TextFileMutation::Unchanged => snapshot.contents().map(<[u8]>::to_vec),
+        TextFileMutation::Write(replacement) => Some(replacement.as_bytes().to_vec()),
+        TextFileMutation::Remove => None,
+    }
+}
+
+fn apply_file_mutation(
+    path: &Path,
+    snapshot: &HostFileSnapshot,
+    mutation: &TextFileMutation,
+    backup: Option<&Path>,
+) -> Result<()> {
+    match mutation {
+        TextFileMutation::Unchanged => Ok(()),
+        TextFileMutation::Write(replacement) => safe_write_bytes_file_from_snapshot(
+            path,
+            replacement.as_bytes(),
+            backup,
+            None,
+            snapshot,
+        ),
+        TextFileMutation::Remove => remove_host_file_from_snapshot(path, snapshot),
+    }
+}
+
+fn restore_group_snapshot(
+    path: &Path,
+    original: &HostFileSnapshot,
+    expected_current: Option<&[u8]>,
+) -> Result<()> {
+    let current = capture_host_file_snapshot(path).map_err(|error| TraceDecayError::Config {
+        message: format!(
+            "failed to inspect {} during rollback: {error}",
+            path.display()
+        ),
+    })?;
+    if current.contents() != expected_current {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "refused to restore {} because it changed after publication",
+                path.display()
+            ),
+        });
+    }
+    match original {
+        HostFileSnapshot::Missing => remove_host_file_from_snapshot(path, &current),
+        HostFileSnapshot::Present {
+            contents, metadata, ..
+        } => safe_write_bytes_file_from_snapshot(path, contents, None, Some(metadata), &current),
+    }
+}
+
 fn update_file_transactionally<T>(
     path: &Path,
     backup: MutationBackup,
