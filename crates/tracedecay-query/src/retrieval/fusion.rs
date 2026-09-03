@@ -374,7 +374,6 @@ impl RetrievalCursorKeyringV1 {
         keyed_mac(&material.secret, &bytes).map_err(map_cursor_key_error)
     }
 
-    #[hotpath::measure(label = "query.stream.verify_cursor")]
     pub(crate) fn verify_cursor(&self, cursor: &RetrievalCursor) -> Result<(), RetrievalError> {
         let material = self
             .key_material(&cursor.key_id, cursor.key_epoch)
@@ -475,7 +474,6 @@ impl CompositionLaneInput {
     }
 }
 
-#[hotpath::measure(label = "query.fusion.compact_lane")]
 fn compact_batch<E>(batch: RetrieverBatch<E>) -> Result<RetrieverBatch<()>, FusionStageError> {
     batch.validate()?;
     Ok(RetrieverBatch {
@@ -775,7 +773,6 @@ struct AdmittedLanes {
     lane_checkpoints: Vec<RetrieverContinuation>,
 }
 
-#[hotpath::measure(label = "query.fusion.admit_lanes")]
 fn admitted_lanes(
     input: &FusionStageInput,
     required_lanes: &[RetrieverKind],
@@ -1136,7 +1133,6 @@ fn decision_cmp(left: &RankingDecision, right: &RankingDecision) -> Ordering {
         .then_with(|| left.detail.cmp(&right.detail))
 }
 
-#[hotpath::measure(label = "query.fusion.attach_decisions")]
 fn attach_same_source_decisions(
     candidates: &mut [FusedCandidate],
     decisions: &[DedupeDecisionV1],
@@ -1189,7 +1185,6 @@ fn attach_same_source_decisions(
     Ok(())
 }
 
-#[hotpath::measure(label = "query.stream.digest_set")]
 pub fn digest_candidate_set(
     candidates: &[RankedCandidate],
 ) -> Result<CandidateSetDigest, RetrievalError> {
@@ -1199,7 +1194,6 @@ pub fn digest_candidate_set(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "query.stream.build_cursor")]
 fn build_cursor(
     request: &RetrievalRequest,
     output: &CompositionOutputV1,
