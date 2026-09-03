@@ -911,24 +911,6 @@ fn extraction_ranges(
     expanded
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn minimal_edit_is_confined_to_the_changed_token() {
-        let before = "fn unchanged() {}\nfn edited() -> u32 { 1 }\n";
-        let after = "fn unchanged() {}\nfn edited() -> u32 { 123 }\n";
-        let edit = minimal_edit(before, after);
-
-        assert_eq!(&before[edit.start_byte..edit.old_end_byte], "");
-        assert_eq!(&after[edit.start_byte..edit.new_end_byte], "23");
-        assert_eq!(edit.start_position, ParsePoint { row: 1, column: 22 });
-        assert_eq!(edit.old_end_position, ParsePoint { row: 1, column: 22 });
-        assert_eq!(edit.new_end_position, ParsePoint { row: 1, column: 24 });
-    }
-}
-
 fn is_attached_leading_syntax(kind: &str) -> bool {
     matches!(
         kind,
@@ -1032,5 +1014,23 @@ fn grammar_key<'a>(language_id: &'a str, logical_path: &str) -> &'a str {
         },
         "typescriptreact" => "tsx",
         _ => language_id,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn minimal_edit_is_confined_to_the_changed_token() {
+        let before = "fn unchanged() {}\nfn edited() -> u32 { 1 }\n";
+        let after = "fn unchanged() {}\nfn edited() -> u32 { 123 }\n";
+        let edit = minimal_edit(before, after);
+
+        assert_eq!(&before[edit.start_byte..edit.old_end_byte], "");
+        assert_eq!(&after[edit.start_byte..edit.new_end_byte], "23");
+        assert_eq!(edit.start_position, ParsePoint { row: 1, column: 22 });
+        assert_eq!(edit.old_end_position, ParsePoint { row: 1, column: 22 });
+        assert_eq!(edit.new_end_position, ParsePoint { row: 1, column: 24 });
     }
 }

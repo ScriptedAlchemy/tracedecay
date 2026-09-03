@@ -178,7 +178,7 @@ impl BashExtractor {
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &kind, &name, start_line);
-        let metrics = count_complexity(node, &BASH_COMPLEXITY, &state.source);
+        let metrics = count_complexity(node, &BASH_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -240,7 +240,7 @@ impl BashExtractor {
             let start_column = node.start_position().column as u32;
             let end_column = node.end_position().column as u32;
             let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-            let id = generate_node_id(&state.file_path, &NodeKind::Const, &name, start_line);
+            let id = generate_node_id(&state.file_path, &NodeKind::Const, name, start_line);
 
             let graph_node = Node {
                 id: id.clone(),
@@ -355,7 +355,7 @@ impl BashExtractor {
     /// Bash uses comment lines (# ...) as documentation. We look for `comment`
     /// sibling nodes that immediately precede the given definition node.
     fn extract_docstring(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        docstring_from_hash_comments(&state.source, node)
+        docstring_from_hash_comments(state.source, node)
     }
 
     /// Recursively find command nodes inside a given node and create unresolved Calls references.

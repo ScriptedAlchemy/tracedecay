@@ -15,7 +15,7 @@ use crate::types::{
 pub struct PowerShellExtractor;
 
 /// Internal state used during AST traversal.
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
@@ -23,12 +23,12 @@ struct ExtractionState {
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -40,7 +40,7 @@ impl ExtractionState {
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
         }
     }
@@ -65,10 +65,8 @@ impl ExtractionState {
     }
 
     /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
@@ -187,8 +185,10 @@ impl PowerShellExtractor {
 
     /// Extract a function definition.
     fn visit_function(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "function_name")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "function_name").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let kind = NodeKind::Function;
         let visibility = Visibility::Pub;
@@ -200,7 +200,7 @@ impl PowerShellExtractor {
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &kind, &name, start_line);
-        let metrics = count_complexity(node, &POWERSHELL_COMPLEXITY, &state.source);
+        let metrics = count_complexity(node, &POWERSHELL_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -323,14 +323,14 @@ impl PowerShellExtractor {
                 && let Some(token) = find_direct_child_by_kind(elements, "generic_token")
             {
                 let module_name = state.node_text(token);
-                Self::emit_use_node(state, node, &module_name);
+                Self::emit_use_node(state, node, module_name);
             }
         } else if find_direct_child_by_kind(node, "command_invokation_operator").is_some() {
             // Dot-source command: `. .\Utils.ps1`
             // The path is in command_name_expr > command_name.
             if let Some(name_expr) = node.child_by_field_name("command_name") {
                 let path = state.node_text(name_expr);
-                Self::emit_use_node(state, node, &path);
+                Self::emit_use_node(state, node, path);
             }
         }
     }
@@ -436,7 +436,7 @@ impl PowerShellExtractor {
                             let callee_name = state.node_text(name_node);
                             state.unresolved_refs.push(UnresolvedRef {
                                 from_node_id: fn_node_id.to_string(),
-                                reference_name: callee_name,
+                                reference_name: callee_name.to_string(),
                                 reference_kind: EdgeKind::Calls,
                                 line: child.start_position().row as u32,
                                 column: child.start_position().column as u32,

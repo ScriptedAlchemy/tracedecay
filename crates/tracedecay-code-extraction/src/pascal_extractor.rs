@@ -19,7 +19,7 @@ use crate::types::{
 pub struct PascalExtractor;
 
 /// Internal state used during AST traversal.
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
@@ -27,7 +27,7 @@ struct ExtractionState {
     /// Stack of `(name, node_id)` for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
     /// Track nesting depth for classes.
     class_depth: usize,
@@ -37,8 +37,8 @@ struct ExtractionState {
     in_implementation: bool,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -50,7 +50,7 @@ impl ExtractionState {
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
             class_depth: 0,
             current_visibility: Visibility::Pub,
@@ -78,10 +78,8 @@ impl ExtractionState {
     }
 
     /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
@@ -331,8 +329,10 @@ impl PascalExtractor {
 
     /// Extract a single uses reference as a Use node.
     fn visit_single_use(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "identifier")
-            .map_or_else(|| state.node_text(node), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "identifier").map_or_else(
+            || state.node_text(node).to_string(),
+            |n| state.node_text(n).to_string(),
+        );
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
         let start_column = node.start_position().column as u32;
@@ -405,8 +405,10 @@ impl PascalExtractor {
     /// Visit a single type declaration (declType).
     /// Dispatches based on whether it's a class, record, interface, or type alias.
     fn visit_type_decl(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         if let Some(class_node) = find_direct_child_by_kind(node, "declClass") {
             if find_direct_child_by_kind(class_node, "kRecord").is_some() {
@@ -488,7 +490,7 @@ impl PascalExtractor {
             let parent_name = state.node_text(parent_ref);
             state.unresolved_refs.push(UnresolvedRef {
                 from_node_id: id.clone(),
-                reference_name: parent_name,
+                reference_name: parent_name.to_string(),
                 reference_kind: EdgeKind::Extends,
                 line: parent_ref.start_position().row as u32,
                 column: parent_ref.start_position().column as u32,
@@ -758,8 +760,10 @@ impl PascalExtractor {
 
     /// Extract a field declaration.
     fn visit_field(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
         let text = state.node_text(node);
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -816,7 +820,7 @@ impl PascalExtractor {
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &node_kind, &name, start_line);
-        let metrics = count_complexity(node, &PASCAL_COMPLEXITY, &state.source);
+        let metrics = count_complexity(node, &PASCAL_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -866,7 +870,7 @@ impl PascalExtractor {
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &node_kind, &name, start_line);
-        let metrics = count_complexity(node, &PASCAL_COMPLEXITY, &state.source);
+        let metrics = count_complexity(node, &PASCAL_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -907,8 +911,10 @@ impl PascalExtractor {
 
     /// Extract a property declaration.
     fn visit_property(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
         let text = state.node_text(node);
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -972,8 +978,10 @@ impl PascalExtractor {
 
     /// Extract a single constant declaration.
     fn visit_const(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
         let text = state.node_text(node);
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -1043,8 +1051,10 @@ impl PascalExtractor {
 
     /// Extract a single variable declaration.
     fn visit_var(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
         let text = state.node_text(node);
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -1139,7 +1149,7 @@ impl PascalExtractor {
                 Visibility::Pub
             };
 
-            let metrics = count_complexity(node, &PASCAL_COMPLEXITY, &state.source);
+            let metrics = count_complexity(node, &PASCAL_COMPLEXITY, state.source);
             let graph_node = Node {
                 id: id.clone(),
                 kind: actual_kind,
@@ -1198,9 +1208,9 @@ impl PascalExtractor {
     fn find_module_name(state: &ExtractionState, node: TsNode<'_>) -> String {
         if let Some(mod_name) = find_direct_child_by_kind(node, "moduleName") {
             if let Some(ident) = find_direct_child_by_kind(mod_name, "identifier") {
-                return state.node_text(ident);
+                return state.node_text(ident).to_string();
             }
-            return state.node_text(mod_name);
+            return state.node_text(mod_name).to_string();
         }
         "<unknown>".to_string()
     }
@@ -1226,10 +1236,12 @@ impl PascalExtractor {
     fn find_proc_name(state: &ExtractionState, node: TsNode<'_>) -> String {
         // Check for genericDot first (dotted name like TMyClass.DoSomething).
         if let Some(dot_node) = find_direct_child_by_kind(node, "genericDot") {
-            return state.node_text(dot_node);
+            return state.node_text(dot_node).to_string();
         }
-        find_direct_child_by_kind(node, "identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n))
+        find_direct_child_by_kind(node, "identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        )
     }
 
     /// Parse a dotted name from a declProc node.
@@ -1243,7 +1255,7 @@ impl PascalExtractor {
                 loop {
                     let child = cursor.node();
                     if child.kind() == "identifier" {
-                        identifiers.push(state.node_text(child));
+                        identifiers.push(state.node_text(child).to_string());
                     }
                     if !cursor.goto_next_sibling() {
                         break;
@@ -1272,7 +1284,7 @@ impl PascalExtractor {
                             let callee_name = state.node_text(callee);
                             state.unresolved_refs.push(UnresolvedRef {
                                 from_node_id: fn_node_id.to_string(),
-                                reference_name: callee_name,
+                                reference_name: callee_name.to_string(),
                                 reference_kind: EdgeKind::Calls,
                                 line: child.start_position().row as u32,
                                 column: child.start_position().column as u32,
@@ -1296,12 +1308,12 @@ impl PascalExtractor {
                                 let callee_name = state.node_text(fc);
                                 // Skip some keywords that aren't calls.
                                 if !matches!(
-                                    callee_name.as_str(),
+                                    callee_name,
                                     "inherited" | "break" | "continue" | "exit"
                                 ) {
                                     state.unresolved_refs.push(UnresolvedRef {
                                         from_node_id: fn_node_id.to_string(),
-                                        reference_name: callee_name,
+                                        reference_name: callee_name.to_string(),
                                         reference_kind: EdgeKind::Calls,
                                         line: fc.start_position().row as u32,
                                         column: fc.start_position().column as u32,
@@ -1325,7 +1337,7 @@ impl PascalExtractor {
 
     /// Extract docstrings from preceding comment nodes.
     fn extract_docstring(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        docstring_from_preceding_comments(&state.source, node, Self::clean_comment)
+        docstring_from_preceding_comments(state.source, node, Self::clean_comment)
     }
 
     /// Strip comment markers from a single Pascal comment text.

@@ -8,19 +8,19 @@ use crate::types::{
 
 pub struct ElixirExtractor;
 
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
     errors: Vec<String>,
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -32,7 +32,7 @@ impl ExtractionState {
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
         }
     }
@@ -55,10 +55,8 @@ impl ExtractionState {
         self.node_stack.last().map(|(_, id)| id.as_str())
     }
 
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
@@ -419,7 +417,7 @@ impl ElixirExtractor {
     fn call_head(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
         // In tree-sitter-elixir, call has a `target` field or first named child is the callee.
         if let Some(target) = node.child_by_field_name("target") {
-            return Some(state.node_text(target));
+            return Some(state.node_text(target).to_string());
         }
         // Fall back: first identifier child.
         let mut cursor = node.walk();
@@ -427,7 +425,7 @@ impl ElixirExtractor {
             loop {
                 let child = cursor.node();
                 if child.kind() == "identifier" {
-                    return Some(state.node_text(child));
+                    return Some(state.node_text(child).to_string());
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -447,7 +445,7 @@ impl ElixirExtractor {
                 if child.kind() == "arguments"
                     && let Some(arg) = child.named_child(0)
                 {
-                    return Some(state.node_text(arg));
+                    return Some(state.node_text(arg).to_string());
                 }
                 // For `def name(args)` the function name might be directly a `call`
                 // child (a call of name/args).
@@ -460,7 +458,7 @@ impl ElixirExtractor {
                     let text = state.node_text(child);
                     // Skip the defmodule/def keyword itself.
                     if !matches!(
-                        text.as_str(),
+                        text,
                         "defmodule"
                             | "def"
                             | "defp"
@@ -472,7 +470,7 @@ impl ElixirExtractor {
                             | "use"
                             | "alias"
                     ) {
-                        return Some(text);
+                        return Some(text.to_string());
                     }
                 }
                 if !cursor.goto_next_sibling() {
@@ -507,7 +505,7 @@ impl ElixirExtractor {
             let head = Self::call_head(state, prev)?;
             if head == "@doc" {
                 let text = state.node_text(prev);
-                return Some(text);
+                return Some(text.to_string());
             }
         }
         None

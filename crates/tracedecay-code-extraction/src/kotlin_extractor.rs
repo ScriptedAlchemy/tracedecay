@@ -22,7 +22,7 @@ use crate::{
 pub struct KotlinExtractor;
 
 /// Internal state used during AST traversal.
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
@@ -30,7 +30,7 @@ struct ExtractionState {
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
     /// Track nesting depth to distinguish methods from top-level functions.
     class_depth: usize,
@@ -38,8 +38,8 @@ struct ExtractionState {
     inside_trait: bool,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -51,7 +51,7 @@ impl ExtractionState {
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
             class_depth: 0,
             inside_trait: false,
@@ -78,16 +78,16 @@ impl ExtractionState {
     }
 
     /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        self.node_str(node).to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 
-    fn node_str(&self, node: TsNode<'_>) -> &str {
-        node.utf8_text(&self.source).unwrap_or("<invalid utf8>")
+    fn node_str(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
-impl AnnotationEmitterState for ExtractionState {
+impl<'s> AnnotationEmitterState for ExtractionState<'s> {
     fn extract_annotation_name(&self, annotation_node: TsNode<'_>) -> String {
         KotlinExtractor::extract_annotation_name(self, annotation_node)
     }
@@ -234,8 +234,10 @@ impl KotlinExtractor {
 
     /// Extract a package header.
     fn visit_package(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "identifier")
-            .map_or_else(|| "<unknown>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "identifier").map_or_else(
+            || "<unknown>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -316,11 +318,11 @@ impl KotlinExtractor {
                 let text = state.node_text(node);
                 text.trim()
                     .strip_prefix("import ")
-                    .unwrap_or(&text)
+                    .unwrap_or(text)
                     .trim()
                     .to_string()
             },
-            |n| state.node_text(n),
+            |n| state.node_text(n).to_string(),
         );
 
         let start_line = node.start_position().row as u32;
@@ -733,7 +735,7 @@ impl KotlinExtractor {
     fn visit_enum_entry(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = find_direct_child_by_kind(node, "simple_identifier").map_or_else(
             || state.node_text(node).trim().to_string(),
-            |n| state.node_text(n),
+            |n| state.node_text(n).to_string(),
         );
 
         let start_line = node.start_position().row as u32;
@@ -782,8 +784,10 @@ impl KotlinExtractor {
 
     /// Extract an object declaration (Kotlin singleton).
     fn visit_object(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "type_identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "type_identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
         let visibility = Self::extract_visibility(node, state);
         let docstring = Self::extract_kdoc(state, node);
         let signature = Some(Self::extract_declaration_signature(state, node));
@@ -844,8 +848,10 @@ impl KotlinExtractor {
     /// Extract a companion object.
     fn visit_companion_object(state: &mut ExtractionState, node: TsNode<'_>) {
         // Companion objects may have a name or be anonymous.
-        let name = find_direct_child_by_kind(node, "type_identifier")
-            .map_or_else(|| "Companion".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "type_identifier").map_or_else(
+            || "Companion".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
         let start_column = node.start_position().column as u32;
@@ -913,8 +919,10 @@ impl KotlinExtractor {
 
     /// Extract a function or method declaration.
     fn visit_function(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "simple_identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "simple_identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         // Check if this is an extension function (has a receiver type before the dot and name).
         let is_extension = Self::is_extension_function(node);
@@ -943,7 +951,7 @@ impl KotlinExtractor {
         };
 
         let id = generate_node_id(&state.file_path, &kind, &name, start_line);
-        let metrics = count_complexity(node, &KOTLIN_COMPLEXITY, &state.source);
+        let metrics = count_complexity(node, &KOTLIN_COMPLEXITY, state.source);
 
         // For extension functions, build a richer signature including the receiver type.
         let final_signature = if is_extension {
@@ -1084,7 +1092,7 @@ impl KotlinExtractor {
         let name = "constructor".to_string();
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &NodeKind::Constructor, &name, start_line);
-        let metrics = count_complexity(node, &KOTLIN_COMPLEXITY, &state.source);
+        let metrics = count_complexity(node, &KOTLIN_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -1133,8 +1141,10 @@ impl KotlinExtractor {
 
     /// Extract the class name from a `class_declaration` node.
     fn extract_class_name(state: &ExtractionState, node: TsNode<'_>) -> String {
-        find_direct_child_by_kind(node, "type_identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n))
+        find_direct_child_by_kind(node, "type_identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        )
     }
 
     /// Extract the property name from a `property_declaration` node.
@@ -1143,11 +1153,11 @@ impl KotlinExtractor {
         if let Some(var_decl) = find_direct_child_by_kind(node, "variable_declaration")
             && let Some(ident) = find_direct_child_by_kind(var_decl, "simple_identifier")
         {
-            return state.node_text(ident);
+            return state.node_text(ident).to_string();
         }
         // Fallback: look for multi_variable_declaration
         if let Some(multi) = find_direct_child_by_kind(node, "multi_variable_declaration") {
-            return state.node_text(multi);
+            return state.node_text(multi).to_string();
         }
         "<anonymous>".to_string()
     }
@@ -1313,7 +1323,7 @@ impl KotlinExtractor {
                 "multiline_comment" => {
                     let text = state.node_text(sibling);
                     if text.starts_with("/**") {
-                        return Some(Self::clean_kdoc(&text));
+                        return Some(Self::clean_kdoc(text));
                     }
                     current = sibling.prev_named_sibling();
                 }
@@ -1374,7 +1384,10 @@ impl KotlinExtractor {
         let type_name = find_direct_child_by_kind(node, "constructor_invocation")
             .and_then(|ci| find_direct_child_by_kind(ci, "user_type"))
             .or_else(|| find_direct_child_by_kind(node, "user_type"))
-            .map_or_else(|| state.node_text(node), |ut| state.node_text(ut));
+            .map_or_else(
+                || state.node_text(node).to_string(),
+                |ut| state.node_text(ut).to_string(),
+            );
 
         let base_name = type_name
             .split('<')
@@ -1414,24 +1427,24 @@ impl KotlinExtractor {
             && let Some(ut) = find_direct_child_by_kind(ci, "user_type")
         {
             if let Some(ti) = find_direct_child_by_kind(ut, "type_identifier") {
-                return state.node_text(ti);
+                return state.node_text(ti).to_string();
             }
-            return state.node_text(ut);
+            return state.node_text(ut).to_string();
         }
         if let Some(ut) = find_direct_child_by_kind(node, "user_type") {
             if let Some(ti) = find_direct_child_by_kind(ut, "type_identifier") {
-                return state.node_text(ti);
+                return state.node_text(ti).to_string();
             }
-            return state.node_text(ut);
+            return state.node_text(ut).to_string();
         }
         // Fallback: text after '@'
         let text = state.node_text(node);
         text.trim()
             .strip_prefix('@')
-            .unwrap_or(&text)
+            .unwrap_or(text)
             .split('(')
             .next()
-            .unwrap_or(&text)
+            .unwrap_or(text)
             .trim()
             .to_string()
     }
@@ -1493,10 +1506,10 @@ impl KotlinExtractor {
     ) {
         if node.kind() == "type_identifier" {
             let type_name = state.node_text(node);
-            if !builtins.contains(&type_name.as_str()) {
+            if !builtins.contains(&type_name) {
                 state.unresolved_refs.push(UnresolvedRef {
                     from_node_id: fn_node_id.to_string(),
-                    reference_name: type_name,
+                    reference_name: type_name.to_string(),
                     reference_kind: EdgeKind::Uses,
                     line: node.start_position().row as u32,
                     column: node.start_position().column as u32,
@@ -1557,10 +1570,10 @@ impl KotlinExtractor {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             let child = cursor.node();
-            return state.node_text(child);
+            return state.node_text(child).to_string();
         }
         let text = state.node_text(node);
-        text.split('(').next().unwrap_or(&text).trim().to_string()
+        text.split('(').next().unwrap_or(text).trim().to_string()
     }
 
     /// Build the final `ExtractionResult` from the accumulated state.

@@ -14,17 +14,17 @@ use crate::types::{
 
 pub struct TomlExtractor;
 
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     file_node_id: String,
     timestamp: u64,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -34,16 +34,14 @@ impl ExtractionState {
             nodes: Vec::new(),
             edges: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             file_node_id,
             timestamp,
         }
     }
 
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
@@ -88,7 +86,7 @@ impl TomlExtractor {
         )
     }
 
-    fn initialize_state(file_path: &str, source: &str) -> ExtractionState {
+    fn initialize_state<'s>(file_path: &str, source: &'s str) -> ExtractionState<'s> {
         let mut state = ExtractionState::new(file_path, source);
         let file_node = Node {
             id: state.file_node_id.clone(),
@@ -209,7 +207,7 @@ impl TomlExtractor {
             loop {
                 let child = cursor.node();
                 if matches!(child.kind(), "bare_key" | "dotted_key" | "quoted_key") {
-                    return Some(state.node_text(child));
+                    return Some(state.node_text(child).to_string());
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -232,12 +230,12 @@ impl TomlExtractor {
         let start_line = pair_node.start_position().row as u32;
         let end_line = pair_node.end_position().row as u32;
         let qualified_name = format!("{parent_qn}::{name}");
-        let id = generate_node_id(&state.file_path, &NodeKind::Const, &name, start_line);
+        let id = generate_node_id(&state.file_path, &NodeKind::Const, name, start_line);
 
         let pair = Node {
             id: id.clone(),
             kind: NodeKind::Const,
-            name,
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,

@@ -17,7 +17,7 @@ use crate::types::{
 pub struct ScalaExtractor;
 
 /// Internal state used during AST traversal.
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
@@ -25,7 +25,7 @@ struct ExtractionState {
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
     /// Track nesting depth to distinguish inner classes from top-level classes.
     class_depth: usize,
@@ -33,8 +33,8 @@ struct ExtractionState {
     inside_trait: bool,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -46,7 +46,7 @@ impl ExtractionState {
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
             class_depth: 0,
             inside_trait: false,
@@ -73,10 +73,8 @@ impl ExtractionState {
     }
 
     /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
@@ -193,9 +191,10 @@ impl ScalaExtractor {
 
     /// Extract a package clause.
     fn visit_package(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = node
-            .child_by_field_name("name")
-            .map_or_else(|| "<unknown>".to_string(), |n| state.node_text(n));
+        let name = node.child_by_field_name("name").map_or_else(
+            || "<unknown>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -258,7 +257,7 @@ impl ScalaExtractor {
         let path = text
             .trim()
             .strip_prefix("import ")
-            .unwrap_or(&text)
+            .unwrap_or(text)
             .trim()
             .to_string();
 
@@ -606,7 +605,7 @@ impl ScalaExtractor {
             .or_else(|| find_direct_child_by_kind(node, "identifier"))
             .map_or_else(
                 || state.node_text(node).trim().to_string(),
-                |n| state.node_text(n),
+                |n| state.node_text(n).to_string(),
             );
 
         let start_line = node.start_position().row as u32;
@@ -672,7 +671,7 @@ impl ScalaExtractor {
         };
 
         let id = generate_node_id(&state.file_path, &kind, &name, start_line);
-        let metrics = count_complexity(node, &SCALA_COMPLEXITY, &state.source);
+        let metrics = count_complexity(node, &SCALA_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -902,9 +901,10 @@ impl ScalaExtractor {
 
     /// Extract a type alias definition.
     fn visit_type_def(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = node
-            .child_by_field_name("name")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = node.child_by_field_name("name").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
         let visibility = Self::extract_visibility(node, state);
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -952,7 +952,8 @@ impl ScalaExtractor {
 
     /// Extract the name from a node's "name" field.
     fn extract_name(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        node.child_by_field_name("name").map(|n| state.node_text(n))
+        node.child_by_field_name("name")
+            .map(|n| state.node_text(n).to_string())
     }
 
     /// Extract the name from a val/var definition.
@@ -960,13 +961,13 @@ impl ScalaExtractor {
     /// `val_definition` uses a "pattern" field; `val_declaration` uses "name".
     fn extract_val_var_name(state: &ExtractionState, node: TsNode<'_>) -> String {
         if let Some(name_node) = node.child_by_field_name("name") {
-            return state.node_text(name_node);
+            return state.node_text(name_node).to_string();
         }
         if let Some(pattern_node) = node.child_by_field_name("pattern") {
             let text = state.node_text(pattern_node);
             // For simple patterns like `x`, return the text directly.
             // For tuple patterns like `(a, b)`, return the whole thing.
-            return text;
+            return text.to_string();
         }
         "<anonymous>".to_string()
     }
@@ -1067,7 +1068,7 @@ impl ScalaExtractor {
                 "block_comment" => {
                     let text = state.node_text(sibling);
                     if text.starts_with("/**") {
-                        return Some(Self::clean_scaladoc(&text));
+                        return Some(Self::clean_scaladoc(text));
                     }
                     current = sibling.prev_named_sibling();
                 }
@@ -1115,7 +1116,7 @@ impl ScalaExtractor {
                         let base_name = type_name
                             .split('[')
                             .next()
-                            .unwrap_or(&type_name)
+                            .unwrap_or(type_name)
                             .trim()
                             .to_string();
                         if !base_name.is_empty() {
@@ -1150,7 +1151,10 @@ impl ScalaExtractor {
                     if child.is_named() && child.kind().contains("type_parameter") {
                         let param_name = find_direct_child_by_kind(child, "identifier")
                             .or_else(|| find_direct_child_by_kind(child, "type_identifier"))
-                            .map_or_else(|| state.node_text(child), |n| state.node_text(n));
+                            .map_or_else(
+                                || state.node_text(child).to_string(),
+                                |n| state.node_text(n).to_string(),
+                            );
                         let start_line = child.start_position().row as u32;
                         let id = generate_node_id(
                             &state.file_path,
@@ -1169,7 +1173,7 @@ impl ScalaExtractor {
                             end_line: child.end_position().row as u32,
                             start_column: child.start_position().column as u32,
                             end_column: child.end_position().column as u32,
-                            signature: Some(state.node_text(child)),
+                            signature: Some(state.node_text(child).to_string()),
                             docstring: None,
                             visibility: Visibility::Private,
                             is_async: false,
@@ -1214,9 +1218,10 @@ impl ScalaExtractor {
                 loop {
                     let child = cursor.node();
                     if child.kind() == "class_parameter" {
-                        let param_name = child
-                            .child_by_field_name("name")
-                            .map_or_else(|| "<param>".to_string(), |n| state.node_text(n));
+                        let param_name = child.child_by_field_name("name").map_or_else(
+                            || "<param>".to_string(),
+                            |n| state.node_text(n).to_string(),
+                        );
 
                         let text = state.node_text(child);
                         let is_val = text.contains("val ");
@@ -1331,21 +1336,21 @@ impl ScalaExtractor {
             let child = cursor.node();
             if child.kind() == "field_expression" {
                 // e.g. obj.method(...)
-                return state.node_text(child);
+                return state.node_text(child).to_string();
             }
             if child.kind() == "identifier" {
-                return state.node_text(child);
+                return state.node_text(child).to_string();
             }
             // generic_function wraps the callee
             if child.kind() == "generic_function"
                 && let Some(inner) = child.child(0)
             {
-                return state.node_text(inner);
+                return state.node_text(inner).to_string();
             }
-            return state.node_text(child);
+            return state.node_text(child).to_string();
         }
         let text = state.node_text(node);
-        text.split('(').next().unwrap_or(&text).trim().to_string()
+        text.split('(').next().unwrap_or(text).trim().to_string()
     }
 
     /// Extract the type name from an `instance_expression` (new Foo(...)).
@@ -1359,7 +1364,7 @@ impl ScalaExtractor {
                         || child.kind() == "generic_type"
                         || child.kind() == "stable_type_identifier")
                 {
-                    return state.node_text(child);
+                    return state.node_text(child).to_string();
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -1449,16 +1454,16 @@ impl ScalaExtractor {
     /// stripping `@` prefix and `(` suffix from the text.
     fn extract_annotation_name(state: &ExtractionState, node: TsNode<'_>) -> String {
         if let Some(ti) = find_direct_child_by_kind(node, "type_identifier") {
-            return state.node_text(ti);
+            return state.node_text(ti).to_string();
         }
         // Fallback: text after '@', before '('
         let text = state.node_text(node);
         text.trim()
             .strip_prefix('@')
-            .unwrap_or(&text)
+            .unwrap_or(text)
             .split('(')
             .next()
-            .unwrap_or(&text)
+            .unwrap_or(text)
             .trim()
             .to_string()
     }

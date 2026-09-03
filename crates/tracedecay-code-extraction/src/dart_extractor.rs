@@ -15,7 +15,7 @@ use crate::types::{
 pub struct DartExtractor;
 
 /// Internal state used during AST traversal.
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
@@ -23,14 +23,14 @@ struct ExtractionState {
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
     /// Tracks depth inside class/mixin/extension/enum bodies.
     class_depth: usize,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -42,7 +42,7 @@ impl ExtractionState {
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
             class_depth: 0,
         }
@@ -68,12 +68,12 @@ impl ExtractionState {
     }
 
     /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        self.node_str(node).to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 
-    fn node_str(&self, node: TsNode<'_>) -> &str {
-        node.utf8_text(&self.source).unwrap_or("<invalid utf8>")
+    fn node_str(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 
     fn text_before(&self, node: TsNode<'_>, end_byte: usize) -> &str {
@@ -226,7 +226,7 @@ impl DartExtractor {
             return;
         };
         let name = state.node_text(ident);
-        Self::push_library_node(state, node, name);
+        Self::push_library_node(state, node, name.to_string());
     }
 
     // ----------------------------------
@@ -236,7 +236,7 @@ impl DartExtractor {
     fn visit_library(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = find_direct_child_by_kind(node, "dotted_identifier_list").map_or_else(
             || state.node_text(node).trim().to_string(),
-            |n| state.node_text(n),
+            |n| state.node_text(n).to_string(),
         );
         Self::push_library_node(state, node, name);
     }
@@ -260,7 +260,7 @@ impl DartExtractor {
             end_line,
             start_column,
             end_column,
-            signature: Some(state.node_text(node)),
+            signature: Some(state.node_text(node).to_string()),
             docstring: None,
             visibility: Visibility::Pub,
             is_async: false,
@@ -292,7 +292,7 @@ impl DartExtractor {
 
     fn visit_import(state: &mut ExtractionState, node: TsNode<'_>) {
         let text = state.node_text(node);
-        let path = Self::extract_import_path(&text);
+        let path = Self::extract_import_path(text);
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
         let start_column = node.start_position().column as u32;
@@ -372,9 +372,10 @@ impl DartExtractor {
         sig_node: TsNode<'_>,
         body: Option<TsNode<'_>>,
     ) {
-        let name = sig_node
-            .child_by_field_name("name")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = sig_node.child_by_field_name("name").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let visibility = Self::dart_visibility(&name);
         // Doc-comment siblings live one level above `sig_node` when dart 0.2
@@ -407,7 +408,7 @@ impl DartExtractor {
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &NodeKind::Function, &name, start_line);
         let metrics = body.map_or(ComplexityMetrics::default(), |b| {
-            count_complexity(b, &DART_COMPLEXITY, &state.source)
+            count_complexity(b, &DART_COMPLEXITY, state.source)
         });
 
         let graph_node = Node {
@@ -460,9 +461,10 @@ impl DartExtractor {
     fn visit_class(state: &mut ExtractionState, node: TsNode<'_>) {
         let is_abstract = find_direct_child_by_kind(node, "abstract").is_some();
 
-        let name = node
-            .child_by_field_name("name")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = node.child_by_field_name("name").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let visibility = Self::dart_visibility(&name);
         let docstring = Self::extract_docstring(state, node);
@@ -483,7 +485,7 @@ impl DartExtractor {
         let graph_node = Node {
             id: id.clone(),
             kind,
-            name: name.clone(),
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -522,7 +524,7 @@ impl DartExtractor {
             let type_name = state.node_text(type_id);
             state.unresolved_refs.push(UnresolvedRef {
                 from_node_id: id.clone(),
-                reference_name: type_name,
+                reference_name: type_name.to_string(),
                 reference_kind: EdgeKind::Extends,
                 line: superclass.start_position().row as u32,
                 column: superclass.start_position().column as u32,
@@ -546,8 +548,10 @@ impl DartExtractor {
     // ----------------------------------
 
     fn visit_mixin(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let visibility = Self::dart_visibility(&name);
         let docstring = Self::extract_docstring(state, node);
@@ -562,7 +566,7 @@ impl DartExtractor {
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Mixin,
-            name: name.clone(),
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -611,8 +615,10 @@ impl DartExtractor {
     // ----------------------------------
 
     fn visit_extension(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let visibility = Self::dart_visibility(&name);
         let docstring = Self::extract_docstring(state, node);
@@ -627,7 +633,7 @@ impl DartExtractor {
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Extension,
-            name: name.clone(),
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -674,9 +680,10 @@ impl DartExtractor {
     // ----------------------------------
 
     fn visit_enum(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = node
-            .child_by_field_name("name")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = node.child_by_field_name("name").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let visibility = Self::dart_visibility(&name);
         let docstring = Self::extract_docstring(state, node);
@@ -691,7 +698,7 @@ impl DartExtractor {
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Enum,
-            name: name.clone(),
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -754,9 +761,10 @@ impl DartExtractor {
     }
 
     fn visit_enum_constant(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = node
-            .child_by_field_name("name")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = node.child_by_field_name("name").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -776,7 +784,7 @@ impl DartExtractor {
             end_line,
             start_column,
             end_column,
-            signature: Some(state.node_text(node)),
+            signature: Some(state.node_text(node).to_string()),
             docstring: None,
             visibility: Visibility::Pub,
             is_async: false,
@@ -809,7 +817,10 @@ impl DartExtractor {
     fn visit_type_alias(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = find_direct_child_by_kind(node, "type_identifier")
             .or_else(|| find_direct_child_by_kind(node, "identifier"))
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+            .map_or_else(
+                || "<anonymous>".to_string(),
+                |n| state.node_text(n).to_string(),
+            );
 
         let visibility = Self::dart_visibility(&name);
         let docstring = Self::extract_docstring(state, node);
@@ -1060,9 +1071,10 @@ impl DartExtractor {
         sig_node: TsNode<'_>,
         body: Option<TsNode<'_>>,
     ) {
-        let name = sig_node
-            .child_by_field_name("name")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = sig_node.child_by_field_name("name").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let visibility = Self::dart_visibility(&name);
         let docstring = Self::extract_docstring(state, sig_node);
@@ -1085,7 +1097,7 @@ impl DartExtractor {
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &NodeKind::Method, &name, start_line);
         let metrics = body.map_or(ComplexityMetrics::default(), |b| {
-            count_complexity(b, &DART_COMPLEXITY, &state.source)
+            count_complexity(b, &DART_COMPLEXITY, state.source)
         });
 
         let graph_node = Node {
@@ -1156,7 +1168,7 @@ impl DartExtractor {
         let end_column = decl_node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &NodeKind::Constructor, &name, start_line);
-        let metrics = count_complexity(decl_node, &DART_COMPLEXITY, &state.source);
+        let metrics = count_complexity(decl_node, &DART_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -1202,7 +1214,7 @@ impl DartExtractor {
             loop {
                 let child = cursor.node();
                 if child.kind() == "identifier" {
-                    parts.push(state.node_text(child));
+                    parts.push(state.node_text(child).to_string());
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -1225,8 +1237,10 @@ impl DartExtractor {
         decl_node: TsNode<'_>,
         sig_node: TsNode<'_>,
     ) {
-        let name = find_direct_child_by_kind(sig_node, "identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(sig_node, "identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let visibility = Self::dart_visibility(&name);
         let docstring = Self::extract_docstring(state, decl_node);
@@ -1252,7 +1266,7 @@ impl DartExtractor {
         let end_column = decl_node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &NodeKind::Method, &name, start_line);
-        let metrics = count_complexity(decl_node, &DART_COMPLEXITY, &state.source);
+        let metrics = count_complexity(decl_node, &DART_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -1332,7 +1346,7 @@ impl DartExtractor {
         let end_column = decl_node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &NodeKind::Method, &name, start_line);
-        let metrics = count_complexity(decl_node, &DART_COMPLEXITY, &state.source);
+        let metrics = count_complexity(decl_node, &DART_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -1384,10 +1398,12 @@ impl DartExtractor {
     ) {
         let name = var_def.child_by_field_name("name").map_or_else(
             || {
-                find_direct_child_by_kind(var_def, "identifier")
-                    .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n))
+                find_direct_child_by_kind(var_def, "identifier").map_or_else(
+                    || "<anonymous>".to_string(),
+                    |n| state.node_text(n).to_string(),
+                )
             },
-            |n| state.node_text(n),
+            |n| state.node_text(n).to_string(),
         );
 
         Self::emit_field(state, decl_node, &name);
@@ -1409,7 +1425,7 @@ impl DartExtractor {
                     && let Some(ident) = find_direct_child_by_kind(child, "identifier")
                 {
                     let name = state.node_text(ident);
-                    Self::emit_field(state, decl_node, &name);
+                    Self::emit_field(state, decl_node, name);
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -1432,7 +1448,7 @@ impl DartExtractor {
                     && let Some(ident) = find_direct_child_by_kind(child, "identifier")
                 {
                     let name = state.node_text(ident);
-                    Self::emit_field(state, decl_node, &name);
+                    Self::emit_field(state, decl_node, name);
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -1558,7 +1574,7 @@ impl DartExtractor {
                     if let Some(ident) = find_direct_child_by_kind(child, "identifier") {
                         state.unresolved_refs.push(UnresolvedRef {
                             from_node_id: fn_node_id.to_string(),
-                            reference_name: state.node_text(ident),
+                            reference_name: state.node_text(ident).to_string(),
                             reference_kind: EdgeKind::Calls,
                             line: ident.start_position().row as u32,
                             column: ident.start_position().column as u32,
@@ -1577,7 +1593,7 @@ impl DartExtractor {
                     {
                         state.unresolved_refs.push(UnresolvedRef {
                             from_node_id: fn_node_id.to_string(),
-                            reference_name: callee_name,
+                            reference_name: callee_name.to_string(),
                             reference_kind: EdgeKind::Calls,
                             line: child.start_position().row as u32,
                             column: child.start_position().column as u32,
@@ -1598,7 +1614,7 @@ impl DartExtractor {
                             let callee_name = state.node_text(ident);
                             state.unresolved_refs.push(UnresolvedRef {
                                 from_node_id: fn_node_id.to_string(),
-                                reference_name: callee_name,
+                                reference_name: callee_name.to_string(),
                                 reference_kind: EdgeKind::Calls,
                                 line: child.start_position().row as u32,
                                 column: child.start_position().column as u32,
@@ -1651,13 +1667,13 @@ impl DartExtractor {
             match sibling.kind() {
                 "documentation_comment" => {
                     let text = state.node_text(sibling);
-                    comments.push(text);
+                    comments.push(text.to_string());
                     current = sibling.prev_named_sibling();
                 }
                 "comment" => {
                     let text = state.node_text(sibling);
                     if text.trim_start().starts_with("///") {
-                        comments.push(text);
+                        comments.push(text.to_string());
                         current = sibling.prev_named_sibling();
                     } else {
                         break;
@@ -1832,16 +1848,16 @@ impl DartExtractor {
     /// Looks for an `identifier` child, or falls back to text after `@`, before `(`.
     fn extract_annotation_name(state: &ExtractionState, node: TsNode<'_>) -> String {
         if let Some(ident) = find_direct_child_by_kind(node, "identifier") {
-            return state.node_text(ident);
+            return state.node_text(ident).to_string();
         }
         // Fallback: text after '@', before '('.
         let text = state.node_text(node);
         text.trim()
             .strip_prefix('@')
-            .unwrap_or(&text)
+            .unwrap_or(text)
             .split('(')
             .next()
-            .unwrap_or(&text)
+            .unwrap_or(text)
             .trim()
             .to_string()
     }

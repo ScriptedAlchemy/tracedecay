@@ -15,7 +15,7 @@ use crate::types::{
 pub struct SwiftExtractor;
 
 /// Internal state used during AST traversal.
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
@@ -23,14 +23,14 @@ struct ExtractionState {
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
     /// Depth of class/struct/enum/protocol/extension nesting. > 0 means inside a type body.
     class_depth: usize,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -42,7 +42,7 @@ impl ExtractionState {
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
             class_depth: 0,
         }
@@ -68,10 +68,8 @@ impl ExtractionState {
     }
 
     /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
@@ -189,11 +187,11 @@ impl SwiftExtractor {
                 // Fallback: get everything after "import "
                 let text = state.node_text(node);
                 text.strip_prefix("import ")
-                    .unwrap_or(&text)
+                    .unwrap_or(text)
                     .trim()
                     .to_string()
             },
-            |n| state.node_text(n),
+            |n| state.node_text(n).to_string(),
         );
 
         let start_line = node.start_position().row as u32;
@@ -262,7 +260,7 @@ impl SwiftExtractor {
         if cursor.goto_first_child() {
             loop {
                 if cursor.field_name() == Some("declaration_kind") {
-                    return state.node_text(cursor.node());
+                    return state.node_text(cursor.node()).to_string();
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -271,7 +269,7 @@ impl SwiftExtractor {
         }
         // Fallback: check first child text.
         if let Some(first) = node.child(0) {
-            return state.node_text(first);
+            return state.node_text(first).to_string();
         }
         "class".to_string()
     }
@@ -477,15 +475,16 @@ impl SwiftExtractor {
     fn visit_enum_entry(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = node
             .child_by_field_name("name")
-            .map(|n| state.node_text(n))
+            .map(|n| state.node_text(n).to_string())
             .or_else(|| {
-                find_direct_child_by_kind(node, "simple_identifier").map(|n| state.node_text(n))
+                find_direct_child_by_kind(node, "simple_identifier")
+                    .map(|n| state.node_text(n).to_string())
             })
             .unwrap_or_else(|| {
                 // Fallback: parse text after "case "
                 let text = state.node_text(node);
                 text.strip_prefix("case ")
-                    .unwrap_or(&text)
+                    .unwrap_or(text)
                     .trim()
                     .to_string()
             });
@@ -541,8 +540,10 @@ impl SwiftExtractor {
             || "<anonymous>".to_string(),
             |n| {
                 // Could be a user_type wrapping a type_identifier.
-                find_direct_child_by_kind(n, "type_identifier")
-                    .map_or_else(|| state.node_text(n), |ti| state.node_text(ti))
+                find_direct_child_by_kind(n, "type_identifier").map_or_else(
+                    || state.node_text(n).to_string(),
+                    |ti| state.node_text(ti).to_string(),
+                )
             },
         );
 
@@ -602,9 +603,10 @@ impl SwiftExtractor {
 
     /// Extract a protocol declaration (maps to Interface).
     fn visit_protocol(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = node
-            .child_by_field_name("name")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = node.child_by_field_name("name").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let docstring = Self::extract_docstring(state, node);
         let signature = Self::extract_first_line_signature(state, node);
@@ -687,9 +689,10 @@ impl SwiftExtractor {
     fn visit_protocol_function(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = node
             .child_by_field_name("name")
-            .map(|n| state.node_text(n))
+            .map(|n| state.node_text(n).to_string())
             .or_else(|| {
-                find_direct_child_by_kind(node, "simple_identifier").map(|n| state.node_text(n))
+                find_direct_child_by_kind(node, "simple_identifier")
+                    .map(|n| state.node_text(n).to_string())
             })
             .unwrap_or_else(|| "<anonymous>".to_string());
 
@@ -744,9 +747,10 @@ impl SwiftExtractor {
     fn visit_function(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = node
             .child_by_field_name("name")
-            .map(|n| state.node_text(n))
+            .map(|n| state.node_text(n).to_string())
             .or_else(|| {
-                find_direct_child_by_kind(node, "simple_identifier").map(|n| state.node_text(n))
+                find_direct_child_by_kind(node, "simple_identifier")
+                    .map(|n| state.node_text(n).to_string())
             })
             .unwrap_or_else(|| "<anonymous>".to_string());
 
@@ -766,7 +770,7 @@ impl SwiftExtractor {
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &kind, &name, start_line);
-        let metrics = count_complexity(node, &SWIFT_COMPLEXITY, &state.source);
+        let metrics = count_complexity(node, &SWIFT_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -821,7 +825,7 @@ impl SwiftExtractor {
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &NodeKind::Constructor, &name, start_line);
-        let metrics = count_complexity(node, &SWIFT_COMPLEXITY, &state.source);
+        let metrics = count_complexity(node, &SWIFT_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -927,9 +931,10 @@ impl SwiftExtractor {
     fn visit_typealias(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = node
             .child_by_field_name("name")
-            .map(|n| state.node_text(n))
+            .map(|n| state.node_text(n).to_string())
             .or_else(|| {
-                find_direct_child_by_kind(node, "type_identifier").map(|n| state.node_text(n))
+                find_direct_child_by_kind(node, "type_identifier")
+                    .map(|n| state.node_text(n).to_string())
             })
             .unwrap_or_else(|| "<anonymous>".to_string());
 
@@ -988,10 +993,12 @@ impl SwiftExtractor {
                 // For class/struct/enum, this is a type_identifier directly.
                 // For extension, it may be a user_type wrapping type_identifier.
                 if n.kind() == "user_type" {
-                    find_direct_child_by_kind(n, "type_identifier")
-                        .map_or_else(|| state.node_text(n), |ti| state.node_text(ti))
+                    find_direct_child_by_kind(n, "type_identifier").map_or_else(
+                        || state.node_text(n).to_string(),
+                        |ti| state.node_text(ti).to_string(),
+                    )
                 } else {
-                    state.node_text(n)
+                    state.node_text(n).to_string()
                 }
             },
         )
@@ -1011,8 +1018,8 @@ impl SwiftExtractor {
                     if let Some(inherits_from) = child.child_by_field_name("inherits_from") {
                         let base_name = find_direct_child_by_kind(inherits_from, "type_identifier")
                             .map_or_else(
-                                || state.node_text(inherits_from),
-                                |ti| state.node_text(ti),
+                                || state.node_text(inherits_from).to_string(),
+                                |ti| state.node_text(ti).to_string(),
                             );
                         let line = inherits_from.start_position().row as u32;
                         let column = inherits_from.start_position().column as u32;
@@ -1039,19 +1046,19 @@ impl SwiftExtractor {
     fn extract_property_name(state: &ExtractionState, node: TsNode<'_>) -> String {
         if let Some(pattern) = node.child_by_field_name("name") {
             if let Some(ident) = pattern.child_by_field_name("bound_identifier") {
-                return state.node_text(ident);
+                return state.node_text(ident).to_string();
             }
             // Fallback: find simple_identifier in pattern.
             if let Some(ident) = find_direct_child_by_kind(pattern, "simple_identifier") {
-                return state.node_text(ident);
+                return state.node_text(ident).to_string();
             }
-            return state.node_text(pattern);
+            return state.node_text(pattern).to_string();
         }
         // Fallback: find pattern child then simple_identifier.
         if let Some(pattern) = find_direct_child_by_kind(node, "pattern")
             && let Some(ident) = find_direct_child_by_kind(pattern, "simple_identifier")
         {
-            return state.node_text(ident);
+            return state.node_text(ident).to_string();
         }
         "<anonymous>".to_string()
     }
@@ -1068,7 +1075,7 @@ impl SwiftExtractor {
                     && let Some(vis_mod) = find_direct_child_by_kind(child, "visibility_modifier")
                 {
                     let text = state.node_text(vis_mod);
-                    return match text.as_str() {
+                    return match text {
                         "private" | "fileprivate" => Visibility::Private,
                         "internal" => Visibility::PubCrate,
                         _ => Visibility::Pub,
@@ -1200,10 +1207,10 @@ impl SwiftExtractor {
                             if let Some(ident) =
                                 find_direct_child_by_kind(child, "simple_identifier")
                             {
-                                last_name = Some(state.node_text(ident));
+                                last_name = Some(state.node_text(ident).to_string());
                             }
                         } else if child.kind() == "simple_identifier" && last_name.is_none() {
-                            last_name = Some(state.node_text(child));
+                            last_name = Some(state.node_text(child).to_string());
                         }
                         if !cursor.goto_next_sibling() {
                             break;
@@ -1212,7 +1219,7 @@ impl SwiftExtractor {
                 }
                 last_name
             }
-            _ => Some(state.node_text(first_child)),
+            _ => Some(state.node_text(first_child).to_string()),
         }
     }
 
@@ -1330,18 +1337,18 @@ impl SwiftExtractor {
         // Try user_type -> type_identifier path.
         if let Some(ut) = find_direct_child_by_kind(node, "user_type") {
             if let Some(ti) = find_direct_child_by_kind(ut, "type_identifier") {
-                return state.node_text(ti);
+                return state.node_text(ti).to_string();
             }
-            return state.node_text(ut);
+            return state.node_text(ut).to_string();
         }
         // Fallback: text after '@', before '('.
         let text = state.node_text(node);
         text.trim()
             .strip_prefix('@')
-            .unwrap_or(&text)
+            .unwrap_or(text)
             .split('(')
             .next()
-            .unwrap_or(&text)
+            .unwrap_or(text)
             .trim()
             .to_string()
     }

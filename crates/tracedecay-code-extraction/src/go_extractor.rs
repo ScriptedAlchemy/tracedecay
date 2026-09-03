@@ -326,7 +326,7 @@ impl GoExtractor {
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &NodeKind::Function, &name, start_line);
-        let metrics = count_complexity(node, &GO_COMPLEXITY, &state.source);
+        let metrics = count_complexity(node, &GO_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -388,7 +388,7 @@ impl GoExtractor {
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &NodeKind::StructMethod, &name, start_line);
-        let metrics = count_complexity(node, &GO_COMPLEXITY, &state.source);
+        let metrics = count_complexity(node, &GO_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -1087,7 +1087,7 @@ impl GoExtractor {
                             let id = generate_node_id(
                                 &state.file_path,
                                 &NodeKind::GenericParam,
-                                &name,
+                                name,
                                 start_line,
                             );
                             let text = state.node_text(child);
@@ -1186,7 +1186,7 @@ impl GoExtractor {
 
     /// Extract docstrings from preceding comment nodes.
     fn extract_docstring(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        docstring_from_preceding_comments(&state.source, node, clean_c_comment)
+        docstring_from_preceding_comments(state.source, node, clean_c_comment)
     }
 
     /// Determine Go visibility: uppercase first character means exported (Pub),

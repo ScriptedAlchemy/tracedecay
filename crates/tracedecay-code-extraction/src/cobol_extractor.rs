@@ -17,7 +17,7 @@ use crate::types::{
 pub struct CobolExtractor;
 
 /// Internal state used during AST traversal.
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
@@ -25,12 +25,12 @@ struct ExtractionState {
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -42,7 +42,7 @@ impl ExtractionState {
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
         }
     }
@@ -67,10 +67,8 @@ impl ExtractionState {
     }
 
     /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 
     /// Extracts the full source line at a given byte offset.
@@ -205,7 +203,7 @@ impl CobolExtractor {
             let start_column = node.start_position().column as u32;
             let end_column = node.end_position().column as u32;
             let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-            let id = generate_node_id(&state.file_path, &NodeKind::Module, &name, start_line);
+            let id = generate_node_id(&state.file_path, &NodeKind::Module, name, start_line);
 
             let text = state.node_text(node);
             let signature = text
@@ -217,7 +215,7 @@ impl CobolExtractor {
             let graph_node = Node {
                 id: id.clone(),
                 kind: NodeKind::Module,
-                name: name.clone(),
+                name: name.to_string(),
                 qualified_name,
                 file_path: state.file_path.clone(),
                 start_line,
@@ -252,7 +250,7 @@ impl CobolExtractor {
             }
 
             // Push module onto stack for qualified names.
-            state.node_stack.push((name, id));
+            state.node_stack.push((name.to_string(), id));
         }
     }
 
@@ -345,12 +343,12 @@ impl CobolExtractor {
         let end_column = node.end_position().column as u32;
         let text = state.node_text(node);
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &kind, &name, start_line);
+        let id = generate_node_id(&state.file_path, &kind, name, start_line);
 
         let graph_node = Node {
             id: id.clone(),
             kind,
-            name,
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -630,7 +628,7 @@ impl CobolExtractor {
         let label = find_direct_child_by_kind(node, "label")?;
         let qw = find_direct_child_by_kind(label, "qualified_word")?;
         let word = find_direct_child_by_kind(qw, "WORD")?;
-        Some(state.node_text(word))
+        Some(state.node_text(word).to_string())
     }
 
     /// Build the final `ExtractionResult` from the accumulated state.

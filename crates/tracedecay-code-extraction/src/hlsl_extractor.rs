@@ -16,19 +16,19 @@ use crate::types::{
 /// Extracts code graph nodes and edges from HLSL source files using tree-sitter.
 pub struct HlslExtractor;
 
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
     errors: Vec<String>,
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -40,7 +40,7 @@ impl ExtractionState {
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
         }
     }
@@ -63,10 +63,8 @@ impl ExtractionState {
         self.node_stack.last().map(|(_, id)| id.as_str())
     }
 
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
@@ -183,7 +181,7 @@ impl HlslExtractor {
 
         let body = node.child_by_field_name("body");
         let metrics = body
-            .map(|b| count_complexity(b, &C_COMPLEXITY, &state.source))
+            .map(|b| count_complexity(b, &C_COMPLEXITY, state.source))
             .unwrap_or_default();
 
         let graph_node = Node {
@@ -231,11 +229,11 @@ impl HlslExtractor {
         // function_definition.declarator → function_declarator.declarator → identifier
         if let Some(func_decl) = find_descendant_by_kind(node, "function_declarator") {
             if let Some(ident) = find_direct_child_by_kind(func_decl, "identifier") {
-                return Some(state.node_text(ident));
+                return Some(state.node_text(ident).to_string());
             }
             // Qualified identifier (e.g. ClassName::method)
             if let Some(qi) = find_direct_child_by_kind(func_decl, "qualified_identifier") {
-                return Some(state.node_text(qi));
+                return Some(state.node_text(qi).to_string());
             }
         }
         None
@@ -251,9 +249,10 @@ impl HlslExtractor {
     }
 
     fn visit_struct_specifier(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = node
-            .child_by_field_name("name")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = node.child_by_field_name("name").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -323,7 +322,10 @@ impl HlslExtractor {
     fn visit_field_declaration(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = find_descendant_by_kind(node, "field_identifier")
             .or_else(|| find_descendant_by_kind(node, "identifier"))
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+            .map_or_else(
+                || "<anonymous>".to_string(),
+                |n| state.node_text(n).to_string(),
+            );
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -371,9 +373,10 @@ impl HlslExtractor {
     }
 
     fn visit_cbuffer_specifier(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = node
-            .child_by_field_name("name")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = node.child_by_field_name("name").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -512,26 +515,28 @@ impl HlslExtractor {
         if let Some(decl) = node.child_by_field_name("declarator") {
             // identifier directly
             if decl.kind() == "identifier" {
-                return Some(state.node_text(decl));
+                return Some(state.node_text(decl).to_string());
             }
             // init_declarator: identifier "=" value
             if let Some(ident) = find_direct_child_by_kind(decl, "identifier") {
-                return Some(state.node_text(ident));
+                return Some(state.node_text(ident).to_string());
             }
             // array_declarator: identifier "[" ... "]"
             if let Some(arr) = find_direct_child_by_kind(decl, "array_declarator")
                 && let Some(ident) = find_direct_child_by_kind(arr, "identifier")
             {
-                return Some(state.node_text(ident));
+                return Some(state.node_text(ident).to_string());
             }
         }
         // Fallback: any identifier child
-        find_direct_child_by_kind(node, "identifier").map(|n| state.node_text(n))
+        find_direct_child_by_kind(node, "identifier").map(|n| state.node_text(n).to_string())
     }
 
     fn visit_preproc_def(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -581,7 +586,10 @@ impl HlslExtractor {
     fn visit_preproc_include(state: &mut ExtractionState, node: TsNode<'_>) {
         let include_path = find_direct_child_by_kind(node, "string_literal")
             .or_else(|| find_direct_child_by_kind(node, "system_lib_string"))
-            .map_or_else(|| "<unknown>".to_string(), |n| state.node_text(n));
+            .map_or_else(
+                || "<unknown>".to_string(),
+                |n| state.node_text(n).to_string(),
+            );
 
         let line = node.start_position().row as u32;
         let column = node.start_position().column as u32;
@@ -600,7 +608,7 @@ impl HlslExtractor {
 
     fn extract_call_sites(state: &mut ExtractionState, node: TsNode<'_>, fn_node_id: &str) {
         extract_call_expression_sites(
-            &state.source,
+            state.source,
             &state.file_path,
             &mut state.unresolved_refs,
             node,

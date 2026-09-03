@@ -19,7 +19,7 @@ use crate::{
 pub struct CExtractor;
 
 /// Internal state used during AST traversal.
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
@@ -27,12 +27,12 @@ struct ExtractionState {
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -44,7 +44,7 @@ impl ExtractionState {
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
         }
     }
@@ -69,15 +69,13 @@ impl ExtractionState {
     }
 
     /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 
     /// Borrowed text of a tree-sitter node, sliced straight from the source.
-    fn node_str(&self, node: TsNode<'_>) -> &str {
-        node.utf8_text(&self.source).unwrap_or("<invalid utf8>")
+    fn node_str(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 
     /// Source slice from `node.start_byte()` up to `end_byte`.
@@ -228,7 +226,7 @@ impl CExtractor {
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &NodeKind::Function, name, start_line);
-        let metrics = count_complexity(node, &C_COMPLEXITY, &state.source);
+        let metrics = count_complexity(node, &C_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -569,7 +567,7 @@ impl CExtractor {
 
         if find_direct_child_by_kind(struct_spec, "field_declaration_list").is_some() {
             let struct_name = find_direct_child_by_kind(struct_spec, "type_identifier")
-                .map_or_else(|| typedef_name.clone(), |n| state.node_text(n));
+                .map_or_else(|| typedef_name.clone(), |n| state.node_text(n).to_string());
 
             Self::create_struct_node(state, &struct_name, struct_spec, docstring);
         }
@@ -636,7 +634,7 @@ impl CExtractor {
 
         if find_direct_child_by_kind(union_spec, "field_declaration_list").is_some() {
             let union_name = find_direct_child_by_kind(union_spec, "type_identifier")
-                .map_or_else(|| typedef_name.clone(), |n| state.node_text(n));
+                .map_or_else(|| typedef_name.clone(), |n| state.node_text(n).to_string());
 
             Self::create_union_node(state, &union_name, union_spec, docstring);
         }
@@ -703,7 +701,7 @@ impl CExtractor {
 
         if find_direct_child_by_kind(enum_spec, "enumerator_list").is_some() {
             let enum_name = find_direct_child_by_kind(enum_spec, "type_identifier")
-                .map_or_else(|| typedef_name.clone(), |n| state.node_text(n));
+                .map_or_else(|| typedef_name.clone(), |n| state.node_text(n).to_string());
 
             Self::create_enum_node(state, &enum_name, enum_spec, docstring);
         }
@@ -777,10 +775,10 @@ impl CExtractor {
                 find_direct_child_by_kind(func_decl, "parenthesized_declarator")
         {
             if let Some(ident) = find_descendant_by_kind(paren_decl, "identifier") {
-                return Some(state.node_text(ident));
+                return Some(state.node_text(ident).to_string());
             }
             if let Some(ident) = find_descendant_by_kind(paren_decl, "type_identifier") {
-                return Some(state.node_text(ident));
+                return Some(state.node_text(ident).to_string());
             }
         }
         None
@@ -847,7 +845,7 @@ impl CExtractor {
             loop {
                 let child = cursor.node();
                 if child.kind() == "type_identifier" {
-                    last_type_id = Some(state.node_text(child));
+                    last_type_id = Some(state.node_text(child).to_string());
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -863,8 +861,10 @@ impl CExtractor {
         if find_direct_child_by_kind(node, "field_declaration_list").is_none() {
             return;
         }
-        let name = find_direct_child_by_kind(node, "type_identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "type_identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         // Skip anonymous structs that are not inside a typedef
         if name == "<anonymous>" {
@@ -880,8 +880,10 @@ impl CExtractor {
         if find_direct_child_by_kind(node, "field_declaration_list").is_none() {
             return;
         }
-        let name = find_direct_child_by_kind(node, "type_identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "type_identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         if name == "<anonymous>" {
             return;
@@ -896,8 +898,10 @@ impl CExtractor {
         if find_direct_child_by_kind(node, "enumerator_list").is_none() {
             return;
         }
-        let name = find_direct_child_by_kind(node, "type_identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "type_identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         if name == "<anonymous>" {
             return;
@@ -1094,8 +1098,10 @@ impl CExtractor {
 
     /// Extract a preprocessor #define.
     fn visit_preproc_def(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let text = state.node_text(node);
         let start_line = node.start_position().row as u32;
@@ -1229,8 +1235,10 @@ impl CExtractor {
     fn extract_single_field(state: &mut ExtractionState, node: TsNode<'_>) {
         // In C, the field name is a field_identifier child of the field_declaration
         // or inside a field_declarator child.
-        let name = find_descendant_by_kind(node, "field_identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_descendant_by_kind(node, "field_identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let text = state.node_text(node);
         let start_line = node.start_position().row as u32;
@@ -1297,8 +1305,10 @@ impl CExtractor {
 
     /// Extract a single enumerator as an `EnumVariant` node.
     fn extract_single_enumerator(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let text = state.node_text(node);
         let start_line = node.start_position().row as u32;
@@ -1348,7 +1358,7 @@ impl CExtractor {
     /// Recursively find `call_expression` nodes and create unresolved Calls references.
     fn extract_call_sites(state: &mut ExtractionState, node: TsNode<'_>, fn_node_id: &str) {
         extract_call_expression_sites(
-            &state.source,
+            state.source,
             &state.file_path,
             &mut state.unresolved_refs,
             node,
@@ -1358,7 +1368,7 @@ impl CExtractor {
 
     /// Extract docstrings from preceding comment nodes.
     fn extract_docstring(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        docstring_from_preceding_comments(&state.source, node, clean_c_comment)
+        docstring_from_preceding_comments(state.source, node, clean_c_comment)
     }
 
     /// Check if a declaration has a specific storage class specifier (e.g., "static").
