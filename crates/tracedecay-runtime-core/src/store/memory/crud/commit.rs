@@ -10,8 +10,9 @@ use super::super::privacy_purge::{
     assertion_payload_is_explicitly_purged_tx, purge_superseded_payloads_for_fact_tx,
 };
 use super::{
-    CommitAttempt, ensure_event_references, ensure_fact_identity, event_exists, event_matches,
-    insert_event, payload_is_purged_projection, publish_current_projection, receipt_outcome,
+    CommitAttempt, ensure_event_references, ensure_fact_identity,
+    ensure_supersession_endpoints_available, event_exists, event_matches, insert_event,
+    payload_is_purged_projection, publish_current_projection, receipt_outcome,
 };
 use crate::db::DatabaseMemoryTransaction as Transaction;
 use crate::db::engine::{params, params_from_iter};
@@ -82,6 +83,7 @@ pub(super) async fn commit_fact_tx(
             wrote: false,
         });
     }
+    ensure_supersession_endpoints_available(transaction, &owner, batch).await?;
     ensure_append_order(transaction, &owner, batch, actual_last.as_ref()).await?;
 
     ensure_fact_identity(transaction, &owner, batch).await?;

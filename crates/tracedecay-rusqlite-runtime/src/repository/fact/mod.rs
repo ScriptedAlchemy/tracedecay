@@ -7,9 +7,9 @@
 
 use std::collections::HashSet;
 
-use rusqlite::{Savepoint, Transaction, params, params_from_iter};
+use rusqlite::{OptionalExtension, Savepoint, Transaction, params, params_from_iter};
 use tracedecay_domain::{
-    FactCurationActionV1, FactLineageEventKindV1, FactOwnerV1, RetrievalAnchorId,
+    FactCurationActionV1, FactId, FactLineageEventKindV1, FactOwnerV1, RetrievalAnchorId,
 };
 use tracedecay_store::{FactReadOperationV1, FactReadResultV1, FactWriteBatch};
 
@@ -45,6 +45,7 @@ impl FactExecutor {
             return Err(invalid("fact lineage last-event conflict"));
         }
 
+        require_supersession_endpoints_available(savepoint, &owner, batch)?;
         require_normalized_tag_evidence_available(savepoint, &owner, batch)?;
         ensure_fact(savepoint, &owner, batch)?;
         require_referenced_anchors_available(savepoint, &owner, batch.referenced_anchor_ids())?;
@@ -87,6 +88,46 @@ impl FactExecutor {
                 read_lineage(snapshot, query).map(FactReadResultV1::Lineage)
             }
         }
+    }
+}
+
+fn require_supersession_endpoints_available(
+    connection: &rusqlite::Connection,
+    owner: &OwnerColumns,
+    batch: &FactWriteBatch,
+) -> rusqlite::Result<()> {
+    for event in batch.events() {
+        let FactLineageEventKindV1::Curated {
+            action: FactCurationActionV1::SupersededBy { fact_id: target },
+            ..
+        } = event.kind()
+        else {
+            continue;
+        };
+        require_current_fact_available(connection, owner, event.fact_id())?;
+        require_current_fact_available(connection, owner, target)?;
+    }
+    Ok(())
+}
+
+fn require_current_fact_available(
+    connection: &rusqlite::Connection,
+    owner: &OwnerColumns,
+    fact_id: &FactId,
+) -> rusqlite::Result<()> {
+    let active = connection
+        .query_row(
+            "SELECT active_assertion_id
+             FROM memory_v2_current_facts
+             WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3",
+            params![fact_id.as_str(), owner.kind, owner.project_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?;
+    match active {
+        Some(Some(_)) => Ok(()),
+        Some(None) => Err(invalid("fact supersession endpoint is unavailable")),
+        None => Err(invalid("fact supersession endpoint was not found")),
     }
 }
 

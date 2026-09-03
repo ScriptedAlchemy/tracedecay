@@ -7,8 +7,9 @@ use crate::db::build_qmark_placeholders;
 use crate::db::engine::{Value, params};
 
 use tracedecay_domain::{
-    Confidence, FactAssertionId, FactEventId, FactId, FactIdentityMaterialV1, FactOwnerV1,
-    FactPayloadV1, PayloadAccessState, UtcMicros,
+    Confidence, FactAssertionId, FactCurationActionV1, FactEventId, FactId, FactIdentityMaterialV1,
+    FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1, PayloadAccessState,
+    UtcMicros,
 };
 use tracedecay_store::{
     FactReadControl, FactStoreError, FactStoreResult, ProjectMemoryFactProjectionV1,
@@ -224,12 +225,18 @@ async fn load_project_memory_projections_inner_tx(
                     current_facts.unhelpful_count,
                     current_facts.last_retrieved_at,
                     current_facts.last_recalled_at,
-                    current_facts.last_feedback_at
+                    current_facts.last_feedback_at,
+                    last_events.event_json
              FROM memory_v2_current_facts AS current_facts
              JOIN memory_v2_facts AS facts
                ON facts.fact_id = current_facts.fact_id
               AND facts.owner_kind = current_facts.owner_kind
               AND facts.project_id = current_facts.project_id
+             JOIN memory_v2_lineage_events AS last_events
+               ON last_events.event_id = current_facts.last_event_id
+              AND last_events.fact_id = current_facts.fact_id
+              AND last_events.owner_kind = current_facts.owner_kind
+              AND last_events.project_id = current_facts.project_id
              LEFT JOIN memory_v2_assertion_payloads AS payloads
                ON payloads.assertion_id = current_facts.active_assertion_id
               AND payloads.fact_id = current_facts.fact_id
@@ -274,6 +281,23 @@ async fn load_project_memory_projections_inner_tx(
                 .map(FactAssertionId::new)
                 .transpose()?
             else {
+                let last_event = from_json::<FactLineageEventV1>(
+                    &row_string(&row, 17, QUERY_OPERATION)?,
+                    QUERY_OPERATION,
+                )?;
+                if last_event.fact_id() == &fact_id
+                    && last_event.owner() == owner
+                    && last_event.event_id().as_str() == row_string(&row, 6, QUERY_OPERATION)?
+                    && matches!(
+                        last_event.kind(),
+                        FactLineageEventKindV1::Curated {
+                            action: FactCurationActionV1::SupersededBy { .. },
+                            ..
+                        }
+                    )
+                {
+                    continue;
+                }
                 return Err(FactStoreError::PayloadAccessMismatch);
             };
             let payload = from_json::<FactPayloadV1>(

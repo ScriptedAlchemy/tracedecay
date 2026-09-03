@@ -121,6 +121,25 @@ pub(super) async fn ensure_event_references(
     Ok(())
 }
 
+pub(super) async fn ensure_supersession_endpoints_available(
+    transaction: &Transaction<'_>,
+    owner: &OwnerKey,
+    batch: &FactWriteBatch,
+) -> FactStoreResult<()> {
+    for event in batch.events() {
+        let FactLineageEventKindV1::Curated {
+            action: FactCurationActionV1::SupersededBy { fact_id: target },
+            ..
+        } = event.kind()
+        else {
+            continue;
+        };
+        ensure_current_fact_available(transaction, owner, event.fact_id()).await?;
+        ensure_current_fact_available(transaction, owner, target).await?;
+    }
+    Ok(())
+}
+
 async fn ensure_owned_relation_fact(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
@@ -132,6 +151,23 @@ async fn ensure_owned_relation_fact(
         });
     }
     Ok(())
+}
+
+async fn ensure_current_fact_available(
+    transaction: &Transaction<'_>,
+    owner: &OwnerKey,
+    fact_id: &FactId,
+) -> FactStoreResult<()> {
+    ensure_owned_relation_fact(transaction, owner, fact_id).await?;
+    if load_current_projection(transaction, owner, fact_id)
+        .await?
+        .is_some_and(|projection| projection.active_assertion_id.is_some())
+    {
+        return Ok(());
+    }
+    Err(FactStoreError::FactUnavailable {
+        fact_id: fact_id.clone(),
+    })
 }
 
 async fn ensure_event_evidence(
@@ -340,6 +376,12 @@ impl Projection {
                     self.active_assertion_id = None;
                 }
             }
+            FactLineageEventKindV1::Curated {
+                action: FactCurationActionV1::SupersededBy { .. },
+                ..
+            } => {
+                self.active_assertion_id = None;
+            }
             FactLineageEventKindV1::Curated { .. } => {}
         }
         self.last_event_id = Some(event.event_id().clone());
@@ -359,7 +401,19 @@ pub(super) async fn publish_current_projection(
     for event in batch.events() {
         projection.apply(event)?;
     }
-    if projection.active_assertion_id.is_none() && !requires_payload_purge(projection.access) {
+    let superseded = batch.events().iter().any(|event| {
+        matches!(
+            event.kind(),
+            FactLineageEventKindV1::Curated {
+                action: FactCurationActionV1::SupersededBy { .. },
+                ..
+            }
+        )
+    });
+    if projection.active_assertion_id.is_none()
+        && !requires_payload_purge(projection.access)
+        && !superseded
+    {
         return Err(storage_message(
             COMMIT_OPERATION,
             "fact projection has no active assertion",

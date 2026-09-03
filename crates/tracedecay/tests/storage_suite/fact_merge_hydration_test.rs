@@ -13,7 +13,7 @@ use std::fmt::Write as _;
 use serde_json::json;
 use tempfile::TempDir;
 use tracedecay_domain::{
-    AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGenerationV2, CapabilityId,
+    AccessPolicyDigest, ActorId, AnchorDurabilityClass, AnchorSourceGenerationV2, CapabilityId,
     ComponentVersion, Confidence, CoverageReportV1, CoverageUniverseKnowledgeV1, DomainError,
     EntityId, EntityKind, EntityRef, EvidenceClass, FactAssertionId, FactAssertionKindV1,
     FactAssertionV1, FactCategoryV1, FactCurationActionV1, FactEventId, FactEvidenceRefV1,
@@ -29,9 +29,10 @@ use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 use tracedecay_store::{
     CurrentFactsQuery, FactAsOfQuery, FactCommitConflict, FactCommitOutcome, FactCommitReceipt,
-    FactContradictionStateV1, FactCurrentQuery, FactLineageQuery, FactStore, FactStoreError,
-    FactWriteBatch, FactWriteControl, MAX_FACT_QUERY_CONTRADICTIONS, RetrievalAnchorQuery,
-    StoredFactV1,
+    FactContradictionStateV1, FactCurrentQuery, FactLineageQuery, FactReadControl, FactStore,
+    FactStoreError, FactWriteBatch, FactWriteControl, MAX_FACT_QUERY_CONTRADICTIONS,
+    ProjectMemoryFactHistoryQueryV1, ProjectMemoryFactIdV1, ProjectMemoryFactSearchKindV1,
+    ProjectMemoryFactSearchQuery, ProjectMemoryFactStore, RetrievalAnchorQuery, StoredFactV1,
 };
 
 struct TestDb {
@@ -350,6 +351,39 @@ async fn commit_assertion(
     .unwrap();
     let receipt = commit(store, batch).await;
     (assertion, receipt)
+}
+
+fn supersession_batch(
+    source: &FactId,
+    owner: &FactOwnerV1,
+    target: &FactId,
+    occurred_at: i64,
+    actor_id: &str,
+    expected_last: &FactEventId,
+) -> FactWriteBatch {
+    let event = FactLineageEventV1::new(
+        source.clone(),
+        owner.clone(),
+        FactLineageEventKindV1::Curated {
+            action: FactCurationActionV1::SupersededBy {
+                fact_id: target.clone(),
+            },
+            evidence_ids: Vec::new(),
+        },
+        UtcMicros(occurred_at),
+        Some(ActorId::new(actor_id).unwrap()),
+    )
+    .unwrap();
+    FactWriteBatch::new(
+        source.clone(),
+        owner.clone(),
+        None,
+        vec![event],
+        Vec::new(),
+        Vec::new(),
+        Some(expected_last.clone()),
+    )
+    .unwrap()
 }
 
 #[tokio::test]
@@ -705,6 +739,370 @@ async fn corrections_supersede_without_editing_prior_evidence() {
     // The evidence anchor is byte-identical after the correction.
     let hydrated_anchor = anchor_record(&store, &owner, fixture.anchor.anchor_id()).await;
     assert_eq!(&hydrated_anchor, &fixture.anchor);
+}
+
+#[tokio::test]
+async fn superseded_fact_leaves_current_views_but_retains_ordered_history() {
+    let test = setup_db().await;
+    let store = DatabaseFactStore::new(&test.db);
+    let owner = FactOwnerV1::Profile;
+    let source = commit_initial(
+        &store,
+        &owner,
+        "operation.fmh.supersession.source",
+        anchor(
+            ObservationScopeV1::Profile,
+            "entity.fmh.supersession.source",
+            "privacy.fmh.supersession",
+            PayloadAccessState::Eligible,
+            CoverageReportV1::default(),
+        ),
+        "old claim",
+        1_000,
+    )
+    .await;
+    let replacement = commit_initial(
+        &store,
+        &owner,
+        "operation.fmh.supersession.replacement",
+        anchor(
+            ObservationScopeV1::Profile,
+            "entity.fmh.supersession.replacement",
+            "privacy.fmh.supersession",
+            PayloadAccessState::Eligible,
+            CoverageReportV1::default(),
+        ),
+        "current claim",
+        2_000,
+    )
+    .await;
+    let batch = supersession_batch(
+        &source.fact_id,
+        &owner,
+        &replacement.fact_id,
+        3_000,
+        "actor.fmh.supersession",
+        source.receipt.last_event_id(),
+    );
+    let supersession_event_id = batch.events()[0].event_id().clone();
+    commit(&store, batch).await;
+
+    assert!(current(&store, &owner, &source.fact_id).await.is_none());
+    assert!(
+        current(&store, &owner, &replacement.fact_id)
+            .await
+            .is_some()
+    );
+    assert_eq!(
+        current_page(&store, &owner)
+            .await
+            .into_iter()
+            .map(|fact| fact.fact_id().clone())
+            .collect::<Vec<_>>(),
+        vec![replacement.fact_id.clone()]
+    );
+    let read_control = FactReadControl::new(std::sync::Arc::new(|| false));
+    let source_target = ProjectMemoryFactIdV1::new(owner.clone(), source.fact_id.clone()).unwrap();
+    assert!(
+        store
+            .get_project_memory_fact(source_target.clone(), &read_control)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let search = store
+        .search_project_memory_facts(
+            ProjectMemoryFactSearchQuery::new(
+                owner.clone(),
+                ProjectMemoryFactSearchKindV1::Search,
+                Some("old claim".to_owned()),
+                None,
+                100,
+            )
+            .unwrap(),
+            &read_control,
+        )
+        .await
+        .unwrap();
+    assert!(
+        search
+            .hits()
+            .iter()
+            .all(|hit| hit.fact().fact_id() != &source.fact_id)
+    );
+
+    let before = as_of(&store, &owner, &source.fact_id, 2_999)
+        .await
+        .expect("the historical assertion remains available before supersession");
+    assert_eq!(
+        before.payload().map(FactPayloadV1::content),
+        Some("old claim")
+    );
+    assert_eq!(before.trust(), Confidence::new(0.5).unwrap());
+    assert!(
+        as_of(&store, &owner, &source.fact_id, 3_000)
+            .await
+            .is_none()
+    );
+
+    let history = lineage(&store, &owner, &source.fact_id).await;
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0].occurred_at(), UtcMicros(1_000));
+    assert_eq!(history[1].occurred_at(), UtcMicros(3_000));
+    assert_eq!(history[1].event_id(), &supersession_event_id);
+    assert_eq!(
+        history[1].actor_id().map(ActorId::as_str),
+        Some("actor.fmh.supersession")
+    );
+    assert!(matches!(
+        history[1].kind(),
+        FactLineageEventKindV1::Curated {
+            action: FactCurationActionV1::SupersededBy { fact_id },
+            evidence_ids,
+        } if fact_id == &replacement.fact_id && evidence_ids.is_empty()
+    ));
+    let explicit_history = store
+        .project_memory_fact_history(
+            ProjectMemoryFactHistoryQueryV1::new(source_target, None, 100).unwrap(),
+            &read_control,
+        )
+        .await
+        .unwrap();
+    assert_eq!(explicit_history.events(), history);
+}
+
+#[tokio::test]
+async fn supersession_chains_replay_exactly_and_reject_repeated_sources() {
+    let test = setup_db().await;
+    let store = DatabaseFactStore::new(&test.db);
+    let owner = FactOwnerV1::Profile;
+    let mut facts = Vec::new();
+    for (suffix, occurred_at) in [("first", 1_000), ("second", 2_000), ("third", 3_000)] {
+        facts.push(
+            commit_initial(
+                &store,
+                &owner,
+                &format!("operation.fmh.supersession.chain.{suffix}"),
+                anchor(
+                    ObservationScopeV1::Profile,
+                    &format!("entity.fmh.supersession.chain.{suffix}"),
+                    "privacy.fmh.supersession.chain",
+                    PayloadAccessState::Eligible,
+                    CoverageReportV1::default(),
+                ),
+                suffix,
+                occurred_at,
+            )
+            .await,
+        );
+    }
+
+    let first_to_second = supersession_batch(
+        &facts[0].fact_id,
+        &owner,
+        &facts[1].fact_id,
+        4_000,
+        "actor.fmh.supersession.chain",
+        facts[0].receipt.last_event_id(),
+    );
+    let first_supersession_receipt = commit(&store, first_to_second).await;
+    let second_to_third = supersession_batch(
+        &facts[1].fact_id,
+        &owner,
+        &facts[2].fact_id,
+        5_000,
+        "actor.fmh.supersession.chain",
+        facts[1].receipt.last_event_id(),
+    );
+    let committed = store
+        .commit_fact(second_to_third.clone(), &write_control())
+        .await
+        .unwrap();
+    assert!(matches!(committed, FactCommitOutcome::Committed(_)));
+    let replayed = store
+        .commit_fact(second_to_third, &write_control())
+        .await
+        .unwrap();
+    assert!(matches!(replayed, FactCommitOutcome::IdempotentReplay(_)));
+
+    assert!(current(&store, &owner, &facts[0].fact_id).await.is_none());
+    assert!(current(&store, &owner, &facts[1].fact_id).await.is_none());
+    assert!(current(&store, &owner, &facts[2].fact_id).await.is_some());
+    assert_eq!(lineage(&store, &owner, &facts[0].fact_id).await.len(), 2);
+    assert_eq!(lineage(&store, &owner, &facts[1].fact_id).await.len(), 2);
+
+    let repeated = supersession_batch(
+        &facts[0].fact_id,
+        &owner,
+        &facts[2].fact_id,
+        6_000,
+        "actor.fmh.supersession.repeated",
+        first_supersession_receipt.last_event_id(),
+    );
+    let error = store
+        .commit_fact(repeated, &write_control())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        FactStoreError::FactUnavailable { fact_id } if fact_id == facts[0].fact_id
+    ));
+    assert_eq!(lineage(&store, &owner, &facts[0].fact_id).await.len(), 2);
+}
+
+#[tokio::test]
+async fn supersession_rejects_missing_unavailable_and_cross_project_targets() {
+    let test = setup_db().await;
+    let store = DatabaseFactStore::new(&test.db);
+    let owner = FactOwnerV1::Profile;
+    let source = commit_initial(
+        &store,
+        &owner,
+        "operation.fmh.supersession.validation.source",
+        anchor(
+            ObservationScopeV1::Profile,
+            "entity.fmh.supersession.validation.source",
+            "privacy.fmh.supersession.validation",
+            PayloadAccessState::Eligible,
+            CoverageReportV1::default(),
+        ),
+        "source",
+        1_000,
+    )
+    .await;
+    let missing = FactId::derive(&application_identity(
+        &owner,
+        "operation.fmh.supersession.validation.missing",
+    ))
+    .unwrap();
+    let missing_error = store
+        .commit_fact(
+            supersession_batch(
+                &source.fact_id,
+                &owner,
+                &missing,
+                2_000,
+                "actor.fmh.supersession.validation",
+                source.receipt.last_event_id(),
+            ),
+            &write_control(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        missing_error,
+        FactStoreError::FactNotFound { fact_id } if fact_id == missing
+    ));
+    assert_eq!(lineage(&store, &owner, &source.fact_id).await.len(), 1);
+
+    let unavailable_target = commit_initial(
+        &store,
+        &owner,
+        "operation.fmh.supersession.validation.unavailable-target",
+        anchor(
+            ObservationScopeV1::Profile,
+            "entity.fmh.supersession.validation.unavailable-target",
+            "privacy.fmh.supersession.validation",
+            PayloadAccessState::Eligible,
+            CoverageReportV1::default(),
+        ),
+        "unavailable target",
+        3_000,
+    )
+    .await;
+    let current_target = commit_initial(
+        &store,
+        &owner,
+        "operation.fmh.supersession.validation.current-target",
+        anchor(
+            ObservationScopeV1::Profile,
+            "entity.fmh.supersession.validation.current-target",
+            "privacy.fmh.supersession.validation",
+            PayloadAccessState::Eligible,
+            CoverageReportV1::default(),
+        ),
+        "current target",
+        4_000,
+    )
+    .await;
+    commit(
+        &store,
+        supersession_batch(
+            &unavailable_target.fact_id,
+            &owner,
+            &current_target.fact_id,
+            5_000,
+            "actor.fmh.supersession.validation",
+            unavailable_target.receipt.last_event_id(),
+        ),
+    )
+    .await;
+    let unavailable_error = store
+        .commit_fact(
+            supersession_batch(
+                &source.fact_id,
+                &owner,
+                &unavailable_target.fact_id,
+                6_000,
+                "actor.fmh.supersession.validation",
+                source.receipt.last_event_id(),
+            ),
+            &write_control(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        unavailable_error,
+        FactStoreError::FactUnavailable { fact_id } if fact_id == unavailable_target.fact_id
+    ));
+    assert_eq!(lineage(&store, &owner, &source.fact_id).await.len(), 1);
+
+    let project_owner = FactOwnerV1::Project {
+        project_id: id("project.fmh.supersession.validation"),
+    };
+    let project_target = commit_initial(
+        &store,
+        &project_owner,
+        "operation.fmh.supersession.validation.project-target",
+        anchor(
+            ObservationScopeV1::Project {
+                project_id: id("project.fmh.supersession.validation"),
+            },
+            "entity.fmh.supersession.validation.project-target",
+            "privacy.fmh.supersession.validation.project",
+            PayloadAccessState::Eligible,
+            CoverageReportV1::default(),
+        ),
+        "project target",
+        7_000,
+    )
+    .await;
+    assert!(matches!(
+        FactLineageEventV1::new(
+            source.fact_id.clone(),
+            owner.clone(),
+            FactLineageEventKindV1::Curated {
+                action: FactCurationActionV1::SupersededBy {
+                    fact_id: project_target.fact_id.clone(),
+                },
+                evidence_ids: Vec::new(),
+            },
+            UtcMicros(8_000),
+            None,
+        ),
+        Err(DomainError::UnknownReference {
+            field: "fact owner binding",
+        })
+    ));
+    assert_eq!(
+        current_page(&store, &project_owner)
+            .await
+            .into_iter()
+            .map(|fact| fact.fact_id().clone())
+            .collect::<Vec<_>>(),
+        vec![project_target.fact_id]
+    );
+    assert!(current(&store, &owner, &source.fact_id).await.is_some());
 }
 
 #[tokio::test]

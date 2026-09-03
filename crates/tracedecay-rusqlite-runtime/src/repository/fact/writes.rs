@@ -6,8 +6,8 @@
 
 use rusqlite::{OptionalExtension, Savepoint, params};
 use tracedecay_domain::{
-    FactEventId, FactId, FactIdentityMaterialV1, FactLineageEventKindV1, FactLineageEventV1,
-    FactOwnerV1, PayloadAccessState, RetrievalAnchorRecordV2,
+    FactCurationActionV1, FactEventId, FactId, FactIdentityMaterialV1, FactLineageEventKindV1,
+    FactLineageEventV1, FactOwnerV1, PayloadAccessState, RetrievalAnchorRecordV2,
 };
 use tracedecay_store::FactWriteBatch;
 
@@ -181,8 +181,26 @@ pub(super) fn publish_projection(
                     active = None;
                 }
             }
+            FactLineageEventKindV1::Curated {
+                action: FactCurationActionV1::SupersededBy { .. },
+                ..
+            } => {
+                active = None;
+            }
             FactLineageEventKindV1::Curated { .. } => {}
         }
+    }
+    let superseded = batch.events().iter().any(|event| {
+        matches!(
+            event.kind(),
+            FactLineageEventKindV1::Curated {
+                action: FactCurationActionV1::SupersededBy { .. },
+                ..
+            }
+        )
+    });
+    if active.is_none() && !matches!(access.as_str(), "quarantined" | "deleted") && !superseded {
+        return Err(invalid("fact projection has no active assertion"));
     }
     let last = batch
         .events()
