@@ -265,6 +265,17 @@ impl DirectEvaluationReportV1 {
         self.validate_native_evidence(workload, NativeVectorGenerationEvidence::Recorded)
     }
 
+    /// Revalidate genuine native activation evidence against a corpus digest
+    /// derived by the caller's canonical embedded-corpus authority.
+    pub fn validate_for_activation_against_authoritative_corpus(
+        &self,
+        workload: &CandidateWorkloadV1,
+        corpus_digest: &str,
+    ) -> Result<(), SearchEvalError> {
+        self.validate_against_authoritative_corpus(workload, corpus_digest)?;
+        self.validate_native_evidence(workload, NativeVectorGenerationEvidence::Recorded)
+    }
+
     /// Validate a redacted portable-qualification report. This is crate-local
     /// because an ordinary evaluator report must retain the actual local
     /// vector-generation provenance it observed.
