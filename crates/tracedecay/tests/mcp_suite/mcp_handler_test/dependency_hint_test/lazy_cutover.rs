@@ -24,7 +24,7 @@ async fn lazy_dependency_fixture(
     };
     production_composition_fixture_with_sources(move |project| {
         fs::create_dir_all(project.join("src")).unwrap();
-        write_dependency_declaration(project, &declaration);
+        write_dependency_declaration(project, "pkg", &declaration);
         fs::write(
             project.join("src/app.ts"),
             "export function GenerationAnchor() { return 1; }\n",
