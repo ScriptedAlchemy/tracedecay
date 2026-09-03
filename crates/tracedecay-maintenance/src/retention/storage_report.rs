@@ -406,9 +406,9 @@ fn sample_registered_storage(
 }
 
 /// Builds one bounded page through the daemon's retained global registry
-/// authority. Registered projects and top-level profile directories are
-/// separate cursor phases so neither the registry query nor the filesystem
-/// census performs an unbounded profile-wide scan.
+/// authority. Registered projects and the durable top-level directory
+/// inventory are separate cursor phases. The inventory captures the source
+/// directory once, then every continuation reads only its bounded slice.
 #[hotpath::measure(label = "maintenance.storage_report.build_page", future = true)]
 pub async fn build_storage_report_page_from_registered_global_db(
     profile_root: &Path,
@@ -473,47 +473,19 @@ pub async fn build_storage_report_page_from_registered_global_db(
     };
     let profile_root_buf = profile_root.to_path_buf();
     let after_directory_owned = after_directory.to_owned();
-    let (directories, has_more) = tokio::task::spawn_blocking(move || {
+    let directory_page = tokio::task::spawn_blocking(move || {
         list_project_directories_page(&profile_root_buf, &after_directory_owned, limit)
     })
     .await
-    .map_err(|error| report_error("join storage directory page", error))?;
-    // Every directory name on this page lies in `(after_directory, last]`, so
-    // one ranged registry scan replaces up to 64 point existence probes (each
-    // of which takes its own registry snapshot); membership is then decided by
-    // local set difference.
-    let mut registered = HashSet::new();
-    if let Some((last_name, _)) = directories.last() {
-        let mut after = (!after_directory.is_empty()).then(|| after_directory.to_owned());
-        loop {
-            let page = global_db
-                .list_code_projects_after(after.as_deref(), MAX_STORAGE_REPORT_PAGE_LIMIT)
-                .await?;
-            let full_page = page.len() == MAX_STORAGE_REPORT_PAGE_LIMIT;
-            let mut next_after = None;
-            let mut past_range = false;
-            for project in page {
-                if project.project_id.as_str() > last_name.as_str() {
-                    past_range = true;
-                    break;
-                }
-                next_after = Some(project.project_id.clone());
-                registered.insert(project.project_id);
-            }
-            if past_range || !full_page {
-                break;
-            }
-            let Some(next_after) = next_after else {
-                break;
-            };
-            after = Some(next_after);
+    .map_err(|error| report_error("join storage directory page", error))??;
+    hotpath::gauge!("maintenance.storage_report.directory_source_entry_visits_total")
+        .inc(directory_page.source_entry_visits);
+    let mut unregistered = Vec::new();
+    for (name, path) in &directory_page.directories {
+        if !global_db.code_project_exists(name).await? {
+            unregistered.push(path.clone());
         }
     }
-    let unregistered = directories
-        .iter()
-        .filter(|(name, _)| !registered.contains(name))
-        .map(|(_, path)| path.clone())
-        .collect::<Vec<_>>();
     let (unregistered_dir_count, unregistered_bytes) = tokio::task::spawn_blocking(move || {
         let bytes = unregistered.iter().fold(0u64, |total, path| {
             total.saturating_add(super::orphan_stores::dir_size_bytes(path))
@@ -522,13 +494,9 @@ pub async fn build_storage_report_page_from_registered_global_db(
     })
     .await
     .map_err(|error| report_error("join unregistered storage page", error))?;
-    let next_cursor = has_more
-        .then(|| {
-            directories
-                .last()
-                .map(|(name, _)| format!("{DIRECTORY_CURSOR_PREFIX}{name}"))
-        })
-        .flatten();
+    let next_cursor = directory_page
+        .next_cursor
+        .map(|cursor| format!("{DIRECTORY_CURSOR_PREFIX}{cursor}"));
     Ok(StorageReport {
         profile_root: profile_root.display().to_string(),
         unregistered_dir_count,
@@ -542,26 +510,28 @@ pub async fn build_storage_report_page_from_registered_global_db(
     })
 }
 
+#[derive(Debug)]
+struct ProjectDirectoryPage {
+    directories: Vec<(String, std::path::PathBuf)>,
+    next_cursor: Option<String>,
+    source_entry_visits: usize,
+}
+
 fn list_project_directories_page(
     profile_root: &Path,
-    after_directory: &str,
+    cursor: &str,
     limit: usize,
-) -> (Vec<(String, std::path::PathBuf)>, bool) {
-    let Ok(entries) = std::fs::read_dir(profile_root.join("projects")) else {
-        return (Vec::new(), false);
-    };
-    let mut directories = entries
-        .flatten()
-        .filter_map(|entry| {
-            entry.file_type().ok().filter(std::fs::FileType::is_dir)?;
-            let name = entry.file_name().into_string().ok()?;
-            (name.as_str() > after_directory).then(|| (name, entry.path()))
-        })
-        .collect::<Vec<_>>();
-    directories.sort_by(|left, right| left.0.cmp(&right.0));
-    let has_more = directories.len() > limit;
-    directories.truncate(limit);
-    (directories, has_more)
+) -> tracedecay_domain::errors::Result<ProjectDirectoryPage> {
+    let page = super::orphan_stores::read_complete_project_directory_inventory_page(
+        profile_root,
+        (!cursor.is_empty()).then_some(cursor),
+        limit,
+    )?;
+    Ok(ProjectDirectoryPage {
+        directories: page.directories,
+        next_cursor: page.next_cursor,
+        source_entry_visits: page.source_entry_visits,
+    })
 }
 
 /// Builds one project-scoped report on the daemon's blocking pool so bounded
@@ -1113,6 +1083,133 @@ mod tests {
         connection
             .execute_batch("CREATE TABLE fixture (id INTEGER PRIMARY KEY);")
             .unwrap();
+    }
+
+    #[test]
+    fn project_directory_pages_visit_each_snapshot_entry_once() {
+        for page_size in [64, 256] {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let profile_root = tmp.path().join("profile");
+            let projects_dir = profile_root.join("projects");
+            let expected = (0..513)
+                .map(|index| format!("proj_{index:04}"))
+                .collect::<BTreeSet<_>>();
+            for name in &expected {
+                std::fs::create_dir_all(projects_dir.join(name)).unwrap();
+            }
+
+            let mut cursor = String::new();
+            let mut observed = BTreeSet::new();
+            let mut source_entry_visits = 0usize;
+            let mut first_page = true;
+            loop {
+                let page =
+                    list_project_directories_page(&profile_root, &cursor, page_size).unwrap();
+                source_entry_visits = source_entry_visits.saturating_add(page.source_entry_visits);
+                observed.extend(page.directories.into_iter().map(|(name, _)| name));
+
+                let Some(next_cursor) = page.next_cursor else {
+                    break;
+                };
+                cursor = next_cursor;
+                if first_page {
+                    first_page = false;
+                    std::fs::create_dir_all(projects_dir.join("proj_foreign_added")).unwrap();
+                    std::fs::remove_dir(projects_dir.join("proj_0500")).unwrap();
+                }
+            }
+
+            assert_eq!(
+                source_entry_visits,
+                expected.len(),
+                "page size {page_size} must inspect each source entry exactly once"
+            );
+            assert_eq!(
+                observed, expected,
+                "page size {page_size} must resume the frozen inventory despite foreign changes"
+            );
+        }
+    }
+
+    #[test]
+    fn project_directory_inventory_resume_fails_closed_when_inventory_is_missing_or_corrupt() {
+        for corrupt in [false, true] {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let profile_root = tmp.path().join("profile");
+            for name in ["proj_a", "proj_b"] {
+                std::fs::create_dir_all(profile_root.join("projects").join(name)).unwrap();
+            }
+            let first = list_project_directories_page(&profile_root, "", 1).unwrap();
+            let cursor = first.next_cursor.expect("second page cursor");
+            let inventory = std::fs::read_dir(
+                profile_root
+                    .join("maintenance")
+                    .join("unregistered-project-directory-inventory-v2"),
+            )
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| path.extension().is_some_and(|extension| extension == "log"))
+            .expect("durable project-directory inventory");
+            if corrupt {
+                std::fs::write(&inventory, b"invalid inventory\n").unwrap();
+            } else {
+                std::fs::remove_file(&inventory).unwrap();
+            }
+
+            let error = list_project_directories_page(&profile_root, &cursor, 1)
+                .expect_err("resume must not reconstruct unavailable inventory from current state");
+            assert!(
+                matches!(
+                    error,
+                    tracedecay_domain::errors::TraceDecayError::Config { .. }
+                ),
+                "inventory unavailability must remain typed: {error}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "manual filesystem scaling measurement"]
+    fn project_directory_inventory_measurements_are_linear() {
+        for directory_count in [1_000usize, 10_000] {
+            for page_size in [64usize, 256] {
+                let tmp = tempfile::TempDir::new().unwrap();
+                let profile_root = tmp.path().join("profile");
+                for index in 0..directory_count {
+                    std::fs::create_dir_all(
+                        profile_root
+                            .join("projects")
+                            .join(format!("proj_{index:05}")),
+                    )
+                    .unwrap();
+                }
+
+                let started = std::time::Instant::now();
+                let mut cursor = String::new();
+                let mut source_entry_visits = 0usize;
+                let mut observed = 0usize;
+                loop {
+                    let page =
+                        list_project_directories_page(&profile_root, &cursor, page_size).unwrap();
+                    source_entry_visits =
+                        source_entry_visits.saturating_add(page.source_entry_visits);
+                    observed = observed.saturating_add(page.directories.len());
+                    let Some(next_cursor) = page.next_cursor else {
+                        break;
+                    };
+                    cursor = next_cursor;
+                }
+                let elapsed = started.elapsed();
+
+                assert_eq!(observed, directory_count);
+                assert_eq!(source_entry_visits, directory_count);
+                eprintln!(
+                    "directories={directory_count} page_size={page_size} \
+                     source_entry_visits={source_entry_visits} elapsed={elapsed:?}"
+                );
+            }
+        }
     }
 
     fn profile_tree_bytes(root: &Path) -> u64 {
