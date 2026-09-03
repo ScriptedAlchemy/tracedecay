@@ -54,6 +54,20 @@ pub fn require_component_capabilities(
         // Devin's supported first-party route is its independent
         // `mcpServers.tracedecay` registration; it has no Core surface.
         (HostKindV1::Devin, Core) => return Err(HostBundleError::UnsupportedCapability),
+        // Vibe's Core component is its prompt-rule surface. Zed and
+        // Antigravity expose only their independently owned MCP documents.
+        (HostKindV1::Vibe, Core) => &[Cli],
+        (HostKindV1::Zed | HostKindV1::Antigravity, Core) => {
+            return Err(HostBundleError::UnsupportedCapability);
+        }
+        (
+            HostKindV1::Zed | HostKindV1::Antigravity | HostKindV1::Vibe,
+            ContextMcp,
+        ) => &[Mcp],
+        (
+            HostKindV1::Zed | HostKindV1::Antigravity | HostKindV1::Vibe,
+            Agent | OperatorMcp,
+        ) => return Err(HostBundleError::UnsupportedCapability),
         (_, ContextMcp | OperatorMcp) => &[Mcp],
         (HostKindV1::CursorDesktop, Agent) => &[NativeDiagnostics],
         (HostKindV1::OpenCode, Agent) => &[Cli],

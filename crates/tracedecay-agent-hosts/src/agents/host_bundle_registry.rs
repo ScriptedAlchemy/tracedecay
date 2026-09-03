@@ -137,6 +137,12 @@ pub fn unsupported_host_component_set_reason(
         HostKindV1::ClineFamily => {
             Some(HostCapabilityUnavailableReasonV1::CheckedInEvidenceMissing)
         }
+        // Identity admission precedes each host's native registration
+        // authority. Until that authority lands, catalog selection must fail
+        // as a typed unavailable set instead of succeeding with no artifacts.
+        HostKindV1::Zed | HostKindV1::Antigravity | HostKindV1::Vibe => {
+            Some(HostCapabilityUnavailableReasonV1::HostRegistrationUnsupported)
+        }
     }
 }
 
@@ -177,7 +183,11 @@ pub fn default_components(host: HostKindV1) -> Vec<HostBundleComponentV1> {
         | HostKindV1::Kilo => {
             vec![HostBundleComponentV1::ContextMcp]
         }
-        HostKindV1::CursorCloud | HostKindV1::ClineFamily => Vec::new(),
+        HostKindV1::CursorCloud
+        | HostKindV1::ClineFamily
+        | HostKindV1::Zed
+        | HostKindV1::Antigravity
+        | HostKindV1::Vibe => Vec::new(),
     }
 }
 
