@@ -66,8 +66,12 @@ pub struct ProductionEmbeddingRuntime {
 }
 
 /// One warmed session of whichever backend the authority selected.
+///
+/// FastEmbed's ORT session is boxed so the enum stays small: the Model2Vec
+/// variant is a table handle, and leaving the ORT session inline made the
+/// discriminant dispatch copy a large unused payload on every Model2Vec call.
 pub enum ProductionEmbeddingSession {
-    FastEmbed(<FastEmbedEmbeddingRuntime as EmbeddingRuntime>::Session),
+    FastEmbed(Box<<FastEmbedEmbeddingRuntime as EmbeddingRuntime>::Session>),
     Model2Vec(<Model2VecEmbeddingRuntime as EmbeddingRuntime>::Session),
 }
 
@@ -135,7 +139,7 @@ impl EmbeddingRuntime for ProductionEmbeddingRuntime {
             EmbeddingRuntimeFamilyV1::FastEmbedOrt => self
                 .fastembed
                 .open_session(authority, interruption)
-                .map(ProductionEmbeddingSession::FastEmbed),
+                .map(|session| ProductionEmbeddingSession::FastEmbed(Box::new(session))),
             EmbeddingRuntimeFamilyV1::Model2VecStatic => self
                 .model2vec
                 .open_session(authority, interruption)
