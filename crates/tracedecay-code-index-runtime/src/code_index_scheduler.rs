@@ -71,11 +71,12 @@ use crate::{
             CodeIndexGenerationScopeV1, CodeIndexIgnoredSourceAdmissionV1, CodeIndexInputErrorV1,
             CodeIndexProductionConfigV1, CodeIndexProductionErrorV1,
             CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
-            CodeIndexRepositoryParseIdentityV1, SealedGenerationSegmentKindV1,
-            SharedPhysicalCodeArtifactPoolV1, UninterruptibleCodeIndexControlV1,
-            VerifiedSealedLexicalCursorRestoreErrorV1, VerifiedSealedLexicalPageBatchBoundsV1,
-            VerifiedSealedLexicalPageBatchReadV1, VerifiedSealedLexicalPageSourceV1,
-            VerifiedSealedLexicalSourceReceiptV1, VerifiedSealedTextGenerationMetadataV1,
+            CodeIndexRepositoryParseIdentityV1, DAEMON_CODE_INDEX_CHUNKER_REVISION,
+            SealedGenerationSegmentKindV1, SharedPhysicalCodeArtifactPoolV1,
+            UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalCursorRestoreErrorV1,
+            VerifiedSealedLexicalPageBatchBoundsV1, VerifiedSealedLexicalPageBatchReadV1,
+            VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalSourceReceiptV1,
+            VerifiedSealedTextGenerationMetadataV1,
         },
         projection::{
             ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -5099,7 +5100,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             // conservative cross-file edges at generation sealing. V2
             // artifacts remain decodable, but cannot be reused as a current
             // graph because they never recorded that evidence.
-            chunker_revision: id::<ChunkerRevision>("chunker.daemon.v3")?,
+            chunker_revision: id::<ChunkerRevision>(DAEMON_CODE_INDEX_CHUNKER_REVISION)?,
             privacy_domain: id::<PrivacyDomainId>("privacy.local-code-index")?,
             privacy_key_epoch: 1,
             max_snapshot_age_micros: None,

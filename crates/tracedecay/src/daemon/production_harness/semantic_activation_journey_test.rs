@@ -12,7 +12,7 @@ use tracedecay_semantic_contracts::{
     DEFAULT_FASTEMBED_MODEL_ID, SemanticConfig, SemanticModelLifecycleStateV1,
     SemanticProfileSelection, SemanticResourceCeilings,
 };
-use tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1;
+use tracedecay_usecases::semantic_runtime::{ProjectSemanticActivationExt, SemanticRuntimeStateV1};
 use tracedecay_usecases::store::vector_generations::{
     GraphVectorGenerationStoreV1, PublishedVectorGenerationV1,
 };
@@ -213,7 +213,17 @@ pub(super) async fn wait_for_semantic_generation(
                 continue;
             };
             if vector.source_generation() == expected_source {
-                return (code, vector);
+                let lifecycle =
+                    tracedecay_usecases::semantic_runtime::project_or_shared_lifecycle_status(
+                        project,
+                    )
+                    .expect("production lifecycle status");
+                if matches!(
+                    lifecycle.state,
+                    Some(SemanticModelLifecycleStateV1::Ready { .. })
+                ) {
+                    return (code, vector);
+                }
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -222,30 +232,81 @@ pub(super) async fn wait_for_semantic_generation(
     .expect("production semantic generation did not publish")
 }
 
+async fn wait_for_settled_semantic_generation(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+    prior: Option<&tracedecay_domain::CodeGenerationId>,
+) -> (
+    tracedecay_domain::CodeGenerationId,
+    Arc<tracedecay_code_index::production::CodeIndexPublishedGenerationV1>,
+    PublishedVectorGenerationV1,
+) {
+    tokio::time::timeout(Duration::from_mins(4), async {
+        loop {
+            let generation_id = harness
+                .resources
+                .as_ref()
+                .expect("live harness")
+                .invocation
+                .code_index_schedulers
+                .latest_generation_id(project)
+                .await
+                .expect("code generation");
+            if prior == Some(&generation_id) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                continue;
+            }
+            let (_code, vector) =
+                wait_for_semantic_generation(harness, project, &generation_id).await;
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            if harness
+                .resources
+                .as_ref()
+                .expect("live harness")
+                .invocation
+                .code_index_schedulers
+                .latest_generation_id(project)
+                .await
+                .as_ref()
+                == Some(&generation_id)
+            {
+                let (settled_code, settled_vector) =
+                    wait_for_semantic_generation(harness, project, &generation_id).await;
+                if settled_vector.generation_id() == vector.generation_id() {
+                    return (generation_id, settled_code, settled_vector);
+                }
+            }
+        }
+    })
+    .await
+    .expect("production semantic generation did not settle")
+}
+
 pub(super) async fn evaluate_native_profile(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
 ) -> ManifestDigest {
     let resources = harness.resources.as_ref().expect("live harness");
-    let evaluation_limits = SemanticResourceCeilings::default();
-    let observed_at = tracedecay_domain::UtcMicros(
-        i64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system time")
-                .as_micros(),
+    for attempt in 0..2 {
+        let evaluation_limits = SemanticResourceCeilings::default();
+        let observed_at = tracedecay_domain::UtcMicros(
+            i64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("system time")
+                    .as_micros(),
+            )
+            .expect("evaluation time"),
+        );
+        // Exercise the same identity authority the production client uses. A
+        // vector generation is a `sha256:<hex>` digest, which cannot be embedded
+        // in a daemon request token; doing so truthfully fails at request
+        // validation before the evaluator is reached.
+        let request_id = tracedecay_application::request_identity::mint_global_request_id(
+            tracedecay_application::request_identity::GlobalRequestSurface::SemanticEvaluation,
         )
-        .expect("evaluation time"),
-    );
-    // Exercise the same identity authority the production client uses. A
-    // vector generation is a `sha256:<hex>` digest, which cannot be embedded
-    // in a daemon request token; doing so truthfully fails at request
-    // validation before the evaluator is reached.
-    let request_id = tracedecay_application::request_identity::mint_global_request_id(
-        tracedecay_application::request_identity::GlobalRequestSurface::SemanticEvaluation,
-    )
-    .expect("mint a production semantic-evaluation request id");
-    let response = resources
+        .expect("mint a production semantic-evaluation request id");
+        let response = resources
         .invocation
         .service
         .invoke(
@@ -270,7 +331,7 @@ pub(super) async fn evaluate_native_profile(
             ),
         )
         .await;
-    match response.outcome {
+        match response.outcome {
         tracedecay_daemon_protocol::DaemonInvocationOutcome::SemanticEvaluatedProfilePublished {
             profile_digest,
             report,
@@ -360,10 +421,91 @@ pub(super) async fn evaluate_native_profile(
                 measured.load_deadline_ms,
                 evaluation_limits.load_deadline_ms
             );
-            profile_digest
+                return profile_digest;
+            }
+            tracedecay_daemon_protocol::DaemonInvocationOutcome::ApplicationProblem {
+                problem: tracedecay_application::ApplicationProblem::Conflict { .. },
+            } if attempt == 0 => continue,
+            outcome => panic!("native semantic profile publication failed: {outcome:?}"),
         }
-        outcome => panic!("native semantic profile publication failed: {outcome:?}"),
     }
+    unreachable!("bounded semantic evaluation retry returned no outcome")
+}
+
+async fn activate_native_profile(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+) -> ManifestDigest {
+    let resources = harness.resources.as_ref().expect("live harness");
+    for attempt in 0..2 {
+        let observed_at = tracedecay_domain::UtcMicros(
+            i64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("system time")
+                    .as_micros(),
+            )
+            .expect("activation time"),
+        );
+        let request_id = tracedecay_application::request_identity::mint_global_request_id(
+            tracedecay_application::request_identity::GlobalRequestSurface::SemanticEvaluation,
+        )
+        .expect("mint a production semantic-activation request id");
+        let response = resources
+            .invocation
+            .service
+            .invoke(
+                &resources.invocation.lsp_session_registry,
+                Some(project),
+                None,
+                None,
+                None,
+                tracedecay_daemon_protocol::DaemonInvocationRequest::semantic_activate(
+                    request_id.as_str(),
+                    EVALUATED_PROFILE_ID.to_owned(),
+                    true,
+                    observed_at,
+                    tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
+                        observed_at.0
+                            + tracedecay_daemon_protocol::SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS,
+                    ))
+                    .expect("activation deadline"),
+                    tracedecay_application::CancellationContext::active(
+                        "cancellation.semantic-native-activation",
+                    )
+                    .expect("activation cancellation"),
+                ),
+            )
+            .await;
+        match response.outcome {
+            tracedecay_daemon_protocol::DaemonInvocationOutcome::SemanticProfileActivated {
+                profile_digest,
+                report_digest,
+                rollback_profile_id,
+                runtime_state,
+                ..
+            } => {
+                assert!(
+                    !report_digest.as_str().is_empty(),
+                    "activation receipt must identify its calibration report"
+                );
+                assert_eq!(
+                    rollback_profile_id, None,
+                    "fresh activation has no prior profile to retain"
+                );
+                assert!(
+                    runtime_state.get("state").is_some(),
+                    "activation receipt must expose the typed runtime state: {runtime_state}"
+                );
+                return profile_digest;
+            }
+            tracedecay_daemon_protocol::DaemonInvocationOutcome::ApplicationProblem {
+                problem: tracedecay_application::ApplicationProblem::Conflict { .. },
+            } if attempt == 0 => continue,
+            outcome => panic!("composed semantic activation failed: {outcome:?}"),
+        }
+    }
+    unreachable!("bounded semantic activation retry returned no outcome")
 }
 
 pub(super) async fn set_semantic_profile(
@@ -439,6 +581,41 @@ async fn search(
     )
 }
 
+async fn strict_unavailable_search(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+) -> Value {
+    let response = harness
+        .call_tool(
+            project,
+            "tracedecay_search",
+            json!({
+                "query": "semantic_product_probe",
+                "limit": 10,
+                "format": "json",
+                "semantic_mode": "strict_semantic",
+            }),
+        )
+        .await
+        .expect("strict semantic failure answers with a typed payload");
+    assert!(
+        response.error.is_none(),
+        "strict semantic unavailability must not become a transport error: {response:?}"
+    );
+    let result = response.result.as_ref().expect("strict semantic result");
+    assert_eq!(
+        result["isError"],
+        json!(true),
+        "strict semantic unavailability must remain a typed tool failure: {result}"
+    );
+    let text = result["content"][0]["text"]
+        .as_str()
+        .expect("strict semantic tool text");
+    serde_json::from_str(text).unwrap_or_else(|error| {
+        panic!("strict semantic tool did not return JSON: {error}; result={result}; text={text}")
+    })
+}
+
 /// Proves that semantic execution contributed to the actual source probe,
 /// rather than merely reporting a ready runtime or complete lane.
 pub(super) fn assert_semantic_probe_contribution(
@@ -483,28 +660,56 @@ async fn semantic_runtime_status(
         .clone()
 }
 
-async fn graph_bytes(
+async fn wait_for_semantic_runtime_ready(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
-    generations: &[(
-        Arc<tracedecay_code_index::production::CodeIndexPublishedGenerationV1>,
-        VectorGenerationIdV1,
-    )],
-) -> Vec<u8> {
-    let resources = harness.resources.as_ref().expect("live harness");
-    let provider = resources
+) -> Value {
+    let mut latest = semantic_runtime_status(harness, project).await;
+    let ready = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let status = semantic_runtime_status(harness, project).await;
+            if status["state"]["state"] == "ready" {
+                return status;
+            }
+            latest = status;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    ready.unwrap_or_else(|_| {
+        panic!("semantic activation did not converge to ready: latest status {latest}")
+    })
+}
+
+async fn retain_graph(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+    generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
+) -> tracedecay_usecases::semantic_runtime::RetainedSemanticVectorGraphV1 {
+    harness
+        .resources
+        .as_ref()
+        .expect("live harness")
         .invocation
         .code_index_schedulers
         .semantic_vector_graph_provider(project)
         .await
-        .expect("daemon semantic vector graph provider");
+        .expect("daemon semantic vector graph provider")
+        .graph_for_generation(generation)
+        .await
+        .expect("retain exact semantic vector graph")
+}
+
+async fn graph_bytes(
+    generations: &[(
+        &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
+        &tracedecay_usecases::semantic_runtime::RetainedSemanticVectorGraphV1,
+        VectorGenerationIdV1,
+    )],
+) -> Vec<u8> {
     let mut snapshots = Vec::new();
-    for (code, vector_id) in generations {
-        let retained = provider
-            .graph_for_generation(code)
-            .await
-            .expect("retain exact semantic vector graph");
-        let store = GraphVectorGenerationStoreV1::read_only_generation(&retained, vector_id)
+    for (code, retained, vector_id) in generations {
+        let store = GraphVectorGenerationStoreV1::read_only_generation(retained, vector_id)
             .expect("read exact vector generation")
             .expect("published vector generation");
         let generation = store
@@ -629,33 +834,32 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         .await
         .expect("production composition");
     let resources = harness.resources.as_ref().expect("live harness");
-    let first_code_id = resources
-        .invocation
-        .code_index_schedulers
-        .latest_generation_id(&project)
-        .await
-        .expect("G1 code generation");
-    let (first_code, first_vector) =
-        wait_for_semantic_generation(&harness, &project, &first_code_id).await;
+    let (first_code_id, first_code, first_vector) =
+        wait_for_settled_semantic_generation(&harness, &project, None).await;
+    let graph = harness.server(&project).expect("project server").cg().await;
+    assert!(
+        graph
+            .configuration_runtime()
+            .semantic_activation_coordinator()
+            .is_some(),
+        "semantic activation coordinator must be mounted before evaluation"
+    );
+    let first_graph = retain_graph(&harness, &project, &first_code).await;
     let first_generation = [(
-        Arc::clone(&first_code),
+        first_code.as_ref(),
+        &first_graph,
         first_vector.generation_id().clone(),
     )];
-    let graph_before_first_evaluation = graph_bytes(&harness, &project, &first_generation).await;
-    let first_profile = evaluate_native_profile(&harness, &project).await;
-    assert_eq!(
-        graph_bytes(&harness, &project, &first_generation).await,
-        graph_before_first_evaluation,
-        "native evaluation must not publish into the project graph"
-    );
-    set_semantic_profile(
-        &harness,
-        &project,
-        selection(first_profile.clone(), &artifact_digest, &artifact_path),
-        None,
-    )
-    .await;
+    let graph_before_first_evaluation = graph_bytes(&first_generation).await;
+    let first_profile = activate_native_profile(&harness, &project).await;
+    let first_runtime = wait_for_semantic_runtime_ready(&harness, &project).await;
+    assert_eq!(first_runtime["state"]["state"], "ready");
     assert_code_generation_unchanged(&harness, &project, &first_code_id).await;
+    assert_eq!(
+        graph_bytes(&first_generation).await,
+        graph_before_first_evaluation,
+        "composed evaluation and activation must not publish into the project graph"
+    );
     let first_query = search(&harness, &project, true).await;
     assert_eq!(first_query["semantic"]["status"], "complete");
     assert_semantic_probe_contribution(
@@ -681,45 +885,30 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
             .notify_hook_paths(&project, &["src/lib.rs".to_owned()])
             .await
     );
-    let second_code_id = tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            let generation = resources
-                .invocation
-                .code_index_schedulers
-                .latest_generation_id(&project)
-                .await;
-            if generation
-                .as_ref()
-                .is_some_and(|generation| generation != &first_code_id)
-            {
-                return generation.expect("G2 generation");
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("G2 code generation did not publish");
-    let (second_code, second_vector) =
-        wait_for_semantic_generation(&harness, &project, &second_code_id).await;
+    let (second_code_id, second_code, second_vector) =
+        wait_for_settled_semantic_generation(&harness, &project, Some(&first_code_id)).await;
     assert_ne!(first_vector.generation_id(), second_vector.generation_id());
+    let second_graph = retain_graph(&harness, &project, &second_code).await;
     let generations = [
         (
-            Arc::clone(&first_code),
+            first_code.as_ref(),
+            &first_graph,
             first_vector.generation_id().clone(),
         ),
         (
-            Arc::clone(&second_code),
+            second_code.as_ref(),
+            &second_graph,
             second_vector.generation_id().clone(),
         ),
     ];
-    let graph_before_second_evaluation = graph_bytes(&harness, &project, &generations).await;
+    let graph_before_second_evaluation = graph_bytes(&generations).await;
     let second_profile = evaluate_native_profile(&harness, &project).await;
     assert_eq!(
-        graph_bytes(&harness, &project, &generations).await,
+        graph_bytes(&generations).await,
         graph_before_second_evaluation,
         "native reevaluation must not publish into the project graph"
     );
-    let graph_before_activation = graph_bytes(&harness, &project, &generations).await;
+    let graph_before_activation = graph_bytes(&generations).await;
     set_semantic_profile(
         &harness,
         &project,
@@ -731,9 +920,14 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         )),
     )
     .await;
+    let second_runtime = wait_for_semantic_runtime_ready(&harness, &project).await;
+    assert_eq!(
+        second_runtime["state"]["receipt"]["activated_generation"],
+        json!(second_vector.generation_id())
+    );
     assert_code_generation_unchanged(&harness, &project, &second_code_id).await;
     assert_eq!(
-        graph_bytes(&harness, &project, &generations).await,
+        graph_bytes(&generations).await,
         graph_before_activation,
         "activation must not publish or rewrite graph state"
     );
@@ -785,9 +979,14 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         )),
     )
     .await;
+    let rollback_runtime = wait_for_semantic_runtime_ready(&harness, &project).await;
+    assert_eq!(
+        rollback_runtime["state"]["receipt"]["activated_generation"],
+        json!(first_vector.generation_id())
+    );
     assert_code_generation_unchanged(&harness, &project, &first_code_id).await;
     assert_eq!(
-        graph_bytes(&harness, &project, &generations).await,
+        graph_bytes(&generations).await,
         graph_before_activation,
         "rollback must preserve the graph catalog, control state, and verified heads byte-for-byte"
     );
@@ -857,16 +1056,16 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         "failed semantic observation must preserve ordinary exact/lexical/graph results"
     );
     assert_ne!(core_during_failure["semantic"]["status"], "complete");
-    let strict_during_failure = search(&harness, &project, true).await;
+    let strict_during_failure = strict_unavailable_search(&harness, &project).await;
     assert_eq!(strict_during_failure["status"], "unavailable");
     assert_ne!(strict_during_failure["semantic"]["status"], "complete");
     assert_ne!(
-        semantic_runtime_status(&harness, &project).await["state"],
+        semantic_runtime_status(&harness, &project).await["state"]["state"],
         "ready",
         "failed observation must remain visibly degraded"
     );
     assert_eq!(
-        graph_bytes(&harness, &project, &generations).await,
+        graph_bytes(&generations).await,
         graph_before_activation,
         "failed live install must not mutate graph publication authority"
     );
@@ -878,7 +1077,7 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         loop {
             let result = search(&harness, &project, true).await;
             let status = semantic_runtime_status(&harness, &project).await;
-            if result["semantic"]["status"] == "complete" && status["state"] == "ready" {
+            if result["semantic"]["status"] == "complete" && status["state"]["state"] == "ready" {
                 return (result, status);
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -888,9 +1087,9 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
     .expect("daemon semantic activation recovery did not converge");
     assert_eq!(recovered["semantic"]["status"], "complete");
     assert_semantic_probe_contribution(&recovered, "semantic_product_probe", "semantic retry");
-    assert_eq!(recovered_status["state"], "ready");
+    assert_eq!(recovered_status["state"]["state"], "ready");
     assert_eq!(
-        recovered_status["receipt"]["activated_generation"],
+        recovered_status["state"]["receipt"]["activated_generation"],
         json!(second_vector.generation_id())
     );
     assert_eq!(
@@ -898,7 +1097,7 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         json!(second_code.manifest().generation_id)
     );
     assert_eq!(
-        graph_bytes(&harness, &project, &generations).await,
+        graph_bytes(&generations).await,
         graph_before_activation,
         "exact retry must restore routing without graph publication"
     );
