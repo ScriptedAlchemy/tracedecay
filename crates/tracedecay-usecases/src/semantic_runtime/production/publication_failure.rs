@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 
+use tracedecay_graph_db::GraphConflictContextV1;
 use tracedecay_semantic_contracts::SemanticRuntimeScheduleFailureV1;
 
 use crate::store::vector_generations::VectorGenerationStoreErrorV1;
@@ -173,25 +174,30 @@ impl SemanticPublicationFailureCategoryV1 {
                 Self::StorePhysicalVectorConflict
             }
             VectorGenerationStoreErrorV1::Storage(_) => Self::StoreStorage,
-            VectorGenerationStoreErrorV1::ConcurrentMutation => Self::StoreConcurrentMutation,
+            VectorGenerationStoreErrorV1::ConcurrentMutation(_) => Self::StoreConcurrentMutation,
             VectorGenerationStoreErrorV1::Projection(_) => Self::StoreProjection,
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct SemanticPublicationFailureReceiptV1 {
     pub(super) stage: SemanticPublicationStageV1,
     pub(super) category: SemanticPublicationFailureCategoryV1,
+    pub(super) conflict: Option<GraphConflictContextV1>,
 }
 
 impl SemanticPublicationFailureReceiptV1 {
-    pub(super) fn detail(self) -> String {
-        format!(
+    pub(super) fn detail(&self) -> String {
+        let mut detail = format!(
             "semantic runtime publication {} failed: {}",
             self.stage.as_str(),
             self.category.as_str()
-        )
+        );
+        if let Some(conflict) = &self.conflict {
+            detail.push_str(&format!(" ({})", conflict.site));
+        }
+        detail
     }
 }
 
@@ -293,6 +299,7 @@ impl SemanticPublicationFailureRecorderV1 {
         self.record(
             stage,
             SemanticPublicationFailureCategoryV1::from_graph(error),
+            None,
         )
     }
 
@@ -301,9 +308,14 @@ impl SemanticPublicationFailureRecorderV1 {
         stage: SemanticPublicationStageV1,
         error: &VectorGenerationStoreErrorV1,
     ) -> SemanticRuntimeScheduleFailureV1 {
+        let conflict = match error {
+            VectorGenerationStoreErrorV1::ConcurrentMutation(context) => Some(context.clone()),
+            _ => None,
+        };
         self.record(
             stage,
             SemanticPublicationFailureCategoryV1::from_store(error),
+            conflict,
         )
     }
 
@@ -312,33 +324,51 @@ impl SemanticPublicationFailureRecorderV1 {
         stage: SemanticPublicationStageV1,
         category: SemanticPublicationFailureCategoryV1,
     ) -> SemanticRuntimeScheduleFailureV1 {
-        self.record(stage, category)
+        self.record(stage, category, None)
     }
 
     pub(super) fn receipt(&self) -> Option<SemanticPublicationFailureReceiptV1> {
-        *self
+        self
             .first
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     fn record(
         &self,
         stage: SemanticPublicationStageV1,
         category: SemanticPublicationFailureCategoryV1,
+        conflict: Option<GraphConflictContextV1>,
     ) -> SemanticRuntimeScheduleFailureV1 {
         let mut first = self
             .first
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if first.is_none() {
-            tracing::warn!(
-                event = "semantic_publication_failure",
-                stage = stage.as_str(),
-                category = category.as_str(),
-                "semantic publication failed at a bounded production stage"
-            );
-            *first = Some(SemanticPublicationFailureReceiptV1 { stage, category });
+            if let Some(context) = &conflict {
+                tracing::warn!(
+                    event = "semantic_publication_failure",
+                    stage = stage.as_str(),
+                    category = category.as_str(),
+                    conflict_site = context.site,
+                    conflict_expected = context.expected.as_deref().unwrap_or(""),
+                    conflict_actual = context.actual.as_deref().unwrap_or(""),
+                    "semantic publication failed at a bounded production stage"
+                );
+            } else {
+                tracing::warn!(
+                    event = "semantic_publication_failure",
+                    stage = stage.as_str(),
+                    category = category.as_str(),
+                    "semantic publication failed at a bounded production stage"
+                );
+            }
+            *first = Some(SemanticPublicationFailureReceiptV1 {
+                stage,
+                category,
+                conflict,
+            });
         }
         SemanticRuntimeScheduleFailureV1::Publication
     }
@@ -348,6 +378,7 @@ impl SemanticPublicationFailureRecorderV1 {
 mod tests {
     use std::collections::BTreeSet;
 
+    use tracedecay_graph_db::GraphConflictContextV1;
     use tracedecay_semantic_contracts::SemanticRuntimeScheduleFailureV1;
 
     use crate::semantic_runtime::SemanticVectorGraphErrorV1;
@@ -357,6 +388,14 @@ mod tests {
         SemanticPublicationFailureCategoryV1, SemanticPublicationFailureRecorderV1,
         SemanticPublicationStageV1,
     };
+
+    fn concurrent_mutation(site: &'static str) -> VectorGenerationStoreErrorV1 {
+        VectorGenerationStoreErrorV1::ConcurrentMutation(GraphConflictContextV1 {
+            site,
+            expected: Some("expected guard value".to_owned()),
+            actual: Some("actual guard value".to_owned()),
+        })
+    }
 
     #[test]
     fn publication_failure_receipts_keep_bounded_stage_and_category_truth() {
@@ -412,7 +451,7 @@ mod tests {
                 SemanticPublicationFailureCategoryV1::StoreInvalidPlan,
             ),
             (
-                VectorGenerationStoreErrorV1::ConcurrentMutation,
+                concurrent_mutation("usecases.store.test"),
                 SemanticPublicationFailureCategoryV1::StoreConcurrentMutation,
             ),
         ] {
@@ -468,7 +507,9 @@ mod tests {
         );
 
         let commit = SemanticPublicationFailureRecorderV1::default();
-        let failure = commit.commit_batch(&VectorGenerationStoreErrorV1::ConcurrentMutation);
+        let failure = commit.commit_batch(&concurrent_mutation(
+            "staging.resume_generation_stage",
+        ));
         assert_eq!(failure, SemanticRuntimeScheduleFailureV1::Publication);
         let receipt = commit.receipt().expect("commit_batch receipt");
         assert_eq!(receipt.stage, SemanticPublicationStageV1::CommitBatch);
@@ -478,7 +519,16 @@ mod tests {
         );
         assert_eq!(
             receipt.detail(),
-            "semantic runtime publication commit_batch failed: store_concurrent_mutation"
+            "semantic runtime publication commit_batch failed: store_concurrent_mutation \
+             (staging.resume_generation_stage)"
+        );
+        assert_eq!(
+            receipt
+                .conflict
+                .expect("concurrent mutation conflict context")
+                .expected
+                .as_deref(),
+            Some("expected guard value")
         );
     }
 
@@ -491,7 +541,8 @@ mod tests {
         let first = resume_failure.retain_for_resume(&SemanticVectorGraphErrorV1::Rejected(
             "backend path is private".to_owned(),
         ));
-        let second = commit_failure.commit_batch(&VectorGenerationStoreErrorV1::ConcurrentMutation);
+        let second =
+            commit_failure.commit_batch(&concurrent_mutation("usecases.store.commit_batch"));
 
         assert_eq!(first, SemanticRuntimeScheduleFailureV1::Publication);
         assert_eq!(second, SemanticRuntimeScheduleFailureV1::Publication);
@@ -516,7 +567,8 @@ mod tests {
         let resume_failure = publication_failure.clone();
         let commit_failure = publication_failure.clone();
 
-        let first = commit_failure.commit_batch(&VectorGenerationStoreErrorV1::ConcurrentMutation);
+        let first =
+            commit_failure.commit_batch(&concurrent_mutation("usecases.store.commit_batch"));
         let second = resume_failure.retain_for_resume(&SemanticVectorGraphErrorV1::Rejected(
             "backend path is private".to_owned(),
         ));
@@ -533,7 +585,8 @@ mod tests {
         );
         assert_eq!(
             receipt.detail(),
-            "semantic runtime publication commit_batch failed: store_concurrent_mutation"
+            "semantic runtime publication commit_batch failed: store_concurrent_mutation \
+             (usecases.store.commit_batch)"
         );
     }
 }

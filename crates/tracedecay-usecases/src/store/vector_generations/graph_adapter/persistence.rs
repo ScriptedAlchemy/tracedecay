@@ -45,7 +45,9 @@ pub(super) fn check_cancelled(
 pub(super) fn map_graph_error(error: GraphDbError) -> VectorGenerationStoreErrorV1 {
     match error {
         GraphDbError::Cancelled => VectorGenerationStoreErrorV1::Cancelled,
-        GraphDbError::Conflict { .. } => VectorGenerationStoreErrorV1::ConcurrentMutation,
+        GraphDbError::Conflict { context } => {
+            VectorGenerationStoreErrorV1::ConcurrentMutation(context)
+        }
         GraphDbError::ProjectionMismatch { message, .. }
         | GraphDbError::GenerationMismatch { message, .. } => {
             VectorGenerationStoreErrorV1::ResetRequired(message)
@@ -82,6 +84,7 @@ mod tests {
     use tracedecay_graph_db::{GraphBudgetKind, GraphDbError};
 
     use super::map_graph_error;
+    use crate::store::vector_generations::VectorGenerationStoreErrorV1;
 
     #[test]
     fn map_graph_error_names_exhausted_budget_kind_and_limit() {
@@ -93,5 +96,21 @@ mod tests {
             error.to_string(),
             "semantic vector graph is unavailable: semantic vector graph mutation budget is exhausted (limit 4096)"
         );
+    }
+
+    #[test]
+    fn stale_writer_conflict_keeps_its_guard_context() {
+        let error = map_graph_error(GraphDbError::conflict_observed(
+            "staging.resume_generation_stage",
+            "writer_fence=incarnation-1",
+            "writer_fence=incarnation-2",
+        ));
+        assert!(matches!(
+            error,
+            VectorGenerationStoreErrorV1::ConcurrentMutation(context)
+                if context.site == "staging.resume_generation_stage"
+                    && context.expected.as_deref() == Some("writer_fence=incarnation-1")
+                    && context.actual.as_deref() == Some("writer_fence=incarnation-2")
+        ));
     }
 }

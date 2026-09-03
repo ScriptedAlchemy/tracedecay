@@ -1,11 +1,19 @@
+use std::sync::Arc;
+
 use tracedecay_domain::{
-    BrainId, ProjectId, RepositoryId, UserProfileId, VectorGenerationIdV1, WorktreeId,
-    canonical_sha256,
+    BrainId, ChangedCodeChunkSetV1, ChangedCodeChunkV1, ChunkerRevision, CodeGenerationId,
+    CodeSearchChunkId, ContentDigest, EmbeddingDeviceClassV1, EmbeddingDocumentCompositionV1,
+    EmbeddingMetricV1, EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1,
+    EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1, PrivacyDomainId, ProjectId,
+    ProjectionBatchRequestV1, ProjectionOperationV1, ProjectionOutcomeV1, ProjectionReplayReasonV1,
+    RepositoryId, UserProfileId, VectorGenerationIdV1, WorktreeId, canonical_sha256,
 };
 use tracedecay_graph_db::{
-    GraphDbError, GraphGenerationDependency, GraphGenerationId, GraphIdempotencyKey,
-    GraphNamespace, GraphProjectionId, GraphProjectionIdentity,
+    GraphCancellation, GraphDbError, GraphGenerationDependency, GraphGenerationId,
+    GraphIdempotencyKey, GraphNamespace, GraphProjectionId, GraphProjectionIdentity,
+    NeverCancelled,
 };
+use tracedecay_semantic::projector::{ProjectedChunkVectorV1, vector_output_digest};
 use tracedecay_store::{
     CodeShardScopeV1, GraphGenerationIdV1, GraphNamespaceV1, GraphProjectionIdV1,
     GraphProjectionIdentityV1, GraphPublicationIdempotencyKeyV1, GraphPublicationKeyV1,
@@ -15,7 +23,12 @@ use tracedecay_store::{
 };
 
 use super::{post_commit_publication_settlement_error, semantic_stage_source_identity};
-use crate::store::vector_generations::VectorGenerationStoreErrorV1;
+use crate::semantic_runtime::SemanticGraphExecutionAuthorityV1;
+use crate::store::vector_generations::graph_adapter::evaluation_runtime::IsolatedSemanticEvaluationGraphV1;
+use crate::store::vector_generations::{
+    GraphVectorGenerationStoreV1, PreparedVectorGenerationV1, SemanticVectorStageDescriptorV1,
+    VectorGenerationBeginOutcomeV1, VectorGenerationPlanV1, VectorGenerationStoreErrorV1,
+};
 
 #[test]
 fn published_stage_settlement_interrupt_is_replayable_durability_uncertainty() {
@@ -108,6 +121,211 @@ fn semantic_plan_keeps_code_scope_and_projects_dependency_through_project_shard(
         plan.source_dependency.generation.projection.shard_id,
         plan.source_scope
     );
+}
+
+#[tokio::test]
+async fn restarted_store_supersedes_pending_stage_from_prior_source_generation() {
+    let first_source = CodeGenerationId::new("code-generation.superseded").unwrap();
+    let second_source = CodeGenerationId::new("code-generation.current").unwrap();
+    let cancellation: Arc<dyn GraphCancellation> = Arc::new(NeverCancelled);
+    let graph = Arc::new(
+        IsolatedSemanticEvaluationGraphV1::open_source_generations(
+            &[first_source.clone(), second_source.clone()],
+            Arc::clone(&cancellation),
+        )
+        .unwrap(),
+    );
+    let embedding = admitted_embedding();
+    let (first_plan, first_prepared, first_descriptor) =
+        prepared_generation(&first_source, "chunk.superseded", 'a', &embedding);
+    let first_retained = graph.retained(&first_source).unwrap();
+    let first_store = GraphVectorGenerationStoreV1::open(&first_retained).unwrap();
+    first_store.configure_stage(first_descriptor).unwrap();
+    let first_build = match first_store
+        .begin_generation(first_plan, Arc::clone(&cancellation))
+        .await
+        .unwrap()
+    {
+        VectorGenerationBeginOutcomeV1::ReplayFromStart { build_id } => build_id,
+        VectorGenerationBeginOutcomeV1::AlreadyPublished { .. } => {
+            panic!("first source generation must begin a pending stage")
+        }
+    };
+    first_store
+        .commit_batch(
+            &first_build,
+            None,
+            first_prepared,
+            Arc::clone(&cancellation),
+        )
+        .await
+        .unwrap();
+    let first_stage = first_store
+        .pending
+        .lock()
+        .unwrap()
+        .get(&first_build)
+        .unwrap()
+        .stage
+        .plan
+        .key
+        .clone();
+    drop(first_store);
+
+    let (second_plan, second_prepared, second_descriptor) =
+        prepared_generation(&second_source, "chunk.current", 'b', &embedding);
+    let second_retained = graph.retained(&second_source).unwrap();
+    let second_store = GraphVectorGenerationStoreV1::open(&second_retained).unwrap();
+    second_store.configure_stage(second_descriptor).unwrap();
+    let second_build = match second_store
+        .begin_generation(second_plan, Arc::clone(&cancellation))
+        .await
+        .unwrap()
+    {
+        VectorGenerationBeginOutcomeV1::ReplayFromStart { build_id } => build_id,
+        VectorGenerationBeginOutcomeV1::AlreadyPublished { .. } => {
+            panic!("current source generation must begin after supersession")
+        }
+    };
+    let authority = SemanticGraphExecutionAuthorityV1::new(
+        Arc::clone(&cancellation),
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
+    );
+    assert!(matches!(
+        first_retained
+            .runtime()
+            .resume_stage(&first_stage, &authority)
+            .unwrap(),
+        tracedecay_store::SemanticVectorStageResumeOutcome::Cancelled(record)
+            if record.plan.key == first_stage
+    ));
+    second_store
+        .commit_batch(
+            &second_build,
+            None,
+            second_prepared,
+            Arc::clone(&cancellation),
+        )
+        .await
+        .unwrap();
+    let publication = second_store
+        .publish_generation(&second_build, cancellation)
+        .await
+        .unwrap();
+    assert_eq!(publication.checkpoint.source_generation, second_source);
+}
+
+fn admitted_embedding() -> tracedecay_domain::AdmittedEmbeddingProjectionKeyV1 {
+    EmbeddingProjectionKeyV1 {
+        model_artifact_digest: digest('1'),
+        tokenizer_digest: digest('2'),
+        config_digest: digest('3'),
+        query_instruction_digest: None,
+        document_instruction_digest: None,
+        document_composition: EmbeddingDocumentCompositionV1::SanitizedText,
+        pooling: EmbeddingPoolingV1::Mean,
+        truncation_side: EmbeddingTruncationSideV1::Right,
+        truncation_length: 512,
+        inference_batch_size: 8,
+        inference_batch_bytes: 16 * 1024,
+        runtime_backend: "fixture-runtime".to_owned(),
+        runtime_build_revision: "fixture-runtime.v1".to_owned(),
+        device_class: EmbeddingDeviceClassV1::Cpu,
+        dimensions: 1,
+        metric: EmbeddingMetricV1::Cosine,
+        normalization: EmbeddingNormalizationV1::L2,
+        precision: EmbeddingPrecisionV1::Fp32,
+        chunk_schema_revision: "code-search-chunk.v1".to_owned(),
+        chunker_revision: ChunkerRevision::new("chunker.fixture.v1").unwrap(),
+        privacy_domain: PrivacyDomainId::new("privacy.fixture").unwrap(),
+        privacy_key_epoch: 1,
+    }
+    .admit()
+    .unwrap()
+}
+
+fn prepared_generation(
+    source: &tracedecay_domain::CodeGenerationId,
+    chunk: &str,
+    digest_byte: char,
+    embedding: &tracedecay_domain::AdmittedEmbeddingProjectionKeyV1,
+) -> (
+    VectorGenerationPlanV1,
+    PreparedVectorGenerationV1,
+    SemanticVectorStageDescriptorV1,
+) {
+    let chunk_id = CodeSearchChunkId::new(chunk).unwrap();
+    let chunk_digest =
+        ContentDigest::new(format!("sha256:{}", digest_byte.to_string().repeat(64))).unwrap();
+    let mut changes = ChangedCodeChunkSetV1 {
+        from_generation: None,
+        to_generation: source.clone(),
+        manifest_digest: digest('0'),
+        added_or_changed: vec![ChangedCodeChunkV1 {
+            chunk_id: chunk_id.clone(),
+            prior_digest: None,
+            current_digest: Some(chunk_digest.clone()),
+        }],
+        deleted: vec![],
+        reused: vec![],
+    };
+    changes.manifest_digest = changes.compute_digest().unwrap();
+    let descriptor =
+        SemanticVectorStageDescriptorV1::from_changes(embedding.clone(), &changes).unwrap();
+    let mut request = ProjectionBatchRequestV1 {
+        request_digest: digest('0'),
+        changes,
+        previous_projection_key: None,
+        target_projection_key: embedding.projection_key().clone(),
+        replay_reason: ProjectionReplayReasonV1::FullRebuildIncompatible,
+    };
+    request.request_digest =
+        tracedecay_code_index::projection::expected_request_digest(&request).unwrap();
+    let values = vec![f32::from(digest_byte as u8)];
+    let output_digest = vector_output_digest(
+        embedding.projection_key(),
+        &chunk_id,
+        &chunk_digest,
+        &values,
+    )
+    .unwrap();
+    let receipt = tracedecay_code_index::projection::build_batch_receipt(
+        &request,
+        &[
+            tracedecay_code_index::projection::ChunkProjectionDecisionV1 {
+                chunk_id: chunk_id.clone(),
+                prior_chunk_digest: None,
+                current_chunk_digest: Some(chunk_digest.clone()),
+                operation: ProjectionOperationV1::Added,
+                outcome: ProjectionOutcomeV1::Applied,
+                output_digest: Some(output_digest.clone()),
+            },
+        ],
+    )
+    .unwrap();
+    let prepared = PreparedVectorGenerationV1 {
+        embedding_key: embedding.clone(),
+        request: request.clone(),
+        receipt,
+        vectors: vec![ProjectedChunkVectorV1 {
+            projection_key: embedding.projection_key().clone(),
+            source_generation: source.clone(),
+            source_manifest_digest: request.changes.manifest_digest.clone(),
+            chunk_id: chunk_id.clone(),
+            chunk_digest,
+            values,
+            output_digest,
+        }],
+        tombstones: vec![],
+    };
+    let plan = VectorGenerationPlanV1 {
+        target_projection_key: embedding.projection_key().clone(),
+        source_generation: source.clone(),
+        source_manifest_digest: request.changes.manifest_digest,
+        expected_chunk_ids: vec![chunk_id].into(),
+        base_generation: None,
+    };
+    (plan, prepared, descriptor)
 }
 
 fn digest<T: TryFrom<String>>(byte: char) -> T

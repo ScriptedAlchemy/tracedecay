@@ -1,4 +1,5 @@
 use super::*;
+use tracedecay_graph_db::VerifiedGenerationBeginV1;
 use tracedecay_usecases::semantic_runtime::SemanticVectorRetentionAuthorizationV1;
 
 impl RetainedCodeGraphRuntimeV1 {
@@ -304,7 +305,7 @@ impl RetainedCodeGraphRuntimeV1 {
         plan: &SemanticVectorStagePlan,
         cancellation: Arc<dyn GraphCancellation>,
         deadline: Instant,
-    ) -> std::result::Result<SemanticVectorStageRecord, GraphDbError> {
+    ) -> std::result::Result<VerifiedGenerationBeginV1, GraphDbError> {
         let mut authority = self
             .project_database
             .semantic_vector_publication_authority()
