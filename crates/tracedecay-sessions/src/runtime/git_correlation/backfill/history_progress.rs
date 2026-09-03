@@ -276,7 +276,10 @@ pub(super) struct GitHistorySeenRow {
     pub oid: String,
 }
 
-#[hotpath::measure(label = "sessions.git_correlation.history_progress_read", future = true)]
+#[hotpath::measure(
+    label = "sessions.git_correlation.history_progress_read",
+    future = true
+)]
 pub(super) async fn read_progress(
     conn: &(impl QueryExecutor + ?Sized),
     key: GitHistoryProgressKey,
@@ -302,7 +305,10 @@ pub(super) async fn read_progress(
         .transpose()
 }
 
-#[hotpath::measure(label = "sessions.git_correlation.history_progress_oldest", future = true)]
+#[hotpath::measure(
+    label = "sessions.git_correlation.history_progress_oldest",
+    future = true
+)]
 pub(super) async fn read_oldest_progress(
     conn: &(impl QueryExecutor + ?Sized),
 ) -> Result<Option<GitHistoryProgressRow>, GitCorrelationError> {
@@ -329,7 +335,10 @@ pub(super) async fn read_oldest_progress(
 }
 
 /// Inserts a new exact progress row without replacing an existing source seal.
-#[hotpath::measure(label = "sessions.git_correlation.history_progress_insert", future = true)]
+#[hotpath::measure(
+    label = "sessions.git_correlation.history_progress_insert",
+    future = true
+)]
 pub(super) async fn insert_progress(
     conn: &(impl Executor + ?Sized),
     progress: &GitHistoryProgressRow,
@@ -553,7 +562,10 @@ pub(super) async fn read_segment(
 }
 
 /// Inserts a segment or updates only its mutable flags when its sealed shape matches.
-#[hotpath::measure(label = "sessions.git_correlation.history_segment_upsert", future = true)]
+#[hotpath::measure(
+    label = "sessions.git_correlation.history_segment_upsert",
+    future = true
+)]
 pub(super) async fn upsert_segment(
     conn: &(impl Executor + ?Sized),
     segment: &GitHistorySegmentRow,
