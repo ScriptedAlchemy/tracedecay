@@ -23,8 +23,8 @@ use self::identity::{
 };
 use self::path::canonical_graph_database_file;
 use self::support::{
-    check_registration_request, check_request, open_registered_graph, reject_path_alias,
-    retains_fault, status,
+    check_registration_request, check_request, open_registered_graph, open_registered_graph_lazy,
+    reject_path_alias, retains_fault, status,
 };
 
 #[path = "registry/identity.rs"]
@@ -49,6 +49,12 @@ pub use vector_retirement::{
 };
 
 const OPEN_WAIT_POLL: Duration = Duration::from_millis(10);
+
+#[derive(Clone, Copy)]
+enum OwnerOpenMode {
+    Eager,
+    Lazy,
+}
 
 /// Existing Grafeo stores receive daemon-lifecycle and request cancellation
 /// while opening. A newly created database file formats before cancellation
@@ -900,6 +906,23 @@ impl GraphDbRegistry {
         Ok(state.entries.contains_key(shard_id))
     }
 
+    /// Number of native Grafeo engines currently resident behind registered
+    /// owners. Lazy authority handles do not contribute until first use.
+    pub fn resident_engine_count(&self) -> Result<usize, GraphDbError> {
+        let state = self.state_lock()?;
+        let mut count = 0_usize;
+        for entry in state.entries.values() {
+            if let RegistryEntry::Ready { owner, .. } = entry
+                && owner.engine_is_open()?
+            {
+                count = count.checked_add(1).ok_or_else(|| {
+                    GraphDbError::budget_exhausted_count(GraphBudgetKind::Capacity, usize::MAX)
+                })?;
+            }
+        }
+        Ok(count)
+    }
+
     /// Mounts an absent graph runtime through its exact Store map-owner
     /// attachment and returns the matching native graph map-owner attachment.
     ///
@@ -919,6 +942,27 @@ impl GraphDbRegistry {
     pub fn resolve_owner_attachment(
         &self,
         registration: GraphDbOwnerRegistrationV1,
+    ) -> Result<GraphDbOwnerAttachmentV1, GraphDbError> {
+        self.resolve_owner_attachment_with_mode(registration, OwnerOpenMode::Eager)
+    }
+
+    /// Mounts the exact map owner without opening its native engine.
+    ///
+    /// The first graph operation materializes the persistent engine through
+    /// the same validated open and deterministic corruption-quarantine path.
+    /// Durable relational/session owners use this route so merely retaining
+    /// their authority does not replay a corpus-sized graph at daemon startup.
+    pub fn resolve_lazy_owner_attachment(
+        &self,
+        registration: GraphDbOwnerRegistrationV1,
+    ) -> Result<GraphDbOwnerAttachmentV1, GraphDbError> {
+        self.resolve_owner_attachment_with_mode(registration, OwnerOpenMode::Lazy)
+    }
+
+    fn resolve_owner_attachment_with_mode(
+        &self,
+        registration: GraphDbOwnerRegistrationV1,
+        open_mode: OwnerOpenMode,
     ) -> Result<GraphDbOwnerAttachmentV1, GraphDbError> {
         let GraphDbOwnerRegistrationV1 {
             operation,
@@ -1081,7 +1125,11 @@ impl GraphDbRegistry {
                 }
             }
         };
-        hotpath::gauge!("graph_db.registry.attach.full_open").inc(1.0);
+        if matches!(open_mode, OwnerOpenMode::Eager) {
+            hotpath::gauge!("graph_db.registry.attach.full_open").inc(1.0);
+        } else {
+            hotpath::gauge!("graph_db.registry.attach.lazy").inc(1.0);
+        }
         // Dropped on every exit below: releases the in-flight slot after a
         // plain open failure or unwind; a no-op once `Ready`/`Faulted` truth
         // has overwritten it.
@@ -1093,8 +1141,14 @@ impl GraphDbRegistry {
             path: path.clone(),
             expected_format,
         };
-        let opened =
-            open_registered_graph(&path, expected_format, &operation, authority_attachment);
+        let opened = match open_mode {
+            OwnerOpenMode::Eager => {
+                open_registered_graph(&path, expected_format, &operation, authority_attachment)
+            }
+            OwnerOpenMode::Lazy => {
+                open_registered_graph_lazy(&path, expected_format, &operation, authority_attachment)
+            }
+        };
         let mut state = self.state_lock()?;
         let slot_is_this_mount = state.entries.get(&shard_id).is_some_and(|entry| {
             matches!(
@@ -2427,6 +2481,36 @@ mod tests {
             registry.resolve(registration(temporary.path())),
             Err(GraphDbError::Unavailable { .. })
         ));
+    }
+
+    #[test]
+    fn lazy_owner_attachment_opens_the_engine_only_on_first_graph_read() {
+        let temporary = TempDir::new().unwrap();
+        let graph_path = temporary.path().join("graph.grafeo");
+        let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
+        let attachment = registry
+            .resolve_lazy_owner_attachment(owner_registration(registration(temporary.path())))
+            .unwrap();
+
+        assert!(
+            !graph_path.exists(),
+            "publishing a retained graph owner must not eagerly create or replay its engine"
+        );
+
+        {
+            let lease = attachment.issue_lease().unwrap();
+            let _snapshot = lease.snapshot().unwrap();
+            assert_eq!(registry.resident_engine_count().unwrap(), 1);
+        }
+        assert!(
+            graph_path.exists(),
+            "the first graph read must materialize the lazy engine"
+        );
+        assert_eq!(
+            registry.resident_engine_count().unwrap(),
+            0,
+            "the lazy engine must hibernate after its final operation lease drops"
+        );
     }
 
     #[test]

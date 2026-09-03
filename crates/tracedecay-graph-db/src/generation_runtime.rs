@@ -275,6 +275,7 @@ impl GraphDb {
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<(GraphCommit, GraphRecoveredGenerationDigestV1), GraphDbError> {
         check()?;
+        self.ensure_opened()?;
         let physical_namespace = identity.physical_namespace()?;
         let guard = self.read_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
@@ -1155,7 +1156,7 @@ impl GraphDb {
                     return Err(error);
                 }
             };
-            *state_guard = recovered_state;
+            *state_guard = Some(recovered_state);
             *quarantined_guard = quarantined;
             *database_guard = Some(recovered);
         }
@@ -1259,7 +1260,7 @@ impl GraphDb {
                     }
                 };
             let still_quarantined = quarantined.contains(&quarantine_key);
-            *state_guard = recovered_state;
+            *state_guard = Some(recovered_state);
             *quarantined_guard = quarantined;
             *database_guard = Some(recovered);
             if still_quarantined {
@@ -1318,7 +1319,7 @@ impl GraphDb {
                 if is_database_fault(&error) {
                     self.inner.poisoned.store(true, Ordering::Release);
                 }
-                *state_guard = recovered_state;
+                *state_guard = Some(recovered_state);
                 *quarantined_guard = quarantined;
                 *database_guard = Some(recovered);
                 Err(error)
@@ -1741,6 +1742,7 @@ impl GraphDb {
         &self,
         identity: &GraphGenerationManifestIdentity,
     ) -> Result<(), GraphDbError> {
+        self.ensure_opened()?;
         let locator =
             GenerationLocator::new(identity.projection.clone(), identity.generation.clone());
         let physical_namespace = locator.physical_namespace()?;
@@ -1789,7 +1791,7 @@ impl GraphDb {
                 message: "generation quarantine disappeared after durable checkpoint".to_owned(),
             });
         }
-        *format_state = recovered_state;
+        *format_state = Some(recovered_state);
         *projection_quarantine = recovered_quarantine;
         *database_guard = Some(recovered);
         let mut state = self.wait_verified_generations_write()?;

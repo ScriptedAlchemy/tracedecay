@@ -100,6 +100,30 @@ pub(super) fn open_registered_graph(
     Ok(owner)
 }
 
+pub(super) fn open_registered_graph_lazy(
+    path: &Path,
+    expected_format: GraphFormatVersion,
+    registration: &GraphDbRegistration,
+    authority_attachment: Box<dyn RetainedGraphStoreOwnerAttachmentV1>,
+) -> Result<GraphDbOwner, GraphDbError> {
+    check_request(
+        registration.lifecycle_cancellation.as_ref(),
+        registration.deadline,
+        "registry.open_lazy.lifecycle",
+    )?;
+    check_request(
+        registration.cancellation.as_ref(),
+        registration.deadline,
+        "registry.open_lazy",
+    )?;
+    let persistent_store_state = inspect_graph_database_file(path)?;
+    let database = GraphDb::open_lazy_with_store_state(
+        registered_open_options(path, expected_format, registration, persistent_store_state),
+        persistent_store_state,
+    )?;
+    GraphDbOwner::register_database(database, authority_attachment)
+}
+
 /// Opens the registry-owned database, running the deterministic-corruption
 /// quarantine protocol when a preexisting container reports the typed
 /// corruption verdict, then reopening the vacated path as a fresh store that
