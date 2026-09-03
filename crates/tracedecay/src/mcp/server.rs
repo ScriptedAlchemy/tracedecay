@@ -473,6 +473,7 @@ struct MountedProjectApplicationRetrievalV1 {
 }
 
 impl MountedProjectApplicationRetrievalV1 {
+    #[hotpath::measure(label = "mcp.server.retrieval_scope_check")]
     fn retrieval_for_scope(
         &self,
         expected_scope: &tracedecay_application::ResolvedScope,
@@ -791,7 +792,7 @@ impl McpServer {
         context
     }
 
-    #[hotpath::skip]
+    #[hotpath::measure(label = "mcp.server.construct", future = true)]
     pub(crate) async fn new_with_context(context: McpServerConstructionContext) -> Arc<Self> {
         let McpServerConstructionContext {
             cg,
@@ -845,7 +846,12 @@ impl McpServer {
         } = context;
         let file_token_map = HashMap::new();
         let response_handle_project_root = cg.project_root().to_path_buf();
-        let persisted_tokens_saved = match cg.get_tokens_saved().await {
+        let persisted_tokens_saved = match hotpath::future!(
+            cg.get_tokens_saved(),
+            label = "mcp.server.read_tokens_baseline"
+        )
+        .await
+        {
             Ok(persisted) => Some(persisted),
             Err(error) => {
                 tracing::warn!(
@@ -890,12 +896,15 @@ impl McpServer {
         let worktree_mismatch = {
             let project_root = cg.project_root().to_path_buf();
             let scope_prefix = scope_prefix.clone();
-            tokio::task::spawn_blocking(move || {
-                tracedecay_runtime_core::worktree::detect_scoped_worktree_index_mismatch(
-                    &project_root,
-                    scope_prefix.as_deref(),
-                )
-            })
+            hotpath::future!(
+                tokio::task::spawn_blocking(move || {
+                    tracedecay_runtime_core::worktree::detect_scoped_worktree_index_mismatch(
+                        &project_root,
+                        scope_prefix.as_deref(),
+                    )
+                }),
+                label = "mcp.server.detect_worktree_mismatch"
+            )
             .await
             .ok()
             .flatten()
@@ -1204,7 +1213,7 @@ impl McpServer {
         self.scope_prefix.as_deref()
     }
 
-    #[hotpath::skip]
+    #[hotpath::measure(label = "mcp.server.reconcile_automation", future = true)]
     pub(crate) async fn reconcile_automation_scheduler(
         &self,
     ) -> tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome {
@@ -1282,6 +1291,7 @@ impl McpServer {
         self.project_application_retrieval.is_some()
     }
 
+    #[hotpath::measure(label = "mcp.server.mount_work_evidence")]
     pub(crate) fn work_evidence_retrieval(
         &self,
         expected_scope: &tracedecay_application::ResolvedScope,
@@ -1319,6 +1329,7 @@ impl McpServer {
         }
     }
 
+    #[hotpath::measure(label = "mcp.server.mount_retained_surfaces")]
     pub(crate) fn retained_surface_ports(
         &self,
         project_root: &Path,
@@ -1359,7 +1370,7 @@ impl McpServer {
         self.cg.read().await.clone()
     }
 
-    #[hotpath::skip]
+    #[hotpath::measure(label = "mcp.server.stats_snapshot", future = true)]
     pub async fn server_stats_json(&self) -> Value {
         let uptime = self.stats.started_at.elapsed();
         let total_requests = self.stats.total_requests.load(Ordering::Relaxed);

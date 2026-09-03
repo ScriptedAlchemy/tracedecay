@@ -125,42 +125,45 @@ impl GuardedStoreTelemetryPort {
         store: &'a StoreKeyV1,
         observation: TableGrowthObservation,
     ) -> StorageTelemetryFuture<'a, TableGrowthTelemetryReadV1> {
-        Box::pin(async move {
-            if !self.admits(context, store) {
-                return TableGrowthTelemetryReadV1::Denied {
-                    store: store.clone(),
-                };
-            }
-            let Ok(current) = self
-                .handle
-                .table_size_telemetry(self.reader_wait, || telemetry_interruption(context))
-            else {
-                return TableGrowthTelemetryReadV1::Unknown {
-                    store: store.clone(),
-                };
-            };
-            let observed_at = now_micros();
-            let mut current_tables = BTreeMap::new();
-            for sample in current {
-                let Ok(table) = TableNameV1::new(sample.table_name) else {
+        Box::pin(hotpath::future!(
+            async move {
+                if !self.admits(context, store) {
+                    return TableGrowthTelemetryReadV1::Denied {
+                        store: store.clone(),
+                    };
+                }
+                let Ok(current) = self
+                    .handle
+                    .table_size_telemetry(self.reader_wait, || telemetry_interruption(context))
+                else {
                     return TableGrowthTelemetryReadV1::Unknown {
                         store: store.clone(),
                     };
                 };
-                current_tables.insert(table, StorageByteSizeV1(sample.bytes));
-            }
-            let mut watermarks = match self.table_watermarks.lock() {
-                Ok(watermarks) => watermarks,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            compare_table_growth(
-                store,
-                current_tables,
-                observed_at,
-                &mut watermarks,
-                observation,
-            )
-        })
+                let observed_at = now_micros();
+                let mut current_tables = BTreeMap::new();
+                for sample in current {
+                    let Ok(table) = TableNameV1::new(sample.table_name) else {
+                        return TableGrowthTelemetryReadV1::Unknown {
+                            store: store.clone(),
+                        };
+                    };
+                    current_tables.insert(table, StorageByteSizeV1(sample.bytes));
+                }
+                let mut watermarks = match self.table_watermarks.lock() {
+                    Ok(watermarks) => watermarks,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                compare_table_growth(
+                    store,
+                    current_tables,
+                    observed_at,
+                    &mut watermarks,
+                    observation,
+                )
+            },
+            label = "daemon.maintenance.read_table_growth"
+        ))
     }
 }
 
@@ -170,34 +173,37 @@ impl StoreSizeTelemetryPort for GuardedStoreTelemetryPort {
         context: &'a RequestContext,
         store: &'a StoreKeyV1,
     ) -> StorageTelemetryFuture<'a, StorageTelemetryReadV1> {
-        Box::pin(async move {
-            if !self.admits(context, store) {
-                return StorageTelemetryReadV1::Denied {
-                    store: store.clone(),
+        Box::pin(hotpath::future!(
+            async move {
+                if !self.admits(context, store) {
+                    return StorageTelemetryReadV1::Denied {
+                        store: store.clone(),
+                    };
+                }
+                let Ok(sample) = self
+                    .handle
+                    .store_size_telemetry(self.reader_wait, || telemetry_interruption(context))
+                else {
+                    return StorageTelemetryReadV1::Unknown {
+                        store: store.clone(),
+                    };
                 };
-            }
-            let Ok(sample) = self
-                .handle
-                .store_size_telemetry(self.reader_wait, || telemetry_interruption(context))
-            else {
-                return StorageTelemetryReadV1::Unknown {
+                let sample = StoreSizeSampleV1 {
                     store: store.clone(),
+                    page_size_bytes: sample.page_size_bytes,
+                    page_count: sample.page_count,
+                    freelist_pages: sample.freelist_pages,
+                    observed_at: now_micros(),
                 };
-            };
-            let sample = StoreSizeSampleV1 {
-                store: store.clone(),
-                page_size_bytes: sample.page_size_bytes,
-                page_count: sample.page_count,
-                freelist_pages: sample.freelist_pages,
-                observed_at: now_micros(),
-            };
-            if sample.validate().is_err() {
-                return StorageTelemetryReadV1::Unknown {
-                    store: store.clone(),
-                };
-            }
-            StorageTelemetryReadV1::Observed { sample }
-        })
+                if sample.validate().is_err() {
+                    return StorageTelemetryReadV1::Unknown {
+                        store: store.clone(),
+                    };
+                }
+                StorageTelemetryReadV1::Observed { sample }
+            },
+            label = "daemon.maintenance.read_store_size"
+        ))
     }
 
     fn table_growth<'a>(
@@ -209,6 +215,7 @@ impl StoreSizeTelemetryPort for GuardedStoreTelemetryPort {
     }
 }
 
+#[hotpath::measure(label = "daemon.maintenance.compare_table_growth")]
 fn compare_table_growth(
     store: &StoreKeyV1,
     current_tables: BTreeMap<TableNameV1, StorageByteSizeV1>,
@@ -863,7 +870,7 @@ impl StoreTelemetrySamplingRegistry {
         )
     }
 
-    #[hotpath::skip]
+    #[hotpath::measure(label = "daemon.maintenance.sample_store_telemetry", future = true)]
     async fn advance_registered(
         &self,
         active_paths: &BTreeSet<PathBuf>,
@@ -920,6 +927,7 @@ pub(super) fn retention_failure_is_by_design(
     }
 }
 
+#[hotpath::measure(label = "daemon.maintenance.mint_telemetry_context")]
 fn storage_telemetry_request_context(
     scope: ResolvedScope,
 ) -> Result<RequestContext, ApplicationContractError> {
@@ -1948,11 +1956,13 @@ fn checkpoint_path(profile_root: &Path) -> PathBuf {
         .join(CHECKPOINT_FILE)
 }
 
+#[hotpath::measure(label = "daemon.maintenance.load_cursor")]
 fn load_cursor(path: &Path) -> Option<ColdStoreCursorV1> {
     let bytes = std::fs::read(path).ok()?;
     serde_json::from_slice(&bytes).ok()
 }
 
+#[hotpath::measure(label = "daemon.maintenance.persist_cursor")]
 fn persist_cursor(path: &Path, cursor: &ColdStoreCursorV1) -> std::io::Result<()> {
     let parent = path
         .parent()
