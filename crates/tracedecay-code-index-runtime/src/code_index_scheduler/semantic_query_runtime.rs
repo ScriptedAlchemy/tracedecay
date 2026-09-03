@@ -8,6 +8,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use thiserror::Error;
+use tokio::task;
 use tracedecay_application::ResolvedScope;
 use tracedecay_domain::{
     EphemeralSanitizedQueryViewV1, OptionalStagePublicStatus, RetrievalRequest, RetrieverKind,
@@ -289,7 +290,11 @@ impl CodeIndexSchedulerRegistryV1 {
         if committed.scope != *scope {
             return Err(SemanticQueryAuthorityErrorV1::ScopeMismatch);
         }
-        let authority = Arc::new(SemanticQueryAuthorityV1::from_committed(committed)?);
+        let authority =
+            task::spawn_blocking(move || SemanticQueryAuthorityV1::from_committed(committed))
+                .await
+                .map_err(|error| SemanticQueryAuthorityErrorV1::Mount(error.to_string()))??;
+        let authority = Arc::new(authority);
         self.mount_semantic_query_authority(project_root, scope, authority)
             .await
     }

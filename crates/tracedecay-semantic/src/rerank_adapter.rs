@@ -4,8 +4,6 @@
 //! capability. Query and chunk bytes remain request-local and are dropped
 //! after [`BoundedRerankRuntimeV1`] returns.
 
-#[cfg(test)]
-use std::cell::Cell;
 use std::sync::{Arc, Mutex, TryLockError};
 
 #[cfg(feature = "semantic-fastembed")]
@@ -36,26 +34,6 @@ pub const RERANK_IMPLEMENTATION_REVISION_V1: &str = "rerank.fastembed.production
 pub const RERANK_RUNTIME_DIGEST_DOMAIN_V1: &str = "tracedecay.rerank-runtime-compatibility.v1";
 const CODE_CHUNK_ANCHOR_PREFIX: &str = "code-chunk:";
 const CODE_SYMBOL_ANCHOR_PREFIX: &str = "code-symbol:";
-
-#[cfg(test)]
-thread_local! {
-    static SESSION_OPEN_ATTEMPTS_V1: Cell<u32> = const { Cell::new(0) };
-}
-
-#[cfg(test)]
-fn record_session_open_attempt() {
-    SESSION_OPEN_ATTEMPTS_V1.set(SESSION_OPEN_ATTEMPTS_V1.get().saturating_add(1));
-}
-
-#[cfg(test)]
-pub(super) fn reset_session_open_attempts() {
-    SESSION_OPEN_ATTEMPTS_V1.set(0);
-}
-
-#[cfg(test)]
-pub(super) fn session_open_attempts() -> u32 {
-    SESSION_OPEN_ATTEMPTS_V1.get()
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RerankArtifactAdmissionErrorV1 {
@@ -104,6 +82,13 @@ impl AdmittedRerankArtifactV1 {
             resident_byte_ceiling: resources.max_resident_bytes,
         })
     }
+}
+
+pub(super) fn admit_reranker_artifact(
+    artifact: AdmittedArtifactV1,
+    pins: RerankCompatibilityPinsV1,
+) -> Result<(), RerankArtifactAdmissionErrorV1> {
+    AdmittedRerankArtifactV1::admit(artifact, pins).map(drop)
 }
 
 pub fn validate_reranker_manifest_pins(
@@ -178,6 +163,14 @@ impl FastEmbedRerankExecutorV1 {
     }
 }
 
+pub(super) fn warm_reranker_executor(
+    artifact: AdmittedArtifactV1,
+    pins: RerankCompatibilityPinsV1,
+) -> Result<Arc<FastEmbedRerankExecutorV1>, RerankArtifactAdmissionErrorV1> {
+    let authority = Arc::new(AdmittedRerankArtifactV1::admit(artifact, pins)?);
+    FastEmbedRerankExecutorV1::new(authority).map(Arc::new)
+}
+
 #[cfg(feature = "semantic-fastembed")]
 struct FastEmbedRerankSessionV1 {
     model: TextRerank,
@@ -249,8 +242,6 @@ impl AdmittedNativeRerankExecutorV1 for FastEmbedRerankExecutorV1 {
 fn open_session(
     authority: &AdmittedRerankArtifactV1,
 ) -> Result<FastEmbedRerankSessionV1, LocalRerankFailureV1> {
-    #[cfg(test)]
-    record_session_open_attempt();
     let payload = &authority.artifact.manifest().payload;
     let _model_pin = supported_reranker_model(&payload.upstream.name, &payload.artifact_id).ok_or(
         LocalRerankFailureV1::Rejected(SanitizedStageFailure::Incompatible),
@@ -277,8 +268,6 @@ fn open_session(
 fn open_session(
     _authority: &AdmittedRerankArtifactV1,
 ) -> Result<FastEmbedRerankSessionV1, LocalRerankFailureV1> {
-    #[cfg(test)]
-    record_session_open_attempt();
     Err(LocalRerankFailureV1::Unavailable(
         SanitizedStageFailure::AuthorityUnavailable,
     ))
@@ -535,12 +524,15 @@ impl ProductionCodeRerankAuthorityV1 {
         artifact: AdmittedArtifactV1,
         pins: RerankCompatibilityPinsV1,
     ) -> Result<Self, RerankArtifactAdmissionErrorV1> {
-        let authority = Arc::new(AdmittedRerankArtifactV1::admit(artifact, pins.clone())?);
-        let executor = FastEmbedRerankExecutorV1::new(authority)?;
-        Ok(Self {
-            pins,
-            executor: Arc::new(executor),
-        })
+        let executor = warm_reranker_executor(artifact, pins.clone())?;
+        Ok(Self::from_warmed(pins, executor))
+    }
+
+    pub(super) fn from_warmed(
+        pins: RerankCompatibilityPinsV1,
+        executor: Arc<FastEmbedRerankExecutorV1>,
+    ) -> Self {
+        Self { pins, executor }
     }
 
     #[cfg(test)]
@@ -557,6 +549,10 @@ impl ProductionCodeRerankAuthorityV1 {
 
     pub fn executor(&self) -> &dyn AdmittedNativeRerankExecutorV1 {
         self.executor.as_ref()
+    }
+
+    pub fn executor_handle(&self) -> &Arc<dyn MountedRerankExecutorV1> {
+        &self.executor
     }
 
     pub fn execute(
