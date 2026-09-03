@@ -5,6 +5,7 @@
 //! selection; strict semantic demand may queue acquisition of the immutable
 //! revision in the background. The request never waits for model bytes and no
 //! ambient hub or cache becomes serving authority.
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -86,6 +87,8 @@ pub enum ModelLifecycleErrorV1 {
     DownloadFailedWithReason(String),
     #[error("semantic model verification failed")]
     VerificationFailed,
+    #[error("semantic reranker warm-up is unavailable")]
+    RerankerUnavailable,
     #[error("semantic model install failed")]
     InstallFailed,
     #[error("semantic model acquisition worker failed while joining")]
