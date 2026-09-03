@@ -12,9 +12,9 @@ use tracedecay_query::retrieval::semantic::{
 };
 use tracedecay_semantic_contracts::SemanticRuntimeScheduleFailureV1;
 
+use super::embedding_backend::{ProductionEmbeddingRuntime, production_embedding_runtime_factory};
 use super::fastembed_adapter::{
-    AdmittedProjectionArtifactV1, FastEmbedEmbeddingRuntime, SemanticExecutionAuthority,
-    SemanticExecutionInterruptionV1,
+    AdmittedProjectionArtifactV1, SemanticExecutionAuthority, SemanticExecutionInterruptionV1,
 };
 use super::projector::{
     CanonicalChunkVectorEncoderV1, PreparedVectorGenerationV1, prepare_vector_generation,
@@ -22,7 +22,6 @@ use super::projector::{
 use super::runtime_query::{PooledSemanticQueryEmbedder, PooledSemanticQueryEmbedderFactory};
 use super::runtime_service::{
     SemanticRuntimeScheduleCancellationV1, SemanticRuntimeService, SharedEmbeddingRuntimeFactory,
-    fastembed_runtime_factory,
 };
 use super::session_pool::SessionPoolConfigV1;
 use super::{LoadedSemanticArtifactV1, RuntimeChunkVectorEncoderV1};
@@ -395,7 +394,7 @@ pub struct SemanticEvaluationProjectionCancellationV1 {
 
 #[derive(Clone)]
 pub struct SemanticEvaluationQueryFactoryV1 {
-    inner: Arc<PooledSemanticQueryEmbedderFactory<FastEmbedEmbeddingRuntime>>,
+    inner: Arc<PooledSemanticQueryEmbedderFactory<ProductionEmbeddingRuntime>>,
 }
 
 /// Isolated evaluator projection. It reuses the verified production artifact
@@ -426,8 +425,8 @@ pub fn prepare_semantic_evaluation_projection(
         return Err(schedule_interruption(interruption));
     }
     let authority = artifact.into_authority();
-    let factory: SharedEmbeddingRuntimeFactory<FastEmbedEmbeddingRuntime> =
-        fastembed_runtime_factory();
+    let factory: SharedEmbeddingRuntimeFactory<ProductionEmbeddingRuntime> =
+        production_embedding_runtime_factory();
     let runtime = SemanticRuntimeService::new_owned(
         Arc::clone(&authority),
         factory,
@@ -493,8 +492,8 @@ pub fn measure_semantic_evaluation_projection_cancellation(
     }
     let chunks_added_or_changed = request.changes.added_or_changed.len() as u64;
     let authority = artifact.into_authority();
-    let factory: SharedEmbeddingRuntimeFactory<FastEmbedEmbeddingRuntime> =
-        fastembed_runtime_factory();
+    let factory: SharedEmbeddingRuntimeFactory<ProductionEmbeddingRuntime> =
+        production_embedding_runtime_factory();
     let runtime = SemanticRuntimeService::new_owned(
         Arc::clone(&authority),
         factory,
@@ -559,7 +558,7 @@ fn schedule_interruption(
 }
 
 struct CancelAfterFirstModelBatchV1 {
-    inner: RuntimeChunkVectorEncoderV1<FastEmbedEmbeddingRuntime>,
+    inner: RuntimeChunkVectorEncoderV1<ProductionEmbeddingRuntime>,
     progress: Arc<SemanticRuntimeScheduleCancellationV1>,
 }
 
@@ -612,7 +611,7 @@ impl super::projector::CanonicalChunkVectorEncoderV1 for CancelAfterFirstModelBa
 
 impl SemanticEvaluationQueryFactoryV1 {
     pub(super) fn from_runtime(
-        inner: Arc<PooledSemanticQueryEmbedderFactory<FastEmbedEmbeddingRuntime>>,
+        inner: Arc<PooledSemanticQueryEmbedderFactory<ProductionEmbeddingRuntime>>,
     ) -> Self {
         Self { inner }
     }
@@ -667,7 +666,7 @@ where
 }
 
 pub struct SemanticEvaluationQueryEmbedderV1<'a> {
-    inner: PooledSemanticQueryEmbedder<'a, FastEmbedEmbeddingRuntime>,
+    inner: PooledSemanticQueryEmbedder<'a, ProductionEmbeddingRuntime>,
 }
 
 impl SemanticQueryEmbeddingPort for SemanticEvaluationQueryEmbedderV1<'_> {
@@ -704,7 +703,9 @@ mod tests {
         SemanticExecutionAuthority, SemanticExecutionInterruptionV1, prepare_vector_generation,
     };
     use crate::AdmittedProjectionArtifactV1;
-    use crate::model_catalog::{CatalogMemberPinV1, CatalogSourceV1, CatalogedFastEmbedModelV1};
+    use crate::model_catalog::{
+        CatalogMemberPinV1, CatalogSourceV1, CatalogedEmbeddingBackendV1, CatalogedFastEmbedModelV1,
+    };
 
     struct ActiveCancellation;
 
@@ -1042,7 +1043,9 @@ mod tests {
         }
         let model = CatalogedFastEmbedModelV1 {
             model_id: "evaluation-cache-model".to_owned(),
-            fastembed_enum: "JinaEmbeddingsV2BaseCode".to_owned(),
+            backend: CatalogedEmbeddingBackendV1::FastEmbedOrt {
+                fastembed_enum: "JinaEmbeddingsV2BaseCode".to_owned(),
+            },
             model_code: "fixture/evaluation-cache-model".to_owned(),
             source: CatalogSourceV1 {
                 upstream: "https://example.invalid/evaluation-cache".to_owned(),

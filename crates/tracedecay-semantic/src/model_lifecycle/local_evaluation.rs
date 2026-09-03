@@ -2,8 +2,7 @@ use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt, ambient_authority};
 use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
 use tracedecay_domain::{
     EmbeddingDeviceClassV1 as DeviceClassV1, EmbeddingMetricV1 as SemanticMetricV1,
-    EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1,
-    EmbeddingTruncationSideV1 as TruncationSideV1,
+    EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingTruncationSideV1 as TruncationSideV1,
 };
 
 /// Import the production embedding package into an explicit evaluator-owned
@@ -109,6 +108,7 @@ fn local_evaluation_manifest(
             .ok_or(ModelLifecycleErrorV1::VerificationFailed)
     };
     let model_member = member(ArtifactMemberRoleV1::Model)?;
+    let backend = model.backend.runtime_family();
     let manifest = ModelArtifactManifestV1 {
         payload: ModelArtifactManifestPayloadV1 {
             schema: MODEL_ARTIFACT_MANIFEST_SCHEMA_V1.to_owned(),
@@ -132,10 +132,10 @@ fn local_evaluation_manifest(
                 side: TruncationSideV1::Right,
                 max_length: model.max_length,
             },
-            precision: EmbeddingPrecisionV1::Fp32,
+            precision: model.backend.precision(),
             runtime: RuntimeCompatibilityV1 {
-                runtime: FASTEMBED_RUNTIME_FAMILY_V1.to_owned(),
-                build_revision: FASTEMBED_RUNTIME_BUILD_REVISION_V1.to_owned(),
+                runtime: backend.runtime_family().to_owned(),
+                build_revision: backend.build_revision().to_owned(),
                 platforms: vec![PlatformTargetV1 {
                     os: std::env::consts::OS.to_owned(),
                     arch: std::env::consts::ARCH.to_owned(),

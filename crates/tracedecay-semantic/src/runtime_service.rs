@@ -23,7 +23,6 @@ use tracedecay_semantic_contracts::{
     SemanticGenerationPointerV1, SemanticRuntimeScheduleFailureV1, SemanticRuntimeScheduleStatusV1,
 };
 
-use super::fastembed_adapter::FastEmbedEmbeddingRuntime;
 use super::fastembed_adapter::{
     AdmittedProjectionArtifactV1, EmbedError, EmbeddingRuntime, SemanticExecutionAuthority,
     SemanticExecutionInterruptionV1,
@@ -37,15 +36,10 @@ use super::session_pool::{
 ///
 /// The factory creates runtime adapters only. Artifact selection and
 /// admission remain explicit inputs to [`SemanticRuntimeService::reload`].
+/// The production factory is
+/// `embedding_backend::production_embedding_runtime_factory`.
 pub type SharedEmbeddingRuntimeFactory<R> =
     Arc<dyn Fn() -> Result<R, EmbedError> + Send + Sync + 'static>;
-
-/// Owned factory for the only production model implementation. Without the
-/// `semantic-fastembed` feature this yields the unavailable stand-in runtime,
-/// whose operations fail with a typed runtime failure.
-pub fn fastembed_runtime_factory() -> SharedEmbeddingRuntimeFactory<FastEmbedEmbeddingRuntime> {
-    Arc::new(|| Ok(FastEmbedEmbeddingRuntime))
-}
 
 #[derive(Debug)]
 pub enum SemanticRuntimeServiceError {
