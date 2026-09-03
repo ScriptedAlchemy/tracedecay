@@ -131,7 +131,7 @@ async fn replay_projectless_hermes_receipts(
             let outcome = HostAdmissionOutcome::spool_ack_conflict();
             blocked_sources.insert(record.source);
             retained_leases.push(record.seq);
-            retained_outcome.get_or_insert(outcome);
+            retained_outcome.get_or_insert(outcome.clone());
             if target_seq == Some(record.seq) {
                 target_outcome = Some(outcome);
             }
@@ -146,7 +146,7 @@ async fn replay_projectless_hermes_receipts(
                     let outcome = HostAdmissionOutcome::durable_payload_unsupported_version();
                     blocked_sources.insert(record.source);
                     retained_leases.push(record.seq);
-                    retained_outcome.get_or_insert(outcome);
+                    retained_outcome.get_or_insert(outcome.clone());
                     if target_seq == Some(record.seq) {
                         target_outcome = Some(outcome);
                     }
@@ -159,7 +159,7 @@ async fn replay_projectless_hermes_receipts(
                         .await
                     {
                         Ok(_) => {
-                            retained_outcome.get_or_insert(outcome);
+                            retained_outcome.get_or_insert(outcome.clone());
                             if target_seq == Some(record.seq) {
                                 target_outcome = Some(outcome);
                             }
@@ -167,7 +167,7 @@ async fn replay_projectless_hermes_receipts(
                         Err(failure) if failure == HostAdmissionOutcome::quarantine_full() => {
                             blocked_sources.insert(record.source);
                             retained_leases.push(record.seq);
-                            retained_outcome.get_or_insert(failure);
+                            retained_outcome.get_or_insert(failure.clone());
                             if target_seq == Some(record.seq) {
                                 target_outcome = Some(failure);
                             }
@@ -195,7 +195,7 @@ async fn replay_projectless_hermes_receipts(
         } else {
             blocked_sources.insert(record.source);
             retained_leases.push(record.seq);
-            retained_outcome.get_or_insert(canonical_outcome);
+            retained_outcome.get_or_insert(canonical_outcome.clone());
             canonical_outcome
         };
         if target_seq == Some(record.seq) {

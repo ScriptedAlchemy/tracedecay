@@ -261,6 +261,7 @@ async fn projection_error_racing_cancellation_remains_visible() {
             provider: "cursor",
             reason: "registered_authority_unavailable",
             retryable: true,
+            ..
         }
     ));
 }

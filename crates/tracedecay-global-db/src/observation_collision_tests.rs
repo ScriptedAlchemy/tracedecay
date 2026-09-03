@@ -2832,6 +2832,7 @@ async fn vibe_jsonl_eof_refusal_survives_retention_generation_and_restart_withou
             provider: "vibe",
             reason: "observation_identity_collision",
             retryable: false,
+            ..
         }
     ));
     assert_eq!(admission.capture_count() - collision_calls, 1);
@@ -2883,6 +2884,7 @@ async fn vibe_jsonl_eof_refusal_survives_retention_generation_and_restart_withou
             provider: "vibe",
             reason: "observation_identity_collision",
             retryable: false,
+            ..
         }
     ));
     assert_eq!(admission.capture_count() - generation_calls, 1);

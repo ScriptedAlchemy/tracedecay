@@ -646,6 +646,7 @@ mod cancellation_tests {
             provider: "cursor",
             reason: "cursor_conflict",
             retryable: true,
+            detail: None,
         };
         let disposition = classify_transcript_ingest_disposition(&conflict);
         assert_eq!(disposition.reason_code, "cursor_conflict");

@@ -38,7 +38,7 @@ use kernels::{
 /// of the three here launders the admission verdict that downstream retry
 /// policy reads back.
 fn reject_unadmitted(
-    admission: HostAdmissionOutcome,
+    admission: &HostAdmissionOutcome,
     unavailable_detail: &'static str,
     unsupported_detail: &'static str,
 ) -> Option<TraceDecayError> {
@@ -315,7 +315,7 @@ async fn admit_codex_rollouts_once(
     let facade = host_admission_facade(Some(cg), HostAdmissionScope::Project, session_authorities)?;
     let admission = facade.accept_replay("codex", HostAdmissionScope::Project);
     if let Some(rejection) = reject_unadmitted(
-        admission,
+        &admission,
         "daemon observation authority is unavailable for compaction ingest",
         "codex transcript provider is unsupported",
     ) {
@@ -614,7 +614,7 @@ pub(crate) async fn ingest_transcript_with_cancellation(
     let facade = host_admission_facade(cg, admission_scope, session_authorities.clone())?;
     let admission = facade.accept_replay(provider, admission_scope);
     if let Some(rejection) = reject_unadmitted(
-        admission,
+        &admission,
         "daemon observation authority is unavailable",
         "transcript provider is unsupported",
     ) {
@@ -671,6 +671,9 @@ pub(crate) async fn ingest_transcript_with_cancellation(
             .is_some_and(|capture| capture.deferred_by_byte_cap);
     // A route whose own authority refused the pass reports that verdict here;
     // otherwise the replay completes against the admission that opened it.
+    let route_reason = route_admission
+        .as_ref()
+        .and_then(|admission| admission.reason_code);
     let admission = route_admission.unwrap_or_else(|| {
         complete_ingest_admission(
             admission,
@@ -688,7 +691,7 @@ pub(crate) async fn ingest_transcript_with_cancellation(
         "admission": admission,
         "messages_upserted": messages_upserted,
     });
-    if let Some(reason) = route_admission.and_then(|admission| admission.reason_code) {
+    if let Some(reason) = route_reason {
         output["reason"] = json!(reason);
     }
     if let Some(receipt) = lcm_receipt {

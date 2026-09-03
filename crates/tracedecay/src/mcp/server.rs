@@ -1161,7 +1161,7 @@ impl McpServer {
                         return HostAdmissionOutcome::retained_unavailable("spool_unavailable");
                     };
                     let outcome = Box::pin(server.replay_host_admission(None)).await;
-                    Self::report_host_admission_outcome(outcome);
+                    Self::report_host_admission_outcome(&outcome);
                     outcome
                 })
                     as std::pin::Pin<

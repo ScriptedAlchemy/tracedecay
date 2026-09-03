@@ -149,6 +149,7 @@ async fn projection_authority_error_racing_cancellation_stays_visible_for_claude
             provider: "claude",
             reason: "registered_authority_unavailable",
             retryable: true,
+            ..
         })
     ));
 }
@@ -243,6 +244,7 @@ async fn final_projection_authority_error_carries_durable_claude_progress() {
                     provider: "claude",
                     reason: "registered_authority_unavailable",
                     retryable: true,
+                    ..
                 })
             ));
         }

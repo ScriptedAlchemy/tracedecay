@@ -352,6 +352,7 @@ fn host_admission_failures_use_bounded_ingest_reason_codes() {
             retryable: true,
             reason_code: Some("authority_unavailable"),
             recovery: None,
+            storage_cause: None,
         },
     );
     assert!(matches!(
@@ -360,6 +361,7 @@ fn host_admission_failures_use_bounded_ingest_reason_codes() {
             provider: PROVIDER,
             reason: "authority_unavailable",
             retryable: true,
+            ..
         }
     ));
 }
