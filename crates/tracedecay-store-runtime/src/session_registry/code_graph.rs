@@ -40,7 +40,9 @@ use tracedecay_usecases::semantic_runtime::{
 };
 
 mod memory_runtime;
-pub(super) use memory_runtime::inline_graph_publication_input_digest;
+pub(super) use memory_runtime::{
+    MemoryGraphRuntimeTaskContext, inline_graph_publication_input_digest,
+};
 pub(super) mod graph_attachment;
 #[cfg(test)]
 mod sealed_publication_tests;

@@ -486,38 +486,6 @@ fn memory_expiry_detail() -> (&'static str, &'static str) {
     )
 }
 
-pub fn retained_effect_outcome<T: Serialize, C: Serialize + ?Sized>(
-    context: &RetainedSurfaceExecutionContextV1<'_>,
-    operation: RetainedSurfaceOperation,
-    configuration_digest: &ManifestDigest,
-    request: &T,
-    durable_operation_id: &str,
-    committed_state_material: &C,
-    reconciliation: ReconciliationState,
-    result: Option<RetainedSurfaceResultV1>,
-    partial: Option<(&str, &str)>,
-) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
-    let prepared = prepare_retained_effect(
-        context,
-        operation,
-        configuration_digest,
-        request,
-        durable_operation_id,
-    )?;
-    let result = result.ok_or_else(|| {
-        RetainedSurfaceExecutionErrorV1::unavailable(
-            "the retained effect completed without a result payload",
-        )
-    })?;
-    prepared.complete(
-        context,
-        committed_state_material,
-        reconciliation,
-        result,
-        partial,
-    )
-}
-
 pub fn session_refresh_effect_outcome<T: Serialize>(
     context: &RetainedSurfaceExecutionContextV1<'_>,
     operation: RetainedSurfaceOperation,
@@ -531,15 +499,18 @@ pub fn session_refresh_effect_outcome<T: Serialize>(
         "application.retained.session-refresh.delivery-failed",
         "The session refresh committed, but required scheduler delivery failed.",
     ));
-    retained_effect_outcome(
+    prepare_retained_effect(
         context,
         operation,
         configuration_digest,
         request,
         durable_operation_id,
+    )?
+    .complete(
+        context,
         durable_operation_id,
         ReconciliationState::Reconciled,
-        Some(result),
+        result,
         partial,
     )
 }

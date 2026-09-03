@@ -305,9 +305,9 @@ pub(super) fn intern_exact_terms(
     Ok(())
 }
 
-pub(super) fn intern_terms<'a>(
+pub(super) fn intern_terms(
     transaction: &Transaction<'_>,
-    pages: &'a [PreparedCodeLexicalArtifactPageV1],
+    pages: &[PreparedCodeLexicalArtifactPageV1],
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<BTreeMap<String, i64>, CodeLexicalArtifactErrorV1> {
     let mut terms = BTreeSet::new();

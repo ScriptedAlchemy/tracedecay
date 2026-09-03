@@ -914,12 +914,18 @@ pub fn config_error(message: impl Into<String>) -> TraceDecayError {
 
 #[doc(hidden)]
 #[cfg(feature = "test-transport")]
+pub struct DashboardTestEndpointV1<'a> {
+    pub host: &'a str,
+    pub port: u16,
+}
+
+#[doc(hidden)]
+#[cfg(feature = "test-transport")]
 pub async fn run_until_shutdown_for_tests_with_host_admission<F>(
     cg: Arc<TraceDecay>,
     authority: DashboardHostAdmissionTestAuthorityV1,
     project_graphs: DashboardTestProjectGraphsV1,
-    host: &str,
-    port: u16,
+    endpoint: DashboardTestEndpointV1<'_>,
     build_version: &'static str,
     spa_routes: Router,
     shutdown: F,
@@ -931,8 +937,8 @@ where
     run_until_shutdown_inner(
         cg.as_ref(),
         DashboardRunRequest {
-            host,
-            port,
+            host: endpoint.host,
+            port: endpoint.port,
             build_version,
             spa_routes,
             test_authority: Some(&authority),

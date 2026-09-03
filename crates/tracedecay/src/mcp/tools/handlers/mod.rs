@@ -763,8 +763,7 @@ pub fn handle_tool_call_with_registry_options<'a>(
 fn seated_generation_age_label(sealed_at: tracedecay_domain::UtcMicros) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_micros() as i64)
-        .unwrap_or(sealed_at.0);
+        .map_or(sealed_at.0, |elapsed| elapsed.as_micros() as i64);
     let seconds = now.saturating_sub(sealed_at.0).max(0) / 1_000_000;
     if seconds < 60 {
         format!("{seconds}s")

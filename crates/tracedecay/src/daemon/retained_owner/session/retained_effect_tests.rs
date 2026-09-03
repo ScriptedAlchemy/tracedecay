@@ -87,9 +87,11 @@ impl RetiredRefreshFixture {
             SessionRootId::new(format!("root.refresh-{label}")).expect("session root id"),
             database.binding().shard_id.clone(),
             project_id.clone(),
-            repository_id.clone(),
-            worktree_id.clone(),
-            BranchId::new(format!("branch.refresh-{label}")).expect("branch id"),
+            tracedecay_session_memory::context::ResolvedGitRoute::new(
+                repository_id.clone(),
+                worktree_id.clone(),
+                BranchId::new(format!("branch.refresh-{label}")).expect("branch id"),
+            ),
             project_root.display().to_string(),
         );
         let identity = retrieval_root.identity().clone();

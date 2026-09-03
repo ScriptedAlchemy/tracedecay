@@ -47,7 +47,7 @@ const DRAIN_EXIT_RESERVE: Duration = Duration::from_secs(5);
 #[cfg(feature = "hotpath")]
 const HOTPATH_FINALIZE_BOUND: Duration = Duration::from_secs(1);
 
-/// Exit status for a forced drain-bound exit (EX_SOFTWARE), distinct from a
+/// Exit status for a forced drain-bound exit (`EX_SOFTWARE`), distinct from a
 /// generic failure so the supervisor journal names the cause.
 pub(crate) const DRAIN_BOUND_EXIT_CODE: i32 = 70;
 
