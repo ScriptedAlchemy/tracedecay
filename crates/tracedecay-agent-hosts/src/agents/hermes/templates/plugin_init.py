@@ -125,6 +125,7 @@ FACT_STORE_EXACT_ROUTES = {
     "get": "tracedecay_fact_store_get",
     "update": "tracedecay_fact_store_update",
     "remove": "tracedecay_fact_store_remove",
+    "supersede": "tracedecay_fact_store_supersede",
     "list": "tracedecay_fact_store_list",
     "curate": "tracedecay_fact_store_curate",
 }

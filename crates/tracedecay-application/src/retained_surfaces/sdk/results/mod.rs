@@ -47,8 +47,8 @@ pub use memory::{
     FactStatusV1, FactStoreAddCommitV1, FactStoreAddResultV1, FactStoreContradictResultV1,
     FactStoreGetResultV1, FactStoreListResultV1, FactStoreProbeResultV1, FactStoreReasonResultV1,
     FactStoreRelatedResultV1, FactStoreRemoveResultV1, FactStoreSearchResultV1,
-    FactStoreUpdateResultV1, FactTelemetryV1, FactV1, MemoryAlgebraV1, MemoryFeedbackFunnelV1,
-    MemoryStatusResultV1, MemoryStatusV1, TrustHistoryEntryV1,
+    FactStoreSupersedeResultV1, FactStoreUpdateResultV1, FactTelemetryV1, FactV1, MemoryAlgebraV1,
+    MemoryFeedbackFunnelV1, MemoryStatusResultV1, MemoryStatusV1, TrustHistoryEntryV1,
 };
 pub use session::{
     ClosedUtcIntervalV1, CorrelationIndexCountModeV1, CorrelationIndexV1, GitScopeV1,
@@ -128,6 +128,7 @@ pub enum RetainedSurfaceResultV1 {
     FactStoreGet(FactStoreGetResultV1),
     FactStoreUpdate(FactStoreUpdateResultV1),
     FactStoreRemove(FactStoreRemoveResultV1),
+    FactStoreSupersede(FactStoreSupersedeResultV1),
     FactStoreList(FactStoreListResultV1),
     FactFeedback(FactFeedbackResultV1),
     MemoryStatus(MemoryStatusResultV1),

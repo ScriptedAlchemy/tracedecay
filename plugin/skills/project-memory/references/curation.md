@@ -64,12 +64,16 @@ result, but there is no second per-operation action.
    contains applied operations, report the committed effects and required
    reconciliation; never rerun blindly.
 9. **Use direct fact commands only for exact administration:**
-   `tracedecay_fact_store_add`, `tracedecay_fact_store_update`, and
-   `tracedecay_fact_store_remove` are independent retained operations, not a
-   continuation of a curator run. Removal requires an exact user instruction
-   because it is permanent. If the user's requested target is ambiguous, show
-   the resolved fact id and content summary and confirm that exact target
-   before removal.
+   `tracedecay_fact_store_add`, `tracedecay_fact_store_update`,
+   `tracedecay_fact_store_supersede`, and `tracedecay_fact_store_remove` are
+   independent retained operations, not a continuation of a curator run.
+   Supersession (`fact_id` + `superseded_by`) is the correction path: the old
+   fact leaves the default retrieval surfaces, stays readable by id through
+   its history with payload and trust as stored, and the memory graph keeps
+   the `SUPERSEDES` edge from successor to old fact. Removal requires an exact
+   user instruction because it is permanent. If the user's requested target is
+   ambiguous, show the resolved fact id and content summary and confirm that
+   exact target before removal.
 10. **Verify read-only:** re-run search/list/probe/related/contradict/get as
    appropriate, inspect direct-command results and oplog when used, and report
    final facts changed, skipped, or still needing human judgment.
@@ -80,8 +84,8 @@ result, but there is no second per-operation action.
   `tracedecay_fact_store_get`, and `tracedecay_fact_store_contradict` are
    read-only recall. `tracedecay_fact_store_list`, `tracedecay_fact_store_probe`,
   `tracedecay_fact_store_related`, and `tracedecay_fact_store_reason` provide canonical/derived retrieval, including holographic search
-  and scoring semantics. `tracedecay_fact_store_add`, `tracedecay_fact_store_update`, `tracedecay_fact_store_remove`,
-  `tracedecay_fact_feedback`, and `tracedecay_dashboard` start/stop mutate
+  and scoring semantics. `tracedecay_fact_store_add`, `tracedecay_fact_store_update`, `tracedecay_fact_store_supersede`,
+  `tracedecay_fact_store_remove`, `tracedecay_fact_feedback`, and `tracedecay_dashboard` start/stop mutate
   state or launch a local process; respect host execution policy.
   `tracedecay_memory_status` is a read-only canonical
   fact/entity/trust/feedback/holographic-algebra status snapshot.

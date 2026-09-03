@@ -95,6 +95,15 @@ pub(super) fn def_fact_store_remove(input_schema: Value) -> ToolDefinition {
     )
 }
 
+pub(super) fn def_fact_store_supersede(input_schema: Value) -> ToolDefinition {
+    def_rw(
+        "tracedecay_fact_store_supersede",
+        "Fact Store Supersede",
+        "Mark one holographic memory fact as superseded by another fact id. The old fact leaves default list/search/probe results but stays readable by id through its history; payload and trust are untouched. Use this when a newer fact corrects an older one instead of removing the old one.",
+        input_schema,
+    )
+}
+
 pub(super) fn def_fact_store_list(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_fact_store_list",

@@ -16,9 +16,10 @@ use tracedecay_application::retained_surfaces::{
     FactStoreContradictResultV1, FactStoreGetResultV1, FactStoreListResultV1,
     FactStoreProbeResultV1, FactStoreReasonResultV1, FactStoreRelatedResultV1,
     FactStoreRemoveRequestV1, FactStoreRemoveResultV1, FactStoreSearchRequestV1,
-    FactStoreSearchResultV1, FactStoreUpdateRequestV1, FactStoreUpdateResultV1, FactTelemetryV1,
-    FactV1, MemoryAlgebraV1, MemoryFeedbackFunnelV1, MemoryScopeV1, MemoryStatusResultV1,
-    MemoryStatusV1, RetainedProjectSelectorV1, RetainedSurfaceOperation, RetainedSurfaceResultV1,
+    FactStoreSearchResultV1, FactStoreSupersedeRequestV1, FactStoreSupersedeResultV1,
+    FactStoreUpdateRequestV1, FactStoreUpdateResultV1, FactTelemetryV1, FactV1, MemoryAlgebraV1,
+    MemoryFeedbackFunnelV1, MemoryScopeV1, MemoryStatusResultV1, MemoryStatusV1,
+    RetainedProjectSelectorV1, RetainedSurfaceOperation, RetainedSurfaceResultV1,
     TrustHistoryEntryV1,
 };
 use tracedecay_domain::{
@@ -34,6 +35,7 @@ use tracedecay_store::{
     ProjectMemoryFactSearchFilterV1, ProjectMemoryFactSearchGraphCoverageV1,
     ProjectMemoryFactSearchGraphDegradationV1, ProjectMemoryFactSearchHitV1,
     ProjectMemoryFactSearchKindV1, ProjectMemoryFactSearchPageV1, ProjectMemoryFactSearchQuery,
+    ProjectMemoryFactSupersedeCommandV1, ProjectMemoryFactSupersedeOutcomeV1,
     ProjectMemoryFactUnavailableV1, ProjectMemoryFactUpdateCommandV1,
     ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryFactUpdatePatchV1, ProjectMemoryFactV1,
     ProjectMemoryMemoryStatusV1,
@@ -156,6 +158,28 @@ pub fn remove_logical_effect(
     })
 }
 
+pub fn supersede_logical_effect(
+    owner: &FactOwnerV1,
+    request: &FactStoreSupersedeRequestV1,
+) -> Result<Value, RetainedSurfaceExecutionErrorV1> {
+    let target = ProjectMemoryFactIdV1::new(owner.clone(), request.fact_id.clone())
+        .map_err(map_store_error)?;
+    let successor = ProjectMemoryFactIdV1::new(owner.clone(), request.superseded_by.clone())
+        .map_err(map_store_error)?;
+    serde_json::to_value((
+        "project-memory-fact-supersede.v1",
+        target.owner(),
+        target.fact_id(),
+        successor.fact_id(),
+        &request.expected_last_event_id,
+    ))
+    .map_err(|error| {
+        RetainedSurfaceExecutionErrorV1::unavailable(format!(
+            "the memory effect payload could not be serialized: {error}"
+        ))
+    })
+}
+
 pub fn feedback_logical_effect(
     owner: &FactOwnerV1,
     request: &FactFeedbackRequestV1,
@@ -226,6 +250,26 @@ pub fn remove_command(
         ProjectMemoryFactIdV1::new(owner, request.fact_id.clone()).map_err(map_store_error)?;
     ProjectMemoryFactRemoveCommandV1::new(
         target,
+        operation_id,
+        request.expected_last_event_id.clone(),
+        Some(actor),
+    )
+    .map_err(map_store_error)
+}
+
+pub fn supersede_command(
+    owner: FactOwnerV1,
+    request: &FactStoreSupersedeRequestV1,
+    operation_id: ProvenanceId,
+    actor: ActorId,
+) -> Result<ProjectMemoryFactSupersedeCommandV1, RetainedSurfaceExecutionErrorV1> {
+    let target = ProjectMemoryFactIdV1::new(owner.clone(), request.fact_id.clone())
+        .map_err(map_store_error)?;
+    let successor = ProjectMemoryFactIdV1::new(owner, request.superseded_by.clone())
+        .map_err(map_store_error)?;
+    ProjectMemoryFactSupersedeCommandV1::new(
+        target,
+        successor,
         operation_id,
         request.expected_last_event_id.clone(),
         Some(actor),
@@ -847,6 +891,31 @@ pub fn remove_result(
         _ => Err(RetainedSurfaceExecutionErrorV1::unavailable(
             "the fact remove outcome had an inconsistent receipt shape",
         )),
+    }
+}
+
+pub fn supersede_result(
+    outcome: &ProjectMemoryFactSupersedeOutcomeV1,
+) -> Result<FactStoreSupersedeResultV1, RetainedSurfaceExecutionErrorV1> {
+    match outcome {
+        ProjectMemoryFactSupersedeOutcomeV1::Superseded {
+            fact_id,
+            superseded_by,
+            commit_receipt: receipt,
+            commit_replayed,
+        } => Ok(FactStoreSupersedeResultV1::Superseded {
+            fact_id: fact_id.clone(),
+            superseded_by: superseded_by.clone(),
+            commit: commit_receipt(receipt, *commit_replayed),
+        }),
+        ProjectMemoryFactSupersedeOutcomeV1::AlreadySuperseded {
+            fact_id,
+            superseded_by,
+        } => Ok(FactStoreSupersedeResultV1::AlreadySuperseded {
+            fact_id: fact_id.clone(),
+            superseded_by: superseded_by.clone(),
+        }),
+        ProjectMemoryFactSupersedeOutcomeV1::NotFound => Ok(FactStoreSupersedeResultV1::NotFound),
     }
 }
 

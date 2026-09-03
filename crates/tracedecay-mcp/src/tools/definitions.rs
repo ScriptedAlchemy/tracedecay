@@ -533,6 +533,7 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
         def_fact_store_get(request_schema("fact_store_get")?),
         def_fact_store_update(request_schema("fact_store_update")?),
         def_fact_store_remove(request_schema("fact_store_remove")?),
+        def_fact_store_supersede(request_schema("fact_store_supersede")?),
         def_fact_store_list(request_schema("fact_store_list")?),
         def_fact_feedback(request_schema("fact_feedback")?),
         def_memory_status(request_schema("memory_status")?),
@@ -855,6 +856,7 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_fact_store_get",
     "tracedecay_fact_store_update",
     "tracedecay_fact_store_remove",
+    "tracedecay_fact_store_supersede",
     "tracedecay_fact_store_list",
     "tracedecay_fact_feedback",
     // workflow
@@ -922,6 +924,7 @@ pub fn tool_defaults_to_markdown(tool_name: &str) -> bool {
             | "tracedecay_fact_store_get"
             | "tracedecay_fact_store_update"
             | "tracedecay_fact_store_remove"
+            | "tracedecay_fact_store_supersede"
             | "tracedecay_fact_store_list"
             | "tracedecay_files"
             | "tracedecay_read"

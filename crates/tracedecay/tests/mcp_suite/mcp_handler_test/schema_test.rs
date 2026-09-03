@@ -117,6 +117,11 @@ async fn schema_required_arguments_match_representative_handler_parsers() {
             &["fact_id"][..],
             "missing field `fact_id`",
         ),
+        (
+            "tracedecay_fact_store_supersede",
+            &["fact_id", "superseded_by"][..],
+            "missing field `fact_id`",
+        ),
         // Hand-written git schemas, parsed with the `require_*_arg` helpers.
         (
             "tracedecay_diff_context",
@@ -477,6 +482,7 @@ fn exact_fact_store_definitions_project_canonical_request_schemas() {
         "fact_store_get",
         "fact_store_update",
         "fact_store_remove",
+        "fact_store_supersede",
         "fact_store_list",
         "fact_feedback",
         "memory_status",
