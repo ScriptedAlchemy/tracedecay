@@ -25,6 +25,7 @@ use super::ports::{
 };
 
 mod projection;
+mod routes;
 
 pub use self::projection::{
     CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
@@ -40,6 +41,12 @@ pub use self::projection::{
     CodeLexicalProjectionMetadataV1, LEXICAL_PROJECTION_BUILD_DEADLINE_MICROS_V1,
     PreparedCodeLexicalArtifactBatchV1, PreparedCodeLexicalArtifactPageV1,
     VerifiedCodeLexicalArtifactV1, lexical_projection_build_deadline_micros,
+};
+pub use self::routes::{
+    LexicalAnchorV1, LexicalRouteErrorV1, LexicalRouteKindV1, LexicalRouteMatchV1,
+    LexicalRouteOutcomeV1, LexicalRoutePlanV1, LexicalRouteReceiptV1, LexicalRouteV1,
+    LexicalRoutingV1, MAX_LEXICAL_ANCHOR_BYTES_V1, MAX_LEXICAL_ANCHORS_V1,
+    MAX_PREFERRED_SYMBOL_TOKENS_V1, merge_lexical_routes, preferred_symbol_tokens,
 };
 
 /// Wording the lexical lane uses when a port-emitted batch fails the shared

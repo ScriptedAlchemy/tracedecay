@@ -609,6 +609,7 @@ where
                         graph_max_depth: 1,
                         page_size: request.limit,
                         cursor: request.cursor,
+                        lexical_routing: request.lexical_routing,
                     },
                     _ => {
                         return code_index_search_unavailable(
@@ -1253,6 +1254,7 @@ where
                         semantic,
                         next_cursor,
                         coverage,
+                        lexical_routes: executed.query.lexical_routes,
                     },
                 )
             },
@@ -1403,6 +1405,7 @@ mod tests {
             limit: 10,
             cursor: None,
             mode: CodeIndexSearchModeV1::FallbackAllowed,
+            lexical_routing: tracedecay_query::retrieval::lexical::LexicalRoutingV1::query_only(),
             authority: None,
             deadline: None,
             cancellation: None,
