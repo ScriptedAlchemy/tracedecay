@@ -143,44 +143,6 @@ pub(crate) fn retained_mcp_operation(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn every_retained_binding_resolves_once_per_cache() {
-        let bindings = std::array::from_fn(|_| OnceLock::new());
-        let resolution_count = std::cell::Cell::new(0);
-        let mut first_pass = Vec::with_capacity(RETAINED_OPERATION_COUNT);
-
-        for operation in RetainedSurfaceOperation::ALL {
-            let binding = retained_mcp_binding_from_cache(&bindings, operation, |operation| {
-                resolution_count.set(resolution_count.get() + 1);
-                resolve_retained_mcp_binding(operation)
-            })
-            .expect("first retained binding contract");
-            assert!(!binding.binding_id().as_str().is_empty());
-            assert!(binding.maximum_millis() > 0);
-            first_pass.push((operation, std::ptr::from_ref(binding)));
-        }
-        assert_eq!(resolution_count.get(), RETAINED_OPERATION_COUNT);
-
-        for (operation, first) in first_pass {
-            let second = retained_mcp_binding_from_cache(&bindings, operation, |operation| {
-                resolution_count.set(resolution_count.get() + 1);
-                resolve_retained_mcp_binding(operation)
-            })
-            .expect("cached retained binding contract");
-            assert_eq!(first, std::ptr::from_ref(second));
-        }
-        assert_eq!(
-            resolution_count.get(),
-            RETAINED_OPERATION_COUNT,
-            "the second complete pass must resolve no binding again"
-        );
-    }
-}
-
 #[hotpath::measure(future = true, label = "mcp.dispatch.profile_retained_application")]
 pub(super) async fn dispatch_profile_retained_application_tool(
     operation: RetainedSurfaceOperation,
@@ -298,4 +260,42 @@ pub(crate) async fn execute_profile_retained_mcp_tool(
             requested_format,
         )
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_retained_binding_resolves_once_per_cache() {
+        let bindings = std::array::from_fn(|_| OnceLock::new());
+        let resolution_count = std::cell::Cell::new(0);
+        let mut first_pass = Vec::with_capacity(RETAINED_OPERATION_COUNT);
+
+        for operation in RetainedSurfaceOperation::ALL {
+            let binding = retained_mcp_binding_from_cache(&bindings, operation, |operation| {
+                resolution_count.set(resolution_count.get() + 1);
+                resolve_retained_mcp_binding(operation)
+            })
+            .expect("first retained binding contract");
+            assert!(!binding.binding_id().as_str().is_empty());
+            assert!(binding.maximum_millis() > 0);
+            first_pass.push((operation, std::ptr::from_ref(binding)));
+        }
+        assert_eq!(resolution_count.get(), RETAINED_OPERATION_COUNT);
+
+        for (operation, first) in first_pass {
+            let second = retained_mcp_binding_from_cache(&bindings, operation, |operation| {
+                resolution_count.set(resolution_count.get() + 1);
+                resolve_retained_mcp_binding(operation)
+            })
+            .expect("cached retained binding contract");
+            assert_eq!(first, std::ptr::from_ref(second));
+        }
+        assert_eq!(
+            resolution_count.get(),
+            RETAINED_OPERATION_COUNT,
+            "the second complete pass must resolve no binding again"
+        );
+    }
 }
