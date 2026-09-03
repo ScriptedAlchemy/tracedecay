@@ -63,6 +63,7 @@ pub(super) struct ArtifactRefs {
     pub(super) optimizer_diagnosis: Value,
 }
 
+#[hotpath::measure(label = "automation_runtime.artifact_payloads.build_traces")]
 pub(super) fn traces_payload(ctx: &ArtifactPayloadContext<'_>) -> Value {
     let curation_result = (ctx.task == AgentTaskKind::MemoryCurator)
         .then(|| curation::memory_curation_trace_summary(ctx.record));
@@ -118,6 +119,7 @@ fn session_reflection_summary(record: &AutomationRunLedgerRecord) -> Value {
     })
 }
 
+#[hotpath::measure(label = "automation_runtime.artifact_payloads.build_feedback")]
 pub(super) fn feedback_payload(ctx: &ArtifactPayloadContext<'_>, trace_ref: &Value) -> Value {
     json!({
         "schema_version": 1,
@@ -140,6 +142,7 @@ pub(super) fn feedback_payload(ctx: &ArtifactPayloadContext<'_>, trace_ref: &Val
     })
 }
 
+#[hotpath::measure(label = "automation_runtime.artifact_payloads.derive_generated_evals")]
 pub(super) fn generated_eval_payloads(ctx: &ArtifactPayloadContext<'_>) -> GeneratedEvalPayloads {
     let definitions = generated_eval_definitions(ctx.record, ctx.task, ctx.policy);
     let count = definitions.len();
@@ -155,6 +158,7 @@ pub(super) fn generated_eval_payloads(ctx: &ArtifactPayloadContext<'_>) -> Gener
     }
 }
 
+#[hotpath::measure(label = "automation_runtime.artifact_payloads.build_generated_evals")]
 pub(super) fn generated_evals_payload(
     ctx: &ArtifactPayloadContext<'_>,
     refs: (&Value, &Value),
@@ -224,6 +228,7 @@ pub(super) fn improvement_gate_payload(
     }
 }
 
+#[hotpath::measure(label = "automation_runtime.artifact_payloads.build_validation_gate")]
 pub(super) fn validation_gate_payload(
     ctx: &ArtifactPayloadContext<'_>,
     refs: (&Value, &Value, &Value),
@@ -288,6 +293,7 @@ pub(super) fn validation_gate_payload(
     })
 }
 
+#[hotpath::measure(label = "automation_runtime.artifact_payloads.build_optimizer_diagnosis")]
 pub(super) fn optimizer_diagnosis_payload(
     ctx: &ArtifactPayloadContext<'_>,
     refs: (&Value, &Value, &Value, &Value),
@@ -334,6 +340,7 @@ pub(super) fn optimizer_diagnosis_payload(
     })
 }
 
+#[hotpath::measure(label = "automation_runtime.artifact_payloads.build_codex_handoff")]
 pub(super) fn codex_handoff_payload(
     ctx: &ArtifactPayloadContext<'_>,
     refs: &ArtifactRefs,

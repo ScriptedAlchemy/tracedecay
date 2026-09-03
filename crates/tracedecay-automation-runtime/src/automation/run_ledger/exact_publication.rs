@@ -222,6 +222,7 @@ pub enum ExactRunUnboundDiscardOutcome {
 /// Stages the canonical JSON row by borrowing the runner-owned record. The
 /// record is streamed twice (digest, then durable file) but is never cloned or
 /// collected into a payload-sized buffer.
+#[hotpath::measure(label = "automation_runtime.run_ledger.bind_exact")]
 pub fn bind_staged_run_record_exact<T>(
     dashboard_root: &Path,
     record: &AutomationRunLedgerRecord,
@@ -410,6 +411,7 @@ pub async fn discard_staged_run_record_exact(
 /// The validator runs under the spool lock. It may acquire the journal lock,
 /// establishing the same `spool -> journal` order as exact binding. Returning
 /// `false` retains every candidate and lets the caller resnapshot newer state.
+#[hotpath::measure(label = "automation_runtime.run_ledger.discard_unbound", future = true)]
 pub async fn discard_unbound_staged_run_records_if<F>(
     dashboard_root: &Path,
     run_id: &str,
@@ -438,6 +440,7 @@ where
     })?
 }
 
+#[hotpath::measure(label = "automation_runtime.run_ledger.publish_exact_blocking")]
 pub fn publish_staged_run_record_exact_blocking(
     dashboard_root: &Path,
     run_id: &str,
@@ -483,6 +486,7 @@ fn publish_staged_run_record_exact_blocking_with_publisher(
 /// Repairs only a corrupt exact-append intent whose ledger state has one
 /// independently provable outcome. Valid intents remain owned by their exact
 /// publication and are not resolved without that journal binding.
+#[hotpath::measure(label = "automation_runtime.run_ledger.repair_append_intent")]
 pub fn repair_corrupt_run_ledger_append_intent_blocking(dashboard_root: &Path) -> Result<()> {
     repair_corrupt_run_ledger_append_intent_impl(
         dashboard_root,
@@ -539,6 +543,7 @@ fn repair_corrupt_run_ledger_append_intent_impl(
 
 /// Blocking form of [`discard_staged_run_record_exact`] for owners that must
 /// retain a claim across process-blocking durability work.
+#[hotpath::measure(label = "automation_runtime.run_ledger.discard_exact")]
 pub fn discard_staged_run_record_exact_blocking(
     dashboard_root: &Path,
     run_id: &str,
@@ -593,6 +598,7 @@ where
     })?
 }
 
+#[hotpath::measure(label = "automation_runtime.run_ledger.discard_stale_exact")]
 fn discard_stale_staged_run_record_exact_after_terminal_blocking<F>(
     dashboard_root: &Path,
     run_id: &str,

@@ -344,6 +344,7 @@ pub fn schedule_decision(
     schedule_decision_or_history_denial(config, task, records, activity, now_secs, true)
 }
 
+#[hotpath::measure(label = "automation_runtime.scheduler.decide_host_receipt")]
 pub fn host_receipt_decision(
     config: &AutomationConfig,
     task: AgentTaskKind,
@@ -814,6 +815,7 @@ fn new_automation_task_lock_token() -> Result<String> {
     Ok(hex::encode(random))
 }
 
+#[hotpath::measure(label = "automation_runtime.scheduler.acquire_task_lock")]
 fn try_acquire_task_lock_blocking(
     path: &Path,
     ownership_token: &str,
@@ -1157,6 +1159,7 @@ impl AutomationTaskLock {
     }
 }
 
+#[hotpath::measure(label = "automation_runtime.scheduler.release_task_lock")]
 fn remove_owned_task_lock_blocking(path: &Path, ownership_token: &str) -> std::io::Result<()> {
     let _coordination = acquire_task_lock_coordination(path)?;
     let Some(snapshot) = read_task_lock_snapshot(path)? else {
