@@ -1,0 +1,77 @@
+# Hotpath coverage for the sessions/lcm/capture/temporal-query slice.
+#
+# Proves this slice's hotpath instrumentation contract on every pull
+# request: feature-off builds keep every hotpath macro a no-op (no metrics
+# listener, no report file, hotpath absent from default features), while
+# `--features hotpath` builds compile, run the same suites, and capture real
+# measured sites in a guard report (see each crate's
+# `tests/hotpath_coverage.rs`).
+#
+# This complements `.github/workflows/hotpath-profile.yml` — the index-bench
+# profiling lane owned by the query/index slice — and must not replace it.
+# Benches for this slice are deliberately deferred; this lane is tests only.
+name: hotpath-slice-tests
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: hotpath-slice-tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Feature-on test binaries must never bind the live metrics listener in CI;
+  # the coverage tests also set this themselves before building a guard.
+  HOTPATH_METRICS_SERVER_OFF: "1"
+  SLICE_PACKAGES: >-
+    -p tracedecay-sessions
+    -p tracedecay-session-memory
+    -p tracedecay-session-runtime
+    -p tracedecay-session-temporal-store
+    -p tracedecay-lcm
+    -p tracedecay-capture
+    -p tracedecay-temporal-query
+
+jobs:
+  slice-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: hotpath-slice-tests
+          cache-on-failure: true
+
+      - name: kache compiler cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/kache
+            ~/.cache/kache
+          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: kache-${{ runner.os }}-
+      - name: Enable kache
+        shell: bash
+        run: |
+          command -v kache >/dev/null 2>&1 || cargo install kache --locked
+          kache init --no-service
+          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
+
+      # Feature-off first: this is the production shape. The per-crate
+      # hotpath_coverage tests assert the no-op contract (no listener on
+      # 6770/6771, no report file, hotpath not in default features).
+      - name: Slice tests (hotpath feature off)
+        run: cargo test ${{ env.SLICE_PACKAGES }} --locked
+
+      # Feature-on second: the same suites plus the guard-report tests, which
+      # fail if the slice's instrumented sites stop being hit.
+      - name: Slice tests (hotpath feature on)
+        run: cargo test ${{ env.SLICE_PACKAGES }} --features hotpath --locked
