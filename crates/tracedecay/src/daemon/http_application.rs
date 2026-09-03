@@ -323,6 +323,7 @@ impl DaemonHttpApplicationRegistry {
         Ok(Some(router))
     }
 
+    #[hotpath::measure(label = "daemon.http.application.build_registry_router")]
     fn router(
         self,
         admission: LocalHttpAdmission,
@@ -418,6 +419,7 @@ async fn provision_remote_node(
     }
 }
 
+#[hotpath::measure(label = "daemon.http.application.remote_status_read", future = true)]
 async fn remote_operational_status(
     State(registry): State<DaemonHttpApplicationRegistry>,
 ) -> Response {
@@ -664,6 +666,7 @@ impl LocalHttpAdmission {
     }
 }
 
+#[hotpath::measure(label = "daemon.http.application.local_admission", future = true)]
 async fn require_local_http_admission(
     State(admission): State<LocalHttpAdmission>,
     request: Request<Body>,
@@ -1003,7 +1006,7 @@ struct RemoteBrainTlsListener {
 }
 
 impl RemoteBrainTlsListener {
-    #[hotpath::skip]
+    #[hotpath::measure(label = "daemon.http.application.tls_bind", future = true)]
     async fn bind(config: &RemoteBrainTlsConfig) -> Result<Self> {
         let certificates = CertificateDer::pem_file_iter(config.certificate_chain())
             .map_err(|error| tls_configuration_error("open Remote Brain TLS certificate", error))?
@@ -1055,7 +1058,7 @@ impl RemoteBrainTlsListener {
         self.listener.local_addr()
     }
 
-    #[hotpath::skip]
+    #[hotpath::measure(label = "daemon.http.application.tls_accept", future = true)]
     async fn accept(&self) -> Option<(RemoteBrainTlsIo, SocketAddr)> {
         let (stream, address) = match self.listener.accept().await {
             Ok(accepted) => accepted,
@@ -1085,6 +1088,7 @@ impl RemoteBrainTlsListener {
     }
 }
 
+#[hotpath::measure(label = "daemon.http.application.tls_validate_identity")]
 fn validate_remote_brain_tls_identity(
     certificates: &[CertificateDer<'_>],
     listen: SocketAddr,
@@ -1449,6 +1453,7 @@ impl RemoteBrainTlsIo {
         }
     }
 
+    #[hotpath::measure(label = "daemon.http.application.observe_http_request")]
     fn observe_http_request(&mut self, bytes: &[u8]) -> io::Result<()> {
         if self.request_read_complete {
             return Ok(());
@@ -1699,6 +1704,7 @@ impl Drop for RemoteBrainTlsIo {
     }
 }
 
+#[hotpath::measure(label = "daemon.http.application.parse_body_length")]
 fn declared_http11_body_length(header_bytes: &[u8]) -> io::Result<u64> {
     let headers = std::str::from_utf8(header_bytes).map_err(|_| {
         io::Error::new(

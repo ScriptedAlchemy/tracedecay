@@ -359,6 +359,7 @@ impl ProjectRuntimeOwnerRegistryV1 {
         self.0.lock()
     }
 
+    #[hotpath::measure(label = "daemon.session_registry.list_ready_sessions")]
     fn ready_session_projects(&self) -> Result<Vec<ProjectId>> {
         let entries = self.lock().map_err(|_| {
             session_registry_error(
@@ -466,6 +467,7 @@ impl ProjectRuntimeOwnerRegistryV1 {
         }
     }
 
+    #[hotpath::measure(label = "daemon.session_registry.reserve_session_replacement")]
     fn reserve_session_replacement(
         &self,
         project_id: &ProjectId,
@@ -524,6 +526,7 @@ impl ProjectRuntimeOwnerRegistryV1 {
         }))
     }
 
+    #[hotpath::measure(label = "daemon.session_registry.reserve_session_recovery")]
     fn reserve_session_recovery(
         &self,
         project_id: &ProjectId,
@@ -569,6 +572,7 @@ impl ProjectRuntimeOwnerRegistryV1 {
     /// Rebuilds the fail-closed post-restart recovery record. The durable
     /// quarantine receipt is written only after the old paired owners have
     /// closed; it never reconstructs or remounts that terminal owner.
+    #[hotpath::measure(label = "daemon.session_registry.reconstruct_terminal_recovery")]
     fn reconstruct_durable_terminal_recovery(
         &self,
         project_id: &ProjectId,
@@ -609,6 +613,7 @@ impl ProjectRuntimeOwnerRegistryV1 {
     }
 }
 
+#[hotpath::measure(label = "daemon.session_registry.bind_memory_graph")]
 fn bind_ready_project_memory_graph(
     owners: &ProjectRuntimeOwnerRegistryV1,
     project_id: &ProjectId,
@@ -2763,6 +2768,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             })
     }
 
+    #[hotpath::measure(label = "daemon.session_registry.admit_remote_node")]
     fn admit_remote_node_owner(
         &self,
         node_id: &BrainNodeId,
@@ -2811,6 +2817,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         ))
     }
 
+    #[hotpath::measure(label = "daemon.session_registry.admit_project_runtime")]
     fn admit_project_runtime_owner(
         &self,
         project_id: &ProjectId,
@@ -2879,6 +2886,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         )))
     }
 
+    #[hotpath::measure(label = "daemon.session_registry.extend_project_runtime")]
     fn extend_project_runtime_owner(
         &self,
         project_id: &ProjectId,
@@ -2928,6 +2936,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         )))
     }
 
+    #[hotpath::measure(label = "daemon.session_registry.reserve_runtime_retirement")]
     fn reserve_project_runtime_retirement(
         &self,
         project_id: &ProjectId,
@@ -3189,7 +3198,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         })
     }
 
-    #[hotpath::skip]
+    #[hotpath::measure(label = "daemon.session_registry.retire_session_sync", future = true)]
     async fn retire_project_session_sync(&self, project_id: &ProjectId) -> Result<()> {
         self.active_session_sync_service("retire project session sync")?
             .retire_project(self.identity.profile_id(), project_id)
@@ -3198,7 +3207,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             .map_err(|error| session_registry_error("retire project session sync", error))
     }
 
-    #[hotpath::skip]
+    #[hotpath::measure(label = "daemon.session_registry.rebind_session_sync", future = true)]
     async fn rebind_project_session_sync(
         &self,
         project_id: &ProjectId,
@@ -3241,6 +3250,7 @@ impl ProfileRuntime for DaemonSessionRuntimeRegistryV1 {
     }
 }
 
+#[hotpath::measure(label = "daemon.session_registry.runtime_incarnation")]
 fn runtime_incarnation(identity: &LocalProfileIdentityAuthorityV1) -> Result<StoreIncarnationV1> {
     let process_run_id = tracedecay_runtime_core::runtime_identity::process_run_id();
     let daemon_generation =
