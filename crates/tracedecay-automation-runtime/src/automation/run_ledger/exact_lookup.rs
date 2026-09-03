@@ -354,7 +354,6 @@ pub(super) fn read_exact_run_digest(path: &Path, run_id: &str) -> Result<Option<
     read_exact_run_match(&file, path, run_id).map(|found| found.map(|found| found.digest))
 }
 
-#[hotpath::measure(label = "automation_runtime.run_ledger.read_exact_identity")]
 pub(super) fn read_exact_run_identity_from_file(
     file: &std::fs::File,
     path: &Path,

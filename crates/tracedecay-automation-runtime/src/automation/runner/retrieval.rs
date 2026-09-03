@@ -189,7 +189,6 @@ impl SessionScopeAuthorizer for ProductionAutomationSessionAuthorizer {
 }
 
 impl ProductionAutomationSessionRetrieval {
-    #[hotpath::measure(label = "automation_runtime.retrieval.mint_request_context")]
     fn request_context(
         &self,
         provider: Option<&str>,
@@ -342,10 +341,6 @@ fn automation_session_policy_digest() -> Option<PolicyDigest> {
     PolicyDigest::from_access_policy_digest(&digest).ok()
 }
 
-#[hotpath::measure(
-    label = "automation_runtime.retrieval.retrieve_session_evidence",
-    future = true
-)]
 pub(super) async fn retrieve_automation_session_evidence(
     retrieval: &dyn AutomationSessionRetrieval,
     query_text: &str,
@@ -403,7 +398,6 @@ pub(super) async fn retrieve_automation_session_evidence(
     Ok(retrieval.retrieve(temporal_query).await)
 }
 
-#[hotpath::measure(label = "automation_runtime.retrieval.accept_outcome")]
 pub(super) fn accept_automation_temporal_outcome(
     outcome: SessionRetrievalOutcome<TemporalKernelResult>,
 ) -> AutomationTemporalRetrieval {
@@ -592,7 +586,6 @@ fn registered_scope_matches(
     }
 }
 
-#[hotpath::measure(label = "automation_runtime.retrieval.resolve_anchor", future = true)]
 async fn active_registered_automation_anchor(database: &RegisteredGlobalDb) -> Option<SessionId> {
     let snapshot = database.read_snapshot().await.ok()?;
     let mut rows = snapshot
@@ -668,10 +661,6 @@ fn profile_automation_identity(
     ))
 }
 
-#[hotpath::measure(
-    label = "automation_runtime.retrieval.bind_project_authority",
-    future = true
-)]
 pub async fn registered_project_automation_retrieval(
     database: RegisteredGlobalDbLeaseV1,
     profile_identity: &dyn ProfileIdentityReadPort,
