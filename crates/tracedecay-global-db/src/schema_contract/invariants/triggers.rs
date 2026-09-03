@@ -1604,10 +1604,7 @@ pub(crate) fn invariant_trigger_names_for_tables(tables: &[&str]) -> Vec<&'stati
         .collect()
 }
 
-#[hotpath::measure(
-    future = true,
-    label = "global_db.schema_contract.triggers.replace"
-)]
+#[hotpath::measure(future = true, label = "global_db.schema_contract.triggers.replace")]
 pub(super) async fn replace_trigger(
     conn: &impl Executor,
     trigger: &Trigger,
@@ -1681,10 +1678,7 @@ async fn trigger_matches(
     trigger_matches_sql(conn, trigger, trigger.create_sql).await
 }
 
-#[hotpath::measure(
-    future = true,
-    label = "global_db.schema_contract.triggers.match_sql"
-)]
+#[hotpath::measure(future = true, label = "global_db.schema_contract.triggers.match_sql")]
 async fn trigger_matches_sql(
     conn: &impl QueryExecutor,
     trigger: &Trigger,

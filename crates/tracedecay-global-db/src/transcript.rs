@@ -96,10 +96,7 @@ impl RegisteredGlobalDb {
         SessionStoreAccess::new(self).get_parse_offset(path).await
     }
 
-    #[hotpath::measure(
-        future = true,
-        label = "global_db.transcript.get_parse_offset_result"
-    )]
+    #[hotpath::measure(future = true, label = "global_db.transcript.get_parse_offset_result")]
     pub async fn get_parse_offset_result(
         &self,
         path: &str,
