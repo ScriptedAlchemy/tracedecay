@@ -356,11 +356,7 @@ impl SemanticModelLifecycleOwnerV1 {
                 executor
             }
         };
-        Ok(
-            super::rerank_adapter::ProductionCodeRerankAuthorityV1::from_warmed(
-                pins, executor,
-            ),
-        )
+        Ok(super::rerank_adapter::ProductionCodeRerankAuthorityV1::from_warmed(pins, executor))
     }
 
     pub fn import_local_reranker_artifact(
