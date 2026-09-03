@@ -405,6 +405,7 @@ pub async fn ensure_registered_schema(
 pub struct RegisteredSchemaConvergence {
     force_exhaustive: bool,
     is_fresh: bool,
+    lcm_status_performance_indexes: bool,
 }
 
 /// Typed schema states an admissible store was classified into, carried from
@@ -540,12 +541,10 @@ pub async fn ensure_registered_schema_for_admission(
         .map_err(|error| {
             global_db_operation_error("initialize observation projection indexes", error)
         })?;
-    // Stores installed before the LCM status indexes existed are already at
-    // the current LCM schema version, so the in-transaction LCM stage above
-    // returned without touching them. Each build is one idempotent
-    // authority-revalidated batch outside the shared schema transaction: a
-    // real-scale index build over the raw-message store gets the long lease
-    // instead of holding every other admission stage open.
+    // Fresh installations publish the final LCM index shape. Keep each build
+    // independently durable outside the shared schema transaction so a
+    // real-scale index build gets the long lease without holding every other
+    // installation stage open.
     for sql in tracedecay_lcm::schema::LCM_STATUS_PERFORMANCE_INDEX_SQL {
         installation
             .execute_authority_revalidated_batch(sql)
@@ -558,6 +557,7 @@ pub async fn ensure_registered_schema_for_admission(
     Ok(RegisteredSchemaConvergence {
         force_exhaustive,
         is_fresh,
+        lcm_status_performance_indexes: false,
     })
 }
 
@@ -753,13 +753,16 @@ async fn install_registered_schema_stages(
 /// an older shape forward: the historical projection-anchor binding, retrieval
 /// anchor, repository provenance, projector version migration, and session
 /// project-path passes were all one-time legacy upgrades and have been removed.
-/// Only the authority invariant audit remains, and it stays out of line because
-/// it pages real authority rows on a large store.
+/// Existing daemon stores also build the LCM status indexes here, after
+/// admission, before the authority invariant audit pages historical rows.
 #[hotpath::measure(future = true, label = "global_db.schema.persist.converge")]
 pub async fn converge_registered_schema(
     database: &Database,
     convergence: RegisteredSchemaConvergence,
 ) -> tracedecay_domain::errors::Result<()> {
+    if convergence.lcm_status_performance_indexes {
+        converge_lcm_status_performance_indexes(database).await?;
+    }
     // The invariant pass pages historical authority rows and can legitimately
     // outlive an ordinary open on a large store. The admission phase has
     // already installed and validated its guard triggers, so daemon reads and
@@ -771,6 +774,22 @@ pub async fn converge_registered_schema(
         .await?;
     converge_registered_schema_on(&transaction, convergence).await?;
     transaction.commit().await
+}
+
+async fn converge_lcm_status_performance_indexes(
+    database: &Database,
+) -> tracedecay_domain::errors::Result<()> {
+    // One independently durable batch per index lets an interrupted daemon
+    // resume without rebuilding indexes that already completed.
+    for sql in tracedecay_lcm::schema::LCM_STATUS_PERFORMANCE_INDEX_SQL {
+        database
+            .execute_authority_revalidated_batch("install LCM status performance index", sql)
+            .await
+            .map_err(|error| {
+                global_db_operation_error("converge LCM status performance indexes", error)
+            })?;
+    }
+    Ok(())
 }
 
 #[hotpath::measure(future = true, label = "global_db.schema.persist.converge")]
@@ -786,19 +805,21 @@ async fn converge_registered_schema_on(
     .await
 }
 
-/// Synchronously converges an attached existing store's authority invariants.
+/// Synchronously converges an attached existing store's historical schema.
 ///
-/// Short-lived attaches have no background maintenance task to run the audit
-/// later, so tamper evidence must fail the attach itself: projection-output
-/// tamper triggers delete the trusted audit checkpoint (arming an exhaustive
-/// re-audit here), and altered guard triggers force the exhaustive pass with
-/// its foreign-key sweep, mirroring
+/// Short-lived attaches have no background maintenance task, so they build the
+/// LCM status indexes and run the authority audit before returning. Tamper
+/// evidence must fail the attach itself: projection-output tamper triggers
+/// delete the trusted audit checkpoint (arming an exhaustive re-audit here),
+/// and altered guard triggers force the exhaustive pass with its foreign-key
+/// sweep, mirroring
 /// [`ensure_registered_schema_for_admission`]. An untampered store resumes
 /// from its plausible checkpoint and pays only the bounded suffix audit.
 #[hotpath::measure(future = true, label = "global_db.schema.persist.converge_attached")]
 pub async fn converge_attached_registered_schema(
     database: &Database,
 ) -> tracedecay_domain::errors::Result<()> {
+    converge_lcm_status_performance_indexes(database).await?;
     let transaction = database
         .begin_bulk_write_transaction("converge attached global database authority schema")
         .await?;
@@ -808,6 +829,7 @@ pub async fn converge_attached_registered_schema(
         RegisteredSchemaConvergence {
             force_exhaustive,
             is_fresh: false,
+            lcm_status_performance_indexes: false,
         },
     )
     .await?;
@@ -822,9 +844,12 @@ pub async fn converge_attached_registered_schema(
 /// authority's exact typed reset identity (LCM `ProfileResetRequired`,
 /// temporal / workflow / configuration / remote-deletion resets) while a
 /// refused store stays untouched for the operator's explicit reset decision.
-/// An admissible store then re-ensures every idempotent schema stage, so an
-/// admissibly-fresh store — an existing database file with no schema objects —
-/// receives the full install exactly as initialization would have.
+/// An admissible store then re-ensures every admission-critical idempotent
+/// schema stage. An admissibly-fresh store — an existing database file with no
+/// schema objects — receives the same admission-critical install as
+/// initialization. The returned convergence plan carries the LCM status-index
+/// work for lifecycle-owned daemon maintenance; short-lived callers run that
+/// same work synchronously through [`converge_attached_registered_schema`].
 #[hotpath::measure(future = true, label = "global_db.schema.persist.attach")]
 pub async fn ensure_attached_registered_schema(
     database: &Database,
@@ -872,19 +897,11 @@ pub async fn ensure_attached_registered_schema(
         })?;
         transaction.commit().await?;
     }
-    for sql in tracedecay_lcm::schema::LCM_STATUS_PERFORMANCE_INDEX_SQL {
-        let transaction = database
-            .begin_bulk_write_transaction("install LCM status performance index")
-            .await?;
-        transaction.execute_batch(sql).await.map_err(|error| {
-            global_db_operation_error("initialize LCM status performance indexes", error)
-        })?;
-        transaction.commit().await?;
-    }
     validate_authority_schema_contract(&read_connection).await?;
     Ok(RegisteredSchemaConvergence {
         force_exhaustive,
         is_fresh: configuration_fresh.is_some(),
+        lcm_status_performance_indexes: true,
     })
 }
 
