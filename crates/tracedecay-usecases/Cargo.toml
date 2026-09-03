@@ -108,6 +108,9 @@ default = []
 # Mirrors the root crate's `semantic-fastembed`: gates the embedded fastembed
 # provider wiring inside `semantic_runtime`.
 semantic-fastembed = ["tracedecay-semantic/semantic-fastembed"]
+# Mirrors the root crate's `semantic-model2vec`: the ORT-free static
+# embedding backend.
+semantic-model2vec = ["tracedecay-semantic/semantic-model2vec"]
 # Mirrors the root crate's opt-in GPU execution-provider features.
 semantic-gpu-coreml = ["tracedecay-semantic/semantic-gpu-coreml"]
 semantic-gpu-cuda = ["tracedecay-semantic/semantic-gpu-cuda"]
