@@ -116,7 +116,10 @@ pub async fn dispatch_opencode_event(event_json: &str, project_root: &Path) -> O
     dispatch.into_recorded_guidance(&telemetry).flatten()
 }
 
-#[hotpath::measure(future = true, label = "agent_hosts.hooks.dispatch_opencode_tool_after")]
+#[hotpath::measure(
+    future = true,
+    label = "agent_hosts.hooks.dispatch_opencode_tool_after"
+)]
 pub async fn dispatch_opencode_tool_after(event_json: &str, project_root: &Path) -> Option<String> {
     let telemetry =
         record_other_hook_invoked(Some(project_root), "opencode_tool_after", event_json);
