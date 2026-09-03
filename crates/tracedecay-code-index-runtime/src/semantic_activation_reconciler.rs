@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -20,6 +21,14 @@ fn should_reconcile_ready_event(
     event.artifact_digest.is_some() && handled_epoch.is_none_or(|handled| event.epoch > handled)
 }
 
+fn should_reconcile(
+    handled_epoch: Option<u64>,
+    event: &SemanticLifecycleVerifiedReadyEventV1,
+    committed_activation_changed: bool,
+) -> bool {
+    committed_activation_changed || should_reconcile_ready_event(handled_epoch, event)
+}
+
 /// One cancellable recovery owner for one mounted project.
 ///
 /// Verified model-lifecycle events are only wakes. Every attempt rereads the
@@ -27,6 +36,7 @@ fn should_reconcile_ready_event(
 /// publication by its exact epoch, revision, and transition digest.
 pub struct DaemonSemanticActivationReconcilerV1 {
     cancellation: CancellationToken,
+    committed_activation_wake: Arc<Notify>,
     task: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -37,12 +47,18 @@ impl DaemonSemanticActivationReconcilerV1 {
     ) -> Self {
         let cancellation = CancellationToken::new();
         let worker_cancellation = cancellation.clone();
+        let committed_activation_wake = Arc::new(Notify::new());
+        let worker_committed_activation_wake = Arc::clone(&committed_activation_wake);
         let reconciler_loop = async move {
             let mut handled_epoch = None;
+            let mut committed_activation_changed = false;
             loop {
                 let event = lifecycle_events.borrow_and_update().clone();
-                if should_reconcile_ready_event(handled_epoch, &event) {
-                    handled_epoch = Some(event.epoch);
+                if should_reconcile(handled_epoch, &event, committed_activation_changed) {
+                    if should_reconcile_ready_event(handled_epoch, &event) {
+                        handled_epoch = Some(event.epoch);
+                    }
+                    committed_activation_changed = false;
                     let mut backoff = REOBSERVATION_INITIAL_BACKOFF;
                     loop {
                         // One static label times each bounded reobservation
@@ -100,12 +116,19 @@ impl DaemonSemanticActivationReconcilerV1 {
                         }
                     }
                 }
+                enum WakeV1 {
+                    Lifecycle(Result<(), tokio::sync::watch::error::RecvError>),
+                    CommittedActivation,
+                }
                 let changed = tokio::select! {
                     () = worker_cancellation.cancelled() => return,
-                    changed = lifecycle_events.changed() => changed,
+                    changed = lifecycle_events.changed() => WakeV1::Lifecycle(changed),
+                    () = worker_committed_activation_wake.notified() => WakeV1::CommittedActivation,
                 };
-                if changed.is_err() {
-                    return;
+                match changed {
+                    WakeV1::Lifecycle(Ok(())) => {}
+                    WakeV1::Lifecycle(Err(_)) => return,
+                    WakeV1::CommittedActivation => committed_activation_changed = true,
                 }
             }
         };
@@ -115,8 +138,18 @@ impl DaemonSemanticActivationReconcilerV1 {
         ));
         Self {
             cancellation,
+            committed_activation_wake,
             task: Mutex::new(Some(task)),
         }
+    }
+
+    /// Wake reconciliation after a semantic configuration transition commits.
+    ///
+    /// The model may already have emitted its latest verified-ready epoch
+    /// before the activation exists. This wake causes the same canonical
+    /// committed tuple reread without fabricating another lifecycle event.
+    pub fn notify_committed_activation(&self) {
+        self.committed_activation_wake.notify_one();
     }
 
     pub async fn cancel_and_join(&self) {
@@ -166,5 +199,22 @@ mod tests {
                 artifact_digest: current.artifact_digest,
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn committed_activation_wake_is_not_blocked_by_a_handled_lifecycle_epoch() {
+        let current = SemanticLifecycleVerifiedReadyEventV1 {
+            epoch: 7,
+            artifact_digest: Some(format!("sha256:{}", "a".repeat(64))),
+        };
+        assert!(!should_reconcile(Some(7), &current, false));
+        assert!(should_reconcile(Some(7), &current, true));
+
+        let wake = Arc::new(Notify::new());
+        wake.notify_one();
+
+        tokio::time::timeout(Duration::from_millis(100), wake.notified())
+            .await
+            .expect("a committed activation must wake reconciliation at the same ready epoch");
     }
 }
