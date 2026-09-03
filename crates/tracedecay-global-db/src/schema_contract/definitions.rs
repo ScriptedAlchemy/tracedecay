@@ -1782,7 +1782,31 @@ pub(super) struct Index {
     pub(super) columns: &'static [&'static str],
 }
 
+pub(super) const INDEX_DESCENDING_COLUMNS: &[(&str, &[&str])] =
+    &[("idx_code_projects_last_seen_project", &["last_seen_at"])];
+
 pub(super) const INDEXES: &[Index] = &[
+    Index {
+        table: "code_projects",
+        name: Some("idx_code_projects_last_seen_project"),
+        unique: false,
+        origin: "c",
+        columns: &["last_seen_at", "project_id"],
+    },
+    Index {
+        table: "code_projects",
+        name: Some("idx_code_projects_git_common_dir"),
+        unique: false,
+        origin: "c",
+        columns: &["git_common_dir"],
+    },
+    Index {
+        table: "code_projects",
+        name: Some("idx_code_projects_canonical_root_project"),
+        unique: false,
+        origin: "c",
+        columns: &["canonical_root", "project_id"],
+    },
     Index {
         table: "project_aliases",
         name: Some("idx_project_aliases_project_id"),

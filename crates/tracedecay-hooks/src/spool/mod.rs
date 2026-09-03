@@ -26,12 +26,17 @@ use crate::{
     MAX_REPLAY_BATCH_BYTES, MAX_REPLAY_BATCH_RECORDS, MAX_SPOOL_AGE_MICROS,
 };
 
+mod checkpoint;
 mod frame;
 mod lease;
 mod meta;
 mod replay;
 mod types;
 
+use checkpoint::{
+    CheckpointAnchorV1, RecordsFileRevisionV1, read_checkpoint, read_transition,
+    records_file_revision, write_checkpoint, write_transition,
+};
 use types::{AcknowledgedSequenceV1, HookSpoolMetaV1, SpoolIntegrityV1};
 pub use types::{
     HookReplayBatchV1, HookSpoolAckDispositionV1, HookSpoolAckV1, HookSpoolConfigV1,
@@ -39,7 +44,10 @@ pub use types::{
     HookSpoolResetReasonV1, HookSpoolWriterLeaseV1,
 };
 
-use frame::{append_frame, decode_complete_frame, encode_frame, scan_records, truncate_records};
+use frame::{
+    append_frame, decode_complete_frame, encode_frame, scan_records, scan_records_from,
+    truncate_records,
+};
 use lease::acquire_lease;
 use meta::{
     acknowledged_map, append_intent, normalize_acknowledgements, partial_tail_matches_intent,
@@ -52,6 +60,7 @@ use replay::{
 const SPOOL_MAGIC: &[u8; 4] = b"TDH2";
 const SPOOL_FORMAT_VERSION: u16 = 1;
 const SPOOL_META_VERSION: u16 = 1;
+const CHECKPOINT_FORMAT_VERSION: u16 = 1;
 const FRAME_LENGTH_BYTES: usize = 4;
 const FRAME_HEADER_BYTES: usize = 4 + 2 + 8 + 8 + 32 + 4;
 const FRAME_CHECKSUM_BYTES: usize = framed_log::CHECKSUM_BYTES;
@@ -64,6 +73,8 @@ const MAX_LEASE_BYTES: usize = 512;
 const MAX_REPLAY_SESSIONS: usize = 4;
 const RECORDS_FILE: &str = "records.v1.bin";
 const META_FILE: &str = "meta.v1.json";
+const CHECKPOINT_FILE: &str = "checkpoint.v1.json";
+const TRANSITION_FILE: &str = "checkpoint-transition.v1.json";
 const LEASE_FILE: &str = "writer.v1.lease";
 const REPLAY_CURSOR_FILE: &str = "replay-cursor.v1.bin";
 const DIRECTORY_POLICY: DirectorySyncPolicy = DirectorySyncPolicy::Strict;
@@ -77,6 +88,8 @@ pub struct HookSpoolV1 {
     lease: HookSpoolWriterLeaseV1,
     lease_file: File,
     meta: HookSpoolMetaV1,
+    checkpoint: Option<CheckpointAnchorV1>,
+    observed_records_revision: Option<RecordsFileRevisionV1>,
     pending: Vec<HookSpoolRecordV1>,
     pending_by_session: BTreeMap<[u8; 32], (u32, u64)>,
     pending_by_event: BTreeMap<[u8; 16], usize>,
@@ -130,7 +143,7 @@ impl Drop for SpoolLeaseHoldObservationV1 {
 impl HookSpoolV1 {
     /// Explicitly recreate one exact host spool without decoding incompatible
     /// metadata, records, or cursors. The normal writer lease still fences a
-    /// live adapter, and only the three incompatible transport-owned files are
+    /// live adapter, and only the incompatible transport-owned files are
     /// removed.
     #[hotpath::measure(label = "hooks.spool.reset")]
     pub fn reset(
@@ -145,6 +158,8 @@ impl HookSpoolV1 {
         for path in [
             records_path(&root),
             meta_path(&root),
+            checkpoint_path(&root),
+            transition_path(&root),
             replay_cursor_path(&root),
         ] {
             remove_spool_member(&path)?;
@@ -189,7 +204,45 @@ impl HookSpoolV1 {
     ) -> Result<(Self, HookSpoolOpenReportV1), HookSpoolError> {
         let mut meta = read_meta(&root)?.unwrap_or_else(HookSpoolMetaV1::fresh);
         validate_meta(&meta, config.limits, config.host)?;
-        let mut scan = scan_records(&root, config)?;
+        let current_revision = records_file_revision(&root)?;
+        let (mut scan, reusable_checkpoint) = match read_checkpoint(&root, config)? {
+            Some(checkpoint) if checkpoint.records_revision == current_revision => {
+                let validated_end = checkpoint
+                    .records_revision
+                    .as_ref()
+                    .map_or(0, |revision| revision.length);
+                let anchor = CheckpointAnchorV1 {
+                    records_revision: checkpoint.records_revision.clone(),
+                    checksum: checkpoint.checksum,
+                };
+                (
+                    scan_records_from(&root, config, checkpoint.records, validated_end)?,
+                    Some(anchor),
+                )
+            }
+            Some(checkpoint) => {
+                let transition = read_transition(&root)?;
+                let validated_end = checkpoint
+                    .records_revision
+                    .as_ref()
+                    .map_or(0, |revision| revision.length);
+                let transition_matches = transition.as_ref().is_some_and(|transition| {
+                    transition.checkpoint_checksum == checkpoint.checksum
+                        && transition.checkpoint_revision == checkpoint.records_revision
+                        && Some(&transition.current_revision) == current_revision.as_ref()
+                        && transition.current_revision.length >= validated_end
+                });
+                if transition_matches {
+                    (
+                        scan_records_from(&root, config, checkpoint.records, validated_end)?,
+                        None,
+                    )
+                } else {
+                    (scan_records(&root, config)?, None)
+                }
+            }
+            None => (scan_records(&root, config)?, None),
+        };
         let mut truncated_partial_tail_bytes = 0;
 
         if let Some(offset) = scan.corruption {
@@ -211,20 +264,27 @@ impl HookSpoolV1 {
             }
         }
 
-        if matches!(meta.integrity, SpoolIntegrityV1::Healthy) {
+        let checkpoint = if matches!(meta.integrity, SpoolIntegrityV1::Healthy) {
             reconcile_append_intent(&mut meta, &scan.records, config.host)?;
             validate_meta_against_records(&meta, &scan.records, config.limits)?;
             write_meta(&root, &meta)?;
-        }
+            Some(match reusable_checkpoint {
+                Some(checkpoint) => checkpoint,
+                None => write_checkpoint(&root, config, &scan.records)?,
+            })
+        } else {
+            None
+        };
 
         let acknowledged = acknowledged_map(&meta)?;
-        let pending = scan
-            .records
-            .into_iter()
+        let validated_records = scan.records;
+        let pending = validated_records
+            .iter()
             .filter(|record| {
                 record.sequence > meta.committed_through
                     && !acknowledged.contains_key(&record.sequence)
             })
+            .cloned()
             .collect::<Vec<_>>();
         let pending_by_session = usage_by_session(&pending, config.limits)?;
         let pending_by_event = pending_event_index(&pending);
@@ -233,6 +293,7 @@ impl HookSpoolV1 {
             pending_bytes: pending_by_session.values().map(|(_, bytes)| *bytes).sum(),
             committed_through: meta.committed_through,
             next_sequence: meta.next_sequence,
+            scanned_records: scan.scanned_records,
             truncated_partial_tail_bytes,
             corrupted_at_offset: match meta.integrity {
                 SpoolIntegrityV1::Healthy => None,
@@ -240,12 +301,17 @@ impl HookSpoolV1 {
             },
         };
         let round_robin_after = read_replay_cursor(&root)?;
+        let observed_records_revision = checkpoint
+            .as_ref()
+            .and_then(|checkpoint| checkpoint.records_revision.clone());
         let mut spool = Self {
             root,
             config,
             lease,
             lease_file,
             meta,
+            checkpoint,
+            observed_records_revision,
             pending,
             pending_by_session,
             pending_by_event,
@@ -326,6 +392,10 @@ impl HookSpoolV1 {
         if self.physical_len.saturating_add(frame_len) > self.config.limits.max_host_bytes {
             return Err(HookSpoolError::SpoolFull);
         }
+        if records_file_revision(&self.root)? != self.observed_records_revision {
+            self.recovery_required = true;
+            return Err(HookSpoolError::MetadataCorrupted);
+        }
 
         let intent = append_intent(sequence, self.physical_len, &frame)?;
         let mut intent_meta = self.meta.clone();
@@ -350,6 +420,23 @@ impl HookSpoolV1 {
         self.meta = committed_meta;
         self.physical_len = self.physical_len.saturating_add(frame_len);
         self.note_pending(&record)?;
+        let Some(checkpoint) = self.checkpoint.as_ref() else {
+            self.recovery_required = true;
+            return Err(HookSpoolError::RecoveryRequired);
+        };
+        match write_transition(&self.root, checkpoint) {
+            Ok(revision) if revision.length == self.physical_len => {
+                self.observed_records_revision = Some(revision);
+            }
+            Ok(_) => {
+                self.recovery_required = true;
+                return Err(HookSpoolError::MetadataCorrupted);
+            }
+            Err(error) => {
+                self.recovery_required = true;
+                return Err(error);
+            }
+        }
         #[cfg(feature = "hotpath")]
         {
             hotpath::gauge!("hooks.spool.append.frame_bytes").set(frame_len);
@@ -660,7 +747,16 @@ impl HookSpoolV1 {
             )
             .map_err(|_| HookSpoolError::Io)
         })?;
+        let checkpoint = match write_checkpoint(&self.root, self.config, &rebuilt) {
+            Ok(checkpoint) => checkpoint,
+            Err(error) => {
+                self.recovery_required = true;
+                return Err(error);
+            }
+        };
         self.pending = rebuilt;
+        self.observed_records_revision = checkpoint.records_revision.clone();
+        self.checkpoint = Some(checkpoint);
         self.pending_by_event = pending_event_index(&self.pending);
         self.physical_len = offset;
         hotpath::gauge!("hooks.spool.compact.frame_count").set(self.pending.len());
@@ -698,6 +794,14 @@ fn records_path(root: &Path) -> PathBuf {
 
 fn meta_path(root: &Path) -> PathBuf {
     root.join(META_FILE)
+}
+
+fn checkpoint_path(root: &Path) -> PathBuf {
+    root.join(CHECKPOINT_FILE)
+}
+
+fn transition_path(root: &Path) -> PathBuf {
+    root.join(TRANSITION_FILE)
 }
 
 fn lease_path(root: &Path) -> PathBuf {
