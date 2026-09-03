@@ -869,11 +869,8 @@ pub(crate) async fn handle_project_local_lifecycle_command(
         dashboard: false,
     };
     let components = [tracedecay::agents::host_bundle_v2::HostBundleComponentV1::ContextMcp];
-    let _registration_paths = integration.project_host_component_registration_paths(
-        &components,
-        &home,
-        &project_path,
-    )?;
+    let _registration_paths =
+        integration.project_host_component_registration_paths(&components, &home, &project_path)?;
     match operation {
         HostBundleCliOperation::Install
         | HostBundleCliOperation::Update
