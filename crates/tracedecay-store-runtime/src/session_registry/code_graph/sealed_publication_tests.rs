@@ -11,12 +11,12 @@
 
 use std::path::Path;
 use std::process::Command;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
 use tracedecay_code_index_retention::code_index_generations::DurablePublicationPointerV1;
-use tracedecay_domain::{ProjectId, canonical_sha256};
+use tracedecay_domain::{ProjectId, WorktreeId, canonical_sha256};
 use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphProjectorRevision, SealedCodeGenerationReplay,
 };
@@ -1147,9 +1147,9 @@ async fn concurrent_sealed_publishers_share_one_gate_and_converge_on_one_head() 
         )
         .await
         .expect("retain the reconcile code graph runtime");
-    // Cross-instance exclusivity is one registry-owned lock cell per code
-    // shard; per-instance locks would silently reintroduce the publication
-    // race the flight table and gate exist to prevent.
+    // Cross-instance exclusivity is one registry-owned lock cell per project
+    // publication shard; per-instance or per-worktree locks would silently
+    // reintroduce overlapping corpus builds.
     assert!(Arc::ptr_eq(
         &seat.publication_locks,
         &reconcile.publication_locks
@@ -1222,4 +1222,179 @@ async fn concurrent_sealed_publishers_share_one_gate_and_converge_on_one_head() 
             GraphPublicationReplayLookupV1::Active(_)
         ));
     });
+}
+
+fn pinned_publication_lock_cells(registry: &DaemonSessionRuntimeRegistryV1) -> usize {
+    registry
+        .code_graph_publication_gates
+        .lock()
+        .expect("publication lock map")
+        .values()
+        .filter(|cell| cell.strong_count() > 0)
+        .count()
+}
+
+fn assert_one_overlapping_build_permit(runtimes: &[RetainedCodeGraphRuntimeV1]) {
+    let scope_count = runtimes.len();
+    let attempts = AtomicUsize::new(0);
+    let in_critical_section = AtomicUsize::new(0);
+    let peak_overlapping_builds = AtomicUsize::new(0);
+    let start = Barrier::new(scope_count);
+    std::thread::scope(|scope| {
+        for runtime in runtimes {
+            scope.spawn(|| {
+                start.wait();
+                attempts.fetch_add(1, Ordering::SeqCst);
+                let _permit = runtime
+                    .publication_locks
+                    .claim_build(&|| Ok(()))
+                    .expect("claim the project publication build permit");
+                let overlapping = in_critical_section.fetch_add(1, Ordering::SeqCst) + 1;
+                peak_overlapping_builds.fetch_max(overlapping, Ordering::SeqCst);
+                while attempts.load(Ordering::SeqCst) < scope_count {
+                    std::thread::yield_now();
+                }
+                in_critical_section.fetch_sub(1, Ordering::SeqCst);
+            });
+        }
+    });
+    assert_eq!(
+        peak_overlapping_builds.load(Ordering::SeqCst),
+        1,
+        "one project publication shard admits at most one overlapping corpus build; observed {scope_count} worktree scopes"
+    );
+}
+
+/// 1/2/4/8 worktree scopes of one project share one publication lock cell and
+/// admit at most one overlapping corpus-sized build. Dropping the runtimes
+/// must not pin that cell in the registry.
+///
+/// Excluded from this coordination slice: eager Grafeo opens, lazy historical
+/// generation handles, and LPG replay open cost. Those stay on their own
+/// issue boundaries; this test counts lock-cell identity and overlapping
+/// `claim_build` permits only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worktree_scopes_share_one_project_publication_build_permit() {
+    let temporary = tempfile::tempdir().expect("temporary fixture parent");
+    let root = temporary
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root");
+    let profile_root = root.join("profile");
+    let project_root = root.join("project");
+    std::fs::create_dir_all(project_root.join("src")).expect("project source directory");
+    git(&project_root, &["init", "-q", "-b", "main"]);
+    git(&project_root, &["config", "user.name", "TraceDecay Test"]);
+    git(
+        &project_root,
+        &["config", "user.email", "tracedecay@example.invalid"],
+    );
+    std::fs::write(
+        project_root.join("src/lib.rs"),
+        "pub fn project_publication_lock_value() -> usize { 44 }\n",
+    )
+    .expect("project source");
+    git(&project_root, &["add", "."]);
+    git(
+        &project_root,
+        &["commit", "-qm", "project publication lock fixture"],
+    );
+    let project_id = ProjectId::new("project.publication-shard-locks").expect("project id");
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+        &project_root,
+        project_id.as_str(),
+    )
+    .expect("project enrollment");
+    let canonical_project = project_root.canonicalize().expect("canonical project root");
+
+    let store_root = root.join("code-index-store");
+    let scoped_store = scoped_code_index_store_root(&store_root, &canonical_project);
+    let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+        project_id.clone(),
+        &canonical_project,
+        scoped_store.clone(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    )
+    .expect("open worktree scheduler");
+    scheduler.reconcile_now().expect("seal the generation");
+    let latest = scheduler.latest_complete().expect("complete generation");
+    let repository_id = latest.generation().snapshot().repository.clone();
+    let reference = latest.generation().snapshot().reference.clone();
+    let generation_id = latest.generation().manifest().generation_id.clone();
+    drop(scheduler);
+    let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
+        &std::fs::read(scoped_store.join("active-code-generation-v1.json"))
+            .expect("active generation pointer"),
+    )
+    .expect("decode active generation pointer");
+    let replay_binding = || CodeGraphReplayBindingV1 {
+        generations_root: scoped_store.join("code-generations-v1"),
+        sealed_state_digest: tracedecay_graph_db::SealedGraphStateDigest::try_from(
+            pointer.state_digest.clone(),
+        )
+        .expect("sealed state digest"),
+    };
+
+    let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        49,
+        "project publication lock coordination",
+    )
+    .expect("daemon database scope");
+    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+        .await
+        .expect("session runtime registry");
+    let project_database = registry
+        .project_memory(project_id.clone(), [canonical_project.clone()])
+        .await
+        .expect("project graph database");
+    let replay_root = project_database
+        .database_path()
+        .with_extension("graph-replay");
+    tracedecay_runtime_core::storage::PrivateStoreIo::create_private_directory(&replay_root)
+        .expect("private graph replay root");
+
+    let mut runtimes = Vec::new();
+    for scope_index in 1..=8 {
+        let worktree_id = WorktreeId::new(format!("worktree.publication-scope-{scope_index}"))
+            .expect("worktree scope id");
+        runtimes.push(
+            registry
+                .retain_code_graph_runtime(
+                    project_id.clone(),
+                    repository_id.clone(),
+                    worktree_id,
+                    reference.clone(),
+                    generation_id.clone(),
+                    Arc::clone(&project_database),
+                    replay_binding(),
+                    None,
+                )
+                .await
+                .expect("retain a worktree-scoped code graph runtime"),
+        );
+    }
+
+    for scope_count in [1usize, 2, 4, 8] {
+        let scopes = &runtimes[..scope_count];
+        for runtime in scopes {
+            assert!(
+                Arc::ptr_eq(&scopes[0].publication_locks, &runtime.publication_locks),
+                "{scope_count} worktree scopes of one project must share one publication lock cell"
+            );
+        }
+        assert_one_overlapping_build_permit(scopes);
+    }
+    assert_eq!(
+        pinned_publication_lock_cells(&registry),
+        1,
+        "eight live worktree runtimes pin exactly one project publication lock cell"
+    );
+    drop(runtimes);
+    assert_eq!(
+        pinned_publication_lock_cells(&registry),
+        0,
+        "dropped runtimes must not leave a permanent strong publication lock cell"
+    );
 }

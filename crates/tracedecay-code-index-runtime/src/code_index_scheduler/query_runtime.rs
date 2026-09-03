@@ -444,8 +444,47 @@ impl CodeIndexSchedulerRegistryV1 {
         // fail-fast rather than degrading into an empty answer.
         let (latest, served_stale) = match self.latest_complete_serving_for_scope(scope).await {
             Some(serving) => match self.latest_complete_ready_decoded_for_scope(scope).await {
-                // Warm path: the ready gate admits, byte-identical to before.
-                Some(ready) => (ready, false),
+                Some(ready) => {
+                    // The graph-bearing generation and the lightweight text
+                    // projection can be restored through distinct handles.
+                    // The mounted text slot is the canonical exact/lexical
+                    // owner, so use its ready owner when the graph ready gate
+                    // has proved the same generation current. Falling back to
+                    // the decoded generation's independent warming handle
+                    // would report `generation_unverified` forever even after
+                    // the background projection had finished.
+                    if let Some(text) = self.latest_text_serving_for_scope(scope).await {
+                        if text.metadata().manifest().generation_id
+                            == ready.generation().manifest().generation_id
+                        {
+                            return execute_query_search_on_text(
+                                self,
+                                scope,
+                                input,
+                                text,
+                                Some(ready),
+                                false,
+                                graph_control,
+                            )
+                            .await;
+                        }
+                        if let Some((text, true)) =
+                            self.latest_text_serving_freshness_for_scope(scope).await
+                        {
+                            return execute_query_search_on_text(
+                                self,
+                                scope,
+                                input,
+                                text,
+                                None,
+                                false,
+                                graph_control,
+                            )
+                            .await;
+                        }
+                    }
+                    (ready, false)
+                }
                 None => {
                     // Graph decode/activation is optional enrichment. Its
                     // readiness gate may abstain while the authenticated text
