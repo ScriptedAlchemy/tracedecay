@@ -22,7 +22,20 @@ use vector_fixture::{
 const VECTOR_DIMENSION: usize = 16;
 const RESULT_LIMIT: usize = 20;
 
+// The candidate workload holds the index small and the vectors production
+// shaped (the semantic lane publishes 768-dim FastEmbed vectors) and sweeps
+// the result limit, so what scales is the per-candidate identity check the
+// search runs after the HNSW walk, not the walk itself. The top limit is the
+// crate's `MAX_VECTOR_SEARCH_LIMIT`.
+const CANDIDATE_ENTITY_COUNT: usize = 20_000;
+const CANDIDATE_DIMENSION: usize = 768;
+const CANDIDATE_LIMITS: [usize; 3] = [64, 512, 4_096];
+
 fn request(query: Vec<f32>) -> VectorSearchRequest {
+    request_with(query, VECTOR_DIMENSION, RESULT_LIMIT)
+}
+
+fn request_with(query: Vec<f32>, dimension: usize, limit: usize) -> VectorSearchRequest {
     VectorSearchRequest {
         namespace: GraphNamespace::new(VECTOR_NAMESPACE)
             .expect("benchmark vector namespace is valid"),
@@ -31,11 +44,59 @@ fn request(query: Vec<f32>) -> VectorSearchRequest {
         property: GraphPropertyName::new(VECTOR_PROPERTY)
             .expect("benchmark vector property is valid"),
         query,
-        dimension: VECTOR_DIMENSION,
+        dimension,
         metric: VectorMetric::Cosine,
-        limit: RESULT_LIMIT,
+        limit,
         cancellation: Arc::new(NeverCancelled),
     }
+}
+
+fn vector_search_candidates(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("vector_search/candidate_post_filter");
+    let mut persistent = PersistentBenchmarkGraph::new();
+    let snapshot = persistent.publish(
+        vector_manifest(CANDIDATE_ENTITY_COUNT, CANDIDATE_DIMENSION, 1),
+        None,
+    );
+    drop(snapshot);
+    let snapshot = persistent.recover_snapshot();
+    let query = deterministic_vector(CANDIDATE_ENTITY_COUNT - 1, CANDIDATE_DIMENSION);
+    let expected = format!("chunk:{:07}", CANDIDATE_ENTITY_COUNT - 1);
+    for limit in CANDIDATE_LIMITS {
+        let result = snapshot
+            .vector_search(request_with(query.clone(), CANDIDATE_DIMENSION, limit))
+            .expect("benchmark candidate search preflight succeeds");
+        assert!(
+            result
+                .matches
+                .iter()
+                .any(|candidate| candidate.entity.as_str() == expected.as_str()),
+            "benchmark query must retrieve its exact source vector",
+        );
+        assert_eq!(
+            result.matches.len(),
+            limit,
+            "every requested candidate must survive the post-filter",
+        );
+        group.bench_with_input(
+            BenchmarkId::new(format!("cosine_{CANDIDATE_DIMENSION}d"), limit),
+            &limit,
+            |bencher, &limit| {
+                bencher.iter_batched(
+                    || request_with(query.clone(), CANDIDATE_DIMENSION, limit),
+                    |request| {
+                        black_box(
+                            snapshot
+                                .vector_search(request)
+                                .expect("benchmark candidate search succeeds"),
+                        )
+                    },
+                    BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+    group.finish();
 }
 
 fn vector_search(criterion: &mut Criterion) {
@@ -85,6 +146,6 @@ criterion_group! {
     config = Criterion::default()
         .sample_size(10)
         .measurement_time(Duration::from_secs(20));
-    targets = vector_search
+    targets = vector_search, vector_search_candidates
 }
 criterion_main!(benches);
