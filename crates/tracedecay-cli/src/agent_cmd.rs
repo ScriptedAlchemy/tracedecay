@@ -837,7 +837,7 @@ pub(crate) async fn handle_project_local_lifecycle_command(
     agent_id: String,
     operation: HostBundleCliOperation,
 ) -> tracedecay_domain::errors::Result<()> {
-    if !matches!(agent_id.as_str(), "devin" | "zed") {
+    if !matches!(agent_id.as_str(), "devin" | "zed" | "vibe") {
         return Err(project_local_host_lifecycle_unavailable());
     }
     let home = tracedecay::agents::home_dir().ok_or_else(|| {
@@ -868,7 +868,12 @@ pub(crate) async fn handle_project_local_lifecycle_command(
         project_root: Some(project_path.clone()),
         dashboard: false,
     };
-    let components = [tracedecay::agents::host_bundle_v2::HostBundleComponentV1::ContextMcp];
+    // Project-local lifecycle installs the host's default component set:
+    // Devin and Zed carry only the MCP registration, while Vibe also owns a
+    // project prompt-rules document.
+    let components = tracedecay::agents::host_bundle_registry::default_components(
+        host_kind_for_agent(&agent_id)?,
+    );
     let _registration_paths =
         integration.project_host_component_registration_paths(&components, &home, &project_path)?;
     match operation {
