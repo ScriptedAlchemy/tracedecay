@@ -74,7 +74,7 @@ pub fn resolved_host_bundle_lifecycle_root() -> crate::errors::Result<PathBuf> {
 
 /// Canonical stock-host enumeration shared by packaging, delivery, and
 /// conformance consumers.
-pub const fn stock_host_kinds() -> [HostKindV1; 14] {
+pub const fn stock_host_kinds() -> [HostKindV1; 15] {
     HostKindV1::ALL
 }
 
