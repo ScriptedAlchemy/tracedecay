@@ -24,7 +24,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::errors::Result;
+use crate::errors::{Result, TraceDecayError};
 
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, config_backup_path,
@@ -303,6 +303,16 @@ fn require_copilot_cli() -> Result<PathBuf> {
     super::host_cli::require_host_cli(COPILOT_CLI, COPILOT_CLI_LIFECYCLE)
 }
 
+fn read_optional_config_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(TraceDecayError::Config {
+            message: format!("failed to read {}: {error}", path.display()),
+        }),
+    }
+}
+
 /// Drive Copilot's own registry to add the tracedecay MCP server.
 ///
 /// Copilot's non-interactive form is
@@ -317,12 +327,48 @@ fn require_copilot_cli() -> Result<PathBuf> {
 #[hotpath::measure(label = "copilot_mcp_install")]
 fn copilot_mcp_add_with(copilot_cli: &Path, home: &Path, tracedecay_bin: &str) -> Result<()> {
     let config_path = copilot_cli_mcp_config_path(home);
-    if super::mcp_config_has_tracedecay(&config_path, "mcpServers", load_json_file) {
+    let previous_registration =
+        if super::mcp_config_has_tracedecay(&config_path, "mcpServers", load_json_file) {
+            let bytes = read_optional_config_bytes(&config_path)?.ok_or_else(|| {
+                TraceDecayError::Config {
+                    message: format!(
+                        "{} disappeared while preparing the Copilot MCP refresh",
+                        config_path.display()
+                    ),
+                }
+            })?;
+            let metadata = super::capture_host_file_metadata(&config_path)?;
+            Some((bytes, metadata))
+        } else {
+            None
+        };
+    if previous_registration.is_some() {
         copilot_mcp_remove_with(copilot_cli, home)?;
     }
     let mut args = vec!["mcp", "add", COPILOT_MCP_SERVER_NAME, "--", tracedecay_bin];
     args.extend(MCP_SERVER_ARGS.iter().copied());
-    run_mcp_registry_step(copilot_cli, &args, home)
+    let result = run_mcp_registry_step(copilot_cli, &args, home);
+    let Err(add_error) = result else {
+        return Ok(());
+    };
+    let Some((previous_bytes, previous_metadata)) = previous_registration else {
+        return Err(add_error);
+    };
+    let current_bytes = read_optional_config_bytes(&config_path)?;
+    if let Err(restore_error) = super::text_file_transaction::restore_bytes_file_if_unchanged(
+        &config_path,
+        current_bytes.as_deref(),
+        &previous_bytes,
+        &previous_metadata,
+    ) {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "{add_error}; restoring the previous Copilot MCP registration also failed: \
+                 {restore_error}"
+            ),
+        });
+    }
+    Err(add_error)
 }
 
 /// Drive Copilot's own registry to drop the tracedecay MCP server.

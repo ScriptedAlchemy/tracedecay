@@ -391,6 +391,33 @@ pub(super) fn write_bytes_file_locked(
     safe_write_bytes_file_from_snapshot(path, contents, backup, replacement_metadata, &observed)
 }
 
+pub(super) fn restore_bytes_file_if_unchanged(
+    path: &Path,
+    expected_current: Option<&[u8]>,
+    original: &[u8],
+    original_metadata: &HostFileMetadataIdentityV1,
+) -> Result<()> {
+    let _lock = lock_host_file_write(path)?;
+    let observed = capture_host_file_snapshot(path).map_err(|error| TraceDecayError::Config {
+        message: format!("failed to inspect {} before restore: {error}", path.display()),
+    })?;
+    if observed.contents() != expected_current {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "refused to restore {} because the host config changed after the failed command",
+                path.display()
+            ),
+        });
+    }
+    safe_write_bytes_file_from_snapshot(
+        path,
+        original,
+        None,
+        Some(original_metadata),
+        &observed,
+    )
+}
+
 pub(crate) enum TextFileMutation {
     Unchanged,
     Write(String),

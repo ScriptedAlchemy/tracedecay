@@ -75,6 +75,19 @@ esac
 exit 0"#;
 
 #[cfg(unix)]
+const FAKE_REFRESH_ADD_FAILURE_BODY: &str = r#"case "$1 $2" in
+  "mcp remove")
+    printf '%s\n' '{"mcpServers":{"other":{"command":"other","args":[]}}}' > "$HOME/.copilot/mcp-config.json"
+    exit 0
+    ;;
+  "mcp add")
+    echo 'replacement registration rejected' >&2
+    exit 17
+    ;;
+esac
+exit 0"#;
+
+#[cfg(unix)]
 fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
@@ -181,6 +194,41 @@ fn refresh_replaces_an_existing_registration_and_preserves_an_operator_owned_pee
         serde_json::from_slice(&std::fs::read(&mcp_path).unwrap()).unwrap();
     assert_eq!(removed["mcpServers"]["other"]["command"], "other");
     assert!(removed["mcpServers"].get("tracedecay").is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_refresh_restores_the_exact_previous_registration() {
+    let home = tempfile::tempdir().unwrap();
+    let bin_dir = tempfile::tempdir().unwrap();
+    let log = bin_dir.path().join("invocations.log");
+    let copilot_cli = bin_dir.path().join("copilot");
+    fake_copilot_cli(&copilot_cli, &log, FAKE_REFRESH_ADD_FAILURE_BODY);
+    let mcp_path = copilot_cli_mcp_config_path(home.path());
+    std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
+    let original = br#"{"mcpServers":{"other":{"command":"other","args":[]},"tracedecay":{"command":"/old/tracedecay","args":["serve"]}}}"#;
+    std::fs::write(&mcp_path, original).unwrap();
+
+    let error = copilot_mcp_add_with(&copilot_cli, home.path(), "/new/tracedecay")
+        .expect_err("a rejected replacement must fail the refresh");
+
+    assert!(
+        error.to_string().contains("replacement registration rejected")
+            && error.to_string().contains("exit code 17"),
+        "the replacement failure must retain Copilot's diagnosis: {error}"
+    );
+    assert_eq!(
+        std::fs::read(&mcp_path).unwrap(),
+        original,
+        "a failed remove-then-add refresh must restore the exact prior registration"
+    );
+    assert_eq!(
+        recorded_invocations(&log),
+        vec![
+            "mcp remove tracedecay".to_string(),
+            "mcp add tracedecay -- /new/tracedecay serve".to_string(),
+        ]
+    );
 }
 
 #[cfg(unix)]
