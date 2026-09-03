@@ -47,7 +47,6 @@ use super::{
 /// outcome was already on the wire. The read bound must therefore outlive the
 /// request deadline; this is by how much. It bounds only a dead or wedged
 /// daemon, never the request.
-
 /// The local read bound for a request whose caller deadline is `request_deadline`.
 pub fn daemon_tool_response_bound(request_deadline: Instant) -> Result<Instant> {
     request_deadline

@@ -15,6 +15,8 @@ use tracedecay_store::{
     build_observation_retrieval_anchor_v2,
 };
 
+use crate::operation::StorageOperationError;
+
 use super::ObservationExecutor;
 
 fn observation_write(body: &str, receipt_id: &str) -> ObservationWrite {
@@ -222,12 +224,16 @@ fn connection() -> Connection {
     connection
 }
 
-fn execute(connection: &mut Connection, write: &AnchoredObservationWrite) -> rusqlite::Result<()> {
+fn execute(
+    connection: &mut Connection,
+    write: &AnchoredObservationWrite,
+) -> Result<(), StorageOperationError> {
     let mut transaction = connection.transaction()?;
     let savepoint = transaction.savepoint()?;
     ObservationExecutor.execute_write(&savepoint, write)?;
     savepoint.commit()?;
-    transaction.commit()
+    transaction.commit()?;
+    Ok(())
 }
 
 fn read(
@@ -241,12 +247,13 @@ fn read(
 fn execute_cursor_advance(
     connection: &mut Connection,
     advance: &ObservationCursorAdvance,
-) -> rusqlite::Result<()> {
+) -> Result<(), StorageOperationError> {
     let mut transaction = connection.transaction()?;
     let savepoint = transaction.savepoint()?;
     ObservationExecutor.execute_cursor_advance(&savepoint, advance)?;
     savepoint.commit()?;
-    transaction.commit()
+    transaction.commit()?;
+    Ok(())
 }
 
 #[test]

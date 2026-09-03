@@ -339,6 +339,53 @@ impl ProjectMemoryDashboardVectorPointV1 {
     }
 }
 
+/// Monotonic generation of the canonical database transaction authority.
+///
+/// This token advances with every committed store write. Derived dashboard
+/// caches key from it instead of inventing vector-specific freshness state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ProjectMemoryStoreRevisionV1(u64);
+
+impl ProjectMemoryStoreRevisionV1 {
+    pub fn new(generation: u64) -> Self {
+        Self(generation)
+    }
+
+    pub fn generation(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectMemoryDashboardVectorSnapshotV1 {
+    store_revision: ProjectMemoryStoreRevisionV1,
+    points: Vec<ProjectMemoryDashboardVectorPointV1>,
+}
+
+impl ProjectMemoryDashboardVectorSnapshotV1 {
+    pub fn new(
+        store_revision: ProjectMemoryStoreRevisionV1,
+        points: Vec<ProjectMemoryDashboardVectorPointV1>,
+    ) -> Self {
+        Self {
+            store_revision,
+            points,
+        }
+    }
+
+    pub fn store_revision(&self) -> ProjectMemoryStoreRevisionV1 {
+        self.store_revision
+    }
+
+    pub fn points(&self) -> &[ProjectMemoryDashboardVectorPointV1] {
+        &self.points
+    }
+
+    pub fn into_points(self) -> Vec<ProjectMemoryDashboardVectorPointV1> {
+        self.points
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectMemoryDashboardOplogQueryV1 {
     owner: FactOwnerV1,

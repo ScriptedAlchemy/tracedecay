@@ -439,125 +439,127 @@ impl CiRetainedProviderObservationAuthorityV1 for ProjectCiRetainedObservationSt
         Box::pin(hotpath::future!(
             async move {
                 if !context_allows_feedback_operation(
-                context,
-                &self.scope,
-                CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1,
-                CI_FAILURE_LOCALIZE_USE_CASE_ID_V1,
-            ) {
-                return None;
-            }
-            if !matches!(
-                (state, coverage),
-                (
-                    CiFailureLocalizationStateV1::Complete | CiFailureLocalizationStateV1::Partial,
-                    CiFailureCoverageV1::Complete | CiFailureCoverageV1::Partial
-                )
-            ) {
-                return None;
-            }
-            let observation = self.observation_for(context, request, record)?;
-            let retained = CiRetainedProviderRecordV1 {
-                provider_record: record.clone(),
-                observation: observation.clone(),
-            };
-            if !retained.validate_for(request) {
-                return None;
-            }
-            let key = self.key(request)?;
-            let encoded = serde_json::to_string(&retained).ok()?;
-            if encoded.len() > MAX_RETAINED_BYTES_V1 {
-                return None;
-            }
-            let transaction = self
-                .database
-                .begin_write_transaction("retain CI provider observation")
-                .await
-                .ok()?;
-            let current = match self
-                .database
-                .get_metadata_unguarded(&transaction, &key)
-                .await
-            {
-                Ok(Some(encoded)) => match Self::decode_record(request, &encoded) {
-                    Some(record) => Some(record),
-                    None => {
-                        let _ = transaction.rollback().await;
-                        return None;
-                    }
-                },
-                Ok(None) => None,
-                Err(_) => {
-                    let _ = transaction.rollback().await;
-                    return None;
-                }
-            };
-            let manifest_key = self.manifest_key()?;
-            let encoded_manifest = match self
-                .database
-                .get_metadata_unguarded(&transaction, &manifest_key)
-                .await
-            {
-                Ok(encoded) => encoded,
-                Err(_) => {
-                    let _ = transaction.rollback().await;
-                    return None;
-                }
-            };
-            let mut manifest = match encoded_manifest {
-                Some(encoded) => match self.decode_manifest(&encoded) {
-                    Some(manifest) => manifest,
-                    None => {
-                        let _ = transaction.rollback().await;
-                        return None;
-                    }
-                },
-                None if current.is_none() => {
-                    CiRetainedObservationManifestV1::empty(self.scope.clone())?
-                }
-                None => {
-                    let _ = transaction.rollback().await;
-                    return None;
-                }
-            };
-            let manifest_entry = manifest
-                .entries
-                .iter()
-                .find(|entry| entry.request == *request);
-            if current.is_some() != manifest_entry.is_some()
-                || current.as_ref().is_some_and(|record| {
-                    manifest_entry.is_none_or(|entry| {
-                        entry.observation_id != record.observation.observation_id
-                            || canonical_sha256(record).ok().as_ref() != Some(&entry.record_digest)
-                    })
-                })
-            {
-                let _ = transaction.rollback().await;
-                return None;
-            }
-            self.update_manifest_entry(&mut manifest, request, &retained)?;
-            let encoded_manifest = serde_json::to_string(&manifest).ok()?;
-            if encoded_manifest.len() > MAX_RETAINED_MANIFEST_BYTES_V1
-                || !context_allows_feedback_operation(
                     context,
                     &self.scope,
                     CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1,
                     CI_FAILURE_LOCALIZE_USE_CASE_ID_V1,
-                )
-                || self
+                ) {
+                    return None;
+                }
+                if !matches!(
+                    (state, coverage),
+                    (
+                        CiFailureLocalizationStateV1::Complete
+                            | CiFailureLocalizationStateV1::Partial,
+                        CiFailureCoverageV1::Complete | CiFailureCoverageV1::Partial
+                    )
+                ) {
+                    return None;
+                }
+                let observation = self.observation_for(context, request, record)?;
+                let retained = CiRetainedProviderRecordV1 {
+                    provider_record: record.clone(),
+                    observation: observation.clone(),
+                };
+                if !retained.validate_for(request) {
+                    return None;
+                }
+                let key = self.key(request)?;
+                let encoded = serde_json::to_string(&retained).ok()?;
+                if encoded.len() > MAX_RETAINED_BYTES_V1 {
+                    return None;
+                }
+                let transaction = self
                     .database
-                    .set_metadata_unguarded(&transaction, &key, &encoded)
+                    .begin_write_transaction("retain CI provider observation")
                     .await
-                    .is_err()
-                || self
+                    .ok()?;
+                let current = match self
                     .database
-                    .set_metadata_unguarded(&transaction, &manifest_key, &encoded_manifest)
+                    .get_metadata_unguarded(&transaction, &key)
                     .await
-                    .is_err()
-                || transaction.commit().await.is_err()
-            {
-                return None;
-            }
-            Some(observation)
+                {
+                    Ok(Some(encoded)) => match Self::decode_record(request, &encoded) {
+                        Some(record) => Some(record),
+                        None => {
+                            let _ = transaction.rollback().await;
+                            return None;
+                        }
+                    },
+                    Ok(None) => None,
+                    Err(_) => {
+                        let _ = transaction.rollback().await;
+                        return None;
+                    }
+                };
+                let manifest_key = self.manifest_key()?;
+                let encoded_manifest = match self
+                    .database
+                    .get_metadata_unguarded(&transaction, &manifest_key)
+                    .await
+                {
+                    Ok(encoded) => encoded,
+                    Err(_) => {
+                        let _ = transaction.rollback().await;
+                        return None;
+                    }
+                };
+                let mut manifest = match encoded_manifest {
+                    Some(encoded) => match self.decode_manifest(&encoded) {
+                        Some(manifest) => manifest,
+                        None => {
+                            let _ = transaction.rollback().await;
+                            return None;
+                        }
+                    },
+                    None if current.is_none() => {
+                        CiRetainedObservationManifestV1::empty(self.scope.clone())?
+                    }
+                    None => {
+                        let _ = transaction.rollback().await;
+                        return None;
+                    }
+                };
+                let manifest_entry = manifest
+                    .entries
+                    .iter()
+                    .find(|entry| entry.request == *request);
+                if current.is_some() != manifest_entry.is_some()
+                    || current.as_ref().is_some_and(|record| {
+                        manifest_entry.is_none_or(|entry| {
+                            entry.observation_id != record.observation.observation_id
+                                || canonical_sha256(record).ok().as_ref()
+                                    != Some(&entry.record_digest)
+                        })
+                    })
+                {
+                    let _ = transaction.rollback().await;
+                    return None;
+                }
+                self.update_manifest_entry(&mut manifest, request, &retained)?;
+                let encoded_manifest = serde_json::to_string(&manifest).ok()?;
+                if encoded_manifest.len() > MAX_RETAINED_MANIFEST_BYTES_V1
+                    || !context_allows_feedback_operation(
+                        context,
+                        &self.scope,
+                        CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1,
+                        CI_FAILURE_LOCALIZE_USE_CASE_ID_V1,
+                    )
+                    || self
+                        .database
+                        .set_metadata_unguarded(&transaction, &key, &encoded)
+                        .await
+                        .is_err()
+                    || self
+                        .database
+                        .set_metadata_unguarded(&transaction, &manifest_key, &encoded_manifest)
+                        .await
+                        .is_err()
+                    || transaction.commit().await.is_err()
+                {
+                    return None;
+                }
+                Some(observation)
             },
             label = "usecases.advisory.ci.retain_observation"
         ))
@@ -613,199 +615,200 @@ impl CiCodeAnchorStoreV1 for ProjectCiCodeAnchorStoreV1 {
         Box::pin(hotpath::future!(
             async move {
                 if !context_allows_feedback_operation(
-                context,
-                &self.scope,
-                CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1,
-                CI_FAILURE_LOCALIZE_USE_CASE_ID_V1,
-            ) || request.scope != self.scope
-                || !record.validate_for(request)
-                || record.provider_record.workflow_run.head_sha
-                    != request.scope.head_commit_id.as_str()
-                || record.provider_record.workflow_job.head_sha
-                    != request.scope.head_commit_id.as_str()
-                || record.provider_record.check_run.head_sha
-                    != request.scope.head_commit_id.as_str()
-            {
-                return None;
-            }
-            let Some(annotation) = record.provider_record.failed_annotation() else {
-                return Some(partial_code_evidence());
-            };
-            let Some(path) = canonical_project_relative_path(&annotation.path) else {
-                return Some(partial_code_evidence());
-            };
-            let cancellation = request_graph_cancellation(context);
-            let Ok(verified) = self
-                .code_graph
-                .open(CodeGraphReadRequest::new(
+                    context,
+                    &self.scope,
+                    CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1,
+                    CI_FAILURE_LOCALIZE_USE_CASE_ID_V1,
+                ) || request.scope != self.scope
+                    || !record.validate_for(request)
+                    || record.provider_record.workflow_run.head_sha
+                        != request.scope.head_commit_id.as_str()
+                    || record.provider_record.workflow_job.head_sha
+                        != request.scope.head_commit_id.as_str()
+                    || record.provider_record.check_run.head_sha
+                        != request.scope.head_commit_id.as_str()
+                {
+                    return None;
+                }
+                let Some(annotation) = record.provider_record.failed_annotation() else {
+                    return Some(partial_code_evidence());
+                };
+                let Some(path) = canonical_project_relative_path(&annotation.path) else {
+                    return Some(partial_code_evidence());
+                };
+                let cancellation = request_graph_cancellation(context);
+                let Ok(verified) = self
+                    .code_graph
+                    .open(CodeGraphReadRequest::new(
+                        context,
+                        context.grant().issued_at,
+                        Arc::clone(&cancellation),
+                    ))
+                    .await
+                else {
+                    return Some(partial_code_evidence());
+                };
+                let Ok(reader) = verified.reader_with_cancellation(
                     context,
                     context.grant().issued_at,
                     Arc::clone(&cancellation),
-                ))
-                .await
-            else {
-                return Some(partial_code_evidence());
-            };
-            let Ok(reader) = verified.reader_with_cancellation(
-                context,
-                context.grant().issued_at,
-                Arc::clone(&cancellation),
-            ) else {
-                return Some(partial_code_evidence());
-            };
-            let Ok(Some(file_record)) =
-                reader.file_by_logical_path(&path, Arc::clone(&cancellation))
-            else {
-                return Some(partial_code_evidence());
-            };
-            let Ok(source) = std::fs::read_to_string(self.project_root.join(&path)) else {
-                return Some(partial_code_evidence());
-            };
-            if ContentDigest::of_bytes(source.as_bytes()) != file_record.content_digest {
-                return Some(partial_code_evidence());
-            }
-            let code_index_identity = if let Some(resolver) = self.code_index_identity.as_ref() {
-                let Some(identity) = resolver.resolve(self.project_root.clone()).await else {
+                ) else {
                     return Some(partial_code_evidence());
                 };
-                if identity.source_revision() != Some(&request.scope.head_commit_id) {
-                    return Some(partial_code_evidence());
-                }
-                Some(identity)
-            } else {
-                None
-            };
-            let Some(span) = source_span_for_annotation(
-                &source,
-                annotation.start_line,
-                annotation.end_line,
-                annotation.start_column,
-                annotation.end_column,
-            ) else {
-                return Some(partial_code_evidence());
-            };
-            let file = if let Some(identity) = code_index_identity.as_ref() {
-                let Some((file, digest)) = identity.file(&path) else {
+                let Ok(Some(file_record)) =
+                    reader.file_by_logical_path(&path, Arc::clone(&cancellation))
+                else {
                     return Some(partial_code_evidence());
                 };
-                if digest != &file_record.content_digest {
+                let Ok(source) = std::fs::read_to_string(self.project_root.join(&path)) else {
+                    return Some(partial_code_evidence());
+                };
+                if ContentDigest::of_bytes(source.as_bytes()) != file_record.content_digest {
                     return Some(partial_code_evidence());
                 }
-                file.clone()
-            } else {
-                file_record.file_occurrence_id.clone()
-            };
-            let Ok(mut symbols) =
-                reader.symbols_in_logical_file(&path, 100_000, Arc::clone(&cancellation))
-            else {
-                return Some(partial_code_evidence());
-            };
-            symbols.retain(|symbol| {
-                symbol
-                    .binding
-                    .as_ref()
-                    .and_then(|binding| binding.source_span)
-                    .is_some_and(|candidate| {
-                        candidate.start_byte <= span.start_byte
-                            && candidate.end_byte >= span.end_byte
-                    })
-            });
-            symbols.sort_by(|left, right| {
-                let left_span = left
-                    .binding
-                    .as_ref()
-                    .and_then(|binding| binding.source_span);
-                let right_span = right
-                    .binding
-                    .as_ref()
-                    .and_then(|binding| binding.source_span);
-                left_span
-                    .map(|span| span.end_byte.saturating_sub(span.start_byte))
-                    .cmp(&right_span.map(|span| span.end_byte.saturating_sub(span.start_byte)))
-                    .then_with(|| left.occurrence.cmp(&right.occurrence))
-            });
-            let Some(symbol_summary) = symbols.first() else {
-                return Some(partial_code_evidence());
-            };
-            let symbol = symbol_summary.occurrence.clone();
-            let Ok(impact) = reader.impact(
-                std::slice::from_ref(&symbol),
-                &[RelationEdgeKindV1::Calls],
-                3,
-                100_000,
-                100_000,
-                Arc::clone(&cancellation),
-            ) else {
-                return Some(partial_code_evidence());
-            };
-            let callers_truncated = impact.impacted.len() > MAX_CI_FAILURE_CALLER_EVIDENCE_V1;
-            let callers = impact
-                .impacted
-                .iter()
-                .take(MAX_CI_FAILURE_CALLER_EVIDENCE_V1)
-                .map(|impacted| CiFailureCallerEvidenceV1 {
-                    retrieval_anchor_id: record.observation.failure_anchor.clone(),
-                    caller_symbol: impacted.summary.occurrence.clone(),
-                    relation: if impacted.depth == 1 {
-                        CiCallerRelationV1::DirectCall
-                    } else {
-                        CiCallerRelationV1::TransitiveCall
-                    },
-                })
-                .collect::<Vec<_>>();
-            let test_symbols = impact
-                .impacted
-                .iter()
-                .filter(|impacted| {
-                    impacted
-                        .summary
-                        .metadata
+                let code_index_identity = if let Some(resolver) = self.code_index_identity.as_ref()
+                {
+                    let Some(identity) = resolver.resolve(self.project_root.clone()).await else {
+                        return Some(partial_code_evidence());
+                    };
+                    if identity.source_revision() != Some(&request.scope.head_commit_id) {
+                        return Some(partial_code_evidence());
+                    }
+                    Some(identity)
+                } else {
+                    None
+                };
+                let Some(span) = source_span_for_annotation(
+                    &source,
+                    annotation.start_line,
+                    annotation.end_line,
+                    annotation.start_column,
+                    annotation.end_column,
+                ) else {
+                    return Some(partial_code_evidence());
+                };
+                let file = if let Some(identity) = code_index_identity.as_ref() {
+                    let Some((file, digest)) = identity.file(&path) else {
+                        return Some(partial_code_evidence());
+                    };
+                    if digest != &file_record.content_digest {
+                        return Some(partial_code_evidence());
+                    }
+                    file.clone()
+                } else {
+                    file_record.file_occurrence_id.clone()
+                };
+                let Ok(mut symbols) =
+                    reader.symbols_in_logical_file(&path, 100_000, Arc::clone(&cancellation))
+                else {
+                    return Some(partial_code_evidence());
+                };
+                symbols.retain(|symbol| {
+                    symbol
+                        .binding
                         .as_ref()
-                        .is_some_and(|metadata| metadata.kind.eq_ignore_ascii_case("test"))
-                })
-                .collect::<Vec<_>>();
-            let tests_truncated = test_symbols.len() > MAX_CI_FAILURE_TEST_EVIDENCE_V1;
-            let tests = test_symbols
-                .into_iter()
-                .take(MAX_CI_FAILURE_TEST_EVIDENCE_V1)
-                .map(|impacted| CiFailureTestEvidenceV1 {
-                    retrieval_anchor_id: record.observation.failure_anchor.clone(),
-                    test_symbol: impacted.summary.occurrence.clone(),
-                })
-                .collect::<Vec<_>>();
-            let generation_id = if let Some(identity) = code_index_identity.as_ref() {
-                if identity.generation_id() != reader.generation() {
+                        .and_then(|binding| binding.source_span)
+                        .is_some_and(|candidate| {
+                            candidate.start_byte <= span.start_byte
+                                && candidate.end_byte >= span.end_byte
+                        })
+                });
+                symbols.sort_by(|left, right| {
+                    let left_span = left
+                        .binding
+                        .as_ref()
+                        .and_then(|binding| binding.source_span);
+                    let right_span = right
+                        .binding
+                        .as_ref()
+                        .and_then(|binding| binding.source_span);
+                    left_span
+                        .map(|span| span.end_byte.saturating_sub(span.start_byte))
+                        .cmp(&right_span.map(|span| span.end_byte.saturating_sub(span.start_byte)))
+                        .then_with(|| left.occurrence.cmp(&right.occurrence))
+                });
+                let Some(symbol_summary) = symbols.first() else {
                     return Some(partial_code_evidence());
-                }
-                identity.generation_id().clone()
-            } else {
-                reader.generation().clone()
-            };
-            let partial = callers_truncated || tests_truncated || !impact.complete;
-            Some(CiExactCodeEvidenceV1 {
-                state: if partial {
-                    CiFailureLocalizationStateV1::Partial
+                };
+                let symbol = symbol_summary.occurrence.clone();
+                let Ok(impact) = reader.impact(
+                    std::slice::from_ref(&symbol),
+                    &[RelationEdgeKindV1::Calls],
+                    3,
+                    100_000,
+                    100_000,
+                    Arc::clone(&cancellation),
+                ) else {
+                    return Some(partial_code_evidence());
+                };
+                let callers_truncated = impact.impacted.len() > MAX_CI_FAILURE_CALLER_EVIDENCE_V1;
+                let callers = impact
+                    .impacted
+                    .iter()
+                    .take(MAX_CI_FAILURE_CALLER_EVIDENCE_V1)
+                    .map(|impacted| CiFailureCallerEvidenceV1 {
+                        retrieval_anchor_id: record.observation.failure_anchor.clone(),
+                        caller_symbol: impacted.summary.occurrence.clone(),
+                        relation: if impacted.depth == 1 {
+                            CiCallerRelationV1::DirectCall
+                        } else {
+                            CiCallerRelationV1::TransitiveCall
+                        },
+                    })
+                    .collect::<Vec<_>>();
+                let test_symbols = impact
+                    .impacted
+                    .iter()
+                    .filter(|impacted| {
+                        impacted
+                            .summary
+                            .metadata
+                            .as_ref()
+                            .is_some_and(|metadata| metadata.kind.eq_ignore_ascii_case("test"))
+                    })
+                    .collect::<Vec<_>>();
+                let tests_truncated = test_symbols.len() > MAX_CI_FAILURE_TEST_EVIDENCE_V1;
+                let tests = test_symbols
+                    .into_iter()
+                    .take(MAX_CI_FAILURE_TEST_EVIDENCE_V1)
+                    .map(|impacted| CiFailureTestEvidenceV1 {
+                        retrieval_anchor_id: record.observation.failure_anchor.clone(),
+                        test_symbol: impacted.summary.occurrence.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                let generation_id = if let Some(identity) = code_index_identity.as_ref() {
+                    if identity.generation_id() != reader.generation() {
+                        return Some(partial_code_evidence());
+                    }
+                    identity.generation_id().clone()
                 } else {
-                    CiFailureLocalizationStateV1::Complete
-                },
-                coverage: if partial {
-                    CiFailureCoverageV1::Partial
-                } else {
-                    CiFailureCoverageV1::Complete
-                },
-                generation: Some(CiFailureGenerationEvidenceV1 {
-                    generation_id,
-                    retrieval_anchor_id: record.observation.failure_anchor.clone(),
-                }),
-                symbol: Some(CiFailureSymbolEvidenceV1 {
-                    retrieval_anchor_id: record.observation.failure_anchor.clone(),
-                    file,
-                    span,
-                    symbol,
-                }),
-                callers,
-                tests,
-            })
+                    reader.generation().clone()
+                };
+                let partial = callers_truncated || tests_truncated || !impact.complete;
+                Some(CiExactCodeEvidenceV1 {
+                    state: if partial {
+                        CiFailureLocalizationStateV1::Partial
+                    } else {
+                        CiFailureLocalizationStateV1::Complete
+                    },
+                    coverage: if partial {
+                        CiFailureCoverageV1::Partial
+                    } else {
+                        CiFailureCoverageV1::Complete
+                    },
+                    generation: Some(CiFailureGenerationEvidenceV1 {
+                        generation_id,
+                        retrieval_anchor_id: record.observation.failure_anchor.clone(),
+                    }),
+                    symbol: Some(CiFailureSymbolEvidenceV1 {
+                        retrieval_anchor_id: record.observation.failure_anchor.clone(),
+                        file,
+                        span,
+                        symbol,
+                    }),
+                    callers,
+                    tests,
+                })
             },
             label = "usecases.advisory.ci.resolve_code_anchor"
         ))

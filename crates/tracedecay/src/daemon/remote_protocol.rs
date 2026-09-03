@@ -17,9 +17,8 @@ use tracedecay_application::remote::capture_protocol::{
     RemoteOfflineCaptureProtocolServiceV1,
 };
 use tracedecay_application::remote::credential_admission::{
-    RemoteCredentialAdmissionPortV1, RemoteCredentialAdmissionServiceV1,
-    RemoteCredentialAuthorityRecordV1, RemoteCredentialClassV1, RemoteCredentialLookupErrorV1,
-    RemoteCredentialLookupPortV1, RemoteSessionBoundProtocolBodyV1,
+    RemoteCredentialAdmissionPortV1, RemoteCredentialAdmissionServiceV1, RemoteCredentialClassV1,
+    RemoteSessionBoundProtocolBodyV1,
 };
 use tracedecay_application::remote::protocol::{
     EnrollmentRequestV1, RemoteEnrollmentProtocolPortV1, RemoteProtocolExecutionControlV1,
@@ -40,7 +39,6 @@ use tracedecay_application::remote::replay::{
     RemoteReplayOutcomeV1, RemoteReplayProtocolAdapterV1, RemoteReplayRequestV1,
     RemoteReplayServiceV1,
 };
-use tracedecay_application::remote::status::RemoteOperationalStatusReadV1;
 use tracedecay_application::remote::transfer::{
     REMOTE_FRAME_TRANSFER_USE_CASE_ID_V1, RemoteFrameTransferErrorV1, RemoteFrameTransferPortV1,
     RemoteFrameTransferReceiptV1, RemoteFrameTransferRequestV1,

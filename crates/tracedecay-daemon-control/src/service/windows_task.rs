@@ -436,8 +436,12 @@ fn render_task_xml_for(spec: &DaemonServiceSpec, identity: &TaskIdentity) -> Res
         Some(profile_root) => profile_root.clone(),
         None => super::tracedecay_data_dir()?,
     };
+    #[cfg(windows)]
     let profile_root = fully_qualified_windows_path(&profile_root, "daemon profile root")?;
+    #[cfg(windows)]
     let executable_path = fully_qualified_windows_path(&spec.tracedecay_bin, "daemon executable")?;
+    #[cfg(not(windows))]
+    let executable_path = spec.tracedecay_bin.clone();
     let executable_text = windows_path_text(&executable_path, "daemon executable")?;
     validate_task_command_text(executable_text)?;
     let executable = xml_escape(executable_text);
@@ -513,42 +517,35 @@ fn windows_path_text<'a>(path: &'a Path, description: &str) -> Result<&'a str> {
     })
 }
 
+#[cfg(windows)]
 fn fully_qualified_windows_path(path: &Path, description: &str) -> Result<PathBuf> {
-    #[cfg(windows)]
+    if matches!(
+        path.components().next(),
+        Some(std::path::Component::Prefix(_))
+    ) && !path.has_root()
     {
-        if matches!(
-            path.components().next(),
-            Some(std::path::Component::Prefix(_))
-        ) && !path.has_root()
-        {
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "Windows Task Scheduler {description} path '{}' is drive-relative",
-                    path.display()
-                ),
-            });
-        }
-        let absolute = std::path::absolute(path).map_err(|error| TraceDecayError::Config {
+        return Err(TraceDecayError::Config {
             message: format!(
-                "could not fully qualify Windows Task Scheduler {description} path '{}': {error}",
+                "Windows Task Scheduler {description} path '{}' is drive-relative",
                 path.display()
             ),
-        })?;
-        if !absolute.is_absolute() {
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "Windows Task Scheduler {description} path '{}' is not fully qualified",
-                    path.display()
-                ),
-            });
-        }
-        Ok(absolute)
+        });
     }
-    #[cfg(not(windows))]
-    {
-        let _ = description;
-        Ok(path.to_path_buf())
+    let absolute = std::path::absolute(path).map_err(|error| TraceDecayError::Config {
+        message: format!(
+            "could not fully qualify Windows Task Scheduler {description} path '{}': {error}",
+            path.display()
+        ),
+    })?;
+    if !absolute.is_absolute() {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "Windows Task Scheduler {description} path '{}' is not fully qualified",
+                path.display()
+            ),
+        });
     }
+    Ok(absolute)
 }
 
 fn validate_task_command_text(command: &str) -> Result<()> {
@@ -665,8 +662,11 @@ fn validate_task_remote_tls(remote_tls: Option<&crate::RemoteBrainTlsConfig>) ->
                 ),
             });
         }
-        let path = fully_qualified_windows_path(path, description)?;
-        let path_text = windows_path_text(&path, description)?;
+        #[cfg(windows)]
+        let qualified_path = fully_qualified_windows_path(path, description)?;
+        #[cfg(windows)]
+        let path = qualified_path.as_path();
+        let path_text = windows_path_text(path, description)?;
         if path_text.chars().any(char::is_control) {
             return Err(TraceDecayError::Config {
                 message: format!(
@@ -678,33 +678,27 @@ fn validate_task_remote_tls(remote_tls: Option<&crate::RemoteBrainTlsConfig>) ->
     Ok(())
 }
 
+#[cfg(windows)]
 pub(super) fn materialize_service_spec_after_quiescence(
     spec: &DaemonServiceSpec,
 ) -> Result<DaemonServiceSpec> {
-    #[cfg(windows)]
-    {
-        let Some(package_id) = package_id_from_executable(&spec.tracedecay_bin) else {
-            return Ok(spec.clone());
-        };
-        let layout = local_runtime_layout(package_id)?;
-        ensure_private_runtime_layout(&layout)?;
-        if !windows_paths_equal(&spec.tracedecay_bin, &layout.executable)? {
-            let source = scoop_service_source(&spec.tracedecay_bin, package_id)?;
-            atomic_copy_private_executable(&source, &layout.executable)?;
-        } else {
-            tracedecay_runtime_core::windows_security::validate_private_file(&layout.executable)
-                .map_err(|error| {
-                    secure_path_error("validate service executable", &layout.executable, error)
-                })?;
-        }
-        let mut materialized = spec.clone();
-        materialized.tracedecay_bin = layout.executable;
-        Ok(materialized)
+    let Some(package_id) = package_id_from_executable(&spec.tracedecay_bin) else {
+        return Ok(spec.clone());
+    };
+    let layout = local_runtime_layout(package_id)?;
+    ensure_private_runtime_layout(&layout)?;
+    if !windows_paths_equal(&spec.tracedecay_bin, &layout.executable)? {
+        let source = scoop_service_source(&spec.tracedecay_bin, package_id)?;
+        atomic_copy_private_executable(&source, &layout.executable)?;
+    } else {
+        tracedecay_runtime_core::windows_security::validate_private_file(&layout.executable)
+            .map_err(|error| {
+                secure_path_error("validate service executable", &layout.executable, error)
+            })?;
     }
-    #[cfg(not(windows))]
-    {
-        Ok(spec.clone())
-    }
+    let mut materialized = spec.clone();
+    materialized.tracedecay_bin = layout.executable;
+    Ok(materialized)
 }
 
 #[cfg(windows)]
@@ -2347,6 +2341,7 @@ mod native {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::path::{Path, PathBuf};
 
     use super::*;
@@ -2489,16 +2484,21 @@ mod tests {
         Delete,
     }
 
+    #[derive(Clone, Copy, Debug, Ord, PartialOrd, Eq, PartialEq)]
+    enum FailurePoint {
+        Enablement,
+        Run,
+        Stop,
+        Delete,
+    }
+
     #[derive(Default)]
     struct FakeTaskScheduler {
         task: Option<TaskSnapshot>,
         xml: Option<String>,
         operations: Vec<Operation>,
         registration_failures_remaining: usize,
-        fail_next_enablement: bool,
-        fail_next_run: bool,
-        fail_next_stop: bool,
-        fail_next_delete: bool,
+        fail_next: BTreeSet<FailurePoint>,
         stop_leaves_running: bool,
         snapshots_until_exit: Option<usize>,
         snapshot_count: usize,
@@ -2518,10 +2518,7 @@ mod tests {
                 xml: Some(xml.to_string()),
                 operations: Vec::new(),
                 registration_failures_remaining: 0,
-                fail_next_enablement: false,
-                fail_next_run: false,
-                fail_next_stop: false,
-                fail_next_delete: false,
+                fail_next: BTreeSet::new(),
                 stop_leaves_running: false,
                 snapshots_until_exit: None,
                 snapshot_count: 0,
@@ -2530,6 +2527,10 @@ mod tests {
 
         fn state(&self) -> DaemonServiceState {
             state_from_snapshot(self.task)
+        }
+
+        fn fail_next(&mut self, point: FailurePoint) {
+            self.fail_next.insert(point);
         }
     }
 
@@ -2574,7 +2575,7 @@ mod tests {
         }
 
         fn set_enabled(&mut self, enabled: bool) -> Result<()> {
-            if std::mem::take(&mut self.fail_next_enablement) {
+            if self.fail_next.remove(&FailurePoint::Enablement) {
                 return Err(TraceDecayError::Config {
                     message: "fake scheduler enablement change failed".to_string(),
                 });
@@ -2593,7 +2594,7 @@ mod tests {
         }
 
         fn run(&mut self) -> Result<()> {
-            if std::mem::take(&mut self.fail_next_run) {
+            if self.fail_next.remove(&FailurePoint::Run) {
                 return Err(TraceDecayError::Config {
                     message: "fake scheduler run failed".to_string(),
                 });
@@ -2610,7 +2611,7 @@ mod tests {
         }
 
         fn stop(&mut self) -> Result<()> {
-            if std::mem::take(&mut self.fail_next_stop) {
+            if self.fail_next.remove(&FailurePoint::Stop) {
                 return Err(TraceDecayError::Config {
                     message: "fake scheduler stop failed".to_string(),
                 });
@@ -2625,7 +2626,7 @@ mod tests {
 
         fn delete(&mut self) -> Result<()> {
             self.operations.push(Operation::Delete);
-            if std::mem::take(&mut self.fail_next_delete) {
+            if self.fail_next.remove(&FailurePoint::Delete) {
                 return Err(TraceDecayError::Config {
                     message: "fake scheduler delete failed".to_string(),
                 });
@@ -3076,7 +3077,7 @@ mod tests {
     fn registration_restores_disabled_state_when_restart_fails() {
         let mut api =
             FakeTaskScheduler::with_task(DaemonServiceState::RunningDisabled, "<Task>old</Task>");
-        api.fail_next_run = true;
+        api.fail_next(FailurePoint::Run);
 
         register_task_xml_with(&mut api, "<Task>new</Task>").expect_err("restart must fail");
 
@@ -3092,7 +3093,7 @@ mod tests {
     fn registration_failure_still_restores_disabled_state() {
         let mut api =
             FakeTaskScheduler::with_task(DaemonServiceState::StoppedDisabled, "<Task>old</Task>");
-        api.fail_next_enablement = true;
+        api.fail_next(FailurePoint::Enablement);
 
         let error = register_task_xml_with(&mut api, "<Task>new</Task>")
             .expect_err("restoration must fail");
@@ -3146,7 +3147,7 @@ mod tests {
     fn failed_new_registration_cleanup_leaves_residual_task_disabled() {
         let mut api =
             FakeTaskScheduler::with_task(DaemonServiceState::StoppedEnabled, "<Task>new</Task>");
-        api.fail_next_delete = true;
+        api.fail_next(FailurePoint::Delete);
 
         let error = rollback_registration_with(&mut api, None, None)
             .expect_err("delete failure must surface");
@@ -3163,7 +3164,7 @@ mod tests {
     fn failed_no_start_transition_removes_new_registration() {
         let mut api = FakeTaskScheduler::default();
         register_task_xml_with(&mut api, "<Task>new</Task>").expect("register task");
-        api.fail_next_enablement = true;
+        api.fail_next(FailurePoint::Enablement);
 
         apply_state_with(&mut api, DaemonServiceState::StoppedDisabled)
             .expect_err("disable transition must fail");
@@ -3206,7 +3207,7 @@ mod tests {
     #[test]
     fn apply_state_restores_disabled_state_when_run_fails() {
         let mut api = FakeTaskScheduler::with_task(DaemonServiceState::StoppedDisabled, "<Task/>");
-        api.fail_next_run = true;
+        api.fail_next(FailurePoint::Run);
 
         apply_state_with(&mut api, DaemonServiceState::RunningDisabled).expect_err("run must fail");
 
@@ -3241,7 +3242,7 @@ mod tests {
     #[test]
     fn rollback_restores_disabled_state_even_when_stop_fails() {
         let mut api = FakeTaskScheduler::with_task(DaemonServiceState::RunningEnabled, "<Task/>");
-        api.fail_next_stop = true;
+        api.fail_next(FailurePoint::Stop);
 
         let error = restore_snapshot_with(
             &mut api,

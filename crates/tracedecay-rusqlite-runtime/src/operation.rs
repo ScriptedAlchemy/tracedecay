@@ -5,6 +5,7 @@ mod validation;
 use std::{error::Error, fmt};
 
 use rusqlite::Savepoint;
+use tracedecay_domain::ObservationSourceCursorV1;
 use tracedecay_store::{
     OutboxEffectStateV1, RepositoryWritePayloadV1, RuntimeSubmitRequestV1,
     StorageRuntimeContractErrorV1, TransactionalInboxReceiptV1, TransactionalOutboxEntryV1,
@@ -55,12 +56,25 @@ pub trait StorageOperationExecutor {
     ) -> rusqlite::Result<()> {
         Ok(())
     }
+
+    fn execute_closed(
+        &mut self,
+        savepoint: &Savepoint<'_>,
+        payload: &RepositoryWritePayloadV1,
+    ) -> Result<(), StorageOperationError> {
+        self.execute(savepoint, payload)
+            .map_err(StorageOperationError::Native)
+    }
 }
 
 #[derive(Debug)]
-pub(crate) enum StorageOperationError {
+pub enum StorageOperationError {
     Contract(StorageRuntimeContractErrorV1),
     Native(rusqlite::Error),
+    ObservationSourceCursorConflict {
+        expected: Box<Option<ObservationSourceCursorV1>>,
+        actual: Box<Option<ObservationSourceCursorV1>>,
+    },
 }
 
 impl fmt::Display for StorageOperationError {
@@ -68,6 +82,10 @@ impl fmt::Display for StorageOperationError {
         match self {
             Self::Contract(error) => write!(formatter, "invalid native storage operation: {error}"),
             Self::Native(error) => write!(formatter, "native SQLite operation failed: {error}"),
+            Self::ObservationSourceCursorConflict { expected, actual } => write!(
+                formatter,
+                "observation source cursor conflict: expected {expected:?}, found {actual:?}"
+            ),
         }
     }
 }
@@ -77,7 +95,14 @@ impl Error for StorageOperationError {
         match self {
             Self::Contract(error) => Some(error),
             Self::Native(error) => Some(error),
+            Self::ObservationSourceCursorConflict { .. } => None,
         }
+    }
+}
+
+impl From<rusqlite::Error> for StorageOperationError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Native(error)
     }
 }
 
@@ -88,12 +113,15 @@ pub(crate) fn execute<E: StorageOperationExecutor>(
 ) -> Result<(), StorageOperationError> {
     validation::validate(request).map_err(StorageOperationError::Contract)?;
     match &request.envelope().payload {
-        RepositoryWritePayloadV1::EnqueueOutbox(entry) => executor.enqueue_outbox(savepoint, entry),
-        RepositoryWritePayloadV1::ApplyInbox(entry) => executor.apply_inbox(savepoint, entry),
-        RepositoryWritePayloadV1::AcknowledgeOutbox(receipt) => {
-            executor.acknowledge_outbox(savepoint, receipt)
-        }
-        payload => executor.execute(savepoint, payload),
+        RepositoryWritePayloadV1::EnqueueOutbox(entry) => executor
+            .enqueue_outbox(savepoint, entry)
+            .map_err(StorageOperationError::Native),
+        RepositoryWritePayloadV1::ApplyInbox(entry) => executor
+            .apply_inbox(savepoint, entry)
+            .map_err(StorageOperationError::Native),
+        RepositoryWritePayloadV1::AcknowledgeOutbox(receipt) => executor
+            .acknowledge_outbox(savepoint, receipt)
+            .map_err(StorageOperationError::Native),
+        payload => executor.execute_closed(savepoint, payload),
     }
-    .map_err(StorageOperationError::Native)
 }

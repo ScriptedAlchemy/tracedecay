@@ -5,7 +5,7 @@
 //! parked, and [`rejection`] for settling work that will never run.
 
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     panic::{AssertUnwindSafe, catch_unwind},
     path::PathBuf,
     sync::{
@@ -23,7 +23,7 @@ use tokio::{
 };
 use tracedecay_store::{
     AdmissionConfigV1, OperationPriorityV1, RuntimeBatchCompatibilityV1, RuntimeInterruptionV1,
-    RuntimeRequestProbeV1, StoreRuntimeBindingV1,
+    RuntimeRequestProbeV1, StoreOperationIdV1, StoreRuntimeBindingV1,
 };
 
 #[cfg(not(any(unix, windows)))]
@@ -32,7 +32,7 @@ use crate::{
     RuntimeWriteAuthorityStage,
     admission::{FairQueue, QueueItem},
     checkpoint::{
-        CheckpointBlockers, CheckpointConfig, CheckpointDecision, CheckpointInterruption,
+        CheckpointBlockerSource, CheckpointConfig, CheckpointDecision, CheckpointInterruption,
         CheckpointOutcome, CheckpointPressure, CheckpointResult, CheckpointStatus, CheckpointWal,
         MaintenanceCheckpointMode, RusqliteCheckpointDriver, WriterCheckpointController,
     },
@@ -51,7 +51,7 @@ use super::{
     backup::{OnlineBackupCommand, run_online_backup},
     request::{
         AcceptedRequest, CheckpointCommand, CheckpointCommandKind, ExecutionBatch,
-        IncrementalVacuumCommand,
+        IncrementalVacuumCommand, SharedReply,
     },
     transaction::{BatchTiming, WriterReporting, process_batch},
 };
@@ -224,6 +224,7 @@ async fn dwell_for_batch(
     checkpoint_receiver: &mut mpsc::Receiver<CheckpointCommand>,
     shutdown_receiver: &mut mpsc::UnboundedReceiver<()>,
     queue: &mut FairQueue<AcceptedRequest>,
+    inflight: &mut HashMap<StoreOperationIdV1, SharedReply>,
     exact_sql_queue: &mut VecDeque<ExactSqlWriterCommand>,
     incremental_vacuum_queue: &mut VecDeque<IncrementalVacuumCommand>,
     online_backup_queue: &mut VecDeque<OnlineBackupCommand>,
@@ -253,7 +254,7 @@ async fn dwell_for_batch(
                 *incremental_vacuum_closed,
                 *online_backup_closed,
                 *checkpoint_closed,
-                false,
+                None,
             ),
         )
         .await
@@ -267,7 +268,7 @@ async fn dwell_for_batch(
                 if !interrupted && pending.accepts(&item, true) {
                     let bytes = item.admission_bytes();
                     let probe = Arc::clone(&item.probe);
-                    if enqueue(queue, item, telemetry) {
+                    if enqueue(queue, inflight, item, telemetry) {
                         pending.window.admit(bytes);
                         pending.probes.push(probe);
                     }
@@ -277,7 +278,7 @@ async fn dwell_for_batch(
                         return;
                     }
                 } else {
-                    let _ = enqueue(queue, item, telemetry);
+                    let _ = enqueue(queue, inflight, item, telemetry);
                     return;
                 }
             }
@@ -285,6 +286,7 @@ async fn dwell_for_batch(
                 apply_wake(
                     wake,
                     queue,
+                    inflight,
                     exact_sql_queue,
                     incremental_vacuum_queue,
                     online_backup_queue,
@@ -324,6 +326,7 @@ pub(super) struct Worker {
     pub(super) watermark_publisher: CommittedWatermarkPublisher,
     pub(super) checkpoint_status: watch::Sender<CheckpointStatus>,
     pub(super) checkpoint_pressure: watch::Sender<CheckpointPressure>,
+    pub(super) checkpoint_blockers: Arc<dyn CheckpointBlockerSource>,
     pub(super) started: SyncSender<Result<Option<u64>, WriterStartError>>,
 }
 
@@ -460,6 +463,7 @@ impl Worker {
         runtime: Runtime,
     ) {
         let mut queue = FairQueue::default();
+        let mut inflight = HashMap::new();
         let mut exact_sql_queue = VecDeque::new();
         let mut incremental_vacuum_queue = VecDeque::new();
         let mut online_backup_queue = VecDeque::new();
@@ -471,12 +475,13 @@ impl Worker {
         let mut checkpoint_closed = false;
         let mut prefer_auxiliary = true;
         let mut next_auxiliary = AuxiliaryWork::IncrementalVacuum;
-        let mut latest_blockers = CheckpointBlockers::default();
+        let mut hard_checkpoint_retry_due = None;
         loop {
             hotpath::measure_block!("rusqlite.writer.drain_ingress", {
                 drain_ingress(
                     &mut self.receiver,
                     &mut queue,
+                    &mut inflight,
                     &self.telemetry,
                     &mut input_closed,
                 );
@@ -536,11 +541,12 @@ impl Worker {
                     incremental_vacuum_closed,
                     online_backup_closed,
                     checkpoint_closed,
-                    false,
+                    None,
                 ));
                 apply_wake(
                     wake,
                     &mut queue,
+                    &mut inflight,
                     &mut exact_sql_queue,
                     &mut incremental_vacuum_queue,
                     &mut online_backup_queue,
@@ -558,10 +564,65 @@ impl Worker {
                 queue.is_empty() || matches!(&command.kind, CheckpointCommandKind::Passive { .. })
             });
             if requested_checkpoint_ready && let Some(command) = checkpoint_queue.pop_front() {
-                latest_blockers = command.snapshot_blockers.clone();
                 self.run_requested_checkpoint(&mut checkpoint, command);
+                hard_checkpoint_retry_due = checkpoint
+                    .hard_drain_required()
+                    .then(|| Instant::now() + HARD_CHECKPOINT_RETRY_INTERVAL);
                 continue;
             }
+            if checkpoint.hard_drain_required() {
+                cancel_waiting(&mut queue, &self.telemetry);
+                reject_unauthorized(&mut queue, &self.telemetry);
+                let now = Instant::now();
+                let retry_due = hard_checkpoint_retry_due.get_or_insert(now);
+                if now >= *retry_due {
+                    self.telemetry.checkpoint_hard_retry();
+                    self.run_scheduled_checkpoint(&mut checkpoint);
+                    hard_checkpoint_retry_due = checkpoint
+                        .hard_drain_required()
+                        .then(|| Instant::now() + HARD_CHECKPOINT_RETRY_INTERVAL);
+                    continue;
+                }
+                let wake = runtime.block_on(wait_for_work(
+                    &mut self.receiver,
+                    &mut self.exact_sql_receiver,
+                    &mut self.incremental_vacuum_receiver,
+                    &mut self.online_backup_receiver,
+                    &mut self.checkpoint_receiver,
+                    &mut self.shutdown_receiver,
+                    input_closed,
+                    exact_sql_closed,
+                    incremental_vacuum_closed,
+                    online_backup_closed,
+                    checkpoint_closed,
+                    Some(retry_due.saturating_duration_since(now)),
+                ));
+                if matches!(wake, WorkerWake::CheckpointRetry) {
+                    self.telemetry.checkpoint_hard_retry();
+                    self.run_scheduled_checkpoint(&mut checkpoint);
+                    hard_checkpoint_retry_due = checkpoint
+                        .hard_drain_required()
+                        .then(|| Instant::now() + HARD_CHECKPOINT_RETRY_INTERVAL);
+                } else {
+                    apply_wake(
+                        wake,
+                        &mut queue,
+                        &mut inflight,
+                        &mut exact_sql_queue,
+                        &mut incremental_vacuum_queue,
+                        &mut online_backup_queue,
+                        &mut checkpoint_queue,
+                        &self.telemetry,
+                        &mut input_closed,
+                        &mut exact_sql_closed,
+                        &mut incremental_vacuum_closed,
+                        &mut online_backup_closed,
+                        &mut checkpoint_closed,
+                    );
+                }
+                continue;
+            }
+            hard_checkpoint_retry_due = None;
             if let Some(auxiliary) = select_auxiliary_work(
                 !exact_sql_queue.is_empty(),
                 !incremental_vacuum_queue.is_empty(),
@@ -591,6 +652,10 @@ impl Worker {
                                 take_observed_vm(),
                                 lock_work.take(),
                             );
+                            self.run_scheduled_checkpoint(&mut checkpoint);
+                            hard_checkpoint_retry_due = checkpoint
+                                .hard_drain_required()
+                                .then(|| Instant::now() + HARD_CHECKPOINT_RETRY_INTERVAL);
                         } else {
                             reject_writer_command(command);
                         }
@@ -657,27 +722,23 @@ impl Worker {
                     incremental_vacuum_closed,
                     online_backup_closed,
                     checkpoint_closed,
-                    checkpoint.hard_drain_required(),
+                    None,
                 ));
-                if matches!(wake, WorkerWake::CheckpointRetry) {
-                    crate::hotpath_observe::record_checkpoint_hard_retry_wake();
-                    self.run_scheduled_checkpoint(&mut checkpoint, latest_blockers.clone());
-                } else {
-                    apply_wake(
-                        wake,
-                        &mut queue,
-                        &mut exact_sql_queue,
-                        &mut incremental_vacuum_queue,
-                        &mut online_backup_queue,
-                        &mut checkpoint_queue,
-                        &self.telemetry,
-                        &mut input_closed,
-                        &mut exact_sql_closed,
-                        &mut incremental_vacuum_closed,
-                        &mut online_backup_closed,
-                        &mut checkpoint_closed,
-                    );
-                }
+                apply_wake(
+                    wake,
+                    &mut queue,
+                    &mut inflight,
+                    &mut exact_sql_queue,
+                    &mut incremental_vacuum_queue,
+                    &mut online_backup_queue,
+                    &mut checkpoint_queue,
+                    &self.telemetry,
+                    &mut input_closed,
+                    &mut exact_sql_closed,
+                    &mut incremental_vacuum_closed,
+                    &mut online_backup_closed,
+                    &mut checkpoint_closed,
+                );
                 continue;
             }
             cancel_waiting(&mut queue, &self.telemetry);
@@ -693,7 +754,7 @@ impl Worker {
                     PendingBatchDwell::from_selected(&selected, &self.config, Instant::now())
             {
                 for item in selected {
-                    let _ = enqueue(&mut queue, item, &self.telemetry);
+                    let _ = enqueue(&mut queue, &mut inflight, item, &self.telemetry);
                 }
                 hotpath::measure_block!("rusqlite.writer.batch_dwell", {
                     runtime.block_on(dwell_for_batch(
@@ -705,6 +766,7 @@ impl Worker {
                         &mut self.checkpoint_receiver,
                         &mut self.shutdown_receiver,
                         &mut queue,
+                        &mut inflight,
                         &mut exact_sql_queue,
                         &mut incremental_vacuum_queue,
                         &mut online_backup_queue,
@@ -724,7 +786,24 @@ impl Worker {
                 reject_unauthorized(&mut queue, &self.telemetry);
                 continue;
             }
-            for batch in build_batches(selected, &self.config) {
+            let executing: Vec<StoreOperationIdV1> = selected
+                .iter()
+                .map(|item| item.operation_id().clone())
+                .collect();
+            for item in &selected {
+                inflight.insert(item.operation_id().clone(), item.shared_reply());
+            }
+            if !input_closed {
+                drain_ingress(
+                    &mut self.receiver,
+                    &mut queue,
+                    &mut inflight,
+                    &self.telemetry,
+                    &mut input_closed,
+                );
+            }
+            let mut batches = build_batches(selected, &self.config).into_iter();
+            while let Some(batch) = batches.next() {
                 self.telemetry.released(
                     u32::try_from(batch.items.len()).unwrap_or(u32::MAX),
                     batch.bytes,
@@ -738,10 +817,33 @@ impl Worker {
                     &self.state,
                     &self.watermark_publisher,
                 );
-                self.run_scheduled_checkpoint(&mut checkpoint, latest_blockers.clone());
+                self.run_scheduled_checkpoint(&mut checkpoint);
+                if checkpoint.hard_drain_required() {
+                    for pending in batches {
+                        for item in pending.items {
+                            inflight.remove(item.operation_id());
+                            let _ = enqueue(&mut queue, &mut inflight, item, &self.telemetry);
+                        }
+                    }
+                    hard_checkpoint_retry_due =
+                        Some(Instant::now() + HARD_CHECKPOINT_RETRY_INTERVAL);
+                    break;
+                }
                 if self.state.load(Ordering::Acquire) == WriterState::Faulted as u8 {
                     break;
                 }
+            }
+            if !input_closed {
+                drain_ingress(
+                    &mut self.receiver,
+                    &mut queue,
+                    &mut inflight,
+                    &self.telemetry,
+                    &mut input_closed,
+                );
+            }
+            for operation_id in executing {
+                inflight.remove(&operation_id);
             }
             prefer_auxiliary = true;
         }
@@ -754,9 +856,9 @@ impl Worker {
     fn run_scheduled_checkpoint(
         &self,
         checkpoint: &mut WriterCheckpointController<RusqliteCheckpointDriver>,
-        snapshot_blockers: CheckpointBlockers,
     ) {
         crate::hotpath_observe::record_scheduled_checkpoint_dispatch();
+        let snapshot_blockers = self.checkpoint_blockers.checkpoint_blockers();
         match hotpath::measure_block!("rusqlite.writer.checkpoint", {
             checkpoint.evaluate_scheduled(snapshot_blockers)
         }) {
@@ -1081,7 +1183,7 @@ fn build_batches(
 #[cfg(test)]
 mod auxiliary_scheduling_tests {
     use std::{
-        collections::VecDeque,
+        collections::{HashMap, VecDeque},
         sync::{
             Arc, Mutex,
             atomic::{AtomicBool, Ordering},
@@ -1095,12 +1197,12 @@ mod auxiliary_scheduling_tests {
     };
     use tracedecay_store::{
         OperationPriorityV1, RuntimeCancellationIdentityV1, RuntimeDeadlineV1,
-        RuntimeInterruptionV1, RuntimeRequestProbeV1,
+        RuntimeInterruptionV1, RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1, UnavailableReasonV1,
     };
 
     use crate::{
         RuntimeWriteAuthority, RuntimeWriteAuthorityError, RuntimeWriteAuthorityStage,
-        admission::{Admission, FairQueue},
+        admission::{Admission, FairQueue, QueueItem},
         telemetry::WriterTelemetry,
         test_support::{metadata, request as test_request},
     };
@@ -1191,6 +1293,130 @@ mod auxiliary_scheduling_tests {
         accepted
     }
 
+    fn accepted_request_with_reply(
+        operation: &str,
+        key: &str,
+    ) -> (
+        AcceptedRequest,
+        oneshot::Receiver<Result<RuntimeSubmitOutcomeV1, tracedecay_store::StorageRuntimeErrorV1>>,
+    ) {
+        let operation_metadata = metadata(operation, key, 'a');
+        let config = tracedecay_store::AdmissionConfigV1::default();
+        let admission = Admission::new(admission_limits(&config).expect("valid default limits"));
+        let permit = admission
+            .reserve(&operation_metadata)
+            .expect("fixture request fits admission");
+        let request = Arc::new(test_request(operation_metadata));
+        let probe = Arc::new(BatchProbe {
+            cancellation: request.control().cancellation.clone(),
+            deadline: request.control().deadline.clone(),
+            interruption: None,
+            isolated: false,
+            commit_started: AtomicBool::new(false),
+        });
+        let (reply, response) = oneshot::channel();
+        (
+            AcceptedRequest::new(
+                request,
+                probe,
+                Arc::new(UnrestrictedRuntimeWriteAuthority),
+                reply,
+                permit,
+            ),
+            response,
+        )
+    }
+
+    #[test]
+    fn duplicate_operation_attach_settles_both_requesters_with_the_same_outcome() {
+        let telemetry = WriterTelemetry::default();
+        let mut queue = FairQueue::default();
+        let mut inflight = HashMap::new();
+        let (leader, leader_rx) =
+            accepted_request_with_reply("operation.duplicate-attach", "key.duplicate-attach");
+        let (follower, follower_rx) =
+            accepted_request_with_reply("operation.duplicate-attach", "key.duplicate-attach");
+        assert!(enqueue(&mut queue, &mut inflight, leader, &telemetry));
+        assert!(enqueue(&mut queue, &mut inflight, follower, &telemetry));
+        let mut selected = queue.drain_fair();
+        assert_eq!(selected.len(), 1);
+        let outcome = RuntimeSubmitOutcomeV1::Unavailable {
+            reason: UnavailableReasonV1::Faulted,
+        };
+        selected
+            .pop()
+            .expect("queued leader")
+            .settle(Ok(outcome.clone()));
+        assert_eq!(
+            leader_rx.blocking_recv().expect("leader reply"),
+            Ok(outcome.clone())
+        );
+        assert_eq!(
+            follower_rx.blocking_recv().expect("follower reply"),
+            Ok(outcome)
+        );
+    }
+
+    #[test]
+    fn inflight_duplicate_attach_settles_both_requesters_with_the_same_outcome() {
+        let telemetry = WriterTelemetry::default();
+        let mut queue = FairQueue::default();
+        let mut inflight = HashMap::new();
+        let (leader, leader_rx) =
+            accepted_request_with_reply("operation.inflight-attach", "key.inflight-attach");
+        let (follower, follower_rx) =
+            accepted_request_with_reply("operation.inflight-attach", "key.inflight-attach");
+        assert!(enqueue(&mut queue, &mut inflight, leader, &telemetry));
+        let mut selected = queue.drain_fair();
+        assert_eq!(selected.len(), 1);
+        let executing = selected.pop().expect("dequeued leader");
+        inflight.insert(executing.operation_id().clone(), executing.shared_reply());
+        assert!(enqueue(&mut queue, &mut inflight, follower, &telemetry));
+        let outcome = RuntimeSubmitOutcomeV1::Unavailable {
+            reason: UnavailableReasonV1::Faulted,
+        };
+        executing.settle(Ok(outcome.clone()));
+        assert_eq!(
+            leader_rx.blocking_recv().expect("leader reply"),
+            Ok(outcome.clone())
+        );
+        assert_eq!(
+            follower_rx.blocking_recv().expect("follower reply"),
+            Ok(outcome)
+        );
+    }
+
+    #[test]
+    fn duplicate_operation_with_different_idempotency_is_rejected() {
+        let telemetry = WriterTelemetry::default();
+        let mut queue = FairQueue::default();
+        let mut inflight = HashMap::new();
+        let (leader, leader_rx) =
+            accepted_request_with_reply("operation.duplicate-conflict", "key.leader");
+        let (conflict, conflict_rx) =
+            accepted_request_with_reply("operation.duplicate-conflict", "key.conflict");
+        assert!(enqueue(&mut queue, &mut inflight, leader, &telemetry));
+        assert!(!enqueue(&mut queue, &mut inflight, conflict, &telemetry));
+        assert!(matches!(
+            conflict_rx.blocking_recv().expect("conflict reply"),
+            Err(tracedecay_store::StorageRuntimeErrorV1::DuplicateOperationInFlight {
+                operation_id
+            }) if operation_id == "operation.duplicate-conflict"
+        ));
+        let outcome = RuntimeSubmitOutcomeV1::Unavailable {
+            reason: UnavailableReasonV1::Faulted,
+        };
+        queue
+            .drain_fair()
+            .pop()
+            .expect("leader remains queued")
+            .settle(Ok(outcome.clone()));
+        assert_eq!(
+            leader_rx.blocking_recv().expect("leader reply"),
+            Ok(outcome)
+        );
+    }
+
     #[test]
     fn compatible_arrivals_within_window_share_one_execution_batch() {
         let enqueued_at = Instant::now();
@@ -1227,8 +1453,9 @@ mod auxiliary_scheduling_tests {
             .expect("first request opens a dwell window");
         let telemetry = WriterTelemetry::default();
         let mut queue = FairQueue::default();
+        let mut inflight = HashMap::new();
         for item in selected {
-            assert!(enqueue(&mut queue, item, &telemetry));
+            assert!(enqueue(&mut queue, &mut inflight, item, &telemetry));
         }
 
         let (write_tx, mut write_rx) = mpsc::channel(1);
@@ -1270,6 +1497,7 @@ mod auxiliary_scheduling_tests {
             &mut checkpoint_rx,
             &mut shutdown_rx,
             &mut queue,
+            &mut inflight,
             &mut exact_sql_queue,
             &mut vacuum_queue,
             &mut backup_queue,

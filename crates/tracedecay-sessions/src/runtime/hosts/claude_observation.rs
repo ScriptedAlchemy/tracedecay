@@ -791,7 +791,7 @@ async fn capture_frame_window<A: HostAdmission + ?Sized>(
     admission: &A,
     context: &FrameCaptureContext,
     observation_cursor: &mut Option<ClaudeSourceCursorV1>,
-    window: &mut Vec<Box<ClaudeSourceFrame>>,
+    window: &mut Vec<ClaudeSourceFrame>,
     stats: &mut ClaudeObservationIngestStats,
 ) -> Result<(), ClaudeWindowedCaptureFailure> {
     let frames = std::mem::take(window);
@@ -893,7 +893,7 @@ async fn apply_prepared_source_windowed<A: HostAdmission + ?Sized>(
         segments,
         mut stats,
     } = prepared;
-    let mut window: Vec<Box<ClaudeSourceFrame>> = Vec::new();
+    let mut window: Vec<ClaudeSourceFrame> = Vec::new();
     let fail = |stats: ClaudeObservationIngestStats, error: ClaudeObservationIngestError| {
         ClaudeWindowedCaptureFailure::Error(terminal_error_after_progress(stats, error))
     };
@@ -903,7 +903,7 @@ async fn apply_prepared_source_windowed<A: HostAdmission + ?Sized>(
         }
         match segment {
             ScannedSegment::Frame(frame) => {
-                window.push(frame);
+                window.push(*frame);
                 if window.len() >= CLAUDE_CAPTURE_WINDOW_FRAMES {
                     capture_frame_window(
                         admission,

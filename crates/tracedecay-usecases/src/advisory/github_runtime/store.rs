@@ -417,140 +417,140 @@ impl GitHubReviewAtomicRefreshStoreV1 for ProjectGitHubReviewStoreV1 {
         Box::pin(hotpath::future!(
             async move {
                 if !next.validate_for(request)
-                || !context_allows_feedback_operation(
+                    || !context_allows_feedback_operation(
+                        context,
+                        &self.scope,
+                        GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
+                        GITHUB_REVIEW_INGEST_USE_CASE_ID_V1,
+                    )
+                {
+                    return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
+                }
+                let Some(key) = self.key(request) else {
+                    return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
+                };
+                let Ok(encoded_next) = serde_json::to_string(next) else {
+                    return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
+                };
+                if encoded_next.len() > MAX_STORED_REFRESH_BYTES_V1 {
+                    return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
+                }
+                let Ok(transaction) = self
+                    .database
+                    .begin_write_transaction("record GitHub review refresh")
+                    .await
+                else {
+                    return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
+                };
+                let Ok(encoded) = self
+                    .database
+                    .get_metadata_unguarded(&transaction, &key)
+                    .await
+                else {
+                    let _ = transaction.rollback().await;
+                    return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
+                };
+                let current = match encoded {
+                    Some(encoded) => {
+                        let Some(state) = Self::decode(request, &encoded) else {
+                            let _ = transaction.rollback().await;
+                            return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
+                        };
+                        Some(state)
+                    }
+                    None => None,
+                };
+                let Some(manifest_key) = self.manifest_key() else {
+                    let _ = transaction.rollback().await;
+                    return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
+                };
+                let Ok(encoded_manifest) = self
+                    .database
+                    .get_metadata_unguarded(&transaction, &manifest_key)
+                    .await
+                else {
+                    let _ = transaction.rollback().await;
+                    return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
+                };
+                let mut manifest = match encoded_manifest {
+                    Some(encoded) => {
+                        let Some(manifest) = self.decode_manifest(&encoded) else {
+                            let _ = transaction.rollback().await;
+                            return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
+                        };
+                        manifest
+                    }
+                    None if current.is_none() => {
+                        let Some(manifest) = GitHubReviewStoreManifestV1::empty(self.scope.clone())
+                        else {
+                            let _ = transaction.rollback().await;
+                            return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
+                        };
+                        manifest
+                    }
+                    None => {
+                        let _ = transaction.rollback().await;
+                        return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
+                    }
+                };
+                let manifest_entry = manifest
+                    .entries
+                    .iter()
+                    .find(|entry| entry.request == *request);
+                if current.is_some() != manifest_entry.is_some()
+                    || current.as_ref().is_some_and(|state| {
+                        manifest_entry.is_none_or(|entry| entry.state_revision != state.revision)
+                    })
+                {
+                    let _ = transaction.rollback().await;
+                    return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
+                }
+                if current
+                    .as_ref()
+                    .is_some_and(|state| state.revision == next.revision)
+                {
+                    let _ = transaction.rollback().await;
+                    return GitHubReviewRefreshStoreCommitOutcomeV1::Duplicate;
+                }
+                if current.as_ref().map(|state| &state.revision) != expected_revision {
+                    let _ = transaction.rollback().await;
+                    return GitHubReviewRefreshStoreCommitOutcomeV1::Conflict;
+                }
+                if self
+                    .update_manifest_entry(&mut manifest, request, &next.revision)
+                    .is_none()
+                {
+                    let _ = transaction.rollback().await;
+                    return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
+                }
+                let Ok(encoded_manifest) = serde_json::to_string(&manifest) else {
+                    let _ = transaction.rollback().await;
+                    return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
+                };
+                if encoded_manifest.len() > MAX_STORED_MANIFEST_BYTES_V1 {
+                    let _ = transaction.rollback().await;
+                    return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
+                }
+                if !context_allows_feedback_operation(
                     context,
                     &self.scope,
                     GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
                     GITHUB_REVIEW_INGEST_USE_CASE_ID_V1,
-                )
-            {
-                return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
-            }
-            let Some(key) = self.key(request) else {
-                return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
-            };
-            let Ok(encoded_next) = serde_json::to_string(next) else {
-                return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
-            };
-            if encoded_next.len() > MAX_STORED_REFRESH_BYTES_V1 {
-                return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
-            }
-            let Ok(transaction) = self
-                .database
-                .begin_write_transaction("record GitHub review refresh")
-                .await
-            else {
-                return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
-            };
-            let Ok(encoded) = self
-                .database
-                .get_metadata_unguarded(&transaction, &key)
-                .await
-            else {
-                let _ = transaction.rollback().await;
-                return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
-            };
-            let current = match encoded {
-                Some(encoded) => {
-                    let Some(state) = Self::decode(request, &encoded) else {
-                        let _ = transaction.rollback().await;
-                        return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
-                    };
-                    Some(state)
-                }
-                None => None,
-            };
-            let Some(manifest_key) = self.manifest_key() else {
-                let _ = transaction.rollback().await;
-                return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
-            };
-            let Ok(encoded_manifest) = self
-                .database
-                .get_metadata_unguarded(&transaction, &manifest_key)
-                .await
-            else {
-                let _ = transaction.rollback().await;
-                return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
-            };
-            let mut manifest = match encoded_manifest {
-                Some(encoded) => {
-                    let Some(manifest) = self.decode_manifest(&encoded) else {
-                        let _ = transaction.rollback().await;
-                        return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
-                    };
-                    manifest
-                }
-                None if current.is_none() => {
-                    let Some(manifest) = GitHubReviewStoreManifestV1::empty(self.scope.clone())
-                    else {
-                        let _ = transaction.rollback().await;
-                        return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
-                    };
-                    manifest
-                }
-                None => {
-                    let _ = transaction.rollback().await;
-                    return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
-                }
-            };
-            let manifest_entry = manifest
-                .entries
-                .iter()
-                .find(|entry| entry.request == *request);
-            if current.is_some() != manifest_entry.is_some()
-                || current.as_ref().is_some_and(|state| {
-                    manifest_entry.is_none_or(|entry| entry.state_revision != state.revision)
-                })
-            {
-                let _ = transaction.rollback().await;
-                return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
-            }
-            if current
-                .as_ref()
-                .is_some_and(|state| state.revision == next.revision)
-            {
-                let _ = transaction.rollback().await;
-                return GitHubReviewRefreshStoreCommitOutcomeV1::Duplicate;
-            }
-            if current.as_ref().map(|state| &state.revision) != expected_revision {
-                let _ = transaction.rollback().await;
-                return GitHubReviewRefreshStoreCommitOutcomeV1::Conflict;
-            }
-            if self
-                .update_manifest_entry(&mut manifest, request, &next.revision)
-                .is_none()
-            {
-                let _ = transaction.rollback().await;
-                return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
-            }
-            let Ok(encoded_manifest) = serde_json::to_string(&manifest) else {
-                let _ = transaction.rollback().await;
-                return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
-            };
-            if encoded_manifest.len() > MAX_STORED_MANIFEST_BYTES_V1 {
-                let _ = transaction.rollback().await;
-                return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
-            }
-            if !context_allows_feedback_operation(
-                context,
-                &self.scope,
-                GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
-                GITHUB_REVIEW_INGEST_USE_CASE_ID_V1,
-            ) || self
-                .database
-                .set_metadata_unguarded(&transaction, &key, &encoded_next)
-                .await
-                .is_err()
-                || self
+                ) || self
                     .database
-                    .set_metadata_unguarded(&transaction, &manifest_key, &encoded_manifest)
+                    .set_metadata_unguarded(&transaction, &key, &encoded_next)
                     .await
                     .is_err()
-                || transaction.commit().await.is_err()
-            {
-                return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
-            }
-            GitHubReviewRefreshStoreCommitOutcomeV1::Recorded
+                    || self
+                        .database
+                        .set_metadata_unguarded(&transaction, &manifest_key, &encoded_manifest)
+                        .await
+                        .is_err()
+                    || transaction.commit().await.is_err()
+                {
+                    return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
+                }
+                GitHubReviewRefreshStoreCommitOutcomeV1::Recorded
             },
             label = "usecases.advisory.github.record_refresh"
         ))

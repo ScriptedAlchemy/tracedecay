@@ -586,8 +586,7 @@ mod tests {
             ],
         );
         insert_summary_evidence(
-            &db,
-            "cursor",
+            (&db, "cursor"),
             "cursor-native-session",
             "cursor-summary",
             10,
@@ -597,8 +596,7 @@ mod tests {
         )
         .await;
         insert_summary_evidence(
-            &db,
-            "codex",
+            (&db, "codex"),
             "codex-native-session",
             "codex-encrypted-summary",
             10,
@@ -611,8 +609,7 @@ mod tests {
         )
         .await;
         insert_summary_evidence(
-            &db,
-            "codex",
+            (&db, "codex"),
             "codex-native-session",
             "codex-unrelated-plaintext",
             12,
@@ -647,8 +644,7 @@ mod tests {
             ],
         );
         insert_summary_evidence(
-            &db,
-            "claude",
+            (&db, "claude"),
             "claude-native-session",
             "claude-summary",
             11,
@@ -691,8 +687,7 @@ mod tests {
             "encrypted Codex compaction must remain non-authoritative"
         );
         insert_summary_evidence(
-            &db,
-            "codex",
+            (&db, "codex"),
             "codex-native-session",
             "codex-plaintext-summary",
             11,
@@ -736,8 +731,7 @@ mod tests {
             ],
         );
         insert_summary_evidence(
-            &db,
-            "claude",
+            (&db, "claude"),
             "claude-native-session",
             "claude-boundary",
             10,
@@ -834,8 +828,7 @@ mod tests {
     }
 
     async fn insert_summary_evidence(
-        db: &RegisteredGlobalDb,
-        provider: &str,
+        source: (&RegisteredGlobalDb, &str),
         session_id: &str,
         message_id: &str,
         ordinal: i64,
@@ -843,6 +836,7 @@ mod tests {
         kind: &str,
         metadata: &Value,
     ) {
+        let (db, provider) = source;
         let transaction = db.begin_write_transaction().await.unwrap();
         transaction
             .execute(

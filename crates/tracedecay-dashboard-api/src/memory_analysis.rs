@@ -387,13 +387,11 @@ impl ScoredPair {
 
 /// A cached O(n²·d) pairwise-similarity computation over query-time encodings.
 ///
-/// `key` fingerprints the canonical fact state used for encoding. Vectors are
-/// not persisted; the cache retains only the fact metadata needed to render
-/// similarity pairs.
+/// Vectors are not persisted; the cache retains only the fact metadata needed
+/// to render similarity pairs. Cache identity is owned by the canonical store
+/// generation at the caller.
 #[derive(Debug)]
 pub struct SimilarityComputation {
-    /// Fingerprint of the canonical fact rows encoded for this computation.
-    pub key: (usize, i64, Option<String>, u64),
     pub dim: usize,
     /// Fact metadata (`fact_id`, content, category, `trust_score`, `retrieval_count`).
     pub facts: Vec<Value>,
@@ -415,7 +413,6 @@ pub struct SimilarityComputation {
 /// distribution + total over everything, lexical overlap only for the
 /// retained serveable prefix. Runs on the blocking pool with the scoring.
 pub fn build_similarity_computation(
-    key: (usize, i64, Option<String>, u64),
     dim: usize,
     facts: Vec<Value>,
     scored: Vec<(f64, usize, usize)>,
@@ -449,7 +446,6 @@ pub fn build_similarity_computation(
         return Err(MemoryAnalysisError::Interrupted);
     }
     Ok(SimilarityComputation {
-        key,
         dim,
         facts,
         pairs,
@@ -658,14 +654,8 @@ mod tests {
         ];
         // Descending scores: all three are scored, all three fit the cap.
         let scored = vec![(0.99, 0, 1), (0.5, 0, 2), (-0.2, 1, 2)];
-        let computation = build_similarity_computation(
-            (3, 0, Some(fact_c.as_str().to_owned()), 7),
-            4,
-            facts,
-            scored,
-            &read_control(),
-        )
-        .expect("complete canonical metadata must build similarity computation");
+        let computation = build_similarity_computation(4, facts, scored, &read_control())
+            .expect("complete canonical metadata must build similarity computation");
         assert_eq!(computation.total_pairs, 3);
         assert_eq!(computation.pairs.len(), 3);
         assert_eq!(computation.distribution["total_pairs"], 3);
@@ -679,9 +669,8 @@ mod tests {
     #[test]
     fn similarity_finalization_observes_live_interruption() {
         let control = FactReadControl::new(Arc::new(|| true));
-        let error =
-            build_similarity_computation((0, 0, None, 0), 0, Vec::new(), Vec::new(), &control)
-                .expect_err("interrupted finalization must not produce a cacheable result");
+        let error = build_similarity_computation(0, Vec::new(), Vec::new(), &control)
+            .expect_err("interrupted finalization must not produce a cacheable result");
 
         assert_eq!(error, MemoryAnalysisError::Interrupted);
     }

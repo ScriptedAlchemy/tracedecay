@@ -1,12 +1,12 @@
 use std::path::{Path, PathBuf};
 
 use crate::{
-    SqliteVmSnapshot, WalCheckpointSnapshot, WriterBatchTotals, WriterLockWorkSnapshot,
-    WriterOperationCounters, WriterTransactionTotals,
+    CheckpointPressure, CheckpointStatus, SqliteVmSnapshot, WalCheckpointSnapshot,
+    WriterBatchTotals, WriterLockWorkSnapshot, WriterOperationCounters, WriterTransactionTotals,
 };
 use tracedecay_store::CommitSequenceV1;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RepositoryWriterRuntimeSnapshot {
     pub operations: WriterOperationCounters,
     pub batches: WriterBatchTotals,
@@ -17,9 +17,11 @@ pub struct RepositoryWriterRuntimeSnapshot {
     pub sqlite_vm: SqliteVmSnapshot,
     pub wal: WalCheckpointSnapshot,
     pub lock_work: WriterLockWorkSnapshot,
+    pub checkpoint_status: CheckpointStatus,
+    pub checkpoint_pressure: CheckpointPressure,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RepositoryRuntimePhysicalSnapshot {
     pub healthy: bool,
     pub writer_present: bool,
@@ -39,7 +41,7 @@ pub struct RepositoryRuntimePhysicalSnapshot {
 
 impl RepositoryRuntimePhysicalSnapshot {
     #[hotpath::skip]
-    pub const fn is_drained(self) -> bool {
+    pub const fn is_drained(&self) -> bool {
         !self.writer_present
             && self.reader_handles == 0
             && self.queued_operations == 0

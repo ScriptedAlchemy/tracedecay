@@ -257,6 +257,14 @@ impl WriterTelemetry {
         });
     }
 
+    pub(crate) fn checkpoint_hard_retry(&self) {
+        self.update(|state| {
+            state.snapshot.wal.hard_retry_wakes =
+                state.snapshot.wal.hard_retry_wakes.saturating_add(1);
+        });
+        crate::hotpath_observe::record_checkpoint_hard_retry_wake();
+    }
+
     pub(crate) fn exact_sql_command(
         &self,
         commands: u64,

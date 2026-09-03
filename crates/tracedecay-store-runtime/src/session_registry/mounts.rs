@@ -26,8 +26,8 @@ use super::{
     ProjectRuntimeOwnerStateV1, RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1,
     RegisteredSchemaConvergenceMaintenance, RegisteredSessionOwnerV1, RemoteNodeStoreOwnerV1,
     Result, RetainedHookTasks, SessionGraphAttachmentStateV1, SessionGraphOwnerV1,
-    StoreRuntimeClientLease, StoreRuntimeOpenRequest, StoreRuntimeOpenResult, StoreRuntimeRegistry,
-    StoreRuntimeResolver, bind_ready_project_memory_graph, open_runtime,
+    StoreRuntimeClientLease, StoreRuntimeOpenRequest, StoreRuntimeOpenResult, StoreRuntimeOpenSpec,
+    StoreRuntimeRegistry, StoreRuntimeResolver, bind_ready_project_memory_graph, open_runtime,
     open_runtime_with_presence, registry_open_error, runtime_incarnation, session_registry_error,
 };
 use crate::register_registered_schema_installer;
@@ -113,12 +113,14 @@ impl DaemonSessionRuntimeRegistryV1 {
             open_runtime(
                 &registry,
                 resolver.as_ref(),
-                profile_shard.clone(),
-                incarnation,
-                None,
-                None,
-                true,
-                "mount profile authority store",
+                StoreRuntimeOpenSpec::new(
+                    profile_shard.clone(),
+                    incarnation,
+                    None,
+                    None,
+                    true,
+                    "mount profile authority store",
+                ),
             ),
             label = "daemon.store.profile_authority.bootstrap_open"
         )
@@ -360,12 +362,14 @@ impl DaemonSessionRuntimeRegistryV1 {
             Box::pin(open_runtime(
                 &self.registry,
                 self.resolver.as_ref(),
-                shard_id,
-                self.incarnation,
-                None,
-                None,
-                true,
-                "mount profile authority store",
+                StoreRuntimeOpenSpec::new(
+                    shard_id,
+                    self.incarnation,
+                    None,
+                    None,
+                    true,
+                    "mount profile authority store",
+                ),
             )),
             label = "daemon.store.profile_authority.mount_open"
         )
@@ -433,12 +437,14 @@ impl DaemonSessionRuntimeRegistryV1 {
             Box::pin(open_runtime(
                 &self.registry,
                 self.resolver.as_ref(),
-                shard_id.clone(),
-                self.incarnation,
-                Some(pin),
-                None,
-                true,
-                "mount profile session store",
+                StoreRuntimeOpenSpec::new(
+                    shard_id.clone(),
+                    self.incarnation,
+                    Some(pin),
+                    None,
+                    true,
+                    "mount profile session store",
+                ),
             )),
             label = "daemon.store.profile_sessions.open"
         )
@@ -513,11 +519,13 @@ impl DaemonSessionRuntimeRegistryV1 {
                     return;
                 };
                 let opened = DaemonSessionRuntimeRegistryV1::retain_memory_graph_runtime_for_task(
-                    identity,
-                    registry,
-                    graph_registry,
-                    graph_lifecycle_cancelled,
-                    incarnation,
+                    super::code_graph::MemoryGraphRuntimeTaskContext::new(
+                        identity,
+                        registry,
+                        graph_registry,
+                        graph_lifecycle_cancelled,
+                        incarnation,
+                    ),
                     task_shard_id,
                     owner,
                     cancellation,
@@ -625,12 +633,14 @@ impl DaemonSessionRuntimeRegistryV1 {
             open_runtime(
                 &self.registry,
                 self.resolver.as_ref(),
-                shard_id.clone(),
-                self.incarnation,
-                Some(pin),
-                None,
-                true,
-                "mount profile memory store",
+                StoreRuntimeOpenSpec::new(
+                    shard_id.clone(),
+                    self.incarnation,
+                    Some(pin),
+                    None,
+                    true,
+                    "mount profile memory store",
+                ),
             ),
             label = "daemon.store.profile_memory.open"
         )
@@ -1213,12 +1223,14 @@ impl DaemonSessionRuntimeRegistryV1 {
             open_runtime(
                 &self.registry,
                 self.resolver.as_ref(),
-                shard_id.clone(),
-                self.incarnation,
-                Some(pin),
-                None,
-                true,
-                "mount project session store",
+                StoreRuntimeOpenSpec::new(
+                    shard_id.clone(),
+                    self.incarnation,
+                    Some(pin),
+                    None,
+                    true,
+                    "mount project session store",
+                ),
             ),
             label = "daemon.store.project_sessions.open"
         )
@@ -1378,12 +1390,14 @@ impl DaemonSessionRuntimeRegistryV1 {
             open_runtime(
                 &self.registry,
                 self.resolver.as_ref(),
-                shard_id.clone(),
-                self.incarnation,
-                Some(pin),
-                None,
-                true,
-                "mount project memory store",
+                StoreRuntimeOpenSpec::new(
+                    shard_id.clone(),
+                    self.incarnation,
+                    Some(pin),
+                    None,
+                    true,
+                    "mount project memory store",
+                ),
             ),
             label = "daemon.store.project_memory.open"
         )
