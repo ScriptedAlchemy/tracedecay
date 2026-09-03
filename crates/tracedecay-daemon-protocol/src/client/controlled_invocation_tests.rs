@@ -598,6 +598,148 @@ async fn two_hundred_invocations_use_at_most_eight_connections_without_leaks() {
 }
 
 #[tokio::test]
+async fn transport_failure_purges_other_idle_connections_before_reconnect() {
+    const FIRST_WARM_ID: &str = "request.pool.restart.warm-first";
+    const SECOND_WARM_ID: &str = "request.pool.restart.warm-second";
+    const FAILED_ID: &str = "request.pool.restart.failed";
+    const RECOVERED_ID: &str = "request.pool.restart.recovered";
+    let (listener, endpoint) =
+        crate::transport::BrokerListener::bind(&crate::transport::default_loopback_endpoint())
+            .await
+            .expect("bind restart pool listener");
+    let accepts = Arc::new(AtomicUsize::new(0));
+    let server_accepts = Arc::clone(&accepts);
+    let (close_warm_connections, close_warm) = tokio::sync::oneshot::channel();
+    let (warm_connections_closed, warm_closed) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let first_stream = listener
+            .accept()
+            .await
+            .expect("accept first warm connection");
+        server_accepts.fetch_add(1, Ordering::SeqCst);
+        let (first_reader, mut first_writer) = first_stream.into_split();
+        let mut first_lines = BufReader::new(first_reader).lines();
+        first_lines
+            .next_line()
+            .await
+            .expect("read first warm handshake")
+            .expect("first warm handshake");
+        let first_request = first_lines
+            .next_line()
+            .await
+            .expect("read first warm invocation")
+            .expect("first warm invocation");
+
+        let second_stream = listener
+            .accept()
+            .await
+            .expect("accept second warm connection");
+        server_accepts.fetch_add(1, Ordering::SeqCst);
+        let (second_reader, mut second_writer) = second_stream.into_split();
+        let mut second_lines = BufReader::new(second_reader).lines();
+        second_lines
+            .next_line()
+            .await
+            .expect("read second warm handshake")
+            .expect("second warm handshake");
+        let second_request = second_lines
+            .next_line()
+            .await
+            .expect("read second warm invocation")
+            .expect("second warm invocation");
+
+        let first_request: DaemonInvocationRequest =
+            serde_json::from_str(&first_request).expect("typed first warm invocation");
+        let second_request: DaemonInvocationRequest =
+            serde_json::from_str(&second_request).expect("typed second warm invocation");
+        write_unavailable_response(&mut first_writer, &first_request.request_id).await;
+        write_unavailable_response(&mut second_writer, &second_request.request_id).await;
+
+        close_warm.await.expect("close warm pool connections");
+        drop(first_lines);
+        drop(first_writer);
+        drop(second_lines);
+        drop(second_writer);
+        warm_connections_closed
+            .send(())
+            .expect("report warm connections closed");
+
+        let recovered_stream = listener
+            .accept()
+            .await
+            .expect("accept recovered connection");
+        server_accepts.fetch_add(1, Ordering::SeqCst);
+        let (recovered_reader, mut recovered_writer) = recovered_stream.into_split();
+        let mut recovered_lines = BufReader::new(recovered_reader).lines();
+        recovered_lines
+            .next_line()
+            .await
+            .expect("read recovered handshake")
+            .expect("recovered handshake");
+        let recovered_request = recovered_lines
+            .next_line()
+            .await
+            .expect("read recovered invocation")
+            .expect("recovered invocation");
+        let recovered_request: DaemonInvocationRequest =
+            serde_json::from_str(&recovered_request).expect("typed recovered invocation");
+        assert_eq!(recovered_request.request_id, RECOVERED_ID);
+        write_unavailable_response(&mut recovered_writer, RECOVERED_ID).await;
+    });
+    let client = invocation_client(endpoint, "client.pool.restart");
+
+    let (first_warm, second_warm) = tokio::join!(
+        client.invoke(invocation_request(
+            FIRST_WARM_ID,
+            deadline_after(Duration::from_secs(5)),
+        )),
+        client.invoke(invocation_request(
+            SECOND_WARM_ID,
+            deadline_after(Duration::from_secs(5)),
+        )),
+    );
+    first_warm.expect("first warm invocation");
+    second_warm.expect("second warm invocation");
+    assert_eq!(
+        client
+            .pool
+            .idle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len(),
+        2,
+        "concurrent warmup must leave two idle pooled connections"
+    );
+
+    close_warm_connections
+        .send(())
+        .expect("request warm connection close");
+    warm_closed.await.expect("warm connections closed");
+
+    client
+        .invoke(invocation_request(
+            FAILED_ID,
+            deadline_after(Duration::from_secs(5)),
+        ))
+        .await
+        .expect_err("first invocation after restart must observe transport failure");
+    client
+        .invoke(invocation_request(
+            RECOVERED_ID,
+            deadline_after(Duration::from_secs(5)),
+        ))
+        .await
+        .expect("second invocation after restart must reconnect");
+
+    server.await.expect("restart pool server task");
+    assert_eq!(
+        accepts.load(Ordering::SeqCst),
+        3,
+        "recovery must accept exactly one fresh connection"
+    );
+}
+
+#[tokio::test]
 async fn concurrent_invocations_report_parallel_activity() {
     const FIRST_ID: &str = "request.concurrent-first";
     const SECOND_ID: &str = "request.concurrent-second";
