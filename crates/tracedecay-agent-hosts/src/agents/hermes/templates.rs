@@ -5,11 +5,14 @@
 //! `super::write_plugin_files` focused on filesystem orchestration.
 
 use crate::errors::{Result, TraceDecayError};
-use crate::ports::mcp_tools::{advertised_tools, format_capable_tool_names};
+use crate::ports::mcp_tools::{AdvertisedToolV1, format_capable_tool_names};
 
-pub(super) fn plugin_manifest(generator_commit: &str) -> String {
-    let tools = advertised_tools()
-        .into_iter()
+pub(super) fn plugin_manifest(
+    generator_commit: &str,
+    advertised_tools: &[AdvertisedToolV1],
+) -> String {
+    let tools = advertised_tools
+        .iter()
         .map(|tool| format!("  - {}", tool.name))
         .collect::<Vec<_>>()
         .join("\n");
@@ -45,9 +48,9 @@ with Path(__file__).with_name("schemas.json").open("r", encoding="utf-8") as sch
     .to_string()
 }
 
-pub(super) fn plugin_schemas_json() -> Result<String> {
-    let defs = advertised_tools()
-        .into_iter()
+pub(super) fn plugin_schemas_json(advertised_tools: &[AdvertisedToolV1]) -> Result<String> {
+    let defs = advertised_tools
+        .iter()
         .map(|tool| {
             serde_json::json!({
                 "name": tool.name,

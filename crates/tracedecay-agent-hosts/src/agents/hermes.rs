@@ -12,6 +12,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use crate::errors::{Result, TraceDecayError};
+use crate::ports::mcp_tools::{AdvertisedToolV1, advertised_tools};
 pub use profile_config::read_config_pinned_project_root;
 use profile_config::{disable_plugin, enable_plugin};
 
@@ -289,10 +290,22 @@ pub(crate) fn rendered_plugin_files(
     tracedecay_bin: &str,
     generator_commit: &str,
 ) -> Result<Vec<(&'static str, String)>> {
+    let tools = advertised_tools();
+    rendered_plugin_files_with_tools(tracedecay_bin, generator_commit, &tools)
+}
+
+fn rendered_plugin_files_with_tools(
+    tracedecay_bin: &str,
+    generator_commit: &str,
+    tools: &[AdvertisedToolV1],
+) -> Result<Vec<(&'static str, String)>> {
     Ok(vec![
-        ("plugin.yaml", templates::plugin_manifest(generator_commit)),
+        (
+            "plugin.yaml",
+            templates::plugin_manifest(generator_commit, tools),
+        ),
         ("schemas.py", templates::plugin_schemas()),
-        ("schemas.json", templates::plugin_schemas_json()?),
+        ("schemas.json", templates::plugin_schemas_json(tools)?),
         ("tools.py", templates::plugin_tools(tracedecay_bin)),
         ("__init__.py", templates::plugin_init(generator_commit)),
         ("cli.py", templates::PLUGIN_CLI_PY.to_string()),
@@ -681,6 +694,32 @@ mod registration_tests {
                 crate::PRODUCT_VERSION,
             ),
         );
+    }
+
+    #[test]
+    fn one_catalog_snapshot_renders_manifest_and_schemas() {
+        let tools = vec![crate::ports::mcp_tools::AdvertisedToolV1 {
+            name: "tracedecay_fixture".to_string(),
+            description: "fixture tool".to_string(),
+            input_schema: serde_json::Value::Null,
+            read_only: true,
+        }];
+
+        let files = rendered_plugin_files_with_tools("tracedecay", "fixture-commit", &tools)
+            .expect("fixture plugin must render");
+        let manifest = &files
+            .iter()
+            .find(|(relative, _)| *relative == "plugin.yaml")
+            .expect("manifest")
+            .1;
+        let schemas = &files
+            .iter()
+            .find(|(relative, _)| *relative == "schemas.json")
+            .expect("schemas")
+            .1;
+
+        assert!(manifest.contains("  - tracedecay_fixture"));
+        assert!(schemas.contains("\"name\": \"tracedecay_fixture\""));
     }
 
     #[test]
