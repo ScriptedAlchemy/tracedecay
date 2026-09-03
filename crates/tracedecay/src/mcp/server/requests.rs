@@ -1004,7 +1004,7 @@ impl McpServer {
 
     #[hotpath::skip]
     async fn apply_token_accounting(
-        &self,
+        self: &Arc<Self>,
         cg: &TraceDecay,
         tool_name: &str,
         result: &mut ToolResult,
@@ -1025,7 +1025,7 @@ impl McpServer {
             net_saved_tokens,
             raw_file_tokens,
         );
-        self.maybe_flush_worldwide().await;
+        self.maybe_flush_worldwide();
 
         // Append per-call token savings to the response content.
         if raw_file_tokens > 0
@@ -1129,7 +1129,7 @@ impl McpServer {
     #[allow(clippy::too_many_arguments)]
     #[hotpath::measure(label = "mcp.server.tools_call.complete.accounting", future = true)]
     async fn record_success_accounting(
-        &self,
+        self: &Arc<Self>,
         cg: &TraceDecay,
         accounting_project_root: &Path,
         tool_name: &str,
@@ -1209,7 +1209,7 @@ impl McpServer {
 
     #[hotpath::measure(label = "mcp.server.tools_call.complete", future = true)]
     async fn complete_tool_call(
-        &self,
+        self: &Arc<Self>,
         id: Value,
         tool_name: String,
         analytics_arguments: Value,
