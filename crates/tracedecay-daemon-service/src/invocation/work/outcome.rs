@@ -24,10 +24,17 @@ use super::super::current_micros;
 use super::{RegisteredWorkRuntime, application_problem};
 
 pub(super) fn offer_work_blocked_interval_receipts(
+    durable_write_signal: &super::WorkDurableWriteSignalV1,
     producer: Option<&tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
     canonical_project_scope: &str,
     receipts: &[tracedecay_domain::WorkBlockedIntervalReceiptV1],
 ) {
+    // PauseRun/ResumeRun call this only after run control has committed the
+    // receipt. Settled receipts can now be recovered even if direct
+    // observability enqueue below is unavailable.
+    if receipts.iter().any(|receipt| receipt.is_settled()) {
+        durable_write_signal.bump();
+    }
     let Some(producer) = producer else {
         return;
     };

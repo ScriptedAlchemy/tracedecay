@@ -221,6 +221,9 @@ pub(super) fn execute_journaled_workflow_effect(
     let Some(terminal) = record.terminal() else {
         return DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::Unavailable);
     };
+    // `execute_effect` has durably published this terminal before returning
+    // it. Wake project recovery even if response translation below fails.
+    registered.durable_write_signal.bump();
     let outcome = match workflow_effect_outcome(terminal) {
         Ok(outcome) => outcome,
         Err(problem) => return DaemonInvocationResponse::problem(request_id, problem),
