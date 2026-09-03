@@ -13,14 +13,14 @@ pub(crate) use super::{SessionProviderCoverage, SessionProviderCoverageState};
 pub(crate) use tracedecay_sessions::runtime::store_access::SESSION_MESSAGES_AFTER_SQL;
 
 impl RegisteredGlobalDb {
-    #[hotpath::skip]
+    #[hotpath::measure(future = true, label = "global_db.sessions.ingest_health")]
     pub async fn cursor_session_ingest_health(&self) -> Result<SessionIngestHealth, String> {
         SessionStoreAccess::new(self)
             .cursor_session_ingest_health()
             .await
     }
 
-    #[hotpath::skip]
+    #[hotpath::measure(future = true, label = "global_db.sessions.ingest_health_provider")]
     pub async fn session_ingest_health_for_provider(
         &self,
         provider: Option<&str>,
@@ -30,7 +30,7 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    #[hotpath::skip]
+    #[hotpath::measure(future = true, label = "global_db.sessions.has_message")]
     pub async fn has_session_message(
         &self,
         provider: &str,
@@ -41,12 +41,12 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    #[hotpath::skip]
+    #[hotpath::measure(future = true, label = "global_db.sessions.message_count")]
     pub async fn session_message_count(&self) -> Result<i64, String> {
         SessionStoreAccess::new(self).session_message_count().await
     }
 
-    #[hotpath::skip]
+    #[hotpath::measure(future = true, label = "global_db.sessions.project_message_count")]
     pub async fn session_message_count_for_project(
         &self,
         project_key: &str,
@@ -56,7 +56,7 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    #[hotpath::skip]
+    #[hotpath::measure(future = true, label = "global_db.sessions.messages_after")]
     pub async fn session_messages_after(
         &self,
         provider: &str,
@@ -74,7 +74,7 @@ impl RegisteredGlobalDb {
     /// `Ok(None)` is the truthful "this store holds no timestamped messages";
     /// a failed query or an unreadable timestamp stays an error rather than
     /// masquerading as an idle store.
-    #[hotpath::skip]
+    #[hotpath::measure(future = true, label = "global_db.sessions.latest_activity")]
     pub async fn latest_session_activity_secs(
         &self,
     ) -> tracedecay_domain::errors::Result<Option<i64>> {
@@ -85,7 +85,7 @@ impl RegisteredGlobalDb {
 
     /// Reads one message by provider and id. `Ok(None)` is truthful absence;
     /// snapshot, query, and row-decode failures stay typed errors.
-    #[hotpath::skip]
+    #[hotpath::measure(future = true, label = "global_db.sessions.get_message")]
     pub async fn get_session_message(
         &self,
         provider: &str,
@@ -100,7 +100,7 @@ impl RegisteredGlobalDb {
     ///
     /// `Ok(vec![])` is the truthful "nothing matched"; snapshot, query, and
     /// row-decode failures are typed errors instead of an empty result page.
-    #[hotpath::skip]
+    #[hotpath::measure(future = true, label = "global_db.sessions.search_messages")]
     pub async fn search_session_messages(
         &self,
         provider: &str,
@@ -116,7 +116,7 @@ impl RegisteredGlobalDb {
     /// Lists each session's latest canonical goal state, newest first.
     /// Goals with no native timestamp rank after all timestamped goals
     /// instead of being assigned a fabricated epoch-zero time.
-    #[hotpath::skip]
+    #[hotpath::measure(future = true, label = "global_db.sessions.recent_goals")]
     pub async fn recent_session_goals(
         &self,
         project_key: Option<&str>,
@@ -127,7 +127,7 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    #[hotpath::skip]
+    #[hotpath::measure(future = true, label = "global_db.sessions.workflow_facts")]
     pub async fn workflow_fact_rows(
         &self,
     ) -> Result<Vec<(String, Option<String>, Option<String>)>, TraceDecayError> {

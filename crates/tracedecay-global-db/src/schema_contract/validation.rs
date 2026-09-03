@@ -134,6 +134,7 @@ fn normalize_default(value: Option<&str>) -> Option<String> {
     })
 }
 
+#[hotpath::measure(label = "global_db.schema_contract.validate.table")]
 fn validate_table(
     contract: &Table,
     actual: &ActualTableMetadata,
@@ -263,6 +264,7 @@ fn primary_key_index_matches(actual: &ActualIndex, expected_columns: &[&str]) ->
             })
 }
 
+#[hotpath::measure(label = "global_db.schema_contract.validate.indexes")]
 fn validate_indexes_for_table(
     table: &str,
     actual: &[ActualIndex],
@@ -321,6 +323,7 @@ fn validate_indexes_for_table(
     Ok(())
 }
 
+#[hotpath::measure(future = true, label = "global_db.schema_contract.validate.trigger")]
 async fn validate_trigger(
     conn: &impl QueryExecutor,
     trigger: &super::invariants::Trigger,
@@ -362,6 +365,10 @@ async fn validate_trigger(
     }
 }
 
+#[hotpath::measure(
+    future = true,
+    label = "global_db.schema_contract.validate.autoincrement"
+)]
 async fn validate_observation_autoincrement(
     conn: &impl QueryExecutor,
 ) -> tracedecay_domain::errors::Result<()> {
@@ -454,6 +461,10 @@ async fn validate_contracts(
     Ok(())
 }
 
+#[hotpath::measure(
+    future = true,
+    label = "global_db.schema_contract.validate.session_temporal"
+)]
 pub async fn validate_session_temporal_schema_contract(
     conn: &impl QueryExecutor,
     table_names: &[&str],
@@ -461,12 +472,20 @@ pub async fn validate_session_temporal_schema_contract(
     validate_named_tables_and_indexes(conn, table_names).await
 }
 
+#[hotpath::measure(
+    future = true,
+    label = "global_db.schema_contract.validate.projection_receipts"
+)]
 pub async fn validate_released_v3_temporal_projection_receipt_contract(
     conn: &impl QueryExecutor,
 ) -> tracedecay_domain::errors::Result<()> {
     validate_contracts(conn, &[&SESSION_TEMPORAL_PROJECTION_RECEIPTS_V3]).await
 }
 
+#[hotpath::measure(
+    future = true,
+    label = "global_db.schema_contract.validate.graph_publication"
+)]
 pub async fn validate_session_graph_publication_schema_contract(
     conn: &impl QueryExecutor,
 ) -> tracedecay_domain::errors::Result<()> {
@@ -510,6 +529,10 @@ pub async fn validate_session_graph_publication_schema_contract(
     Ok(())
 }
 
+#[hotpath::measure(
+    future = true,
+    label = "global_db.schema_contract.query.graph_inventory"
+)]
 async fn read_graph_publication_inventory(
     conn: &impl QueryExecutor,
 ) -> tracedecay_domain::errors::Result<GraphPublicationSchemaInventory> {
@@ -572,12 +595,17 @@ fn belongs_to_graph_publication_namespace(name: &str, table: &str) -> bool {
     })
 }
 
+#[hotpath::measure(future = true, label = "global_db.schema_contract.validate.registry")]
 pub async fn validate_registry_schema_contract(
     conn: &impl QueryExecutor,
 ) -> tracedecay_domain::errors::Result<()> {
     validate_named_tables_and_indexes(conn, REGISTRY_TABLE_NAMES).await
 }
 
+#[hotpath::measure(
+    future = true,
+    label = "global_db.schema_contract.validate.remote_deletion"
+)]
 pub async fn validate_remote_deletion_schema_contract(
     conn: &impl QueryExecutor,
 ) -> tracedecay_domain::errors::Result<()> {
@@ -588,6 +616,7 @@ pub async fn validate_remote_deletion_schema_contract(
 ///
 /// Transcript, LCM, git-correlation, and workflow-index tables are independently owned by their
 /// schema modules; this validator intentionally neither claims nor validates those domains.
+#[hotpath::measure(future = true, label = "global_db.schema_contract.validate.authority")]
 pub async fn validate_authority_schema_contract(
     conn: &impl QueryExecutor,
 ) -> tracedecay_domain::errors::Result<()> {

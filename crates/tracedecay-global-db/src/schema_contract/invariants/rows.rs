@@ -68,6 +68,7 @@ fn bounded_row_audit_invariants() -> impl Iterator<Item = &'static Invariant> {
     })
 }
 
+#[hotpath::measure(future = true, label = "global_db.schema_contract.audit.probe")]
 pub(super) async fn query_has_rows(
     conn: &impl QueryExecutor,
     query: &str,
@@ -112,6 +113,7 @@ pub(super) fn encode_authority_json<T: Serialize>(
         .map_err(|error| authority_violation(format!("cannot encode {authority}: {error}")))
 }
 
+#[hotpath::measure(future = true, label = "global_db.schema_contract.audit.receipt_rows")]
 pub(super) async fn validate_receipt_authority_rows(
     conn: &impl QueryExecutor,
     after_rowid: i64,
@@ -201,6 +203,10 @@ pub(super) async fn validate_receipt_authority_rows(
     }
 }
 
+#[hotpath::measure(
+    future = true,
+    label = "global_db.schema_contract.audit.observation_rows"
+)]
 pub(super) async fn validate_observation_authority_rows(
     conn: &impl QueryExecutor,
     after_sequence: i64,
@@ -289,6 +295,10 @@ pub(super) async fn validate_observation_authority_rows(
     }
 }
 
+#[hotpath::measure(
+    future = true,
+    label = "global_db.schema_contract.audit.source_cursor_rows"
+)]
 pub(super) async fn validate_source_cursor_authority_rows(
     conn: &impl QueryExecutor,
 ) -> tracedecay_domain::errors::Result<()> {
@@ -305,6 +315,10 @@ pub(super) async fn validate_source_cursor_authority_rows(
     }
 }
 
+#[hotpath::measure(
+    future = true,
+    label = "global_db.schema_contract.audit.source_cursor_chunk"
+)]
 pub(super) async fn validate_source_cursor_authority_chunk(
     conn: &impl QueryExecutor,
     mut cursor_rowid: i64,
@@ -441,6 +455,7 @@ pub(super) async fn validate_source_cursor_authority_chunk(
     Ok((cursor_rowid, advance_rowid, page_rows < AUDIT_PAGE_ROWS))
 }
 
+#[hotpath::measure(future = true, label = "global_db.schema_contract.audit.mutable_rows")]
 pub(super) async fn validate_mutable_invariant_rows(
     conn: &impl QueryExecutor,
 ) -> tracedecay_domain::errors::Result<()> {
