@@ -30,11 +30,12 @@ use tracedecay_store::{
     RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeReadCoverageV1,
     RuntimeReadOperationV1, RuntimeReadRequestV1, RuntimeReadResultV1, RuntimeRequestControlV1,
     RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1, RuntimeTransactionIdV1,
-    RuntimeTransactionScopeV1, StoreClientIdV1, StoreIdempotencyKeyV1, StoreOperationIdV1,
-    StoreOperationMetadataV1, StoredObservation, StoredObservationRowV1,
+    RuntimeTransactionScopeV1, StorageRuntimeErrorV1, StoreClientIdV1, StoreIdempotencyKeyV1,
+    StoreOperationIdV1, StoreOperationMetadataV1, StoredObservation, StoredObservationRowV1,
 };
 
 use tracedecay_runtime_core::db::{Database, DatabaseEngineReadSnapshot, DatabaseRuntimeClientV1};
+use tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRegistryFailure;
 use tracedecay_rusqlite_runtime::repository::observation_cursor_authority::{
     COMMIT_SOURCE_CURSOR_SQL, READ_CURSOR_ADVANCE_SQL, READ_SOURCE_CURSOR_SQL,
     RECORD_CURSOR_ADVANCE_SQL, cursor_advance_ledger_row_matches,
@@ -1100,37 +1101,6 @@ impl PreparedObservationPersist {
 async fn persist_observation_writes(
     store: &GlobalDbObservationStore,
     writes: Vec<AnchoredObservationWrite>,
-    replay_peer_commit: bool,
-) -> ObservationStoreResult<Vec<ObservationBatchPersistOutcome>> {
-    if !replay_peer_commit {
-        return persist_observation_writes_once(store, writes).await;
-    }
-    // Same-rollout catch-up and hook ingest share one command digest, so the
-    // writer rejects the loser as a duplicate operation id until the winner
-    // commits. Re-preflight after each yield so that commit becomes a typed
-    // ExactDuplicate instead of authority_write_failed.
-    const PEER_PERSIST_ATTEMPTS: usize = 8;
-    let mut leftover = writes;
-    let mut attempt = 0;
-    loop {
-        attempt += 1;
-        let retry_writes = (attempt < PEER_PERSIST_ATTEMPTS).then(|| leftover.clone());
-        match persist_observation_writes_once(store, leftover).await {
-            Err(error)
-                if is_peer_persist_race(&error)
-                    && let Some(retry_writes) = retry_writes =>
-            {
-                tokio::task::yield_now().await;
-                leftover = retry_writes;
-            }
-            other => return other,
-        }
-    }
-}
-
-async fn persist_observation_writes_once(
-    store: &GlobalDbObservationStore,
-    writes: Vec<AnchoredObservationWrite>,
 ) -> ObservationStoreResult<Vec<ObservationBatchPersistOutcome>> {
     crate::hotpath_observe::record_transaction_rows(1);
     let preflight = load_observation_preflight(&store.database, &writes).await?;
@@ -1198,18 +1168,6 @@ async fn persist_observation_writes_once(
         .collect()
 }
 
-fn is_peer_persist_race(error: &ObservationStoreError) -> bool {
-    match error {
-        ObservationStoreError::CursorConflict { .. } => true,
-        ObservationStoreError::Storage { source, .. } => {
-            let message = source.to_string();
-            message.contains("observation source cursor conflict")
-                || message.contains("duplicate operation id reached persistent writer")
-        }
-        _ => false,
-    }
-}
-
 impl ObservationStore for GlobalDbObservationStore {
     #[hotpath::skip]
     async fn persist_observation(
@@ -1245,7 +1203,7 @@ impl ObservationStore for GlobalDbObservationStore {
             "observation.admission.batch",
             writes = writes.len()
         );
-        persist_observation_writes(self, writes, true)
+        persist_observation_writes(self, writes)
             .instrument(span)
             .await
     }
@@ -1895,18 +1853,17 @@ async fn dispatch_runtime_submit(
 
 fn map_observation_submit_error(
     operation: &'static str,
-    error: impl std::fmt::Debug,
+    error: StoreRuntimeRegistryFailure,
 ) -> ObservationStoreError {
-    let message = format!("{error:?}");
-    if message.contains("observation source cursor conflict")
-        || message.contains("duplicate operation id reached persistent writer")
-    {
-        return ObservationStoreError::CursorConflict {
-            expected: Box::new(None),
-            actual: Box::new(None),
-        };
+    match error {
+        StoreRuntimeRegistryFailure::StorageRuntime(error) => match *error {
+            StorageRuntimeErrorV1::ObservationSourceCursorConflict { expected, actual } => {
+                ObservationStoreError::CursorConflict { expected, actual }
+            }
+            error => runtime_storage_error(operation, error.to_string()),
+        },
+        error => runtime_storage_error(operation, format!("{error:?}")),
     }
-    runtime_storage_error(operation, message)
 }
 
 fn runtime_command_value(

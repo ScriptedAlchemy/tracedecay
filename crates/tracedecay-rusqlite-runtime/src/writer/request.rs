@@ -1,4 +1,7 @@
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::{Arc, Mutex},
+    time::Instant,
+};
 
 use tokio::sync::oneshot;
 use tracedecay_store::{
@@ -18,11 +21,75 @@ use crate::{
 
 pub(super) type RequestResult = Result<RuntimeSubmitOutcomeV1, StorageRuntimeErrorV1>;
 
+struct ReplyState {
+    leader: Option<oneshot::Sender<RequestResult>>,
+    followers: Vec<oneshot::Sender<RequestResult>>,
+    settled: Option<RequestResult>,
+}
+
+#[derive(Clone)]
+pub(super) struct SharedReply {
+    inner: Arc<Mutex<ReplyState>>,
+}
+
+impl SharedReply {
+    fn new(leader: oneshot::Sender<RequestResult>) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(ReplyState {
+                leader: Some(leader),
+                followers: Vec::new(),
+                settled: None,
+            })),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, ReplyState> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub(super) fn attach(&self, follower: oneshot::Sender<RequestResult>) {
+        let mut state = self.lock();
+        if let Some(result) = &state.settled {
+            let result = result.clone();
+            drop(state);
+            let _ = follower.send(result);
+            return;
+        }
+        state.followers.push(follower);
+    }
+
+    pub(super) fn attach_request(&self, follower: AcceptedRequest) {
+        if let Some(sender) = follower.into_leader_sender() {
+            self.attach(sender);
+        }
+    }
+
+    fn take_leader(&self) -> Option<oneshot::Sender<RequestResult>> {
+        self.lock().leader.take()
+    }
+
+    fn settle(&self, result: RequestResult) {
+        let mut state = self.lock();
+        state.settled = Some(result.clone());
+        let leader = state.leader.take();
+        let followers = std::mem::take(&mut state.followers);
+        drop(state);
+        for follower in followers {
+            let _ = follower.send(result.clone());
+        }
+        if let Some(leader) = leader {
+            let _ = leader.send(result);
+        }
+    }
+}
+
 pub(super) struct AcceptedRequest {
     pub(super) request: Arc<RuntimeSubmitRequestV1>,
     pub(super) probe: Arc<dyn RuntimeRequestProbeV1>,
     pub(super) authority: Arc<dyn RuntimeWriteAuthority>,
-    reply: oneshot::Sender<RequestResult>,
+    reply: SharedReply,
     pub(super) enqueued_at: Instant,
     _permit: Permit,
 }
@@ -39,14 +106,28 @@ impl AcceptedRequest {
             request,
             probe,
             authority,
-            reply,
+            reply: SharedReply::new(reply),
             enqueued_at: Instant::now(),
             _permit: permit,
         }
     }
 
+    pub(super) fn shared_reply(&self) -> SharedReply {
+        self.reply.clone()
+    }
+
+    pub(super) fn attach_follower(&mut self, follower: Self) {
+        if let Some(sender) = follower.into_leader_sender() {
+            self.reply.attach(sender);
+        }
+    }
+
+    fn into_leader_sender(self) -> Option<oneshot::Sender<RequestResult>> {
+        self.reply.take_leader()
+    }
+
     pub(super) fn settle(self, result: RequestResult) {
-        let _ = self.reply.send(result);
+        self.reply.settle(result);
         // `_permit` is dropped only after the final reply has been sent.
     }
 }

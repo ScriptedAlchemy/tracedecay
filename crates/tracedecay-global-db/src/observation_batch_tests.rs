@@ -822,19 +822,21 @@ async fn persist_observations_recovers_a_peer_commit_as_exact_duplicate() {
     let right = right.expect("concurrent persist must not surface Storage");
     assert_eq!(left.len(), 1);
     assert_eq!(right.len(), 1);
-    let committed = matches!(left[0].outcome(), ObservationPersistOutcome::Committed(_))
-        || matches!(right[0].outcome(), ObservationPersistOutcome::Committed(_));
-    let duplicate = matches!(
-        left[0].outcome(),
-        ObservationPersistOutcome::ExactDuplicate(_)
-            | ObservationPersistOutcome::CoveredDuplicate(_)
-    ) || matches!(
-        right[0].outcome(),
-        ObservationPersistOutcome::ExactDuplicate(_)
-            | ObservationPersistOutcome::CoveredDuplicate(_)
+    let persist_class = |outcome: &ObservationPersistOutcome| match outcome {
+        ObservationPersistOutcome::Committed(_) => "committed",
+        ObservationPersistOutcome::ExactDuplicate(_) => "exact_duplicate",
+        ObservationPersistOutcome::CoveredDuplicate(_) => "covered_duplicate",
+    };
+    let left_class = persist_class(left[0].outcome());
+    let right_class = persist_class(right[0].outcome());
+    let attached = left_class == right_class;
+    let serialized_replay = matches!(
+        (left_class, right_class),
+        ("committed", "exact_duplicate" | "covered_duplicate")
+            | ("exact_duplicate" | "covered_duplicate", "committed")
     );
     assert!(
-        committed && duplicate,
-        "one writer commits and the loser must recover as a typed duplicate, got {left:?} / {right:?}"
+        attached || serialized_replay,
+        "identical peer submits must attach to one writer outcome or serialize as commit+replay, got {left:?} / {right:?}"
     );
 }
