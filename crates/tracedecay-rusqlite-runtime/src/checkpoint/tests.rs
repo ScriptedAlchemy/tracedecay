@@ -84,7 +84,7 @@ fn report(busy: bool, log_frames: u64, checkpointed_frames: u64) -> CheckpointRe
 
 fn inventory(id: &str) -> CheckpointBlockers {
     CheckpointBlockers {
-        blockers: vec![CheckpointBlocker {
+        blockers: vec![CheckpointBlocker::SnapshotLease {
             lease_id: SnapshotLeaseIdV1::try_from(id.to_owned()).unwrap(),
             age: Duration::from_secs(3),
         }],

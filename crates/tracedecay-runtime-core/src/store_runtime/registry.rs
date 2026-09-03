@@ -73,6 +73,10 @@ pub use retirement::{
 pub use tracedecay_rusqlite_runtime::repository::{
     RepositoryRuntimePhysicalSnapshot, RepositoryWriterRuntimeSnapshot,
 };
+pub use tracedecay_rusqlite_runtime::{
+    CheckpointBlocker, CheckpointBlockers, CheckpointOutcome, CheckpointPressure, CheckpointStatus,
+    CheckpointWal,
+};
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StoreRuntimeKey {
     shard_id: StoreShardIdV1,

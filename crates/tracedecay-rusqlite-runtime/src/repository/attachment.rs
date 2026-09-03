@@ -22,8 +22,8 @@ use crate::{
     connection::{OpenedDatabaseFile, OpenedDatabaseFileError},
     exact_sql::{ExactSqlError, ExactSqlHandle},
     reader::{
-        ExistingReaderLocator, ReaderAcquireError, ReaderPool, ReaderQueryExecutor,
-        ReaderStartError,
+        ExistingReaderLocator, ReaderAcquireError, ReaderCheckpointBlockers, ReaderPool,
+        ReaderQueryExecutor, ReaderStartError,
     },
 };
 
@@ -205,11 +205,13 @@ impl RepositoryPhysicalAttachmentFactory {
                     ));
                 }
             };
+        let checkpoint_blockers = ReaderCheckpointBlockers::default();
         start_hook(AttachmentWorkerStartStage::BeforeWriter);
-        let writer_result = PersistentWriter::start(
+        let writer_result = PersistentWriter::start_with_checkpoint_blockers(
             writer_locator,
             admission.clone(),
             ConcreteRepositoryWriteExecutor::default(),
+            Arc::new(checkpoint_blockers.clone()),
         );
         start_hook(AttachmentWorkerStartStage::AfterWriter);
         let writer = match writer_result {
@@ -224,11 +226,12 @@ impl RepositoryPhysicalAttachmentFactory {
             }
         };
         start_hook(AttachmentWorkerStartStage::BeforeReaders);
-        let readers_result = ReaderPool::start_with_checkpoint_pressure(
+        let readers_result = ReaderPool::start_with_checkpoint_control(
             reader_locator,
             admission.readers,
             RepositoryRuntimeReadExecutor::default(),
             Some(writer.checkpoint_handle().pressure_subscription()),
+            checkpoint_blockers,
         );
         start_hook(AttachmentWorkerStartStage::AfterReaders);
         let readers = match readers_result {
@@ -422,9 +425,9 @@ impl RepositoryRuntimePhysicalAttachment {
             writer_busy_events: writer_telemetry
                 .as_ref()
                 .map_or(0, |snapshot| snapshot.busy_events),
-            writer: writer_telemetry
-                .as_ref()
-                .map(|snapshot| RepositoryWriterRuntimeSnapshot {
+            writer: writer
+                .zip(writer_telemetry.as_ref())
+                .map(|(writer, snapshot)| RepositoryWriterRuntimeSnapshot {
                     operations: snapshot.operations,
                     batches: snapshot.batches,
                     error_events: snapshot.error_events,
@@ -434,6 +437,8 @@ impl RepositoryRuntimePhysicalAttachment {
                     sqlite_vm: snapshot.sqlite_vm,
                     wal: snapshot.wal,
                     lock_work: snapshot.lock_work,
+                    checkpoint_status: writer.checkpoint_handle().status(),
+                    checkpoint_pressure: writer.checkpoint_handle().pressure(),
                 }),
             wal_bytes: wal_bytes(&state.database_path),
             snapshot_admissions: occupancy.map_or(0, |snapshot| snapshot.snapshot_admissions),
@@ -899,7 +904,12 @@ fn infrastructure(operation: impl Into<String>) -> StorageRuntimeErrorV1 {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, time::Duration};
+    use std::{
+        fs,
+        sync::mpsc,
+        thread,
+        time::{Duration, Instant},
+    };
 
     use tempfile::TempDir;
     use tracedecay_domain::LocatorDigest;
@@ -1186,6 +1196,139 @@ mod tests {
                 AdmissionConfigV1::default(),
             )
             .unwrap()
+    }
+
+    #[test]
+    fn hard_wal_pressure_queues_further_writes_until_the_snapshot_releases() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("hard-pressure.sqlite3");
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let journal_mode: String = connection
+            .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_mode, "wal");
+        drop(connection);
+        let path = path.canonicalize().unwrap();
+        let mut wal_path = path.as_os_str().to_owned();
+        wal_path.push("-wal");
+        let wal_path = PathBuf::from(wal_path);
+        let binding = binding();
+        let mut admission = AdmissionConfigV1::default();
+        admission.wal.soft_limit_bytes = 8 * 1024;
+        admission.wal.hard_limit_bytes = 16 * 1024;
+        let attachment = RepositoryPhysicalAttachmentFactory
+            .attach(binding.clone(), locator(&binding), path, admission)
+            .unwrap();
+        let handle = attachment.exact_sql_handle().unwrap();
+        handle
+            .execute_batch(
+                "CREATE TABLE hard_pressure (id INTEGER PRIMARY KEY, payload BLOB NOT NULL)"
+                    .to_owned(),
+            )
+            .unwrap();
+        let snapshot = handle.begin_read_snapshot(Duration::from_secs(1)).unwrap();
+        snapshot
+            .query(statement("SELECT COUNT(*) FROM hard_pressure", vec![]))
+            .unwrap();
+
+        handle
+            .execute(statement(
+                "INSERT INTO hard_pressure (id, payload) VALUES (?, ?)",
+                vec![
+                    ExactSqlValue::Integer(1),
+                    ExactSqlValue::Blob(vec![7; 128 * 1024]),
+                ],
+            ))
+            .unwrap();
+        let checkpoint = {
+            let state = attachment.lock_state();
+            state
+                .writer
+                .as_ref()
+                .expect("writer remains attached")
+                .checkpoint_handle()
+        };
+        let pressure_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if matches!(
+                checkpoint.pressure(),
+                crate::CheckpointPressure::BlockGeneral { .. }
+            ) {
+                break;
+            }
+            assert!(
+                Instant::now() < pressure_deadline,
+                "the first over-hard-limit write must publish hard checkpoint pressure"
+            );
+            thread::yield_now();
+        }
+        let blocked_wal_bytes = std::fs::metadata(&wal_path).unwrap().len();
+
+        let queued_handle = handle.clone();
+        let (completed_tx, completed_rx) = mpsc::sync_channel(1);
+        let queued = thread::spawn(move || {
+            let result = queued_handle.execute(statement(
+                "INSERT INTO hard_pressure (id, payload) VALUES (?, ?)",
+                vec![ExactSqlValue::Integer(2), ExactSqlValue::Blob(vec![8; 32])],
+            ));
+            let _ = completed_tx.send(result);
+        });
+        assert!(
+            completed_rx
+                .recv_timeout(Duration::from_millis(300))
+                .is_err(),
+            "hard pressure must hold the next admitted write behind the checkpoint drain"
+        );
+        assert_eq!(
+            std::fs::metadata(&wal_path).unwrap().len(),
+            blocked_wal_bytes,
+            "the queued write must not grow the physical WAL while hard pressure is active"
+        );
+        let pressure = checkpoint.pressure();
+        assert!(matches!(
+            pressure,
+            crate::CheckpointPressure::BlockGeneral { ref blockers, .. }
+                if !blockers.is_clear()
+        ));
+        let runtime_snapshot = attachment.snapshot();
+        let writer_snapshot = runtime_snapshot
+            .writer
+            .as_ref()
+            .expect("the writer remains attached while hard pressure is active");
+        assert!(matches!(
+            writer_snapshot.checkpoint_pressure,
+            crate::CheckpointPressure::BlockGeneral { .. }
+        ));
+        assert!(writer_snapshot.wal.hard_retry_wakes > 0);
+
+        drop(snapshot);
+        completed_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        queued.join().unwrap();
+        let recovery_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let status = checkpoint.status();
+            let recovered = matches!(checkpoint.pressure(), crate::CheckpointPressure::Open)
+                && status.latest.as_ref().is_some_and(|outcome| match outcome {
+                    crate::CheckpointOutcome::BelowSoft { wal }
+                    | crate::CheckpointOutcome::Complete { wal, .. } => wal.bytes <= 8 * 1024,
+                    crate::CheckpointOutcome::Pending { .. }
+                    | crate::CheckpointOutcome::Interrupted { .. } => false,
+                });
+            if recovered {
+                break;
+            }
+            assert!(
+                Instant::now() < recovery_deadline,
+                "the released reader must let the checkpoint recover below the soft limit"
+            );
+            thread::yield_now();
+        }
+
+        attachment.drain().unwrap();
+        attachment.close_and_join().unwrap();
     }
 
     fn maintenance_request(

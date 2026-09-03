@@ -147,6 +147,7 @@ pub struct WalCheckpointSnapshot {
     pub busy_events: u64,
     pub blocker_count: u64,
     pub hard_pressure_events: u64,
+    pub hard_retry_wakes: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

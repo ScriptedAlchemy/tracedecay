@@ -37,8 +37,9 @@ use crate::{
         Limits,
     },
     checkpoint::{
-        CheckpointBlockers, CheckpointError, CheckpointOutcome, CheckpointPressure,
-        CheckpointResult, CheckpointStatus, MaintenanceCheckpointMode, RusqliteCheckpointError,
+        CheckpointBlockerSource, CheckpointBlockers, CheckpointError, CheckpointOutcome,
+        CheckpointPressure, CheckpointResult, CheckpointStatus, MaintenanceCheckpointMode,
+        RusqliteCheckpointError,
     },
     connection::{OpenedDatabaseFile, OpenedDatabaseFileError},
     exact_sql::WriterCommand as ExactSqlWriterCommand,
@@ -49,6 +50,14 @@ use crate::{
 };
 
 struct UnrestrictedRuntimeWriteAuthority;
+
+struct NoCheckpointBlockers;
+
+impl CheckpointBlockerSource for NoCheckpointBlockers {
+    fn checkpoint_blockers(&self) -> CheckpointBlockers {
+        CheckpointBlockers::default()
+    }
+}
 
 impl RuntimeWriteAuthority for UnrestrictedRuntimeWriteAuthority {
     fn verify(&self, _stage: RuntimeWriteAuthorityStage) -> Result<(), RuntimeWriteAuthorityError> {
@@ -553,10 +562,41 @@ impl PersistentWriter {
         )
     }
 
+    pub(crate) fn start_with_checkpoint_blockers<E>(
+        locator: ExistingWriterLocator,
+        admission: AdmissionConfigV1,
+        executor: E,
+        checkpoint_blockers: Arc<dyn CheckpointBlockerSource>,
+    ) -> Result<Self, WriterStartError>
+    where
+        E: StorageOperationExecutor + Send + 'static,
+    {
+        Self::start_with_persistence_and_checkpoint_blockers(
+            locator,
+            admission,
+            Box::new(RuntimeWriterPersistence::new(executor)),
+            checkpoint_blockers,
+        )
+    }
+
     pub(crate) fn start_with_persistence(
         locator: ExistingWriterLocator,
         config: AdmissionConfigV1,
         persistence: Box<dyn WriterPersistence>,
+    ) -> Result<Self, WriterStartError> {
+        Self::start_with_persistence_and_checkpoint_blockers(
+            locator,
+            config,
+            persistence,
+            Arc::new(NoCheckpointBlockers),
+        )
+    }
+
+    fn start_with_persistence_and_checkpoint_blockers(
+        locator: ExistingWriterLocator,
+        config: AdmissionConfigV1,
+        persistence: Box<dyn WriterPersistence>,
+        checkpoint_blockers: Arc<dyn CheckpointBlockerSource>,
     ) -> Result<Self, WriterStartError> {
         config
             .validate()
@@ -613,6 +653,7 @@ impl PersistentWriter {
             watermark_publisher,
             checkpoint_status: checkpoint_status_tx,
             checkpoint_pressure: checkpoint_pressure_tx,
+            checkpoint_blockers,
             started: started_tx,
         };
         let join = thread::Builder::new()
