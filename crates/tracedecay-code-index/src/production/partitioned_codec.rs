@@ -906,11 +906,20 @@ impl CodeIndexPublishedGenerationV1 {
                         })
                         .collect::<Result<Vec<_>, _>>()
                         .ok()?;
-                    let rematerialized = symbol_occurrences.iter().collect::<BTreeSet<_>>();
-                    file.artifacts
+                    let mut current_symbol_occurrences = file
+                        .artifacts
                         .symbols
                         .iter()
-                        .all(|symbol| rematerialized.contains(&symbol.occurrence))
+                        .map(|symbol| (symbol.identity.clone(), symbol.occurrence.clone()))
+                        .collect::<Vec<_>>();
+                    current_symbol_occurrences.sort();
+                    let current_symbol_occurrences = current_symbol_occurrences
+                        .into_iter()
+                        .map(|(_, occurrence)| occurrence)
+                        .collect::<Vec<_>>();
+                    (symbol_occurrences.len() >= current_symbol_occurrences.len()
+                        && symbol_occurrences[..current_symbol_occurrences.len()]
+                            == current_symbol_occurrences)
                         .then(|| PartitionedFileSegmentDescriptorV1 {
                             file_key: key,
                             segment_digest: prior_descriptor.segment_digest.clone(),
