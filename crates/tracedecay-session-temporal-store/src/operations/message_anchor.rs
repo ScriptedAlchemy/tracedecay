@@ -31,6 +31,7 @@ pub(super) type ResolvedMessageAnchor = (String, bool, i64);
 /// `Ok(None)` means the message has no canonical anchor in this store at all —
 /// the only case in which the publication falls back to a legacy compatibility
 /// anchor.
+#[hotpath::measure(future = true, label = "session_temporal.publication.resolve_anchor")]
 pub(super) async fn resolve_message_anchor(
     conn: &impl crate::handle::SessionTemporalExec,
     provider: &str,
@@ -47,6 +48,7 @@ pub(super) async fn resolve_message_anchor(
 }
 
 /// Resolves through the message's occurrence in the active temporal generation.
+#[hotpath::measure(future = true, label = "session_temporal.publication.anchor_occurrence")]
 async fn resolve_materialized_occurrence(
     conn: &impl crate::handle::SessionTemporalExec,
     provider: &str,
@@ -124,6 +126,7 @@ async fn resolve_materialized_occurrence(
 
 /// Resolves through the durable observation authority, which retains the
 /// exact-observation anchor before any generation materializes the occurrence.
+#[hotpath::measure(future = true, label = "session_temporal.publication.anchor_observation")]
 async fn resolve_canonical_observation(
     conn: &impl crate::handle::SessionTemporalExec,
     provider: &str,

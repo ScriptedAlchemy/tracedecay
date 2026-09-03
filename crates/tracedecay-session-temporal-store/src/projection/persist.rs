@@ -41,6 +41,7 @@ fn observation_envelope(
         .map_err(|error| storage(PERSIST_OPERATION, error))
 }
 
+#[hotpath::measure(future = true, label = "session_temporal.projection.record_count")]
 pub async fn session_temporal_projection_record_count(
     conn: &impl crate::handle::SessionTemporalQuery,
     session_id: &SessionId,
@@ -266,6 +267,7 @@ async fn canonical_occurrence_projection(
     })
 }
 
+#[hotpath::measure(future = true, label = "session_temporal.persist.occurrences")]
 pub(super) async fn persist_occurrences(
     conn: &impl crate::handle::SessionTemporalExec,
     batch: &SessionTemporalProjectionBatchV1,
@@ -509,6 +511,7 @@ async fn persist_occurrence(
 }
 
 /// Derives the canonical occurrence for one already-resolved projection output.
+#[hotpath::measure(future = true, label = "session_temporal.projection.canonical_occurrence")]
 pub(super) async fn canonical_occurrence(
     conn: &impl crate::handle::SessionTemporalQuery,
     observation: &tracedecay_domain::DurableObservationV1,
@@ -703,6 +706,7 @@ pub(super) async fn ensure_agent(
     Ok(())
 }
 
+#[hotpath::measure(future = true, label = "session_temporal.projection.require_occurrence")]
 pub(super) async fn require_exact_occurrence(
     conn: &impl crate::handle::SessionTemporalExec,
     batch: &SessionTemporalProjectionBatchV1,
@@ -791,6 +795,7 @@ pub(super) async fn require_exact_occurrence(
     Ok(())
 }
 
+#[hotpath::measure(future = true, label = "session_temporal.projection.validate_copy")]
 pub(super) async fn validate_copy(
     conn: &impl crate::handle::SessionTemporalExec,
     batch: &SessionTemporalProjectionBatchV1,
@@ -908,6 +913,7 @@ pub(super) async fn occurrence_observation_and_anchor(
     Ok((observation, envelope, anchor_id))
 }
 
+#[hotpath::measure(future = true, label = "session_temporal.projection.validate_copy_proof")]
 pub(super) async fn validate_copy_proof(
     conn: &impl crate::handle::SessionTemporalExec,
     batch: &SessionTemporalProjectionBatchV1,
@@ -1005,6 +1011,7 @@ pub(super) async fn validate_copy_proof(
     Ok(())
 }
 
+#[hotpath::measure(future = true, label = "session_temporal.persist.assertion")]
 pub(super) async fn persist_assertion(
     conn: &impl crate::handle::SessionTemporalExec,
     batch: &SessionTemporalProjectionBatchV1,
@@ -1094,6 +1101,7 @@ pub(super) async fn persist_assertion(
     Ok(inserted)
 }
 
+#[hotpath::measure(future = true, label = "session_temporal.projection.validate_assertion")]
 pub(super) async fn validate_assertion(
     conn: &impl crate::handle::SessionTemporalExec,
     batch: &SessionTemporalProjectionBatchV1,
