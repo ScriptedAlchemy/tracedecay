@@ -19,8 +19,6 @@ use super::super::{
     request::{AcceptedRequest, CheckpointCommand, IncrementalVacuumCommand},
     settlement::infrastructure,
 };
-use super::HARD_CHECKPOINT_RETRY_INTERVAL;
-
 pub(super) enum WorkerWake {
     Write(Option<AcceptedRequest>),
     ExactSql(Box<Option<ExactSqlWriterCommand>>),
@@ -44,7 +42,7 @@ pub(super) async fn wait_for_work(
     incremental_vacuum_closed: bool,
     online_backup_closed: bool,
     checkpoint_closed: bool,
-    retry_checkpoint: bool,
+    checkpoint_retry_after: Option<std::time::Duration>,
 ) -> WorkerWake {
     let receive = poll_fn(|context| {
         if Pin::new(&mut *shutdown_receiver)
@@ -79,8 +77,8 @@ pub(super) async fn wait_for_work(
         }
         Poll::Pending
     });
-    if retry_checkpoint {
-        match tokio::time::timeout(HARD_CHECKPOINT_RETRY_INTERVAL, receive).await {
+    if let Some(retry_after) = checkpoint_retry_after {
+        match tokio::time::timeout(retry_after, receive).await {
             Ok(wake) => wake,
             Err(_) => WorkerWake::CheckpointRetry,
         }
@@ -269,7 +267,7 @@ mod tests {
             false,
             false,
             false,
-            false,
+            None,
         ));
 
         assert!(matches!(wake, WorkerWake::Shutdown));

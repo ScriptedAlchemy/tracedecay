@@ -32,7 +32,7 @@ struct Checkout<E: ReaderQueryExecutor> {
 
 impl<E: ReaderQueryExecutor> Drop for Checkout<E> {
     fn drop(&mut self) {
-        let deferred_end = self.deferred_end.take();
+        let mut deferred_end = self.deferred_end.take();
         let mut state = self
             .inner
             .state
@@ -60,8 +60,7 @@ impl<E: ReaderQueryExecutor> Drop for Checkout<E> {
         // A retired worker is not in limbo. Its record has already left the
         // pool and is shut down below, so nothing is waiting to come back.
         let timed_out_retirement = deferred_end.is_some() && retired.is_some();
-        let deferred_end = deferred_end.filter(|_| retired.is_none());
-        if deferred_end.is_some() {
+        if deferred_end.is_some() && retired.is_none() {
             *state.limbo_mut(self.lane) += 1;
         }
         drop(state);
@@ -69,11 +68,31 @@ impl<E: ReaderQueryExecutor> Drop for Checkout<E> {
         self.inner.capacity_changed.notify_all();
 
         if let Some(mut record) = retired {
-            record.client.shutdown();
-            if let Some(join) = record.join.take()
-                && !timed_out_retirement
-            {
-                let _ = join.join();
+            if timed_out_retirement {
+                if let Some(receive) = deferred_end.take() {
+                    let checkpoint_blockers = self.inner.checkpoint_blockers.clone();
+                    let reader_id = self.worker.id;
+                    spawn_or_run_deferred_return(
+                        Box::new(move || {
+                            record.client.shutdown();
+                            let _ = receive.recv_timeout(DEFERRED_SNAPSHOT_END_LIMIT);
+                            if let Some(join) = record.join.take() {
+                                let _ = join.join();
+                            }
+                            checkpoint_blockers.finish(reader_id);
+                        }),
+                        |task| {
+                            thread::Builder::new()
+                                .name("tracedecay-rusqlite-reader-retire".to_owned())
+                                .spawn(task)
+                        },
+                    );
+                }
+            } else {
+                record.client.shutdown();
+                if let Some(join) = record.join.take() {
+                    let _ = join.join();
+                }
             }
         }
         if let Some(receive) = deferred_end {
@@ -88,6 +107,8 @@ impl<E: ReaderQueryExecutor> Drop for Checkout<E> {
                         .spawn(task)
                 },
             );
+        } else if !timed_out_retirement {
+            self.inner.checkpoint_blockers.finish(self.worker.id);
         }
     }
 }
@@ -127,11 +148,7 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
 
     #[hotpath::measure(label = "rusqlite.reader_lease.begin_snapshot")]
     pub fn begin_snapshot(&mut self) -> Result<SnapshotLease<'_, E>, ReaderWorkerError> {
-        if self.snapshot_active {
-            return Err(ReaderWorkerError::SnapshotAlreadyActive);
-        }
-        self.checkout.worker.client.begin()?;
-        self.snapshot_active = true;
+        self.start_snapshot()?;
         Ok(SnapshotLease { lease: self })
     }
 
@@ -168,17 +185,8 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
         &mut self,
         statement: ExactSqlStatement,
     ) -> Result<ExactSqlRows, ExactSqlError> {
-        if self.snapshot_active {
-            return Err(ExactSqlError::ReaderUnavailable(
-                ReaderWorkerError::SnapshotAlreadyActive.to_string(),
-            ));
-        }
-        self.checkout
-            .worker
-            .client
-            .begin()
+        self.start_snapshot()
             .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))?;
-        self.snapshot_active = true;
         self.checkout
             .worker
             .client
@@ -187,17 +195,8 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
 
     #[hotpath::measure(label = "rusqlite.reader_lease.begin_exact_sql_snapshot")]
     pub(super) fn begin_exact_sql_snapshot(&mut self) -> Result<(), ExactSqlError> {
-        if self.snapshot_active {
-            return Err(ExactSqlError::ReaderUnavailable(
-                ReaderWorkerError::SnapshotAlreadyActive.to_string(),
-            ));
-        }
-        self.checkout
-            .worker
-            .client
-            .begin()
+        self.start_snapshot()
             .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))?;
-        self.snapshot_active = true;
         self.checkout.worker.client.pin_exact_sql()
     }
 
@@ -222,17 +221,7 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
         &mut self,
         reply_bound: std::time::Duration,
     ) -> Result<worker::StoreSizeTelemetrySample, ReaderAcquireError> {
-        if self.snapshot_active {
-            return Err(ReaderAcquireError::Worker(
-                ReaderWorkerError::SnapshotAlreadyActive,
-            ));
-        }
-        self.checkout
-            .worker
-            .client
-            .begin()
-            .map_err(ReaderAcquireError::Worker)?;
-        self.snapshot_active = true;
+        self.start_snapshot().map_err(ReaderAcquireError::Worker)?;
         self.checkout
             .worker
             .client
@@ -245,17 +234,7 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
         &mut self,
         reply_bound: std::time::Duration,
     ) -> Result<Vec<worker::TableSizeTelemetrySample>, ReaderAcquireError> {
-        if self.snapshot_active {
-            return Err(ReaderAcquireError::Worker(
-                ReaderWorkerError::SnapshotAlreadyActive,
-            ));
-        }
-        self.checkout
-            .worker
-            .client
-            .begin()
-            .map_err(ReaderAcquireError::Worker)?;
-        self.snapshot_active = true;
+        self.start_snapshot().map_err(ReaderAcquireError::Worker)?;
         self.checkout
             .worker
             .client
@@ -281,6 +260,27 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
             .map_err(|error| ReaderAcquireError::Worker(ReaderWorkerError::Storage(error)))
     }
 
+    fn start_snapshot(&mut self) -> Result<(), ReaderWorkerError> {
+        if self.snapshot_active
+            || !self
+                .checkout
+                .inner
+                .checkpoint_blockers
+                .begin(self.checkout.worker.id)
+        {
+            return Err(ReaderWorkerError::SnapshotAlreadyActive);
+        }
+        if let Err(error) = self.checkout.worker.client.begin() {
+            self.checkout
+                .inner
+                .checkpoint_blockers
+                .finish(self.checkout.worker.id);
+            return Err(error);
+        }
+        self.snapshot_active = true;
+        Ok(())
+    }
+
     #[hotpath::measure(label = "rusqlite.reader_lease.finish_snapshot")]
     fn finish_snapshot(&mut self) {
         if !self.snapshot_active {
@@ -295,7 +295,11 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
             }
         };
         match receive.recv_timeout(SNAPSHOT_END_GRACE) {
-            Ok(Ok(())) => {}
+            Ok(Ok(())) => self
+                .checkout
+                .inner
+                .checkpoint_blockers
+                .finish(self.checkout.worker.id),
             Ok(Err(_)) | Err(RecvTimeoutError::Disconnected) => {
                 self.checkout.retire = true;
             }
@@ -340,6 +344,8 @@ fn finish_deferred_return<E: ReaderQueryExecutor>(
     mut worker: AvailableWorker,
     receive: Receiver<Result<(), ReaderWorkerError>>,
 ) {
+    let checkpoint_blockers = inner.checkpoint_blockers.clone();
+    let reader_id = worker.id;
     // Bounded, not open-ended. An unbounded `recv()` here parks this thread
     // for the life of the process against a worker that never answers, and the
     // limbo slot it holds never clears — so the lane runs one worker short and
@@ -374,6 +380,7 @@ fn finish_deferred_return<E: ReaderQueryExecutor>(
             let _ = join.join();
         }
     }
+    checkpoint_blockers.finish(reader_id);
 }
 
 type DeferredReturnTask = Box<dyn FnOnce() + Send + 'static>;
