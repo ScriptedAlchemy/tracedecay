@@ -16,7 +16,9 @@ mod tests;
 #[cfg(test)]
 mod types;
 
-pub(in crate::db) use schema::{FINAL_SCHEMA_BATCHES, create_schema};
+pub(in crate::db) use schema::{
+    FINAL_SCHEMA_BATCHES, PAYLOAD_DIGEST_OBJECTS, PAYLOAD_DIGESTS_SCHEMA, create_schema,
+};
 #[cfg(test)]
 use types::OwnerKey;
 

@@ -165,6 +165,54 @@ fn reset_required(reason: impl Into<String>) -> TraceDecayError {
     )
 }
 
+/// Admits a store for the v34 -> v35 payload-digest step: apart from the
+/// digest objects themselves (absent, or already created by an interrupted
+/// earlier step) its inventory must be exactly the final shape.
+pub(super) async fn require_final_shape_except_payload_digests(
+    conn: &impl QueryExecutor,
+) -> Result<()> {
+    let actual = read_inventory(conn).await?;
+    let expected = EXPECTED_FINAL_SHAPE
+        .as_ref()
+        .map_err(|error| database_error(error.clone()))?;
+    let digest_objects = crate::db::memory_v2::PAYLOAD_DIGEST_OBJECTS;
+    for (name, expected_object) in expected {
+        if digest_objects.contains(&name.as_str()) {
+            if let Some(actual_object) = actual.get(name)
+                && actual_object != expected_object
+            {
+                return Err(reset_required(format!(
+                    "database schema has incompatible {} '{name}' from an earlier payload-digest step",
+                    expected_object.object_type
+                )));
+            }
+            continue;
+        }
+        let Some(actual_object) = actual.get(name) else {
+            return Err(reset_required(format!(
+                "database schema is missing required {} '{name}'",
+                expected_object.object_type
+            )));
+        };
+        if actual_object != expected_object {
+            return Err(reset_required(format!(
+                "database schema has incompatible {} '{name}'",
+                expected_object.object_type
+            )));
+        }
+    }
+    if let Some((name, object)) = actual
+        .iter()
+        .find(|(name, _object)| !expected.contains_key(*name))
+    {
+        return Err(reset_required(format!(
+            "database schema contains unexpected {} '{name}'",
+            object.object_type
+        )));
+    }
+    Ok(())
+}
+
 pub(super) async fn require_exact_final_shape(conn: &impl QueryExecutor) -> Result<()> {
     let actual = read_inventory(conn).await?;
     let expected = EXPECTED_FINAL_SHAPE

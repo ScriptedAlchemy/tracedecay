@@ -6,7 +6,11 @@ use tracedecay_rusqlite_runtime::exact_sql::{
 
 use crate::db::engine::{Connection, TestConnection};
 
-use super::{SCHEMA_VERSION, create_schema_connection, ensure_schema_current_connection};
+use super::{
+    PAYLOAD_DIGEST_BACKFILL_RECEIPT_KEY, PAYLOAD_DIGEST_STEP_SOURCE_VERSION, SCHEMA_VERSION,
+    create_schema_connection, ensure_schema_current_connection, verify_final_schema_connection,
+};
+use crate::db::engine::params;
 
 mod final_shape;
 mod fts;
@@ -152,7 +156,7 @@ async fn an_empty_database_is_created_at_the_supported_schema_version() {
 /// remedy instead of upgrading in place.
 #[tokio::test]
 async fn a_store_at_another_schema_version_is_refused_with_a_fresh_start_remedy() {
-    for stamped in [1_u32, 18, 24, SCHEMA_VERSION - 1, SCHEMA_VERSION + 1] {
+    for stamped in [1_u32, 18, 24, SCHEMA_VERSION - 2, SCHEMA_VERSION + 1] {
         let (conn, _dir) = create_schema_db().await;
         set_user_version(&conn, stamped).await;
 
@@ -394,6 +398,7 @@ async fn fresh_creation_installs_every_stage_of_the_final_shape() {
         .await,
         [
             "memory_v2_assertion_evidence",
+            "memory_v2_assertion_payload_digests",
             "memory_v2_assertion_payload_purges",
             "memory_v2_assertion_payloads",
             "memory_v2_assertion_payloads_fts",
@@ -548,4 +553,311 @@ async fn fresh_creation_installs_every_stage_of_the_final_shape() {
         "fresh terminal receipt schema must reject an intermediate state"
     );
     assert_eq!(get_user_version(&conn).await, SCHEMA_VERSION);
+}
+
+// ---------------------------------------------------------------------------
+// v34 -> v35: persisted payload content digests (#834)
+// ---------------------------------------------------------------------------
+
+const PAYLOAD_DIGEST_OBJECT_DROPS: &str = "DROP TRIGGER memory_v2_payloads_digest_delete;
+    DROP TRIGGER memory_v2_assertion_payload_digests_no_update;
+    DROP INDEX memory_v2_assertion_payload_digests_lookup;
+    DROP TABLE memory_v2_assertion_payload_digests;";
+
+const V34_FIXTURE_CONTENTS: [&str; 3] = [
+    "Unicode café naïve 東京 🚀",
+    "JSON escaped quote \" and backslash \\ with\ttab and\nnewline",
+    "trailing whitespace ",
+];
+
+fn expected_payload_digest(content: &str) -> String {
+    use sha2::Digest as _;
+    tracedecay_domain::canonical_text::encode_tagged_lowercase_hex(
+        "sha256:",
+        &sha2::Sha256::digest(content.as_bytes()),
+    )
+}
+
+/// Seeds one profile fact with a single asserted payload through the raw
+/// authority tables, the way a pre-#834 binary left them.
+async fn seed_payload(conn: &Connection, ordinal: usize, content: &str) {
+    let fact_id = format!("fact.v34.{ordinal}");
+    let assertion_id = format!("assertion.v34.{ordinal}");
+    conn.execute(
+        "INSERT INTO memory_v2_facts (
+            fact_id, owner_kind, project_id, owner_json, identity_json, created_at
+         ) VALUES (?1, 'profile', '', '{\"kind\":\"profile\"}', '{}', ?2)",
+        params![fact_id.as_str(), ordinal as i64],
+    )
+    .await
+    .expect("seed v34 fact");
+    conn.execute(
+        "INSERT INTO memory_v2_assertions (
+            assertion_id, fact_id, owner_kind, project_id, owner_json,
+            assertion_header_json, kind_json, payload_reference_json, receipt_json,
+            asserted_at, actor_id
+         ) VALUES (?1, ?2, 'profile', '', '{\"kind\":\"profile\"}', '{}', '{}', '{}', '{}', ?3, NULL)",
+        params![assertion_id.as_str(), fact_id.as_str(), ordinal as i64],
+    )
+    .await
+    .expect("seed v34 assertion");
+    conn.execute(
+        "INSERT INTO memory_v2_assertion_payloads (
+            assertion_id, fact_id, owner_kind, project_id, payload_json, content
+         ) VALUES (?1, ?2, 'profile', '', '{}', ?3)",
+        params![assertion_id.as_str(), fact_id.as_str(), content],
+    )
+    .await
+    .expect("seed v34 payload");
+}
+
+/// A v35 store whose payloads were written before the digest objects
+/// existed: the objects are dropped and the stamp rewound, exactly the shape
+/// a pre-#834 binary leaves behind.
+async fn create_v34_db_with_payloads() -> (TestConnection, TempDir) {
+    let (conn, dir) = create_schema_db().await;
+    for (ordinal, content) in V34_FIXTURE_CONTENTS.iter().enumerate() {
+        seed_payload(&conn, ordinal, content).await;
+    }
+    conn.execute_batch(PAYLOAD_DIGEST_OBJECT_DROPS)
+        .await
+        .expect("drop payload digest objects");
+    set_user_version(&conn, PAYLOAD_DIGEST_STEP_SOURCE_VERSION).await;
+    assert!(
+        !table_exists(&conn, "memory_v2_assertion_payload_digests").await,
+        "fixture must start without the digest table"
+    );
+    (conn, dir)
+}
+
+async fn digest_rows(conn: &Connection) -> Vec<(String, String)> {
+    let mut rows = conn
+        .query(
+            "SELECT fact_id, content_digest FROM memory_v2_assertion_payload_digests
+             ORDER BY payload_rowid ASC",
+            (),
+        )
+        .await
+        .expect("query digest rows");
+    let mut values = Vec::new();
+    while let Some(row) = rows.next().await.expect("read digest row") {
+        values.push((
+            row.get(0).expect("read digest fact id"),
+            row.get(1).expect("read digest value"),
+        ));
+    }
+    values
+}
+
+fn expected_digest_rows() -> Vec<(String, String)> {
+    V34_FIXTURE_CONTENTS
+        .iter()
+        .enumerate()
+        .map(|(ordinal, content)| {
+            (
+                format!("fact.v34.{ordinal}"),
+                expected_payload_digest(content),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_v34_store_is_stepped_to_v35_with_a_digest_for_every_payload() {
+    let (conn, _dir) = create_v34_db_with_payloads().await;
+
+    ensure_schema_current_connection(&conn)
+        .await
+        .expect("a v34 store must step forward in place");
+
+    assert_eq!(get_user_version(&conn).await, SCHEMA_VERSION);
+    assert_eq!(digest_rows(&conn).await, expected_digest_rows());
+    let receipts = string_column(
+        &conn,
+        &format!("SELECT value FROM metadata WHERE key = '{PAYLOAD_DIGEST_BACKFILL_RECEIPT_KEY}'"),
+    )
+    .await;
+    let receipt: serde_json::Value =
+        serde_json::from_str(receipts.first().expect("step must journal a receipt"))
+            .expect("receipt is JSON");
+    assert_eq!(receipt["from_version"], PAYLOAD_DIGEST_STEP_SOURCE_VERSION);
+    assert_eq!(receipt["to_version"], SCHEMA_VERSION);
+    assert_eq!(receipt["backfilled_rows"], V34_FIXTURE_CONTENTS.len());
+
+    ensure_schema_current_connection(&conn)
+        .await
+        .expect("a stepped store is the exact final shape");
+    assert_eq!(digest_rows(&conn).await.len(), V34_FIXTURE_CONTENTS.len());
+}
+
+#[tokio::test]
+async fn an_interrupted_payload_digest_step_resumes_from_the_rows_still_missing() {
+    let (conn, _dir) = create_v34_db_with_payloads().await;
+    // A previous run created the objects and fingerprinted the first payload
+    // before losing the writer; the stamp never moved.
+    conn.execute_batch(crate::db::memory_v2::PAYLOAD_DIGESTS_SCHEMA)
+        .await
+        .expect("recreate digest objects as an interrupted step left them");
+    conn.execute(
+        "INSERT INTO memory_v2_assertion_payload_digests (
+            payload_rowid, assertion_id, fact_id, owner_kind, project_id, content_digest
+         )
+         SELECT rowid, assertion_id, fact_id, owner_kind, project_id, ?1
+         FROM memory_v2_assertion_payloads WHERE fact_id = 'fact.v34.0'",
+        params![expected_payload_digest(V34_FIXTURE_CONTENTS[0]).as_str()],
+    )
+    .await
+    .expect("seed the partial backfill");
+    assert_eq!(
+        get_user_version(&conn).await,
+        PAYLOAD_DIGEST_STEP_SOURCE_VERSION
+    );
+
+    ensure_schema_current_connection(&conn)
+        .await
+        .expect("an interrupted step must resume");
+
+    assert_eq!(get_user_version(&conn).await, SCHEMA_VERSION);
+    assert_eq!(digest_rows(&conn).await, expected_digest_rows());
+}
+
+#[tokio::test]
+async fn a_v34_store_is_refused_read_only_with_the_step_pending_remedy() {
+    let (conn, _dir) = create_v34_db_with_payloads().await;
+
+    let error = verify_final_schema_connection(&conn)
+        .await
+        .expect_err("a read-only verifier must not step the store");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("payload digest step is pending"),
+        "read-only refusal must name the pending step: {message}"
+    );
+    assert!(
+        error.reset_required_context().is_none(),
+        "a steppable store must not be reported as reset-required: {message}"
+    );
+    assert_eq!(
+        get_user_version(&conn).await,
+        PAYLOAD_DIGEST_STEP_SOURCE_VERSION
+    );
+    assert!(
+        !table_exists(&conn, "memory_v2_assertion_payload_digests").await,
+        "read-only verification must not create the digest objects"
+    );
+}
+
+#[tokio::test]
+async fn a_v34_stamp_on_a_store_that_is_not_v34_shaped_is_reset_required() {
+    let (conn, _dir) = create_schema_db().await;
+    conn.execute_batch(PAYLOAD_DIGEST_OBJECT_DROPS)
+        .await
+        .expect("drop payload digest objects");
+    conn.execute_batch("DROP TABLE memory_v2_assertion_supersession;")
+        .await
+        .expect("drop an unrelated final-shape table");
+    set_user_version(&conn, PAYLOAD_DIGEST_STEP_SOURCE_VERSION).await;
+
+    let error = ensure_schema_current_connection(&conn)
+        .await
+        .expect_err("the step admits only the exact pre-digest shape");
+    assert_eq!(
+        error
+            .reset_required_context()
+            .map(|(authority, _reason)| authority),
+        Some("SQLite store")
+    );
+    assert_eq!(
+        get_user_version(&conn).await,
+        PAYLOAD_DIGEST_STEP_SOURCE_VERSION
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_payload_drops_its_digest_and_digests_never_update() {
+    let (conn, _dir) = create_schema_db().await;
+    for (ordinal, content) in V34_FIXTURE_CONTENTS.iter().enumerate() {
+        seed_payload(&conn, ordinal, content).await;
+    }
+    conn.execute_batch(
+        "INSERT INTO memory_v2_assertion_payload_digests (
+            payload_rowid, assertion_id, fact_id, owner_kind, project_id, content_digest
+         )
+         SELECT rowid, assertion_id, fact_id, owner_kind, project_id,
+                'sha256:0000000000000000000000000000000000000000000000000000000000000000'
+         FROM memory_v2_assertion_payloads;",
+    )
+    .await
+    .expect("seed digest rows");
+    assert_eq!(digest_rows(&conn).await.len(), V34_FIXTURE_CONTENTS.len());
+
+    let update = conn
+        .execute_batch(
+            "UPDATE memory_v2_assertion_payload_digests SET content_digest = \
+             'sha256:1111111111111111111111111111111111111111111111111111111111111111';",
+        )
+        .await;
+    assert!(
+        update
+            .expect_err("digest rows are immutable")
+            .to_string()
+            .contains("immutable")
+    );
+
+    conn.execute_batch("DELETE FROM memory_v2_assertion_payloads WHERE fact_id = 'fact.v34.1';")
+        .await
+        .expect("delete a payload");
+    let remaining: Vec<String> = digest_rows(&conn)
+        .await
+        .into_iter()
+        .map(|(fact_id, _digest)| fact_id)
+        .collect();
+    assert_eq!(
+        remaining,
+        vec!["fact.v34.0".to_owned(), "fact.v34.2".to_owned()]
+    );
+}
+
+#[tokio::test]
+async fn the_content_digest_lookup_is_an_indexed_point_read() {
+    let (conn, _dir) = create_schema_db().await;
+    let mut rows = conn
+        .query(
+            "EXPLAIN QUERY PLAN
+             SELECT current_facts.fact_id
+             FROM memory_v2_assertion_payload_digests AS digests
+             CROSS JOIN memory_v2_current_facts AS current_facts
+               ON current_facts.fact_id = digests.fact_id
+              AND current_facts.owner_kind = digests.owner_kind
+              AND current_facts.project_id = digests.project_id
+              AND current_facts.active_assertion_id = digests.assertion_id
+             CROSS JOIN memory_v2_facts AS facts
+               ON facts.fact_id = current_facts.fact_id
+              AND facts.owner_kind = current_facts.owner_kind
+              AND facts.project_id = current_facts.project_id
+             WHERE digests.owner_kind = 'profile'
+               AND digests.project_id = ''
+               AND digests.content_digest = 'sha256:x'
+               AND facts.owner_json = '{}'
+               AND current_facts.payload_access = 'eligible'
+             ORDER BY current_facts.fact_id ASC
+             LIMIT 1",
+            (),
+        )
+        .await
+        .expect("explain the digest lookup");
+    let mut plan = Vec::new();
+    while let Some(row) = rows.next().await.expect("read plan row") {
+        plan.push(row.get::<String>(3).expect("read plan detail"));
+    }
+    let plan = plan.join("\n");
+    assert!(
+        plan.contains("SEARCH digests USING INDEX memory_v2_assertion_payload_digests_lookup"),
+        "the digest lookup must drive from the digest index: {plan}"
+    );
+    assert!(
+        !plan.contains("SCAN digests"),
+        "the digest lookup must never scan the digest table: {plan}"
+    );
 }

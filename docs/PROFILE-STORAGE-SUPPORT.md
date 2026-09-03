@@ -5,6 +5,15 @@ Any other persisted shape returns `ResetRequired` and requires an explicit reset
 or recreation; support guidance must not promise a V1 reader, conversion,
 backfill, sidecar reconciliation, or profile-store migration.
 
+The single sanctioned exception is an additive V2 step between adjacent V2
+schema stamps, such as v34 → v35 (persisted payload content digests, #834):
+the writer creates the missing objects and fills them from data the store
+already holds, in bounded chunks, resuming after interruption, and moves the
+stamp only when the final shape is exact. A read-only mount of a store that is
+one step behind reports the pending step and names the writer-side remedy; it
+is not `ResetRequired`. Every other stamp, and a source-stamp store whose
+inventory is not exactly the pre-step shape, is still refused.
+
 ## Planned Support Bundle Privacy
 
 Support-bundle export is not implemented yet. When it lands, the redacted mode should default to metadata only and may include:
