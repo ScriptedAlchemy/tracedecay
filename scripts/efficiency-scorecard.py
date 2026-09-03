@@ -805,6 +805,30 @@ def median_runs(runs: list[dict]) -> dict[str, float]:
     }
 
 
+def enforce_run_invariants(run: dict) -> None:
+    if run.get("status") != "ok":
+        return
+    graph = (run.get("cold_index") or {}).get("graph_statistics") or {}
+    if graph.get("state") == "observed":
+        return
+    detail = graph.get("reason") or f"state={graph.get('state')!r}"
+    run["status"] = "failed"
+    run["failure"] = {
+        "phase": "cold_index",
+        "reason": f"graph statistics were not observed: {detail}",
+    }
+
+
+def finalize_scorecard(scorecard: dict) -> int:
+    runs = scorecard["runs"]
+    for run in runs:
+        enforce_run_invariants(run)
+    scorecard["median"] = median_runs(runs)
+    failed = [run for run in runs if run.get("status") != "ok"]
+    scorecard["verdict"] = "ok" if not failed else "failed"
+    return 0 if not failed else 1
+
+
 def human_summary(scorecard: dict) -> str:
     median = scorecard["median"]
     runs = scorecard["runs"]
@@ -1045,6 +1069,7 @@ def main() -> int:
         peaks, hwm = sampler.finish()
         run["rss"] = {"peak_bytes": peaks, "vmhwm_bytes_at_phase_end": hwm}
         flatten_store_bytes(run)
+        enforce_run_invariants(run)
         scorecard["runs"].append(run)
         if run["status"] != "ok":
             print(
@@ -1054,9 +1079,7 @@ def main() -> int:
             )
 
     scorecard["host"]["load_avg_end"] = list(os.getloadavg())
-    scorecard["median"] = median_runs(scorecard["runs"])
-    failed = [run for run in scorecard["runs"] if run.get("status") != "ok"]
-    scorecard["verdict"] = "ok" if not failed else "failed"
+    exit_code = finalize_scorecard(scorecard)
 
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
@@ -1067,7 +1090,7 @@ def main() -> int:
     (output / "summary.md").write_text(summary + "\n", encoding="utf-8")
     print(summary)
     print(f"scorecard: JSON written to {output / 'scorecard.json'}", file=sys.stderr)
-    return 0 if not failed else 1
+    return exit_code
 
 
 if __name__ == "__main__":

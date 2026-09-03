@@ -85,6 +85,7 @@ jobs:
       - name: Test dogfood harnesses
         run: |
           python3 scripts/test-check-pr-dogfood-output.py
+          python3 scripts/test-efficiency-scorecard.py
           python3 scripts/test-pr-dogfood-portability.py
 
       - name: Initialize checkout and exercise CLI tools
