@@ -408,38 +408,36 @@ where
             .push(file.clone());
     }
 
-    let mut clusters: Vec<DsmCluster> = dir_to_files
-        .into_iter()
-        .map(|(directory, files)| {
-            let file_set: HashSet<&str> = files.iter().map(String::as_str).collect();
-            let mut internal_edges = 0;
-            let mut outgoing_edges = 0;
-            let mut incoming_edges = 0;
-            for file in &files {
-                if let Some(targets) = adj.get(file) {
-                    for target in targets {
-                        if file_set.contains(target.as_str()) {
-                            internal_edges += 1;
-                        } else {
-                            outgoing_edges += 1;
-                        }
-                    }
+    let mut clusters = Vec::with_capacity(dir_to_files.len());
+    let mut file_to_cluster = HashMap::with_capacity(adj.len());
+    for (directory, files) in &dir_to_files {
+        let cluster_index = clusters.len();
+        file_to_cluster.extend(files.iter().map(|file| (file.as_str(), cluster_index)));
+        clusters.push(DsmCluster {
+            directory: directory.clone(),
+            file_count: files.len(),
+            internal_edges: 0,
+            outgoing_edges: 0,
+            incoming_edges: 0,
+        });
+    }
+    for (source, targets) in adj {
+        let source_cluster = file_to_cluster[source.as_str()];
+        for target in targets {
+            match file_to_cluster.get(target.as_str()).copied() {
+                Some(target_cluster) if target_cluster == source_cluster => {
+                    clusters[source_cluster].internal_edges += 1;
                 }
-                for (source, targets) in adj {
-                    if !file_set.contains(source.as_str()) && targets.contains(file) {
-                        incoming_edges += 1;
-                    }
+                Some(target_cluster) => {
+                    clusters[source_cluster].outgoing_edges += 1;
+                    clusters[target_cluster].incoming_edges += 1;
+                }
+                None => {
+                    clusters[source_cluster].outgoing_edges += 1;
                 }
             }
-            DsmCluster {
-                directory,
-                file_count: files.len(),
-                internal_edges,
-                outgoing_edges,
-                incoming_edges,
-            }
-        })
-        .collect();
+        }
+    }
     clusters.sort_by(|left, right| {
         right
             .boundary_edges()
@@ -608,4 +606,84 @@ pub fn compute_composite_health(dims: &HealthDimensions) -> u32 {
     // Low-weight penalty: skip-test-coverage overuse reduces score by up to 2%.
     let penalized = base * (0.98 + 0.02 * dims.coverage_discipline);
     penalized.round() as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use std::hash::{BuildHasher, Hasher};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    #[derive(Clone)]
+    struct CountingBuildHasher {
+        hashes: Arc<AtomicUsize>,
+    }
+
+    struct CountingHasher {
+        hashes: Arc<AtomicUsize>,
+        state: u64,
+    }
+
+    impl BuildHasher for CountingBuildHasher {
+        type Hasher = CountingHasher;
+
+        fn build_hasher(&self) -> Self::Hasher {
+            CountingHasher {
+                hashes: Arc::clone(&self.hashes),
+                state: 0xcbf2_9ce4_8422_2325,
+            }
+        }
+    }
+
+    impl Hasher for CountingHasher {
+        fn finish(&self) -> u64 {
+            self.state
+        }
+
+        fn write(&mut self, bytes: &[u8]) {
+            self.hashes.fetch_add(1, Ordering::Relaxed);
+            for byte in bytes {
+                self.state ^= u64::from(*byte);
+                self.state = self.state.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+    }
+
+    #[test]
+    fn dsm_clusters_reads_each_adjacency_edge_once() {
+        const FILES: usize = 100;
+
+        let hashes = Arc::new(AtomicUsize::new(0));
+        let hasher = CountingBuildHasher {
+            hashes: Arc::clone(&hashes),
+        };
+        let mut adjacency = HashMap::new();
+        for index in 0..FILES {
+            let source = format!("cluster_{index:03}/source.rs");
+            let target = format!("cluster_{:03}/source.rs", (index + 1) % FILES);
+            let mut targets = HashSet::with_hasher(hasher.clone());
+            targets.insert(target);
+            adjacency.insert(source, targets);
+        }
+        hashes.store(0, Ordering::Relaxed);
+
+        let clusters = dsm_clusters(&adjacency);
+
+        assert_eq!(clusters.len(), FILES);
+        assert!(
+            clusters.iter().all(|cluster| {
+                cluster.internal_edges == 0
+                    && cluster.outgoing_edges == 1
+                    && cluster.incoming_edges == 1
+            }),
+            "ring topology must retain one incoming and outgoing edge per directory"
+        );
+        let hash_lookups = hashes.load(Ordering::Relaxed);
+        assert!(
+            hash_lookups <= FILES * 4,
+            "DSM clustering hashed adjacency probes {hash_lookups} times for {FILES} edges"
+        );
+    }
 }
