@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{Read, Seek};
 
 use serde::{Deserialize, Serialize};
@@ -760,6 +760,25 @@ fn parse_partitioned_manifest(
     Ok(Some(generation))
 }
 
+fn snapshot_file_keys<'a>(
+    file_occurrences: impl Iterator<Item = &'a FileOccurrenceId>,
+) -> Result<HashMap<&'a FileOccurrenceId, u32>, CodeIndexProductionErrorV1> {
+    let mut keys = HashMap::new();
+    for (key, occurrence) in file_occurrences.enumerate() {
+        let key = u32::try_from(key).map_err(|_| {
+            CodeIndexProductionErrorV1::Contract(
+                "sealed generation file key exceeds u32".to_owned(),
+            )
+        })?;
+        if keys.insert(occurrence, key).is_some() {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed generation snapshot repeats a file occurrence".to_owned(),
+            ));
+        }
+    }
+    Ok(keys)
+}
+
 impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
     pub fn open_partitioned_sealed(
         reader: R,
@@ -807,25 +826,22 @@ impl CodeIndexPublishedGenerationV1 {
         ) -> Result<(), CodeIndexProductionErrorV1>,
     ) -> Result<Vec<u8>, CodeIndexProductionErrorV1> {
         self.validate()?;
-        let mut file_segments = Vec::with_capacity(self.files.len());
-        for file in &self.files {
-            let key = self
-                .snapshot
+        let file_keys = snapshot_file_keys(
+            self.snapshot
                 .files
                 .iter()
-                .position(|snapshot_file| {
-                    snapshot_file.file_occurrence_id == file.extraction.file_occurrence_id
-                })
+                .map(|file| &file.file_occurrence_id),
+        )?;
+        let mut file_segments = Vec::with_capacity(self.files.len());
+        for file in &self.files {
+            let key = file_keys
+                .get(&file.extraction.file_occurrence_id)
+                .copied()
                 .ok_or_else(|| {
                     CodeIndexProductionErrorV1::Contract(
                         "sealed generation file is absent from its snapshot".to_owned(),
                     )
                 })?;
-            let key = u32::try_from(key).map_err(|_| {
-                CodeIndexProductionErrorV1::Contract(
-                    "sealed generation file key exceeds u32".to_owned(),
-                )
-            })?;
             let (descriptor, bytes) = encode_file_segment(&self.manifest.generation_id, file, key)?;
             publish_segment(&descriptor.segment_digest, &bytes)?;
             file_segments.push(descriptor);
@@ -984,5 +1000,22 @@ impl CodeIndexPublishedGenerationV1 {
             }
         }
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_file_key_index_preserves_canonical_positions() {
+        let first = FileOccurrenceId::new("file.partitioned.first").expect("first file identity");
+        let second =
+            FileOccurrenceId::new("file.partitioned.second").expect("second file identity");
+
+        let keys = snapshot_file_keys([&first, &second].into_iter()).expect("snapshot file keys");
+
+        assert_eq!(keys.get(&first), Some(&0));
+        assert_eq!(keys.get(&second), Some(&1));
     }
 }
