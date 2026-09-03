@@ -753,6 +753,7 @@ fn catalog_bound_compatibility_tools_resolve_before_retained_dispatch() {
             "fact_store_related",
             "fact_store_remove",
             "fact_store_search",
+            "fact_store_supersede",
             "fact_store_update",
             "impact",
             "insert_at",

@@ -411,6 +411,7 @@ impl RetainedSurfaceResultV1 {
             | Self::FactStoreAdd(_)
             | Self::FactStoreUpdate(_)
             | Self::FactStoreRemove(_)
+            | Self::FactStoreSupersede(_)
             | Self::FactFeedback(_)
             | Self::SessionRefreshCancel(_)
             | Self::SessionRefreshBegin(_) => Err(RetainedSurfaceEvidenceTerminalV1::Effect),

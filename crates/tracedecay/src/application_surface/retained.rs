@@ -7,12 +7,12 @@ use tracedecay_application::retained_surfaces::{
     FactFeedbackRequestV1, FactStoreAddRequestV1, FactStoreContradictRequestV1,
     FactStoreCurateRequestV1, FactStoreGetRequestV1, FactStoreListRequestV1,
     FactStoreProbeRequestV1, FactStoreReasonRequestV1, FactStoreRelatedRequestV1,
-    FactStoreRemoveRequestV1, FactStoreSearchRequestV1, FactStoreUpdateRequestV1,
-    LcmDescribeRequestV1, LcmDoctorRequestV1, LcmExpandQueryRequestV1, LcmExpandRequestV1,
-    LcmGrepRequestV1, LcmLoadSessionRequestV1, LcmStatusRequestV1, MemoryStatusRequestV1,
-    MessageSearchRequestV1, RetainedSurfaceOperation, RetainedSurfaceRequestV1,
-    RetainedSurfaceResultV1, SessionRefreshActionRequestV1, SessionRefreshActionV1,
-    SessionRefreshRequestV1, SessionsForRequestV1, WorkflowsRequestV1,
+    FactStoreRemoveRequestV1, FactStoreSearchRequestV1, FactStoreSupersedeRequestV1,
+    FactStoreUpdateRequestV1, LcmDescribeRequestV1, LcmDoctorRequestV1, LcmExpandQueryRequestV1,
+    LcmExpandRequestV1, LcmGrepRequestV1, LcmLoadSessionRequestV1, LcmStatusRequestV1,
+    MemoryStatusRequestV1, MessageSearchRequestV1, RetainedSurfaceOperation,
+    RetainedSurfaceRequestV1, RetainedSurfaceResultV1, SessionRefreshActionRequestV1,
+    SessionRefreshActionV1, SessionRefreshRequestV1, SessionsForRequestV1, WorkflowsRequestV1,
 };
 use tracedecay_tool_catalog::RouteExposureV1;
 
@@ -268,6 +268,9 @@ pub(crate) fn decode_request(
         }
         RetainedSurfaceOperation::FactStoreRemove => {
             decode!(FactStoreRemoveRequestV1, FactStoreRemove)
+        }
+        RetainedSurfaceOperation::FactStoreSupersede => {
+            decode!(FactStoreSupersedeRequestV1, FactStoreSupersede)
         }
         RetainedSurfaceOperation::FactStoreList => {
             decode!(FactStoreListRequestV1, FactStoreList)

@@ -164,6 +164,7 @@ pub fn prepare_retained_effect<T: Serialize>(
             | RetainedSurfaceOperation::FactStoreAdd
             | RetainedSurfaceOperation::FactStoreUpdate
             | RetainedSurfaceOperation::FactStoreRemove
+            | RetainedSurfaceOperation::FactStoreSupersede
             | RetainedSurfaceOperation::FactFeedback
             | RetainedSurfaceOperation::FactStoreSearch
     );
@@ -460,6 +461,7 @@ impl PreparedRetainedEffect {
             RetainedSurfaceOperation::FactStoreAdd
             | RetainedSurfaceOperation::FactStoreUpdate
             | RetainedSurfaceOperation::FactStoreRemove
+            | RetainedSurfaceOperation::FactStoreSupersede
             | RetainedSurfaceOperation::FactFeedback
             | RetainedSurfaceOperation::FactStoreSearch => memory_expiry_detail(),
             RetainedSurfaceOperation::SessionRefreshBegin

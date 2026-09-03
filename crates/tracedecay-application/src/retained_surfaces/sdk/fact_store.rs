@@ -145,6 +145,22 @@ pub struct FactStoreRemoveRequestV1 {
     pub project_selector: Option<RetainedProjectSelectorV1>,
 }
 
+/// Mark `fact_id` as superseded by `superseded_by`. The old fact leaves the
+/// default retrieval surfaces but stays readable by id through its history;
+/// payload and trust are never rewritten.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FactStoreSupersedeRequestV1 {
+    pub fact_id: FactId,
+    pub superseded_by: FactId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_last_event_id: Option<FactEventId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_scope: Option<MemoryScopeV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_selector: Option<RetainedProjectSelectorV1>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FactStoreListRequestV1 {

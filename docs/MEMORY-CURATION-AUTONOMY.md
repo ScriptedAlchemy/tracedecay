@@ -42,7 +42,8 @@ Use existing TraceDecay surfaces before inventing a new plan format:
   `tracedecay_fact_store_probe`, `tracedecay_fact_store_related`,
   `tracedecay_fact_store_reason`, and `tracedecay_fact_store_contradict`;
   separate exact administration through `tracedecay_fact_store_add`,
-  `tracedecay_fact_store_update`, and `tracedecay_fact_store_remove`.
+  `tracedecay_fact_store_update`, `tracedecay_fact_store_supersede`, and
+  `tracedecay_fact_store_remove`.
 - `tracedecay_memory_status`: read-only memory authority and coverage health;
   use only when health/counts are part of the task. Similarity and dedupe
   evidence comes from the bounded verified Grafeo projection, not an alternate

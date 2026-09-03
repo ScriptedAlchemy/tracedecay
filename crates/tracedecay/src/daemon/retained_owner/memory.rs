@@ -6,9 +6,9 @@ use tracedecay_application::retained_surfaces::{
     FactFeedbackRequestV1, FactRetrievalTelemetryV1, FactStoreAddRequestV1,
     FactStoreContradictRequestV1, FactStoreGetRequestV1, FactStoreListRequestV1,
     FactStoreProbeRequestV1, FactStoreReasonRequestV1, FactStoreRelatedRequestV1,
-    FactStoreRemoveRequestV1, FactStoreSearchRequestV1, FactStoreUpdateRequestV1, MemoryScopeV1,
-    MemoryStatusRequestV1, RetainedProjectSelectorV1, RetainedSurfaceOperation,
-    RetainedSurfaceResultV1,
+    FactStoreRemoveRequestV1, FactStoreSearchRequestV1, FactStoreSupersedeRequestV1,
+    FactStoreUpdateRequestV1, MemoryScopeV1, MemoryStatusRequestV1, RetainedProjectSelectorV1,
+    RetainedSurfaceOperation, RetainedSurfaceResultV1,
 };
 use tracedecay_application::{
     ApplicationOutcome, RetainedMemoryExecutionPortV1, RetainedMemoryRequestV1,
@@ -247,6 +247,22 @@ impl<'a> DirectRetainedMemoryPortV1<'a> {
     }
 
     #[hotpath::skip]
+    async fn execute_supersede(
+        &self,
+        context: &RetainedSurfaceExecutionContextV1<'_>,
+        request: &FactStoreSupersedeRequestV1,
+    ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+        execute_scoped_memory!(
+            self,
+            context,
+            request.memory_scope,
+            request.project_selector.as_ref(),
+            super::memory_target::MemoryTargetAccessV1::Write,
+            execute_supersede_on_db(request)
+        )
+    }
+
+    #[hotpath::skip]
     async fn execute_feedback(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -297,6 +313,9 @@ impl RetainedMemoryExecutionPortV1 for DirectRetainedMemoryPortV1<'_> {
                 }
                 RetainedMemoryRequestV1::FactStoreRemove(request) => {
                     self.execute_remove(&context, request).await
+                }
+                RetainedMemoryRequestV1::FactStoreSupersede(request) => {
+                    self.execute_supersede(&context, request).await
                 }
                 RetainedMemoryRequestV1::FactStoreList(request) => {
                     self.execute_read(&context, Read::List(request)).await
@@ -479,6 +498,67 @@ async fn execute_remove_on_db(
         }
     };
     let result = RetainedSurfaceResultV1::FactStoreRemove(public.clone());
+    let partial = memory_expiry_partial(settled_after_expiry);
+    if let Some(commit) = committed_receipt {
+        return prepared.complete_with_digest(
+            context,
+            commit.committed_state_digest(),
+            tracedecay_application::ReconciliationState::Reconciled,
+            result,
+            partial,
+        );
+    }
+    prepared.complete(
+        context,
+        &public,
+        tracedecay_application::ReconciliationState::Reconciled,
+        result,
+        partial,
+    )
+}
+
+async fn execute_supersede_on_db(
+    context: &RetainedSurfaceExecutionContextV1<'_>,
+    database: &Database,
+    owner: FactOwnerV1,
+    request: &FactStoreSupersedeRequestV1,
+    configuration_digest: &ManifestDigest,
+) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+    let memory = memory_application(database, owner.clone())?;
+    let logical_effect = memory_mapping::supersede_logical_effect(&owner, request)?;
+    let operation_context =
+        memory_operation_context(context, &owner, "supersede", &logical_effect)?;
+    let operation_id = operation_context.operation_id().as_str().to_owned();
+    let prepared = prepare_retained_effect(
+        context,
+        RetainedSurfaceOperation::FactStoreSupersede,
+        configuration_digest,
+        &logical_effect,
+        &operation_id,
+    )?;
+    let command = memory_mapping::supersede_command(
+        owner,
+        request,
+        operation_context.operation_id().clone(),
+        context.request_context.actor().clone(),
+    )?;
+    let write_control = fact_write_control(context);
+    let (outcome, settled_after_expiry) = bounded_memory_operation(context, async {
+        Ok(hotpath::future!(
+            memory.supersede_project_memory_fact(command, &write_control),
+            label = "daemon.retained.memory.supersede.commit"
+        )
+        .await)
+    })
+    .await?;
+    let outcome = validate_memory_mutation(outcome, &prepared, |outcome| {
+        outcome
+            .commit_receipt()
+            .map(tracedecay_store::FactCommitReceipt::committed_state_digest)
+    })?;
+    let committed_receipt = outcome.commit_receipt();
+    let public = memory_mapping::supersede_result(&outcome)?;
+    let result = RetainedSurfaceResultV1::FactStoreSupersede(public.clone());
     let partial = memory_expiry_partial(settled_after_expiry);
     if let Some(commit) = committed_receipt {
         return prepared.complete_with_digest(

@@ -429,6 +429,7 @@ pub fn handle_tool_call_with_registry_options<'a>(
                         | RetainedSurfaceOperation::FactStoreGet
                         | RetainedSurfaceOperation::FactStoreUpdate
                         | RetainedSurfaceOperation::FactStoreRemove
+                        | RetainedSurfaceOperation::FactStoreSupersede
                         | RetainedSurfaceOperation::FactStoreList
                         | RetainedSurfaceOperation::FactFeedback
                         | RetainedSurfaceOperation::MemoryStatus
