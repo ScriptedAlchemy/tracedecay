@@ -30,7 +30,8 @@ use crate::retrieval::rerank::{
     RerankViewOutcomeV1, RerankViewPermitV1,
 };
 use crate::retrieval::semantic::{
-    CodeSemanticEvidenceV1, SemanticLaneRetriever, SemanticRetrievalRequestV1, SemanticSearchKindV1,
+    CodeSemanticEvidenceV1, SemanticLaneRetriever, SemanticRetrievalRequestV1,
+    SemanticSearchExecutionV1,
 };
 
 mod fallback;
@@ -642,7 +643,7 @@ fn exact_flat_oracle(
                 )
             })?;
         if candidate.retriever != RetrieverKind::Semantic
-            || evidence.search_kind != SemanticSearchKindV1::ExactFlat
+            || evidence.search != SemanticSearchExecutionV1::ExactFlat
         {
             return Err(SemanticNativeEvaluationErrorV1::Contract(
                 "semantic oracle accepts only the production exact-flat lane".to_owned(),

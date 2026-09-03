@@ -23,7 +23,7 @@ use tracedecay_query::retrieval::graph::{GraphLaneEvidence, GraphPathSegmentV1};
 use tracedecay_query::retrieval::lexical::{LexicalFieldV1, LexicalLaneEvidence};
 use tracedecay_query::retrieval::ports::{CodeCandidateBindingV1, CodeOccurrenceRefV1};
 use tracedecay_query::retrieval::semantic::{
-    CanonicalSemanticDistanceV1, CodeSemanticEvidenceV1, SemanticSearchKindV1,
+    CanonicalSemanticDistanceV1, CodeSemanticEvidenceV1, SemanticSearchExecutionV1,
 };
 use tracedecay_query::retrieval::{
     AdmittedGenerationContextV1, NativeCodeOccurrenceV1, NativeExactRecordV1, NativeGraphRecordV1,
@@ -221,7 +221,7 @@ fn semantic_evidence() -> CodeSemanticEvidenceV1 {
         vector_generation: VectorGenerationIdV1::new(digest('6')),
         chunk_id: id("chunk.canonical-equivalence"),
         distance,
-        search_kind: SemanticSearchKindV1::ExactFlat,
+        search: SemanticSearchExecutionV1::ExactFlat,
     }
 }
 

@@ -4,10 +4,11 @@
 //! The lane consumes only an admitted embedding projection, a request-local
 //! query-embedding port, and an immutable vector-generation read port. The
 //! request's search-index key selects the path: `exact_flat` scans and
-//! exactly scores every published row, while `ann_hnsw_exact_rescore` asks
-//! the read port for index-bounded candidates and exactly rescores them with
-//! the same canonical distance, falling back to the exact-flat scan (typed,
-//! never silent) when the port reports its index missing or incomplete.
+//! exactly scores every published row, while `ann_hnsw_exact_rescore` gathers
+//! index-bounded candidates under the adaptive recall policy committed in the
+//! profile digest and exactly rescores them with the same canonical distance,
+//! falling back to the exact-flat scan (typed, never silent) when the port
+//! reports its index missing or incomplete.
 //! The lane performs no artifact admission, vector mutation, fusion,
 //! reranking, hydration, activation, or calls into another retrieval lane.
 
@@ -18,14 +19,17 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
+    AdaptiveRecallDepthPolicyV1, AdaptiveRecallStepV1, AdaptiveRecallStopV1,
     AdmittedEmbeddingProjectionKeyV1, CodeGenerationId, CodeSearchChunkId, CompactCandidate,
     CursorPayloadDigest, EmbeddingMetricV1, EmbeddingProjectionKeyV1,
     EphemeralSanitizedQueryViewV1, FixedPointScore, FreshnessCompatibilityV1, ManifestDigest,
     ProjectionKeyV1, QueryDigest, RetrievalBudget, RetrievalBudgetUsage, RetrievalError,
     RetrievalFailure, RetrievalRequest, Retriever, RetrieverBatch, RetrieverContinuation,
-    RetrieverCoverage, RetrieverKind, RetrieverOutcome, SemanticSearchIndexKeyV1,
-    SemanticSearchIndexKindV1, VectorGenerationIdV1,
+    RetrieverCoverage, RetrieverKind, RetrieverOutcome, SEMANTIC_ANN_RECALL_POLICY_V1,
+    SemanticSearchIndexKeyV1, SemanticSearchIndexKindV1, SemanticSearchIndexProfileV1,
+    SourceOccurrenceId, VectorGenerationIdV1,
 };
+use tracedecay_graph_db::MAX_VECTOR_SEARCH_LIMIT;
 
 use super::ports::{
     CodeCandidateBindingV1, CompactCandidateLane, RetrievalPortError, candidate_checkpoint_prefix,
@@ -54,9 +58,10 @@ pub use service::{
 const SEMANTIC_DISTANCE_SCALE: f64 = 1_000_000_000.0;
 const SEMANTIC_CHECKPOINT_DOMAIN: &str = "tracedecay.semantic-flat-checkpoint.v1";
 
-/// The search implementation that actually executed for one request.
-/// Evidence records the executed path, so an ANN-profiled request that fell
-/// back to the exact-flat scan is visibly `ExactFlat` in its evidence.
+/// The search implementation a read request asks the port to serve. It is
+/// distinct from the request's search-index kind because an ANN-profiled
+/// request that fell back reads the port as `ExactFlat`; the executed path
+/// and its facts are published through `SemanticSearchExecutionV1`.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SemanticSearchKindV1 {
     #[serde(rename = "exact_flat")]
@@ -65,11 +70,55 @@ pub enum SemanticSearchKindV1 {
     AnnHnswExactRescore,
 }
 
-/// How many index candidates the ANN path requests per retained result. The
-/// oversample absorbs candidates the exact rescore reorders near the cap
-/// boundary; it is committed in the ANN search-index profile's parameters
-/// digest, so changing it mints a new index identity.
-pub const SEMANTIC_ANN_CANDIDATE_OVERSAMPLE_V1: usize = 4;
+// The lane executes `SEMANTIC_ANN_RECALL_POLICY_V1`, the value the canonical
+// ANN profile commits into its parameters digest, and refuses an ANN key
+// minted from any other policy, so the depth sequence a request observes is
+// always the one its index identity promised. The ceiling must stay within
+// the vector store's hard search bound; otherwise the port would clamp a pass
+// and the loop would misread the clamp as an unsaturated index.
+const _: () = assert!(SEMANTIC_ANN_RECALL_POLICY_V1.max_depth as usize <= MAX_VECTOR_SEARCH_LIMIT);
+
+/// One executed adaptive recall loop: how deep the ANN path actually searched
+/// before rescoring, and why it stopped there.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SemanticAdaptiveRecallExecutionV1 {
+    /// Passes issued to the index, each for the ranks past the previous depth.
+    pub passes: u32,
+    /// Deepest rank the last pass searched.
+    pub final_depth: u32,
+    /// Pool size the policy aimed for under this request's retained cap.
+    pub target: u32,
+    pub stop: AdaptiveRecallStopV1,
+}
+
+/// The search path that actually executed for one batch, with the execution
+/// facts that path produces. An ANN-profiled request that fell back to the
+/// exact-flat scan is visibly `ExactFlat` here.
+///
+/// The tag is spelled `search_kind` and the enum is flattened into
+/// `CodeSemanticEvidenceV1`, so exact-flat evidence keeps the byte-exact wire
+/// shape of the SHA-pinned packaged native qualification (`search_kind` as
+/// its last key, no recall facts) while ANN evidence carries `recall` beside
+/// the tag.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "search_kind", rename_all = "snake_case")]
+pub enum SemanticSearchExecutionV1 {
+    ExactFlat,
+    AnnHnswExactRescore {
+        recall: SemanticAdaptiveRecallExecutionV1,
+    },
+}
+
+impl SemanticSearchExecutionV1 {
+    #[hotpath::skip]
+    pub const fn kind(self) -> SemanticSearchKindV1 {
+        match self {
+            Self::ExactFlat => SemanticSearchKindV1::ExactFlat,
+            Self::AnnHnswExactRescore { .. } => SemanticSearchKindV1::AnnHnswExactRescore,
+        }
+    }
+}
 
 /// Canonical fixed-point semantic distance. Smaller values rank first.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -87,15 +136,19 @@ impl CanonicalSemanticDistanceV1 {
     }
 }
 
+/// Per-candidate semantic evidence. Unknown fields cannot be denied here
+/// because `search` is flattened (serde offers no `deny_unknown_fields` with
+/// `flatten`); the packaged qualification loader still rejects any byte drift
+/// through its SHA pin and canonical re-serialization check.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct CodeSemanticEvidenceV1 {
     pub projection_key: EmbeddingProjectionKeyV1,
     pub search_index_key: SemanticSearchIndexKeyV1,
     pub vector_generation: VectorGenerationIdV1,
     pub chunk_id: CodeSearchChunkId,
     pub distance: CanonicalSemanticDistanceV1,
-    pub search_kind: SemanticSearchKindV1,
+    #[serde(flatten)]
+    pub search: SemanticSearchExecutionV1,
 }
 
 /// Frozen semantic-lane request. The query view remains borrowed and
@@ -245,10 +298,34 @@ pub enum SemanticAnnIndexStateV1 {
     Unsupported,
 }
 
+/// One slice of the index's nearest-neighbour ranking: the ranks in
+/// `skip..depth`. The first pass of the adaptive recall loop starts at rank
+/// zero; every later pass asks only for the ranks past what earlier passes
+/// already served, so no row crosses the port twice under an exact ranking.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SemanticAnnCandidateWindowV1 {
+    /// Ranks earlier passes already served; the port skips this many.
+    pub skip: usize,
+    /// Total ranking depth this pass searches.
+    pub depth: usize,
+}
+
+impl SemanticAnnCandidateWindowV1 {
+    /// Most rows the port may answer with for this window.
+    #[hotpath::skip]
+    pub const fn requested(self) -> usize {
+        self.depth.saturating_sub(self.skip)
+    }
+}
+
 /// Outcome of one bounded ANN candidate request.
 pub enum SemanticAnnCandidatesV1<'a> {
-    /// Index-nearest rows in ascending index-distance order, at most the
-    /// requested limit, each a serving row of the requested generation.
+    /// Index-nearest rows for the requested window in ascending
+    /// index-distance order, at most `window.requested()` of them, each a
+    /// serving row of the requested generation. An approximate index may
+    /// rank a row differently at a deeper search, so a later window can
+    /// re-serve a row an earlier one already answered; the lane never rescores
+    /// or republishes such a row and accounts for it as excluded coverage.
     Candidates(Vec<&'a SemanticVectorRecordV1>),
     /// The typed reason the index cannot serve this request; the lane falls
     /// back to the exact-flat scan and records the fallback.
@@ -267,20 +344,23 @@ pub trait SemanticVectorReadPort {
         visit: &mut dyn FnMut(&SemanticVectorRecordV1) -> Result<(), RetrievalPortError>,
     ) -> Result<SemanticVectorScanSummaryV1, RetrievalPortError>;
 
-    /// Index-bounded nearest candidates for one request-local query vector.
+    /// Index-bounded nearest candidates for one request-local query vector,
+    /// restricted to the ranks in `window`.
     ///
     /// `query` is the ephemeral query embedding: implementations may use it
     /// for the one transient index search and must not retain, copy beyond
     /// the search, or serialize it. Ports without a generation-bound ANN
     /// index report `Unavailable` with a typed state; they must never
-    /// approximate this surface with a partial scan.
+    /// approximate this surface with a partial scan. Availability is a
+    /// property of the immutable generation, so it must not change between
+    /// windows of one request.
     fn ann_candidates(
         &self,
         request: SemanticVectorReadRequestV1<'_>,
         query: &[f32],
-        limit: usize,
+        window: SemanticAnnCandidateWindowV1,
     ) -> Result<SemanticAnnCandidatesV1<'_>, RetrievalPortError> {
-        let _ = (request, query, limit);
+        let _ = (request, query, window);
         Ok(SemanticAnnCandidatesV1::Unavailable(
             SemanticAnnIndexStateV1::Unsupported,
         ))
@@ -333,6 +413,8 @@ where
         record: &SemanticVectorRecordV1,
         query: &EphemeralQueryEmbeddingV1,
     ) -> Result<CanonicalSemanticDistanceV1, RetrievalPortError> {
+        #[cfg(test)]
+        SEMANTIC_SCORED_ROWS.with(|count| count.set(count.get() + 1));
         crate::hotpath_metrics::measure_frequent("query.lane.semantic.score_row", || {
             Self::score_record_inner(request, record, query)
         })
@@ -399,10 +481,8 @@ where
     }
 
     fn materialize_record(
-        request: &SemanticRetrievalRequestV1<'_>,
         record: &SemanticVectorRecordV1,
         distance: CanonicalSemanticDistanceV1,
-        search_kind: SemanticSearchKindV1,
     ) -> SemanticRankedEntryV1 {
         #[cfg(test)]
         SEMANTIC_RETAINED_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
@@ -410,22 +490,14 @@ where
         candidate.raw_score = distance.as_descending_score();
         SemanticRankedEntryV1 {
             candidate,
-            evidence: CodeSemanticEvidenceV1 {
-                projection_key: request.projection.embedding_key().clone(),
-                search_index_key: request.search_index_key.clone(),
-                vector_generation: request.vector_generation.clone(),
-                chunk_id: record.chunk_id.clone(),
-                distance,
-                search_kind,
-            },
+            chunk_id: record.chunk_id.clone(),
+            distance,
         }
     }
 
     fn retain_scored_record(
-        request: &SemanticRetrievalRequestV1<'_>,
         record: &SemanticVectorRecordV1,
         distance: CanonicalSemanticDistanceV1,
-        search_kind: SemanticSearchKindV1,
         cap: usize,
         ranked: &mut BinaryHeap<SemanticRankedEntryV1>,
     ) {
@@ -444,10 +516,10 @@ where
                 &record.chunk_id,
             )
             .cmp(&rank_key(
-                worst.evidence.distance,
+                worst.distance,
                 &worst.candidate.source_occurrence_id,
                 &worst.candidate.retriever_evidence_anchor,
-                &worst.evidence.chunk_id,
+                &worst.chunk_id,
             )) == Ordering::Less
         } else {
             false
@@ -455,7 +527,7 @@ where
         if !retain {
             return;
         }
-        let entry = Self::materialize_record(request, record, distance, search_kind);
+        let entry = Self::materialize_record(record, distance);
         if ranked.len() == cap {
             ranked.pop();
         }
@@ -480,20 +552,33 @@ where
     }
 
     /// ANN candidate generation with exact rescoring. Candidates come from
-    /// the port's generation-bound index; each is rescored with the same
-    /// canonical distance the exact-flat scan uses, so published distances
-    /// are bit-identical to a flat scan's for every returned row. Coverage is
-    /// candidate-bounded and the continuation never claims exhaustion: an
-    /// index-bounded candidate set cannot prove no better row exists.
+    /// the port's generation-bound index, gathered by the adaptive recall
+    /// loop `SEMANTIC_ANN_RECALL_POLICY_V1` defines: each pass asks for the
+    /// ranks past the previous depth, and the depth grows only while the pass
+    /// was saturated and the pool is under target. Each candidate is rescored
+    /// once with the same canonical distance the exact-flat scan uses, so
+    /// published distances are bit-identical to a flat scan's for every
+    /// returned row. Coverage is candidate-bounded and the continuation never
+    /// claims exhaustion: an index-bounded candidate set cannot prove no
+    /// better row exists.
+    ///
+    /// The loop is a pure function of the policy, the retained cap, and the
+    /// row counts the port answers; cancellation and the deadline are observed
+    /// before every pass and every row, and budget usage counts every pass.
     fn retrieve_ann_exact_rescore(
         &self,
         request: &SemanticRetrievalRequestV1<'_>,
         query: &EphemeralQueryEmbeddingV1,
     ) -> Result<RetrieverOutcome<RetrieverBatch<CodeSemanticEvidenceV1>>, RetrievalPortError> {
+        let policy = SEMANTIC_ANN_RECALL_POLICY_V1;
+        verify_ann_search_index_key(request.search_index_key, &policy)?;
         let cap = lane_candidate_cap(&request.budget, &request.base.budget);
-        let limit = cap
-            .saturating_mul(SEMANTIC_ANN_CANDIDATE_OVERSAMPLE_V1)
-            .max(1);
+        let retained_cap = u32::try_from(cap).map_err(|_| {
+            observe_semantic_lane_failure("ann_retained_cap", "contract");
+            RetrievalPortError::Contract(
+                "semantic lane candidate cap exceeds the recall policy domain".to_owned(),
+            )
+        })?;
         let read_request = SemanticVectorReadRequestV1 {
             vector_generation: &request.vector_generation,
             projection_key: request.projection.projection_key(),
@@ -502,35 +587,19 @@ where
             capability_manifest_digest: &request.capability_manifest_digest,
             search_kind: SemanticSearchKindV1::AnnHnswExactRescore,
         };
-        let candidates = match self
-            .vectors
-            .ann_candidates(read_request, &query.values, limit)
-        {
-            Ok(candidates) => candidates,
-            Err(error) => {
-                observe_semantic_lane_failure("ann_candidates", port_error_class(&error));
-                return port_error_outcome(error, budget_usage(request, 0, 0, self.control));
-            }
-        };
-        let records = match candidates {
-            SemanticAnnCandidatesV1::Candidates(records) => records,
-            SemanticAnnCandidatesV1::Unavailable(state) => {
-                observe_semantic_ann_fallback(state);
-                return self.retrieve_exact_flat(request, query);
-            }
-        };
-        if records.len() > limit {
-            observe_semantic_lane_failure("ann_candidate_limit", "contract");
-            return Err(RetrievalPortError::Contract(
-                "semantic ANN port returned more candidates than requested".to_owned(),
-            ));
-        }
-        hotpath::gauge!("query.lane.semantic.ann.candidates").set(records.len());
 
         let mut ranked: BinaryHeap<SemanticRankedEntryV1> = BinaryHeap::new();
+        // Distinct rows rescored so far; `reserved_count` is rows an
+        // approximate index re-served in a later window (never rescored).
         let mut eligible_count: usize = 0;
-        let mut seen_occurrences = BTreeSet::new();
-        for record in records {
+        let mut reserved_count: usize = 0;
+        // Occurrence -> the pass that scored it, so a repeat inside one pass
+        // (a corrupt answer) is told apart from a repeat across passes.
+        let mut scored_passes: BTreeMap<SourceOccurrenceId, u32> = BTreeMap::new();
+        let mut passes: u32 = 0;
+        let mut searched_depth: u32 = 0;
+        let mut next_depth = policy.first_depth();
+        let stop = loop {
             if self.control.is_cancelled() {
                 hotpath::gauge!("query.cancel.count").inc(1u32);
                 return Ok(RetrieverOutcome::Cancelled);
@@ -538,38 +607,135 @@ where
             if deadline_exhausted(request, self.control) {
                 return Ok(RetrieverOutcome::BudgetExceeded(budget_usage(
                     request,
-                    eligible_count as u64,
+                    (eligible_count + reserved_count) as u64,
                     0,
                     self.control,
                 )));
             }
-            let distance = Self::score_record(request, record, query)?;
-            if !seen_occurrences.insert(record.candidate.source_occurrence_id.clone()) {
-                observe_semantic_lane_failure("ann_duplicate_occurrence", "contract");
+            let window = SemanticAnnCandidateWindowV1 {
+                skip: searched_depth as usize,
+                depth: next_depth as usize,
+            };
+            let candidates = match self
+                .vectors
+                .ann_candidates(read_request, &query.values, window)
+            {
+                Ok(candidates) => candidates,
+                Err(error) => {
+                    observe_semantic_lane_failure("ann_candidates", port_error_class(&error));
+                    return port_error_outcome(
+                        error,
+                        budget_usage(
+                            request,
+                            (eligible_count + reserved_count) as u64,
+                            0,
+                            self.control,
+                        ),
+                    );
+                }
+            };
+            let records = match candidates {
+                SemanticAnnCandidatesV1::Candidates(records) => records,
+                SemanticAnnCandidatesV1::Unavailable(state) if passes == 0 => {
+                    observe_semantic_ann_fallback(state);
+                    return self.retrieve_exact_flat(request, query);
+                }
+                SemanticAnnCandidatesV1::Unavailable(_) => {
+                    // The port reads one immutable generation: an index that
+                    // served the first window cannot truthfully vanish before
+                    // the next, and falling back now would discard scored
+                    // rows behind a flat-scan label.
+                    observe_semantic_lane_failure("ann_unavailable_between_passes", "contract");
+                    return Err(RetrievalPortError::Contract(
+                        "semantic ANN index became unavailable between recall passes".to_owned(),
+                    ));
+                }
+            };
+            if records.len() > window.requested() {
+                observe_semantic_lane_failure("ann_candidate_limit", "contract");
                 return Err(RetrievalPortError::Contract(
-                    "semantic ANN candidates contain duplicate source occurrences".to_owned(),
+                    "semantic ANN port returned more candidates than requested".to_owned(),
                 ));
             }
-            eligible_count += 1;
-            Self::retain_scored_record(
-                request,
-                record,
-                distance,
-                SemanticSearchKindV1::AnnHnswExactRescore,
-                cap,
-                &mut ranked,
-            );
-        }
+            passes += 1;
+            let returned = records.len();
+            for record in records {
+                if self.control.is_cancelled() {
+                    hotpath::gauge!("query.cancel.count").inc(1u32);
+                    return Ok(RetrieverOutcome::Cancelled);
+                }
+                if deadline_exhausted(request, self.control) {
+                    return Ok(RetrieverOutcome::BudgetExceeded(budget_usage(
+                        request,
+                        (eligible_count + reserved_count) as u64,
+                        0,
+                        self.control,
+                    )));
+                }
+                match scored_passes.get(&record.candidate.source_occurrence_id) {
+                    Some(scored_in) if *scored_in == passes => {
+                        observe_semantic_lane_failure("ann_duplicate_occurrence", "contract");
+                        return Err(RetrievalPortError::Contract(
+                            "semantic ANN candidates contain duplicate source occurrences"
+                                .to_owned(),
+                        ));
+                    }
+                    Some(_) => {
+                        reserved_count += 1;
+                        continue;
+                    }
+                    None => {}
+                }
+                let distance = Self::score_record(request, record, query)?;
+                scored_passes.insert(record.candidate.source_occurrence_id.clone(), passes);
+                eligible_count += 1;
+                Self::retain_scored_record(record, distance, cap, &mut ranked);
+            }
+            // `returned <= requested <= next_depth` and the pool never exceeds
+            // the total depth searched, so these conversions only fail if the
+            // window check above was bypassed.
+            let requested = next_depth - searched_depth;
+            let returned = u32::try_from(returned).map_err(|_| {
+                RetrievalPortError::Contract(
+                    "semantic ANN pass answered beyond the recall policy domain".to_owned(),
+                )
+            })?;
+            let pool = u32::try_from(eligible_count).map_err(|_| {
+                RetrievalPortError::Contract(
+                    "semantic ANN candidate pool exceeds the recall policy domain".to_owned(),
+                )
+            })?;
+            searched_depth = next_depth;
+            match policy.step(retained_cap, searched_depth, requested, returned, pool) {
+                AdaptiveRecallStepV1::Grow { next_depth: depth } => next_depth = depth,
+                AdaptiveRecallStepV1::Stop(stop) => break stop,
+            }
+        };
+        let recall = SemanticAdaptiveRecallExecutionV1 {
+            passes,
+            final_depth: searched_depth,
+            target: policy.target(retained_cap),
+            stop,
+        };
+        hotpath::gauge!("query.lane.semantic.ann.passes").set(passes);
+        hotpath::gauge!("query.lane.semantic.ann.depth").set(searched_depth);
+        hotpath::gauge!("query.lane.semantic.ann.candidates").set(eligible_count + reserved_count);
         let coverage = RetrieverCoverage {
-            examined: eligible_count as u64,
+            examined: (eligible_count + reserved_count) as u64,
             eligible: eligible_count as u64,
-            excluded: 0,
+            excluded: reserved_count as u64,
             capped: eligible_count.saturating_sub(ranked.len()) as u64,
             unknown: 0,
         };
         hotpath::gauge!("query.lane.semantic.examined").set(coverage.examined);
         hotpath::gauge!("query.lane.semantic.candidates").set(eligible_count);
-        self.assemble_ranked_batch(request, ranked, coverage, false)
+        self.assemble_ranked_batch(
+            request,
+            ranked,
+            coverage,
+            false,
+            SemanticSearchExecutionV1::AnnHnswExactRescore { recall },
+        )
     }
 
     /// Exact-flat scan: visit and exactly score every published row.
@@ -621,14 +787,7 @@ where
                     ));
                 }
                 eligible_count += 1;
-                Self::retain_scored_record(
-                    request,
-                    record,
-                    distance,
-                    SemanticSearchKindV1::ExactFlat,
-                    cap,
-                    &mut ranked,
-                );
+                Self::retain_scored_record(record, distance, cap, &mut ranked);
                 Ok(())
             });
         let summary = match scan {
@@ -691,19 +850,28 @@ where
             capped: truncated as u64,
             unknown: summary.unknown,
         };
-        self.assemble_ranked_batch(request, ranked, coverage, truncated == 0)
+        self.assemble_ranked_batch(
+            request,
+            ranked,
+            coverage,
+            truncated == 0,
+            SemanticSearchExecutionV1::ExactFlat,
+        )
     }
 
     /// Drain the retained heap in ascending ranking order (identical to a
     /// full sort followed by truncation), bind evidence, and validate the
     /// batch. Shared by the exact-flat and ANN-rescore paths; only their
-    /// coverage accounting and exhaustion claims differ.
+    /// coverage accounting, exhaustion claims, and executed search differ.
+    /// Evidence is bound here rather than at retention because the ANN
+    /// execution facts are known only once the recall loop has stopped.
     fn assemble_ranked_batch(
         &self,
         request: &SemanticRetrievalRequestV1<'_>,
         ranked: BinaryHeap<SemanticRankedEntryV1>,
         coverage: RetrieverCoverage,
         exhausted: bool,
+        search: SemanticSearchExecutionV1,
     ) -> Result<RetrieverOutcome<RetrieverBatch<CodeSemanticEvidenceV1>>, RetrievalPortError> {
         let ranked = ranked.into_sorted_vec();
         let mut candidates = Vec::with_capacity(ranked.len());
@@ -711,10 +879,21 @@ where
         for (ordinal, entry) in ranked.into_iter().enumerate() {
             let SemanticRankedEntryV1 {
                 mut candidate,
-                evidence,
+                chunk_id,
+                distance,
             } = entry;
             candidate.ordinal_rank = ordinal as u32;
-            evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), evidence);
+            evidence_by_occurrence.insert(
+                candidate.source_occurrence_id.clone(),
+                CodeSemanticEvidenceV1 {
+                    projection_key: request.projection.embedding_key().clone(),
+                    search_index_key: request.search_index_key.clone(),
+                    vector_generation: request.vector_generation.clone(),
+                    chunk_id,
+                    distance,
+                    search,
+                },
+            );
             candidates.push(candidate);
         }
         let checkpoint_digest =
@@ -886,6 +1065,16 @@ pub(super) fn observe_semantic_lane_failure(stage: &'static str, error_class: &'
         }
         "ann_candidate_limit" => {
             hotpath::gauge!("query.lane.semantic.failure.ann_candidate_limit").inc(1_u64);
+        }
+        "ann_unavailable_between_passes" => {
+            hotpath::gauge!("query.lane.semantic.failure.ann_unavailable_between_passes")
+                .inc(1_u64);
+        }
+        "ann_recall_policy" => {
+            hotpath::gauge!("query.lane.semantic.failure.ann_recall_policy").inc(1_u64);
+        }
+        "ann_retained_cap" => {
+            hotpath::gauge!("query.lane.semantic.failure.ann_retained_cap").inc(1_u64);
         }
         "scan_eligible_coverage" => {
             hotpath::gauge!("query.lane.semantic.failure.scan_eligible_coverage").inc(1_u64);
@@ -1101,11 +1290,17 @@ fn elapsed_micros<C: SemanticExecutionControl>(
 #[cfg(test)]
 thread_local! {
     static SEMANTIC_RETAINED_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
+    static SEMANTIC_SCORED_ROWS: Cell<usize> = const { Cell::new(0) };
 }
 
 #[cfg(test)]
 pub(crate) fn take_semantic_retained_materializations() -> usize {
     SEMANTIC_RETAINED_MATERIALIZATIONS.with(|count| count.replace(0))
+}
+
+#[cfg(test)]
+pub(crate) fn take_semantic_scored_rows() -> usize {
+    SEMANTIC_SCORED_ROWS.with(|count| count.replace(0))
 }
 
 fn rank_key<'a>(
@@ -1127,31 +1322,54 @@ fn rank_key<'a>(
     )
 }
 
-/// One retained ExactFlat row, ordered by the deterministic semantic ranking
+/// One retained scored row, ordered by the deterministic semantic ranking
 /// key (ascending distance, then `source_occurrence_id`,
 /// `retriever_evidence_anchor`, `chunk_id`). `Ord` mirrors the former
 /// `ranked.sort_by` comparator exactly, so a max-heap of these keeps the cap
 /// smallest rows and `into_sorted_vec` yields the identical ascending order.
 struct SemanticRankedEntryV1 {
     candidate: CompactCandidate,
-    evidence: CodeSemanticEvidenceV1,
+    chunk_id: CodeSearchChunkId,
+    distance: CanonicalSemanticDistanceV1,
 }
 
 impl SemanticRankedEntryV1 {
     fn rank_cmp(&self, other: &Self) -> Ordering {
         rank_key(
-            self.evidence.distance,
+            self.distance,
             &self.candidate.source_occurrence_id,
             &self.candidate.retriever_evidence_anchor,
-            &self.evidence.chunk_id,
+            &self.chunk_id,
         )
         .cmp(&rank_key(
-            other.evidence.distance,
+            other.distance,
             &other.candidate.source_occurrence_id,
             &other.candidate.retriever_evidence_anchor,
-            &other.evidence.chunk_id,
+            &other.chunk_id,
         ))
     }
+}
+
+/// The lane executes exactly one recall policy, so an ANN key must be the
+/// identity that policy mints: serving a key minted under another policy
+/// would silently run a different depth sequence than the key committed to.
+fn verify_ann_search_index_key(
+    search_index_key: &SemanticSearchIndexKeyV1,
+    policy: &AdaptiveRecallDepthPolicyV1,
+) -> Result<(), RetrievalPortError> {
+    let committed = SemanticSearchIndexProfileV1::ann_hnsw_exact_rescore(policy)
+        .and_then(|profile| profile.index_key())
+        .map_err(contract_error)
+        .inspect_err(|error| {
+            observe_semantic_lane_failure("ann_recall_policy", port_error_class(error));
+        })?;
+    if *search_index_key != committed {
+        observe_semantic_lane_failure("ann_recall_policy", "contract");
+        return Err(RetrievalPortError::Contract(
+            "semantic ANN search index key does not commit to the lane's recall policy".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 impl Ord for SemanticRankedEntryV1 {
