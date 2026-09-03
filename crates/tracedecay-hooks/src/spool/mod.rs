@@ -34,8 +34,9 @@ mod replay;
 mod types;
 
 use checkpoint::{
-    CheckpointAnchorV1, RecordsFileRevisionV1, read_checkpoint, read_transition,
-    records_file_revision, write_checkpoint, write_transition,
+    CHECKPOINT_REWRITE_BYTE_THRESHOLD, CHECKPOINT_REWRITE_FRAME_THRESHOLD, CheckpointAnchorV1,
+    RecordsFileRevisionV1, read_checkpoint, read_transition, records_file_revision,
+    write_checkpoint, write_transition,
 };
 use types::{AcknowledgedSequenceV1, HookSpoolMetaV1, SpoolIntegrityV1};
 pub use types::{
@@ -202,10 +203,13 @@ impl HookSpoolV1 {
         lease_file: File,
         _now: UtcMicros,
     ) -> Result<(Self, HookSpoolOpenReportV1), HookSpoolError> {
-        let mut meta = read_meta(&root)?.unwrap_or_else(HookSpoolMetaV1::fresh);
+        let stored_meta = read_meta(&root)?;
+        let meta_was_missing = stored_meta.is_none();
+        let mut meta = stored_meta.unwrap_or_else(HookSpoolMetaV1::fresh);
         validate_meta(&meta, config.limits, config.host)?;
         let current_revision = records_file_revision(&root)?;
-        let (mut scan, reusable_checkpoint) = match read_checkpoint(&root, config)? {
+        let cached_checkpoint = read_checkpoint(&root, config)?;
+        let (mut scan, reusable_checkpoint) = match cached_checkpoint {
             Some(checkpoint) if checkpoint.records_revision == current_revision => {
                 let validated_end = checkpoint
                     .records_revision
@@ -233,9 +237,13 @@ impl HookSpoolV1 {
                         && transition.current_revision.length >= validated_end
                 });
                 if transition_matches {
+                    let anchor = CheckpointAnchorV1 {
+                        records_revision: checkpoint.records_revision.clone(),
+                        checksum: checkpoint.checksum,
+                    };
                     (
                         scan_records_from(&root, config, checkpoint.records, validated_end)?,
-                        None,
+                        Some(anchor),
                     )
                 } else {
                     (scan_records(&root, config)?, None)
@@ -264,27 +272,47 @@ impl HookSpoolV1 {
             }
         }
 
+        let checkpoint_suffix_bytes =
+            reusable_checkpoint
+                .as_ref()
+                .map_or(scan.valid_end, |anchor| {
+                    scan.valid_end.saturating_sub(
+                        anchor
+                            .records_revision
+                            .as_ref()
+                            .map_or(0, |revision| revision.length),
+                    )
+                });
+        let rewrite_checkpoint = reusable_checkpoint.is_none()
+            || scan.scanned_records >= CHECKPOINT_REWRITE_FRAME_THRESHOLD
+            || checkpoint_suffix_bytes >= CHECKPOINT_REWRITE_BYTE_THRESHOLD;
+        let mut checkpoint_rewritten = false;
         let checkpoint = if matches!(meta.integrity, SpoolIntegrityV1::Healthy) {
+            let unreconciled_meta = meta.clone();
             reconcile_append_intent(&mut meta, &scan.records, config.host)?;
             validate_meta_against_records(&meta, &scan.records, config.limits)?;
-            write_meta(&root, &meta)?;
-            Some(match reusable_checkpoint {
-                Some(checkpoint) => checkpoint,
-                None => write_checkpoint(&root, config, &scan.records)?,
+            if meta_was_missing || meta != unreconciled_meta {
+                write_meta(&root, &meta)?;
+            }
+            Some(match (reusable_checkpoint, rewrite_checkpoint) {
+                (Some(checkpoint), false) => checkpoint,
+                _ => {
+                    checkpoint_rewritten = true;
+                    write_checkpoint(&root, config, &scan.records)?
+                }
             })
         } else {
             None
         };
 
         let acknowledged = acknowledged_map(&meta)?;
-        let validated_records = scan.records;
-        let pending = validated_records
-            .iter()
+        let pending = scan
+            .records
+            .into_iter()
             .filter(|record| {
                 record.sequence > meta.committed_through
                     && !acknowledged.contains_key(&record.sequence)
             })
-            .cloned()
             .collect::<Vec<_>>();
         let pending_by_session = usage_by_session(&pending, config.limits)?;
         let pending_by_event = pending_event_index(&pending);
@@ -294,6 +322,7 @@ impl HookSpoolV1 {
             committed_through: meta.committed_through,
             next_sequence: meta.next_sequence,
             scanned_records: scan.scanned_records,
+            checkpoint_rewritten,
             truncated_partial_tail_bytes,
             corrupted_at_offset: match meta.integrity {
                 SpoolIntegrityV1::Healthy => None,
@@ -301,9 +330,13 @@ impl HookSpoolV1 {
             },
         };
         let round_robin_after = read_replay_cursor(&root)?;
-        let observed_records_revision = checkpoint
-            .as_ref()
-            .and_then(|checkpoint| checkpoint.records_revision.clone());
+        let observed_records_revision = if checkpoint_rewritten {
+            checkpoint
+                .as_ref()
+                .and_then(|checkpoint| checkpoint.records_revision.clone())
+        } else {
+            current_revision
+        };
         let mut spool = Self {
             root,
             config,

@@ -3,7 +3,10 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracedecay_domain::{canonical_json_bytes, framed_log::checksum as frame_checksum};
+use tracedecay_domain::{
+    canonical_json_bytes,
+    framed_log::{self, checksum as frame_checksum},
+};
 use tracedecay_private_fs::framed_log::atomic_write as shared_atomic_write;
 
 use crate::{HookHostV1, MAX_SPOOL_BYTES_PER_HOST, MAX_SPOOL_RECORDS_PER_HOST};
@@ -16,6 +19,12 @@ use super::{
 
 const MAX_CHECKPOINT_BYTES: usize = (MAX_SPOOL_BYTES_PER_HOST as usize) * 4;
 const MAX_TRANSITION_BYTES: usize = 16 * 1024;
+const CHECKPOINT_MAGIC: &[u8; 4] = b"TDHC";
+const CHECKPOINT_HEADER_BYTES: usize = 4 + 2 + 8;
+// Bound suffix validation by both ordinary frame count and unusually large
+// payload bytes while amortizing each full checkpoint publication.
+pub(super) const CHECKPOINT_REWRITE_FRAME_THRESHOLD: u32 = 64;
+pub(super) const CHECKPOINT_REWRITE_BYTE_THRESHOLD: u64 = 256 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -33,13 +42,6 @@ struct HookSpoolCheckpointBodyV1 {
     host: HookHostV1,
     records_revision: Option<RecordsFileRevisionV1>,
     records: Vec<HookSpoolRecordV1>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct HookSpoolCheckpointFileV1 {
-    body: HookSpoolCheckpointBodyV1,
-    checksum: [u8; 32],
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -85,27 +87,49 @@ pub(super) fn read_checkpoint(
     let Some(bytes) = read_accelerator(&checkpoint_path(root), MAX_CHECKPOINT_BYTES)? else {
         return Ok(None);
     };
-    let Ok(file) = serde_json::from_slice::<HookSpoolCheckpointFileV1>(&bytes) else {
+    let minimum = CHECKPOINT_HEADER_BYTES + framed_log::CHECKSUM_BYTES;
+    if bytes.len() < minimum
+        || &bytes[..4] != CHECKPOINT_MAGIC
+        || u16::from_le_bytes([bytes[4], bytes[5]]) != CHECKPOINT_FORMAT_VERSION
+    {
+        return Ok(None);
+    }
+    let Ok(length_bytes) = bytes[6..CHECKPOINT_HEADER_BYTES].try_into() else {
         return Ok(None);
     };
-    let Ok(body_bytes) = canonical_json_bytes(&file.body) else {
+    let Ok(body_len) = usize::try_from(u64::from_le_bytes(length_bytes)) else {
         return Ok(None);
     };
-    if file.body.version != CHECKPOINT_FORMAT_VERSION
-        || file.body.host != config.host
-        || frame_checksum(&body_bytes) != file.checksum
-        || !valid_cached_records(
-            &file.body.records,
-            file.body.records_revision.as_ref(),
-            config,
-        )
+    let Some(checksum_at) = CHECKPOINT_HEADER_BYTES.checked_add(body_len) else {
+        return Ok(None);
+    };
+    let Some(expected_len) = checksum_at.checked_add(framed_log::CHECKSUM_BYTES) else {
+        return Ok(None);
+    };
+    if expected_len != bytes.len() {
+        return Ok(None);
+    }
+    let Ok(checksum) = bytes[checksum_at..].try_into() else {
+        return Ok(None);
+    };
+    if frame_checksum(&bytes[..checksum_at]) != checksum {
+        return Ok(None);
+    }
+    let Ok(body) = serde_json::from_slice::<HookSpoolCheckpointBodyV1>(
+        &bytes[CHECKPOINT_HEADER_BYTES..checksum_at],
+    ) else {
+        return Ok(None);
+    };
+    if body.version != CHECKPOINT_FORMAT_VERSION
+        || body.host != config.host
+        || !valid_cached_records(&body.records, body.records_revision.as_ref(), config)
     {
         return Ok(None);
     }
     Ok(Some(ValidatedCheckpointV1 {
-        records_revision: file.body.records_revision,
-        records: file.body.records,
-        checksum: file.checksum,
+        records_revision: body.records_revision,
+        records: body.records,
+        checksum,
     }))
 }
 
@@ -125,12 +149,22 @@ pub(super) fn write_checkpoint(
         records: records.to_vec(),
     };
     let body_bytes = canonical_json_bytes(&body).map_err(|_| HookSpoolError::MetadataCorrupted)?;
-    let checksum = frame_checksum(&body_bytes);
-    let bytes = serde_json::to_vec(&HookSpoolCheckpointFileV1 { body, checksum })
-        .map_err(|_| HookSpoolError::MetadataCorrupted)?;
-    if bytes.len() > MAX_CHECKPOINT_BYTES {
+    let body_len =
+        u64::try_from(body_bytes.len()).map_err(|_| HookSpoolError::MetadataCorrupted)?;
+    let framed_len = CHECKPOINT_HEADER_BYTES
+        .checked_add(body_bytes.len())
+        .and_then(|length| length.checked_add(framed_log::CHECKSUM_BYTES))
+        .ok_or(HookSpoolError::MetadataCorrupted)?;
+    if framed_len > MAX_CHECKPOINT_BYTES {
         return Err(HookSpoolError::MetadataCorrupted);
     }
+    let mut bytes = Vec::with_capacity(framed_len);
+    bytes.extend_from_slice(CHECKPOINT_MAGIC);
+    bytes.extend_from_slice(&CHECKPOINT_FORMAT_VERSION.to_le_bytes());
+    bytes.extend_from_slice(&body_len.to_le_bytes());
+    bytes.extend_from_slice(&body_bytes);
+    let checksum = frame_checksum(&bytes);
+    bytes.extend_from_slice(&checksum);
     shared_atomic_write(
         &checkpoint_path(root),
         CHECKPOINT_FILE,
