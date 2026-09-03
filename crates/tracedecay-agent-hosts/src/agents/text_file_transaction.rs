@@ -399,7 +399,10 @@ pub(super) fn restore_bytes_file_if_unchanged(
 ) -> Result<()> {
     let _lock = lock_host_file_write(path)?;
     let observed = capture_host_file_snapshot(path).map_err(|error| TraceDecayError::Config {
-        message: format!("failed to inspect {} before restore: {error}", path.display()),
+        message: format!(
+            "failed to inspect {} before restore: {error}",
+            path.display()
+        ),
     })?;
     if observed.contents() != expected_current {
         return Err(TraceDecayError::Config {
@@ -409,13 +412,7 @@ pub(super) fn restore_bytes_file_if_unchanged(
             ),
         });
     }
-    safe_write_bytes_file_from_snapshot(
-        path,
-        original,
-        None,
-        Some(original_metadata),
-        &observed,
-    )
+    safe_write_bytes_file_from_snapshot(path, original, None, Some(original_metadata), &observed)
 }
 
 pub(crate) enum TextFileMutation {
