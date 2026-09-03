@@ -1480,7 +1480,7 @@ impl McpServer {
                 let outcome = HostAdmissionOutcome::spool_ack_conflict();
                 blocked_sources.insert(record.source);
                 retained_leases.push(record.seq);
-                non_committed_outcome.get_or_insert(outcome);
+                non_committed_outcome.get_or_insert(outcome.clone());
                 if target_seq == Some(record.seq) {
                     target_outcome = Some(outcome);
                 }
@@ -1492,7 +1492,7 @@ impl McpServer {
                     let outcome = HostAdmissionOutcome::durable_payload_unsupported_version();
                     blocked_sources.insert(record.source);
                     retained_leases.push(record.seq);
-                    non_committed_outcome.get_or_insert(outcome);
+                    non_committed_outcome.get_or_insert(outcome.clone());
                     if target_seq == Some(record.seq) {
                         target_outcome = Some(outcome);
                     }
@@ -1505,7 +1505,7 @@ impl McpServer {
                         .await
                     {
                         Ok(_) => {
-                            non_committed_outcome.get_or_insert(outcome);
+                            non_committed_outcome.get_or_insert(outcome.clone());
                             if target_seq == Some(record.seq) {
                                 target_outcome = Some(outcome);
                             }
@@ -1513,7 +1513,7 @@ impl McpServer {
                         Err(failure) if failure == HostAdmissionOutcome::quarantine_full() => {
                             blocked_sources.insert(record.source);
                             retained_leases.push(record.seq);
-                            non_committed_outcome.get_or_insert(failure);
+                            non_committed_outcome.get_or_insert(failure.clone());
                             if target_seq == Some(record.seq) {
                                 target_outcome = Some(failure);
                             }
@@ -1537,13 +1537,13 @@ impl McpServer {
                     .await
                 {
                     Ok(_) => {
-                        non_committed_outcome.get_or_insert(canonical_outcome);
+                        non_committed_outcome.get_or_insert(canonical_outcome.clone());
                         canonical_outcome
                     }
                     Err(failure) if failure == HostAdmissionOutcome::quarantine_full() => {
                         blocked_sources.insert(record.source);
                         retained_leases.push(record.seq);
-                        non_committed_outcome.get_or_insert(failure);
+                        non_committed_outcome.get_or_insert(failure.clone());
                         failure
                     }
                     Err(failure) => {
@@ -1565,7 +1565,7 @@ impl McpServer {
             } else {
                 blocked_sources.insert(record.source);
                 retained_leases.push(record.seq);
-                non_committed_outcome.get_or_insert(canonical_outcome);
+                non_committed_outcome.get_or_insert(canonical_outcome.clone());
                 canonical_outcome
             };
             if target_seq == Some(record.seq) {
@@ -1583,7 +1583,7 @@ impl McpServer {
             .unwrap_or_else(HostAdmissionOutcome::accepted_for_replay)
     }
 
-    pub(crate) fn report_host_admission_outcome(outcome: HostAdmissionOutcome) {
+    pub(crate) fn report_host_admission_outcome(outcome: &HostAdmissionOutcome) {
         if outcome.status.is_replay_progress() {
             return;
         }
