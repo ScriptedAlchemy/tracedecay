@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::AsyncWriteExt;
-use tokio::time::{Instant, timeout};
+use tokio::time::Instant;
 
 use crate::handshake::DaemonHandshake;
 use crate::transport::{BrokerStream, DaemonAuthPreface, DaemonEndpoint};
@@ -18,7 +18,6 @@ use tracedecay_framing::{
 };
 
 pub const DAEMON_TOOL_LIVENESS_POLL_INTERVAL: Duration = Duration::from_secs(5);
-pub const DAEMON_TOOL_HEALTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 pub const DAEMON_TOOL_RESPONSE_GRACE: Duration = Duration::from_secs(30);
 pub const DAEMON_RESTART_GRACE: Duration = Duration::from_secs(8);
 pub const DAEMON_RESTART_POLL_INTERVAL: Duration = Duration::from_millis(200);
@@ -176,24 +175,7 @@ pub async fn ensure_daemon_connection_live(
     if let Some(probe) = connection.liveness.as_ref() {
         probe.ensure_live(request_label)?;
     }
-    timeout(
-        DAEMON_TOOL_HEALTH_CONNECT_TIMEOUT,
-        BrokerStream::connect(&connection.endpoint),
-    )
-    .await
-    .map_err(|_| TraceDecayError::Config {
-        message: format!(
-            "daemon health check timed out at '{}' while request '{request_label}' was awaiting a response; the request was already sent and was not retried",
-            connection.endpoint
-        ),
-    })?
-    .map(|_| ())
-    .map_err(|error| TraceDecayError::Config {
-        message: format!(
-            "daemon became unreachable at '{}' while request '{request_label}' was awaiting a response: {error}; the request was already sent and was not retried",
-            connection.endpoint
-        ),
-    })
+    Ok(())
 }
 
 #[hotpath::measure(label = "daemon_protocol.client.response.wait", future = true)]
