@@ -128,6 +128,69 @@ fn key(label: &str) -> GraphIdempotencyKey {
     GraphIdempotencyKey::new(format!("publication.{label}")).expect("idempotency key")
 }
 
+#[tokio::test]
+async fn multi_scope_startup_retains_graph_authorities_without_opening_engines() {
+    let fixture = ContractFixture::new("lazy-startup").await;
+    fixture
+        .registry
+        .profile_memory()
+        .await
+        .expect("profile memory authority");
+    fixture
+        .registry
+        .profile_sessions()
+        .await
+        .expect("profile session authority");
+    fixture
+        .registry
+        .settle_profile_session_graph()
+        .await
+        .expect("profile session graph attachment");
+
+    let project_id = project_id("lazy-startup");
+    let roots = fixture.project_roots(&project_id);
+    for root in &roots {
+        std::fs::create_dir_all(root).expect("worktree root");
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+            root,
+            project_id.as_str(),
+        )
+        .expect("project enrollment");
+    }
+    let project_memory = fixture
+        .registry
+        .project_memory(project_id.clone(), roots.clone())
+        .await
+        .expect("project memory authority");
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while project_memory.memory_graph_runtime().is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("project memory graph authority attachment");
+    fixture
+        .registry
+        .project_sessions(project_id.clone(), roots)
+        .await
+        .expect("project session authority");
+    fixture
+        .registry
+        .settle_project_session_graph(&project_id)
+        .await
+        .expect("project session graph attachment");
+
+    assert_eq!(
+        fixture
+            .registry
+            .graph_registry
+            .resident_engine_count()
+            .expect("resident graph engine census"),
+        0,
+        "startup must retain lazy relation-graph authorities without replaying Grafeo"
+    );
+}
+
 fn cancellation(cancelled: bool) -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(cancelled))
 }
