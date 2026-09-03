@@ -8,15 +8,17 @@ use serde_json::json;
 use tempfile::{TempDir, tempdir};
 use tokio::sync::Notify;
 use tracedecay_domain::{
-    Confidence, FactCategoryV1, FactEventId, FactOwnerV1, ProvenanceId, UtcMicros,
+    Confidence, FactCategoryV1, FactCurationActionV1, FactEventId, FactLineageEventKindV1,
+    FactLineageEventV1, FactOwnerV1, ProjectMemoryGraphRelationKindV1, ProvenanceId, UtcMicros,
 };
 use tracedecay_graph_db::{
     GraphDbError, GraphGenerationManifest, GraphIdempotencyKey, GraphProjectionIdentity,
     NeverCancelled, VerifiedGraphSnapshot,
 };
 use tracedecay_store::{
-    FactCommitOutcome, FactCurrentQuery, FactReadControl, FactStore, FactStoreError,
-    FactWriteBatch, FactWriteControl, ProjectMemoryAutomaticFactApplyDispositionV1,
+    FactCommitOutcome, FactCurrentQuery, FactLineageQuery, FactReadControl, FactStore,
+    FactStoreError, FactWriteBatch, FactWriteControl,
+    ProjectMemoryAutomaticFactApplyDispositionV1,
     ProjectMemoryAutomaticFactEffectV1, ProjectMemoryAutomaticFactEvidenceV1,
     ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddDispositionV1,
     ProjectMemoryFactAddMaterialV1, ProjectMemoryFactCurationAddV1,
@@ -24,9 +26,12 @@ use tracedecay_store::{
     ProjectMemoryFactCurationMutationKindV1, ProjectMemoryFactCurationOperationV1,
     ProjectMemoryFactCurationReviewRefV1, ProjectMemoryFactFeedbackActionV1,
     ProjectMemoryFactFeedbackCommandV1, ProjectMemoryFactIdV1, ProjectMemoryFactMergeCommandV1,
-    ProjectMemoryFactMergeTargetV1, ProjectMemoryFactRemoveCommandV1,
+    ProjectMemoryFactListQueryV1, ProjectMemoryFactMergeTargetV1,
+    ProjectMemoryFactProjectionV1, ProjectMemoryFactRemoveCommandV1,
     ProjectMemoryFactRetrievalCommandV1, ProjectMemoryFactStore, ProjectMemoryFactUpdateCommandV1,
-    ProjectMemoryFactUpdatePatchV1, ProjectMemoryGraphQueryV1, StoreRuntimeBindingV1,
+    ProjectMemoryFactSearchKindV1, ProjectMemoryFactSearchQuery, ProjectMemoryFactUpdatePatchV1,
+    ProjectMemoryGraphQueryV1, ProjectMemoryGraphStore, ProjectMemoryGraphTargetV1,
+    StoreRuntimeBindingV1,
     VerifiedStoreLocatorV1, derive_project_memory_fact_curation_child_operation_id,
 };
 
@@ -589,6 +594,153 @@ async fn seed_quarantined_automatic_fact(
         .commit()
         .await
         .expect("commit quarantined automatic fact receipt");
+}
+
+#[tokio::test]
+async fn superseded_fact_remains_in_current_retrieval_and_graph_history() {
+    let (_directory, database) = database("superseded-current-retrieval").await;
+    let runtime = bind_runtime(&database);
+    let store = DatabaseFactStore::new(&database);
+    let old = seed_high_level_fact(
+        &store,
+        &runtime,
+        "superseded-old",
+        "retrievalmarker compiler rust memory lineage architecture",
+    )
+    .await;
+    let successor = seed_high_level_fact(
+        &store,
+        &runtime,
+        "superseded-successor",
+        "retrievalmarker gardening tomatoes irrigation rainfall soil",
+    )
+    .await;
+    let old_projection = store
+        .get_project_memory_fact(
+            old.target.clone(),
+            &FactReadControl::new(Arc::new(|| false)),
+        )
+        .await
+        .expect("load old fact before supersession")
+        .expect("old fact exists before supersession");
+    let ProjectMemoryFactProjectionV1::Available(old_fact) = old_projection else {
+        panic!("old fact is available before supersession");
+    };
+    let occurred_at = UtcMicros(
+        old_fact
+            .projected_as_of()
+            .0
+            .checked_add(1)
+            .expect("supersession event time"),
+    );
+    let event = FactLineageEventV1::new(
+        old.target.fact_id().clone(),
+        FactOwnerV1::Profile,
+        FactLineageEventKindV1::Curated {
+            action: FactCurationActionV1::SupersededBy {
+                fact_id: successor.target.fact_id().clone(),
+            },
+            evidence_ids: Vec::new(),
+        },
+        occurred_at,
+        None,
+    )
+    .expect("superseded lineage event");
+    let batch = FactWriteBatch::new(
+        old.target.fact_id().clone(),
+        FactOwnerV1::Profile,
+        None,
+        vec![event],
+        Vec::new(),
+        Vec::new(),
+        Some(old.last_event_id.clone()),
+    )
+    .expect("superseded lineage batch");
+
+    let outcome = store
+        .commit_fact(batch, &write_control())
+        .await
+        .expect("commit superseded lineage event");
+    assert!(matches!(outcome, FactCommitOutcome::Committed(_)));
+    wait_for_reconciliation(&runtime).await;
+
+    let lineage = store
+        .query_fact_lineage(
+            FactLineageQuery::new(
+                FactOwnerV1::Profile,
+                old.target.fact_id().clone(),
+                None,
+                64,
+            )
+            .expect("old fact lineage query"),
+        )
+        .await
+        .expect("load old fact lineage");
+    assert!(lineage.iter().any(|event| {
+        matches!(
+            event.kind(),
+            FactLineageEventKindV1::Curated {
+                action: FactCurationActionV1::SupersededBy { fact_id },
+                evidence_ids,
+            } if fact_id == successor.target.fact_id() && evidence_ids.is_empty()
+        )
+    }));
+
+    let graph = store
+        .project_memory_graph(
+            ProjectMemoryGraphQueryV1::new(
+                FactOwnerV1::Profile,
+                vec![successor.target.fact_id().clone()],
+                64,
+            )
+            .expect("supersession graph query"),
+            &FactReadControl::new(Arc::new(|| false)),
+        )
+        .await
+        .expect("load supersession graph");
+    assert!(graph.relations().iter().any(|relation| {
+        relation.kind() == ProjectMemoryGraphRelationKindV1::Supersedes
+            && relation.source()
+                == &ProjectMemoryGraphTargetV1::Fact(successor.target.clone())
+            && relation.target() == &ProjectMemoryGraphTargetV1::Fact(old.target.clone())
+    }));
+
+    let list = store
+        .list_project_memory_facts(
+            ProjectMemoryFactListQueryV1::new(FactOwnerV1::Profile, None, None, None, 64)
+                .expect("current fact list query"),
+            &FactReadControl::new(Arc::new(|| false)),
+        )
+        .await
+        .expect("load current fact list");
+    assert!(
+        list.facts()
+            .iter()
+            .any(|fact| fact.fact_id() == old.target.fact_id()),
+        "current list still returns a superseded fact"
+    );
+
+    let search = store
+        .search_project_memory_facts(
+            ProjectMemoryFactSearchQuery::new(
+                FactOwnerV1::Profile,
+                ProjectMemoryFactSearchKindV1::Search,
+                Some("retrievalmarker".to_owned()),
+                None,
+                64,
+            )
+            .expect("current fact search query"),
+            &FactReadControl::new(Arc::new(|| false)),
+        )
+        .await
+        .expect("search current facts");
+    assert!(
+        search
+            .hits()
+            .iter()
+            .any(|hit| hit.fact().fact_id() == old.target.fact_id()),
+        "current search still returns a superseded fact"
+    );
 }
 
 #[tokio::test]
