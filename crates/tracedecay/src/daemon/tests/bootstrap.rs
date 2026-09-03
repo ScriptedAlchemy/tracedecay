@@ -2818,6 +2818,7 @@ async fn portable_broker_bootstrap_bypasses_project_writer_gate() {
     let receipt = super::super::shutdown_project_servers(
         tokio::time::Instant::now() + tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE,
         &store_administration,
+        &super::super::http_application::DaemonHttpApplicationRegistry::default(),
     )
     .await;
     assert!(receipt.is_clean(), "{:?}", receipt.outcomes);

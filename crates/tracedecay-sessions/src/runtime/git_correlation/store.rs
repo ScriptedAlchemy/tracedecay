@@ -20,9 +20,9 @@ use tracedecay_runtime_core::{
 use tracedecay_store::FactReadControl;
 
 use super::{
-    CommitSessionRecord, CorrelationIndexHealth, GitCorrelationError, GitEvidenceProjectionV1,
-    GitScopeFilter, SessionGitCorrelationHit, SessionGitSpan, SessionsForQuery,
-    canonical_provider_map,
+    CommitSessionRecord, CorrelationIndexHealth, CorrelationIndexPresence, GitCorrelationError,
+    GitEvidenceProjectionV1, GitScopeFilter, SessionGitCorrelationHit, SessionGitSpan,
+    SessionsForQuery, canonical_provider_map,
 };
 
 const GRAPH_READ_PAGE_ITEMS: usize = 10_000;
@@ -294,6 +294,17 @@ impl GitEvidenceProjectionStore {
             span_count: u64::try_from(self.projection.spans().len()).unwrap_or(u64::MAX),
             commit_count: u64::try_from(self.projection.commit_sessions().len())
                 .unwrap_or(u64::MAX),
+            backfill_watermark,
+        }
+    }
+
+    pub fn presence(&self, backfill_watermark: Option<i64>) -> CorrelationIndexPresence {
+        CorrelationIndexPresence {
+            projection_available: true,
+            generation: Some(self.snapshot.generation().as_str().to_owned()),
+            source_watermark: Some(self.projection.source_watermark().to_owned()),
+            spans_present: !self.projection.spans().is_empty(),
+            commits_present: !self.projection.commit_sessions().is_empty(),
             backfill_watermark,
         }
     }
