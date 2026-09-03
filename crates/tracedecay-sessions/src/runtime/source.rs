@@ -89,6 +89,7 @@ impl HostProviderCoverage {
 pub(super) const CODEX_HISTORY_FRONTIER_KEY: &str = "tracedecay-internal:codex-history-frontier:v2";
 pub(super) const CODEX_HISTORY_EPOCH_KEY: &str = "tracedecay-internal:codex-history-epoch:v2";
 
+#[hotpath::measure(label = "sessions.source.coverage_read", future = true)]
 pub(super) async fn read_host_provider_coverage(
     admission: &dyn HostAdmission,
     scope: &ObservationScopeV1,
@@ -149,6 +150,7 @@ pub(super) async fn persist_codex_history_frontier(
         })
 }
 
+#[hotpath::measure(label = "sessions.source.coverage_persist", future = true)]
 pub(super) async fn persist_host_provider_coverage(
     admission: &(impl HostAdmission + ?Sized),
     scope: &ObservationScopeV1,
@@ -365,6 +367,7 @@ pub struct LoadedTranscriptCursor {
     durable_offset: ParseOffset,
 }
 
+#[hotpath::measure(label = "sessions.source.cursor_load", future = true)]
 pub async fn load_transcript_cursor<S: TranscriptIngestStore>(
     store: &S,
     key: TranscriptCursorKey,
@@ -902,6 +905,7 @@ use jsonl::{
     stream_new_jsonl_raw_strict, stream_new_jsonl_strict, stream_new_jsonl_with_policy,
 };
 
+#[hotpath::measure(label = "sessions.source.preflight_jsonl")]
 pub fn preflight_strict_jsonl(
     provider: &'static str,
     path: &Path,
@@ -942,6 +946,7 @@ pub struct ChangedFile {
 /// with deterministic ids. Idempotent upserts make re-adding unchanged messages
 /// a no-op. Returns `None` when the file cannot be read or is unchanged since
 /// the last run.
+#[hotpath::measure(label = "sessions.source.read_changed")]
 pub fn read_changed_file(path: &Path, prev: StoredCursor, max_bytes: u64) -> Option<ChangedFile> {
     let meta = match std::fs::metadata(path) {
         Ok(meta) => meta,
@@ -975,6 +980,7 @@ pub fn read_changed_file(path: &Path, prev: StoredCursor, max_bytes: u64) -> Opt
 /// own content hash moves or a companion sidecar file's hash moves. The stored
 /// cursor's `position` is a combined hash of both files so a sidecar-only
 /// update (e.g. Cline `ui_messages.json` usage counters) triggers a re-ingest.
+#[hotpath::measure(label = "sessions.source.read_changed_companion")]
 pub fn read_changed_with_companion(
     primary: &Path,
     companion: &Path,
