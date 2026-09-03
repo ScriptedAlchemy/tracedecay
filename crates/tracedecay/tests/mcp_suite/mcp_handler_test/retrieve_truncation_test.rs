@@ -7,6 +7,8 @@ use std::fs;
 mod retrieve_truncation_support;
 #[cfg(feature = "test-transport")]
 use retrieve_truncation_support::call_production_tool;
+#[cfg(feature = "test-transport")]
+use retrieve_truncation_support::retrieve_all_json_pages;
 use retrieve_truncation_support::retrieve_json_arguments;
 
 #[tokio::test]
@@ -46,6 +48,21 @@ async fn retrieve_tool_returns_full_stored_response() {
     assert_eq!(payload["content"], original);
     assert_eq!(payload["expired"], false);
 
+    let markdown = handle_tool_call(
+        &cg,
+        "tracedecay_retrieve",
+        json!({"handle": stored.handle, "offset": 2, "max_chars": 7}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let markdown = extract_text(&markdown.value);
+    assert!(markdown.contains("**offset:** 2"));
+    assert!(markdown.contains("**next_offset:** 9"));
+    assert!(markdown.contains("**has_more:** true"));
+    assert!(markdown.ends_with(&original.chars().skip(2).take(7).collect::<String>()));
+
     let alias_result = handle_tool_call(
         &cg,
         "tracedecay_retrieve",
@@ -61,6 +78,100 @@ async fn retrieve_tool_returns_full_stored_response() {
     assert!(
         alias_result.is_err(),
         "tracedecay_retrieve must accept only the canonical `handle` field"
+    );
+}
+
+#[tokio::test]
+async fn retrieve_pages_reconstruct_large_and_multibyte_handles_with_bounded_frames() {
+    let (cg, _env, _dir) = setup_empty_project().await;
+    let cases = [
+        "a".repeat(16 * 1024),
+        "b".repeat(1024 * 1024),
+        format!("{}尾", "🦀漢字".repeat(6_000)),
+        "c".repeat(4 * 1024 * 1024),
+    ];
+
+    for original in cases {
+        let stored = tracedecay_mcp::response_handles::store_response_handle(
+            cg.project_root(),
+            &original,
+            tracedecay::tracedecay::current_timestamp(),
+        )
+        .unwrap();
+        let mut offset = 0usize;
+        let mut reconstructed = String::new();
+        loop {
+            let result = handle_tool_call(
+                &cg,
+                "tracedecay_retrieve",
+                json!({
+                    "format": "json",
+                    "handle": stored.handle,
+                    "offset": offset,
+                    "max_chars": tracedecay_mcp::MAX_RESPONSE_CHARS,
+                }),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            let response = tracedecay_mcp::transport::JsonRpcResponse::success(
+                json!(71),
+                result.value.clone(),
+            );
+            let frame = tracedecay_mcp::serialize_response_line(&response);
+            assert!(
+                frame.len() <= tracedecay_mcp::MAX_RESPONSE_CHARS,
+                "retrieve frame exceeded the canonical cap: {} > {}",
+                frame.len(),
+                tracedecay_mcp::MAX_RESPONSE_CHARS
+            );
+            let page: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+            assert_eq!(page["offset"].as_u64(), Some(offset as u64));
+            assert_eq!(
+                page["total_chars"].as_u64(),
+                Some(original.chars().count() as u64)
+            );
+            let content = page["content"].as_str().expect("page content");
+            reconstructed.push_str(content);
+            if !page["has_more"].as_bool().expect("has_more") {
+                assert!(page["next_offset"].is_null());
+                break;
+            }
+            let next = page["next_offset"].as_u64().expect("continuation offset") as usize;
+            assert_eq!(next, offset + content.chars().count());
+            offset = next;
+        }
+        assert_eq!(reconstructed, original);
+    }
+}
+
+#[tokio::test]
+async fn retrieve_offset_beyond_content_returns_typed_reason() {
+    let (cg, _env, _dir) = setup_empty_project().await;
+    let stored = tracedecay_mcp::response_handles::store_response_handle(
+        cg.project_root(),
+        "short",
+        tracedecay::tracedecay::current_timestamp(),
+    )
+    .unwrap();
+
+    let error = handle_tool_call(
+        &cg,
+        "tracedecay_retrieve",
+        json!({
+            "format": "json",
+            "handle": stored.handle,
+            "offset": 6,
+        }),
+        None,
+        None,
+    )
+    .await
+    .expect_err("offset beyond total chars must fail");
+    assert_eq!(
+        error.project_route_context().map(|context| context.0),
+        Some("response_handle_offset_out_of_range")
     );
 }
 
@@ -251,18 +362,8 @@ async fn fact_store_large_json_list_response_uses_retrieve_handle() {
     assert_eq!(deleted_fact["status"]["fact_id"], last_fact_id);
     assert_eq!(deleted_fact["status"]["payload_access"], "deleted");
 
-    let retrieved = call_production_tool(
-        &fixture,
-        "tracedecay_retrieve",
-        retrieve_json_arguments(&handle),
-    )
-    .await;
-    let retrieved_payload: Value = serde_json::from_str(extract_text(&retrieved.value)).unwrap();
-    assert_eq!(retrieved_payload["expired"], false);
-    let full_json = retrieved_payload["content"]
-        .as_str()
-        .expect("retrieve response should contain original JSON text");
-    let full: Value = serde_json::from_str(full_json).expect("retrieved content should be JSON");
+    let full_json = retrieve_all_json_pages(&fixture, &handle).await;
+    let full: Value = serde_json::from_str(&full_json).expect("retrieved content should be JSON");
     assert_eq!(
         full["outcome"]["value"]["payload"]["facts"]
             .as_array()
@@ -338,17 +439,7 @@ async fn grep_large_response_uses_retrievable_truncation_handle() {
         "stored original must exceed the truncated wire payload"
     );
 
-    let retrieved = call_production_tool(
-        &fixture,
-        "tracedecay_retrieve",
-        retrieve_json_arguments(handle),
-    )
-    .await;
-    let retrieved_payload: Value = serde_json::from_str(extract_text(&retrieved.value)).unwrap();
-    assert_eq!(retrieved_payload["expired"], false);
-    let full_json = retrieved_payload["content"]
-        .as_str()
-        .expect("retrieve response should contain full discovery JSON");
+    let full_json = retrieve_all_json_pages(&fixture, handle).await;
     assert_eq!(
         full_json.chars().count() as u64,
         original_chars,
@@ -360,7 +451,7 @@ async fn grep_large_response_uses_retrievable_truncation_handle() {
         "fixture must distinguish UTF-8 bytes from characters"
     );
     let full: Value =
-        serde_json::from_str(full_json).expect("retrieved discovery content should be JSON");
+        serde_json::from_str(&full_json).expect("retrieved discovery content should be JSON");
     assert_eq!(
         full["match_count"].as_u64(),
         Some(EXPECTED_MATCH_COUNT as u64),
@@ -452,17 +543,7 @@ async fn diff_context_large_response_uses_retrievable_truncation_handle() {
         .as_str()
         .expect("large diff_context response should include a handle");
 
-    let retrieved = call_production_tool(
-        &fixture,
-        "tracedecay_retrieve",
-        retrieve_json_arguments(handle),
-    )
-    .await;
-    let retrieved_payload: Value = serde_json::from_str(extract_text(&retrieved.value)).unwrap();
-    assert_eq!(retrieved_payload["expired"], false);
-    let full_json = retrieved_payload["content"]
-        .as_str()
-        .expect("retrieve response should contain full diff_context JSON");
+    let full_json = retrieve_all_json_pages(&fixture, handle).await;
     assert!(
         full_json.contains(&format!(
             "reversible_diff_context_marker_{LAST_LARGE_RESPONSE_MARKER:03}"
