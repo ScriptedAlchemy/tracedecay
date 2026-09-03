@@ -23,6 +23,15 @@ pub use delivery_settlement::{
     PendingDeliverySourceReceiptV1, WorkAttemptDeliveryCensusReadV1,
 };
 
+type SessionRelationGraphStateV1 = RwLock<
+    Option<(
+        tracedecay_session_temporal_store::relations::SessionRelationScope,
+        tracedecay_graph_db::GraphDbLeaseV1,
+        StoreRuntimeBindingV1,
+        VerifiedStoreLocatorV1,
+    )>,
+>;
+
 /// The sole map owner for one registered global-database publication.
 ///
 /// It can issue independently counted client leases, but cannot be cloned or
@@ -31,18 +40,7 @@ pub use delivery_settlement::{
 pub struct RegisteredGlobalDbOwnerV1 {
     database: DatabaseOwnerV1,
     project_graph: Arc<OnceLock<VerifiedGraphRuntimeWeakProxyV1>>,
-    session_relation_graph: RwLock<
-        Weak<
-            RwLock<
-                Option<(
-                    tracedecay_session_temporal_store::relations::SessionRelationScope,
-                    tracedecay_graph_db::GraphDbLeaseV1,
-                    StoreRuntimeBindingV1,
-                    VerifiedStoreLocatorV1,
-                )>,
-            >,
-        >,
-    >,
+    session_relation_graph: Arc<SessionRelationGraphStateV1>,
 }
 
 /// Cloneable, weak issuance route for one registered global-database owner.
@@ -54,16 +52,7 @@ pub struct RegisteredGlobalDbOwnerV1 {
 pub struct RegisteredGlobalDbWeakLeaseIssuerV1 {
     database: DatabaseOwnerWeakLeaseIssuerV1,
     project_graph: Arc<OnceLock<VerifiedGraphRuntimeWeakProxyV1>>,
-    session_relation_graph: Weak<
-        RwLock<
-            Option<(
-                tracedecay_session_temporal_store::relations::SessionRelationScope,
-                tracedecay_graph_db::GraphDbLeaseV1,
-                StoreRuntimeBindingV1,
-                VerifiedStoreLocatorV1,
-            )>,
-        >,
-    >,
+    session_relation_graph: Weak<SessionRelationGraphStateV1>,
 }
 
 impl RegisteredGlobalDbOwnerV1 {
@@ -99,7 +88,7 @@ impl RegisteredGlobalDbOwnerV1 {
         Ok(Self {
             database,
             project_graph: Arc::new(OnceLock::new()),
-            session_relation_graph: RwLock::new(Weak::new()),
+            session_relation_graph: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -120,7 +109,7 @@ impl RegisteredGlobalDbOwnerV1 {
             Self {
                 database,
                 project_graph: Arc::new(OnceLock::new()),
-                session_relation_graph: RwLock::new(Weak::new()),
+                session_relation_graph: Arc::new(RwLock::new(None)),
             },
             convergence,
         ))
@@ -134,7 +123,7 @@ impl RegisteredGlobalDbOwnerV1 {
             RegisteredGlobalDb::from_database_with_project_graph(
                 self.database.issue_lease()?,
                 Arc::clone(&self.project_graph),
-                self.session_relation_graph_state(),
+                Arc::clone(&self.session_relation_graph),
             ),
         ))
     }
@@ -145,7 +134,7 @@ impl RegisteredGlobalDbOwnerV1 {
             RegisteredGlobalDb::from_database_with_project_graph(
                 self.database.issue_read_only_lease()?,
                 Arc::clone(&self.project_graph),
-                self.session_relation_graph_state(),
+                Arc::clone(&self.session_relation_graph),
             ),
         ))
     }
@@ -154,36 +143,11 @@ impl RegisteredGlobalDbOwnerV1 {
     /// retaining this owner or a counted Store client.
     #[must_use]
     pub fn weak_lease_issuer(&self) -> RegisteredGlobalDbWeakLeaseIssuerV1 {
-        let session_relation_graph = self.session_relation_graph_state();
         RegisteredGlobalDbWeakLeaseIssuerV1 {
             database: self.database.weak_lease_issuer(),
             project_graph: Arc::clone(&self.project_graph),
-            session_relation_graph: Arc::downgrade(&session_relation_graph),
+            session_relation_graph: Arc::downgrade(&self.session_relation_graph),
         }
-    }
-
-    fn session_relation_graph_state(
-        &self,
-    ) -> Arc<
-        RwLock<
-            Option<(
-                tracedecay_session_temporal_store::relations::SessionRelationScope,
-                tracedecay_graph_db::GraphDbLeaseV1,
-                StoreRuntimeBindingV1,
-                VerifiedStoreLocatorV1,
-            )>,
-        >,
-    > {
-        let mut shared = self
-            .session_relation_graph
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(state) = shared.upgrade() {
-            return state;
-        }
-        let state = Arc::new(RwLock::new(None));
-        *shared = Arc::downgrade(&state);
-        state
     }
 
     /// Releases the graph client shared by every live lease from this owner.
@@ -192,16 +156,10 @@ impl RegisteredGlobalDbOwnerV1 {
     /// owner. Existing database leases remain valid for SQL access but can no
     /// longer keep the retired graph writer locked.
     pub fn detach_session_relation_graph(&self) {
-        let shared = self
+        *self
             .session_relation_graph
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .upgrade();
-        if let Some(shared) = shared {
-            *shared
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-        }
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 
     /// Starts the exact database-owner reservation used by daemon map
@@ -303,16 +261,7 @@ impl RegisteredGlobalDbLeaseV1 {
 pub struct RegisteredGlobalDb {
     database: Database,
     project_graph: Arc<OnceLock<VerifiedGraphRuntimeWeakProxyV1>>,
-    session_relation_graph: Arc<
-        RwLock<
-            Option<(
-                tracedecay_session_temporal_store::relations::SessionRelationScope,
-                tracedecay_graph_db::GraphDbLeaseV1,
-                StoreRuntimeBindingV1,
-                VerifiedStoreLocatorV1,
-            )>,
-        >,
-    >,
+    session_relation_graph: Arc<SessionRelationGraphStateV1>,
 }
 
 impl RegisteredGlobalDb {
@@ -360,16 +309,7 @@ impl RegisteredGlobalDb {
     fn from_database_with_project_graph(
         database: Database,
         project_graph: Arc<OnceLock<VerifiedGraphRuntimeWeakProxyV1>>,
-        session_relation_graph: Arc<
-            RwLock<
-                Option<(
-                    tracedecay_session_temporal_store::relations::SessionRelationScope,
-                    tracedecay_graph_db::GraphDbLeaseV1,
-                    StoreRuntimeBindingV1,
-                    VerifiedStoreLocatorV1,
-                )>,
-            >,
-        >,
+        session_relation_graph: Arc<SessionRelationGraphStateV1>,
     ) -> Self {
         Self {
             database,

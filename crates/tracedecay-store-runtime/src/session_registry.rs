@@ -1545,6 +1545,17 @@ impl ProjectSessionReplacementReservationV1 {
         Ok(database)
     }
 
+    fn detach_old_relation_graph(&self) -> Result<()> {
+        let session = self.sessions.as_ref().ok_or_else(|| {
+            session_registry_error(
+                "detach replacing project relation graph",
+                "project session replacement has no retained session owner".to_owned(),
+            )
+        })?;
+        session.database.detach_session_relation_graph();
+        Ok(())
+    }
+
     fn graph_retirement_target(&self) -> Result<tracedecay_graph_db::GraphDbRetirementTarget> {
         self.sessions
             .as_ref()
