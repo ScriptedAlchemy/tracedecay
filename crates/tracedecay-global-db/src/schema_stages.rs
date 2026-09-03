@@ -599,6 +599,12 @@ async fn install_registered_schema_stages(
                 global_db_operation_error("initialize global project registry", error)
             })?;
     }
+    transaction
+        .execute_batch(project_registry::PROJECT_REGISTRY_PERFORMANCE_INDEX_SQL)
+        .await
+        .map_err(|error| {
+            global_db_operation_error("initialize project registry performance indexes", error)
+        })?;
     if is_fresh {
         transaction
             .execute_batch(REMOTE_DELETION_SCHEMA)

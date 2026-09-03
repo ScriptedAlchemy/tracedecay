@@ -98,6 +98,10 @@ pub struct HookSpoolOpenReportV1 {
     pub pending_bytes: u64,
     pub committed_through: u64,
     pub next_sequence: u64,
+    /// Frames whose framing, SHA-256, and envelope JSON were decoded during
+    /// this open. A validated checkpoint contributes zero; only its appended
+    /// suffix contributes to this count.
+    pub scanned_records: u32,
     pub truncated_partial_tail_bytes: u64,
     pub corrupted_at_offset: Option<u64>,
 }
@@ -312,6 +316,7 @@ pub(super) struct ScanResult {
     pub(super) records: Vec<HookSpoolRecordV1>,
     pub(super) valid_end: u64,
     pub(super) physical_len: u64,
+    pub(super) scanned_records: u32,
     pub(super) partial_tail: Option<Vec<u8>>,
     pub(super) corruption: Option<u64>,
 }

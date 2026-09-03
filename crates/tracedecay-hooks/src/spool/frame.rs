@@ -36,12 +36,26 @@ pub(super) fn scan_records(
     root: &Path,
     config: HookSpoolConfigV1,
 ) -> Result<ScanResult, HookSpoolError> {
+    scan_records_from(root, config, Vec::new(), 0)
+}
+
+#[hotpath::measure(label = "hooks.spool.scan_records_suffix")]
+pub(super) fn scan_records_from(
+    root: &Path,
+    config: HookSpoolConfigV1,
+    mut records: Vec<HookSpoolRecordV1>,
+    validated_end: u64,
+) -> Result<ScanResult, HookSpoolError> {
     let path = records_path(root);
     if !validate_regular_or_missing(&path)? {
+        if validated_end != 0 || !records.is_empty() {
+            return Err(HookSpoolError::MetadataCorrupted);
+        }
         return Ok(ScanResult {
-            records: Vec::new(),
+            records,
             valid_end: 0,
             physical_len: 0,
+            scanned_records: 0,
             partial_tail: None,
             corruption: None,
         });
@@ -54,13 +68,18 @@ pub(super) fn scan_records(
         File::open(&path).map_err(|_| HookSpoolError::Io)?,
         label = "hooks.spool.scan"
     );
-    let mut records = Vec::new();
-    let mut offset = 0u64;
-    let mut previous_sequence = None;
+    if validated_end > physical_len {
+        return Err(HookSpoolError::MetadataCorrupted);
+    }
+    file.seek(SeekFrom::Start(validated_end))
+        .map_err(|_| HookSpoolError::Io)?;
+    let mut offset = validated_end;
+    let mut previous_sequence = records.last().map(|record| record.sequence);
+    let mut scanned_records = 0u32;
     while offset < physical_len {
         let remaining = physical_len - offset;
         if remaining < FRAME_LENGTH_BYTES as u64 {
-            return partial_scan(records, offset, physical_len, &mut file);
+            return partial_scan(records, offset, physical_len, scanned_records, &mut file);
         }
         let mut prefix = [0u8; FRAME_LENGTH_BYTES];
         file.read_exact(&mut prefix)
@@ -71,7 +90,7 @@ pub(super) fn scan_records(
             .checked_add(MAX_HOOK_PAYLOAD_BYTES)
             .ok_or(HookSpoolError::MetadataCorrupted)?;
         if declared < minimum || declared > maximum {
-            return Ok(corrupt_scan(records, offset, physical_len));
+            return Ok(corrupt_scan(records, offset, physical_len, scanned_records));
         }
         let frame_len = FRAME_LENGTH_BYTES
             .checked_add(declared)
@@ -79,7 +98,7 @@ pub(super) fn scan_records(
         if frame_len as u64 > remaining {
             file.seek(SeekFrom::Start(offset))
                 .map_err(|_| HookSpoolError::Io)?;
-            return partial_scan(records, offset, physical_len, &mut file);
+            return partial_scan(records, offset, physical_len, scanned_records, &mut file);
         }
         let mut frame = Vec::with_capacity(frame_len);
         frame.extend_from_slice(&prefix);
@@ -89,25 +108,29 @@ pub(super) fn scan_records(
         let record = match decode_complete_frame(&frame, offset, config.host) {
             Ok(record) => record,
             Err(HookSpoolError::Corrupted { .. }) | Err(HookSpoolError::MetadataCorrupted) => {
-                return Ok(corrupt_scan(records, offset, physical_len));
+                return Ok(corrupt_scan(records, offset, physical_len, scanned_records));
             }
             Err(error) => return Err(error),
         };
         if previous_sequence.is_some_and(|previous| record.sequence <= previous)
             || records.len() >= config.limits.max_host_records as usize
         {
-            return Ok(corrupt_scan(records, offset, physical_len));
+            return Ok(corrupt_scan(records, offset, physical_len, scanned_records));
         }
         previous_sequence = Some(record.sequence);
         offset = offset.saturating_add(u64::from(record.framed_len));
         records.push(record);
+        scanned_records = scanned_records
+            .checked_add(1)
+            .ok_or(HookSpoolError::MetadataCorrupted)?;
     }
-    hotpath::gauge!("hooks.spool.scan.frame_count").set(records.len());
-    hotpath::gauge!("hooks.spool.scan.bytes").set(physical_len);
+    hotpath::gauge!("hooks.spool.scan.frame_count").set(scanned_records);
+    hotpath::gauge!("hooks.spool.scan.bytes").set(physical_len.saturating_sub(validated_end));
     Ok(ScanResult {
         records,
         valid_end: offset,
         physical_len,
+        scanned_records,
         partial_tail: None,
         corruption: None,
     })
@@ -117,6 +140,7 @@ pub(super) fn partial_scan(
     records: Vec<HookSpoolRecordV1>,
     offset: u64,
     physical_len: u64,
+    scanned_records: u32,
     file: &mut impl Read,
 ) -> Result<ScanResult, HookSpoolError> {
     let mut partial_tail = Vec::with_capacity((physical_len - offset) as usize);
@@ -126,6 +150,7 @@ pub(super) fn partial_scan(
         records,
         valid_end: offset,
         physical_len,
+        scanned_records,
         partial_tail: Some(partial_tail),
         corruption: None,
     })
@@ -135,11 +160,13 @@ pub(super) fn corrupt_scan(
     records: Vec<HookSpoolRecordV1>,
     offset: u64,
     physical_len: u64,
+    scanned_records: u32,
 ) -> ScanResult {
     ScanResult {
         records,
         valid_end: offset,
         physical_len,
+        scanned_records,
         partial_tail: None,
         corruption: Some(offset),
     }

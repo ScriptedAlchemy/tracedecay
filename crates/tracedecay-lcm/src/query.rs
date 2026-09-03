@@ -73,7 +73,7 @@ pub async fn expand_query(
     let context_max_chars = request.context_max_tokens.max(1);
     let mut matches = Vec::new();
     let mut selected_summaries = Vec::new();
-    let mut selected_raw_store_ids = Vec::new();
+    let mut selected_raw_identities = Vec::new();
 
     if request.node_ids.is_empty() {
         if let Some(query) = request
@@ -144,9 +144,12 @@ pub async fn expand_query(
                     )
                     .await?;
                     for hit in raw_hits {
-                        if let Some(store_id) = hit.store_id {
+                        if hit.store_id.is_some()
+                            && let Some(message_id) = hit.message_id.as_deref()
+                        {
                             matches.push(expand_query_match_from_hit(&hit));
-                            selected_raw_store_ids.push(store_id);
+                            selected_raw_identities
+                                .push((hit.provider.clone(), message_id.to_owned()));
                         }
                     }
                 }
@@ -183,7 +186,7 @@ pub async fn expand_query(
         }
     }
 
-    if selected_summaries.is_empty() && selected_raw_store_ids.is_empty() {
+    if selected_summaries.is_empty() && selected_raw_identities.is_empty() {
         return Ok(LcmExpandQueryResponse {
             prompt: request.prompt,
             query: request.query,
@@ -204,13 +207,13 @@ pub async fn expand_query(
         });
     }
 
-    let mut hydrated_raws = Vec::new();
-    for store_id in selected_raw_store_ids {
-        let raw = hotpath::future!(
-            raw::load_raw_message_by_store_id(conn, store_id),
-            label = "sessions.lcm.expand_query.hydrate"
-        )
-        .await?;
+    let selected_raws = hotpath::future!(
+        raw::load_raw_messages_by_identity(conn, &selected_raw_identities),
+        label = "sessions.lcm.expand_query.hydrate"
+    )
+    .await?;
+    let mut hydrated_raws = Vec::with_capacity(selected_raws.len());
+    for raw in selected_raws {
         if raw.provider == request.provider && raw.session_id == request.session_id {
             hydrated_raws.push(raw);
         }
@@ -1098,6 +1101,36 @@ mod tests {
         (temp, conn)
     }
 
+    async fn insert_query_test_raw(
+        temp: &tempfile::TempDir,
+        conn: &TestConnection,
+        provider: &str,
+        message_id: &str,
+        ordinal: i64,
+        text: &str,
+    ) {
+        let message = tracedecay_store::SessionMessageRecord {
+            provider: provider.to_owned(),
+            message_id: message_id.to_owned(),
+            session_id: "session-a".to_owned(),
+            role: "assistant".to_owned(),
+            timestamp: Some(ordinal),
+            ordinal,
+            text: text.to_owned(),
+            kind: Some("message".to_owned()),
+            model: None,
+            tool_names: None,
+            source_path: None,
+            source_offset: None,
+            metadata_json: None,
+        };
+        let mut rollback = payload::PayloadFileRollback::begin_cancellation_safe(temp.path());
+        raw::upsert_raw_message_with_payload_tracked(conn, temp.path(), &message, &mut rollback)
+            .await
+            .expect("raw query fixture");
+        rollback.disarm();
+    }
+
     fn summary_source(store_id: i64) -> LcmExpandedSummarySource {
         LcmExpandedSummarySource {
             source_ref: LcmSourceRef::RawMessage { store_id },
@@ -1170,6 +1203,122 @@ mod tests {
             "LIKE fallback visited {} rows for {} returned hits",
             counted.rows_visited.get(),
             outcome.hits.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn expand_query_batches_ranked_raw_hydration_roundtrips() {
+        let (temp, conn) = query_test_store().await;
+        for ordinal in 0..8_i64 {
+            insert_query_test_raw(
+                &temp,
+                &conn,
+                "cursor",
+                &format!("message-{ordinal}"),
+                ordinal,
+                &format!("orchard detail {ordinal}"),
+            )
+            .await;
+        }
+
+        let counted = CountingQuery::new(&conn);
+        let response = expand_query(
+            &counted,
+            LcmExpandQueryRequest {
+                provider: "cursor".to_string(),
+                session_id: "session-a".to_string(),
+                prompt: "summarize orchard".to_string(),
+                query: Some("orchard".to_string()),
+                node_ids: Vec::new(),
+                max_results: 8,
+                max_tokens: 100,
+                context_max_tokens: 10_000,
+            },
+        )
+        .await
+        .expect("expand raw query");
+
+        assert_eq!(response.context_blocks.len(), 8);
+        assert_eq!(
+            response
+                .context_blocks
+                .iter()
+                .map(|block| block.content.as_str())
+                .collect::<Vec<_>>(),
+            (0..8)
+                .rev()
+                .map(|ordinal| format!("orchard detail {ordinal}"))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            counted.queries.get() <= 3,
+            "eight ranked raw hits used {} DB roundtrips",
+            counted.queries.get()
+        );
+        println!(
+            "expand_query selected raw hydration: {} DB roundtrips for 8 hits",
+            counted.queries.get()
+        );
+    }
+
+    #[tokio::test]
+    async fn batched_raw_hydration_matches_ordered_per_row_semantics() {
+        let (temp, conn) = query_test_store().await;
+        conn.execute(
+            "INSERT INTO sessions(provider, session_id, project_key, project_path)
+             VALUES ('claude', 'session-a', '/p', '/p')",
+            (),
+        )
+        .await
+        .expect("second provider session");
+        for (provider, message_id, ordinal, text) in [
+            ("cursor", "shared", 1, "cursor shared"),
+            ("claude", "shared", 2, "claude shared"),
+            ("cursor", "cursor-only", 3, "cursor only"),
+        ] {
+            insert_query_test_raw(&temp, &conn, provider, message_id, ordinal, text).await;
+        }
+        let identities = vec![
+            ("claude".to_string(), "shared".to_string()),
+            ("cursor".to_string(), "cursor-only".to_string()),
+            ("cursor".to_string(), "shared".to_string()),
+        ];
+        let mut per_row = Vec::new();
+        for (provider, message_id) in &identities {
+            let identity =
+                raw::load_raw_message_by_identity(&conn, provider, "session-a", message_id)
+                    .await
+                    .expect("identity lookup")
+                    .expect("raw fixture");
+            per_row.push(
+                raw::load_raw_message_by_store_id(&conn, identity.store_id)
+                    .await
+                    .expect("legacy per-row hydration"),
+            );
+        }
+
+        let batched = raw::load_raw_messages_by_identity(&conn, &identities)
+            .await
+            .expect("batch hydration");
+        assert_eq!(
+            serde_json::to_vec(&batched).expect("batch encoding"),
+            serde_json::to_vec(&per_row).expect("per-row encoding"),
+            "mixed-provider output must remain byte-for-byte ordered"
+        );
+
+        let per_row_missing = raw::load_raw_message_by_store_id(&conn, i64::MAX)
+            .await
+            .expect_err("missing legacy row");
+        let batched_missing = raw::load_raw_messages_by_identity(
+            &conn,
+            &[("cursor".to_string(), "missing".to_string())],
+        )
+        .await
+        .expect_err("missing batch row");
+        assert_eq!(
+            batched_missing.to_string(),
+            per_row_missing.to_string(),
+            "batching must retain the typed missing-row failure"
         );
     }
 
