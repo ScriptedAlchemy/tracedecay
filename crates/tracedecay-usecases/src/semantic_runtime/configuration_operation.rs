@@ -1301,8 +1301,8 @@ mod tests {
     use super::*;
     use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationSnapshotV1};
     use tracedecay_domain::{
-        ChunkerRevision, ComponentRevision, EmbeddingDeviceClassV1, EmbeddingMetricV1,
-        EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1,
+        ChunkerRevision, ComponentRevision, EmbeddingDeviceClassV1, EmbeddingDocumentCompositionV1,
+        EmbeddingMetricV1, EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1,
         EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1, FusionProfileId, PrivacyDomainId,
         ProjectId, RepositoryId, RetrievalBudget, WorktreeId,
     };
@@ -1492,6 +1492,7 @@ mod tests {
             config_digest: digest('c'),
             query_instruction_digest: None,
             document_instruction_digest: None,
+            document_composition: EmbeddingDocumentCompositionV1::SanitizedText,
             pooling: EmbeddingPoolingV1::Mean,
             truncation_side: EmbeddingTruncationSideV1::Right,
             truncation_length: 32,

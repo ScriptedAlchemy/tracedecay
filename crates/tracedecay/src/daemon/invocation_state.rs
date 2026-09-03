@@ -447,6 +447,7 @@ impl DaemonInvocationState {
         semantic_runtime: Option<&tracedecay_semantic::DaemonSemanticRuntimeHandleV1>,
         semantic_lifecycle: Option<Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1>>,
         semantic_resources: Option<SemanticResourceCeilings>,
+        semantic_document_composition: tracedecay_domain::EmbeddingDocumentCompositionV1,
         native_graph_activation: bool,
         graph_runtime: Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
         graph_publication_database: Arc<tracedecay_runtime_core::db::Database>,
@@ -504,6 +505,7 @@ impl DaemonInvocationState {
                         graph,
                         lifecycle,
                         resources,
+                        document_composition: semantic_document_composition,
                         fair_scheduler: self.semantic_projection_scheduler.clone(),
                     },
                 )

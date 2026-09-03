@@ -13,10 +13,10 @@ use tracedecay::vector_generation_test_support::{
 use tracedecay_domain::{
     BoundedSanitizedText, ChangedCodeChunkSetV1, ChangedCodeChunkV1, ChunkerRevision,
     CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId,
-    CodeSearchChunkV1, EmbeddingDeviceClassV1, EmbeddingMetricV1, EmbeddingNormalizationV1,
-    EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1,
-    FileOccurrenceId, LanguageDescriptorRevision, ManifestDigest, PolicyRevisionId,
-    PrivacyDomainId, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1,
+    CodeSearchChunkV1, EmbeddingDeviceClassV1, EmbeddingDocumentCompositionV1, EmbeddingMetricV1,
+    EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingProjectionKeyV1,
+    EmbeddingTruncationSideV1, FileOccurrenceId, LanguageDescriptorRevision, ManifestDigest,
+    PolicyRevisionId, PrivacyDomainId, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1,
     ProjectionOperationV1, ProjectionOutcomeV1, ProjectionReplayReasonV1, SanitizerRevision,
     SemanticSearchIndexProfileV1, SensitivityDecision, SensitivityLevelV1, SourceSpan,
 };
@@ -48,6 +48,7 @@ fn embedding_key() -> EmbeddingProjectionKeyV1 {
         config_digest: digest(3),
         query_instruction_digest: Some(digest(4)),
         document_instruction_digest: Some(digest(5)),
+        document_composition: EmbeddingDocumentCompositionV1::SanitizedText,
         pooling: EmbeddingPoolingV1::Mean,
         truncation_side: EmbeddingTruncationSideV1::Right,
         truncation_length: 512,

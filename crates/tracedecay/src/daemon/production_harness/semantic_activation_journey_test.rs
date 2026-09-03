@@ -396,6 +396,8 @@ pub(super) async fn set_semantic_profile(
                 active_profile: Some(active),
                 rollback_profile: rollback,
                 resources: SemanticResourceCeilings::default(),
+                document_composition:
+                    tracedecay_domain::EmbeddingDocumentCompositionV1::SanitizedText,
             })
             .expect("semantic runtime JSON"),
         ),

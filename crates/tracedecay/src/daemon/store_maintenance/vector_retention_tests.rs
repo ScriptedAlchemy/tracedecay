@@ -242,6 +242,7 @@ fn committed_retrieval_profiles_keep_the_unseated_state_retryable() {
         active_profile: None,
         rollback_profile: None,
         resources: SemanticResourceCeilings::default(),
+        document_composition: tracedecay_domain::EmbeddingDocumentCompositionV1::SanitizedText,
     };
     assert!(
         super::semantic_retrieval_profiles_disabled(&disabled),
