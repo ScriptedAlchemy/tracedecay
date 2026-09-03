@@ -89,7 +89,7 @@ impl McpServer {
     /// Reads the upload policy from the daemon-retained desired configuration
     /// snapshot. There is deliberately no `config.toml` fallback: without the
     /// canonical authority, the upload decision is unavailable.
-    #[hotpath::skip]
+    #[hotpath::measure(label = "mcp.ledger.read_upload_policy", future = true)]
     pub(super) async fn canonical_upload_enabled(&self) -> Result<bool> {
         let cg = self.cg_snapshot().await;
         let desired = cg
@@ -108,6 +108,7 @@ impl McpServer {
     /// Estimates the raw-file token cost ("before") for the given file
     /// paths from the cached file-token map (indexed file bytes / 4).
     /// Pure lookup — persists nothing.
+    #[hotpath::measure(label = "mcp.ledger.estimate_raw_tokens")]
     pub(crate) fn estimate_raw_file_tokens(&self, file_paths: &[String]) -> u64 {
         if file_paths.is_empty() {
             return 0;
@@ -137,6 +138,7 @@ impl McpServer {
     /// ledger-write path so the response never waits on them and tests can
     /// still await durability via [`Self::ledger_writes_settled`]. Shutdown
     /// persists the final counter independently.
+    #[hotpath::measure(label = "mcp.ledger.persist_token_accounting")]
     pub(crate) fn spawn_token_accounting_persist(
         &self,
         monitor_project_root: &Path,
@@ -262,7 +264,7 @@ impl McpServer {
 
     /// Flushes pending tokens to the worldwide counter if at least 30 seconds
     /// have elapsed since the last flush. Best-effort, never blocks for long.
-    #[hotpath::skip]
+    #[hotpath::measure(label = "mcp.ledger.flush_worldwide", future = true)]
     pub(crate) async fn maybe_flush_worldwide(&self) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -329,6 +331,7 @@ impl McpServer {
         }
     }
 
+    #[hotpath::measure(label = "mcp.ledger.record_error_analytics")]
     pub(crate) fn record_mcp_tool_error_analytics(
         &self,
         request: McpToolErrorAnalyticsRequest<'_>,
@@ -382,6 +385,7 @@ impl McpServer {
     /// [`HostAdmissionOutcome`]. The durable admission sequence is carried as
     /// the event idempotency identity, so identical but distinct admissions
     /// remain distinct analytics rows.
+    #[hotpath::measure(label = "mcp.ledger.record_route_analytics")]
     pub(crate) fn record_hook_route_analytics(
         &self,
         project_root: &std::path::Path,
@@ -428,6 +432,7 @@ impl McpServer {
     /// [`DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS`](tracedecay_sessions::runtime::git_correlation::DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS)
     /// (spans merge regardless, so a dropped observation only widens a span
     /// slightly less).
+    #[hotpath::measure(label = "mcp.ledger.record_span_observation")]
     pub(crate) fn record_hook_span_observation(
         self: &Arc<Self>,
         event: &hook_events::HookEvent,
