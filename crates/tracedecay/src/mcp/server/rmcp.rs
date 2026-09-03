@@ -580,12 +580,410 @@ fn project_server_retired_error() -> ErrorData {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use rmcp::model::{CallToolResponse, CallToolResult};
+    use rmcp::model::{
+        CallToolRequestParams, CallToolResponse, CallToolResult, ReadResourceRequestParams,
+    };
+    use rmcp::service::ServiceRole;
+    use rmcp::transport::{IntoTransport, Transport};
+    use rmcp::{RoleClient, ServiceExt};
+    use serde::Serialize;
     use serde_json::json;
 
     use super::*;
+
+    struct RecordingTransport<R, T>
+    where
+        R: ServiceRole,
+    {
+        inner: T,
+        messages: Arc<std::sync::Mutex<Vec<Value>>>,
+        _role: std::marker::PhantomData<R>,
+    }
+
+    impl<R, T> RecordingTransport<R, T>
+    where
+        R: ServiceRole,
+    {
+        fn new(inner: T, messages: Arc<std::sync::Mutex<Vec<Value>>>) -> Self {
+            Self {
+                inner,
+                messages,
+                _role: std::marker::PhantomData,
+            }
+        }
+    }
+
+    impl<R, T> Transport<R> for RecordingTransport<R, T>
+    where
+        R: ServiceRole,
+        T: Transport<R> + 'static,
+        rmcp::service::TxJsonRpcMessage<R>: Serialize,
+    {
+        type Error = T::Error;
+
+        fn name() -> Cow<'static, str> {
+            "rmcp-wire-recording".into()
+        }
+
+        fn send(
+            &mut self,
+            item: rmcp::service::TxJsonRpcMessage<R>,
+        ) -> impl std::future::Future<Output = std::result::Result<(), Self::Error>> + Send + 'static
+        {
+            let encoded = serde_json::to_value(&item).expect("record RMCP wire message");
+            self.messages
+                .lock()
+                .expect("RMCP wire recording lock")
+                .push(encoded);
+            self.inner.send(item)
+        }
+
+        fn receive(
+            &mut self,
+        ) -> impl std::future::Future<Output = Option<rmcp::service::RxJsonRpcMessage<R>>> + Send
+        {
+            self.inner.receive()
+        }
+
+        fn close(
+            &mut self,
+        ) -> impl std::future::Future<Output = std::result::Result<(), Self::Error>> + Send
+        {
+            self.inner.close()
+        }
+    }
+
+    struct RmcpWireFixture {
+        client: rmcp::service::RunningService<RoleClient, ()>,
+        server: Arc<McpServer>,
+        client_messages: Arc<std::sync::Mutex<Vec<Value>>>,
+        server_messages: Arc<std::sync::Mutex<Vec<Value>>>,
+        serving: tokio::task::JoinHandle<()>,
+        _repo: tempfile::TempDir,
+        _authority: crate::mcp::server::writer_test_support::WriterTestFixtureAuthority,
+    }
+
+    impl RmcpWireFixture {
+        async fn start() -> Self {
+            crate::product_runtime::register_fixture_product_runtime();
+            let (cg, repo, authority) =
+                crate::mcp::server::writer_test_support::init_indexed_repo().await;
+            let context =
+                crate::mcp::server::writer_test_support::registered_context(cg, &authority);
+            let server = McpServer::new_with_registered_test_context(context, Vec::new())
+                .await
+                .expect("registered RMCP wire server");
+            let adapter =
+                RmcpConnectionAdapter::new(Arc::clone(&server), false, Some(Arc::new(|response| {
+                    response.result.as_mut().expect("initialize result")["_meta"]
+                        ["tracedecayInitializeRoute"] = json!({
+                            "projectPath": "/wire/oracle",
+                            "allowInit": false,
+                        });
+                })))
+                .expect("RMCP adapter");
+            let (server_io, client_io) = tokio::io::duplex(2 * 1024 * 1024);
+            let server_messages = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let server_transport = RecordingTransport::<RoleServer, _>::new(
+                IntoTransport::<RoleServer, _, _>::into_transport(server_io),
+                Arc::clone(&server_messages),
+            );
+            let serving = tokio::spawn(async move {
+                let running = adapter
+                    .serve(server_transport)
+                    .await
+                    .expect("serve RMCP adapter");
+                running.waiting().await.expect("RMCP adapter task");
+            });
+            let client_messages = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let client_transport = RecordingTransport::<RoleClient, _>::new(
+                IntoTransport::<RoleClient, _, _>::into_transport(client_io),
+                Arc::clone(&client_messages),
+            );
+            let client = ().serve(client_transport).await.expect("initialize RMCP client");
+            Self {
+                client,
+                server,
+                client_messages,
+                server_messages,
+                serving,
+                _repo: repo,
+                _authority: authority,
+            }
+        }
+
+        fn last_request(&self) -> JsonRpcRequest {
+            let response_id = self.last_response()["id"].clone();
+            let messages = self
+                .client_messages
+                .lock()
+                .expect("client wire recording lock");
+            let request = messages
+                .iter()
+                .rev()
+                .find(|message| message.get("id") == Some(&response_id))
+                .expect("recorded client request for response");
+            serde_json::from_value(request.clone()).expect("legacy request shape")
+        }
+
+        fn last_response(&self) -> Value {
+            self.server_messages
+                .lock()
+                .expect("server wire recording lock")
+                .last()
+                .expect("recorded server response")
+                .clone()
+        }
+
+        async fn assert_last_response_matches_legacy(&self, decorate_initialize: bool) {
+            let request = self.last_request();
+            let mut expected = self
+                .server
+                .handle_request(&request)
+                .await
+                .expect("legacy response");
+            if decorate_initialize {
+                expected.result.as_mut().expect("legacy initialize result")["_meta"]["tracedecayInitializeRoute"] = json!({
+                    "projectPath": "/wire/oracle",
+                    "allowInit": false,
+                });
+            }
+            assert_eq!(
+                self.last_response(),
+                serde_json::to_value(expected).expect("serialize legacy response"),
+            );
+        }
+
+        async fn shutdown(mut self) {
+            self.client.close().await.expect("close RMCP client");
+            self.serving.await.expect("join RMCP server");
+            self.server.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn rmcp_wire_matrix_matches_legacy_initialize_tools_and_resources() {
+        let fixture = RmcpWireFixture::start().await;
+        let initialize_id = fixture.last_response()["id"].clone();
+        let mut initialize_result =
+            crate::mcp::server::initialize_result(crate::mcp::server::SERVER_INSTRUCTIONS)
+                .expect("initialize oracle");
+        initialize_result["protocolVersion"] = json!("2025-11-25");
+        initialize_result["_meta"]["tracedecayInitializeRoute"] = json!({
+            "projectPath": "/wire/oracle",
+            "allowInit": false,
+        });
+        assert_eq!(
+            fixture.last_response(),
+            serde_json::to_value(JsonRpcResponse::success(initialize_id, initialize_result))
+                .expect("serialize initialize oracle"),
+            "rmcp negotiates the client protocol version while preserving the legacy payload",
+        );
+        assert_eq!(
+            fixture.last_response()["result"]["_meta"]["tracedecayInitializeRoute"],
+            json!({"projectPath": "/wire/oracle", "allowInit": false}),
+            "rmcp InitializeResult must preserve daemon-selected route metadata",
+        );
+
+        fixture
+            .client
+            .list_tools(None)
+            .await
+            .expect("RMCP tools/list");
+        fixture.assert_last_response_matches_legacy(false).await;
+
+        fixture
+            .client
+            .call_tool(
+                CallToolRequestParams::new("tracedecay_status").with_arguments(
+                    json!({"admission_only": true, "format": "json"})
+                        .as_object()
+                        .cloned()
+                        .expect("object arguments"),
+                ),
+            )
+            .await
+            .expect("RMCP tools/call success");
+        assert_eq!(
+            fixture.last_response()["result"]["content"][0]["type"],
+            json!("text"),
+        );
+        assert!(
+            fixture.last_response()["result"]["content"][0]["text"]
+                .as_str()
+                .is_some_and(|text| !text.is_empty()),
+            "RMCP success must preserve the real handler's text content",
+        );
+
+        let handler_error = fixture
+            .client
+            .call_tool(
+                CallToolRequestParams::new("tracedecay_not_a_tool")
+                    .with_arguments(serde_json::Map::new()),
+            )
+            .await
+            .expect_err("unknown tool must be a JSON-RPC error");
+        fixture.assert_last_response_matches_legacy(false).await;
+        assert_eq!(
+            fixture.last_response()["error"]["code"],
+            json!(-32603),
+            "handler error code is a host-visible protocol contract",
+        );
+        assert!(
+            handler_error.to_string().contains("unknown tool"),
+            "typed rmcp client must receive the handler error",
+        );
+
+        fixture
+            .client
+            .call_tool(
+                CallToolRequestParams::new("tracedecay_changelog").with_arguments(
+                    json!({"from_ref": "missing-rmcp-oracle-ref", "to_ref": "HEAD"})
+                        .as_object()
+                        .cloned()
+                        .expect("object arguments"),
+                ),
+            )
+            .await
+            .expect("semantic refusal stays a completed tool result");
+        assert_eq!(
+            fixture.last_response()["result"]["isError"],
+            json!(true),
+            "typed refusals must remain successful JSON-RPC responses with isError=true",
+        );
+
+        fixture
+            .client
+            .list_resources(None)
+            .await
+            .expect("RMCP resources/list");
+        fixture.assert_last_response_matches_legacy(false).await;
+
+        fixture
+            .client
+            .read_resource(ReadResourceRequestParams::new("tracedecay://schema"))
+            .await
+            .expect("RMCP resources/read");
+        fixture.assert_last_response_matches_legacy(false).await;
+
+        for index in 0..8 {
+            fixture
+                .client
+                .call_tool(
+                    CallToolRequestParams::new("tracedecay_fact_store_add").with_arguments(
+                        json!({
+                            "content": format!(
+                                "RMCP_WIRE_ORACLE_{index:02}: {}",
+                                "large response remains retrievable ".repeat(180),
+                            ),
+                            "category": "project",
+                            "trust": 0.9,
+                            "format": "json",
+                        })
+                        .as_object()
+                        .cloned()
+                        .expect("object arguments"),
+                    ),
+                )
+                .await
+                .expect("seed large RMCP tools/call");
+        }
+        fixture
+            .client
+            .call_tool(
+                CallToolRequestParams::new("tracedecay_fact_store_list").with_arguments(
+                    json!({
+                        "category": "project",
+                        "min_trust": 0.0,
+                        "limit": 200,
+                        "format": "json",
+                    })
+                    .as_object()
+                    .cloned()
+                    .expect("object arguments"),
+                ),
+            )
+            .await
+            .expect("large RMCP tools/call");
+        let large_response = fixture.last_response();
+        let large_text = large_response["result"]["content"][0]["text"]
+            .as_str()
+            .expect("large response text");
+        let large_envelope: Value =
+            serde_json::from_str(large_text).expect("large response truncation envelope");
+        assert_eq!(large_envelope["truncated"], json!(true));
+        assert!(
+            large_envelope["original_chars"]
+                .as_u64()
+                .unwrap_or_default()
+                >= 15_000,
+            "large response must cross the production response budget",
+        );
+        assert!(
+            large_envelope["handle"]
+                .as_str()
+                .is_some_and(|handle| handle.starts_with("rh_")),
+            "large response must retain a typed retrieval handle",
+        );
+        fixture.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn rmcp_cancellation_uses_the_connection_scoped_application_identity() {
+        crate::product_runtime::register_fixture_product_runtime();
+        let (cg, _repo, authority) =
+            crate::mcp::server::writer_test_support::init_indexed_repo().await;
+        let context = crate::mcp::server::writer_test_support::registered_context(cg, &authority);
+        let server = McpServer::new_with_registered_test_context(context, Vec::new())
+            .await
+            .expect("registered cancellation server");
+        let adapter =
+            RmcpConnectionAdapter::new(Arc::clone(&server), false, None).expect("RMCP adapter");
+        let wire_id = json!("rmcp-cancellation-oracle");
+        let application_id =
+            super::super::application_surface_request_id(&wire_id, &adapter.memory_request_scope)
+                .expect("connection-scoped application request id");
+        let cancellation =
+            tracedecay_application::CancellationSignal::active("cancellation.rmcp-wire-oracle")
+                .expect("cancellation signal");
+        server
+            .dispatch_authority
+            .register_cancellation(application_id, cancellation);
+
+        assert!(
+            adapter.cancel_request(Some(rmcp::model::RequestId::String(Arc::from(
+                "rmcp-cancellation-oracle"
+            ),)))
+        );
+        assert!(
+            !adapter.cancel_request(Some(rmcp::model::RequestId::String(Arc::from(
+                "different-id",
+            )))),
+            "a cancellation from the same connection must not alias another wire id",
+        );
+        server.shutdown().await;
+    }
+
+    #[test]
+    fn rmcp_selected_project_retirement_error_is_stable() {
+        let error = project_server_retired_error();
+        assert_eq!(error.code, ErrorCode::INTERNAL_ERROR);
+        assert_eq!(
+            error.message,
+            "tool project route failed: project server was retired",
+        );
+        assert_eq!(
+            error.data,
+            Some(json!({
+                "reason_code": "project_server_retired",
+                "retryable": true,
+                "detail": "the retained project server was replaced or revoked; retry against the current owner",
+            })),
+        );
+    }
 
     #[test]
     fn response_conversion_preserves_tool_content_and_rpc_errors() {
