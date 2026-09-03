@@ -387,8 +387,12 @@ async fn run_foreground_loopback(
                 clients,
                 owner_phases,
                 move |project_server_deadline| async move {
-                    shutdown_project_servers(project_server_deadline, &server_store_administration)
-                        .await
+                    shutdown_project_servers(
+                        project_server_deadline,
+                        &server_store_administration,
+                        &http_application_registry,
+                    )
+                    .await
                 },
             )
             .with_terminal_owner_phases(vec![vec![memory_graph_reconciliation]])

@@ -625,6 +625,10 @@ where
     let (sanitized, owners) = hotpath::measure_block!("daemon.code_index.query.admission", {
         let sanitized = RawRetrievalRequestV1::new(input.query, request)
             .sanitize(input.sanitizer_revision, input.normalization_revision)?;
+        if text.text_serving_needs_work() {
+            schedulers.request_query_background_reconcile(scope).await;
+            return Err(QuerySearchExecutionErrorV1::GenerationUnverified);
+        }
         let owners = text.production_query_owners_with_budget(&sanitized.request().budget)?;
         (sanitized, owners)
     });

@@ -5796,8 +5796,10 @@ impl CodeIndexSchedulerRegistryV1 {
     /// remedy this admission would ask for, so it is reused rather than
     /// duplicated — that is what keeps a rebuild window's worth of failing
     /// searches from becoming a wake storm and from each fabricating its own
-    /// cadence arrival. Second, when a generation is servable the ladder's own
-    /// suppression decides, exactly as it does on the grep/context/callers path.
+    /// cadence arrival. Second, when a generation's immutable text owners are
+    /// ready, the ladder's own suppression decides, exactly as it does on the
+    /// grep/context/callers path. Authenticated metadata without those owners
+    /// is still warming and always needs the worker's next bounded slice.
     pub async fn request_query_background_reconcile(
         &self,
         scope: &tracedecay_application::ResolvedScope,
@@ -5870,6 +5872,11 @@ impl CodeIndexSchedulerRegistryV1 {
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .is_none();
+            let text_owners_are_warming = text_generation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .is_some_and(LatestCodeTextGenerationV1::text_serving_needs_work);
             // Nothing is servable at all, so the ladder's suppression cannot
             // apply: a reconcile is the only thing that can ever make this scope
             // answerable, and no other caller on this path will ask for it.
@@ -5881,7 +5888,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .overflow();
-            } else if !scheduler.request_fresh_for_query_background() {
+            } else if !text_owners_are_warming && !scheduler.request_fresh_for_query_background() {
                 return false;
             }
             Self::note_wake(

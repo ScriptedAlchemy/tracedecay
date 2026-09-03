@@ -182,6 +182,15 @@ impl DaemonHttpApplicationRegistry {
         Ok(())
     }
 
+    /// Drop every cached project application route before project servers are
+    /// shut down. Axum routers own cloned server state, so retaining this
+    /// cache past server detachment would also retain the project's graph
+    /// leases. Remote application state is intentionally unaffected.
+    #[hotpath::skip]
+    pub(super) async fn drain_project_routes_for_shutdown(&self) {
+        self.routers.lock().await.clear();
+    }
+
     pub(super) fn install_resolver<F, Fut>(&self, resolver: F) -> Result<()>
     where
         F: Fn(ProjectId) -> Fut + Send + Sync + 'static,

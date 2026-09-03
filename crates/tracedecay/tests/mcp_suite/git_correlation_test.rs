@@ -114,11 +114,7 @@ async fn record_span(runtime: &HostAdmissionTestRuntimeV1, observation: &SpanObs
         .unwrap_or_else(|e| panic!("record span: {e}"));
 }
 
-async fn call(
-    server: &McpServer,
-    tool: &str,
-    mut args: Value,
-) -> Value {
+async fn call(server: &McpServer, tool: &str, mut args: Value) -> Value {
     if let Some(obj) = args.as_object_mut() {
         obj.entry("format".to_string())
             .or_insert_with(|| json!("json"));
@@ -220,7 +216,10 @@ async fn sessions_for_distinguishes_empty_correlation_index_from_no_match() {
     .await;
     assert_eq!(empty["count"], 0, "{empty}");
     assert_eq!(empty["index_empty"], true, "{empty}");
+    assert_eq!(empty["index"]["projection_available"], false, "{empty}");
+    assert_eq!(empty["index"]["spans_present"], false, "{empty}");
     assert_eq!(empty["index"]["span_count"], 0, "{empty}");
+    assert_eq!(empty["index"]["count_mode"], "presence_only", "{empty}");
     assert!(
         empty["message"]
             .as_str()
@@ -240,6 +239,10 @@ async fn sessions_for_distinguishes_empty_correlation_index_from_no_match() {
     .await;
     assert_eq!(no_match["count"], 0, "{no_match}");
     assert_eq!(no_match["index_empty"], false, "{no_match}");
+    assert_eq!(
+        no_match["index"]["projection_available"], true,
+        "{no_match}"
+    );
     assert_eq!(no_match["index"]["spans_present"], true, "{no_match}");
     assert_eq!(no_match["index"]["span_count"], Value::Null, "{no_match}");
     assert_eq!(
