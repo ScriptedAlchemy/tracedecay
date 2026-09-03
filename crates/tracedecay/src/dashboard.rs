@@ -190,6 +190,11 @@ impl DashboardGraphTestRuntimeV1 {
     ) -> tracedecay_domain::errors::Result<Self> {
         use std::sync::atomic::{AtomicU64, Ordering};
 
+        // This fixture bypasses CLI and host-admission constructors, so it
+        // must install the same root ports before graph init publishes Hook
+        // bindings for the admitted project.
+        crate::register_runtime_ports_without_mcp_tool_catalog();
+
         static NEXT_ELECTION_EPOCH: AtomicU64 = AtomicU64::new(1);
 
         let profile_root = profile_root.as_ref().to_path_buf();
