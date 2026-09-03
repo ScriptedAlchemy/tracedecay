@@ -1,14 +1,18 @@
 use std::fmt;
 use std::sync::Arc;
 
+use grafeo_common::types::{NodeId, PropertyKey, Value};
+use grafeo_common::utils::hash::FxHashMap;
 use grafeo_engine::GrafeoDB;
 use serde::{Deserialize, Serialize};
 
-use crate::schema::{entity_projection_label, vector_property_key};
-use crate::state::load_entity_by_node;
+use crate::schema::{
+    ENTITY_ID_PROPERTY, NAMESPACE_PROPERTY, PROJECTION_PROPERTY, entity_projection_label,
+    required_string, vector_property_key,
+};
 use crate::{
     GraphCancellation, GraphDbError, GraphEntityId, GraphNamespace, GraphProjectionId,
-    GraphProperty, GraphPropertyName,
+    GraphPropertyName,
 };
 
 pub const MAX_VECTOR_SEARCH_LIMIT: usize = 4_096;
@@ -236,25 +240,39 @@ pub(crate) fn vector_search(
     }
     hotpath::gauge!("graph_db.search.vector.candidates").set(candidates.len());
 
-    let mut matches = Vec::new();
-    for (node_id, distance) in candidates {
+    // The index answers with node ids; confirming each one still belongs to
+    // the requested projection and still carries the searched vector needs
+    // exactly four scalar columns. Read them in one projected batch instead
+    // of hydrating every candidate through the identity index and decoding
+    // its full property set (including the vector itself) per row.
+    let node_ids = candidates
+        .iter()
+        .map(|(node_id, _)| *node_id)
+        .collect::<Vec<NodeId>>();
+    let columns = CandidateColumns::new(&key);
+    let rows = hotpath::measure_block!(
+        "graph_db.search.vector.candidate_columns",
+        database
+            .graph_store()
+            .get_nodes_properties_selective_batch(&node_ids, columns.keys())
+    );
+    if rows.len() != node_ids.len() {
+        return Err(GraphDbError::Corrupt {
+            message: "vector candidate column batch does not cover every candidate".to_owned(),
+        });
+    }
+
+    let mut matches = Vec::with_capacity(candidates.len().min(request.limit));
+    for ((_, distance), row) in candidates.into_iter().zip(rows) {
         if request.cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
         }
-        let stored = load_entity_by_node(database, node_id)?;
-        if stored.namespace != request.namespace || stored.projection != request.projection {
-            continue;
-        }
-        let Some(GraphProperty::Vector(vector)) = stored.entity.properties.get(&request.property)
-        else {
+        let Some(entity) = columns.admit(&row, &request)? else {
             continue;
         };
-        if vector.dimension == request.dimension
-            && vector.metric == request.metric
-            && distance.is_finite()
-        {
+        if distance.is_finite() {
             matches.push(VectorMatch {
-                entity: stored.entity.identity.clone(),
+                entity,
                 distance: normalize_distance(f64::from(distance)),
             });
         }
@@ -274,6 +292,73 @@ pub(crate) fn native_vector_label(
     projection: &GraphProjectionId,
 ) -> String {
     entity_projection_label(namespace, projection)
+}
+
+/// The scalar columns one candidate must present to count as a match:
+/// owner namespace and projection, entity identity, and the searched
+/// vector under its exact `name_dimension_metric` key.
+struct CandidateColumns {
+    keys: [PropertyKey; 4],
+}
+
+impl CandidateColumns {
+    fn new(vector_key: &str) -> Self {
+        Self {
+            keys: [
+                PropertyKey::new(NAMESPACE_PROPERTY),
+                PropertyKey::new(PROJECTION_PROPERTY),
+                PropertyKey::new(ENTITY_ID_PROPERTY),
+                PropertyKey::new(vector_key),
+            ],
+        }
+    }
+
+    fn keys(&self) -> &[PropertyKey] {
+        &self.keys
+    }
+
+    /// Resolves one candidate row to its entity identity, or `None` when the
+    /// row belongs to another projection or no longer carries the searched
+    /// vector. A row with no identity columns at all is the node the index
+    /// pointed at having vanished from under it, which is store corruption
+    /// rather than a filtered-out neighbour.
+    fn admit(
+        &self,
+        row: &FxHashMap<PropertyKey, Value>,
+        request: &VectorSearchRequest,
+    ) -> Result<Option<GraphEntityId>, GraphDbError> {
+        let [namespace_key, projection_key, entity_key, vector_key] = &self.keys;
+        if row.is_empty() {
+            return Err(GraphDbError::Corrupt {
+                message: "entity node is unreadable".to_owned(),
+            });
+        }
+        let namespace = required_string(row.get(namespace_key), "entity namespace")?;
+        let projection = required_string(row.get(projection_key), "entity projection")?;
+        if namespace != request.namespace.as_str() || projection != request.projection.as_str() {
+            return Ok(None);
+        }
+        // The property key already binds name, dimension, and metric; the
+        // stored length is the one thing the key cannot vouch for. The HNSW
+        // topology can still return a node after that exact vector scalar was
+        // removed or superseded, so any non-vector value is a stale candidate
+        // rather than a search failure.
+        match row.get(vector_key) {
+            Some(Value::Vector(values)) if values.len() == request.dimension => {}
+            Some(Value::Vector(_)) => {
+                return Err(GraphDbError::Corrupt {
+                    message: "native vector property does not match its declared dimension"
+                        .to_owned(),
+                });
+            }
+            _ => return Ok(None),
+        }
+        let identity = GraphEntityId::new(required_string(row.get(entity_key), "entity identity")?)
+            .map_err(|error| GraphDbError::Corrupt {
+                message: format!("invalid persisted entity identity: {error}"),
+            })?;
+        Ok(Some(identity))
+    }
 }
 
 fn normalize_distance(distance: f64) -> f64 {
