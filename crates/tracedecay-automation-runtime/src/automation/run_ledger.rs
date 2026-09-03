@@ -910,7 +910,10 @@ pub async fn load_run_records_page(
     .map_err(|e| config_error(format!("failed to join automation run ledger read: {e}")))?
 }
 
-#[hotpath::measure(label = "automation_runtime.run_ledger.load_for_task_key", future = true)]
+#[hotpath::measure(
+    label = "automation_runtime.run_ledger.load_for_task_key",
+    future = true
+)]
 pub async fn load_run_records_for_task_key(
     dashboard_root: &Path,
     requested_task_key: &str,
