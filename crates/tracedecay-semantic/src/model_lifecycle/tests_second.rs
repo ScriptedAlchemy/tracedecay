@@ -573,90 +573,8 @@
         }
     }
 
-    #[test]
-    fn reranker_publication_attempts_session_activation_before_returning_authority() {
-        let fixture = tempfile::tempdir().unwrap();
-        let (catalog, model_id) = tiny_catalog(fixture.path());
-        let model = catalog.get(&model_id).unwrap();
-        let manifest = reranker_manifest(model, "BAAI/bge-reranker-base");
-        let pins = reranker_pins(&manifest);
-        let admitted =
-            super::super::artifact_store::AdmittedArtifactV1::test_fixture(manifest);
-
-        super::super::rerank_adapter::reset_session_open_attempts();
-        let _publication =
-            super::super::rerank_adapter::ProductionCodeRerankAuthorityV1::from_admitted(
-                admitted, pins,
-            );
-
-        assert_eq!(
-            super::super::rerank_adapter::session_open_attempts(),
-            1,
-            "authority publication must attempt exactly one session activation"
-        );
-    }
-
-    #[test]
-    fn reranker_warm_failure_prevents_authority_publication() {
-        let fixture = tempfile::tempdir().unwrap();
-        let (catalog, model_id) = tiny_catalog(fixture.path());
-        let model = catalog.get(&model_id).unwrap();
-        let manifest = reranker_manifest(model, "BAAI/bge-reranker-base");
-        let pins = reranker_pins(&manifest);
-        let admitted =
-            super::super::artifact_store::AdmittedArtifactV1::test_fixture(manifest);
-
-        assert!(matches!(
-            super::super::rerank_adapter::ProductionCodeRerankAuthorityV1::from_admitted(
-                admitted, pins,
-            ),
-            Err(super::super::rerank_adapter::RerankArtifactAdmissionErrorV1::Unavailable)
-        ));
-    }
-
-    #[test]
-    fn supported_reranker_publication_has_one_activation_attempt_property() {
-        for artifact_id in [
-            "BAAI/bge-reranker-base",
-            "rozgo/bge-reranker-v2-m3",
-            "jinaai/jina-reranker-v1-turbo-en",
-            "jinaai/jina-reranker-v2-base-multilingual",
-        ] {
-            let fixture = tempfile::tempdir().unwrap();
-            let (catalog, model_id) = tiny_catalog(fixture.path());
-            let model = catalog.get(&model_id).unwrap();
-            let manifest = reranker_manifest(model, artifact_id);
-            let pins = reranker_pins(&manifest);
-            let admitted =
-                super::super::artifact_store::AdmittedArtifactV1::test_fixture(manifest);
-
-            super::super::rerank_adapter::reset_session_open_attempts();
-            let publication =
-                super::super::rerank_adapter::ProductionCodeRerankAuthorityV1::from_admitted(
-                    admitted, pins,
-                );
-
-            assert!(
-                matches!(
-                    publication,
-                    Err(
-                        super::super::rerank_adapter::RerankArtifactAdmissionErrorV1::Unavailable
-                    )
-                ),
-                "{artifact_id} warm failure did not return typed unavailability"
-            );
-            assert_eq!(
-                super::super::rerank_adapter::session_open_attempts(),
-                1,
-                "{artifact_id} must attempt exactly one activation"
-            );
-        }
-    }
-
     #[cfg(feature = "semantic-fastembed")]
-    fn pinned_reranker_fixture_catalog(
-        fixture: &Path,
-    ) -> (FastEmbedModelCatalogV1, String) {
+    fn pinned_reranker_fixture_catalog(fixture: &Path) -> (FastEmbedModelCatalogV1, String) {
         let mut members = BTreeMap::new();
         for (role, name) in [
             ("model", "model.onnx"),
@@ -682,16 +600,16 @@
             );
         }
         let model = CatalogedFastEmbedModelV1 {
-            model_id: "PinnedRerankerFixture".to_owned(),
-            fastembed_enum: "BGERerankerBase".to_owned(),
-            model_code: "BAAI/bge-reranker-base".to_owned(),
+            model_id: "PinnedJinaRerankerV1TurboEn".to_owned(),
+            fastembed_enum: "JINARerankerV1TurboEn".to_owned(),
+            model_code: "jinaai/jina-reranker-v1-turbo-en".to_owned(),
             source: CatalogSourceV1 {
-                upstream: "https://huggingface.co/BAAI/bge-reranker-base".to_owned(),
-                revision: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                upstream: "https://huggingface.co/jinaai/jina-reranker-v1-turbo-en".to_owned(),
+                revision: "b8c14f4e723d9e0aab4732a7b7b93741eeeb77c2".to_owned(),
                 license: "Apache-2.0".to_owned(),
                 license_url: "https://www.apache.org/licenses/LICENSE-2.0".to_owned(),
                 provenance:
-                    "https://huggingface.co/BAAI/bge-reranker-base/tree/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    "https://huggingface.co/jinaai/jina-reranker-v1-turbo-en/tree/b8c14f4e723d9e0aab4732a7b7b93741eeeb77c2"
                         .to_owned(),
             },
             expected_dimensions: 1,
@@ -718,13 +636,15 @@
         let (catalog, model_id) = pinned_reranker_fixture_catalog(&fixture);
         let model = catalog.get(&model_id).unwrap().clone();
         let root = tempfile::tempdir().unwrap();
-        let owner = SemanticModelLifecycleOwnerV1::open(
-            root.path(),
-            catalog,
-            scoped_hub_source(root.path()),
-        )
-        .unwrap();
-        let mut manifest = reranker_manifest(&model, "BAAI/bge-reranker-base");
+        let owner = Arc::new(
+            SemanticModelLifecycleOwnerV1::open(
+                root.path(),
+                catalog,
+                scoped_hub_source(root.path()),
+            )
+            .unwrap(),
+        );
+        let mut manifest = reranker_manifest(&model, "jinaai/jina-reranker-v1-turbo-en");
         let package_bytes = manifest
             .payload
             .members
@@ -733,8 +653,8 @@
             .sum::<u64>();
         manifest.payload.resource_ceiling.max_model_bytes =
             manifest.payload.model_member.byte_length;
-        manifest.payload.resource_ceiling.max_tokenizer_bytes = package_bytes
-            .saturating_sub(manifest.payload.model_member.byte_length);
+        manifest.payload.resource_ceiling.max_tokenizer_bytes =
+            package_bytes.saturating_sub(manifest.payload.model_member.byte_length);
         manifest.payload.resource_ceiling.max_resident_bytes = package_bytes.saturating_mul(4);
         manifest.payload.resource_ceiling.max_batch_size = 8;
         manifest.payload.resource_ceiling.max_sequence_length = 512;
@@ -743,14 +663,33 @@
             .import_local_reranker_artifact(pins.clone(), &manifest, &fixture, 10)
             .unwrap();
 
-        super::super::rerank_adapter::reset_session_open_attempts();
+        let barrier = Arc::new(Barrier::new(3));
+        let mounts = (0..2)
+            .map(|_| {
+                let owner = Arc::clone(&owner);
+                let barrier = Arc::clone(&barrier);
+                let pins = pins.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    owner.mount_reranker(pins)
+                })
+            })
+            .collect::<Vec<_>>();
         let publication_started = Instant::now();
-        let authority = owner.mount_reranker(pins).unwrap();
+        barrier.wait();
+        let mut authorities = mounts
+            .into_iter()
+            .map(|mount| mount.join().unwrap().unwrap())
+            .collect::<Vec<_>>();
         let publication_micros = publication_started.elapsed().as_micros();
-        assert_eq!(
-            super::super::rerank_adapter::session_open_attempts(),
-            1,
-            "ready publication must create exactly one resident session"
+        let shared_authority = authorities.pop().unwrap();
+        let authority = authorities.pop().unwrap();
+        assert!(
+            Arc::ptr_eq(
+                authority.executor_handle(),
+                shared_authority.executor_handle()
+            ),
+            "repeated mounts must share one resident model session"
         );
 
         let candidates = ["session pooling", "unrelated rendering"]
@@ -776,13 +715,10 @@
                 final_ordinal: index as u32,
             })
             .collect::<Vec<_>>();
-        let snapshot = tracedecay_domain::CandidateSetDigest::new(format!(
-            "sha256:{}",
-            "a".repeat(64)
-        ))
-        .unwrap();
-        let privacy =
-            tracedecay_domain::PrivacyDomainId::new("privacy.rerank.fixture").unwrap();
+        let snapshot =
+            tracedecay_domain::CandidateSetDigest::new(format!("sha256:{}", "a".repeat(64)))
+                .unwrap();
+        let privacy = tracedecay_domain::PrivacyDomainId::new("privacy.rerank.fixture").unwrap();
         let query = "reuse one warmed reranker session";
         let views = candidates
             .iter()
@@ -835,13 +771,13 @@
             deadline_micros: None,
         };
 
-        let cold_started = Instant::now();
-        let cold = authority
+        let first_query_started = Instant::now();
+        let first = authority
             .executor()
             .rerank(&policy, &inputs, permit)
             .unwrap();
-        let cold_first_query_micros = cold_started.elapsed().as_micros();
-        assert_eq!(cold.len(), inputs.len());
+        let first_query_micros = first_query_started.elapsed().as_micros();
+        assert_eq!(first.len(), inputs.len());
 
         let mut warm_micros = Vec::with_capacity(20);
         for _ in 0..20 {
@@ -851,20 +787,14 @@
                 .rerank(&policy, &inputs, permit)
                 .unwrap();
             warm_micros.push(started.elapsed().as_micros());
-            assert_eq!(warm, cold);
+            assert_eq!(warm, first);
         }
         warm_micros.sort_unstable();
         let warm_p50_micros = warm_micros[warm_micros.len() / 2];
         let warm_p95_micros = warm_micros[(warm_micros.len() * 95).div_ceil(100) - 1];
-        assert_eq!(
-            super::super::rerank_adapter::session_open_attempts(),
-            1,
-            "all later requests must reuse the publication session"
-        );
         println!(
-            "reranker publication={publication_micros}us cold_first_query=\
-             {cold_first_query_micros}us warm_p50={warm_p50_micros}us \
-             warm_p95={warm_p95_micros}us samples={}",
+            "reranker publication={publication_micros}us first_query={first_query_micros}us \
+             warm_p50={warm_p50_micros}us warm_p95={warm_p95_micros}us samples={}",
             warm_micros.len()
         );
     }
@@ -873,7 +803,7 @@
     // `detect_fastembed_process()` evidence; see the gate rationale above.
     #[cfg(feature = "semantic-fastembed")]
     #[test]
-    fn invalid_local_reranker_never_activates_an_artifact_lease() {
+    fn independent_reranker_import_rotates_active_and_rollback_leases() {
         let fixture = tempfile::tempdir().unwrap();
         let (catalog, model_id) = tiny_catalog(fixture.path());
         let model = catalog.get(&model_id).unwrap().clone();
@@ -886,20 +816,51 @@
         .unwrap();
         let first = reranker_manifest(&model, "BAAI/bge-reranker-base");
         let first_pins = reranker_pins(&first);
+        let first_digest = first.artifact_identity_digest();
 
+        let first_status = owner
+            .import_local_reranker_artifact(first_pins.clone(), &first, fixture.path(), 10)
+            .unwrap();
         assert_eq!(
-            owner
-                .import_local_reranker_artifact(first_pins, &first, fixture.path(), 10)
-                .unwrap_err(),
-            ModelLifecycleErrorV1::VerificationFailed
+            first_status.active_artifact_digest,
+            Some(first_digest.clone())
+        );
+        assert_eq!(first_status.rollback_artifact_digest, None);
+        assert!(matches!(
+            owner.mount_reranker(first_pins.clone()),
+            Err(ModelLifecycleErrorV1::RerankerUnavailable)
+        ));
+
+        let second = reranker_manifest(&model, "jinaai/jina-reranker-v1-turbo-en");
+        let second_pins = reranker_pins(&second);
+        let second_digest = second.artifact_identity_digest();
+        let second_status = owner
+            .import_local_reranker_artifact(second_pins.clone(), &second, fixture.path(), 11)
+            .unwrap();
+        assert_eq!(
+            second_status.active_artifact_digest,
+            Some(second_digest.clone())
         );
         assert_eq!(
-            owner.reranker_artifact_status().unwrap(),
-            RerankerArtifactLifecycleStatusV1 {
-                active_artifact_digest: None,
-                rollback_artifact_digest: None,
-            }
+            second_status.rollback_artifact_digest,
+            Some(first_digest.clone())
         );
+        assert!(matches!(
+            owner.mount_reranker(first_pins),
+            Err(ModelLifecycleErrorV1::VerificationFailed)
+        ));
+        assert!(matches!(
+            owner.mount_reranker(second_pins.clone()),
+            Err(ModelLifecycleErrorV1::RerankerUnavailable)
+        ));
+
+        let rolled_back = owner.rollback_reranker_artifact(12).unwrap();
+        assert_eq!(rolled_back.active_artifact_digest, Some(first_digest));
+        assert_eq!(rolled_back.rollback_artifact_digest, Some(second_digest));
+        assert!(matches!(
+            owner.mount_reranker(second_pins),
+            Err(ModelLifecycleErrorV1::VerificationFailed)
+        ));
     }
 
     #[cfg(feature = "semantic-fastembed")]
@@ -939,7 +900,7 @@
     // Same runtime-evidence gate as the local reranker import above.
     #[cfg(feature = "semantic-fastembed")]
     #[test]
-    fn configured_https_invalid_reranker_never_activates_an_artifact_lease() {
+    fn configured_https_reranker_acquisition_uses_immutable_member_pins() {
         let fixture = tempfile::tempdir().unwrap();
         let (catalog, model_id) = tiny_catalog(fixture.path());
         let model = catalog.get(&model_id).unwrap().clone();
@@ -972,21 +933,25 @@
         )
         .unwrap();
 
+        let status = owner
+            .import_configured_https_reranker_artifact(
+                pins.clone(),
+                &manifest,
+                &source,
+                &transport,
+                None,
+                20,
+            )
+            .unwrap();
+
         assert_eq!(
-            owner
-                .import_configured_https_reranker_artifact(
-                    pins, &manifest, &source, &transport, None, 20,
-                )
-                .unwrap_err(),
-            ModelLifecycleErrorV1::VerificationFailed
+            status.active_artifact_digest,
+            Some(manifest.artifact_identity_digest())
         );
-        assert_eq!(
-            owner.reranker_artifact_status().unwrap(),
-            RerankerArtifactLifecycleStatusV1 {
-                active_artifact_digest: None,
-                rollback_artifact_digest: None,
-            }
-        );
+        assert!(matches!(
+            owner.mount_reranker(pins),
+            Err(ModelLifecycleErrorV1::RerankerUnavailable)
+        ));
     }
 
     #[test]
