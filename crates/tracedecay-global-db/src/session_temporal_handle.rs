@@ -194,7 +194,7 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    #[hotpath::measure(future = true, label = "global_db.session_temporal.summary_relations")]
+    #[hotpath::skip]
     pub async fn active_session_summary_relations(
         &self,
         session_id: &tracedecay_domain::SessionId,
