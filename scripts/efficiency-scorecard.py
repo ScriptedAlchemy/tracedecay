@@ -53,10 +53,13 @@ Determinism policy
   counts, fixed observer cadence (50 ms). Repetition: the whole scenario runs
   --runs times (default 3); the scorecard reports per-run values and the
   cross-run median for every scalar.
-- Each measured wait uses one long-lived MCP observer process/connection.
-  Wall times that end on an observation quantize at the observer cadence
-  plus one protocol round-trip; the identical policy applies to every commit
-  being compared, and the medians absorb scheduler noise.
+- Each measured wait uses one long-lived MCP observer process/connection
+  on the healthy path. If that observer becomes unusable (proxy exit or
+  handshake failure), it is closed and a new observer is opened; reconnects
+  increment the recorded process/connection counts. Wall times that end on
+  an observation quantize at the observer cadence plus one protocol
+  round-trip; the identical policy applies to every commit being compared,
+  and the medians absorb scheduler noise.
 - Load averages before/after are recorded; compare scorecards captured
   under comparable load.
 
@@ -261,9 +264,8 @@ class StatusObserver:
 
     def __init__(self, sandbox: Sandbox) -> None:
         self._sandbox = sandbox
-        self._stderr = (
-            sandbox.root / f"status-observer-{sandbox.observer_process_count}.log"
-        ).open("wb")
+        self.log_path = sandbox.root / f"status-observer-{sandbox.observer_process_count}.log"
+        self._stderr = self.log_path.open("wb")
         try:
             self._process = subprocess.Popen(
                 (str(sandbox.binary), "serve", "--path", str(sandbox.project)),
@@ -287,6 +289,10 @@ class StatusObserver:
         self._buffer = b""
         self._initialized = False
         self._usable = True
+
+    @property
+    def usable(self) -> bool:
+        return self._usable
 
     def __enter__(self) -> StatusObserver:
         return self
@@ -639,27 +645,44 @@ def wait_for(
     deadline_seconds: float,
     predicate,
 ) -> tuple[float, dict, float]:
-    """Observe `status` until predicate(payload); return (wall, payload, observed_at)."""
+    """Observe `status` until predicate(payload); return (wall, payload, observed_at).
+
+    One observer process/connection is used for the whole wait on the healthy
+    path. An unusable observer (proxy death, failed handshake, broken JSON-RPC
+    stream) is closed and a new one is opened so readiness polling keeps the
+    same retry cadence as the old per-poll CLI, with reconnects visible in
+    the observer process/connection counts.
+    """
     started = time.monotonic()
     deadline = started + deadline_seconds
-    with sandbox.open_status_observer() as observer:
-        while True:
-            payload = observer.status_payload()
-            observed_at = time.time()
-            if payload is not None and predicate(payload):
-                return time.monotonic() - started, payload, observed_at
-            if not sandbox.daemon_alive():
-                raise PhaseFailure(
-                    phase, f"daemon exited; log tail: {sandbox.daemon_log_tail()}"
-                )
-            if time.monotonic() > deadline:
-                state = (
-                    "unanswered" if payload is None else json.dumps(freshness(payload))[:300]
-                )
-                raise PhaseFailure(
-                    phase, f"not ready within {deadline_seconds}s (last freshness: {state})"
-                )
-            time.sleep(POLL_INTERVAL_SECONDS)
+    while True:
+        with sandbox.open_status_observer() as observer:
+            while True:
+                payload = observer.status_payload()
+                observed_at = time.time()
+                if payload is not None and predicate(payload):
+                    return time.monotonic() - started, payload, observed_at
+                if not sandbox.daemon_alive():
+                    raise PhaseFailure(
+                        phase, f"daemon exited; log tail: {sandbox.daemon_log_tail()}"
+                    )
+                if time.monotonic() > deadline:
+                    state = (
+                        "unanswered"
+                        if payload is None
+                        else json.dumps(freshness(payload))[:300]
+                    )
+                    reason = (
+                        f"not ready within {deadline_seconds}s (last freshness: {state})"
+                    )
+                    if not observer.usable:
+                        reason = (
+                            f"{reason}; last observer unusable, stderr: {observer.log_path}"
+                        )
+                    raise PhaseFailure(phase, reason)
+                time.sleep(POLL_INTERVAL_SECONDS)
+                if not observer.usable:
+                    break
 
 
 def seal_to_activation_seconds(payload: dict, observed_at: float) -> float | None:
