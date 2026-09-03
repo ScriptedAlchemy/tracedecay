@@ -485,6 +485,7 @@ where
     /// are bit-identical to a flat scan's for every returned row. Coverage is
     /// candidate-bounded and the continuation never claims exhaustion: an
     /// index-bounded candidate set cannot prove no better row exists.
+    #[hotpath::measure(label = "query.lane.semantic.ann_rescore")]
     fn retrieve_ann_exact_rescore(
         &self,
         request: &SemanticRetrievalRequestV1<'_>,
@@ -573,6 +574,7 @@ where
     }
 
     /// Exact-flat scan: visit and exactly score every published row.
+    #[hotpath::measure(label = "query.lane.semantic.exact_flat")]
     fn retrieve_exact_flat(
         &self,
         request: &SemanticRetrievalRequestV1<'_>,
@@ -698,6 +700,7 @@ where
     /// full sort followed by truncation), bind evidence, and validate the
     /// batch. Shared by the exact-flat and ANN-rescore paths; only their
     /// coverage accounting and exhaustion claims differ.
+    #[hotpath::measure(label = "query.lane.semantic.assemble")]
     fn assemble_ranked_batch(
         &self,
         request: &SemanticRetrievalRequestV1<'_>,
@@ -778,10 +781,12 @@ where
                 self.control,
             )));
         }
-        let query = match self.embedder.embed_query(SemanticQueryEmbeddingRequestV1 {
-            query_digest: &request.query_digest,
-            query_view: request.query_view,
-            projection: request.projection,
+        let query = match hotpath::measure_block!("query.lane.semantic.embed_query", {
+            self.embedder.embed_query(SemanticQueryEmbeddingRequestV1 {
+                query_digest: &request.query_digest,
+                query_view: request.query_view,
+                projection: request.projection,
+            })
         }) {
             Ok(query) => query,
             Err(error) => {

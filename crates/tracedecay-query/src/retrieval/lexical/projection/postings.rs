@@ -86,6 +86,17 @@ impl ByteNgramPostings {
         bytes: &[u8],
         budget: &mut ByteNgramBudget,
     ) -> Result<(), String> {
+        crate::hotpath_metrics::measure_frequent("query.artifact.ngram.insert_document", || {
+            self.insert_document_inner(document, bytes, budget)
+        })
+    }
+
+    fn insert_document_inner(
+        &mut self,
+        document: u32,
+        bytes: &[u8],
+        budget: &mut ByteNgramBudget,
+    ) -> Result<(), String> {
         let scratch_entries = (1..=bytes.len().min(3)).try_fold(0usize, |entries, width| {
             entries
                 .checked_add(bytes.len().saturating_sub(width).saturating_add(1))
@@ -241,6 +252,7 @@ impl ByteNgramPostings {
         Ok(postings)
     }
 
+    #[hotpath::measure(label = "query.artifact.ngram.candidate_documents")]
     pub(super) fn candidate_documents(&self, needle: &[u8]) -> RoaringBitmap {
         let width = needle.len().min(3);
         if width == 0 {
@@ -393,6 +405,7 @@ pub(super) struct FuzzySearchSlice {
 }
 
 impl FuzzyTermIndex {
+    #[hotpath::measure(label = "query.lane.fuzzy.build_index")]
     pub(super) fn from_terms<I, S>(terms: I, deadline: Option<Instant>) -> Result<Self, String>
     where
         I: IntoIterator<Item = S>,
@@ -416,6 +429,7 @@ impl FuzzyTermIndex {
         Ok(Self { terms })
     }
 
+    #[hotpath::measure(label = "query.lane.fuzzy.terms_at_distance")]
     pub(super) fn terms_at_distance(
         &self,
         query: &str,

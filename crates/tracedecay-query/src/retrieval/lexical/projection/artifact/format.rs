@@ -207,6 +207,7 @@ pub(super) fn initial_base_section_receipt_fold()
     Ok((row_counts, accumulators))
 }
 
+#[hotpath::measure(label = "query.artifact.finalization.receipt_absorb")]
 pub(super) fn absorb_page_base_sections_receipt(
     page_ordinal: u64,
     bytes: &[u8],
@@ -301,6 +302,7 @@ fn validate_page_base_sections(
     Ok(())
 }
 
+#[hotpath::measure(label = "query.artifact.index_verify")]
 pub(super) fn verify_required_artifact_indexes(
     connection: &Connection,
     layout: LexicalArtifactLayoutV1,
@@ -655,6 +657,7 @@ fn table_columns(
         })
 }
 
+#[hotpath::measure(label = "query.artifact.ngram.page_digest")]
 pub(super) fn ngram_page_digest<'a>(
     page_ordinal: u64,
     rows: impl IntoIterator<Item = (i64, i64, &'a [u8], u64)>,
@@ -690,12 +693,14 @@ pub(super) fn encode_ngram_bitmap(
     layout: LexicalArtifactLayoutV1,
     bitmap: &RoaringBitmap,
 ) -> Result<Vec<u8>, CodeLexicalArtifactErrorV1> {
-    match layout {
-        LexicalArtifactLayoutV1::V10 | LexicalArtifactLayoutV1::V11 => {
-            encode_ngram_bitmap_v11(bitmap)
+    crate::hotpath_metrics::measure_frequent("query.artifact.ngram.encode_shard", || {
+        match layout {
+            LexicalArtifactLayoutV1::V10 | LexicalArtifactLayoutV1::V11 => {
+                encode_ngram_bitmap_v11(bitmap)
+            }
+            LexicalArtifactLayoutV1::V12 => encode_ngram_delta_varints_v12(bitmap),
         }
-        LexicalArtifactLayoutV1::V12 => encode_ngram_delta_varints_v12(bitmap),
-    }
+    })
 }
 
 fn encode_ngram_bitmap_v11(bitmap: &RoaringBitmap) -> Result<Vec<u8>, CodeLexicalArtifactErrorV1> {
@@ -776,12 +781,14 @@ pub(super) fn decode_ngram_bitmap(
     layout: LexicalArtifactLayoutV1,
     encoded: &[u8],
 ) -> Result<RoaringBitmap, CodeLexicalArtifactErrorV1> {
-    match layout {
-        LexicalArtifactLayoutV1::V10 | LexicalArtifactLayoutV1::V11 => {
-            decode_ngram_bitmap_v11(encoded)
+    crate::hotpath_metrics::measure_frequent("query.artifact.ngram.decode_shard", || {
+        match layout {
+            LexicalArtifactLayoutV1::V10 | LexicalArtifactLayoutV1::V11 => {
+                decode_ngram_bitmap_v11(encoded)
+            }
+            LexicalArtifactLayoutV1::V12 => decode_ngram_delta_varints_v12(encoded),
         }
-        LexicalArtifactLayoutV1::V12 => decode_ngram_delta_varints_v12(encoded),
-    }
+    })
 }
 
 fn decode_ngram_bitmap_v11(encoded: &[u8]) -> Result<RoaringBitmap, CodeLexicalArtifactErrorV1> {
@@ -1214,6 +1221,7 @@ pub(super) fn decode_padded_receipt(
 /// Decode a fixed-size receipt while honoring the caller's canonical work
 /// control. Reopen paths use this version so a corrupt or cold artifact never
 /// turns an expired epoch into an unbounded padding scan.
+#[hotpath::measure(label = "query.artifact.open.receipt_decode")]
 pub(super) fn decode_padded_receipt_with_control(
     bytes: &[u8],
     control: &dyn CodeIndexExecutionControlV1,
