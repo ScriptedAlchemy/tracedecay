@@ -84,6 +84,9 @@ pub(crate) struct Inner {
     /// after every database write claim; see
     /// [`crate::projection_identity_index`].
     pub(crate) identity_indexes: crate::projection_identity_index::IdentityIndexCache,
+    pub(crate) label_keys: crate::epoch_cache::LabelKeyCache,
+    pub(crate) adjacency_ids: crate::adjacency_id_index::AdjacencyIdIndexCache,
+    pub(crate) projection_approvals: crate::epoch_cache::ProjectionApprovalCache,
     pub(crate) closed: AtomicBool,
     pub(crate) poisoned: AtomicBool,
 }
@@ -92,6 +95,15 @@ struct OpenedGraphState {
     database: GrafeoDB,
     state: FormatState,
     quarantined_projections: BTreeSet<(GraphNamespace, GraphProjectionId)>,
+}
+
+impl Inner {
+    pub(crate) fn invalidate_store_epoch_caches(&self) {
+        self.identity_indexes.invalidate();
+        self.label_keys.invalidate();
+        self.adjacency_ids.invalidate();
+        self.projection_approvals.invalidate();
+    }
 }
 
 pub struct GraphSnapshot {
@@ -172,6 +184,9 @@ impl GraphDb {
                 sealed_read_only: AtomicBool::new(false),
                 markers,
                 identity_indexes: crate::projection_identity_index::IdentityIndexCache::default(),
+                label_keys: crate::epoch_cache::LabelKeyCache::default(),
+                adjacency_ids: crate::adjacency_id_index::AdjacencyIdIndexCache::default(),
+                projection_approvals: crate::epoch_cache::ProjectionApprovalCache::default(),
                 closed: AtomicBool::new(false),
                 poisoned: AtomicBool::new(false),
             }),
@@ -477,7 +492,7 @@ impl GraphDb {
             std::slice::from_ref(&request.start),
         )?;
         let result = traversal::traverse(database, request, &|namespace, projection| {
-            self.ensure_projection_readable(namespace, projection)
+            self.approve_projection(namespace, projection)
         })?;
         #[cfg(feature = "hotpath")]
         {
@@ -513,7 +528,9 @@ impl GraphDb {
             relation_kinds,
             max_relations,
             cancellation.as_ref(),
-            &|namespace, projection| self.ensure_projection_readable(namespace, projection),
+            &|namespace, projection| self.approve_projection(namespace, projection),
+            &self.inner.label_keys,
+            &self.inner.adjacency_ids,
         )?;
         #[cfg(feature = "hotpath")]
         {
@@ -548,7 +565,87 @@ impl GraphDb {
             relation_kinds,
             max_relations,
             cancellation.as_ref(),
-            &|namespace, projection| self.ensure_projection_readable(namespace, projection),
+            &|namespace, projection| self.approve_projection(namespace, projection),
+            &self.inner.label_keys,
+            &self.inner.adjacency_ids,
+        )?;
+        #[cfg(feature = "hotpath")]
+        {
+            let edges = batches.iter().map(Vec::len).sum();
+            crate::hotpath_observe::record_counts(starts.len(), edges, 0, 0);
+            crate::hotpath_observe::record_hydration_source(
+                crate::hotpath_observe::HydrationSource::Live,
+            );
+        }
+        Ok(batches)
+    }
+
+    /// Cursor-exclusive ID page over outgoing adjacency.
+    ///
+    /// `after` is the last identity of the previous page. The page is ordered
+    /// by relation identity and bounded by `limit` per start.
+    #[hotpath::measure(label = "graph_db.traversal.outgoing_ids_page", impl_type = "GraphDb")]
+    pub fn outgoing_relation_ids_page(
+        &self,
+        namespace: &GraphNamespace,
+        starts: &[GraphEntityId],
+        relation_kinds: &BTreeSet<GraphRelationKind>,
+        after: Option<&GraphRelationId>,
+        limit: usize,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
+        let guard = self.read_guard()?;
+        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        self.ensure_start_projections_readable(database, namespace, starts)?;
+        let batches = traversal::outgoing_relation_ids_page(
+            database,
+            namespace,
+            starts,
+            relation_kinds,
+            after,
+            limit,
+            cancellation.as_ref(),
+            &|namespace, projection| self.approve_projection(namespace, projection),
+            &self.inner.label_keys,
+            &self.inner.adjacency_ids,
+        )?;
+        #[cfg(feature = "hotpath")]
+        {
+            let edges = batches.iter().map(Vec::len).sum();
+            crate::hotpath_observe::record_counts(starts.len(), edges, 0, 0);
+            crate::hotpath_observe::record_hydration_source(
+                crate::hotpath_observe::HydrationSource::Live,
+            );
+        }
+        Ok(batches)
+    }
+
+    /// Cursor-exclusive ID page over incoming adjacency. See
+    /// [`Self::outgoing_relation_ids_page`].
+    #[hotpath::measure(label = "graph_db.traversal.incoming_ids_page", impl_type = "GraphDb")]
+    pub fn incoming_relation_ids_page(
+        &self,
+        namespace: &GraphNamespace,
+        starts: &[GraphEntityId],
+        relation_kinds: &BTreeSet<GraphRelationKind>,
+        after: Option<&GraphRelationId>,
+        limit: usize,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
+        let guard = self.read_guard()?;
+        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        self.ensure_start_projections_readable(database, namespace, starts)?;
+        let batches = traversal::incoming_relation_ids_page(
+            database,
+            namespace,
+            starts,
+            relation_kinds,
+            after,
+            limit,
+            cancellation.as_ref(),
+            &|namespace, projection| self.approve_projection(namespace, projection),
+            &self.inner.label_keys,
+            &self.inner.adjacency_ids,
         )?;
         #[cfg(feature = "hotpath")]
         {
@@ -580,7 +677,7 @@ impl GraphDb {
             relation_kinds,
             max_relations,
             cancellation.as_ref(),
-            &|namespace, projection| self.ensure_projection_readable(namespace, projection),
+            &|namespace, projection| self.approve_projection(namespace, projection),
         )?;
         #[cfg(feature = "hotpath")]
         {
@@ -614,7 +711,7 @@ impl GraphDb {
             relation_kinds,
             max_relations,
             cancellation.as_ref(),
-            &|namespace, projection| self.ensure_projection_readable(namespace, projection),
+            &|namespace, projection| self.approve_projection(namespace, projection),
         )?;
         #[cfg(feature = "hotpath")]
         {
@@ -646,7 +743,7 @@ impl GraphDb {
             relation_kinds,
             max_relations,
             cancellation.as_ref(),
-            &|namespace, projection| self.ensure_projection_readable(namespace, projection),
+            &|namespace, projection| self.approve_projection(namespace, projection),
         )?;
         #[cfg(feature = "hotpath")]
         {
@@ -680,7 +777,7 @@ impl GraphDb {
             start,
             relation_kinds,
             cancellation.as_ref(),
-            &|namespace, projection| self.ensure_projection_readable(namespace, projection),
+            &|namespace, projection| self.approve_projection(namespace, projection),
             visitor,
         )?;
         #[cfg(feature = "hotpath")]
@@ -714,7 +811,7 @@ impl GraphDb {
             relation_kinds,
             max_relations,
             cancellation.as_ref(),
-            &|namespace, projection| self.ensure_projection_readable(namespace, projection),
+            &|namespace, projection| self.approve_projection(namespace, projection),
         )?;
         #[cfg(feature = "hotpath")]
         {
@@ -748,7 +845,7 @@ impl GraphDb {
             relation_kinds,
             max_relations,
             cancellation.as_ref(),
-            &|namespace, projection| self.ensure_projection_readable(namespace, projection),
+            &|namespace, projection| self.approve_projection(namespace, projection),
         )?;
         #[cfg(feature = "hotpath")]
         {
@@ -786,7 +883,7 @@ impl GraphDb {
             outgoing_overrides,
             max_visits,
             cancellation.as_ref(),
-            &|namespace, projection| self.ensure_projection_readable(namespace, projection),
+            &|namespace, projection| self.approve_projection(namespace, projection),
         )?;
         #[cfg(feature = "hotpath")]
         {
@@ -926,7 +1023,7 @@ impl GraphDb {
                 });
             }
         };
-        self.inner.identity_indexes.invalidate();
+        self.inner.invalidate_store_epoch_caches();
         let was_uncertain = self.inner.poisoned.load(Ordering::Acquire);
         if self.inner.closed.swap(true, Ordering::AcqRel) {
             return if was_uncertain {
@@ -1256,11 +1353,24 @@ impl GraphDb {
         Ok(guard)
     }
 
+    pub(crate) fn approve_projection(
+        &self,
+        namespace: &GraphNamespace,
+        projection: &GraphProjectionId,
+    ) -> Result<(), GraphDbError> {
+        self.inner
+            .projection_approvals
+            .approve(namespace, projection, || {
+                self.ensure_projection_readable(namespace, projection)
+            })
+    }
+
     pub(crate) fn ensure_projection_readable(
         &self,
         namespace: &GraphNamespace,
         projection: &GraphProjectionId,
     ) -> Result<(), GraphDbError> {
+        crate::hotpath_observe::record_quarantine_lock();
         let quarantined = self
             .inner
             .quarantined_projections
@@ -1294,7 +1404,7 @@ impl GraphDb {
     ) -> Result<(), GraphDbError> {
         for start in starts {
             if let Some(stored) = load_entity_locator(database, namespace, start)? {
-                self.ensure_projection_readable(&stored.namespace, &stored.projection)?;
+                self.approve_projection(&stored.namespace, &stored.projection)?;
             }
         }
         Ok(())
@@ -1416,7 +1526,7 @@ impl GraphDb {
         .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
         // Anything holding this guard may rewrite the rows a cached ordered
         // identity index was built from, so the index is stale from here on.
-        self.inner.identity_indexes.invalidate();
+        self.inner.invalidate_store_epoch_caches();
         self.ensure_available()?;
         Ok(guard)
     }

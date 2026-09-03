@@ -214,6 +214,10 @@ name = "runtime_contract"
 required-features = ["test-helpers"]
 
 [[test]]
+name = "paged_relation_ids"
+required-features = ["test-helpers"]
+
+[[test]]
 name = "semantic_vector_staging_contract"
 
 [[test]]
