@@ -6,8 +6,8 @@ pub mod manifest;
 pub mod runtime_status;
 
 pub use configuration::{
-    DEFAULT_FASTEMBED_MODEL_ID, RerankCompatibilityPinsV1, SemanticConfig,
-    SemanticFallbackReasonV1, SemanticProfileSelection, SemanticResourceCeilings,
+    DEFAULT_FASTEMBED_MODEL_ID, MODEL2VEC_POTION_CODE_16M_V2_MODEL_ID, RerankCompatibilityPinsV1,
+    SemanticConfig, SemanticFallbackReasonV1, SemanticProfileSelection, SemanticResourceCeilings,
 };
 pub use lifecycle::{
     RerankerArtifactLifecycleStatusV1, SemanticLifecycleVerifiedReadyEventV1,

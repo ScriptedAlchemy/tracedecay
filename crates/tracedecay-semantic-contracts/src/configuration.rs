@@ -6,8 +6,17 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{ComponentRevision, ManifestDigest, host_cpu_target};
 
 pub const DEFAULT_FASTEMBED_MODEL_ID: &str = "JinaEmbeddingsV2BaseCode";
+/// Catalog id of the Model2Vec static code-embedding model
+/// (`minishlab/potion-code-16M-v2`, 256 dimensions, no ONNX Runtime).
+pub const MODEL2VEC_POTION_CODE_16M_V2_MODEL_ID: &str = "PotionCode16MV2";
 
-const CATALOGED_FASTEMBED_MODEL_IDS: &[&str] = &[DEFAULT_FASTEMBED_MODEL_ID];
+/// Every model id the semantic catalog serves. Settings validation is
+/// provider-free, so the list is mirrored here and the catalog test suite
+/// proves every production entry is accepted by `SemanticConfig::validate`.
+const CATALOGED_SEMANTIC_MODEL_IDS: &[&str] = &[
+    DEFAULT_FASTEMBED_MODEL_ID,
+    MODEL2VEC_POTION_CODE_16M_V2_MODEL_ID,
+];
 const MAX_SEMANTIC_MODEL_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const MAX_SEMANTIC_TOKENIZER_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_SEMANTIC_RESIDENT_BYTES: u64 = 16 * 1024 * 1024 * 1024;
@@ -177,9 +186,9 @@ impl SemanticConfig {
                     "semantic selected_model must be a non-empty catalog id at most 128 bytes",
                 ));
             }
-            if !CATALOGED_FASTEMBED_MODEL_IDS.contains(&model_id.as_str()) {
+            if !CATALOGED_SEMANTIC_MODEL_IDS.contains(&model_id.as_str()) {
                 return Err(config_error(format!(
-                    "semantic selected_model '{model_id}' is not a cataloged FastEmbed model"
+                    "semantic selected_model '{model_id}' is not a cataloged semantic embedding model"
                 )));
             }
         }
