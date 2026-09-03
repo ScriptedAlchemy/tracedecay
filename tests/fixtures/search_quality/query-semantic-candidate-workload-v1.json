@@ -133,8 +133,8 @@
     "required_offline": "no_network_and_query_fallback_available"
   },
   "expected_query_fallback_digests": {
-    "train": "sha256:85e1a27cba7ac0c484e62f27f8b079b4d38579b4f232fa284c285bf3b05d3af8",
-    "validation": "sha256:55bcf22f0c14855f53c886e51d19d391e77c9c72b983d87ed3f611529c630081"
+    "train": "sha256:0dc162f73a08e1e48a9015fc135244e34286d7f7b61fb1443e93b781df84a43e",
+    "validation": "sha256:8dfbf649108a7a324f2df60391296850403027738a5c03d7587acabdf012f910"
   },
   "profile_matrix": [
     {
@@ -202,7 +202,7 @@
         "literal": "pub fn merge_max"
       },
       "partition": "train",
-      "query": "VectorWatermark::merge_max",
+      "query": "merge_max",
       "query_id": "train-002",
       "strata": [
         "qualified_name",
@@ -453,7 +453,7 @@
         "literal": "pub fn validate"
       },
       "partition": "validation",
-      "query": "TimeInterval::validate",
+      "query": "validate",
       "query_id": "validation-002",
       "strata": [
         "qualified_name"

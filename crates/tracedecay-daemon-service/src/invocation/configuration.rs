@@ -484,6 +484,7 @@ pub(super) async fn apply_configuration_or_semantic_transition(
             requested.is_some(),
         )
     });
+    let coordinated_semantic_transition = semantic_profile.is_some();
     let receipt =
         if current.revision_id != expected_revision {
             Box::pin(registered.runtime.client().mutate_direct(
@@ -528,7 +529,9 @@ pub(super) async fn apply_configuration_or_semantic_transition(
             ))
             .await?
         };
-    Box::pin(reconcile_configuration_runtime(registered, &receipt, now)).await;
+    if !coordinated_semantic_transition {
+        Box::pin(reconcile_configuration_runtime(registered, &receipt, now)).await;
+    }
     Ok(receipt)
 }
 

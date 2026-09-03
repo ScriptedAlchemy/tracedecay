@@ -495,9 +495,10 @@ impl DaemonCodeIndexPublicationStoreV1 {
             })?;
         Self::validate_generation_file(&pointer.generation_file)?;
         if pointer.generation_id != generation_id.as_str() {
-            return Err(Self::unavailable(
-                "active code-generation pointer names a different generation",
-            ));
+            return Err(Self::unavailable(format!(
+                "active code-generation pointer names {} instead of {}",
+                pointer.generation_id, generation_id
+            )));
         }
         let digest = pointer
             .state_digest
