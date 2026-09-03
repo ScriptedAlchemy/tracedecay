@@ -457,6 +457,7 @@ fn host_admission_failures_preserve_provider_with_bounded_reason_codes() {
                 retryable: true,
                 reason_code: Some("authority_unavailable"),
                 recovery: None,
+                storage_cause: None,
             },
         );
         assert!(matches!(
@@ -465,6 +466,7 @@ fn host_admission_failures_preserve_provider_with_bounded_reason_codes() {
                 provider: error_provider,
                 reason: "authority_unavailable",
                 retryable: true,
+                ..
             } if error_provider == provider
         ));
     }

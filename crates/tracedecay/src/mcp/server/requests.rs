@@ -471,7 +471,7 @@ impl McpServer {
         let Some(event) = hook_events::parse_hook_event(params) else {
             self.record_request_accounting("tracedecay/hookEvent", false);
             let outcome = HostAdmissionOutcome::degraded("malformed_event");
-            Self::report_host_admission_outcome(outcome);
+            Self::report_host_admission_outcome(&outcome);
             return outcome;
         };
         // Resolve the hook's exact project before opening a graph, publishing
@@ -486,7 +486,7 @@ impl McpServer {
                 let outcome = HostAdmissionOutcome::retained_unavailable(
                     "project_registry_route_unavailable",
                 );
-                Self::report_host_admission_outcome(outcome);
+                Self::report_host_admission_outcome(&outcome);
                 return outcome;
             }
         };
@@ -504,7 +504,7 @@ impl McpServer {
                 self.record_request_accounting("tracedecay/hookEvent", false);
                 let outcome =
                     HostAdmissionOutcome::retained_unavailable("project_route_unavailable");
-                Self::report_host_admission_outcome(outcome);
+                Self::report_host_admission_outcome(&outcome);
                 return outcome;
             }
         };
@@ -561,7 +561,7 @@ impl McpServer {
         let plan = hook_events::plan_hook_event(&event, &root, current_branch.as_deref());
         let Ok(payload) = hook_events::encode_durable_hook_event_plan(&plan) else {
             let outcome = HostAdmissionOutcome::degraded("invalid_host_event_plan");
-            Self::report_host_admission_outcome(outcome);
+            Self::report_host_admission_outcome(&outcome);
             return outcome;
         };
         let admission_source = event.admission_source();
@@ -574,7 +574,7 @@ impl McpServer {
         let admitted = match admitted {
             Ok(admitted) => admitted,
             Err(outcome) => {
-                Self::report_host_admission_outcome(outcome);
+                Self::report_host_admission_outcome(&outcome);
                 return outcome;
             }
         };
@@ -601,7 +601,7 @@ impl McpServer {
             );
             dispatch_server.record_hook_span_observation(&event, &hook_route);
         }
-        Self::report_host_admission_outcome(outcome);
+        Self::report_host_admission_outcome(&outcome);
         outcome
     }
 

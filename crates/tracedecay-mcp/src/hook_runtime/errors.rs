@@ -21,11 +21,19 @@ pub fn map_transcript_ingest_error(
     error: &tracedecay_sessions::runtime::source::TranscriptIngestError,
 ) -> TraceDecayError {
     let disposition = tracedecay_sessions::runtime::classify_transcript_ingest_disposition(error);
+    let detail = match error {
+        tracedecay_sessions::runtime::source::TranscriptIngestError::HostAdmission {
+            reason: "authority_write_failed",
+            detail: Some(cause),
+            ..
+        } => format!("transcript ingest failed: authority_write_failed: {cause}"),
+        _ => format!("transcript ingest failed: {}", disposition.reason_code),
+    };
     hook_admission_error(
         disposition.status,
         disposition.reason_code,
         disposition.retryable,
-        format!("transcript ingest failed: {}", disposition.reason_code),
+        detail,
     )
 }
 
