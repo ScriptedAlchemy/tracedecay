@@ -20,10 +20,11 @@ const MIGRATION_NAME: &str = "lcm";
 /// `lcm_summary_nodes` / `lcm_external_payloads` records — multi-gigabyte
 /// body reads on a long-lived profile store for a one-row answer (issue #767
 /// measured 10.65 s daemon-side). Each entry is one independently committed
-/// idempotent batch: fresh stores install them with the schema, and the
-/// registered-schema admission ensures them on already-current stores, where
-/// the one-time build cost is a bounded scan per index instead of that same
-/// scan on every status call.
+/// idempotent batch. Fresh stores install the final index shape with the
+/// schema. Already-current daemon stores build missing indexes through
+/// lifecycle-owned post-admission convergence, while short-lived attaches
+/// converge synchronously. The one-time work is one full-table build per
+/// missing index instead of that same scan on every status call.
 ///
 /// The partial-index predicates must stay byte-identical to the WHERE terms
 /// in the status count queries ([`super::query`] status counts): SQLite only
