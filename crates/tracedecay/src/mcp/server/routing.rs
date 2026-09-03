@@ -70,6 +70,7 @@ pub(crate) struct ConnectionRouteState {
     pub(crate) route_cache: HookProjectRouteCache,
     selected_response_lease: Option<SelectedProjectResponseLease>,
     selected_request_server: Option<std::sync::Arc<super::McpServer>>,
+    connection_owns_dispatch: bool,
 }
 
 impl ConnectionRouteState {
@@ -80,6 +81,7 @@ impl ConnectionRouteState {
             route_cache,
             selected_response_lease: None,
             selected_request_server: None,
+            connection_owns_dispatch: false,
         }
     }
 
@@ -115,7 +117,18 @@ impl ConnectionRouteState {
             route_cache: self.route_cache.clone(),
             selected_response_lease: None,
             selected_request_server: None,
+            connection_owns_dispatch: false,
         }
+    }
+
+    pub(crate) fn fork_for_connection_owned_read(&self) -> Self {
+        let mut fork = self.fork_for_independent_read();
+        fork.connection_owns_dispatch = true;
+        fork
+    }
+
+    pub(crate) fn connection_owns_dispatch(&self) -> bool {
+        self.connection_owns_dispatch
     }
 
     pub(crate) fn install_selected_response_lease(&mut self, lease: SelectedProjectResponseLease) {
