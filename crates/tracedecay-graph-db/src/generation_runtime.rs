@@ -1360,30 +1360,31 @@ impl GraphDb {
             latest_projection(database, &namespace, &locator.projection.projection)?
                 .map(|projection| projection.commit)
         };
-        let Some(commit) = commit else {
-            let mut state = self.wait_verified_generations_write()?;
-            state.known.remove(locator);
-            state.quarantined.remove(locator);
-            state.stored.remove(locator);
-            state.retiring.remove(locator);
-            state.collected.insert(locator.clone());
-            drop(state);
-            self.retire_sealed_generation_store(locator);
-            return Ok(());
-        };
-        self.delete_projection_checked(
-            namespace,
-            locator.projection.projection.clone(),
-            commit.source_generation,
-            commit.watermark,
-            check,
-        )?;
+        if let Some(commit) = commit {
+            self.delete_projection_checked(
+                namespace,
+                locator.projection.projection.clone(),
+                commit.source_generation,
+                commit.watermark,
+                check,
+            )?;
+        }
         let mut state = self.wait_verified_generations_write()?;
         state.known.remove(locator);
         state.quarantined.remove(locator);
         state.stored.remove(locator);
         state.retiring.remove(locator);
         state.collected.insert(locator.clone());
+        // A retired projection head (a deleted code generation's own
+        // projection) must leave the installed-head cache with its rows, or
+        // the stale lease would keep retaining its dependency closure.
+        if state
+            .heads
+            .get(&locator.projection)
+            .is_some_and(|installed| installed.locator == *locator)
+        {
+            state.heads.remove(&locator.projection);
+        }
         drop(state);
         self.retire_sealed_generation_store(locator);
         Ok(())

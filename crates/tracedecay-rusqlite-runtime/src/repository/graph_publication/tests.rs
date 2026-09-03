@@ -954,6 +954,143 @@ fn historical_retirement_refuses_current_and_pending_then_tombstones_exactly() {
 }
 
 #[test]
+fn verified_head_retirement_tombstones_and_finalizes_exactly() {
+    let fixture = Fixture::new();
+    let projection = projection("code-head-retirement");
+    let publication = replay(
+        projection.clone(),
+        "generation.1",
+        "publish.1",
+        'a',
+        'b',
+        None,
+        b"one",
+    );
+    let mut storage = fixture.storage();
+    append_with_fresh_context(&mut storage, &publication, "head-retire.append").unwrap();
+    let head = advance_head(&mut storage, &publication);
+    let request = retirement(&publication);
+
+    let (control, probe) = control_and_probe("head-retire", None);
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let tombstone = match storage
+        .retire_verified_head_replay(&request, &head, &context)
+        .unwrap()
+    {
+        GraphReplayRetirementOutcomeV1::Retired(tombstone) => tombstone,
+        outcome => panic!("unexpected verified-head retirement outcome: {outcome:?}"),
+    };
+    assert_eq!(storage.verified_head(&projection, &context).unwrap(), None);
+    assert_eq!(
+        storage.replay(&publication.key, &context).unwrap(),
+        GraphPublicationReplayLookupV1::Retired(tombstone.clone())
+    );
+    assert!(matches!(
+        append_with_fresh_context(&mut storage, &publication, "head-retire.reappend").unwrap(),
+        GraphReplayAppendOutcomeV1::RetiredReplayConflict { .. }
+    ));
+
+    let (control, probe) = control_and_probe("head-retire.repeat", None);
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    assert_eq!(
+        storage
+            .retire_verified_head_replay(&request, &head, &context)
+            .unwrap(),
+        GraphReplayRetirementOutcomeV1::ExactReplay(tombstone)
+    );
+    let (control, probe) = control_and_probe("head-retire.finalize", None);
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    assert!(matches!(
+        storage
+            .finalize_retired_replay_cleanup(&request, &context)
+            .unwrap(),
+        GraphRetiredReplayCleanupFinalizeOutcomeV1::Finalized(_)
+    ));
+}
+
+#[test]
+fn verified_head_retirement_refuses_changed_expected_head() {
+    let fixture = Fixture::new();
+    let projection = projection("code-head-conflict");
+    let publication = replay(
+        projection.clone(),
+        "generation.1",
+        "publish.1",
+        'a',
+        'b',
+        None,
+        b"one",
+    );
+    let mut storage = fixture.storage();
+    append_with_fresh_context(&mut storage, &publication, "head-conflict.append").unwrap();
+    let head = advance_head(&mut storage, &publication);
+    let mut wrong_head = head.clone();
+    wrong_head.recovered_digest = GraphRecoveredGenerationDigestV1::new(digest('c')).unwrap();
+    let (control, probe) = control_and_probe("head-conflict", None);
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+
+    assert_eq!(
+        storage
+            .retire_verified_head_replay(&retirement(&publication), &wrong_head, &context)
+            .unwrap(),
+        GraphReplayRetirementOutcomeV1::Conflict
+    );
+    assert_eq!(
+        storage.verified_head(&projection, &context).unwrap(),
+        Some(head)
+    );
+}
+
+#[test]
+fn verified_head_retirement_refuses_projection_with_pending_replay() {
+    let fixture = Fixture::new();
+    let projection = projection("code-head-pending");
+    let publication = replay(
+        projection.clone(),
+        "generation.1",
+        "publish.1",
+        'a',
+        'b',
+        None,
+        b"one",
+    );
+    let mut storage = fixture.storage();
+    append_with_fresh_context(&mut storage, &publication, "head-pending.append").unwrap();
+    let head = advance_head(&mut storage, &publication);
+    let pending = replay(
+        projection,
+        "generation.2",
+        "publish.2",
+        'c',
+        'd',
+        Some(head.clone()),
+        b"two",
+    );
+    let pending_record =
+        match append_with_fresh_context(&mut storage, &pending, "head-pending.pending").unwrap() {
+            GraphReplayAppendOutcomeV1::Appended(record) => record,
+            outcome => panic!("unexpected pending append outcome: {outcome:?}"),
+        };
+    let (control, probe) = control_and_probe("head-pending.retire", None);
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+
+    assert_eq!(
+        storage
+            .retire_verified_head_replay(&retirement(&publication), &head, &context)
+            .unwrap(),
+        GraphReplayRetirementOutcomeV1::PendingReplay {
+            pending: pending_record
+        }
+    );
+    assert_eq!(
+        storage
+            .verified_head(&publication.key.projection, &context)
+            .unwrap(),
+        Some(head)
+    );
+}
+
+#[test]
 fn retirement_rejects_changed_evidence_and_interruption_without_deleting_replay() {
     let fixture = Fixture::new();
     let (control, probe) = control_and_probe("retire-evidence", None);

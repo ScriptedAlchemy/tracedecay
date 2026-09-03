@@ -105,6 +105,18 @@ impl GraphPublicationStoreV1 for SemanticVectorStagingExactSqlStorage {
         self.graph_publication.retire_replay(request, context)
     }
 
+    fn retire_verified_head_replay(
+        &mut self,
+        request: &tracedecay_store::GraphPublicationReplayRetirementV1,
+        expected_head: &tracedecay_store::GraphVerifiedHeadV1,
+        context: &GraphPublicationOperationContextV1<'_>,
+    ) -> tracedecay_store::GraphPublicationStoreResultV1<
+        tracedecay_store::GraphReplayRetirementOutcomeV1,
+    > {
+        self.graph_publication
+            .retire_verified_head_replay(request, expected_head, context)
+    }
+
     fn discard_pending_replay(
         &mut self,
         request: &tracedecay_store::GraphPendingReplayDiscardV1,
