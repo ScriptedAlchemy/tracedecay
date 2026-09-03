@@ -3,6 +3,7 @@ use tracedecay_store::{RemoteObservationReplayWriteV1, RemoteWriterFenceInstallV
 
 use super::support::{encode, invalid};
 
+#[hotpath::measure(label = "rusqlite.remote.fence_verify_seed")]
 pub(super) fn verify_and_seed_writer_fence(
     savepoint: &Savepoint<'_>,
     write: &RemoteObservationReplayWriteV1,
@@ -44,6 +45,7 @@ pub(super) fn verify_and_seed_writer_fence(
     Ok(())
 }
 
+#[hotpath::measure(label = "rusqlite.remote.observation_event_persist")]
 pub(super) fn persist_remote_observation_event(
     savepoint: &Savepoint<'_>,
     write: &RemoteObservationReplayWriteV1,
@@ -133,6 +135,7 @@ pub(super) fn persist_remote_observation_event(
     Ok(())
 }
 
+#[hotpath::measure(label = "rusqlite.remote.fence_install")]
 pub(super) fn install_writer_fence(
     savepoint: &Savepoint<'_>,
     install: &RemoteWriterFenceInstallV1,

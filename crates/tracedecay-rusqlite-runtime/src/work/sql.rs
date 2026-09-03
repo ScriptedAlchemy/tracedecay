@@ -51,6 +51,7 @@ impl RegisteredWorkQuery for ExactSqlTransaction {
     }
 }
 
+#[hotpath::measure(label = "rusqlite.work.query")]
 pub(crate) fn registered_work_query(
     source: &impl RegisteredWorkQuery,
     sql: &str,
