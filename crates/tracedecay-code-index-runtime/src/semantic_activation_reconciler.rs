@@ -58,7 +58,6 @@ fn should_reconcile(
 /// publication by its exact epoch, revision, and transition digest.
 pub struct DaemonSemanticActivationReconcilerV1 {
     cancellation: CancellationToken,
-    committed_activation_wake: Arc<Notify>,
     task: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -160,18 +159,8 @@ impl DaemonSemanticActivationReconcilerV1 {
         ));
         Self {
             cancellation,
-            committed_activation_wake,
             task: Mutex::new(Some(task)),
         }
-    }
-
-    /// Wake reconciliation after a semantic configuration transition commits.
-    ///
-    /// The model may already have emitted its latest verified-ready epoch
-    /// before the activation exists. This wake causes the same canonical
-    /// committed tuple reread without fabricating another lifecycle event.
-    pub fn notify_committed_activation(&self) {
-        self.committed_activation_wake.notify_one();
     }
 
     pub async fn cancel_and_join(&self) {
