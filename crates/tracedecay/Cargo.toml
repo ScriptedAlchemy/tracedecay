@@ -325,6 +325,7 @@ test-helpers = [
     "tracedecay-daemon-service/test-helpers",
     "tracedecay-host-admission/test-helpers",
     "tracedecay-maintenance/test-helpers",
+    "tracedecay-runtime-core/test-helpers",
     "tracedecay-session-runtime/test-helpers",
     "tracedecay-store-runtime/test-helpers",
 ]
