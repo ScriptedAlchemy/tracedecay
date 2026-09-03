@@ -55,6 +55,15 @@ const DEVIN_CONFIGS: &[(&str, &[u8])] = &[(
     br#"{"mcpServers":{"foreign":{"command":"foreign-bin","args":["serve"]}},"ui":{"theme":"dark"}}
 "#,
 )];
+const ZED_CONFIGS: &[(&str, &[u8])] = &[(
+    ".config/zed/settings.json",
+    br#"{
+  // preserve through the byte-exact uninstall snapshot
+  "context_servers": {"foreign": {"command": "foreign-bin"}},
+  "theme": "dark"
+}
+"#,
+)];
 const HERMES_CONFIGS: &[(&str, &[u8])] = &[
     (
         ".hermes/config.yaml",
@@ -156,6 +165,7 @@ fn host_case(host: HostKindV1) -> HostCase {
         HostKindV1::CursorDesktop => CURSOR_CONFIGS,
         HostKindV1::Codex => CODEX_CONFIGS,
         HostKindV1::Devin => DEVIN_CONFIGS,
+        HostKindV1::Zed => ZED_CONFIGS,
         HostKindV1::Hermes => HERMES_CONFIGS,
         HostKindV1::Kiro => KIRO_CONFIGS,
         HostKindV1::KimiCode => &[],
@@ -269,6 +279,7 @@ fn assert_documented_mcp_registration(case: HostCase, cli: &IsolatedCli) {
     let (relative, root) = match case.host {
         HostKindV1::Cline => (".cline/mcp.json", "mcpServers"),
         HostKindV1::Devin => (".config/devin/mcp_config.json", "mcpServers"),
+        HostKindV1::Zed => (".config/zed/settings.json", "context_servers"),
         HostKindV1::RooCode => (
             ".config/Code/User/globalStorage/rooveterinaryinc.roo-cline/settings/cline_mcp_settings.json",
             "mcpServers",
@@ -284,6 +295,7 @@ fn assert_documented_mcp_registration(case: HostCase, cli: &IsolatedCli) {
         case.id
     );
     let theme = match case.host {
+        HostKindV1::Zed => &config["theme"],
         HostKindV1::Cline | HostKindV1::Devin | HostKindV1::RooCode => &config["ui"]["theme"],
         HostKindV1::Kilo => &config["theme"],
         _ => unreachable!(),
@@ -308,6 +320,13 @@ fn assert_documented_mcp_registration(case: HostCase, cli: &IsolatedCli) {
             assert_eq!(entry["args"], serde_json::json!(["serve"]));
             assert_eq!(entry["env"], serde_json::json!({}));
             assert_eq!(entry["transport"], "stdio");
+        }
+        HostKindV1::Zed => {
+            assert_eq!(
+                entry["command"],
+                serde_json::json!(cli.bin_dir.join("tracedecay"))
+            );
+            assert_eq!(entry["args"], serde_json::json!(["serve"]));
         }
         HostKindV1::RooCode => {
             assert_eq!(
@@ -579,6 +598,7 @@ fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
         HostKindV1::OpenCode,
         HostKindV1::Cline,
         HostKindV1::Devin,
+        HostKindV1::Zed,
         HostKindV1::Hermes,
     ] {
         let case = host_case(host);
@@ -782,6 +802,39 @@ fn production_cli_installs_devin_project_mcp_without_touching_siblings() {
     assert_eq!(
         config["mcpServers"]["tracedecay"]["env"],
         serde_json::json!({})
+    );
+}
+
+#[test]
+fn production_cli_installs_zed_project_mcp_without_touching_siblings() {
+    let cli = IsolatedCli::new();
+    let config = cli.project.path().join(".zed/settings.json");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    fs::write(
+        &config,
+        br#"{"context_servers":{"foreign":{"command":"foreign-bin"}},"theme":"dark"}"#,
+    )
+    .unwrap();
+
+    assert_success(
+        "zed",
+        "project install",
+        cli.run(&["install", "--agent", "zed", "--local"]),
+    );
+
+    let config: serde_json::Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
+    assert_eq!(config["theme"], "dark");
+    assert_eq!(
+        config["context_servers"]["foreign"]["command"],
+        "foreign-bin"
+    );
+    assert_eq!(
+        config["context_servers"]["tracedecay"]["command"],
+        serde_json::json!(cli.bin_dir.join("tracedecay"))
+    );
+    assert_eq!(
+        config["context_servers"]["tracedecay"]["args"],
+        serde_json::json!(["serve"])
     );
 }
 
