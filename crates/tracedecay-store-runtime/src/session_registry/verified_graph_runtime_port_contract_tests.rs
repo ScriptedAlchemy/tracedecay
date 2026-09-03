@@ -671,12 +671,12 @@ async fn session_relation_close_refusal_restores_route_and_retry_closes_exact_gr
         .registry
         .retire_project_session_relation_graph(&project_id)
         .await
-        .expect_err("external old session facade must refuse graph close");
+        .expect_err("external old session facade must refuse Store close");
     match refusal {
         TraceDecayError::Database { operation, message } => {
-            assert_eq!(operation, "reserve project session graph retirement");
+            assert_eq!(operation, "reserve project session Store retirement");
             assert!(
-                message.contains("graph database conflict"),
+                message.contains("ClientLeases"),
                 "unexpected close refusal: {message}"
             );
         }
@@ -690,7 +690,7 @@ async fn session_relation_close_refusal_restores_route_and_retry_closes_exact_gr
         .expect("close refusal restores a mounted ProjectSessions route");
     assert!(
         !external_old_sessions.shares_client_with(&restored),
-        "restoration must not reinsert the facade that still leases the old graph handle"
+        "restoration must not reinsert the facade that still leases the old Store client"
     );
     let (replay_binding, replay_path) = fixture
         .registry

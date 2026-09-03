@@ -4,6 +4,8 @@
 //! capability. Query and chunk bytes remain request-local and are dropped
 //! after [`BoundedRerankRuntimeV1`] returns.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::sync::{Arc, Mutex, TryLockError};
 
 #[cfg(feature = "semantic-fastembed")]
@@ -35,10 +37,31 @@ pub const RERANK_RUNTIME_DIGEST_DOMAIN_V1: &str = "tracedecay.rerank-runtime-com
 const CODE_CHUNK_ANCHOR_PREFIX: &str = "code-chunk:";
 const CODE_SYMBOL_ANCHOR_PREFIX: &str = "code-symbol:";
 
+#[cfg(test)]
+thread_local! {
+    static SESSION_OPEN_ATTEMPTS_V1: Cell<u32> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_session_open_attempt() {
+    SESSION_OPEN_ATTEMPTS_V1.set(SESSION_OPEN_ATTEMPTS_V1.get().saturating_add(1));
+}
+
+#[cfg(test)]
+pub(super) fn reset_session_open_attempts() {
+    SESSION_OPEN_ATTEMPTS_V1.set(0);
+}
+
+#[cfg(test)]
+pub(super) fn session_open_attempts() -> u32 {
+    SESSION_OPEN_ATTEMPTS_V1.get()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RerankArtifactAdmissionErrorV1 {
     IncompatiblePins,
     IncompatibleArtifact,
+    Unavailable,
 }
 
 #[derive(Clone)]
@@ -131,15 +154,23 @@ pub fn validate_reranker_manifest_pins(
 /// of waiting or opening an unbounded second model.
 pub struct FastEmbedRerankExecutorV1 {
     authority: Arc<AdmittedRerankArtifactV1>,
-    session: Mutex<Option<FastEmbedRerankSessionV1>>,
+    session: Mutex<FastEmbedRerankSessionV1>,
 }
 
 impl FastEmbedRerankExecutorV1 {
-    fn new(authority: Arc<AdmittedRerankArtifactV1>) -> Self {
-        Self {
+    fn new(
+        authority: Arc<AdmittedRerankArtifactV1>,
+    ) -> Result<Self, RerankArtifactAdmissionErrorV1> {
+        let session = hotpath::measure_block!("semantic.model.load", {
+            open_session(&authority).inspect_err(|error| {
+                crate::hotpath_observe::record_rerank_error(error);
+            })
+        })
+        .map_err(|_| RerankArtifactAdmissionErrorV1::Unavailable)?;
+        Ok(Self {
             authority,
-            session: Mutex::new(None),
-        }
+            session: Mutex::new(session),
+        })
     }
 
     pub fn compatibility(&self) -> &RerankCompatibilityPinsV1 {
@@ -195,17 +226,8 @@ impl DeterministicLocalRerankExecutorV1 for FastEmbedRerankExecutorV1 {
             }
             Err(TryLockError::Poisoned(error)) => error.into_inner(),
         };
-        if session.is_none() {
-            *session = Some(hotpath::measure_block!("semantic.model.load", {
-                open_session(&self.authority).inspect_err(|error| {
-                    crate::hotpath_observe::record_rerank_error(error);
-                })?
-            }));
-        }
         run_session(
-            session.as_mut().ok_or(LocalRerankFailureV1::Unavailable(
-                SanitizedStageFailure::Internal,
-            ))?,
+            &mut session,
             query,
             &documents,
             inputs,
@@ -227,6 +249,8 @@ impl AdmittedNativeRerankExecutorV1 for FastEmbedRerankExecutorV1 {
 fn open_session(
     authority: &AdmittedRerankArtifactV1,
 ) -> Result<FastEmbedRerankSessionV1, LocalRerankFailureV1> {
+    #[cfg(test)]
+    record_session_open_attempt();
     let payload = &authority.artifact.manifest().payload;
     let _model_pin = supported_reranker_model(&payload.upstream.name, &payload.artifact_id).ok_or(
         LocalRerankFailureV1::Rejected(SanitizedStageFailure::Incompatible),
@@ -253,6 +277,8 @@ fn open_session(
 fn open_session(
     _authority: &AdmittedRerankArtifactV1,
 ) -> Result<FastEmbedRerankSessionV1, LocalRerankFailureV1> {
+    #[cfg(test)]
+    record_session_open_attempt();
     Err(LocalRerankFailureV1::Unavailable(
         SanitizedStageFailure::AuthorityUnavailable,
     ))
@@ -503,14 +529,17 @@ pub struct ProductionCodeRerankAuthorityV1 {
 }
 
 impl ProductionCodeRerankAuthorityV1 {
+    /// Publish only after one model session is resident. A caller that receives
+    /// this authority never pays model activation on its first rerank request.
     pub fn from_admitted(
         artifact: AdmittedArtifactV1,
         pins: RerankCompatibilityPinsV1,
     ) -> Result<Self, RerankArtifactAdmissionErrorV1> {
         let authority = Arc::new(AdmittedRerankArtifactV1::admit(artifact, pins.clone())?);
+        let executor = FastEmbedRerankExecutorV1::new(authority)?;
         Ok(Self {
             pins,
-            executor: Arc::new(FastEmbedRerankExecutorV1::new(authority)),
+            executor: Arc::new(executor),
         })
     }
 
