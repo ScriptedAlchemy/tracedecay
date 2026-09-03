@@ -145,6 +145,7 @@ enum PlaceholderScanFlow {
 /// Aggregates every prefiltered candidate row. Callers that only need to know
 /// whether *one* row qualifies must use [`any_placeholder_text_row`] instead:
 /// this retains the full result in memory.
+#[hotpath::measure(label = "sessions.lcm.gc.placeholder_scan", future = true)]
 pub(crate) async fn scan_placeholder_text_rows(
     conn: &(impl QueryExecutor + ?Sized),
     scope: PlaceholderScanScope<'_>,
@@ -166,6 +167,7 @@ pub(crate) async fn scan_placeholder_text_rows(
 /// over what a match means; the early exit changes when the scan stops, never
 /// what it decides. An existence question about one payload therefore costs one
 /// page of candidates instead of the store's whole placeholder history.
+#[hotpath::measure(label = "sessions.lcm.gc.placeholder_probe", future = true)]
 pub(crate) async fn any_placeholder_text_row(
     conn: &(impl QueryExecutor + ?Sized),
     scope: PlaceholderScanScope<'_>,
@@ -258,6 +260,7 @@ async fn drive_placeholder_text_scan(
     }
 }
 
+#[hotpath::measure(label = "sessions.lcm.gc.placeholder_count", future = true)]
 pub(crate) async fn count_placeholder_text_rows(
     conn: &(impl QueryExecutor + ?Sized),
     scope: PlaceholderScanScope<'_>,
