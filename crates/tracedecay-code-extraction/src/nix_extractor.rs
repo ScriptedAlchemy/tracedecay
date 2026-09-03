@@ -93,7 +93,6 @@ impl NixExtractor {
         .result
     }
 
-    #[hotpath::measure(label = "code_extraction.nix.extract_tree")]
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -146,7 +145,6 @@ impl NixExtractor {
     }
 
     /// Parse source code into a tree-sitter AST.
-    #[hotpath::measure(label = "code_extraction.nix.parse_source")]
     fn parse_source(source: &str) -> Result<Tree, String> {
         crate::ts_provider::parse_extractor_source("nix", "Nix", source)
     }
@@ -1045,12 +1043,10 @@ impl crate::LanguageExtractor for NixExtractor {
         "Nix"
     }
 
-    #[hotpath::measure(label = "code_extraction.nix.extract")]
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_nix(file_path, source)
     }
 
-    #[hotpath::measure(label = "code_extraction.nix.extract_parsed")]
     fn extract_parsed(
         &self,
         file_path: &str,

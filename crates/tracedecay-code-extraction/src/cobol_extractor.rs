@@ -110,7 +110,6 @@ impl CobolExtractor {
         .result
     }
 
-    #[hotpath::measure(label = "code_extraction.cobol.extract_tree")]
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -163,7 +162,6 @@ impl CobolExtractor {
     }
 
     /// Parse source code into a tree-sitter AST.
-    #[hotpath::measure(label = "code_extraction.cobol.parse_source")]
     fn parse_source(source: &str) -> Result<Tree, String> {
         crate::ts_provider::parse_extractor_source("cobol", "COBOL", source)
     }
@@ -652,12 +650,10 @@ impl crate::LanguageExtractor for CobolExtractor {
         "COBOL"
     }
 
-    #[hotpath::measure(label = "code_extraction.cobol.extract")]
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_cobol(file_path, source)
     }
 
-    #[hotpath::measure(label = "code_extraction.cobol.extract_parsed")]
     fn extract_parsed(
         &self,
         file_path: &str,
