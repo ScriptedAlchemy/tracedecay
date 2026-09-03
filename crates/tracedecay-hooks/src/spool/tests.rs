@@ -625,7 +625,10 @@ fn hydration_detects_a_corrupted_checkpointed_frame() {
     records.sync_all().unwrap();
     drop(records);
 
-    assert_eq!(spool.pending_envelope(first.event_id), None);
+    assert_eq!(
+        spool.pending_envelope(first.event_id).unwrap_err(),
+        HookSpoolError::MetadataCorrupted
+    );
     assert_eq!(
         spool
             .append(numbered_envelope(3, 9), &binding(), UtcMicros(12))
@@ -1249,6 +1252,7 @@ fn quotas_are_never_evicted_and_expired_records_need_tombstones() {
     assert_eq!(
         spool
             .expired_records(UtcMicros(10 + MAX_SPOOL_AGE_MICROS + 1))
+            .unwrap()
             .len(),
         1
     );

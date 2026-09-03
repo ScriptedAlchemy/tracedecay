@@ -400,18 +400,18 @@ impl HookSpoolV1 {
     /// Return the durable pending envelope for an exact provider event ID.
     /// Callers use this only to preserve a prior transport attempt's envelope
     /// on retry; it does not grant replay or acknowledgement authority.
-    pub fn pending_envelope(&mut self, event_id: [u8; 16]) -> Option<HookEventEnvelopeV2> {
-        let index = self
+    pub fn pending_envelope(
+        &mut self,
+        event_id: [u8; 16],
+    ) -> Result<Option<HookEventEnvelopeV2>, HookSpoolError> {
+        let Some(index) = self
             .pending
             .iter()
-            .position(|record| record.event_id == event_id)?;
-        match self.hydrate(index) {
-            Ok(record) => Some(record.envelope),
-            Err(_) => {
-                self.recovery_required = true;
-                None
-            }
-        }
+            .position(|record| record.event_id == event_id)
+        else {
+            return Ok(None);
+        };
+        self.hydrate(index).map(|record| Some(record.envelope))
     }
 
     /// Append one validated envelope. An exact pending `event_id` duplicate
@@ -610,7 +610,10 @@ impl HookSpoolV1 {
 
     /// List records whose maximum transport age has elapsed. They remain
     /// durable until the daemon supplies a terminal tombstone acknowledgement.
-    pub fn expired_records(&mut self, now: UtcMicros) -> Vec<HookSpoolRecordV1> {
+    pub fn expired_records(
+        &mut self,
+        now: UtcMicros,
+    ) -> Result<Vec<HookSpoolRecordV1>, HookSpoolError> {
         let indices = self
             .pending
             .iter()
@@ -620,16 +623,10 @@ impl HookSpoolV1 {
             .collect::<Vec<_>>();
         let mut expired = Vec::with_capacity(indices.len());
         for index in indices {
-            match self.hydrate(index) {
-                Ok(record) => expired.push(record),
-                Err(_) => {
-                    self.recovery_required = true;
-                    return Vec::new();
-                }
-            }
+            expired.push(self.hydrate(index)?);
         }
         hotpath::gauge!("hooks.spool.expired.frame_count").set(expired.len());
-        expired
+        Ok(expired)
     }
 
     /// Persist one daemon acknowledgement and compact logically deleted
