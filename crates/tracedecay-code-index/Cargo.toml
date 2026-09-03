@@ -137,6 +137,12 @@ test = false
 required-features = ["hotpath"]
 
 [[bench]]
+name = "partitioned_codec"
+harness = false
+test = false
+required-features = ["hotpath"]
+
+[[bench]]
 name = "source_search"
 harness = false
 test = false
