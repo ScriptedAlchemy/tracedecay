@@ -390,7 +390,7 @@ where
             runtime,
             clock,
             config,
-            Arc::new(|| sampled_process_resident_bytes_v1()),
+            Arc::new(sampled_process_resident_bytes_v1),
         )
     }
 

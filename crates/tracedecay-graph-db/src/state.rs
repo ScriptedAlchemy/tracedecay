@@ -88,12 +88,11 @@ impl ExistingBatchState {
                         ),
                     }
                 });
-        let local_endpoint_count = (!physical_generation)
-            .then_some(relation_endpoint_count)
-            .unwrap_or(0);
-        let locator_count = physical_generation
-            .then_some(relation_endpoint_count)
-            .unwrap_or(0);
+        let (local_endpoint_count, locator_count) = if physical_generation {
+            (0, relation_endpoint_count)
+        } else {
+            (relation_endpoint_count, 0)
+        };
         let mut entity_keys =
             HashMap::with_capacity(entity_count.saturating_add(local_endpoint_count));
         let mut entity_locator_keys = HashMap::with_capacity(locator_count);

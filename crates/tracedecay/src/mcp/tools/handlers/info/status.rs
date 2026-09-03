@@ -124,8 +124,7 @@ fn age_seconds(recorded_at_micros: Option<i64>) -> Option<i64> {
     let recorded = recorded_at_micros?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_micros() as i64)
-        .unwrap_or(recorded);
+        .map_or(recorded, |elapsed| elapsed.as_micros() as i64);
     Some(now.saturating_sub(recorded).max(0) / 1_000_000)
 }
 

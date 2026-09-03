@@ -92,7 +92,7 @@ impl FakeAttachmentControl {
 
 impl PhysicalRuntimeAttachment for FakeAttachment {
     fn snapshot(&self) -> PhysicalRuntimeSnapshot {
-        *self.control.snapshot.lock().unwrap()
+        self.control.snapshot.lock().unwrap().clone()
     }
 
     fn opened_file_identity(&self) -> Result<u64, String> {

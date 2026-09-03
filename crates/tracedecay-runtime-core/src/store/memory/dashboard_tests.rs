@@ -74,6 +74,35 @@ async fn seed_fact(database: &Database) {
 }
 
 #[tokio::test]
+async fn vector_snapshot_uses_the_canonical_store_revision() {
+    let (_directory, database) = database("vector-store-revision").await;
+    let store = DatabaseFactStore::new(&database);
+    let read_control = FactReadControl::new(Arc::new(|| false));
+
+    let initial = store
+        .dashboard_project_memory_store_revision(FactOwnerV1::Profile, &read_control)
+        .await
+        .expect("initial store revision");
+    seed_fact(&database).await;
+    let current = store
+        .dashboard_project_memory_store_revision(FactOwnerV1::Profile, &read_control)
+        .await
+        .expect("current store revision");
+    assert!(current > initial);
+
+    let snapshot = store
+        .dashboard_project_memory_vector_snapshot(
+            ProjectMemoryDashboardVectorPointsQueryV1::new(FactOwnerV1::Profile, None, 8)
+                .expect("dashboard vector query"),
+            &read_control,
+        )
+        .await
+        .expect("vector snapshot");
+    assert_eq!(snapshot.store_revision(), current);
+    assert_eq!(snapshot.points().len(), 1);
+}
+
+#[tokio::test]
 async fn overview_observes_live_cancellation_between_sql_and_projection_stages() {
     let (_directory, database) = database("overview-cancellation").await;
     let (checks, read_control) = interrupt_on_check(4);
@@ -97,7 +126,7 @@ async fn vector_points_observe_cancellation_after_per_fact_encoding() {
         .expect("dashboard vector query");
 
     let result = DatabaseFactStore::new(&database)
-        .dashboard_project_memory_vector_points(query, &read_control)
+        .dashboard_project_memory_vector_snapshot(query, &read_control)
         .await;
 
     assert!(matches!(result, Err(FactStoreError::ReadCancelled)));

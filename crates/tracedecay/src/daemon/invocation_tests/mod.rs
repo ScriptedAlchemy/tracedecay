@@ -1,6 +1,6 @@
 //! Root integration tests for the daemon invocation service.
 //!
-//! These suites use composition-root fixtures (TraceDecay, host-admission,
+//! These suites use composition-root fixtures (`TraceDecay`, host-admission,
 //! session retrieval). Pure unit tests live in `tracedecay-daemon-service`.
 
 use std::sync::Arc;

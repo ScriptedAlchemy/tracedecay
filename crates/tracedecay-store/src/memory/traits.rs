@@ -12,7 +12,7 @@ use super::{
     ProjectMemoryDashboardFactDetailQueryV1, ProjectMemoryDashboardFactDetailV1,
     ProjectMemoryDashboardMemoryOverviewQueryV1, ProjectMemoryDashboardMemoryOverviewV1,
     ProjectMemoryDashboardOplogEntryV1, ProjectMemoryDashboardOplogQueryV1,
-    ProjectMemoryDashboardVectorPointV1, ProjectMemoryDashboardVectorPointsQueryV1,
+    ProjectMemoryDashboardVectorPointsQueryV1, ProjectMemoryDashboardVectorSnapshotV1,
     ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddOutcomeV1,
     ProjectMemoryFactContentDigestQueryV1, ProjectMemoryFactContradictionPageV1,
     ProjectMemoryFactContradictionQueryV1, ProjectMemoryFactCurationBatchV1,
@@ -26,8 +26,8 @@ use super::{
     ProjectMemoryFactRetrievalOutcomeV1, ProjectMemoryFactSearchPageV1,
     ProjectMemoryFactSearchQuery, ProjectMemoryFactUpdateCommandV1,
     ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryMemoryStatusV1,
-    ProjectMemoryPrivacyPurgeCursorV1, ProjectMemoryPrivacyPurgeReceiptV1, RetrievalAnchorQuery,
-    StoredFactV1,
+    ProjectMemoryPrivacyPurgeCursorV1, ProjectMemoryPrivacyPurgeReceiptV1,
+    ProjectMemoryStoreRevisionV1, RetrievalAnchorQuery, StoredFactV1,
 };
 
 /// Authoritative persistence boundary for append-only facts and evidence.
@@ -227,13 +227,21 @@ pub trait ProjectMemoryFactStore: FactStore {
         read_control: &FactReadControl,
     ) -> impl Future<Output = FactStoreResult<Option<ProjectMemoryDashboardFactDetailV1>>> + Send;
 
-    /// Bounded, finite vector points. Similarity pairs are deliberately derived
-    /// from this capped output at the dashboard edge rather than by a generic query API.
-    fn dashboard_project_memory_vector_points(
+    /// Canonical transaction generation used to identify derived read caches
+    /// before any bounded vector rows are loaded.
+    fn dashboard_project_memory_store_revision(
+        &self,
+        owner: FactOwnerV1,
+        read_control: &FactReadControl,
+    ) -> impl Future<Output = FactStoreResult<ProjectMemoryStoreRevisionV1>> + Send;
+
+    /// Bounded vector points and the canonical transaction generation observed
+    /// in the same read snapshot.
+    fn dashboard_project_memory_vector_snapshot(
         &self,
         query: ProjectMemoryDashboardVectorPointsQueryV1,
         read_control: &FactReadControl,
-    ) -> impl Future<Output = FactStoreResult<Vec<ProjectMemoryDashboardVectorPointV1>>> + Send;
+    ) -> impl Future<Output = FactStoreResult<ProjectMemoryDashboardVectorSnapshotV1>> + Send;
 
     /// Bounded owner-scoped lineage audit projection.
     fn dashboard_project_memory_oplog(

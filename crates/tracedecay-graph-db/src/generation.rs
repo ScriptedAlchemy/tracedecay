@@ -1020,7 +1020,7 @@ pub(crate) fn sealed_copy_proofs() -> usize {
     SEALED_COPY_PROOFS.with(std::cell::Cell::get)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "graph-sealed-store"))]
 pub(crate) fn reset_sealed_copy_marker_hits() {
     SEALED_COPY_MARKER_HITS.with(|count| count.set(0));
 }
@@ -1028,7 +1028,7 @@ pub(crate) fn reset_sealed_copy_marker_hits() {
 /// Sealed-copy opens on this thread that resolved their recovered-digest
 /// proof from a verified-generation marker over byte-identical container
 /// bytes instead of re-streaming the rows.
-#[cfg(test)]
+#[cfg(all(test, feature = "graph-sealed-store"))]
 pub(crate) fn sealed_copy_marker_hits() -> usize {
     SEALED_COPY_MARKER_HITS.with(std::cell::Cell::get)
 }

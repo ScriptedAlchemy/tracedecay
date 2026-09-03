@@ -96,9 +96,19 @@ impl CheckpointBlockers {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CheckpointBlocker {
-    pub lease_id: SnapshotLeaseIdV1,
-    pub age: Duration,
+pub enum CheckpointBlocker {
+    SnapshotLease {
+        lease_id: SnapshotLeaseIdV1,
+        age: Duration,
+    },
+    PhysicalReader {
+        reader_id: u64,
+        age: Duration,
+    },
+}
+
+pub(crate) trait CheckpointBlockerSource: Send + Sync {
+    fn checkpoint_blockers(&self) -> CheckpointBlockers;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -1,7 +1,6 @@
 //! Vector-point rows, fingerprints, and the cached PCA projection payload.
 
-use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use serde_json::{Map, Value, json};
@@ -9,14 +8,14 @@ use serde_json::{Map, Value, json};
 use super::super::DashboardState;
 use super::super::memory_analysis::pca_scores;
 use super::facts::fact_summary_json;
+use crate::snapshot_cache::{DerivedSnapshotCache, DerivedSnapshotCacheState};
 use crate::tracedecay::facts::memory_application_for_db;
 use tracedecay_store::{
     FactReadControl, ProjectMemoryDashboardVectorPointV1, ProjectMemoryFactProjectionV1,
+    ProjectMemoryStoreRevisionV1,
 };
 
 pub(super) const PROJECTION_POINT_CAP: i64 = 2000;
-
-pub(super) type VectorStateFingerprint = (usize, i64, Option<String>, u64);
 
 pub fn projection_point_cap() -> i64 {
     PROJECTION_POINT_CAP
@@ -71,48 +70,21 @@ pub(super) fn vector_rows(
     Ok(rows)
 }
 
-pub(super) fn vector_fingerprint(
-    rows: &[(Value, Vec<f64>)],
-) -> Result<VectorStateFingerprint, String> {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    let mut updated_at = 0_i64;
-    let mut max_fact_id = None;
-    for (fact, vector) in rows {
-        let fact_id = fact
-            .get("fact_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "vector row omitted its canonical fact ID".to_owned())?;
-        let updated = fact
-            .get("updated_at")
-            .and_then(Value::as_i64)
-            .ok_or_else(|| "vector row omitted its authoritative update time".to_owned())?;
-        updated_at = updated_at.max(updated);
-        if max_fact_id
-            .as_deref()
-            .is_none_or(|current| fact_id > current)
-        {
-            max_fact_id = Some(fact_id.to_owned());
-        }
-        fact_id.hash(&mut hasher);
-        updated.hash(&mut hasher);
-        vector.len().hash(&mut hasher);
-        for component in vector {
-            component.to_bits().hash(&mut hasher);
-        }
-    }
-    Ok((rows.len(), updated_at, max_fact_id, hasher.finish()))
-}
-
 struct ProjectionComputation {
-    key: (String, i64, VectorStateFingerprint),
     dim: usize,
     method: &'static str,
     error: &'static str,
     points: Vec<Value>,
+    examined: usize,
+    point_limit: usize,
+    coverage_complete: bool,
 }
 
-static PROJECTION_CACHE: OnceLock<tokio::sync::Mutex<HashMap<String, Arc<ProjectionComputation>>>> =
-    OnceLock::new();
+type ProjectionCacheRevision = (ProjectMemoryStoreRevisionV1, String, i64);
+
+static PROJECTION_CACHE: OnceLock<
+    DerivedSnapshotCache<String, ProjectionCacheRevision, ProjectionComputation>,
+> = OnceLock::new();
 
 fn projection_point(meta: &Value, x: f64, y: f64) -> Result<Value, String> {
     let mut point = meta.clone();
@@ -169,8 +141,8 @@ fn projection_point(meta: &Value, x: f64, y: f64) -> Result<Value, String> {
 }
 
 fn compute_projection(
-    key: (String, i64, VectorStateFingerprint),
     rows: Vec<(Value, Vec<f64>)>,
+    point_limit: usize,
     read_control: FactReadControl,
 ) -> Result<ProjectionComputation, String> {
     if read_control.interrupted() {
@@ -189,11 +161,13 @@ fn compute_projection(
             .into_iter()
             .collect();
         return Ok(ProjectionComputation {
-            key,
             dim,
             method: "none",
             error: "",
             points,
+            examined: rows.len(),
+            point_limit,
+            coverage_complete: rows.len() < point_limit,
         });
     }
 
@@ -212,7 +186,6 @@ fn compute_projection(
     }
     match pca_scores(&features, &read_control).map_err(|error| error.to_string())? {
         Some(scores) => Ok(ProjectionComputation {
-            key,
             dim,
             method: "pca",
             error: "",
@@ -221,13 +194,18 @@ fn compute_projection(
                 .zip(&scores)
                 .map(|((meta, _), s)| projection_point(meta, s[0], s[1]))
                 .collect::<Result<Vec<_>, _>>()?,
+            examined: rows.len(),
+            point_limit,
+            coverage_complete: rows.len() < point_limit,
         }),
         None => Ok(ProjectionComputation {
-            key,
             dim,
             method: "none",
             error: "projection failed",
             points: Vec::new(),
+            examined: rows.len(),
+            point_limit,
+            coverage_complete: rows.len() < point_limit,
         }),
     }
 }
@@ -273,89 +251,89 @@ pub async fn projection_payload(
             return Value::Object(obj);
         }
     };
-    let points = match application
-        .dashboard_vector_points(
-            (!query.trim().is_empty()).then(|| query.trim().to_owned()),
-            point_limit,
-            read_control,
-        )
-        .await
-    {
-        Ok(points) => points,
+    let store_revision = match application.dashboard_store_revision(read_control).await {
+        Ok(revision) => revision,
         Err(error) => {
             obj.insert("error".into(), json!(error.to_string()));
             return Value::Object(obj);
         }
     };
-    let rows = match vector_rows(points) {
-        Ok(rows) => rows,
+    let normalized_query = query.trim().to_owned();
+    let revision = (store_revision, normalized_query.clone(), limit);
+    let cache = PROJECTION_CACHE.get_or_init(DerivedSnapshotCache::new);
+    // The loader is the only writer, so this is the exact row count read for
+    // this response. A hit never polls the closure and therefore reports zero.
+    let vector_rows_read = AtomicUsize::new(0);
+    let (computed, cache_state) = match cache
+        .get_or_compute(state.mem_db_path.clone(), revision, || async {
+            let snapshot = application
+                .dashboard_vector_snapshot(
+                    (!normalized_query.is_empty()).then(|| normalized_query.clone()),
+                    point_limit,
+                    read_control,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            vector_rows_read.store(snapshot.points().len(), Ordering::Relaxed);
+            let observed_revision = (snapshot.store_revision(), normalized_query, limit);
+            let rows = vector_rows(snapshot.into_points())?;
+            let blocking_control = read_control.clone();
+            let computed = tokio::task::spawn_blocking(move || {
+                hotpath::measure_block!("dashboard_api.memory.projection_compute", {
+                    compute_projection(rows, point_limit, blocking_control)
+                })
+            })
+            .await
+            .map_err(|error| format!("projection task failed: {error}"))??;
+            Ok::<_, String>((observed_revision, Arc::new(computed)))
+        })
+        .await
+    {
+        Ok(cached) => cached,
         Err(error) => {
             obj.insert("error".into(), json!(error));
             return Value::Object(obj);
         }
     };
-    let coverage_complete = rows.len() < point_limit;
+    if read_control.interrupted() {
+        obj.insert("error".into(), json!("memory projection interrupted"));
+        return Value::Object(obj);
+    }
+    projection_response(
+        &computed,
+        cache_state,
+        vector_rows_read.load(Ordering::Relaxed),
+        obj,
+    )
+}
+
+fn projection_response(
+    computation: &ProjectionComputation,
+    cache_state: DerivedSnapshotCacheState,
+    vector_rows_read: usize,
+    mut obj: Map<String, Value>,
+) -> Value {
     obj.insert(
         "coverage".into(),
         json!({
-            "completeness": if coverage_complete { "complete" } else { "bounded" },
-            "examined": rows.len(),
-            "limit": point_limit,
-            "omission_reasons": if coverage_complete {
+            "completeness": if computation.coverage_complete { "complete" } else { "bounded" },
+            "examined": computation.examined,
+            "limit": computation.point_limit,
+            "omission_reasons": if computation.coverage_complete {
                 Vec::<&str>::new()
             } else {
                 vec!["request_limit_reached"]
             },
         }),
     );
-    let fingerprint = match vector_fingerprint(&rows) {
-        Ok(fingerprint) => fingerprint,
-        Err(error) => {
-            obj.insert("error".into(), json!(error));
-            return Value::Object(obj);
-        }
-    };
-    let key = (query.trim().to_string(), limit, fingerprint);
-
-    let cache = PROJECTION_CACHE.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()));
-    let mut guard = cache.lock().await;
-    if read_control.interrupted() {
-        obj.insert("error".into(), json!("memory projection interrupted"));
-        return Value::Object(obj);
-    }
-    if let Some(existing) = guard.get(&state.mem_db_path)
-        && existing.key == key
-    {
-        return projection_response(existing, obj);
-    }
-
-    let blocking_control = read_control.clone();
-    let computed =
-        match tokio::task::spawn_blocking(move || compute_projection(key, rows, blocking_control))
-            .await
-        {
-            Ok(Ok(computed)) => Arc::new(computed),
-            Ok(Err(error)) => {
-                obj.insert("error".into(), json!(error));
-                return Value::Object(obj);
-            }
-            Err(e) => {
-                obj.insert(
-                    "error".into(),
-                    json!(format!("projection task failed: {e}")),
-                );
-                return Value::Object(obj);
-            }
-        };
-    if read_control.interrupted() {
-        obj.insert("error".into(), json!("memory projection interrupted"));
-        return Value::Object(obj);
-    }
-    guard.insert(state.mem_db_path.clone(), computed.clone());
-    projection_response(&computed, obj)
-}
-
-fn projection_response(computation: &ProjectionComputation, mut obj: Map<String, Value>) -> Value {
+    obj.insert(
+        "scan".into(),
+        json!({
+            "cache_scope": "store_revision",
+            "cache_state": cache_state.as_str(),
+            "vector_rows_read": vector_rows_read,
+        }),
+    );
     obj.insert("dim".into(), json!(computation.dim));
     obj.insert("method".into(), json!(computation.method));
     obj.insert("points".into(), json!(computation.points));

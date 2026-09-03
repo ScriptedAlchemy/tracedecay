@@ -715,7 +715,7 @@ impl ProjectRuntimeReservationLease {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
         {
-            commit_starting.send(()).expect("commit-starting receiver");
+            let _ = commit_starting.send(());
         }
         let root_fences = self.registry.lock_root_fences();
         let mut runtimes = self.registry.lock_runtimes();

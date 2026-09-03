@@ -372,7 +372,12 @@ async fn lsp_session_rejects_a_client_root_that_differs_from_the_admitted_root()
     let service = DaemonInvocationService::default();
     let project_root = PathBuf::from("/authoritative");
     DaemonLspOwnerRegistrar::new(&service)
-        .register_factory(project_root.clone(), unavailable_lsp_session_factory())
+        .register_factory_for_project(
+            project_root.clone(),
+            UserProfileId::new("profile.test.lsp").expect("test LSP profile"),
+            ProjectId::new("project.test.lsp").expect("test LSP project"),
+            unavailable_lsp_session_factory(),
+        )
         .await
         .unwrap();
     let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
@@ -630,7 +635,12 @@ async fn lsp_session_admission_accepts_the_lsp_protocol_revision() {
     let service = DaemonInvocationService::default();
     let project_root = PathBuf::from("/authoritative");
     DaemonLspOwnerRegistrar::new(&service)
-        .register_factory(project_root.clone(), unavailable_lsp_session_factory())
+        .register_factory_for_project(
+            project_root.clone(),
+            UserProfileId::new("profile.test.lsp").expect("test LSP profile"),
+            ProjectId::new("project.test.lsp").expect("test LSP project"),
+            unavailable_lsp_session_factory(),
+        )
         .await
         .unwrap();
     let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
@@ -668,7 +678,12 @@ async fn lsp_disconnect_reconnect_and_final_detach_have_distinct_lifecycles() {
     let service = DaemonInvocationService::default();
     let project_root = PathBuf::from("/authoritative");
     DaemonLspOwnerRegistrar::new(&service)
-        .register_factory(project_root.clone(), unavailable_lsp_session_factory())
+        .register_factory_for_project(
+            project_root.clone(),
+            UserProfileId::new("profile.test.lsp").expect("test LSP profile"),
+            ProjectId::new("project.test.lsp").expect("test LSP project"),
+            unavailable_lsp_session_factory(),
+        )
         .await
         .unwrap();
     let registry = Arc::new(Mutex::new(LspSessionRegistry::new(1)));

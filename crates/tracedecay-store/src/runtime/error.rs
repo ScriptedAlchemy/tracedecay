@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracedecay_domain::ObservationSourceCursorV1;
 
 use super::{DurabilityClassV1, StoreIncarnationV1};
 
@@ -144,7 +145,8 @@ pub enum RuntimeCancellationStageV1 {
 ///
 /// Expected admission, interruption, fencing, consistency, and unsupported
 /// decisions belong in submit outcomes or read coverage. This error channel is
-/// reserved for infrastructure failure and detected corruption.
+/// reserved for infrastructure failure, detected corruption, and the two
+/// observation-writer refusals that callers must classify structurally.
 #[derive(Clone, Debug, Error, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum StorageRuntimeErrorV1 {
@@ -152,6 +154,13 @@ pub enum StorageRuntimeErrorV1 {
     Infrastructure { operation: String },
     #[error("storage corruption detected: {class:?}")]
     Corrupt { class: CorruptionClassV1 },
+    #[error("observation source cursor conflict: expected {expected:?}, found {actual:?}")]
+    ObservationSourceCursorConflict {
+        expected: Box<Option<ObservationSourceCursorV1>>,
+        actual: Box<Option<ObservationSourceCursorV1>>,
+    },
+    #[error("duplicate operation {operation_id} is already in the persistent writer")]
+    DuplicateOperationInFlight { operation_id: String },
 }
 
 pub type StorageRuntimeResultV1<T> = Result<T, StorageRuntimeErrorV1>;

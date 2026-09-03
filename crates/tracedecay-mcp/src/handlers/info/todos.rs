@@ -137,9 +137,9 @@ pub async fn handle_todos(
                                 }
                             }
                             let enclosing = enclosing.map(|(qualified_name, _)| qualified_name);
-                            *by_kind.entry(kind.to_string()).or_insert(0) += 1;
+                            *by_kind.entry(kind.clone()).or_insert(0) += 1;
                             markers.push(TodoMarkerV1 {
-                                kind: kind.to_string(),
+                                kind: kind.clone(),
                                 file: file.clone(),
                                 line: line_no,
                                 text: line.trim().to_owned(),

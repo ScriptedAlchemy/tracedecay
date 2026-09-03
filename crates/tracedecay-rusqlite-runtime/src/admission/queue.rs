@@ -116,6 +116,29 @@ impl<T: QueueItem> FairQueue<T> {
         self.operation_ids.is_empty()
     }
 
+    pub(crate) fn get_mut(&mut self, operation_id: &StoreOperationIdV1) -> Option<&mut T> {
+        if !self.operation_ids.contains(operation_id) {
+            return None;
+        }
+        if let Some(index) = self
+            .health
+            .iter()
+            .position(|item| item.operation_id() == operation_id)
+        {
+            return self.health.get_mut(index);
+        }
+        for queue in self.clients.values_mut() {
+            if let Some(index) = queue
+                .items
+                .iter()
+                .position(|item| item.operation_id() == operation_id)
+            {
+                return queue.items.get_mut(index);
+            }
+        }
+        None
+    }
+
     pub(crate) fn drain_matching(&mut self, predicate: impl Fn(&T) -> bool) -> Vec<T> {
         let mut removed = Vec::new();
         drain_deque(&mut self.health, &predicate, &mut removed);

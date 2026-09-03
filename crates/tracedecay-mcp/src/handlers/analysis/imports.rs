@@ -391,7 +391,7 @@ mod tests {
         fs::create_dir_all(project.path().join("src")).expect("create source directory");
         fs::write(
             project.path().join("src/lib.rs"),
-            r#"use std::collections::{
+            r"use std::collections::{
     HashMap,
     HashSet as Set,
     BTreeMap,
@@ -401,7 +401,7 @@ mod tests {
 pub fn used() -> (HashMap<u32, u32>, Set<u32>) {
     (HashMap::new(), Set::new())
 }
-"#,
+",
         )
         .expect("write source");
 

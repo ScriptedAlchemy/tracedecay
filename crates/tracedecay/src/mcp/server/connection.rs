@@ -409,7 +409,7 @@ struct ConcurrentReadCompletion {
 enum ConnectionLoopEvent {
     Queued(String),
     Incoming(std::io::Result<Option<String>>),
-    Completed(Option<std::result::Result<ConcurrentReadCompletion, tokio::task::JoinError>>),
+    Completed(Box<Option<std::result::Result<ConcurrentReadCompletion, tokio::task::JoinError>>>),
     Shutdown,
     PeerClosed,
 }
@@ -995,7 +995,9 @@ impl McpServer {
                     () = &mut external_shutdown_requested => ConnectionLoopEvent::Shutdown,
                     () = wait_for_peer_close(&mut peer_close_check), if input_closed =>
                         ConnectionLoopEvent::PeerClosed,
-                    result = active_reads.join_next() => ConnectionLoopEvent::Completed(result),
+                    result = active_reads.join_next() => {
+                        ConnectionLoopEvent::Completed(Box::new(result))
+                    },
                     result = &mut incoming, if can_read_more =>
                         ConnectionLoopEvent::Incoming(result),
                 }
@@ -1020,7 +1022,7 @@ impl McpServer {
                     return Err(error.into());
                 }
                 ConnectionLoopEvent::Completed(completed) => {
-                    let Some(completed) = completed else {
+                    let Some(completed) = *completed else {
                         continue;
                     };
                     let mut completion = completed.map_err(|error| TraceDecayError::Config {

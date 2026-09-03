@@ -106,8 +106,8 @@ pub use memory::{
     ProjectMemoryDashboardMemoryOverviewQueryV1, ProjectMemoryDashboardMemoryOverviewV1,
     ProjectMemoryDashboardNamedCountV1, ProjectMemoryDashboardOplogEntryV1,
     ProjectMemoryDashboardOplogQueryV1, ProjectMemoryDashboardVectorPointV1,
-    ProjectMemoryDashboardVectorPointsQueryV1, ProjectMemoryEntityIdV1,
-    ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddDispositionV1,
+    ProjectMemoryDashboardVectorPointsQueryV1, ProjectMemoryDashboardVectorSnapshotV1,
+    ProjectMemoryEntityIdV1, ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddDispositionV1,
     ProjectMemoryFactAddMaterialV1, ProjectMemoryFactAddOutcomeV1,
     ProjectMemoryFactContentDigestQueryV1, ProjectMemoryFactContradictionPageV1,
     ProjectMemoryFactContradictionQueryV1, ProjectMemoryFactContradictionV1,
@@ -139,8 +139,8 @@ pub use memory::{
     ProjectMemoryGraphQueryV1, ProjectMemoryGraphRelationV1, ProjectMemoryGraphStore,
     ProjectMemoryGraphTargetV1, ProjectMemoryMemoryAlgebraV1, ProjectMemoryMemoryFeedbackFunnelV1,
     ProjectMemoryMemoryStatusV1, ProjectMemoryPrivacyPurgeCursorV1,
-    ProjectMemoryPrivacyPurgeReceiptV1, RetrievalAnchorQuery, StoredFactV1,
-    derive_project_memory_fact_curation_child_operation_id,
+    ProjectMemoryPrivacyPurgeReceiptV1, ProjectMemoryStoreRevisionV1, RetrievalAnchorQuery,
+    StoredFactV1, derive_project_memory_fact_curation_child_operation_id,
 };
 pub use native_integration::{
     NativeIntegrationBeginResultV1, NativeIntegrationRecordV1, NativeIntegrationStore,

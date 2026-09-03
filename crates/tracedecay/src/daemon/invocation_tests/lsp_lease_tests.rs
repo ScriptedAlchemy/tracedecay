@@ -36,7 +36,12 @@ async fn open_session(
 ) -> DaemonLspSessionAccess {
     let project_root = PathBuf::from("/authoritative");
     DaemonLspOwnerRegistrar::new(service)
-        .register_factory(project_root.clone(), unavailable_lsp_session_factory())
+        .register_factory_for_project(
+            project_root.clone(),
+            tracedecay_domain::UserProfileId::new("profile.test.lsp").expect("test LSP profile"),
+            tracedecay_domain::ProjectId::new("project.test.lsp").expect("test LSP project"),
+            unavailable_lsp_session_factory(),
+        )
         .await
         .unwrap();
     let response = service
@@ -142,7 +147,12 @@ async fn rejected_lsp_open_does_not_initialize_analyzer_or_mint_session_access()
             ))),
     );
     DaemonLspOwnerRegistrar::new(&service)
-        .register_factory(project_root.clone(), factory)
+        .register_factory_for_project(
+            project_root.clone(),
+            tracedecay_domain::UserProfileId::new("profile.test.lsp").expect("test LSP profile"),
+            tracedecay_domain::ProjectId::new("project.test.lsp").expect("test LSP project"),
+            factory,
+        )
         .await
         .expect("register LSP owner");
 
@@ -560,8 +570,12 @@ async fn shutdown_fences_racing_lsp_open_before_it_can_publish_state() {
             None,
             Vec::new(),
             now_millis(),
-            Some(DaemonLspInvocationOwner::new(
+            Some(DaemonLspInvocationOwner::for_test_project(
                 unavailable_lsp_session_factory(),
+                tracedecay_domain::UserProfileId::new("profile.test.lsp")
+                    .expect("test LSP profile"),
+                tracedecay_domain::ProjectId::new("project.test.lsp").expect("test LSP project"),
+                PathBuf::from("/test/lsp"),
             )),
         )
         .await;
@@ -606,8 +620,13 @@ async fn state_shutdown_fences_a_queued_open_before_the_endpoint_expiry_sweep() 
                 None,
                 Vec::new(),
                 now_millis(),
-                Some(DaemonLspInvocationOwner::new(
+                Some(DaemonLspInvocationOwner::for_test_project(
                     unavailable_lsp_session_factory(),
+                    tracedecay_domain::UserProfileId::new("profile.test.lsp")
+                        .expect("test LSP profile"),
+                    tracedecay_domain::ProjectId::new("project.test.lsp")
+                        .expect("test LSP project"),
+                    PathBuf::from("/test/lsp"),
                 )),
             )
             .await

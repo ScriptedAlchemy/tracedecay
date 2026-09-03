@@ -150,14 +150,14 @@ impl ServiceRunner {
                     .args(["--user", "is-active", "--quiet", crate::SERVICE_NAME])
                     .status()
                     .map_err(|error| {
-                        service_program_spawn_error("systemctl", "systemd service state", error)
+                        service_program_spawn_error("systemctl", "systemd service state", &error)
                     })?
                     .success();
                 let enablement = Command::new(systemctl)
                     .args(["--user", "is-enabled", crate::SERVICE_NAME])
                     .output()
                     .map_err(|error| {
-                        service_program_spawn_error("systemctl", "systemd service state", error)
+                        service_program_spawn_error("systemctl", "systemd service state", &error)
                     })?;
                 let enablement = String::from_utf8_lossy(&enablement.stdout)
                     .trim()
@@ -302,8 +302,7 @@ impl ServiceRunner {
                     let _ = run_systemctl(systemctl, &["daemon-reload"]);
                 }
             }
-            Self::Launchd { .. } => {}
-            Self::WindowsTask => {}
+            Self::Launchd { .. } | Self::WindowsTask => {}
         }
     }
 
@@ -362,7 +361,7 @@ fn run_systemctl(systemctl: &Path, args: &[&str]) -> Result<()> {
         .args(args)
         .output()
         .map_err(|error| {
-            service_program_spawn_error("systemctl", "systemd service management", error)
+            service_program_spawn_error("systemctl", "systemd service management", &error)
         })?;
     if output.status.success() {
         return Ok(());
@@ -473,7 +472,7 @@ fn service_program_is_executable(_metadata: &std::fs::Metadata) -> bool {
 fn service_program_spawn_error(
     program: &str,
     lifecycle: &str,
-    error: std::io::Error,
+    error: &std::io::Error,
 ) -> TraceDecayError {
     if error.kind() == std::io::ErrorKind::NotFound {
         service_program_unavailable(program, lifecycle)
@@ -617,7 +616,7 @@ fn run_launchd_commands(launchctl: &Path, commands: &[LaunchdCommand]) -> Result
                 run_launchctl(launchctl, &args)?;
             }
             LaunchctlFailureMode::TolerateNotLoaded => {
-                run_launchctl_allow_not_loaded(launchctl, &args)?
+                run_launchctl_allow_not_loaded(launchctl, &args)?;
             }
             LaunchctlFailureMode::Ignore => {
                 let _ = run_launchctl(launchctl, &args);
@@ -632,7 +631,7 @@ fn run_launchd_commands(launchctl: &Path, commands: &[LaunchdCommand]) -> Result
 
 fn launchd_domain(id: &Path) -> Result<String> {
     let output = Command::new(id).arg("-u").output().map_err(|error| {
-        service_program_spawn_error("id", "launchd user-domain resolution", error)
+        service_program_spawn_error("id", "launchd user-domain resolution", &error)
     })?;
     if !output.status.success() {
         return Err(TraceDecayError::Config {
@@ -662,7 +661,7 @@ fn launchd_service_is_disabled(launchctl: &Path, id: &Path) -> Result<bool> {
         .args(["print-disabled", &domain])
         .output()
         .map_err(|error| {
-            service_program_spawn_error("launchctl", "launchd service state", error)
+            service_program_spawn_error("launchctl", "launchd service state", &error)
         })?;
     Ok(launchd_disabled_output_contains_label(
         &String::from_utf8_lossy(&output.stdout),
@@ -785,7 +784,7 @@ fn launchctl_spawn(launchctl: &Path, args: &[&str]) -> Result<std::process::Outp
             service_program_spawn_error(
                 "launchctl",
                 &format!("launchd command `{}`", args.join(" ")),
-                error,
+                &error,
             )
         })
 }

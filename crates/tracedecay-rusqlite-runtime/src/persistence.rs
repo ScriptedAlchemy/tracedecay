@@ -80,7 +80,12 @@ fn map_ledger_error(error: LedgerError) -> StorageRuntimeErrorV1 {
 }
 
 fn map_operation_error(error: StorageOperationError) -> StorageRuntimeErrorV1 {
-    infrastructure(format!("closed native operation: {error}"))
+    match error {
+        StorageOperationError::ObservationSourceCursorConflict { expected, actual } => {
+            StorageRuntimeErrorV1::ObservationSourceCursorConflict { expected, actual }
+        }
+        error => infrastructure(format!("closed native operation: {error}")),
+    }
 }
 
 fn infrastructure(operation: impl Into<String>) -> StorageRuntimeErrorV1 {

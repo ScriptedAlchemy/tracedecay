@@ -953,8 +953,7 @@ fn recover_portable_inventory_tail(inventory: &Path, signature: &str) -> std::io
     let truncate_at = tail
         .iter()
         .rposition(|byte| *byte == b'\n')
-        .map(|position| tail_start + position as u64 + 1)
-        .unwrap_or(header_len)
+        .map_or(header_len, |position| tail_start + position as u64 + 1)
         .max(header_len);
     file.set_len(truncate_at)?;
     file.sync_all()

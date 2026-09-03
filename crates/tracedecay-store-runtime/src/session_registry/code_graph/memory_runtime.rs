@@ -16,6 +16,32 @@ use tracedecay_store::{
 
 use super::super::{DaemonSessionRuntimeRegistryV1, session_registry_error};
 
+pub(crate) struct MemoryGraphRuntimeTaskContext {
+    identity: super::super::LocalProfileIdentityAuthorityV1,
+    registry: tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRegistry,
+    graph_registry: tracedecay_graph_db::GraphDbRegistry,
+    graph_lifecycle_cancelled: Arc<AtomicBool>,
+    incarnation: tracedecay_store::StoreIncarnationV1,
+}
+
+impl MemoryGraphRuntimeTaskContext {
+    pub(crate) fn new(
+        identity: super::super::LocalProfileIdentityAuthorityV1,
+        registry: tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRegistry,
+        graph_registry: tracedecay_graph_db::GraphDbRegistry,
+        graph_lifecycle_cancelled: Arc<AtomicBool>,
+        incarnation: tracedecay_store::StoreIncarnationV1,
+    ) -> Self {
+        Self {
+            identity,
+            registry,
+            graph_registry,
+            graph_lifecycle_cancelled,
+            incarnation,
+        }
+    }
+}
+
 pub fn inline_graph_publication_input_digest(
     publication_key: &GraphPublicationKeyV1,
     manifest: &GraphGenerationManifest,
@@ -101,11 +127,13 @@ impl DaemonSessionRuntimeRegistryV1 {
         database: tracedecay_runtime_core::db::DatabaseOwnerV1,
     ) -> super::super::Result<RetainedVerifiedGraphRuntimeV1> {
         Self::retain_memory_graph_runtime_for_task(
-            self.identity.clone(),
-            self.registry.clone(),
-            self.graph_registry.clone(),
-            Arc::clone(&self.graph_lifecycle_cancelled),
-            self.incarnation,
+            MemoryGraphRuntimeTaskContext::new(
+                self.identity.clone(),
+                self.registry.clone(),
+                self.graph_registry.clone(),
+                Arc::clone(&self.graph_lifecycle_cancelled),
+                self.incarnation,
+            ),
             shard_id,
             database,
             ObservationCancellation::default(),
@@ -116,15 +144,18 @@ impl DaemonSessionRuntimeRegistryV1 {
 
     #[hotpath::skip]
     pub(crate) async fn retain_memory_graph_runtime_for_task(
-        identity: super::super::LocalProfileIdentityAuthorityV1,
-        registry: tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRegistry,
-        graph_registry: tracedecay_graph_db::GraphDbRegistry,
-        graph_lifecycle_cancelled: Arc<AtomicBool>,
-        incarnation: tracedecay_store::StoreIncarnationV1,
+        context: MemoryGraphRuntimeTaskContext,
         shard_id: StoreShardIdV1,
         database: tracedecay_runtime_core::db::DatabaseOwnerV1,
         cancellation: ObservationCancellation,
     ) -> std::result::Result<RetainedVerifiedGraphRuntimeV1, MemoryGraphRuntimeOpenFailureV1> {
+        let MemoryGraphRuntimeTaskContext {
+            identity,
+            registry,
+            graph_registry,
+            graph_lifecycle_cancelled,
+            incarnation,
+        } = context;
         if !matches!(
             &shard_id.scope,
             StoreShardScopeV1::Project { .. } | StoreShardScopeV1::ProfileMemory

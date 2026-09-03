@@ -459,7 +459,10 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
         }
     }
 
-    #[hotpath::measure(label = "usecases.semantic_config.read_committed_profile", future = true)]
+    #[hotpath::measure(
+        label = "usecases.semantic_config.read_committed_profile",
+        future = true
+    )]
     pub async fn current_committed_profile_state(
         &self,
         configuration: &SemanticConfigurationPinV1,

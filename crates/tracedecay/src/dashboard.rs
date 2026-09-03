@@ -28,7 +28,7 @@ pub use tracedecay_dashboard_api::contract_schema;
 #[cfg(feature = "test-transport")]
 #[doc(hidden)]
 pub use tracedecay_dashboard_api::{
-    DashboardHostAdmissionTestAuthorityV1, DashboardTestProjectGraphsV1,
+    DashboardHostAdmissionTestAuthorityV1, DashboardTestEndpointV1, DashboardTestProjectGraphsV1,
     run_until_shutdown_for_tests_with_host_admission,
 };
 
@@ -189,6 +189,11 @@ impl DashboardGraphTestRuntimeV1 {
         profile_root: impl AsRef<std::path::Path>,
     ) -> tracedecay_domain::errors::Result<Self> {
         use std::sync::atomic::{AtomicU64, Ordering};
+
+        // This fixture bypasses CLI and host-admission constructors, so it
+        // must install the same root ports before graph init publishes Hook
+        // bindings for the admitted project.
+        crate::register_runtime_ports_without_mcp_tool_catalog();
 
         static NEXT_ELECTION_EPOCH: AtomicU64 = AtomicU64::new(1);
 

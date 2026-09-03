@@ -940,9 +940,11 @@ pub(crate) mod tests {
                     .expect("session root identity"),
                 database.binding().shard_id.clone(),
                 project_id,
-                repository_id,
-                worktree_id,
-                BranchId::new("branch.work-task-session").expect("branch identity"),
+                tracedecay_session_memory::context::ResolvedGitRoute::new(
+                    repository_id,
+                    worktree_id,
+                    BranchId::new("branch.work-task-session").expect("branch identity"),
+                ),
                 project.display().to_string(),
             );
         let scope = root

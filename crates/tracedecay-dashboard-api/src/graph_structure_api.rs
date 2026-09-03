@@ -5,7 +5,7 @@
 //! remains unchanged; new structure consumers receive `DashboardEnvelopeV1`.
 
 use std::borrow::Cow;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -26,6 +26,7 @@ use super::util::{JsonPath, JsonQuery, query_rows};
 use super::{DashboardHttpRequestControlV1, DashboardState};
 use crate::graph::health::{dependency_depth, dsm_clusters};
 use crate::graph::queries::GraphQueryManager;
+use crate::snapshot_cache::DerivedSnapshotCache;
 use tracedecay_application::{CallableCodeOperationKind, callable_code_operation};
 use tracedecay_code_index::graph_projection::{
     CodeGraphInteractiveReader, CodeGraphSemanticEdgeV1, CodeGraphSymbolSummaryV1,
@@ -162,7 +163,7 @@ struct CachedStrataV1 {
     dependency_edges_examined: usize,
 }
 
-static STRATA_CACHE: OnceLock<tokio::sync::Mutex<HashMap<String, Arc<CachedStrataV1>>>> =
+static STRATA_CACHE: OnceLock<DerivedSnapshotCache<String, String, CachedStrataV1>> =
     OnceLock::new();
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -424,96 +425,114 @@ async fn strata(
                 Err(response) => return response,
             };
             let graph_generation = graph.reader.generation().as_str().to_owned();
-            let cache_key = graph_generation.clone();
-            let cache = STRATA_CACHE.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()));
-            let mut guard = cache.lock().await;
-            let (snapshot, cache_state) = if let Some(existing) = guard.get(&cache_key)
-                && existing.graph_generation == graph_generation
-            {
-                (existing.clone(), "hit")
-            } else {
-                // The futures lane also records the drop-on-timeout case, so
-                // budget-exceeded scans stay visible as cancelled work.
-                let scan = match tokio::time::timeout(
-                    STRATA_SCAN_BUDGET,
-                    hotpath::future!(
-                        GraphQueryManager::new(&graph.reader, Arc::clone(&graph.cancellation))
-                            .build_file_adjacency_bounded(
-                                STRATA_MAX_FILES,
-                                STRATA_MAX_DEPENDENCY_EDGES,
+            let cache = STRATA_CACHE.get_or_init(DerivedSnapshotCache::new);
+            let (snapshot, cache_state) = match cache
+                .get_or_compute(
+                    state.graph_db_path.clone(),
+                    graph_generation.clone(),
+                    || async {
+                        // The futures lane also records the drop-on-timeout case,
+                        // so budget-exceeded scans stay visible as cancelled work.
+                        let scan = match tokio::time::timeout(
+                            STRATA_SCAN_BUDGET,
+                            hotpath::future!(
+                                GraphQueryManager::new(
+                                    &graph.reader,
+                                    Arc::clone(&graph.cancellation)
+                                )
+                                .build_file_adjacency_bounded(
+                                    STRATA_MAX_FILES,
+                                    STRATA_MAX_DEPENDENCY_EDGES,
+                                ),
+                                label = "dashboard_api.graph.strata_scan"
                             ),
-                        label = "dashboard_api.graph.strata_scan"
-                    ),
+                        )
+                        .await
+                        {
+                            Ok(Ok(scan)) => scan,
+                            Ok(Err(error)) => {
+                                return Err(graph_runtime_error_response::<StrataMeasurementV1>(
+                                    &state, error,
+                                ));
+                            }
+                            Err(_) => {
+                                return Err(failed_response::<StrataMeasurementV1>(
+                                    &state,
+                                    "strata_scan_timed_out",
+                                    format!(
+                                        "file adjacency scan exceeded the {}ms budget",
+                                        STRATA_SCAN_BUDGET.as_millis()
+                                    ),
+                                    true,
+                                ));
+                            }
+                        };
+                        let observed_generation = graph_generation.clone();
+                        let computed_generation = graph_generation.clone();
+                        let snapshot = tokio::task::spawn_blocking(move || {
+                            hotpath::measure_block!("dashboard_api.graph.strata_compute", {
+                                let depth = dependency_depth(&scan.adjacency, scan.adjacency.len());
+                                let mut files = Vec::with_capacity(scan.adjacency.len());
+                                for chain in &depth.chains {
+                                    for path in &chain.scc_files {
+                                        files.push(StrataFileV1 {
+                                            path: path.clone(),
+                                            depth: chain.depth,
+                                            scc_size: chain.scc_files.len(),
+                                            chain: chain.chain.clone(),
+                                        });
+                                    }
+                                }
+                                files.sort_by(|left, right| {
+                                    right
+                                        .depth
+                                        .cmp(&left.depth)
+                                        .then_with(|| left.path.cmp(&right.path))
+                                });
+                                let clusters = dsm_clusters(&scan.adjacency)
+                                    .into_iter()
+                                    .enumerate()
+                                    .map(|(index, cluster)| {
+                                        let boundary_edges = cluster.boundary_edges();
+                                        StrataClusterV1 {
+                                            order: index,
+                                            directory: cluster.directory,
+                                            file_count: cluster.file_count,
+                                            internal_edges: cluster.internal_edges,
+                                            outgoing_edges: cluster.outgoing_edges,
+                                            incoming_edges: cluster.incoming_edges,
+                                            boundary_edges,
+                                        }
+                                    })
+                                    .collect();
+                                Arc::new(CachedStrataV1 {
+                                    graph_generation: computed_generation,
+                                    max_depth: depth.max_depth,
+                                    ideal_depth: depth.ideal_depth,
+                                    files,
+                                    clusters,
+                                    files_examined: scan.files_examined,
+                                    dependency_edges_examined: scan.dependency_edges_examined,
+                                })
+                            })
+                        })
+                        .await
+                        .map_err(|error| {
+                            failed_response::<StrataMeasurementV1>(
+                                &state,
+                                "strata_compute_task_failed",
+                                error.to_string(),
+                                true,
+                            )
+                        })?;
+                        Ok((observed_generation, snapshot))
+                    },
                 )
                 .await
-                {
-                    Ok(Ok(scan)) => scan,
-                    Ok(Err(error)) => {
-                        return graph_runtime_error_response::<StrataMeasurementV1>(&state, error);
-                    }
-                    Err(_) => {
-                        return failed_response::<StrataMeasurementV1>(
-                            &state,
-                            "strata_scan_timed_out",
-                            format!(
-                                "file adjacency scan exceeded the {}ms budget",
-                                STRATA_SCAN_BUDGET.as_millis()
-                            ),
-                            true,
-                        );
-                    }
-                };
-                // SCC/longest-path/DSM aggregation is the CPU-bound half of a
-                // cache miss; keep it distinguishable from the bounded scan.
-                let computed = hotpath::measure_block!("dashboard_api.graph.strata_compute", {
-                    let depth = dependency_depth(&scan.adjacency, scan.adjacency.len());
-                    let mut files = Vec::with_capacity(scan.adjacency.len());
-                    for chain in &depth.chains {
-                        for path in &chain.scc_files {
-                            files.push(StrataFileV1 {
-                                path: path.clone(),
-                                depth: chain.depth,
-                                scc_size: chain.scc_files.len(),
-                                chain: chain.chain.clone(),
-                            });
-                        }
-                    }
-                    files.sort_by(|left, right| {
-                        right
-                            .depth
-                            .cmp(&left.depth)
-                            .then_with(|| left.path.cmp(&right.path))
-                    });
-                    let clusters = dsm_clusters(&scan.adjacency)
-                        .into_iter()
-                        .enumerate()
-                        .map(|(index, cluster)| {
-                            let boundary_edges = cluster.boundary_edges();
-                            StrataClusterV1 {
-                                order: index,
-                                directory: cluster.directory,
-                                file_count: cluster.file_count,
-                                internal_edges: cluster.internal_edges,
-                                outgoing_edges: cluster.outgoing_edges,
-                                incoming_edges: cluster.incoming_edges,
-                                boundary_edges,
-                            }
-                        })
-                        .collect();
-                    Arc::new(CachedStrataV1 {
-                        graph_generation: graph_generation.clone(),
-                        max_depth: depth.max_depth,
-                        ideal_depth: depth.ideal_depth,
-                        files,
-                        clusters,
-                        files_examined: scan.files_examined,
-                        dependency_edges_examined: scan.dependency_edges_examined,
-                    })
-                });
-                guard.insert(cache_key, computed.clone());
-                (computed, "miss")
+            {
+                Ok(cached) => cached,
+                Err(response) => return response,
             };
-            drop(guard);
             crate::observe::record_strata_files(snapshot.files.len());
 
             measured_response(
@@ -530,7 +549,7 @@ async fn strata(
                     clusters: snapshot.clusters.clone(),
                     scan: StrataScanV1 {
                         cache_scope: "graph_generation",
-                        cache_state,
+                        cache_state: cache_state.as_str(),
                         budget_ms: STRATA_SCAN_BUDGET.as_millis() as u64,
                         max_files: STRATA_MAX_FILES,
                         max_dependency_edges: STRATA_MAX_DEPENDENCY_EDGES,

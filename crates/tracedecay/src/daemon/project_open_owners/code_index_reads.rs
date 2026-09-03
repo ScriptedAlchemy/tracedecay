@@ -22,7 +22,7 @@ fn refuse_projection_wait(request: &CodeGraphReadRequest<'_>) -> Result<(), Code
     if request.cancellation.is_cancelled()
         || request
             .live_cancellation
-            .is_some_and(|signal| signal.is_cancelled())
+            .is_some_and(tracedecay_application::CancellationSignal::is_cancelled)
     {
         return Err(CodeGraphReadError::Cancelled);
     }
@@ -188,14 +188,14 @@ impl tracedecay_graph_query::CodeGraphProjectionReadPort for ProjectCodeGraphPro
                 (deadline, live_cancellation) => {
                     tokio::select! {
                         biased;
-                        _ = async {
+                        () = async {
                             if let Some(signal) = live_cancellation {
                                 signal.cancelled().await;
                             } else {
                                 std::future::pending::<()>().await;
                             }
                         } => return Err(CodeGraphReadError::Cancelled),
-                        _ = async {
+                        () = async {
                             if let Some(deadline) = deadline {
                                 sleep_until_deadline(deadline).await;
                             } else {

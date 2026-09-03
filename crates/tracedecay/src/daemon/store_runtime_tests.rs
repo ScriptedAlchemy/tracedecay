@@ -7,7 +7,6 @@
 use std::path::PathBuf;
 use std::sync::{Arc, atomic::AtomicBool};
 
-use tracedecay_code_index_runtime::CodeGraphSeatRuntimePortV1;
 use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV1;
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::{
@@ -756,7 +755,7 @@ async fn daemon_admission_remains_ready_while_lcm_indexes_converge_in_background
         project_sessions_pending_convergence("project.schema-admission").await;
     let seed = TestConnection::open(&sessions_path);
     seed.execute_batch(
-        r#"INSERT INTO sessions(provider, session_id, project_key, project_path)
+        r"INSERT INTO sessions(provider, session_id, project_key, project_path)
            VALUES ('cursor', 'deferred-index-session', 'project.schema-admission', '/deferred');
            INSERT INTO lcm_raw_messages (
                provider, message_id, session_id, role, ordinal, content,
@@ -774,7 +773,7 @@ async fn daemon_admission_remains_ready_while_lcm_indexes_converge_in_background
            DROP INDEX idx_lcm_summary_nodes_depth_tokens;
            DROP INDEX idx_lcm_external_payloads_owner_bytes;
            CREATE INDEX idx_lcm_external_payloads_owner
-               ON lcm_external_payloads(provider, session_id);"#,
+               ON lcm_external_payloads(provider, session_id);",
     )
     .await
     .expect("seed an already-current store without the LCM status indexes");

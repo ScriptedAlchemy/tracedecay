@@ -86,9 +86,11 @@ async fn continuation_resumes_the_same_provider_session_without_repeating_eviden
                 .expect("session root identity"),
             database.binding().shard_id.clone(),
             project_id,
-            repository_id,
-            worktree_id,
-            BranchId::new("branch.work-task-session-continuation").expect("branch identity"),
+            tracedecay_session_memory::context::ResolvedGitRoute::new(
+                repository_id,
+                worktree_id,
+                BranchId::new("branch.work-task-session-continuation").expect("branch identity"),
+            ),
             project.display().to_string(),
         );
     let scope = root

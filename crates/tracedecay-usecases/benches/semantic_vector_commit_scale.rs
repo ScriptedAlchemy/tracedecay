@@ -280,10 +280,7 @@ fn main() {
                             .apply_batch(&build, staged_commit)
                             .expect("bench batch commits"),
                     );
-                    publication = match state.publish_generation(&build) {
-                        Ok(publication) => Some(publication),
-                        Err(_) => None,
-                    };
+                    publication = state.publish_generation(&build).ok();
                 }
                 "machine" => {
                     checkpoint = Some(

@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tracedecay_rusqlite_runtime::repository::{
-    RepositoryPhysicalAttachmentFactory, RepositoryRuntimePhysicalAttachment,
-    RepositoryRuntimePhysicalSnapshot,
+    RepositoryDispatchError, RepositoryPhysicalAttachmentFactory,
+    RepositoryRuntimePhysicalAttachment, RepositoryRuntimePhysicalSnapshot,
 };
 use tracedecay_store::{
     AdmissionConfigV1, RuntimeMaintenanceStateV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1,
@@ -454,6 +454,9 @@ impl PhysicalRuntimeAttachment for RepositoryRuntimePhysicalAttachment {
                 error_events: writer.error_events,
                 health_lane_services: writer.health_lane_services,
                 commit_sequence: writer.commit_sequence,
+                checkpoint_status: writer.checkpoint_status,
+                checkpoint_pressure: writer.checkpoint_pressure,
+                checkpoint_hard_retry_wakes: writer.wal.hard_retry_wakes,
             }),
             wal_bytes: snapshot.wal_bytes,
             memory_estimate_bytes: None,
@@ -576,9 +579,14 @@ impl PhysicalRuntimeAttachment for RepositoryRuntimePhysicalAttachment {
         Box::pin(async move {
             RepositoryRuntimePhysicalAttachment::dispatch_submit(self, request, probe, authority)
                 .await
-                .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                    operation: "dispatch repository submit",
-                    message: error.to_string(),
+                .map_err(|error| match error {
+                    RepositoryDispatchError::WriterRuntime(error) => {
+                        StoreRuntimeRegistryFailure::StorageRuntime(Box::new(error))
+                    }
+                    error => StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                        operation: "dispatch repository submit",
+                        message: error.to_string(),
+                    },
                 })
         })
     }

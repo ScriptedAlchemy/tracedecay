@@ -47,8 +47,8 @@ use tracedecay_store::{
     ProjectMemoryAutomaticFactStateV1, ProjectMemoryDashboardFactDetailQueryV1,
     ProjectMemoryDashboardFactDetailV1, ProjectMemoryDashboardMemoryOverviewQueryV1,
     ProjectMemoryDashboardMemoryOverviewV1, ProjectMemoryDashboardOplogEntryV1,
-    ProjectMemoryDashboardOplogQueryV1, ProjectMemoryDashboardVectorPointV1,
-    ProjectMemoryDashboardVectorPointsQueryV1, ProjectMemoryFactAddCommandV1,
+    ProjectMemoryDashboardOplogQueryV1, ProjectMemoryDashboardVectorPointsQueryV1,
+    ProjectMemoryDashboardVectorSnapshotV1, ProjectMemoryFactAddCommandV1,
     ProjectMemoryFactAddOutcomeV1, ProjectMemoryFactContentDigestQueryV1,
     ProjectMemoryFactContradictionPageV1, ProjectMemoryFactContradictionQueryV1,
     ProjectMemoryFactCurationBatchV1, ProjectMemoryFactCurationReceiptV1,
@@ -62,7 +62,8 @@ use tracedecay_store::{
     ProjectMemoryFactSearchPageV1, ProjectMemoryFactSearchQuery, ProjectMemoryFactStore,
     ProjectMemoryFactUpdateCommandV1, ProjectMemoryFactUpdateOutcomeV1,
     ProjectMemoryMemoryStatusV1, ProjectMemoryPrivacyPurgeCursorV1,
-    ProjectMemoryPrivacyPurgeReceiptV1, RetrievalAnchorQuery, StoredFactV1,
+    ProjectMemoryPrivacyPurgeReceiptV1, ProjectMemoryStoreRevisionV1, RetrievalAnchorQuery,
+    StoredFactV1,
 };
 
 /// Maps a [`MemoryApplicationError`] onto the root/dashboard-facing

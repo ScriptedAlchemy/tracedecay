@@ -1937,8 +1937,10 @@ fn cas_conflict_naming_this_publication_seats_the_incumbent_head() {
     let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
     let (control, probe) = control_and_probe();
     let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
-    let mut authority = RelationalAuthority::default();
-    authority.cas_reports_own_head_as_conflict = true;
+    let mut authority = RelationalAuthority {
+        cas_reports_own_head_as_conflict: true,
+        ..RelationalAuthority::default()
+    };
     let identity = projection("cas-own", "work");
     let g1 = manifest(identity.clone(), "g1", "g1", vec![], vec![]);
     let g1_record = stage_manifest(
