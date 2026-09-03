@@ -808,6 +808,71 @@ fn supersession_clears_active_assertion_without_purging_payload_access() {
 }
 
 #[test]
+fn supersession_projection_rejects_a_trailing_lineage_event() {
+    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE memory_v2_current_facts (
+                    fact_id TEXT NOT NULL,
+                    owner_kind TEXT NOT NULL,
+                    project_id TEXT NOT NULL,
+                    payload_access TEXT NOT NULL,
+                    trust_score REAL,
+                    active_assertion_id TEXT,
+                    last_event_id TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    PRIMARY KEY (fact_id, owner_kind, project_id)
+                );",
+        )
+        .unwrap();
+    let owner = FactOwnerV1::Profile;
+    let owner_columns = OwnerColumns::new(&owner).unwrap();
+    let source = profile_fact_id("operation.supersession-projection.non-terminal.source");
+    let target = profile_fact_id("operation.supersession-projection.non-terminal.target");
+    let supersession = FactLineageEventV1::new(
+        source.clone(),
+        owner.clone(),
+        FactLineageEventKindV1::Curated {
+            action: FactCurationActionV1::SupersededBy { fact_id: target },
+            evidence_ids: vec![],
+        },
+        UtcMicros(2),
+        None,
+    )
+    .unwrap();
+    let retained = FactLineageEventV1::new(
+        source.clone(),
+        owner.clone(),
+        FactLineageEventKindV1::Curated {
+            action: FactCurationActionV1::Retained,
+            evidence_ids: vec![],
+        },
+        UtcMicros(3),
+        None,
+    )
+    .unwrap();
+    let batch = FactWriteBatch::new(
+        source,
+        owner,
+        None,
+        vec![supersession, retained],
+        vec![],
+        vec![],
+        None,
+    )
+    .unwrap();
+    let savepoint = connection.savepoint().unwrap();
+
+    let error = publish_projection(&savepoint, &owner_columns, &batch).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("fact supersession must be the final event")
+    );
+}
+
+#[test]
 fn stale_projection_transitions_are_rejected() {
     let mut connection = rusqlite::Connection::open_in_memory().unwrap();
     connection
