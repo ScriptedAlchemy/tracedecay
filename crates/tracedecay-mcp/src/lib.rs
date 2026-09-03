@@ -100,8 +100,8 @@ pub use tools::render::format_relative_time;
 pub use tools::{
     MAX_RESPONSE_CHARS, RESERVED_FLAGS_FOOTER, ToolDefinition, ToolRegistryMode, ToolResult,
     apply_context_warming_budget, ast_grep_available, ast_grep_diagnostics_json,
-    ast_grep_outline_available, context_description, explore_call_budget,
-    format_capable_tool_names, get_maximal_tool_definitions,
+    ast_grep_outline_available, context_description, context_warming_description,
+    explore_call_budget, format_capable_tool_names, get_maximal_tool_definitions,
     get_maximal_tool_definitions_with_budget, get_tool_definitions,
     get_tool_definitions_with_budget, get_tool_definitions_with_warming_budget,
     internal_daemon_tool_definition, project_catalog_discovery_scope, render_tool_cli_help,

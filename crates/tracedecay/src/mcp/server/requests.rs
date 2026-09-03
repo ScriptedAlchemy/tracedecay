@@ -659,7 +659,8 @@ impl McpServer {
         };
         match hotpath::measure_block!(
             "mcp.server.tools_list.compose",
-            crate::mcp::tools::get_catalog_filtered_tool_definitions_with_warming_budget(
+            crate::mcp::tools::catalog_discovery_tools_list_payload(
+                None,
                 budget,
                 &profile_id,
                 &authority,
@@ -667,13 +668,7 @@ impl McpServer {
                 ToolRegistryMode::HostAvailable,
             )
         ) {
-            Ok(tools) => {
-                let payload = hotpath::measure_block!(
-                    "mcp.server.tools_list.compose_payload",
-                    json!({ "tools": tools })
-                );
-                JsonRpcResponse::success(id, payload)
-            }
+            Ok(payload) => JsonRpcResponse::success(id, payload),
             Err(error) => JsonRpcResponse::error(
                 id,
                 ErrorCode::InternalError,

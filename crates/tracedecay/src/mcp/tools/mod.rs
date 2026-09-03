@@ -20,7 +20,8 @@ pub(crate) use binding::{
     tool_dispatches_source_edit_effect, tool_supports_live_cancellation,
 };
 pub use catalog_discovery::{
-    default_catalog_discovery_authority, get_catalog_filtered_tool_definitions_with_budget,
+    catalog_discovery_tools_list_payload, default_catalog_discovery_authority,
+    get_catalog_filtered_tool_definitions_with_budget,
     get_catalog_filtered_tool_definitions_with_warming_budget,
 };
 pub(crate) use handlers::retained_catalog::{
