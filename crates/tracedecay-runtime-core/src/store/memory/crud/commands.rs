@@ -50,6 +50,7 @@ pub(super) fn project_memory_feedback_delta(action: ProjectMemoryFactFeedbackAct
     }
 }
 
+#[hotpath::measure(label = "runtime_core.memory.feedback_projection")]
 pub(super) async fn project_memory_update_feedback_projection_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
@@ -198,6 +199,7 @@ pub(super) fn commit_receipt_json(outcome: &'static str, receipt: &FactCommitRec
     })
 }
 
+#[hotpath::measure(label = "runtime_core.memory.commit_receipt")]
 pub(super) async fn project_memory_commit_receipt_from_operation_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
@@ -304,6 +306,7 @@ pub(in crate::store::memory) async fn load_mutable_project_memory_fact_tx(
     }
 }
 
+#[hotpath::measure(label = "runtime_core.memory.replay_add")]
 async fn project_memory_replay_add_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
@@ -527,6 +530,7 @@ pub(in crate::store::memory) async fn add_project_memory_fact_tx(
     ProjectMemoryFactAddOutcomeV1::added(fact, canonical_receipt, replayed)
 }
 
+#[hotpath::measure(label = "runtime_core.memory.replay_update")]
 async fn project_memory_replay_update_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
@@ -677,6 +681,7 @@ pub(in crate::store::memory) async fn update_project_memory_fact_tx(
     )
 }
 
+#[hotpath::measure(label = "runtime_core.memory.replay_remove")]
 async fn project_memory_replay_remove_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
