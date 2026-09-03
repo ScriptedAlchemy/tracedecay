@@ -420,7 +420,7 @@ impl McpServer {
     /// hands back this request's single branch resolution, so the rest of the
     /// request reads the live branch from the memo instead of re-opening the
     /// repository. The memo is request-scoped and never retained.
-    #[hotpath::skip]
+    #[hotpath::measure(label = "mcp.server.branch_drift_reopen_memoized", future = true)]
     pub(crate) async fn reopen_if_branch_drifted_memoized(
         &self,
     ) -> (Arc<TraceDecay>, tracedecay_runtime_core::branch::BranchMemo) {
