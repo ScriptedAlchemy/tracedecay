@@ -441,6 +441,7 @@ async fn production_project_server_inner(
         cancellation: cancellation.clone(),
         graph_runtime: Arc::clone(&graph_runtime),
         graph_publication_database: Arc::new(cg.db().clone()),
+        configuration_runtime: Arc::clone(cg.configuration_runtime()),
         profile_id: cg.store_runtime_registry().profile_id().clone(),
     });
     let code_index_hint_sink = code_index_activation_hint_sink(
