@@ -4,7 +4,7 @@ use super::{CURRENT_SURFACES, RetainedSurfaceOperation, RetainedSurfaceSpec};
 
 const MEMORY_SCOPE: &[ScopeDimension] = &[ScopeDimension::Resource];
 
-pub(super) const SPECS: [RetainedSurfaceSpec; 12] = [
+pub(super) const SPECS: [RetainedSurfaceSpec; 13] = [
     RetainedSurfaceSpec {
         operation: RetainedSurfaceOperation::FactStoreAdd,
         summary: "Add a retained fact",
@@ -90,6 +90,16 @@ pub(super) const SPECS: [RetainedSurfaceSpec; 12] = [
         summary: "Remove a retained fact",
         description: "Remove one authorized fact through the owner-bound memory application.",
         example: "Remove this retained fact",
+        effect: EffectClass::Administrative,
+        scope: MEMORY_SCOPE,
+        paginated: false,
+        surfaces: CURRENT_SURFACES,
+    },
+    RetainedSurfaceSpec {
+        operation: RetainedSurfaceOperation::FactStoreSupersede,
+        summary: "Supersede a retained fact",
+        description: "Mark one authorized fact as superseded by another fact through the owner-bound memory application; the old fact leaves default retrieval but stays readable by id.",
+        example: "This fact is superseded by that one",
         effect: EffectClass::Administrative,
         scope: MEMORY_SCOPE,
         paginated: false,

@@ -94,6 +94,7 @@ const FIRST_TOUCH_STORE_TOOLS: &[&str] = &[
     "tracedecay_fact_store_get",
     "tracedecay_fact_store_update",
     "tracedecay_fact_store_remove",
+    "tracedecay_fact_store_supersede",
     "tracedecay_fact_store_list",
     "tracedecay_fact_feedback",
     "tracedecay_memory_status",

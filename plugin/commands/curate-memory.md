@@ -31,9 +31,10 @@ resolve the active project and run the canonical agent-managed curator.
    /api/automation/runs`, `GET /api/automation/runs/{run_id}/artifacts`, and
    `GET /api/automation/runs/{run_id}/artifacts/{kind}`.
 7. Use direct `tracedecay_fact_store_add`, `tracedecay_fact_store_update`,
-   `tracedecay_fact_store_remove`, or `tracedecay_fact_feedback` only for an
-   exact administrative instruction; these are independent retained
-   operations. Deletion is permanent. If the requested deletion target is
+   `tracedecay_fact_store_supersede`, `tracedecay_fact_store_remove`, or
+   `tracedecay_fact_feedback` only for an exact administrative instruction;
+   these are independent retained operations. Prefer supersede over remove
+   when a newer fact corrects an older one. Deletion is permanent. If the requested deletion target is
    ambiguous, show the resolved fact id and content summary and confirm only
    that target before removal.
 8. Verify read-only with canonical fact queries and memory status. If a failed

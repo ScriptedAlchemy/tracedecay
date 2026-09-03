@@ -440,6 +440,156 @@ async fn memory_fact_store_add_search_update_and_remove() {
     close_test_graph(cg).await;
 }
 
+/// #727: an explicit supersession retires the old fact from the default
+/// surfaces without deleting it. Fails if the superseded fact still lists, if
+/// its history stops carrying the retired projection, or if a second
+/// successor is silently accepted.
+#[tokio::test]
+async fn memory_fact_store_supersede_retires_old_fact_from_default_surfaces() {
+    let cg = setup_project().await;
+    let old = invoke_production_tool(
+        &cg,
+        "tracedecay_fact_store_add",
+        json!({
+            "content": "Project Phoenix ships on the first of the month",
+            "category": "project",
+            "entities": ["Project Phoenix"]
+        }),
+    )
+    .await
+    .unwrap();
+    let old_fact = committed_add_result(&old);
+    let old_fact_id = available_fact(&old_fact["fact"])["fact_id"]
+        .as_str()
+        .expect("old fact id")
+        .to_owned();
+    let successor = invoke_production_tool(
+        &cg,
+        "tracedecay_fact_store_add",
+        json!({
+            "content": "The Phoenix release train now departs on the fifteenth after the Q3 retro moved the cutoff",
+            "category": "decision",
+            "entities": ["Phoenix release train", "Q3 retro"]
+        }),
+    )
+    .await
+    .unwrap();
+    let successor_fact_id = available_fact(&committed_add_result(&successor)["fact"])["fact_id"]
+        .as_str()
+        .expect("successor fact id")
+        .to_owned();
+
+    let superseded = invoke_production_tool(
+        &cg,
+        "tracedecay_fact_store_supersede",
+        json!({
+            "fact_id": old_fact_id.clone(),
+            "superseded_by": successor_fact_id.clone()
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(superseded["outcome"], "superseded", "{superseded}");
+    assert_eq!(superseded["fact_id"], old_fact_id);
+    assert_eq!(superseded["superseded_by"], successor_fact_id);
+    assert_eq!(superseded["commit"]["fact_id"], old_fact_id);
+    assert!(
+        superseded["commit"]["active_assertion_id"].is_null(),
+        "supersession retires the active assertion: {superseded}"
+    );
+
+    let listed = invoke_production_tool(&cg, "tracedecay_fact_store_list", json!({}))
+        .await
+        .unwrap();
+    let listed_ids: Vec<String> = listed["facts"]
+        .as_array()
+        .expect("list facts")
+        .iter()
+        .map(|fact| {
+            available_fact(fact)["fact_id"]
+                .as_str()
+                .expect("listed fact id")
+                .to_owned()
+        })
+        .collect();
+    assert!(
+        !listed_ids.contains(&old_fact_id),
+        "a superseded fact must leave the default list surface: {listed}"
+    );
+    assert!(
+        listed_ids.contains(&successor_fact_id),
+        "the successor stays current: {listed}"
+    );
+
+    // The identical request is the same retained operation: it replays the
+    // recorded commit instead of writing a second supersession event.
+    let replayed = invoke_production_tool(
+        &cg,
+        "tracedecay_fact_store_supersede",
+        json!({
+            "fact_id": old_fact_id.clone(),
+            "superseded_by": successor_fact_id.clone()
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(replayed["outcome"], "superseded", "{replayed}");
+    assert_eq!(
+        replayed["commit"]["disposition"], "idempotent_replay",
+        "{replayed}"
+    );
+    assert_eq!(
+        replayed["commit"]["last_event_id"], superseded["commit"]["last_event_id"],
+        "a replay must not append a second supersession event: {replayed}"
+    );
+
+    // A distinct operation naming the same successor observes the recorded
+    // supersession instead of writing again.
+    let observed = invoke_production_tool(
+        &cg,
+        "tracedecay_fact_store_supersede",
+        json!({
+            "fact_id": old_fact_id.clone(),
+            "superseded_by": successor_fact_id.clone(),
+            "expected_last_event_id": superseded["commit"]["last_event_id"].clone()
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(observed["outcome"], "already_superseded", "{observed}");
+    assert_eq!(observed["superseded_by"], successor_fact_id);
+
+    let other = invoke_production_tool(
+        &cg,
+        "tracedecay_fact_store_add",
+        json!({
+            "content": "Quarterly shipping for the Orion service is owned by the platform guild",
+            "category": "tool",
+            "entities": ["Orion service", "platform guild"]
+        }),
+    )
+    .await
+    .unwrap();
+    let other_fact_id = available_fact(&committed_add_result(&other)["fact"])["fact_id"]
+        .as_str()
+        .expect("other fact id")
+        .to_owned();
+    let refused = invoke_production_tool(
+        &cg,
+        "tracedecay_fact_store_supersede",
+        json!({
+            "fact_id": old_fact_id.clone(),
+            "superseded_by": other_fact_id
+        }),
+    )
+    .await;
+    assert!(
+        refused.is_err(),
+        "a fact has exactly one successor; a different successor is a typed refusal: {refused:?}"
+    );
+    close_test_graph(cg).await;
+}
+
 #[tokio::test]
 async fn memory_fact_store_project_selector_targets_registered_project() {
     let fixture = fact_store_cross_project_fixture().await;

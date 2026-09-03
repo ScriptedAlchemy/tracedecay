@@ -70,7 +70,14 @@ authority. Hard rules that always apply:
   an exact deletion instruction needs no redundant confirmation.
 - Subagents may inspect and recommend only — never let a subagent call
   `tracedecay_fact_store_add`, `tracedecay_fact_store_update`,
-  `tracedecay_fact_store_remove`, or `tracedecay_fact_feedback`.
+  `tracedecay_fact_store_remove`, `tracedecay_fact_store_supersede`, or
+  `tracedecay_fact_feedback`.
+- Prefer `tracedecay_fact_store_supersede` over removal when a newer fact
+  corrects an older one: name the successor fact id, the old fact leaves
+  default search/list/probe results but stays readable by id through its
+  history, and payload, trust, and provenance are never rewritten. A fact has
+  exactly one successor; superseding it again with a different fact is a
+  typed refusal.
 - Do not lower trust merely for age; cite newer evidence or a contradiction.
 
 ## If tools are deferred or MCP fails

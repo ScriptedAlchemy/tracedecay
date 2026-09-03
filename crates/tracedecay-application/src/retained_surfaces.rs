@@ -51,6 +51,7 @@ pub enum RetainedSurfaceOperation {
     FactStoreGet,
     FactStoreUpdate,
     FactStoreRemove,
+    FactStoreSupersede,
     FactStoreList,
     FactFeedback,
     MemoryStatus,
@@ -104,7 +105,7 @@ impl RetainedSdkOperationContractV1 {
 impl RetainedSurfaceOperation {
     /// Canonical catalog operations. The broad `session_refresh` translator is
     /// intentionally not a catalog operation.
-    pub const ALL: [Self; 26] = [
+    pub const ALL: [Self; 27] = [
         Self::FactStoreCurate,
         Self::FactStoreAdd,
         Self::FactStoreSearch,
@@ -115,6 +116,7 @@ impl RetainedSurfaceOperation {
         Self::FactStoreGet,
         Self::FactStoreUpdate,
         Self::FactStoreRemove,
+        Self::FactStoreSupersede,
         Self::FactStoreList,
         Self::FactFeedback,
         Self::MemoryStatus,
@@ -136,11 +138,11 @@ impl RetainedSurfaceOperation {
     /// Operations with a current callable transport. Daemon grants, HTTP
     /// routes, and the SDK all derive from this exact mounted set, which is
     /// the full catalog today.
-    pub const CALLABLE: [Self; 26] = Self::ALL;
+    pub const CALLABLE: [Self; 27] = Self::ALL;
 
     /// Every current retained action has an exact project-open production
     /// adapter. SDK clients invoke the operation-selected routes.
-    pub const SDK_EXECUTABLE: [Self; 26] = Self::ALL;
+    pub const SDK_EXECUTABLE: [Self; 27] = Self::ALL;
 
     #[hotpath::skip]
     pub const fn is_callable(self) -> bool {
@@ -172,6 +174,7 @@ impl RetainedSurfaceOperation {
             Self::FactStoreGet => "fact_store_get",
             Self::FactStoreUpdate => "fact_store_update",
             Self::FactStoreRemove => "fact_store_remove",
+            Self::FactStoreSupersede => "fact_store_supersede",
             Self::FactStoreList => "fact_store_list",
             Self::FactFeedback => "fact_feedback",
             Self::MemoryStatus => "memory_status",
@@ -398,6 +401,15 @@ fn retained_surface_executable_schemas(
             RetainedSurfaceOperation::FactStoreRemove,
             "tracedecay_application::retained_surfaces::FactStoreRemoveRequestV1",
             "tracedecay_application::retained_surfaces::FactStoreRemoveResultV1",
+        )?,
+        retained_surface_executable_schema::<
+            FactStoreSupersedeRequestV1,
+            FactStoreSupersedeResultV1,
+        >(
+            contribution,
+            RetainedSurfaceOperation::FactStoreSupersede,
+            "tracedecay_application::retained_surfaces::FactStoreSupersedeRequestV1",
+            "tracedecay_application::retained_surfaces::FactStoreSupersedeResultV1",
         )?,
         retained_surface_executable_schema::<FactStoreListRequestV1, FactStoreListResultV1>(
             contribution,
@@ -859,6 +871,7 @@ mod tests {
             "fact_store_get",
             "fact_store_update",
             "fact_store_remove",
+            "fact_store_supersede",
             "fact_store_list",
             "fact_feedback",
         ] {

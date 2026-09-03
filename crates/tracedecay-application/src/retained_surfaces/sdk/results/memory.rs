@@ -161,6 +161,24 @@ pub enum FactStoreRemoveResultV1 {
     },
 }
 
+/// Outcome of an explicit supersession. `superseded` carries the durable
+/// commit receipt of the `Curated { SupersededBy }` lineage event;
+/// `already_superseded` reports the successor already recorded for the fact.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FactStoreSupersedeResultV1 {
+    Superseded {
+        fact_id: FactId,
+        superseded_by: FactId,
+        commit: FactCommitReceiptV1,
+    },
+    AlreadySuperseded {
+        fact_id: FactId,
+        superseded_by: FactId,
+    },
+    NotFound,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FactStoreListResultV1 {

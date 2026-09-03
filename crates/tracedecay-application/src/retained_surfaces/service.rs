@@ -10,12 +10,12 @@ use super::{
     FactFeedbackRequestV1, FactStoreAddRequestV1, FactStoreContradictRequestV1,
     FactStoreCurateRequestV1, FactStoreGetRequestV1, FactStoreListRequestV1,
     FactStoreProbeRequestV1, FactStoreReasonRequestV1, FactStoreRelatedRequestV1,
-    FactStoreRemoveRequestV1, FactStoreSearchRequestV1, FactStoreUpdateRequestV1,
-    LcmDescribeRequestV1, LcmDoctorRequestV1, LcmExpandQueryRequestV1, LcmExpandRequestV1,
-    LcmGrepRequestV1, LcmLoadSessionRequestV1, LcmStatusRequestV1, MemoryStatusRequestV1,
-    MessageSearchRequestV1, RetainedSurfaceOperation, RetainedSurfaceRequestV1,
-    RetainedSurfaceResultV1, SessionRefreshRequestV1, SessionsForRequestV1, WorkflowsRequestV1,
-    retained_surface_application_operation,
+    FactStoreRemoveRequestV1, FactStoreSearchRequestV1, FactStoreSupersedeRequestV1,
+    FactStoreUpdateRequestV1, LcmDescribeRequestV1, LcmDoctorRequestV1, LcmExpandQueryRequestV1,
+    LcmExpandRequestV1, LcmGrepRequestV1, LcmLoadSessionRequestV1, LcmStatusRequestV1,
+    MemoryStatusRequestV1, MessageSearchRequestV1, RetainedSurfaceOperation,
+    RetainedSurfaceRequestV1, RetainedSurfaceResultV1, SessionRefreshRequestV1,
+    SessionsForRequestV1, WorkflowsRequestV1, retained_surface_application_operation,
 };
 use crate::{
     ApplicationOperation, ApplicationOutcome, ApplicationProblem, CancellationSignal,
@@ -94,6 +94,7 @@ pub enum RetainedMemoryRequestV1<'a> {
     FactStoreGet(&'a FactStoreGetRequestV1),
     FactStoreUpdate(&'a FactStoreUpdateRequestV1),
     FactStoreRemove(&'a FactStoreRemoveRequestV1),
+    FactStoreSupersede(&'a FactStoreSupersedeRequestV1),
     FactStoreList(&'a FactStoreListRequestV1),
     FactFeedback(&'a FactFeedbackRequestV1),
     MemoryStatus(&'a MemoryStatusRequestV1),
@@ -324,6 +325,9 @@ fn classify_retained_surface_request(
         RetainedSurfaceRequestV1::FactStoreRemove(request) => {
             RetainedSurfaceDispatch::Memory(RetainedMemoryRequestV1::FactStoreRemove(request))
         }
+        RetainedSurfaceRequestV1::FactStoreSupersede(request) => {
+            RetainedSurfaceDispatch::Memory(RetainedMemoryRequestV1::FactStoreSupersede(request))
+        }
         RetainedSurfaceRequestV1::FactStoreList(request) => {
             RetainedSurfaceDispatch::Memory(RetainedMemoryRequestV1::FactStoreList(request))
         }
@@ -432,6 +436,9 @@ pub(super) fn outcome_matches_operation(
                 RetainedSurfaceOperation::FactStoreRemove,
                 Some(RetainedSurfaceResultV1::FactStoreRemove(_))
             ) | (
+                RetainedSurfaceOperation::FactStoreSupersede,
+                Some(RetainedSurfaceResultV1::FactStoreSupersede(_))
+            ) | (
                 RetainedSurfaceOperation::FactStoreList,
                 Some(RetainedSurfaceResultV1::FactStoreList(_))
             ) | (
@@ -491,6 +498,7 @@ pub const fn retained_surface_operation_is_effect(operation: RetainedSurfaceOper
             | RetainedSurfaceOperation::FactStoreAdd
             | RetainedSurfaceOperation::FactStoreUpdate
             | RetainedSurfaceOperation::FactStoreRemove
+            | RetainedSurfaceOperation::FactStoreSupersede
             | RetainedSurfaceOperation::FactFeedback
             | RetainedSurfaceOperation::SessionRefreshCancel
             | RetainedSurfaceOperation::SessionRefreshBegin

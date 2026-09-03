@@ -275,6 +275,7 @@ const MCP_TOOL_BINDING_SPECS: &[McpToolBinding] = &[
     McpToolBinding { name: "tracedecay_fact_store_get", group: None, project: RegisteredProjectAccess::SelectorOnly },
     McpToolBinding { name: "tracedecay_fact_store_update", group: None, project: RegisteredProjectAccess::SelectorOnly },
     McpToolBinding { name: "tracedecay_fact_store_remove", group: None, project: RegisteredProjectAccess::SelectorOnly },
+    McpToolBinding { name: "tracedecay_fact_store_supersede", group: None, project: RegisteredProjectAccess::SelectorOnly },
     McpToolBinding { name: "tracedecay_fact_store_list", group: None, project: RegisteredProjectAccess::SelectorOnly },
     McpToolBinding { name: "tracedecay_memory_status", group: None, project: RegisteredProjectAccess::SelectorOnly },
     McpToolBinding { name: "tracedecay_message_search", group: None, project: RegisteredProjectAccess::SelectorOnly },
@@ -379,6 +380,7 @@ fn direct_effect(tool_name: &str) -> EffectClass {
         | "tracedecay_fact_store_add"
         | "tracedecay_fact_store_update"
         | "tracedecay_fact_store_remove"
+        | "tracedecay_fact_store_supersede"
         | "tracedecay_fact_feedback"
         | "tracedecay_session_refresh"
         | "tracedecay_session_refresh_begin"
@@ -626,6 +628,7 @@ fn verified_effect_journey(tool_name: &str) -> bool {
             | "tracedecay_fact_store_add"
             | "tracedecay_fact_store_update"
             | "tracedecay_fact_store_remove"
+            | "tracedecay_fact_store_supersede"
             | "tracedecay_fact_feedback"
             | "tracedecay_session_refresh"
             | "tracedecay_session_refresh_begin"
@@ -1089,6 +1092,7 @@ mod tests {
             "tracedecay_fact_store_get",
             "tracedecay_fact_store_update",
             "tracedecay_fact_store_remove",
+            "tracedecay_fact_store_supersede",
             "tracedecay_fact_store_list",
             "tracedecay_memory_status",
         ] {
@@ -1099,6 +1103,7 @@ mod tests {
             "tracedecay_fact_store_add",
             "tracedecay_fact_store_update",
             "tracedecay_fact_store_remove",
+            "tracedecay_fact_store_supersede",
         ] {
             assert!(
                 tool_is_selector_bound_effect(tool_name),

@@ -143,6 +143,7 @@ const MEMORY_TOOLS: &[&str] = &[
     "fact_store_get",
     "fact_store_update",
     "fact_store_remove",
+    "fact_store_supersede",
     "fact_store_list",
 ];
 const EDIT_TOOLS: &[&str] = &[

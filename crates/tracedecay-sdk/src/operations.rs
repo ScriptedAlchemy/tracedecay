@@ -2255,6 +2255,47 @@ typed_operation!(
     1
 );
 
+pub mod application_fact_store_supersede {
+    pub type Request = tracedecay_application::retained_surfaces::FactStoreSupersedeRequestV1;
+    pub type Result = tracedecay_application::retained_surfaces::FactStoreSupersedeResultV1;
+}
+typed_operation!(
+    ApplicationFactStoreSupersede,
+    application_fact_store_supersede,
+    "operation.application.fact_store_supersede",
+    OperationTransport::Http {
+        route: "/application/retained/fact_store_supersede"
+    },
+    "binding.http.fact_store_supersede.v1",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
+    true,
+    &[
+        CancellationPoint::BeforeAdmission,
+        CancellationPoint::BeforeEffect,
+        CancellationPoint::EffectInFlight,
+        CancellationPoint::Reconciling,
+        CancellationPoint::AfterCommit
+    ],
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
+    ReconciliationContract::Required,
+    ReceiptContract::DurableEffect,
+    &[
+        TerminalState::Completed,
+        TerminalState::Cancelled,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::Unavailable,
+        TerminalState::EffectUnknown,
+        TerminalState::Partial
+    ],
+    "schema.application.retained.fact-store-supersede.result",
+    1
+);
+
 pub mod application_fact_store_update {
     pub type Request = tracedecay_application::retained_surfaces::FactStoreUpdateRequestV1;
     pub type Result = tracedecay_application::retained_surfaces::FactStoreUpdateResultV1;

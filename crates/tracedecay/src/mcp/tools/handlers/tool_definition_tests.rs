@@ -299,6 +299,7 @@ fn test_tool_definitions_have_annotations() {
         "tracedecay_fact_store_curate",
         "tracedecay_fact_store_update",
         "tracedecay_fact_store_remove",
+        "tracedecay_fact_store_supersede",
         "tracedecay_fact_feedback",
         "tracedecay_multi_root_scope_set_compare_and_swap",
         "tracedecay_worktree_cleanup_remove",
