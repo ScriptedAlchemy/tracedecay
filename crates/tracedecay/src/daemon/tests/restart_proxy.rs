@@ -537,9 +537,10 @@ async fn initialize_root_routing_replaces_cached_project_and_scope() {
         &mut routed_handshake,
         &line,
     );
+    let first_request = super::super::AuthenticatedFirstRequest::new(line);
     let route = super::super::apply_daemon_initialize_route(
         &mut routed_handshake,
-        &line,
+        &first_request,
         &store_administration,
     )
     .await
@@ -565,10 +566,11 @@ async fn initialize_root_routing_replaces_cached_project_and_scope() {
         &mut routed_handshake,
         &rerun_without_roots,
     );
+    let first_request = super::super::AuthenticatedFirstRequest::new(rerun_without_roots);
     assert!(
         super::super::apply_daemon_initialize_route(
             &mut routed_handshake,
-            &rerun_without_roots,
+            &first_request,
             &store_administration,
         )
         .await
@@ -622,11 +624,15 @@ async fn daemon_resolves_registry_only_initialize_root_alias() {
     })
     .to_string();
 
-    let route =
-        super::super::apply_daemon_initialize_route(&mut handshake, &line, &store_administration)
-            .await
-            .expect("daemon initialize routing should succeed")
-            .expect("authenticated daemon should resolve registry alias");
+    let first_request = super::super::AuthenticatedFirstRequest::new(line);
+    let route = super::super::apply_daemon_initialize_route(
+        &mut handshake,
+        &first_request,
+        &store_administration,
+    )
+    .await
+    .expect("daemon initialize routing should succeed")
+    .expect("authenticated daemon should resolve registry alias");
     assert_eq!(route.project_path, alias);
     assert_eq!(handshake.project_path.as_deref(), Some(alias.as_path()));
     assert!(!route.allow_init);
@@ -688,9 +694,10 @@ async fn initialize_root_routing_fails_closed_without_pinned_configuration() {
         &mut routed_handshake,
         &line,
     );
+    let first_request = super::super::AuthenticatedFirstRequest::new(line);
     super::super::apply_daemon_initialize_route(
         &mut routed_handshake,
-        &line,
+        &first_request,
         &store_administration,
     )
     .await

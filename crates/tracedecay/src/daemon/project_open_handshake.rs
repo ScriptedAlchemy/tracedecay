@@ -169,17 +169,16 @@ fn is_readonly_database_error(err: &TraceDecayError) -> bool {
 
 pub(super) async fn write_project_open_error(
     transport: &mut impl McpTransport,
-    request_line: &str,
+    first_request: &AuthenticatedFirstRequest,
     connection_scope: &str,
     error: &TraceDecayError,
 ) -> Result<()> {
-    let request = serde_json::from_str::<JsonRpcRequest>(request_line).ok();
+    let request = first_request.parsed();
     let response = request
-        .as_ref()
         .and_then(|request| tool_call_open_refusal_response(request, connection_scope, error))
         .unwrap_or_else(|| {
             let id = request
-                .and_then(|request| request.id)
+                .and_then(|request| request.id.clone())
                 .unwrap_or(serde_json::Value::Null);
             project_open_error_response(id, error)
         });
