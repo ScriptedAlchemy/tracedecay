@@ -551,7 +551,8 @@ impl ProductionCodeRerankAuthorityV1 {
         self.executor.as_ref()
     }
 
-    pub fn executor_handle(&self) -> &Arc<dyn MountedRerankExecutorV1> {
+    #[cfg(test)]
+    pub(crate) fn executor_handle(&self) -> &Arc<dyn MountedRerankExecutorV1> {
         &self.executor
     }
 
