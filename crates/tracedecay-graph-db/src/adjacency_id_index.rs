@@ -11,6 +11,11 @@ use std::sync::{Arc, RwLock};
 use crate::{GraphDbError, GraphEntityId, GraphNamespace, GraphRelationId, GraphRelationKind};
 
 const MAX_CACHED_ADJACENCY_INDEXES: usize = 32;
+/// Identity-count cap. Entry count alone is not a memory bound: 32 cached
+/// hubs of 100k ids would pin millions of relation identities for the rest
+/// of the epoch. Evict the map when an insert would push the retained
+/// identity total past this ceiling.
+const MAX_CACHED_ADJACENCY_IDS: usize = 1_000_000;
 
 #[derive(Clone, Eq, Hash, PartialEq)]
 pub(crate) struct AdjacencyIndexKey {
@@ -50,6 +55,7 @@ pub(crate) struct AdjacencyIdIndexCache {
 struct AdjacencyEntries {
     epoch: u64,
     indexes: HashMap<AdjacencyIndexKey, Arc<[GraphRelationId]>>,
+    cached_ids: usize,
 }
 
 impl AdjacencyIdIndexCache {
@@ -84,12 +90,22 @@ impl AdjacencyIdIndexCache {
             .map_err(|_| GraphDbError::unavailable("graph adjacency id cache is poisoned"))?;
         if entries.epoch != epoch {
             entries.indexes.clear();
+            entries.cached_ids = 0;
             entries.epoch = epoch;
         }
-        if entries.indexes.len() >= MAX_CACHED_ADJACENCY_INDEXES {
+        let incoming_ids = ids.len();
+        if entries.indexes.len() >= MAX_CACHED_ADJACENCY_INDEXES
+            || entries.cached_ids.saturating_add(incoming_ids) > MAX_CACHED_ADJACENCY_IDS
+        {
             entries.indexes.clear();
+            entries.cached_ids = 0;
         }
-        entries.indexes.insert(key, Arc::clone(&ids));
+        if incoming_ids <= MAX_CACHED_ADJACENCY_IDS {
+            if let Some(previous) = entries.indexes.insert(key, Arc::clone(&ids)) {
+                entries.cached_ids = entries.cached_ids.saturating_sub(previous.len());
+            }
+            entries.cached_ids = entries.cached_ids.saturating_add(incoming_ids);
+        }
         Ok(ids)
     }
 }

@@ -102,7 +102,17 @@ fn apply_star(
     spokes: usize,
     incoming: bool,
 ) -> GraphEntityId {
-    let hub = "hub";
+    apply_named_star(db, "hub", "spoke", "edge", spokes, incoming)
+}
+
+fn apply_named_star(
+    db: &tracedecay_graph_db::GraphDbLeaseV1,
+    hub: &str,
+    spoke_prefix: &str,
+    edge_prefix: &str,
+    spokes: usize,
+    incoming: bool,
+) -> GraphEntityId {
     let mut mutations = vec![GraphMutation::UpsertEntity(entity(hub))];
     let mut batch_no = 0_usize;
     let flush = |batch_no: &mut usize, mutations: &mut Vec<GraphMutation>| {
@@ -114,8 +124,8 @@ fn apply_star(
             GraphWriteBatch::new(
                 namespace(),
                 projection("code"),
-                SourceGeneration::new(format!("g{batch_no}")).unwrap(),
-                GraphWatermark::new(format!("w{batch_no}")).unwrap(),
+                SourceGeneration::new(format!("g{batch_no}-{hub}")).unwrap(),
+                GraphWatermark::new(format!("w{batch_no}-{hub}")).unwrap(),
                 std::mem::take(mutations),
                 live(),
             )
@@ -124,8 +134,8 @@ fn apply_star(
         .unwrap();
     };
     for index in 0..spokes {
-        let spoke = format!("spoke-{index:06}");
-        let edge = format!("edge-{index:06}");
+        let spoke = format!("{spoke_prefix}-{index:06}");
+        let edge = format!("{edge_prefix}-{index:06}");
         mutations.push(GraphMutation::UpsertEntity(entity(&spoke)));
         mutations.push(GraphMutation::UpsertRelation(if incoming {
             fat_relation(&edge, &spoke, hub)
@@ -383,5 +393,81 @@ fn paged_ids_refuse_foreign_namespace_and_absent_start() {
         filtered,
         vec![Vec::<GraphRelationId>::new()],
         "a kind filter must not leak another kind's identities"
+    );
+}
+
+#[test]
+fn refuse_mode_stops_at_budget_without_caching_index() {
+    let db = memory_db();
+    let hub = apply_star(&db, STAR, false);
+    let starts = [hub];
+    let _ = take_graph_db_traversal_counters();
+
+    assert_eq!(
+        db.outgoing_relation_ids(&namespace(), &starts, &kinds(), 8, live())
+            .unwrap_err(),
+        GraphDbError::budget_exhausted(GraphBudgetKind::Read, 8)
+    );
+    let refused = take_graph_db_traversal_counters();
+    assert!(
+        refused.relation_identity_decodes <= 9,
+        "refuse must stop at budget+1 edges, not the full star; observed {} identity decodes",
+        refused.relation_identity_decodes
+    );
+    assert_eq!(
+        refused.adjacency_index_builds, 0,
+        "a refused complete read must not publish an adjacency index"
+    );
+
+    let page = db
+        .outgoing_relation_ids_page(&namespace(), &starts, &kinds(), None, PAGE, live())
+        .unwrap();
+    let paged = take_graph_db_traversal_counters();
+    assert_eq!(page[0], expected_edge_ids(STAR)[..PAGE]);
+    assert!(
+        paged.adjacency_index_builds >= 1,
+        "a following paged read must still build the index; refuse must not have cached it"
+    );
+
+    let _ = take_graph_db_traversal_counters();
+    assert_eq!(
+        db.outgoing_relation_ids(&namespace(), &starts, &kinds(), 8, live())
+            .unwrap_err(),
+        GraphDbError::budget_exhausted(GraphBudgetKind::Read, 8)
+    );
+    let cached_refuse = take_graph_db_traversal_counters();
+    assert_eq!(
+        cached_refuse.relation_identity_decodes, 0,
+        "a cached over-budget refuse must not re-decode identities"
+    );
+    assert_eq!(cached_refuse.adjacency_index_builds, 0);
+    assert!(
+        cached_refuse.adjacency_index_hits >= 1,
+        "over-budget refuse after a paged build must use the cached index"
+    );
+}
+
+#[test]
+fn paged_ids_honor_limit_per_start() {
+    let db = memory_db();
+    let hub_a = apply_star(&db, 32, false);
+    let hub_b = apply_named_star(&db, "hub-b", "hub-b-spoke", "hub-b-edge", 32, false);
+    let starts = [hub_a, hub_b];
+
+    let pages = db
+        .outgoing_relation_ids_page(&namespace(), &starts, &kinds(), None, PAGE, live())
+        .unwrap();
+    assert_eq!(pages.len(), 2, "each start must receive its own page slot");
+    assert_eq!(
+        pages[0].len(),
+        PAGE,
+        "first hub must receive a full per-start page, not a shared leftover; got {}",
+        pages[0].len()
+    );
+    assert_eq!(
+        pages[1].len(),
+        PAGE,
+        "second hub must receive a full per-start page, not an empty leftover from a total cap; got {}",
+        pages[1].len()
     );
 }
