@@ -174,6 +174,18 @@ mod tests {
     }
 
     #[test]
+    fn unicode_escape_prevents_dispatch_prefilter() {
+        assert!(
+            record_bytes_may_name_subagent_dispatch(br#"{"name":"\u0074ask"}"#),
+            "escaped tool name `\\u0074ask` must pass the byte prefilter"
+        );
+        assert!(
+            record_bytes_may_name_subagent_dispatch(br#"{"text":"prefix \u0073uffix"}"#),
+            "any JSON unicode escape must fail-open the prefilter"
+        );
+    }
+
+    #[test]
     fn subagent_dispatch_tools_match_case_insensitively() {
         for name in ["task", "Task", "TASK", "subagent", "SubAgent"] {
             assert!(is_subagent_dispatch_tool(name), "{name} is a dispatch tool");
