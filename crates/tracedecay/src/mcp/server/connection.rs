@@ -1160,7 +1160,7 @@ impl McpServer {
                             Arc::clone(self),
                             request.clone(),
                             timings_enabled,
-                            connection_route.fork_for_independent_read(),
+                            connection_route.fork_for_connection_owned_read(),
                             request_activity,
                             cancellation,
                             connection_shutdown.clone(),
@@ -1921,6 +1921,54 @@ mod cancellable_queue_tests {
             .await
             .expect("join concurrent connection")
             .expect("serve concurrent connection");
+        fixture.harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn ordinary_connection_read_has_one_connection_task_owner() {
+        let fixture = DelayedRouteFixture::new().await;
+        let registry = fixture.caller.dispatch_authority.registry();
+        let retained_before = registry.retained_spawn_count_for_test();
+        let connection_owned_before = registry.connection_owned_count_for_test();
+        let (mut transport, sender, mut responses) =
+            tracedecay_mcp::transport::ChannelTransport::new();
+        let serving = tokio::spawn({
+            let caller = Arc::clone(&fixture.caller);
+            async move { caller.run_connection(&mut transport).await }
+        });
+
+        sender
+            .send(
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "tracedecay_status",
+                        "arguments": {"admission_only": true}
+                    }
+                })
+                .to_string(),
+            )
+            .expect("send ordinary connection read");
+        assert_eq!(receive_response(&mut responses).await["id"], json!(3));
+
+        assert_eq!(
+            registry.retained_spawn_count_for_test(),
+            retained_before,
+            "the connection's active-read task must be the sole task owner"
+        );
+        assert_eq!(
+            registry.connection_owned_count_for_test(),
+            connection_owned_before + 1,
+            "one inline registry lease must cover the ordinary read"
+        );
+
+        drop(sender);
+        serving
+            .await
+            .expect("join ordinary read connection")
+            .expect("serve ordinary read connection");
         fixture.harness.shutdown().await;
     }
 

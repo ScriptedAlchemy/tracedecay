@@ -1561,33 +1561,42 @@ impl McpServer {
         let worker_server = dispatch_server.dispatch_authority.server();
         let worker_tool_name = tool_name.clone();
         let worker_control = control.clone();
-        let retained = control
-            .run_retained(dispatch_server.dispatch_authority.registry(), async move {
-                let server = worker_server.upgrade().ok_or_else(|| {
-                    TraceDecayError::project_route(
-                        "tool_dispatch_shutdown",
-                        true,
-                        "MCP server was released before retained dispatch admission",
-                    )
-                })?;
-                Ok(server
-                    .dispatch_routed_tool_call(
-                        &worker_tool_name,
-                        routed,
-                        timings_enabled,
-                        !fast_unavailable,
-                        application_request_id,
-                        worker_control,
-                    )
-                    .await)
-            })
-            .await;
+        let worker = async move {
+            let server = worker_server.upgrade().ok_or_else(|| {
+                TraceDecayError::project_route(
+                    "tool_dispatch_shutdown",
+                    true,
+                    "MCP server was released before retained dispatch admission",
+                )
+            })?;
+            Ok(server
+                .dispatch_routed_tool_call(
+                    &worker_tool_name,
+                    routed,
+                    timings_enabled,
+                    !fast_unavailable,
+                    application_request_id,
+                    worker_control,
+                )
+                .await)
+        };
+        let dispatch_outcome = if connection.connection_owns_dispatch()
+            && control.permits_connection_owned_execution()
+        {
+            control
+                .run_connection_owned(dispatch_server.dispatch_authority.registry(), worker)
+                .await
+        } else {
+            control
+                .run_retained(dispatch_server.dispatch_authority.registry(), worker)
+                .await
+        };
         tracing::trace!(
             tool_name,
-            settlement = ?retained.settlement(),
+            settlement = ?dispatch_outcome.settlement(),
             "MCP tool dispatch settled"
         );
-        let dispatch = match retained.result {
+        let dispatch = match dispatch_outcome.result {
             Ok(dispatch) => dispatch,
             Err(failure) => {
                 connection.clear_selected_response_lease();
