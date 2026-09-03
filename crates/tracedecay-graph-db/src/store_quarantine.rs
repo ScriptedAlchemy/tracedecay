@@ -77,10 +77,10 @@ struct GraphStoreQuarantineReceiptV1 {
 
 /// Outcome of the corruption recovery protocol for one mount attempt.
 #[derive(Debug)]
-pub(crate) enum CorruptStoreRecovery {
+pub(crate) enum CorruptStoreRecovery<T = Arc<GraphDb>> {
     /// The verification reopen succeeded: the first verdict did not
     /// reproduce, so the live database is served and nothing was moved.
-    Reopened(Arc<GraphDb>),
+    Reopened(T),
     /// The fault reproduced byte-identically and the container family was
     /// moved into the returned quarantine directory. The live path is vacant
     /// and the caller reopens it as a fresh store.
@@ -97,6 +97,14 @@ pub(crate) fn recover_deterministically_corrupt_container(
     first_fault: &str,
     verification_open: &dyn Fn() -> Result<Arc<GraphDb>, GraphDbError>,
 ) -> Result<CorruptStoreRecovery, GraphDbError> {
+    recover_deterministically_corrupt_container_with(container, first_fault, verification_open)
+}
+
+pub(crate) fn recover_deterministically_corrupt_container_with<T>(
+    container: &Path,
+    first_fault: &str,
+    verification_open: &dyn Fn() -> Result<T, GraphDbError>,
+) -> Result<CorruptStoreRecovery<T>, GraphDbError> {
     let _decision_lock = acquire_quarantine_decision_lock(container)?;
 
     // Re-verify under the decision lock: quarantine only adopts a store

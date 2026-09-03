@@ -529,13 +529,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                         let graph_port: Arc<
                             dyn tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1,
                         > = runtime.clone();
-                        let activation = task_database
-                            .bind_memory_graph_runtime(graph_port)
-                            .and_then(|()| {
-                                super::code_graph::schedule_bound_memory_graph_reconciliation(
-                                    &task_database,
-                                )
-                            });
+                        let activation = task_database.bind_memory_graph_runtime(graph_port);
                         let reconciliation = activation
                             .as_ref()
                             .ok()

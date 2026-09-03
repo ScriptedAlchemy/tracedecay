@@ -8,16 +8,13 @@ use tracedecay_graph_db::{
     GraphDbError, GraphGenerationManifest, GraphIdempotencyKey, GraphProjectionIdentity,
     VerifiedGraphSnapshot,
 };
-use tracedecay_runtime_core::store::memory::{
-    ProjectMemoryGraphReconciliationScheduleV1, schedule_project_memory_graph_reconciliation,
-};
 use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_store::{
     FactReadControl, GraphPublicationInputDigestV1, GraphPublicationKeyV1, StoreShardIdV1,
     StoreShardScopeV1,
 };
 
-use super::super::{DaemonSessionRuntimeRegistryV1, Result, session_registry_error};
+use super::super::{DaemonSessionRuntimeRegistryV1, session_registry_error};
 
 pub fn inline_graph_publication_input_digest(
     publication_key: &GraphPublicationKeyV1,
@@ -33,26 +30,6 @@ pub fn inline_graph_publication_input_digest(
         .map_err(|error| GraphDbError::invalid(error.to_string()))
 }
 
-pub fn schedule_bound_memory_graph_reconciliation(
-    database: &tracedecay_runtime_core::db::Database,
-) -> Result<()> {
-    match schedule_project_memory_graph_reconciliation(database.clone()) {
-        ProjectMemoryGraphReconciliationScheduleV1::Scheduled
-        | ProjectMemoryGraphReconciliationScheduleV1::AlreadyScheduled => Ok(()),
-        ProjectMemoryGraphReconciliationScheduleV1::Retiring => Err(session_registry_error(
-            "schedule verified memory graph reconciliation",
-            "memory graph reconciliation is fenced for runtime retirement".to_owned(),
-        )),
-        ProjectMemoryGraphReconciliationScheduleV1::NotMounted => Err(session_registry_error(
-            "schedule verified memory graph reconciliation",
-            "writable memory database has no bound verified graph runtime".to_owned(),
-        )),
-        ProjectMemoryGraphReconciliationScheduleV1::LifecycleClosed => Err(session_registry_error(
-            "schedule verified memory graph reconciliation",
-            "memory graph reconciliation lifecycle is closed".to_owned(),
-        )),
-    }
-}
 use super::RetainedVerifiedGraphRuntimeV1;
 
 impl RetainedVerifiedGraphRuntimeV1 {
@@ -122,7 +99,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         &self,
         shard_id: StoreShardIdV1,
         database: tracedecay_runtime_core::db::DatabaseOwnerV1,
-    ) -> Result<RetainedVerifiedGraphRuntimeV1> {
+    ) -> super::super::Result<RetainedVerifiedGraphRuntimeV1> {
         Self::retain_memory_graph_runtime_for_task(
             self.identity.clone(),
             self.registry.clone(),

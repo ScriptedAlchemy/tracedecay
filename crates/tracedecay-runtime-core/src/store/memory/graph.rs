@@ -110,7 +110,6 @@ pub(super) async fn project_memory_graph(
     let fact_runtime =
         super::runtime::retained_fact_runtime(db)?.ok_or(FactStoreError::GraphUnavailable)?;
     super::runtime::validate_owner_binding(fact_runtime.binding(), &owner, OPERATION)?;
-    let runtime = issue_memory_graph_operation(db)?;
     let namespace = namespace(&owner)?;
     let projection =
         GraphProjectionId::new(PROJECTION).map_err(|error| graph_error(&owner, error))?;
@@ -120,17 +119,7 @@ pub(super) async fn project_memory_graph(
         expected_source_watermark(db, &owner, Some(read_control)).await?;
     let expected_generation = generation_for_watermark(&owner, &expected_watermark)?;
     ensure_source_read_active(Some(read_control))?;
-    let control_for_snapshot = read_control.clone();
-    let projection_for_snapshot = projection_identity.clone();
-    let verified_snapshot = tokio::task::spawn_blocking(move || {
-        runtime
-            .runtime()
-            .verified_snapshot(&projection_for_snapshot, control_for_snapshot)
-    })
-    .await
-    .map_err(|error| storage_error(OPERATION, error))?
-    .map_err(|error| graph_error(&owner, error))?
-    .ok_or(FactStoreError::GraphUnavailable)?;
+    let verified_snapshot = reconcile_project_memory_graph_pass(db, Some(read_control)).await?;
     if verified_snapshot.projection() != &projection_identity
         || verified_snapshot.generation() != &expected_generation
     {
@@ -310,8 +299,8 @@ pub(super) fn schedule_project_memory_graph_reconciliation(
         let Some(db) = weak_db.upgrade() else {
             return true;
         };
-        match reconcile_project_memory_graph_pass(&db).await {
-            Ok(()) => true,
+        match reconcile_project_memory_graph_pass(&db, None).await {
+            Ok(_) => true,
             Err(error) => {
                 hotpath::gauge!("runtime_core.memory_graph.pass_failures").inc(1.0);
                 tracing::warn!(
@@ -341,7 +330,10 @@ pub(super) fn schedule_project_memory_graph_reconciliation(
 /// build) then apply (verified-manifest publication). The Hotpath span is the
 /// sweep's wall-time authority; per-node work is deliberately unmeasured.
 #[hotpath::measure(label = "runtime_core.memory_graph.reconcile_pass")]
-async fn reconcile_project_memory_graph_pass(db: &Database) -> FactStoreResult<()> {
+async fn reconcile_project_memory_graph_pass(
+    db: &Database,
+    read_control: Option<&FactReadControl>,
+) -> FactStoreResult<tracedecay_graph_db::VerifiedGraphSnapshot> {
     let _pass = db
         .begin_project_memory_reconciliation_pass()
         .map_err(|counter| {
@@ -358,12 +350,12 @@ async fn reconcile_project_memory_graph_pass(db: &Database) -> FactStoreResult<(
         namespace(&owner)?,
         GraphProjectionId::new(PROJECTION).map_err(|error| graph_error(&owner, error))?,
     );
-    let loaded = load_source(db, &owner, None, Some(db)).await?;
+    let loaded = load_source(db, &owner, read_control, Some(db)).await?;
     hotpath::gauge!("runtime_core.memory_graph.source_entities")
         .set(loaded.source.entities.len() as f64);
     hotpath::gauge!("runtime_core.memory_graph.source_relations")
         .set(loaded.source.relations.len() as f64);
-    let watermark = source_watermark(&owner, &loaded.source, None)?;
+    let watermark = source_watermark(&owner, &loaded.source, read_control)?;
     if let Some(stamp) = loaded.lineage_stamp {
         db.record_memory_graph_source_watermark(stamp, watermark.clone());
     }
@@ -390,6 +382,7 @@ async fn reconcile_project_memory_graph_pass(db: &Database) -> FactStoreResult<(
                 format!("project memory reconciliation telemetry overflowed: {counter}"),
             )
         })?;
+    ensure_source_read_active(read_control)?;
     let runtime = issue_memory_graph_operation(db)?;
     let snapshot = match tokio::task::spawn_blocking(move || {
         hotpath::measure_block!(
@@ -411,21 +404,28 @@ async fn reconcile_project_memory_graph_pass(db: &Database) -> FactStoreResult<(
             tracing::warn!(%error, "memory graph verified-manifest publication failed");
             let mapped = graph_error(&owner, error);
             if matches!(mapped, FactStoreError::GraphConflict)
-                && verified_head_matches_expected(db, &projection, &expected_generation, &owner)
-                    .await?
+                && let Some(snapshot) =
+                    verified_head_matching(db, &projection, &expected_generation, &owner).await?
             {
-                return finish_reconciliation_watermark(db, &owner, watermark, source_stamp).await;
+                finish_reconciliation_watermark(db, &owner, watermark, source_stamp, read_control)
+                    .await?;
+                return Ok(snapshot);
             }
             return Err(mapped);
         }
     };
     if snapshot.projection() != &projection || snapshot.generation() != &expected_generation {
-        if verified_head_matches_expected(db, &projection, &expected_generation, &owner).await? {
-            return finish_reconciliation_watermark(db, &owner, watermark, source_stamp).await;
+        if let Some(snapshot) =
+            verified_head_matching(db, &projection, &expected_generation, &owner).await?
+        {
+            finish_reconciliation_watermark(db, &owner, watermark, source_stamp, read_control)
+                .await?;
+            return Ok(snapshot);
         }
         return Err(FactStoreError::GraphConflict);
     }
-    finish_reconciliation_watermark(db, &owner, watermark, source_stamp).await
+    finish_reconciliation_watermark(db, &owner, watermark, source_stamp, read_control).await?;
+    Ok(snapshot)
 }
 
 async fn finish_reconciliation_watermark(
@@ -433,12 +433,13 @@ async fn finish_reconciliation_watermark(
     owner: &FactOwnerV1,
     watermark: tracedecay_graph_db::GraphWatermark,
     source_stamp: Option<i64>,
+    read_control: Option<&FactReadControl>,
 ) -> FactStoreResult<()> {
-    if source_unchanged_since(db, source_stamp, None).await? {
+    if source_unchanged_since(db, source_stamp, read_control).await? {
         return Ok(());
     }
-    let reloaded = load_source(db, owner, None, Some(db)).await?;
-    let reloaded_watermark = source_watermark(owner, &reloaded.source, None)?;
+    let reloaded = load_source(db, owner, read_control, Some(db)).await?;
+    let reloaded_watermark = source_watermark(owner, &reloaded.source, read_control)?;
     if let Some(stamp) = reloaded.lineage_stamp {
         db.record_memory_graph_source_watermark(stamp, reloaded_watermark.clone());
     }
@@ -448,12 +449,12 @@ async fn finish_reconciliation_watermark(
     Ok(())
 }
 
-async fn verified_head_matches_expected(
+async fn verified_head_matching(
     db: &Database,
     projection: &GraphProjectionIdentity,
     expected_generation: &tracedecay_graph_db::GraphGenerationId,
     owner: &FactOwnerV1,
-) -> FactStoreResult<bool> {
+) -> FactStoreResult<Option<tracedecay_graph_db::VerifiedGraphSnapshot>> {
     let runtime = issue_memory_graph_operation(db)?;
     let projection_for_read = projection.clone();
     let snapshot = tokio::task::spawn_blocking(move || {
@@ -465,7 +466,7 @@ async fn verified_head_matches_expected(
     .await
     .map_err(|error| storage_error(OPERATION, error))?
     .map_err(|error| graph_error(owner, error))?;
-    Ok(snapshot.is_some_and(|snapshot| {
+    Ok(snapshot.filter(|snapshot| {
         snapshot.projection() == projection && snapshot.generation() == expected_generation
     }))
 }
@@ -478,8 +479,8 @@ fn issue_memory_graph_operation(
 }
 
 pub(super) async fn publish_project_memory_graph_after_write(db: Database) {
-    match reconcile_project_memory_graph_pass(&db).await {
-        Ok(()) => {}
+    match reconcile_project_memory_graph_pass(&db, None).await {
+        Ok(_) => {}
         Err(error) => {
             hotpath::gauge!("runtime_core.memory_graph.pass_failures").inc(1.0);
             tracing::warn!(
