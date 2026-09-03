@@ -119,86 +119,97 @@ pub(super) async fn validate_receipt_authority_rows(
     let mut high_water = after_rowid;
     let mut audited = 0;
     loop {
-        let mut rows = conn
-            .query(
-                "SELECT rowid, receipt_id, sanitizer_version, payload_digest, receipt_json
-             FROM sanitization_receipts WHERE rowid > ?1 ORDER BY rowid LIMIT ?2",
-                params![high_water, AUDIT_PAGE_ROWS],
-            )
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let mut page_rows = 0_i64;
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?
-        {
-            page_rows += 1;
-            high_water = row
-                .get::<i64>(0)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let receipt_id = row
-                .get::<String>(1)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let sanitizer_version = row
-                .get::<String>(2)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let payload_digest = row
-                .get::<String>(3)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let receipt_json = row
-                .get::<String>(4)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            if sanitizer_version == SUMMARY_PUBLICATION_SANITIZER_VERSION {
-                let receipt: FrozenPublicationReceipt = decode_authority_json(
-                    &receipt_json,
-                    "summary publication receipt authority JSON",
-                )?;
-                let is_digest = |value: &str| {
-                    value.len() == 64
-                        && value
-                            .bytes()
-                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-                };
-                if receipt_id != summary_receipt_id(&receipt.summary_id, &payload_digest)
-                    || receipt.disposition != "accepted"
-                    || receipt.generation <= 0
-                    || receipt.published_at <= 0
-                    || !is_digest(&payload_digest)
-                    || !is_digest(&receipt.publication_manifest_digest)
-                    || serde_json::from_str::<serde_json::Value>(&receipt.frozen_watermarks_json)
-                        .is_err()
-                    || serde_json::from_str::<serde_json::Value>(&receipt.source_horizon_json)
-                        .is_err()
-                {
-                    return Err(authority_violation(
-                        "summary publication receipt authority columns disagree with receipt JSON",
-                    ));
-                }
-                audited += 1;
-                continue;
-            }
-            let receipt: SanitizationReceiptV1 =
-                decode_authority_json(&receipt_json, "sanitization receipt authority JSON")?;
-            let receipt_ref = receipt.receipt();
-            let expected_payload_digest = receipt
-                .payload()
-                .map_or("", |payload| payload.digest().as_str());
-            if receipt_ref.receipt_id().as_str() != receipt_id
-                || receipt_ref.sanitizer_version().as_str() != sanitizer_version
-                || expected_payload_digest != payload_digest
-            {
-                return Err(authority_violation(
-                    "sanitization receipt authority columns disagree with receipt JSON",
-                ));
-            }
-            audited += 1;
-        }
-        drop(rows);
-        if page_rows < AUDIT_PAGE_ROWS {
+        let (next, page_audited, complete) =
+            validate_receipt_authority_page(conn, high_water).await?;
+        high_water = next;
+        audited += page_audited;
+        if complete {
             return Ok((high_water, audited));
         }
     }
+}
+
+#[hotpath::measure(future = true, label = "global_db.schema_contract.audit.receipt_rows")]
+pub(super) async fn validate_receipt_authority_page(
+    conn: &impl QueryExecutor,
+    after_rowid: i64,
+) -> tracedecay_domain::errors::Result<(i64, i64, bool)> {
+    let mut high_water = after_rowid;
+    let mut audited = 0;
+    let mut rows = conn
+        .query(
+            "SELECT rowid, receipt_id, sanitizer_version, payload_digest, receipt_json
+             FROM sanitization_receipts WHERE rowid > ?1 ORDER BY rowid LIMIT ?2",
+            params![high_water, AUDIT_PAGE_ROWS],
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    let mut page_rows = 0_i64;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?
+    {
+        page_rows += 1;
+        high_water = row
+            .get::<i64>(0)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let receipt_id = row
+            .get::<String>(1)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let sanitizer_version = row
+            .get::<String>(2)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let payload_digest = row
+            .get::<String>(3)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let receipt_json = row
+            .get::<String>(4)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        if sanitizer_version == SUMMARY_PUBLICATION_SANITIZER_VERSION {
+            let receipt: FrozenPublicationReceipt =
+                decode_authority_json(&receipt_json, "summary publication receipt authority JSON")?;
+            let is_digest = |value: &str| {
+                value.len() == 64
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            };
+            if receipt_id != summary_receipt_id(&receipt.summary_id, &payload_digest)
+                || receipt.disposition != "accepted"
+                || receipt.generation <= 0
+                || receipt.published_at <= 0
+                || !is_digest(&payload_digest)
+                || !is_digest(&receipt.publication_manifest_digest)
+                || serde_json::from_str::<serde_json::Value>(&receipt.frozen_watermarks_json)
+                    .is_err()
+                || serde_json::from_str::<serde_json::Value>(&receipt.source_horizon_json).is_err()
+            {
+                return Err(authority_violation(
+                    "summary publication receipt authority columns disagree with receipt JSON",
+                ));
+            }
+            audited += 1;
+            continue;
+        }
+        let receipt: SanitizationReceiptV1 =
+            decode_authority_json(&receipt_json, "sanitization receipt authority JSON")?;
+        let receipt_ref = receipt.receipt();
+        let expected_payload_digest = receipt
+            .payload()
+            .map_or("", |payload| payload.digest().as_str());
+        if receipt_ref.receipt_id().as_str() != receipt_id
+            || receipt_ref.sanitizer_version().as_str() != sanitizer_version
+            || expected_payload_digest != payload_digest
+        {
+            return Err(authority_violation(
+                "sanitization receipt authority columns disagree with receipt JSON",
+            ));
+        }
+        audited += 1;
+    }
+    drop(rows);
+    Ok((high_water, audited, page_rows < AUDIT_PAGE_ROWS))
 }
 
 pub(super) async fn validate_observation_authority_rows(
@@ -208,9 +219,25 @@ pub(super) async fn validate_observation_authority_rows(
     let mut high_water = after_sequence;
     let mut audited = 0;
     loop {
-        let mut rows = conn
-            .query(
-                "SELECT observation.sequence, observation.observation_id,
+        let (next, page_audited, complete) =
+            validate_observation_authority_page(conn, high_water).await?;
+        high_water = next;
+        audited += page_audited;
+        if complete {
+            return Ok((high_water, audited));
+        }
+    }
+}
+
+pub(super) async fn validate_observation_authority_page(
+    conn: &impl QueryExecutor,
+    after_sequence: i64,
+) -> tracedecay_domain::errors::Result<(i64, i64, bool)> {
+    let mut high_water = after_sequence;
+    let mut audited = 0;
+    let mut rows = conn
+        .query(
+            "SELECT observation.sequence, observation.observation_id,
                     observation.payload_digest, observation.receipt_id,
                     observation.observation_json, observation.committed_cursor_json,
                     receipt.receipt_id
@@ -218,75 +245,72 @@ pub(super) async fn validate_observation_authority_rows(
              LEFT JOIN sanitization_receipts AS receipt
                ON receipt.receipt_id = observation.receipt_id
              WHERE observation.sequence > ?1 ORDER BY observation.sequence LIMIT ?2",
-                params![high_water, OBSERVATION_AUDIT_PAGE_ROWS],
-            )
-            .await
+            params![high_water, OBSERVATION_AUDIT_PAGE_ROWS],
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    let mut page_rows = 0_i64;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?
+    {
+        page_rows += 1;
+        let sequence = row
+            .get::<i64>(0)
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let mut page_rows = 0_i64;
-        while let Some(row) = rows
-            .next()
-            .await
+        high_water = sequence;
+        let observation_id = row
+            .get::<String>(1)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let payload_digest = row
+            .get::<String>(2)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let receipt_id = row
+            .get::<String>(3)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let observation_json = row
+            .get::<String>(4)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let cursor_json = row
+            .get::<String>(5)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let Some(joined_receipt_id) = row
+            .get::<Option<String>>(6)
             .map_err(|error| global_db_operation_error(OPERATION, error))?
-        {
-            page_rows += 1;
-            let sequence = row
-                .get::<i64>(0)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            high_water = sequence;
-            let observation_id = row
-                .get::<String>(1)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let payload_digest = row
-                .get::<String>(2)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let receipt_id = row
-                .get::<String>(3)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let observation_json = row
-                .get::<String>(4)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let cursor_json = row
-                .get::<String>(5)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let Some(joined_receipt_id) = row
-                .get::<Option<String>>(6)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?
-            else {
-                return Err(authority_violation(
-                    "committed observation references a missing receipt",
-                ));
-            };
+        else {
+            return Err(authority_violation(
+                "committed observation references a missing receipt",
+            ));
+        };
 
-            let observation: DurableObservationV1 =
-                decode_authority_json(&observation_json, "committed observation authority JSON")?;
-            let cursor: ObservationSourceCursorV1 =
-                decode_authority_json(&cursor_json, "committed source cursor authority JSON")?;
-            if sequence <= 0
-                || observation.observation_id().as_str() != observation_id
-                || observation.payload_reference().digest().as_str() != payload_digest
-                || observation.receipt().receipt().receipt_id().as_str() != receipt_id
-                || joined_receipt_id != receipt_id
-            {
-                return Err(authority_violation(
-                    "committed observation authority columns disagree with observation JSON",
-                ));
-            }
-            if cursor.source() != observation.source()
-                || cursor.scope() != observation.scope()
-                || cursor.generation() != observation.identity().generation()
-                || cursor.position() != observation.identity().position().end()
-            {
-                return Err(authority_violation(
-                    "committed source cursor disagrees with observation source evidence",
-                ));
-            }
-            audited += 1;
+        let observation: DurableObservationV1 =
+            decode_authority_json(&observation_json, "committed observation authority JSON")?;
+        let cursor: ObservationSourceCursorV1 =
+            decode_authority_json(&cursor_json, "committed source cursor authority JSON")?;
+        if sequence <= 0
+            || observation.observation_id().as_str() != observation_id
+            || observation.payload_reference().digest().as_str() != payload_digest
+            || observation.receipt().receipt().receipt_id().as_str() != receipt_id
+            || joined_receipt_id != receipt_id
+        {
+            return Err(authority_violation(
+                "committed observation authority columns disagree with observation JSON",
+            ));
         }
-        drop(rows);
-        if page_rows < OBSERVATION_AUDIT_PAGE_ROWS {
-            return Ok((high_water, audited));
+        if cursor.source() != observation.source()
+            || cursor.scope() != observation.scope()
+            || cursor.generation() != observation.identity().generation()
+            || cursor.position() != observation.identity().position().end()
+        {
+            return Err(authority_violation(
+                "committed source cursor disagrees with observation source evidence",
+            ));
         }
+        audited += 1;
     }
+    drop(rows);
+    Ok((high_water, audited, page_rows < OBSERVATION_AUDIT_PAGE_ROWS))
 }
 
 pub(super) async fn validate_source_cursor_authority_rows(
@@ -709,15 +733,20 @@ mod tests {
         )
         .await
         .expect("seed corrupt cursor keys");
+        transaction
+            .commit()
+            .await
+            .expect("commit corrupt cursor fixture");
+        let database = harness.registered.runtime_database();
 
         // Fresh creation skips the row audits, so the seeded corruption is not
         // scanned even with force_exhaustive requested.
-        super::super::ensure_authority_invariants(conn, true, true)
+        super::super::ensure_authority_invariants(database, true, true)
             .await
             .expect("fresh creation skips the row audits");
 
         // A reopen audits exhaustively and rejects the same corruption.
-        let error = super::super::ensure_authority_invariants(conn, true, false)
+        let error = super::super::ensure_authority_invariants(database, true, false)
             .await
             .expect_err("reopen must run the exhaustive audit");
         assert!(

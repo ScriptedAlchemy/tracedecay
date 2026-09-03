@@ -166,7 +166,11 @@ async fn wait_for_schema_convergence(
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             if let Some(status) = registry.registered_schema_convergence_status(shard_id)
-                && !matches!(status, RegisteredSchemaConvergenceStatus::Pending)
+                && !matches!(
+                    status,
+                    RegisteredSchemaConvergenceStatus::Pending
+                        | RegisteredSchemaConvergenceStatus::Running
+                )
             {
                 return status;
             }
@@ -540,6 +544,7 @@ async fn concurrent_profile_sessions_mounts_singleflight_schema_admission() {
     let registry = DaemonSessionRuntimeRegistryV1::open_with_session_maintenance(identity, true)
         .await
         .expect("session runtime registry");
+    let convergence_gate = registry.block_registered_schema_convergence_for_test();
 
     let (first, second, third, fourth) = tokio::join!(
         registry.profile_sessions(),
@@ -553,11 +558,18 @@ async fn concurrent_profile_sessions_mounts_singleflight_schema_admission() {
         assert!(!first.shares_client_with(&mounted));
         assert_eq!(first.binding(), mounted.binding());
     }
+    convergence_gate.wait_until_blocked().await;
     assert_eq!(
         registry.registered_schema_convergence_schedule_count_for_test(),
         1,
         "one retained mount must schedule schema convergence exactly once"
     );
+    assert_eq!(
+        registry.registered_schema_convergence_execution_count_for_test(),
+        1,
+        "concurrent equivalent requests must execute convergence exactly once"
+    );
+    convergence_gate.release();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -809,7 +821,7 @@ async fn daemon_admission_remains_ready_while_lcm_indexes_converge_in_background
 
     assert_eq!(
         registry.registered_schema_convergence_status(&shard_id),
-        Some(RegisteredSchemaConvergenceStatus::Pending)
+        Some(RegisteredSchemaConvergenceStatus::Running)
     );
     {
         let snapshot = database
@@ -938,7 +950,66 @@ async fn duplicate_project_attaches_schedule_one_historical_convergence() {
         1,
         "the retained registry must deduplicate convergence tasks"
     );
+    assert_eq!(
+        registry.registered_schema_convergence_execution_count_for_test(),
+        1,
+        "the retained registry must execute the coalesced convergence once"
+    );
     convergence_gate.release();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn schema_convergence_runs_one_shard_while_other_shards_remain_pending() {
+    let (_temporary, identity, project_id, project_root, _sessions_path, _database_scope) =
+        project_sessions_pending_convergence("project.schema-concurrency").await;
+    let registry = DaemonSessionRuntimeRegistryV1::open_with_session_maintenance(identity, true)
+        .await
+        .expect("session runtime registry");
+    let convergence_gate = registry.block_registered_schema_convergence_for_test();
+
+    let profile = registry
+        .profile_sessions()
+        .await
+        .expect("registered profile sessions");
+    convergence_gate.wait_until_blocked().await;
+    let project = registry
+        .project_sessions(project_id, [project_root])
+        .await
+        .expect("registered project sessions");
+    let profile_shard = profile.binding().shard_id.clone();
+    let project_shard = project.binding().shard_id.clone();
+
+    assert_eq!(
+        registry.registered_schema_convergence_status(&profile_shard),
+        Some(RegisteredSchemaConvergenceStatus::Running),
+        "the permit holder must be distinguishable from deferred work"
+    );
+    assert_eq!(
+        registry.registered_schema_convergence_status(&project_shard),
+        Some(RegisteredSchemaConvergenceStatus::Pending),
+        "a second shard must wait without starting convergence"
+    );
+    assert_eq!(
+        registry.registered_schema_convergence_schedule_count_for_test(),
+        2,
+        "both distinct shards must retain one scheduled task"
+    );
+    assert_eq!(
+        registry.registered_schema_convergence_execution_count_for_test(),
+        1,
+        "only the permit holder may enter convergence"
+    );
+
+    convergence_gate.release();
+    convergence_gate.release();
+    assert_eq!(
+        wait_for_schema_convergence(&registry, &profile_shard).await,
+        RegisteredSchemaConvergenceStatus::Complete
+    );
+    assert_eq!(
+        wait_for_schema_convergence(&registry, &project_shard).await,
+        RegisteredSchemaConvergenceStatus::Complete
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -973,7 +1044,7 @@ async fn terminal_shutdown_cancels_and_joins_blocked_schema_convergence() {
 
     assert_eq!(
         registry.registered_schema_convergence_status(&shard_id),
-        Some(RegisteredSchemaConvergenceStatus::Pending),
+        Some(RegisteredSchemaConvergenceStatus::Running),
         "a cancelled convergence task must not publish a fabricated completion"
     );
 }
