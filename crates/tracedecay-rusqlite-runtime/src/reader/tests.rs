@@ -27,6 +27,7 @@ use tracedecay_store::{
 use super::pool::FOREGROUND_RESERVED_GENERAL_WORKERS;
 use super::*;
 use crate::SqliteStoreSizeTelemetryPort;
+use crate::checkpoint::CheckpointBlockerSource;
 #[cfg(unix)]
 use crate::connection::OpenedDatabaseFile;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
@@ -1346,7 +1347,15 @@ fn a_deferred_snapshot_end_is_counted_replaceable_and_bounded() {
         entered: Gate::default(),
     };
     let entered = executor.entered.clone();
-    let pool = ReaderPool::start(store.locator(), two_reader_budget(), executor).unwrap();
+    let checkpoint_blockers = ReaderCheckpointBlockers::default();
+    let pool = ReaderPool::start_with_checkpoint_control(
+        store.locator(),
+        two_reader_budget(),
+        executor,
+        None,
+        checkpoint_blockers.clone(),
+    )
+    .unwrap();
 
     let read = request(&store.binding, OperationPriorityV1::Foreground);
     let probe = Probe::for_request(&read);
@@ -1381,6 +1390,11 @@ fn a_deferred_snapshot_end_is_counted_replaceable_and_bounded() {
         !pool.is_quiescent(),
         "quiescence must not be reported while a rollback is in flight"
     );
+    assert_eq!(
+        checkpoint_blockers.checkpoint_blockers().count(),
+        1,
+        "a rollback still in flight must remain a live checkpoint blocker"
+    );
 
     // One worker is stuck, but the lane must not run degraded: it can grow a
     // replacement rather than serve `max_per_hot_shard - 1` until it resolves.
@@ -1405,5 +1419,9 @@ fn a_deferred_snapshot_end_is_counted_replaceable_and_bounded() {
         pool.snapshot().limbo_general,
         0,
         "the limbo worker was never reclaimed or replaced"
+    );
+    assert!(
+        checkpoint_blockers.checkpoint_blockers().is_clear(),
+        "the blocker must clear only after rollback resolves"
     );
 }
