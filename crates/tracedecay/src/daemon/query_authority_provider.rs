@@ -199,16 +199,12 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
                 .await
                 .map_err(|_| RetrievalProfileActivationObserverErrorV1::Conflict)?;
             let observed = async {
-                let redundancy_ready = prepared_redundancy.has_active_authority();
                 let prepared_cache = if semantic_enabled {
                     let pins = committed
                         .current_activation
                         .as_ref()
                         .map(|activation| &activation.compatibility)
                         .ok_or(RetrievalProfileActivationObserverErrorV1::Rejected)?;
-                    if !redundancy_ready {
-                        return Err(RetrievalProfileActivationObserverErrorV1::Rejected);
-                    }
                     let runtime = project_semantic_production_runtime(&project_root)
                         .ok_or(RetrievalProfileActivationObserverErrorV1::Unavailable)?;
                     let vectors = runtime
