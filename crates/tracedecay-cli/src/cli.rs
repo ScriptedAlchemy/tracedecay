@@ -253,7 +253,7 @@ pub enum Commands {
     Sync {
         /// Project path (default: current directory)
         path: Option<String>,
-        /// Force a full re-index
+        /// Compatibility flag that queues the same authoritative reconciliation
         #[arg(short, long)]
         force: bool,
         /// Folders to skip during indexing (can be repeated)

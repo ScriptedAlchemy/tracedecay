@@ -641,10 +641,11 @@ pub fn unique_mounted_for_scope<'a>(
 /// Remediation reported beside a parked deterministic contract violation.
 /// The reason names the exact violation (path, observed mode, required mode);
 /// this names the operator journey and the automatic recovery cadence.
-const CONVERGENCE_PARK_CONTRACT_REMEDIATION_V1: &str = "remove the named contract violation \
-     (for example restore owner-only access on the named path, or re-enroll the store); \
-     background convergence re-checks on every wake and resumes automatically once the \
-     contract holds";
+const CONVERGENCE_PARK_CONTRACT_REMEDIATION_V1: &str = "fix the named contract violation \
+     (for example restore owner-only access on the named path), then run `tracedecay sync` and \
+     re-check `tracedecay status`; an incompatible derived lexical cursor is replaced \
+     automatically without resetting project identity, sessions, memory, or configuration; \
+     `storage reset-project-store` is only for a reported schema reset requirement";
 
 /// Remediation reported when the text-projection task itself failed
 /// abnormally. Unchanged input reproduces the failure, so only changed input

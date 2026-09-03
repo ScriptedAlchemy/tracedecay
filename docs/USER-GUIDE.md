@@ -112,10 +112,19 @@ unchanged content-addressed artifacts when their complete identity matches.
 Duplicate hints and no-op saves produce no new durable work. A failed or
 cancelled refresh leaves the prior complete generation readable.
 
-### Force re-index
+If an authenticated derived lexical cursor no longer fits its sealed source,
+the daemon discards only that resumable text-artifact staging database and
+rebuilds it automatically. Project identity, sessions, memory, configuration,
+the sealed source generation, and any prior complete serving generation remain
+untouched. Run `tracedecay sync`, then re-check `tracedecay status`; do not use
+`storage reset-project-store`, which is reserved for a reported schema reset
+requirement.
 
-If the daemon reports a compatible generation rebuild is needed, an operator may
-request an explicit full refresh with `--force`:
+### Explicit refresh compatibility
+
+`--force` remains accepted for compatibility and queues the same authoritative
+reconciliation as `tracedecay sync`. It does not delete or fully rebuild the
+project store:
 
 ```bash
 tracedecay sync --force
@@ -161,7 +170,7 @@ Example output:
 ✔ sync done — 3 added, 12 modified, 0 removed in 4412ms
 ```
 
-This also works with `--force` for full re-index diagnostics.
+This also accepts the `--force` compatibility flag, with the same diagnostics.
 
 ### Respecting .gitignore
 

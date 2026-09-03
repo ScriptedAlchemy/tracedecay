@@ -48,13 +48,15 @@ tracedecay gitignore, tracedecay wipe (delete local stores).";
 pub(crate) const SYNC_LONG_ABOUT: &str = "\
 Re-parses only files that changed since the last index and updates the code \
 graph in place. Use after editing, switching branches, or pulling; agent \
-hooks usually run it automatically. `--force` rebuilds from scratch when the \
-index looks wrong; `--doctor`/`--verbose` explain what a sync actually did.";
+hooks usually run it automatically. Incompatible derived lexical staging is \
+replaced automatically. The retained `--force` compatibility flag queues the \
+same authoritative reconciliation; it does not delete or fully rebuild the \
+project store. `--doctor`/`--verbose` explain what a sync actually did.";
 
 pub(crate) const SYNC_AFTER_HELP: &str = "\
 Examples:
   tracedecay sync                                Incremental refresh from cwd
-  tracedecay sync --force                        Full re-index
+  tracedecay sync --force                        Compatible explicit refresh
   tracedecay sync --doctor                       List added/modified/removed files
   tracedecay sync --verbose                      Per-phase timings for slow syncs
 
@@ -397,7 +399,7 @@ Related: tracedecay disable-upload-counter, tracedecay gain.";
 pub(crate) const GITIGNORE_LONG_ABOUT: &str = "\
 Shows or toggles whether indexing respects .gitignore rules for this project. \
 Turning it off indexes ignored folders too (generated code, vendored deps); \
-re-run `tracedecay sync --force` afterwards so the change takes effect. \
+re-run `tracedecay sync` afterwards so the change takes effect. \
 Prefer --include-folder on init/sync to whitelist single folders instead.";
 
 pub(crate) const GITIGNORE_AFTER_HELP: &str = "\
@@ -406,7 +408,7 @@ Examples:
   tracedecay gitignore off                       Index ignored files too
   tracedecay gitignore on                        Respect .gitignore again
 
-Related: tracedecay sync --force (apply the change), tracedecay init
+Related: tracedecay sync (apply the change), tracedecay init
 --include-folder (targeted alternative).";
 
 pub(crate) const DOCTOR_LONG_ABOUT: &str = "\

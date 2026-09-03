@@ -68,9 +68,10 @@ use crate::{
             CodeIndexProductionConfigV1, CodeIndexProductionErrorV1,
             CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
             CodeIndexRepositoryParseIdentityV1, SharedPhysicalCodeArtifactPoolV1,
-            UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalPageBatchBoundsV1,
-            VerifiedSealedLexicalPageBatchReadV1, VerifiedSealedLexicalPageSourceV1,
-            VerifiedSealedLexicalSourceReceiptV1, VerifiedSealedTextGenerationMetadataV1,
+            UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalCursorRestoreErrorV1,
+            VerifiedSealedLexicalPageBatchBoundsV1, VerifiedSealedLexicalPageBatchReadV1,
+            VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalSourceReceiptV1,
+            VerifiedSealedTextGenerationMetadataV1,
         },
         projection::{
             ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -3935,7 +3936,7 @@ impl LatestCodeTextGenerationV1 {
         let mut source = self.take_preopened_source_or_open(&sealed_identity, control)?;
         let builder_budget = text_artifact_builder_budget(source.staging_window_bytes())?;
         let metadata = self.text_projection_metadata()?;
-        let builder = if staging_path.exists() {
+        let mut builder = if staging_path.exists() {
             match CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
                 &staging_path,
                 metadata.clone(),
@@ -3947,7 +3948,7 @@ impl LatestCodeTextGenerationV1 {
                     store.discard_incompatible_staging(&staging_path, control)?;
                     CodeLexicalArtifactBuilderV1::create_with_memory_budget(
                         &staging_path,
-                        metadata,
+                        metadata.clone(),
                         builder_budget,
                     )
                 }
@@ -3956,16 +3957,30 @@ impl LatestCodeTextGenerationV1 {
         } else {
             CodeLexicalArtifactBuilderV1::create_with_memory_budget(
                 &staging_path,
-                metadata,
+                metadata.clone(),
                 builder_budget,
             )
         }
         .map_err(map_text_artifact_error)?;
-        let progress = builder.progress().map_err(map_text_artifact_error)?;
+        let mut progress = builder.progress().map_err(map_text_artifact_error)?;
         if let Some(cursor) = progress.next_cursor.as_ref() {
-            source
-                .restore_cursor(cursor, control)
-                .map_err(map_sealed_page_source_error)?;
+            match source.restore_cursor_classified(cursor, control) {
+                Ok(()) => {}
+                Err(VerifiedSealedLexicalCursorRestoreErrorV1::IncompatiblePosition) => {
+                    drop(builder);
+                    store.discard_incompatible_staging(&staging_path, control)?;
+                    builder = CodeLexicalArtifactBuilderV1::create_with_memory_budget(
+                        &staging_path,
+                        metadata,
+                        builder_budget,
+                    )
+                    .map_err(map_text_artifact_error)?;
+                    progress = builder.progress().map_err(map_text_artifact_error)?;
+                }
+                Err(VerifiedSealedLexicalCursorRestoreErrorV1::Production(error)) => {
+                    return Err(map_sealed_page_source_error(error));
+                }
+            }
         }
         let initialized = CodeTextArtifactBuildV1 {
             builder,
