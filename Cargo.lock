@@ -6445,6 +6445,7 @@ dependencies = [
  "tracedecay-tool-catalog",
  "tracedecay-usecases",
  "tracing",
+ "tracing-subscriber",
  "url",
 ]
 

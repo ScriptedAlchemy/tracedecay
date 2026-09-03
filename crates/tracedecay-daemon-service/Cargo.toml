@@ -141,5 +141,6 @@ url = "2"
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }

@@ -180,6 +180,7 @@ mod observability_producer;
 mod observatory;
 mod primitive;
 pub use primitive::callable_code_request_context;
+mod recovery_schedule;
 mod registrars;
 mod retained;
 mod semantic_activation;
