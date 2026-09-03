@@ -806,6 +806,13 @@ pub struct RegisteredConfigurationRuntime {
     pub(super) actor: ActorId,
     pub(super) grants: DaemonConfigurationGrantAuthority,
     pub(super) semantic_operation: Arc<OnceLock<Arc<ProductionSemanticConfigurationOperationV1>>>,
+    pub(super) semantic_activation_reconciler: Arc<
+        OnceLock<
+            Arc<
+                tracedecay_code_index_runtime::semantic_activation_reconciler::DaemonSemanticActivationReconcilerV1,
+            >,
+        >,
+    >,
     pub(super) semantic_evaluation_workers: Arc<
         tracedecay_code_index_runtime::semantic_evaluation::DaemonSemanticEvaluationWorkerOwnerV1,
     >,

@@ -883,6 +883,7 @@ impl DaemonConfigurationRuntimeRegistrar {
                     actor: grants.actor.clone(),
                     grants,
                     semantic_operation: Arc::new(OnceLock::new()),
+                    semantic_activation_reconciler: Arc::new(OnceLock::new()),
                     semantic_evaluation_workers: Arc::new(
                         tracedecay_code_index_runtime::semantic_evaluation::DaemonSemanticEvaluationWorkerOwnerV1::with_scheduler_admission(
                             self.service
@@ -928,6 +929,22 @@ impl DaemonConfigurationRuntimeRegistrar {
             tracedecay_code_index_runtime::semantic_activation_reconciler::DaemonSemanticActivationReconcilerV1,
         >,
     ) -> Result<(), TraceDecayError> {
+        self.service
+            .project_runtimes
+            .read::<RegisteredConfigurationRuntime, _, _>(project_root, |registered| {
+                registered
+                    .semantic_activation_reconciler
+                    .set(Arc::clone(&reconciler))
+                    .map_err(|_| TraceDecayError::Config {
+                        message: "semantic activation reconciler is already installed".to_owned(),
+                    })
+            })
+            .await
+            .ok_or_else(|| TraceDecayError::Config {
+                message:
+                    "semantic activation reconciler requires a registered configuration runtime"
+                        .to_owned(),
+            })??;
         self.service
             .project_runtimes
             .register(project_root.to_path_buf(), reconciler)
