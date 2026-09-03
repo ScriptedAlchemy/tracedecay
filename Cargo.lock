@@ -6205,6 +6205,8 @@ dependencies = [
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
  "tracedecay-sdk",
+ "tracedecay-semantic",
+ "tracedecay-semantic-contracts",
  "tracedecay-session-memory",
  "tracedecay-session-temporal-store",
  "tracedecay-sessions",

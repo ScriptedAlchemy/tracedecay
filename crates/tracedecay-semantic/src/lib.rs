@@ -1939,6 +1939,35 @@ mod scheduling_tests {
         );
     }
 
+    #[tokio::test]
+    async fn load_deadline_maps_to_terminal_failed_schedule_state() {
+        let handle = SemanticRuntimeSchedulingHandleV1::new();
+        assert!(handle.schedule(SemanticRuntimeWorkV1::new(
+            source_generation('a'),
+            1,
+            move |_progress| async move {
+                Err(warm_failure(SessionAcquireError::LoadDeadlineExceeded {
+                    elapsed: std::time::Duration::from_secs(2),
+                    deadline: std::time::Duration::from_secs(1),
+                }))
+            },
+        )));
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !matches!(
+                handle.status(),
+                SemanticRuntimeScheduleStatusV1::Failed {
+                    reason: SemanticRuntimeScheduleFailureV1::DeadlineExceeded,
+                    prior_generation: None,
+                }
+            ) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("load deadline failure became terminal");
+    }
+
     #[test]
     fn restore_with_digest_mismatched_model_never_becomes_current() {
         let mismatched = digest_mismatched_lifecycle_authority();
