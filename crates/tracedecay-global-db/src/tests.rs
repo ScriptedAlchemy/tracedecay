@@ -15,6 +15,8 @@ mod lcm_schema;
 mod session_sync;
 
 #[cfg(test)]
+use super::registered_analytics::ANALYTICS_INSERT_ROWS_PER_STATEMENT;
+#[cfg(test)]
 use harness::RegisteredGlobalDbHarness;
 
 #[cfg(test)]
@@ -641,6 +643,77 @@ async fn cancelled_lcm_lifecycle_mutation_rolls_back_and_releases_writer() {
     assert_eq!(state.provider, update.provider);
     assert_eq!(state.conversation_id, update.conversation_id);
     assert_eq!(state.maintenance_debt, update.maintenance_debt);
+}
+
+#[tokio::test]
+async fn analytics_batch_ids_preserve_input_order_across_insert_chunks() {
+    let harness = RegisteredGlobalDbHarness::open("analytics-batch-id-order").await;
+    let db = &harness.registered;
+    let event = |session_id: String| AnalyticsEventInsert {
+        provider: "codex".to_string(),
+        project_id: "project".to_string(),
+        session_id: Some(session_id),
+        timestamp: 1,
+        event_kind: "hook_route".to_string(),
+        hook_name: None,
+        tool_name: None,
+        tool_category: None,
+        skill_name: None,
+        hint_category: None,
+        hint_id: None,
+        outcome: None,
+        metadata_json: None,
+    };
+
+    assert!(
+        db.append_analytics_events(&[])
+            .await
+            .expect("append empty analytics batch")
+            .is_empty()
+    );
+
+    let single_ids = db
+        .append_analytics_events(&[event("single".to_string())])
+        .await
+        .expect("append single analytics event");
+    assert_eq!(single_ids.len(), 1);
+
+    let events = (0..ANALYTICS_INSERT_ROWS_PER_STATEMENT + 3)
+        .map(|index| event(format!("batch-{index:03}")))
+        .collect::<Vec<_>>();
+    let ids = db
+        .append_analytics_events(&events)
+        .await
+        .expect("append analytics batch spanning insert chunks");
+    assert_eq!(ids.len(), events.len());
+
+    let snapshot = db.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT id, session_id
+             FROM analytics_events
+             WHERE id > ?1
+             ORDER BY id ASC",
+            tracedecay_runtime_core::db::engine::params![single_ids[0]],
+        )
+        .await
+        .unwrap();
+    let mut stored = Vec::with_capacity(events.len());
+    while let Some(row) = rows.next().await.unwrap() {
+        stored.push((row.get::<i64>(0).unwrap(), row.get::<String>(1).unwrap()));
+    }
+
+    assert_eq!(stored.len(), events.len());
+    for ((stored_id, stored_session_id), (returned_id, event)) in
+        stored.iter().zip(ids.iter().zip(&events))
+    {
+        assert_eq!(stored_id, returned_id);
+        assert_eq!(Some(stored_session_id), event.session_id.as_ref());
+    }
+    assert_eq!(
+        row_count(db, "analytics_events").await,
+        i64::try_from(events.len() + 1).unwrap()
+    );
 }
 
 #[tokio::test]
