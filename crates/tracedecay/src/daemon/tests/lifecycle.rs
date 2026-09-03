@@ -95,6 +95,9 @@ fn daemon_admission_preserves_reserved_health_capacity() {
         "method": tracedecay_daemon_protocol::DAEMON_SHUTDOWN_METHOD,
     })
     .to_string();
+    let status_request = super::super::AuthenticatedFirstRequest::new(status_request);
+    let shutdown_request = super::super::AuthenticatedFirstRequest::new(shutdown_request);
+    let bulk_request = super::super::AuthenticatedFirstRequest::new(bulk_request);
     assert!(super::super::is_reserved_control_request(&status_request));
     assert!(super::super::is_reserved_control_request(&shutdown_request));
     assert!(!super::super::is_reserved_control_request(&bulk_request));
@@ -213,6 +216,7 @@ fn mcp_discovery_requests_are_reserved_control_traffic() {
             "method": method,
         })
         .to_string();
+        let request = super::super::AuthenticatedFirstRequest::new(request);
         assert!(
             super::super::is_reserved_control_request(&request),
             "{method} must be admitted as reserved control traffic"
@@ -224,6 +228,7 @@ fn mcp_discovery_requests_are_reserved_control_traffic() {
             "method": method,
         })
         .to_string();
+        let notification = super::super::AuthenticatedFirstRequest::new(notification);
         assert!(
             super::super::is_reserved_control_request(&notification),
             "{method} must be admitted as reserved control traffic"
@@ -245,6 +250,8 @@ fn daemon_shutdown_requires_a_response_id() {
     })
     .to_string();
 
+    let notification = super::super::AuthenticatedFirstRequest::new(notification);
+    let request = super::super::AuthenticatedFirstRequest::new(request);
     assert!(super::super::daemon_shutdown_response(&notification).is_none());
     let response = super::super::daemon_shutdown_response(&request).expect("shutdown response");
     assert_eq!(response.id, serde_json::json!(17));
@@ -407,6 +414,8 @@ fn daemon_per_client_fairness_never_blocks_reserved_health_requests() {
         "params": {"name": "tracedecay_context", "arguments": {"task": "x"}},
     })
     .to_string();
+    let status_request = super::super::AuthenticatedFirstRequest::new(status_request);
+    let context_request = super::super::AuthenticatedFirstRequest::new(context_request);
 
     assert!(
         admission

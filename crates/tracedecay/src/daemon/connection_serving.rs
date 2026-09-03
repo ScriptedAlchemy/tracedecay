@@ -170,9 +170,8 @@ fn serve_routed_rmcp_connection_inner(
     })
 }
 
-fn is_mcp_initialize_request(line: &str) -> bool {
-    serde_json::from_str::<JsonRpcRequest>(line.trim())
-        .is_ok_and(|request| request.method == "initialize")
+fn is_mcp_initialize_request(request: Option<&JsonRpcRequest>) -> bool {
+    request.is_some_and(|request| request.method == "initialize")
 }
 
 /// Answer an unparseable handshake with one typed refusal frame and drain
@@ -695,7 +694,7 @@ fn serve_broker_socket_client_inner(
             mut transport,
             engine,
             mut handshake,
-            first_request_line,
+            first_request,
             setup_activity,
             _per_client_permit,
         )) = boxed_broker_connection_phase(async move {
@@ -748,14 +747,15 @@ fn serve_broker_socket_client_inner(
         let Some(first_request_line) = first_request_line else {
             return Ok(None);
         };
-        let reserved_control_request = is_reserved_control_request(&first_request_line);
+        let first_request = AuthenticatedFirstRequest::new(first_request_line);
+        let reserved_control_request = is_reserved_control_request(&first_request);
         if admission_class == DaemonClientAdmissionClass::ReservedControl
             && !reserved_control_request
         {
             drop(setup_activity);
             reject_reserved_bulk_request(
                 &mut transport,
-                &first_request_line,
+                &first_request,
                 MAX_CONCURRENT_DAEMON_CLIENTS,
             )
             .await?;
@@ -764,12 +764,12 @@ fn serve_broker_socket_client_inner(
         let _per_client_permit = if admission_class == DaemonClientAdmissionClass::General {
             match engine
                 .per_client_admission
-                .try_admit_request(&handshake, &first_request_line)
+                .try_admit_request(&handshake, &first_request)
             {
                 Ok(permit) => Some(permit),
                 Err(response) => {
                     drop(setup_activity);
-                    reject_admitted_request(&mut transport, &first_request_line, response).await?;
+                    reject_admitted_request(&mut transport, &first_request, response).await?;
                     return Ok(None);
                 }
             }
@@ -780,7 +780,7 @@ fn serve_broker_socket_client_inner(
                 transport,
                 engine,
                 handshake,
-                first_request_line,
+                first_request,
                 setup_activity,
                 _per_client_permit,
             )))
@@ -795,14 +795,14 @@ fn serve_broker_socket_client_inner(
             mut transport,
             engine,
             handshake,
-            first_request_line,
+            first_request,
             setup_activity,
             _per_client_permit,
             initialize_route,
         )) = boxed_broker_connection_phase(async move {
         if let Some(cancellation) =
             tracedecay_daemon_protocol::parse_daemon_invocation_cancellation_request(
-                &first_request_line,
+                first_request.raw(),
             )
         {
             hotpath::measure_block!("daemon.engine.transport.cancel", {
@@ -811,7 +811,7 @@ cancel(cancellation.target_request_id());
             drop(setup_activity);
             return Ok(None);
         }
-        let git_watcher_health = if doctor_runtime_request(&first_request_line).is_some() {
+        let git_watcher_health = if doctor_runtime_request(first_request.parsed()).is_some() {
             Some(
                 Box::pin(engine.git_watcher_health(handshake.project_path.as_deref())).await,
             )
@@ -823,7 +823,7 @@ cancel(cancellation.target_request_id());
             &handshake,
             &engine.store_administration,
             setup_activity,
-            &first_request_line,
+            &first_request,
             git_watcher_health,
             || {
                 Box::pin(async {
@@ -854,7 +854,7 @@ cancel(cancellation.target_request_id());
         // retryable state the deferral carries.
         let initialize_route = match Box::pin(apply_daemon_initialize_route(
             &mut handshake,
-            &first_request_line,
+            &first_request,
             &engine.store_administration,
         ))
         .await
@@ -864,7 +864,7 @@ cancel(cancellation.target_request_id());
                 drop(setup_activity);
                 Box::pin(write_project_open_error(
                     &mut transport,
-                    &first_request_line,
+                    &first_request,
                     &handshake.client_instance_id,
                     &error,
                 ))
@@ -876,7 +876,7 @@ cancel(cancellation.target_request_id());
                 transport,
                 engine,
                 handshake,
-                first_request_line,
+                first_request,
                 setup_activity,
                 _per_client_permit,
                 initialize_route,
@@ -888,7 +888,7 @@ cancel(cancellation.target_request_id());
         };
 
         boxed_broker_connection_phase(async move {
-        if let Some(request) = parse_branch_admin_request(&first_request_line) {
+        if let Some(request) = parse_branch_admin_request(first_request.parsed()) {
             return boxed_broker_connection_phase(async move {
             let result = match request.action.clone() {
                 Ok(action) => engine.execute_branch_admin(&handshake, action).await,
@@ -900,7 +900,7 @@ cancel(cancellation.target_request_id());
             })
             .await;
         }
-        if let Some(request) = parse_branch_add_request(&first_request_line) {
+        if let Some(request) = parse_branch_add_request(first_request.parsed()) {
             return boxed_broker_connection_phase(async move {
             let response = match await_project_owner_or_disconnect(
                 &mut transport,
@@ -930,7 +930,7 @@ cancel(cancellation.target_request_id());
             })
             .await;
         }
-        if let Some(invocation) = parse_daemon_invocation_request(&first_request_line) {
+        if let Some(invocation) = parse_daemon_invocation_request(first_request.raw()) {
             return boxed_broker_connection_phase(async move {
             let mut invocation = invocation;
             let mut owned_lsp_sessions = HashMap::new();
@@ -1143,7 +1143,7 @@ cancel(cancellation.target_request_id());
             .await;
         }
         let bootstrap_handled = boxed_broker_connection_phase(async {
-        if let Ok(request) = serde_json::from_str::<JsonRpcRequest>(first_request_line.trim()) {
+        if let Some(request) = first_request.parsed() {
             let initialized_project_server_ready =
                 matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
                     && handshake.project_path.is_some()
@@ -1212,7 +1212,11 @@ cancel(cancellation.target_request_id());
                     _ => false,
                 };
                 if let Some(key) = engine
-                    .claim_catalog_refresh(&handshake, &first_request_line, catalog_is_provisional)
+                    .claim_catalog_refresh(
+                        &handshake,
+                        first_request.parsed(),
+                        catalog_is_provisional,
+                    )
                     .await
                     && let Err(error) = write_tool_list_changed_notification(&mut transport).await
                 {
@@ -1233,14 +1237,14 @@ cancel(cancellation.target_request_id());
             return Ok(());
         }
 
-        let user_session_request = projectless_user_session_request(&first_request_line);
+        let user_session_request = projectless_user_session_request(first_request.parsed());
         let project_owner = boxed_broker_connection_phase(async {
         if handshake.project_path.is_some() && !user_session_request {
             match await_project_owner_or_disconnect(
                 &mut transport,
                 engine.project_server_for_request(
                     &handshake,
-                    project_server_requirement(&first_request_line),
+                    project_server_requirement(first_request.parsed()),
                 ),
             )
             .await
@@ -1250,7 +1254,7 @@ cancel(cancellation.target_request_id());
                 Err(error) => {
                     write_project_open_error(
                         &mut transport,
-                        &first_request_line,
+                        &first_request,
                         &handshake.client_instance_id,
                         &error,
                     )
@@ -1274,7 +1278,7 @@ cancel(cancellation.target_request_id());
         // The stdio proxy creates one daemon connection per request. The request
         // was peeked above so initialize-root routing happens before project open.
         if let Some(key) = engine
-            .claim_catalog_refresh(&handshake, &first_request_line, false)
+            .claim_catalog_refresh(&handshake, first_request.parsed(), false)
             .await
             && let Err(error) = write_tool_list_changed_notification(&mut transport).await
         {
@@ -1282,16 +1286,21 @@ cancel(cancellation.target_request_id());
             return Err(error);
         }
         if let Some(server) = server {
-            if is_mcp_initialize_request(&first_request_line) {
+            if is_mcp_initialize_request(first_request.parsed()) {
                 #[cfg(test)]
                 tests::record_mcp_route(
                     &handshake.client_instance_id,
                     tests::ObservedMcpRoute::Rmcp,
                 );
+                #[cfg(test)]
+                tests::record_first_request_replay(
+                    &handshake.client_instance_id,
+                    first_request.raw(),
+                );
                 Box::pin(serve_routed_rmcp_connection(
                     server,
                     transport,
-                    first_request_line,
+                    first_request.into_raw(),
                     pending_project_open_lines,
                     initialize_route,
                     handshake.timings,
@@ -1304,8 +1313,13 @@ cancel(cancellation.target_request_id());
                     &handshake.client_instance_id,
                     tests::ObservedMcpRoute::Legacy,
                 );
+                #[cfg(test)]
+                tests::record_first_request_replay(
+                    &handshake.client_instance_id,
+                    first_request.raw(),
+                );
                 let mut transport = ReplayTransport::new(transport);
-                transport.push_replay(first_request_line)?;
+                transport.push_replay(first_request.into_raw())?;
                 for line in pending_project_open_lines {
                     transport.push_replay(line)?;
                 }
@@ -1318,7 +1332,7 @@ cancel(cancellation.target_request_id());
             }
         } else {
             let mut transport = ReplayTransport::new(transport);
-            transport.push_replay(first_request_line)?;
+            transport.push_replay(first_request.into_raw())?;
             for line in pending_project_open_lines {
                 transport.push_replay(line)?;
             }
@@ -1433,7 +1447,8 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
     let Some(first_request_line) = read_line_handling_wire_oversized(&mut transport).await? else {
         return Ok(());
     };
-    if let Some(response) = daemon_shutdown_response(&first_request_line) {
+    let first_request = AuthenticatedFirstRequest::new(first_request_line);
+    if let Some(response) = daemon_shutdown_response(&first_request) {
         lifecycle.begin_draining();
         write_json_rpc_response(&mut transport, &response).await?;
         drop(setup_activity);
@@ -1445,23 +1460,23 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         result = Box::pin(bind_authenticated_profile_identity(&mut handshake, &store_administration)) => result?,
         () = &mut peer_full_close => return Ok(()),
     };
-    let reserved_control_request = is_reserved_control_request(&first_request_line);
+    let reserved_control_request = is_reserved_control_request(&first_request);
     if admission_class == DaemonClientAdmissionClass::ReservedControl && !reserved_control_request {
         drop(setup_activity);
         reject_reserved_bulk_request(
             &mut transport,
-            &first_request_line,
+            &first_request,
             MAX_CONCURRENT_DAEMON_CLIENTS,
         )
         .await?;
         return Ok(());
     }
     let _per_client_permit = if admission_class == DaemonClientAdmissionClass::General {
-        match per_client_admission.try_admit_request(&handshake, &first_request_line) {
+        match per_client_admission.try_admit_request(&handshake, &first_request) {
             Ok(permit) => Some(permit),
             Err(response) => {
                 drop(setup_activity);
-                reject_admitted_request(&mut transport, &first_request_line, response).await?;
+                reject_admitted_request(&mut transport, &first_request, response).await?;
                 return Ok(());
             }
         }
@@ -1470,7 +1485,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
     };
     if let Some(cancellation) =
         tracedecay_daemon_protocol::parse_daemon_invocation_cancellation_request(
-            &first_request_line,
+            first_request.raw(),
         )
     {
         hotpath::measure_block!("daemon.engine.transport.cancel", {
@@ -1484,7 +1499,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         &handshake,
         &store_administration,
         setup_activity,
-        &first_request_line,
+        &first_request,
         None,
         || async {
             let (canonical_project_path, _) = project_route_for_handshake(&handshake)?;
@@ -1513,7 +1528,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
     // typed response, never a dropped connection.
     let initialize_route = match Box::pin(apply_daemon_initialize_route(
         &mut handshake,
-        &first_request_line,
+        &first_request,
         &store_administration,
     ))
     .await
@@ -1523,7 +1538,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
             drop(setup_activity);
             write_project_open_error(
                 &mut transport,
-                &first_request_line,
+                &first_request,
                 &handshake.client_instance_id,
                 &error,
             )
@@ -1531,7 +1546,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
             return Ok(());
         }
     };
-    if let Some(request) = parse_branch_admin_request(&first_request_line) {
+    if let Some(request) = parse_branch_admin_request(first_request.parsed()) {
         let result = match request.action.clone() {
             Ok(action) => {
                 Box::pin(store_administration.execute_branch_admin_for_handshake(
@@ -1547,7 +1562,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         write_branch_admin_response(&mut transport, request, result).await?;
         return Ok(());
     }
-    if let Some(request) = parse_branch_add_request(&first_request_line) {
+    if let Some(request) = parse_branch_add_request(first_request.parsed()) {
         let response = match await_project_owner_or_disconnect(
             &mut transport,
             Box::pin(portable_project_server_for_request(
@@ -1584,7 +1599,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         write_json_rpc_response(&mut transport, &response).await?;
         return Ok(());
     }
-    if let Some(invocation_request) = parse_daemon_invocation_request(&first_request_line) {
+    if let Some(invocation_request) = parse_daemon_invocation_request(first_request.raw()) {
         let mut invocation_request = invocation_request;
         let mut owned_lsp_sessions = HashMap::new();
         let mut pending_line = None;
@@ -1797,7 +1812,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         cleanup_connection_lsp_sessions(&invocation, owned_lsp_sessions).await;
         return result;
     }
-    if let Ok(request) = serde_json::from_str::<JsonRpcRequest>(first_request_line.trim()) {
+    if let Some(request) = first_request.parsed() {
         let initialized_project_server_ready =
             if matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
                 && handshake.project_path.is_some()
@@ -1876,7 +1891,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
             return Ok(());
         }
     }
-    let user_session_request = projectless_user_session_request(&first_request_line);
+    let user_session_request = projectless_user_session_request(first_request.parsed());
     if handshake.project_path.is_some() && !user_session_request {
         // Heap-allocate the owner-await composition: embedded by value it
         // dominates this serve future's resident frame and overflows the
@@ -1890,7 +1905,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
                 invocation.clone(),
                 http_application_registry,
                 &handshake,
-                project_server_requirement(&first_request_line),
+                project_server_requirement(first_request.parsed()),
                 #[cfg(test)]
                 project_open_attempts.clone(),
             )),
@@ -1906,7 +1921,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
                 drop(setup_activity);
                 write_project_open_error(
                     &mut transport,
-                    &first_request_line,
+                    &first_request,
                     &handshake.client_instance_id,
                     &error,
                 )
@@ -1916,13 +1931,15 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         };
         drop(setup_activity);
         let (server, pending_lines) = server;
-        if is_mcp_initialize_request(&first_request_line) {
+        if is_mcp_initialize_request(first_request.parsed()) {
             #[cfg(test)]
             tests::record_mcp_route(&handshake.client_instance_id, tests::ObservedMcpRoute::Rmcp);
+            #[cfg(test)]
+            tests::record_first_request_replay(&handshake.client_instance_id, first_request.raw());
             Box::pin(serve_routed_rmcp_connection(
                 server,
                 transport,
-                first_request_line,
+                first_request.into_raw(),
                 pending_lines,
                 initialize_route,
                 handshake.timings,
@@ -1935,8 +1952,10 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
                 &handshake.client_instance_id,
                 tests::ObservedMcpRoute::Legacy,
             );
+            #[cfg(test)]
+            tests::record_first_request_replay(&handshake.client_instance_id, first_request.raw());
             let mut transport = ReplayTransport::new(transport);
-            transport.push_replay(first_request_line)?;
+            transport.push_replay(first_request.into_raw())?;
             for line in pending_lines {
                 transport.push_replay(line)?;
             }
@@ -1950,7 +1969,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
     } else {
         drop(setup_activity);
         let mut transport = ReplayTransport::new(transport);
-        transport.push_replay(first_request_line)?;
+        transport.push_replay(first_request.into_raw())?;
         Box::pin(serve_projectless_client(
             &mut transport,
             &handshake.client_identity,

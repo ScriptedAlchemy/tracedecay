@@ -55,15 +55,15 @@ pub(super) fn prewarm_daemon_bootstrap_catalog() -> Result<()> {
 #[hotpath::measure(label = "daemon.bootstrap.initialize_route", future = true)]
 pub(super) async fn apply_daemon_initialize_route(
     handshake: &mut DaemonHandshake,
-    first_request_line: &str,
+    first_request: &AuthenticatedFirstRequest,
     store_administration: &StoreAdministration,
 ) -> Result<Option<InitializeRouteMetadata>> {
-    apply_daemon_initialize_route_inner(handshake, first_request_line, store_administration).await
+    apply_daemon_initialize_route_inner(handshake, first_request, store_administration).await
 }
 
 fn apply_daemon_initialize_route_inner<'a>(
     handshake: &'a mut DaemonHandshake,
-    first_request_line: &'a str,
+    first_request: &'a AuthenticatedFirstRequest,
     store_administration: &'a StoreAdministration,
 ) -> std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<Option<InitializeRouteMetadata>>> + Send + 'a>,
@@ -74,7 +74,7 @@ fn apply_daemon_initialize_route_inner<'a>(
         if !handshake.allow_initialize_root_routing {
             return Ok(None);
         }
-        let Ok(request) = serde_json::from_str::<JsonRpcRequest>(first_request_line.trim()) else {
+        let Some(request) = first_request.parsed() else {
             return Ok(None);
         };
         if request.method != "initialize" {
