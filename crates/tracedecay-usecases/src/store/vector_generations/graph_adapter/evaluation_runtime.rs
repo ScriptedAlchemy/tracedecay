@@ -22,7 +22,7 @@ use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphDbOwnerAttachmentV1, GraphDbOwnerRegistrationV1,
     GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig, GraphGenerationDependency,
     GraphProjectionIdentity, GraphProjectorRevision, GraphWriteBatch, NeverCancelled,
-    VerifiedGenerationBatchCommit, VerifiedGraphSnapshot,
+    VerifiedGenerationBatchCommit, VerifiedGenerationBeginV1, VerifiedGraphSnapshot,
 };
 use tracedecay_rusqlite_runtime::{
     ExistingWriterLocator, PersistentWriter,
@@ -44,9 +44,8 @@ use tracedecay_store::{
     SemanticVectorStageBatchReceipt, SemanticVectorStageCancelOutcome, SemanticVectorStageKey,
     SemanticVectorStagePlan, SemanticVectorStagePublicationPrepareOutcome,
     SemanticVectorStagePublishOutcome, SemanticVectorStagePublishSettlement,
-    SemanticVectorStageRecord, SemanticVectorStageResumeOutcome, SemanticVectorStageState,
-    SemanticVectorStagingStore, StoreRuntimeBindingV1, StoreShardIdV1, VerifiedStoreLocatorV1,
-    canonical_store_locator_digest,
+    SemanticVectorStageResumeOutcome, SemanticVectorStagingStore, StoreRuntimeBindingV1,
+    StoreShardIdV1, VerifiedStoreLocatorV1, canonical_store_locator_digest,
 };
 
 use crate::semantic_runtime::{
@@ -287,7 +286,18 @@ impl IsolatedSemanticEvaluationGraphV1 {
         generations: &[&CodeIndexPublishedGenerationV1],
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Self, GraphDbError> {
-        if generations.is_empty() {
+        let source_generations = generations
+            .iter()
+            .map(|generation| generation.manifest().generation_id.clone())
+            .collect::<Vec<_>>();
+        Self::open_source_generations(&source_generations, cancellation)
+    }
+
+    pub(super) fn open_source_generations(
+        source_generations: &[CodeGenerationId],
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Self, GraphDbError> {
+        if source_generations.is_empty() {
             return Err(GraphDbError::invalid(
                 "semantic evaluation requires at least one projected code generation",
             ));
@@ -394,24 +404,21 @@ impl IsolatedSemanticEvaluationGraphV1 {
             _root: root,
         };
         let mut runtime = runtime;
-        for generation in generations {
-            if runtime
-                .source_dependencies
-                .contains_key(&generation.manifest().generation_id)
-            {
+        for source_generation in source_generations {
+            if runtime.source_dependencies.contains_key(source_generation) {
                 continue;
             }
-            let dependency = runtime.project_source_generation(generation)?;
+            let dependency = runtime.project_source_generation(source_generation)?;
             runtime
                 .source_dependencies
-                .insert(generation.manifest().generation_id.clone(), dependency);
+                .insert(source_generation.clone(), dependency);
         }
         Ok(runtime)
     }
 
     fn project_source_generation(
         &self,
-        generation: &CodeIndexPublishedGenerationV1,
+        source_generation_id: &CodeGenerationId,
     ) -> Result<GraphGenerationDependency, GraphDbError> {
         let check = || {
             if self.cancellation.is_cancelled() {
@@ -423,7 +430,6 @@ impl IsolatedSemanticEvaluationGraphV1 {
         let projector_revision =
             GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION.to_owned())
                 .map_err(|error| GraphDbError::invalid(error.to_string()))?;
-        let source_generation_id = &generation.manifest().generation_id;
         let projection =
             code_graph_projection_identity(evaluation_source_namespace(source_generation_id)?)
                 .map_err(map_code_graph_error)?;
@@ -436,13 +442,12 @@ impl IsolatedSemanticEvaluationGraphV1 {
             &check,
         )?;
         let expected_recovered_digest = manifest.expected_recovered_digest(&check)?;
-        let idempotency =
-            code_graph_idempotency_key(&generation.manifest().generation_id, &projector_revision)
-                .map_err(map_code_graph_error)?;
+        let idempotency = code_graph_idempotency_key(source_generation_id, &projector_revision)
+            .map_err(map_code_graph_error)?;
         let input_digest = GraphPublicationInputDigestV1::new(
             canonical_sha256(&(
                 "tracedecay.semantic-evaluation-source-receipt.v1",
-                &generation.manifest().generation_id,
+                source_generation_id,
                 &manifest.generation,
                 &manifest.source_generation,
                 &manifest.watermark,
@@ -699,7 +704,7 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for IsolatedSemanticEvaluationRuntimeV
         &self,
         plan: &SemanticVectorStagePlan,
         execution: &SemanticGraphExecutionAuthorityV1,
-    ) -> Result<SemanticVectorStageRecord, GraphDbError> {
+    ) -> Result<VerifiedGenerationBeginV1, GraphDbError> {
         let mut authority = self.authority()?;
         self.with_operation(
             execution.cancellation(),
@@ -837,40 +842,9 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for IsolatedSemanticEvaluationRuntimeV
             execution.cancellation(),
             execution.deadline(),
             "stage-cancel",
-            |_registration, context| {
-                // This graph and its native rows share one temporary owner and
-                // are destroyed together after evaluation. Terminalize the
-                // canonical staging authority here, but do not run the
-                // persistent registry's page-wise native retirement while the
-                // evaluator is still measuring projection behavior.
-                let Some(record) = authority.stage(stage, context).map_err(map_staging_error)?
-                else {
-                    return Ok(SemanticVectorStageCancelOutcome::MissingStage);
-                };
-                if record.plan.key != *stage {
-                    return Err(GraphDbError::conflict("evaluation_runtime.cancel_stage"));
-                }
-                if record.state == SemanticVectorStageState::Cancelled {
-                    return Ok(SemanticVectorStageCancelOutcome::ExactReplay(record));
-                }
-                if record.state != SemanticVectorStageState::Pending {
-                    return Ok(SemanticVectorStageCancelOutcome::ReadyToPublish(record));
-                }
-                if !matches!(
-                    authority
-                        .replay(&record.plan.publication_key, context)
-                        .map_err(map_publication_error)?,
-                    tracedecay_store::GraphPublicationReplayLookupV1::Missing
-                ) || authority
-                    .verified_head(&record.plan.key.projection, context)
-                    .map_err(map_publication_error)?
-                    .is_some_and(|head| head.key == record.plan.publication_key)
-                {
-                    return Err(GraphDbError::conflict("evaluation_runtime.cancel_stage"));
-                }
-                authority
-                    .cancel_stage(stage, &record.plan.writer_fence, context)
-                    .map_err(map_staging_error)
+            |registration, context| {
+                self.registry
+                    .cancel_generation_stage(registration, &mut *authority, context, stage)
             },
         )
     }

@@ -23,6 +23,7 @@ use tracedecay_domain::{
 pub use tracedecay_domain::VectorGenerationIdV1;
 
 use tracedecay_code_index::projection::{expected_publication_digest, verify_batch_receipt};
+use tracedecay_graph_db::GraphConflictContextV1;
 use tracedecay_semantic::projector::{
     PreparedVectorGenerationV1, ProjectedChunkVectorV1, SemanticProjectionErrorV1,
 };
@@ -1202,8 +1203,8 @@ pub enum VectorGenerationStoreErrorV1 {
     PhysicalVectorConflict,
     #[error("project vector generation storage failed: {0}")]
     Storage(String),
-    #[error("project vector generation state changed repeatedly during compare-and-swap")]
-    ConcurrentMutation,
+    #[error("project vector generation state changed during compare-and-swap {0}")]
+    ConcurrentMutation(GraphConflictContextV1),
     #[error("semantic projector handoff rejected: {0}")]
     Projection(#[from] SemanticProjectionErrorV1),
 }

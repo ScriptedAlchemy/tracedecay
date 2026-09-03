@@ -1,15 +1,16 @@
 use std::sync::Arc;
 
 use tracedecay_graph_db::{
-    GraphDbError, GraphWriteBatch, VerifiedGenerationBatchCommit, VerifiedGraphSnapshot,
+    GraphDbError, GraphWriteBatch, VerifiedGenerationBatchCommit, VerifiedGenerationBeginV1,
+    VerifiedGraphSnapshot,
 };
 use tracedecay_store::{
     GraphPublicationKeyV1, GraphVerifiedHeadV1, SemanticVectorPublishedGenerationKey,
     SemanticVectorPublishedGenerationLookup, SemanticVectorStageBatchReceipt,
     SemanticVectorStageCancelOutcome, SemanticVectorStageKey, SemanticVectorStagePlan,
     SemanticVectorStagePublicationPrepareOutcome, SemanticVectorStagePublishOutcome,
-    SemanticVectorStagePublishSettlement, SemanticVectorStageRecord,
-    SemanticVectorStageResumeOutcome, StoreRuntimeBindingV1, StoreShardIdV1,
+    SemanticVectorStagePublishSettlement, SemanticVectorStageResumeOutcome, StoreRuntimeBindingV1,
+    StoreShardIdV1,
 };
 use tracedecay_usecases::semantic_runtime::{
     SemanticGraphExecutionAuthorityV1, SemanticVectorGraphScopeV1,
@@ -88,7 +89,7 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for DaemonVerifiedSemanticVectorGraphR
         &self,
         plan: &SemanticVectorStagePlan,
         authority: &SemanticGraphExecutionAuthorityV1,
-    ) -> Result<SemanticVectorStageRecord, GraphDbError> {
+    ) -> Result<VerifiedGenerationBeginV1, GraphDbError> {
         self.retained.begin_semantic_vector_stage(
             plan,
             authority.cancellation(),

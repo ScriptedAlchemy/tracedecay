@@ -27,6 +27,15 @@ pub struct VerifiedGenerationBatchApply {
     pub commit: GraphCommit,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VerifiedGenerationBeginV1 {
+    Begun(SemanticVectorStageRecord),
+    Recovered(SemanticVectorStageRecord),
+    Occupied {
+        existing: SemanticVectorStageRecord,
+    },
+}
+
 impl GraphDbRegistry {
     #[hotpath::measure(
         label = "graph_db.generation.stage.begin",
@@ -38,7 +47,7 @@ impl GraphDbRegistry {
         authority: &mut dyn SemanticVectorPublicationAuthority,
         context: &GraphPublicationOperationContextV1<'_>,
         plan: &SemanticVectorStagePlan,
-    ) -> Result<SemanticVectorStageRecord, GraphDbError> {
+    ) -> Result<VerifiedGenerationBeginV1, GraphDbError> {
         check_all(&registration, context, "generation.staging")?;
         require_authority_binding(&registration, authority)?;
         require_publication_binding(&registration, &plan.publication_key)?;
@@ -46,26 +55,60 @@ impl GraphDbRegistry {
         plan.validate()
             .map_err(|error| GraphDbError::invalid(error.to_string()))?;
         self.resolve(registration.clone())?;
-        let (record, recovered_publication) = match authority
+        let (record, recovered_publication, outcome) = match authority
             .begin_stage(plan, context)
             .map_err(map_staging_error)?
         {
-            tracedecay_store::SemanticVectorStageBeginOutcome::Begun(record)
-            | tracedecay_store::SemanticVectorStageBeginOutcome::ExactReplay(record) => {
-                (record, false)
+            tracedecay_store::SemanticVectorStageBeginOutcome::Begun(record) => {
+                let outcome = VerifiedGenerationBeginV1::Begun(record.clone());
+                (record, false, outcome)
+            }
+            tracedecay_store::SemanticVectorStageBeginOutcome::ExactReplay(record) => {
+                let outcome = VerifiedGenerationBeginV1::Recovered(record.clone());
+                (record, false, outcome)
             }
             tracedecay_store::SemanticVectorStageBeginOutcome::Published {
                 record,
                 verified_head: _,
-            } => (*record, true),
-            tracedecay_store::SemanticVectorStageBeginOutcome::InputConflict { .. }
-            | tracedecay_store::SemanticVectorStageBeginOutcome::SemanticGenerationConflict {
-                ..
+            } => {
+                let record = *record;
+                let outcome = VerifiedGenerationBeginV1::Recovered(record.clone());
+                (record, true, outcome)
             }
-            | tracedecay_store::SemanticVectorStageBeginOutcome::PublicationConflict
-            | tracedecay_store::SemanticVectorStageBeginOutcome::PriorVerifiedHeadConflict {
-                ..
-            } => return Err(GraphDbError::conflict("staging.begin_verified_generation")),
+            tracedecay_store::SemanticVectorStageBeginOutcome::InputConflict { existing } => {
+                return Ok(VerifiedGenerationBeginV1::Occupied { existing });
+            }
+            tracedecay_store::SemanticVectorStageBeginOutcome::SemanticGenerationConflict {
+                existing,
+            } => {
+                return Err(GraphDbError::conflict_observed(
+                    "staging.begin_verified_generation",
+                    format!(
+                        "semantic_generation={}",
+                        plan.semantic_generation_id.as_digest().as_str()
+                    ),
+                    format!(
+                        "semantic_generation={}",
+                        existing.plan.semantic_generation_id.as_digest().as_str()
+                    ),
+                ));
+            }
+            tracedecay_store::SemanticVectorStageBeginOutcome::PublicationConflict => {
+                return Err(GraphDbError::conflict_observed(
+                    "staging.begin_verified_generation",
+                    format!("publication={:?}", plan.publication_key),
+                    "publication identity already occupied",
+                ));
+            }
+            tracedecay_store::SemanticVectorStageBeginOutcome::PriorVerifiedHeadConflict {
+                actual,
+            } => {
+                return Err(GraphDbError::conflict_observed(
+                    "staging.begin_verified_generation",
+                    format!("prior_verified_head={:?}", plan.expected_prior_verified_head),
+                    format!("prior_verified_head={actual:?}"),
+                ));
+            }
         };
         if recovered_publication {
             require_same_semantic_generation(&record.plan, plan)?;
@@ -73,7 +116,7 @@ impl GraphDbRegistry {
             require_stage_plan(&record, plan)?;
             require_plan_binding(&registration, &record.plan)?;
         }
-        Ok(record)
+        Ok(outcome)
     }
 
     pub fn published_semantic_generation(

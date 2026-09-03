@@ -382,7 +382,7 @@ fn record_vector_generation_failure(error: &VectorGenerationStoreErrorV1) {
             "daemon.semantic.evaluation.candidate.vector_generation.failed.storage",
             ()
         ),
-        VectorGenerationStoreErrorV1::ConcurrentMutation => hotpath::measure_block!(
+        VectorGenerationStoreErrorV1::ConcurrentMutation(_) => hotpath::measure_block!(
             "daemon.semantic.evaluation.candidate.vector_generation.failed.concurrent_mutation",
             ()
         ),

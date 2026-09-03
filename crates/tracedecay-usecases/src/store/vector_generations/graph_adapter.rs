@@ -8,9 +8,9 @@ use tracedecay_domain::{
     ManifestDigest, VectorGenerationIdV1,
 };
 use tracedecay_graph_db::{
-    GraphCancellation, GraphEntityId, GraphNamespace, GraphProjectionId, GraphPropertyName,
-    GraphVectorIndexRequest, GraphVectorIndexStatus, GraphWatermark, MAX_VECTOR_SEARCH_LIMIT,
-    VectorMetric, VectorSearchRequest,
+    GraphCancellation, GraphDbError, GraphEntityId, GraphNamespace, GraphProjectionId,
+    GraphPropertyName, GraphVectorIndexRequest, GraphVectorIndexStatus, GraphWatermark,
+    MAX_VECTOR_SEARCH_LIMIT, VectorMetric, VectorSearchRequest,
 };
 use tracedecay_store::{
     GraphNamespaceV1, GraphProjectionIdV1, GraphProjectionIdentityV1, SemanticVectorChunkDigest,
@@ -452,7 +452,11 @@ impl GraphVectorGenerationStoreV1 {
             .recover_verified_generation(&verified_head.key, &authority)
             .map_err(map_graph_error)?;
         if snapshot.verified_head() != verified_head.as_ref() {
-            return Err(VectorGenerationStoreErrorV1::ConcurrentMutation);
+            return Err(map_graph_error(GraphDbError::conflict_observed(
+                    "usecases.store.read_only_generation.verified_head",
+                    format!("verified_head={verified_head:?}"),
+                    format!("verified_head={:?}", snapshot.verified_head()),
+                )));
         }
         Ok(Some(Self {
             runtime,
@@ -473,7 +477,11 @@ impl GraphVectorGenerationStoreV1 {
         })?;
         match current.as_ref() {
             Some(existing) if existing != &descriptor => {
-                Err(VectorGenerationStoreErrorV1::ConcurrentMutation)
+                Err(map_graph_error(GraphDbError::conflict_observed(
+                        "usecases.store.configure_stage",
+                        format!("descriptor={existing:?}"),
+                        format!("descriptor={descriptor:?}"),
+                    )))
             }
             Some(_) => Ok(()),
             None => {
@@ -686,7 +694,11 @@ impl GraphVectorGenerationStoreV1 {
             .recover_verified_generation(&verified_head.key, &authority)
             .map_err(map_graph_error)?;
         if snapshot.verified_head() != verified_head.as_ref() {
-            return Err(VectorGenerationStoreErrorV1::ConcurrentMutation);
+            return Err(map_graph_error(GraphDbError::conflict_observed(
+                    "usecases.store.load_published_generation.verified_head",
+                    format!("verified_head={verified_head:?}"),
+                    format!("verified_head={:?}", snapshot.verified_head()),
+                )));
         }
         Ok(Some(SemanticVectorVerifiedReadV1::new(snapshot)))
     }

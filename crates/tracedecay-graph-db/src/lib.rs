@@ -96,7 +96,7 @@ pub use registry::{
     GraphPublicationPreparationV1, ProvenGraphPublicationV1, SemanticVectorRetentionAction,
     SemanticVectorRetentionCensus, SemanticVectorRetentionStep,
     SemanticVectorRetirementReservation, VerifiedGenerationBatchApply,
-    VerifiedGenerationBatchCommit,
+    VerifiedGenerationBatchCommit, VerifiedGenerationBeginV1,
 };
 pub use runtime::{GraphDb, GraphDbRuntimeState, GraphSnapshot};
 

@@ -29,7 +29,7 @@ use tracedecay_store::{
     RuntimeRequestProbeV1, SemanticVectorStageBatchReceipt, SemanticVectorStageCancelOutcome,
     SemanticVectorStageKey, SemanticVectorStagePlan, SemanticVectorStagePublicationPrepareOutcome,
     SemanticVectorStagePublishOutcome, SemanticVectorStagePublishSettlement,
-    SemanticVectorStageRecord, SemanticVectorStageResumeOutcome, SemanticVectorStagingStore,
+    SemanticVectorStageResumeOutcome, SemanticVectorStagingStore,
     StoreShardIdV1,
 };
 
