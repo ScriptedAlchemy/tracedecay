@@ -58,12 +58,13 @@ use tracedecay_query::retrieval::ports::{
 use tracedecay_query::retrieval::rerank::RerankExecutionControlV1;
 use tracedecay_query::retrieval::semantic::{
     CalibratedSemanticQueryService, CodeSemanticEvidenceV1, CompleteSemanticGenerationV1,
-    SemanticAbstentionDispositionV1, SemanticAnnCandidatesV1, SemanticAnnIndexStateV1,
-    SemanticCalibrationProfileV1, SemanticCodeRetriever, SemanticExecutionControl,
-    SemanticIndexStateV1, SemanticLaneReadinessV1, SemanticLaneRetriever, SemanticQueryDecisionV1,
-    SemanticQueryModeV1, SemanticQueryServiceError, SemanticQueryServiceOutcomeV1,
-    SemanticRetrievalRequestV1, SemanticSearchKindV1, SemanticVectorReadPort,
-    SemanticVectorReadRequestV1, SemanticVectorRecordV1, SemanticVectorScanSummaryV1,
+    SemanticAbstentionDispositionV1, SemanticAnnCandidateWindowV1, SemanticAnnCandidatesV1,
+    SemanticAnnIndexStateV1, SemanticCalibrationProfileV1, SemanticCodeRetriever,
+    SemanticExecutionControl, SemanticIndexStateV1, SemanticLaneReadinessV1, SemanticLaneRetriever,
+    SemanticQueryDecisionV1, SemanticQueryModeV1, SemanticQueryServiceError,
+    SemanticQueryServiceOutcomeV1, SemanticRetrievalRequestV1, SemanticSearchKindV1,
+    SemanticVectorReadPort, SemanticVectorReadRequestV1, SemanticVectorRecordV1,
+    SemanticVectorScanSummaryV1,
 };
 use tracedecay_query::search_quality::candidate_output::ProductionCandidateSemanticProjectionSourcesV1;
 use tracedecay_query::search_quality::semantic_native::{
@@ -3221,11 +3222,15 @@ impl SemanticVectorReadPort for PublishedSemanticVectorReadPortV1 {
         })
     }
 
+    /// Serves `window` as the ranks past `window.skip` of one index search
+    /// to `window.depth`. HNSW has no rank offset: the deeper search is the
+    /// only way to reach those ranks, and its prefix may reorder relative to
+    /// the shallower pass, which is why the lane tolerates re-served rows.
     fn ann_candidates(
         &self,
         request: SemanticVectorReadRequestV1<'_>,
         query: &[f32],
-        limit: usize,
+        window: SemanticAnnCandidateWindowV1,
     ) -> Result<SemanticAnnCandidatesV1<'_>, RetrievalPortError> {
         if request.search_kind != SemanticSearchKindV1::AnnHnswExactRescore
             || request.vector_generation != &self.generation
@@ -3247,11 +3252,14 @@ impl SemanticVectorReadPort for PublishedSemanticVectorReadPortV1 {
         };
         let chunks = hotpath::measure_block!(
             "semantic.vector.ann_candidates",
-            index.search(query, limit).map_err(ann_search_port_error)
+            index
+                .search(query, window.depth)
+                .map_err(ann_search_port_error)
         )?;
         hotpath::gauge!("semantic_ann_candidates").set(chunks.len());
         chunks
             .into_iter()
+            .skip(window.skip)
             .map(|chunk_id| {
                 rows_by_chunk
                     .get(&chunk_id)
