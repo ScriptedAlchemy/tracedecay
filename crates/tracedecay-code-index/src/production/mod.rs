@@ -93,6 +93,11 @@ pub use sealed_codec::{
     sealed_generation_format_revision_is_compatible, sealed_generation_payload_digest,
 };
 
+/// Current daemon chunker identity shared by production indexing and native
+/// semantic evaluation fixtures. Historical revisions remain decodable but
+/// must never be emitted as current activation evidence.
+pub const DAEMON_CODE_INDEX_CHUNKER_REVISION: &str = "chunker.daemon.v3";
+
 /// Immutable configuration retained by one production index owner.
 #[derive(Clone, Debug)]
 pub struct CodeIndexProductionConfigV1 {

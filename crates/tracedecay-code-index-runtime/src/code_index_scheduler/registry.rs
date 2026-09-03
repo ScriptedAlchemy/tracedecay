@@ -1282,6 +1282,14 @@ impl CodeIndexSchedulerRegistryV1 {
         Arc::clone(&self.background_reconcile_admission)
     }
 
+    /// Admit one native semantic evaluation through the same bounded
+    /// background-work authority as code-index reconciliation. Holding this
+    /// permit keeps the evaluated generation stable and prevents an
+    /// operator-triggered current+10x run from bypassing daemon scheduling.
+    pub fn semantic_evaluation_admission(&self) -> Arc<tokio::sync::Semaphore> {
+        Arc::clone(&self.background_reconcile_admission)
+    }
+
     /// Test-only observation of an exact mounted worktree's active owner pass.
     #[cfg(test)]
     pub async fn reconcile_in_progress_for_test(&self, project_root: &Path) -> bool {

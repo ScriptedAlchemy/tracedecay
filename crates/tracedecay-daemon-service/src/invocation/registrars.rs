@@ -884,7 +884,11 @@ impl DaemonConfigurationRuntimeRegistrar {
                     grants,
                     semantic_operation: Arc::new(OnceLock::new()),
                     semantic_evaluation_workers: Arc::new(
-                        tracedecay_code_index_runtime::semantic_evaluation::DaemonSemanticEvaluationWorkerOwnerV1::default(),
+                        tracedecay_code_index_runtime::semantic_evaluation::DaemonSemanticEvaluationWorkerOwnerV1::with_scheduler_admission(
+                            self.service
+                                .code_index_schedulers
+                                .semantic_evaluation_admission(),
+                        ),
                     ),
                 },
             )
