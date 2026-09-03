@@ -62,15 +62,6 @@ pub(super) fn document_ngrams(
     bytes: &[u8],
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<Vec<u32>, CodeLexicalArtifactErrorV1> {
-    crate::hotpath_metrics::measure_frequent("query.artifact.ngram.project_document", || {
-        document_ngrams_inner(bytes, control)
-    })
-}
-
-fn document_ngrams_inner(
-    bytes: &[u8],
-    control: &dyn CodeIndexExecutionControlV1,
-) -> Result<Vec<u32>, CodeLexicalArtifactErrorV1> {
     let (_, scratch_bytes) = document_ngram_scratch(bytes.len())?;
     if scratch_bytes > ARTIFACT_DOCUMENT_SCRATCH_LIMIT_BYTES {
         return Err(CodeLexicalArtifactErrorV1::Contract(format!(
@@ -112,7 +103,6 @@ fn document_ngrams_inner(
     Ok(ngrams)
 }
 
-#[hotpath::measure(label = "query.artifact.ngram.project_query")]
 pub(super) fn query_ngrams(bytes: &[u8]) -> BTreeSet<u32> {
     let width = bytes.len().min(3);
     if width == 0 {

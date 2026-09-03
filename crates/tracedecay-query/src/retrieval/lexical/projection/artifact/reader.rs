@@ -1692,7 +1692,6 @@ impl<'a> ArtifactQueryV1<'a> {
             .map_err(map_query_artifact_error)
     }
 
-    #[hotpath::measure(label = "query.lane.lexical.select_documents")]
     fn lexical_documents(
         &self,
         request: &LexicalLaneRequest<'_>,
@@ -1758,7 +1757,6 @@ impl<'a> ArtifactQueryV1<'a> {
         union_document_queries(sources)
     }
 
-    #[hotpath::measure(label = "query.lane.exact.select_documents")]
     fn exact_documents(
         &self,
         request: &ExactLaneRequest,
