@@ -209,6 +209,7 @@ pub(crate) const fn admission_outcome(
         retryable,
         reason_code,
         recovery: None,
+        storage_cause: None,
     }
 }
 
@@ -1250,12 +1251,23 @@ fn classify_error(error: &ObservationApplicationError) -> HostAdmissionOutcome {
                 Some("cursor_conflict"),
             )
         }
-        ObservationApplicationError::Store(ObservationStoreError::Storage { .. }) => {
-            admission_outcome(
+        ObservationApplicationError::Store(ObservationStoreError::Storage {
+            operation,
+            source,
+        }) => {
+            tracing::warn!(
+                operation,
+                error = %source,
+                reason_code = "authority_write_failed",
+                "observation store storage failure classified as authority_write_failed"
+            );
+            let mut outcome = admission_outcome(
                 HostAdmissionStatus::Unavailable,
                 true,
                 Some("authority_write_failed"),
-            )
+            );
+            outcome.storage_cause = Some(format!("{operation}: {source}"));
+            outcome
         }
         ObservationApplicationError::Contract(_) => {
             HostAdmissionOutcome::deterministic_content_refusal("invalid_observation_contract")
