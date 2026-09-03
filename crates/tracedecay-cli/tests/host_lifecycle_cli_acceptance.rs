@@ -64,6 +64,18 @@ const ZED_CONFIGS: &[(&str, &[u8])] = &[(
 }
 "#,
 )];
+const ANTIGRAVITY_CONFIGS: &[(&str, &[u8])] = &[
+    (
+        ".gemini/antigravity/mcp_config.json",
+        br#"{"mcpServers":{"foreign":{"command":"foreign-bin"}},"ui":{"theme":"dark"}}
+"#,
+    ),
+    (
+        ".gemini/antigravity-cli/plugins/tracedecay.json",
+        br#"{"mcpServers":{"foreign":{"command":"foreign-bin"}},"ui":{"theme":"dark"}}
+"#,
+    ),
+];
 const HERMES_CONFIGS: &[(&str, &[u8])] = &[
     (
         ".hermes/config.yaml",
@@ -166,6 +178,7 @@ fn host_case(host: HostKindV1) -> HostCase {
         HostKindV1::Codex => CODEX_CONFIGS,
         HostKindV1::Devin => DEVIN_CONFIGS,
         HostKindV1::Zed => ZED_CONFIGS,
+        HostKindV1::Antigravity => ANTIGRAVITY_CONFIGS,
         HostKindV1::Hermes => HERMES_CONFIGS,
         HostKindV1::Kiro => KIRO_CONFIGS,
         HostKindV1::KimiCode => &[],
@@ -280,6 +293,7 @@ fn assert_documented_mcp_registration(case: HostCase, cli: &IsolatedCli) {
         HostKindV1::Cline => (".cline/mcp.json", "mcpServers"),
         HostKindV1::Devin => (".config/devin/mcp_config.json", "mcpServers"),
         HostKindV1::Zed => (".config/zed/settings.json", "context_servers"),
+        HostKindV1::Antigravity => (".gemini/antigravity/mcp_config.json", "mcpServers"),
         HostKindV1::RooCode => (
             ".config/Code/User/globalStorage/rooveterinaryinc.roo-cline/settings/cline_mcp_settings.json",
             "mcpServers",
@@ -296,7 +310,9 @@ fn assert_documented_mcp_registration(case: HostCase, cli: &IsolatedCli) {
     );
     let theme = match case.host {
         HostKindV1::Zed => &config["theme"],
-        HostKindV1::Cline | HostKindV1::Devin | HostKindV1::RooCode => &config["ui"]["theme"],
+        HostKindV1::Cline | HostKindV1::Devin | HostKindV1::Antigravity | HostKindV1::RooCode => {
+            &config["ui"]["theme"]
+        }
         HostKindV1::Kilo => &config["theme"],
         _ => unreachable!(),
     };
@@ -312,7 +328,7 @@ fn assert_documented_mcp_registration(case: HostCase, cli: &IsolatedCli) {
             assert_eq!(entry["disabled"], false);
             assert_eq!(entry["autoApprove"], serde_json::json!([]));
         }
-        HostKindV1::Devin => {
+        HostKindV1::Devin | HostKindV1::Antigravity => {
             assert_eq!(
                 entry["command"],
                 serde_json::json!(cli.bin_dir.join("tracedecay"))
@@ -320,6 +336,30 @@ fn assert_documented_mcp_registration(case: HostCase, cli: &IsolatedCli) {
             assert_eq!(entry["args"], serde_json::json!(["serve"]));
             assert_eq!(entry["env"], serde_json::json!({}));
             assert_eq!(entry["transport"], "stdio");
+            if case.host == HostKindV1::Antigravity {
+                let cli_plugin: serde_json::Value = serde_json::from_slice(
+                    &fs::read(
+                        cli.home
+                            .path()
+                            .join(".gemini/antigravity-cli/plugins/tracedecay.json"),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    cli_plugin["mcpServers"]["foreign"]["command"],
+                    "foreign-bin"
+                );
+                assert_eq!(cli_plugin["ui"]["theme"], "dark");
+                assert_eq!(
+                    cli_plugin["mcpServers"]["tracedecay"]["command"],
+                    serde_json::json!(cli.bin_dir.join("tracedecay"))
+                );
+                assert_eq!(
+                    cli_plugin["mcpServers"]["tracedecay"]["args"],
+                    serde_json::json!(["serve"])
+                );
+            }
         }
         HostKindV1::Zed => {
             assert_eq!(
@@ -599,6 +639,7 @@ fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
         HostKindV1::Cline,
         HostKindV1::Devin,
         HostKindV1::Zed,
+        HostKindV1::Antigravity,
         HostKindV1::Hermes,
     ] {
         let case = host_case(host);
