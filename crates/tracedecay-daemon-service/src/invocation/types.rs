@@ -607,6 +607,37 @@ impl FeedbackCycleRuntimePort for SwitchableFeedbackCycleRuntimeV1 {
     }
 }
 
+/// Project-local wakeup sequence for recovery work created by durable Work
+/// writes. The sender is retained by [`RegisteredWorkRuntime`]; each recovery
+/// owner receives an independent watch cursor so one scan cannot consume
+/// another owner's notification.
+///
+/// The daemon bumps this sequence after settled blocked-interval receipts,
+/// workflow fan-out census records, and workflow effect terminals are durable.
+/// Reads never bump it.
+#[derive(Clone)]
+pub(crate) struct WorkDurableWriteSignalV1 {
+    sender: tokio::sync::watch::Sender<u64>,
+}
+
+impl Default for WorkDurableWriteSignalV1 {
+    fn default() -> Self {
+        let (sender, _) = tokio::sync::watch::channel(0);
+        Self { sender }
+    }
+}
+
+impl WorkDurableWriteSignalV1 {
+    pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.sender.subscribe()
+    }
+
+    pub(crate) fn bump(&self) {
+        self.sender
+            .send_modify(|sequence| *sequence = sequence.wrapping_add(1));
+    }
+}
+
 /// Retained daemon state for the typed Work application operations.
 #[derive(Clone)]
 pub struct RegisteredWorkRuntime {
@@ -625,6 +656,7 @@ pub struct RegisteredWorkRuntime {
     /// Canonical Work evidence retrieval adapter with per-request
     /// evaluated-profile resolution.
     pub(super) evidence_retrieval: Arc<dyn WorkEvidenceRetrievalPortV1>,
+    pub(super) durable_write_signal: WorkDurableWriteSignalV1,
     /// Project-owned bounded replay for receipts that closed outside a request
     /// response, such as terminal attempt compare-and-swaps.
     pub(super) blocked_interval_observation_recovery:
