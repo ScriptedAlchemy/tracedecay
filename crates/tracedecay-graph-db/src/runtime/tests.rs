@@ -425,9 +425,10 @@ fn apply_vector_batch_with_check(
     let guard = db.write_guard().unwrap();
     let database = guard.as_ref().unwrap();
     let mut state = db.state_write_guard().unwrap();
+    let state = state.as_mut().unwrap();
     db.apply_locked(
         database,
-        &mut state,
+        state,
         batch,
         mutation::CommitMetadata::for_digest(digest),
         &mutation::RelationEndpointNamespaces::new(),

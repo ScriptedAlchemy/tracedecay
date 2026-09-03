@@ -636,9 +636,12 @@ impl GraphDb {
         let guard = self.write_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
         let mut state = self.state_write_guard()?;
+        let state = state
+            .as_mut()
+            .ok_or_else(|| GraphDbError::unavailable("graph format state is unavailable"))?;
         self.apply_locked_without_vector_index_maintenance(
             database,
-            &mut state,
+            state,
             batch,
             mutation::CommitMetadata {
                 digest,

@@ -158,6 +158,9 @@ impl GraphDb {
         }
         check()?;
         let mut state = self.state_write_guard()?;
+        let state = state
+            .as_mut()
+            .ok_or_else(|| GraphDbError::unavailable("graph format state is unavailable"))?;
         // Staged semantic vectors maintain their per-generation HNSW index
         // inline: the pinned grafeo persists index topology at checkpoint and
         // restores it on open, so the index built here is the one the serving
@@ -168,7 +171,7 @@ impl GraphDb {
             "graph_db.generation.stage.batch.apply_locked",
             self.apply_locked(
                 database,
-                &mut state,
+                state,
                 batch,
                 mutation::CommitMetadata {
                     digest: batch_digest.clone(),
