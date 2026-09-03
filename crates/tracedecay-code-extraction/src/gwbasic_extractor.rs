@@ -21,7 +21,7 @@ use crate::types::{
 pub struct GwBasicExtractor;
 
 /// Internal state used during AST traversal.
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
@@ -29,12 +29,12 @@ struct ExtractionState {
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -46,7 +46,7 @@ impl ExtractionState {
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
         }
     }
@@ -71,10 +71,8 @@ impl ExtractionState {
     }
 
     /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
@@ -223,7 +221,7 @@ impl GwBasicExtractor {
                 let stripped = text
                     .get(..3)
                     .filter(|p| p.eq_ignore_ascii_case("REM"))
-                    .map_or(text.as_str(), |_| &text[3..])
+                    .map_or(text, |_| &text[3..])
                     .trim()
                     .to_string();
                 comment_text = Some(stripped);
@@ -268,13 +266,13 @@ impl GwBasicExtractor {
             let start_column = basic_line.node.start_position().column as u32;
             let end_column = basic_line.node.end_position().column as u32;
             let qualified_name = format!("{}::{}", state.qualified_prefix(), fn_name);
-            let id = generate_node_id(&state.file_path, &NodeKind::Function, &fn_name, start_line);
+            let id = generate_node_id(&state.file_path, &NodeKind::Function, fn_name, start_line);
             let text = state.node_text(basic_line.node);
 
             let graph_node = Node {
                 id: id.clone(),
                 kind: NodeKind::Function,
-                name: fn_name,
+                name: fn_name.to_string(),
                 qualified_name,
                 file_path: state.file_path.clone(),
                 start_line,
@@ -357,13 +355,13 @@ impl GwBasicExtractor {
         let start_column = basic_line.node.start_position().column as u32;
         let end_column = basic_line.node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Const, &name, start_line);
+        let id = generate_node_id(&state.file_path, &NodeKind::Const, name, start_line);
         let text = state.node_text(basic_line.node);
 
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Const,
-            name,
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -595,7 +593,7 @@ impl GwBasicExtractor {
                     let target = state.node_text(ln_node);
                     state.unresolved_refs.push(UnresolvedRef {
                         from_node_id: from_node_id.to_string(),
-                        reference_name: target,
+                        reference_name: target.to_string(),
                         reference_kind: EdgeKind::Calls,
                         line: node.start_position().row as u32,
                         column: node.start_position().column as u32,

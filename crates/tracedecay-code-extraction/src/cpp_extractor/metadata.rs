@@ -221,7 +221,7 @@ impl CppExtractor {
         fn_node_id: &str,
     ) {
         extract_call_expression_sites(
-            &state.source,
+            state.source,
             &state.file_path,
             &mut state.unresolved_refs,
             node,
@@ -230,7 +230,7 @@ impl CppExtractor {
     }
 
     pub(super) fn extract_docstring(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        docstring_from_preceding_comments(&state.source, node, clean_c_doc_comment)
+        docstring_from_preceding_comments(state.source, node, clean_c_doc_comment)
     }
 
     pub(super) fn has_storage_class(

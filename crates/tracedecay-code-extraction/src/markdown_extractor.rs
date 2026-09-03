@@ -49,11 +49,11 @@ fn line_bounds(source: &[u8]) -> Vec<(usize, usize)> {
     bounds
 }
 
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
     /// (heading title, node id, level) — heading levels strictly increase
     /// going *down* the stack. Headings of equal or shallower level pop
@@ -86,8 +86,8 @@ struct PendingReferenceLink {
     line: u32,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str, extract_inline_links: bool) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str, extract_inline_links: bool) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -96,7 +96,7 @@ impl ExtractionState {
             nodes: Vec::new(),
             edges: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
             node_stack: Vec::new(),
             inline_parser: None,
@@ -107,10 +107,8 @@ impl ExtractionState {
         }
     }
 
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 
     /// Parse the byte range covered by `inline_node` with the inline grammar
@@ -136,7 +134,7 @@ impl ExtractionState {
         if parser.set_included_ranges(&[range]).is_err() {
             return None;
         }
-        parser.parse(&self.source, None)
+        parser.parse(self.source, None)
     }
 }
 
@@ -225,7 +223,7 @@ impl MarkdownExtractor {
         if state.headings.is_empty() {
             return;
         }
-        let bounds = line_bounds(&state.source);
+        let bounds = line_bounds(state.source);
         if bounds.is_empty() {
             return;
         }
@@ -475,13 +473,13 @@ impl MarkdownExtractor {
         let Some(dest_node) = child_of_kind(node, "link_destination") else {
             return;
         };
-        let label = normalize_link_label(&strip_label_brackets(&state.node_text(label_node)));
+        let label = normalize_link_label(&strip_label_brackets(state.node_text(label_node)));
         if label.is_empty() {
             return;
         }
         state
             .reference_defs
-            .insert(label, clean_link_destination(&state.node_text(dest_node)));
+            .insert(label, clean_link_destination(state.node_text(dest_node)));
     }
 
     fn queue_reference_link(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -494,9 +492,11 @@ impl MarkdownExtractor {
         };
         let label = match node.kind() {
             "full_reference_link" | "image" => child_of_kind(node, "link_label")
-                .map(|n| strip_label_brackets(&state.node_text(n)))
-                .or_else(|| child_of_kind(node, "link_text").map(|n| state.node_text(n))),
-            _ => child_of_kind(node, "link_text").map(|n| state.node_text(n)),
+                .map(|n| strip_label_brackets(state.node_text(n)))
+                .or_else(|| {
+                    child_of_kind(node, "link_text").map(|n| state.node_text(n).to_string())
+                }),
+            _ => child_of_kind(node, "link_text").map(|n| state.node_text(n).to_string()),
         };
         let Some(label) = label.map(|raw| normalize_link_label(&raw)) else {
             return;
@@ -533,7 +533,7 @@ impl MarkdownExtractor {
             return;
         };
         let url = state.node_text(url_node);
-        Self::emit_code_uses(state, &url, &parent_id, node.start_position().row as u32);
+        Self::emit_code_uses(state, url, &parent_id, node.start_position().row as u32);
     }
 
     fn emit_code_uses(state: &mut ExtractionState, url: &str, parent_id: &str, line: u32) {

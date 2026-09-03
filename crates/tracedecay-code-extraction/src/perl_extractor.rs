@@ -15,7 +15,7 @@ use crate::types::{
 pub struct PerlExtractor;
 
 /// Internal state used during AST traversal.
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
@@ -23,14 +23,14 @@ struct ExtractionState {
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
     /// Depth of package nesting. > 0 means we are inside a package.
     class_depth: usize,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -42,7 +42,7 @@ impl ExtractionState {
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
             class_depth: 0,
         }
@@ -68,10 +68,8 @@ impl ExtractionState {
     }
 
     /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
@@ -169,9 +167,10 @@ impl PerlExtractor {
     ///
     /// If `class_depth` > 0, this is a method inside a package; otherwise it is a top-level function.
     fn visit_function(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = node
-            .child_by_field_name("name")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = node.child_by_field_name("name").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let kind = if state.class_depth > 0 {
             NodeKind::Method
@@ -187,7 +186,7 @@ impl PerlExtractor {
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &kind, &name, start_line);
-        let metrics = count_complexity(node, &PERL_COMPLEXITY, &state.source);
+        let metrics = count_complexity(node, &PERL_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -239,8 +238,10 @@ impl PerlExtractor {
     /// we handle them by scanning ahead through siblings until the next
     /// `package_statement` or end of the `source_file` children.
     fn visit_package(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "package_name")
-            .map_or_else(|| "<anonymous>".to_string(), |pn| state.node_text(pn));
+        let name = find_direct_child_by_kind(node, "package_name").map_or_else(
+            || "<anonymous>".to_string(),
+            |pn| state.node_text(pn).to_string(),
+        );
 
         // Skip `package main;` — it just returns to the top-level scope.
         if name == "main" {
@@ -341,9 +342,10 @@ impl PerlExtractor {
 
     /// Extract a `use` or `require` statement as a Use node.
     fn visit_use(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = node
-            .child_by_field_name("package_name")
-            .map_or_else(|| "<unknown>".to_string(), |n| state.node_text(n));
+        let name = node.child_by_field_name("package_name").map_or_else(
+            || "<unknown>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -528,10 +530,10 @@ impl PerlExtractor {
 
                         if let Some(name) = callee_name {
                             // Skip Perl built-in keywords that aren't real calls.
-                            if !Self::is_perl_builtin(&name) {
+                            if !Self::is_perl_builtin(name) {
                                 state.unresolved_refs.push(UnresolvedRef {
                                     from_node_id: fn_node_id.to_string(),
-                                    reference_name: name,
+                                    reference_name: name.to_string(),
                                     reference_kind: EdgeKind::Calls,
                                     line: child.start_position().row as u32,
                                     column: child.start_position().column as u32,
@@ -584,7 +586,7 @@ impl PerlExtractor {
                             } else {
                                 state.unresolved_refs.push(UnresolvedRef {
                                     from_node_id: fn_node_id.to_string(),
-                                    reference_name: name,
+                                    reference_name: name.to_string(),
                                     reference_kind: EdgeKind::Calls,
                                     line: child.start_position().row as u32,
                                     column: child.start_position().column as u32,
