@@ -1,5 +1,5 @@
 use std::sync::{
-    Arc, Mutex,
+    Arc, Mutex, Weak,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant};
@@ -49,6 +49,7 @@ mod semantic_vector;
 mod semantic_vector_runtime;
 use seals::{
     finalize_project_graph_replay_unlink, lock_project_graph_replay_pool,
+    prove_stable_sealed_source, revalidate_stable_sealed_source,
     sealed_digest_from_generation_file, stage_project_graph_replay_unlink,
 };
 use semantic_vector_runtime::DaemonVerifiedSemanticVectorGraphRuntimeV1;
@@ -314,7 +315,7 @@ impl CodeGraphPublicationFlightV1 {
     }
 }
 
-/// The registry-owned per-code-shard publication locks.
+/// The registry-owned per-project-publication-shard locks.
 ///
 /// `gate` is the serving gate: a leaf lock held only across the short
 /// storage-ordered slices of a publication — manifest-provider bind plus
@@ -324,8 +325,9 @@ impl CodeGraphPublicationFlightV1 {
 /// gate held. `flight` dedupes same-key publishers; see
 /// [`CodeGraphPublicationFlightV1`].
 ///
-/// `build` admits one corpus-sized sealed publish at a time across the whole
-/// shard, keys included. Every scope of a project stages into the one shared
+/// `build` admits one corpus-sized sealed publish at a time across every
+/// worktree/branch scope of the project. The permit is held from manifest
+/// projection through publication. Every scope stages into the one shared
 /// staging store, and each in-flight publish holds a decoded generation, a
 /// projection manifest, staging pages, and the sealed-store copy at once —
 /// several times the corpus in transient memory. A daemon recovering a
@@ -336,8 +338,11 @@ impl CodeGraphPublicationFlightV1 {
 /// observe their typed interruption while parked, and no read or serving
 /// path ever takes this permit.
 ///
-/// Lock order is `replay-pool file lock -> build -> flight -> gate`; the
-/// gate acquires nothing while held.
+/// Lock order is `build -> replay-pool file lock -> flight -> gate`. Build is
+/// acquired first and is never taken while holding replay-pool, flight, or
+/// gate. Replay-pool is released after a stable source identity proof;
+/// hashing and materialization run without it. The gate acquires nothing
+/// while held.
 #[derive(Default)]
 pub(crate) struct CodeGraphShardPublicationLocksV1 {
     gate: Mutex<()>,
@@ -390,7 +395,7 @@ pub(crate) struct RetainedCodeGraphRuntimeV1 {
     replay_root: std::path::PathBuf,
     sealed_state_digest: tracedecay_graph_db::SealedGraphStateDigest,
     lifecycle_cancelled: Arc<AtomicBool>,
-    /// Registry-owned per-shard publication locks; see
+    /// Registry-owned per-project-publication-shard locks; see
     /// `DaemonSessionRuntimeRegistryV1::code_graph_publication_gates`.
     publication_locks: Arc<CodeGraphShardPublicationLocksV1>,
 }
@@ -993,15 +998,13 @@ impl RetainedCodeGraphRuntimeV1 {
             ));
         }
         self.sweep_aborted_read_bundle_temporaries()?;
-        // Everything up to `prepared` below is a pure function of the
-        // immutable published generation and this runtime's identity — no
-        // publication storage is read or written — so racing publishers
-        // compute it concurrently instead of serializing manifest projection
-        // behind the per-shard publication gate. The manifest build memoizes
-        // on the generation handle (first complete build wins), so the seat
-        // pass and the background reconcile still share one projection. The
-        // deadline window consequently also spans the gate wait; under the
-        // background budget, cancellation stays the governing mechanism.
+        // The project-shard build permit is claimed before manifest
+        // projection and held through publication so 1/2/4/8 worktree scopes
+        // cannot overlap corpus-sized transients. Same-generation seat and
+        // reconcile publishers still share one memoized projection once the
+        // winner finishes; they wait here instead of projecting in parallel.
+        // The deadline window consequently also spans the build wait; under
+        // the background budget, cancellation stays the governing mechanism.
         let projection_deadline = sealed_projection_deadline();
         let deadline_at = Instant::now() + projection_deadline;
         let graph_generation = tracedecay_code_index::graph_projection::code_graph_generation_id(
@@ -1044,6 +1047,12 @@ impl RetainedCodeGraphRuntimeV1 {
         };
         let context = GraphPublicationOperationContextV1::new(&control, &probe)
             .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+        let interruption = || match probe.interruption() {
+            Some(RuntimeInterruptionV1::Cancelled) => Err(GraphDbError::Cancelled),
+            Some(RuntimeInterruptionV1::DeadlineExceeded) => Err(GraphDbError::DeadlineExceeded),
+            None => Ok(()),
+        };
+        let _build = self.publication_locks.claim_build(&interruption)?;
         let projection = tracedecay_code_index::graph_projection::code_graph_projection_identity(
             self.authority.namespace().clone(),
         )
@@ -1438,15 +1447,20 @@ impl RetainedCodeGraphRuntimeV1 {
             deadline: prepared.deadline_at,
         };
         let verify_durable_source = || {
-            let replay_pool_lock = lock_project_graph_replay_pool(
+            let check = || match probe.interruption() {
+                Some(RuntimeInterruptionV1::Cancelled) => Err(GraphDbError::Cancelled),
+                Some(RuntimeInterruptionV1::DeadlineExceeded) => {
+                    Err(GraphDbError::DeadlineExceeded)
+                }
+                None => Ok(()),
+            };
+            // Stable identity under the replay-pool lock, then release so
+            // retention/replay cleanup is not blocked by seal hashing.
+            let proof = prove_stable_sealed_source(
+                &self.generations_root,
                 &self.replay_root,
-                &|| match probe.interruption() {
-                    Some(RuntimeInterruptionV1::Cancelled) => Err(GraphDbError::Cancelled),
-                    Some(RuntimeInterruptionV1::DeadlineExceeded) => {
-                        Err(GraphDbError::DeadlineExceeded)
-                    }
-                    None => Ok(()),
-                },
+                &self.sealed_state_digest,
+                &check,
             )?;
             hotpath::measure_block!(
                 "daemon.session_registry.publish_snapshot.verify_source",
@@ -1454,16 +1468,10 @@ impl RetainedCodeGraphRuntimeV1 {
                     &self.generations_root,
                     &self.replay_root,
                     &self.sealed_state_digest,
-                    &|| match probe.interruption() {
-                        Some(RuntimeInterruptionV1::Cancelled) => Err(GraphDbError::Cancelled),
-                        Some(RuntimeInterruptionV1::DeadlineExceeded) => {
-                            Err(GraphDbError::DeadlineExceeded)
-                        }
-                        None => Ok(()),
-                    },
+                    &check,
                 )
             )?;
-            Ok::<_, GraphDbError>(replay_pool_lock)
+            revalidate_stable_sealed_source(&proof, &self.replay_root, &check)
         };
         let mut storage = self
             .project_database
@@ -1531,11 +1539,10 @@ impl RetainedCodeGraphRuntimeV1 {
                 }
                 None => Ok(()),
             };
-            // One corpus-sized build at a time across the shard: the decoded
-            // generation, the projection manifest, the staging pages, and
-            // the sealed-store copy of concurrent scope publications
-            // otherwise overlap into an unbounded replay working set.
-            let _build = self.publication_locks.claim_build(&interruption)?;
+            // The project-shard build permit is already held by
+            // `publish_verified_snapshot` from projection through this
+            // publish, including predecessor completions. Claiming it again
+            // here would deadlock the non-reentrant mutex.
             let _flight = self.publication_locks.flight.claim(key, &interruption)?;
             // The already-built projection manifest rides along so first
             // publication does not re-read and re-project the sealed artifact
@@ -1662,7 +1669,10 @@ impl RetainedCodeGraphRuntimeV1 {
                 );
             }
             SealedPublicationClassificationV1::ResumeJournaled => {
-                let _replay_pool_lock = verify_durable_source()?;
+                let replay_pool_lock = verify_durable_source()?;
+                // Hashing already ran without the pool lock. Release before
+                // materialization so retention/replay cleanup can proceed.
+                drop(replay_pool_lock);
                 // Seal-time bundle: stage from the in-hand rows before the
                 // publish consumes them, commit only after it succeeds.
                 let bundle_identity = prepared.manifest.identity();
@@ -2218,6 +2228,25 @@ impl DaemonSessionRuntimeRegistryV1 {
         }
     }
 
+    /// One lock cell per project publication shard, reused while any runtime
+    /// holds it and dropped once the last strong reference retires.
+    fn retain_project_publication_locks(
+        &self,
+        project_shard: &StoreShardIdV1,
+    ) -> Arc<CodeGraphShardPublicationLocksV1> {
+        let mut gates = self
+            .code_graph_publication_gates
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        gates.retain(|_, weak| weak.strong_count() > 0);
+        if let Some(existing) = gates.get(project_shard).and_then(Weak::upgrade) {
+            return existing;
+        }
+        let cell = Arc::new(CodeGraphShardPublicationLocksV1::default());
+        gates.insert(project_shard.clone(), Arc::downgrade(&cell));
+        cell
+    }
+
     #[allow(clippy::too_many_arguments)]
     #[hotpath::measure(
         label = "daemon.session_registry.retain_code_graph_runtime",
@@ -2311,13 +2340,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         let replay_root = project_database
             .database_path()
             .with_extension("graph-replay");
-        let publication_locks = {
-            let mut gates = self
-                .code_graph_publication_gates
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            Arc::clone(gates.entry(code_shard.clone()).or_default())
-        };
+        let publication_locks = self.retain_project_publication_locks(&project_shard);
         Ok(RetainedCodeGraphRuntimeV1 {
             graph_registry: self.graph_registry.clone(),
             graph_manifest_provider: Arc::clone(&self.graph_manifest_provider),

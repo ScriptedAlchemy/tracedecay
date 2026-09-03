@@ -8,19 +8,19 @@ use crate::types::{
 
 pub struct HaskellExtractor;
 
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
     errors: Vec<String>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     file_node_id: String,
     timestamp: u64,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -32,16 +32,14 @@ impl ExtractionState {
             unresolved_refs: Vec::new(),
             errors: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             file_node_id,
             timestamp,
         }
     }
 
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 
     fn emit(
@@ -308,7 +306,7 @@ impl HaskellExtractor {
     fn extract_function_name(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
         // Try the `name` field first.
         if let Some(n) = node.child_by_field_name("name") {
-            return Some(state.node_text(n));
+            return Some(state.node_text(n).to_string());
         }
         // Fall back to first child with kind "variable" or "operator".
         let mut cursor = node.walk();
@@ -316,7 +314,7 @@ impl HaskellExtractor {
             loop {
                 let child = cursor.node();
                 if matches!(child.kind(), "variable" | "operator" | "prefix_id") {
-                    return Some(state.node_text(child));
+                    return Some(state.node_text(child).to_string());
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -335,7 +333,7 @@ impl HaskellExtractor {
                 if matches!(child.kind(), "constructor" | "type" | "name") {
                     let text = state.node_text(child);
                     if text.chars().next().is_some_and(char::is_uppercase) {
-                        return Some(text);
+                        return Some(text.to_string());
                     }
                 }
                 if !cursor.goto_next_sibling() {

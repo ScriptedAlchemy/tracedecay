@@ -471,6 +471,54 @@ impl VerifiedGraphSnapshot {
         })
     }
 
+    #[hotpath::measure(
+        label = "graph_db.lease.outgoing_relation_ids_page",
+        impl_type = "VerifiedGraphSnapshot"
+    )]
+    pub fn outgoing_relation_ids_page(
+        &self,
+        starts: &[GraphEntityId],
+        relation_kinds: &BTreeSet<crate::GraphRelationKind>,
+        after: Option<&GraphRelationId>,
+        limit: usize,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
+        self.with_operation(|| {
+            self.database.outgoing_relation_ids_page(
+                &self.head.locator.physical_namespace()?,
+                starts,
+                relation_kinds,
+                after,
+                limit,
+                cancellation,
+            )
+        })
+    }
+
+    #[hotpath::measure(
+        label = "graph_db.lease.incoming_relation_ids_page",
+        impl_type = "VerifiedGraphSnapshot"
+    )]
+    pub fn incoming_relation_ids_page(
+        &self,
+        starts: &[GraphEntityId],
+        relation_kinds: &BTreeSet<crate::GraphRelationKind>,
+        after: Option<&GraphRelationId>,
+        limit: usize,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
+        self.with_operation(|| {
+            self.database.incoming_relation_ids_page(
+                &self.head.locator.physical_namespace()?,
+                starts,
+                relation_kinds,
+                after,
+                limit,
+                cancellation,
+            )
+        })
+    }
+
     /// Bulk outgoing relation rows over this verified generation. This keeps
     /// the traversal's already-decoded rows in hand for callers that need the
     /// relation payload, instead of reducing them to identities and issuing a

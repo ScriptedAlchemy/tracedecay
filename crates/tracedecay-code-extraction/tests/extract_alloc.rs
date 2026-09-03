@@ -14,12 +14,15 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
+use std::fmt::Write as _;
 use std::time::Instant;
 
+use sha2::{Digest, Sha256};
 use tracedecay_code_extraction::incremental::{ParseChangedRange, ParsePoint};
 use tracedecay_code_extraction::parsed_extraction::{ParsedExtraction, ParsedExtractionScope};
 use tracedecay_code_extraction::{
-    LanguageExtractor, PythonExtractor, RustExtractor, TypeScriptExtractor, ts_provider,
+    BashExtractor, GoExtractor, HaskellExtractor, LanguageExtractor, PythonExtractor,
+    RustExtractor, TypeScriptExtractor, ts_provider,
 };
 use tracedecay_domain::{ExtractionResult, NodeKind};
 use tree_sitter::{Parser, Tree};
@@ -78,6 +81,8 @@ const PAD_WIDTH: usize = 960;
 /// the body child; a helper that copies the whole item instead busts the
 /// allocation budget and changes the pinned signature.
 const INLINE_LITERAL_WIDTH: usize = 200_000;
+const REGIONAL_SOURCE_BYTES: usize = 1_500_000;
+const REGIONAL_BASE_BUDGET: usize = 64 * 1024;
 
 fn push_inline_literal(source: &mut String) {
     for _ in 0..INLINE_LITERAL_WIDTH {
@@ -94,6 +99,16 @@ fn push_padded_statement(source: &mut String, statement: &str, comment_marker: &
         source.push('x');
     }
     source.push('\n');
+}
+
+fn regional_fixture(trailing_item: &str) -> String {
+    let padding_line = format!("{}\n", " ".repeat(PAD_WIDTH));
+    let mut source = String::with_capacity(REGIONAL_SOURCE_BYTES + trailing_item.len());
+    while source.len() + padding_line.len() + trailing_item.len() <= REGIONAL_SOURCE_BYTES {
+        source.push_str(&padding_line);
+    }
+    source.push_str(trailing_item);
+    source
 }
 
 fn rust_fixture() -> String {
@@ -170,6 +185,22 @@ fn signature_rows(result: &ExtractionResult) -> Vec<(String, Option<String>)> {
         .collect();
     rows.sort();
     rows
+}
+
+/// Digest canonical extraction rows while excluding runtime-only timing fields.
+fn canonical_digest(result: &ExtractionResult) -> String {
+    let mut stable = result.clone();
+    stable.duration_ms = 0;
+    for node in &mut stable.nodes {
+        node.updated_at = 0;
+    }
+    let encoded = serde_json::to_vec(&stable).expect("serialize canonical extraction rows");
+    Sha256::digest(encoded)
+        .iter()
+        .fold(String::with_capacity(64), |mut digest, byte| {
+            write!(&mut digest, "{byte:02x}").expect("write digest");
+            digest
+        })
 }
 
 fn signature_of<'r>(result: &'r ExtractionResult, kind: NodeKind, name: &str) -> &'r str {
@@ -457,4 +488,119 @@ fn incremental_walk_of_tiny_item_pays_only_for_that_item() {
             case.source.len()
         );
     }
+}
+
+/// Representative lite, medium, and full extractors must retain the caller's
+/// source during a one-line incremental walk. The fixed allowance covers the
+/// canonical file/item rows; the variable allowance scales only with bytes in
+/// the selected syntax node, never with the 1–2 MiB source.
+#[test]
+fn representative_language_walks_allocate_by_changed_region() {
+    struct Case {
+        tier: &'static str,
+        extractor: &'static dyn LanguageExtractor,
+        file_path: &'static str,
+        grammar_key: &'static str,
+        source: String,
+        needle: &'static str,
+        expected_digest: &'static str,
+    }
+
+    let cases = [
+        Case {
+            tier: "lite",
+            extractor: &GoExtractor,
+            file_path: "region.go",
+            grammar_key: "go",
+            source: regional_fixture("func tiny() int { return 1 }\n"),
+            needle: "func tiny",
+            expected_digest: "7bc4d1d7e778bf2c40976672e63f12a7c5817dd8d8c34c28129105988dafef3c",
+        },
+        Case {
+            tier: "medium",
+            extractor: &BashExtractor,
+            file_path: "region.sh",
+            grammar_key: "bash",
+            source: regional_fixture("tiny() { :; }\n"),
+            needle: "tiny()",
+            expected_digest: "0b6dc46dcc1aa39ee5e93ab7b7380922ca2299c3090679be0d9f8084d5dbbb3f",
+        },
+        Case {
+            tier: "full",
+            extractor: &HaskellExtractor,
+            file_path: "Region.hs",
+            grammar_key: "haskell",
+            source: regional_fixture("tiny = 1\n"),
+            needle: "tiny =",
+            expected_digest: "f395f8ee10318640159cd719d4f3769e0927295902473e66a154238d1d4e6c14",
+        },
+    ];
+
+    let mut over_budget = Vec::new();
+    for case in cases {
+        assert!(
+            (1_000_000..=2_000_000).contains(&case.source.len()),
+            "{} fixture must remain 1–2 MiB, got {} bytes",
+            case.file_path,
+            case.source.len()
+        );
+        let cold = case.extractor.extract(case.file_path, &case.source);
+        assert!(
+            cold.errors.is_empty(),
+            "{} cold errors: {:?}",
+            case.file_path,
+            cold.errors
+        );
+        let tree = parse_with_grammar(case.grammar_key, &case.source);
+        let region = trailing_region(&case.source, case.needle);
+        let regions = [region];
+        let (incremental, walk_bytes) = measure_allocation(|| {
+            case.extractor.extract_parsed(
+                case.file_path,
+                &case.source,
+                &tree,
+                ParsedExtractionScope::ChangedRegions(&regions),
+            )
+        });
+        assert!(
+            incremental.result.errors.is_empty(),
+            "{} incremental errors: {:?}",
+            case.file_path,
+            incremental.result.errors
+        );
+
+        let cold_digest = canonical_digest(&cold);
+        let incremental_digest = canonical_digest(&incremental.result);
+        println!(
+            "{} ({}): source={} visited={} allocated={} digest={cold_digest}",
+            case.file_path,
+            case.tier,
+            case.source.len(),
+            incremental.metrics.visited_bytes,
+            walk_bytes,
+        );
+        assert_eq!(
+            cold_digest, incremental_digest,
+            "{} cold and incremental canonical rows differ",
+            case.file_path
+        );
+        assert_eq!(
+            cold_digest, case.expected_digest,
+            "{} canonical row bytes changed",
+            case.file_path
+        );
+
+        let budget = REGIONAL_BASE_BUDGET + incremental.metrics.visited_bytes * 32;
+        if walk_bytes > budget {
+            over_budget.push(format!(
+                "{} ({}) allocated {walk_bytes} bytes for a {} byte source and {} visited bytes; \
+                 budget is {budget} bytes",
+                case.file_path,
+                case.tier,
+                case.source.len(),
+                incremental.metrics.visited_bytes,
+            ));
+        }
+    }
+    assert!(over_budget.is_empty(), "{}", over_budget.join("\n"));
 }
