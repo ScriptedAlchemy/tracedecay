@@ -66,6 +66,7 @@ pub struct CodeIndexSemanticAbstentionV1 {
 pub enum CodeIndexSearchUnavailableReasonV1 {
     CapabilityUnavailable,
     AuthorityUnavailable,
+    LinkedWorktreeDisabled,
     Cancelled,
     TimedOut,
     CapacityUnavailable,
@@ -83,6 +84,7 @@ impl CodeIndexSearchUnavailableReasonV1 {
         match self {
             Self::CapabilityUnavailable => "code_index_unavailable",
             Self::AuthorityUnavailable => "authority_unavailable",
+            Self::LinkedWorktreeDisabled => "linked_worktree_disabled",
             Self::Cancelled => "cancelled",
             Self::TimedOut => "timed_out",
             Self::CapacityUnavailable => "search_capacity_unavailable",

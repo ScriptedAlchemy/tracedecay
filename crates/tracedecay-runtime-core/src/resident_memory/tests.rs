@@ -11,7 +11,8 @@ use super::{
     RESIDENT_MEMORY_PRESSURE_LOW_WATERMARK_PERMILLE_V1, ResidentMemoryAdmissionFailureV1,
     ResidentMemoryComponentIdV1, ResidentMemoryKeyV1, ResidentMemoryPressureStateV1,
     ResidentMemoryPressureV1, cgroup_v2_memory_limit_v1, effective_memory_bytes_v1,
-    process_resident_memory_limit_for_system_v1, resident_memory_watermark_bytes_v1,
+    process_resident_memory_limit_for_system_v1, process_resident_memory_limit_v1,
+    resident_memory_watermark_bytes_v1,
 };
 
 fn bytes(value: u64) -> NonZeroU64 {
@@ -84,6 +85,63 @@ fn absent_cgroup_memory_files_keep_host_memory_capacity() {
     assert_eq!(
         effective_memory_bytes(88 * 1024 * 1024 * 1024, &proc_self_cgroup, &cgroup_root,),
         88 * 1024 * 1024 * 1024
+    );
+}
+
+#[test]
+fn cgroup_v1_only_membership_does_not_invent_a_v2_ceiling() {
+    let gib = 1024 * 1024 * 1024;
+    let (_directory, proc_self_cgroup, cgroup_root) = cgroup_fixture(
+        Some("12:memory:/trace.slice/daemon.scope\n"),
+        Some("32212254720\n"),
+        Some("max\n"),
+    );
+
+    assert_eq!(
+        effective_memory_bytes(88 * gib, &proc_self_cgroup, &cgroup_root),
+        88 * gib
+    );
+}
+
+#[test]
+fn hybrid_membership_uses_the_unified_v2_memory_ceiling() {
+    let gib = 1024 * 1024 * 1024;
+    let (_directory, proc_self_cgroup, cgroup_root) = cgroup_fixture(
+        Some("12:memory:/legacy.slice\n0::/trace.slice/daemon.scope\n"),
+        Some("32212254720\n"),
+        Some("max\n"),
+    );
+
+    assert_eq!(
+        effective_memory_bytes(88 * gib, &proc_self_cgroup, &cgroup_root),
+        30 * gib
+    );
+}
+
+#[test]
+fn root_v2_membership_reads_the_mount_root_ceiling() {
+    let gib = 1024 * 1024 * 1024;
+    let directory = tempfile::tempdir().expect("cgroup fixture root");
+    let proc_self_cgroup = directory.path().join("proc-self-cgroup");
+    let cgroup_root = directory.path().join("sys-fs-cgroup");
+    fs::create_dir_all(&cgroup_root).expect("cgroup mount fixture");
+    fs::write(&proc_self_cgroup, "0::/\n").expect("root process cgroup membership fixture");
+    fs::write(cgroup_root.join("memory.max"), "32212254720\n").expect("root memory.max fixture");
+    fs::write(cgroup_root.join("memory.high"), "max\n").expect("root memory.high fixture");
+
+    assert_eq!(
+        effective_memory_bytes(88 * gib, &proc_self_cgroup, &cgroup_root),
+        30 * gib
+    );
+}
+
+#[test]
+fn configured_override_cannot_exceed_the_cgroup_ceiling() {
+    let gib = 1024 * 1024 * 1024;
+
+    assert_eq!(
+        process_resident_memory_limit_v1(88 * gib, Some(30 * gib), Some(bytes(64 * gib))).get(),
+        30 * gib
     );
 }
 
