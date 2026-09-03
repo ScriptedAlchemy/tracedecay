@@ -8,7 +8,7 @@ use tracedecay_private_fs::framed_log::{append_durable, truncate_file as shared_
 use crate::{HOOK_EVENT_SCHEMA_VERSION, HookEventEnvelopeV2, HookHostV1, MAX_HOOK_PAYLOAD_BYTES};
 use serde_json::Value;
 
-use super::types::{HookSpoolRecordV1, ScanResult};
+use super::types::{HookSpoolRecordV1, PendingRecordV1, ScanResult};
 use super::{
     DIRECTORY_POLICY, FRAME_CHECKSUM_BYTES, FRAME_HEADER_BYTES, FRAME_LENGTH_BYTES,
     HookSpoolConfigV1, HookSpoolError, SPOOL_FORMAT_VERSION, SPOOL_MAGIC, records_path,
@@ -43,7 +43,7 @@ pub(super) fn scan_records(
 pub(super) fn scan_records_from(
     root: &Path,
     config: HookSpoolConfigV1,
-    mut records: Vec<HookSpoolRecordV1>,
+    mut records: Vec<PendingRecordV1>,
     validated_end: u64,
 ) -> Result<ScanResult, HookSpoolError> {
     let path = records_path(root);
@@ -118,8 +118,9 @@ pub(super) fn scan_records_from(
             return Ok(corrupt_scan(records, offset, physical_len, scanned_records));
         }
         previous_sequence = Some(record.sequence);
+        let record_offset = offset;
         offset = offset.saturating_add(u64::from(record.framed_len));
-        records.push(record);
+        records.push(PendingRecordV1::from_record(&record, record_offset));
         scanned_records = scanned_records
             .checked_add(1)
             .ok_or(HookSpoolError::MetadataCorrupted)?;
@@ -137,7 +138,7 @@ pub(super) fn scan_records_from(
 }
 
 pub(super) fn partial_scan(
-    records: Vec<HookSpoolRecordV1>,
+    records: Vec<PendingRecordV1>,
     offset: u64,
     physical_len: u64,
     scanned_records: u32,
@@ -157,7 +158,7 @@ pub(super) fn partial_scan(
 }
 
 pub(super) fn corrupt_scan(
-    records: Vec<HookSpoolRecordV1>,
+    records: Vec<PendingRecordV1>,
     offset: u64,
     physical_len: u64,
     scanned_records: u32,
