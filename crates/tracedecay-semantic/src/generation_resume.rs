@@ -6,7 +6,7 @@ use std::sync::{Arc, RwLock};
 use tracedecay_domain::{CodeGenerationId, ProjectionKeyV1};
 use tracedecay_semantic_contracts::SemanticRuntimeScheduleFailureV1;
 
-use crate::fastembed_adapter::FastEmbedEmbeddingRuntime;
+use crate::embedding_backend::ProductionEmbeddingRuntime;
 use crate::runtime_query::CurrentSemanticQueryRuntimeV1;
 use crate::{PreparedSemanticRuntimeCommitV1, SemanticRuntimeService};
 
@@ -56,8 +56,8 @@ pub(super) fn install_candidate_on_success(
     commit: PreparedSemanticRuntimeCommitV1,
     expected_source: CodeGenerationId,
     expected_projection: ProjectionKeyV1,
-    runtime: Arc<RwLock<Option<CurrentSemanticQueryRuntimeV1<FastEmbedEmbeddingRuntime>>>>,
-    candidate: Arc<SemanticRuntimeService<FastEmbedEmbeddingRuntime>>,
+    runtime: Arc<RwLock<Option<CurrentSemanticQueryRuntimeV1<ProductionEmbeddingRuntime>>>>,
+    candidate: Arc<SemanticRuntimeService<ProductionEmbeddingRuntime>>,
     query_in_flight: Arc<AtomicBool>,
 ) -> PreparedSemanticRuntimeCommitV1 {
     commit.on_success(move |pointer| {

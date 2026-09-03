@@ -26,7 +26,9 @@
         RuntimeCompatibilityV1, SemanticModelLifecycleStateV1, SemanticResourceCeilings,
         Sha256DigestHex, TruncationPolicyV1, UpstreamSourceV1,
     };
-    use super::super::model_catalog::{CatalogMemberPinV1, CatalogSourceV1};
+    use super::super::model_catalog::{
+        CatalogMemberPinV1, CatalogSourceV1, CatalogedEmbeddingBackendV1,
+    };
 
     struct FixtureSource {
         root: PathBuf,
@@ -279,7 +281,9 @@
         }
         let model = CatalogedFastEmbedModelV1 {
             model_id: "TinyFixtureModel".to_owned(),
-            fastembed_enum: "TinyFixtureModel".to_owned(),
+            backend: CatalogedEmbeddingBackendV1::FastEmbedOrt {
+                fastembed_enum: "TinyFixtureModel".to_owned(),
+            },
             model_code: "tracedecay/tiny-fixture".to_owned(),
             source: CatalogSourceV1 {
                 upstream: "https://example.invalid/tracedecay/tiny-fixture".to_owned(),
