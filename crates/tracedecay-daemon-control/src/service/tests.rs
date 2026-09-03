@@ -11,9 +11,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 #[cfg(target_os = "linux")]
 use std::process::Command;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::sync::Arc;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::TempDir;
 
@@ -366,12 +366,62 @@ fn serve_probe_response(
     })
 }
 
+#[cfg(unix)]
+fn serve_counted_authenticated_probe(
+    listener: UnixListener,
+    expected_auth_token: String,
+) -> (std::thread::JoinHandle<()>, Arc<AtomicUsize>) {
+    let accepts = Arc::new(AtomicUsize::new(0));
+    let server_accepts = Arc::clone(&accepts);
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept readiness probe");
+        server_accepts.fetch_add(1, Ordering::SeqCst);
+        let mut reader =
+            std::io::BufReader::new(stream.try_clone().expect("clone readiness stream"));
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("read auth preface");
+        let preface = tracedecay_daemon_protocol::DaemonAuthPreface::from_line(line.trim())
+            .expect("authenticated readiness preface");
+        assert!(preface.authenticate(&expected_auth_token));
+        line.clear();
+        reader.read_line(&mut line).expect("read handshake");
+        line.clear();
+        reader.read_line(&mut line).expect("read initialize");
+        let request: serde_json::Value =
+            serde_json::from_str(line.trim()).expect("initialize json");
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request["id"],
+            "result": {
+                "serverInfo": {"name": "tracedecay", "version": TEST_BUILD_VERSION}
+            }
+        });
+        writeln!(stream, "{response}").expect("write initialize response");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking accept audit");
+        let audit_deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+        while std::time::Instant::now() < audit_deadline {
+            match listener.accept() {
+                Ok((_stream, _)) => {
+                    server_accepts.fetch_add(1, Ordering::SeqCst);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(error) => panic!("readiness accept audit failed: {error}"),
+            }
+        }
+    });
+    (server, accepts)
+}
+
 /// Serves the managed-daemon identity probe for every connection accepted on
 /// `listener`, answering `versions[n]` on the n-th completed identity
-/// exchange (the last entry repeats once the list is exhausted). Connections
-/// that close without a request — `daemon_socket_state` connectability
-/// probes — are tolerated. Returns the count of identity responses served,
-/// which lets tests prove the readiness wait actually consulted the daemon.
+/// exchange (the last entry repeats once the list is exhausted). Every
+/// readiness connection must carry its authenticated initialize request.
+/// Returns the count of identity responses served, which lets tests prove the
+/// readiness wait actually consulted the daemon.
 #[cfg(target_os = "linux")]
 fn serve_identity_probes(listener: UnixListener, versions: Vec<&'static str>) -> Arc<AtomicUsize> {
     let served = Arc::new(AtomicUsize::new(0));
@@ -386,15 +436,21 @@ fn serve_identity_probes(listener: UnixListener, versions: Vec<&'static str>) ->
             };
             let mut reader = std::io::BufReader::new(clone);
             let mut line = String::new();
-            // Handshake line, then the initialize request; a bare
-            // connectability probe disconnects before sending either.
-            if reader.read_line(&mut line).unwrap_or(0) == 0 {
-                continue;
-            }
+            assert_ne!(
+                reader
+                    .read_line(&mut line)
+                    .expect("read readiness handshake"),
+                0,
+                "readiness connection closed without a handshake"
+            );
             line.clear();
-            if reader.read_line(&mut line).unwrap_or(0) == 0 {
-                continue;
-            }
+            assert_ne!(
+                reader
+                    .read_line(&mut line)
+                    .expect("read readiness initialize"),
+                0,
+                "readiness connection closed without initialize"
+            );
             let Ok(request) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
                 continue;
             };
@@ -471,6 +527,195 @@ fn daemon_protocol_probe_authenticates_to_managed_daemon() {
         super::probe::DaemonProtocolState::Ready
     );
     server.join().expect("join authenticated probe server");
+}
+
+#[cfg(unix)]
+#[test]
+fn daemon_readiness_probe_uses_one_authenticated_connection() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let profile = TempDir::new().expect("profile temp dir");
+    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, profile.path());
+    let socket_path = profile.path().join("daemon.sock");
+    let listener = UnixListener::bind(&socket_path).expect("bind readiness socket");
+    let endpoint = tracedecay_daemon_protocol::DaemonEndpoint::Unix(socket_path.clone());
+    let authority = tracedecay_daemon_identity::authority::DaemonAuthority::acquire(
+        profile.path(),
+        &endpoint,
+        TEST_BUILD_VERSION,
+    )
+    .expect("publish daemon authority");
+    let (server, accepts) =
+        serve_counted_authenticated_probe(listener, authority.auth_token().to_owned());
+
+    assert_eq!(
+        super::probe::daemon_readiness_probe(
+            &socket_path,
+            TEST_BUILD_VERSION,
+            std::time::Duration::from_secs(1),
+        ),
+        (
+            super::probe::DaemonSocketState::Connectable,
+            super::probe::DaemonProtocolState::Ready,
+        )
+    );
+    server.join().expect("join readiness server");
+    assert_eq!(accepts.load(Ordering::SeqCst), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn daemon_readiness_probe_classifies_connect_and_protocol_failures() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let profile = TempDir::new().expect("profile temp dir");
+    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, profile.path());
+    let missing_socket = profile.path().join("missing.sock");
+    let missing = super::probe::daemon_readiness_probe(
+        &missing_socket,
+        TEST_BUILD_VERSION,
+        std::time::Duration::from_millis(50),
+    );
+    assert_eq!(missing.0, super::probe::DaemonSocketState::Missing);
+    assert!(matches!(
+        missing.1,
+        super::probe::DaemonProtocolState::Unresponsive(_)
+    ));
+
+    let stale_socket = profile.path().join("stale.sock");
+    drop(UnixListener::bind(&stale_socket).expect("bind stale socket"));
+    let stale = super::probe::daemon_readiness_probe(
+        &stale_socket,
+        TEST_BUILD_VERSION,
+        std::time::Duration::from_millis(50),
+    );
+    assert_eq!(stale.0, super::probe::DaemonSocketState::Stale);
+    assert!(matches!(
+        stale.1,
+        super::probe::DaemonProtocolState::Unresponsive(_)
+    ));
+
+    let unresponsive_socket = profile.path().join("unresponsive.sock");
+    let listener = UnixListener::bind(&unresponsive_socket).expect("bind unresponsive socket");
+    let server = std::thread::spawn(move || {
+        let (_stream, _) = listener.accept().expect("accept unresponsive probe");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    });
+    let unresponsive = super::probe::daemon_readiness_probe(
+        &unresponsive_socket,
+        TEST_BUILD_VERSION,
+        std::time::Duration::from_millis(20),
+    );
+    server.join().expect("join unresponsive server");
+    assert_eq!(unresponsive.0, super::probe::DaemonSocketState::Connectable);
+    assert!(matches!(
+        unresponsive.1,
+        super::probe::DaemonProtocolState::Unresponsive(_)
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn daemon_readiness_probe_classifies_authentication_denial() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let profile = TempDir::new().expect("profile temp dir");
+    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, profile.path());
+    let socket_path = profile.path().join("daemon.sock");
+    let listener = UnixListener::bind(&socket_path).expect("bind readiness socket");
+    let endpoint = tracedecay_daemon_protocol::DaemonEndpoint::Unix(socket_path.clone());
+    let authority = tracedecay_daemon_identity::authority::DaemonAuthority::acquire(
+        profile.path(),
+        &endpoint,
+        TEST_BUILD_VERSION,
+    )
+    .expect("publish daemon authority");
+    let expected_auth_token = authority.auth_token().to_owned();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept readiness probe");
+        let mut reader =
+            std::io::BufReader::new(stream.try_clone().expect("clone readiness stream"));
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("read auth preface");
+        let preface = tracedecay_daemon_protocol::DaemonAuthPreface::from_line(line.trim())
+            .expect("authenticated readiness preface");
+        assert!(preface.authenticate(&expected_auth_token));
+        line.clear();
+        reader.read_line(&mut line).expect("read handshake");
+        line.clear();
+        reader.read_line(&mut line).expect("read initialize");
+        let request: serde_json::Value =
+            serde_json::from_str(line.trim()).expect("initialize json");
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request["id"],
+            "error": {"code": -32001, "message": "authentication denied"}
+        });
+        writeln!(stream, "{response}").expect("write denial");
+    });
+
+    let readiness = super::probe::daemon_readiness_probe(
+        &socket_path,
+        TEST_BUILD_VERSION,
+        std::time::Duration::from_secs(1),
+    );
+    server.join().expect("join denial server");
+    assert_eq!(readiness.0, super::probe::DaemonSocketState::Connectable);
+    let super::probe::DaemonProtocolState::Unresponsive(detail) = readiness.1 else {
+        panic!("authentication denial must be unresponsive");
+    };
+    assert!(detail.contains("authentication denied"), "{detail}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn running_service_snapshot_uses_one_authenticated_connection() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().expect("temp dir");
+    let config_home = dir.path().join("config");
+    let home = dir.path().join("home");
+    let fake_bin = dir.path().join("bin");
+    std::fs::create_dir_all(&home).expect("home dir");
+    std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
+    let systemctl = fake_bin.join("systemctl");
+    std::fs::write(
+        &systemctl,
+        "#!/bin/sh\n[ \"$2\" = is-active ] && echo active\n[ \"$2\" = is-enabled ] && echo enabled\nexit 0\n",
+    )
+    .expect("fake systemctl");
+    std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
+        .expect("systemctl permissions");
+    let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
+    let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
+    let _home_guard = EnvVarGuard::set("HOME", &home);
+    let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
+    let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
+    std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
+    let socket_path = dir.path().join("daemon.sock");
+    std::fs::write(
+        &service_path,
+        format!(
+            "[Service]\nExecStart=/old/tracedecay daemon run --socket {}\n",
+            socket_path.display()
+        ),
+    )
+    .expect("service unit");
+    let listener = UnixListener::bind(&socket_path).expect("bind readiness socket");
+    let endpoint = tracedecay_daemon_protocol::DaemonEndpoint::Unix(socket_path.clone());
+    let authority = tracedecay_daemon_identity::authority::DaemonAuthority::acquire(
+        dir.path(),
+        &endpoint,
+        TEST_BUILD_VERSION,
+    )
+    .expect("publish daemon authority");
+    let (server, accepts) =
+        serve_counted_authenticated_probe(listener, authority.auth_token().to_owned());
+
+    let snapshot = super::installed_service_status_snapshot(&runner, TEST_BUILD_VERSION)
+        .expect("running service snapshot");
+    server.join().expect("join readiness server");
+
+    assert_eq!(snapshot.0, DaemonServiceState::RunningEnabled);
+    assert_eq!(snapshot.2, super::probe::DaemonSocketState::Connectable);
+    assert_eq!(snapshot.3, super::probe::DaemonProtocolState::Ready);
+    assert_eq!(accepts.load(Ordering::SeqCst), 1);
 }
 
 #[test]
