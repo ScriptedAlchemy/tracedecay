@@ -12,9 +12,12 @@ use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 
+use tracedecay_code_index::embedding_document::{
+    EmbeddingDocumentComposerV1, EmbeddingDocumentHeaderV1,
+};
 use tracedecay_domain::{
-    CodeGenerationId, CodeSearchChunkV1, ProjectionBatchRequestV1, ProjectionKeyV1,
-    VectorGenerationIdV1,
+    CodeGenerationId, CodeSearchChunkV1, EmbeddingDocumentCompositionV1, ProjectionBatchRequestV1,
+    ProjectionKeyV1, VectorGenerationIdV1,
 };
 use tracedecay_semantic_contracts::configuration::{
     SemanticFallbackReasonV1, SemanticResourceCeilings,
@@ -138,6 +141,7 @@ impl LoadedSemanticArtifactV1 {
         lifecycle: &SemanticModelLifecycleOwnerV1,
         manifest: &tracedecay_domain::CodeGenerationManifestV1,
         resources: SemanticResourceCeilings,
+        document_composition: EmbeddingDocumentCompositionV1,
     ) -> Result<Self, SemanticRuntimeScheduleFailureV1> {
         let status = lifecycle.status();
         let state = status
@@ -177,6 +181,7 @@ impl LoadedSemanticArtifactV1 {
             manifest.privacy_domain.clone(),
             manifest.privacy_key_epoch,
             resources,
+            document_composition,
         )
         .map_err(SemanticRuntimeScheduleFailureV1::artifact)?;
         Ok(Self(Arc::new(authority)))
@@ -210,6 +215,7 @@ impl LoadedSemanticArtifactV1 {
             key.privacy_domain.clone(),
             key.privacy_key_epoch,
             resources,
+            key.document_composition,
         )
         .map_err(SemanticRuntimeScheduleFailureV1::artifact)?;
         if authority.projection() != projection {
@@ -224,6 +230,7 @@ impl LoadedSemanticArtifactV1 {
         lifecycle: &SemanticModelLifecycleOwnerV1,
         manifest: &tracedecay_domain::CodeGenerationManifestV1,
         resources: SemanticResourceCeilings,
+        document_composition: EmbeddingDocumentCompositionV1,
     ) -> Result<tracedecay_domain::AdmittedEmbeddingProjectionKeyV1, SemanticRuntimeScheduleFailureV1>
     {
         let status = lifecycle.status();
@@ -249,6 +256,7 @@ impl LoadedSemanticArtifactV1 {
             manifest.privacy_domain.clone(),
             manifest.privacy_key_epoch,
             resources,
+            document_composition,
         )
         .map_err(SemanticRuntimeScheduleFailureV1::artifact)
     }
@@ -267,6 +275,9 @@ pub struct FastEmbedSemanticGenerationRequestV1 {
     target_generation: CodeGenerationId,
     projection_request: ProjectionBatchRequestV1,
     canonical_chunks: Vec<Arc<CodeSearchChunkV1>>,
+    /// Composes each chunk's tensor input from the target generation's own
+    /// symbol index under the admitted key's composition.
+    documents: Arc<EmbeddingDocumentComposerV1>,
     max_embeds_per_batch: usize,
     load_artifact: FastEmbedArtifactLoaderV1,
     resume_projection: SemanticProjectionResumeV1,
@@ -291,6 +302,7 @@ impl FastEmbedSemanticGenerationRequestV1 {
         target_generation: CodeGenerationId,
         projection_request: ProjectionBatchRequestV1,
         canonical_chunks: Vec<Arc<CodeSearchChunkV1>>,
+        documents: Arc<EmbeddingDocumentComposerV1>,
         max_embeds_per_batch: usize,
         load_artifact: LoadArtifact,
         resume_projection: ResumeProjection,
@@ -318,7 +330,9 @@ impl FastEmbedSemanticGenerationRequestV1 {
             > + Send
             + 'static,
     {
-        if projection_request.changes.to_generation != target_generation {
+        if projection_request.changes.to_generation != target_generation
+            || documents.symbols().generation_id() != &target_generation
+        {
             return Err(SemanticRuntimeScheduleFailureV1::Projection);
         }
         let mut commit_batch = commit_batch;
@@ -326,6 +340,7 @@ impl FastEmbedSemanticGenerationRequestV1 {
             target_generation,
             projection_request,
             canonical_chunks,
+            documents,
             max_embeds_per_batch,
             load_artifact: Box::new(load_artifact),
             resume_projection: Box::new(move || Box::pin(resume_projection())),
@@ -583,6 +598,7 @@ impl DaemonSemanticRuntimeHandleV1 {
                         Arc::clone(&candidate),
                         Arc::clone(&progress),
                         authority.embedding_execution_plan(),
+                        Arc::clone(&request.documents),
                     );
                     let batch_units = batch.request.changes.added_or_changed.len() as u64;
                     let prepared = prepare_vector_generation_async(
@@ -931,6 +947,7 @@ struct RuntimeChunkVectorEncoderV1<R: EmbeddingRuntime> {
     width: usize,
     intra_threads: usize,
     completed_units: u64,
+    documents: Arc<EmbeddingDocumentComposerV1>,
 }
 
 impl<R> RuntimeChunkVectorEncoderV1<R>
@@ -941,6 +958,7 @@ where
         runtime: Arc<SemanticRuntimeService<R>>,
         progress: Arc<SemanticRuntimeScheduleCancellationV1>,
         execution: embedding_parallelism::EmbeddingExecutionPlanV1,
+        documents: Arc<EmbeddingDocumentComposerV1>,
     ) -> Self {
         let intra_threads = execution.intra_threads;
         let width = execution.sessions;
@@ -956,6 +974,7 @@ where
             width,
             intra_threads,
             completed_units: 0,
+            documents,
         }
     }
 
@@ -1002,6 +1021,7 @@ fn encode_group_with_session<R>(
     key: &tracedecay_domain::EmbeddingProjectionKeyV1,
     chunks: &[&CodeSearchChunkV1],
     progress: &SemanticRuntimeScheduleCancellationV1,
+    documents: &EmbeddingDocumentComposerV1,
 ) -> Result<(Vec<Vec<f32>>, u64), String>
 where
     R: EmbeddingRuntime + Send + Sync + 'static,
@@ -1030,21 +1050,16 @@ where
             "semantic projection authority does not match its inference batch identity".to_owned(),
         );
     }
-    // The one copy between canonical chunks and tensor input: every chunk's
-    // sanitized text is cloned into an owned String. Timed separately so it
-    // cannot hide inside `semantic.embed.infer`.
+    // The one copy between canonical chunks and tensor input: every chunk is
+    // composed into an owned document under the key's composition. Timed
+    // separately so it cannot hide inside `semantic.embed.infer`.
     let batch = hotpath::measure_block!(
         "semantic.embed.batch_assembly",
-        BoundedSanitizedTextBatchV1::try_new(
-            chunks
-                .iter()
-                .map(|chunk| chunk.sanitized_text.as_str().to_owned())
-                .collect(),
-            max_texts,
-            max_bytes,
-        )
-    )
-    .map_err(|error| error.to_string())?;
+        compose_group_documents(key, chunks, documents).and_then(|texts| {
+            BoundedSanitizedTextBatchV1::try_new(texts, max_texts, max_bytes)
+                .map_err(|error| error.to_string())
+        })
+    )?;
     let vectors = session
         .embed_batch(&batch, progress)
         .map_err(|error| error.to_string())?;
@@ -1065,6 +1080,37 @@ where
             .collect::<Result<Vec<_>, String>>()
     )?;
     Ok((encoded, chunks.len() as u64))
+}
+
+/// Compose one encoder group's documents in group order.
+///
+/// A symbol-backed chunk embedded without its header is counted rather than
+/// silently accepted: under the header composition that count is the only
+/// visible difference between a corpus whose symbol text is canonical and one
+/// where headers were withheld.
+fn compose_group_documents(
+    key: &tracedecay_domain::EmbeddingProjectionKeyV1,
+    chunks: &[&CodeSearchChunkV1],
+    documents: &EmbeddingDocumentComposerV1,
+) -> Result<Vec<String>, String> {
+    chunks
+        .iter()
+        .map(|chunk| {
+            let document = documents
+                .compose(key, chunk)
+                .map_err(|error| error.to_string())?;
+            match document.header() {
+                EmbeddingDocumentHeaderV1::Rendered => {
+                    hotpath::gauge!("semantic_embed_header_rendered").inc(1u32);
+                }
+                EmbeddingDocumentHeaderV1::Withheld(_) => {
+                    hotpath::gauge!("semantic_embed_header_withheld").inc(1u32);
+                }
+                EmbeddingDocumentHeaderV1::NotComposed | EmbeddingDocumentHeaderV1::NoSymbol => {}
+            }
+            Ok(document.into_text())
+        })
+        .collect()
 }
 
 impl<R> CanonicalChunkVectorEncoderV1 for RuntimeChunkVectorEncoderV1<R>
@@ -1099,10 +1145,17 @@ where
         }
         self.ensure_sessions(1)?;
         let progress = Arc::clone(&self.progress);
+        let documents = Arc::clone(&self.documents);
         let intra_threads = self.intra_threads;
         let (encoded, units) =
             tracedecay_code_index::parallelism::with_background_cpu_permits(intra_threads, || {
-                encode_group_with_session(&mut self.sessions[0], key, chunks, progress.as_ref())
+                encode_group_with_session(
+                    &mut self.sessions[0],
+                    key,
+                    chunks,
+                    progress.as_ref(),
+                    documents.as_ref(),
+                )
             })?;
         self.completed_units = self.completed_units.saturating_add(units);
         self.progress.set_completed_units(self.completed_units);
@@ -1143,6 +1196,7 @@ where
             hotpath::gauge!("semantic_embed_sequential_dispatch").inc(1);
             hotpath::gauge!("semantic_embed_encode_stripes").set(1_usize);
             let progress = Arc::clone(&self.progress);
+            let documents = Arc::clone(&self.documents);
             let intra_threads = self.intra_threads;
             let mut encoded = Vec::with_capacity(groups.len());
             let mut units = 0u64;
@@ -1156,6 +1210,7 @@ where
                                 key,
                                 group,
                                 progress.as_ref(),
+                                documents.as_ref(),
                             )
                         },
                     )
@@ -1175,6 +1230,7 @@ where
         let stripes = groups.chunks(stripe_len).collect::<Vec<_>>();
         hotpath::gauge!("semantic_embed_encode_stripes").set(stripes.len());
         let progress = Arc::clone(&self.progress);
+        let documents = Arc::clone(&self.documents);
         let intra_threads = self.intra_threads;
         let mut stripe_results: Vec<EncodedStripeResultV1> =
             embedding_parallelism::install(|| {
@@ -1200,6 +1256,7 @@ where
                                             key,
                                             group,
                                             progress.as_ref(),
+                                            documents.as_ref(),
                                         )?;
                                         units = units.saturating_add(group_units);
                                         encoded.push(vectors);
@@ -1240,11 +1297,210 @@ where
 }
 
 #[cfg(test)]
+mod document_composition_tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tracedecay_code_index::embedding_document::{
+        EmbeddingDocumentComposerV1, EmbeddingSymbolContextIndexV1,
+    };
+    use tracedecay_code_index::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
+    use tracedecay_domain::{
+        BoundedSanitizedText, ChunkerRevision, CodeGenerationId, CodeSearchChunkAnchorV1,
+        CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchChunkV1, ContentDigest,
+        EmbeddingDocumentCompositionV1, FileIdentityDigest, FileOccurrenceId,
+        LanguageDescriptorRevision, PolicyRevisionId, SanitizerRevision, SensitivityDecision,
+        SensitivityLevelV1, SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId,
+    };
+
+    use super::RuntimeChunkVectorEncoderV1;
+    use super::fastembed_adapter::{AdmittedProjectionArtifactV1, FakeEmbeddingRuntime};
+    use super::projector::CanonicalChunkVectorEncoderV1;
+    use super::runtime_service::{
+        SemanticRuntimeScheduleCancellationV1, SemanticRuntimeService,
+        SharedEmbeddingRuntimeFactory,
+    };
+    use super::session_pool::test_support;
+
+    fn generation() -> CodeGenerationId {
+        CodeGenerationId::new("composition.generation".to_owned()).expect("generation fixture")
+    }
+
+    fn digest(byte: char) -> String {
+        format!("sha256:{}", byte.to_string().repeat(64))
+    }
+
+    fn symbol_record() -> Arc<LineageSymbolRecordV1> {
+        Arc::new(LineageSymbolRecordV1 {
+            occurrence: SymbolOccurrenceId::new("composition.symbol.get".to_owned())
+                .expect("occurrence fixture"),
+            identity: SymbolIdentityDigest::new(digest('1')).expect("identity fixture"),
+            qualified_name: "Holder::get".to_owned(),
+            simple_name: "get".to_owned(),
+            kind: "method".to_owned(),
+            visibility: "public".to_owned(),
+            branches: 0,
+            loops: 0,
+            max_nesting: 0,
+            line_span: 1,
+            start_line: 0,
+            signature: None,
+            skip_test_coverage: false,
+            file_identity: FileIdentityDigest::new(digest('f')).expect("file identity fixture"),
+            content_digest: ContentDigest::new(digest('d')).expect("content fixture"),
+        })
+    }
+
+    fn documents() -> Arc<EmbeddingDocumentComposerV1> {
+        let index = GenerationSymbolIndexV1::new(generation(), vec![symbol_record()])
+            .expect("symbol index");
+        Arc::new(EmbeddingDocumentComposerV1::new(
+            EmbeddingSymbolContextIndexV1::from_generation_symbols(&index),
+        ))
+    }
+
+    fn chunk(label: &str, occurrence: Option<&str>, text: &str) -> CodeSearchChunkV1 {
+        CodeSearchChunkV1 {
+            id: CodeSearchChunkId::new(format!("composition.chunk.{label}")).expect("chunk id"),
+            anchor: CodeSearchChunkAnchorV1 {
+                generation_id: generation(),
+                file_occurrence_id: FileOccurrenceId::new("holder.rs".to_owned())
+                    .expect("file fixture"),
+                symbol_occurrence_id: occurrence
+                    .map(|value| SymbolOccurrenceId::new(value.to_owned()).expect("occurrence")),
+                parent_chunk_id: None,
+                source_span: SourceSpan {
+                    start_byte: 0,
+                    end_byte: text.len() as u64,
+                },
+                grain: if occurrence.is_some() {
+                    CodeSearchChunkGrainV1::SymbolBody
+                } else {
+                    CodeSearchChunkGrainV1::FileWindow
+                },
+                ordinal: 0,
+            },
+            content_digest: ContentDigest::new(digest('c')).expect("content fixture"),
+            language_descriptor_revision: LanguageDescriptorRevision::new("rust.v1")
+                .expect("language fixture"),
+            chunker_revision: ChunkerRevision::new("chunker.v1").expect("chunker fixture"),
+            sanitizer_revision: SanitizerRevision::new("sanitizer.v1").expect("sanitizer fixture"),
+            sensitivity: SensitivityDecision {
+                level: SensitivityLevelV1::Public,
+                policy_revision: PolicyRevisionId::new("policy.v1").expect("policy fixture"),
+            },
+            exact_terms: Vec::new(),
+            subtokens: Vec::new(),
+            sanitized_text: BoundedSanitizedText::new(text).expect("sanitized fixture"),
+        }
+    }
+
+    fn encode_with(
+        authority: AdmittedProjectionArtifactV1,
+        chunks: &[&CodeSearchChunkV1],
+    ) -> Vec<Vec<f32>> {
+        let factory: SharedEmbeddingRuntimeFactory<FakeEmbeddingRuntime> =
+            Arc::new(|| Ok(FakeEmbeddingRuntime::new().with_resident_bytes_per_session(1024)));
+        let authority = Arc::new(authority);
+        let runtime = SemanticRuntimeService::new_owned(
+            Arc::clone(&authority),
+            factory,
+            test_support::config(1, Duration::from_mins(1), 1 << 20),
+        )
+        .expect("fake runtime service");
+        let mut encoder = RuntimeChunkVectorEncoderV1::new(
+            runtime,
+            Arc::new(SemanticRuntimeScheduleCancellationV1::new(
+                chunks.len() as u64
+            )),
+            authority.embedding_execution_plan(),
+            documents(),
+        );
+        encoder
+            .encode_batch(authority.projection().embedding_key(), chunks)
+            .expect("encoded batch")
+    }
+
+    /// The header reaches the tensor input: under the header composition a
+    /// symbol chunk embeds exactly as the sanitized composition embeds a chunk
+    /// whose text already is the composed document, and differently from its
+    /// bare text. The fake runtime's vectors are a pure function of the text.
+    #[test]
+    fn header_composition_changes_the_tensor_input_and_only_that() {
+        let body =
+            "pub fn get(&self, key: u32) -> Option<u32> {\n    self.map.get(&key).copied()\n}";
+        let symbol_chunk = chunk("symbol", Some("composition.symbol.get"), body);
+        let composed_as_text = chunk(
+            "composed",
+            None,
+            &format!("symbol: method get\nscope: Holder\n{body}"),
+        );
+        let file_chunk = chunk("file", None, "use std::collections::HashMap;\n");
+
+        let sanitized = encode_with(
+            test_support::authority(),
+            &[&symbol_chunk, &composed_as_text, &file_chunk],
+        );
+        let header = encode_with(
+            test_support::authority_with_document_composition(
+                EmbeddingDocumentCompositionV1::SymbolContextHeader,
+            ),
+            &[&symbol_chunk, &file_chunk],
+        );
+
+        assert_ne!(
+            header[0], sanitized[0],
+            "the header must change the symbol chunk's input"
+        );
+        assert_eq!(
+            header[0], sanitized[1],
+            "the header composition embeds exactly the composed document"
+        );
+        assert_eq!(
+            header[1], sanitized[2],
+            "a file-grain chunk carries no header and embeds its text unchanged"
+        );
+    }
+
+    #[test]
+    fn foreign_generation_chunks_fail_the_batch_under_the_header_composition() {
+        let mut foreign = chunk("foreign", Some("composition.symbol.get"), "pub fn get() {}");
+        foreign.anchor.generation_id =
+            CodeGenerationId::new("composition.other".to_owned()).expect("generation fixture");
+        let factory: SharedEmbeddingRuntimeFactory<FakeEmbeddingRuntime> =
+            Arc::new(|| Ok(FakeEmbeddingRuntime::new().with_resident_bytes_per_session(1024)));
+        let authority = Arc::new(test_support::authority_with_document_composition(
+            EmbeddingDocumentCompositionV1::SymbolContextHeader,
+        ));
+        let runtime = SemanticRuntimeService::new_owned(
+            Arc::clone(&authority),
+            factory,
+            test_support::config(1, Duration::from_mins(1), 1 << 20),
+        )
+        .expect("fake runtime service");
+        let mut encoder = RuntimeChunkVectorEncoderV1::new(
+            runtime,
+            Arc::new(SemanticRuntimeScheduleCancellationV1::new(1)),
+            authority.embedding_execution_plan(),
+            documents(),
+        );
+        let error = encoder
+            .encode_batch(authority.projection().embedding_key(), &[&foreign])
+            .expect_err("a chunk from another generation cannot borrow this symbol index");
+        assert!(error.contains("composition.generation"), "{error}");
+    }
+}
+
+#[cfg(test)]
 mod scheduling_tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use tokio::sync::oneshot;
+    use tracedecay_code_index::embedding_document::{
+        EmbeddingDocumentComposerV1, EmbeddingSymbolContextIndexV1,
+    };
+    use tracedecay_code_index::lineage::GenerationSymbolIndexV1;
     use tracedecay_domain::{
         ChangedCodeChunkSetV1, CodeGenerationId, ManifestDigest, ProjectionBatchRequestV1,
         ProjectionKeyV1, ProjectionReplayReasonV1, VectorGenerationIdV1,
@@ -1261,6 +1517,14 @@ mod scheduling_tests {
 
     fn source_generation(value: char) -> CodeGenerationId {
         CodeGenerationId::new(format!("code-generation.{value}")).expect("source generation")
+    }
+
+    fn documents(value: char) -> Arc<EmbeddingDocumentComposerV1> {
+        let index = GenerationSymbolIndexV1::new(source_generation(value), Vec::new())
+            .expect("empty symbol index");
+        Arc::new(EmbeddingDocumentComposerV1::new(
+            EmbeddingSymbolContextIndexV1::from_generation_symbols(&index),
+        ))
     }
 
     fn vector_generation(value: char) -> VectorGenerationIdV1 {
@@ -1373,6 +1637,7 @@ mod scheduling_tests {
             source_generation('a'),
             projection_request('a'),
             Vec::new(),
+            documents('a'),
             8,
             move || {
                 let _ = started_tx.send(());
@@ -1600,6 +1865,7 @@ mod scheduling_tests {
             source_generation('a'),
             projection_request_with_key('a', projection_key),
             Vec::new(),
+            documents('a'),
             8,
             move || Ok(super::LoadedSemanticArtifactV1(authority)),
             || async { Ok(SemanticProjectionResumeOutcomeV1::AlreadyPublished) },

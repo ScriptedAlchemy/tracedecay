@@ -2383,9 +2383,10 @@ mod tests {
     use super::*;
     use tracedecay_domain::{
         ChangedCodeChunkSetV1, ChangedCodeChunkV1, ChunkerRevision, EmbeddingDeviceClassV1,
-        EmbeddingMetricV1, EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1,
-        EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1, PrivacyDomainId,
-        ProjectionBatchRequestV1, ProjectionReplayReasonV1,
+        EmbeddingDocumentCompositionV1, EmbeddingMetricV1, EmbeddingNormalizationV1,
+        EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingProjectionKeyV1,
+        EmbeddingTruncationSideV1, PrivacyDomainId, ProjectionBatchRequestV1,
+        ProjectionReplayReasonV1,
     };
     fn id<T>(value: &str) -> T
     where
@@ -2410,6 +2411,7 @@ mod tests {
             config_digest: manifest_digest('3'),
             query_instruction_digest: Some(manifest_digest('4')),
             document_instruction_digest: Some(manifest_digest('5')),
+            document_composition: EmbeddingDocumentCompositionV1::SanitizedText,
             pooling: EmbeddingPoolingV1::Mean,
             truncation_side: EmbeddingTruncationSideV1::Right,
             truncation_length: 512,

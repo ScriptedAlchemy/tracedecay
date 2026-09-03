@@ -354,6 +354,7 @@ async fn production_project_server_inner(
         handle: semantic_runtime,
         lifecycle: semantic_lifecycle,
         resources: semantic_resources,
+        document_composition: semantic_document_composition,
         auto_download_enabled: semantic_auto_download_enabled,
         startup_selection: semantic_startup_selection,
     } = semantic_project_runtime(&runtime_configuration, &runtime)?;
@@ -433,6 +434,7 @@ async fn production_project_server_inner(
         semantic_runtime: semantic_runtime.clone(),
         semantic_lifecycle: semantic_lifecycle.clone(),
         semantic_resources,
+        semantic_document_composition,
         native_graph_activation: runtime_configuration.config.native_graph_activation,
         scope: code_search_scope.clone(),
         route_registered: Arc::clone(&route_registered),
@@ -1318,6 +1320,7 @@ struct SemanticProjectRuntime {
     handle: tracedecay_semantic::DaemonSemanticRuntimeHandleV1,
     lifecycle: Option<Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1>>,
     resources: SemanticResourceCeilings,
+    document_composition: tracedecay_domain::EmbeddingDocumentCompositionV1,
     auto_download_enabled: bool,
     startup_selection: Option<String>,
 }
@@ -1351,6 +1354,7 @@ fn semantic_project_runtime(
         handle,
         lifecycle: tracedecay_semantic::default_shared_lifecycle_owner(),
         resources: *semantic_resources,
+        document_composition: semantic_config.document_composition,
         auto_download_enabled: semantic_config.auto_download && runtime.semantic_auto_download(),
         startup_selection: semantic_config.selected_model.clone(),
     })
