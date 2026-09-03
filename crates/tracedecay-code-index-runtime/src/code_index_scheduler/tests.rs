@@ -133,6 +133,15 @@ impl GitFixture {
     fn edit(&self, path: &str, source: &str) {
         write(self.path(), path, source);
     }
+
+    fn remove(&self, path: &str) {
+        std::fs::remove_file(self.path().join(path)).expect("remove fixture source");
+    }
+
+    fn commit_all(&self, message: &str) {
+        git(self.path(), &["add", "-A"]);
+        git(self.path(), &["commit", "-qm", message]);
+    }
 }
 
 fn alpha_lib_v1_template() -> &'static Path {
@@ -460,6 +469,308 @@ fn one_file_increment_captures_only_edited_bytes_with_one_thousand_unchanged_fil
             .find(|file| file.logical_path == "src/unchanged_0001.rs"),
         Some(&untouched_row),
         "an untouched file row must still be reused from the dirty active generation"
+    );
+}
+
+/// Unchanged-file count for the committed one-file-edit capture. Defaults to
+/// 1,000; the 10k acceptance measurement sets `TRACEDECAY_CAPTURE_CORPUS_FILES`.
+fn committed_capture_corpus_files() -> usize {
+    match std::env::var("TRACEDECAY_CAPTURE_CORPUS_FILES") {
+        Ok(value) => value
+            .parse()
+            .expect("TRACEDECAY_CAPTURE_CORPUS_FILES must be a positive integer"),
+        Err(std::env::VarError::NotPresent) => 1_000,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            panic!("TRACEDECAY_CAPTURE_CORPUS_FILES must contain valid Unicode")
+        }
+    }
+}
+
+#[test]
+fn committed_one_file_edit_reuses_unchanged_rows_across_the_new_head_tree() {
+    let unchanged_files = committed_capture_corpus_files();
+    let mut owned_sources = (0..unchanged_files)
+        .map(|index| {
+            (
+                format!("src/unchanged_{index:04}.rs"),
+                format!("pub fn unchanged_{index:04}() -> usize {{ {index} }}\n"),
+            )
+        })
+        .collect::<Vec<_>>();
+    owned_sources.push((
+        "src/edited.rs".to_owned(),
+        "pub fn committed_edit() -> usize { 1 }\n".to_owned(),
+    ));
+    let borrowed_sources = owned_sources
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(&borrowed_sources);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(
+        scheduler
+            .reconcile_now()
+            .expect("publish initial large generation"),
+    );
+
+    fixture.edit("src/edited.rs", "pub fn committed_edit() -> usize { 2 }\n");
+    fixture.commit_all("commit one-file edit");
+    scheduler.identity = super::identity::IndexingIdentityV1::resolve(fixture.path())
+        .expect("refresh HEAD identity");
+
+    let capture_started = Instant::now();
+    let captured = scheduler
+        .capture_authoritative_snapshot(None)
+        .expect("capture committed one-file delta");
+    let capture_elapsed = capture_started.elapsed();
+    assert_eq!(captured.captured_files.len(), 1);
+    assert_eq!(captured.snapshot.files.len(), unchanged_files + 1);
+    assert!(captured.changed_paths.contains("src/edited.rs"));
+    let captured_bytes = captured
+        .captured_files
+        .iter()
+        .map(|file| file.sanitized_bytes.len())
+        .sum::<usize>();
+    println!(
+        "committed one-file edit over {unchanged_files} unchanged files: captured_files=1 \
+         captured_bytes={captured_bytes} capture_ms={}",
+        capture_elapsed.as_millis()
+    );
+    let full_started = Instant::now();
+    let full = scheduler
+        .capture_authoritative_snapshot_without_active_generation_reuse(None)
+        .expect("capture full comparison snapshot");
+    println!(
+        "full capture over {unchanged_files} unchanged files: captured_files={} \
+         captured_bytes={} capture_ms={}",
+        full.captured_files.len(),
+        full.captured_files
+            .iter()
+            .map(|file| file.sanitized_bytes.len())
+            .sum::<usize>(),
+        full_started.elapsed().as_millis()
+    );
+    assert_eq!(
+        captured.snapshot.content_identity, full.snapshot.content_identity,
+        "clean-tip reuse must preserve the full capture identity"
+    );
+
+    published(
+        scheduler
+            .reconcile_now()
+            .expect("publish committed one-file delta"),
+    );
+    let chunks = scheduler
+        .latest_complete()
+        .expect("committed generation")
+        .lexical()
+        .iter()
+        .filter(|chunk| chunk.sanitized_text.as_str().contains("fn committed_edit"))
+        .map(|chunk| chunk.sanitized_text.as_str().to_owned())
+        .collect::<Vec<_>>();
+    assert!(!chunks.is_empty());
+    assert!(chunks.iter().all(|text| text.contains("{ 2 }")));
+}
+
+#[test]
+fn committed_revert_recaptures_the_reverted_file() {
+    let committed = "pub fn committed_revert() -> u32 { 1 }\n";
+    let fixture = GitFixture::new(&[
+        ("src/lib.rs", committed),
+        ("src/other.rs", "pub fn other() -> u32 { 2 }\n"),
+    ]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(
+        scheduler
+            .reconcile_now()
+            .expect("publish initial generation"),
+    );
+    let original_digest = scheduler
+        .latest_complete()
+        .expect("initial generation")
+        .generation
+        .snapshot()
+        .files
+        .iter()
+        .find(|file| file.logical_path == "src/lib.rs")
+        .expect("initial lib row")
+        .content_digest
+        .clone();
+
+    fixture.edit("src/lib.rs", "pub fn committed_revert() -> u32 { 99 }\n");
+    fixture.commit_all("commit edit");
+    published(scheduler.reconcile_now().expect("publish committed edit"));
+
+    fixture.edit("src/lib.rs", committed);
+    fixture.commit_all("commit revert");
+    scheduler.identity = super::identity::IndexingIdentityV1::resolve(fixture.path())
+        .expect("refresh HEAD identity");
+    let captured = scheduler
+        .capture_authoritative_snapshot(None)
+        .expect("capture committed revert");
+    assert_eq!(captured.captured_files.len(), 1);
+    assert!(captured.changed_paths.contains("src/lib.rs"));
+    assert_eq!(
+        captured
+            .snapshot
+            .files
+            .iter()
+            .find(|file| file.logical_path == "src/lib.rs")
+            .expect("reverted lib row")
+            .content_digest,
+        original_digest
+    );
+
+    published(scheduler.reconcile_now().expect("publish committed revert"));
+    let chunks = scheduler
+        .latest_complete()
+        .expect("reverted generation")
+        .lexical()
+        .iter()
+        .filter(|chunk| {
+            chunk
+                .sanitized_text
+                .as_str()
+                .contains("fn committed_revert")
+        })
+        .map(|chunk| chunk.sanitized_text.as_str().to_owned())
+        .collect::<Vec<_>>();
+    assert!(!chunks.is_empty());
+    assert!(chunks.iter().all(|text| text.contains("{ 1 }")));
+    assert!(chunks.iter().all(|text| !text.contains("{ 99 }")));
+}
+
+#[test]
+fn committed_deletion_drops_the_row_and_committed_addition_captures_it() {
+    let owned_sources = (0..1_001)
+        .map(|index| {
+            (
+                format!("src/original_{index:04}.rs"),
+                format!("pub fn original_{index:04}() -> usize {{ {index} }}\n"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let borrowed_sources = owned_sources
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(&borrowed_sources);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(
+        scheduler
+            .reconcile_now()
+            .expect("publish initial large generation"),
+    );
+
+    fixture.remove("src/original_0000.rs");
+    fixture.edit(
+        "src/added.rs",
+        "pub fn committed_addition() -> usize { 7 }\n",
+    );
+    fixture.commit_all("replace one committed file");
+    scheduler.identity = super::identity::IndexingIdentityV1::resolve(fixture.path())
+        .expect("refresh HEAD identity");
+    let captured = scheduler
+        .capture_authoritative_snapshot(None)
+        .expect("capture committed deletion and addition");
+
+    assert_eq!(captured.snapshot.files.len(), 1_001);
+    assert_eq!(captured.captured_files.len(), 1);
+    assert!(captured.changed_paths.contains("src/original_0000.rs"));
+    assert!(captured.changed_paths.contains("src/added.rs"));
+    assert!(
+        captured
+            .snapshot
+            .files
+            .iter()
+            .any(|file| file.logical_path == "src/added.rs")
+    );
+    assert!(
+        captured
+            .snapshot
+            .files
+            .iter()
+            .all(|file| file.logical_path != "src/original_0000.rs")
+    );
+    let full = scheduler
+        .capture_authoritative_snapshot_without_active_generation_reuse(None)
+        .expect("capture full comparison snapshot");
+    assert_eq!(
+        captured.snapshot.content_identity,
+        full.snapshot.content_identity
+    );
+}
+
+#[test]
+fn unresolvable_active_tree_falls_back_to_full_capture() {
+    let fixture = GitFixture::new(&[
+        ("src/lib.rs", "pub fn old_tree() -> u32 { 1 }\n"),
+        ("src/other.rs", "pub fn other() -> u32 { 2 }\n"),
+    ]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(
+        scheduler
+            .reconcile_now()
+            .expect("publish initial generation"),
+    );
+    let active_tree = scheduler
+        .latest_complete()
+        .expect("initial generation")
+        .generation
+        .repository_parse_identity()
+        .tree
+        .as_ref()
+        .expect("active tree")
+        .as_str()
+        .to_owned();
+
+    fixture.edit("src/lib.rs", "pub fn old_tree() -> u32 { 3 }\n");
+    fixture.commit_all("move HEAD tree");
+    let object_path = fixture
+        .path()
+        .join(".git")
+        .join("objects")
+        .join(&active_tree[..2])
+        .join(&active_tree[2..]);
+    assert!(object_path.is_file(), "active tree must be a loose object");
+    std::fs::remove_file(object_path).expect("remove active tree object");
+    scheduler.identity = super::identity::IndexingIdentityV1::resolve(fixture.path())
+        .expect("refresh HEAD identity");
+
+    let captured = scheduler
+        .capture_authoritative_snapshot(None)
+        .expect("fall back to full capture");
+    assert_eq!(
+        captured.captured_files.len(),
+        2,
+        "an unresolvable active tree must disable row reuse"
+    );
+    let full = scheduler
+        .capture_authoritative_snapshot_without_active_generation_reuse(None)
+        .expect("capture full comparison snapshot");
+    assert_eq!(
+        captured.snapshot.content_identity,
+        full.snapshot.content_identity
     );
 }
 
@@ -2207,16 +2518,11 @@ fn saved_edit_incremental_publish() {
         .expect("graph owner is activated");
 }
 
-/// Committing content the index already serves re-seals for provenance (see
-/// `same_content_head_move_publishes_new_source_identity`), and that re-seal
-/// must be delta-empty at the parse boundary: zero capture-declared changed
-/// files and zero changed chunks, with every chunk reused. This pins the
-/// evidence the downstream phases receive — graph activation, text-artifact
-/// projection, and semantic staging currently rebuild generation-scoped
-/// state from scratch even when these counters say the corpus is
-/// byte-identical, which is what makes a small drift cost a full pass.
+/// Committing content the dirty index already serves re-seals for provenance
+/// and recaptures the HEAD-tree delta, while byte identity still proves that
+/// every chunk can be reused.
 #[test]
-fn provenance_only_reseal_carries_the_full_parse_forward() {
+fn provenance_only_reseal_recaptures_the_tree_delta_without_changing_chunks() {
     let fixture = GitFixture::new(&[
         ("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n"),
         ("src/other.rs", "pub fn gamma() -> u32 { 3 }\n"),
@@ -2257,8 +2563,8 @@ fn provenance_only_reseal_carries_the_full_parse_forward() {
         "committing indexed content must not change the content identity"
     );
     assert_eq!(
-        resealed.reextracted_files, 0,
-        "a provenance-only reseal declares no changed files to re-extract"
+        resealed.reextracted_files, 1,
+        "the moved HEAD tree must declare its one changed path for recapture"
     );
     assert_eq!(
         resealed.changed_chunks, 0,

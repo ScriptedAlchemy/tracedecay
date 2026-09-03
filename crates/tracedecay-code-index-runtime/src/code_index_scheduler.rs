@@ -17,6 +17,10 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
+use gix::{
+    bstr::ByteSlice,
+    object::tree::diff::{Action as TreeDiffAction, Change as TreeDiffChange},
+};
 use same_file::Handle;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -32,7 +36,7 @@ use tracedecay_domain::{
     PrivacyDomainId, ProjectId, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1,
     ProjectionOperationV1, ProjectionOutcomeV1, RepositoryDirtyStateV1, RepositoryId,
     RetrievalBudget, RetrieverBatch, RetrieverOutcome, SanitizationReceiptId, SanitizedCodeFileV1,
-    SanitizedCodeSnapshotV1, SanitizerRevision, ScoreDomainId, SnapshotFileDispositionV1,
+    SanitizedCodeSnapshotV1, SanitizerRevision, ScoreDomainId, SnapshotFileDispositionV1, TreeId,
     WorktreeId, canonical_sha256,
 };
 use tracedecay_private_fs::{
@@ -7168,7 +7172,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        let reusable_active = if allow_active_generation_reuse
+        let reusable_active_candidate = if allow_active_generation_reuse
             && self.ignored_source_admissions.is_empty()
         {
             match self
@@ -7187,9 +7191,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                         && active
                             .compatibility_with(&self.production_config)
                             .is_reusable()
-                        && active.ignored_source_admissions().is_empty()
-                        && active.repository_parse_identity().tree.as_ref()
-                            == self.identity.head_tree())
+                        && active.ignored_source_admissions().is_empty())
                     .then_some(active)
                     .filter(|active| {
                         active.repository_parse_identity().dirty == RepositoryDirtyStateV1::Clean
@@ -7204,6 +7206,32 @@ impl CodeIndexWorktreeSchedulerV1 {
             }
         } else {
             None
+        };
+        let (reusable_active, tree_delta) = match reusable_active_candidate {
+            Some(active) => {
+                let tree_delta = match (
+                    active.repository_parse_identity().tree.as_ref(),
+                    self.identity.head_tree(),
+                ) {
+                    (Some(active_tree), Some(head_tree)) if active_tree != head_tree => {
+                        changed_paths_between_trees(&repository, active_tree, head_tree)
+                    }
+                    (active_tree, head_tree) if active_tree == head_tree => Some(BTreeSet::new()),
+                    _ => None,
+                };
+                match tree_delta {
+                    Some(tree_delta) => (Some(active), tree_delta),
+                    None => {
+                        tracing::warn!(
+                            active_tree = ?active.repository_parse_identity().tree,
+                            head_tree = ?self.identity.head_tree(),
+                            "HEAD-tree delta unavailable; capturing without active-generation reuse"
+                        );
+                        (None, BTreeSet::new())
+                    }
+                }
+            }
+            None => (None, BTreeSet::new()),
         };
         if reusable_active.is_none()
             && allow_active_generation_reuse
@@ -7254,6 +7282,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         .flatten();
         let mut candidate_paths = classification.candidate_paths();
         let mut changed_paths = classification.changed_paths();
+        changed_paths.extend(tree_delta);
         candidate_paths.extend(
             self.ignored_source_admissions
                 .iter()
@@ -7463,6 +7492,75 @@ impl CodeIndexWorktreeSchedulerV1 {
         ));
         Ok(captured)
     }
+}
+
+/// Return the exact file-level delta, or `None` when gix cannot prove it so
+/// callers can disable active-row reuse instead of guessing.
+fn changed_paths_between_trees(
+    repository: &gix::Repository,
+    active_tree: &TreeId,
+    head_tree: &TreeId,
+) -> Option<BTreeSet<String>> {
+    let active_tree = repository
+        .find_tree(active_tree.as_str().parse::<gix::ObjectId>().ok()?)
+        .ok()?;
+    let head_tree = repository
+        .find_tree(head_tree.as_str().parse::<gix::ObjectId>().ok()?)
+        .ok()?;
+    let mut changes = active_tree.changes().ok()?;
+    // Rename/copy detection would compare blob contents across the whole
+    // tree; a rename surfaces as deletion + addition, which already marks both
+    // paths, so keep the walk proportional to the differing subtrees.
+    changes.options(|options| {
+        options.track_path().track_rewrites(None);
+    });
+    let mut paths = BTreeSet::new();
+    let mut invalid_path = false;
+    changes
+        .for_each_to_obtain_tree(&head_tree, |change| {
+            let mut insert = |path: &gix::bstr::BStr| match path.to_str() {
+                Ok(path) => {
+                    paths.insert(path.to_owned());
+                }
+                Err(_) => invalid_path = true,
+            };
+            match change {
+                TreeDiffChange::Addition {
+                    location,
+                    entry_mode,
+                    ..
+                }
+                | TreeDiffChange::Deletion {
+                    location,
+                    entry_mode,
+                    ..
+                } if entry_mode.is_no_tree() => {
+                    insert(location);
+                }
+                TreeDiffChange::Modification {
+                    location,
+                    previous_entry_mode,
+                    entry_mode,
+                    ..
+                } if previous_entry_mode.is_no_tree() || entry_mode.is_no_tree() => {
+                    insert(location);
+                }
+                TreeDiffChange::Rewrite {
+                    source_location,
+                    source_entry_mode,
+                    location,
+                    entry_mode,
+                    ..
+                } if source_entry_mode.is_no_tree() || entry_mode.is_no_tree() => {
+                    insert(source_location);
+                    insert(location);
+                }
+                _ => {}
+            }
+            Ok::<_, std::convert::Infallible>(TreeDiffAction::Continue(()))
+        })
+        .ok()?;
+    (!invalid_path).then_some(paths)
 }
 
 fn cancelled_code_index_reconcile() -> CodeIndexSchedulerErrorV1 {
