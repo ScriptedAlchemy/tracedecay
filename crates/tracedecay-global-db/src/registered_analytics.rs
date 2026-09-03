@@ -1,6 +1,6 @@
 use std::fmt::Write as _;
 
-use tracedecay_runtime_core::db::engine::Value;
+use tracedecay_runtime_core::db::engine::{Value, opt_text};
 
 use super::{
     AnalyticsEventInsert, AnalyticsEventQuery, AnalyticsEventRecord, AnalyticsHintCounts,
@@ -13,6 +13,7 @@ const OBSERVABILITY_DETAIL_RETENTION_SECONDS: i64 = 30 * 86_400;
 const OBSERVABILITY_ROLLUP_RETENTION_SECONDS: i64 = 395 * 86_400;
 const MAX_OBSERVABILITY_OUTBOX_JSON_BYTES: usize = 1_048_576;
 const OBSERVABILITY_RETENTION_ROWS_PER_CLASS: usize = 512;
+pub(crate) const ANALYTICS_INSERT_ROWS_PER_STATEMENT: usize = 500;
 const ACTIVE_DIRTY_ROLLUP_SOURCE_EXCLUSION_SQL: &str = r#"
 NOT (
     analytics_events.event_kind IN (
@@ -462,10 +463,7 @@ impl RegisteredGlobalDb {
             .begin_write_transaction()
             .await
             .map_err(|error| format!("failed to begin analytics event batch: {error}"))?;
-        let mut ids = Vec::with_capacity(events.len());
-        for event in events {
-            ids.push(append_analytics_event_in_existing_tx(&transaction, event).await?);
-        }
+        let ids = append_analytics_events_in_existing_tx(&transaction, events).await?;
         transaction
             .commit()
             .await
@@ -495,10 +493,7 @@ impl RegisteredGlobalDb {
         super::transcript::require_expected_offset(&transaction, cursor_path, expected_cursor)
             .await
             .map_err(|error| format!("failed to claim analytics import cursor: {error}"))?;
-        let mut ids = Vec::with_capacity(events.len());
-        for event in events {
-            ids.push(append_analytics_event_in_existing_tx(&transaction, event).await?);
-        }
+        let ids = append_analytics_events_in_existing_tx(&transaction, events).await?;
         super::transcript::set_parse_offset(&transaction, cursor_path, cursor)
             .await
             .map_err(|error| format!("failed to persist analytics import cursor: {error}"))?;
@@ -721,6 +716,72 @@ impl RegisteredGlobalDb {
         }
         Ok(counts)
     }
+}
+
+async fn append_analytics_events_in_existing_tx(
+    transaction: &super::RegisteredGlobalDbWriteTransaction<'_>,
+    events: &[AnalyticsEventInsert],
+) -> Result<Vec<i64>, String> {
+    let mut ids = Vec::with_capacity(events.len());
+    for chunk in events.chunks(ANALYTICS_INSERT_ROWS_PER_STATEMENT) {
+        let mut sql = String::from(
+            "INSERT INTO analytics_events
+                 (provider, project_id, session_id, timestamp, event_kind, hook_name,
+                  tool_name, tool_category, skill_name, hint_category, hint_id, outcome,
+                  metadata_json)
+                 VALUES ",
+        );
+        let mut values = Vec::with_capacity(chunk.len() * 13);
+        for (index, event) in chunk.iter().enumerate() {
+            if index > 0 {
+                sql.push(',');
+            }
+            sql.push_str("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            values.extend([
+                Value::Text(event.provider.clone()),
+                Value::Text(event.project_id.clone()),
+                opt_text(event.session_id.as_deref()),
+                Value::Integer(event.timestamp),
+                Value::Text(event.event_kind.clone()),
+                opt_text(event.hook_name.as_deref()),
+                opt_text(event.tool_name.as_deref()),
+                opt_text(event.tool_category.as_deref()),
+                opt_text(event.skill_name.as_deref()),
+                opt_text(event.hint_category.as_deref()),
+                opt_text(event.hint_id.as_deref()),
+                opt_text(event.outcome.as_deref()),
+                opt_text(event.metadata_json.as_deref()),
+            ]);
+        }
+        sql.push_str(" RETURNING id");
+
+        let mut rows = transaction
+            .query(&sql, values)
+            .await
+            .map_err(|error| format!("failed to append analytics event batch: {error}"))?;
+        let mut chunk_ids = Vec::with_capacity(chunk.len());
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| format!("failed to read appended analytics event ids: {error}"))?
+        {
+            chunk_ids.push(row.get::<i64>(0).map_err(|error| {
+                format!("failed to decode appended analytics event id: {error}")
+            })?);
+        }
+        if chunk_ids.len() != chunk.len() {
+            return Err(format!(
+                "analytics event batch returned {} ids for {} inserted rows",
+                chunk_ids.len(),
+                chunk.len()
+            ));
+        }
+        // `id` is an INTEGER PRIMARY KEY rowid alias allocated in VALUES order.
+        // RETURNING order is unspecified, so restore input order explicitly.
+        chunk_ids.sort_unstable();
+        ids.extend(chunk_ids);
+    }
+    Ok(ids)
 }
 
 async fn append_analytics_event_in_existing_tx(
