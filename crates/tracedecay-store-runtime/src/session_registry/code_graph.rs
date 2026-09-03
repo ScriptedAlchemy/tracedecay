@@ -1,3 +1,5 @@
+#[cfg(any(test, feature = "test-helpers"))]
+use std::sync::atomic::AtomicUsize;
 use std::sync::{
     Arc, Mutex, Weak,
     atomic::{AtomicBool, Ordering},
@@ -67,6 +69,16 @@ const GRAPH_OPEN_DEADLINE: Duration = Duration::from_secs(30);
 /// head by one, so even a journal wedged across many interrupted boots drains
 /// across a few reconcile passes rather than blocking forever.
 const MAX_PENDING_REPLAY_COMPLETIONS_V1: usize = 8;
+
+#[cfg(any(test, feature = "test-helpers"))]
+static PUBLICATION_PROJECTION_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(any(test, feature = "test-helpers"))]
+static PUBLICATION_PROJECTION_OVERLAP_PEAK: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(any(test, feature = "test-helpers"))]
+pub(crate) fn take_publication_projection_overlap_peak() -> usize {
+    PUBLICATION_PROJECTION_OVERLAP_PEAK.swap(0, Ordering::AcqRel)
+}
 
 #[derive(Clone, Copy)]
 enum CodeGraphPublicationConflictStageV1 {
@@ -1059,14 +1071,19 @@ impl RetainedCodeGraphRuntimeV1 {
             self.authority.namespace().clone(),
         )
         .map_err(map_code_graph_error)?;
+        let projector_revision = GraphProjectorRevision::try_from(
+            tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
+        )?;
+        #[cfg(any(test, feature = "test-helpers"))]
+        {
+            let overlapping = PUBLICATION_PROJECTION_IN_FLIGHT.fetch_add(1, Ordering::AcqRel) + 1;
+            PUBLICATION_PROJECTION_OVERLAP_PEAK.fetch_max(overlapping, Ordering::AcqRel);
+        }
         let manifest =
             tracedecay_code_index::graph_projection::build_published_code_graph_manifest_checked(
                 projection.clone(),
                 generation,
-                &GraphProjectorRevision::try_from(
-                    tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION
-                        .to_owned(),
-                )?,
+                &projector_revision,
                 &|| match probe.interruption() {
                     Some(RuntimeInterruptionV1::Cancelled) => Err(GraphDbError::Cancelled),
                     Some(RuntimeInterruptionV1::DeadlineExceeded) => {
@@ -1074,8 +1091,10 @@ impl RetainedCodeGraphRuntimeV1 {
                     }
                     None => Ok(()),
                 },
-            )
-            .map_err(map_code_graph_error)?;
+            );
+        #[cfg(any(test, feature = "test-helpers"))]
+        PUBLICATION_PROJECTION_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
+        let manifest = manifest.map_err(map_code_graph_error)?;
         let relational_projection = GraphProjectionIdentityV1 {
             shard_id: self.authority.binding().shard_id.clone(),
             namespace: tracedecay_store::GraphNamespaceV1::new(self.authority.namespace().as_str())

@@ -9,14 +9,18 @@
 //! looped on the same conflict, and the served census stayed
 //! `exact_scope_generation_not_ready` until the store was reset.
 
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
 use tracedecay_code_index_retention::code_index_generations::DurablePublicationPointerV1;
-use tracedecay_domain::{ProjectId, WorktreeId, canonical_sha256};
+use tracedecay_domain::{
+    CodeGenerationId, ProjectId, RefId, RepositoryId, WorktreeId, canonical_sha256,
+};
 use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphProjectorRevision, SealedCodeGenerationReplay,
 };
@@ -29,7 +33,10 @@ use tracedecay_store::{
 };
 
 use super::super::DaemonSessionRuntimeRegistryV1;
-use super::{AtomicGraphCancellationV1, GraphPublicationProbeV1, RetainedCodeGraphRuntimeV1};
+use super::{
+    AtomicGraphCancellationV1, GraphPublicationProbeV1, RetainedCodeGraphRuntimeV1,
+    take_publication_projection_overlap_peak,
+};
 use tracedecay_code_index_runtime::CodeGraphReplayBindingV1;
 use tracedecay_code_index_runtime::code_index_scheduler::{
     CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1, scoped_code_index_store_root,
@@ -1396,5 +1403,392 @@ async fn worktree_scopes_share_one_project_publication_build_permit() {
         pinned_publication_lock_cells(&registry),
         0,
         "dropped runtimes must not leave a permanent strong publication lock cell"
+    );
+}
+
+struct PublicationMeasurementScopeV1 {
+    canonical_root: PathBuf,
+    generation: Arc<tracedecay_code_index::production::CodeIndexPublishedGenerationV1>,
+    generation_id: CodeGenerationId,
+    repository_id: RepositoryId,
+    reference: Option<RefId>,
+    worktree_id: WorktreeId,
+    sealed_source: PathBuf,
+    segments_source_root: PathBuf,
+    sealed_state_digest: tracedecay_graph_db::SealedGraphStateDigest,
+}
+
+fn publication_measurement_parameter(name: &str, default: usize) -> usize {
+    match std::env::var(name) {
+        Ok(value) => value
+            .parse()
+            .unwrap_or_else(|error| panic!("{name} must be a positive integer: {error}")),
+        Err(std::env::VarError::NotPresent) => default,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            panic!("{name} must contain valid Unicode")
+        }
+    }
+}
+
+fn process_vm_hwm_kib() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmHWM:"))
+        .and_then(|value| value.split_whitespace().next())
+        .and_then(|value| value.parse().ok())
+}
+
+fn write_publication_measurement_corpus(project_root: &Path, corpus_files: usize) {
+    let source_root = project_root.join("src");
+    std::fs::create_dir_all(&source_root).expect("publication corpus source directory");
+    let mut library = String::new();
+    for file_index in 0..corpus_files {
+        writeln!(&mut library, "pub mod mod_{file_index:04};")
+            .expect("write publication corpus module declaration");
+        let mut module = String::new();
+        for function_index in 0..12 {
+            if file_index > 0 && function_index < 6 {
+                writeln!(
+                    &mut module,
+                    "pub fn item_{function_index:02}() -> usize {{ crate::mod_{previous:04}::item_{function_index:02}() + {file_index} }}",
+                    previous = file_index - 1,
+                )
+                .expect("write publication corpus call");
+            } else {
+                writeln!(
+                    &mut module,
+                    "pub fn item_{function_index:02}() -> usize {{ {} }}",
+                    file_index * 12 + function_index,
+                )
+                .expect("write publication corpus function");
+            }
+        }
+        std::fs::write(source_root.join(format!("mod_{file_index:04}.rs")), module)
+            .expect("write publication corpus module");
+    }
+    std::fs::write(source_root.join("lib.rs"), library).expect("write publication corpus library");
+}
+
+/// Measures the real projection and publication path for distinct worktree
+/// generations of one project. Run one scope count per process because both
+/// sampled RSS and VmHWM are process-wide.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "concurrent worktree-scope publication measurement; run one scope count per process with --ignored --nocapture"]
+async fn concurrent_worktree_scopes_publish_with_one_corpus_build_and_bounded_rss() {
+    let scope_count = publication_measurement_parameter("TRACEDECAY_PUBLICATION_SCOPES", 1);
+    assert!(
+        matches!(scope_count, 1 | 2 | 4 | 8),
+        "TRACEDECAY_PUBLICATION_SCOPES must be one of 1, 2, 4, or 8"
+    );
+    let corpus_files =
+        publication_measurement_parameter("TRACEDECAY_PUBLICATION_CORPUS_FILES", 600);
+    assert!(
+        corpus_files > 0,
+        "TRACEDECAY_PUBLICATION_CORPUS_FILES must be positive"
+    );
+
+    let temporary = tempfile::tempdir().expect("temporary fixture parent");
+    let root = temporary
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root");
+    let profile_root = root.join("profile");
+    let project_root = root.join("project");
+    std::fs::create_dir_all(&project_root).expect("publication project directory");
+    git(&project_root, &["init", "-q", "-b", "main"]);
+    git(&project_root, &["config", "user.name", "TraceDecay Test"]);
+    git(
+        &project_root,
+        &["config", "user.email", "tracedecay@example.invalid"],
+    );
+    write_publication_measurement_corpus(&project_root, corpus_files);
+    git(&project_root, &["add", "."]);
+    git(
+        &project_root,
+        &["commit", "-qm", "publication measurement corpus"],
+    );
+    let project_id =
+        ProjectId::new("project.concurrent-publication-measurement").expect("project id");
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+        &project_root,
+        project_id.as_str(),
+    )
+    .expect("project enrollment");
+
+    let scopes_root = root.join("scopes");
+    std::fs::create_dir_all(&scopes_root).expect("publication scopes directory");
+    let store_root = root.join("code-index-store");
+    let mut measurement_scopes = Vec::with_capacity(scope_count);
+    for scope_index in 0..scope_count {
+        let scope_root = scopes_root.join(format!("scope-{scope_index}"));
+        let branch = format!("publication-scope-{scope_index}");
+        git(
+            &project_root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                branch.as_str(),
+                scope_root.to_str().expect("UTF-8 scope root"),
+            ],
+        );
+        let canonical_root = scope_root.canonicalize().expect("canonical scope root");
+        let module_path = canonical_root.join("src/mod_0000.rs");
+        let mut module = std::fs::read_to_string(&module_path).expect("scope marker module");
+        writeln!(
+            &mut module,
+            "pub fn scope_{scope_index:02}_marker() -> usize {{ {scope_index} }}"
+        )
+        .expect("append distinct scope marker");
+        std::fs::write(&module_path, module).expect("write distinct scope marker");
+        git(&canonical_root, &["add", "src/mod_0000.rs"]);
+        git(
+            &canonical_root,
+            &["commit", "-qm", "distinct publication scope"],
+        );
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+            &canonical_root,
+            project_id.as_str(),
+        )
+        .expect("scope project enrollment");
+
+        let scoped_store = scoped_code_index_store_root(&store_root, &canonical_root);
+        let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+            project_id.clone(),
+            &canonical_root,
+            scoped_store.clone(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        )
+        .expect("open publication scope scheduler");
+        scheduler
+            .reconcile_now()
+            .expect("seal publication scope generation");
+        let latest = scheduler
+            .latest_complete()
+            .expect("complete publication scope generation");
+        let generation = latest.generation_handle();
+        let generation_id = generation.manifest().generation_id.clone();
+        let repository_id = generation.snapshot().repository.clone();
+        let reference = generation.snapshot().reference.clone();
+        let worktree_id = scheduler.identity().worktree_id().clone();
+        drop(scheduler);
+        let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
+            &std::fs::read(scoped_store.join("active-code-generation-v1.json"))
+                .expect("active publication scope pointer"),
+        )
+        .expect("decode publication scope pointer");
+        assert_eq!(pointer.generation_id, generation_id.as_str());
+        let digest = pointer
+            .state_digest
+            .strip_prefix("sha256:")
+            .expect("sha256 publication scope digest");
+        measurement_scopes.push(PublicationMeasurementScopeV1 {
+            canonical_root,
+            generation,
+            generation_id,
+            repository_id,
+            reference,
+            worktree_id,
+            sealed_source: scoped_store
+                .join("code-generations-v1")
+                .join(format!("generation-{digest}.json")),
+            segments_source_root: scoped_store.join("code-generation-segments-v1"),
+            sealed_state_digest: tracedecay_graph_db::SealedGraphStateDigest::try_from(
+                pointer.state_digest,
+            )
+            .expect("publication scope sealed state digest"),
+        });
+    }
+
+    let distinct_generations = measurement_scopes
+        .iter()
+        .map(|scope| scope.generation_id.clone())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        distinct_generations.len(),
+        scope_count,
+        "every worktree scope must publish a distinct generation"
+    );
+
+    // The manifest provider binds one canonical generations root per project
+    // shard. Retain each scope scheduler's exact immutable seal in one
+    // project-level fixture root so this harness isolates publication overlap
+    // rather than exercising unsupported multi-root provider rebinding.
+    let publication_store_root = root.join("publication-store");
+    let publication_generations_root = publication_store_root.join("code-generations-v1");
+    let publication_segments_root = publication_store_root.join("code-generation-segments-v1");
+    std::fs::create_dir_all(&publication_generations_root)
+        .expect("project publication generations root");
+    std::fs::create_dir_all(&publication_segments_root).expect("project publication segments root");
+    for scope in &measurement_scopes {
+        let file_name = scope
+            .sealed_source
+            .file_name()
+            .expect("publication scope seal file name");
+        std::fs::copy(
+            &scope.sealed_source,
+            publication_generations_root.join(file_name),
+        )
+        .expect("retain publication scope seal in project generations root");
+        for entry in
+            std::fs::read_dir(&scope.segments_source_root).expect("publication scope segments root")
+        {
+            let entry = entry.expect("publication scope segment entry");
+            if entry
+                .file_type()
+                .expect("publication scope segment type")
+                .is_file()
+            {
+                std::fs::copy(
+                    entry.path(),
+                    publication_segments_root.join(entry.file_name()),
+                )
+                .expect("retain publication scope segment in project segments root");
+            }
+        }
+    }
+
+    let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        53,
+        "concurrent publication measurement",
+    )
+    .expect("daemon database scope");
+    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+        .await
+        .expect("session runtime registry");
+    let project_database = registry
+        .project_memory(
+            project_id.clone(),
+            measurement_scopes
+                .iter()
+                .map(|scope| scope.canonical_root.clone()),
+        )
+        .await
+        .expect("project graph database");
+    let replay_root = project_database
+        .database_path()
+        .with_extension("graph-replay");
+    tracedecay_runtime_core::storage::PrivateStoreIo::create_private_directory(&replay_root)
+        .expect("private graph replay root");
+
+    let mut runtimes = Vec::with_capacity(scope_count);
+    for scope in &measurement_scopes {
+        runtimes.push(
+            registry
+                .retain_code_graph_runtime(
+                    project_id.clone(),
+                    scope.repository_id.clone(),
+                    scope.worktree_id.clone(),
+                    scope.reference.clone(),
+                    scope.generation_id.clone(),
+                    Arc::clone(&project_database),
+                    CodeGraphReplayBindingV1 {
+                        generations_root: publication_generations_root.clone(),
+                        sealed_state_digest: scope.sealed_state_digest.clone(),
+                    },
+                    Some(Arc::clone(&scope.generation)),
+                )
+                .await
+                .expect("retain publication scope runtime"),
+        );
+    }
+    for runtime in &runtimes {
+        assert!(
+            Arc::ptr_eq(&runtimes[0].publication_locks, &runtime.publication_locks),
+            "all worktree scopes must share one project publication lock cell"
+        );
+    }
+
+    let _ = take_publication_projection_overlap_peak();
+    let rss_before = tracedecay_runtime_core::resident_memory::sampled_process_resident_bytes_v1()
+        .expect("Linux sampled RSS");
+    let vm_hwm_before = process_vm_hwm_kib().expect("Linux VmHWM before publication");
+    let rss_peak = Arc::new(AtomicU64::new(rss_before));
+    let stop_sampler = Arc::new(AtomicBool::new(false));
+    let sampler_peak = Arc::clone(&rss_peak);
+    let sampler_stop = Arc::clone(&stop_sampler);
+    let sampler = std::thread::spawn(move || {
+        while !sampler_stop.load(Ordering::Acquire) {
+            if let Some(sample) =
+                tracedecay_runtime_core::resident_memory::sampled_process_resident_bytes_v1()
+            {
+                sampler_peak.fetch_max(sample, Ordering::AcqRel);
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        if let Some(sample) =
+            tracedecay_runtime_core::resident_memory::sampled_process_resident_bytes_v1()
+        {
+            sampler_peak.fetch_max(sample, Ordering::AcqRel);
+        }
+    });
+
+    let barrier = Barrier::new(scope_count + 1);
+    let wall_started = Instant::now();
+    let outcomes = std::thread::scope(|thread_scope| {
+        let mut workers = Vec::with_capacity(scope_count);
+        for (scope_index, (runtime, measurement_scope)) in
+            runtimes.iter().zip(&measurement_scopes).enumerate()
+        {
+            let worker_barrier = &barrier;
+            workers.push(thread_scope.spawn(move || {
+                worker_barrier.wait();
+                let started = Instant::now();
+                let result = runtime.publish_verified_snapshot(
+                    &measurement_scope.generation,
+                    Arc::new(AtomicBool::new(false)),
+                );
+                let elapsed_ms =
+                    u64::try_from(started.elapsed().as_millis()).expect("publish milliseconds");
+                (scope_index, result, elapsed_ms)
+            }));
+        }
+        barrier.wait();
+        workers
+            .into_iter()
+            .map(|worker| worker.join().expect("join publication scope worker"))
+            .collect::<Vec<_>>()
+    });
+    let wall_ms = u64::try_from(wall_started.elapsed().as_millis())
+        .expect("publication measurement milliseconds");
+    stop_sampler.store(true, Ordering::Release);
+    sampler.join().expect("join resident memory sampler");
+    let rss_peak_sampled = rss_peak.load(Ordering::Acquire);
+    let vm_hwm_after = process_vm_hwm_kib().expect("Linux VmHWM after publication");
+    let peak_overlapping_projections = take_publication_projection_overlap_peak();
+
+    let mut per_scope_publish_ms = vec![0; scope_count];
+    for (scope_index, outcome, elapsed_ms) in outcomes {
+        match outcome {
+            Ok(_) => per_scope_publish_ms[scope_index] = elapsed_ms,
+            Err(error) => {
+                println!("publication scope {scope_index} failed with typed error: {error}");
+                panic!("publication scope {scope_index} failed")
+            }
+        }
+    }
+    let measurement = serde_json::json!({
+        "scopes": scope_count,
+        "corpus_files": corpus_files,
+        "distinct_generations": distinct_generations.len(),
+        "peak_overlapping_projections": peak_overlapping_projections,
+        "rss_before_bytes": rss_before,
+        "rss_peak_sampled_bytes": rss_peak_sampled,
+        "vm_hwm_before_kb": vm_hwm_before,
+        "vm_hwm_after_kb": vm_hwm_after,
+        "wall_ms": wall_ms,
+        "per_scope_publish_ms": per_scope_publish_ms,
+    });
+    println!(
+        "TRACEDECAY_PUBLICATION_MEASUREMENT {}",
+        serde_json::to_string(&measurement).expect("serialize publication measurement")
+    );
+    assert!(
+        peak_overlapping_projections <= 1,
+        "one project publication shard must admit at most one manifest projection"
     );
 }
