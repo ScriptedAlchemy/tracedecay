@@ -139,7 +139,6 @@ impl JavaExtractor {
         .result
     }
 
-    #[hotpath::measure(label = "code_extraction.java.extract_tree")]
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -192,7 +191,6 @@ impl JavaExtractor {
     }
 
     /// Parse source code into a tree-sitter AST.
-    #[hotpath::measure(label = "code_extraction.java.parse_source")]
     fn parse_source(source: &str) -> Result<Tree, String> {
         crate::ts_provider::parse_extractor_source("java", "Java", source)
     }
@@ -1440,12 +1438,10 @@ impl crate::LanguageExtractor for JavaExtractor {
         "Java"
     }
 
-    #[hotpath::measure(label = "code_extraction.java.extract")]
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         JavaExtractor::extract_java(file_path, source)
     }
 
-    #[hotpath::measure(label = "code_extraction.java.extract_parsed")]
     fn extract_parsed(
         &self,
         file_path: &str,

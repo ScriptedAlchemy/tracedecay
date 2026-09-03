@@ -98,7 +98,6 @@ impl RustExtractor {
         .result
     }
 
-    #[hotpath::measure(label = "code_extraction.rust.extract_tree")]
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -151,7 +150,6 @@ impl RustExtractor {
     }
 
     /// Parse source code into a tree-sitter AST.
-    #[hotpath::measure(label = "code_extraction.rust.parse_source")]
     fn parse_source(source: &str) -> Result<Tree, String> {
         crate::ts_provider::parse_extractor_source("rust", "Rust", source)
     }
@@ -1540,12 +1538,10 @@ impl crate::LanguageExtractor for RustExtractor {
         "Rust"
     }
 
-    #[hotpath::measure(label = "code_extraction.rust.extract")]
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         RustExtractor::extract(file_path, source)
     }
 
-    #[hotpath::measure(label = "code_extraction.rust.extract_parsed")]
     fn extract_parsed(
         &self,
         file_path: &str,
