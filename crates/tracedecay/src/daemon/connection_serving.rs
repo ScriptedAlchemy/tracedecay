@@ -1841,7 +1841,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
             };
         if !initialized_project_server_ready
             && let Some(mut response) =
-                daemon_bootstrap_response(&request, initialize_route.as_ref(), project_node_count)
+                daemon_bootstrap_response(request, initialize_route.as_ref(), project_node_count)
         {
             let project_open_error = if handshake.project_path.is_some()
                 && matches!(
