@@ -382,7 +382,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         )
     }
 
-        fn session_message_projection_statement(
+    fn session_message_projection_statement(
         message: &SessionMessageRecord,
         text: &str,
         metadata_json: Option<&str>,
