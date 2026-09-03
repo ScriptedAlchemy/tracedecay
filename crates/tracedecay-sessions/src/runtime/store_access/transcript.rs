@@ -67,7 +67,6 @@ async fn flush_transcript_statement_window(
         })
 }
 
-#[hotpath::measure(label = "sessions.transcript.offset_read", future = true)]
 pub async fn get_parse_offset(
     conn: &impl QueryExecutor,
     path: &str,
@@ -211,7 +210,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             .map_err(|error| TranscriptPersistenceError::storage("begin transcript batch", error))
     }
 
-    #[hotpath::measure(label = "sessions.transcript.session_upsert", future = true)]
+    #[hotpath::skip]
     pub async fn upsert_session(&self, session: &SessionRecord) -> bool {
         let Ok(transaction) = self.begin_transcript_transaction().await else {
             return false;
@@ -270,7 +269,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             .flatten()
     }
 
-    #[hotpath::measure(label = "sessions.transcript.session_read", future = true)]
+    #[hotpath::skip]
     pub async fn get_session_result(
         &self,
         provider: &str,
@@ -353,7 +352,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         })
     }
 
-    #[hotpath::measure(label = "sessions.transcript.message_upsert", future = true)]
+    #[hotpath::skip]
     async fn upsert_session_message_in_existing_tx(
         &self,
         conn: &impl Executor,
@@ -473,7 +472,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         .await
     }
 
-    #[hotpath::measure(label = "sessions.transcript.offset_commit", future = true)]
+    #[hotpath::skip]
     pub async fn persist_transcript_offset_result(
         &self,
         parse_offset_path: &str,
@@ -647,7 +646,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             .map_err(|error| format!("commit transcript parse offset: {error}"))
     }
 
-    #[hotpath::measure(label = "sessions.transcript.offset_advance", future = true)]
+    #[hotpath::skip]
     pub async fn advance_parse_offset_result(
         &self,
         path: &str,
@@ -666,7 +665,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
 
     /// Exact compare-and-set for versioned parse-offset authorities whose
     /// numeric fields are not monotonic transcript positions.
-    #[hotpath::measure(label = "sessions.transcript.offset_replace", future = true)]
+    #[hotpath::skip]
     pub async fn replace_parse_offset_result(
         &self,
         path: &str,
@@ -684,7 +683,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     /// Atomically compare-and-replace two parse-offset keys. Both expected
     /// values are checked before either write and one transaction owns the
     /// pair through commit.
-    #[hotpath::measure(label = "sessions.transcript.offset_replace_pair", future = true)]
+    #[hotpath::skip]
     pub async fn replace_parse_offset_pair_result(
         &self,
         first: (&str, ParseOffset, ParseOffset),

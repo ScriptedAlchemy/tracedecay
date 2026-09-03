@@ -416,7 +416,7 @@ where
         self.has_tables(&["workflow_runs", "workflow_agents"]).await
     }
 
-    #[hotpath::measure(label = "sessions.workflow_index.runs_for_session", future = true)]
+    #[hotpath::skip]
     pub async fn runs_for_session(
         &self,
         parent_session_id: &str,
@@ -446,7 +446,7 @@ where
         Ok(runs)
     }
 
-    #[hotpath::measure(label = "sessions.workflow_index.run_read", future = true)]
+    #[hotpath::skip]
     pub async fn run_for_id(
         &self,
         run_id: &str,
@@ -462,7 +462,7 @@ where
         rows.next().await?.map(|row| row_to_run(&row)).transpose()
     }
 
-    #[hotpath::measure(label = "sessions.workflow_index.agents_for_run", future = true)]
+    #[hotpath::skip]
     pub async fn agents_for_run(
         &self,
         run_id: &str,
@@ -539,7 +539,7 @@ where
         rows.next().await?.map(|row| row_to_agent(&row)).transpose()
     }
 
-    #[hotpath::measure(label = "sessions.workflow_index.runs_for_git_scope", future = true)]
+    #[hotpath::skip]
     pub async fn runs_for_git_scope(
         &self,
         session_ids: Option<&[(String, String)]>,
