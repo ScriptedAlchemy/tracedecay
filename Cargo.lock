@@ -5832,6 +5832,7 @@ dependencies = [
  "indexmap",
  "toml_datetime",
  "toml_parser",
+ "toml_writer",
  "winnow",
 ]
 
@@ -6020,6 +6021,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml",
+ "toml_edit",
  "tracedecay-application",
  "tracedecay-automation",
  "tracedecay-automation-runtime",

@@ -292,6 +292,7 @@ impl CatalogHostComponentRegistrationAuthority {
             || component_set.host == crate::agents::host_bundle_v2::HostKindV1::Devin
         || component_set.host == crate::agents::host_bundle_v2::HostKindV1::Zed
         || component_set.host == crate::agents::host_bundle_v2::HostKindV1::Antigravity
+        || component_set.host == crate::agents::host_bundle_v2::HostKindV1::Vibe
             || component_set.host == crate::agents::host_bundle_v2::HostKindV1::Hermes
             || component_set.host == crate::agents::host_bundle_v2::HostKindV1::KimiCode
             || component_set.host == crate::agents::host_bundle_v2::HostKindV1::Kiro
