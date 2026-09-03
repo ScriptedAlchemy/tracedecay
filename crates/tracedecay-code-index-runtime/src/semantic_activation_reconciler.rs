@@ -14,6 +14,28 @@ const REOBSERVATION_UNIT_DEADLINE: Duration = Duration::from_secs(15);
 const REOBSERVATION_INITIAL_BACKOFF: Duration = Duration::from_millis(50);
 const REOBSERVATION_MAX_BACKOFF: Duration = Duration::from_secs(5);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReobservationFailureDispositionV1 {
+    Retry,
+    Refuse,
+}
+
+fn classify_reobservation_failure(
+    error: &SemanticActivationCoordinationErrorV1,
+) -> ReobservationFailureDispositionV1 {
+    match error {
+        SemanticActivationCoordinationErrorV1::Rejected
+        | SemanticActivationCoordinationErrorV1::RejectedDetail(_) => {
+            ReobservationFailureDispositionV1::Refuse
+        }
+        SemanticActivationCoordinationErrorV1::Unavailable
+        | SemanticActivationCoordinationErrorV1::Runtime(_)
+        | SemanticActivationCoordinationErrorV1::Conflict => {
+            ReobservationFailureDispositionV1::Retry
+        }
+    }
+}
+
 fn should_reconcile_ready_event(
     handled_epoch: Option<u64>,
     event: &SemanticLifecycleVerifiedReadyEventV1,
@@ -81,22 +103,22 @@ impl DaemonSemanticActivationReconcilerV1 {
                                 .inc(1_u64);
                                 break;
                             }
-                            Ok(Err(
-                                SemanticActivationCoordinationErrorV1::Rejected
-                                | SemanticActivationCoordinationErrorV1::RejectedDetail(_)
-                                | SemanticActivationCoordinationErrorV1::Conflict,
-                            )) => {
-                                hotpath::gauge!(
-                                    "daemon.semantic.activation_reconciler.reobserve.refused_total"
-                                )
-                                .inc(1_u64);
-                                break;
-                            }
-                            Ok(Err(
-                                SemanticActivationCoordinationErrorV1::Unavailable
-                                | SemanticActivationCoordinationErrorV1::Runtime(_),
-                            ))
-                            | Err(_) => {
+                            Ok(Err(error)) => match classify_reobservation_failure(&error) {
+                                ReobservationFailureDispositionV1::Refuse => {
+                                    hotpath::gauge!(
+                                        "daemon.semantic.activation_reconciler.reobserve.refused_total"
+                                    )
+                                    .inc(1_u64);
+                                    break;
+                                }
+                                ReobservationFailureDispositionV1::Retry => {
+                                    hotpath::gauge!(
+                                        "daemon.semantic.activation_reconciler.reobserve.retried_total"
+                                    )
+                                    .inc(1_u64);
+                                }
+                            },
+                            Err(_) => {
                                 hotpath::gauge!(
                                     "daemon.semantic.activation_reconciler.reobserve.retried_total"
                                 )
@@ -206,5 +228,17 @@ mod tests {
         tokio::time::timeout(Duration::from_millis(100), reconciler_wake.notified())
             .await
             .expect("a pre-install activation must wake reconciliation at the same ready epoch");
+    }
+
+    #[test]
+    fn coordination_conflict_retries_canonical_reobservation() {
+        assert_eq!(
+            classify_reobservation_failure(&SemanticActivationCoordinationErrorV1::Conflict),
+            ReobservationFailureDispositionV1::Retry
+        );
+        assert_eq!(
+            classify_reobservation_failure(&SemanticActivationCoordinationErrorV1::Rejected),
+            ReobservationFailureDispositionV1::Refuse
+        );
     }
 }
