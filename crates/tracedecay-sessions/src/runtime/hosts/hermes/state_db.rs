@@ -26,6 +26,30 @@ use super::routing::{
 use super::rows::{HermesPageRead, HermesRow, hermes_budget_bytes, hermes_page_row_charge};
 use super::{CHUNK_ROWS, MAX_HERMES_IDENTITY_BYTES, MAX_HERMES_PAGE_BYTES, MAX_HERMES_VALUE_BYTES};
 
+pub(super) const HERMES_PAYLOAD_BATCH_ROWS: usize = 256;
+
+#[derive(Clone)]
+pub(super) struct HermesReadSql {
+    admission: String,
+    payload_select: String,
+}
+
+impl HermesReadSql {
+    pub(super) fn admission_sql(&self) -> &str {
+        &self.admission
+    }
+
+    pub(super) fn payload_sql(&self, row_count: usize) -> String {
+        let admitted_values = std::iter::repeat_n("(?, ?)", row_count)
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "WITH admitted(id, row_fits_budget) AS (VALUES {admitted_values}) {}",
+            self.payload_select
+        )
+    }
+}
+
 /// Column names of the `messages` table — `active` (v12 rewind soft-delete)
 /// and `reasoning` arrived in later Hermes schema revisions, so the sweep
 /// probes before selecting to stay readable on legacy stores.
@@ -154,10 +178,10 @@ fn sql_value_oversized(expr: &str, max_bytes: usize) -> String {
     )
 }
 
-pub fn select_new_messages_sql(
+pub(super) fn select_new_messages_sql(
     message_columns: &std::collections::BTreeSet<String>,
     session_columns: &std::collections::BTreeSet<String>,
-) -> String {
+) -> HermesReadSql {
     let reasoning_raw = if message_columns.contains("reasoning") {
         "m.reasoning"
     } else {
@@ -281,7 +305,7 @@ pub fn select_new_messages_sql(
         source_os = sql_value_oversized(session_source_raw, id_max),
         title_os = sql_value_oversized(session_title_raw, value_max),
     );
-    let row_fits_budget = format!("({measured}) <= ?2");
+    let row_fits_budget = "admitted.row_fits_budget != 0";
     let session_id = sql_bounded_text("m.session_id", id_max, &row_fits_budget);
     let role = sql_bounded_text("m.role", id_max, &row_fits_budget);
     let content = sql_bounded_text("m.content", value_max, &row_fits_budget);
@@ -306,7 +330,17 @@ pub fn select_new_messages_sql(
         "CASE WHEN ({oversized}) > 0 OR ({measured}) > {MAX_HERMES_PAGE_BYTES} \
               THEN 1 ELSE 0 END"
     );
-    format!(
+    let admission = format!(
+        "SELECT m.id,
+                CAST(({measured}) AS INTEGER) AS measured_bytes,
+                CAST(({typed_oversized}) AS INTEGER) AS value_oversized,
+                CAST(({session_usage_frontier}) AS INTEGER) AS session_usage_frontier
+         FROM messages m LEFT JOIN sessions s ON s.id = m.session_id
+         WHERE m.id > ?1
+         ORDER BY m.id
+         LIMIT {CHUNK_ROWS}"
+    );
+    let payload_select = format!(
         "SELECT m.id,
                 {session_id},
                 {role},
@@ -323,16 +357,16 @@ pub fn select_new_messages_sql(
                 {session_started_at},
                 {session_ended_at},
                 {input_tokens}, {output_tokens}, {cache_read_tokens}, {cache_write_tokens},
-                {reasoning_tokens}, {active},
-                CAST(({measured}) AS INTEGER) AS measured_bytes,
-                CAST(({typed_oversized}) AS INTEGER) AS value_oversized,
-                CAST(({row_fits_budget}) AS INTEGER) AS row_fits_budget,
-                CAST(({session_usage_frontier}) AS INTEGER) AS session_usage_frontier
-         FROM messages m LEFT JOIN sessions s ON s.id = m.session_id
-         WHERE m.id > ?1
-         ORDER BY m.id
-         LIMIT 1"
-    )
+                {reasoning_tokens}, {active}
+         FROM admitted
+         JOIN messages m ON m.id = admitted.id
+         LEFT JOIN sessions s ON s.id = m.session_id
+         ORDER BY m.id"
+    );
+    HermesReadSql {
+        admission,
+        payload_select,
+    }
 }
 
 /// Incrementally scans one Hermes `state.db`; each bounded page is admitted
@@ -349,7 +383,7 @@ async fn open_state_source(
         ObservationSourceGenerationV1,
         u64,
         u64,
-        String,
+        HermesReadSql,
     ),
     String,
 > {
@@ -384,7 +418,7 @@ async fn open_state_source(
 async fn ingest_bounded_pages<F, R>(
     admission: &dyn HostAdmission,
     conn: &SqliteReadConn,
-    select_sql: &str,
+    select_sql: &HermesReadSql,
     scope: ObservationScopeV1,
     generation: ObservationSourceGenerationV1,
     file_identity: u64,
@@ -658,70 +692,117 @@ pub async fn open_read_only_strict(path: &Path) -> Result<SqliteReadConn, String
 
 pub(super) async fn read_new_rows_strict(
     conn: &SqliteReadConn,
-    select_sql: &str,
+    select_sql: &HermesReadSql,
     prev: StoredCursor,
 ) -> Result<HermesPageRead, String> {
-    let select_sql = select_sql.to_string();
+    let select_sql = select_sql.clone();
     conn.with(move |conn| read_new_rows_strict_sync(conn, &select_sql, prev))
         .await
         .unwrap_or_else(|| Err("could not query legacy Hermes state rows".to_string()))
 }
 
-/// One byte-budgeted page over the legacy Hermes state rows. The loop is a
-/// deliberate one-row-per-query cursor — the remaining page budget is bound
-/// into each fetch — but the statement text never changes, so it goes
-/// through the connection's prepared-statement cache instead of re-parsing
-/// once per row.
+#[derive(Clone, Copy)]
+struct AdmittedHermesRow {
+    rowid: i64,
+    measured_bytes: u64,
+    payload_fits_budget: bool,
+    value_oversized: bool,
+    session_usage_frontier: bool,
+}
+
+/// One byte-budgeted page over Hermes state rows. A scalar-only admission scan
+/// establishes exact row order, frontier state, and cumulative byte admission;
+/// payload columns are then fetched in bounded batches only for admitted ids.
 #[hotpath::measure(label = "sessions.hosts.hermes.read_new_rows_strict")]
 fn read_new_rows_strict_sync(
     conn: &rusqlite::Connection,
-    select_sql: &str,
+    select_sql: &HermesReadSql,
     prev: StoredCursor,
 ) -> Result<HermesPageRead, String> {
-    let mut items = Vec::new();
-    let mut max_rowid = prev.position;
+    let mut admitted = Vec::new();
     let mut page_bytes = 0_u64;
     let mut truncated_by_byte_budget = false;
-    while items.len() < CHUNK_ROWS {
-        let remaining = MAX_HERMES_PAGE_BYTES.saturating_sub(page_bytes);
+    {
         let mut statement = conn
-            .prepare_cached(select_sql)
+            .prepare_cached(select_sql.admission_sql())
             .map_err(|error| format!("could not query legacy Hermes state rows: {error}"))?;
         let mut rows = statement
-            .query(rusqlite::params![max_rowid as i64, remaining as i64])
+            .query(rusqlite::params![prev.position as i64])
             .map_err(|error| format!("could not query legacy Hermes state rows: {error}"))?;
-        let row = rows
+        while let Some(row) = rows
             .next()
-            .map_err(|error| format!("could not read legacy Hermes state row: {error}"))?;
-        let Some(row) = row else {
-            break;
-        };
-        let rowid = row
-            .get::<_, i64>(0)
-            .map_err(|error| format!("legacy Hermes state row has no id: {error}"))?;
-        // Columns 21..23 are SQL byte/typeof/budget aggregates — integers only.
-        let measured = row_i64_flag(row, 21).max(0) as u64;
-        let charge = hermes_page_row_charge(measured);
-        let row_fits_budget = row_i64_flag(row, 23) != 0;
-        if !row_fits_budget && !items.is_empty() {
-            // SQL returned NULL for every text payload in this row, so defer it
-            // without allocating the value that would cross the page budget.
-            truncated_by_byte_budget = true;
-            break;
-        }
-        let mapped = map_row(rowid, row, measured)
-            .ok_or_else(|| format!("legacy Hermes state row {rowid} is malformed"))?;
-        page_bytes = page_bytes.saturating_add(charge);
-        max_rowid = max_rowid.max(rowid as u64);
-        items.push(mapped);
-        if page_bytes >= MAX_HERMES_PAGE_BYTES {
-            truncated_by_byte_budget = true;
-            break;
+            .map_err(|error| format!("could not read legacy Hermes state row: {error}"))?
+        {
+            let rowid = row
+                .get::<_, i64>(0)
+                .map_err(|error| format!("legacy Hermes state row has no id: {error}"))?;
+            let measured_bytes = row_i64_flag(row, 1).max(0) as u64;
+            let remaining = MAX_HERMES_PAGE_BYTES.saturating_sub(page_bytes);
+            let payload_fits_budget = measured_bytes <= remaining;
+            if !payload_fits_budget && !admitted.is_empty() {
+                truncated_by_byte_budget = true;
+                break;
+            }
+            page_bytes = page_bytes.saturating_add(hermes_page_row_charge(measured_bytes));
+            admitted.push(AdmittedHermesRow {
+                rowid,
+                measured_bytes,
+                payload_fits_budget,
+                value_oversized: row_i64_flag(row, 2) != 0,
+                session_usage_frontier: row_i64_flag(row, 3) != 0,
+            });
+            if page_bytes >= MAX_HERMES_PAGE_BYTES {
+                truncated_by_byte_budget = true;
+                break;
+            }
         }
     }
-    if items.len() >= CHUNK_ROWS {
+    if admitted.len() >= CHUNK_ROWS {
         truncated_by_byte_budget = true;
     }
+
+    let mut items = Vec::with_capacity(admitted.len());
+    let mut max_rowid = prev.position;
+    for batch in admitted.chunks(HERMES_PAYLOAD_BATCH_ROWS) {
+        let payload_sql = select_sql.payload_sql(batch.len());
+        let mut statement = conn
+            .prepare_cached(&payload_sql)
+            .map_err(|error| format!("could not query legacy Hermes state rows: {error}"))?;
+        let mut rows = statement
+            .query(rusqlite::params_from_iter(batch.iter().flat_map(
+                |candidate| [candidate.rowid, i64::from(candidate.payload_fits_budget)],
+            )))
+            .map_err(|error| format!("could not query legacy Hermes state rows: {error}"))?;
+        let mut expected = batch.iter();
+        while let Some(row) = rows
+            .next()
+            .map_err(|error| format!("could not read legacy Hermes state row: {error}"))?
+        {
+            let Some(candidate) = expected.next() else {
+                return Err("legacy Hermes payload query returned an unadmitted row".to_string());
+            };
+            let rowid = row
+                .get::<_, i64>(0)
+                .map_err(|error| format!("legacy Hermes state row has no id: {error}"))?;
+            if rowid != candidate.rowid {
+                return Err(format!(
+                    "legacy Hermes payload row order changed: expected {}, got {rowid}",
+                    candidate.rowid
+                ));
+            }
+            let mapped = map_payload_row(*candidate, row)
+                .ok_or_else(|| format!("legacy Hermes state row {rowid} is malformed"))?;
+            max_rowid = max_rowid.max(rowid as u64);
+            items.push(mapped);
+        }
+        if let Some(missing) = expected.next() {
+            return Err(format!(
+                "legacy Hermes payload query omitted admitted row {}",
+                missing.rowid
+            ));
+        }
+    }
+
     Ok(HermesPageRead {
         items,
         #[cfg(test)]
@@ -753,8 +834,9 @@ fn row_optional_f64(row: &rusqlite::Row<'_>, idx: usize) -> Option<f64> {
     })
 }
 
-fn map_row(rowid: i64, row: &rusqlite::Row<'_>, sql_measured_bytes: u64) -> Option<HermesRow> {
-    let sql_value_oversized = row_i64_flag(row, 22) != 0;
+fn map_payload_row(candidate: AdmittedHermesRow, row: &rusqlite::Row<'_>) -> Option<HermesRow> {
+    let rowid = candidate.rowid;
+    let sql_value_oversized = candidate.value_oversized;
     let session_id = match row.get::<_, Option<String>>(1).ok().flatten() {
         Some(id) if !id.is_empty() => id,
         // Rejected/oversized session_id never materializes the hostile value; use a
@@ -787,9 +869,9 @@ fn map_row(rowid: i64, row: &rusqlite::Row<'_>, sql_measured_bytes: u64) -> Opti
         session_cache_read_tokens: row.get::<_, Option<i64>>(17).ok().flatten(),
         session_cache_write_tokens: row.get::<_, Option<i64>>(18).ok().flatten(),
         session_reasoning_tokens: row.get::<_, Option<i64>>(19).ok().flatten(),
-        is_session_usage_frontier: row_i64_flag(row, 24) != 0,
+        is_session_usage_frontier: candidate.session_usage_frontier,
         active: row.get::<_, Option<i64>>(20).ok().flatten().unwrap_or(1),
         sql_value_oversized,
-        sql_measured_bytes,
+        sql_measured_bytes: candidate.measured_bytes,
     })
 }

@@ -51,8 +51,9 @@ use observation::{
 use rows::HermesRow;
 #[cfg(test)]
 use state_db::{
-    message_columns, open_read_only_strict, read_new_rows_strict, select_new_messages_sql,
-    table_columns, validate_required_schema,
+    HERMES_PAYLOAD_BATCH_ROWS, message_columns, open_read_only_strict, read_new_rows_strict,
+    select_new_messages_sql, table_columns, try_ingest_state_db_bounded_with_admission,
+    validate_required_schema,
 };
 
 const PROVIDER: &str = "hermes";
