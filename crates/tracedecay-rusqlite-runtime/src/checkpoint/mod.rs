@@ -19,7 +19,10 @@ pub use types::{
     CheckpointKind, CheckpointOutcome, CheckpointPressure, CheckpointStatus, CheckpointWal,
     MaintenanceCheckpointMode,
 };
-pub(crate) use types::{CheckpointConfig, CheckpointDecision, CheckpointError, CheckpointResult};
+pub(crate) use types::{
+    CheckpointBlockerSource, CheckpointConfig, CheckpointDecision, CheckpointError,
+    CheckpointResult,
+};
 #[cfg(test)]
 pub(crate) use types::{
     CheckpointConfigError, CheckpointMode, CheckpointReport, WalPressure, WalSample,

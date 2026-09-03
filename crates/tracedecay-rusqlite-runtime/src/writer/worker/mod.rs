@@ -32,7 +32,7 @@ use crate::{
     RuntimeWriteAuthorityStage,
     admission::{FairQueue, QueueItem},
     checkpoint::{
-        CheckpointBlockers, CheckpointConfig, CheckpointDecision, CheckpointInterruption,
+        CheckpointBlockerSource, CheckpointConfig, CheckpointDecision, CheckpointInterruption,
         CheckpointOutcome, CheckpointPressure, CheckpointResult, CheckpointStatus, CheckpointWal,
         MaintenanceCheckpointMode, RusqliteCheckpointDriver, WriterCheckpointController,
     },
@@ -253,7 +253,7 @@ async fn dwell_for_batch(
                 *incremental_vacuum_closed,
                 *online_backup_closed,
                 *checkpoint_closed,
-                false,
+                None,
             ),
         )
         .await
@@ -324,6 +324,7 @@ pub(super) struct Worker {
     pub(super) watermark_publisher: CommittedWatermarkPublisher,
     pub(super) checkpoint_status: watch::Sender<CheckpointStatus>,
     pub(super) checkpoint_pressure: watch::Sender<CheckpointPressure>,
+    pub(super) checkpoint_blockers: Arc<dyn CheckpointBlockerSource>,
     pub(super) started: SyncSender<Result<Option<u64>, WriterStartError>>,
 }
 
@@ -471,7 +472,7 @@ impl Worker {
         let mut checkpoint_closed = false;
         let mut prefer_auxiliary = true;
         let mut next_auxiliary = AuxiliaryWork::IncrementalVacuum;
-        let mut latest_blockers = CheckpointBlockers::default();
+        let mut hard_checkpoint_retry_due = None;
         loop {
             hotpath::measure_block!("rusqlite.writer.drain_ingress", {
                 drain_ingress(
@@ -536,7 +537,7 @@ impl Worker {
                     incremental_vacuum_closed,
                     online_backup_closed,
                     checkpoint_closed,
-                    false,
+                    None,
                 ));
                 apply_wake(
                     wake,
@@ -558,10 +559,64 @@ impl Worker {
                 queue.is_empty() || matches!(&command.kind, CheckpointCommandKind::Passive { .. })
             });
             if requested_checkpoint_ready && let Some(command) = checkpoint_queue.pop_front() {
-                latest_blockers = command.snapshot_blockers.clone();
                 self.run_requested_checkpoint(&mut checkpoint, command);
+                hard_checkpoint_retry_due = checkpoint
+                    .hard_drain_required()
+                    .then(|| Instant::now() + HARD_CHECKPOINT_RETRY_INTERVAL);
                 continue;
             }
+            if checkpoint.hard_drain_required() {
+                cancel_waiting(&mut queue, &self.telemetry);
+                reject_unauthorized(&mut queue, &self.telemetry);
+                let now = Instant::now();
+                let retry_due = hard_checkpoint_retry_due.get_or_insert(now);
+                if now >= *retry_due {
+                    self.telemetry.checkpoint_hard_retry();
+                    self.run_scheduled_checkpoint(&mut checkpoint);
+                    hard_checkpoint_retry_due = checkpoint
+                        .hard_drain_required()
+                        .then(|| Instant::now() + HARD_CHECKPOINT_RETRY_INTERVAL);
+                    continue;
+                }
+                let wake = runtime.block_on(wait_for_work(
+                    &mut self.receiver,
+                    &mut self.exact_sql_receiver,
+                    &mut self.incremental_vacuum_receiver,
+                    &mut self.online_backup_receiver,
+                    &mut self.checkpoint_receiver,
+                    &mut self.shutdown_receiver,
+                    input_closed,
+                    exact_sql_closed,
+                    incremental_vacuum_closed,
+                    online_backup_closed,
+                    checkpoint_closed,
+                    Some(retry_due.saturating_duration_since(now)),
+                ));
+                if matches!(wake, WorkerWake::CheckpointRetry) {
+                    self.telemetry.checkpoint_hard_retry();
+                    self.run_scheduled_checkpoint(&mut checkpoint);
+                    hard_checkpoint_retry_due = checkpoint
+                        .hard_drain_required()
+                        .then(|| Instant::now() + HARD_CHECKPOINT_RETRY_INTERVAL);
+                } else {
+                    apply_wake(
+                        wake,
+                        &mut queue,
+                        &mut exact_sql_queue,
+                        &mut incremental_vacuum_queue,
+                        &mut online_backup_queue,
+                        &mut checkpoint_queue,
+                        &self.telemetry,
+                        &mut input_closed,
+                        &mut exact_sql_closed,
+                        &mut incremental_vacuum_closed,
+                        &mut online_backup_closed,
+                        &mut checkpoint_closed,
+                    );
+                }
+                continue;
+            }
+            hard_checkpoint_retry_due = None;
             if let Some(auxiliary) = select_auxiliary_work(
                 !exact_sql_queue.is_empty(),
                 !incremental_vacuum_queue.is_empty(),
@@ -591,6 +646,10 @@ impl Worker {
                                 take_observed_vm(),
                                 lock_work.take(),
                             );
+                            self.run_scheduled_checkpoint(&mut checkpoint);
+                            hard_checkpoint_retry_due = checkpoint
+                                .hard_drain_required()
+                                .then(|| Instant::now() + HARD_CHECKPOINT_RETRY_INTERVAL);
                         } else {
                             reject_writer_command(command);
                         }
@@ -657,27 +716,22 @@ impl Worker {
                     incremental_vacuum_closed,
                     online_backup_closed,
                     checkpoint_closed,
-                    checkpoint.hard_drain_required(),
+                    None,
                 ));
-                if matches!(wake, WorkerWake::CheckpointRetry) {
-                    crate::hotpath_observe::record_checkpoint_hard_retry_wake();
-                    self.run_scheduled_checkpoint(&mut checkpoint, latest_blockers.clone());
-                } else {
-                    apply_wake(
-                        wake,
-                        &mut queue,
-                        &mut exact_sql_queue,
-                        &mut incremental_vacuum_queue,
-                        &mut online_backup_queue,
-                        &mut checkpoint_queue,
-                        &self.telemetry,
-                        &mut input_closed,
-                        &mut exact_sql_closed,
-                        &mut incremental_vacuum_closed,
-                        &mut online_backup_closed,
-                        &mut checkpoint_closed,
-                    );
-                }
+                apply_wake(
+                    wake,
+                    &mut queue,
+                    &mut exact_sql_queue,
+                    &mut incremental_vacuum_queue,
+                    &mut online_backup_queue,
+                    &mut checkpoint_queue,
+                    &self.telemetry,
+                    &mut input_closed,
+                    &mut exact_sql_closed,
+                    &mut incremental_vacuum_closed,
+                    &mut online_backup_closed,
+                    &mut checkpoint_closed,
+                );
                 continue;
             }
             cancel_waiting(&mut queue, &self.telemetry);
@@ -724,7 +778,8 @@ impl Worker {
                 reject_unauthorized(&mut queue, &self.telemetry);
                 continue;
             }
-            for batch in build_batches(selected, &self.config) {
+            let mut batches = build_batches(selected, &self.config).into_iter();
+            while let Some(batch) = batches.next() {
                 self.telemetry.released(
                     u32::try_from(batch.items.len()).unwrap_or(u32::MAX),
                     batch.bytes,
@@ -738,7 +793,17 @@ impl Worker {
                     &self.state,
                     &self.watermark_publisher,
                 );
-                self.run_scheduled_checkpoint(&mut checkpoint, latest_blockers.clone());
+                self.run_scheduled_checkpoint(&mut checkpoint);
+                if checkpoint.hard_drain_required() {
+                    for pending in batches {
+                        for item in pending.items {
+                            let _ = enqueue(&mut queue, item, &self.telemetry);
+                        }
+                    }
+                    hard_checkpoint_retry_due =
+                        Some(Instant::now() + HARD_CHECKPOINT_RETRY_INTERVAL);
+                    break;
+                }
                 if self.state.load(Ordering::Acquire) == WriterState::Faulted as u8 {
                     break;
                 }
@@ -754,9 +819,9 @@ impl Worker {
     fn run_scheduled_checkpoint(
         &self,
         checkpoint: &mut WriterCheckpointController<RusqliteCheckpointDriver>,
-        snapshot_blockers: CheckpointBlockers,
     ) {
         crate::hotpath_observe::record_scheduled_checkpoint_dispatch();
+        let snapshot_blockers = self.checkpoint_blockers.checkpoint_blockers();
         match hotpath::measure_block!("rusqlite.writer.checkpoint", {
             checkpoint.evaluate_scheduled(snapshot_blockers)
         }) {

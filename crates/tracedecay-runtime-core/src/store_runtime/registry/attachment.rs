@@ -7,6 +7,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use tracedecay_rusqlite_runtime::{CheckpointPressure, CheckpointStatus};
 use tracedecay_store::{
     CommitSequenceV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1, RuntimeRequestProbeV1,
     RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1, StoreRuntimeBindingV1,
@@ -19,7 +20,7 @@ use super::StoreRuntimeRegistryFailure;
 /// The horizon begins when this writer starts and ends when the registry closes
 /// it. These counters are not process-lifetime totals; presence in the parent
 /// snapshot is the coverage signal for this writer.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PhysicalWriterRuntimeSnapshot {
     pub offered_operations: u64,
     pub admitted_operations: u64,
@@ -35,10 +36,13 @@ pub struct PhysicalWriterRuntimeSnapshot {
     pub error_events: u64,
     pub health_lane_services: u64,
     pub commit_sequence: CommitSequenceV1,
+    pub checkpoint_status: CheckpointStatus,
+    pub checkpoint_pressure: CheckpointPressure,
+    pub checkpoint_hard_retry_wakes: u64,
 }
 
 /// Bounded, path-free facts sampled from the physical writer/read runtime.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PhysicalRuntimeSnapshot {
     pub healthy: bool,
     pub writer_present: bool,
@@ -55,7 +59,7 @@ pub struct PhysicalRuntimeSnapshot {
 
 impl PhysicalRuntimeSnapshot {
     #[hotpath::skip]
-    pub const fn is_drained(self) -> bool {
+    pub const fn is_drained(&self) -> bool {
         !self.writer_present
             && self.reader_handles == 0
             && self.queued_operations == 0
