@@ -558,15 +558,13 @@ pub(crate) fn decode_relation(locator: &Node, edge: &Edge) -> Result<GraphRelati
     .map_err(|error| persisted_validation_error("relation", error))
 }
 
-/// Identity-only relation decode: namespace, projection, kind, endpoints, and
-/// identity. Skips [`decode_graph_properties`] so an ID fan-out does not pay
-/// property allocation for rows the caller will discard.
+/// Identity-only relation decode: namespace, projection, kind, and identity.
+/// Skips endpoint materialization and [`decode_graph_properties`] so an ID
+/// fan-out does not allocate fields the caller discards.
 pub(crate) struct DecodedRelationIdentity {
     pub identity: GraphRelationId,
     pub projection: GraphProjectionId,
     pub kind: GraphRelationKind,
-    pub from: GraphEntityId,
-    pub to: GraphEntityId,
 }
 
 pub(crate) fn decode_relation_identity(
@@ -578,7 +576,7 @@ pub(crate) fn decode_relation_identity(
         required_string(edge.get_property(NAMESPACE_PROPERTY), "relation namespace")?;
     if stored_namespace != namespace.as_str() {
         return Err(GraphDbError::Corrupt {
-            message: "outgoing relation belongs to a foreign namespace".to_owned(),
+            message: "relation belongs to a foreign namespace".to_owned(),
         });
     }
     let projection = GraphProjectionId::new(required_string(
@@ -598,22 +596,10 @@ pub(crate) fn decode_relation_identity(
         "relation identity",
     )?)
     .map_err(|error| persisted_validation_error("relation identity", error))?;
-    let from = GraphEntityId::new(required_string(
-        edge.get_property(RELATION_FROM_PROPERTY),
-        "relation source",
-    )?)
-    .map_err(|error| persisted_validation_error("relation source", error))?;
-    let to = GraphEntityId::new(required_string(
-        edge.get_property(RELATION_TO_PROPERTY),
-        "relation target",
-    )?)
-    .map_err(|error| persisted_validation_error("relation target", error))?;
     Ok(DecodedRelationIdentity {
         identity,
         projection,
         kind,
-        from,
-        to,
     })
 }
 
