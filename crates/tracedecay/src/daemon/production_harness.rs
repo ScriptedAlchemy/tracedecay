@@ -229,9 +229,10 @@ struct ProductionCompositionAdmissionSnapshotV1 {
 
 #[cfg(any(test, feature = "test-transport"))]
 fn production_composition_admission_capacity() -> usize {
-    let worker_width = tracedecay_code_index::parallelism::installed_worker_status()
-        .map(|status| usize::from(status.effective_workers))
-        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from));
+    let worker_width = tracedecay_code_index::parallelism::installed_worker_status().map_or_else(
+        || std::thread::available_parallelism().map_or(1, usize::from),
+        |status| usize::from(status.effective_workers),
+    );
     (worker_width / PRODUCTION_COMPOSITION_CPU_DIVISOR).max(1)
 }
 

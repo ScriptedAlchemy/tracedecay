@@ -271,9 +271,8 @@ async fn workflow_queries_distinguish_missing_schema_from_empty_results() {
             .await
             .expect_err("a missing workflow index must be a retained problem")
             .to_string();
-        assert_eq!(
+        assert!(
             error.contains("workflow_index_not_built"),
-            true,
             "a missing workflow schema must take precedence over empty or missing results"
         );
         assert!(error.contains("\"kind\":\"unavailable\""), "{error}");
