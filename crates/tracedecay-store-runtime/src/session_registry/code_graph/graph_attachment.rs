@@ -110,7 +110,7 @@ async fn open_session_relation_owner_with_cancellation(
     // load through the exact registration authority.
     let graph = tokio::task::spawn_blocking(move || {
         hotpath::measure_block!("daemon.store.session_relation_graph.open", {
-            graph_registry.resolve_owner_attachment(GraphDbOwnerRegistrationV1 {
+            graph_registry.resolve_lazy_owner_attachment(GraphDbOwnerRegistrationV1 {
                 operation: registration,
                 authority_attachment: Box::new(store_attachment),
             })
