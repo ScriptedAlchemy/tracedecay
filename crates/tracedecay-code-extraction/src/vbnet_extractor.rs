@@ -44,7 +44,7 @@ pub static VBNET_COMPLEXITY: ComplexityConfig = ComplexityConfig {
 pub struct VbNetExtractor;
 
 /// Internal state used during AST traversal.
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
@@ -52,14 +52,14 @@ struct ExtractionState {
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
     /// Track nesting depth to distinguish inner classes from top-level classes.
     class_depth: usize,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -71,7 +71,7 @@ impl ExtractionState {
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
             class_depth: 0,
         }
@@ -97,10 +97,8 @@ impl ExtractionState {
     }
 
     /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
@@ -312,11 +310,11 @@ impl VbNetExtractor {
                 let text = state.node_text(node);
                 text.trim()
                     .strip_prefix("Imports ")
-                    .unwrap_or(&text)
+                    .unwrap_or(text)
                     .trim()
                     .to_string()
             },
-            |n| state.node_text(n),
+            |n| state.node_text(n).to_string(),
         );
 
         let start_line = node.start_position().row as u32;
@@ -697,7 +695,7 @@ impl VbNetExtractor {
         };
 
         let id = generate_node_id(&state.file_path, &kind, &name, start_line);
-        let metrics = count_complexity(node, &VBNET_COMPLEXITY, &state.source);
+        let metrics = count_complexity(node, &VBNET_COMPLEXITY, state.source);
         let signature = Self::extract_method_signature(state, node);
 
         let graph_node = Node {
@@ -751,7 +749,7 @@ impl VbNetExtractor {
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &NodeKind::Constructor, &name, start_line);
-        let metrics = count_complexity(node, &VBNET_COMPLEXITY, &state.source);
+        let metrics = count_complexity(node, &VBNET_COMPLEXITY, state.source);
 
         let sig_text = state.node_text(node);
         let signature = sig_text.lines().next().map(|l| l.trim().to_string());
@@ -879,16 +877,16 @@ impl VbNetExtractor {
                                 loop {
                                     let ic = inner.node();
                                     if ic.kind() == "identifier" {
-                                        return state.node_text(ic);
+                                        return state.node_text(ic).to_string();
                                     }
                                     if !inner.goto_next_sibling() {
                                         break;
                                     }
                                 }
                             }
-                            state.node_text(child)
+                            state.node_text(child).to_string()
                         },
-                        |n| state.node_text(n),
+                        |n| state.node_text(n).to_string(),
                     );
 
                     // Skip field names that look like mis-parsed Inherits/Implements
@@ -977,7 +975,7 @@ impl VbNetExtractor {
                     loop {
                         let child = cursor.node();
                         if child.kind() == "identifier" {
-                            return state.node_text(child);
+                            return state.node_text(child).to_string();
                         }
                         if !cursor.goto_next_sibling() {
                             break;
@@ -986,7 +984,7 @@ impl VbNetExtractor {
                 }
                 "<anonymous>".to_string()
             },
-            |n| state.node_text(n),
+            |n| state.node_text(n).to_string(),
         );
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -1036,7 +1034,7 @@ impl VbNetExtractor {
     fn extract_block_name(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
         // Block nodes in VB.NET grammar use `name` field
         if let Some(name_node) = node.child_by_field_name("name") {
-            return Some(state.node_text(name_node));
+            return Some(state.node_text(name_node).to_string());
         }
         // Fallback: find first identifier child
         let mut cursor = node.walk();
@@ -1044,7 +1042,7 @@ impl VbNetExtractor {
             loop {
                 let child = cursor.node();
                 if child.kind() == "identifier" {
-                    return Some(state.node_text(child));
+                    return Some(state.node_text(child).to_string());
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -1057,7 +1055,7 @@ impl VbNetExtractor {
     /// Extract the name from a node via its "name" field.
     fn extract_name(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
         if let Some(name_node) = node.child_by_field_name("name") {
-            return Some(state.node_text(name_node));
+            return Some(state.node_text(name_node).to_string());
         }
         // Fallback: first identifier child
         let mut cursor = node.walk();
@@ -1065,7 +1063,7 @@ impl VbNetExtractor {
             loop {
                 let child = cursor.node();
                 if child.kind() == "identifier" {
-                    return Some(state.node_text(child));
+                    return Some(state.node_text(child).to_string());
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -1106,7 +1104,7 @@ impl VbNetExtractor {
                 if child.kind() == "as_clause" {
                     // The as_clause contains "As" keyword and a type node
                     if let Some(type_node) = child.child_by_field_name("type") {
-                        return Some(state.node_text(type_node));
+                        return Some(state.node_text(type_node).to_string());
                     }
                     // Fallback: get type child
                     let mut inner = child.walk();
@@ -1114,7 +1112,7 @@ impl VbNetExtractor {
                         loop {
                             let ic = inner.node();
                             if ic.kind() == "type" {
-                                return Some(state.node_text(ic));
+                                return Some(state.node_text(ic).to_string());
                             }
                             if !inner.goto_next_sibling() {
                                 break;
@@ -1144,7 +1142,7 @@ impl VbNetExtractor {
                             let mc = inner.node();
                             if mc.kind() == "modifier" {
                                 let text = state.node_text(mc);
-                                match text.as_str() {
+                                match text {
                                     "Public" => return Visibility::Pub,
                                     "Private" => return Visibility::Private,
                                     "Friend" => return Visibility::PubCrate,
@@ -1309,15 +1307,15 @@ impl VbNetExtractor {
     /// Extract the name from an invocation node.
     fn extract_invocation_name(state: &ExtractionState, node: TsNode<'_>) -> String {
         if let Some(target) = node.child_by_field_name("target") {
-            return state.node_text(target);
+            return state.node_text(target).to_string();
         }
         // Fallback: first child
         if let Some(first) = node.child(0)
             && first.kind() != "argument_list"
         {
-            return state.node_text(first);
+            return state.node_text(first).to_string();
         }
-        state.node_text(node)
+        state.node_text(node).to_string()
     }
 
     /// Extract VB.NET attributes from a node's children (for methods,
@@ -1445,7 +1443,7 @@ impl VbNetExtractor {
             loop {
                 let child = cursor.node();
                 if child.kind() == "identifier" || child.kind() == "qualified_name" {
-                    return state.node_text(child);
+                    return state.node_text(child).to_string();
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -1454,7 +1452,7 @@ impl VbNetExtractor {
         }
         // Fallback: text before '('
         let text = state.node_text(node);
-        text.split('(').next().unwrap_or(&text).trim().to_string()
+        text.split('(').next().unwrap_or(text).trim().to_string()
     }
 
     /// Build the final `ExtractionResult` from the accumulated state.

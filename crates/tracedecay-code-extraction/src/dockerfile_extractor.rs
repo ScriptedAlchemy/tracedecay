@@ -13,7 +13,7 @@ use crate::types::{
 pub struct DockerfileExtractor;
 
 /// Internal state used during AST traversal.
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     errors: Vec<String>,
@@ -23,12 +23,12 @@ struct ExtractionState {
     stage_targets: Vec<(String, String)>,
     stage_count: usize,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -41,7 +41,7 @@ impl ExtractionState {
             stage_targets: Vec::new(),
             stage_count: 0,
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
         }
     }
@@ -78,10 +78,8 @@ impl ExtractionState {
     }
 
     /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
@@ -204,12 +202,12 @@ impl DockerfileExtractor {
             // Named stage -> Module node.
             let kind = NodeKind::Module;
             let qualified_name = format!("{}::{}", state.qualified_prefix(), alias_name);
-            let id = generate_node_id(&state.file_path, &kind, &alias_name, start_line);
+            let id = generate_node_id(&state.file_path, &kind, alias_name, start_line);
 
             let graph_node = Node {
                 id: id.clone(),
                 kind,
-                name: alias_name.clone(),
+                name: alias_name.to_string(),
                 qualified_name,
                 file_path: state.file_path.clone(),
                 start_line,
@@ -233,7 +231,7 @@ impl DockerfileExtractor {
             };
             state.nodes.push(graph_node);
             state.register_stage_target(stage_index.to_string(), &id);
-            state.register_stage_target(alias_name.clone(), &id);
+            state.register_stage_target(alias_name, &id);
 
             if let Some(parent_id) = state.parent_node_id() {
                 state.edges.push(Edge {
@@ -245,7 +243,7 @@ impl DockerfileExtractor {
             }
 
             // Push stage onto the stack so subsequent instructions belong to it.
-            state.node_stack.push((alias_name, id));
+            state.node_stack.push((alias_name.to_string(), id));
         } else {
             // Unnamed stage -> synthetic Module node keyed by stage index.
             let stage_name = format!("stage{stage_index}");
@@ -326,12 +324,12 @@ impl DockerfileExtractor {
         let end_column = node.end_position().column as u32;
         let text = state.node_text(node);
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Const, &name, start_line);
+        let id = generate_node_id(&state.file_path, &NodeKind::Const, name, start_line);
 
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Const,
-            name,
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -381,12 +379,12 @@ impl DockerfileExtractor {
         let end_column = node.end_position().column as u32;
         let text = state.node_text(node);
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Const, &name, start_line);
+        let id = generate_node_id(&state.file_path, &NodeKind::Const, name, start_line);
 
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Const,
-            name,
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -433,17 +431,13 @@ impl DockerfileExtractor {
                     let start_column = child.start_position().column as u32;
                     let end_column = child.end_position().column as u32;
                     let qualified_name = format!("{}::{}", state.qualified_prefix(), port_text);
-                    let id = generate_node_id(
-                        &state.file_path,
-                        &NodeKind::Field,
-                        &port_text,
-                        start_line,
-                    );
+                    let id =
+                        generate_node_id(&state.file_path, &NodeKind::Field, port_text, start_line);
 
                     let graph_node = Node {
                         id: id.clone(),
                         kind: NodeKind::Field,
-                        name: port_text,
+                        name: port_text.to_string(),
                         qualified_name,
                         file_path: state.file_path.clone(),
                         start_line,
@@ -505,12 +499,12 @@ impl DockerfileExtractor {
                     let end_column = child.end_position().column as u32;
                     let text = state.node_text(child);
                     let qualified_name = format!("{}::{}", state.qualified_prefix(), key);
-                    let id = generate_node_id(&state.file_path, &NodeKind::Field, &key, start_line);
+                    let id = generate_node_id(&state.file_path, &NodeKind::Field, key, start_line);
 
                     let graph_node = Node {
                         id: id.clone(),
                         kind: NodeKind::Field,
-                        name: key,
+                        name: key.to_string(),
                         qualified_name,
                         file_path: state.file_path.clone(),
                         start_line,

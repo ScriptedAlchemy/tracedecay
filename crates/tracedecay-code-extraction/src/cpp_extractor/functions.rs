@@ -52,7 +52,7 @@ impl CppExtractor {
             NodeKind::Function
         };
         let id = generate_node_id(&state.file_path, &kind, &name, start_line);
-        let metrics = count_complexity(node, &CPP_COMPLEXITY, &state.source);
+        let metrics = count_complexity(node, &CPP_COMPLEXITY, state.source);
         let graph_node = Node {
             id: id.clone(),
             kind,
@@ -126,7 +126,7 @@ impl CppExtractor {
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &NodeKind::Constructor, &name, start_line);
-        let metrics = count_complexity(node, &CPP_COMPLEXITY, &state.source);
+        let metrics = count_complexity(node, &CPP_COMPLEXITY, state.source);
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Constructor,
@@ -182,7 +182,7 @@ impl CppExtractor {
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &NodeKind::Method, &name, start_line);
-        let metrics = count_complexity(node, &CPP_COMPLEXITY, &state.source);
+        let metrics = count_complexity(node, &CPP_COMPLEXITY, state.source);
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Method,
@@ -311,7 +311,7 @@ impl CppExtractor {
             let end_column = node.end_position().column as u32;
             let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
             let id = generate_node_id(&state.file_path, &NodeKind::Constructor, &name, start_line);
-            let metrics = count_complexity(node, &CPP_COMPLEXITY, &state.source);
+            let metrics = count_complexity(node, &CPP_COMPLEXITY, state.source);
             let graph_node = Node {
                 id: id.clone(),
                 kind: NodeKind::Constructor,
@@ -361,7 +361,7 @@ impl CppExtractor {
             NodeKind::Method
         };
         let id = generate_node_id(&state.file_path, &kind, &name, start_line);
-        let metrics = count_complexity(node, &CPP_COMPLEXITY, &state.source);
+        let metrics = count_complexity(node, &CPP_COMPLEXITY, state.source);
         let graph_node = Node {
             id: id.clone(),
             kind,

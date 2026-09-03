@@ -16,7 +16,7 @@ use crate::types::{
 pub struct RubyExtractor;
 
 /// Internal state used during AST traversal.
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
@@ -24,14 +24,14 @@ struct ExtractionState {
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
     /// Depth of class/module nesting. > 0 means we are inside a class or module.
     class_depth: usize,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -43,7 +43,7 @@ impl ExtractionState {
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
             class_depth: 0,
         }
@@ -69,10 +69,8 @@ impl ExtractionState {
     }
 
     /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
@@ -184,8 +182,10 @@ impl RubyExtractor {
     /// `is_singleton` controls whether this becomes a Method regardless of class depth
     /// (singleton methods are always `NodeKind::Method`).
     fn visit_method(state: &mut ExtractionState, node: TsNode<'_>, is_singleton: bool) {
-        let name = find_direct_child_by_kind(node, "identifier")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "identifier").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let in_class = state.class_depth > 0 || is_singleton;
         let kind = if in_class {
@@ -202,7 +202,7 @@ impl RubyExtractor {
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &kind, &name, start_line);
-        let metrics = count_complexity(node, &RUBY_COMPLEXITY, &state.source);
+        let metrics = count_complexity(node, &RUBY_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -260,7 +260,7 @@ impl RubyExtractor {
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &kind, &name, start_line);
-        let metrics = count_complexity(node, &RUBY_COMPLEXITY, &state.source);
+        let metrics = count_complexity(node, &RUBY_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -304,8 +304,10 @@ impl RubyExtractor {
     /// Extract a class definition.
     fn visit_class(state: &mut ExtractionState, node: TsNode<'_>) {
         // In tree-sitter-ruby, class node children include: "class", constant (name), superclass?, body
-        let name = find_direct_child_by_kind(node, "constant")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "constant").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let visibility = Visibility::Pub;
         let docstring = Self::extract_docstring(state, node);
@@ -366,8 +368,10 @@ impl RubyExtractor {
 
     /// Extract a module definition.
     fn visit_module(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "constant")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "constant").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let visibility = Visibility::Pub;
         let docstring = Self::extract_docstring(state, node);
@@ -447,12 +451,12 @@ impl RubyExtractor {
             let end_column = node.end_position().column as u32;
             let text = state.node_text(node);
             let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-            let id = generate_node_id(&state.file_path, &NodeKind::Const, &name, start_line);
+            let id = generate_node_id(&state.file_path, &NodeKind::Const, name, start_line);
 
             let graph_node = Node {
                 id: id.clone(),
                 kind: NodeKind::Const,
-                name,
+                name: name.to_string(),
                 qualified_name,
                 file_path: state.file_path.clone(),
                 start_line,
@@ -526,7 +530,7 @@ impl RubyExtractor {
                             let column = const_node.start_position().column as u32;
                             state.unresolved_refs.push(UnresolvedRef {
                                 from_node_id: class_id.to_string(),
-                                reference_name: base_name,
+                                reference_name: base_name.to_string(),
                                 reference_kind: EdgeKind::Extends,
                                 line,
                                 column,
@@ -586,7 +590,7 @@ impl RubyExtractor {
     /// Ruby uses comment lines (# ...) as documentation. We look for `comment`
     /// sibling nodes that immediately precede the given definition node.
     fn extract_docstring(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        docstring_from_hash_comments(&state.source, node)
+        docstring_from_hash_comments(state.source, node)
     }
 
     /// Find the method name identifier in a singleton method.
@@ -605,7 +609,7 @@ impl RubyExtractor {
                 let child = cursor.node();
                 match child.kind() {
                     "identifier" => {
-                        last_ident = Some(state.node_text(child));
+                        last_ident = Some(state.node_text(child).to_string());
                     }
                     "method_parameters" | "body_statement" => {
                         break;
@@ -641,7 +645,7 @@ impl RubyExtractor {
                         if let Some(name) = callee_name {
                             state.unresolved_refs.push(UnresolvedRef {
                                 from_node_id: fn_node_id.to_string(),
-                                reference_name: name,
+                                reference_name: name.to_string(),
                                 reference_kind: EdgeKind::Calls,
                                 line: child.start_position().row as u32,
                                 column: child.start_position().column as u32,

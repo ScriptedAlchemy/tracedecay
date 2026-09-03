@@ -19,7 +19,7 @@ use crate::{
 pub struct JavaExtractor;
 
 /// Internal state used during AST traversal.
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
@@ -27,7 +27,7 @@ struct ExtractionState {
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
     /// Track nesting depth to distinguish inner classes from top-level classes.
     class_depth: usize,
@@ -35,8 +35,8 @@ struct ExtractionState {
     inside_interface: bool,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -48,7 +48,7 @@ impl ExtractionState {
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
             class_depth: 0,
             inside_interface: false,
@@ -75,16 +75,16 @@ impl ExtractionState {
     }
 
     /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        self.node_str(node).to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 
-    fn node_str(&self, node: TsNode<'_>) -> &str {
-        node.utf8_text(&self.source).unwrap_or("<invalid utf8>")
+    fn node_str(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
-impl AnnotationEmitterState for ExtractionState {
+impl<'s> AnnotationEmitterState for ExtractionState<'s> {
     fn extract_annotation_name(&self, annotation_node: TsNode<'_>) -> String {
         JavaExtractor::extract_annotation_name(self, annotation_node)
     }
@@ -238,7 +238,7 @@ impl JavaExtractor {
         let pkg_name = text
             .trim()
             .strip_prefix("package ")
-            .unwrap_or(&text)
+            .unwrap_or(text)
             .trim_end_matches(';')
             .trim()
             .to_string();
@@ -294,10 +294,10 @@ impl JavaExtractor {
         let path = text
             .trim()
             .strip_prefix("import ")
-            .unwrap_or(&text)
+            .unwrap_or(text)
             .trim()
             .strip_prefix("static ")
-            .unwrap_or(text.trim().strip_prefix("import ").unwrap_or(&text).trim())
+            .unwrap_or(text.trim().strip_prefix("import ").unwrap_or(text).trim())
             .trim_end_matches(';')
             .trim()
             .to_string();
@@ -379,7 +379,7 @@ impl JavaExtractor {
         let graph_node = Node {
             id: id.clone(),
             kind,
-            name: name.clone(),
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -442,7 +442,7 @@ impl JavaExtractor {
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Interface,
-            name: name.clone(),
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -506,7 +506,7 @@ impl JavaExtractor {
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Enum,
-            name: name.clone(),
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -625,7 +625,7 @@ impl JavaExtractor {
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Annotation,
-            name: name.clone(),
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -687,7 +687,7 @@ impl JavaExtractor {
         };
 
         let id = generate_node_id(&state.file_path, &kind, &name, start_line);
-        let metrics = count_complexity(node, &JAVA_COMPLEXITY, &state.source);
+        let metrics = count_complexity(node, &JAVA_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -746,7 +746,7 @@ impl JavaExtractor {
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &NodeKind::Constructor, &name, start_line);
-        let metrics = count_complexity(node, &JAVA_COMPLEXITY, &state.source);
+        let metrics = count_complexity(node, &JAVA_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -810,7 +810,7 @@ impl JavaExtractor {
                             Self::extract_name(state, child)
                                 .unwrap_or_else(|| "<anonymous>".to_string())
                         },
-                        |n| state.node_text(n),
+                        |n| state.node_text(n).to_string(),
                     );
 
                     let qualified_name = format!("{}::{}", state.qualified_prefix(), field_name);
@@ -913,7 +913,8 @@ impl JavaExtractor {
 
     /// Extract the name of a node by looking for a "name" field child.
     fn extract_name(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        node.child_by_field_name("name").map(|n| state.node_text(n))
+        node.child_by_field_name("name")
+            .map(|n| state.node_text(n).to_string())
     }
 
     /// Extract Java visibility from modifiers child.
@@ -994,7 +995,7 @@ impl JavaExtractor {
                 "block_comment" => {
                     let text = state.node_text(sibling);
                     if text.starts_with("/**") {
-                        return Some(Self::clean_javadoc(&text));
+                        return Some(Self::clean_javadoc(text));
                     }
                     // Skip non-javadoc block comments.
                     current = sibling.prev_named_sibling();
@@ -1055,7 +1056,7 @@ impl JavaExtractor {
                                 let type_name = state.node_text(inner_child);
                                 state.unresolved_refs.push(UnresolvedRef {
                                     from_node_id: class_id.to_string(),
-                                    reference_name: type_name,
+                                    reference_name: type_name.to_string(),
                                     reference_kind: EdgeKind::Extends,
                                     line: inner_child.start_position().row as u32,
                                     column: inner_child.start_position().column as u32,
@@ -1109,7 +1110,7 @@ impl JavaExtractor {
                     let type_name = state.node_text(child);
                     state.unresolved_refs.push(UnresolvedRef {
                         from_node_id: class_id.to_string(),
-                        reference_name: type_name,
+                        reference_name: type_name.to_string(),
                         reference_kind: EdgeKind::Implements,
                         line: child.start_position().row as u32,
                         column: child.start_position().column as u32,
@@ -1154,7 +1155,7 @@ impl JavaExtractor {
                 if child.kind() == "type_parameter" {
                     let param_name = state.node_text(child);
                     // Extract just the type name (first identifier).
-                    let name = param_name.split_whitespace().next().unwrap_or(&param_name);
+                    let name = param_name.split_whitespace().next().unwrap_or(param_name);
                     let start_line = child.start_position().row as u32;
                     let end_line = child.end_position().row as u32;
                     let start_column = child.start_position().column as u32;
@@ -1230,7 +1231,7 @@ impl JavaExtractor {
                 if child.is_named()
                     && (child.kind() == "identifier" || child.kind() == "scoped_identifier")
                 {
-                    return state.node_text(child);
+                    return state.node_text(child).to_string();
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -1301,10 +1302,10 @@ impl JavaExtractor {
     ) {
         if node.kind() == "type_identifier" {
             let type_name = state.node_text(node);
-            if !builtins.contains(&type_name.as_str()) {
+            if !builtins.contains(&type_name) {
                 state.unresolved_refs.push(UnresolvedRef {
                     from_node_id: fn_node_id.to_string(),
-                    reference_name: type_name,
+                    reference_name: type_name.to_string(),
                     reference_kind: EdgeKind::Uses,
                     line: node.start_position().row as u32,
                     column: node.start_position().column as u32,
@@ -1382,11 +1383,11 @@ impl JavaExtractor {
                 let obj = state.node_text(obj_node);
                 return format!("{obj}.{name}");
             }
-            return name;
+            return name.to_string();
         }
         // Fallback: full text of invocation.
         let text = state.node_text(node);
-        text.split('(').next().unwrap_or(&text).trim().to_string()
+        text.split('(').next().unwrap_or(text).trim().to_string()
     }
 
     /// Extract the type name from an `object_creation_expression`.
@@ -1394,7 +1395,7 @@ impl JavaExtractor {
         // object_creation_expression: "new" type argument_list
         // The "type" field gives the type name.
         if let Some(type_node) = node.child_by_field_name("type") {
-            return state.node_text(type_node);
+            return state.node_text(type_node).to_string();
         }
         // Fallback: try to extract the type from children.
         let mut cursor = node.walk();
@@ -1406,7 +1407,7 @@ impl JavaExtractor {
                         || child.kind() == "generic_type"
                         || child.kind() == "scoped_type_identifier")
                 {
-                    return state.node_text(child);
+                    return state.node_text(child).to_string();
                 }
                 if !cursor.goto_next_sibling() {
                     break;
