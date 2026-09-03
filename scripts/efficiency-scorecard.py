@@ -50,11 +50,12 @@ Determinism policy
 - The fixture copy is committed in the sandbox with pinned git author,
   committer, and timestamps, so the fixture commit SHA is a constant.
 - Fixed query set, fixed warm-up (2 untimed calls per tool), fixed sample
-  counts, fixed poll cadence (50 ms). Repetition: the whole scenario runs
+  counts, fixed observer cadence (50 ms). Repetition: the whole scenario runs
   --runs times (default 3); the scorecard reports per-run values and the
   cross-run median for every scalar.
-- Wall times that end on a poll observation quantize at the poll cadence
-  plus one CLI round-trip; the identical policy applies to every commit
+- Each measured wait uses one long-lived MCP observer process/connection.
+  Wall times that end on an observation quantize at the observer cadence
+  plus one protocol round-trip; the identical policy applies to every commit
   being compared, and the medians absorb scheduler noise.
 - Load averages before/after are recorded; compare scorecards captured
   under comparable load.
@@ -82,6 +83,7 @@ import json
 import math
 import os
 import re
+import select
 import shutil
 import signal
 import statistics
@@ -254,6 +256,172 @@ class RssSampler:
             return dict(self._peaks), dict(self._hwm)
 
 
+class StatusObserver:
+    """One persistent MCP connection for a measured readiness phase."""
+
+    def __init__(self, sandbox: Sandbox) -> None:
+        self._sandbox = sandbox
+        self._stderr = (
+            sandbox.root / f"status-observer-{sandbox.observer_process_count}.log"
+        ).open("wb")
+        try:
+            self._process = subprocess.Popen(
+                (str(sandbox.binary), "serve", "--path", str(sandbox.project)),
+                cwd=sandbox.project,
+                env=sandbox.env,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=self._stderr,
+                start_new_session=True,
+                bufsize=0,
+            )
+        except OSError:
+            self._stderr.close()
+            raise
+        if self._process.stdin is None or self._process.stdout is None:
+            self.close()
+            raise HarnessError("could not create status observer MCP pipes")
+        self._input = self._process.stdin
+        self._output = self._process.stdout
+        self._next_id = 0
+        self._buffer = b""
+        self._initialized = False
+        self._usable = True
+
+    def __enter__(self) -> StatusObserver:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        process = self._process
+        input_stream = getattr(self, "_input", None)
+        output_stream = getattr(self, "_output", None)
+        if input_stream is not None:
+            try:
+                input_stream.close()
+            except OSError:
+                pass
+        if process.poll() is None:
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    process.wait(timeout=2)
+        if output_stream is not None:
+            try:
+                output_stream.close()
+            except OSError:
+                pass
+        if not self._stderr.closed:
+            self._stderr.close()
+
+    def status_payload(self) -> dict | None:
+        """Read status through this observer; None while the route is unavailable."""
+        if not self._usable:
+            return None
+        try:
+            if not self._initialized:
+                self._initialize()
+            self._sandbox.observer_request_count += 1
+            response = self._request(
+                "tools/call",
+                {
+                    "name": "tracedecay_status",
+                    "arguments": {
+                        "format": "json",
+                        "include_branch_diagnostics": False,
+                    },
+                },
+                TOOL_CALL_TIMEOUT,
+            )
+            if response is None or response.get("error") is not None:
+                return None
+            result = response["result"]
+            if result.get("isError") is True:
+                return None
+            return json.loads(result["content"][0]["text"])
+        except (KeyError, OSError, TypeError, ValueError):
+            self._usable = False
+            return None
+
+    def _initialize(self) -> None:
+        response = self._request(
+            "initialize",
+            {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "tracedecay-efficiency-scorecard", "version": "1"},
+            },
+            TOOL_CALL_TIMEOUT,
+        )
+        if response is None or response.get("error") is not None:
+            raise OSError("status observer MCP initialize failed")
+        self._send(
+            {
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized",
+                "params": {},
+            }
+        )
+        self._initialized = True
+
+    def _request(self, method: str, params: dict, timeout: float) -> dict | None:
+        self._next_id += 1
+        request_id = self._next_id
+        self._send(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": method,
+                "params": params,
+            }
+        )
+        deadline = time.monotonic() + timeout
+        while (remaining := deadline - time.monotonic()) > 0:
+            message = self._read(remaining)
+            if message is None:
+                return None
+            if message.get("id") == request_id:
+                return message
+        return None
+
+    def _send(self, value: dict) -> None:
+        if self._process.poll() is not None:
+            raise OSError(f"status observer exited with {self._process.returncode}")
+        self._input.write(json.dumps(value, separators=(",", ":")).encode() + b"\n")
+        self._input.flush()
+
+    def _read(self, timeout: float) -> dict | None:
+        while True:
+            if b"\n" in self._buffer:
+                line, _, self._buffer = self._buffer.partition(b"\n")
+                if not line.strip():
+                    continue
+                value = json.loads(line)
+                if not isinstance(value, dict):
+                    raise ValueError("status observer emitted a non-object response")
+                return value
+            ready, _, _ = select.select([self._output.fileno()], [], [], timeout)
+            if not ready:
+                return None
+            chunk = os.read(self._output.fileno(), 65_536)
+            if not chunk:
+                raise OSError("status observer closed stdout before responding")
+            self._buffer += chunk
+
+
 @dataclass
 class Sandbox:
     """One disposable, isolated profile + fixture project + daemon."""
@@ -268,6 +436,9 @@ class Sandbox:
     env: dict[str, str] = field(init=False)
     daemon: subprocess.Popen | None = field(init=False, default=None)
     daemon_log_index: int = field(init=False, default=0)
+    observer_process_count: int = field(init=False, default=0)
+    observer_connection_count: int = field(init=False, default=0)
+    observer_request_count: int = field(init=False, default=0)
     # Called with the daemon pid immediately after spawn, before the socket
     # bind wait, so the RSS sampler covers the startup window too.
     on_spawn: object = field(init=False, default=None)
@@ -427,14 +598,11 @@ class Sandbox:
         envelope = json.loads(completed.stdout)
         return json.loads(envelope["content"][0]["text"])
 
-    def status_payload(self) -> dict | None:
-        """One freshness poll; None while the project/store is not answering."""
-        try:
-            return self.tool_json(
-                "status", {"format": "json", "include_branch_diagnostics": False}
-            )
-        except (PhaseFailure, json.JSONDecodeError, KeyError, subprocess.TimeoutExpired):
-            return None
+    def open_status_observer(self) -> StatusObserver:
+        observer = StatusObserver(self)
+        self.observer_process_count += 1
+        self.observer_connection_count += 1
+        return observer
 
     def cleanup(self) -> None:
         self.stop_daemon()
@@ -468,22 +636,27 @@ def wait_for(
     deadline_seconds: float,
     predicate,
 ) -> tuple[float, dict, float]:
-    """Poll `status` until predicate(payload); return (wall, payload, observed_at)."""
+    """Observe `status` until predicate(payload); return (wall, payload, observed_at)."""
     started = time.monotonic()
     deadline = started + deadline_seconds
-    while True:
-        payload = sandbox.status_payload()
-        observed_at = time.time()
-        if payload is not None and predicate(payload):
-            return time.monotonic() - started, payload, observed_at
-        if not sandbox.daemon_alive():
-            raise PhaseFailure(phase, f"daemon exited; log tail: {sandbox.daemon_log_tail()}")
-        if time.monotonic() > deadline:
-            state = "unanswered" if payload is None else json.dumps(freshness(payload))[:300]
-            raise PhaseFailure(
-                phase, f"not ready within {deadline_seconds}s (last freshness: {state})"
-            )
-        time.sleep(POLL_INTERVAL_SECONDS)
+    with sandbox.open_status_observer() as observer:
+        while True:
+            payload = observer.status_payload()
+            observed_at = time.time()
+            if payload is not None and predicate(payload):
+                return time.monotonic() - started, payload, observed_at
+            if not sandbox.daemon_alive():
+                raise PhaseFailure(
+                    phase, f"daemon exited; log tail: {sandbox.daemon_log_tail()}"
+                )
+            if time.monotonic() > deadline:
+                state = (
+                    "unanswered" if payload is None else json.dumps(freshness(payload))[:300]
+                )
+                raise PhaseFailure(
+                    phase, f"not ready within {deadline_seconds}s (last freshness: {state})"
+                )
+            time.sleep(POLL_INTERVAL_SECONDS)
 
 
 def seal_to_activation_seconds(payload: dict, observed_at: float) -> float | None:
@@ -758,6 +931,11 @@ def run_scenario(
         run["daemon_log_tail"] = sandbox.daemon_log_tail()
         return run
     finally:
+        run["observer"] = {
+            "process_count": sandbox.observer_process_count,
+            "connection_count": sandbox.observer_connection_count,
+            "request_count": sandbox.observer_request_count,
+        }
         sampler.set_pid(None)
         sandbox.cleanup()
 
@@ -784,6 +962,7 @@ def collect_scalars(run: dict) -> dict[str, float]:
         "tool_calls",
         "incremental_sync",
         "daemon_restart",
+        "observer",
         "rss",
     ):
         visit(section, run.get(section))
@@ -861,6 +1040,9 @@ def human_summary(scorecard: dict) -> str:
     row("incremental sync (1-file) → new generation current", "incremental_sync.wall_seconds")
     row("incremental sync seal → activation", "incremental_sync.seal_to_activation_seconds")
     row("daemon restart → serving (populated store)", "daemon_restart.spawn_to_current_seconds")
+    row("readiness observer processes", "observer.process_count", "")
+    row("readiness observer connections", "observer.connection_count", "")
+    row("readiness observer requests", "observer.request_count", "")
     lines.append("| | |")
     for tool in ("search", "grep", "context", "status", "memory_recall"):
         row(f"{tool} p50", f"tool_calls.{tool}.p50_ms", "ms")
