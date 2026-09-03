@@ -1003,6 +1003,7 @@ impl DaemonSemanticRuntimeRegistrar {
         project_root: PathBuf,
         handle: tracedecay_semantic::DaemonSemanticRuntimeHandleV1,
     ) -> Result<(), DaemonSemanticRuntimeRegistrationError> {
+        let registry_handle = handle.clone();
         self.service
             .project_runtimes
             .register_or_reconcile(
@@ -1010,18 +1011,17 @@ impl DaemonSemanticRuntimeRegistrar {
                 |_: &mut tracedecay_semantic::DaemonSemanticRuntimeHandleV1| {
                     Err(DaemonSemanticRuntimeRegistrationError::AlreadyRegistered)
                 },
-                || async {
-                    // The process-wide table is only joined once the project slot
-                    // is known to be free, so a refused registration cannot
-                    // replace a live handle there.
-                    tracedecay_usecases::semantic_runtime::register_project_semantic_runtime(
-                        project_root.clone(),
-                        handle.clone(),
-                    );
-                    Ok(handle)
-                },
+                || async { Ok(registry_handle) },
             )
-            .await
+            .await?;
+        // This separate process-wide projection has no reservation rollback
+        // authority. Join it only after the owning project slot commits, in
+        // the same poll that observes commit success.
+        tracedecay_usecases::semantic_runtime::register_project_semantic_runtime(
+            project_root,
+            handle,
+        );
+        Ok(())
     }
 }
 
