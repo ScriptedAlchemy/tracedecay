@@ -608,22 +608,19 @@ fn daemon_readiness_probe_classifies_connect_and_protocol_failures() {
         super::probe::DaemonProtocolState::Unresponsive(_)
     ));
 
-    let unresponsive_socket = profile.path().join("unresponsive.sock");
-    let listener = UnixListener::bind(&unresponsive_socket).expect("bind unresponsive socket");
-    let server = std::thread::spawn(move || {
-        let (_stream, _) = listener.accept().expect("accept unresponsive probe");
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    });
-    let unresponsive = super::probe::daemon_readiness_probe(
-        &unresponsive_socket,
+    let connectable_socket = profile.path().join("connectable.sock");
+    let _listener = UnixListener::bind(&connectable_socket).expect("bind connectable socket");
+    let connectable = super::probe::daemon_readiness_probe(
+        &connectable_socket,
         TEST_BUILD_VERSION,
         std::time::Duration::from_millis(20),
     );
-    server.join().expect("join unresponsive server");
-    assert_eq!(unresponsive.0, super::probe::DaemonSocketState::Connectable);
     assert!(matches!(
-        unresponsive.1,
-        super::probe::DaemonProtocolState::Unresponsive(_)
+        connectable,
+        (
+            super::probe::DaemonSocketState::Connectable,
+            super::probe::DaemonProtocolState::Unresponsive(_),
+        )
     ));
 }
 

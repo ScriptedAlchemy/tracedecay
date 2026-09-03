@@ -1160,7 +1160,7 @@ cancel(cancellation.target_request_id());
                 };
             if !initialized_project_server_ready
                 && let Some(mut response) = daemon_bootstrap_response(
-                    &request,
+                    request,
                     initialize_route.as_ref(),
                     project_node_count,
                 )

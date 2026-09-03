@@ -403,6 +403,7 @@ pub(crate) fn apply_proxy_initialize_metadata(
 }
 
 #[cfg(unix)]
+#[cfg(test)]
 pub(crate) fn reset_proxy_handshake_for_initialize(
     base_handshake: &DaemonHandshake,
     handshake: &mut DaemonHandshake,
@@ -605,6 +606,7 @@ async fn write_proxy_request_result(
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn send_daemon_request_line(
     socket_path: &Path,
     handshake: &DaemonHandshake,
@@ -661,6 +663,7 @@ async fn send_daemon_request_with_project_open_retry(
     Ok(responses)
 }
 
+#[cfg(test)]
 pub(crate) async fn send_daemon_request_line_with_liveness_poll(
     socket_path: &Path,
     handshake: &DaemonHandshake,
@@ -801,6 +804,7 @@ async fn send_daemon_request_with_liveness_poll(
 /// freshly-updated client can still detect a stale daemon left running by a
 /// non-systemd setup or a plain `tracedecay upgrade`.
 #[cfg(unix)]
+#[cfg(test)]
 pub(crate) fn proxy_initialize_metadata(
     request_line: &str,
     responses: &[String],
@@ -846,7 +850,7 @@ fn proxy_initialize_metadata_for_request(
 
 /// The warning to surface when the daemon behind an `initialize` response is
 /// running a different binary version than this client.
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 pub(crate) fn daemon_version_skew_warning(
     request_line: &str,
     responses: &[String],
