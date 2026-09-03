@@ -51,6 +51,19 @@ ort = { version = "=2.0.0-rc.12", optional = true, default-features = false }
 # Only compiled with `semantic-fastembed`; the stub runtime path never needs
 # it.
 tracing = { version = "0.1", optional = true, default-features = false }
+# Model2Vec static-embedding runtime (`model2vec_adapter.rs`): a safetensors
+# token-embedding table summed and L2-normalized in-process, with no ONNX
+# Runtime. All three crates already sit in `Cargo.lock` as FastEmbed
+# transitive dependencies, so enabling them adds no new lock entries; they
+# are still optional so a build that wants neither embedding backend links
+# neither. `tokenizers` mirrors FastEmbed's exact feature selection
+# (`onig`, no defaults) so feature unification never changes the FastEmbed
+# tokenizer build. Exact pins keep `MODEL2VEC_RUNTIME_BUILD_REVISION_V1`
+# truthful; a version bump must bump that revision so vector generations
+# replay under the new identity.
+half = { version = "=2.7.1", optional = true, default-features = false, features = ["std"] }
+safetensors = { version = "=0.8.0", optional = true, default-features = false, features = ["std"] }
+tokenizers = { version = "=0.22.2", optional = true, default-features = false, features = ["onig"] }
 
 [target.'cfg(windows)'.dependencies]
 fsys = "1.1.0"
@@ -105,6 +118,13 @@ semantic-fastembed = [
 # `execution_provider.rs`).
 semantic-gpu-coreml = ["semantic-fastembed", "dep:ort", "ort/coreml", "ort/tracing"]
 semantic-gpu-cuda = ["semantic-fastembed", "dep:ort", "ort/cuda", "ort/tracing"]
+# SEMANTIC Model2Vec static-embedding runtime. Independent of
+# `semantic-fastembed`: a build may ship either backend or both, and the
+# catalog entry's declared backend selects which runtime serves a model. The
+# daemon-owned hf-hub acquisition is shared by both backends, so this feature
+# pulls `hf-hub` too; without it a Model2Vec model could be selected but never
+# acquired. Inference still loads only locally verified member bytes.
+semantic-model2vec = ["dep:half", "dep:hf-hub", "dep:safetensors", "dep:tokenizers"]
 # Explicit opt-in (same policy as the query kernel): exposes the pooled-session
 # and catalog test constructors to dependent crates' test builds only.
 test-helpers = []

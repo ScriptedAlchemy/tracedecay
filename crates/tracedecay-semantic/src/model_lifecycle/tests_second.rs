@@ -601,7 +601,9 @@
         }
         let model = CatalogedFastEmbedModelV1 {
             model_id: "PinnedJinaRerankerV1TurboEn".to_owned(),
-            fastembed_enum: "JINARerankerV1TurboEn".to_owned(),
+            backend: CatalogedEmbeddingBackendV1::FastEmbedOrt {
+                fastembed_enum: "JINARerankerV1TurboEn".to_owned(),
+            },
             model_code: "jinaai/jina-reranker-v1-turbo-en".to_owned(),
             source: CatalogSourceV1 {
                 upstream: "https://huggingface.co/jinaai/jina-reranker-v1-turbo-en".to_owned(),

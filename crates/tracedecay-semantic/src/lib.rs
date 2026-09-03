@@ -25,27 +25,30 @@ use tracedecay_semantic_contracts::runtime_status::{
     SemanticRuntimeStatusProjectionV1,
 };
 
+use self::embedding_backend::{ProductionEmbeddingRuntime, production_embedding_runtime_factory};
 #[cfg(any(test, feature = "test-helpers"))]
 pub use self::fastembed_adapter::AdmittedProjectionArtifactV1;
 #[cfg(not(any(test, feature = "test-helpers")))]
 use self::fastembed_adapter::AdmittedProjectionArtifactV1;
 use self::fastembed_adapter::{
     BoundedSanitizedTextBatchV1, EmbedError, EmbeddingRuntime, EmbeddingSession,
-    FastEmbedEmbeddingRuntime,
 };
 use self::projector::{
     CanonicalChunkVectorEncoderV1, PreparedVectorGenerationV1, prepare_vector_generation_async,
     split_projection_request,
 };
 use self::runtime_query::CurrentSemanticQueryRuntimeV1;
-use self::runtime_service::{
-    SemanticRuntimeService, SharedEmbeddingRuntimeFactory, fastembed_runtime_factory,
-};
+use self::runtime_service::{SemanticRuntimeService, SharedEmbeddingRuntimeFactory};
 use self::session_pool::{
     PooledSession, SessionAcquireError, SessionPoolConfigV1, SystemMonotonicClock,
 };
 
 mod artifact_store;
+mod embedding_backend;
+// Paired with the `AdmittedProjectionArtifactV1` test-helper export: its
+// `runtime_family()` echo names this type.
+#[cfg(any(test, feature = "test-helpers"))]
+pub use embedding_backend::EmbeddingRuntimeFamilyV1;
 pub mod embedding_parallelism;
 #[cfg(feature = "semantic-fastembed")]
 mod execution_provider;
@@ -56,6 +59,7 @@ mod hotpath_observe;
 pub use generation_resume::SemanticProjectionResumeOutcomeV1;
 use generation_resume::SemanticProjectionResumeV1;
 use generation_resume::{completed_batch_offset, install_candidate_on_success};
+mod model2vec_adapter;
 mod model_catalog;
 mod model_lifecycle;
 pub mod projector;
@@ -69,7 +73,9 @@ pub mod session_pool;
 #[cfg(any(test, feature = "test-helpers"))]
 pub use model_catalog::production_fastembed_catalog;
 #[cfg(any(test, feature = "test-helpers"))]
-pub use model_catalog::{CatalogedFastEmbedModelV1, FastEmbedModelCatalogV1};
+pub use model_catalog::{
+    CatalogedEmbeddingBackendV1, CatalogedFastEmbedModelV1, FastEmbedModelCatalogV1,
+};
 #[cfg(any(test, feature = "test-helpers"))]
 pub use model_lifecycle::ModelMemberSourceV1;
 pub use model_lifecycle::{
@@ -362,7 +368,7 @@ fn warm_failure(error: SessionAcquireError) -> SemanticRuntimeScheduleFailureV1 
 /// a same-length digest-mismatched model fails here with a typed runtime
 /// failure instead of ever becoming the current serving generation.
 async fn warm_candidate_for_install(
-    candidate: &Arc<SemanticRuntimeService<FastEmbedEmbeddingRuntime>>,
+    candidate: &Arc<SemanticRuntimeService<ProductionEmbeddingRuntime>>,
 ) -> Result<(), SemanticRuntimeScheduleFailureV1> {
     let warmed = Arc::clone(candidate);
     hotpath::future!(
@@ -392,7 +398,7 @@ pub struct SemanticRuntimeSchedulingBoundsV1 {
 pub struct DaemonSemanticRuntimeHandleV1 {
     scheduling: SemanticRuntimeSchedulingHandleV1,
     bounds: SemanticRuntimeSchedulingBoundsV1,
-    runtime: Arc<RwLock<Option<CurrentSemanticQueryRuntimeV1<FastEmbedEmbeddingRuntime>>>>,
+    runtime: Arc<RwLock<Option<CurrentSemanticQueryRuntimeV1<ProductionEmbeddingRuntime>>>>,
     query_in_flight: Arc<AtomicBool>,
     transitions: Arc<Mutex<()>>,
     pool_config: SessionPoolConfigV1,
@@ -400,7 +406,7 @@ pub struct DaemonSemanticRuntimeHandleV1 {
 
 pub struct PreparedSemanticRuntimeRestoreV1 {
     pointer: SemanticGenerationPointerV1,
-    runtime: CurrentSemanticQueryRuntimeV1<FastEmbedEmbeddingRuntime>,
+    runtime: CurrentSemanticQueryRuntimeV1<ProductionEmbeddingRuntime>,
     expected_current: Option<SemanticGenerationPointerV1>,
     expected_status: SemanticRuntimeScheduleStatusV1,
 }
@@ -517,8 +523,8 @@ impl DaemonSemanticRuntimeHandleV1 {
                     return Err(failure);
                 }
 
-                let factory: SharedEmbeddingRuntimeFactory<FastEmbedEmbeddingRuntime> =
-                    fastembed_runtime_factory();
+                let factory: SharedEmbeddingRuntimeFactory<ProductionEmbeddingRuntime> =
+                    production_embedding_runtime_factory();
                 let candidate =
                     SemanticRuntimeService::new_owned(Arc::clone(&authority), factory, pool_config)
                         .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?;
@@ -730,8 +736,8 @@ impl DaemonSemanticRuntimeHandleV1 {
         if authority.projection().projection_key() != &pointer.projection_key {
             return Err(SemanticRuntimeScheduleFailureV1::Publication);
         }
-        let factory: SharedEmbeddingRuntimeFactory<FastEmbedEmbeddingRuntime> =
-            fastembed_runtime_factory();
+        let factory: SharedEmbeddingRuntimeFactory<ProductionEmbeddingRuntime> =
+            production_embedding_runtime_factory();
         let candidate =
             SemanticRuntimeService::new_owned(authority, factory, self.pool_config.clone())
                 .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?;
@@ -782,8 +788,8 @@ impl DaemonSemanticRuntimeHandleV1 {
         if authority.projection().projection_key() != &pointer.projection_key {
             return Err(SemanticRuntimeScheduleFailureV1::Publication);
         }
-        let factory: SharedEmbeddingRuntimeFactory<FastEmbedEmbeddingRuntime> =
-            fastembed_runtime_factory();
+        let factory: SharedEmbeddingRuntimeFactory<ProductionEmbeddingRuntime> =
+            production_embedding_runtime_factory();
         let candidate =
             SemanticRuntimeService::new_owned(authority, factory, self.pool_config.clone())
                 .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?;
