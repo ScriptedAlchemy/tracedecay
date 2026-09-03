@@ -75,7 +75,7 @@ static PUBLICATION_PROJECTION_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 #[cfg(any(test, feature = "test-helpers"))]
 static PUBLICATION_PROJECTION_OVERLAP_PEAK: AtomicUsize = AtomicUsize::new(0);
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 pub(crate) fn take_publication_projection_overlap_peak() -> usize {
     PUBLICATION_PROJECTION_OVERLAP_PEAK.swap(0, Ordering::AcqRel)
 }
