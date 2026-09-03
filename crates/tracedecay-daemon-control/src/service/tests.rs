@@ -481,7 +481,12 @@ fn daemon_protocol_probe_requires_current_tracedecay_identity() {
     let ready_listener = UnixListener::bind(&ready_socket).expect("bind ready socket");
     let ready_server = serve_probe_response(ready_listener, "tracedecay", TEST_BUILD_VERSION, None);
     assert_eq!(
-        super::probe::daemon_protocol_state(&ready_socket, TEST_BUILD_VERSION),
+        super::probe::daemon_readiness_probe(
+            &ready_socket,
+            TEST_BUILD_VERSION,
+            std::time::Duration::from_secs(10),
+        )
+        .1,
         super::probe::DaemonProtocolState::Ready
     );
     ready_server.join().expect("join ready server");
@@ -490,7 +495,12 @@ fn daemon_protocol_probe_requires_current_tracedecay_identity() {
     let stale_listener = UnixListener::bind(&stale_socket).expect("bind stale socket");
     let stale_server = serve_probe_response(stale_listener, "tracedecay", "0.0.0-stale", None);
     assert_eq!(
-        super::probe::daemon_protocol_state(&stale_socket, TEST_BUILD_VERSION),
+        super::probe::daemon_readiness_probe(
+            &stale_socket,
+            TEST_BUILD_VERSION,
+            std::time::Duration::from_secs(10),
+        )
+        .1,
         super::probe::DaemonProtocolState::IdentityMismatch {
             name: Some("tracedecay".to_string()),
             version: Some("0.0.0-stale".to_string()),
@@ -523,7 +533,12 @@ fn daemon_protocol_probe_authenticates_to_managed_daemon() {
     );
 
     assert_eq!(
-        super::probe::daemon_protocol_state(&socket_path, TEST_BUILD_VERSION),
+        super::probe::daemon_readiness_probe(
+            &socket_path,
+            TEST_BUILD_VERSION,
+            std::time::Duration::from_secs(10),
+        )
+        .1,
         super::probe::DaemonProtocolState::Ready
     );
     server.join().expect("join authenticated probe server");
