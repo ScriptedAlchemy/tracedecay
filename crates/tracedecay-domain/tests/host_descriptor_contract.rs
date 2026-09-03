@@ -60,6 +60,9 @@ fn native_identities_preserve_provider_specific_hosts() {
             // still an incoherent projection and still panics.
             (
                 HostKindV1::Devin
+                | HostKindV1::Zed
+                | HostKindV1::Antigravity
+                | HostKindV1::Vibe
                 | HostKindV1::ClineFamily
                 | HostKindV1::Gemini
                 | HostKindV1::Copilot,
@@ -158,6 +161,30 @@ fn activation_and_registration_never_invent_unsupported_routes() {
     assert_eq!(
         devin.project_registration_path().relative_path(),
         Some(".devin")
+    );
+
+    let zed = HostKindV1::Zed.descriptor();
+    assert_eq!(zed.components(), &[HostComponentV1::ContextMcp]);
+    assert_eq!(zed.project_registration_path().relative_path(), Some(".zed"));
+
+    let antigravity = HostKindV1::Antigravity.descriptor();
+    assert_eq!(
+        antigravity.components(),
+        &[HostComponentV1::ContextMcp]
+    );
+    assert_eq!(
+        antigravity.project_registration_path(),
+        HostProjectRegistrationPathV1::Unavailable
+    );
+
+    let vibe = HostKindV1::Vibe.descriptor();
+    assert_eq!(
+        vibe.components(),
+        &[HostComponentV1::Core, HostComponentV1::ContextMcp]
+    );
+    assert_eq!(
+        vibe.project_registration_path().relative_path(),
+        Some(".vibe")
     );
 
     let kimi = HostKindV1::KimiCode.descriptor();

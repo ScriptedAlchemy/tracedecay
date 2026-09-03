@@ -535,7 +535,10 @@ fn native_feedback(case: HostCase) -> Vec<(&'static str, &'static str, Vec<u8>)>
             ]
         }
         HostKindV1::Kiro
-            | HostKindV1::Devin
+        | HostKindV1::Devin
+        | HostKindV1::Zed
+        | HostKindV1::Antigravity
+        | HostKindV1::Vibe
         | HostKindV1::Gemini
         | HostKindV1::Copilot
         | HostKindV1::Cline

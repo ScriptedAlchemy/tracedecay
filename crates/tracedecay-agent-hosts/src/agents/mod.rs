@@ -689,6 +689,9 @@ pub fn integration_id_for_host(host: host_bundle_v2::HostKindV1) -> &'static str
         }
         host_bundle_v2::HostKindV1::Codex => "codex",
         host_bundle_v2::HostKindV1::Devin => "devin",
+        host_bundle_v2::HostKindV1::Zed => "zed",
+        host_bundle_v2::HostKindV1::Antigravity => "antigravity",
+        host_bundle_v2::HostKindV1::Vibe => "vibe",
         host_bundle_v2::HostKindV1::Hermes => "hermes",
         host_bundle_v2::HostKindV1::Kiro => "kiro",
         host_bundle_v2::HostKindV1::ClineFamily => "cline",

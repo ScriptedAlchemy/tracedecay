@@ -34,7 +34,7 @@ const HOST_EVENT_FIXTURES: [(&str, &str); 5] = [
 ];
 
 #[test]
-fn stock_host_order_preserves_existing_rows_and_appends_devin() {
+fn stock_host_order_preserves_existing_rows_and_appends_new_direct_config_hosts() {
     assert_eq!(
         HostKindV1::ALL,
         [
@@ -53,6 +53,9 @@ fn stock_host_order_preserves_existing_rows_and_appends_devin() {
             HostKindV1::Gemini,
             HostKindV1::Copilot,
             HostKindV1::Devin,
+            HostKindV1::Zed,
+            HostKindV1::Antigravity,
+            HostKindV1::Vibe,
         ],
         "new stock hosts append so established capability rows retain their positions"
     );
@@ -315,6 +318,9 @@ fn stock_host_kinds_project_only_fixture_backed_observation_integrations() {
             "gemini",
             "copilot",
             "devin",
+            "zed",
+            "antigravity",
+            "vibe",
         ]
         .map(Value::from)
     );
@@ -341,6 +347,9 @@ fn stock_host_kinds_project_only_fixture_backed_observation_integrations() {
     for host in [
         HostKindV1::CursorCloud,
         HostKindV1::Devin,
+        HostKindV1::Zed,
+        HostKindV1::Antigravity,
+        HostKindV1::Vibe,
         HostKindV1::ClineFamily,
         HostKindV1::Cline,
         HostKindV1::RooCode,
