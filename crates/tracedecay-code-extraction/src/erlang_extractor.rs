@@ -8,19 +8,19 @@ use crate::types::{
 
 pub struct ErlangExtractor;
 
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
     errors: Vec<String>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     file_node_id: String,
     timestamp: u64,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -32,16 +32,14 @@ impl ExtractionState {
             unresolved_refs: Vec::new(),
             errors: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             file_node_id,
             timestamp,
         }
     }
 
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
@@ -317,7 +315,7 @@ impl ErlangExtractor {
     /// Extracts the atom (function name) from the first child of a `function_clause`.
     fn extract_atom_name(state: &ExtractionState, clause: TsNode<'_>) -> Option<String> {
         if let Some(n) = clause.child_by_field_name("name") {
-            return Some(state.node_text(n));
+            return Some(state.node_text(n).to_string());
         }
         // Fall back to first atom child.
         let mut cursor = clause.walk();
@@ -325,7 +323,7 @@ impl ErlangExtractor {
             loop {
                 let child = cursor.node();
                 if child.kind() == "atom" {
-                    return Some(state.node_text(child));
+                    return Some(state.node_text(child).to_string());
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -368,11 +366,8 @@ impl ErlangExtractor {
                 if child.kind() == "atom" {
                     let text = state.node_text(child);
                     // Skip keywords like "module", "type", "spec".
-                    if !matches!(
-                        text.as_str(),
-                        "module" | "type" | "opaque" | "spec" | "callback"
-                    ) {
-                        return Some(text);
+                    if !matches!(text, "module" | "type" | "opaque" | "spec" | "callback") {
+                        return Some(text.to_string());
                     }
                 }
                 if !cursor.goto_next_sibling() {
@@ -393,7 +388,7 @@ impl ErlangExtractor {
                         let name = state.node_text(callee);
                         state.unresolved_refs.push(UnresolvedRef {
                             from_node_id: fn_id.to_string(),
-                            reference_name: name,
+                            reference_name: name.to_string(),
                             reference_kind: EdgeKind::Calls,
                             line: child.start_position().row as u32,
                             column: child.start_position().column as u32,

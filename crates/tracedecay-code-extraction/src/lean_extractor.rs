@@ -19,11 +19,11 @@ use crate::types::{
 
 pub struct LeanExtractor;
 
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     file_node_id: String,
     timestamp: u64,
     /// `(qualified_prefix, parent_id)` — top is the active scope. The file
@@ -31,8 +31,8 @@ struct ExtractionState {
     scope_stack: Vec<(String, String)>,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -42,17 +42,15 @@ impl ExtractionState {
             nodes: Vec::new(),
             edges: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             file_node_id,
             timestamp,
             scope_stack: Vec::new(),
         }
     }
 
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
@@ -97,7 +95,7 @@ impl LeanExtractor {
         )
     }
 
-    fn initialize_state(file_path: &str, source: &str) -> ExtractionState {
+    fn initialize_state<'s>(file_path: &str, source: &'s str) -> ExtractionState<'s> {
         let mut state = ExtractionState::new(file_path, source);
         let file_node = Node {
             id: state.file_node_id.clone(),
@@ -203,7 +201,7 @@ impl LeanExtractor {
     /// the *surrounding* scope.
     fn visit_namespace(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = node.child_by_field_name("name").map(|n| state.node_text(n));
-        let pushed = if let Some(name) = name.as_deref() {
+        let pushed = if let Some(name) = name {
             let id = Self::emit_node(state, node, NodeKind::Module, name);
             let parent_qn = match state.scope_stack.last() {
                 Some((qn, _)) => qn.clone(),
@@ -241,7 +239,7 @@ impl LeanExtractor {
         // The `module` field on `import` holds the dotted module path.
         if let Some(n) = node.child_by_field_name("module") {
             let target = state.node_text(n);
-            Self::push_use_edge(state, node, &target);
+            Self::push_use_edge(state, node, target);
             return;
         }
         // Fallback: scan for an identifier child (older grammars / shapes).
@@ -250,7 +248,7 @@ impl LeanExtractor {
             loop {
                 if cursor.node().kind() == "identifier" {
                     let target = state.node_text(cursor.node());
-                    Self::push_use_edge(state, node, &target);
+                    Self::push_use_edge(state, node, target);
                     break;
                 }
                 if !cursor.goto_next_sibling() {
@@ -279,7 +277,7 @@ impl LeanExtractor {
     /// for nested content.
     fn emit_named(state: &mut ExtractionState, node: TsNode<'_>, kind: NodeKind) -> String {
         let name = match node.child_by_field_name("name") {
-            Some(n) => state.node_text(n),
+            Some(n) => state.node_text(n).to_string(),
             None => format!("<anonymous_{}>", node.kind()),
         };
         Self::emit_node(state, node, kind, &name)
@@ -290,7 +288,7 @@ impl LeanExtractor {
     fn emit_if_named(state: &mut ExtractionState, node: TsNode<'_>, kind: NodeKind) {
         if let Some(name_node) = node.child_by_field_name("name") {
             let name = state.node_text(name_node);
-            Self::emit_node(state, node, kind, &name);
+            Self::emit_node(state, node, kind, name);
         }
     }
 

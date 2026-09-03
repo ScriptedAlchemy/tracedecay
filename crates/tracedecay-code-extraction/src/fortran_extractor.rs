@@ -15,7 +15,7 @@ use crate::types::{
 pub struct FortranExtractor;
 
 /// Internal state used during AST traversal.
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
@@ -23,12 +23,12 @@ struct ExtractionState {
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -40,7 +40,7 @@ impl ExtractionState {
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
         }
     }
@@ -65,10 +65,8 @@ impl ExtractionState {
     }
 
     /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
@@ -256,7 +254,7 @@ impl FortranExtractor {
             .map(|l| l.trim().to_string())
             .filter(|l| !l.is_empty());
 
-        let metrics = count_complexity(node, &FORTRAN_COMPLEXITY, &state.source);
+        let metrics = count_complexity(node, &FORTRAN_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -312,7 +310,7 @@ impl FortranExtractor {
         let id = generate_node_id(&state.file_path, &NodeKind::Function, &name, start_line);
 
         let signature = Self::extract_first_line_signature(state, node);
-        let metrics = count_complexity(node, &FORTRAN_COMPLEXITY, &state.source);
+        let metrics = count_complexity(node, &FORTRAN_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -365,7 +363,7 @@ impl FortranExtractor {
         let id = generate_node_id(&state.file_path, &NodeKind::Function, &name, start_line);
 
         let signature = Self::extract_first_line_signature(state, node);
-        let metrics = count_complexity(node, &FORTRAN_COMPLEXITY, &state.source);
+        let metrics = count_complexity(node, &FORTRAN_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -496,9 +494,10 @@ impl FortranExtractor {
     /// Extract a field from a `variable_declaration` inside a derived type.
     fn visit_field(state: &mut ExtractionState, node: TsNode<'_>) {
         // The field name is in the `declarator` field, which is an `identifier`.
-        let name = node
-            .child_by_field_name("declarator")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = node.child_by_field_name("declarator").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -614,9 +613,10 @@ impl FortranExtractor {
         if let Some(decl) = declarator
             && decl.kind() == "init_declarator"
         {
-            let name = decl
-                .child_by_field_name("left")
-                .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+            let name = decl.child_by_field_name("left").map_or_else(
+                || "<anonymous>".to_string(),
+                |n| state.node_text(n).to_string(),
+            );
 
             let docstring = Self::extract_docstring(state, node);
             let start_line = node.start_position().row as u32;
@@ -667,8 +667,10 @@ impl FortranExtractor {
 
     /// Extract a use statement.
     fn visit_use_statement(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "module_name")
-            .map_or_else(|| "<unknown>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "module_name").map_or_else(
+            || "<unknown>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -719,7 +721,10 @@ impl FortranExtractor {
     fn find_module_name(state: &ExtractionState, node: TsNode<'_>) -> String {
         find_direct_child_by_kind(node, "module_statement")
             .and_then(|stmt| find_direct_child_by_kind(stmt, "name"))
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n))
+            .map_or_else(
+                || "<anonymous>".to_string(),
+                |n| state.node_text(n).to_string(),
+            )
     }
 
     /// Find the program name from a program node.
@@ -727,7 +732,10 @@ impl FortranExtractor {
     fn find_program_name(state: &ExtractionState, node: TsNode<'_>) -> String {
         find_direct_child_by_kind(node, "program_statement")
             .and_then(|stmt| find_direct_child_by_kind(stmt, "name"))
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n))
+            .map_or_else(
+                || "<anonymous>".to_string(),
+                |n| state.node_text(n).to_string(),
+            )
     }
 
     /// Find the subroutine name from a subroutine node.
@@ -735,7 +743,10 @@ impl FortranExtractor {
     fn find_subroutine_name(state: &ExtractionState, node: TsNode<'_>) -> String {
         find_direct_child_by_kind(node, "subroutine_statement")
             .and_then(|stmt| stmt.child_by_field_name("name"))
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n))
+            .map_or_else(
+                || "<anonymous>".to_string(),
+                |n| state.node_text(n).to_string(),
+            )
     }
 
     /// Find the function name from a function node.
@@ -743,7 +754,10 @@ impl FortranExtractor {
     fn find_function_name(state: &ExtractionState, node: TsNode<'_>) -> String {
         find_direct_child_by_kind(node, "function_statement")
             .and_then(|stmt| stmt.child_by_field_name("name"))
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n))
+            .map_or_else(
+                || "<anonymous>".to_string(),
+                |n| state.node_text(n).to_string(),
+            )
     }
 
     /// Find the derived type name and optional base type.
@@ -755,12 +769,15 @@ impl FortranExtractor {
         let stmt = find_direct_child_by_kind(node, "derived_type_statement");
         let name = stmt
             .and_then(|s| find_direct_child_by_kind(s, "type_name"))
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+            .map_or_else(
+                || "<anonymous>".to_string(),
+                |n| state.node_text(n).to_string(),
+            );
 
         let base_type = stmt
             .and_then(|s| s.child_by_field_name("base"))
             .and_then(|base_spec| find_direct_child_by_kind(base_spec, "identifier"))
-            .map(|n| state.node_text(n));
+            .map(|n| state.node_text(n).to_string());
 
         (name, base_type)
     }
@@ -770,7 +787,10 @@ impl FortranExtractor {
     fn find_interface_name(state: &ExtractionState, node: TsNode<'_>) -> String {
         find_direct_child_by_kind(node, "interface_statement")
             .and_then(|stmt| find_direct_child_by_kind(stmt, "name"))
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n))
+            .map_or_else(
+                || "<anonymous>".to_string(),
+                |n| state.node_text(n).to_string(),
+            )
     }
 
     /// Check if a `variable_declaration` has a `parameter` attribute.
@@ -842,7 +862,7 @@ impl FortranExtractor {
                             let callee_name = state.node_text(sub_node);
                             state.unresolved_refs.push(UnresolvedRef {
                                 from_node_id: fn_node_id.to_string(),
-                                reference_name: callee_name,
+                                reference_name: callee_name.to_string(),
                                 reference_kind: EdgeKind::Calls,
                                 line: child.start_position().row as u32,
                                 column: child.start_position().column as u32,
@@ -859,7 +879,7 @@ impl FortranExtractor {
                             let callee_name = state.node_text(ident);
                             state.unresolved_refs.push(UnresolvedRef {
                                 from_node_id: fn_node_id.to_string(),
-                                reference_name: callee_name,
+                                reference_name: callee_name.to_string(),
                                 reference_kind: EdgeKind::Calls,
                                 line: child.start_position().row as u32,
                                 column: child.start_position().column as u32,

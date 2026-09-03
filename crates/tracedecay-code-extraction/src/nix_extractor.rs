@@ -14,7 +14,7 @@ use crate::types::{
 pub struct NixExtractor;
 
 /// Internal state used during AST traversal.
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
@@ -22,12 +22,12 @@ struct ExtractionState {
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -39,7 +39,7 @@ impl ExtractionState {
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
         }
     }
@@ -64,10 +64,8 @@ impl ExtractionState {
     }
 
     /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
@@ -248,7 +246,7 @@ impl NixExtractor {
                 let signature = Self::extract_function_signature(state, node);
                 let metrics = if let Some(expr_node) = expr {
                     if expr_node.child_count() > 0 {
-                        count_complexity(expr_node, &NIX_COMPLEXITY, &state.source)
+                        count_complexity(expr_node, &NIX_COMPLEXITY, state.source)
                     } else {
                         ComplexityMetrics::default()
                     }
@@ -494,7 +492,7 @@ impl NixExtractor {
                                 let id = generate_node_id(
                                     &state.file_path,
                                     &kind,
-                                    &attr_name,
+                                    attr_name,
                                     start_line,
                                 );
                                 let attr_line = attr.start_position().row as u32;
@@ -502,7 +500,7 @@ impl NixExtractor {
                                 let graph_node = Node {
                                     id: id.clone(),
                                     kind,
-                                    name: attr_name.clone(),
+                                    name: attr_name.to_string(),
                                     qualified_name,
                                     file_path: state.file_path.clone(),
                                     start_line: attr_line,
@@ -538,7 +536,7 @@ impl NixExtractor {
                                 // Also create an unresolved Uses ref
                                 state.unresolved_refs.push(UnresolvedRef {
                                     from_node_id: id,
-                                    reference_name: attr_name,
+                                    reference_name: attr_name.to_string(),
                                     reference_kind: EdgeKind::Uses,
                                     line: start_line,
                                     column: start_column,
@@ -780,7 +778,7 @@ impl NixExtractor {
                 loop {
                     let child = cursor.node();
                     if child.kind() == "identifier" {
-                        return Some(state.node_text(child));
+                        return Some(state.node_text(child).to_string());
                     }
                     if !cursor.goto_next_sibling() {
                         break;
@@ -873,7 +871,7 @@ impl NixExtractor {
                             && arg.kind() == "path_expression"
                         {
                             let path_text = state.node_text(arg);
-                            Self::emit_import_use_node(state, &path_text, child);
+                            Self::emit_import_use_node(state, path_text, child);
                         }
 
                         // Recurse into the apply_expression for nested calls.
@@ -903,7 +901,7 @@ impl NixExtractor {
                 && arg.kind() == "path_expression"
             {
                 let path_text = state.node_text(arg);
-                Self::emit_import_use_node(state, &path_text, node);
+                Self::emit_import_use_node(state, path_text, node);
             }
         }
         // Recurse into children
@@ -979,19 +977,20 @@ impl NixExtractor {
         match node.kind() {
             "variable_expression" => {
                 // variable_expression has a `name` field (identifier)
-                node.child_by_field_name("name").map(|n| state.node_text(n))
+                node.child_by_field_name("name")
+                    .map(|n| state.node_text(n).to_string())
             }
             "select_expression" => {
                 // select_expression: expression.attrpath
                 // Extract the full dotted path for the callee name.
-                Some(state.node_text(node))
+                Some(state.node_text(node).to_string())
             }
             "apply_expression" => {
                 // Curried call: (f x) y — extract the innermost function name
                 node.child_by_field_name("function")
                     .and_then(|f| Self::extract_callee_name(state, f))
             }
-            _ => Some(state.node_text(node)),
+            _ => Some(state.node_text(node).to_string()),
         }
     }
 
