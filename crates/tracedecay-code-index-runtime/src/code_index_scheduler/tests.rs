@@ -606,9 +606,7 @@ fn partitioned_publication_reuses_unchanged_file_segments() {
         .load(std::sync::atomic::Ordering::Relaxed);
     assert!(
         second_encoded_segment_bytes.saturating_mul(4) < first_encoded_segment_bytes,
-        "one-file increment encoded {} segment bytes after the cold generation encoded {}",
-        second_encoded_segment_bytes,
-        first_encoded_segment_bytes
+        "one-file increment encoded {second_encoded_segment_bytes} segment bytes after the cold generation encoded {first_encoded_segment_bytes}"
     );
     assert_eq!(
         second_existing_segment_bytes_read, 0,
