@@ -27,6 +27,8 @@ const SOURCE_SYMBOL_DISPLAY_CHAIN_RECORD_DOMAIN: &[u8] =
 const IMPORT_DICTIONARY_CHAIN_RECORD_DOMAIN: &[u8] =
     b"tracedecay.sealed-lexical-import-dictionary-chain.v1\0";
 const CURSOR_DIGEST_DOMAIN: &[u8] = b"tracedecay.sealed-lexical-cursor.v1\0";
+const INVALID_CURSOR_POSITION_DETAIL: &str =
+    "sealed lexical cursor is not a valid position in its next file";
 const LAYOUT_PROGRESS_INTERVAL_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_LEXICAL_GENERATION_METADATA_BYTES: u64 = 64 * 1024 * 1024;
 /// Concurrent exact-read/decode window. Same 64 MiB retain cap as one
@@ -65,6 +67,35 @@ pub struct VerifiedSealedLexicalCursorV1 {
     emitted_import_payload_bytes: u64,
     import_dictionary_digest: ManifestDigest,
     cumulative_digest: ManifestDigest,
+}
+
+/// Classified failure while restoring an authenticated lexical cursor.
+///
+/// Only a position that cannot exist in the authenticated next file is
+/// staging incompatibility. All other failures retain their production error
+/// so callers cannot discard staging for an unrelated contract or authority
+/// failure.
+#[derive(Debug)]
+pub enum VerifiedSealedLexicalCursorRestoreErrorV1 {
+    IncompatiblePosition,
+    Production(CodeIndexProductionErrorV1),
+}
+
+impl VerifiedSealedLexicalCursorRestoreErrorV1 {
+    fn into_production_error(self) -> CodeIndexProductionErrorV1 {
+        match self {
+            Self::IncompatiblePosition => {
+                CodeIndexProductionErrorV1::Contract(INVALID_CURSOR_POSITION_DETAIL.to_owned())
+            }
+            Self::Production(error) => error,
+        }
+    }
+}
+
+impl From<CodeIndexProductionErrorV1> for VerifiedSealedLexicalCursorRestoreErrorV1 {
+    fn from(error: CodeIndexProductionErrorV1) -> Self {
+        Self::Production(error)
+    }
 }
 
 impl VerifiedSealedLexicalCursorV1 {
@@ -1152,6 +1183,15 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         &mut self,
         generation: &CodeIndexPublishedGenerationV1,
     ) -> Result<(), CodeIndexProductionErrorV1> {
+        generation.validate()?;
+        if generation.manifest() != self.metadata.manifest()
+            || generation.snapshot() != self.metadata.snapshot()
+        {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "published generation does not match the authenticated sealed lexical source"
+                    .to_owned(),
+            ));
+        }
         if generation.files.len() != self.file_ranges.len() {
             return Err(CodeIndexProductionErrorV1::Contract(
                 "published generation file count does not match the sealed lexical layout"
@@ -1191,56 +1231,81 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
 
     /// Adopt a persisted cursor after binding it to this source and validating
     /// its first unread file. This deliberately never walks earlier files.
-    #[hotpath::measure(label = "code_index.restore.cursor")]
     pub fn restore_cursor(
         &mut self,
         cursor: &VerifiedSealedLexicalCursorV1,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<(), CodeIndexProductionErrorV1> {
-        checkpoint(control)?;
-        cursor.verify_source(&self.source_state_digest)?;
+        self.restore_cursor_classified(cursor, control)
+            .map_err(VerifiedSealedLexicalCursorRestoreErrorV1::into_production_error)
+    }
+
+    /// Restore a cursor while preserving the one incompatibility that permits
+    /// a derived staging artifact to be superseded and rebuilt.
+    #[hotpath::measure(label = "code_index.restore.cursor")]
+    pub fn restore_cursor_classified(
+        &mut self,
+        cursor: &VerifiedSealedLexicalCursorV1,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<(), VerifiedSealedLexicalCursorRestoreErrorV1> {
+        let production = VerifiedSealedLexicalCursorRestoreErrorV1::Production;
+        checkpoint(control).map_err(production)?;
+        cursor
+            .verify_source(&self.source_state_digest)
+            .map_err(production)?;
         self.admitted_window.clear();
         if cursor.next_file_ordinal > self.file_count {
             return Err(CodeIndexProductionErrorV1::Contract(
                 "sealed lexical cursor exceeds the admitted file layout".to_owned(),
-            ));
+            )
+            .into());
         }
         if cursor.next_file_ordinal == self.file_count {
             if cursor.next_chunk_ordinal != 0
                 || cursor.next_import_ordinal != 0
                 || cursor.next_file_offset != self.files_end_offset
             {
-                return Err(CodeIndexProductionErrorV1::Contract(
-                    "completed sealed lexical cursor has a non-terminal file position".to_owned(),
+                return Err(VerifiedSealedLexicalCursorRestoreErrorV1::Production(
+                    CodeIndexProductionErrorV1::Contract(
+                        "completed sealed lexical cursor has a non-terminal file position"
+                            .to_owned(),
+                    ),
                 ));
             }
         } else {
             if cursor.next_file_offset < self.first_file_offset
                 || cursor.next_file_offset >= self.files_end_offset
             {
-                return Err(CodeIndexProductionErrorV1::Contract(
-                    "sealed lexical cursor byte offset is outside the files array".to_owned(),
+                return Err(VerifiedSealedLexicalCursorRestoreErrorV1::Production(
+                    CodeIndexProductionErrorV1::Contract(
+                        "sealed lexical cursor byte offset is outside the files array".to_owned(),
+                    ),
                 ));
             }
-            self.ensure_admitted_file(cursor.next_file_offset, control)?;
-            let admitted = self.admitted_arc(cursor.next_file_offset)?;
+            self.ensure_admitted_file(cursor.next_file_offset, control)
+                .map_err(production)?;
+            let admitted = self
+                .admitted_arc(cursor.next_file_offset)
+                .map_err(production)?;
             let chunk_count = u64::try_from(admitted.chunks.len()).map_err(|_| {
-                CodeIndexProductionErrorV1::Contract(
-                    "sealed lexical file chunk count exceeds u64".to_owned(),
+                VerifiedSealedLexicalCursorRestoreErrorV1::Production(
+                    CodeIndexProductionErrorV1::Contract(
+                        "sealed lexical file chunk count exceeds u64".to_owned(),
+                    ),
                 )
             })?;
             let import_count = u64::try_from(admitted.imports.len()).map_err(|_| {
-                CodeIndexProductionErrorV1::Contract(
-                    "sealed lexical file import count exceeds u64".to_owned(),
+                VerifiedSealedLexicalCursorRestoreErrorV1::Production(
+                    CodeIndexProductionErrorV1::Contract(
+                        "sealed lexical file import count exceeds u64".to_owned(),
+                    ),
                 )
             })?;
             if cursor.next_chunk_ordinal > chunk_count
                 || cursor.next_import_ordinal > import_count
                 || (cursor.next_chunk_ordinal < chunk_count && cursor.next_import_ordinal != 0)
             {
-                return Err(CodeIndexProductionErrorV1::Contract(
-                    "sealed lexical cursor is not a valid position in its next file".to_owned(),
-                ));
+                return Err(VerifiedSealedLexicalCursorRestoreErrorV1::IncompatiblePosition);
             }
         }
         self.cursor = cursor.clone();
@@ -3172,13 +3237,186 @@ mod lexical_page_source_tests {
         assert_eq!(disk, memory);
     }
 
+    #[test]
+    fn foreign_memory_files_cannot_mint_an_import_cursor_for_a_sealed_source() {
+        let imports = (0..128)
+            .map(|ordinal| format!("import type {{ Type{ordinal} }} from \"module-{ordinal}\";\n"))
+            .collect::<String>();
+        let target_source = format!(
+            "{imports}{}",
+            (0..64)
+                .map(|ordinal| {
+                    format!(
+                        "export function targetItem{ordinal}(): number {{ return {ordinal}; }}\n"
+                    )
+                })
+                .collect::<String>()
+        );
+        let foreign_source =
+            format!("{imports}export function foreignItem(): number {{ return 1; }}\n");
+        let target = fixture_for_typescript_source(&target_source);
+        let foreign = fixture_for_typescript_source(&foreign_source);
+        assert!(
+            target
+                .generation
+                .admitted_chunks()
+                .expect("target generation exposes chunks")
+                .len()
+                > foreign
+                    .generation
+                    .admitted_chunks()
+                    .expect("foreign generation exposes chunks")
+                    .len(),
+            "the authenticated target must have more chunks than the foreign memory source"
+        );
+        assert!(
+            foreign.generation.imports().len() > 1,
+            "the foreign source must reach a partial import position"
+        );
+        let maximum_page_bytes = [&target.generation, &foreign.generation]
+            .into_iter()
+            .map(|generation| {
+                let admitted = admit_file_generation_artifacts(
+                    generation.files[0].as_ref(),
+                    1,
+                    &ActiveControl,
+                )
+                .expect("fixture file admits");
+                admitted
+                    .serialized_chunks
+                    .iter()
+                    .zip(&admitted.serialized_displays)
+                    .map(|(chunk, display)| {
+                        chunk
+                            .len()
+                            .saturating_add(display.as_ref().map_or(0, Vec::len))
+                    })
+                    .chain(admitted.serialized_imports.iter().map(Vec::len))
+                    .max()
+                    .expect("fixture exposes lexical records")
+            })
+            .max()
+            .expect("fixtures expose lexical records")
+            .saturating_add(1);
+        let foreign_import_bytes = foreign.generation.files[0]
+            .artifacts
+            .imports
+            .iter()
+            .map(|evidence| {
+                serde_json::to_vec(evidence)
+                    .expect("import serializes")
+                    .len()
+            })
+            .sum::<usize>();
+        assert!(
+            foreign_import_bytes > maximum_page_bytes,
+            "imports must span more than one bounded page"
+        );
+
+        let mut source = VerifiedSealedLexicalPageSourceV1::open(
+            Cursor::new(target.sealed.clone()),
+            u64::try_from(target.sealed.len()).expect("target sealed length fits u64"),
+            target.state_digest.clone(),
+            usize::MAX,
+            maximum_page_bytes,
+            &ActiveControl,
+        )
+        .expect("authenticated target source opens");
+        let foreign_was_rejected = source.attach_published_files(&foreign.generation).is_err();
+
+        let boundary_cursor = loop {
+            let previous_cursor = source.cursor().clone();
+            let read = source
+                .next_page_if(&ActiveControl, |page| {
+                    page.verify_transition(Some(&previous_cursor))
+                        .expect("source-minted page verifies before acceptance");
+                    Ok::<(), std::convert::Infallible>(())
+                })
+                .expect("source stages the next boundary page");
+            let page = match read {
+                Ok(VerifiedSealedLexicalPageReadV1::Page(page)) => page,
+                Ok(VerifiedSealedLexicalPageReadV1::Complete(_)) => {
+                    panic!("fixture must expose a partial import cursor")
+                }
+                Err(never) => match never {},
+            };
+            if page.next_cursor().next_file_ordinal() == 0
+                && page.next_cursor().next_import_ordinal() > 0
+            {
+                break page.next_cursor().clone();
+            }
+        };
+        let persisted = boundary_cursor
+            .persisted_bytes()
+            .expect("accepted import cursor persists");
+        let cursor_before_cancellation = source.cursor().clone();
+        let error = source
+            .next_page(&CancelDuringStaging::new())
+            .expect_err("cancellation interrupts the next import page");
+        assert!(matches!(
+            error,
+            CodeIndexProductionErrorV1::Interrupted(CodeIndexInterruptionV1::Cancelled)
+        ));
+        assert_eq!(
+            source.cursor(),
+            &cursor_before_cancellation,
+            "cancelled staging must preserve the accepted import cursor"
+        );
+
+        let restored = VerifiedSealedLexicalCursorV1::restore_persisted(&persisted)
+            .expect("accepted import cursor restores");
+        let mut resumed = VerifiedSealedLexicalPageSourceV1::open(
+            Cursor::new(target.sealed.clone()),
+            u64::try_from(target.sealed.len()).expect("target sealed length fits u64"),
+            target.state_digest.clone(),
+            usize::MAX,
+            maximum_page_bytes,
+            &ActiveControl,
+        )
+        .expect("fresh authenticated target source opens");
+        resumed
+            .restore_cursor(&restored, &ActiveControl)
+            .expect("an accepted cursor must resume its authenticated source");
+        let resumed_page = resumed
+            .next_page_if(&ActiveControl, |page| {
+                page.verify_transition(Some(&restored))
+                    .expect("resumed import page continues the accepted cursor");
+                Ok::<(), std::convert::Infallible>(())
+            })
+            .expect("resumed source stages an import page")
+            .expect("resumed page acceptance is infallible");
+        let VerifiedSealedLexicalPageReadV1::Page(resumed_page) = resumed_page else {
+            panic!("imports must remain after the accepted boundary")
+        };
+        assert!(
+            resumed_page.next_cursor().next_import_ordinal() > restored.next_import_ordinal(),
+            "resumed acceptance must advance the import position"
+        );
+        assert!(
+            foreign_was_rejected,
+            "decoded files from another generation must not replace sealed source authority"
+        );
+    }
+
     fn fixture_for_source(source: &str) -> SealedSourceFixture {
+        fixture_for_source_parts(source, "src/batch_fixture.rs", "rust")
+    }
+
+    fn fixture_for_typescript_source(source: &str) -> SealedSourceFixture {
+        fixture_for_source_parts(source, "src/batch_fixture.ts", "typescript")
+    }
+
+    fn fixture_for_source_parts(
+        source: &str,
+        logical_path: &str,
+        language: &str,
+    ) -> SealedSourceFixture {
         let source = source.as_bytes();
         let file = SanitizedCodeFileV1 {
             file_occurrence_id: FileOccurrenceId::new("file.lexical-page-batch")
                 .expect("fixture file occurrence ID"),
-            logical_path: "src/batch_fixture.rs".to_owned(),
-            language: Some(LanguageId::new("rust").expect("fixture language ID")),
+            logical_path: logical_path.to_owned(),
+            language: Some(LanguageId::new(language).expect("fixture language ID")),
             content_digest: content_digest(source),
             disposition: SnapshotFileDispositionV1::Present,
         };

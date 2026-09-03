@@ -4004,6 +4004,145 @@ fn incompatible_partial_text_artifact_is_discarded_and_rebuilt() {
 }
 
 #[test]
+fn invalid_partial_text_artifact_cursor_is_discarded_and_rebuilt() {
+    let mut source = "import { readFileSync } from 'node:fs';\n".to_owned();
+    for index in 0..256 {
+        writeln!(
+            &mut source,
+            "export function staleCursor{index}(): number {{ return {index}; }}"
+        )
+        .expect("write staged source fixture");
+    }
+    let fixture = GitFixture::new(&[("src/lib.ts", source.as_str())]);
+    let store = TempDir::new().expect("store root");
+    let (generation_id, snapshot) = {
+        let mut scheduler = scheduler(
+            &fixture,
+            store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(scheduler.reconcile_now().expect("publish"));
+        let latest = scheduler.latest_complete().expect("latest generation");
+        assert!(
+            !latest
+                .advance_text_serving(1)
+                .expect("start bounded text artifact build"),
+            "one page must leave resumable staging state"
+        );
+        (
+            latest.metadata().manifest().generation_id.clone(),
+            latest.metadata().snapshot().clone(),
+        )
+    };
+    let artifacts_root = store.path().join("code-text-artifacts-v1");
+    let staging_path = std::fs::read_dir(&artifacts_root)
+        .expect("read artifacts root")
+        .map(|entry| entry.expect("artifact entry").path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".staging"))
+        })
+        .expect("partial staging database");
+    {
+        let connection =
+            rusqlite::Connection::open(&staging_path).expect("open partial staging database");
+        let cursor_bytes: Vec<u8> = connection
+            .query_row(
+                "SELECT next_cursor FROM source_pages ORDER BY page_ordinal DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read persisted cursor");
+        let mut cursor: Vec<serde_json::Value> =
+            serde_json::from_slice(&cursor_bytes).expect("decode persisted cursor");
+        assert_eq!(
+            cursor[1].as_u64(),
+            Some(0),
+            "cursor must remain in its file"
+        );
+        assert!(
+            cursor[3].as_u64().is_some_and(|ordinal| ordinal > 0),
+            "first page must advance within the file's chunks"
+        );
+        cursor[3] = serde_json::Value::from(0_u64);
+        cursor[7] = serde_json::Value::from(1_u64);
+
+        let text = |index: usize| {
+            cursor[index]
+                .as_str()
+                .expect("cursor digest field")
+                .as_bytes()
+        };
+        let number = |index: usize| cursor[index].as_u64().expect("cursor numeric field");
+        let mut hasher = Sha256::new();
+        hasher.update(b"tracedecay.sealed-lexical-cursor.v1\0");
+        hasher.update(
+            u64::try_from(text(0).len())
+                .expect("digest length")
+                .to_le_bytes(),
+        );
+        hasher.update(text(0));
+        for index in [1, 2, 3, 7, 4, 5, 6, 8, 9] {
+            hasher.update(number(index).to_le_bytes());
+        }
+        for index in [10, 11] {
+            hasher.update(
+                u64::try_from(text(index).len())
+                    .expect("digest length")
+                    .to_le_bytes(),
+            );
+            hasher.update(text(index));
+        }
+        cursor[12] = serde_json::Value::from(format!("sha256:{}", hex::encode(hasher.finalize())));
+        let cursor_bytes = serde_json::to_vec(&cursor).expect("encode invalid persisted cursor");
+        connection
+            .execute_batch("DROP TRIGGER immutable_source_pages_update")
+            .expect("open immutable page fixture for corruption");
+        assert_eq!(
+            connection
+                .execute(
+                    "UPDATE source_pages SET next_cursor = ?1 WHERE page_ordinal = \
+                     (SELECT MAX(page_ordinal) FROM source_pages)",
+                    [cursor_bytes],
+                )
+                .expect("rewrite persisted cursor"),
+            1
+        );
+        connection
+            .execute_batch(
+                "CREATE TRIGGER immutable_source_pages_update BEFORE UPDATE ON source_pages \
+                 BEGIN SELECT RAISE(ABORT, 'immutable lexical source pages'); END",
+            )
+            .expect("restore immutable page contract");
+    }
+
+    let scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let latest = scheduler.latest_complete().expect("restored generation");
+    assert_eq!(latest.metadata().manifest().generation_id, generation_id);
+    assert_eq!(latest.metadata().snapshot(), &snapshot);
+    let mut passes = 0_usize;
+    while !latest
+        .advance_text_serving(64)
+        .expect("discard invalid cursor and rebuild")
+    {
+        passes += 1;
+        assert!(passes < 10_000, "invalid cursor rebuild did not converge");
+    }
+
+    assert!(latest.query_owners_are_warm());
+    assert!(active_text_artifact_path(store.path()).is_file());
+    assert!(
+        !staging_path.exists(),
+        "invalid resumable staging state must not survive repair"
+    );
+}
+
+#[test]
 fn reader_reservation_refusal_precedes_missing_artifact_access() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn reserved_first() {}\n")]);
     let store = TempDir::new().expect("store root");

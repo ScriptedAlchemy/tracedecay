@@ -77,6 +77,7 @@ pub use generation_attribution::PublishedGenerationTestAttributionAuthorityV1;
 mod generation_statistics;
 pub use generation_statistics::CodeIndexGenerationStatisticsV1;
 mod lexical_page_source;
+pub use lexical_page_source::VerifiedSealedLexicalCursorRestoreErrorV1;
 pub use lexical_page_source::{
     VerifiedSealedLexicalCursorV1, VerifiedSealedLexicalPageBatchBoundsV1,
     VerifiedSealedLexicalPageBatchReadV1, VerifiedSealedLexicalPageReadV1,

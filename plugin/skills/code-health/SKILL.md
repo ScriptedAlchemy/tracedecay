@@ -77,10 +77,17 @@ and the specific scans the user asked for — don't run every tool by reflex.
    instead of scanning parent directories.
 5. **Index status → `tracedecay_status`**: node/edge/file counts, DB size,
    active branch + fallback warning, tokens saved.
-6. **Config lookups → `tracedecay_config`** (`key` required, plus `path` or
+6. **Parked convergence → follow the exact typed remediation.** For an
+   incompatible sealed lexical cursor, run `tracedecay sync` and re-check
+   `tracedecay status`; the daemon automatically replaces only the derived
+   text-artifact staging database. Do not use `storage reset-project-store`
+   for this state: it is a schema-recovery command, while the automatic path
+   preserves project identity, sessions, memory, configuration, and sealed
+   generations.
+7. **Config lookups → `tracedecay_config`** (`key` required, plus `path` or
    `glob`): query TOML/JSON by dotted key — works even before `tracedecay init`.
-7. **Outstanding work → `tracedecay_todos`** (`kinds?`, `path?`, `limit?`).
-8. **Server triage → `tracedecay_runtime`** (PID, memory, CPU%, DB sizes) when
+8. **Outstanding work → `tracedecay_todos`** (`kinds?`, `path?`, `limit?`).
+9. **Server triage → `tracedecay_runtime`** (PID, memory, CPU%, DB sizes) when
    TraceDecay seems to hog CPU or RAM. **Visual → `tracedecay_dashboard`**
    (`action`: `start`|`stop`): hand the URL to the user.
 
