@@ -1298,7 +1298,13 @@ fn cursor_subagent_identity(path: &Path, parent_session_id: &str) -> Option<(Str
     Some((session_id.clone(), session_id))
 }
 
-fn parent_dispatch_model_for_subagent(
+/// Resolve the model a parent Cursor transcript assigned to `agent_id`.
+///
+/// Tries `{parent_dir}/{parent_session_id}.jsonl` first, then
+/// `{parent_dir}.jsonl`. Public so the dispatch-model measurement harness
+/// can drive the same two-candidate production lookup the admission path
+/// uses.
+pub fn parent_dispatch_model_for_subagent(
     path: &Path,
     parent_session_id: &str,
     agent_id: &str,
