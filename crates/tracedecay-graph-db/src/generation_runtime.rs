@@ -80,6 +80,14 @@ struct GenerationStageContext {
     dependency_digest: tracedecay_store::runtime::GraphDependencyGenerationClosureDigestV1,
 }
 
+struct GenerationStagePlan<'a> {
+    identity: &'a GraphGenerationManifestIdentity,
+    expected: &'a GraphRecoveredGenerationDigestV1,
+    context: &'a GenerationStageContext,
+    pages: &'a [GenerationStagePage],
+    adopt_legacy_partial: bool,
+}
+
 /// CPU-only page batch, built outside the exclusive snapshot gate so the next
 /// page can construct while the current page applies.
 struct PreparedGenerationStagePage {
@@ -491,6 +499,13 @@ impl GraphDb {
                 crate::hotpath_observe::HydrationSource::Staged,
             );
         }
+        let plan = GenerationStagePlan {
+            identity: &identity,
+            expected,
+            context: &context,
+            pages: &pages,
+            adopt_legacy_partial,
+        };
         match Arc::try_unwrap(manifest) {
             Ok(mut manifest) => {
                 let entities = std::mem::take(&mut manifest.entities);
@@ -498,27 +513,10 @@ impl GraphDb {
                 // Drop metadata and digest memo before staging. The separately
                 // owned identity carries every value later phases need.
                 drop(manifest);
-                self.stage_owned_generation_pages(
-                    entities,
-                    relations,
-                    &identity,
-                    expected,
-                    &context,
-                    &pages,
-                    adopt_legacy_partial,
-                    check,
-                )?;
+                self.stage_owned_generation_pages(entities, relations, plan, check)?;
             }
             Err(manifest) => {
-                self.stage_generation_pages(
-                    &manifest,
-                    &identity,
-                    expected,
-                    &context,
-                    &pages,
-                    adopt_legacy_partial,
-                    check,
-                )?;
+                self.stage_generation_pages(&manifest, plan, check)?;
                 // Shared supplied manifests cannot donate their rows, but the
                 // staging owner still releases its Arc at the exact boundary.
                 drop(manifest);
@@ -568,13 +566,16 @@ impl GraphDb {
     fn stage_generation_pages(
         &self,
         manifest: &GraphGenerationManifest,
-        identity: &GraphGenerationManifestIdentity,
-        expected: &GraphRecoveredGenerationDigestV1,
-        context: &GenerationStageContext,
-        pages: &[GenerationStagePage],
-        adopt_legacy_partial: bool,
+        plan: GenerationStagePlan<'_>,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<(), GraphDbError> {
+        let GenerationStagePlan {
+            identity,
+            expected,
+            context,
+            pages,
+            adopt_legacy_partial,
+        } = plan;
         let mut prepared_next = None;
         for (index, page) in pages.iter().enumerate() {
             check()?;
@@ -651,18 +652,20 @@ impl GraphDb {
         label = "graph_db.generation.page_pipeline_owned",
         impl_type = "GraphDb"
     )]
-    #[allow(clippy::too_many_arguments)]
     fn stage_owned_generation_pages(
         &self,
         entities: Vec<crate::GraphEntity>,
         relations: Vec<GraphGenerationRelation>,
-        identity: &GraphGenerationManifestIdentity,
-        expected: &GraphRecoveredGenerationDigestV1,
-        context: &GenerationStageContext,
-        pages: &[GenerationStagePage],
-        adopt_legacy_partial: bool,
+        plan: GenerationStagePlan<'_>,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<(), GraphDbError> {
+        let GenerationStagePlan {
+            identity,
+            expected,
+            context,
+            pages,
+            adopt_legacy_partial,
+        } = plan;
         let mut rows = OwnedGenerationStageRows::new(entities, relations);
         let Some(first_page) = pages.first() else {
             return rows.finish();
@@ -3078,11 +3081,13 @@ mod tests {
         database
             .stage_generation_pages(
                 &manifest,
-                &identity,
-                &sealed,
-                &context,
-                &pages,
-                false,
+                super::GenerationStagePlan {
+                    identity: &identity,
+                    expected: &sealed,
+                    context: &context,
+                    pages: &pages,
+                    adopt_legacy_partial: false,
+                },
                 &|| Ok(()),
             )
             .unwrap();

@@ -51,25 +51,24 @@ impl DaemonConfigurationGrantAuthority {
     pub fn for_test(
         layers: impl IntoIterator<Item = ConfigurationLayerIdV1>,
         expires_at: UtcMicros,
-    ) -> Self {
-        Self {
-            actor: ActorId::new("actor.configuration.test").expect("actor"),
+    ) -> Option<Self> {
+        Some(Self {
+            actor: ActorId::new("actor.configuration.test").ok()?,
             policy_epoch: 1,
-            policy_digest: AccessPolicyDigest::new(format!("sha256:{}", "a".repeat(64)))
-                .expect("policy"),
+            policy_digest: AccessPolicyDigest::new(format!("sha256:{}", "a".repeat(64))).ok()?,
             expires_at,
             direct_layers: Arc::new(
                 layers
                     .into_iter()
                     .map(|layer| {
-                        let digest =
-                            configuration_layer_scope_digest(&layer).expect("layer digest");
-                        (digest, layer)
+                        configuration_layer_scope_digest(&layer)
+                            .ok()
+                            .map(|digest| (digest, layer))
                     })
-                    .collect(),
+                    .collect::<Option<BTreeMap<_, _>>>()?,
             ),
             grants: Arc::new(RwLock::new(BTreeMap::new())),
-        }
+        })
     }
 
     pub(super) fn issue(
@@ -343,23 +342,22 @@ impl DaemonFeedbackPublicationTestGate {
     }
 
     #[hotpath::skip]
-    async fn wait(&self) {
-        self.publication_ready
+    async fn wait(&self) -> bool {
+        let Some(publication_ready) = self
+            .publication_ready
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
-            .expect("publication-ready sender")
-            .send(())
-            .expect("publication-ready receiver");
-        let continue_publication = self
-            .continue_publication
-            .lock()
-            .await
-            .take()
-            .expect("continue-publication receiver");
-        continue_publication
-            .await
-            .expect("continue-publication sender");
+        else {
+            return false;
+        };
+        if publication_ready.send(()).is_err() {
+            return false;
+        }
+        let Some(continue_publication) = self.continue_publication.lock().await.take() else {
+            return false;
+        };
+        continue_publication.await.is_ok()
     }
 }
 
@@ -384,6 +382,7 @@ impl DaemonFeedbackRuntimeRegistrar {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
     pub fn with_publication_gate(mut self, gate: Arc<DaemonFeedbackPublicationTestGate>) -> Self {
         self.publication_gate = Some(gate);
         self
@@ -430,8 +429,8 @@ impl DaemonFeedbackRuntimeRegistrar {
                     runtime.source_observation_port(),
                 ));
                 publication.stage(RegisteredCallableCodeRuntime {
-                    authorization,
                     scope,
+                    authorization,
                 })?;
                 publication.stage(RegisteredFeedbackRuntime {
                     project_id,
@@ -441,8 +440,10 @@ impl DaemonFeedbackRuntimeRegistrar {
                     unavailable_cycle,
                 )))?;
                 #[cfg(any(test, feature = "test-helpers"))]
-                if let Some(gate) = publication_gate {
-                    gate.wait().await;
+                if let Some(gate) = publication_gate
+                    && !gate.wait().await
+                {
+                    return Err(DaemonFeedbackRuntimeRegistrationError::CyclePublication);
                 }
                 Ok((publication, publications))
             })

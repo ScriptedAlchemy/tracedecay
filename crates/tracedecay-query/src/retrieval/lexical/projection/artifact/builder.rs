@@ -2337,7 +2337,7 @@ fn prepare_term_insert_plan<'a>(
     }
     for run in entries.chunks_mut(TERM_INSERT_SORT_RUN_ROWS) {
         checkpoint(control)?;
-        run.sort_unstable_by(|left, right| left.key().cmp(&right.key()));
+        run.sort_unstable_by_key(PreparedTermInsertRefV1::key);
         checkpoint(control)?;
     }
     checkpoint(control)?;

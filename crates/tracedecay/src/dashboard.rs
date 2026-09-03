@@ -28,7 +28,7 @@ pub use tracedecay_dashboard_api::contract_schema;
 #[cfg(feature = "test-transport")]
 #[doc(hidden)]
 pub use tracedecay_dashboard_api::{
-    DashboardHostAdmissionTestAuthorityV1, DashboardTestProjectGraphsV1,
+    DashboardHostAdmissionTestAuthorityV1, DashboardTestEndpointV1, DashboardTestProjectGraphsV1,
     run_until_shutdown_for_tests_with_host_admission,
 };
 

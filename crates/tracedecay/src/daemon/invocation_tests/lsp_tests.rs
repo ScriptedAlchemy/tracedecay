@@ -24,7 +24,12 @@ async fn production_lsp_bridge_retries_only_an_unconsumed_full_queue_frame() {
     let service = DaemonInvocationService::default();
     let project_root = PathBuf::from("/bridge-backpressure");
     DaemonLspOwnerRegistrar::new(&service)
-        .register_factory(project_root.clone(), unavailable_lsp_session_factory())
+        .register_factory_for_project(
+            project_root.clone(),
+            tracedecay_domain::UserProfileId::new("profile.test.lsp").expect("test LSP profile"),
+            tracedecay_domain::ProjectId::new("project.test.lsp").expect("test LSP project"),
+            unavailable_lsp_session_factory(),
+        )
         .await
         .expect("register LSP owner");
     let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));

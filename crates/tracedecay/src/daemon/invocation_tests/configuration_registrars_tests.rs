@@ -79,7 +79,8 @@ fn direct_configuration_grants_reject_foreign_caller_selected_layers() {
             exact_collection.clone(),
         ],
         UtcMicros(100),
-    );
+    )
+    .expect("test configuration grant authority");
     let expected_revision =
         ConfigurationRevisionId::new("configuration.revision.exact").expect("revision");
 

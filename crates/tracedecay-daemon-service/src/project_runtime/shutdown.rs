@@ -263,7 +263,7 @@ impl ProjectRuntimeRegistryV1 {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .take()
             {
-                drain_waiting.send(()).expect("drain-waiting receiver");
+                let _ = drain_waiting.send(());
             }
             let mut current_version = version
                 .lock()
