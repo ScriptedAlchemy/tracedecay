@@ -4,19 +4,9 @@
 //! project-independent calls so a client can hand shake without paying for a
 //! project admission.
 
-use std::sync::OnceLock;
-
-use tracedecay_mcp::ToolDefinition;
-
 use super::*;
 
-static WARMING_BOOTSTRAP_TOOLS: OnceLock<Vec<ToolDefinition>> = OnceLock::new();
-
-#[hotpath::measure(label = "daemon.bootstrap.warming_catalog")]
-fn warming_bootstrap_tool_definitions() -> Result<Vec<ToolDefinition>> {
-    if let Some(definitions) = WARMING_BOOTSTRAP_TOOLS.get() {
-        return Ok(definitions.clone());
-    }
+fn bootstrap_tools_list_payload(node_count: Option<u64>, budget: u8) -> Result<serde_json::Value> {
     let profile_id = tracedecay_tool_catalog::ProfileId::new(
         tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID,
     )
@@ -27,8 +17,9 @@ fn warming_bootstrap_tool_definitions() -> Result<Vec<ToolDefinition>> {
         default_catalog_discovery_authority().map_err(|error| TraceDecayError::Config {
             message: format!("MCP bootstrap catalog authority is unavailable: {error}"),
         })?;
-    let definitions = get_catalog_filtered_tool_definitions_with_warming_budget(
-        explore_call_budget(0),
+    catalog_discovery_tools_list_payload(
+        node_count,
+        budget,
         &profile_id,
         &authority,
         &project_catalog_discovery_scope(),
@@ -36,20 +27,16 @@ fn warming_bootstrap_tool_definitions() -> Result<Vec<ToolDefinition>> {
     )
     .map_err(|error| TraceDecayError::Config {
         message: format!("MCP bootstrap catalog is unavailable: {error}"),
-    })?;
-    if WARMING_BOOTSTRAP_TOOLS.set(definitions.clone()).is_ok() {
-        return Ok(definitions);
-    }
-    WARMING_BOOTSTRAP_TOOLS
-        .get()
-        .cloned()
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "MCP bootstrap catalog cache lost a concurrent publication".to_owned(),
-        })
+    })
+}
+
+#[hotpath::measure(label = "daemon.bootstrap.warming_catalog")]
+fn warming_bootstrap_tools_list_payload() -> Result<serde_json::Value> {
+    bootstrap_tools_list_payload(None, explore_call_budget(0))
 }
 
 pub(super) fn prewarm_daemon_bootstrap_catalog() -> Result<()> {
-    warming_bootstrap_tool_definitions().map(|_| ())
+    warming_bootstrap_tools_list_payload().map(|_| ())
 }
 
 #[hotpath::measure(label = "daemon.bootstrap.initialize_route", future = true)]
@@ -126,49 +113,20 @@ pub(super) fn daemon_bootstrap_response(
             response
         })),
         McpMethod::InitializedAck => Some(None),
-        McpMethod::ToolsList => Some(request.id.clone().map(|id| match project_node_count {
-            None => match warming_bootstrap_tool_definitions() {
-                Ok(tools) => JsonRpcResponse::success(id, json!({ "tools": tools })),
+        McpMethod::ToolsList => Some(request.id.clone().map(|id| {
+            let budget =
+                project_node_count.map_or_else(|| explore_call_budget(0), explore_call_budget);
+            let payload = hotpath::measure_block!(
+                "daemon.bootstrap.catalog",
+                bootstrap_tools_list_payload(project_node_count, budget)
+            );
+            match payload {
+                Ok(payload) => JsonRpcResponse::success(id, payload),
                 Err(_) => JsonRpcResponse::error(
                     id,
                     ErrorCode::InternalError,
                     "MCP catalog discovery unavailable".to_owned(),
                 ),
-            },
-            Some(node_count) => {
-                let budget = explore_call_budget(node_count);
-                let profile_id = tracedecay_tool_catalog::ProfileId::new(
-                    tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID,
-                );
-                let authority = default_catalog_discovery_authority();
-                match (profile_id, authority) {
-                    (Ok(profile_id), Ok(authority)) => {
-                        let definitions = hotpath::measure_block!(
-                            "daemon.bootstrap.catalog",
-                            get_catalog_filtered_tool_definitions_with_budget(
-                                node_count,
-                                budget,
-                                &profile_id,
-                                &authority,
-                                &project_catalog_discovery_scope(),
-                                ToolRegistryMode::HostAvailable
-                            )
-                        );
-                        match definitions {
-                            Ok(tools) => JsonRpcResponse::success(id, json!({ "tools": tools })),
-                            Err(_) => JsonRpcResponse::error(
-                                id,
-                                ErrorCode::InternalError,
-                                "MCP catalog discovery unavailable".to_owned(),
-                            ),
-                        }
-                    }
-                    _ => JsonRpcResponse::error(
-                        id,
-                        ErrorCode::InternalError,
-                        "MCP catalog discovery unavailable".to_owned(),
-                    ),
-                }
             }
         })),
         _ => None,
