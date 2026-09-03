@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 
 use tracedecay_domain::canonical_sha256;
@@ -152,6 +152,39 @@ impl RegisteredGlobalDb {
             .await
             .map(|row| row.is_some())
             .map_err(|error| dashboard_error("read code project registration", error))
+    }
+
+    /// Resolves a bounded set of project IDs through one registry snapshot and
+    /// one membership query.
+    #[hotpath::measure(future = true, label = "global_db.registered.dashboard.membership")]
+    pub async fn registered_code_project_ids(
+        &self,
+        project_ids: &[String],
+    ) -> Result<HashSet<String>> {
+        if project_ids.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let snapshot = self
+            .dashboard_snapshot("read code project registration membership")
+            .await?;
+        let mut rows = query_ids(
+            &snapshot,
+            "SELECT project_id
+             FROM code_projects
+             WHERE project_id IN ({})",
+            project_ids,
+            "read code project registration membership",
+        )
+        .await?;
+        let mut registered = HashSet::with_capacity(project_ids.len());
+        while let Some(row) = rows.next().await.map_err(|error| {
+            dashboard_error("read code project registration membership row", error)
+        })? {
+            registered.insert(row.get::<String>(0).map_err(|error| {
+                dashboard_error("decode code project registration membership", error)
+            })?);
+        }
+        Ok(registered)
     }
 
     #[hotpath::measure(future = true, label = "global_db.registered.dashboard.context")]
