@@ -1144,7 +1144,7 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         scope: &tracedecay_application::ResolvedScope,
     ) -> Option<Arc<super::CodeIndexActivationV1>> {
-        let activation = {
+        {
             let mut activations = self
                 .activations
                 .lock()
@@ -1159,8 +1159,7 @@ impl CodeIndexSchedulerRegistryV1 {
             } else {
                 activation
             }
-        };
-        activation
+        }
     }
 
     pub fn automatic_admission_for_scope(
