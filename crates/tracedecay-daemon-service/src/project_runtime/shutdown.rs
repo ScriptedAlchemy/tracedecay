@@ -144,10 +144,10 @@ impl ProjectRuntimeRegistryV1 {
     /// woken tasks are scheduled, never polled inline — so no cancelled owner
     /// can re-enter this lock while the guard is held.
     ///
-    /// No owner can slip past the sweep. `register_or_reconcile` tests
-    /// `closed` and mounts the component under one continuously-held guard on
-    /// this same map, so a concurrent registrar either takes the lock first
-    /// and is swept here, or takes it after and is refused.
+    /// No owner can slip past the sweep. `register_or_reconcile` rechecks
+    /// `closed` while committing its exact reservation under this same map
+    /// lock, so a concurrent registrar either commits first and is swept here,
+    /// or observes closed admission and rolls its reservation back.
     fn cancel_retained_background_recovery(&self) {
         for runtime in self.lock_runtimes().values() {
             runtime.cancel_background_recovery();
