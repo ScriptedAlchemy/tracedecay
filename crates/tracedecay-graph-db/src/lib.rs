@@ -1,5 +1,7 @@
+mod adjacency_id_index;
 mod backup;
 mod bundle;
+mod epoch_cache;
 mod error;
 mod generation;
 mod generation_runtime;
@@ -144,6 +146,28 @@ pub struct GraphDbVerificationCounters {
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn take_graph_db_verification_counters() -> GraphDbVerificationCounters {
     hotpath_observe::take_verification_counters()
+}
+
+/// Fan-out decode, quarantine-lock, and epoch-cache work on **this thread**
+/// since the last take.
+///
+/// Used by operation-count tests that prove ID-only paging stays O(page +
+/// frontier) instead of hydrating every property and re-locking quarantine
+/// on every edge.
+#[cfg(any(test, feature = "test-helpers"))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GraphDbTraversalCounters {
+    pub property_decodes: u64,
+    pub relation_identity_decodes: u64,
+    pub quarantine_lock_acquisitions: u64,
+    pub label_universe_scans: u64,
+    pub adjacency_index_builds: u64,
+    pub adjacency_index_hits: u64,
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn take_graph_db_traversal_counters() -> GraphDbTraversalCounters {
+    hotpath_observe::take_traversal_counters()
 }
 pub use traversal::{
     GraphRelationTarget, GraphTraversalDirection, RelationFanoutOverflow, TraversalRequest,
