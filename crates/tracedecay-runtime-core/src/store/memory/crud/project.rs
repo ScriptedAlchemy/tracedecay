@@ -48,7 +48,6 @@ pub(in crate::store::memory) async fn list_project_memory_facts_controlled_tx(
     list_project_memory_facts_inner_tx(transaction, query, Some(read_control)).await
 }
 
-#[hotpath::measure(label = "runtime_core.memory.project_list")]
 async fn list_project_memory_facts_inner_tx(
     transaction: &Transaction<'_>,
     query: &ProjectMemoryFactListQueryV1,
@@ -255,7 +254,6 @@ pub(in crate::store::memory) async fn find_project_memory_fact_by_content_digest
         .await
 }
 
-#[hotpath::measure(label = "runtime_core.memory.project_find_digest")]
 async fn find_project_memory_fact_by_content_digest_inner_tx(
     transaction: &Transaction<'_>,
     query: &ProjectMemoryFactContentDigestQueryV1,
@@ -620,7 +618,6 @@ pub(in crate::store::memory) async fn commit_batch_tx(
     }
 }
 
-#[hotpath::measure(label = "runtime_core.memory.active_fact_count")]
 pub(super) async fn active_fact_count_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,

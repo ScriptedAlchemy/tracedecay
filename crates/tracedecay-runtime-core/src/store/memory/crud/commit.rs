@@ -55,7 +55,6 @@ fn assertion_header_json(assertion: &FactAssertionV1) -> FactStoreResult<String>
     )
 }
 
-#[hotpath::measure(label = "runtime_core.memory.commit_fact")]
 pub(super) async fn commit_fact_tx(
     transaction: &Transaction<'_>,
     batch: &FactWriteBatch,
@@ -116,7 +115,6 @@ pub(super) async fn commit_fact_tx(
     })
 }
 
-#[hotpath::measure(label = "runtime_core.memory.last_event")]
 pub(super) async fn current_last_event(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
@@ -144,7 +142,6 @@ pub(super) async fn current_last_event(
     )?)?))
 }
 
-#[hotpath::measure(label = "runtime_core.memory.append_order_check")]
 async fn ensure_append_order(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
@@ -184,7 +181,6 @@ async fn ensure_append_order(
     Ok(())
 }
 
-#[hotpath::measure(label = "runtime_core.memory.replay_check")]
 async fn batch_is_exact_replay(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
@@ -215,7 +211,6 @@ async fn batch_is_exact_replay(
     Ok(true)
 }
 
-#[hotpath::measure(label = "runtime_core.memory.collision_check")]
 async fn batch_identity_collision(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
@@ -307,7 +302,6 @@ async fn fact_identity_matches(
 /// probe binds, kept clear of `SQLite`'s default variable ceiling.
 const REFERENCED_ANCHOR_BATCH: usize = 500;
 
-#[hotpath::measure(label = "runtime_core.memory.anchors_ensure")]
 async fn ensure_referenced_anchors(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
@@ -360,7 +354,6 @@ async fn ensure_referenced_anchors(
     Ok(())
 }
 
-#[hotpath::measure(label = "runtime_core.memory.anchor_upsert")]
 async fn insert_or_verify_anchor(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
@@ -479,7 +472,6 @@ pub(super) async fn anchor_matches(
     Ok(stored == expected)
 }
 
-#[hotpath::measure(label = "runtime_core.memory.assertion_insert")]
 async fn insert_assertion(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,

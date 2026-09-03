@@ -16,7 +16,6 @@ use tracedecay_domain::{
 use tracedecay_store::{
     FactCommitOutcome, FactCommitReceipt, FactStoreError, FactStoreResult, FactWriteBatch,
 };
-#[hotpath::measure(label = "runtime_core.memory.purged_projection_check")]
 pub(super) async fn payload_is_purged_projection(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
@@ -56,7 +55,6 @@ pub(super) async fn payload_is_purged_projection(
     ))
 }
 
-#[hotpath::measure(label = "runtime_core.memory.event_refs_ensure")]
 pub(super) async fn ensure_event_references(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
@@ -217,7 +215,6 @@ async fn owned_fact_exists(
     .await
 }
 
-#[hotpath::measure(label = "runtime_core.memory.event_insert")]
 pub(super) async fn insert_event(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
@@ -351,7 +348,6 @@ impl Projection {
     }
 }
 
-#[hotpath::measure(label = "runtime_core.memory.projection_publish")]
 pub(super) async fn publish_current_projection(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
@@ -477,7 +473,6 @@ pub(in crate::store::memory) async fn load_current_projection(
     }))
 }
 
-#[hotpath::measure(label = "runtime_core.memory.receipt_outcome")]
 pub(super) async fn receipt_outcome(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
@@ -513,7 +508,6 @@ pub(super) async fn receipt_outcome(
     })
 }
 
-#[hotpath::measure(label = "runtime_core.memory.fact_identity_ensure")]
 pub(super) async fn ensure_fact_identity(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,

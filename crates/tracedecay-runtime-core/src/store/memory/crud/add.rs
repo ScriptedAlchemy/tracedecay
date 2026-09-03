@@ -61,7 +61,6 @@ fn classification_similarity(
     Ok(project_memory_millionths(similarity))
 }
 
-#[hotpath::measure(label = "runtime_core.memory.add_candidates")]
 async fn candidates_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
@@ -137,7 +136,6 @@ async fn candidates_tx(
     Ok(candidates)
 }
 
-#[hotpath::measure(label = "runtime_core.memory.add_classify")]
 pub(super) async fn classify_project_memory_add_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,

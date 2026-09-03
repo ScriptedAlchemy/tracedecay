@@ -188,7 +188,6 @@ fn project_memory_feedback_action(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "runtime_core.memory.feedback_history")]
 async fn project_memory_record_feedback_history_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
@@ -228,7 +227,6 @@ async fn project_memory_record_feedback_history_tx(
     Ok(())
 }
 
-#[hotpath::measure(label = "runtime_core.memory.replay_feedback")]
 async fn project_memory_replay_feedback_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
@@ -486,7 +484,6 @@ pub(in crate::store::memory) async fn inspect_project_memory_fact_controlled_tx(
     inspect_project_memory_fact_inner_tx(transaction, target, Some(read_control)).await
 }
 
-#[hotpath::measure(label = "runtime_core.memory.fact_inspect")]
 async fn inspect_project_memory_fact_inner_tx(
     transaction: &Transaction<'_>,
     target: &ProjectMemoryFactIdV1,
