@@ -392,12 +392,19 @@ fn retrieve_tool_schema_requires_handle_and_canonical_project_selector() {
     let properties = tool_properties(&tools, "tracedecay_retrieve");
 
     assert!(properties.contains_key("handle"));
+    assert!(properties.contains_key("offset"));
+    assert!(properties.contains_key("max_chars"));
     assert!(properties.contains_key("project_selector"));
     for alias in ["project_id", "project_path", "project_root", "root"] {
         assert!(!properties.contains_key(alias));
     }
     assert!(!properties.contains_key("retrieve_handle"));
     assert_eq!(retrieve.input_schema["required"], json!(["handle"]));
+    assert_eq!(properties["offset"]["default"], json!(0));
+    assert_eq!(
+        properties["max_chars"]["maximum"],
+        json!(tracedecay_mcp::MAX_RESPONSE_CHARS)
+    );
     assert_eq!(
         properties["project_selector"]["required"],
         json!(["project_id"])
