@@ -28,7 +28,7 @@ const RECOVERY_PAGE_LIMIT: u32 = 32;
 /// A restart scan provides prompt recovery; this interval is only a backstop
 /// for writes committed by older processes that could not emit this process's
 /// in-memory signal.
-const SAFETY_INTERVAL: Duration = Duration::from_secs(60);
+const SAFETY_INTERVAL: Duration = Duration::from_mins(1);
 
 enum RecoveryFailureV1 {
     Database(tracedecay_domain::errors::TraceDecayError),

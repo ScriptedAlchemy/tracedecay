@@ -4,7 +4,7 @@ use std::time::Duration;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
 const INITIAL_RETRY_DELAY: Duration = Duration::from_secs(5);
-const MAX_RETRY_DELAY: Duration = Duration::from_secs(300);
+const MAX_RETRY_DELAY: Duration = Duration::from_mins(5);
 const WARNING_EVERY_FAILURES: u64 = 10;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,7 +46,9 @@ impl RecoveryFailureTrackerV1 {
             self.last_warned_at = 0;
             self.next_delay = INITIAL_RETRY_DELAY;
         }
-        if self.consecutive == 1 || self.consecutive % WARNING_EVERY_FAILURES == 0 {
+        if self.consecutive == 1
+            || self.consecutive.is_multiple_of(WARNING_EVERY_FAILURES)
+        {
             let suppressed = self
                 .consecutive
                 .saturating_sub(self.last_warned_at)
@@ -198,8 +200,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn idle_recovery_scans_only_at_mount_and_safety_intervals() {
         const PROJECT_COUNTS: [usize; 3] = [1, 10, 100];
-        const SAFETY_INTERVAL: Duration = Duration::from_secs(60);
-        const WINDOW: Duration = Duration::from_secs(180);
+        const SAFETY_INTERVAL: Duration = Duration::from_mins(1);
+        const WINDOW: Duration = Duration::from_mins(3);
 
         for project_count in PROJECT_COUNTS {
             let scans = Arc::new(AtomicUsize::new(0));
@@ -262,7 +264,7 @@ mod tests {
         let task = tokio::spawn(run_recovery_loop(
             signal.subscribe(),
             cancellation.clone(),
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             "fixture signalled recovery",
             move |trigger| {
                 let scans = Arc::clone(&task_scans);
@@ -299,7 +301,7 @@ mod tests {
         let first = tokio::spawn(run_recovery_loop(
             first_signal.subscribe(),
             first_cancellation.clone(),
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             "fixture restart recovery",
             move |_| {
                 let scans = Arc::clone(&first_scans);
@@ -322,7 +324,7 @@ mod tests {
         let second = tokio::spawn(run_recovery_loop(
             second_signal.subscribe(),
             second_cancellation.clone(),
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             "fixture restart recovery",
             move |_| {
                 let scans = Arc::clone(&second_scans);
@@ -349,7 +351,7 @@ mod tests {
         let task = tokio::spawn(run_recovery_loop(
             signal.subscribe(),
             cancellation.clone(),
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             "fixture failing recovery",
             move |_| {
                 let attempts = Arc::clone(&task_attempts);
@@ -373,10 +375,10 @@ mod tests {
             elapsed += retry;
             tokio::task::yield_now().await;
             assert_eq!(attempts.load(Ordering::SeqCst), expected);
-            retry = retry.saturating_mul(2).min(Duration::from_secs(300));
+            retry = retry.saturating_mul(2).min(Duration::from_mins(5));
         }
         assert!(
-            elapsed >= Duration::from_secs(300),
+            elapsed >= Duration::from_mins(5),
             "repeated failures must not spin"
         );
 
