@@ -7,7 +7,6 @@
 use std::path::PathBuf;
 use std::sync::{Arc, atomic::AtomicBool};
 
-use tracedecay_code_index_runtime::CodeGraphSeatRuntimePortV1;
 use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV1;
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::{

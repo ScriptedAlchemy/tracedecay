@@ -1356,10 +1356,6 @@ mod cost_probe {
             .apply_generation_unverified_with_digest(Arc::new(manifest), &expected, check)
             .unwrap();
         let stage_s = started.elapsed().as_secs_f64();
-        // Capture the whole disposable store directory here, before the
-        // sealed artifact exists, so Grafeo sidecars/WAL bytes are included.
-        let staging_bytes = directory_bytes(temp.path());
-
         // The serial full proof, exactly as every open before the parallel
         // pipeline streamed it.
         let started = Instant::now();

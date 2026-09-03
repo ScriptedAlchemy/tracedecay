@@ -24,22 +24,6 @@ impl DaemonLspOwnerRegistrar {
 
     #[cfg(any(test, feature = "test-helpers"))]
     #[hotpath::skip]
-    pub async fn register_factory(
-        &self,
-        project_root: PathBuf,
-        factory: Arc<DaemonLspSessionFactory>,
-    ) -> Result<(), ProjectRuntimeRegistryError> {
-        self.register_factory_for_project(
-            project_root,
-            UserProfileId::new("profile.test.lsp").expect("test LSP profile"),
-            ProjectId::new("project.test.lsp").expect("test LSP project"),
-            factory,
-        )
-        .await
-    }
-
-    #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::skip]
     pub async fn register_factory_for_project(
         &self,
         project_root: PathBuf,

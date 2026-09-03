@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use tracedecay_runtime_core::storage::PrivateStoreIo;

@@ -546,9 +546,11 @@ fn reverted_dirty_file_is_recaptured_from_clean_content() {
 
 #[test]
 fn partitioned_publication_reuses_unchanged_file_segments() {
-    let unchanged = (0..256)
-        .map(|index| format!("pub fn unchanged_{index}() -> usize {{ {index} }}\n"))
-        .collect::<String>();
+    let unchanged = (0..256).fold(String::new(), |mut source, index| {
+        writeln!(source, "pub fn unchanged_{index}() -> usize {{ {index} }}")
+            .expect("write generated fixture source");
+        source
+    });
     let fixture = GitFixture::new(&[
         ("src/large.rs", unchanged.as_str()),
         ("src/edited.rs", "pub fn edited() -> usize { 1 }\n"),

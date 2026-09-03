@@ -3278,16 +3278,48 @@ pub fn process_runtime_generation(process_run_id: &str) -> Option<u64> {
     Some((raw & i64::MAX as u64).max(1))
 }
 
-async fn open_runtime(
-    registry: &StoreRuntimeRegistry,
-    resolver: &LocalStoreRuntimeResolverV1,
+struct StoreRuntimeOpenSpec {
     shard_id: StoreShardIdV1,
     incarnation: StoreIncarnationV1,
     profile_pin: Option<ProfileAuthorityPin>,
     database_authority: Option<DatabaseAuthority>,
     initialize_if_missing: bool,
     operation: &'static str,
+}
+
+impl StoreRuntimeOpenSpec {
+    fn new(
+        shard_id: StoreShardIdV1,
+        incarnation: StoreIncarnationV1,
+        profile_pin: Option<ProfileAuthorityPin>,
+        database_authority: Option<DatabaseAuthority>,
+        initialize_if_missing: bool,
+        operation: &'static str,
+    ) -> Self {
+        Self {
+            shard_id,
+            incarnation,
+            profile_pin,
+            database_authority,
+            initialize_if_missing,
+            operation,
+        }
+    }
+}
+
+async fn open_runtime(
+    registry: &StoreRuntimeRegistry,
+    resolver: &LocalStoreRuntimeResolverV1,
+    spec: StoreRuntimeOpenSpec,
 ) -> Result<StoreRuntimeClientLease> {
+    let StoreRuntimeOpenSpec {
+        shard_id,
+        incarnation,
+        profile_pin,
+        database_authority,
+        initialize_if_missing,
+        operation,
+    } = spec;
     open_runtime_with_presence(
         registry,
         resolver,

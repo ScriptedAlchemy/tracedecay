@@ -53,11 +53,13 @@ impl DaemonSessionSyncService {
         self.persist_terminal(
             context,
             alias_key,
-            completion.termination,
-            completion.stats,
-            completion.coverage,
-            completion.source_frontiers,
-            completion.failure_codes,
+            SessionSyncTerminalMaterial {
+                termination: completion.termination,
+                stats: completion.stats,
+                coverage: completion.coverage,
+                source_frontiers: completion.source_frontiers,
+                failure_codes: completion.failure_codes,
+            },
         )
         .await
         .map(Some)
@@ -105,13 +107,16 @@ impl DaemonSessionSyncService {
                                         .persist_terminal(
                                             &context,
                                             &key,
-                                            OperationTermination::Unavailable,
-                                            journal.stats.clone(),
-                                            journal.coverage.clone(),
-                                            journal.source_frontiers.clone(),
-                                            vec![
-                                                "session_sync_coalesced_journal_invalid".to_owned(),
-                                            ],
+                                            SessionSyncTerminalMaterial {
+                                                termination: OperationTermination::Unavailable,
+                                                stats: journal.stats.clone(),
+                                                coverage: journal.coverage.clone(),
+                                                source_frontiers: journal.source_frontiers.clone(),
+                                                failure_codes: vec![
+                                                    "session_sync_coalesced_journal_invalid"
+                                                        .to_owned(),
+                                                ],
+                                            },
                                         )
                                         .await;
                                     return;
@@ -122,11 +127,13 @@ impl DaemonSessionSyncService {
                                     .persist_terminal(
                                         &context,
                                         &key,
-                                        completion.termination,
-                                        completion.stats,
-                                        completion.coverage,
-                                        completion.source_frontiers,
-                                        completion.failure_codes,
+                                        SessionSyncTerminalMaterial {
+                                            termination: completion.termination,
+                                            stats: completion.stats,
+                                            coverage: completion.coverage,
+                                            source_frontiers: completion.source_frontiers,
+                                            failure_codes: completion.failure_codes,
+                                        },
                                     )
                                     .await;
                                 return;
@@ -153,11 +160,15 @@ impl DaemonSessionSyncService {
                                 .persist_terminal(
                                     &context,
                                     &key,
-                                    OperationTermination::Unavailable,
-                                    journal.stats.clone(),
-                                    journal.coverage.clone(),
-                                    journal.source_frontiers.clone(),
-                                    vec!["session_sync_coalesced_journal_missing".to_owned()],
+                                    SessionSyncTerminalMaterial {
+                                        termination: OperationTermination::Unavailable,
+                                        stats: journal.stats.clone(),
+                                        coverage: journal.coverage.clone(),
+                                        source_frontiers: journal.source_frontiers.clone(),
+                                        failure_codes: vec![
+                                            "session_sync_coalesced_journal_missing".to_owned(),
+                                        ],
+                                    },
                                 )
                                 .await;
                             return;
@@ -168,11 +179,15 @@ impl DaemonSessionSyncService {
                                 .persist_terminal(
                                     &context,
                                     &key,
-                                    OperationTermination::Unavailable,
-                                    journal.stats.clone(),
-                                    journal.coverage.clone(),
-                                    journal.source_frontiers.clone(),
-                                    vec!["session_sync_coalesced_journal_read_failed".to_owned()],
+                                    SessionSyncTerminalMaterial {
+                                        termination: OperationTermination::Unavailable,
+                                        stats: journal.stats.clone(),
+                                        coverage: journal.coverage.clone(),
+                                        source_frontiers: journal.source_frontiers.clone(),
+                                        failure_codes: vec![
+                                            "session_sync_coalesced_journal_read_failed".to_owned(),
+                                        ],
+                                    },
                                 )
                                 .await;
                             return;

@@ -50,6 +50,7 @@ const HOTPATH_PORTS: [u16; 2] = [6770, 6771];
 /// surface this suite exercises. Compile-time constants on purpose: a label
 /// edit in production code must show up here as a deliberate diff, and the
 /// feature-on report assertion fails if a probe disappears.
+#[cfg(feature = "hotpath")]
 const AUTHORITY_LABELS: [&str; 4] = [
     "runtime_core.git.repository_discover",
     "runtime_core.git.references",

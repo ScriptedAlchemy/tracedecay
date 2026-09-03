@@ -708,7 +708,7 @@ fn systemd_escape_exec_argument(value: &str) -> String {
 /// systemd.syntax(7)). Arguments without those characters stay bare, keeping
 /// the rendered unit byte-identical to previously installed units; arguments
 /// that need quoting use the escaped form the quote-aware
-/// `unit_file::systemd_exec_tokens` parser round-trips for every ExecStart
+/// `unit_file::systemd_exec_tokens` parser round-trips for every `ExecStart`
 /// read-back (the socket path and the Remote Brain TLS paths alike).
 fn systemd_quote_exec_argument_if_needed(value: &str) -> String {
     let needs_quoting = value
@@ -934,11 +934,14 @@ pub fn install_service_under_lease(
     #[cfg(not(windows))]
     let new_windows_task = false;
     let operation_result = (|| {
+        #[cfg(windows)]
         let materialized_spec = if matches!(runner, ServiceRunner::WindowsTask) {
             windows_task::materialize_service_spec_after_quiescence(spec)?
         } else {
             spec.clone()
         };
+        #[cfg(not(windows))]
+        let materialized_spec = spec.clone();
         let service_path = write_service_unit(&materialized_spec)?;
         runner.install(
             &service_path,
@@ -979,11 +982,14 @@ fn refresh_service_with_runner(
             });
         }
     }
+    #[cfg(windows)]
     let materialized_spec = if matches!(runner, ServiceRunner::WindowsTask) {
         windows_task::materialize_service_spec_after_quiescence(spec)?
     } else {
         spec.clone()
     };
+    #[cfg(not(windows))]
+    let materialized_spec = spec.clone();
     let service_path = write_service_unit(&materialized_spec)?;
     runner.refresh(
         &service_path,
@@ -1325,7 +1331,7 @@ pub fn wait_for_installed_service_state(
     )
 }
 
-pub(super) fn wait_for_installed_service_state_with_runner(
+fn wait_for_installed_service_state_with_runner(
     runner: &ServiceRunner,
     expected: DaemonServiceState,
     expected_version: &str,

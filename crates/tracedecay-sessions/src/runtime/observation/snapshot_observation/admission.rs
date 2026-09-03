@@ -688,7 +688,7 @@ mod tests {
                 "provider": "test",
                 "session_id": "session-window",
                 "message_id": native_record_id,
-                "role": if order % 2 == 0 { "user" } else { "assistant" },
+                "role": if order.is_multiple_of(2) { "user" } else { "assistant" },
                 "ordinal": order,
                 "text": format!("windowed snapshot record {order}")
             }))

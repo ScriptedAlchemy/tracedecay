@@ -64,7 +64,7 @@ fn graph_handlers_that_await_query() -> &'static [&'static str] {
     ]
 }
 
-fn lower_level_ports_without_query<'a>(cg: &'a TraceDecay) -> ToolCallRegistryOptions<'a> {
+fn lower_level_ports_without_query(cg: &TraceDecay) -> ToolCallRegistryOptions<'_> {
     let mut options = verified_graph_options(cg, ToolCallRegistryOptions::default());
     assert!(
         options.code_graph_read_admission_port.is_some(),

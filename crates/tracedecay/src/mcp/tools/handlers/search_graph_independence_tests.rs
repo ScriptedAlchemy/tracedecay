@@ -472,7 +472,7 @@ fn stale_lexical_search() -> crate::mcp::server::CodeIndexSearchOutcomeV1 {
             );
             crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(complete)
         }
-        other => other,
+        other @ crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(_) => other,
     }
 }
 

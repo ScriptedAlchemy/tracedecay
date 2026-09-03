@@ -30,7 +30,12 @@ async fn project_quiescence_denies_semantic_and_git_cached_routes() {
     let service = DaemonInvocationService::default();
     let project_root = PathBuf::from("/project-quiescence-dispatch");
     DaemonLspOwnerRegistrar::new(&service)
-        .register_factory(project_root.clone(), unavailable_lsp_session_factory())
+        .register_factory_for_project(
+            project_root.clone(),
+            UserProfileId::new("profile.test.lsp").expect("test LSP profile"),
+            ProjectId::new("project.test.lsp").expect("test LSP project"),
+            unavailable_lsp_session_factory(),
+        )
         .await
         .expect("register project runtime");
     let quiescence = service

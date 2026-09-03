@@ -454,7 +454,7 @@ mod tests {
             auto_download: false,
             active_profile: Some(selection("hybrid-conservative", 'b')),
             rollback_profile: None,
-            resources: Default::default(),
+            resources: tracedecay_semantic_contracts::SemanticResourceCeilings::default(),
         };
         let composed = compose_activated_semantic_config(
             &current,
@@ -492,7 +492,7 @@ mod tests {
             auto_download: false,
             active_profile: Some(selection("hybrid-conservative", 'c')),
             rollback_profile: None,
-            resources: Default::default(),
+            resources: tracedecay_semantic_contracts::SemanticResourceCeilings::default(),
         };
         let composed = compose_activated_semantic_config(
             &current,
@@ -516,7 +516,7 @@ mod tests {
             auto_download: true,
             active_profile: None,
             rollback_profile: Some(selection("hybrid-aggressive", 'd')),
-            resources: Default::default(),
+            resources: tracedecay_semantic_contracts::SemanticResourceCeilings::default(),
         };
         let composed = compose_activated_semantic_config(
             &current,
