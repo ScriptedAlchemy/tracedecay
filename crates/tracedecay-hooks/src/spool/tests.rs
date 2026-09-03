@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::{Seek, SeekFrom, Write};
 use std::process::Command;
 
 use super::*;
@@ -276,6 +276,7 @@ fn append_ack_compact_and_reopen_are_exact() {
     drop(spool);
     let (spool, report) = HookSpoolV1::open(&root.0, config(), UtcMicros(20)).unwrap();
     assert_eq!(report.committed_through, 2);
+    assert_eq!(report.scanned_records, 0);
     assert!(spool.pending.is_empty());
     assert_eq!(fs::metadata(records_path(&root.0)).unwrap().len(), 0);
 }
@@ -291,7 +292,8 @@ fn identical_event_id_and_envelope_reuses_pending_record_after_reopen() {
         .unwrap();
     let physical_len = spool.physical_len;
     drop(spool);
-    let (mut spool, _) = HookSpoolV1::open(&root.0, config, UtcMicros(11)).unwrap();
+    let (mut spool, report) = HookSpoolV1::open(&root.0, config, UtcMicros(11)).unwrap();
+    assert_eq!(report.scanned_records, 1);
 
     let duplicate = spool
         .append(envelope(1, 9), &binding(), UtcMicros(11))
@@ -313,7 +315,8 @@ fn reused_event_id_with_different_envelope_is_rejected_after_reopen() {
         .append(envelope(1, 9), &binding(), UtcMicros(10))
         .unwrap();
     drop(spool);
-    let (mut spool, _) = HookSpoolV1::open(&root.0, config, UtcMicros(11)).unwrap();
+    let (mut spool, report) = HookSpoolV1::open(&root.0, config, UtcMicros(11)).unwrap();
+    assert_eq!(report.scanned_records, 1);
     let mut conflicting = envelope(1, 9);
     conflicting.observed_at = UtcMicros(11);
 
@@ -325,6 +328,156 @@ fn reused_event_id_with_different_envelope_is_rejected_after_reopen() {
     );
     assert_eq!(spool.pending.len(), 1);
     assert_eq!(spool.meta.next_sequence, 2);
+}
+
+#[test]
+fn checkpoint_reopen_scans_only_the_appended_suffix() {
+    let root = TestDir::new("checkpoint-suffix");
+    let (mut spool, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(10)).unwrap();
+    for event in 1..=4 {
+        spool
+            .append(envelope(event, event + 8), &binding(), UtcMicros(10))
+            .unwrap();
+    }
+    drop(spool);
+
+    let (mut spool, first_reopen) = HookSpoolV1::open(&root.0, config(), UtcMicros(11)).unwrap();
+    assert_eq!(first_reopen.scanned_records, 4);
+    spool
+        .append(envelope(5, 13), &binding(), UtcMicros(11))
+        .unwrap();
+    drop(spool);
+
+    let (spool, second_reopen) = HookSpoolV1::open(&root.0, config(), UtcMicros(12)).unwrap();
+    assert_eq!(second_reopen.pending_records, 5);
+    assert_eq!(
+        second_reopen.scanned_records, 1,
+        "reopen work must be proportional to the one appended suffix frame"
+    );
+    assert_eq!(spool.pending.len(), 5);
+    drop(spool);
+
+    let (restarted, restart_report) = HookSpoolV1::open(&root.0, config(), UtcMicros(13)).unwrap();
+    assert_eq!(restart_report.scanned_records, 0);
+    assert_eq!(restarted.pending.len(), 5);
+}
+
+#[test]
+fn checkpoint_corruption_falls_back_and_detects_the_corrupt_prefix() {
+    let root = TestDir::new("checkpoint-corrupt-prefix");
+    let (mut spool, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(10)).unwrap();
+    spool
+        .append(envelope(1, 9), &binding(), UtcMicros(10))
+        .unwrap();
+    spool
+        .append(envelope(2, 10), &binding(), UtcMicros(10))
+        .unwrap();
+    drop(spool);
+    let (spool, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(11)).unwrap();
+    drop(spool);
+
+    let mut records = std::fs::OpenOptions::new()
+        .write(true)
+        .open(records_path(&root.0))
+        .unwrap();
+    records.seek(SeekFrom::Start(70)).unwrap();
+    records.write_all(&[0xff]).unwrap();
+    records.sync_all().unwrap();
+    drop(records);
+
+    let (spool, report) = HookSpoolV1::open(&root.0, config(), UtcMicros(12)).unwrap();
+    assert_eq!(report.corrupted_at_offset, Some(0));
+    assert!(matches!(
+        spool.ensure_healthy(),
+        Err(HookSpoolError::Corrupted { at_offset: 0 })
+    ));
+}
+
+#[test]
+fn live_writer_never_attests_an_external_prefix_mutation() {
+    let root = TestDir::new("checkpoint-live-mutation");
+    let (mut spool, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(10)).unwrap();
+    spool
+        .append(envelope(1, 9), &binding(), UtcMicros(10))
+        .unwrap();
+    drop(spool);
+    let (mut spool, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(11)).unwrap();
+
+    let mut records = std::fs::OpenOptions::new()
+        .write(true)
+        .open(records_path(&root.0))
+        .unwrap();
+    records.seek(SeekFrom::Start(70)).unwrap();
+    records.write_all(&[0xff]).unwrap();
+    records.sync_all().unwrap();
+    drop(records);
+
+    assert_eq!(
+        spool
+            .append(envelope(2, 10), &binding(), UtcMicros(11))
+            .unwrap_err(),
+        HookSpoolError::MetadataCorrupted
+    );
+    drop(spool);
+    let (_, report) = HookSpoolV1::open(&root.0, config(), UtcMicros(12)).unwrap();
+    assert_eq!(report.corrupted_at_offset, Some(0));
+}
+
+#[test]
+fn torn_stale_and_replaced_checkpoints_never_skip_authoritative_scans() {
+    let root = TestDir::new("checkpoint-fail-closed");
+    let (mut spool, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(10)).unwrap();
+    spool
+        .append(envelope(1, 9), &binding(), UtcMicros(10))
+        .unwrap();
+    spool
+        .append(envelope(2, 10), &binding(), UtcMicros(10))
+        .unwrap();
+    drop(spool);
+    let (spool, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(11)).unwrap();
+    drop(spool);
+
+    fs::write(checkpoint_path(&root.0), b"{\"body\":").unwrap();
+    let (spool, torn_report) = HookSpoolV1::open(&root.0, config(), UtcMicros(12)).unwrap();
+    assert_eq!(torn_report.scanned_records, 2);
+    drop(spool);
+
+    let mut mismatched: serde_json::Value =
+        serde_json::from_slice(&fs::read(checkpoint_path(&root.0)).unwrap()).unwrap();
+    mismatched["checksum"][0] = serde_json::json!(255);
+    fs::write(
+        checkpoint_path(&root.0),
+        serde_json::to_vec(&mismatched).unwrap(),
+    )
+    .unwrap();
+    let (spool, mismatched_report) = HookSpoolV1::open(&root.0, config(), UtcMicros(13)).unwrap();
+    assert_eq!(mismatched_report.scanned_records, 2);
+    drop(spool);
+
+    let stale_checkpoint = fs::read(checkpoint_path(&root.0)).unwrap();
+    let (mut spool, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(14)).unwrap();
+    spool
+        .append(envelope(3, 11), &binding(), UtcMicros(14))
+        .unwrap();
+    drop(spool);
+    let (spool, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(15)).unwrap();
+    drop(spool);
+    let (mut spool, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(16)).unwrap();
+    spool
+        .append(envelope(4, 12), &binding(), UtcMicros(16))
+        .unwrap();
+    drop(spool);
+    fs::write(checkpoint_path(&root.0), stale_checkpoint).unwrap();
+    let (spool, stale_report) = HookSpoolV1::open(&root.0, config(), UtcMicros(17)).unwrap();
+    assert_eq!(stale_report.scanned_records, 4);
+    drop(spool);
+
+    let replacement = root.0.join("records-replacement.bin");
+    fs::write(&replacement, fs::read(records_path(&root.0)).unwrap()).unwrap();
+    fs::rename(&replacement, records_path(&root.0)).unwrap();
+    let (spool, replaced_report) = HookSpoolV1::open(&root.0, config(), UtcMicros(18)).unwrap();
+    assert_eq!(replaced_report.scanned_records, 4);
+    assert_eq!(spool.pending.len(), 4);
 }
 
 #[test]
@@ -382,6 +535,7 @@ fn matching_torn_append_tail_is_truncated_and_sequence_is_reused() {
     drop(output);
     drop(spool);
     let (mut spool, report) = HookSpoolV1::open(&root.0, config(), UtcMicros(20)).unwrap();
+    assert_eq!(report.scanned_records, 1);
     assert_eq!(report.truncated_partial_tail_bytes, torn_len as u64);
     assert_eq!(spool.meta.next_sequence, 2);
     assert_eq!(

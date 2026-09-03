@@ -28,6 +28,15 @@ mod tests;
 /// directory rather than a checkout path.
 pub const GIT_COMMON_DIR_ALIAS_PREFIX: &str = "git-common-dir:";
 
+pub(super) const PROJECT_REGISTRY_PERFORMANCE_INDEX_SQL: &str = "
+    CREATE INDEX IF NOT EXISTS idx_code_projects_last_seen_project
+        ON code_projects(last_seen_at DESC, project_id);
+    CREATE INDEX IF NOT EXISTS idx_code_projects_git_common_dir
+        ON code_projects(git_common_dir);
+    CREATE INDEX IF NOT EXISTS idx_code_projects_canonical_root_project
+        ON code_projects(canonical_root, project_id);
+";
+
 /// Which registry table a reap candidate belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -472,34 +481,64 @@ impl QueryExecutor for ProjectRegistryReadSnapshot {
     }
 }
 
+struct CodeProjectPathEvidence {
+    project_id: String,
+    canonical_root: String,
+    display_root: String,
+    platform: Option<String>,
+    bytes: Option<Vec<u8>>,
+    primary_root_last_seen_at: Option<i64>,
+    last_seen_at: i64,
+    current_aliases: Vec<String>,
+}
+
 pub(super) async fn list_registered_code_project_paths(
     db: &RegisteredGlobalDb,
     limit: usize,
 ) -> tracedecay_domain::errors::Result<Vec<PathBuf>> {
-    list_code_project_paths_from(ProjectRegistryDatabase(db), limit).await
+    let read = ProjectRegistryDatabase(db)
+        .read_snapshot("list native code project paths")
+        .await?;
+    list_code_project_paths_from(&read, limit).await
 }
 
 #[hotpath::measure(future = true, label = "global_db.registry.query.list")]
 async fn list_code_project_paths_from(
-    db: ProjectRegistryDatabase<'_>,
+    read: &impl QueryExecutor,
     limit: usize,
 ) -> tracedecay_domain::errors::Result<Vec<PathBuf>> {
     const OPERATION: &str = "list native code project paths";
 
     let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-    let read = db.read_snapshot(OPERATION).await?;
     let mut rows = read
         .query(
-            "SELECT project_id, canonical_root, display_root, primary_root_platform,
-                    primary_root_bytes, primary_root_last_seen_at, last_seen_at
-             FROM code_projects
-             ORDER BY last_seen_at DESC, project_id
-             LIMIT ?1",
+            "WITH recent_projects AS (
+                 SELECT project_id, canonical_root, display_root, primary_root_platform,
+                        primary_root_bytes, primary_root_last_seen_at, last_seen_at
+                 FROM code_projects
+                 ORDER BY last_seen_at DESC, project_id
+                 LIMIT ?1
+             )
+             SELECT recent_projects.project_id,
+                    recent_projects.canonical_root,
+                    recent_projects.display_root,
+                    recent_projects.primary_root_platform,
+                    recent_projects.primary_root_bytes,
+                    recent_projects.primary_root_last_seen_at,
+                    recent_projects.last_seen_at,
+                    project_aliases.alias_path
+             FROM recent_projects
+             LEFT JOIN project_aliases
+               ON project_aliases.project_id = recent_projects.project_id
+              AND project_aliases.last_seen_at = recent_projects.last_seen_at
+             ORDER BY recent_projects.last_seen_at DESC,
+                      recent_projects.project_id,
+                      project_aliases.alias_path",
             tracedecay_runtime_core::db::engine::params![limit],
         )
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    let mut roots = Vec::new();
+    let mut roots: Vec<CodeProjectPathEvidence> = Vec::new();
     while let Some(row) = rows
         .next()
         .await
@@ -526,7 +565,16 @@ async fn list_code_project_paths_from(
         let last_seen_at = row
             .get::<i64>(6)
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        roots.push((
+        let alias = row
+            .get::<Option<String>>(7)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        if let Some(current) = roots.last_mut()
+            && current.project_id == project_id
+        {
+            current.current_aliases.extend(alias);
+            continue;
+        }
+        roots.push(CodeProjectPathEvidence {
             project_id,
             canonical_root,
             display_root,
@@ -534,12 +582,13 @@ async fn list_code_project_paths_from(
             bytes,
             primary_root_last_seen_at,
             last_seen_at,
-        ));
+            current_aliases: alias.into_iter().collect(),
+        });
     }
     drop(rows);
 
     let mut paths = Vec::with_capacity(roots.len());
-    for (
+    for CodeProjectPathEvidence {
         project_id,
         canonical_root,
         display_root,
@@ -547,7 +596,8 @@ async fn list_code_project_paths_from(
         bytes,
         primary_root_last_seen_at,
         last_seen_at,
-    ) in roots
+        current_aliases,
+    } in roots
     {
         // One project's stale or malformed evidence must not make every
         // registered root unlistable — a listing consumer (transcript sweeps,
@@ -576,7 +626,7 @@ async fn list_code_project_paths_from(
                 let display_evidence = path.to_string_lossy();
                 if primary_last_seen != last_seen_at
                     || (display_evidence != canonical_root && display_evidence != display_root)
-                    || !project_alias_is_current(&read, &project_id, &path, last_seen_at).await?
+                    || !current_aliases.contains(&project_path_alias_key(&path))
                 {
                     skip("stale primary root");
                     continue;
@@ -599,28 +649,6 @@ async fn list_code_project_paths_from(
         paths.push(path);
     }
     Ok(paths)
-}
-
-async fn project_alias_is_current(
-    read: &impl QueryExecutor,
-    project_id: &str,
-    path: &Path,
-    last_seen_at: i64,
-) -> tracedecay_domain::errors::Result<bool> {
-    const OPERATION: &str = "list native code project paths";
-    let alias = project_path_alias_key(path);
-    let mut rows = read
-        .query(
-            "SELECT 1 FROM project_aliases
-             WHERE project_id = ?1 AND alias_path = ?2 AND last_seen_at = ?3",
-            tracedecay_runtime_core::db::engine::params![project_id, alias, last_seen_at],
-        )
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    rows.next()
-        .await
-        .map(|row| row.is_some())
-        .map_err(|error| global_db_operation_error(OPERATION, error))
 }
 
 pub(super) async fn list_registered_lossless_paths(
