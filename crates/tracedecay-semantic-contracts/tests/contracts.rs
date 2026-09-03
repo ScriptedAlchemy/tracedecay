@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 
 use tracedecay_domain::{
-    EmbeddingDeviceClassV1, EmbeddingMetricV1, EmbeddingNormalizationV1, EmbeddingPoolingV1,
-    EmbeddingPrecisionV1, EmbeddingTruncationSideV1, ManifestDigest, host_cpu_target,
+    EmbeddingDeviceClassV1, EmbeddingDocumentCompositionV1, EmbeddingMetricV1,
+    EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingTruncationSideV1,
+    ManifestDigest, host_cpu_target,
 };
 use tracedecay_semantic_contracts::configuration::{
     DEFAULT_FASTEMBED_MODEL_ID, SemanticConfig, SemanticFallbackReasonV1, SemanticProfileSelection,
@@ -128,7 +129,32 @@ fn semantic_config_serialization_preserves_contract_field_order() {
         .find(r#""max_resident_bytes":"#)
         .expect("resident field");
     assert!(model < tokenizer && tokenizer < resident);
-    assert!(encoded.ends_with(r#","load_deadline_ms":30000}}"#));
+    assert!(
+        encoded.ends_with(r#","load_deadline_ms":30000},"document_composition":"sanitized_text"}"#)
+    );
+}
+
+#[test]
+fn semantic_config_without_a_document_composition_selects_sanitized_text() {
+    let legacy = r#"{"selected_model":"JinaEmbeddingsV2BaseCode","auto_download":true,"active_profile":null,"rollback_profile":null,"resources":{"max_model_bytes":734003200,"max_tokenizer_bytes":67108864,"max_resident_bytes":2147483648,"max_threads":4,"max_concurrent_sessions":16,"max_batch_size":32,"max_sequence_length":512,"load_deadline_ms":30000}}"#;
+    let config: SemanticConfig = serde_json::from_str(legacy).expect("persisted configuration");
+    assert_eq!(
+        config.document_composition,
+        EmbeddingDocumentCompositionV1::SanitizedText
+    );
+
+    let header: SemanticConfig = serde_json::from_str(&legacy.replace(
+        r#""load_deadline_ms":30000}}"#,
+        r#""load_deadline_ms":30000},"document_composition":"symbol_context_header"}"#,
+    ))
+    .expect("configuration selecting the header composition");
+    assert_eq!(
+        header.document_composition,
+        EmbeddingDocumentCompositionV1::SymbolContextHeader
+    );
+    header
+        .validate()
+        .expect("header composition is a valid selection");
 }
 
 #[test]

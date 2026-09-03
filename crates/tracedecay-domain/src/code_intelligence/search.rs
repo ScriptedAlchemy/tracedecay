@@ -863,6 +863,32 @@ pub enum EmbeddingPrecisionV1 {
     Int8,
 }
 
+/// How one canonical chunk becomes the text handed to the embedding model.
+///
+/// Composition is projection identity: the same chunk under two compositions
+/// is two different tensor inputs, so their vectors never share a projection
+/// key. On the wire the field is absent for `SanitizedText`, which keeps the
+/// shipped composition's persisted projection digests byte-identical.
+#[derive(
+    Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbeddingDocumentCompositionV1 {
+    /// The chunk's sanitized text, unchanged.
+    #[default]
+    SanitizedText,
+    /// A deterministic symbol-context header (symbol kind and name, enclosing
+    /// scope) ahead of the sanitized text, with the whole document bounded by
+    /// [`EmbeddingProjectionKeyV1::document_byte_budget`].
+    SymbolContextHeader,
+}
+
+impl EmbeddingDocumentCompositionV1 {
+    pub const fn is_sanitized_text(&self) -> bool {
+        matches!(self, Self::SanitizedText)
+    }
+}
+
 /// Immutable identity of one fully published semantic vector generation.
 ///
 /// This identity is shared by projection stores and semantic retrieval
@@ -896,6 +922,15 @@ pub struct EmbeddingProjectionKeyV1 {
     pub config_digest: ManifestDigest,
     pub query_instruction_digest: Option<ManifestDigest>,
     pub document_instruction_digest: Option<ManifestDigest>,
+    /// How each chunk's tensor input is composed. Skipped on the wire for
+    /// `SanitizedText` so the shipped composition's canonical digest — and
+    /// every vector generation persisted under it — is unchanged; every other
+    /// composition serializes and therefore mints its own projection key.
+    #[serde(
+        default,
+        skip_serializing_if = "EmbeddingDocumentCompositionV1::is_sanitized_text"
+    )]
+    pub document_composition: EmbeddingDocumentCompositionV1,
     pub pooling: EmbeddingPoolingV1,
     pub truncation_side: EmbeddingTruncationSideV1,
     pub truncation_length: u32,
@@ -1037,6 +1072,28 @@ impl EmbeddingProjectionKeyV1 {
 
     pub fn projection_key(&self) -> Result<ProjectionKeyV1, DomainError> {
         Ok(self.admit()?.projection_key)
+    }
+
+    /// Byte budget of one composed embedding document: the per-document share
+    /// of the admitted inference group byte ceiling. A full group of
+    /// `inference_batch_size` documents each within this budget therefore
+    /// always fits `inference_batch_bytes`, so composing documents never moves
+    /// the canonical group boundaries derived from the chunks' sanitized text.
+    pub fn document_byte_budget(&self) -> Result<usize, DomainError> {
+        if self.inference_batch_size == 0 {
+            return Err(DomainError::Empty {
+                field: "embedding inference batch size",
+            });
+        }
+        let budget = self.inference_batch_bytes / self.inference_batch_size;
+        if budget == 0 {
+            return Err(DomainError::Empty {
+                field: "embedding document byte budget",
+            });
+        }
+        usize::try_from(budget).map_err(|_| DomainError::NonCanonical {
+            field: "embedding document byte budget",
+        })
     }
 }
 
@@ -1614,6 +1671,80 @@ mod tests {
         };
         manifest.manifest_digest = manifest.compute_digest().expect("digest computable");
         manifest
+    }
+
+    fn embedding_key() -> EmbeddingProjectionKeyV1 {
+        EmbeddingProjectionKeyV1 {
+            model_artifact_digest: id(&digest('a')),
+            tokenizer_digest: id(&digest('b')),
+            config_digest: id(&digest('c')),
+            query_instruction_digest: None,
+            document_instruction_digest: None,
+            document_composition: EmbeddingDocumentCompositionV1::SanitizedText,
+            pooling: EmbeddingPoolingV1::Mean,
+            truncation_side: EmbeddingTruncationSideV1::Right,
+            truncation_length: 512,
+            inference_batch_size: 8,
+            inference_batch_bytes: 8 * 512 * 4,
+            runtime_backend: "fastembed-ort".to_owned(),
+            runtime_build_revision: "ort-fixture".to_owned(),
+            device_class: EmbeddingDeviceClassV1::Cpu,
+            dimensions: 8,
+            metric: EmbeddingMetricV1::Cosine,
+            normalization: EmbeddingNormalizationV1::L2,
+            precision: EmbeddingPrecisionV1::Fp32,
+            chunk_schema_revision: "code-search-chunk.v1".to_owned(),
+            chunker_revision: id("chunker.v1"),
+            privacy_domain: PrivacyDomainId::new("privacy.fixture").unwrap(),
+            privacy_key_epoch: 1,
+        }
+    }
+
+    #[test]
+    fn document_composition_is_projection_identity() {
+        let sanitized = embedding_key();
+        let same = embedding_key();
+        let mut header = embedding_key();
+        header.document_composition = EmbeddingDocumentCompositionV1::SymbolContextHeader;
+
+        let sanitized_digest = sanitized.canonical_digest().expect("digest");
+        assert_eq!(sanitized_digest, same.canonical_digest().expect("digest"));
+        assert_ne!(sanitized_digest, header.canonical_digest().expect("digest"));
+        assert_ne!(
+            sanitized.projection_key().expect("projection key"),
+            header.projection_key().expect("projection key")
+        );
+
+        let sanitized_json = serde_json::to_string(&sanitized).expect("JSON");
+        assert!(
+            !sanitized_json.contains("document_composition"),
+            "the shipped composition must serialize exactly as before it existed"
+        );
+        let header_json = serde_json::to_string(&header).expect("JSON");
+        assert!(header_json.contains(r#""document_composition":"symbol_context_header""#));
+
+        let restored: EmbeddingProjectionKeyV1 =
+            serde_json::from_str(&sanitized_json).expect("wire without the field");
+        assert_eq!(restored, sanitized);
+        let restored_header: EmbeddingProjectionKeyV1 =
+            serde_json::from_str(&header_json).expect("wire with the field");
+        assert_eq!(restored_header, header);
+    }
+
+    #[test]
+    fn document_byte_budget_is_the_per_document_share_of_the_group_ceiling() {
+        let key = embedding_key();
+        assert_eq!(key.document_byte_budget().expect("budget"), 512 * 4);
+
+        let mut uneven = embedding_key();
+        uneven.inference_batch_bytes = 1_001;
+        uneven.inference_batch_size = 10;
+        assert_eq!(uneven.document_byte_budget().expect("budget"), 100);
+
+        let mut starved = embedding_key();
+        starved.inference_batch_bytes = 3;
+        starved.inference_batch_size = 8;
+        assert!(starved.document_byte_budget().is_err());
     }
 
     #[test]

@@ -3,7 +3,9 @@ use std::path::{Component, PathBuf};
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::canonical_text::default_true;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_domain::{ComponentRevision, ManifestDigest, host_cpu_target};
+use tracedecay_domain::{
+    ComponentRevision, EmbeddingDocumentCompositionV1, ManifestDigest, host_cpu_target,
+};
 
 pub const DEFAULT_FASTEMBED_MODEL_ID: &str = "JinaEmbeddingsV2BaseCode";
 /// Catalog id of the Model2Vec static code-embedding model
@@ -159,6 +161,12 @@ pub struct SemanticConfig {
     pub rollback_profile: Option<SemanticProfileSelection>,
     #[serde(default)]
     pub resources: SemanticResourceCeilings,
+    /// How each chunk's embedding input is composed. Projection identity: a
+    /// change re-projects every generation under a new projection key, so the
+    /// header composition stays a measured candidate until the search-quality
+    /// harness has compared it against `SanitizedText`.
+    #[serde(default)]
+    pub document_composition: EmbeddingDocumentCompositionV1,
 }
 
 fn default_selected_fastembed_model() -> Option<String> {
@@ -173,6 +181,7 @@ impl Default for SemanticConfig {
             active_profile: None,
             rollback_profile: None,
             resources: SemanticResourceCeilings::default(),
+            document_composition: EmbeddingDocumentCompositionV1::SanitizedText,
         }
     }
 }
