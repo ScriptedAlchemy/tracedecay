@@ -311,7 +311,11 @@ impl HookSpoolV1 {
             }
             let suffix_at = usize::try_from(checkpoint_records)
                 .map_err(|_| HookSpoolError::MetadataCorrupted)?;
-            reconcile_append_intent(&mut meta, &scan.records[suffix_at..], config.host)?;
+            let suffix_records = scan
+                .records
+                .get(suffix_at..)
+                .ok_or(HookSpoolError::MetadataCorrupted)?;
+            reconcile_append_intent(&mut meta, suffix_records, config.host)?;
             validate_meta_against_records(
                 &meta,
                 scan.records.iter().map(|record| record.sequence),
@@ -400,18 +404,18 @@ impl HookSpoolV1 {
     /// Return the durable pending envelope for an exact provider event ID.
     /// Callers use this only to preserve a prior transport attempt's envelope
     /// on retry; it does not grant replay or acknowledgement authority.
-    pub fn pending_envelope(&mut self, event_id: [u8; 16]) -> Option<HookEventEnvelopeV2> {
-        let index = self
+    pub fn pending_envelope(
+        &mut self,
+        event_id: [u8; 16],
+    ) -> Result<Option<HookEventEnvelopeV2>, HookSpoolError> {
+        let Some(index) = self
             .pending
             .iter()
-            .position(|record| record.event_id == event_id)?;
-        match self.hydrate(index) {
-            Ok(record) => Some(record.envelope),
-            Err(_) => {
-                self.recovery_required = true;
-                None
-            }
-        }
+            .position(|record| record.event_id == event_id)
+        else {
+            return Ok(None);
+        };
+        self.hydrate(index).map(|record| Some(record.envelope))
     }
 
     /// Append one validated envelope. An exact pending `event_id` duplicate
@@ -545,32 +549,32 @@ impl HookSpoolV1 {
                     .checked_add(self.pending[*index].framed_len)
                     .ok_or(HookSpoolError::ReplayBatchExceeded)
             })?;
-            let mut records = Vec::with_capacity(indices.len());
-            for index in indices {
-                records.push(self.hydrate(index)?);
-            }
             let claim_id = next_token();
-            selected.push((
-                session,
-                claim_id,
-                HookReplayBatchV1 {
-                    claim_id,
-                    protected_session_id: session,
-                    records,
-                    byte_count,
-                },
-            ));
+            selected.push((session, claim_id, indices, byte_count));
         }
-        if let Some((last_session, _, _)) = selected.last()
+        let indices = selected
+            .iter()
+            .flat_map(|(_, _, indices, _)| indices.iter().copied())
+            .collect::<Vec<_>>();
+        let mut hydrated = self.hydrate_many(&indices)?.into_iter();
+        if let Some((last_session, _, _, _)) = selected.last()
             && self.round_robin_after != Some(*last_session)
         {
             write_replay_cursor(&self.root, *last_session)?;
             self.round_robin_after = Some(*last_session);
         }
         let mut batches = Vec::with_capacity(selected.len());
-        for (session, claim_id, batch) in selected {
+        for (session, claim_id, indices, byte_count) in selected {
+            let records = (0..indices.len())
+                .map(|_| hydrated.next().ok_or(HookSpoolError::MetadataCorrupted))
+                .collect::<Result<Vec<_>, _>>()?;
             self.replay_claims.insert(session, claim_id);
-            batches.push(batch);
+            batches.push(HookReplayBatchV1 {
+                claim_id,
+                protected_session_id: session,
+                records,
+                byte_count,
+            });
         }
         #[cfg(feature = "hotpath")]
         {
@@ -610,7 +614,10 @@ impl HookSpoolV1 {
 
     /// List records whose maximum transport age has elapsed. They remain
     /// durable until the daemon supplies a terminal tombstone acknowledgement.
-    pub fn expired_records(&mut self, now: UtcMicros) -> Vec<HookSpoolRecordV1> {
+    pub fn expired_records(
+        &mut self,
+        now: UtcMicros,
+    ) -> Result<Vec<HookSpoolRecordV1>, HookSpoolError> {
         let indices = self
             .pending
             .iter()
@@ -618,18 +625,9 @@ impl HookSpoolV1 {
             .filter(|(_, record)| is_expired(record, now))
             .map(|(index, _)| index)
             .collect::<Vec<_>>();
-        let mut expired = Vec::with_capacity(indices.len());
-        for index in indices {
-            match self.hydrate(index) {
-                Ok(record) => expired.push(record),
-                Err(_) => {
-                    self.recovery_required = true;
-                    return Vec::new();
-                }
-            }
-        }
+        let expired = self.hydrate_many(&indices)?;
         hotpath::gauge!("hooks.spool.expired.frame_count").set(expired.len());
-        expired
+        Ok(expired)
     }
 
     /// Persist one daemon acknowledgement and compact logically deleted
@@ -702,31 +700,77 @@ impl HookSpoolV1 {
     }
 
     fn hydrate(&mut self, index: usize) -> Result<HookSpoolRecordV1, HookSpoolError> {
-        if records_file_revision(&self.root)? != self.observed_records_revision {
-            self.recovery_required = true;
-            return Err(HookSpoolError::MetadataCorrupted);
+        self.hydrate_many(&[index])?
+            .into_iter()
+            .next()
+            .ok_or(HookSpoolError::MetadataCorrupted)
+    }
+
+    fn hydrate_many(
+        &mut self,
+        indices: &[usize],
+    ) -> Result<Vec<HookSpoolRecordV1>, HookSpoolError> {
+        let entries = indices
+            .iter()
+            .map(|index| {
+                self.pending
+                    .get(*index)
+                    .cloned()
+                    .map(|entry| (*index, entry))
+                    .ok_or(HookSpoolError::MetadataCorrupted)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if let Some(records) = entries
+            .iter()
+            .map(|(_, entry)| entry.to_record())
+            .collect::<Option<Vec<_>>>()
+        {
+            return Ok(records);
         }
-        let entry = self
-            .pending
-            .get(index)
-            .cloned()
-            .ok_or(HookSpoolError::MetadataCorrupted)?;
-        if let Some(record) = entry.to_record() {
-            return Ok(record);
-        }
-        let frame = match read_frame_at(&self.root, entry.file_offset, entry.framed_len) {
-            Ok(frame) => frame,
+        let revision = match records_file_revision(&self.root) {
+            Ok(revision) => revision,
             Err(error) => {
                 self.recovery_required = true;
                 return Err(error);
             }
         };
-        let record = match decode_complete_frame(&frame, entry.file_offset, self.config.host) {
-            Ok(record) if entry.matches_record(&record) => record,
-            Ok(_) | Err(_) => return self.fail_corrupted(entry.file_offset),
+        if revision != self.observed_records_revision {
+            self.recovery_required = true;
+            return Err(HookSpoolError::MetadataCorrupted);
+        }
+        let file = match File::open(records_path(&self.root)) {
+            Ok(file) => file,
+            Err(_) => {
+                self.recovery_required = true;
+                return Err(HookSpoolError::Io);
+            }
         };
-        self.pending[index].envelope = Some(record.envelope.clone());
-        Ok(record)
+        let mut records = Vec::with_capacity(entries.len());
+        for (index, entry) in entries {
+            if let Some(record) = entry.to_record() {
+                records.push(record);
+                continue;
+            }
+            let frame = match read_frame_at(&file, entry.file_offset, entry.framed_len) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    self.recovery_required = true;
+                    return Err(error);
+                }
+            };
+            let record = match decode_complete_frame(&frame, entry.file_offset, self.config.host) {
+                Ok(record) if entry.matches_record(&record) => record,
+                Ok(_) => return self.fail_checkpoint_mismatch(),
+                Err(_) => return self.fail_corrupted(entry.file_offset),
+            };
+            let pending = self
+                .pending
+                .get_mut(index)
+                .ok_or(HookSpoolError::MetadataCorrupted)?;
+            pending.envelope = Some(record.envelope.clone());
+            records.push(record);
+        }
+        Ok(records)
     }
 
     fn fail_corrupted<T>(&mut self, at_offset: u64) -> Result<T, HookSpoolError> {
@@ -736,6 +780,15 @@ impl HookSpoolV1 {
             return Err(error);
         }
         Err(HookSpoolError::Corrupted { at_offset })
+    }
+
+    fn fail_checkpoint_mismatch<T>(&mut self) -> Result<T, HookSpoolError> {
+        self.recovery_required = true;
+        if remove_spool_member(&checkpoint_path(&self.root)).is_err() {
+            return Err(HookSpoolError::Io);
+        }
+        self.checkpoint = None;
+        Err(HookSpoolError::MetadataCorrupted)
     }
 
     fn ensure_append_capacity(
@@ -868,7 +921,8 @@ impl HookSpoolV1 {
             };
             let record = match decode_complete_frame(frame, entry.file_offset, self.config.host) {
                 Ok(record) if entry.matches_record(&record) => record,
-                Ok(_) | Err(_) => return self.fail_corrupted(entry.file_offset),
+                Ok(_) => return self.fail_checkpoint_mismatch(),
+                Err(_) => return self.fail_corrupted(entry.file_offset),
             };
             let rebuilt_entry = PendingRecordV1::from_record(&record, offset);
             offset = offset.saturating_add(u64::from(entry.framed_len));
