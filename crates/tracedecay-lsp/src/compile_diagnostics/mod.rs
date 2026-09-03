@@ -187,9 +187,12 @@ fn canonicalise_file(file_name: &str, project_root: &Path) -> String {
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
-    use super::fingerprint::DiagnosticsFingerprint;
+    use super::fingerprint::{
+        DiagnosticsFingerprint, DiagnosticsFingerprintOperationCounts, operation_counts,
+        reset_operation_counts,
+    };
     use super::*;
 
     fn test_diagnostic(message: &str) -> Diagnostic {
@@ -299,6 +302,201 @@ mod tests {
         }
 
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn generation_cache_hit_performs_zero_workspace_operations() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("src")).unwrap();
+        std::fs::write(temp.path().join("src/lib.rs"), "pub fn demo() {}\n").unwrap();
+
+        let cache = DiagnosticsCache::default();
+        let calls = Arc::new(AtomicUsize::new(0));
+        reset_operation_counts(temp.path());
+
+        for message in ["first", "cached"] {
+            let calls = Arc::clone(&calls);
+            let diagnostics = cache
+                .run_with_generation(temp.path(), &Scope::Workspace, 7, || async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(vec![test_diagnostic(message)])
+                })
+                .await
+                .unwrap();
+            assert_eq!(diagnostics[0].message, "first");
+        }
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            operation_counts(temp.path()),
+            DiagnosticsFingerprintOperationCounts::default()
+        );
+    }
+
+    #[tokio::test]
+    async fn sibling_edit_generation_invalidates_file_scope_without_a_workspace_walk() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("src")).unwrap();
+        std::fs::write(temp.path().join("src/lib.rs"), "pub fn demo() {}\n").unwrap();
+        let sibling = temp.path().join("src/other.rs");
+        std::fs::write(&sibling, "pub fn other() {}\n").unwrap();
+
+        let cache = DiagnosticsCache::default();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let scope = Scope::File {
+            path: "src/lib.rs".to_string(),
+        };
+        reset_operation_counts(temp.path());
+
+        for (generation, message) in [(7, "first"), (8, "second")] {
+            std::fs::write(
+                &sibling,
+                format!("pub fn other() {{}}\n// generation {generation}\n"),
+            )
+            .unwrap();
+            let calls = Arc::clone(&calls);
+            let diagnostics = cache
+                .run_with_generation(temp.path(), &scope, generation, || async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(vec![test_diagnostic(message)])
+                })
+                .await
+                .unwrap();
+            assert_eq!(diagnostics[0].message, message);
+        }
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            operation_counts(temp.path()),
+            DiagnosticsFingerprintOperationCounts::default()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn generation_cache_rejects_symlink_escape_and_missing_root() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("src")).unwrap();
+        std::fs::write(outside.path().join("outside.rs"), "pub fn outside() {}\n").unwrap();
+        symlink(outside.path(), temp.path().join("escape")).unwrap();
+        let cache = DiagnosticsCache::default();
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let escaped_calls = Arc::clone(&calls);
+        let escaped = cache
+            .run_with_generation(
+                temp.path(),
+                &Scope::File {
+                    path: "escape/outside.rs".to_string(),
+                },
+                1,
+                || async move {
+                    escaped_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(vec![test_diagnostic("escaped")])
+                },
+            )
+            .await;
+        assert!(escaped.is_err());
+
+        let missing_calls = Arc::clone(&calls);
+        let missing = cache
+            .run_with_generation(
+                &temp.path().join("missing"),
+                &Scope::Workspace,
+                1,
+                || async move {
+                    missing_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(vec![test_diagnostic("missing")])
+                },
+            )
+            .await;
+        assert!(missing.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "1k/10k filesystem operation and latency measurement"]
+    async fn diagnostics_cache_scale_operation_plan() {
+        const SAMPLES: usize = 11;
+
+        for file_count in [1_000_usize, 10_000] {
+            let temp = tempfile::tempdir().unwrap();
+            let source_root = temp.path().join("src");
+            std::fs::create_dir_all(&source_root).unwrap();
+            for index in 0..file_count {
+                std::fs::write(
+                    source_root.join(format!("file_{index:05}.rs")),
+                    format!("pub fn file_{index:05}() {{}}\n"),
+                )
+                .unwrap();
+            }
+
+            let recovery_cache = DiagnosticsCache::default();
+            let recovery_calls = Arc::new(AtomicUsize::new(0));
+            let mut recovery_micros = Vec::with_capacity(SAMPLES);
+            reset_operation_counts(temp.path());
+            for _ in 0..SAMPLES {
+                let started = Instant::now();
+                let calls = Arc::clone(&recovery_calls);
+                recovery_cache
+                    .run_with(temp.path(), &Scope::Workspace, || async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        Ok(vec![test_diagnostic("recovery")])
+                    })
+                    .await
+                    .unwrap();
+                recovery_micros.push(started.elapsed().as_micros());
+            }
+            let recovery_operations = operation_counts(temp.path());
+            assert_eq!(recovery_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(recovery_operations.workspace_walks, SAMPLES);
+            assert_eq!(recovery_operations.metadata_reads, SAMPLES * file_count);
+
+            let generation_cache = DiagnosticsCache::default();
+            let generation_calls = Arc::new(AtomicUsize::new(0));
+            let mut generation_micros = Vec::with_capacity(SAMPLES);
+            reset_operation_counts(temp.path());
+            for _ in 0..SAMPLES {
+                let started = Instant::now();
+                let calls = Arc::clone(&generation_calls);
+                generation_cache
+                    .run_with_generation(temp.path(), &Scope::Workspace, 1, || async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        Ok(vec![test_diagnostic("generation")])
+                    })
+                    .await
+                    .unwrap();
+                generation_micros.push(started.elapsed().as_micros());
+            }
+            let generation_operations = operation_counts(temp.path());
+            assert_eq!(generation_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                generation_operations,
+                DiagnosticsFingerprintOperationCounts::default()
+            );
+
+            recovery_micros.sort_unstable();
+            generation_micros.sort_unstable();
+            let p50 = SAMPLES / 2;
+            let p95 = SAMPLES - 1;
+            println!(
+                "diagnostics_cache_scale files={file_count} samples={SAMPLES} \
+                 recovery_walks={} recovery_metadata_reads={} recovery_p50_us={} \
+                 recovery_p95_us={} generation_walks={} generation_metadata_reads={} \
+                 generation_p50_us={} generation_p95_us={}",
+                recovery_operations.workspace_walks,
+                recovery_operations.metadata_reads,
+                recovery_micros[p50],
+                recovery_micros[p95],
+                generation_operations.workspace_walks,
+                generation_operations.metadata_reads,
+                generation_micros[p50],
+                generation_micros[p95],
+            );
+        }
     }
 
     #[tokio::test]

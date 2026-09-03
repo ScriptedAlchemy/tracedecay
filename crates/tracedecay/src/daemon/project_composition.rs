@@ -20,6 +20,7 @@ mod session_database_admission;
 use code_index_activation::{
     CodeIndexActivationMountInputs, code_index_activation_hint_sink, code_index_activation_mount,
     code_index_freshness_probe_sink, code_index_hook_sink, code_index_reconcile_sink,
+    diagnostics_change_generation_resolver,
 };
 pub(in crate::daemon) use runtime::ProductionProjectCompositionRuntime;
 use runtime::bind_verified_project_graph_runtime;
@@ -469,6 +470,8 @@ async fn production_project_server_inner(
     );
     let code_index_freshness_probe_sink =
         code_index_freshness_probe_sink(invocation.code_index_schedulers.clone());
+    let diagnostics_change_generation =
+        diagnostics_change_generation_resolver(invocation.code_index_schedulers.clone());
     // The daemon mounts the same broker the MCP server and the directly
     // served dashboard open: persisted analyzer settings (with a recorded
     // degradation for an unreadable file) plus the home-level OpenCode
@@ -560,6 +563,7 @@ async fn production_project_server_inner(
     .with_code_index_hook_sink(Arc::clone(&code_index_hook_sink))
     .with_code_index_reconcile_sink(Arc::clone(&code_index_reconcile_sink))
     .with_code_index_freshness_probe_sink(Arc::clone(&code_index_freshness_probe_sink))
+    .with_diagnostics_change_generation(Arc::clone(&diagnostics_change_generation))
     .with_code_index_publication_identity(Arc::clone(&code_index_publication_identity))
     .with_code_index_search_executor(Arc::clone(&code_index_search_executor))
     .with_code_index_branch_diff_executor(Arc::clone(&code_index_branch_diff_executor))
@@ -967,6 +971,7 @@ async fn production_project_server_inner(
             .with_code_index_hook_sink(code_index_hook_sink)
             .with_code_index_reconcile_sink(code_index_reconcile_sink)
             .with_code_index_freshness_probe_sink(code_index_freshness_probe_sink)
+            .with_diagnostics_change_generation(diagnostics_change_generation)
             .with_code_index_publication_identity(code_index_publication_identity)
             .with_code_index_search_executor(code_index_search_executor)
             .with_code_index_branch_diff_executor(code_index_branch_diff_executor)

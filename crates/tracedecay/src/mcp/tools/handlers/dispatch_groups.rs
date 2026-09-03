@@ -1007,6 +1007,7 @@ fn dispatch_analysis_tools_inner<'a>(
                     &graph,
                     args,
                     options.diagnostics_cache,
+                    options.diagnostics_change_generation.as_ref(),
                     options.diagnostics_lsp.as_deref(),
                     active_project_session_db.map(RegisteredGlobalDbLeaseV1::as_ref),
                 )

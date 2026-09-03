@@ -1,8 +1,58 @@
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::Mutex;
 use std::time::UNIX_EPOCH;
 
 use super::Scope;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+
+#[cfg(test)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct DiagnosticsFingerprintOperationCounts {
+    pub(super) workspace_walks: usize,
+    pub(super) metadata_reads: usize,
+}
+
+#[cfg(test)]
+static OPERATION_COUNTS: Mutex<Option<(PathBuf, DiagnosticsFingerprintOperationCounts)>> =
+    Mutex::new(None);
+
+#[cfg(test)]
+pub(super) fn reset_operation_counts(project_root: &Path) {
+    *OPERATION_COUNTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((
+        project_root.to_path_buf(),
+        DiagnosticsFingerprintOperationCounts::default(),
+    ));
+}
+
+#[cfg(test)]
+pub(super) fn operation_counts(project_root: &Path) -> DiagnosticsFingerprintOperationCounts {
+    OPERATION_COUNTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .filter(|(observed_root, _)| observed_root == project_root)
+        .map(|(_, counts)| counts.clone())
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+fn record_operation(project_root: &Path, metadata_read: bool) {
+    let mut observed = OPERATION_COUNTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((observed_root, counts)) = observed.as_mut()
+        && observed_root == project_root
+    {
+        if metadata_read {
+            counts.metadata_reads += 1;
+        } else {
+            counts.workspace_walks += 1;
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct DiagnosticsFingerprint {
@@ -43,6 +93,8 @@ impl DiagnosticsFingerprint {
     }
 
     fn include_path(&mut self, project_root: &Path, path: &Path) {
+        #[cfg(test)]
+        record_operation(project_root, true);
         let Ok(metadata) = std::fs::metadata(path) else {
             return;
         };
@@ -77,6 +129,8 @@ fn diagnostics_input_paths(project_root: &Path, scope: &Scope) -> Result<Vec<Pat
 }
 
 fn workspace_diagnostics_input_paths(project_root: &Path) -> Result<Vec<PathBuf>> {
+    #[cfg(test)]
+    record_operation(project_root, false);
     let mut paths = Vec::new();
     for entry in walkdir::WalkDir::new(project_root)
         .into_iter()

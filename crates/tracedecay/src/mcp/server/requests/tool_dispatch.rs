@@ -290,6 +290,7 @@ impl McpServer {
                 explorer_semantic_reader: self.dashboard_explorer_semantic_reader.clone(),
                 feedback_status_reader: self.dashboard_feedback_status_reader.clone(),
                 diagnostics_cache: Some(&self.diagnostics_cache),
+                diagnostics_change_generation: self.diagnostics_change_generation.clone(),
                 diagnostics_lsp: Some(Arc::clone(&self.diagnostics_lsp)),
                 application_invocation_executor,
                 application_invocation_target,

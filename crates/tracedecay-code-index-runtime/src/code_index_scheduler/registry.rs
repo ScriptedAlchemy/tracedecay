@@ -1144,7 +1144,7 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         scope: &tracedecay_application::ResolvedScope,
     ) -> Option<Arc<super::CodeIndexActivationV1>> {
-        let activation = {
+        {
             let mut activations = self
                 .activations
                 .lock()
@@ -1159,8 +1159,7 @@ impl CodeIndexSchedulerRegistryV1 {
             } else {
                 activation
             }
-        };
-        activation
+        }
     }
 
     pub fn automatic_admission_for_scope(
@@ -4633,24 +4632,36 @@ impl CodeIndexSchedulerRegistryV1 {
     /// admission wake; a matching stat signature refreshes the scheduler's
     /// cadence watermark and returns without traversal.
     pub async fn probe_freshness(&self, project_root: &Path) -> bool {
+        self.diagnostics_change_generation(project_root)
+            .await
+            .is_some()
+    }
+
+    /// Return the mounted scheduler's canonical worktree-change generation.
+    ///
+    /// The generation is exactly as fresh as the index used by search: hook
+    /// hints and Git metadata changes are observed immediately, while other
+    /// out-of-band edits are observed by the 30-second stat-signature ladder.
+    /// Until that ladder runs, callers intentionally receive the preceding
+    /// generation and must not derive a parallel workspace fingerprint.
+    pub async fn diagnostics_change_generation(&self, project_root: &Path) -> Option<u64> {
         let Ok(project_root) = project_root.canonicalize() else {
-            return false;
+            return None;
         };
-        let (scheduler, wake, pending_wake, reconcile_in_progress) = {
+        let (scheduler, wake, pending_wake, reconcile_in_progress, epoch) = {
             let mounted = self.mounted.lock().await;
-            let Some(worktree) = mounted.get(&project_root) else {
-                return false;
-            };
+            let worktree = mounted.get(&project_root)?;
             (
                 Arc::clone(&worktree.scheduler),
                 Arc::clone(&worktree.wake),
                 Arc::clone(&worktree.pending_wake),
                 Arc::clone(&worktree.reconcile_in_progress),
+                Arc::clone(&worktree.epoch),
             )
         };
         if pending_wake.has_pending_arrival() || reconcile_in_progress.load(Ordering::Acquire) != 0
         {
-            return true;
+            return Some(epoch.load(Ordering::Acquire));
         }
         tokio::task::spawn_blocking(move || {
             let mut scheduler = scheduler
@@ -4663,10 +4674,10 @@ impl CodeIndexSchedulerRegistryV1 {
                     CodeIndexCadenceTriggerV1::QueryAdmission,
                 );
             }
-            true
+            epoch.load(Ordering::Acquire)
         })
         .await
-        .unwrap_or(false)
+        .ok()
     }
 
     /// Mounted scope identity plus the currently serving generation for one

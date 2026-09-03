@@ -163,6 +163,7 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) code_index_hook_sink: Option<super::CodeIndexHookSink>,
     pub(crate) code_index_reconcile_sink: Option<super::CodeIndexReconcileSink>,
     pub(crate) code_index_freshness_probe_sink: Option<super::CodeIndexFreshnessProbeSink>,
+    pub(crate) diagnostics_change_generation: Option<super::DiagnosticsChangeGenerationResolver>,
     pub(crate) code_index_publication_identity: Option<super::CodeIndexPublicationIdentityResolver>,
     pub(crate) code_index_search_executor: Option<super::CodeIndexSearchExecutor>,
     pub(crate) code_index_branch_diff_executor: Option<super::CodeIndexBranchDiffExecutor>,
@@ -279,6 +280,7 @@ impl McpServerConstructionContext {
             code_index_hook_sink: None,
             code_index_reconcile_sink: None,
             code_index_freshness_probe_sink: None,
+            diagnostics_change_generation: None,
             code_index_publication_identity: None,
             code_index_search_executor: None,
             code_index_branch_diff_executor: None,
@@ -384,6 +386,7 @@ impl McpServerConstructionContext {
             code_index_hook_sink: None,
             code_index_reconcile_sink: None,
             code_index_freshness_probe_sink: None,
+            diagnostics_change_generation: None,
             code_index_publication_identity: None,
             code_index_search_executor: None,
             code_index_branch_diff_executor: None,
@@ -450,6 +453,7 @@ impl McpServerConstructionContext {
             code_index_hook_sink: None,
             code_index_reconcile_sink: None,
             code_index_freshness_probe_sink: None,
+            diagnostics_change_generation: None,
             code_index_publication_identity: None,
             code_index_search_executor: None,
             code_index_branch_diff_executor: None,
@@ -498,6 +502,14 @@ impl McpServerConstructionContext {
         sink: super::CodeIndexFreshnessProbeSink,
     ) -> Self {
         self.code_index_freshness_probe_sink = Some(sink);
+        self
+    }
+
+    pub(crate) fn with_diagnostics_change_generation(
+        mut self,
+        resolver: super::DiagnosticsChangeGenerationResolver,
+    ) -> Self {
+        self.diagnostics_change_generation = Some(resolver);
         self
     }
 

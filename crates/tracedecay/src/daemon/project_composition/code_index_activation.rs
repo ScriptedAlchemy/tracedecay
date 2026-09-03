@@ -409,6 +409,15 @@ pub(super) fn code_index_freshness_probe_sink(
     })
 }
 
+pub(super) fn diagnostics_change_generation_resolver(
+    schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
+) -> crate::mcp::server::DiagnosticsChangeGenerationResolver {
+    Arc::new(move |root: PathBuf| {
+        let schedulers = schedulers.clone();
+        Box::pin(async move { schedulers.diagnostics_change_generation(&root).await })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::process::Command;

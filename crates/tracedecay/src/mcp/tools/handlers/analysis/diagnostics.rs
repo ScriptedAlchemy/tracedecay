@@ -20,6 +20,7 @@ use tracedecay_lsp::compile_diagnostics::{
 };
 use tracedecay_mcp::ToolResult;
 
+use crate::mcp::server::DiagnosticsChangeGenerationResolver;
 use crate::tracedecay::TraceDecay;
 
 use super::super::support::{generic_tool_result, unique_file_paths};
@@ -171,6 +172,7 @@ pub(crate) async fn handle_diagnostics(
     graph: &VerifiedGraphQuery,
     args: Value,
     diagnostics_cache: Option<&DiagnosticsCache>,
+    diagnostics_change_generation: Option<&DiagnosticsChangeGenerationResolver>,
     diagnostics_lsp: Option<&Mutex<DiagnosticBroker>>,
     session_db: Option<&RegisteredGlobalDb>,
 ) -> Result<ToolResult> {
@@ -197,7 +199,18 @@ pub(crate) async fn handle_diagnostics(
             {
                 Ok(lsp_diagnostics)
             } else if let Some(cache) = diagnostics_cache {
-                cache.run(&project_root, &collect_scope).await
+                let generation = match diagnostics_change_generation {
+                    Some(resolve) => resolve(project_root.clone()).await,
+                    None => None,
+                };
+                match generation {
+                    Some(generation) => {
+                        cache
+                            .run_for_generation(&project_root, &collect_scope, generation)
+                            .await
+                    }
+                    None => cache.run(&project_root, &collect_scope).await,
+                }
             } else {
                 run_all(&project_root, &collect_scope).await
             }
