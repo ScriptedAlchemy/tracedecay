@@ -220,6 +220,38 @@ fn transcript_store_failures_keep_their_conflict_and_availability_statuses() {
 }
 
 #[test]
+fn authority_write_failed_includes_storage_cause_in_hook_detail() {
+    let mapped = map_transcript_ingest_error(
+        &tracedecay_sessions::runtime::source::TranscriptIngestError::HostAdmission {
+            provider: "codex",
+            reason: "authority_write_failed",
+            retryable: true,
+            detail: Some(
+                "submit observation batch: exact SQL transaction lease expired".to_owned(),
+            ),
+        },
+    );
+    let rendered = mapped.to_string();
+    let data = structured_hook_error_data(&mapped).unwrap();
+    assert_eq!(data["reason_code"], "authority_write_failed");
+    assert_eq!(data["status"], "unavailable");
+    assert_eq!(data["retryable"], true);
+    let detail = data["detail"].as_str().expect("hook detail");
+    assert!(
+        detail.contains("submit observation batch"),
+        "JSON-RPC detail must carry the storage operation: {detail}"
+    );
+    assert!(
+        detail.contains("transaction lease expired"),
+        "JSON-RPC detail must carry the storage source: {detail}"
+    );
+    assert!(
+        rendered.contains("submit observation batch"),
+        "hook error message must carry the storage operation: {rendered}"
+    );
+}
+
+#[test]
 fn transcript_hook_errors_keep_bounded_retry_data_without_cursor_detail() {
     let error = tracedecay_sessions::runtime::source::TranscriptIngestError::CursorKeyMismatch {
         expected: "private expected cursor".to_string(),
