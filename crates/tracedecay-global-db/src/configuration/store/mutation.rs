@@ -144,6 +144,10 @@ pub(super) fn decode_stored_mutation_receipt(
     })
 }
 
+#[hotpath::measure(
+    future = true,
+    label = "global_db.configuration.query.idempotency_receipt"
+)]
 pub(super) async fn receipt_for_idempotency_from_transaction(
     transaction: &impl QueryExecutor,
     actor_id: &ActorId,
@@ -174,6 +178,10 @@ pub(super) async fn receipt_for_idempotency_from_transaction(
     Ok(Some(receipt))
 }
 
+#[hotpath::measure(
+    future = true,
+    label = "global_db.configuration.persist.mutation_receipt"
+)]
 pub(super) async fn insert_mutation_receipt(
     transaction: &impl Executor,
     commit: &ConfigurationCommitV1,
@@ -257,6 +265,7 @@ pub(super) fn validate_commit_bindings(
     Ok(())
 }
 
+#[hotpath::measure(future = true, label = "global_db.configuration.query.replay_match")]
 pub(super) async fn replay_matches_commit(
     transaction: &impl QueryExecutor,
     stored: &StoredMutationReceipt,
@@ -292,6 +301,7 @@ pub(super) async fn replay_matches_commit(
     Ok(true)
 }
 
+#[hotpath::measure(future = true, label = "global_db.configuration.persist.commit")]
 pub(super) async fn commit_configuration_transaction(
     transaction: &impl Executor,
     commit: &ConfigurationCommitV1,
@@ -310,6 +320,10 @@ pub(super) async fn commit_configuration_transaction(
     .await
 }
 
+#[hotpath::measure(
+    future = true,
+    label = "global_db.configuration.persist.commit_with_registry"
+)]
 pub(super) async fn commit_configuration_transaction_with_registry(
     transaction: &impl Executor,
     commit: &ConfigurationCommitV1,
@@ -596,6 +610,7 @@ pub(super) struct ConfigurationCommitDraft<'a, T> {
     pub(super) target: &'a T,
 }
 
+#[hotpath::measure(future = true, label = "global_db.configuration.persist.build_commit")]
 pub(super) async fn build_configuration_commit<T: Serialize>(
     transaction: &impl Executor,
     draft: ConfigurationCommitDraft<'_, T>,
@@ -780,6 +795,7 @@ pub(super) fn rollback_redacted_changes(
         .collect()
 }
 
+#[hotpath::measure(future = true, label = "global_db.configuration.query.current_state")]
 pub(super) async fn current_state_from_transaction(
     transaction: &impl QueryExecutor,
 ) -> Result<ConfigurationCurrentStateV1, ConfigurationError> {
@@ -798,6 +814,7 @@ pub(super) async fn current_state_from_transaction(
     })
 }
 
+#[hotpath::measure(future = true, label = "global_db.configuration.query.replay_control")]
 pub(super) async fn replay_control_receipt(
     transaction: &impl QueryExecutor,
     actor_id: &ActorId,
@@ -848,6 +865,7 @@ pub struct ConfigurationDirectCommitOutcomeV1 {
     pub current: ConfigurationCurrentStateV1,
 }
 
+#[hotpath::measure(future = true, label = "global_db.configuration.persist.commit_direct")]
 pub async fn commit_direct_in_transaction<E>(
     transaction: &E,
     authority: &ConfigurationMutationAuthority,
@@ -867,6 +885,10 @@ where
     .await
 }
 
+#[hotpath::measure(
+    future = true,
+    label = "global_db.configuration.persist.commit_direct_registry"
+)]
 pub(super) async fn commit_direct_in_transaction_with_registry<E>(
     transaction: &E,
     authority: &ConfigurationMutationAuthority,

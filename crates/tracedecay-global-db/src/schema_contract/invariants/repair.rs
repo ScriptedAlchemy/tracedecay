@@ -25,6 +25,7 @@ struct CommittedCursorCandidate {
 /// `observation_projection::rebuild::read_observation_frontier` for why a
 /// caller doing further reads or writes on the same connection depends on
 /// that.
+#[hotpath::measure(future = true, label = "global_db.schema_contract.repair.read_frontier")]
 async fn read_observation_frontier(
     conn: &impl QueryExecutor,
 ) -> tracedecay_domain::errors::Result<i64> {
@@ -40,6 +41,10 @@ async fn read_observation_frontier(
         .map_err(|error| global_db_operation_error(OPERATION, error))
 }
 
+#[hotpath::measure(
+    future = true,
+    label = "global_db.schema_contract.repair.projection_frontier"
+)]
 pub(super) async fn repair_projection_frontier(
     conn: &impl Executor,
     trusted_checkpoint: i64,
@@ -165,6 +170,10 @@ pub(super) async fn repair_projection_frontier(
     Ok(repaired_checkpoint)
 }
 
+#[hotpath::measure(
+    future = true,
+    label = "global_db.schema_contract.repair.source_cursors"
+)]
 pub(super) async fn repair_committed_source_cursors(
     conn: &impl Executor,
     after_sequence: i64,
@@ -216,6 +225,10 @@ pub(super) async fn repair_committed_source_cursors(
     Ok(())
 }
 
+#[hotpath::measure(
+    future = true,
+    label = "global_db.schema_contract.repair.scan_committed"
+)]
 async fn latest_committed_source_cursors(
     conn: &impl QueryExecutor,
     after_sequence: i64,
@@ -284,6 +297,7 @@ fn is_new_generation_frontier(
         && stored.position() == 0
 }
 
+#[hotpath::measure(future = true, label = "global_db.schema_contract.repair.read_cursor")]
 async fn read_source_cursor(
     conn: &impl QueryExecutor,
     source_json: &str,
@@ -309,6 +323,7 @@ async fn read_source_cursor(
         .transpose()
 }
 
+#[hotpath::measure(future = true, label = "global_db.schema_contract.repair.write_cursor")]
 async fn write_source_cursor(
     conn: &impl Executor,
     candidate: &CommittedCursorCandidate,
@@ -329,6 +344,10 @@ async fn write_source_cursor(
     .map_err(|error| global_db_operation_error(OPERATION, error))
 }
 
+#[hotpath::measure(
+    future = true,
+    label = "global_db.schema_contract.repair.check_advance_receipt"
+)]
 async fn cursor_has_exact_advance_receipt(
     conn: &impl QueryExecutor,
     source_json: &str,
@@ -363,6 +382,10 @@ async fn cursor_has_exact_advance_receipt(
     Ok(false)
 }
 
+#[hotpath::measure(
+    future = true,
+    label = "global_db.schema_contract.repair.cursor_coverage"
+)]
 pub(super) async fn validate_observation_cursor_coverage(
     conn: &impl QueryExecutor,
     after_sequence: i64,

@@ -1604,6 +1604,10 @@ pub(crate) fn invariant_trigger_names_for_tables(tables: &[&str]) -> Vec<&'stati
         .collect()
 }
 
+#[hotpath::measure(
+    future = true,
+    label = "global_db.schema_contract.triggers.replace"
+)]
 pub(super) async fn replace_trigger(
     conn: &impl Executor,
     trigger: &Trigger,
@@ -1616,6 +1620,10 @@ pub(super) async fn replace_trigger(
     .map_err(|error| global_db_operation_error(OPERATION, error))
 }
 
+#[hotpath::measure(
+    future = true,
+    label = "global_db.schema_contract.triggers.contracts_intact"
+)]
 pub(super) async fn trigger_contracts_intact(
     conn: &impl QueryExecutor,
 ) -> tracedecay_domain::errors::Result<bool> {
@@ -1629,6 +1637,10 @@ pub(super) async fn trigger_contracts_intact(
     Ok(true)
 }
 
+#[hotpath::measure(
+    future = true,
+    label = "global_db.schema_contract.triggers.released_v3_intact"
+)]
 pub async fn released_v3_invariant_triggers_intact(
     conn: &impl QueryExecutor,
 ) -> tracedecay_domain::errors::Result<bool> {
@@ -1669,6 +1681,10 @@ async fn trigger_matches(
     trigger_matches_sql(conn, trigger, trigger.create_sql).await
 }
 
+#[hotpath::measure(
+    future = true,
+    label = "global_db.schema_contract.triggers.match_sql"
+)]
 async fn trigger_matches_sql(
     conn: &impl QueryExecutor,
     trigger: &Trigger,
@@ -1699,6 +1715,10 @@ async fn trigger_matches_sql(
         && normalize_trigger_sql(&sql) == normalize_trigger_sql(expected_sql))
 }
 
+#[hotpath::measure(
+    future = true,
+    label = "global_db.schema_contract.triggers.suspend_immutability"
+)]
 pub async fn suspend_immutability_for_canonical_repair(
     conn: &impl Executor,
 ) -> tracedecay_domain::errors::Result<()> {
@@ -1718,6 +1738,10 @@ pub async fn suspend_immutability_for_canonical_repair(
     Ok(())
 }
 
+#[hotpath::measure(
+    future = true,
+    label = "global_db.schema_contract.triggers.restore_immutability"
+)]
 pub async fn restore_immutability_after_canonical_repair(
     conn: &impl Executor,
 ) -> tracedecay_domain::errors::Result<()> {

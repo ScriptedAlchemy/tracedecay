@@ -29,6 +29,7 @@ pub(super) fn encode_audit_payload(
 
 pub(super) const CONFIGURATION_AUDIT_REDACTION_KEY_BYTES: usize = 32;
 
+#[hotpath::measure(future = true, label = "global_db.configuration.audit.read_key")]
 pub(super) async fn read_audit_redaction_key(
     transaction: &impl QueryExecutor,
 ) -> ConfigurationStoreResult<Option<Zeroizing<Vec<u8>>>> {
@@ -55,6 +56,7 @@ pub(super) async fn read_audit_redaction_key(
     Ok(Some(material))
 }
 
+#[hotpath::measure(future = true, label = "global_db.configuration.audit.ensure_key")]
 pub(super) async fn ensure_audit_redaction_key(
     transaction: &impl Executor,
     created_at: UtcMicros,
@@ -93,6 +95,7 @@ pub(super) fn audit_target_commitment(
         .map_err(ConfigurationStoreError::from)
 }
 
+#[hotpath::measure(future = true, label = "global_db.configuration.audit.seal_target")]
 pub(super) async fn seal_audit_target<T: Serialize>(
     transaction: &impl Executor,
     event_id: &ConfigurationAuditEventId,
@@ -109,6 +112,7 @@ pub(super) async fn seal_audit_target<T: Serialize>(
     Ok((sealed, commitment))
 }
 
+#[hotpath::measure(future = true, label = "global_db.configuration.audit.validate_seal")]
 pub(super) async fn validate_sealed_audit_target(
     transaction: &impl QueryExecutor,
     event: &ConfigurationAuditEvent,
@@ -129,6 +133,7 @@ pub(super) async fn validate_sealed_audit_target(
     Ok(())
 }
 
+#[hotpath::measure(future = true, label = "global_db.configuration.audit.insert_dry_run")]
 pub(super) async fn insert_dry_run_audit_event(
     transaction: &impl Executor,
     record: &ConfigurationProtectedPlanRecordV1,
@@ -267,6 +272,7 @@ pub(super) fn decode_audit_row(
     Ok((event, sealed_target_reference))
 }
 
+#[hotpath::measure(future = true, label = "global_db.configuration.audit.read_event")]
 pub(super) async fn read_audit_event_from_transaction(
     transaction: &impl QueryExecutor,
     event_id: &ConfigurationAuditEventId,
@@ -295,6 +301,7 @@ pub(super) async fn read_audit_event_from_transaction(
     Ok(Some(event))
 }
 
+#[hotpath::measure(future = true, label = "global_db.configuration.audit.insert_event")]
 pub(super) async fn insert_audit_event_with_receipt_digest(
     transaction: &impl Executor,
     event: &ConfigurationAuditEvent,
@@ -354,6 +361,7 @@ pub(super) fn is_terminal_plan_event(event_kind: &str) -> bool {
     matches!(event_kind, "applied" | "rollback_applied")
 }
 
+#[hotpath::measure(future = true, label = "global_db.configuration.audit.append_terminal")]
 pub(super) async fn append_terminal_plan_event(
     transaction: &impl Executor,
     plan: &ProtectedChangePlan,
@@ -423,6 +431,7 @@ pub(super) async fn append_terminal_plan_event(
     Ok(())
 }
 
+#[hotpath::measure(future = true, label = "global_db.configuration.audit.match_terminal")]
 pub(super) async fn has_matching_terminal_plan_event(
     transaction: &impl QueryExecutor,
     plan: &ProtectedChangePlan,
@@ -454,6 +463,7 @@ pub(super) async fn has_matching_terminal_plan_event(
     Ok(terminal_count == 1 && matched)
 }
 
+#[hotpath::measure(future = true, label = "global_db.configuration.audit.read_page")]
 pub(super) async fn audit_from_transaction(
     transaction: &impl QueryExecutor,
     after: Option<&ConfigurationAuditEventId>,
