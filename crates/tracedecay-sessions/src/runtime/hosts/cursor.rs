@@ -630,10 +630,6 @@ pub async fn try_ingest_cursor_user_transcript_event_capped_with_registered_root
     .await
 }
 
-#[hotpath::measure(
-    label = "sessions.hosts.cursor.ingest_user_event_capped",
-    future = true
-)]
 pub async fn try_ingest_cursor_user_transcript_event_capped_with_admission(
     event_json: &str,
     admission: &dyn HostAdmission,
