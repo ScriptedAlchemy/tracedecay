@@ -10,7 +10,7 @@ use super::RegisteredWorkRuntime;
 
 /// The durable-write signal is the prompt path. This interval reconciles
 /// writes from previous processes and notification loss after restarts.
-const SAFETY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+const SAFETY_INTERVAL: std::time::Duration = std::time::Duration::from_mins(1);
 
 pub(super) fn persist_workflow_fan_out_census(
     registered: &RegisteredWorkRuntime,

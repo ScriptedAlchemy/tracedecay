@@ -21,7 +21,7 @@ use tracedecay_usecases::observability::{
     BoundedObservabilityProducerV1, work_blocked_interval_observation_envelope,
 };
 
-use super::recovery_schedule::run_recovery_loop;
+use super::recovery_schedule::{RecoveryWarningTrackerV1, run_recovery_loop};
 use super::work_blocked_interval_recovery_context;
 
 const RECOVERY_PAGE_LIMIT: u32 = 32;
@@ -151,6 +151,7 @@ async fn run_recovery(
     cancellation: CancellationToken,
 ) {
     let scan_cancellation = cancellation.clone();
+    let receipt_warnings = Arc::new(Mutex::new(RecoveryWarningTrackerV1::default()));
     run_recovery_loop(
         signal,
         cancellation,
@@ -161,7 +162,10 @@ async fn run_recovery(
             let context = context.clone();
             let producer = Arc::clone(&producer);
             let cancellation = scan_cancellation.clone();
-            async move { recover_once(database, context, producer, cancellation).await }
+            let receipt_warnings = Arc::clone(&receipt_warnings);
+            async move {
+                recover_once(database, context, producer, cancellation, receipt_warnings).await
+            }
         },
     )
     .await;
@@ -172,6 +176,7 @@ async fn recover_once(
     context: RequestContext,
     producer: Arc<BoundedObservabilityProducerV1>,
     cancellation: CancellationToken,
+    receipt_warnings: Arc<Mutex<RecoveryWarningTrackerV1>>,
 ) -> Result<(), String> {
     let read_database = database.clone();
     let read_context = context.clone();
@@ -191,25 +196,54 @@ async fn recover_once(
             .map_err(|error| format!("scan failed: {error}"))?,
     };
 
+    let mut skipped_receipt = false;
     for receipt in receipts {
         if !receipt.is_settled() {
-            return Err("source receipt is not settled".to_owned());
+            skipped_receipt = true;
+            receipt_warnings
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .warn(
+                    "Work blocked-interval recovery",
+                    "source receipt is not settled",
+                );
+            continue;
         }
-        let envelope = work_blocked_interval_observation_envelope(
+        let envelope = match work_blocked_interval_observation_envelope(
             producer.as_ref(),
             context.scope().project_id.as_str(),
             &receipt,
-        )
-        .map_err(|error| format!("source receipt is invalid: {error}"))?;
+        ) {
+            Ok(envelope) => envelope,
+            Err(error) => {
+                skipped_receipt = true;
+                receipt_warnings
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .warn(
+                        "Work blocked-interval recovery",
+                        &format!("source receipt is invalid: {error}"),
+                    );
+                continue;
+            }
+        };
         let emission = producer.emit_owner_fact(envelope);
         tokio::pin!(emission);
-        tokio::select! {
+        let emission_result = tokio::select! {
             biased;
             () = cancellation.cancelled() => return Ok(()),
-            outcome = &mut emission => {
-                outcome
-                    .map_err(|error| format!("durable observability claim failed: {error:?}"))?;
-            }
+            outcome = &mut emission => outcome,
+        };
+        if let Err(error) = emission_result {
+            skipped_receipt = true;
+            receipt_warnings
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .warn(
+                    "Work blocked-interval recovery",
+                    &format!("durable observability claim failed: {error:?}"),
+                );
+            continue;
         }
 
         let mark_database = database.clone();
@@ -232,6 +266,12 @@ async fn recover_once(
                 .map_err(|error| format!("source marker worker failed: {error}"))?
                 .map_err(|error| format!("exact source marker remains pending: {error}"))?,
         }
+    }
+    if !skipped_receipt {
+        receipt_warnings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .recover("Work blocked-interval recovery");
     }
     Ok(())
 }
