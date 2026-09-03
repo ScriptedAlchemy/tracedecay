@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use tracedecay_domain::{
     CompactContextBundleV1, CompactContextConflictV1, CompactContextLineageEdgeV1,
@@ -179,12 +179,17 @@ fn order_context_omissions<U: ContextUnavailable>(
     omissions: &mut [CompactContextOmissionV1],
     unavailable: &[U],
 ) {
+    let mut hydration_positions = BTreeMap::new();
+    for (position, item) in unavailable.iter().enumerate() {
+        hydration_positions
+            .entry(item.anchor_id())
+            .or_insert(position);
+    }
     let hydration_position = |omission: &CompactContextOmissionV1| {
-        omission.anchor_id.as_ref().and_then(|anchor_id| {
-            unavailable
-                .iter()
-                .position(|item| item.anchor_id() == anchor_id)
-        })
+        omission
+            .anchor_id
+            .as_ref()
+            .and_then(|anchor_id| hydration_positions.get(anchor_id).copied())
     };
     omissions.sort_by(
         |left, right| match (hydration_position(left), hydration_position(right)) {
@@ -660,4 +665,69 @@ pub fn validate_bundle(bundle: &CompactContextBundleV1) -> Result<(), ContextErr
     bundle
         .validate()
         .map_err(|error| ContextError::InvalidBundle(error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use tracedecay_domain::{ContextOmissionReasonV1, HydrationStateV1};
+
+    use super::*;
+
+    struct CountingUnavailable {
+        anchor_id: RetrievalAnchorId,
+        anchor_reads: Cell<usize>,
+    }
+
+    impl ContextUnavailable for CountingUnavailable {
+        fn anchor_id(&self) -> &RetrievalAnchorId {
+            self.anchor_reads.set(self.anchor_reads.get() + 1);
+            &self.anchor_id
+        }
+
+        fn state(&self) -> HydrationStateV1 {
+            HydrationStateV1::RetainedButUnavailable
+        }
+    }
+
+    #[test]
+    fn omission_ordering_indexes_unavailable_anchors_once() {
+        let unavailable = (0..64)
+            .map(|index| CountingUnavailable {
+                anchor_id: RetrievalAnchorId::new(format!("anchor-{index:03}")).unwrap(),
+                anchor_reads: Cell::new(0),
+            })
+            .collect::<Vec<_>>();
+        let mut omissions = unavailable
+            .iter()
+            .rev()
+            .map(|item| CompactContextOmissionV1 {
+                anchor_id: Some(item.anchor_id.clone()),
+                reason: ContextOmissionReasonV1::Unavailable,
+            })
+            .collect::<Vec<_>>();
+
+        order_context_omissions(&mut omissions, &unavailable);
+
+        assert_eq!(
+            omissions
+                .iter()
+                .map(|omission| omission.anchor_id.as_ref().unwrap())
+                .collect::<Vec<_>>(),
+            unavailable
+                .iter()
+                .map(|item| &item.anchor_id)
+                .collect::<Vec<_>>()
+        );
+        let anchor_reads = unavailable
+            .iter()
+            .map(|item| item.anchor_reads.get())
+            .sum::<usize>();
+        assert_eq!(
+            anchor_reads,
+            unavailable.len(),
+            "ordering must index each unavailable hydration anchor exactly once"
+        );
+    }
 }
