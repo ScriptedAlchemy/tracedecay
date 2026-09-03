@@ -399,6 +399,7 @@ mod branch_memo_tests {
     }
 
     #[test]
+    #[ignore = "measurement harness: timing evidence for #818, not an assertion"]
     fn measure_live_probe_against_resolved_memo() {
         let temp = tempfile::tempdir().expect("temporary directory");
         let root = temp.path();

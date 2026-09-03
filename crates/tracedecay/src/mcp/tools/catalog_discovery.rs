@@ -672,6 +672,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "measurement harness: timing evidence for #824, not an assertion"]
     fn measure_warm_cached_discovery_against_fresh_compose() {
         let (profile, authority, scope) = default_discovery_inputs();
         let mode = ToolRegistryMode::HostAvailable;
