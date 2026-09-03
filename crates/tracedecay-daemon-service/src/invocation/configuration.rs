@@ -531,10 +531,14 @@ pub(super) async fn apply_configuration_or_semantic_transition(
         };
     if !coordinated_semantic_transition {
         Box::pin(reconcile_configuration_runtime(registered, &receipt, now)).await;
-    } else if let Some(reconciler) = registered.semantic_activation_reconciler.get() {
-        reconciler.notify_committed_activation();
+    } else {
+        notify_committed_semantic_activation(&registered.semantic_activation_committed);
     }
     Ok(receipt)
+}
+
+pub(super) fn notify_committed_semantic_activation(committed_activation: &Notify) {
+    committed_activation.notify_one();
 }
 
 pub(super) fn requires_coordinated_semantic_profile_transition(
