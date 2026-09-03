@@ -1,5 +1,8 @@
 //! Hermes observation normalization, coverage, and bounded-page tests.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use rusqlite::trace::{TraceEvent, TraceEventCodes};
 use serde_json::{Value, json};
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationFactV1,
@@ -18,10 +21,18 @@ use tracedecay_runtime_core::privacy::{
 };
 
 use super::coverage::admit_rows_with_admission_and_cancellation;
+use super::ingest::HermesProfileSource;
 use super::*;
 
 static HERMES_UNIT_FIXTURE_OWNED_STORE_READY: tokio::sync::OnceCell<()> =
     tokio::sync::OnceCell::const_new();
+static OBSERVED_HERMES_READ_QUERIES: AtomicUsize = AtomicUsize::new(0);
+
+fn count_hermes_read_query(event: TraceEvent<'_>) {
+    if matches!(event, TraceEvent::Stmt(_, _)) {
+        OBSERVED_HERMES_READ_QUERIES.fetch_add(1, Ordering::Relaxed);
+    }
+}
 
 async fn initialize_owned_store_before_foreign_fixture(directory: &std::path::Path) {
     HERMES_UNIT_FIXTURE_OWNED_STORE_READY
@@ -216,6 +227,37 @@ async fn cancelled_hermes_admission_stops_before_the_next_transactional_row() {
         stats,
         crate::runtime::shared::TranscriptIngestStats::default()
     );
+}
+
+#[tokio::test]
+async fn cancelled_hermes_sweep_stops_before_opening_the_host_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = HermesProfileSource {
+        state_db: dir.path().join("state.db"),
+        legacy_project_pin: None,
+        profile: Some("cancelled-fixture".to_string()),
+    };
+    let cancellation = ObservationCancellation::default();
+    cancellation.cancel();
+    let mut budget =
+        crate::runtime::ingest_byte_budget::IngestByteBudget::bounded(MAX_HERMES_PAGE_BYTES);
+
+    let stats = try_ingest_state_db_bounded_with_admission(
+        &source,
+        dir.path(),
+        tracedecay_domain::ProjectId::new("project.hermes-cancelled-read").unwrap(),
+        &PanicHostAdmission,
+        &mut budget,
+        &cancellation,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        stats,
+        crate::runtime::shared::TranscriptIngestStats::default()
+    );
+    assert!(!source.state_db.exists());
 }
 
 #[test]
@@ -1096,6 +1138,211 @@ fn write_usage_state_db(path: &std::path::Path, rows: usize) {
             .unwrap();
     }
     transaction.commit().unwrap();
+}
+
+fn row_projection_bytes(row: &HermesRow) -> Vec<u8> {
+    serde_json::to_vec(&json!([
+        row.id,
+        row.session_id,
+        row.role,
+        row.content,
+        row.reasoning,
+        row.tool_name,
+        row.tool_calls,
+        row.timestamp,
+        row.session_model,
+        row.parent_session_id,
+        row.session_cwd,
+        row.session_source,
+        row.session_title,
+        row.session_started_at,
+        row.session_ended_at,
+        row.session_input_tokens,
+        row.session_output_tokens,
+        row.session_cache_read_tokens,
+        row.session_cache_write_tokens,
+        row.session_reasoning_tokens,
+        row.is_session_usage_frontier,
+        row.active,
+        row.sql_value_oversized,
+        row.sql_measured_bytes,
+    ]))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn batched_page_is_byte_identical_to_reference_projection() {
+    let dir = tempfile::tempdir().unwrap();
+    initialize_owned_store_before_foreign_fixture(dir.path()).await;
+    let path = dir.path().join("state.db");
+    write_usage_state_db(&path, 3);
+
+    let conn = open_read_only_strict(&path).await.unwrap();
+    let select_sql = select_new_messages_sql(
+        &message_columns(&conn).await.unwrap(),
+        &table_columns(&conn, "sessions").await.unwrap(),
+    );
+    let page = read_new_rows_strict(&conn, &select_sql, StoredCursor::default())
+        .await
+        .unwrap();
+    let actual = page
+        .items
+        .iter()
+        .map(row_projection_bytes)
+        .collect::<Vec<_>>();
+    let expected = (0..3)
+        .map(|index| {
+            let content = format!("usage row {index}");
+            row_projection_bytes(&HermesRow {
+                id: index + 1,
+                session_id: "usage-session".to_string(),
+                role: "assistant".to_string(),
+                content: Some(content.clone()),
+                reasoning: None,
+                tool_name: None,
+                tool_calls: None,
+                timestamp: Some(index as f64),
+                session_model: Some("hermes-model".to_string()),
+                parent_session_id: None,
+                session_cwd: None,
+                session_source: None,
+                session_title: None,
+                session_started_at: None,
+                session_ended_at: None,
+                session_input_tokens: Some(10),
+                session_output_tokens: Some(5),
+                session_cache_read_tokens: None,
+                session_cache_write_tokens: None,
+                session_reasoning_tokens: None,
+                is_session_usage_frontier: index == 2,
+                active: 1,
+                sql_value_oversized: false,
+                sql_measured_bytes: ["usage-session", "assistant", &content, "hermes-model"]
+                    .into_iter()
+                    .map(str::len)
+                    .sum::<usize>() as u64,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(actual, expected);
+}
+
+async fn explain_query_plan(
+    conn: &crate::runtime::shared::SqliteReadConn,
+    sql: String,
+    parameters: Vec<i64>,
+) -> Vec<String> {
+    conn.with(move |conn| {
+        let mut statement = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        statement
+            .query_map(rusqlite::params_from_iter(parameters), |row| row.get(3))
+            .unwrap()
+            .collect::<Result<Vec<String>, _>>()
+            .unwrap()
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn active_and_legacy_batch_queries_keep_primary_key_seek_plans() {
+    for active_schema in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        initialize_owned_store_before_foreign_fixture(dir.path()).await;
+        let path = dir.path().join("state.db");
+        if active_schema {
+            write_usage_state_db(&path, 3);
+        } else {
+            write_minimal_legacy_state_db(&path, 3);
+        }
+
+        let conn = open_read_only_strict(&path).await.unwrap();
+        let select_sql = select_new_messages_sql(
+            &message_columns(&conn).await.unwrap(),
+            &table_columns(&conn, "sessions").await.unwrap(),
+        );
+        let admission_plan =
+            explain_query_plan(&conn, select_sql.admission_sql().to_string(), vec![0]).await;
+        let payload_plan =
+            explain_query_plan(&conn, select_sql.payload_sql(2), vec![1, 1, 2, 1]).await;
+
+        assert!(
+            admission_plan
+                .iter()
+                .any(|step| step.contains("SEARCH m USING INTEGER PRIMARY KEY (rowid>?)")),
+            "admission must seek from the cursor for active_schema={active_schema}: {admission_plan:?}"
+        );
+        assert!(
+            admission_plan
+                .iter()
+                .any(|step| step.contains("CORRELATED SCALAR SUBQUERY")),
+            "frontier lookup must remain inside the single admission execution: {admission_plan:?}"
+        );
+        assert!(
+            payload_plan
+                .iter()
+                .any(|step| step.contains("SEARCH m USING INTEGER PRIMARY KEY (rowid=?)")),
+            "payload batches must seek admitted ids for active_schema={active_schema}: {payload_plan:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn full_page_executes_one_admission_query_and_bounded_payload_batches() {
+    let dir = tempfile::tempdir().unwrap();
+    initialize_owned_store_before_foreign_fixture(dir.path()).await;
+    let path = dir.path().join("state.db");
+    write_usage_state_db(&path, CHUNK_ROWS);
+
+    let conn = open_read_only_strict(&path).await.unwrap();
+    conn.with(|conn| {
+        conn.trace_v2(
+            TraceEventCodes::SQLITE_TRACE_STMT,
+            Some(count_hermes_read_query),
+        );
+    })
+    .await
+    .unwrap();
+    let select_sql = select_new_messages_sql(
+        &message_columns(&conn).await.unwrap(),
+        &table_columns(&conn, "sessions").await.unwrap(),
+    );
+
+    OBSERVED_HERMES_READ_QUERIES.store(0, Ordering::Relaxed);
+    let page = read_new_rows_strict(&conn, &select_sql, StoredCursor::default())
+        .await
+        .unwrap();
+    let query_executions = OBSERVED_HERMES_READ_QUERIES.load(Ordering::Relaxed);
+    conn.with(|conn| conn.trace_v2(TraceEventCodes::empty(), None))
+        .await
+        .unwrap();
+
+    assert_eq!(page.items.len(), CHUNK_ROWS);
+    let query_ceiling = CHUNK_ROWS.div_ceil(HERMES_PAYLOAD_BATCH_ROWS) + 1;
+    assert!(
+        query_executions <= query_ceiling,
+        "one full page must execute one admission query plus at most one query per {HERMES_PAYLOAD_BATCH_ROWS} payloads; observed {query_executions}"
+    );
+    assert_eq!(query_executions, query_ceiling);
+    let admitted_payload_bytes = page
+        .items
+        .iter()
+        .map(|row| super::rows::hermes_page_row_charge(row.sql_measured_bytes))
+        .sum::<u64>();
+    let peak_payload_batch_bytes = page
+        .items
+        .chunks(HERMES_PAYLOAD_BATCH_ROWS)
+        .map(|batch| {
+            batch
+                .iter()
+                .map(|row| super::rows::hermes_page_row_charge(row.sql_measured_bytes))
+                .sum::<u64>()
+        })
+        .max()
+        .unwrap_or(0);
+    assert!(admitted_payload_bytes <= MAX_HERMES_PAGE_BYTES);
+    assert!(peak_payload_batch_bytes <= MAX_HERMES_PAGE_BYTES);
 }
 
 fn sqlite_sidecar(path: &std::path::Path, suffix: &str) -> std::path::PathBuf {
