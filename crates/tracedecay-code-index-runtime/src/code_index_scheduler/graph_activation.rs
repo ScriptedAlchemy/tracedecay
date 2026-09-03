@@ -4,6 +4,8 @@ use std::sync::{
 };
 
 use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
+#[cfg(any(test, feature = "test-helpers"))]
+use tracedecay_graph_db::GraphDbError;
 use tracedecay_graph_db::{GraphCancellation, SealedGraphStateDigest};
 
 use super::{
@@ -29,6 +31,28 @@ fn injected_activation_failures()
         std::sync::Mutex<std::collections::BTreeMap<String, usize>>,
     > = std::sync::OnceLock::new();
     FAILURES.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
+}
+
+/// Test-only injected publication conflicts, keyed by worktree id.
+/// A positive count makes the memory activation authority fail that many
+/// activations with `GraphDbError::Conflict` so a first-conflict retry that
+/// later seats is observable (issue #765).
+#[cfg(any(test, feature = "test-helpers"))]
+fn injected_activation_conflicts()
+-> &'static std::sync::Mutex<std::collections::BTreeMap<String, usize>> {
+    static CONFLICTS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::BTreeMap<String, usize>>,
+    > = std::sync::OnceLock::new();
+    CONFLICTS.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+fn injected_activation_attempts()
+-> &'static std::sync::Mutex<std::collections::BTreeMap<String, usize>> {
+    static ATTEMPTS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::BTreeMap<String, usize>>,
+    > = std::sync::OnceLock::new();
+    ATTEMPTS.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -112,6 +136,28 @@ pub fn set_injected_activation_failures(worktree_id: &WorktreeId, failures: usiz
 }
 
 #[cfg(test)]
+pub fn set_injected_activation_conflicts(worktree_id: &WorktreeId, conflicts: usize) {
+    let mut injected = injected_activation_conflicts()
+        .lock()
+        .expect("injected activation conflict gate must not be poisoned");
+    if conflicts == 0 {
+        injected.remove(worktree_id.as_str());
+    } else {
+        injected.insert(worktree_id.as_str().to_owned(), conflicts);
+    }
+}
+
+#[cfg(test)]
+pub fn injected_activation_attempt_count(worktree_id: &WorktreeId) -> usize {
+    injected_activation_attempts()
+        .lock()
+        .expect("injected activation attempt map must not be poisoned")
+        .get(worktree_id.as_str())
+        .copied()
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
 pub fn set_injected_resident_memory_refusal(worktree_id: &WorktreeId, refused: bool) {
     let mut refusals = injected_resident_memory_refusals()
         .lock()
@@ -157,6 +203,31 @@ fn take_injected_activation_failure(worktree_id: &WorktreeId) -> bool {
         }
         _ => false,
     }
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+#[allow(clippy::expect_used)] // fixture gate: a poisoned injection mutex is a test-harness bug
+fn take_injected_activation_conflict(worktree_id: &WorktreeId) -> bool {
+    let mut injected = injected_activation_conflicts()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match injected.get_mut(worktree_id.as_str()) {
+        Some(remaining) if *remaining > 0 => {
+            *remaining = remaining.saturating_sub(1);
+            true
+        }
+        _ => false,
+    }
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+#[allow(clippy::expect_used)] // fixture gate: a poisoned injection mutex is a test-harness bug
+fn record_injected_activation_attempt(worktree_id: &WorktreeId) {
+    *injected_activation_attempts()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entry(worktree_id.as_str().to_owned())
+        .or_insert(0) += 1;
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -374,6 +445,7 @@ impl CodeGraphActivationAuthorityV1 {
                     gate.started.notify_one();
                     gate.release.notified().await;
                 }
+                record_injected_activation_attempt(worktree_id);
                 if take_injected_terminal_activation_failure(worktree_id) {
                     return Err(CodeIndexSchedulerErrorV1::Identity(
                         "injected terminal graph activation failure".to_owned(),
@@ -390,6 +462,11 @@ impl CodeGraphActivationAuthorityV1 {
                                 tracedecay_runtime_core::resident_memory::detected_process_resident_memory_limit_v1()
                                     .get(),
                         },
+                    ));
+                }
+                if take_injected_activation_conflict(worktree_id) {
+                    return Err(CodeIndexSchedulerErrorV1::GraphProjection(
+                        GraphDbError::conflict("publication.prepare.expected_prior_head").into(),
                     ));
                 }
                 if take_injected_activation_failure(worktree_id) {

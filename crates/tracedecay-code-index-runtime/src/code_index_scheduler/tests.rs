@@ -7062,6 +7062,131 @@ fn repeated_identical_conflict_verdict_is_terminal_not_retryable() {
     );
 }
 
+/// A first publication conflict is a concurrent-publisher race, not a
+/// deterministic refusal. The seat loop must schedule exactly one retry and
+/// seat the sealed generation when that retry succeeds (issue #765). A later
+/// conflict at a different guard site stays retryable — only an identical
+/// repeat is terminal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn first_activation_conflict_retries_once_and_then_seats() {
+    use tracedecay_graph_db::GraphDbError;
+
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let scoped_store = super::scoped_code_index_store_root(
+        store.path(),
+        &fixture.path().canonicalize().expect("canonical fixture"),
+    );
+    let (scope, worktree_id, sealed_generation_id) = {
+        let mut scheduler = scheduler(
+            &fixture,
+            scoped_store,
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(scheduler.reconcile_now().expect("seed generation"));
+        let latest = scheduler.latest_complete().expect("seeded generation");
+        let snapshot = latest.generation.snapshot();
+        let worktree_id = snapshot.worktree.clone().expect("worktree id");
+        (
+            ResolvedScope::new(
+                test_project_id(),
+                snapshot.repository.clone(),
+                worktree_id.clone(),
+                snapshot.reference.clone(),
+            )
+            .expect("resolved scope"),
+            worktree_id,
+            latest.generation.manifest().generation_id.clone(),
+        )
+    };
+
+    let conflict_error = |site: &'static str| {
+        super::CodeIndexSchedulerErrorV1::GraphProjection(GraphDbError::conflict(site).into())
+    };
+    let context_of = |site: &'static str| {
+        conflict_error(site)
+            .activation_conflict_context()
+            .expect("conflict error carries its context")
+            .clone()
+    };
+    let first = conflict_error("publication.prepare.expected_prior_head");
+    let different_site = (
+        sealed_generation_id.clone(),
+        context_of("publication.complete.cas_prior_head"),
+    );
+    assert!(
+        !super::registry::is_repeated_conflict_verdict(&first, &sealed_generation_id, None),
+        "the first conflict retries; it may be a concurrent-publisher race"
+    );
+    assert!(
+        !super::registry::is_repeated_conflict_verdict(
+            &first,
+            &sealed_generation_id,
+            Some(&different_site)
+        ),
+        "a second different conflict is not classified terminal"
+    );
+
+    super::graph_activation::set_injected_activation_conflicts(&worktree_id, 1);
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount retained generation");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let freshness = registry
+            .dashboard_freshness(fixture.path())
+            .await
+            .expect("mounted dashboard freshness");
+        if let Some(
+            tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Unavailable {
+                ref reason,
+            },
+        ) = freshness.code_graph_serving
+            && reason != "generation_unavailable"
+        {
+            panic!("first conflict became a terminal graph refusal: {reason}");
+        }
+        let seated = registry
+            .latest_complete_serving_for_scope(&scope)
+            .await
+            .is_some_and(|latest| {
+                latest.generation().manifest().generation_id == sealed_generation_id
+                    && latest.code_graph_serving_readiness()
+                        == tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Ready
+            });
+        if seated
+            && matches!(
+                freshness.code_graph_serving,
+                Some(
+                    tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Ready
+                )
+            )
+        {
+            break;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "the first-conflict retry did not seat the sealed generation: {freshness:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    assert_eq!(
+        super::graph_activation::injected_activation_attempt_count(&worktree_id),
+        2,
+        "one injected conflict must schedule exactly one retry that then seats"
+    );
+    registry.shutdown().await;
+}
+
 /// The serving gates are relaxed on `reference` only. A different repository
 /// or a different worktree is a different checkout identity and must stay
 /// unservable, or an answer would be mis-attributed rather than merely old.
