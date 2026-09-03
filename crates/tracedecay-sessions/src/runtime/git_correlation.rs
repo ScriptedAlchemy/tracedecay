@@ -514,6 +514,31 @@ impl CorrelationIndexHealth {
     }
 }
 
+/// Bounded row-family presence for the session/Git evidence projection.
+///
+/// Query paths need only distinguish a projection with no applicable evidence
+/// from a populated projection that produced no matches. They must not pay for
+/// exact health counts, which remain a diagnostics concern.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CorrelationIndexPresence {
+    pub projection_available: bool,
+    pub generation: Option<String>,
+    pub source_watermark: Option<String>,
+    pub spans_present: bool,
+    pub commits_present: bool,
+    pub backfill_watermark: Option<i64>,
+}
+
+impl CorrelationIndexPresence {
+    #[hotpath::skip]
+    pub const fn is_empty_for(&self, git_ref: &GitRefFilter) -> bool {
+        match git_ref {
+            GitRefFilter::Branch(_) | GitRefFilter::Worktree(_) => !self.spans_present,
+            GitRefFilter::Commit(_) => !self.commits_present,
+        }
+    }
+}
+
 pub fn normalize_worktree(path: &str) -> String {
     let mut normalized = path.trim().replace('\\', "/");
     if let Some(stripped) = normalized.strip_prefix("//?/UNC/") {

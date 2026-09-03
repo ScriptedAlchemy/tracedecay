@@ -442,15 +442,24 @@ pub struct SessionCorrelationHitV1 {
     pub evidence_message_id: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CorrelationIndexCountModeV1 {
+    PresenceOnly,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CorrelationIndexV1 {
     pub projection_available: bool,
     pub generation: Option<String>,
     pub source_watermark: Option<String>,
-    pub span_count: u64,
-    pub commit_count: u64,
+    pub spans_present: bool,
+    pub commits_present: bool,
+    pub span_count: Option<u64>,
+    pub commit_count: Option<u64>,
     pub backfill_watermark: Option<i64>,
+    pub count_mode: CorrelationIndexCountModeV1,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

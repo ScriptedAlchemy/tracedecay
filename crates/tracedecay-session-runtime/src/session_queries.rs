@@ -2,10 +2,10 @@
 
 use tracedecay_application::RetainedSurfaceExecutionErrorV1;
 use tracedecay_application::retained_surfaces::{
-    CorrelationIndexV1, GitScopeV1, RetainedErrorV1, RetainedOutcomeStatusV1,
-    SessionCorrelationHitV1, SessionGitRefV1, SessionGitRelationV1, SessionsForRequestV1,
-    SessionsForResultV1, WorkflowAgentV1, WorkflowCoverageV1, WorkflowQueryModeV1, WorkflowRunV1,
-    WorkflowStatusV1, WorkflowsRequestV1, WorkflowsResultV1,
+    CorrelationIndexCountModeV1, CorrelationIndexV1, GitScopeV1, RetainedErrorV1,
+    RetainedOutcomeStatusV1, SessionCorrelationHitV1, SessionGitRefV1, SessionGitRelationV1,
+    SessionsForRequestV1, SessionsForResultV1, WorkflowAgentV1, WorkflowCoverageV1,
+    WorkflowQueryModeV1, WorkflowRunV1, WorkflowStatusV1, WorkflowsRequestV1, WorkflowsResultV1,
 };
 use tracedecay_sessions::runtime::git_correlation::{
     CommitEvidence, CommitRelation, CommitRelationFilter, GitCorrelationError, GitRefFilter,
@@ -60,9 +60,8 @@ pub async fn sessions_for(
         limit,
     };
     let correlation = GlobalDbGitCorrelationStore::new(database);
-    let index_health = correlation.correlation_index_health().await.ok();
-    let results = match hotpath::future!(
-        correlation.sessions_for_with_relation(&query, relation),
+    let (results, index_presence) = match hotpath::future!(
+        correlation.sessions_for_with_relation_and_presence(&query, relation),
         label = "daemon.retained.session.sessions_for.query"
     )
     .await
@@ -93,9 +92,7 @@ pub async fn sessions_for(
     } else {
         None
     };
-    let index_empty = index_health
-        .as_ref()
-        .is_none_or(|health| health.is_empty_for(&query.git_ref));
+    let index_empty = index_presence.is_empty_for(&query.git_ref);
     let mut result = SessionsForResultV1 {
         status: RetainedOutcomeStatusV1::Ok,
         git_ref: Some(query.git_ref.kind().to_owned()),
@@ -106,13 +103,16 @@ pub async fn sessions_for(
         count: results.len(),
         results: results.into_iter().map(correlation_hit).collect(),
         index_empty: Some(index_empty),
-        index: index_health.map(|health| CorrelationIndexV1 {
-            projection_available: health.projection_available,
-            generation: health.generation,
-            source_watermark: health.source_watermark,
-            span_count: health.span_count,
-            commit_count: health.commit_count,
-            backfill_watermark: health.backfill_watermark,
+        index: Some(CorrelationIndexV1 {
+            projection_available: index_presence.projection_available,
+            generation: index_presence.generation,
+            source_watermark: index_presence.source_watermark,
+            spans_present: index_presence.spans_present,
+            commits_present: index_presence.commits_present,
+            span_count: (!index_presence.spans_present).then_some(0),
+            commit_count: (!index_presence.commits_present).then_some(0),
+            backfill_watermark: index_presence.backfill_watermark,
+            count_mode: CorrelationIndexCountModeV1::PresenceOnly,
         }),
         message: None,
         observed_count: None,
