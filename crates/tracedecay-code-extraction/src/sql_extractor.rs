@@ -65,6 +65,7 @@ impl SqlExtractor {
         .result
     }
 
+    #[hotpath::measure(label = "code_extraction.sql.extract_tree")]
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -112,6 +113,7 @@ impl SqlExtractor {
         )
     }
 
+    #[hotpath::measure(label = "code_extraction.sql.parse_source")]
     fn parse_source(source: &str) -> Result<Tree, String> {
         crate::ts_provider::parse_extractor_source("sql", "SQL", source)
     }
@@ -230,10 +232,12 @@ impl crate::LanguageExtractor for SqlExtractor {
         "SQL"
     }
 
+    #[hotpath::measure(label = "code_extraction.sql.extract")]
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_sql(file_path, source)
     }
 
+    #[hotpath::measure(label = "code_extraction.sql.extract_parsed")]
     fn extract_parsed(
         &self,
         file_path: &str,

@@ -89,6 +89,7 @@ impl WgslExtractor {
         .result
     }
 
+    #[hotpath::measure(label = "code_extraction.wgsl.extract_tree")]
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -139,6 +140,7 @@ impl WgslExtractor {
         )
     }
 
+    #[hotpath::measure(label = "code_extraction.wgsl.parse_source")]
     fn parse_source(source: &str) -> Result<Tree, String> {
         crate::ts_provider::parse_extractor_source("wgsl", "WGSL", source)
     }
@@ -542,10 +544,12 @@ impl crate::LanguageExtractor for WgslExtractor {
         "WGSL"
     }
 
+    #[hotpath::measure(label = "code_extraction.wgsl.extract")]
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         WgslExtractor::extract_source(file_path, source)
     }
 
+    #[hotpath::measure(label = "code_extraction.wgsl.extract_parsed")]
     fn extract_parsed(
         &self,
         file_path: &str,

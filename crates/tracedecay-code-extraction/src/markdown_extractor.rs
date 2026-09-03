@@ -664,10 +664,12 @@ impl crate::LanguageExtractor for MarkdownExtractor {
         "Markdown"
     }
 
+    #[hotpath::measure(label = "code_extraction.markdown.extract")]
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_markdown(file_path, source)
     }
 
+    #[hotpath::measure(label = "code_extraction.markdown.extract_parsed")]
     fn extract_parsed(
         &self,
         file_path: &str,

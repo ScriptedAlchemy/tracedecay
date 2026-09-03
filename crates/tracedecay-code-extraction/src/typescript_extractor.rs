@@ -120,6 +120,7 @@ impl TypeScriptExtractor {
         .artifact
     }
 
+    #[hotpath::measure(label = "code_extraction.typescript.extract_tree")]
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -202,6 +203,7 @@ impl TypeScriptExtractor {
     }
 
     /// Parse source code into a tree-sitter AST, selecting grammar by file extension.
+    #[hotpath::measure(label = "code_extraction.typescript.parse_source")]
     fn parse_source(source: &str, extension: &str) -> Result<Tree, String> {
         let (key, label) = match extension {
             "ts" | "astro" | "svelte" => ("typescript", "TypeScript"),
@@ -1508,6 +1510,7 @@ impl crate::LanguageExtractor for TypeScriptExtractor {
         "TypeScript"
     }
 
+    #[hotpath::measure(label = "code_extraction.typescript.extract")]
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         TypeScriptExtractor::extract_typescript(file_path, source)
     }
@@ -1521,6 +1524,7 @@ impl crate::LanguageExtractor for TypeScriptExtractor {
         )
     }
 
+    #[hotpath::measure(label = "code_extraction.typescript.extract_parsed")]
     fn extract_parsed(
         &self,
         file_path: &str,

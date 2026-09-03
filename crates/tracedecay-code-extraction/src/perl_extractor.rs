@@ -97,6 +97,7 @@ impl PerlExtractor {
         .result
     }
 
+    #[hotpath::measure(label = "code_extraction.perl.extract_tree")]
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -149,6 +150,7 @@ impl PerlExtractor {
     }
 
     /// Parse source code into a tree-sitter AST.
+    #[hotpath::measure(label = "code_extraction.perl.parse_source")]
     fn parse_source(source: &str) -> Result<Tree, String> {
         crate::ts_provider::parse_extractor_source("perl", "Perl", source)
     }
@@ -681,10 +683,12 @@ impl crate::LanguageExtractor for PerlExtractor {
         "Perl"
     }
 
+    #[hotpath::measure(label = "code_extraction.perl.extract")]
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_perl(file_path, source)
     }
 
+    #[hotpath::measure(label = "code_extraction.perl.extract_parsed")]
     fn extract_parsed(
         &self,
         file_path: &str,

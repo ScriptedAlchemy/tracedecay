@@ -101,6 +101,7 @@ impl ScalaExtractor {
         .result
     }
 
+    #[hotpath::measure(label = "code_extraction.scala.extract_tree")]
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -153,6 +154,7 @@ impl ScalaExtractor {
     }
 
     /// Parse source code into a tree-sitter AST.
+    #[hotpath::measure(label = "code_extraction.scala.parse_source")]
     fn parse_source(source: &str) -> Result<Tree, String> {
         crate::ts_provider::parse_extractor_source("scala", "Scala", source)
     }
@@ -1482,10 +1484,12 @@ impl crate::LanguageExtractor for ScalaExtractor {
         "Scala"
     }
 
+    #[hotpath::measure(label = "code_extraction.scala.extract")]
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         ScalaExtractor::extract_scala(file_path, source)
     }
 
+    #[hotpath::measure(label = "code_extraction.scala.extract_parsed")]
     fn extract_parsed(
         &self,
         file_path: &str,

@@ -82,6 +82,7 @@ impl ClojureExtractor {
         .result
     }
 
+    #[hotpath::measure(label = "code_extraction.clojure.extract_tree")]
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -133,6 +134,7 @@ impl ClojureExtractor {
         )
     }
 
+    #[hotpath::measure(label = "code_extraction.clojure.parse_source")]
     fn parse_source(source: &str) -> Result<Tree, String> {
         crate::ts_provider::parse_extractor_source("clojure", "Clojure", source)
     }
@@ -537,10 +539,12 @@ impl crate::LanguageExtractor for ClojureExtractor {
         "Clojure"
     }
 
+    #[hotpath::measure(label = "code_extraction.clojure.extract")]
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_clojure(file_path, source)
     }
 
+    #[hotpath::measure(label = "code_extraction.clojure.extract_parsed")]
     fn extract_parsed(
         &self,
         file_path: &str,
