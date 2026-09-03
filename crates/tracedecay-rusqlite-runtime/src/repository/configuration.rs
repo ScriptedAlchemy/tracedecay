@@ -24,6 +24,7 @@ const ACTIVATION_NOT_RECORDED: &str = "not_recorded_by_configuration_store_v1";
 pub struct ConfigurationExecutor;
 
 impl ConfigurationExecutor {
+    #[hotpath::measure(label = "rusqlite.configuration.write")]
     pub fn execute_write(
         &mut self,
         savepoint: &Savepoint<'_>,
@@ -78,6 +79,7 @@ impl ConfigurationExecutor {
         Ok(())
     }
 
+    #[hotpath::measure(label = "rusqlite.configuration.read")]
     pub fn execute_read(
         &mut self,
         snapshot: &Transaction<'_>,
@@ -138,6 +140,7 @@ fn current_revision_id(connection: &rusqlite::Connection) -> rusqlite::Result<Op
     }
 }
 
+#[hotpath::measure(label = "rusqlite.configuration.insert_revision")]
 fn insert_revision(
     savepoint: &Savepoint<'_>,
     revision: &ConfigurationRevisionRecordV1,

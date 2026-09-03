@@ -26,6 +26,7 @@ pub struct ProjectExecutor {
 }
 
 impl ProjectExecutor {
+    #[hotpath::measure(label = "rusqlite.project.fact_write")]
     pub fn execute_fact_write(
         &mut self,
         savepoint: &Savepoint<'_>,
@@ -34,6 +35,7 @@ impl ProjectExecutor {
         self.fact.execute_write(savepoint, batch)
     }
 
+    #[hotpath::measure(label = "rusqlite.project.observation_write")]
     pub fn execute_observation_write(
         &mut self,
         savepoint: &Savepoint<'_>,
@@ -54,6 +56,7 @@ impl ProjectExecutor {
         Ok(())
     }
 
+    #[hotpath::measure(label = "rusqlite.project.observation_batch")]
     pub fn execute_observation_batch(
         &mut self,
         savepoint: &Savepoint<'_>,
@@ -65,6 +68,7 @@ impl ProjectExecutor {
         Ok(())
     }
 
+    #[hotpath::measure(label = "rusqlite.project.remote_observation_replay")]
     pub fn execute_remote_observation_replay(
         &mut self,
         savepoint: &Savepoint<'_>,
@@ -83,6 +87,7 @@ impl ProjectExecutor {
         install_writer_fence(savepoint, install)
     }
 
+    #[hotpath::measure(label = "rusqlite.project.observation_cursor_advance")]
     pub fn execute_observation_cursor_advance(
         &mut self,
         savepoint: &Savepoint<'_>,
@@ -113,6 +118,7 @@ impl ProjectExecutor {
             .map(|_| ())
     }
 
+    #[hotpath::measure(label = "rusqlite.project.evidence_assembly_write")]
     pub fn execute_evidence_assembly_write(
         &mut self,
         savepoint: &Savepoint<'_>,
@@ -184,6 +190,7 @@ impl ProjectExecutor {
             .execute_derivative_write(savepoint, derivative)
     }
 
+    #[hotpath::measure(label = "rusqlite.project.read")]
     pub fn execute_read(
         &mut self,
         snapshot: &Transaction<'_>,

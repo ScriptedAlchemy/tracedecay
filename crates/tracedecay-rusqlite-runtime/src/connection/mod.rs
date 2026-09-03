@@ -227,6 +227,7 @@ impl OpenedDatabaseFile {
         Ok(())
     }
 
+    #[hotpath::measure(label = "rusqlite.connection.verify_identity")]
     pub(crate) fn verify_connection(
         &self,
         _connection: &Connection,

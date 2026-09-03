@@ -142,6 +142,7 @@ impl RemoteRecoverySqliteAuthorityV1 {
 
     /// Publishes the authority-store value used by every later recovery CAS.
     /// A lower epoch, or a different writer at the same epoch, is rejected.
+    #[hotpath::measure(label = "rusqlite.recovery.publish_authority")]
     pub fn publish_authority(
         &self,
         authority: &CurrentRemoteAuthorityV1,
@@ -191,6 +192,7 @@ impl RemoteRecoverySqliteAuthorityV1 {
     /// becomes available. The original admitted request and caller binding are
     /// journaled before the write gate is visible, so recovery never depends
     /// on an API caller retrying.
+    #[hotpath::measure(label = "rusqlite.recovery.reconcile_promotions")]
     pub fn reconcile_interrupted_promotions(
         &self,
         project_id: &tracedecay_domain::ProjectId,
@@ -224,6 +226,7 @@ impl RemoteRecoverySqliteAuthorityV1 {
         Ok(reconciled)
     }
 
+    #[hotpath::measure(label = "rusqlite.recovery.seed_authority")]
     fn ensure_authority_seeded(
         &self,
         expected: &RecoveryAuthorityExpectationV1,
@@ -256,6 +259,7 @@ impl RemoteRecoverySqliteAuthorityV1 {
             .map_err(map_store_error)
     }
 
+    #[hotpath::measure(label = "rusqlite.recovery.promotion_pending")]
     fn promotion_is_pending(
         &self,
         operation_id: &str,
@@ -278,6 +282,7 @@ impl RemoteRecoverySqliteAuthorityV1 {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure(label = "rusqlite.recovery.execute_operation")]
     fn execute_operation<Request, Output>(
         &self,
         kind: &'static str,
@@ -404,6 +409,7 @@ impl RemoteRecoveryControlPortV1 for RecoveryReconciliationControlV1 {
 }
 
 impl RemoteSqliteStorageV1 {
+    #[hotpath::measure(label = "rusqlite.recovery.load_writer")]
     pub fn recovery_writer(
         &self,
         expected: &RecoveryAuthorityExpectationV1,
@@ -426,6 +432,7 @@ impl RemoteSqliteStorageV1 {
         Ok(writer)
     }
 
+    #[hotpath::measure(label = "rusqlite.recovery.load_writer_lineage")]
     pub fn recovery_writer_for_lineage(
         &self,
         expected: &RecoveryAuthorityExpectationV1,
@@ -517,6 +524,7 @@ impl RemoteRecoveryOperationPortV1 for RemoteRecoverySqliteAuthorityV1 {
         )
     }
 
+    #[hotpath::measure(label = "rusqlite.recovery.promote")]
     fn promote(
         &self,
         request: &RemoteProtocolRequestV1<PromotionConfirmationV1>,
@@ -652,6 +660,7 @@ impl RemoteRecoveryOperationPortV1 for RemoteRecoverySqliteAuthorityV1 {
     }
 }
 
+#[hotpath::measure(label = "rusqlite.recovery.authority_state")]
 fn available_authority_state(
     handle: &ExactSqlHandle,
     expected: &RecoveryAuthorityExpectationV1,
@@ -815,6 +824,7 @@ fn validate_sink_inventory(sink_ids: &[String]) -> Result<(), RemoteRecoveryOper
     Ok(())
 }
 
+#[hotpath::measure(label = "rusqlite.recovery.persist_sink_receipts")]
 fn persist_sink_receipts(
     handle: &ExactSqlHandle,
     operation_id: &str,
