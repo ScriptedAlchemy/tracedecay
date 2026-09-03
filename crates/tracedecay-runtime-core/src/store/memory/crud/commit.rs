@@ -553,6 +553,29 @@ async fn insert_assertion(
         )
         .await
         .map_err(|error| storage_error(COMMIT_OPERATION, error))?;
+    // The digest row is written by the same authority as the payload so the
+    // indexed duplicate lookup (#834) can never disagree with the bytes it
+    // fingerprints; the payload delete trigger drops it with the payload.
+    let digest = super::content_digest(assertion.payload().content())?;
+    transaction
+        .execute(
+            "INSERT INTO memory_v2_assertion_payload_digests(
+                payload_rowid, assertion_id, fact_id, owner_kind, project_id, content_digest
+             )
+             SELECT rowid, assertion_id, fact_id, owner_kind, project_id, ?5
+             FROM memory_v2_assertion_payloads
+             WHERE assertion_id = ?1 AND fact_id = ?2
+               AND owner_kind = ?3 AND project_id = ?4",
+            params![
+                assertion.assertion_id().as_str(),
+                assertion.fact_id().as_str(),
+                owner.kind,
+                owner.project_id.as_str(),
+                digest.as_str(),
+            ],
+        )
+        .await
+        .map_err(|error| storage_error(COMMIT_OPERATION, error))?;
 
     for (ordinal, evidence) in assertion.evidence().iter().enumerate() {
         let evidence_json = to_json(evidence, "serialize fact evidence")?;

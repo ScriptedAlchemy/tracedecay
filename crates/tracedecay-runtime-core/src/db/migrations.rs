@@ -6,7 +6,7 @@
 //! an incompatible binary and is refused at open with a fresh-start remedy.
 
 use crate::db::connection::DatabaseEngineWriteConnection;
-use crate::db::engine::{Connection, Executor, QueryExecutor};
+use crate::db::engine::{Connection, Executor, QueryExecutor, params};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 mod final_shape;
@@ -41,7 +41,18 @@ const ROOT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS metadata (
 /// canonical `memory_v2_*` tables; derived vectors are re-created from that
 /// content. A current-stamped store containing a retired projection fails
 /// closed before interpretation.
-pub const SCHEMA_VERSION: u32 = 34;
+pub const SCHEMA_VERSION: u32 = 35;
+
+/// The one prior shape this binary steps forward in place: v34 is v35 minus
+/// the persisted payload-digest objects (#834). Every other stamp is still
+/// refused with the fresh-start remedy.
+pub const PAYLOAD_DIGEST_STEP_SOURCE_VERSION: u32 = 34;
+
+/// Metadata key journaling the v34 -> v35 backfill receipt.
+pub const PAYLOAD_DIGEST_BACKFILL_RECEIPT_KEY: &str = "memory_v2.payload_digest_backfill.v35";
+
+/// Payload rows fingerprinted per short backfill write.
+const PAYLOAD_DIGEST_BACKFILL_CHUNK_ROWS: usize = 512;
 
 /// Reads the current schema version from `PRAGMA user_version`.
 async fn get_version(conn: &impl QueryExecutor) -> Result<u32> {
@@ -308,7 +319,146 @@ async fn ensure_schema_current_engine_connection(
     if current == 0 && !store_has_objects(conn).await? {
         return create_schema_engine_connection(conn).await;
     }
+    if current == PAYLOAD_DIGEST_STEP_SOURCE_VERSION {
+        step_payload_digests(conn).await?;
+    }
     verify_final_schema_connection(conn).await
+}
+
+/// Steps a v34 store to v35: creates the payload-digest objects (idempotent)
+/// and fingerprints every existing payload in bounded chunks, each its own
+/// short write, so the writer is released between chunks and an interrupted
+/// run resumes from the rows still missing a digest. The stamp moves only
+/// after the last chunk and the receipt are durable.
+async fn step_payload_digests(conn: &DatabaseEngineWriteConnection) -> Result<()> {
+    const OPERATION: &str = "step_payload_digests";
+    final_shape::require_final_shape_except_payload_digests(conn).await?;
+    conn.execute_batch(super::memory_v2::PAYLOAD_DIGESTS_SCHEMA)
+        .await
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("failed to create payload digest objects: {error}"),
+            operation: OPERATION.to_owned(),
+        })?;
+    let mut cursor: i64 = 0;
+    let mut backfilled: u64 = 0;
+    loop {
+        let chunk = payload_digest_backfill_chunk(conn, cursor).await?;
+        let Some(last_rowid) = chunk.last().map(|row| row.rowid) else {
+            break;
+        };
+        for row in &chunk {
+            let digest = payload_content_digest(&row.content);
+            conn.execute(
+                "INSERT OR IGNORE INTO memory_v2_assertion_payload_digests(
+                    payload_rowid, assertion_id, fact_id, owner_kind, project_id, content_digest
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    row.rowid,
+                    row.assertion_id.as_str(),
+                    row.fact_id.as_str(),
+                    row.owner_kind.as_str(),
+                    row.project_id.as_str(),
+                    digest.as_str(),
+                ],
+            )
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to backfill payload digest: {error}"),
+                operation: OPERATION.to_owned(),
+            })?;
+            backfilled += 1;
+        }
+        cursor = last_rowid;
+    }
+    let receipt = serde_json::json!({
+        "from_version": PAYLOAD_DIGEST_STEP_SOURCE_VERSION,
+        "to_version": SCHEMA_VERSION,
+        "backfilled_rows": backfilled,
+        "chunk_rows": PAYLOAD_DIGEST_BACKFILL_CHUNK_ROWS,
+    });
+    conn.execute(
+        "INSERT OR REPLACE INTO metadata (key, value) VALUES (?1, ?2)",
+        params![PAYLOAD_DIGEST_BACKFILL_RECEIPT_KEY, receipt.to_string()],
+    )
+    .await
+    .map_err(|error| TraceDecayError::Database {
+        message: format!("failed to journal payload digest backfill receipt: {error}"),
+        operation: OPERATION.to_owned(),
+    })?;
+    set_version(conn, SCHEMA_VERSION).await
+}
+
+struct PayloadDigestBackfillRow {
+    rowid: i64,
+    assertion_id: String,
+    fact_id: String,
+    owner_kind: String,
+    project_id: String,
+    content: String,
+}
+
+async fn payload_digest_backfill_chunk(
+    conn: &impl QueryExecutor,
+    after_rowid: i64,
+) -> Result<Vec<PayloadDigestBackfillRow>> {
+    const OPERATION: &str = "step_payload_digests";
+    let map = |error: String| TraceDecayError::Database {
+        message: error,
+        operation: OPERATION.to_owned(),
+    };
+    let mut rows = conn
+        .query(
+            "SELECT payloads.rowid, payloads.assertion_id, payloads.fact_id,
+                    payloads.owner_kind, payloads.project_id, payloads.content
+             FROM memory_v2_assertion_payloads AS payloads
+             LEFT JOIN memory_v2_assertion_payload_digests AS digests
+               ON digests.payload_rowid = payloads.rowid
+             WHERE digests.payload_rowid IS NULL AND payloads.rowid > ?1
+             ORDER BY payloads.rowid ASC
+             LIMIT ?2",
+            params![
+                after_rowid,
+                i64::try_from(PAYLOAD_DIGEST_BACKFILL_CHUNK_ROWS).unwrap_or(i64::MAX)
+            ],
+        )
+        .await
+        .map_err(|error| {
+            map(format!(
+                "failed to read payload digest backfill chunk: {error}"
+            ))
+        })?;
+    let mut chunk = Vec::with_capacity(PAYLOAD_DIGEST_BACKFILL_CHUNK_ROWS);
+    while let Some(row) = rows.next().await.map_err(|error| {
+        map(format!(
+            "failed to read payload digest backfill row: {error}"
+        ))
+    })? {
+        let column = |index: i32| -> Result<String> {
+            row.get::<String>(index)
+                .map_err(|error| map(format!("failed to read backfill column {index}: {error}")))
+        };
+        chunk.push(PayloadDigestBackfillRow {
+            rowid: row
+                .get::<i64>(0)
+                .map_err(|error| map(format!("failed to read backfill rowid: {error}")))?,
+            assertion_id: column(1)?,
+            fact_id: column(2)?,
+            owner_kind: column(3)?,
+            project_id: column(4)?,
+            content: column(5)?,
+        });
+    }
+    Ok(chunk)
+}
+
+/// Byte-for-byte the digest `store::memory::crud::content_digest` derives for
+/// a payload's `content`: `sha256:` plus lowercase hex.
+fn payload_content_digest(content: &str) -> String {
+    use sha2::Digest as _;
+    tracedecay_domain::canonical_text::encode_tagged_lowercase_hex(
+        "sha256:",
+        &sha2::Sha256::digest(content.as_bytes()),
+    )
 }
 
 /// Verifies that an already-existing store has the one exact final shape this
@@ -316,6 +466,18 @@ async fn ensure_schema_current_engine_connection(
 /// fresh file, so read-only mounts cannot change persisted state.
 pub(crate) async fn verify_final_schema_connection(conn: &impl QueryExecutor) -> Result<()> {
     let current = get_version(conn).await?;
+    if current == PAYLOAD_DIGEST_STEP_SOURCE_VERSION {
+        // A read-only mount may not step the store; the message names the
+        // writer-side remedy instead of the fresh-start reset.
+        return Err(TraceDecayError::Database {
+            message: format!(
+                "database schema v{current} is one step behind v{SCHEMA_VERSION}: \
+                 the payload digest step is pending and runs the next time a writer \
+                 opens this store; retry after that open instead of resetting the store"
+            ),
+            operation: "verify_final_schema".to_owned(),
+        });
+    }
     if current != SCHEMA_VERSION {
         return Err(unsupported_schema_version(current));
     }
@@ -339,7 +501,70 @@ pub(crate) async fn ensure_schema_current_connection(conn: &Connection) -> Resul
     if current == 0 && !store_has_objects(conn).await? {
         return create_schema_connection(conn).await;
     }
+    if current == PAYLOAD_DIGEST_STEP_SOURCE_VERSION {
+        step_payload_digests_connection(conn).await?;
+    }
     verify_final_schema_connection(conn).await
+}
+
+/// Test-runtime twin of [`step_payload_digests`] on a plain connection.
+#[cfg(test)]
+async fn step_payload_digests_connection(conn: &Connection) -> Result<()> {
+    const OPERATION: &str = "step_payload_digests";
+    final_shape::require_final_shape_except_payload_digests(conn).await?;
+    conn.execute_batch(super::memory_v2::PAYLOAD_DIGESTS_SCHEMA)
+        .await
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("failed to create payload digest objects: {error}"),
+            operation: OPERATION.to_owned(),
+        })?;
+    let mut cursor: i64 = 0;
+    let mut backfilled: u64 = 0;
+    loop {
+        let chunk = payload_digest_backfill_chunk(conn, cursor).await?;
+        let Some(last_rowid) = chunk.last().map(|row| row.rowid) else {
+            break;
+        };
+        for row in &chunk {
+            let digest = payload_content_digest(&row.content);
+            conn.execute(
+                "INSERT OR IGNORE INTO memory_v2_assertion_payload_digests(
+                    payload_rowid, assertion_id, fact_id, owner_kind, project_id, content_digest
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    row.rowid,
+                    row.assertion_id.as_str(),
+                    row.fact_id.as_str(),
+                    row.owner_kind.as_str(),
+                    row.project_id.as_str(),
+                    digest.as_str(),
+                ],
+            )
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to backfill payload digest: {error}"),
+                operation: OPERATION.to_owned(),
+            })?;
+            backfilled += 1;
+        }
+        cursor = last_rowid;
+    }
+    let receipt = serde_json::json!({
+        "from_version": PAYLOAD_DIGEST_STEP_SOURCE_VERSION,
+        "to_version": SCHEMA_VERSION,
+        "backfilled_rows": backfilled,
+        "chunk_rows": PAYLOAD_DIGEST_BACKFILL_CHUNK_ROWS,
+    });
+    conn.execute(
+        "INSERT OR REPLACE INTO metadata (key, value) VALUES (?1, ?2)",
+        params![PAYLOAD_DIGEST_BACKFILL_RECEIPT_KEY, receipt.to_string()],
+    )
+    .await
+    .map_err(|error| TraceDecayError::Database {
+        message: format!("failed to journal payload digest backfill receipt: {error}"),
+        operation: OPERATION.to_owned(),
+    })?;
+    set_version(conn, SCHEMA_VERSION).await
 }
 
 #[cfg(test)]

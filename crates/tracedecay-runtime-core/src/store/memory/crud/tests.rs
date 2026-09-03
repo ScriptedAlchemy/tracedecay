@@ -23,9 +23,9 @@ use tracedecay_store::{
 
 use super::feedback::inspect_project_memory_fact_controlled_tx;
 use super::project::{
-    find_project_memory_fact_by_content_digest_controlled_tx,
-    get_project_memory_fact_controlled_tx, list_project_memory_facts_controlled_tx,
-    project_memory_fact_history_controlled_tx,
+    commit_batch_tx, find_project_memory_fact_by_content_digest_controlled_tx,
+    get_project_memory_fact_controlled_tx, initial_batch, list_project_memory_facts_controlled_tx,
+    project_memory_fact_history_controlled_tx, sanitize_payload,
 };
 
 async fn database() -> (TempDir, Database) {
@@ -608,6 +608,91 @@ async fn normalized_equivalent_add_is_the_only_no_write_near_duplicate() {
     );
     assert!(duplicate.commit_receipt().is_none());
     assert!(!duplicate.commit_replayed());
+}
+
+#[tokio::test]
+async fn add_succeeds_past_ten_thousand_eligible_facts() {
+    let (_directory, database) = database().await;
+    let owner = FactOwnerV1::Profile;
+    let transaction = database
+        .begin_memory_write_transaction("seed content-digest limit fixture")
+        .await
+        .expect("begin content-digest limit fixture");
+    for index in 0..10_001 {
+        let content = format!("Distinct content-digest limit fixture {index}");
+        let sanitized = sanitize_payload(
+            &content,
+            FactCategoryV1::Project,
+            &["digest-limit".to_owned()],
+            &["TraceDecay".to_owned()],
+            &json!({"fixture": "content-digest-limit"}),
+            None,
+        )
+        .expect("sanitize content-digest limit fixture")
+        .expect("content-digest limit fixture is durable");
+        let operation_id = ProvenanceId::new(format!("operation.digest-limit.seed.{index}"))
+            .expect("content-digest limit operation identity");
+        let batch = initial_batch(
+            &owner,
+            &operation_id,
+            sanitized.payload,
+            sanitized.access,
+            Confidence::new(0.5).expect("content-digest limit trust"),
+            None,
+            UtcMicros(1_000_000 + i64::from(index)),
+        )
+        .expect("build content-digest limit batch");
+        commit_batch_tx(&transaction, &batch)
+            .await
+            .expect("commit content-digest limit fixture");
+    }
+    transaction
+        .commit()
+        .await
+        .expect("commit content-digest limit transaction");
+
+    let store = DatabaseFactStore::new(&database);
+    let control = write_control();
+    let added = store
+        .add_project_memory_fact(
+            accepted_add_command(
+                owner.clone(),
+                "operation.digest-limit.added",
+                "A fact added after ten thousand eligible facts.",
+                None,
+            ),
+            &control,
+        )
+        .await
+        .expect("add beyond content-digest query materialization limit");
+    assert_eq!(
+        added.disposition(),
+        ProjectMemoryFactAddDispositionV1::Added
+    );
+
+    let duplicate = store
+        .add_project_memory_fact(
+            accepted_add_command(
+                owner,
+                "operation.digest-limit.duplicate",
+                "A fact added after ten thousand eligible facts.",
+                None,
+            ),
+            &control,
+        )
+        .await
+        .expect("recognize duplicate beyond content-digest query materialization limit");
+    assert_eq!(
+        duplicate.disposition(),
+        ProjectMemoryFactAddDispositionV1::NearDuplicate
+    );
+    assert!(duplicate.commit_receipt().is_none());
+    assert_eq!(
+        duplicate
+            .closest_fact_id()
+            .map(ProjectMemoryFactIdV1::fact_id),
+        Some(added.fact().fact_id())
+    );
 }
 
 #[tokio::test]
