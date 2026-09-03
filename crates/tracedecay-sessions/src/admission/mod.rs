@@ -55,7 +55,7 @@ pub struct HostDiscoveryQueueEntry {
     pub path: PathBuf,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct HostAdmissionOutcome {
     pub status: HostAdmissionStatus,
     pub retryable: bool,
@@ -68,6 +68,13 @@ pub struct HostAdmissionOutcome {
     /// from strings at another layer.
     #[serde(skip)]
     pub recovery: Option<HostAdmissionRecovery>,
+    /// Operator-only storage cause for [`ObservationStoreError::Storage`].
+    ///
+    /// Host wire output stays reason-code-only. Admission callers that already
+    /// carry a detail/message slot (MCP hook JSON-RPC `detail`) may copy this
+    /// text; it is never reconstructed into a reason code.
+    #[serde(skip)]
+    pub storage_cause: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,6 +111,7 @@ impl HostAdmissionOutcome {
             retryable,
             reason_code,
             recovery: None,
+            storage_cause: None,
         }
     }
 
@@ -114,6 +122,7 @@ impl HostAdmissionOutcome {
             retryable: true,
             reason_code: Some("batch_requires_scalar_fallback"),
             recovery: Some(HostAdmissionRecovery::BatchRequiresScalarFallback(cause)),
+            storage_cause: None,
         }
     }
 
@@ -124,6 +133,7 @@ impl HostAdmissionOutcome {
             retryable: false,
             reason_code: Some(reason_code),
             recovery: Some(HostAdmissionRecovery::DeterministicContentRefusal),
+            storage_cause: None,
         }
     }
 

@@ -298,6 +298,7 @@ impl HostAdmissionTestRuntimeV1 {
             retryable: false,
             reason_code: Some("project_authority_unbound"),
             recovery: None,
+            storage_cause: None,
         })?;
         self.facade()
             .get_source_cursor(

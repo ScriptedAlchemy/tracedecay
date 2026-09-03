@@ -99,18 +99,27 @@ fn application_errors_map_to_bounded_static_outcomes() {
             Some("admission_cancelled"),
         )
     );
+    let storage = classify_error(&ObservationApplicationError::Store(
+        ObservationStoreError::Storage {
+            operation: "write",
+            source: Box::new(std::io::Error::other("provider content must not escape")),
+        },
+    ));
+    assert_eq!(storage.status, HostAdmissionStatus::Unavailable);
+    assert!(storage.retryable);
+    assert_eq!(storage.reason_code, Some("authority_write_failed"));
     assert_eq!(
-        classify_error(&ObservationApplicationError::Store(
-            ObservationStoreError::Storage {
-                operation: "write",
-                source: Box::new(std::io::Error::other("provider content must not escape",)),
-            },
-        )),
-        admission_outcome(
-            HostAdmissionStatus::Unavailable,
-            true,
-            Some("authority_write_failed"),
-        )
+        storage.storage_cause.as_deref(),
+        Some("write: provider content must not escape")
+    );
+    let serialized = serde_json::to_string(&storage).unwrap();
+    assert!(
+        !serialized.contains("provider content must not escape"),
+        "storage cause must not escape onto the host-admission wire: {serialized}"
+    );
+    assert!(
+        !serialized.contains("\"write\""),
+        "storage operation must not escape onto the host-admission wire: {serialized}"
     );
     for error in [
         tracedecay_runtime_core::privacy::PrivacySanitizerError::DetectorUnavailable,

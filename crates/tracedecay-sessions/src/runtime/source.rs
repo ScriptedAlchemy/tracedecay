@@ -221,6 +221,7 @@ pub enum TranscriptIngestError {
         provider: &'static str,
         reason: &'static str,
         retryable: bool,
+        detail: Option<String>,
     },
     #[error("{provider} frame state is invalid")]
     InvalidFrameState { provider: &'static str },
