@@ -5356,12 +5356,21 @@ impl CodeIndexWorktreeSchedulerV1 {
     }
 
     pub fn request_background_reconcile(&self) {
-        {
+        let newly_dirty = {
             let mut hints = self
                 .hints
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let newly_dirty = !hints.overflow;
             hints.overflow();
+            newly_dirty
+        };
+        // Overflow is the dirty marker. Freshness requests coalesce until
+        // reconciliation drains it through `take()`, so only the clean-to-dirty
+        // transition mints a generation. While its wake is pending, registry
+        // reads return that generation without running another probe.
+        if newly_dirty {
+            DaemonCodeIndexControlV1::advance(&self.epoch);
         }
         // `Notify` already coalesces stored permits. Always refresh the permit:
         // a prior worker may have consumed its wake and then failed before
