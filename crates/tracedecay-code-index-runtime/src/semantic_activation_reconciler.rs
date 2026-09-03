@@ -36,7 +36,6 @@ fn should_reconcile(
 /// publication by its exact epoch, revision, and transition digest.
 pub struct DaemonSemanticActivationReconcilerV1 {
     cancellation: CancellationToken,
-    committed_activation_wake: Arc<Notify>,
     task: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -44,10 +43,10 @@ impl DaemonSemanticActivationReconcilerV1 {
     pub fn spawn(
         coordinator: Arc<ProductionSemanticActivationCoordinatorV1>,
         mut lifecycle_events: tokio::sync::watch::Receiver<SemanticLifecycleVerifiedReadyEventV1>,
+        committed_activation_wake: Arc<Notify>,
     ) -> Self {
         let cancellation = CancellationToken::new();
         let worker_cancellation = cancellation.clone();
-        let committed_activation_wake = Arc::new(Notify::new());
         let worker_committed_activation_wake = Arc::clone(&committed_activation_wake);
         let reconciler_loop = async move {
             let mut handled_epoch = None;
@@ -138,18 +137,8 @@ impl DaemonSemanticActivationReconcilerV1 {
         ));
         Self {
             cancellation,
-            committed_activation_wake,
             task: Mutex::new(Some(task)),
         }
-    }
-
-    /// Wake reconciliation after a semantic configuration transition commits.
-    ///
-    /// The model may already have emitted its latest verified-ready epoch
-    /// before the activation exists. This wake causes the same canonical
-    /// committed tuple reread without fabricating another lifecycle event.
-    pub fn notify_committed_activation(&self) {
-        self.committed_activation_wake.notify_one();
     }
 
     pub async fn cancel_and_join(&self) {
@@ -202,7 +191,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn committed_activation_wake_is_not_blocked_by_a_handled_lifecycle_epoch() {
+    async fn committed_activation_before_reconciler_subscription_is_retained() {
         let current = SemanticLifecycleVerifiedReadyEventV1 {
             epoch: 7,
             artifact_digest: Some(format!("sha256:{}", "a".repeat(64))),
@@ -210,11 +199,12 @@ mod tests {
         assert!(!should_reconcile(Some(7), &current, false));
         assert!(should_reconcile(Some(7), &current, true));
 
-        let wake = Arc::new(Notify::new());
-        wake.notify_one();
+        let registered_configuration_wake = Arc::new(Notify::new());
+        registered_configuration_wake.notify_one();
+        let reconciler_wake = Arc::clone(&registered_configuration_wake);
 
-        tokio::time::timeout(Duration::from_millis(100), wake.notified())
+        tokio::time::timeout(Duration::from_millis(100), reconciler_wake.notified())
             .await
-            .expect("a committed activation must wake reconciliation at the same ready epoch");
+            .expect("a pre-install activation must wake reconciliation at the same ready epoch");
     }
 }

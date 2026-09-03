@@ -883,7 +883,7 @@ impl DaemonConfigurationRuntimeRegistrar {
                     actor: grants.actor.clone(),
                     grants,
                     semantic_operation: Arc::new(OnceLock::new()),
-                    semantic_activation_reconciler: Arc::new(OnceLock::new()),
+                    semantic_activation_committed: Arc::new(Notify::new()),
                     semantic_evaluation_workers: Arc::new(
                         tracedecay_code_index_runtime::semantic_evaluation::DaemonSemanticEvaluationWorkerOwnerV1::with_scheduler_admission(
                             self.service
@@ -925,26 +925,32 @@ impl DaemonConfigurationRuntimeRegistrar {
     pub async fn install_semantic_activation_reconciler(
         &self,
         project_root: &Path,
-        reconciler: Arc<
-            tracedecay_code_index_runtime::semantic_activation_reconciler::DaemonSemanticActivationReconcilerV1,
+        coordinator: Arc<
+            tracedecay_usecases::semantic_runtime::ProductionSemanticActivationCoordinatorV1,
+        >,
+        lifecycle_events: tokio::sync::watch::Receiver<
+            tracedecay_semantic_contracts::SemanticLifecycleVerifiedReadyEventV1,
         >,
     ) -> Result<(), TraceDecayError> {
-        self.service
+        let committed_activation_wake = self
+            .service
             .project_runtimes
             .read::<RegisteredConfigurationRuntime, _, _>(project_root, |registered| {
-                registered
-                    .semantic_activation_reconciler
-                    .set(Arc::clone(&reconciler))
-                    .map_err(|_| TraceDecayError::Config {
-                        message: "semantic activation reconciler is already installed".to_owned(),
-                    })
+                Arc::clone(&registered.semantic_activation_committed)
             })
             .await
             .ok_or_else(|| TraceDecayError::Config {
                 message:
                     "semantic activation reconciler requires a registered configuration runtime"
                         .to_owned(),
-            })??;
+            })?;
+        let reconciler = Arc::new(
+            tracedecay_code_index_runtime::semantic_activation_reconciler::DaemonSemanticActivationReconcilerV1::spawn(
+                coordinator,
+                lifecycle_events,
+                committed_activation_wake,
+            ),
+        );
         self.service
             .project_runtimes
             .register(project_root.to_path_buf(), reconciler)
