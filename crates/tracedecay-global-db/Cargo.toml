@@ -131,6 +131,10 @@ required-features = ["test-helpers"]
 name = "hotpath_coverage"
 required-features = ["test-helpers"]
 
+[[test]]
+name = "schema_convergence_hotpath"
+required-features = ["test-helpers", "hotpath-alloc"]
+
 [[bench]]
 name = "stack_delivery_batch"
 harness = false

@@ -408,6 +408,18 @@ pub struct RegisteredSchemaConvergence {
     lcm_status_performance_indexes: bool,
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
+impl RegisteredSchemaConvergence {
+    #[doc(hidden)]
+    pub fn exhaustive_for_test() -> Self {
+        Self {
+            force_exhaustive: true,
+            is_fresh: false,
+            lcm_status_performance_indexes: false,
+        }
+    }
+}
+
 /// Typed schema states an admissible store was classified into, carried from
 /// the read-only classification pass to the installation stages that consume
 /// them.
