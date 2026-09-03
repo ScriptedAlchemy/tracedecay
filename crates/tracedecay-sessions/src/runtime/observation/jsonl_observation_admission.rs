@@ -1570,7 +1570,7 @@ impl ActiveAdmission<'_> {
         .with_resume_checkpoint(self.file_identity, resume_fingerprint))
     }
 
-    #[hotpath::measure(label = "sessions.observation.jsonl_coverage_advance", future = true)]
+    #[hotpath::skip]
     async fn advance_coverage(
         &self,
         expected_cursor: &mut Option<ObservationSourceCursorV1>,
@@ -1764,7 +1764,7 @@ impl ActiveAdmission<'_> {
         }
     }
 
-    #[hotpath::measure(label = "sessions.observation.jsonl_capture", future = true)]
+    #[hotpath::skip]
     async fn capture(
         &self,
         expected_cursor: &mut Option<ObservationSourceCursorV1>,
@@ -1783,7 +1783,7 @@ impl ActiveAdmission<'_> {
             .await
     }
 
-    #[hotpath::measure(label = "sessions.observation.jsonl_capture_window", future = true)]
+    #[hotpath::skip]
     async fn capture_window(
         &self,
         expected_cursor: &mut Option<ObservationSourceCursorV1>,

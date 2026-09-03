@@ -487,7 +487,6 @@ pub(super) struct HermesProfileSource {
     pub profile: Option<String>,
 }
 
-#[hotpath::measure(label = "sessions.hosts.hermes.discover_profiles")]
 fn all_profile_sources(hermes_homes: &[PathBuf]) -> Vec<HermesProfileSource> {
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
@@ -519,7 +518,6 @@ fn all_profile_sources(hermes_homes: &[PathBuf]) -> Vec<HermesProfileSource> {
     out
 }
 
-#[hotpath::measure(label = "sessions.hosts.hermes.discover_candidates")]
 fn candidate_state_dbs(hermes_homes: &[PathBuf], project_root: &Path) -> Vec<HermesProfileSource> {
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
