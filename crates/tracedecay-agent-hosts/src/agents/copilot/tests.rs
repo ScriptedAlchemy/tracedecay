@@ -213,7 +213,9 @@ fn failed_refresh_restores_the_exact_previous_registration() {
         .expect_err("a rejected replacement must fail the refresh");
 
     assert!(
-        error.to_string().contains("replacement registration rejected")
+        error
+            .to_string()
+            .contains("replacement registration rejected")
             && error.to_string().contains("exit code 17"),
         "the replacement failure must retain Copilot's diagnosis: {error}"
     );
