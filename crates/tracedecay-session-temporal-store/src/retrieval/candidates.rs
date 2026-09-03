@@ -232,7 +232,6 @@ impl RootAuthorityDecisions {
 ///
 /// Candidates are denied unless the window query names their ordinal, so a
 /// query that cannot see a candidate never widens the authorized root.
-#[hotpath::measure(future = true, label = "session_temporal.query.root_authority")]
 pub(super) async fn resolve_root_authority(
     conn: &TemporalSqlRead<'_>,
     candidates: &[RankingCandidate],
@@ -346,7 +345,6 @@ pub(super) async fn require_candidate_root_authority(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(future = true, label = "session_temporal.query.candidate_clause")]
 pub(super) async fn query_candidate_clause(
     conn: &TemporalSqlRead<'_>,
     scope: &TemporalRetrievalScope,

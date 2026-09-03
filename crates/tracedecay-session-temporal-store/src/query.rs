@@ -77,7 +77,6 @@ pub(super) fn encode_watermarks(
     .map_err(|error| storage(operation, error))
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.query.read_generation")]
 pub(super) async fn read_generation(
     conn: &impl crate::handle::SessionTemporalQuery,
     session_id: &SessionId,
@@ -107,7 +106,6 @@ fn decode_generation(row: &Row, operation: &'static str) -> SessionStoreResult<G
     })
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.query.read_active_generation")]
 pub(super) async fn read_active_generation(
     conn: &impl crate::handle::SessionTemporalQuery,
     session_id: &SessionId,
@@ -152,7 +150,6 @@ pub(super) async fn require_active_generation(
     }
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.query.read_observation")]
 pub(super) async fn read_observation(
     conn: &impl crate::handle::SessionTemporalQuery,
     observation_id: &CanonicalObservationIdV1,
@@ -199,7 +196,6 @@ const OBSERVATION_READ_BATCH: usize = 500;
 /// would have returned. Ids that are absent are simply missing from the map:
 /// reporting a missing observation stays with the caller so it still surfaces in
 /// the caller's own iteration order, with the same message.
-#[hotpath::measure(future = true, label = "session_temporal.query.read_observations")]
 pub(super) async fn read_observations(
     conn: &impl crate::handle::SessionTemporalQuery,
     observation_ids: &[CanonicalObservationIdV1],
