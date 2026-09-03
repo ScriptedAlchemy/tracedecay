@@ -67,11 +67,11 @@ use crate::{
             CodeIndexGenerationScopeV1, CodeIndexIgnoredSourceAdmissionV1, CodeIndexInputErrorV1,
             CodeIndexProductionConfigV1, CodeIndexProductionErrorV1,
             CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
-            CodeIndexRepositoryParseIdentityV1, SharedPhysicalCodeArtifactPoolV1,
-            UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalCursorRestoreErrorV1,
-            VerifiedSealedLexicalPageBatchBoundsV1, VerifiedSealedLexicalPageBatchReadV1,
-            VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalSourceReceiptV1,
-            VerifiedSealedTextGenerationMetadataV1,
+            CodeIndexRepositoryParseIdentityV1, SealedGenerationSegmentKindV1,
+            SharedPhysicalCodeArtifactPoolV1, UninterruptibleCodeIndexControlV1,
+            VerifiedSealedLexicalCursorRestoreErrorV1, VerifiedSealedLexicalPageBatchBoundsV1,
+            VerifiedSealedLexicalPageBatchReadV1, VerifiedSealedLexicalPageSourceV1,
+            VerifiedSealedLexicalSourceReceiptV1, VerifiedSealedTextGenerationMetadataV1,
         },
         projection::{
             ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -608,6 +608,8 @@ impl UndecodedActivePublicationExpectationV1 {
 pub struct DaemonCodeIndexPublicationStoreV1 {
     cache: Arc<DecodedGenerationCacheV1>,
     active_encoded_bytes: Arc<AtomicU64>,
+    seal_encoded_segment_bytes: Arc<AtomicU64>,
+    seal_existing_segment_bytes_read: Arc<AtomicU64>,
     active_path: PathBuf,
     generations_root: PathBuf,
     segments_root: PathBuf,
@@ -667,6 +669,8 @@ impl DaemonCodeIndexPublicationStoreV1 {
         Ok(Self {
             cache: Arc::new(DecodedGenerationCacheV1::default()),
             active_encoded_bytes: Arc::new(AtomicU64::new(0)),
+            seal_encoded_segment_bytes: Arc::new(AtomicU64::new(0)),
+            seal_existing_segment_bytes_read: Arc::new(AtomicU64::new(0)),
             active_path: store_root.join("active-code-generation-v1.json"),
             generations_root,
             segments_root,
@@ -724,7 +728,8 @@ impl DaemonCodeIndexPublicationStoreV1 {
 
     #[hotpath::measure(label = "code_index.generation.publish.segment")]
     fn publish_segment_durable(
-        segments_root: &Path,
+        &self,
+        kind: SealedGenerationSegmentKindV1,
         digest: &ManifestDigest,
         bytes: &[u8],
     ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
@@ -738,9 +743,15 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 "sealed segment bytes do not match their content address",
             ));
         }
-        let final_path = segments_root.join(format!("segment-{digest_hex}.json"));
+        let final_path = self
+            .segments_root
+            .join(format!("segment-{digest_hex}.json"));
         match final_path.symlink_metadata() {
             Ok(metadata) => {
+                if kind == SealedGenerationSegmentKindV1::File {
+                    self.seal_existing_segment_bytes_read
+                        .fetch_add(metadata.len(), Ordering::Relaxed);
+                }
                 if !metadata.file_type().is_file()
                     || metadata.len() != u64::try_from(bytes.len()).map_err(Self::unavailable)?
                     || Self::state_digest_file(&final_path)? != expected_digest
@@ -754,7 +765,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(Self::unavailable(error)),
         }
-        let temporary_path = segments_root.join(format!(
+        let temporary_path = self.segments_root.join(format!(
             ".segment-publication.{}.{}.tmp",
             std::process::id(),
             digest_hex
@@ -773,7 +784,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         }
         Self::write_durable(&temporary_path, bytes)?;
         std::fs::rename(&temporary_path, &final_path).map_err(Self::unavailable)?;
-        Self::sync_directory(segments_root)
+        Self::sync_directory(&self.segments_root)
     }
 
     fn state_digest_file(path: &Path) -> Result<String, CodeIndexPublicationStoreErrorV1> {
@@ -1646,6 +1657,34 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         // Encode and fsync without the decoded-generation cache lock so
         // readers are not parked across the durable write.
         drop(state);
+        let parent_manifest_bytes = expected_active_generation
+            .filter(|expected| generation.manifest().parent_generation.as_ref() == Some(*expected))
+            .and_then(|expected| {
+                prior_pointer.as_ref().and_then(|pointer| {
+                    pointer
+                        .generation_index
+                        .iter()
+                        .find(|entry| entry.generation_id == expected.as_str())
+                })
+            })
+            .map(|entry| {
+                Self::validate_generation_file(&entry.generation_file)?;
+                let path = self.generations_root.join(&entry.generation_file);
+                let metadata = path.symlink_metadata().map_err(Self::unavailable)?;
+                if !metadata.file_type().is_file() || metadata.len() != entry.size_bytes {
+                    return Err(Self::corruption(
+                        "parent generation manifest identity is corrupt",
+                    ));
+                }
+                let bytes = std::fs::read(path).map_err(Self::unavailable)?;
+                if Self::state_digest(&bytes) != entry.state_digest {
+                    return Err(Self::corruption(
+                        "parent generation manifest digest does not verify",
+                    ));
+                }
+                Ok(bytes)
+            })
+            .transpose()?;
         let temporary_path = self.generations_root.join(format!(
             ".generation-publication.{}.tmp",
             std::process::id()
@@ -1664,21 +1703,41 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         }
         let mut temporary = TemporaryGenerationFileV1::new(temporary_path);
         let mut referenced_segment_bytes = 0_u64;
+        self.seal_encoded_segment_bytes.store(0, Ordering::Relaxed);
+        self.seal_existing_segment_bytes_read
+            .store(0, Ordering::Relaxed);
         let manifest_bytes = hotpath::measure_block!(
             "code_index.generation.publish.segment_encode",
-            generation.encode_partitioned_sealed(|digest, bytes| {
-                let segment_size = u64::try_from(bytes.len()).map_err(|_| {
-                    CodeIndexProductionErrorV1::Contract(
-                        "sealed segment length exceeds u64".to_owned(),
-                    )
-                })?;
-                Self::publish_segment_durable(&self.segments_root, digest, bytes)
-                    .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-                referenced_segment_bytes = referenced_segment_bytes.saturating_add(segment_size);
-                Ok(())
-            })
+            generation.encode_partitioned_sealed_with_parent(
+                parent_manifest_bytes.as_deref(),
+                |kind, digest, bytes| {
+                    let segment_size = u64::try_from(bytes.len()).map_err(|_| {
+                        CodeIndexProductionErrorV1::Contract(
+                            "sealed segment length exceeds u64".to_owned(),
+                        )
+                    })?;
+                    if kind == SealedGenerationSegmentKindV1::File {
+                        self.seal_encoded_segment_bytes
+                            .fetch_add(segment_size, Ordering::Relaxed);
+                    }
+                    self.publish_segment_durable(kind, digest, bytes)
+                        .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+                    referenced_segment_bytes =
+                        referenced_segment_bytes.saturating_add(segment_size);
+                    Ok(())
+                },
+            )
         )
         .map_err(Self::unavailable)?;
+        #[cfg(feature = "hotpath")]
+        {
+            hotpath::gauge!("code_index.generation.publish.encoded_file_segment_bytes")
+                .set(self.seal_encoded_segment_bytes.load(Ordering::Relaxed));
+            hotpath::gauge!("code_index.generation.publish.existing_file_segment_bytes_read").set(
+                self.seal_existing_segment_bytes_read
+                    .load(Ordering::Relaxed),
+            );
+        }
         hotpath::measure_block!("code_index.generation.publish.seal_fsync", {
             Self::write_durable(&temporary.path, &manifest_bytes)?;
             Ok::<(), CodeIndexPublicationStoreErrorV1>(())
@@ -7063,7 +7122,36 @@ impl CodeIndexWorktreeSchedulerV1 {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(cancelled_code_index_reconcile());
         }
-        if allow_active_generation_reuse
+        let reusable_active =
+            if allow_active_generation_reuse && self.ignored_source_admissions.is_empty() {
+                match self
+                    .publication
+                    .load_active_shared()
+                    .map_err(CodeIndexProductionErrorV1::Publication)?
+                {
+                    Some(active) => {
+                        self.validate_generation_identity(&active)?;
+                        let current_scope = CodeIndexGenerationScopeV1 {
+                            repository: self.repository_id.clone(),
+                            reference: self.identity.head_ref().cloned(),
+                            worktree: Some(self.worktree_id.clone()),
+                        };
+                        (active.sealed_scope() == current_scope
+                            && active
+                                .compatibility_with(&self.production_config)
+                                .is_reusable()
+                            && active.ignored_source_admissions().is_empty()
+                            && active.repository_parse_identity().tree.as_ref()
+                                == self.identity.head_tree())
+                        .then_some(active)
+                    }
+                    None => None,
+                }
+            } else {
+                None
+            };
+        if reusable_active.is_none()
+            && allow_active_generation_reuse
             && self.ignored_source_admissions.is_empty()
             && classification.changes().is_empty()
             && let (Some(reference), Some(revision), Some(tree)) = (
@@ -7128,12 +7216,36 @@ impl CodeIndexWorktreeSchedulerV1 {
         };
 
         let registry = StaticLanguageRegistry::new();
+        let active_files = reusable_active
+            .as_ref()
+            .map(|active| {
+                active
+                    .snapshot()
+                    .files
+                    .iter()
+                    .filter(|file| file.disposition == SnapshotFileDispositionV1::Present)
+                    .map(|file| (file.logical_path.as_str(), file))
+                    .collect::<BTreeMap<_, _>>()
+            })
+            .unwrap_or_default();
+        let mut files = candidate_paths
+            .iter()
+            .filter(|logical_path| !changed_paths.contains(*logical_path))
+            .filter_map(|logical_path| active_files.get(logical_path.as_str()).copied())
+            .cloned()
+            .collect::<Vec<_>>();
         // Read + sanitize + digest is per-file pure work over independent
         // paths, so it fans out across the reserved-width indexing pool. The
         // candidate set is an ordered `BTreeSet`; results are collected in
         // that same order and the lowest-index failure is the reported one,
         // so the captured snapshot is byte-identical to the sequential sweep.
-        let candidates = candidate_paths.into_iter().collect::<Vec<_>>();
+        let candidates = candidate_paths
+            .into_iter()
+            .filter(|logical_path| {
+                changed_paths.contains(logical_path)
+                    || !active_files.contains_key(logical_path.as_str())
+            })
+            .collect::<Vec<_>>();
         let admitted_paths = self.ignored_admission_paths();
         let progress = git_tree_capture::CaptureProgressV1::new();
         let outcomes = crate::code_index::parallelism::install(|| {
@@ -7161,9 +7273,18 @@ impl CodeIndexWorktreeSchedulerV1 {
             CodeIndexSchedulerErrorV1::Production(CodeIndexProductionErrorV1::Parallelism(error))
         })?;
 
-        let mut files = Vec::new();
         let mut captured_files = Vec::new();
-        let mut sanitization_receipts = BTreeSet::new();
+        let mut sanitization_receipts = reusable_active
+            .as_ref()
+            .map(|active| {
+                active
+                    .snapshot()
+                    .sanitization_receipts
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
         // A privacy refusal is evidence about one file. Withholding it keeps
         // the rest of the worktree indexable; only a genuine capture fault
         // still terminates the pass.

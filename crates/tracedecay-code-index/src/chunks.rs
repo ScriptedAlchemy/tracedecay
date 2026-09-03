@@ -675,7 +675,7 @@ fn symbol_occurrence_id(
     })
 }
 
-fn rematerialized_symbol_occurrence_id(
+pub(crate) fn rematerialized_symbol_occurrence_id(
     generation_id: &CodeGenerationId,
     file_occurrence_id: &FileOccurrenceId,
     prior_occurrence: &SymbolOccurrenceId,

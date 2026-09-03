@@ -357,6 +357,65 @@ fn remove_historical_pointer_entries(store_root: &Path) {
 }
 
 #[test]
+fn one_file_increment_captures_only_edited_bytes_with_one_thousand_unchanged_files() {
+    let mut owned_sources = (0..1_000)
+        .map(|index| {
+            (
+                format!("src/unchanged_{index:04}.rs"),
+                format!("pub fn unchanged_{index:04}() -> usize {{ {index} }}\n"),
+            )
+        })
+        .collect::<Vec<_>>();
+    owned_sources.push((
+        "src/edited.rs".to_owned(),
+        "pub fn edited() -> usize { 1 }\n".to_owned(),
+    ));
+    let borrowed_sources = owned_sources
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(&borrowed_sources);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(
+        scheduler
+            .reconcile_now()
+            .expect("publish initial large generation"),
+    );
+
+    let edited_source = "pub fn edited() -> usize { 2 }\n";
+    fixture.edit("src/edited.rs", edited_source);
+    scheduler.notify_hook_paths([PathBuf::from("src/edited.rs")]);
+
+    let captured = scheduler
+        .capture_authoritative_snapshot(None)
+        .expect("capture one-file increment");
+    assert_eq!(
+        captured.snapshot.files.len(),
+        1_001,
+        "the complete snapshot must retain every unchanged row"
+    );
+    assert_eq!(
+        captured.captured_files.len(),
+        1,
+        "only the classified changed file may be read and sanitized"
+    );
+    assert_eq!(
+        captured
+            .captured_files
+            .iter()
+            .map(|file| file.sanitized_bytes.len())
+            .sum::<usize>(),
+        edited_source.len(),
+        "captured bytes must be proportional to the one edited file"
+    );
+}
+
+#[test]
 fn partitioned_publication_reuses_unchanged_file_segments() {
     let unchanged = (0..256)
         .map(|index| format!("pub fn unchanged_{index}() -> usize {{ {index} }}\n"))
@@ -377,6 +436,10 @@ fn partitioned_publication_reuses_unchanged_file_segments() {
             .reconcile_now()
             .expect("publish first segmented generation"),
     );
+    let first_encoded_segment_bytes = scheduler
+        .publication
+        .seal_encoded_segment_bytes
+        .load(std::sync::atomic::Ordering::Relaxed);
     let pointer_path = store.path().join("active-code-generation-v1.json");
     let first_pointer: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&pointer_path).expect("read first pointer"))
@@ -401,6 +464,24 @@ fn partitioned_publication_reuses_unchanged_file_segments() {
         scheduler
             .reconcile_now()
             .expect("publish one-line-edit generation"),
+    );
+    let second_encoded_segment_bytes = scheduler
+        .publication
+        .seal_encoded_segment_bytes
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let second_existing_segment_bytes_read = scheduler
+        .publication
+        .seal_existing_segment_bytes_read
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        second_encoded_segment_bytes.saturating_mul(4) < first_encoded_segment_bytes,
+        "one-file increment encoded {} segment bytes after the cold generation encoded {}",
+        second_encoded_segment_bytes,
+        first_encoded_segment_bytes
+    );
+    assert_eq!(
+        second_existing_segment_bytes_read, 0,
+        "unchanged content-addressed segments must not be reopened during incremental seal"
     );
     let second_pointer: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&pointer_path).expect("read second pointer"))
@@ -532,6 +613,14 @@ fn partitioned_publication_reuses_unchanged_file_segments() {
         .find(|segment| segment["file_key"].as_u64() == Some(edited_key))
         .and_then(|segment| segment["segment_size_bytes"].as_u64())
         .expect("edited segment size");
+    assert_eq!(
+        first_encoded_segment_bytes, first_generation_segment_bytes,
+        "cold seal counts every encoded file segment byte"
+    );
+    assert_eq!(
+        second_encoded_segment_bytes, second_generation_new_bytes,
+        "incremental seal counts only the edited file segment bytes"
+    );
     assert!(
         second_generation_new_bytes.saturating_mul(8) < first_generation_segment_bytes,
         "one-line edit rewrote {second_generation_new_bytes} bytes from a \
