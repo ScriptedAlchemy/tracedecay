@@ -106,3 +106,7 @@ tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", feat
 [[bench]]
 name = "host_transcript_io"
 harness = false
+
+[[bench]]
+name = "cursor_dispatch_model"
+harness = false
