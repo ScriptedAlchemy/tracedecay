@@ -498,14 +498,20 @@ impl InvocationConnectionLease {
 
 impl Drop for InvocationConnectionLease {
     fn drop(&mut self) {
-        if self.return_to_pool
-            && let Some(connection) = self.connection.take()
-        {
+        if self.return_to_pool {
+            if let Some(connection) = self.connection.take() {
+                self.pool
+                    .idle
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(connection);
+            }
+        } else {
             self.pool
                 .idle
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(connection);
+                .clear();
         }
         drop(self.permit.take());
     }
