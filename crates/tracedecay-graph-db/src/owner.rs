@@ -64,13 +64,11 @@ impl Drop for GraphDbLeaseToken {
                 && matches!(state.lifecycle, GraphDbOwnerLifecycle::Ready)
                 && state.owner_attachment.is_some()
         };
-        if hibernate {
-            if let Err(error) = self.source.database.hibernate_if_lazy() {
-                tracing::warn!(
-                    %error,
-                    "lazy graph engine could not hibernate after its final operation lease"
-                );
-            }
+        if hibernate && let Err(error) = self.source.database.hibernate_if_lazy() {
+            tracing::warn!(
+                %error,
+                "lazy graph engine could not hibernate after its final operation lease"
+            );
         }
     }
 }
