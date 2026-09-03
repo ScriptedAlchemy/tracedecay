@@ -13,6 +13,8 @@ mod common;
 mod config_test;
 mod gain_test;
 mod monitor_test;
+#[cfg(unix)]
+mod semantic_activation_test;
 mod sync_test;
 mod test_profile_isolation_test;
 #[cfg(unix)]
