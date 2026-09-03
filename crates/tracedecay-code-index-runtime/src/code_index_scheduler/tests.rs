@@ -7660,6 +7660,105 @@ async fn unchanged_background_freshness_probe_posts_no_overflow_wake() {
 }
 
 #[tokio::test]
+async fn diagnostics_change_generation_is_stable_until_a_sibling_edit_hint() {
+    let fixture = GitFixture::new(&[
+        ("src/lib.rs", "pub fn primary() {}\n"),
+        ("src/sibling.rs", "pub fn sibling() {}\n"),
+    ]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold background reconcile admission");
+    registry.clear_pending_wake_for_scope(&scope).await;
+
+    let first = registry
+        .diagnostics_change_generation(fixture.path())
+        .await
+        .expect("mounted diagnostics generation");
+    let unchanged = registry
+        .diagnostics_change_generation(fixture.path())
+        .await
+        .expect("stable diagnostics generation");
+    assert_eq!(unchanged, first);
+
+    fixture.edit(
+        "src/sibling.rs",
+        "pub fn sibling() { println!(\"changed\"); }\n",
+    );
+    assert!(
+        registry
+            .notify_hook_paths(fixture.path(), &["src/sibling.rs".to_owned()])
+            .await
+    );
+    let changed = registry
+        .diagnostics_change_generation(fixture.path())
+        .await
+        .expect("changed diagnostics generation");
+    assert!(changed > first);
+    let still_pending = registry
+        .diagnostics_change_generation(fixture.path())
+        .await
+        .expect("pending diagnostics generation");
+    assert_eq!(
+        still_pending, changed,
+        "a coalesced pending reconcile must not mint another generation"
+    );
+
+    drop(admission);
+    registry.shutdown().await;
+}
+
+#[tokio::test]
+async fn diagnostics_change_generation_advances_for_out_of_band_git_drift() {
+    let fixture = GitFixture::new(&[
+        ("src/lib.rs", "pub fn primary() {}\n"),
+        ("src/sibling.rs", "pub fn sibling() {}\n"),
+    ]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold background reconcile admission");
+    registry.clear_pending_wake_for_scope(&scope).await;
+
+    let first = registry
+        .diagnostics_change_generation(fixture.path())
+        .await
+        .expect("mounted diagnostics generation");
+    fixture.edit(
+        "src/sibling.rs",
+        "pub fn sibling() { println!(\"out of band\"); }\n",
+    );
+    git(fixture.path(), &["add", "src/sibling.rs"]);
+    git(fixture.path(), &["commit", "-qm", "out-of-band drift"]);
+
+    let changed = registry
+        .diagnostics_change_generation(fixture.path())
+        .await
+        .expect("drifted diagnostics generation");
+    assert!(
+        changed > first,
+        "Git metadata drift must advance the canonical change generation"
+    );
+    let unchanged = registry
+        .diagnostics_change_generation(fixture.path())
+        .await
+        .expect("stable drifted diagnostics generation");
+    assert_eq!(
+        unchanged, changed,
+        "repeated reads of the same pending drift must stay stable"
+    );
+
+    drop(admission);
+    registry.shutdown().await;
+}
+
+#[tokio::test]
 async fn elapsed_freshness_window_alone_does_not_make_dashboard_state_stale() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
     let store = TempDir::new().expect("store root");

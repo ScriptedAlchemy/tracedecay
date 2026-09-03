@@ -167,7 +167,10 @@ pub(crate) fn adapter_workspace_root_from_canonical_root(
     None
 }
 
-fn scoped_project_file_from_canonical_root(project_root: &Path, file: &str) -> Option<PathBuf> {
+pub(crate) fn scoped_project_file_from_canonical_root(
+    project_root: &Path,
+    file: &str,
+) -> Option<PathBuf> {
     let relative = scoped_relative_path(file)?;
     let path = project_root.join(relative);
     match path.canonicalize() {
