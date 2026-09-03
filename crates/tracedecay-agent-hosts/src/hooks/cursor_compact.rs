@@ -51,6 +51,7 @@ pub async fn cursor_pre_compact_via_daemon(event_json: &str) -> CursorPreCompact
     cursor_pre_compact_via_daemon_with_telemetry(event_json, None).await
 }
 
+#[hotpath::measure(future = true, label = "agent_hosts.hooks.cursor.compact_via_daemon")]
 pub(super) async fn cursor_pre_compact_via_daemon_with_telemetry(
     event_json: &str,
     telemetry: Option<&super::analytics::HookTimingSpan>,

@@ -121,6 +121,7 @@ pub fn register_cursor_catch_up_ingest_max_bytes(max_bytes: CursorCatchUpIngestM
 /// Errors when the root never registered an invoker. Callers already treat a
 /// daemon request failure as "defer this work and warn", which is the correct
 /// handling for an unwired build too.
+#[hotpath::measure(future = true, label = "agent_hosts.hook_runtime.daemon_tool")]
 pub async fn daemon_tool_json(
     project_root: Option<&Path>,
     tool_name: &str,
@@ -137,11 +138,13 @@ pub async fn daemon_tool_json(
     invoker(project_root, tool_name, arguments, require_project_identity).await
 }
 
+#[hotpath::measure(future = true, label = "agent_hosts.hook_runtime.resolve_root")]
 pub async fn resolve_project_root_with_identity(start: &Path) -> Option<PathBuf> {
     let resolver = PROJECT_ROOT_RESOLVER.get()?;
     resolver(start).await
 }
 
+#[hotpath::measure(label = "agent_hosts.hook_runtime.resolve_scope")]
 pub fn resolve_hook_scope(
     project_root: &Path,
     project_id: &ProjectId,
@@ -152,6 +155,7 @@ pub fn resolve_hook_scope(
     )
 }
 
+#[hotpath::measure(future = true, label = "agent_hosts.hook_runtime.notify_event")]
 pub async fn notify_hook_event(project_root: &Path, event: DaemonHookEvent) {
     if let Some(notifier) = HOOK_EVENT_NOTIFIER.get() {
         notifier(project_root, event).await;
@@ -164,6 +168,7 @@ pub fn hook_timings_enabled(project_root: &Path) -> Option<bool> {
 }
 
 #[must_use]
+#[hotpath::measure(label = "agent_hosts.hook_runtime.project_initialized")]
 pub fn is_project_initialized(project_root: &Path) -> bool {
     PROJECT_INITIALIZATION_GATE.get().map_or_else(
         || {
@@ -174,6 +179,7 @@ pub fn is_project_initialized(project_root: &Path) -> bool {
     )
 }
 
+#[hotpath::measure(future = true, label = "agent_hosts.hook_runtime.store_layout")]
 pub async fn resolve_store_layout(project_root: &Path) -> Result<StoreLayout> {
     let Some(resolver) = STORE_LAYOUT_RESOLVER.get() else {
         return Err(TraceDecayError::Config {

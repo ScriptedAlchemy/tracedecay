@@ -112,6 +112,7 @@ pub(crate) fn now_utc() -> UtcMicros {
     UtcMicros(micros.max(1))
 }
 
+#[hotpath::measure(label = "agent_hosts.hook_ports.admission_decode")]
 pub(crate) fn daemon_admission_response(response: &serde_json::Value) -> DaemonAdmissionResponseV1 {
     let unavailable = || DaemonAdmissionResponseV1 {
         immediate: HookImmediateAdmissionV1::Unavailable,
@@ -218,6 +219,7 @@ fn delivery_outcome_from_status(status: Option<&str>) -> HookFeedbackDeliveryOut
     }
 }
 
+#[hotpath::measure(future = true, label = "agent_hosts.hook_ports.timed_daemon_action")]
 async fn timed_daemon_hook_action(
     project_root: &Path,
     action: serde_json::Value,
@@ -291,6 +293,7 @@ impl<'a> DaemonDeliveryReceiptPort<'a> {
         Self { project_root }
     }
 
+    #[hotpath::measure(future = true, label = "agent_hosts.hook_ports.post_receipt")]
     pub(crate) async fn post_receipt(
         &self,
         receipt: &ContextScoutDeliveryReceiptV1,
@@ -411,6 +414,7 @@ impl<'a> DaemonOpenCodeLspUpdatePort<'a> {
         }
     }
 
+    #[hotpath::measure(future = true, label = "agent_hosts.hook_ports.opencode_lsp_submit")]
     pub(crate) async fn submit_updated_event(&self, event: &serde_json::Value) -> bool {
         let response = super::daemon_hook_action(
             Some(self.project_root),

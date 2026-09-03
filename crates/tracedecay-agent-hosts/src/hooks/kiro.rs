@@ -25,6 +25,7 @@ const KIRO_HOT_INGEST_BUDGET: std::time::Duration = std::time::Duration::from_mi
 /// Kiro `preToolUse` hook handler.
 ///
 /// Blocks with exit code 2 and stderr, per Kiro's hook contract.
+#[hotpath::measure(label = "agent_hosts.hooks.kiro.pre_tool_use")]
 pub fn hook_kiro_pre_tool_use() -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
@@ -139,6 +140,7 @@ fn collect_strings<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
 ///
 /// Resets the per-turn counter, catches up transcripts, and injects bounded
 /// user/project memory relevant to the submitted prompt.
+#[hotpath::measure(future = true, label = "agent_hosts.hooks.kiro.prompt_submit")]
 pub async fn hook_kiro_prompt_submit() -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
@@ -201,6 +203,7 @@ pub async fn hook_kiro_prompt_submit() -> i32 {
 ///
 /// Notifies the daemon after Kiro writes. Missing daemon/index state is
 /// fail-open.
+#[hotpath::measure(future = true, label = "agent_hosts.hooks.kiro.post_tool_use")]
 pub async fn hook_kiro_post_tool_use() -> i32 {
     let event = read_hook_event!();
     // One parse for the root, the analytics row, and the notification.

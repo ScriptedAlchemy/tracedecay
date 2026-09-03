@@ -85,6 +85,7 @@ pub fn aggregate_hook_completed_readiness(rows: &[Value]) -> HookCompletedReadin
 use tool_hints::{HintAgent, ToolHint};
 use tracedecay_policy::hint_delivery::HintDeliveryDecisionV1;
 
+#[hotpath::measure(future = true, label = "agent_hosts.hooks.dispatch_kimi_event")]
 pub async fn dispatch_kimi_event(event_json: &str, project_root: &Path) -> Option<String> {
     let telemetry = record_other_hook_invoked(Some(project_root), "kimi_event", event_json);
     dispatch::dispatch(
@@ -98,6 +99,7 @@ pub async fn dispatch_kimi_event(event_json: &str, project_root: &Path) -> Optio
     .flatten()
 }
 
+#[hotpath::measure(future = true, label = "agent_hosts.hooks.dispatch_opencode_event")]
 pub async fn dispatch_opencode_event(event_json: &str, project_root: &Path) -> Option<String> {
     let telemetry = record_other_hook_invoked(Some(project_root), "opencode_event", event_json);
     let dispatch = if tracedecay_hooks::decode_opencode_lsp_event(event_json.as_bytes()).is_ok() {
@@ -114,6 +116,7 @@ pub async fn dispatch_opencode_event(event_json: &str, project_root: &Path) -> O
     dispatch.into_recorded_guidance(&telemetry).flatten()
 }
 
+#[hotpath::measure(future = true, label = "agent_hosts.hooks.dispatch_opencode_tool_after")]
 pub async fn dispatch_opencode_tool_after(event_json: &str, project_root: &Path) -> Option<String> {
     let telemetry =
         record_other_hook_invoked(Some(project_root), "opencode_tool_after", event_json);
