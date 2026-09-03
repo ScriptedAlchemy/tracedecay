@@ -5,12 +5,12 @@ use rusqlite::Savepoint;
 use tempfile::TempDir;
 use tracedecay_domain::{
     AdmittedEmbeddingProjectionKeyV1, ChunkerRevision, CodeChunkProjectionReceiptV1,
-    CodeGenerationId, CodeSearchChunkId, ContentDigest, EmbeddingDeviceClassV1, EmbeddingMetricV1,
-    EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingProjectionKeyV1,
-    EmbeddingTruncationSideV1, ManifestDigest, PrivacyDomainId, ProjectionBatchReceiptV1,
-    ProjectionOperationV1, ProjectionOutcomeV1, RepositoryId, UtcMicros, VectorGenerationIdV1,
-    WorktreeId, canonical_sha256, projection_batch_publication_digest,
-    semantic_vector_output_digest,
+    CodeGenerationId, CodeSearchChunkId, ContentDigest, EmbeddingDeviceClassV1,
+    EmbeddingDocumentCompositionV1, EmbeddingMetricV1, EmbeddingNormalizationV1,
+    EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1,
+    ManifestDigest, PrivacyDomainId, ProjectionBatchReceiptV1, ProjectionOperationV1,
+    ProjectionOutcomeV1, RepositoryId, UtcMicros, VectorGenerationIdV1, WorktreeId,
+    canonical_sha256, projection_batch_publication_digest, semantic_vector_output_digest,
 };
 use tracedecay_graph_db::{
     GraphDbError, GraphDbRegistration, GraphEntity, GraphEntityId, GraphEntityRef,
@@ -1286,6 +1286,7 @@ fn admitted_embedding_with_dimensions(dimensions: u32) -> AdmittedEmbeddingProje
         config_digest: digest('c'),
         query_instruction_digest: None,
         document_instruction_digest: None,
+        document_composition: EmbeddingDocumentCompositionV1::SanitizedText,
         pooling: EmbeddingPoolingV1::Mean,
         truncation_side: EmbeddingTruncationSideV1::Right,
         truncation_length: 512,

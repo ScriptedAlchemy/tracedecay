@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
+use tracedecay_code_index::embedding_document::{EmbeddingDocumentComposerV1, EmbeddingDocumentV1};
 use tracedecay_domain::{
     AdmittedEmbeddingProjectionKeyV1, CodeSearchChunkV1, EmbeddingProjectionKeyV1,
     ProjectionBatchRequestV1,
@@ -74,7 +75,10 @@ struct SemanticEvaluationProjectionBatchCacheKeyV1 {
     group_len: usize,
     tensor_batch_size: u32,
     tensor_dimensions: u32,
-    ordered_sanitized_inputs: Vec<String>,
+    /// The exact composed documents the model would receive, in group order.
+    /// Composition is keyed here as well as in the admitted projection: two
+    /// generations can share chunk text yet differ in symbol context.
+    ordered_documents: Vec<String>,
 }
 
 impl SemanticEvaluationProjectionBatchCacheV1 {
@@ -160,12 +164,12 @@ fn cache_entry_bytes(
     // allocation headers, then add the vector buffers at their actual
     // capacities rather than their logical lengths.
     let input_bytes = key
-        .ordered_sanitized_inputs
+        .ordered_documents
         .iter()
         .try_fold(0_u64, |total, input| {
             total.checked_add(u64::try_from(input.len()).ok()?)
         });
-    let input_headers = u64::try_from(key.ordered_sanitized_inputs.len())
+    let input_headers = u64::try_from(key.ordered_documents.len())
         .ok()
         .and_then(|count| count.checked_mul(u64::try_from(std::mem::size_of::<String>()).ok()?));
     let vector_bytes = vectors.iter().try_fold(0_u64, |total, vector| {
@@ -202,6 +206,7 @@ struct CachedSemanticEvaluationChunkEncoderV1<'a, E> {
     cache: &'a SemanticEvaluationProjectionBatchCacheV1,
     cache_policy: SemanticEvaluationProjectionBatchCachePolicyV1,
     cancellation: Arc<dyn SemanticEvaluationCancellationV1>,
+    documents: Arc<EmbeddingDocumentComposerV1>,
 }
 
 impl<'a, E> CachedSemanticEvaluationChunkEncoderV1<'a, E> {
@@ -211,6 +216,7 @@ impl<'a, E> CachedSemanticEvaluationChunkEncoderV1<'a, E> {
         cache: &'a SemanticEvaluationProjectionBatchCacheV1,
         cache_policy: SemanticEvaluationProjectionBatchCachePolicyV1,
         cancellation: Arc<dyn SemanticEvaluationCancellationV1>,
+        documents: Arc<EmbeddingDocumentComposerV1>,
     ) -> Self {
         Self {
             inner,
@@ -220,6 +226,7 @@ impl<'a, E> CachedSemanticEvaluationChunkEncoderV1<'a, E> {
             cache,
             cache_policy,
             cancellation,
+            documents,
         }
     }
 
@@ -240,18 +247,24 @@ impl<'a, E> CachedSemanticEvaluationChunkEncoderV1<'a, E> {
         &self,
         embedding_key: &EmbeddingProjectionKeyV1,
         chunks: &[&CodeSearchChunkV1],
-    ) -> SemanticEvaluationProjectionBatchCacheKeyV1 {
-        SemanticEvaluationProjectionBatchCacheKeyV1 {
+    ) -> Result<SemanticEvaluationProjectionBatchCacheKeyV1, String> {
+        let ordered_documents = chunks
+            .iter()
+            .map(|chunk| {
+                self.documents
+                    .compose(embedding_key, chunk)
+                    .map(EmbeddingDocumentV1::into_text)
+                    .map_err(|error| error.to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SemanticEvaluationProjectionBatchCacheKeyV1 {
             admitted_projection: self.admitted_projection.clone(),
             max_threads: self.max_threads,
             group_len: chunks.len(),
             tensor_batch_size: embedding_key.inference_batch_size,
             tensor_dimensions: embedding_key.dimensions,
-            ordered_sanitized_inputs: chunks
-                .iter()
-                .map(|chunk| chunk.sanitized_text.as_str().to_owned())
-                .collect(),
-        }
+            ordered_documents,
+        })
     }
 }
 
@@ -317,7 +330,7 @@ where
             Vec<usize>,
         )>::new();
         for (position, group) in groups.iter().enumerate() {
-            let cache_key = self.exact_key(key, group);
+            let cache_key = self.exact_key(key, group)?;
             if let Some(vectors) = self.cache.lookup(&cache_key) {
                 encoded[position] = Some(vectors);
             } else if let Some(miss_index) = unique_miss_indices.get(&cache_key) {
@@ -412,10 +425,15 @@ pub struct SemanticEvaluationProjectionResourcesV1 {
     pub memory_ceiling_bytes: u64,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is a distinct caller-owned authority of one evaluator projection"
+)]
 pub fn prepare_semantic_evaluation_projection(
     artifact: LoadedSemanticArtifactV1,
     request: ProjectionBatchRequestV1,
     canonical_chunks: &[Arc<CodeSearchChunkV1>],
+    documents: Arc<EmbeddingDocumentComposerV1>,
     resources: SemanticEvaluationProjectionResourcesV1,
     cache: &SemanticEvaluationProjectionBatchCacheV1,
     cache_policy: SemanticEvaluationProjectionBatchCachePolicyV1,
@@ -423,6 +441,9 @@ pub fn prepare_semantic_evaluation_projection(
 ) -> Result<PreparedSemanticEvaluationProjectionV1, SemanticRuntimeScheduleFailureV1> {
     if let Some(interruption) = cancellation.interruption() {
         return Err(schedule_interruption(interruption));
+    }
+    if documents.symbols().generation_id() != &request.changes.to_generation {
+        return Err(SemanticRuntimeScheduleFailureV1::Projection);
     }
     let authority = artifact.into_authority();
     let factory: SharedEmbeddingRuntimeFactory<ProductionEmbeddingRuntime> =
@@ -446,6 +467,7 @@ pub fn prepare_semantic_evaluation_projection(
         Arc::clone(&runtime),
         progress,
         authority.embedding_execution_plan(),
+        Arc::clone(&documents),
     );
     let mut encoder = CachedSemanticEvaluationChunkEncoderV1::new(
         inner,
@@ -453,6 +475,7 @@ pub fn prepare_semantic_evaluation_projection(
         cache,
         cache_policy,
         cancellation,
+        documents,
     );
     let prepared = prepare_vector_generation(
         authority.projection(),
@@ -475,16 +498,23 @@ pub fn prepare_semantic_evaluation_projection(
 
 /// Execute one genuine model batch and then cancel before a complete
 /// evaluator projection can be returned or published.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is a distinct caller-owned authority of one evaluator projection"
+)]
 pub fn measure_semantic_evaluation_projection_cancellation(
     artifact: LoadedSemanticArtifactV1,
     request: ProjectionBatchRequestV1,
     canonical_chunks: &[Arc<CodeSearchChunkV1>],
+    documents: Arc<EmbeddingDocumentComposerV1>,
     max_sessions: usize,
     memory_ceiling_bytes: u64,
     cache: &SemanticEvaluationProjectionBatchCacheV1,
     cancellation: Arc<dyn SemanticEvaluationCancellationV1>,
 ) -> Result<SemanticEvaluationProjectionCancellationV1, SemanticRuntimeScheduleFailureV1> {
-    if request.changes.added_or_changed.is_empty() {
+    if request.changes.added_or_changed.is_empty()
+        || documents.symbols().generation_id() != &request.changes.to_generation
+    {
         return Err(SemanticRuntimeScheduleFailureV1::Projection);
     }
     if let Some(interruption) = cancellation.interruption() {
@@ -513,6 +543,7 @@ pub fn measure_semantic_evaluation_projection_cancellation(
         Arc::clone(&runtime),
         Arc::clone(&progress),
         authority.embedding_execution_plan(),
+        Arc::clone(&documents),
     );
     let inner = CancelAfterFirstModelBatchV1 {
         inner,
@@ -524,6 +555,7 @@ pub fn measure_semantic_evaluation_projection_cancellation(
         cache,
         SemanticEvaluationProjectionBatchCachePolicyV1::Bypass,
         cancellation,
+        documents,
     );
     if prepare_vector_generation(
         authority.projection(),
@@ -687,12 +719,17 @@ mod tests {
     };
 
     use sha2::{Digest, Sha256};
+    use tracedecay_code_index::embedding_document::{
+        EmbeddingDocumentComposerV1, EmbeddingSymbolContextIndexV1,
+    };
+    use tracedecay_code_index::lineage::GenerationSymbolIndexV1;
     use tracedecay_domain::{
         BoundedSanitizedText, ChangedCodeChunkSetV1, ChangedCodeChunkV1, ChunkerRevision,
         CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId,
-        ContentDigest, FileOccurrenceId, LanguageDescriptorRevision, ManifestDigest,
-        PolicyRevisionId, ProjectionBatchRequestV1, ProjectionReplayReasonV1, SanitizerRevision,
-        SensitivityDecision, SensitivityLevelV1, SourceSpan,
+        ContentDigest, EmbeddingDocumentCompositionV1, FileOccurrenceId,
+        LanguageDescriptorRevision, ManifestDigest, PolicyRevisionId, ProjectionBatchRequestV1,
+        ProjectionReplayReasonV1, SanitizerRevision, SensitivityDecision, SensitivityLevelV1,
+        SourceSpan,
     };
     use tracedecay_semantic_contracts::SemanticResourceCeilings;
 
@@ -861,6 +898,18 @@ mod tests {
             .clone()
     }
 
+    /// A symbol-free composer. Every fixture projection here embeds sanitized
+    /// text, which consults no symbol index.
+    fn documents() -> Arc<EmbeddingDocumentComposerV1> {
+        let generation = CodeGenerationId::new("evaluation-cache.generation".to_owned())
+            .expect("generation fixture");
+        let index =
+            GenerationSymbolIndexV1::new(generation, Vec::new()).expect("empty symbol index");
+        Arc::new(EmbeddingDocumentComposerV1::new(
+            EmbeddingSymbolContextIndexV1::from_generation_symbols(&index),
+        ))
+    }
+
     fn chunk(label: char, text: &str) -> CodeSearchChunkV1 {
         let generation = CodeGenerationId::new("evaluation-cache.generation".to_owned())
             .expect("generation fixture");
@@ -1004,6 +1053,7 @@ mod tests {
             cache,
             policy,
             cancellation(),
+            documents(),
         )
     }
 
@@ -1075,6 +1125,7 @@ mod tests {
                 max_sequence_length: 512,
                 load_deadline_ms: 1_000,
             },
+            EmbeddingDocumentCompositionV1::SanitizedText,
         )
         .expect("verified lifecycle authority");
         LifecycleAuthorityFixtureV1 {
@@ -1353,6 +1404,7 @@ mod tests {
             &cache,
             SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
             cancellation as Arc<dyn SemanticEvaluationCancellationV1>,
+            documents(),
         );
 
         assert!(

@@ -487,6 +487,8 @@ fn set_semantic_runtime_configuration(
                         active_profile,
                         rollback_profile: None,
                         resources: journey_semantic_resources(),
+                        document_composition:
+                            tracedecay_domain::EmbeddingDocumentCompositionV1::SanitizedText,
                     })
                     .expect("semantic runtime configuration JSON"),
                 ),

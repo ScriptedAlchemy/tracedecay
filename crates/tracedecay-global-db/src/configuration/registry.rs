@@ -1058,6 +1058,7 @@ mod semantic_runtime_payload_tests {
                 max_sequence_length: 512,
                 load_deadline_ms: 30_000,
             },
+            document_composition: tracedecay_domain::EmbeddingDocumentCompositionV1::SanitizedText,
         }
     }
 

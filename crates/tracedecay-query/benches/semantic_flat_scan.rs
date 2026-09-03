@@ -18,14 +18,14 @@ use std::time::Duration;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use tracedecay_domain::{
     AdmittedEmbeddingProjectionKeyV1, ChunkerRevision, CodeSearchChunkId, CompactCandidate,
-    ComponentRevision, EmbeddingDeviceClassV1, EmbeddingMetricV1, EmbeddingNormalizationV1,
-    EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1,
-    EvidenceRole, FreshnessCompatibilityV1, LogicalEvidenceId, PrincipalId, QueryDigest, QueryMac,
-    QueryNormalizationRevision, RetrievalAnchorId, RetrievalBudget, RetrievalRequest,
-    RetrievalScope, RetrievalSnapshot, RetrieverKind, RetrieverOutcome, SanitizerRevision,
-    ScoreDomainId, SemanticSearchIndexKeyV1, SemanticSearchIndexProfileV1, SingleRootScopeV1,
-    SourceFreshness, SourceNamespace, SourceOccurrenceId, TemporalModeV1, UtcMicros,
-    VectorGenerationIdV1, VectorWatermark,
+    ComponentRevision, EmbeddingDeviceClassV1, EmbeddingDocumentCompositionV1, EmbeddingMetricV1,
+    EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingProjectionKeyV1,
+    EmbeddingTruncationSideV1, EvidenceRole, FreshnessCompatibilityV1, LogicalEvidenceId,
+    PrincipalId, QueryDigest, QueryMac, QueryNormalizationRevision, RetrievalAnchorId,
+    RetrievalBudget, RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverKind,
+    RetrieverOutcome, SanitizerRevision, ScoreDomainId, SemanticSearchIndexKeyV1,
+    SemanticSearchIndexProfileV1, SingleRootScopeV1, SourceFreshness, SourceNamespace,
+    SourceOccurrenceId, TemporalModeV1, UtcMicros, VectorGenerationIdV1, VectorWatermark,
 };
 use tracedecay_query::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, RetrievalPortError,
@@ -69,6 +69,7 @@ fn projection(dimensions: u32) -> AdmittedEmbeddingProjectionKeyV1 {
         config_digest: digest('c'),
         query_instruction_digest: Some(digest('d')),
         document_instruction_digest: Some(digest('e')),
+        document_composition: EmbeddingDocumentCompositionV1::SanitizedText,
         pooling: EmbeddingPoolingV1::Mean,
         truncation_side: EmbeddingTruncationSideV1::Right,
         truncation_length: 128,
