@@ -774,6 +774,18 @@ async fn production_project_server_inner(
                 profile_session_open,
             ))
             .await?;
+            let session_runtime_registry =
+                Box::pin(store_administration.session_runtime_registry()).await?;
+            tokio::select! {
+                biased;
+                () = cancellation.cancelled() => {
+                    return Err(project_open_cancellation_error());
+                }
+                settlement = session_runtime_registry
+                    .settle_project_session_graph_for_serving(&code_search_scope.project_id) => {
+                    settlement?;
+                }
+            }
             if !project_database_is_read_only {
                 Box::pin(bind_verified_project_graph_runtime(
                     cg.db(),

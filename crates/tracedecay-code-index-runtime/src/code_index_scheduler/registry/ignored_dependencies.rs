@@ -427,6 +427,7 @@ impl CodeIndexSchedulerRegistryV1 {
             worktree_id,
             scheduler,
             serving_generation,
+            text_generation,
             published_generation_id,
             serving_generation_epoch,
             graph_activation,
@@ -449,6 +450,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 worktree.worktree_id.clone(),
                 Arc::clone(&worktree.scheduler),
                 Arc::clone(&worktree.serving_generation),
+                Arc::clone(&worktree.text_generation),
                 Arc::clone(&worktree.published_generation_id),
                 Arc::clone(&worktree.serving_generation_epoch),
                 worktree.graph_activation.clone(),
@@ -546,6 +548,15 @@ impl CodeIndexSchedulerRegistryV1 {
             request_reactivation();
             return Err(error);
         }
+        *text_generation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(build.latest.text_generation_handle());
+        Self::note_wake(
+            &pending_wake,
+            &wake,
+            CodeIndexCadenceTriggerV1::QueryAdmission,
+        );
         let swap_scheduler = Arc::clone(&scheduler);
         let swap_serving_generation = Arc::clone(&serving_generation);
         let swap_serving_generation_epoch = Arc::clone(&serving_generation_epoch);
