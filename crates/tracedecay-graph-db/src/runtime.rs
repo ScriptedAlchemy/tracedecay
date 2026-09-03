@@ -524,16 +524,21 @@ impl GraphDb {
         let guard = self.read_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
         self.ensure_start_projections_readable(database, namespace, starts)?;
+        let approve_projection = |namespace: &GraphNamespace, projection: &GraphProjectionId| {
+            self.approve_projection(namespace, projection)
+        };
         let batches = traversal::outgoing_relation_ids(
-            database,
+            traversal::RelationIdReadContext::new(
+                database,
+                &approve_projection,
+                &self.inner.label_keys,
+                &self.inner.adjacency_ids,
+            ),
             namespace,
             starts,
             relation_kinds,
             max_relations,
             cancellation.as_ref(),
-            &|namespace, projection| self.approve_projection(namespace, projection),
-            &self.inner.label_keys,
-            &self.inner.adjacency_ids,
         )?;
         #[cfg(feature = "hotpath")]
         {
@@ -561,16 +566,21 @@ impl GraphDb {
         let guard = self.read_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
         self.ensure_start_projections_readable(database, namespace, starts)?;
+        let approve_projection = |namespace: &GraphNamespace, projection: &GraphProjectionId| {
+            self.approve_projection(namespace, projection)
+        };
         let batches = traversal::incoming_relation_ids(
-            database,
+            traversal::RelationIdReadContext::new(
+                database,
+                &approve_projection,
+                &self.inner.label_keys,
+                &self.inner.adjacency_ids,
+            ),
             namespace,
             starts,
             relation_kinds,
             max_relations,
             cancellation.as_ref(),
-            &|namespace, projection| self.approve_projection(namespace, projection),
-            &self.inner.label_keys,
-            &self.inner.adjacency_ids,
         )?;
         #[cfg(feature = "hotpath")]
         {
@@ -600,17 +610,22 @@ impl GraphDb {
         let guard = self.read_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
         self.ensure_start_projections_readable(database, namespace, starts)?;
+        let approve_projection = |namespace: &GraphNamespace, projection: &GraphProjectionId| {
+            self.approve_projection(namespace, projection)
+        };
         let batches = traversal::outgoing_relation_ids_page(
-            database,
+            traversal::RelationIdReadContext::new(
+                database,
+                &approve_projection,
+                &self.inner.label_keys,
+                &self.inner.adjacency_ids,
+            ),
             namespace,
             starts,
             relation_kinds,
             after,
             limit,
             cancellation.as_ref(),
-            &|namespace, projection| self.approve_projection(namespace, projection),
-            &self.inner.label_keys,
-            &self.inner.adjacency_ids,
         )?;
         #[cfg(feature = "hotpath")]
         {
@@ -638,17 +653,22 @@ impl GraphDb {
         let guard = self.read_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
         self.ensure_start_projections_readable(database, namespace, starts)?;
+        let approve_projection = |namespace: &GraphNamespace, projection: &GraphProjectionId| {
+            self.approve_projection(namespace, projection)
+        };
         let batches = traversal::incoming_relation_ids_page(
-            database,
+            traversal::RelationIdReadContext::new(
+                database,
+                &approve_projection,
+                &self.inner.label_keys,
+                &self.inner.adjacency_ids,
+            ),
             namespace,
             starts,
             relation_kinds,
             after,
             limit,
             cancellation.as_ref(),
-            &|namespace, projection| self.approve_projection(namespace, projection),
-            &self.inner.label_keys,
-            &self.inner.adjacency_ids,
         )?;
         #[cfg(feature = "hotpath")]
         {
