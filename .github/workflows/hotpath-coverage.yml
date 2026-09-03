@@ -1,7 +1,7 @@
 # Runtime coverage for the production Hotpath probes exercised by focused
 # storage, session, LCM, capture, and temporal-query journeys.
 #
-# Two lanes, same test set:
+# The job runs two lanes of the same test set:
 #   1. feature off  — every `#[hotpath::measure]` macro must stay a no-op;
 #   2. `--features hotpath` — the `hotpath_coverage` tests wrap a real
 #      workload in a HotpathGuard and assert the JSON report carries the

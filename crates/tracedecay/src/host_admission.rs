@@ -103,7 +103,6 @@ static SESSION_CAPTURE_TEST_RESIDENT_MEMORY: LazyLock<Arc<ProcessResidentMemoryV
 /// same authority production and the scheduler's test fallback use — keeps
 /// the background CPU width consistent with any later worker-plan install in
 /// the same test process instead of poisoning it with an ad-hoc width.
-#[hotpath::measure(label = "daemon.host_admission.install_background_cpu")]
 pub(crate) fn ensure_process_background_cpu_authority() -> Result<()> {
     if process_background_cpu().is_none() {
         let memory = SESSION_CAPTURE_TEST_RESIDENT_MEMORY.snapshot();
@@ -187,7 +186,7 @@ impl HostAdmissionTestRuntimeV1 {
     /// cannot exist — the profile session-relation graph has exactly one
     /// writer.
     #[doc(hidden)]
-    #[hotpath::measure(label = "daemon.host_admission.mount_sibling_project", future = true)]
+    #[hotpath::skip]
     pub async fn sibling_project(
         &self,
         project_root: impl AsRef<Path>,
@@ -250,7 +249,7 @@ impl HostAdmissionTestRuntimeV1 {
         })
     }
 
-    #[hotpath::measure(label = "daemon.host_admission.open_runtime", future = true)]
+    #[hotpath::skip]
     async fn open(profile_root: PathBuf, project: Option<(PathBuf, ProjectId)>) -> Result<Self> {
         // Fixture compositions run in-process daemon code that reads the
         // registered product runtime (handshakes, initialize payloads);
@@ -418,7 +417,6 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    #[hotpath::measure(label = "daemon.host_admission.scan_storage_bytes")]
     pub fn session_database_storage_bytes_for_test(
         &self,
         scope: HostAdmissionScope,
@@ -443,7 +441,7 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    #[hotpath::measure(label = "daemon.host_admission.digest_session_domain", future = true)]
+    #[hotpath::skip]
     pub async fn session_domain_sha256_for_test(
         &self,
         scope: HostAdmissionScope,
@@ -465,7 +463,7 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    #[hotpath::measure(label = "daemon.host_admission.replay_observations", future = true)]
+    #[hotpath::skip]
     pub async fn replay_observations(
         &self,
         scope: HostAdmissionScope,
@@ -504,7 +502,7 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    #[hotpath::measure(label = "daemon.host_admission.count_temporal_rows", future = true)]
+    #[hotpath::skip]
     pub async fn session_temporal_fixture_count_for_test(
         &self,
         scope: HostAdmissionScope,
@@ -645,7 +643,7 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    #[hotpath::measure(label = "daemon.host_admission.upsert_transcript_batch", future = true)]
+    #[hotpath::skip]
     pub async fn upsert_transcript_batch_for_test(
         &self,
         scope: HostAdmissionScope,
@@ -686,7 +684,7 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    #[hotpath::measure(label = "daemon.host_admission.count_transcript_rows", future = true)]
+    #[hotpath::skip]
     pub async fn transcript_store_counts_for_test(
         &self,
         scope: HostAdmissionScope,
@@ -1060,7 +1058,7 @@ impl HostAdmissionTestRuntimeV1 {
 
     /// Initializes a project graph through this retained registered runtime.
     #[doc(hidden)]
-    #[hotpath::measure(label = "daemon.host_admission.init_project_graph", future = true)]
+    #[hotpath::skip]
     pub async fn initialize_project_graph_for_test(
         &self,
         project_root: &Path,
@@ -1104,7 +1102,7 @@ impl HostAdmissionTestRuntimeV1 {
 
     /// Reopens an existing project graph through this retained runtime.
     #[doc(hidden)]
-    #[hotpath::measure(label = "daemon.host_admission.open_project_graph", future = true)]
+    #[hotpath::skip]
     pub async fn open_project_graph_for_test(
         &self,
         project_root: &Path,
@@ -1126,7 +1124,7 @@ impl HostAdmissionTestRuntimeV1 {
 
     /// Opens one tracked branch through this retained registered runtime.
     #[doc(hidden)]
-    #[hotpath::measure(label = "daemon.host_admission.open_project_branch", future = true)]
+    #[hotpath::skip]
     pub async fn open_project_branch_for_test(
         &self,
         project_root: &Path,
@@ -1171,7 +1169,7 @@ impl HostAdmissionTestRuntimeV1 {
 
     /// Reopens an existing graph read-only without inferring authority.
     #[doc(hidden)]
-    #[hotpath::measure(label = "daemon.host_admission.open_graph_read_only", future = true)]
+    #[hotpath::skip]
     pub async fn open_project_graph_read_only_for_test(
         &self,
         project_root: &Path,
@@ -1281,7 +1279,6 @@ impl std::ops::Deref for ProjectScopedTestRuntimeV1 {
     }
 }
 
-#[hotpath::measure(label = "daemon.host_admission.validate_authorities")]
 fn validate_registered_authorities(
     brain_id: &BrainId,
     profile_id: &UserProfileId,
