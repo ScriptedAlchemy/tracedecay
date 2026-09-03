@@ -311,6 +311,7 @@ pub(in crate::db) async fn create_schema(
     conn.execute_batch(BASELINE_SCHEMA)
         .await
         .map_err(|error| db_error(operation, error))?;
+    super::payload_digests::install_payload_digests(conn, operation).await?;
     conn.execute_batch(
         "INSERT OR IGNORE INTO retrieval_anchor_reverse_lineage (
              source_anchor_id, owner_json, derivative_kind, derivative_id, direct_evidence
