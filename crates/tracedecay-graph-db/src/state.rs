@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use grafeo_common::types::{ArcStr, EdgeId, NodeId, Value};
+use grafeo_common::types::{ArcStr, EdgeId, NodeId, PropertyKey, Value};
+use grafeo_common::utils::hash::FxHashMap;
 use grafeo_core::graph::lpg::Node;
 use grafeo_core::graph::{Direction, GraphStore};
 use grafeo_engine::GrafeoDB;
@@ -260,14 +261,7 @@ fn load_indexed_entity_node(
     namespace: &GraphNamespace,
     identity: &GraphEntityId,
 ) -> Result<Option<(NodeId, Node, GraphNamespace, GraphProjectionId)>, GraphDbError> {
-    let Some(node_id) = unique_property_node(
-        database,
-        ENTITY_KEY_PROPERTY,
-        &entity_key_value(namespace, identity),
-        ENTITY_LABEL,
-        "entity identity",
-    )?
-    else {
+    let Some(node_id) = indexed_entity_node(database, namespace, identity)? else {
         return Ok(None);
     };
     let node = database
@@ -276,27 +270,111 @@ fn load_indexed_entity_node(
         .ok_or_else(|| GraphDbError::Corrupt {
             message: "indexed entity node is unreadable".to_owned(),
         })?;
-    let stored_namespace = GraphNamespace::new(required_string(
+    let (stored_namespace, projection) = verify_indexed_entity_owner(
         node.get_property(NAMESPACE_PROPERTY),
-        "entity namespace",
-    )?)
-    .map_err(|error| persisted_validation_error("entity namespace", error))?;
-    let projection = GraphProjectionId::new(required_string(
         node.get_property(PROJECTION_PROPERTY),
-        "entity projection",
-    )?)
-    .map_err(|error| persisted_validation_error("entity projection", error))?;
-    let stored_identity = GraphEntityId::new(required_string(
         node.get_property(ENTITY_ID_PROPERTY),
+        namespace,
+        identity,
+    )?;
+    Ok(Some((node_id, node, stored_namespace, projection)))
+}
+
+/// Resolves the node one entity identity is indexed under through the
+/// unique-key index alone, without materializing the node's properties.
+pub(crate) fn indexed_entity_node(
+    database: &GrafeoDB,
+    namespace: &GraphNamespace,
+    identity: &GraphEntityId,
+) -> Result<Option<NodeId>, GraphDbError> {
+    unique_property_node(
+        database,
+        ENTITY_KEY_PROPERTY,
+        &entity_key_value(namespace, identity),
+        ENTITY_LABEL,
         "entity identity",
-    )?)
-    .map_err(|error| persisted_validation_error("entity identity", error))?;
+    )
+}
+
+/// Checks the owner scalars an indexed entity node carries against the
+/// identity it was resolved from and returns the owner it belongs to. The
+/// unique-key index is derived from exactly these scalars, so a disagreement
+/// means the index and the row have drifted apart.
+fn verify_indexed_entity_owner(
+    stored_namespace: Option<&Value>,
+    stored_projection: Option<&Value>,
+    stored_identity: Option<&Value>,
+    namespace: &GraphNamespace,
+    identity: &GraphEntityId,
+) -> Result<(GraphNamespace, GraphProjectionId), GraphDbError> {
+    let stored_namespace =
+        GraphNamespace::new(required_string(stored_namespace, "entity namespace")?)
+            .map_err(|error| persisted_validation_error("entity namespace", error))?;
+    let projection =
+        GraphProjectionId::new(required_string(stored_projection, "entity projection")?)
+            .map_err(|error| persisted_validation_error("entity projection", error))?;
+    let stored_identity = GraphEntityId::new(required_string(stored_identity, "entity identity")?)
+        .map_err(|error| persisted_validation_error("entity identity", error))?;
     if stored_namespace != *namespace || stored_identity != *identity {
         return Err(GraphDbError::Corrupt {
             message: "entity native index does not match its scalar identity".to_owned(),
         });
     }
-    Ok(Some((node_id, node, stored_namespace, projection)))
+    Ok((stored_namespace, projection))
+}
+
+/// The owner columns every indexed entity node carries, keyed once so a
+/// projected batch read and the per-row verification of its rows share the
+/// same interned keys.
+pub(crate) struct EntityOwnerColumns {
+    namespace: PropertyKey,
+    projection: PropertyKey,
+    identity: PropertyKey,
+}
+
+impl Default for EntityOwnerColumns {
+    fn default() -> Self {
+        Self {
+            namespace: PropertyKey::new(NAMESPACE_PROPERTY),
+            projection: PropertyKey::new(PROJECTION_PROPERTY),
+            identity: PropertyKey::new(ENTITY_ID_PROPERTY),
+        }
+    }
+}
+
+impl EntityOwnerColumns {
+    pub(crate) fn keys(&self) -> [PropertyKey; 3] {
+        [
+            self.namespace.clone(),
+            self.projection.clone(),
+            self.identity.clone(),
+        ]
+    }
+
+    /// The projection of the indexed entity node `row` was read from, after
+    /// the same owner check a full node load performs. An empty row is a node
+    /// with no readable column at all — the store no longer has the node the
+    /// index pointed at — which is the corruption a failed `get_node` reports.
+    pub(crate) fn projection_of(
+        &self,
+        row: &FxHashMap<PropertyKey, Value>,
+        namespace: &GraphNamespace,
+        identity: &GraphEntityId,
+    ) -> Result<GraphProjectionId, GraphDbError> {
+        if row.is_empty() {
+            return Err(GraphDbError::Corrupt {
+                message: "indexed entity node is unreadable".to_owned(),
+            });
+        }
+        verify_indexed_entity_owner(
+            row.get(&self.namespace),
+            row.get(&self.projection),
+            row.get(&self.identity),
+            namespace,
+            identity,
+        )
+        .map(|(_, projection)| projection)
+    }
 }
 
 pub(crate) fn load_entity_locator(

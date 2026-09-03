@@ -1,3 +1,12 @@
+//! Commit-time cost of one semantic vector page.
+//!
+//! Run (wall times only):
+//!   cargo bench -p tracedecay-graph-db --bench vector_commit_refresh \
+//!     --features test-helpers
+//! Run with phase attribution (`graph_db.vector_index.*`, `graph_db.write.*`):
+//!   cargo bench -p tracedecay-graph-db --bench vector_commit_refresh \
+//!     --features test-helpers,hotpath
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -100,6 +109,9 @@ fn assert_page_is_searchable(entity_count: usize) {
 }
 
 fn vector_commit_refresh(criterion: &mut Criterion) {
+    #[cfg(feature = "hotpath")]
+    let _hotpath = hotpath::HotpathGuardBuilder::new("vector-commit-refresh").build();
+
     let mut group = criterion.benchmark_group("vector_commit_refresh/page_apply");
     for entity_count in PAGE_ENTITY_COUNTS {
         assert_page_is_searchable(entity_count);

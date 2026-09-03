@@ -3,9 +3,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, mpsc};
 use std::time::Duration;
 
-use grafeo_common::types::Value;
+use grafeo_common::types::{PropertyKey, Value};
 
-use super::{require_committed_vector_scalar, sync_wal};
+use super::{
+    VectorRefreshUpdate, refresh_vector_indexes, require_committed_vector_scalar, sync_wal,
+    vector_property_key,
+};
 use crate::recovery::set_projection_quarantine;
 use crate::{
     GraphCommit, GraphDbError, GraphDbLeaseV1, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner,
@@ -13,7 +16,7 @@ use crate::{
     GraphMutation, GraphNamespace, GraphProjectionId, GraphProperty, GraphPropertyName,
     GraphRelation, GraphRelationId, GraphRelationKind, GraphTraversalDirection, GraphVector,
     GraphWatermark, GraphWriteBatch, NeverCancelled, SourceGeneration, TraversalRequest,
-    VectorMetric, mutation,
+    VectorMetric, VectorSearchRequest, mutation,
 };
 
 fn memory_db() -> GraphDbLeaseV1 {
@@ -355,20 +358,163 @@ fn vector_index_refresh_requires_the_identical_committed_scalar() {
         .session()
         .create_node_with_props(&["Vector"], [("embedding", expected.clone())])
         .unwrap();
+    let committed = database
+        .graph_store()
+        .get_node_property(node, &PropertyKey::new("embedding"));
 
     assert_eq!(
-        require_committed_vector_scalar(&database, node, "embedding", &expected),
+        require_committed_vector_scalar(committed.as_ref(), "embedding", &expected),
         Ok(())
     );
     assert!(matches!(
         require_committed_vector_scalar(
-            &database,
-            node,
+            committed.as_ref(),
             "embedding",
             &Value::Vector(vec![2.0_f32, 1.0].into()),
         ),
         Err(GraphDbError::DurabilityUncertain { .. })
     ));
+    assert!(matches!(
+        require_committed_vector_scalar(None, "embedding", &expected),
+        Err(GraphDbError::DurabilityUncertain { .. })
+    ));
+}
+
+fn refresh_update(identity: &str, values: Vec<f32>) -> VectorRefreshUpdate {
+    VectorRefreshUpdate {
+        identity: GraphEntityId::new(identity).unwrap(),
+        property: PropertyKey::new(vector_property_key(
+            &GraphPropertyName::new("embedding").unwrap(),
+            2,
+            VectorMetric::Cosine,
+        )),
+        value: Value::Vector(values.into()),
+    }
+}
+
+/// The batched refresh must fail closed on exactly the rows the per-row path
+/// did: an identity the index no longer resolves, and a committed scalar that
+/// is not the one about to be re-applied. A healthy row still refreshes.
+#[test]
+fn vector_index_refresh_fails_closed_on_missing_and_differing_committed_rows() {
+    let db = memory_db();
+    db.apply_unverified(vector_batch("committed")).unwrap();
+    let guard = db.write_guard().unwrap();
+    let database = guard.as_ref().unwrap();
+    let namespace = GraphNamespace::new("project").unwrap();
+
+    assert_eq!(
+        refresh_vector_indexes(
+            database,
+            &namespace,
+            vec![refresh_update("vector-entity", vec![1.0, 2.0])],
+        ),
+        Ok(())
+    );
+
+    let differing = refresh_vector_indexes(
+        database,
+        &namespace,
+        vec![
+            refresh_update("vector-entity", vec![1.0, 2.0]),
+            refresh_update("vector-entity", vec![2.0, 1.0]),
+        ],
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            &differing,
+            GraphDbError::DurabilityUncertain { message }
+                if message.contains("differs before native index refresh")
+        ),
+        "a differing committed scalar must be durability-uncertain: {differing:?}"
+    );
+
+    let missing = refresh_vector_indexes(
+        database,
+        &namespace,
+        vec![
+            refresh_update("vector-entity", vec![1.0, 2.0]),
+            refresh_update("never-committed", vec![1.0, 2.0]),
+        ],
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            &missing,
+            GraphDbError::DurabilityUncertain { message }
+                if message.contains("`never-committed` is missing from native identity index")
+        ),
+        "an unresolvable identity must be durability-uncertain: {missing:?}"
+    );
+}
+
+/// The refresh learns each committed row's node id, projection, and vector
+/// scalar from the identity index plus one projected column read; it must not
+/// hydrate the committed entities (labels, every property, and the vector
+/// decoded into a `GraphEntity`) to get there.
+#[test]
+fn vector_index_refresh_does_not_hydrate_committed_entities() {
+    let db = memory_db();
+    db.apply_unverified(vector_batch("seed")).unwrap();
+    let page = GraphWriteBatch::new(
+        GraphNamespace::new("project").unwrap(),
+        GraphProjectionId::new("code").unwrap(),
+        SourceGeneration::new("page").unwrap(),
+        GraphWatermark::new("page").unwrap(),
+        (0..64)
+            .map(|index| {
+                GraphMutation::UpsertEntity(
+                    GraphEntity::new(
+                        GraphEntityId::new(format!("chunk:{index}")).unwrap(),
+                        BTreeSet::new(),
+                        BTreeMap::from([(
+                            GraphPropertyName::new("embedding").unwrap(),
+                            GraphProperty::Vector(
+                                GraphVector::new(
+                                    vec![index as f32, (64 - index) as f32],
+                                    2,
+                                    VectorMetric::Cosine,
+                                )
+                                .unwrap(),
+                            ),
+                        )]),
+                    )
+                    .unwrap(),
+                )
+            })
+            .collect(),
+        Arc::new(NeverCancelled),
+    )
+    .unwrap();
+
+    let _ = crate::hotpath_observe::take_traversal_counters();
+    db.apply_unverified(page).unwrap();
+    let counters = crate::hotpath_observe::take_traversal_counters();
+
+    assert_eq!(
+        counters.property_decodes, 0,
+        "committing a page of new vector rows must not decode any stored entity"
+    );
+    assert_eq!(
+        db.vector_search(VectorSearchRequest {
+            namespace: GraphNamespace::new("project").unwrap(),
+            projection: GraphProjectionId::new("code").unwrap(),
+            property: GraphPropertyName::new("embedding").unwrap(),
+            query: vec![63.0, 1.0],
+            dimension: 2,
+            metric: VectorMetric::Cosine,
+            limit: 1,
+            cancellation: Arc::new(NeverCancelled),
+        })
+        .unwrap()
+        .matches
+        .into_iter()
+        .map(|candidate| candidate.entity)
+        .collect::<Vec<_>>(),
+        vec![GraphEntityId::new("chunk:63").unwrap()],
+        "the refreshed index must serve the committed page"
+    );
 }
 
 #[test]
