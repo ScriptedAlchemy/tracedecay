@@ -355,6 +355,7 @@ pub async fn append_run_record(
     Ok(())
 }
 
+#[hotpath::measure(label = "automation_runtime.run_ledger.append_locked")]
 fn append_jsonl_line_locked(path: &Path, line: &str) -> std::io::Result<()> {
     use std::io::Write;
 
@@ -895,6 +896,7 @@ impl AutomationRunLedgerTaskSummary {
     }
 }
 
+#[hotpath::measure(label = "automation_runtime.run_ledger.load_page", future = true)]
 pub async fn load_run_records_page(
     dashboard_root: &Path,
     limit: usize,
@@ -908,6 +910,7 @@ pub async fn load_run_records_page(
     .map_err(|e| config_error(format!("failed to join automation run ledger read: {e}")))?
 }
 
+#[hotpath::measure(label = "automation_runtime.run_ledger.load_for_task_key", future = true)]
 pub async fn load_run_records_for_task_key(
     dashboard_root: &Path,
     requested_task_key: &str,
@@ -1261,6 +1264,7 @@ fn is_session_evidence_budget_exhausted_skip(
     status == AutomationRunStatus::Skipped && session_evidence_budget_exhausted_error
 }
 
+#[hotpath::measure(label = "automation_runtime.run_ledger.scan_task_summary")]
 fn read_run_ledger_task_summary(
     path: &Path,
     task: AgentTaskKind,
@@ -1479,6 +1483,7 @@ fn decode_task_summary(
     Ok(summary)
 }
 
+#[hotpath::measure(label = "automation_runtime.run_ledger.scan_page")]
 fn read_any_run_records_page(
     file: &std::fs::File,
     path: &Path,
@@ -1531,6 +1536,7 @@ struct FilteredRunSelection {
     effective_task_key: String,
 }
 
+#[hotpath::measure(label = "automation_runtime.run_ledger.scan_filtered")]
 fn read_filtered_run_records_two_pass(
     file: &std::fs::File,
     path: &Path,
