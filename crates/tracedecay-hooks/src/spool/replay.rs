@@ -3,12 +3,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use tracedecay_domain::UtcMicros;
 
 use super::{
-    HookSpoolError, HookSpoolLimitsV1, HookSpoolRecordV1, MAX_REPLAY_BATCH_BYTES,
-    MAX_REPLAY_BATCH_RECORDS, MAX_SPOOL_AGE_MICROS,
+    HookSpoolError, HookSpoolLimitsV1, MAX_REPLAY_BATCH_BYTES, MAX_REPLAY_BATCH_RECORDS,
+    MAX_SPOOL_AGE_MICROS, types::PendingRecordV1,
 };
 
 pub(super) fn usage_by_session(
-    records: &[HookSpoolRecordV1],
+    records: &[PendingRecordV1],
     limits: HookSpoolLimitsV1,
 ) -> Result<BTreeMap<[u8; 32], (u32, u64)>, HookSpoolError> {
     let mut usage = BTreeMap::<[u8; 32], (u32, u64)>::new();
@@ -24,7 +24,7 @@ pub(super) fn usage_by_session(
 }
 
 pub(super) fn replayable_sessions(
-    pending: &[HookSpoolRecordV1],
+    pending: &[PendingRecordV1],
     now: UtcMicros,
 ) -> BTreeSet<[u8; 32]> {
     pending
@@ -48,15 +48,16 @@ pub(super) fn round_robin_after(
 }
 
 pub(super) fn batch_for_session(
-    pending: &[HookSpoolRecordV1],
+    pending: &[PendingRecordV1],
     session: [u8; 32],
     now: UtcMicros,
-) -> Result<Vec<HookSpoolRecordV1>, HookSpoolError> {
+) -> Result<Vec<usize>, HookSpoolError> {
     let mut records = Vec::new();
     let mut bytes = 0u32;
-    for record in pending
+    for (index, record) in pending
         .iter()
-        .filter(|record| record.protected_session_id == session && !is_expired(record, now))
+        .enumerate()
+        .filter(|(_, record)| record.protected_session_id == session && !is_expired(record, now))
     {
         let next = bytes
             .checked_add(record.framed_len)
@@ -65,11 +66,11 @@ pub(super) fn batch_for_session(
             break;
         }
         bytes = next;
-        records.push(record.clone());
+        records.push(index);
     }
     Ok(records)
 }
 
-pub(super) fn is_expired(record: &HookSpoolRecordV1, now: UtcMicros) -> bool {
+pub(super) fn is_expired(record: &PendingRecordV1, now: UtcMicros) -> bool {
     now.0.saturating_sub(record.queued_at.0) > MAX_SPOOL_AGE_MICROS
 }
