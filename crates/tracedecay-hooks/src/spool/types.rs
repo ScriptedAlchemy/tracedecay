@@ -102,6 +102,8 @@ pub struct HookSpoolOpenReportV1 {
     /// this open. A validated checkpoint contributes zero; only its appended
     /// suffix contributes to this count.
     pub scanned_records: u32,
+    /// Whether this open durably refreshed the bounded checkpoint anchor.
+    pub checkpoint_rewritten: bool,
     pub truncated_partial_tail_bytes: u64,
     pub corrupted_at_offset: Option<u64>,
 }

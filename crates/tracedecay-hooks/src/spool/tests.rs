@@ -82,6 +82,14 @@ fn envelope(event: u8, session: u8) -> HookEventEnvelopeV2 {
     }
 }
 
+fn numbered_envelope(event: u32, session: u8) -> HookEventEnvelopeV2 {
+    let mut numbered = envelope((event % 251) as u8 + 1, session);
+    numbered.event_id = [0; 16];
+    numbered.event_id[..4].copy_from_slice(&event.to_le_bytes());
+    numbered.ordering = HookOrderingV1::ProviderSequence(u64::from(event));
+    numbered
+}
+
 fn regular_envelope(event: u8, session: u8) -> HookEventEnvelopeV2 {
     HookEventEnvelopeV2 {
         event: HookEventV2::SavedEdit {
@@ -331,7 +339,7 @@ fn reused_event_id_with_different_envelope_is_rejected_after_reopen() {
 }
 
 #[test]
-fn checkpoint_reopen_scans_only_the_appended_suffix() {
+fn checkpoint_anchor_is_reused_until_the_suffix_threshold() {
     let root = TestDir::new("checkpoint-suffix");
     let (mut spool, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(10)).unwrap();
     for event in 1..=4 {
@@ -343,6 +351,7 @@ fn checkpoint_reopen_scans_only_the_appended_suffix() {
 
     let (mut spool, first_reopen) = HookSpoolV1::open(&root.0, config(), UtcMicros(11)).unwrap();
     assert_eq!(first_reopen.scanned_records, 4);
+    assert!(!first_reopen.checkpoint_rewritten);
     spool
         .append(envelope(5, 13), &binding(), UtcMicros(11))
         .unwrap();
@@ -351,15 +360,113 @@ fn checkpoint_reopen_scans_only_the_appended_suffix() {
     let (spool, second_reopen) = HookSpoolV1::open(&root.0, config(), UtcMicros(12)).unwrap();
     assert_eq!(second_reopen.pending_records, 5);
     assert_eq!(
-        second_reopen.scanned_records, 1,
-        "reopen work must be proportional to the one appended suffix frame"
+        second_reopen.scanned_records, 5,
+        "the empty anchor remains reusable until its suffix reaches the rewrite threshold"
     );
+    assert!(!second_reopen.checkpoint_rewritten);
     assert_eq!(spool.pending.len(), 5);
     drop(spool);
 
     let (restarted, restart_report) = HookSpoolV1::open(&root.0, config(), UtcMicros(13)).unwrap();
-    assert_eq!(restart_report.scanned_records, 0);
+    assert_eq!(restart_report.scanned_records, 5);
+    assert!(!restart_report.checkpoint_rewritten);
     assert_eq!(restarted.pending.len(), 5);
+}
+
+#[test]
+fn checkpoint_rewrites_are_amortized_across_dispatches() {
+    const INITIAL_RECORDS: u32 = 400;
+    const DISPATCHES: u32 = 24;
+
+    let root = TestDir::new("checkpoint-amortized");
+    let config = HookSpoolConfigV1::stock(HookHostV1::CursorDesktop);
+    let (mut spool, _) = HookSpoolV1::open(&root.0, config, UtcMicros(10)).unwrap();
+    for event in 1..=INITIAL_RECORDS {
+        spool
+            .append(numbered_envelope(event, 9), &binding(), UtcMicros(10))
+            .unwrap();
+    }
+    drop(spool);
+
+    let (spool, report) = HookSpoolV1::open(&root.0, config, UtcMicros(11)).unwrap();
+    assert!(report.checkpoint_rewritten);
+    drop(spool);
+    let mut checkpoint_rewrites = 1u32;
+
+    for event in (INITIAL_RECORDS + 1)..=(INITIAL_RECORDS + DISPATCHES) {
+        let (mut spool, report) = HookSpoolV1::open(&root.0, config, UtcMicros(11)).unwrap();
+        checkpoint_rewrites += u32::from(report.checkpoint_rewritten);
+        spool
+            .append(numbered_envelope(event, 9), &binding(), UtcMicros(11))
+            .unwrap();
+    }
+
+    let (spool, report) = HookSpoolV1::open(&root.0, config, UtcMicros(12)).unwrap();
+    checkpoint_rewrites += u32::from(report.checkpoint_rewritten);
+    assert!(
+        checkpoint_rewrites <= DISPATCHES.div_ceil(CHECKPOINT_REWRITE_FRAME_THRESHOLD) + 1,
+        "{checkpoint_rewrites} checkpoint rewrites for {DISPATCHES} dispatches"
+    );
+    assert!(report.scanned_records <= CHECKPOINT_REWRITE_FRAME_THRESHOLD);
+    assert_eq!(
+        spool
+            .pending
+            .iter()
+            .map(|record| record.sequence)
+            .collect::<Vec<_>>(),
+        (1..=u64::from(INITIAL_RECORDS + DISPATCHES)).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        spool
+            .pending
+            .iter()
+            .map(|record| record.envelope.event_id)
+            .collect::<Vec<_>>(),
+        (1..=INITIAL_RECORDS + DISPATCHES)
+            .map(|event| numbered_envelope(event, 9).event_id)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn transition_extended_anchor_detects_corrupted_prefix() {
+    let root = TestDir::new("checkpoint-extended-corrupt-prefix");
+    let config = HookSpoolConfigV1::stock(HookHostV1::CursorDesktop);
+    let (mut spool, _) = HookSpoolV1::open(&root.0, config, UtcMicros(10)).unwrap();
+    for event in 1..=CHECKPOINT_REWRITE_FRAME_THRESHOLD {
+        spool
+            .append(numbered_envelope(event, 9), &binding(), UtcMicros(10))
+            .unwrap();
+    }
+    drop(spool);
+    let (spool, report) = HookSpoolV1::open(&root.0, config, UtcMicros(11)).unwrap();
+    assert!(report.checkpoint_rewritten);
+    drop(spool);
+
+    for event in (CHECKPOINT_REWRITE_FRAME_THRESHOLD + 1)..=(CHECKPOINT_REWRITE_FRAME_THRESHOLD + 3)
+    {
+        let (mut spool, report) = HookSpoolV1::open(&root.0, config, UtcMicros(11)).unwrap();
+        assert!(!report.checkpoint_rewritten);
+        spool
+            .append(numbered_envelope(event, 9), &binding(), UtcMicros(11))
+            .unwrap();
+    }
+
+    let mut records = std::fs::OpenOptions::new()
+        .write(true)
+        .open(records_path(&root.0))
+        .unwrap();
+    records.seek(SeekFrom::Start(70)).unwrap();
+    records.write_all(&[0xff]).unwrap();
+    records.sync_all().unwrap();
+    drop(records);
+
+    let (spool, report) = HookSpoolV1::open(&root.0, config, UtcMicros(12)).unwrap();
+    assert_eq!(report.corrupted_at_offset, Some(0));
+    assert!(matches!(
+        spool.ensure_healthy(),
+        Err(HookSpoolError::Corrupted { at_offset: 0 })
+    ));
 }
 
 #[test]
@@ -442,14 +549,10 @@ fn torn_stale_and_replaced_checkpoints_never_skip_authoritative_scans() {
     assert_eq!(torn_report.scanned_records, 2);
     drop(spool);
 
-    let mut mismatched: serde_json::Value =
-        serde_json::from_slice(&fs::read(checkpoint_path(&root.0)).unwrap()).unwrap();
-    mismatched["checksum"][0] = serde_json::json!(255);
-    fs::write(
-        checkpoint_path(&root.0),
-        serde_json::to_vec(&mismatched).unwrap(),
-    )
-    .unwrap();
+    let mut mismatched = fs::read(checkpoint_path(&root.0)).unwrap();
+    let checksum_byte = mismatched.last_mut().unwrap();
+    *checksum_byte ^= 0xff;
+    fs::write(checkpoint_path(&root.0), mismatched).unwrap();
     let (spool, mismatched_report) = HookSpoolV1::open(&root.0, config(), UtcMicros(13)).unwrap();
     assert_eq!(mismatched_report.scanned_records, 2);
     drop(spool);
@@ -460,6 +563,7 @@ fn torn_stale_and_replaced_checkpoints_never_skip_authoritative_scans() {
         .append(envelope(3, 11), &binding(), UtcMicros(14))
         .unwrap();
     drop(spool);
+    fs::remove_file(transition_path(&root.0)).unwrap();
     let (spool, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(15)).unwrap();
     drop(spool);
     let (mut spool, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(16)).unwrap();
