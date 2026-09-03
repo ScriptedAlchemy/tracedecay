@@ -7,6 +7,8 @@ use crate::{
     MAX_SPOOL_BYTES_PER_SESSION, MAX_SPOOL_RECORDS_PER_HOST, MAX_SPOOL_RECORDS_PER_SESSION,
 };
 
+use super::{FRAME_CHECKSUM_BYTES, FRAME_HEADER_BYTES, FRAME_LENGTH_BYTES};
+
 /// Per-host and per-session bounds. Callers may narrow these for a host test
 /// or constrained installation but can never widen the checked-in limits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,6 +104,12 @@ pub struct HookSpoolOpenReportV1 {
     /// this open. A validated checkpoint contributes zero; only its appended
     /// suffix contributes to this count.
     pub scanned_records: u32,
+    /// Fixed-width checkpoint index entries adopted without decoding their
+    /// envelope frames during this open.
+    pub checkpoint_records: u32,
+    /// Bytes read from a checkpoint whose framing, checksum, and index body
+    /// were validated during this open.
+    pub checkpoint_bytes: u64,
     /// Whether this open durably refreshed the bounded checkpoint anchor.
     pub checkpoint_rewritten: bool,
     pub truncated_partial_tail_bytes: u64,
@@ -315,10 +323,60 @@ pub(super) struct LeaseFileV1 {
 
 #[derive(Debug)]
 pub(super) struct ScanResult {
-    pub(super) records: Vec<HookSpoolRecordV1>,
+    pub(super) records: Vec<PendingRecordV1>,
     pub(super) valid_end: u64,
     pub(super) physical_len: u64,
     pub(super) scanned_records: u32,
     pub(super) partial_tail: Option<Vec<u8>>,
     pub(super) corruption: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct PendingRecordV1 {
+    pub(super) sequence: u64,
+    pub(super) protected_session_id: [u8; 32],
+    pub(super) queued_at: UtcMicros,
+    pub(super) framed_len: u32,
+    pub(super) file_offset: u64,
+    pub(super) event_id: [u8; 16],
+    pub(super) checksum: [u8; 32],
+    pub(super) envelope: Option<HookEventEnvelopeV2>,
+}
+
+impl PendingRecordV1 {
+    pub(super) fn from_record(record: &HookSpoolRecordV1, file_offset: u64) -> Self {
+        Self {
+            sequence: record.sequence,
+            protected_session_id: record.protected_session_id,
+            queued_at: record.queued_at,
+            framed_len: record.framed_len,
+            file_offset,
+            event_id: record.envelope.event_id,
+            checksum: record.checksum,
+            envelope: Some(record.envelope.clone()),
+        }
+    }
+
+    pub(super) fn to_record(&self) -> Option<HookSpoolRecordV1> {
+        let frame_overhead =
+            u32::try_from(FRAME_LENGTH_BYTES + FRAME_HEADER_BYTES + FRAME_CHECKSUM_BYTES).ok()?;
+        Some(HookSpoolRecordV1 {
+            sequence: self.sequence,
+            protected_session_id: self.protected_session_id,
+            queued_at: self.queued_at,
+            envelope: self.envelope.clone()?,
+            encoded_len: self.framed_len.checked_sub(frame_overhead)?,
+            checksum: self.checksum,
+            framed_len: self.framed_len,
+        })
+    }
+
+    pub(super) fn matches_record(&self, record: &HookSpoolRecordV1) -> bool {
+        self.sequence == record.sequence
+            && self.protected_session_id == record.protected_session_id
+            && self.queued_at == record.queued_at
+            && self.framed_len == record.framed_len
+            && self.event_id == record.envelope.event_id
+            && self.checksum == record.checksum
+    }
 }
