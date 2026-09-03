@@ -100,6 +100,75 @@ fn regular_envelope(event: u8, session: u8) -> HookEventEnvelopeV2 {
     }
 }
 
+fn lifecycle_envelope(event: u32, session: u8) -> HookEventEnvelopeV2 {
+    let mut envelope = numbered_envelope(event, session);
+    envelope.event = if event.is_multiple_of(2) {
+        HookEventV2::ToolLifecycle {
+            tool_id: [event as u8; 16],
+            phase: crate::HookLifecyclePhaseV1::Completed,
+            effect_receipt_id: Some([event.wrapping_add(1) as u8; 16]),
+        }
+    } else {
+        HookEventV2::TestLifecycle {
+            test_run_id: [event as u8; 16],
+            test_count: 128,
+            phase: crate::HookLifecyclePhaseV1::Completed,
+            receipt_id: Some([event.wrapping_add(1) as u8; 16]),
+        }
+    };
+    envelope
+}
+
+fn binding_for_envelopes(
+    host: HookHostV1,
+    envelopes: &[HookEventEnvelopeV2],
+) -> HookScopeBindingV1 {
+    let mut binding = binding();
+    binding.host = host;
+    binding.capabilities.clear();
+    for family in envelopes.iter().map(|envelope| envelope.event.family()) {
+        if !binding
+            .capabilities
+            .iter()
+            .any(|capability| capability.family == family)
+        {
+            binding.capabilities.push(HookCapabilityV1 {
+                family,
+                support: crate::stock_event_support(host, family),
+            });
+        }
+    }
+    binding
+}
+
+fn publish_checkpoint(
+    root: &Path,
+    config: HookSpoolConfigV1,
+    envelopes: &[HookEventEnvelopeV2],
+) -> Vec<HookSpoolRecordV1> {
+    let (mut spool, _) = HookSpoolV1::open(root, config, UtcMicros(10)).unwrap();
+    let binding = binding_for_envelopes(config.host, envelopes);
+    let records = envelopes
+        .iter()
+        .cloned()
+        .map(|envelope| spool.append(envelope, &binding, UtcMicros(10)).unwrap())
+        .collect::<Vec<_>>();
+    drop(spool);
+    fs::remove_file(checkpoint_path(root)).unwrap();
+    let (spool, report) = HookSpoolV1::open(root, config, UtcMicros(11)).unwrap();
+    assert!(report.checkpoint_rewritten);
+    drop(spool);
+    records
+}
+
+fn checkpoint_header_json_len(bytes: &[u8]) -> usize {
+    u32::from_le_bytes(
+        bytes[CHECKPOINT_HEADER_BYTES..CHECKPOINT_HEADER_BYTES + 4]
+            .try_into()
+            .unwrap(),
+    ) as usize
+}
+
 #[test]
 fn checksum_is_real_sha256() {
     assert_eq!(
@@ -308,7 +377,7 @@ fn identical_event_id_and_envelope_reuses_pending_record_after_reopen() {
         .unwrap();
 
     assert_eq!(duplicate, first);
-    assert_eq!(spool.pending, [first]);
+    assert_eq!(spool.pending[0].to_record(), Some(first));
     assert_eq!(spool.meta.next_sequence, 2);
     assert_eq!(spool.physical_len, physical_len);
 }
@@ -420,11 +489,258 @@ fn checkpoint_rewrites_are_amortized_across_dispatches() {
         spool
             .pending
             .iter()
-            .map(|record| record.envelope.event_id)
+            .map(|record| record.event_id)
             .collect::<Vec<_>>(),
         (1..=INITIAL_RECORDS + DISPATCHES)
             .map(|event| numbered_envelope(event, 9).event_id)
             .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn checkpoint_stores_a_fixed_width_index_without_envelopes() {
+    const RECORDS: u32 = 40;
+
+    let compact_root = TestDir::new("checkpoint-fixed-compact");
+    let large_root = TestDir::new("checkpoint-fixed-large");
+    let compact_config = HookSpoolConfigV1::stock(HookHostV1::Hermes);
+    let large_config = HookSpoolConfigV1::stock(HookHostV1::Hermes);
+    let compact = (1..=RECORDS)
+        .map(|event| {
+            let mut envelope = numbered_envelope(event, 9);
+            envelope.producer = HookHostV1::Hermes;
+            envelope
+        })
+        .collect::<Vec<_>>();
+    let large = (1..=RECORDS)
+        .map(|event| {
+            let mut envelope = lifecycle_envelope(event, 9);
+            envelope.producer = HookHostV1::Hermes;
+            envelope
+        })
+        .collect::<Vec<_>>();
+    publish_checkpoint(&compact_root.0, compact_config, &compact);
+    publish_checkpoint(&large_root.0, large_config, &large);
+
+    let compact_bytes = fs::read(checkpoint_path(&compact_root.0)).unwrap();
+    let large_bytes = fs::read(checkpoint_path(&large_root.0)).unwrap();
+    let compact_header_len = checkpoint_header_json_len(&compact_bytes);
+    let large_header_len = checkpoint_header_json_len(&large_bytes);
+    let expected_compact = CHECKPOINT_HEADER_BYTES
+        + 4
+        + compact_header_len
+        + RECORDS as usize * CHECKPOINT_ENTRY_BYTES
+        + FRAME_CHECKSUM_BYTES;
+    let expected_large = CHECKPOINT_HEADER_BYTES
+        + 4
+        + large_header_len
+        + RECORDS as usize * CHECKPOINT_ENTRY_BYTES
+        + FRAME_CHECKSUM_BYTES;
+    assert_eq!(compact_bytes.len(), expected_compact);
+    assert_eq!(large_bytes.len(), expected_large);
+    assert_eq!(compact_bytes.len(), large_bytes.len());
+    assert_eq!(
+        &compact_bytes[..CHECKPOINT_HEADER_BYTES],
+        &large_bytes[..CHECKPOINT_HEADER_BYTES]
+    );
+    let compact_entries_at = CHECKPOINT_HEADER_BYTES + 4 + compact_header_len;
+    let large_entries_at = CHECKPOINT_HEADER_BYTES + 4 + large_header_len;
+    assert_ne!(
+        &compact_bytes[compact_entries_at..compact_bytes.len() - FRAME_CHECKSUM_BYTES],
+        &large_bytes[large_entries_at..large_bytes.len() - FRAME_CHECKSUM_BYTES]
+    );
+
+    let (compact_spool, compact_report) =
+        HookSpoolV1::open(&compact_root.0, compact_config, UtcMicros(12)).unwrap();
+    assert_eq!(compact_report.checkpoint_records, RECORDS);
+    assert_eq!(compact_report.checkpoint_bytes, compact_bytes.len() as u64);
+    assert_eq!(compact_report.scanned_records, 0);
+    drop(compact_spool);
+    let (large_spool, large_report) =
+        HookSpoolV1::open(&large_root.0, large_config, UtcMicros(12)).unwrap();
+    assert_eq!(large_report.checkpoint_records, RECORDS);
+    assert_eq!(large_report.checkpoint_bytes, large_bytes.len() as u64);
+    assert_eq!(large_report.scanned_records, 0);
+    drop(large_spool);
+}
+
+#[test]
+fn open_after_one_dispatch_decodes_only_the_appended_suffix() {
+    const INITIAL_RECORDS: u32 = 3_000;
+    const DISPATCHES: u32 = 5;
+
+    let root = TestDir::new("checkpoint-suffix-materialization");
+    let config = HookSpoolConfigV1::stock(HookHostV1::CursorDesktop);
+    let initial = (1..=INITIAL_RECORDS)
+        .map(|event| numbered_envelope(event, (event % 251) as u8 + 1))
+        .collect::<Vec<_>>();
+    publish_checkpoint(&root.0, config, &initial);
+
+    for suffix_records in 0..DISPATCHES {
+        let (mut spool, report) = HookSpoolV1::open(&root.0, config, UtcMicros(12)).unwrap();
+        assert_eq!(report.checkpoint_records, INITIAL_RECORDS);
+        assert_eq!(report.scanned_records, suffix_records);
+        spool
+            .append(
+                numbered_envelope(
+                    INITIAL_RECORDS + suffix_records + 1,
+                    ((INITIAL_RECORDS + suffix_records + 1) % 251) as u8 + 1,
+                ),
+                &binding(),
+                UtcMicros(12),
+            )
+            .unwrap();
+    }
+
+    let (spool, report) = HookSpoolV1::open(&root.0, config, UtcMicros(13)).unwrap();
+    assert_eq!(report.checkpoint_records, INITIAL_RECORDS);
+    assert_eq!(report.scanned_records, DISPATCHES);
+    assert_eq!(
+        spool
+            .pending
+            .iter()
+            .filter(|entry| entry.envelope.is_some())
+            .count(),
+        report.scanned_records as usize
+    );
+    assert_eq!(report.pending_records, INITIAL_RECORDS + DISPATCHES);
+}
+
+#[test]
+fn hydration_detects_a_corrupted_checkpointed_frame() {
+    let root = TestDir::new("checkpoint-hydration-corruption");
+    let config = HookSpoolConfigV1::stock(HookHostV1::CursorDesktop);
+    let first = numbered_envelope(1, 9);
+    publish_checkpoint(&root.0, config, &[first.clone(), numbered_envelope(2, 9)]);
+    let (mut spool, report) = HookSpoolV1::open(&root.0, config, UtcMicros(12)).unwrap();
+    assert_eq!(report.checkpoint_records, 2);
+    assert_eq!(report.scanned_records, 0);
+
+    let mut records = std::fs::OpenOptions::new()
+        .write(true)
+        .open(records_path(&root.0))
+        .unwrap();
+    records.seek(SeekFrom::Start(70)).unwrap();
+    records.write_all(&[0xff]).unwrap();
+    records.sync_all().unwrap();
+    drop(records);
+
+    assert_eq!(spool.pending_envelope(first.event_id), None);
+    assert_eq!(
+        spool
+            .append(numbered_envelope(3, 9), &binding(), UtcMicros(12))
+            .unwrap_err(),
+        HookSpoolError::RecoveryRequired
+    );
+    drop(spool);
+
+    let (spool, reopened) = HookSpoolV1::open(&root.0, config, UtcMicros(13)).unwrap();
+    assert_eq!(reopened.corrupted_at_offset, Some(0));
+    assert!(matches!(
+        spool.ensure_healthy(),
+        Err(HookSpoolError::Corrupted { at_offset: 0 })
+    ));
+}
+
+#[test]
+fn checkpoint_body_version_one_is_rejected_and_rewritten() {
+    let root = TestDir::new("checkpoint-old-body");
+    let config = HookSpoolConfigV1::stock(HookHostV1::CursorDesktop);
+    let envelopes = [numbered_envelope(1, 9), numbered_envelope(2, 9)];
+    publish_checkpoint(&root.0, config, &envelopes);
+
+    let body = b"{\"version\":1}";
+    let mut old_checkpoint = Vec::new();
+    old_checkpoint.extend_from_slice(CHECKPOINT_MAGIC);
+    old_checkpoint.extend_from_slice(&1u16.to_le_bytes());
+    old_checkpoint.extend_from_slice(&(body.len() as u64).to_le_bytes());
+    old_checkpoint.extend_from_slice(body);
+    let checksum = frame_checksum(&old_checkpoint);
+    old_checkpoint.extend_from_slice(&checksum);
+    fs::write(checkpoint_path(&root.0), old_checkpoint).unwrap();
+
+    let (spool, report) = HookSpoolV1::open(&root.0, config, UtcMicros(12)).unwrap();
+    assert_eq!(report.scanned_records, envelopes.len() as u32);
+    assert_eq!(report.checkpoint_bytes, 0);
+    assert!(report.checkpoint_rewritten);
+    drop(spool);
+    let rewritten = fs::read(checkpoint_path(&root.0)).unwrap();
+    assert_eq!(u16::from_le_bytes([rewritten[4], rewritten[5]]), 2);
+}
+
+#[test]
+fn compaction_copies_surviving_checkpointed_frames_byte_exactly() {
+    let root = TestDir::new("checkpoint-compaction-bytes");
+    let config = HookSpoolConfigV1::stock(HookHostV1::CursorDesktop);
+    let envelopes = [
+        numbered_envelope(1, 9),
+        numbered_envelope(2, 10),
+        numbered_envelope(3, 11),
+    ];
+    publish_checkpoint(&root.0, config, &envelopes);
+    let (mut spool, report) = HookSpoolV1::open(&root.0, config, UtcMicros(12)).unwrap();
+    assert_eq!(report.checkpoint_records, 3);
+    assert!(spool.pending.iter().all(|entry| entry.envelope.is_none()));
+    let original = fs::read(records_path(&root.0)).unwrap();
+    let survivors = spool
+        .pending
+        .iter()
+        .filter(|entry| entry.sequence != 2)
+        .flat_map(|entry| {
+            let start = entry.file_offset as usize;
+            let end = start + entry.framed_len as usize;
+            original[start..end].iter().copied()
+        })
+        .collect::<Vec<_>>();
+
+    spool
+        .acknowledge(
+            HookSpoolAckV1 {
+                sequence: 2,
+                receipt_id: [22; 16],
+                disposition: HookSpoolAckDispositionV1::Committed,
+            },
+            UtcMicros(12),
+        )
+        .unwrap();
+    spool.compact_pending().unwrap();
+    assert_eq!(fs::read(records_path(&root.0)).unwrap(), survivors);
+    drop(spool);
+
+    let (spool, report) = HookSpoolV1::open(&root.0, config, UtcMicros(13)).unwrap();
+    assert_eq!(report.scanned_records, 0);
+    assert_eq!(
+        spool
+            .pending
+            .iter()
+            .map(|entry| (entry.sequence, entry.event_id))
+            .collect::<Vec<_>>(),
+        [(1, envelopes[0].event_id), (3, envelopes[2].event_id)]
+    );
+}
+
+#[test]
+fn replay_hydrates_only_checkpointed_records_in_the_batch() {
+    let root = TestDir::new("checkpoint-replay-hydration");
+    let config = HookSpoolConfigV1::stock(HookHostV1::CursorDesktop);
+    let envelopes = (1..=6)
+        .map(|event| numbered_envelope(event, if event <= 3 { 9 } else { 10 }))
+        .collect::<Vec<_>>();
+    let appended = publish_checkpoint(&root.0, config, &envelopes);
+    let (mut spool, report) = HookSpoolV1::open(&root.0, config, UtcMicros(12)).unwrap();
+    assert_eq!(report.checkpoint_records, envelopes.len() as u32);
+    assert!(spool.pending.iter().all(|entry| entry.envelope.is_none()));
+
+    let batches = spool.claim_replay_batches(UtcMicros(12), 1).unwrap();
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0].records, appended[..3]);
+    assert_eq!(
+        spool
+            .pending
+            .iter()
+            .filter(|entry| entry.envelope.is_some())
+            .count(),
+        batches[0].records.len()
     );
 }
 

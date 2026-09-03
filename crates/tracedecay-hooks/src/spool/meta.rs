@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use tracedecay_domain::framed_log::partial_tail_matches_prefix;
@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use super::frame::{decode_complete_frame, encode_frame};
 use super::types::{
-    AcknowledgedSequenceV1, AppendIntentV1, HookSpoolLimitsV1, HookSpoolMetaV1, HookSpoolRecordV1,
+    AcknowledgedSequenceV1, AppendIntentV1, HookSpoolLimitsV1, HookSpoolMetaV1, PendingRecordV1,
 };
 use super::{
     DIRECTORY_POLICY, FRAME_CHECKSUM_BYTES, FRAME_HEADER_BYTES, FRAME_LENGTH_BYTES, HookSpoolError,
@@ -88,7 +88,7 @@ pub(super) fn partial_tail_matches_intent(
 
 pub(super) fn reconcile_append_intent(
     meta: &mut HookSpoolMetaV1,
-    records: &[HookSpoolRecordV1],
+    records: &[PendingRecordV1],
     host: HookHostV1,
 ) -> Result<(), HookSpoolError> {
     let Some(intent) = meta.append_intent.clone() else {
@@ -101,8 +101,12 @@ pub(super) fn reconcile_append_intent(
         .iter()
         .find(|record| record.sequence == intent.sequence)
     {
-        let payload = canonical_json_bytes(&record.envelope)
-            .map_err(|_| HookSpoolError::MetadataCorrupted)?;
+        let envelope = record
+            .envelope
+            .as_ref()
+            .ok_or(HookSpoolError::MetadataCorrupted)?;
+        let payload =
+            canonical_json_bytes(envelope).map_err(|_| HookSpoolError::MetadataCorrupted)?;
         let frame = encode_frame(
             record.sequence,
             record.queued_at,
@@ -174,7 +178,7 @@ pub(super) fn valid_append_intent(intent: &AppendIntentV1, host: HookHostV1) -> 
 
 pub(super) fn validate_meta_against_records(
     meta: &HookSpoolMetaV1,
-    records: &[HookSpoolRecordV1],
+    sequences: impl IntoIterator<Item = u64>,
     limits: HookSpoolLimitsV1,
 ) -> Result<(), HookSpoolError> {
     let outstanding = meta
@@ -186,20 +190,37 @@ pub(super) fn validate_meta_against_records(
         return Err(HookSpoolError::MetadataCorrupted);
     }
     let acknowledged = acknowledged_map(meta)?;
-    let present = records
-        .iter()
-        .map(|record| record.sequence)
-        .collect::<BTreeSet<_>>();
-    if records
-        .iter()
-        .any(|record| record.sequence >= meta.next_sequence)
-    {
-        return Err(HookSpoolError::MetadataCorrupted);
-    }
+    let mut present = sequences.into_iter().peekable();
+    let mut acknowledged = acknowledged.keys().copied().peekable();
     for sequence in meta.committed_through.saturating_add(1)..meta.next_sequence {
-        if !acknowledged.contains_key(&sequence) && !present.contains(&sequence) {
+        while present.peek().is_some_and(|present| *present < sequence) {
+            present.next();
+        }
+        while acknowledged
+            .peek()
+            .is_some_and(|acknowledged| *acknowledged < sequence)
+        {
+            acknowledged.next();
+        }
+        if present.peek().is_some_and(|present| *present == sequence) {
+            present.next();
+        } else if acknowledged
+            .peek()
+            .is_some_and(|acknowledged| *acknowledged == sequence)
+        {
+            acknowledged.next();
+        } else {
             return Err(HookSpoolError::MetadataCorrupted);
         }
+    }
+    while present
+        .peek()
+        .is_some_and(|present| *present < meta.next_sequence)
+    {
+        present.next();
+    }
+    if present.next().is_some() {
+        return Err(HookSpoolError::MetadataCorrupted);
     }
     Ok(())
 }
