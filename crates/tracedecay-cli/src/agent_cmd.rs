@@ -837,7 +837,7 @@ pub(crate) async fn handle_project_local_lifecycle_command(
     agent_id: String,
     operation: HostBundleCliOperation,
 ) -> tracedecay_domain::errors::Result<()> {
-    if agent_id != "devin" {
+    if !matches!(agent_id.as_str(), "devin" | "zed") {
         return Err(project_local_host_lifecycle_unavailable());
     }
     let home = tracedecay::agents::home_dir().ok_or_else(|| {
@@ -2715,7 +2715,8 @@ pub(crate) async fn handle_install_command(
     validate_codex_automation_flags(agent.as_deref(), automation)?;
     if local {
         let agent_id = agent.ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-            message: "`tracedecay install --local` requires `--agent devin`".to_string(),
+            message: "`tracedecay install --local` requires a project-capable `--agent`"
+                .to_string(),
         })?;
         return handle_project_local_lifecycle_command(agent_id, HostBundleCliOperation::Install)
             .await;
