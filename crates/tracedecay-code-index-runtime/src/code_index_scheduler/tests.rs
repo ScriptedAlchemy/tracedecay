@@ -9899,6 +9899,370 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
     registry.shutdown().await;
 }
 
+const CALLER_STAR: usize = 2_000;
+const CALLER_STAR_FILES: usize = 8;
+const CALLER_PAGE: u32 = 10;
+
+fn caller_star_sources() -> Vec<(String, String)> {
+    let per_file = CALLER_STAR / CALLER_STAR_FILES;
+    let mut mods = String::from("pub fn hub() {}\n");
+    let mut files = Vec::with_capacity(CALLER_STAR_FILES.saturating_add(1));
+    for file_idx in 0..CALLER_STAR_FILES {
+        let _ = writeln!(mods, "mod callers_{file_idx:02};");
+        let mut body = String::new();
+        for local in 0..per_file {
+            let index = file_idx * per_file + local;
+            let _ = writeln!(body, "pub fn caller_{index:04}() {{ crate::hub(); }}");
+        }
+        files.push((format!("src/callers_{file_idx:02}.rs"), body));
+    }
+    files.insert(0, ("src/lib.rs".to_owned(), mods));
+    files
+}
+
+fn callers_page_meta(page_size: u32, cursor: Option<OpaqueCursor>) -> RetrievalRequestMeta {
+    RetrievalRequestMeta::current(
+        PageRequest::new(page_size, cursor).expect("callers page"),
+        ResultProjection::Evidence,
+        RetrievalOrder::Relevance,
+    )
+}
+
+async fn wait_for_live_complete_generation_deadline(
+    registry: &CodeIndexSchedulerRegistryV1,
+    path: &Path,
+    budget: Duration,
+) -> super::LatestCompleteCodeIndexV1 {
+    let deadline = Instant::now() + budget;
+    let mut publications = registry.subscribe_generation_publications();
+    loop {
+        if let Some(latest) = registry.latest_complete_serving_for_test(path).await {
+            return latest;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "large callers fixture did not seat a complete generation"
+        );
+        tokio::select! {
+            _ = publications.recv() => {}
+            () = tokio::time::sleep(Duration::from_millis(50)) => {}
+        }
+    }
+}
+
+#[tokio::test]
+async fn callers_page_hydrates_only_the_requested_slice() {
+    let sources = caller_star_sources();
+    let files = sources
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(&files);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount daemon-owned scheduler");
+    let latest = wait_for_live_complete_generation_deadline(
+        &registry,
+        fixture.path(),
+        Duration::from_mins(2),
+    )
+    .await;
+    let generation = latest.generation.manifest().generation_id.clone();
+    let repository = latest.generation.snapshot().repository.clone();
+    let worktree = latest
+        .generation
+        .snapshot()
+        .worktree
+        .clone()
+        .expect("worktree identity");
+    let scope = CodeQueryScope::new(generation.clone(), None).expect("query scope");
+    let hub = latest
+        .generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|record| record.qualified_name.ends_with("hub"))
+        .expect("hub symbol");
+    let expected_keys = super::queries::relation_keys(
+        &latest,
+        &hub.occurrence,
+        &[RelationEdgeKindV1::Calls],
+        true,
+        1,
+        &scope,
+    );
+    let expected = super::queries::hydrate_relation_records(&latest, &expected_keys)
+        .expect("hydrate all keys");
+    assert_eq!(expected.len(), CALLER_STAR);
+    let _ = super::queries::take_relation_symbol_hydrations();
+
+    let operation = callable_code_operation(CallableCodeOperationKind::Callers).expect("operation");
+    let context = application_context(&operation, repository, worktree);
+    mount_query_authority(
+        &registry,
+        fixture.path(),
+        &context,
+        latest.generation.manifest().privacy_domain.clone(),
+    )
+    .await;
+    let request = CodeRelationRequest {
+        node_id: hub.occurrence.as_str().to_owned(),
+        maximum_depth: 1,
+        resolve_trait_dispatch: false,
+        scope: scope.clone(),
+        meta: callers_page_meta(CALLER_PAGE, None),
+    };
+    let first = registry
+        .callers(
+            RetrievalPortContext {
+                request: &context,
+                operation: &operation,
+            },
+            &request,
+        )
+        .await;
+    let first_page = match first {
+        RetrievalPortOutcome::Completed(evidence) => evidence.payload.expect("first callers page"),
+        other => panic!("expected completed callers page, got {other:?}"),
+    };
+    assert_eq!(first_page.items.len(), CALLER_PAGE as usize);
+    assert_eq!(first_page.total, Some(CALLER_STAR as u64));
+    assert_eq!(
+        first_page.items,
+        expected[..CALLER_PAGE as usize],
+        "page 1 must match the pre-change (depth, node_id) order"
+    );
+    let page1_hydrations = super::queries::take_relation_symbol_hydrations();
+    assert_eq!(
+        page1_hydrations,
+        u64::from(CALLER_PAGE),
+        "page 1 must hydrate only the returned slice; observed {page1_hydrations}"
+    );
+
+    let cursor = first_page.next_cursor.clone().expect("page 2 cursor");
+    let second_request = CodeRelationRequest {
+        node_id: hub.occurrence.as_str().to_owned(),
+        maximum_depth: 1,
+        resolve_trait_dispatch: false,
+        scope: scope.clone(),
+        meta: callers_page_meta(CALLER_PAGE, Some(cursor)),
+    };
+    let second = registry
+        .callers(
+            RetrievalPortContext {
+                request: &context,
+                operation: &operation,
+            },
+            &second_request,
+        )
+        .await;
+    let second_page = match second {
+        RetrievalPortOutcome::Completed(evidence) => evidence.payload.expect("second callers page"),
+        other => panic!("expected completed callers continuation, got {other:?}"),
+    };
+    assert_eq!(second_page.items.len(), CALLER_PAGE as usize);
+    assert_eq!(
+        second_page.items,
+        expected[CALLER_PAGE as usize..CALLER_PAGE as usize * 2]
+    );
+    assert!(
+        second_page
+            .items
+            .iter()
+            .all(|item| !first_page.items.contains(item)),
+        "page 2 must return a disjoint slice"
+    );
+    let page2_hydrations = super::queries::take_relation_symbol_hydrations();
+    assert_eq!(
+        page2_hydrations,
+        u64::from(CALLER_PAGE),
+        "page 2 must hydrate only the returned slice; observed {page2_hydrations}"
+    );
+
+    let mut collected = first_page.items.clone();
+    collected.extend(second_page.items);
+    let mut cursor = second_page.next_cursor;
+    while let Some(next) = cursor {
+        let page_request = CodeRelationRequest {
+            node_id: hub.occurrence.as_str().to_owned(),
+            maximum_depth: 1,
+            resolve_trait_dispatch: false,
+            scope: scope.clone(),
+            meta: callers_page_meta(CALLER_PAGE, Some(next)),
+        };
+        let page = match registry
+            .callers(
+                RetrievalPortContext {
+                    request: &context,
+                    operation: &operation,
+                },
+                &page_request,
+            )
+            .await
+        {
+            RetrievalPortOutcome::Completed(evidence) => evidence.payload.expect("callers page"),
+            other => panic!("expected completed callers page, got {other:?}"),
+        };
+        collected.extend(page.items);
+        cursor = page.next_cursor;
+    }
+    let _ = super::queries::take_relation_symbol_hydrations();
+    assert_eq!(
+        collected, expected,
+        "concatenated pages must equal the full (depth, occurrence) neighborhood"
+    );
+    registry.shutdown().await;
+}
+
+/// An unpinned candidate-page cursor is bound to the immutable generation that
+/// minted it: after a rebuild publishes generation B, page 2 still answers from
+/// generation A (same contract as
+/// `unpinned_cursor_continues_on_its_immutable_generation`), hydrating only its
+/// own slice.
+#[tokio::test]
+async fn callers_candidate_cursor_continues_on_its_immutable_generation() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn hub() {}\npub fn caller_a() { hub(); }\npub fn caller_b() { hub(); }\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount daemon-owned scheduler");
+    let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let generation_a = latest.generation.manifest().generation_id.clone();
+    let repository = latest.generation.snapshot().repository.clone();
+    let worktree = latest
+        .generation
+        .snapshot()
+        .worktree
+        .clone()
+        .expect("worktree identity");
+    let scope = CodeQueryScope::new(super::queries::unpinned_latest_generation(), None)
+        .expect("unpinned callers scope");
+    let hub = latest
+        .generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|record| record.qualified_name.ends_with("hub"))
+        .expect("hub symbol")
+        .occurrence
+        .as_str()
+        .to_owned();
+    let operation = callable_code_operation(CallableCodeOperationKind::Callers).expect("operation");
+    let context = application_context(&operation, repository, worktree);
+    mount_query_authority(
+        &registry,
+        fixture.path(),
+        &context,
+        latest.generation.manifest().privacy_domain.clone(),
+    )
+    .await;
+    let first = registry
+        .callers(
+            RetrievalPortContext {
+                request: &context,
+                operation: &operation,
+            },
+            &CodeRelationRequest {
+                node_id: hub.clone(),
+                maximum_depth: 1,
+                resolve_trait_dispatch: false,
+                scope: scope.clone(),
+                meta: callers_page_meta(1, None),
+            },
+        )
+        .await;
+    let first_page = match first {
+        RetrievalPortOutcome::Completed(evidence) => evidence.payload.expect("generation A page"),
+        other => panic!("expected completed callers page, got {other:?}"),
+    };
+    let cursor = first_page.next_cursor.clone().expect("generation A cursor");
+    assert_eq!(first_page.generation, generation_a);
+
+    fixture.edit(
+        "src/lib.rs",
+        "pub fn hub() {}\npub fn caller_a() { hub(); }\npub fn caller_b() { hub(); }\npub fn caller_c() { hub(); }\n",
+    );
+    git(fixture.path(), &["commit", "-qam", "publish generation B"]);
+    let _ = registry
+        .latest_complete_fresh(fixture.path())
+        .await
+        .expect("retained generation stays servable while the rebuild runs");
+    let generation_b = wait_for_generation_change(&registry, fixture.path(), &generation_a).await;
+    assert_ne!(generation_b, generation_a);
+    let serving_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if registry
+            .latest_complete_fresh(fixture.path())
+            .await
+            .is_some_and(|latest| latest.generation.manifest().generation_id == generation_b)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() <= serving_deadline,
+            "generation B must be the unpinned latest before the continuation read"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let _ = super::queries::take_relation_symbol_hydrations();
+    let continuation = registry
+        .callers(
+            RetrievalPortContext {
+                request: &context,
+                operation: &operation,
+            },
+            &CodeRelationRequest {
+                node_id: hub,
+                maximum_depth: 1,
+                resolve_trait_dispatch: false,
+                scope,
+                meta: callers_page_meta(1, Some(cursor)),
+            },
+        )
+        .await;
+    let continuation_page = match continuation {
+        RetrievalPortOutcome::Completed(evidence) => {
+            evidence.payload.expect("generation A continuation page")
+        }
+        other => panic!("cursor from generation A must continue on generation A; got {other:?}"),
+    };
+    assert_eq!(continuation_page.generation, generation_a);
+    assert_eq!(continuation_page.total, Some(2));
+    assert_eq!(continuation_page.items.len(), 1);
+    assert!(
+        continuation_page.next_cursor.is_none(),
+        "generation A has exactly two callers"
+    );
+    assert!(
+        !first_page.items.contains(&continuation_page.items[0]),
+        "page 2 must be the remaining generation-A caller"
+    );
+    assert_eq!(
+        super::queries::take_relation_symbol_hydrations(),
+        1,
+        "the continuation must hydrate only its own slice"
+    );
+    registry.shutdown().await;
+}
+
 // ---------------------------------------------------------------------------
 // Worktree-aware incremental indexing: identity, gix classification, the
 // hook-driven + lazy-reconcile freshness ladder.
