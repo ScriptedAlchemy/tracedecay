@@ -1349,7 +1349,7 @@ fn dispatch_retained_application_tools_inner<'a>(
             application_surface::render_retained_result(
                 Some(cg.project_root()),
                 retained_operation,
-                binding.binding_id,
+                &binding.binding_id,
                 result,
                 requested_format,
             )
