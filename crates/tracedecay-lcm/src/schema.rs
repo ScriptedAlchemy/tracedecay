@@ -83,7 +83,6 @@ const RAW_FTS_DDL: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS lcm_raw_messages_f
 
 /// Returns whether the raw-message FTS table and all three synchronization
 /// triggers use the v3 content-only contracts.
-#[hotpath::measure(label = "sessions.lcm.schema.verify_raw_fts", future = true)]
 pub async fn raw_fts_structure_is_current(conn: &(impl QueryExecutor + ?Sized)) -> Option<bool> {
     let mut rows = conn
         .query(
@@ -166,7 +165,6 @@ fn compact_sql(sql: &str) -> String {
 /// explicit schema initialization/rebuild owner; idempotent and data-preserving
 /// because the index is derived entirely from the content table. Doctor never
 /// invokes this mutation.
-#[hotpath::measure(label = "sessions.lcm.schema.rebuild_raw_fts", future = true)]
 pub async fn rebuild_raw_fts(conn: &(impl Executor + ?Sized)) -> Option<()> {
     conn.execute_batch(
         "DROP TRIGGER IF EXISTS lcm_raw_messages_fts_insert;
@@ -221,7 +219,6 @@ pub enum LcmSchemaAdmission {
 /// explicit profile reset. Admission callers run this before other schema
 /// authorities so the truthful LCM state is surfaced rather than masked by a
 /// coarser authority's reset.
-#[hotpath::measure(label = "sessions.lcm.schema.admit", future = true)]
 pub async fn require_admissible_lcm_schema(
     conn: &(impl QueryExecutor + ?Sized),
 ) -> Result<LcmSchemaAdmission, LcmError> {
@@ -243,7 +240,6 @@ pub async fn require_admissible_lcm_schema(
     }
 }
 
-#[hotpath::measure(label = "sessions.lcm.schema.ensure", future = true)]
 pub async fn ensure_lcm_schema_in_transaction(
     conn: &(impl Executor + ?Sized),
 ) -> Result<(), LcmError> {
@@ -549,7 +545,6 @@ pub async fn clear_gc_meta(conn: &(impl Executor + ?Sized), key: &str) -> Result
     Ok(())
 }
 
-#[hotpath::measure(label = "sessions.lcm.raw.load_message", future = true)]
 pub async fn load_raw_message(
     conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
