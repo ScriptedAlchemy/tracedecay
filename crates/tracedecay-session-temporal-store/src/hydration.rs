@@ -127,6 +127,7 @@ impl<B> SessionTemporalHydrationAdapter<B> {
 }
 
 impl<B: TemporalHydrationBackend> SessionTemporalHydrationAdapter<B> {
+    #[hotpath::measure(future = true, label = "session_temporal.hydrate.authorize")]
     async fn authorize(
         &self,
         snapshot: &TemporalExecutionSnapshot,
@@ -143,7 +144,7 @@ impl<B: TemporalHydrationBackend> SessionTemporalHydrationAdapter<B> {
         }
     }
 
-    #[hotpath::skip]
+    #[hotpath::measure(future = true, label = "session_temporal.hydrate.read_authorized")]
     async fn read_after_recheck(
         &self,
         snapshot: &TemporalExecutionSnapshot,
@@ -349,6 +350,7 @@ impl<'snapshot> SessionTemporalHydrationAdapter<GlobalDbHydrationBackend<'snapsh
     }
 }
 
+#[hotpath::measure(future = true, label = "session_temporal.hydrate.decode_message")]
 pub(super) async fn session_message_from_hydrated_bytes(
     read: &TemporalSqlRead<'_>,
     snapshot: &TemporalExecutionSnapshot,
@@ -625,6 +627,7 @@ impl TemporalHydrationBackend for GlobalDbHydrationBackend<'_> {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure(future = true, label = "session_temporal.hydrate.read_occurrence")]
 async fn read_occurrence_content(
     conn: &TemporalSqlRead<'_>,
     storage_root: &Path,
@@ -819,6 +822,7 @@ async fn resolve_current(
     ))
 }
 
+#[hotpath::measure(future = true, label = "session_temporal.hydrate.resolve_occurrence")]
 async fn resolve_occurrence(
     conn: &TemporalSqlRead<'_>,
     snapshot: &TemporalExecutionSnapshot,
@@ -937,6 +941,7 @@ async fn resolve_occurrence(
     })))
 }
 
+#[hotpath::measure(future = true, label = "session_temporal.hydrate.resolve_summary")]
 async fn resolve_summary(
     conn: &TemporalSqlRead<'_>,
     relation_authority: Option<&SessionHydrationRelationAuthority<'_>>,
@@ -1085,6 +1090,7 @@ async fn resolve_summary(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure(future = true, label = "session_temporal.hydrate.summary_evidence")]
 async fn summary_has_provider_evidence(
     conn: &TemporalSqlRead<'_>,
     relation_store: &SessionRelationGraphStore,
