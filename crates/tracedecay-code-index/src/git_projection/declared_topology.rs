@@ -44,7 +44,6 @@ impl GitTopologyProjectionStore {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::measure(label = "code_index.git_topology.read_stack_revision")]
     pub fn branch_stack_revision_exact(
         &self,
         project: &ProjectId,
@@ -135,7 +134,6 @@ impl GitTopologyProjectionStore {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::measure(label = "code_index.git_topology.read_worktree_occupancy")]
     pub fn worktree_occupancy_exact(
         &self,
         project: &ProjectId,
