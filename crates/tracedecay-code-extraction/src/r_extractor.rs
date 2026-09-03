@@ -83,6 +83,7 @@ impl RExtractor {
         .result
     }
 
+    #[hotpath::measure(label = "code_extraction.r.extract_tree")]
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -134,6 +135,7 @@ impl RExtractor {
         )
     }
 
+    #[hotpath::measure(label = "code_extraction.r.parse_source")]
     fn parse_source(source: &str) -> Result<Tree, String> {
         crate::ts_provider::parse_extractor_source("r", "R", source)
     }
@@ -325,10 +327,12 @@ impl crate::LanguageExtractor for RExtractor {
         "R"
     }
 
+    #[hotpath::measure(label = "code_extraction.r.extract")]
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_r(file_path, source)
     }
 
+    #[hotpath::measure(label = "code_extraction.r.extract_parsed")]
     fn extract_parsed(
         &self,
         file_path: &str,

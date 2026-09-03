@@ -93,6 +93,7 @@ impl LuaExtractor {
         .result
     }
 
+    #[hotpath::measure(label = "code_extraction.lua.extract_tree")]
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -145,6 +146,7 @@ impl LuaExtractor {
     }
 
     /// Parse source code into a tree-sitter AST.
+    #[hotpath::measure(label = "code_extraction.lua.parse_source")]
     fn parse_source(source: &str) -> Result<Tree, String> {
         crate::ts_provider::parse_extractor_source("lua", "Lua", source)
     }
@@ -543,10 +545,12 @@ impl crate::LanguageExtractor for LuaExtractor {
         "Lua"
     }
 
+    #[hotpath::measure(label = "code_extraction.lua.extract")]
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_lua(file_path, source)
     }
 
+    #[hotpath::measure(label = "code_extraction.lua.extract_parsed")]
     fn extract_parsed(
         &self,
         file_path: &str,

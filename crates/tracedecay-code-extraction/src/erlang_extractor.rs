@@ -65,6 +65,7 @@ impl ErlangExtractor {
         .result
     }
 
+    #[hotpath::measure(label = "code_extraction.erlang.extract_tree")]
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -112,6 +113,7 @@ impl ErlangExtractor {
         )
     }
 
+    #[hotpath::measure(label = "code_extraction.erlang.parse_source")]
     fn parse_source(source: &str) -> Result<Tree, String> {
         crate::ts_provider::parse_extractor_source("erlang", "Erlang", source)
     }
@@ -434,10 +436,12 @@ impl crate::LanguageExtractor for ErlangExtractor {
         "Erlang"
     }
 
+    #[hotpath::measure(label = "code_extraction.erlang.extract")]
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_erlang(file_path, source)
     }
 
+    #[hotpath::measure(label = "code_extraction.erlang.extract_parsed")]
     fn extract_parsed(
         &self,
         file_path: &str,

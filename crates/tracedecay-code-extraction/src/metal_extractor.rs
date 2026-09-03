@@ -18,10 +18,12 @@ impl crate::LanguageExtractor for MetalExtractor {
         "Metal"
     }
 
+    #[hotpath::measure(label = "code_extraction.metal.extract")]
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         CppExtractor::extract_source(file_path, source)
     }
 
+    #[hotpath::measure(label = "code_extraction.metal.extract_parsed")]
     fn extract_parsed(
         &self,
         file_path: &str,

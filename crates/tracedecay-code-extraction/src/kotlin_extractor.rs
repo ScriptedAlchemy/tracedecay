@@ -144,6 +144,7 @@ impl KotlinExtractor {
         .result
     }
 
+    #[hotpath::measure(label = "code_extraction.kotlin.extract_tree")]
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -196,6 +197,7 @@ impl KotlinExtractor {
     }
 
     /// Parse source code into a tree-sitter AST.
+    #[hotpath::measure(label = "code_extraction.kotlin.parse_source")]
     fn parse_source(source: &str) -> Result<Tree, String> {
         crate::ts_provider::parse_extractor_source("kotlin", "Kotlin", source)
     }
@@ -1582,10 +1584,12 @@ impl crate::LanguageExtractor for KotlinExtractor {
         "Kotlin"
     }
 
+    #[hotpath::measure(label = "code_extraction.kotlin.extract")]
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         KotlinExtractor::extract_kotlin(file_path, source)
     }
 
+    #[hotpath::measure(label = "code_extraction.kotlin.extract_parsed")]
     fn extract_parsed(
         &self,
         file_path: &str,
