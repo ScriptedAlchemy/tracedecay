@@ -22,8 +22,9 @@ use tracedecay_store::{
     ProjectMemoryFactRemoveCommandV1, ProjectMemoryFactRemoveOutcomeV1,
     ProjectMemoryFactRetrievalCommandV1, ProjectMemoryFactRetrievalOutcomeV1,
     ProjectMemoryFactSearchCursorV1, ProjectMemoryFactSearchPageV1, ProjectMemoryFactSearchQuery,
-    ProjectMemoryFactStore, ProjectMemoryFactUpdateCommandV1, ProjectMemoryFactUpdateOutcomeV1,
-    ProjectMemoryMemoryStatusV1,
+    ProjectMemoryFactStore, ProjectMemoryFactSupersedeCommandV1,
+    ProjectMemoryFactSupersedeOutcomeV1, ProjectMemoryFactUpdateCommandV1,
+    ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryMemoryStatusV1,
 };
 
 use super::MemoryApplication;
@@ -353,6 +354,53 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
             } else if outcome.commit_replayed() {
                 return Err(MemoryApplicationError::InvalidAuthorityResult {
                     invariant: "project-memory remove replay without commit receipt",
+                });
+            }
+            Ok(())
+        })
+    }
+
+    #[hotpath::measure(label = "usecases.memory.supersede", future = true)]
+    pub async fn supersede_project_memory_fact(
+        &self,
+        request: ProjectMemoryFactSupersedeCommandV1,
+        write_control: &FactWriteControl,
+    ) -> Result<
+        ProjectMemoryFactSupersedeOutcomeV1,
+        MemoryMutationError<ProjectMemoryFactSupersedeOutcomeV1>,
+    > {
+        self.ensure_owner(request.target().owner())?;
+        self.ensure_owner(request.superseded_by().owner())?;
+        let target = request.target().clone();
+        let successor = request.superseded_by().clone();
+        let outcome = self
+            .authority
+            .supersede_project_memory_fact(request, write_control)
+            .await
+            .map_err(MemoryApplicationError::from)?;
+        settle_authority_result(outcome, |outcome| {
+            if outcome
+                .fact_id()
+                .is_some_and(|fact_id| fact_id != target.fact_id())
+                || outcome
+                    .superseded_by()
+                    .is_some_and(|fact_id| fact_id != successor.fact_id())
+            {
+                return Err(MemoryApplicationError::InvalidAuthorityResult {
+                    invariant: "project-memory supersession identity",
+                });
+            }
+            if let Some(receipt) = outcome.commit_receipt() {
+                validate_commit_receipt(
+                    &self.owner,
+                    target.fact_id(),
+                    Some(receipt),
+                    outcome.commit_replayed(),
+                    "project-memory supersession commit receipt",
+                )?;
+            } else if outcome.commit_replayed() {
+                return Err(MemoryApplicationError::InvalidAuthorityResult {
+                    invariant: "project-memory supersession replay without commit receipt",
                 });
             }
             Ok(())

@@ -684,9 +684,15 @@ async fn load_source(
             }
             let fact_id = FactId::new(fact_id)?;
             ensure_projected_fact_exists(&all_fact_ids, owner, &fact_id)?;
-            let active_assertion = active_assertion.ok_or(FactStoreError::PayloadAccessMismatch)?;
             push_source_entity(&mut entities, fact_entity_id_from_str(fact_id.as_str())?)?;
-            active_assertions.insert(fact_id.clone(), active_assertion);
+            // A superseded fact keeps an eligible payload but no active
+            // assertion (#727). It stays a graph entity so the successor's
+            // `SUPERSEDES` edge remains rooted in the historical view, but it
+            // no longer projects an active-assertion relation and never
+            // re-enters the default retrieval surfaces through the graph.
+            if let Some(active_assertion) = active_assertion {
+                active_assertions.insert(fact_id.clone(), active_assertion);
+            }
             fact_ids.insert(fact_id);
         }
         drop(rows);
@@ -878,7 +884,16 @@ async fn load_source(
             }
             let fact = FactId::new(fact)?;
             ensure_projected_fact_exists(&fact_ids, owner, &fact)?;
-            let payload_json = payload_json.ok_or(FactStoreError::PayloadAccessMismatch)?;
+            let Some(payload_json) = payload_json else {
+                // A superseded fact has no active assertion to join a payload
+                // through; it projects no MENTIONS edges (#727). An eligible
+                // fact that still holds an active assertion without a payload
+                // row is a genuine access mismatch.
+                if active_assertions.contains_key(&fact) {
+                    return Err(FactStoreError::PayloadAccessMismatch);
+                }
+                continue;
+            };
             let payload = serde_json::from_str::<FactPayloadV1>(&payload_json)
                 .map_err(|error| storage_error(OPERATION, error))?;
             for entity in payload.entities() {
@@ -1308,13 +1323,12 @@ mod tests {
         assert_eq!(
             transaction
                 .execute(
-                    "UPDATE memory_v2_current_facts
-                     SET active_assertion_id = NULL
+                    "DELETE FROM memory_v2_assertion_payloads
                      WHERE fact_id = ?1",
                     params![fact_id.as_str()],
                 )
                 .await
-                .expect("clear canonical assertion reference"),
+                .expect("remove the active assertion payload"),
             1
         );
         transaction
@@ -1326,7 +1340,7 @@ mod tests {
 
         let error = load_source(&database, &FactOwnerV1::Profile, None, Some(&database))
             .await
-            .expect_err("missing canonical assertion must fail source loading");
+            .expect_err("an active assertion without its payload must fail source loading");
         assert!(matches!(error, FactStoreError::PayloadAccessMismatch));
 
         let failed = observer.snapshot();

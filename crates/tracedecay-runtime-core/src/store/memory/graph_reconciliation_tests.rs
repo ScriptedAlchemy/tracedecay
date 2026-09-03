@@ -17,22 +17,21 @@ use tracedecay_graph_db::{
 };
 use tracedecay_store::{
     FactCommitOutcome, FactCurrentQuery, FactLineageQuery, FactReadControl, FactStore,
-    FactStoreError, FactWriteBatch, FactWriteControl,
-    ProjectMemoryAutomaticFactApplyDispositionV1,
+    FactStoreError, FactWriteBatch, FactWriteControl, ProjectMemoryAutomaticFactApplyDispositionV1,
     ProjectMemoryAutomaticFactEffectV1, ProjectMemoryAutomaticFactEvidenceV1,
     ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddDispositionV1,
     ProjectMemoryFactAddMaterialV1, ProjectMemoryFactCurationAddV1,
     ProjectMemoryFactCurationBatchV1, ProjectMemoryFactCurationEvidenceV1,
     ProjectMemoryFactCurationMutationKindV1, ProjectMemoryFactCurationOperationV1,
     ProjectMemoryFactCurationReviewRefV1, ProjectMemoryFactFeedbackActionV1,
-    ProjectMemoryFactFeedbackCommandV1, ProjectMemoryFactIdV1, ProjectMemoryFactMergeCommandV1,
-    ProjectMemoryFactListQueryV1, ProjectMemoryFactMergeTargetV1,
+    ProjectMemoryFactFeedbackCommandV1, ProjectMemoryFactHistoryQueryV1, ProjectMemoryFactIdV1,
+    ProjectMemoryFactListQueryV1, ProjectMemoryFactMergeCommandV1, ProjectMemoryFactMergeTargetV1,
     ProjectMemoryFactProjectionV1, ProjectMemoryFactRemoveCommandV1,
-    ProjectMemoryFactRetrievalCommandV1, ProjectMemoryFactStore, ProjectMemoryFactUpdateCommandV1,
-    ProjectMemoryFactSearchKindV1, ProjectMemoryFactSearchQuery, ProjectMemoryFactUpdatePatchV1,
-    ProjectMemoryGraphQueryV1, ProjectMemoryGraphStore, ProjectMemoryGraphTargetV1,
-    StoreRuntimeBindingV1,
-    VerifiedStoreLocatorV1, derive_project_memory_fact_curation_child_operation_id,
+    ProjectMemoryFactRetrievalCommandV1, ProjectMemoryFactSearchKindV1,
+    ProjectMemoryFactSearchQuery, ProjectMemoryFactStore, ProjectMemoryFactUpdateCommandV1,
+    ProjectMemoryFactUpdatePatchV1, ProjectMemoryGraphQueryV1, ProjectMemoryGraphStore,
+    ProjectMemoryGraphTargetV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
+    derive_project_memory_fact_curation_child_operation_id,
 };
 
 use crate::db::{
@@ -597,7 +596,7 @@ async fn seed_quarantined_automatic_fact(
 }
 
 #[tokio::test]
-async fn superseded_fact_remains_in_current_retrieval_and_graph_history() {
+async fn superseded_fact_leaves_current_retrieval_but_stays_in_history() {
     let (_directory, database) = database("superseded-current-retrieval").await;
     let runtime = bind_runtime(&database);
     let store = DatabaseFactStore::new(&database);
@@ -666,13 +665,8 @@ async fn superseded_fact_remains_in_current_retrieval_and_graph_history() {
 
     let lineage = store
         .query_fact_lineage(
-            FactLineageQuery::new(
-                FactOwnerV1::Profile,
-                old.target.fact_id().clone(),
-                None,
-                64,
-            )
-            .expect("old fact lineage query"),
+            FactLineageQuery::new(FactOwnerV1::Profile, old.target.fact_id().clone(), None, 64)
+                .expect("old fact lineage query"),
         )
         .await
         .expect("load old fact lineage");
@@ -700,8 +694,7 @@ async fn superseded_fact_remains_in_current_retrieval_and_graph_history() {
         .expect("load supersession graph");
     assert!(graph.relations().iter().any(|relation| {
         relation.kind() == ProjectMemoryGraphRelationKindV1::Supersedes
-            && relation.source()
-                == &ProjectMemoryGraphTargetV1::Fact(successor.target.clone())
+            && relation.source() == &ProjectMemoryGraphTargetV1::Fact(successor.target.clone())
             && relation.target() == &ProjectMemoryGraphTargetV1::Fact(old.target.clone())
     }));
 
@@ -713,11 +706,20 @@ async fn superseded_fact_remains_in_current_retrieval_and_graph_history() {
         )
         .await
         .expect("load current fact list");
+    // #727: the default list surface drops the superseded fact and keeps
+    // the successor current.
+    assert!(
+        !list
+            .facts()
+            .iter()
+            .any(|fact| fact.fact_id() == old.target.fact_id()),
+        "current list must not return a superseded fact"
+    );
     assert!(
         list.facts()
             .iter()
-            .any(|fact| fact.fact_id() == old.target.fact_id()),
-        "current list still returns a superseded fact"
+            .any(|fact| fact.fact_id() == successor.target.fact_id()),
+        "the successor stays in the current list"
     );
 
     let search = store
@@ -735,11 +737,48 @@ async fn superseded_fact_remains_in_current_retrieval_and_graph_history() {
         .await
         .expect("search current facts");
     assert!(
-        search
+        !search
             .hits()
             .iter()
             .any(|hit| hit.fact().fact_id() == old.target.fact_id()),
-        "current search still returns a superseded fact"
+        "current search must not return a superseded fact"
+    );
+    assert!(
+        search
+            .hits()
+            .iter()
+            .any(|hit| hit.fact().fact_id() == successor.target.fact_id()),
+        "the successor stays searchable"
+    );
+
+    // The explicit historical path still serves the retired projection with
+    // its payload and trust as stored.
+    let history = store
+        .project_memory_fact_history(
+            ProjectMemoryFactHistoryQueryV1::new(old.target.clone(), None, 64)
+                .expect("history query"),
+            &FactReadControl::new(Arc::new(|| false)),
+        )
+        .await
+        .expect("load superseded fact history");
+    let retired = history
+        .retired_fact()
+        .expect("history carries the projection as of the supersession event");
+    assert_eq!(retired.fact_id(), old.target.fact_id());
+    assert!(
+        retired.payload().is_some(),
+        "the retired projection keeps its payload"
+    );
+    assert!(
+        store
+            .get_project_memory_fact(
+                old.target.clone(),
+                &FactReadControl::new(Arc::new(|| false)),
+            )
+            .await
+            .expect("load superseded fact by id")
+            .is_none(),
+        "the default get surface no longer projects the superseded fact"
     );
 }
 

@@ -19,6 +19,7 @@ pub use fact_commands::{
     ProjectMemoryFactAddMaterialV1, ProjectMemoryFactAddOutcomeV1,
     ProjectMemoryFactFeedbackCommandV1, ProjectMemoryFactFeedbackOutcomeV1,
     ProjectMemoryFactRemoveCommandV1, ProjectMemoryFactRemoveOutcomeV1,
+    ProjectMemoryFactSupersedeCommandV1, ProjectMemoryFactSupersedeOutcomeV1,
     ProjectMemoryFactUpdateCommandV1, ProjectMemoryFactUpdateOutcomeV1,
     ProjectMemoryFactUpdatePatchV1,
 };
