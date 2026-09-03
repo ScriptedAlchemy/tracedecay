@@ -40,7 +40,6 @@ impl<'a> ImprovementArtifactWriter<'a> {
         }
     }
 
-    #[hotpath::measure(label = "automation_runtime.artifacts.prepare_artifact", future = true)]
     async fn write(
         &mut self,
         kind: AutomationRunArtifactKind,
@@ -62,10 +61,6 @@ impl<'a> ImprovementArtifactWriter<'a> {
     }
 }
 
-#[hotpath::measure(
-    label = "automation_runtime.artifacts.write_improvement_chain",
-    future = true
-)]
 pub(crate) async fn write_improvement_artifacts(
     dashboard_root: &Path,
     run_id: &str,
