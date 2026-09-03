@@ -95,6 +95,10 @@ semantic-fastembed = [
     "tracedecay-semantic/semantic-fastembed",
     "tracedecay-usecases/semantic-fastembed",
 ]
+semantic-model2vec = [
+    "tracedecay-semantic/semantic-model2vec",
+    "tracedecay-usecases/semantic-model2vec",
+]
 # Forwards the kernel test-transport seam so this crate's unit tests can
 # reach `Database::publish_test_runtime` / `DatabaseAuthority::acquire_test`.
 test-transport = ["tracedecay-runtime-core/test-transport"]
