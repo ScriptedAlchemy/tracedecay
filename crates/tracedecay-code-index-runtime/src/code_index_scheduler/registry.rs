@@ -1140,7 +1140,10 @@ impl CodeIndexSchedulerRegistryV1 {
         true
     }
 
-    fn activate_for_scope(&self, scope: &tracedecay_application::ResolvedScope) -> bool {
+    fn activation_for_scope(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> Option<Arc<super::CodeIndexActivationV1>> {
         let activation = {
             let mut activations = self
                 .activations
@@ -1157,7 +1160,20 @@ impl CodeIndexSchedulerRegistryV1 {
                 activation
             }
         };
-        activation.is_some_and(|activation| activation.activate())
+        activation
+    }
+
+    pub fn automatic_admission_for_scope(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> Option<super::CodeIndexAutomaticAdmissionV1> {
+        self.activation_for_scope(scope)
+            .map(|activation| activation.automatic_admission())
+    }
+
+    fn activate_for_scope(&self, scope: &tracedecay_application::ResolvedScope) -> bool {
+        self.activation_for_scope(scope)
+            .is_some_and(|activation| activation.activate())
     }
 
     #[cfg(test)]

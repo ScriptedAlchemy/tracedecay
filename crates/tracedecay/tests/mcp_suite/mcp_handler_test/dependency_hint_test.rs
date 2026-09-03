@@ -17,10 +17,14 @@ struct ScopedDependencyHintFixture {
     _isolation: TestTempDir,
 }
 
-fn write_dependency_declaration(project: &Path, declarations: &str) {
-    fs::create_dir_all(project.join("node_modules/pkg")).unwrap();
+fn write_dependency_declaration(project: &Path, module: &str, declarations: &str) {
+    fs::create_dir_all(project.join("node_modules").join(module)).unwrap();
     fs::write(project.join(".gitignore"), "node_modules/\n").unwrap();
-    fs::write(project.join("node_modules/pkg/index.d.ts"), declarations).unwrap();
+    fs::write(
+        project.join("node_modules").join(module).join("index.d.ts"),
+        declarations,
+    )
+    .unwrap();
 }
 
 fn initialize_git_repository(project: &Path) {
@@ -106,6 +110,27 @@ async fn wait_for_search_payload(server: &McpServer, arguments: Value) -> Value 
     panic!("code-index search authority did not activate within the polling budget: {last}");
 }
 
+async fn wait_for_named_search_payload(
+    server: &McpServer,
+    arguments: Value,
+    expected_name: &str,
+) -> Value {
+    let mut last = Value::Null;
+    for _ in 0..60 {
+        let payload = search_payload(server, arguments.clone()).await;
+        if payload["results"].as_array().is_some_and(|results| {
+            results
+                .iter()
+                .any(|result| result["display"]["name"] == expected_name)
+        }) {
+            return payload;
+        }
+        last = payload;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    panic!("named code-index result did not activate within the polling budget: {last}");
+}
+
 fn hint_candidates(payload: &Value) -> &[Value] {
     payload["external_import_hint"]["candidates"]
         .as_array()
@@ -116,10 +141,14 @@ fn hint_candidates(payload: &Value) -> &[Value] {
 async fn test_search_reports_unresolved_external_import_hint_without_mutating_generation() {
     let fixture = production_composition_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).unwrap();
-        write_dependency_declaration(project, "export interface SparseWidget { value: string }\n");
+        write_dependency_declaration(
+            project,
+            "SparseWidgetHelperDependency",
+            "export interface SparseWidget { value: string }\n",
+        );
         fs::write(
             project.join("src/app.ts"),
-            r#"import type { SparseWidget as ExternalSparseWidget } from "pkg";
+            r#"import type { SparseWidget as ExternalSparseWidget } from "SparseWidgetHelperDependency";
 export function SparseWidgetHelper() { return 1; }
 export function GenerationAnchor() { return 2; }
 "#,
@@ -134,19 +163,25 @@ export function GenerationAnchor() { return 2; }
     let before =
         wait_for_search_payload(&server, json!({"query": "GenerationAnchor", "limit": 1})).await;
 
-    let sparse = search_payload(&server, json!({"query": "SparseWidget", "limit": 5})).await;
+    let sparse = wait_for_named_search_payload(
+        &server,
+        json!({"query": "SparseWidgetHelper", "limit": 5}),
+        "SparseWidgetHelper",
+    )
+    .await;
     assert!(
         sparse["results"].as_array().is_some_and(|results| {
-            results
-                .iter()
-                .any(|result| result["display"]["path"] == "src/app.ts")
+            results.iter().any(|result| {
+                result["display"]["name"] == "SparseWidgetHelper"
+                    && result["display"]["path"] == "src/app.ts"
+            })
         }),
-        "the successful sparse lexical result must be preserved: {sparse}"
+        "the successful sparse lexical symbol result must be preserved: {sparse}"
     );
     assert_eq!(
         hint_candidates(&sparse),
         &[json!({
-            "module": "pkg",
+            "module": "SparseWidgetHelperDependency",
             "symbol": "SparseWidget",
             "import_file": "src/app.ts",
             "line": 1,
@@ -190,6 +225,7 @@ async fn test_search_external_import_hint_respects_scope_before_limit() {
         fs::create_dir_all(project.join("outside")).unwrap();
         write_dependency_declaration(
             project,
+            "pkg",
             "export interface ScopedDependency { value: string }\n",
         );
         for index in 0..8 {
@@ -236,6 +272,7 @@ async fn test_search_skips_external_import_hint_when_results_fill_limit() {
         fs::create_dir_all(project.join("src")).unwrap();
         write_dependency_declaration(
             project,
+            "pkg",
             "export interface IndexedAnchor { value: string }\n",
         );
         fs::write(

@@ -1305,6 +1305,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                 || cursor.next_import_ordinal > import_count
                 || (cursor.next_chunk_ordinal < chunk_count && cursor.next_import_ordinal != 0)
             {
+                self.admitted_window.clear();
                 return Err(VerifiedSealedLexicalCursorRestoreErrorV1::IncompatiblePosition);
             }
         }
@@ -3235,6 +3236,23 @@ mod lexical_page_source_tests {
             }
         }
         assert_eq!(disk, memory);
+    }
+
+    #[test]
+    fn incompatible_cursor_restore_drops_the_stale_prefetch_window() {
+        let fixture = fixture();
+        let mut source = fixture.open();
+        let mut incompatible = source.cursor().clone();
+        incompatible.next_chunk_ordinal = u64::MAX;
+
+        assert!(matches!(
+            source.restore_cursor_classified(&incompatible, &ActiveControl),
+            Err(VerifiedSealedLexicalCursorRestoreErrorV1::IncompatiblePosition)
+        ));
+        assert!(
+            source.admitted_window.is_empty(),
+            "a rejected stale cursor must not retain its prefetched decode window"
+        );
     }
 
     #[test]
