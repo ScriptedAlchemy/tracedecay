@@ -59,10 +59,22 @@ fn observed_mcp_routes()
     ROUTES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
+fn observed_first_request_replays()
+-> &'static std::sync::Mutex<std::collections::HashMap<String, Vec<String>>> {
+    static REPLAYS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>,
+    > = std::sync::OnceLock::new();
+    REPLAYS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
 fn register_mcp_route_observer(client_instance_id: &str) {
     observed_mcp_routes()
         .lock()
         .expect("route observer")
+        .insert(client_instance_id.to_owned(), Vec::new());
+    observed_first_request_replays()
+        .lock()
+        .expect("first request replay observer")
         .insert(client_instance_id.to_owned(), Vec::new());
 }
 
@@ -74,6 +86,25 @@ pub(super) fn record_mcp_route(client_instance_id: &str, route: ObservedMcpRoute
     {
         routes.push(route);
     }
+}
+
+pub(super) fn record_first_request_replay(client_instance_id: &str, raw: &str) {
+    if let Some(replays) = observed_first_request_replays()
+        .lock()
+        .expect("first request replay observer")
+        .get_mut(client_instance_id)
+    {
+        replays.push(raw.to_owned());
+    }
+}
+
+fn first_request_replays(client_instance_id: &str) -> Vec<String> {
+    observed_first_request_replays()
+        .lock()
+        .expect("first request replay observer")
+        .get(client_instance_id)
+        .cloned()
+        .unwrap_or_default()
 }
 
 async fn wait_for_mcp_routes(client_instance_id: &str, expected: &[ObservedMcpRoute]) {
@@ -98,6 +129,22 @@ async fn wait_for_mcp_routes(client_instance_id: &str, expected: &[ObservedMcpRo
 
 fn test_client_identity() -> DaemonClientIdentity {
     test_client_identity_for(PathBuf::from("/profiles/client"))
+}
+
+#[test]
+fn authenticated_first_request_preserves_raw_and_optional_parsed_view() {
+    let raw =
+        " \t{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"initialize\",\"params\":{}}\r\n".to_owned();
+
+    let request = super::AuthenticatedFirstRequest::new(raw.clone());
+
+    assert_eq!(request.raw(), raw);
+    assert_eq!(
+        request.parsed().map(|request| request.method.as_str()),
+        Some("initialize")
+    );
+    let malformed = super::AuthenticatedFirstRequest::new("not json-rpc".to_owned());
+    assert!(malformed.parsed().is_none());
 }
 
 #[cfg(unix)]

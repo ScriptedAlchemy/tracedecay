@@ -995,8 +995,10 @@ pub(super) enum ProjectServerRequirement {
     RegisteredHostIngest,
 }
 
-pub(super) fn project_server_requirement(request_line: &str) -> ProjectServerRequirement {
-    let Ok(request) = serde_json::from_str::<JsonRpcRequest>(request_line.trim()) else {
+pub(super) fn project_server_requirement(
+    request: Option<&JsonRpcRequest>,
+) -> ProjectServerRequirement {
+    let Some(request) = request else {
         return ProjectServerRequirement::Core;
     };
     match classify_mcp_method(&request.method) {

@@ -344,13 +344,13 @@ impl DaemonEngine {
     pub(super) async fn claim_catalog_refresh(
         &self,
         handshake: &DaemonHandshake,
-        request_line: &str,
+        request: Option<&JsonRpcRequest>,
         catalog_is_provisional: bool,
     ) -> Option<CatalogRefreshClientKey> {
         if !valid_client_instance_id(&handshake.client_instance_id) {
             return None;
         }
-        let request = serde_json::from_str::<JsonRpcRequest>(request_line).ok()?;
+        let request = request?;
         if request.method == HOOK_EVENT_METHOD {
             return None;
         }

@@ -10,10 +10,10 @@ use serde::{Deserialize, Serialize};
 use tokio::time::{Duration, Instant, timeout, timeout_at};
 
 use super::{
-    BrokerStream, BrokerStreamTransport, DaemonAuthPreface, DaemonHandshake, JsonRpcRequest,
-    JsonRpcResponse, McpMethod, Result, StoreAdministration, TraceDecayError, classify_mcp_method,
-    log_daemon_event, parse_daemon_invocation_request, read_line_handling_wire_oversized,
-    write_json_rpc_response,
+    AuthenticatedFirstRequest, BrokerStream, BrokerStreamTransport, DaemonAuthPreface,
+    DaemonHandshake, JsonRpcResponse, McpMethod, Result, StoreAdministration, TraceDecayError,
+    classify_mcp_method, log_daemon_event, parse_daemon_invocation_request,
+    read_line_handling_wire_oversized, write_json_rpc_response,
 };
 use tracedecay_application::{ApplicationProblem, LegalAction, RetryDirective, SafeDiagnostic};
 use tracedecay_daemon_protocol::DAEMON_SHUTDOWN_METHOD;
@@ -367,9 +367,9 @@ impl DaemonPerClientAdmission {
     pub(crate) fn try_admit_request(
         &self,
         handshake: &DaemonHandshake,
-        request_line: &str,
+        request: &AuthenticatedFirstRequest,
     ) -> std::result::Result<DaemonPerClientPermit, DaemonClientSaturationResponse> {
-        if is_reserved_control_request(request_line) {
+        if is_reserved_control_request(request) {
             return Ok(DaemonPerClientPermit { _permit: None });
         }
         self.try_admit(handshake)
@@ -514,17 +514,17 @@ pub(crate) fn is_mcp_discovery_method(method: &str) -> bool {
     )
 }
 
-pub(crate) fn is_reserved_control_request(request_line: &str) -> bool {
-    if tracedecay_daemon_protocol::parse_daemon_invocation_cancellation_request(request_line)
+pub(crate) fn is_reserved_control_request(request: &AuthenticatedFirstRequest) -> bool {
+    if tracedecay_daemon_protocol::parse_daemon_invocation_cancellation_request(request.raw())
         .is_some()
     {
         return true;
     }
-    let Ok(request) = serde_json::from_str::<JsonRpcRequest>(request_line.trim()) else {
+    let Some(request) = request.parsed() else {
         return false;
     };
     if request.method == DAEMON_SHUTDOWN_METHOD {
-        return request.id.is_some_and(|id| !id.is_null());
+        return request.id.as_ref().is_some_and(|id| !id.is_null());
     }
     // MCP discovery and handshake are reserved, never bulk. They render the
     // immutable tool catalog and touch no store, so they cost O(catalog) and
@@ -556,21 +556,23 @@ pub(crate) fn is_reserved_control_request(request_line: &str) -> bool {
 }
 
 #[cfg(any(not(unix), test))]
-pub(crate) fn daemon_shutdown_response(request_line: &str) -> Option<JsonRpcResponse> {
-    let request = serde_json::from_str::<JsonRpcRequest>(request_line.trim()).ok()?;
-    let id = request.id.filter(|id| !id.is_null())?;
+pub(crate) fn daemon_shutdown_response(
+    request: &AuthenticatedFirstRequest,
+) -> Option<JsonRpcResponse> {
+    let request = request.parsed()?;
+    let id = request.id.clone().filter(|id| !id.is_null())?;
     (request.method == DAEMON_SHUTDOWN_METHOD)
         .then(|| JsonRpcResponse::success(id, serde_json::json!({"accepted": true})))
 }
 
 pub(crate) async fn reject_reserved_bulk_request(
     transport: &mut impl tracedecay_mcp::McpTransport,
-    request_line: &str,
+    request: &AuthenticatedFirstRequest,
     capacity: usize,
 ) -> Result<()> {
     reject_admitted_request(
         transport,
-        request_line,
+        request,
         DaemonClientSaturationResponse {
             kind: DaemonClientSaturationKind::BulkCapacityReached,
             retryable: true,
@@ -583,7 +585,7 @@ pub(crate) async fn reject_reserved_bulk_request(
 #[hotpath::measure(label = "daemon.engine.admission.reject_request", future = true)]
 pub(crate) async fn reject_admitted_request(
     transport: &mut impl tracedecay_mcp::McpTransport,
-    request_line: &str,
+    request: &AuthenticatedFirstRequest,
     saturation: DaemonClientSaturationResponse,
 ) -> Result<()> {
     let outcome = match saturation.kind {
@@ -591,19 +593,19 @@ pub(crate) async fn reject_admitted_request(
         DaemonClientSaturationKind::PerClientCapacityReached => "per_client_capacity_reached",
         DaemonClientSaturationKind::BulkCapacityReached => "bulk_capacity_reached",
     };
-    if let Some(response) = invocation_saturation_response(request_line, &saturation) {
+    if let Some(response) = invocation_saturation_response(request.raw(), &saturation) {
         write_invocation_response(transport, &response).await?;
     } else {
-        let parsed = serde_json::from_str::<JsonRpcRequest>(request_line).ok();
         // A notification (a well-formed request carrying no id) must never be
         // answered: JSON-RPC 2.0 forbids it, and a stray null-id error frame
         // desynchronizes strict MCP clients mid-handshake. Only an
         // unparseable line falls back to a null-id error, which is the
         // correct reply for a malformed request.
-        let notification = parsed.as_ref().is_some_and(|request| request.id.is_none());
+        let notification = request.parsed().is_some_and(|request| request.id.is_none());
         if !notification {
-            let request_id = parsed
-                .and_then(|request| request.id)
+            let request_id = request
+                .parsed()
+                .and_then(|request| request.id.clone())
                 .unwrap_or(serde_json::Value::Null);
             let response = saturation.into_json_rpc_with_id(request_id);
             write_json_rpc_response(transport, &response).await?;
@@ -645,9 +647,9 @@ pub(crate) async fn reject_saturated_daemon_client(
         if let Some(invocation) = invocation_saturation_response(&request_line, &response) {
             write_invocation_response(&mut transport, &invocation).await
         } else {
-            let request_id = serde_json::from_str::<JsonRpcRequest>(&request_line)
+            let request_id = serde_json::from_str::<serde_json::Value>(&request_line)
                 .ok()
-                .and_then(|request| request.id)
+                .and_then(|request| request.get("id").cloned())
                 .unwrap_or(serde_json::Value::Null);
             write_json_rpc_response(&mut transport, &response.into_json_rpc_with_id(request_id))
                 .await
