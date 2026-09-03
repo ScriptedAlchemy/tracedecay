@@ -11,6 +11,7 @@ use std::fs::File;
 use std::io::{BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock, PoisonError};
+use std::time::SystemTime;
 
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -74,9 +75,7 @@ struct FileIdentity {
     #[cfg(unix)]
     ino: u64,
     #[cfg(not(unix))]
-    len: u64,
-    #[cfg(not(unix))]
-    mtime_nanos: u128,
+    created: Option<SystemTime>,
 }
 
 impl FileIdentity {
@@ -91,52 +90,24 @@ impl FileIdentity {
         #[cfg(not(unix))]
         {
             Self {
-                len: metadata.len(),
-                mtime_nanos: file_mtime_nanos(metadata),
+                created: metadata.created().ok(),
             }
         }
     }
 }
 
-fn file_mtime_secs(metadata: &std::fs::Metadata) -> i64 {
-    #[cfg(unix)]
-    {
-        metadata.mtime()
-    }
-    #[cfg(not(unix))]
-    {
-        metadata
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-            .and_then(|duration| i64::try_from(duration.as_secs()).ok())
-            .unwrap_or(0)
-    }
-}
-
-#[cfg(not(unix))]
-fn file_mtime_nanos(metadata: &std::fs::Metadata) -> u128 {
-    metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0)
-}
-
 struct ParentDispatchEntry {
     identity: FileIdentity,
-    len: u64,
-    mtime: i64,
+    modified: Option<SystemTime>,
     verified_cursor: u64,
     models: HashMap<String, String>,
 }
 
 impl ParentDispatchEntry {
-    fn must_reset(&self, identity: FileIdentity, len: u64, mtime: i64) -> bool {
+    fn must_reset(&self, identity: FileIdentity, len: u64, modified: Option<SystemTime>) -> bool {
         self.identity != identity
             || len < self.verified_cursor
-            || (len <= self.verified_cursor && mtime != self.mtime)
+            || (len <= self.verified_cursor && (modified.is_none() || modified != self.modified))
     }
 }
 
@@ -167,16 +138,15 @@ impl ParentDispatchIndex {
         };
         let identity = FileIdentity::from_metadata(&metadata);
         let len = metadata.len();
-        let mtime = file_mtime_secs(&metadata);
+        let modified = metadata.modified().ok();
         let reset = self
             .entries
             .get(parent_path)
-            .is_none_or(|entry| entry.must_reset(identity, len, mtime));
+            .is_none_or(|entry| entry.must_reset(identity, len, modified));
         if reset {
-            self.insert_reset(parent_path, identity, len, mtime);
+            self.insert_reset(parent_path, identity, modified);
         } else if let Some(entry) = self.entries.get_mut(parent_path) {
-            entry.len = len;
-            entry.mtime = mtime;
+            entry.modified = modified;
         }
         self.touch(parent_path);
 
@@ -214,8 +184,7 @@ impl ParentDispatchIndex {
             entry.models.entry(id).or_insert(model);
         }
         entry.verified_cursor = delta.verified_cursor;
-        entry.len = len;
-        entry.mtime = mtime;
+        entry.modified = modified;
         let model = entry
             .models
             .get(agent_id)
@@ -231,14 +200,13 @@ impl ParentDispatchIndex {
         )
     }
 
-    fn insert_reset(&mut self, path: &Path, identity: FileIdentity, len: u64, mtime: i64) {
+    fn insert_reset(&mut self, path: &Path, identity: FileIdentity, modified: Option<SystemTime>) {
         let existed = self.entries.contains_key(path);
         self.entries.insert(
             path.to_path_buf(),
             ParentDispatchEntry {
                 identity,
-                len,
-                mtime,
+                modified,
                 verified_cursor: 0,
                 models: HashMap::new(),
             },
@@ -502,6 +470,8 @@ mod tests {
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    #[cfg(unix)]
+    use filetime::{FileTime, set_file_mtime};
     use serde_json::json;
     use tempfile::TempDir;
 
@@ -677,6 +647,38 @@ mod tests {
             lookup(&layout, "fresh-agent").0.as_deref(),
             Some("fresh-model")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn same_length_same_second_rewrite_invalidates_stale_models() {
+        let layout = layout();
+        let old = dispatch_record("agent_id", "old-agent", "old-model");
+        let new = dispatch_record("agent_id", "new-agent", "new-model");
+        assert_eq!(old.len(), new.len(), "fixture must preserve file length");
+
+        write_lines(&layout.candidate_two, &[old]);
+        set_file_mtime(
+            &layout.candidate_two,
+            FileTime::from_unix_time(1_800_000_000, 100_000_000),
+        )
+        .unwrap();
+        assert_eq!(lookup(&layout, "old-agent").0.as_deref(), Some("old-model"));
+
+        write_lines(&layout.candidate_two, &[new]);
+        set_file_mtime(
+            &layout.candidate_two,
+            FileTime::from_unix_time(1_800_000_000, 200_000_000),
+        )
+        .unwrap();
+
+        let (stale, receipt) = lookup(&layout, "old-agent");
+        assert!(
+            stale.is_none(),
+            "same-length rewrite must drop stale models"
+        );
+        assert!(receipt.rescanned_from_zero);
+        assert_eq!(lookup(&layout, "new-agent").0.as_deref(), Some("new-model"));
     }
 
     #[test]

@@ -71,14 +71,15 @@ pub fn is_subagent_dispatch_tool(name: &str) -> bool {
 
 /// Whether raw JSONL record bytes can name a subagent dispatch tool.
 ///
-/// The accepted names are plain ASCII identifiers. A JSON encoder never
-/// escapes them, so substring absence proves the record cannot name a
-/// dispatch tool. Comparison is case-insensitive to match
-/// [`is_subagent_dispatch_tool`].
+/// Raw names are compared case-insensitively to match
+/// [`is_subagent_dispatch_tool`]. A Unicode escape can encode any ASCII byte,
+/// so records containing `\u` remain candidates rather than risking a false
+/// negative before JSON decoding.
 pub fn record_bytes_may_name_subagent_dispatch(record: &[u8]) -> bool {
-    SUBAGENT_DISPATCH_TOOLS
-        .iter()
-        .any(|name| contains_ignore_ascii_case(record, name.as_bytes()))
+    record.windows(2).any(|window| window == br"\u")
+        || SUBAGENT_DISPATCH_TOOLS
+            .iter()
+            .any(|name| contains_ignore_ascii_case(record, name.as_bytes()))
 }
 
 fn contains_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
@@ -160,6 +161,9 @@ mod tests {
         ));
         assert!(record_bytes_may_name_subagent_dispatch(
             br#"{"name":"SUBAGENT"}"#
+        ));
+        assert!(record_bytes_may_name_subagent_dispatch(
+            br#"{"name":"T\u0061sk","input":{}}"#
         ));
         assert!(
             !record_bytes_may_name_subagent_dispatch(
