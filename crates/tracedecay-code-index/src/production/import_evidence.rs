@@ -9,6 +9,7 @@ where
     derive_import_evidence_from(files.iter().map(AsRef::as_ref))
 }
 
+#[hotpath::measure(label = "code_index.imports.derive")]
 fn derive_import_evidence_from<'a>(
     files: impl Iterator<Item = &'a FileGenerationArtifactsV1>,
 ) -> Vec<CodeIndexImportEvidenceV1> {
@@ -29,6 +30,7 @@ fn derive_import_evidence_from<'a>(
         .collect()
 }
 
+#[hotpath::measure(label = "code_index.imports.validate")]
 pub(super) fn validate_import_evidence(
     files: &[&FileGenerationArtifactsV1],
     imports: &[CodeIndexImportEvidenceV1],

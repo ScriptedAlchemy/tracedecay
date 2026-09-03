@@ -234,6 +234,7 @@ pub fn git_topology_idempotency_key(
     GraphIdempotencyKey::new(format!("publish:{}", generation.as_str())).map_err(Into::into)
 }
 
+#[hotpath::measure(label = "code_index.git_topology.build_manifest")]
 pub fn build_git_topology_manifest_checked(
     identity: GraphProjectionIdentity,
     projection: &GitTopologyProjectionV1,
@@ -368,6 +369,7 @@ impl GitTopologyProjectionStore {
         Ok(store)
     }
 
+    #[hotpath::measure(label = "code_index.git_topology.open")]
     pub fn from_verified_snapshot_verified(
         snapshot: VerifiedGraphSnapshot,
         cancellation: Arc<dyn GraphCancellation>,
@@ -481,6 +483,7 @@ impl GitTopologyProjectionStore {
             .map(|(oid, _)| oid.clone()))
     }
 
+    #[hotpath::measure(label = "code_index.git_topology.traverse")]
     fn traverse(
         &self,
         commit: &GitOidV1,
@@ -511,6 +514,7 @@ impl GitTopologyProjectionStore {
             .collect()
     }
 
+    #[hotpath::measure(label = "code_index.git_topology.collect_ancestors")]
     fn ancestor_depths(
         &self,
         commit: &GitOidV1,

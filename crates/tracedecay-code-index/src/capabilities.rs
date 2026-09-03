@@ -123,6 +123,7 @@ struct LegacySealPayload<'a> {
 /// The canonical expected digest a generation planner must seal before handing
 /// rows and the expected digest to the store publication port. The emitter
 /// verifies this digest before emitting capabilities for the generation.
+#[hotpath::measure(label = "code_index.capability.compute_seal")]
 pub fn expected_seal_digest(
     generation: &CodeGenerationManifestV1,
 ) -> Result<ManifestDigest, DomainError> {
@@ -216,6 +217,7 @@ impl<R: LanguageRegistry> BaseCapabilityEmitter<R> {
 }
 
 impl<R: LanguageRegistry> CodeIndexCapabilityEmitter for BaseCapabilityEmitter<R> {
+    #[hotpath::measure(label = "code_index.capability.emit")]
     fn emit(
         &self,
         generation: &CodeGenerationManifestV1,
@@ -352,6 +354,7 @@ impl Default for BaseCapabilityValidator {
 }
 
 impl CodeIndexCapabilityValidator for BaseCapabilityValidator {
+    #[hotpath::measure(label = "code_index.capability.validate")]
     fn validate_for_candidates(
         &self,
         generation: &CodeGenerationId,
