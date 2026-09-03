@@ -48,6 +48,7 @@ use quarantine::{
     quarantine_store_for_verified_collection_controlled, recover_existing_store_quarantine,
 };
 pub use unregistered_page::UnregisteredSweepCompletionV1;
+pub(super) use unregistered_page::read_complete_project_directory_inventory_page;
 pub use unregistered_page::{
     DEFAULT_UNREGISTERED_STORE_PAGE_LIMIT, UnregisteredStoreSweepReport,
     UnregisteredStoreSweepRequestV1, sweep_unregistered_store_page,
