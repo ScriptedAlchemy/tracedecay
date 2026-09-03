@@ -262,6 +262,7 @@ impl ProjectFeedbackObservationSinkV1 {
         })
     }
 
+    #[hotpath::measure(label = "usecases.feedback.close_drain", future = true)]
     async fn close_and_drain(&self) -> Result<(), FeedbackRuntimeError> {
         let terminal = {
             let _admission = self
@@ -921,8 +922,9 @@ impl DurableFeedbackReadStoreV1 for ProjectFeedbackStore {
         context: &'a FeedbackReadPortContext<'a>,
         request: &'a FeedbackDiagnosticsReadRequestV1,
     ) -> FeedbackReadPortFuture<'a, FeedbackDiagnosticsReadResultV1> {
-        Box::pin(async move {
-            let domains = vec![
+        Box::pin(hotpath::future!(
+            async move {
+                let domains = vec![
                 EvidenceDomain::Diagnostic,
                 EvidenceDomain::Graph,
                 EvidenceDomain::Test,
@@ -957,7 +959,9 @@ impl DurableFeedbackReadStoreV1 for ProjectFeedbackStore {
                 None,
                 finished_at,
             )
-        })
+            },
+            label = "usecases.feedback.read_diagnostics"
+        ))
     }
 
     fn get<'a>(
@@ -965,8 +969,9 @@ impl DurableFeedbackReadStoreV1 for ProjectFeedbackStore {
         context: &'a FeedbackReadPortContext<'a>,
         request: &'a FeedbackGetRequestV1,
     ) -> FeedbackReadPortFuture<'a, FeedbackGetResultV1> {
-        Box::pin(async move {
-            let domains = vec![EvidenceDomain::Diagnostic];
+        Box::pin(hotpath::future!(
+            async move {
+                let domains = vec![EvidenceDomain::Diagnostic];
             if let Some(interrupted) = interruption(context.request, now_micros(), domains.clone())
             {
                 return interrupted;
@@ -994,7 +999,9 @@ impl DurableFeedbackReadStoreV1 for ProjectFeedbackStore {
                 None,
                 finished_at,
             )
-        })
+            },
+            label = "usecases.feedback.read_get"
+        ))
     }
 
     fn expand<'a>(
@@ -1002,9 +1009,10 @@ impl DurableFeedbackReadStoreV1 for ProjectFeedbackStore {
         context: &'a FeedbackReadPortContext<'a>,
         request: &'a FeedbackExpandRequestV1,
     ) -> FeedbackReadPortFuture<'a, FeedbackExpandResultV1> {
-        Box::pin(async move {
-            let domains = vec![EvidenceDomain::Anchor];
-            let started_at = now_micros();
+        Box::pin(hotpath::future!(
+            async move {
+                let domains = vec![EvidenceDomain::Anchor];
+                let started_at = now_micros();
             if let Some(interrupted) = interruption(context.request, started_at, domains.clone()) {
                 self.observe_expansion(
                     context.request,
@@ -1116,7 +1124,9 @@ impl DurableFeedbackReadStoreV1 for ProjectFeedbackStore {
                 None,
                 finished_at,
             )
-        })
+            },
+            label = "usecases.feedback.read_expand"
+        ))
     }
 
     fn list<'a>(
@@ -1124,8 +1134,9 @@ impl DurableFeedbackReadStoreV1 for ProjectFeedbackStore {
         context: &'a FeedbackReadPortContext<'a>,
         request: &'a FeedbackListRequestV1,
     ) -> FeedbackReadPortFuture<'a, FeedbackListResultV1> {
-        Box::pin(async move {
-            let domains = vec![EvidenceDomain::Diagnostic];
+        Box::pin(hotpath::future!(
+            async move {
+                let domains = vec![EvidenceDomain::Diagnostic];
             if let Some(interrupted) = interruption(context.request, now_micros(), domains.clone())
             {
                 return interrupted;
@@ -1204,7 +1215,9 @@ impl DurableFeedbackReadStoreV1 for ProjectFeedbackStore {
                 expires_at,
                 finished_at,
             )
-        })
+            },
+            label = "usecases.feedback.read_list"
+        ))
     }
 }
 
@@ -1245,6 +1258,7 @@ impl ProjectFeedbackStore {
         );
     }
 
+    #[hotpath::measure(label = "usecases.feedback.load_publications", future = true)]
     async fn load_publications(
         &self,
     ) -> Result<Vec<FeedbackCompletedPublicationV1>, FeedbackRuntimeError> {
@@ -1276,6 +1290,7 @@ impl ProjectFeedbackStore {
     /// Latest validated durable publication visible in the exact admitted
     /// project/repository/worktree/ref scope. Doctor consumes this mounted read
     /// store; it does not scan provider-local state or mutable paths.
+    #[hotpath::measure(label = "usecases.feedback.doctor_latest", future = true)]
     pub async fn doctor_latest_publication(
         &self,
         context: &RequestContext,
@@ -1293,6 +1308,7 @@ impl ProjectFeedbackStore {
         Ok(publication)
     }
 
+    #[hotpath::measure(label = "usecases.feedback.record_publication", future = true)]
     async fn record_publication(
         &self,
         publication: FeedbackCompletedPublicationV1,
@@ -1482,6 +1498,7 @@ impl ProjectFeedbackStore {
 /// Read the canonical durable Plan-26 observation projection from an already
 /// admitted project database. Doctor uses this same projection rather than
 /// deriving a second telemetry model.
+#[hotpath::measure(label = "usecases.feedback.observation_read_model", future = true)]
 pub async fn feedback_observation_read_model(
     database: &Database,
 ) -> Result<FeedbackObservationReadModelV1, FeedbackRuntimeError> {
@@ -1609,6 +1626,7 @@ fn interruption_outcome(context: &RequestContext, observed_at: UtcMicros) -> Fee
     }
 }
 
+#[hotpath::measure(label = "usecases.feedback.persist_observation", future = true)]
 async fn persist_feedback_observation(
     database: &Database,
     envelope: FeedbackObservationEnvelopeV1,
@@ -1690,6 +1708,7 @@ async fn persist_feedback_observation(
         .map_err(|_| FeedbackRuntimeError::Store)
 }
 
+#[hotpath::measure(label = "usecases.feedback.persist_boot", future = true)]
 async fn persist_feedback_producer_boot(
     database: &Database,
     boot_id: ManifestDigest,
@@ -1736,6 +1755,7 @@ async fn persist_feedback_producer_boot(
         .map_err(|_| FeedbackRuntimeError::Store)
 }
 
+#[hotpath::measure(label = "usecases.feedback.load_ledger", future = true)]
 async fn load_observation_ledger(
     transaction: &DatabaseWriteTransaction<'_>,
 ) -> Result<StoredFeedbackObservationLedgerV1, FeedbackRuntimeError> {

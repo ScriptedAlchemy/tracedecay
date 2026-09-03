@@ -157,6 +157,7 @@ impl ProjectGitHubReviewStoreV1 {
         Ok(Some((Box::new(state), encoded_bytes)))
     }
 
+    #[hotpath::measure(label = "usecases.advisory.github.load_state", future = true)]
     async fn load_state(
         &self,
         request: &GitHubReviewReadRequestV1,
@@ -217,6 +218,7 @@ impl ProjectGitHubReviewStoreV1 {
     /// Loads the bounded exact-scope inventory and verifies every referenced
     /// point record. A partial or corrupt inventory is never reported as an
     /// empty or complete source.
+    #[hotpath::measure(label = "usecases.advisory.github.load_manifest", future = true)]
     pub async fn load_manifest(
         &self,
         context: &RequestContext,
@@ -246,6 +248,7 @@ impl ProjectGitHubReviewStoreV1 {
     /// Loads only the bounded, structurally validated exact-scope inventory.
     /// Point records remain caller-budgeted and are loaded separately through
     /// [`Self::load_bounded_entry`].
+    #[hotpath::measure(label = "usecases.advisory.github.load_inventory", future = true)]
     pub async fn load_inventory_manifest(
         &self,
         context: &RequestContext,
@@ -303,6 +306,7 @@ impl ProjectGitHubReviewStoreV1 {
     /// Loads one inventory-bound point without decoding bytes beyond the
     /// caller's remaining budget. `None` covers absent, malformed, oversized,
     /// revision-mismatched, or no-longer-authorized records.
+    #[hotpath::measure(label = "usecases.advisory.github.load_entry", future = true)]
     pub async fn load_bounded_entry(
         &self,
         context: &RequestContext,
@@ -410,8 +414,9 @@ impl GitHubReviewAtomicRefreshStoreV1 for ProjectGitHubReviewStoreV1 {
         expected_revision: Option<&'a ManifestDigest>,
         next: &'a GitHubReviewRefreshStateV1,
     ) -> FeedbackPortFuture<'a, GitHubReviewRefreshStoreCommitOutcomeV1> {
-        Box::pin(async move {
-            if !next.validate_for(request)
+        Box::pin(hotpath::future!(
+            async move {
+                if !next.validate_for(request)
                 || !context_allows_feedback_operation(
                     context,
                     &self.scope,
@@ -546,7 +551,9 @@ impl GitHubReviewAtomicRefreshStoreV1 for ProjectGitHubReviewStoreV1 {
                 return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
             }
             GitHubReviewRefreshStoreCommitOutcomeV1::Recorded
-        })
+            },
+            label = "usecases.advisory.github.record_refresh"
+        ))
     }
 }
 

@@ -525,6 +525,7 @@ fn index_envelope(
 /// Records one completed retrieval query through the project-bound observation
 /// authority. `answered == false` is retained as an abstention, never as a
 /// failed or absent query.
+#[hotpath::measure(label = "usecases.observability.record_query", future = true)]
 pub async fn record_retrieval_query(
     db: &RegisteredGlobalDb,
     observation: RetrievalQueryObservedV1,
@@ -538,6 +539,7 @@ pub async fn record_retrieval_query(
 /// Records one adoption-eligibility census. `coverage` is required because only
 /// the caller knows whether it enumerated the whole eligible population; an
 /// incomplete census must not reach the rollup as `Known`.
+#[hotpath::measure(label = "usecases.observability.record_adoption_eligibility", future = true)]
 pub async fn record_adoption_eligibility(
     db: &RegisteredGlobalDb,
     coverage: CoverageStateV1,
@@ -553,6 +555,7 @@ pub async fn record_adoption_eligibility(
 /// Records one linked adoption-outcome funnel. Unresolved outcomes weaken both
 /// the terminal result and coverage in addition to being carried as explicit
 /// `censored` / `unknown` denominators.
+#[hotpath::measure(label = "usecases.observability.record_adoption_outcome", future = true)]
 pub async fn record_adoption_outcome(
     db: &RegisteredGlobalDb,
     census_coverage: CoverageStateV1,
@@ -566,6 +569,7 @@ pub async fn record_adoption_outcome(
 }
 
 /// Records one per-stage latency observation at an operation boundary.
+#[hotpath::measure(label = "usecases.observability.record_latency", future = true)]
 pub async fn record_latency(
     db: &RegisteredGlobalDb,
     observation: LatencyObservedV1,
@@ -579,6 +583,7 @@ pub async fn record_latency(
 /// Records one per-operation resource receipt. `terminal_result` is `None` when
 /// the operation's terminal state is genuinely unknown; the rollup projects that
 /// as an unknown rather than a completion.
+#[hotpath::measure(label = "usecases.observability.record_operation_resource", future = true)]
 pub async fn record_operation_resource(
     db: &RegisteredGlobalDb,
     coverage: CoverageStateV1,
@@ -598,6 +603,7 @@ pub async fn record_operation_resource(
 }
 
 /// Records one storage size, budget, or latency observation.
+#[hotpath::measure(label = "usecases.observability.record_storage", future = true)]
 pub async fn record_storage(
     db: &RegisteredGlobalDb,
     observation: StorageObservedV1,
@@ -609,6 +615,7 @@ pub async fn record_storage(
 }
 
 /// Records one code-index generation lifecycle observation.
+#[hotpath::measure(label = "usecases.observability.record_index", future = true)]
 pub async fn record_index(
     db: &RegisteredGlobalDb,
     observation: IndexObservedV1,
@@ -621,6 +628,7 @@ pub async fn record_index(
 
 /// Offers one code-index generation lifecycle observation to the mounted
 /// bounded producer without waiting for project-store persistence.
+#[hotpath::measure(label = "usecases.observability.emit_index")]
 pub fn emit_index(
     producer: &BoundedObservabilityProducerV1,
     observation: IndexObservedV1,

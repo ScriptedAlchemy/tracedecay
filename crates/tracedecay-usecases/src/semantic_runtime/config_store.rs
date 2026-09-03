@@ -53,6 +53,7 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
         &self.scope
     }
 
+    #[hotpath::measure(label = "usecases.semantic_config.install_initial", future = true)]
     pub async fn install_initial_state(
         &self,
         configuration: &SemanticConfigurationPinV1,
@@ -107,6 +108,7 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
             .map_err(|_| SemanticConfigurationBackendErrorV1::Unavailable)
     }
 
+    #[hotpath::measure(label = "usecases.semantic_config.read_committed", future = true)]
     pub async fn current_committed_state(
         &self,
     ) -> Result<Option<CommittedRetrievalProfileStateV1>, SemanticConfigurationBackendErrorV1> {
@@ -141,6 +143,7 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
         }))
     }
 
+    #[hotpath::measure(label = "usecases.semantic_config.read_present", future = true)]
     pub async fn current_state_if_present(
         &self,
     ) -> Result<Option<RetrievalProfileStateV1>, SemanticConfigurationBackendErrorV1> {
@@ -154,6 +157,7 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
             .map(|stored| stored.state))
     }
 
+    #[hotpath::measure(label = "usecases.semantic_config.read_profile", future = true)]
     pub async fn current_profile_state(
         &self,
     ) -> Result<RetrievalProfileStateSnapshotV1, SemanticConfigurationBackendErrorV1> {
@@ -164,6 +168,7 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
             .map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)
     }
 
+    #[hotpath::measure(label = "usecases.semantic_config.preview_mutation", future = true)]
     pub(crate) async fn preview_central_mutation(
         &self,
         authority: &ConfigurationMutationAuthority,
@@ -236,6 +241,7 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure(label = "usecases.semantic_config.stage_activation", future = true)]
     pub async fn stage_activation(
         &self,
         base_configuration: SemanticConfigurationPinV1,
@@ -299,6 +305,7 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[hotpath::measure(label = "usecases.semantic_config.stage_rollback", future = true)]
     pub async fn stage_rollback(
         &self,
         base_configuration: SemanticConfigurationPinV1,
@@ -372,6 +379,7 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
             .ok_or(SemanticConfigurationBackendErrorV1::Unavailable)
     }
 
+    #[hotpath::measure(label = "usecases.semantic_config.persist_pending", future = true)]
     async fn persist_pending(
         &self,
         base_epoch: i64,
@@ -451,6 +459,7 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
         }
     }
 
+    #[hotpath::measure(label = "usecases.semantic_config.read_committed_profile", future = true)]
     pub async fn current_committed_profile_state(
         &self,
         configuration: &SemanticConfigurationPinV1,

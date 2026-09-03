@@ -337,6 +337,7 @@ impl BoundedObservabilityProducerV1 {
         prepare_delivery_with_identity(&self.identity, envelope, sequence, delayed)
     }
 
+    #[hotpath::measure(label = "usecases.observability.try_emit")]
     pub fn try_emit(
         &self,
         envelope: ObservabilityEnvelopeV1,
@@ -429,6 +430,7 @@ impl BoundedObservabilityProducerV1 {
 impl ObservabilityProducerCoreV1 {
     /// Shutdown lives only on the core: any frontend may drive it, and the
     /// lifecycle compare-and-swap admits exactly one drain.
+    #[hotpath::measure(label = "usecases.observability.producer_stop", future = true)]
     async fn stop(
         &self,
         cancelled: bool,
@@ -867,6 +869,7 @@ fn push_drop_range(ranges: &mut Vec<DropRange>, range: DropRange) {
     ranges.push(range);
 }
 
+#[hotpath::measure(label = "usecases.observability.persist_queued", future = true)]
 async fn record_queued(
     db: &RegisteredGlobalDb,
     durable_emission_lock: &AsyncMutex<()>,
@@ -959,6 +962,7 @@ fn payload_safe_label(value: &str, max_bytes: usize) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b':' | b'-' | b'_'))
 }
 
+#[hotpath::measure(label = "usecases.observability.persist_envelope", future = true)]
 async fn record(
     db: &RegisteredGlobalDb,
     envelope: ObservabilityEnvelopeV1,

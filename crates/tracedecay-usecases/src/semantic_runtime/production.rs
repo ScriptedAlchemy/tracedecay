@@ -428,6 +428,7 @@ impl ProductionSemanticRuntimeV1 {
     }
 
     /// Restore a compatible immutable generation after daemon restart.
+    #[hotpath::measure(label = "usecases.semantic.restore_current", future = true)]
     pub async fn restore_current(
         &self,
         generation: &CodeIndexPublishedGenerationV1,
@@ -442,6 +443,7 @@ impl ProductionSemanticRuntimeV1 {
         Ok(prepared.commit())
     }
 
+    #[hotpath::measure(label = "usecases.semantic.prepare_restore", future = true)]
     pub async fn prepare_restore_current(
         &self,
         generation: &CodeIndexPublishedGenerationV1,
@@ -1435,6 +1437,7 @@ impl ProductionSemanticRuntimeV1 {
     /// Recheck the opaque pre-acceptance lifecycle observation immediately
     /// before publication. A changed vector/code/lifecycle target is a CAS
     /// conflict, while a malformed or foreign lease remains rejected.
+    #[hotpath::measure(label = "usecases.semantic.revalidate_target", future = true)]
     pub async fn revalidate_verified_evaluation_target(
         &self,
         verification: &SemanticEvaluationLifecycleVerificationV1,
@@ -1544,6 +1547,7 @@ impl ProductionSemanticRuntimeV1 {
     /// Inspect only immutable vector/source identity before native evaluation.
     /// Resource evidence does not exist yet and is therefore not fabricated
     /// from the evaluator's configured ceilings.
+    #[hotpath::measure(label = "usecases.semantic.inspect_eval_snapshot", future = true)]
     pub async fn inspect_evaluation_current_generation_snapshot(
         &self,
         required: &crate::config::retrieval::SemanticCompatibilityPinsV1,
@@ -1626,6 +1630,7 @@ impl ProductionSemanticRuntimeV1 {
     ///
     /// The installed runtime pointer is a cache observation only and cannot
     /// substitute another graph generation.
+    #[hotpath::measure(label = "usecases.semantic.active_generation", future = true)]
     pub async fn active_vector_generation(
         &self,
         pins: &crate::config::retrieval::SemanticCompatibilityPinsV1,
@@ -2102,6 +2107,7 @@ impl ProductionSemanticRuntimeV1 {
     /// Real application consumer for the optional semantic lane. The exact
     /// configuration-pinned generation is loaded before composition; indexing/download never
     /// enters this request path.
+    #[hotpath::measure(label = "usecases.semantic.execute_search", future = true)]
     pub async fn execute_search<C>(
         &self,
         code_generation: &CodeIndexPublishedGenerationV1,

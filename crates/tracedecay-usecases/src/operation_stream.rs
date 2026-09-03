@@ -420,6 +420,7 @@ impl CanonicalManagedTestRunReader {
         Self { events }
     }
 
+    #[hotpath::measure(label = "usecases.operation.read_test_run", future = true)]
     pub(crate) async fn latest_current(
         &self,
         current: &ManagedTestRunCurrentScope,
@@ -460,6 +461,7 @@ impl CanonicalManagedTestRunReader {
         Some(current_managed_test_run(snapshot, current))
     }
 
+    #[hotpath::measure(label = "usecases.operation.page_test_run", future = true)]
     pub(crate) async fn latest_current_page(
         &self,
         current: &ManagedTestRunCurrentScope,
@@ -735,6 +737,7 @@ impl OperationEventAuthority {
             .await
     }
 
+    #[hotpath::measure(label = "usecases.operation.resolve_context", future = true)]
     async fn resolve_invocation_context_inner(
         &self,
         operation_id: &OperationId,
@@ -806,6 +809,7 @@ impl OperationEventAuthority {
     }
 
     /// Registers an admitted operation and publishes its sole accepted event.
+    #[hotpath::measure(label = "usecases.operation.begin", future = true)]
     pub async fn begin(
         &self,
         context: &RequestContext,
@@ -889,6 +893,7 @@ impl OperationEventAuthority {
     /// Starts one trusted project-local managed test run. The caller is the
     /// already-routed project workflow handler, so the retained authorization
     /// key is the canonical admitted root URI rather than client payload.
+    #[hotpath::measure(label = "usecases.operation.begin_test_run", future = true)]
     pub async fn begin_managed_test_run(
         &self,
         root_uri: String,
@@ -1033,6 +1038,7 @@ impl OperationEventAuthority {
     }
 
     /// Requests cancellation for one exact trusted project-local test run.
+    #[hotpath::measure(label = "usecases.operation.cancel_test_run", future = true)]
     pub(crate) async fn cancel_managed_test_run(
         &self,
         operation_id: &OperationId,
@@ -1068,6 +1074,7 @@ impl OperationEventAuthority {
 
     /// Replays retained events from `requested_next_sequence`, then follows
     /// the same bounded Tokio broadcast stream used by live producers.
+    #[hotpath::measure(label = "usecases.operation.subscribe", future = true)]
     pub async fn subscribe(
         &self,
         operation_id: &OperationId,
@@ -1148,6 +1155,7 @@ impl OperationEventAuthority {
 
     /// Requests cancellation after revalidating actor, scope, grant, and
     /// disclosure. Subscription disconnects never call this method.
+    #[hotpath::measure(label = "usecases.operation.cancel", future = true)]
     pub async fn cancel(
         &self,
         operation_id: &OperationId,
@@ -1176,12 +1184,14 @@ impl OperationEventAuthority {
 
     /// Drops all memory-retained frontiers. Existing streams close; reconnects
     /// receive `FrontierExpired` rather than a fabricated snapshot.
+    #[hotpath::measure(label = "usecases.operation.expire_all", future = true)]
     pub async fn expire_all(&self) {
         let mut state = self.inner.state.lock().await;
         state.operations.clear();
         state.insertion_order.clear();
     }
 
+    #[hotpath::measure(label = "usecases.operation.emit_progress", future = true)]
     async fn emit_progress(
         &self,
         operation_id: &OperationId,
@@ -1211,6 +1221,7 @@ impl OperationEventAuthority {
         Ok(event)
     }
 
+    #[hotpath::measure(label = "usecases.operation.emit_test_result", future = true)]
     async fn emit_test_result(
         &self,
         operation_id: &OperationId,
@@ -1247,6 +1258,7 @@ impl OperationEventAuthority {
         Ok(event)
     }
 
+    #[hotpath::measure(label = "usecases.operation.emit_terminal", future = true)]
     async fn emit_terminal(
         &self,
         operation_id: &OperationId,

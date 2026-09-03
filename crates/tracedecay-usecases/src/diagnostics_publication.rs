@@ -349,6 +349,7 @@ impl CleanGenerationDiagnosticSnapshotBuilderV1 {
     /// Every field of canonical identity comes from the scope or the
     /// contribution; the message digest is recomputed so the record validates
     /// against its own sanitized text.
+    #[hotpath::measure(label = "usecases.diagnostics.contribute")]
     pub fn contribute(
         &mut self,
         pillar: DiagnosticPillarV1,
@@ -426,6 +427,7 @@ impl CleanGenerationDiagnosticSnapshotBuilderV1 {
     /// Republishing an identical snapshot converges (the store treats it as a
     /// no-op), so a repeated production cycle over an unchanged generation is
     /// safe.
+    #[hotpath::measure(label = "usecases.diagnostics.publish_snapshot", future = true)]
     pub async fn publish(&self, store: &DiagnosticsStore<'_>) -> Result<(u64, u64)> {
         store
             .publish_clean_generation(&self.scope.generation_id, &self.records())
@@ -651,6 +653,7 @@ impl std::fmt::Display for CompilerDiagnosticResolutionSkipV1 {
 ///
 /// The span runs from the reported column to the end of the reported line —
 /// the honest extent of what `cargo` reports without re-parsing the source.
+#[hotpath::measure(label = "usecases.diagnostics.resolve_compiler", future = true)]
 pub async fn resolve_compiler_diagnostics_v1(
     project_root: &Path,
     identity: &CodeIndexPublicationIdentityV1,
@@ -710,6 +713,7 @@ pub async fn resolve_compiler_diagnostics_v1(
 }
 
 /// Reads one repository-relative file, refusing paths that escape the root.
+#[hotpath::measure(label = "usecases.diagnostics.load_project_file", future = true)]
 async fn load_project_file(project_root: &Path, relative: &str) -> Option<(ContentDigest, String)> {
     let path = Path::new(relative);
     if path.is_absolute()
@@ -759,6 +763,7 @@ fn line_column_span(text: &str, line: u32, column: u32) -> Option<SourceSpan> {
 ///
 /// Contributions that cannot form a valid record are reported, never silently
 /// dropped.
+#[hotpath::measure(label = "usecases.diagnostics.publish_compiler", future = true)]
 pub async fn publish_compiler_diagnostics_v1(
     store: &DiagnosticsStore<'_>,
     scope: CleanGenerationDiagnosticScopeV1,
@@ -831,6 +836,7 @@ pub enum CompilerDiagnosticPublicationOutcomeV1 {
 /// generation. Both identities the LSP feedback projection compares —
 /// `file_occurrence_id` and `generation_id` — therefore come from the same mint
 /// as the saved-edit cycle's impact target.
+#[hotpath::measure(label = "usecases.diagnostics.publish_compiler_indexed", future = true)]
 pub async fn publish_compiler_diagnostics_through_code_index_v1(
     project_root: &Path,
     resolver: Option<&dyn CodeIndexPublicationIdentityPortV1>,
