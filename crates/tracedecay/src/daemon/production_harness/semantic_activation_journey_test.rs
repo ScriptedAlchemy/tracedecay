@@ -788,6 +788,24 @@ async fn assert_code_generation_unchanged(
     );
 }
 
+async fn wait_for_model_lifecycle_ready(
+    lifecycle: &tracedecay_semantic::SemanticModelLifecycleOwnerV1,
+) {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            if matches!(
+                lifecycle.status().state,
+                Some(SemanticModelLifecycleStateV1::Ready { .. })
+            ) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("production semantic generation did not publish model readiness");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_authority() {
     let fixture_root = std::env::var_os("TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE")
@@ -828,6 +846,7 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
     let resources = harness.resources.as_ref().expect("live harness");
     let (first_code_id, first_code, first_vector) =
         wait_for_settled_semantic_generation(&harness, &project, None).await;
+    wait_for_model_lifecycle_ready(&lifecycle).await;
     let graph = harness.server(&project).expect("project server").cg().await;
     assert!(
         graph
