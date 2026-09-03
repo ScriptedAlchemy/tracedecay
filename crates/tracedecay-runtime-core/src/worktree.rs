@@ -153,7 +153,7 @@ pub fn is_linked_worktree(dir: &Path) -> bool {
         return false;
     };
     repository.worktree_root().is_some_and(|root| {
-        realpath(dir).is_some_and(|canonical_dir| root == canonical_dir)
+        realpath(dir).is_some_and(|canonical_dir| canonical_dir.starts_with(root))
             && repository.git_dir() != repository.common_dir()
     })
 }
@@ -442,9 +442,18 @@ mod tests {
             &main,
             &["worktree", "add", "--detach", linked.to_str().unwrap()],
         );
+        let primary_subdirectory = main.join("packages/service");
+        let linked_subdirectory = linked.join("packages/service");
+        fs::create_dir_all(&primary_subdirectory).unwrap();
+        fs::create_dir_all(&linked_subdirectory).unwrap();
 
         assert!(!is_linked_worktree(&main));
+        assert!(!is_linked_worktree(&primary_subdirectory));
         assert!(is_linked_worktree(&linked));
+        assert!(
+            is_linked_worktree(&linked_subdirectory),
+            "a project rooted below a linked worktree must retain linked-worktree admission"
+        );
     }
 
     #[test]
