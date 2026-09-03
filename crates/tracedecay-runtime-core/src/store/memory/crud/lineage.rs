@@ -395,6 +395,18 @@ pub(super) async fn publish_current_projection(
     owner: &OwnerKey,
     batch: &FactWriteBatch,
 ) -> FactStoreResult<()> {
+    if batch.events().iter().enumerate().any(|(index, event)| {
+        index + 1 != batch.events().len()
+            && matches!(
+                event.kind(),
+                FactLineageEventKindV1::Curated {
+                    action: FactCurationActionV1::SupersededBy { .. },
+                    ..
+                }
+            )
+    }) {
+        return Err(FactStoreError::NonTerminalSupersession);
+    }
     let mut projection = load_current_projection(transaction, owner, batch.fact_id())
         .await?
         .unwrap_or(Projection::empty()?);

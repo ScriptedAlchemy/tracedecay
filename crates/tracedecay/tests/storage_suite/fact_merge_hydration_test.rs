@@ -872,6 +872,77 @@ async fn superseded_fact_leaves_current_views_but_retains_ordered_history() {
 }
 
 #[tokio::test]
+async fn supersession_must_be_the_terminal_event_in_a_write_batch() {
+    let test = setup_db().await;
+    let store = DatabaseFactStore::new(&test.db);
+    let owner = FactOwnerV1::Profile;
+    let source = commit_initial(
+        &store,
+        &owner,
+        "operation.fmh.supersession.non-terminal.source",
+        anchor(
+            ObservationScopeV1::Profile,
+            "entity.fmh.supersession.non-terminal.source",
+            "privacy.fmh.supersession.non-terminal",
+            PayloadAccessState::Eligible,
+            CoverageReportV1::default(),
+        ),
+        "old claim",
+        1_000,
+    )
+    .await;
+    let replacement = commit_initial(
+        &store,
+        &owner,
+        "operation.fmh.supersession.non-terminal.replacement",
+        anchor(
+            ObservationScopeV1::Profile,
+            "entity.fmh.supersession.non-terminal.replacement",
+            "privacy.fmh.supersession.non-terminal",
+            PayloadAccessState::Eligible,
+            CoverageReportV1::default(),
+        ),
+        "replacement claim",
+        2_000,
+    )
+    .await;
+    let supersession = supersession_batch(
+        &source.fact_id,
+        &owner,
+        &replacement.fact_id,
+        3_000,
+        "actor.fmh.supersession.non-terminal",
+        source.receipt.last_event_id(),
+    );
+    let retained = FactLineageEventV1::new(
+        source.fact_id.clone(),
+        owner.clone(),
+        FactLineageEventKindV1::Curated {
+            action: FactCurationActionV1::Retained,
+            evidence_ids: Vec::new(),
+        },
+        UtcMicros(3_001),
+        None,
+    )
+    .unwrap();
+    let batch = FactWriteBatch::new(
+        source.fact_id,
+        owner,
+        None,
+        vec![supersession.events()[0].clone(), retained],
+        Vec::new(),
+        Vec::new(),
+        Some(source.receipt.last_event_id().clone()),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        store.commit_fact(batch, &write_control()).await,
+        Err(FactStoreError::NonTerminalSupersession)
+    ));
+}
+
+#[tokio::test]
 async fn supersession_chains_replay_exactly_and_reject_repeated_sources() {
     let test = setup_db().await;
     let store = DatabaseFactStore::new(&test.db);

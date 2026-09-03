@@ -136,6 +136,20 @@ pub(super) fn publish_projection(
     owner: &OwnerColumns,
     batch: &FactWriteBatch,
 ) -> rusqlite::Result<()> {
+    if batch.events().iter().enumerate().any(|(index, event)| {
+        index + 1 != batch.events().len()
+            && matches!(
+                event.kind(),
+                FactLineageEventKindV1::Curated {
+                    action: FactCurationActionV1::SupersededBy { .. },
+                    ..
+                }
+            )
+    }) {
+        return Err(invalid(
+            "fact supersession must be the final event in its write batch",
+        ));
+    }
     let existing = savepoint
         .query_row(
             "SELECT payload_access, trust_score, active_assertion_id

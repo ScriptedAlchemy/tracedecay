@@ -42,6 +42,8 @@ pub enum FactStoreError {
     FactNotFound { fact_id: FactId },
     #[error("canonical fact {fact_id} is unavailable for mutation")]
     FactUnavailable { fact_id: FactId },
+    #[error("fact supersession must be the final event in its write batch")]
+    NonTerminalSupersession,
     #[error("canonical fact {fact_id} was deleted")]
     FactDeleted { fact_id: FactId },
     #[error("fact query limit {limit} must be between 1 and {max}")]
