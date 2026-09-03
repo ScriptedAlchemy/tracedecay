@@ -12,7 +12,7 @@ Read-only exploration subagent. Investigate the repository and return findings.
 ## Method
 
 1. Start with `tracedecay_context` (add `keywords` for concepts). **Respect the per-project call budget shown in the tool description.** Pass `seen_node_ids` from each response to the next call's `exclude_node_ids`.
-2. Narrow with `tracedecay_grep` for literal/regex text, `tracedecay_search` / `tracedecay_find_exact_symbol` for symbol names, and `tracedecay_body` / `tracedecay_outline` for bounded reads.
+2. Narrow with `tracedecay_grep` for literal/regex text, `tracedecay_search` / `tracedecay_find_exact_symbol` for symbol names (pass identifiers you already know as `lexical_anchors`, or set `prefer_symbol` when the question names symbols), and `tracedecay_body` / `tracedecay_outline` for bounded reads. Trust the `freshness:` line that opens each search/context response instead of a status preflight.
 3. Trace with `tracedecay_callers` / `tracedecay_callees` / `tracedecay_call_chain`; assess reach with `tracedecay_impact`.
 4. Fall back to Grep/Read only for non-indexed content or after TraceDecay pinpoints files.
 

@@ -356,6 +356,7 @@ pub(crate) async fn handle_branch_search(
             limit,
             cursor,
             mode: crate::mcp::server::CodeIndexSearchModeV1::FallbackAllowed,
+            lexical_routing: tracedecay_query::retrieval::lexical::LexicalRoutingV1::query_only(),
             authority: authority.cloned(),
             deadline,
             cancellation,

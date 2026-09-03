@@ -12,7 +12,8 @@ If there is even a 1% chance this workspace has a TraceDecay index, the graph, m
 | The moment you are in | Do this instead |
 |---|---|
 | Grep/rg a literal string, regex, or config key | `tracedecay_grep` — `tracedecay:exploring-code` |
-| Search a symbol/concept, or open a source file | `tracedecay_search` / `tracedecay_context`, then outline→body→read — `tracedecay:exploring-code` |
+| Search a symbol/concept, or open a source file | `tracedecay_search` / `tracedecay_context` (known identifiers → `lexical_anchors`; symbol-naming questions → `prefer_symbol`), then outline→body→read — `tracedecay:exploring-code` |
+| Wondering whether results are current | Read the `freshness:` line that opens every search/context response; no `tracedecay_status` preflight — `tracedecay:exploring-code` |
 | "Who calls X" / "what does X call" / "trace this" | `tracedecay:tracing-functions` |
 | What breaks / which tests to run | `tracedecay:assessing-impact` |
 | `gh pr diff` or read a raw diff to review | `tracedecay_pr_context` / `tracedecay_diff_context` (offline) — `tracedecay:reviewing-changes` |

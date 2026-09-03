@@ -20,6 +20,8 @@ row below, run it, and stop when the question is answered.
 | Literal string / regex / config key / error text | `tracedecay_grep` (`fixed_strings` for plain literals) | raw Grep/rg |
 | A code structure — call shape, argument order, expression form (e.g. `foo($$$)`, `if ($C) { $$$ }`) a text regex cannot pin down | `tracedecay_ast_grep_search` (in-process AST match; then `tracedecay_ast_grep_rewrite` via `tracedecay:editing-safely` to change matches) | multi-line regex guesses |
 | A symbol by exact name | `tracedecay_find_exact_symbol`, else `tracedecay_search` | Glob + open |
+| A concept plus identifiers you already know ("how does X work in `Foo::bar`") | one `tracedecay_search` / `tracedecay_context` call: natural-language `query`/`task` + `lexical_anchors: ["Foo::bar", ...]` (each anchor is its own ranked route fused with the query; max 8, one term each) | a search per identifier, then grep |
+| A question whose words name symbols ("where is reserve_stock validated") | `tracedecay_search` / `tracedecay_context` with `prefer_symbol: true` (adds a symbol-name route for the identifier-shaped words; `Foo::bar` contributes `bar`) | guessing exact names |
 | A concept / "how does X work" (names unknown) | `tracedecay_context` (`task` = the question, add `keywords` synonyms) | Explore agent |
 | A file by role or path | `tracedecay_files` | find/ls -R |
 | Half-remembered name | `tracedecay_similar` | guessing greps |
@@ -67,8 +69,20 @@ of falling back to a different project or worktree.
   budget in the tool description.
 - Truncated response with a `handle`? Narrow the query; call
   `tracedecay_retrieve` only if the omitted detail is needed. Never re-run broad.
-- Empty or stale-looking results → check `tracedecay_status` BEFORE concluding
-  the repo is unindexed; the index auto-syncs — do not run manual sync commands.
+- Every `tracedecay_search` / `tracedecay_context` response opens with
+  `freshness: fresh` or `freshness: possibly_stale` (followed by one
+  `indexing:` line naming the served generation, the scheduler state, and any
+  rebuild in flight). `fresh` → use the results; no `tracedecay_status`
+  preflight. `possibly_stale` → sufficient results are still usable; call
+  `tracedecay_status` only when the indexing line does not already answer
+  why. Never run manual sync commands — the index auto-syncs.
+- Empty results with `freshness: fresh` → the repo is indexed and the name is
+  wrong; retry with `lexical_anchors` / `prefer_symbol` or `tracedecay_similar`
+  before concluding the code does not exist.
+- Anchored results show ` · via anchor:<term>` / ` · via symbol:<token>` on
+  each hit and a `Lexical Routes` section, so you can see which route ranked
+  it. A cursor continuation must repeat the same `lexical_anchors` /
+  `prefer_symbol`; a different routing is a typed cursor mismatch.
 - Search came up empty and a new helper seems needed → run the
   `tracedecay:editing-safely` duplicate probe first.
 - Similarity by functionality/body, not just by name → run

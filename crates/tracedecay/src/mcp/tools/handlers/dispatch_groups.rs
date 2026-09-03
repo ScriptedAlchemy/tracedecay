@@ -503,6 +503,7 @@ fn dispatch_graph_tools_inner<'a>(
                     options.code_index_search_executor.as_ref(),
                     options.code_index_search_authority.as_ref(),
                     options.code_index_ignored_dependency_admission.as_deref(),
+                    options.code_index_freshness_reader.as_ref(),
                     options.application_deadline.clone(),
                     options.application_cancellation.clone(),
                 )
@@ -539,6 +540,7 @@ fn dispatch_graph_tools_inner<'a>(
                     selected_scope_prefix,
                     options.code_index_search_executor.as_ref(),
                     options.code_index_search_authority.as_ref(),
+                    options.code_index_freshness_reader.as_ref(),
                     options.application_deadline.clone(),
                     options.application_cancellation.clone(),
                 )
