@@ -6,11 +6,7 @@ mod quickbasic_tests {
     use tracedecay_domain::*;
 
     fn extract_fixture() -> ExtractionResult {
-        let source = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/sample.bi"
-        ))
-        .unwrap();
+        let source = std::fs::read_to_string("../../tests/fixtures/sample.bi").unwrap();
         let extractor = QuickBasicExtractor;
         let result = extractor.extract("sample.bi", &source);
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -52,8 +48,6 @@ mod quickbasic_tests {
             .iter()
             .filter(|n| n.kind == NodeKind::Function)
             .collect();
-        // SUBs: InitSystem, Shutdown, LogInit
-        // FUNCTION: GetStatus
         assert!(
             fns.len() >= 4,
             "expected >= 4 functions, got {}: {:?}",
@@ -174,7 +168,6 @@ mod quickbasic_tests {
 
     #[test]
     fn test_quickbasic_parses_redim_and_sleep() {
-        // Verify that QB4.5-specific statements (REDIM, SLEEP, ERASE) don't cause parse errors
         let source = r#"
 SUB Test
     REDIM arr(1 TO 10) AS INTEGER

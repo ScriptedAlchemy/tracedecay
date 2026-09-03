@@ -1,5 +1,12 @@
 # `tracedecay tool` CLI arguments, reimagined for the AI-agent consumer
 
+> **Archived record — not implementation authority.** This document preserves
+> historical intent and evidence. Current requirements come only from the
+> `docs/plans/tracedecay-v2/` hierarchy. Exact tests and counts, source-string
+> checks, branch/commit/worktree choreography, snapshots, receipts,
+> attestations, PR packets, and gate matrices below are not rebuild
+> instructions; validate current parser, runtime, and product behavior directly.
+
 Date: 2026-07-04
 Branch: `codex/cli-args-stdin` (PR #286, "Support stdin for tool args")
 Status: implemented on `codex/cli-args-stdin` — the branch now includes the
@@ -603,7 +610,7 @@ when it can't — before and after the changes.
 
 ### 7.1 Harness (existing, verified)
 
-`eval/hermetic/run.sh` builds this worktree's binary, stages it at a
+`evals/hermetic/run.sh` builds this worktree's binary, stages it at a
 non-cargo path, installs the plugin into an isolated
 `CLAUDE_CONFIG_DIR`/`CODEX_HOME`/`TRACEDECAY_DATA_DIR`, indexes a target
 project, then runs each corpus line via `claude -p … --model sonnet`
@@ -611,7 +618,7 @@ project, then runs each corpus line via `claude -p … --model sonnet`
 the isolated transcript with `score.py`. A scenario passes when every
 `expected_tools` fragment appears among MCP tool names, every
 `expected_cli` fragment appears among captured shell command strings, and
-no `anti_tools` appear (`score.py:203-231`; `eval/hermetic/README.md:87-110`).
+no `anti_tools` appear (`score.py:203-231`; `evals/hermetic/README.md:87-110`).
 The existing two-scenario corpus (`corpora/tool-args-ergonomics.jsonl`)
 already demonstrates the MCP-first vs CLI-fallback pattern; it stays
 untouched as a continuity check.
@@ -641,12 +648,12 @@ payloads; Codex command strings are captured equivalently
    (e.g. `git checkout -- lib.rs` in the fixture project) run before each
    rep.
 
-Corpus schema additions documented in `eval/hermetic/README.md:87-110`.
+Corpus schema additions documented in `evals/hermetic/README.md:87-110`.
 
 ### 7.3 Fixture
 
 A tiny dedicated fixture project (3–4 files, committed under
-`eval/hermetic/fixtures/tool-args/`, copied into the env and indexed by
+`evals/hermetic/fixtures/tool-args/`, copied into the env and indexed by
 `run.sh index`) rather than the tracedecay repo itself: edit scenarios
 must mutate files deterministically, and `verify_cmd`/`setup_cmd` need
 stable content. One file carries a function whose body contains a comma,
@@ -654,7 +661,7 @@ both quote characters, and a `$` — the quoting gauntlet. A second
 registered project (one file) is indexed to exercise `project_selector`.
 A >128 KiB `cargo-output.txt` fixture feeds the argv-cap scenario.
 
-### 7.4 Corpus: `eval/hermetic/corpora/tool-args-agent-path.jsonl`
+### 7.4 Corpus: `evals/hermetic/corpora/tool-args-agent-path.jsonl`
 
 All prompts begin from the same fiction the existing corpus uses
 ("Assume the TraceDecay MCP server is unavailable; use the tracedecay CLI
@@ -692,10 +699,10 @@ Per arm: `setup` → `index` (fixture + second project) → `run --corpus
 tool-args-agent-path.jsonl --reps 3` for `--agent claude --model sonnet`
 and `--agent codex`. 8 scenarios × 2 agents × 3 reps × 2 arms ≈ 96 short
 sessions — same manual, cost-gated posture as the existing harness (no
-CI; `eval/run_real_model.py` sets the precedent for explicit cost
+CI; `evals/memory/run_real_model.py` sets the precedent for explicit cost
 consent). Record per-arm `summary.md` pass rates and mean
 `tool_cmd_attempts`; store both as durable facts per the README's
-post-merge protocol (`eval/hermetic/README.md:144-158`).
+post-merge protocol (`evals/hermetic/README.md:144-158`).
 
 **Success bar:** Arm B ≥ Arm A on every scenario (majority-of-3 reps);
 the four trap scenarios (`array-of-pairs`, `multiline`, `enum`,

@@ -1,3 +1,4 @@
+use crate::AutomationRunRecord;
 use crate::backend::AgentTaskKind;
 
 #[derive(Debug, Clone, Copy)]
@@ -10,8 +11,11 @@ pub struct TaskArtifactPolicy {
 }
 
 impl TaskArtifactPolicy {
-    pub fn next_actions(self, accepted_count: usize) -> Vec<&'static str> {
-        if accepted_count > 0 {
+    pub fn next_actions<R>(self, record: &R) -> Vec<&'static str>
+    where
+        R: AutomationRunRecord + ?Sized,
+    {
+        if record.accepted_count() > 0 {
             self.accepted_next_actions.to_vec()
         } else {
             self.rejected_next_actions.to_vec()
@@ -30,52 +34,52 @@ impl TaskArtifactPolicy {
 pub fn artifact_policy(task: AgentTaskKind) -> TaskArtifactPolicy {
     match task {
         AgentTaskKind::MemoryCurator => TaskArtifactPolicy {
-            optimizer_action: "update memory curation evidence or apply policy",
+            optimizer_action: "update memory curation evidence or validation repair",
             accepted_next_actions: &[
-                "review accepted memory curation ops",
-                "apply through dashboard or CLI if approved",
+                "inspect autonomously applied memory curation outcomes",
+                "restore or roll back through administrative controls if needed",
             ],
             rejected_next_actions: &[
-                "review rejected curation reasons",
-                "collect more evidence before applying changes",
+                "inspect quarantined validation failures",
+                "collect stronger evidence before rerunning curation",
             ],
             handoff_test: "cargo test --test automation_runner_test memory_curator",
-            eval_replay_command: "cargo test --test automation_runner_test memory_curator_runner_validates_backend_ops_and_records_ledger -- --nocapture",
+            eval_replay_command: "cargo test --test automation_runner_test memory_curator_repairs_then_applies_validated_ops_and_records_ledger -- --nocapture",
         },
         AgentTaskKind::SessionReflector => TaskArtifactPolicy {
-            optimizer_action: "update fact proposal evidence or dedupe policy",
+            optimizer_action: "update automatic fact receipt evidence or dedupe policy",
             accepted_next_actions: &[
-                "inspect fact automation outcomes",
-                "apply or reject fact records only when explicitly reviewing",
+                "inspect automatically applied fact receipts and canonical fact ids",
+                "use administrative controls to restore or roll back automatic fact receipts if needed",
             ],
             rejected_next_actions: &[
-                "review rejected fact proposals",
+                "inspect quarantined automatic fact receipts",
                 "adjust evidence query before rerunning",
             ],
             handoff_test: "cargo test --test automation_runner_test session_reflector",
-            eval_replay_command: "cargo test --test automation_runner_test session_reflector_runner_auto_applies_valid_fact_proposals_by_default -- --nocapture",
+            eval_replay_command: "cargo test --test automation_runner_test session_reflector_runner_applies_valid_automatic_facts_by_default -- --nocapture",
         },
         AgentTaskKind::SkillWriter => TaskArtifactPolicy {
-            optimizer_action: "update skill writer evidence or draft validation",
+            optimizer_action: "update skill writer evidence or activation validation",
             accepted_next_actions: &[
-                "review managed skill drafts or auto-enabled changes",
-                "approve, disable, or archive through managed skill controls",
+                "inspect automatically activated managed skill changes",
+                "disable or archive through managed skill controls if needed",
             ],
             rejected_next_actions: &[
-                "review rejected skill proposals",
+                "inspect rejected skill validation outcomes",
                 "collect stronger usage evidence before rerunning",
             ],
             handoff_test: "cargo test --test automation_runner_test skill_writer",
-            eval_replay_command: "cargo test --test automation_runner_test skill_writer_runner_creates_pending_skill_drafts_for_approval -- --nocapture",
+            eval_replay_command: "cargo test --test automation_runner_test skill_writer_runner_activates_validated_skills -- --nocapture",
         },
         AgentTaskKind::CombinedReview => TaskArtifactPolicy {
-            optimizer_action: "update combined review evidence or per-task validation",
+            optimizer_action: "update combined automation evidence or per-task validation",
             accepted_next_actions: &[
-                "inspect fact automation outcomes and managed skill drafts",
-                "apply or reject fact records only when explicitly reviewing",
+                "inspect applied automatic fact receipts and activated managed skills",
+                "confirm the atomic commit receipt before consuming either automatic outcome",
             ],
             rejected_next_actions: &[
-                "review rejected fact and skill proposals",
+                "inspect rejected automatic fact and skill validation outcomes",
                 "collect more evidence before rerunning",
             ],
             handoff_test: "cargo test --test automation_runner_test combined_review",
@@ -84,11 +88,11 @@ pub fn artifact_policy(task: AgentTaskKind) -> TaskArtifactPolicy {
         AgentTaskKind::UserJob => TaskArtifactPolicy {
             optimizer_action: "update the job prompt, schedule, or delivery target",
             accepted_next_actions: &[
-                "review the delivered job output",
+                "inspect the delivered job output",
                 "adjust the job definition from the dashboard if needed",
             ],
             rejected_next_actions: &[
-                "review the job failure reason",
+                "inspect the job failure reason",
                 "adjust the job definition before the next scheduled run",
             ],
             handoff_test: "cargo test --test automation_runner_test jobs",

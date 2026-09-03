@@ -5,8 +5,8 @@
 //! (literal `${workspaceFolder}` path, uninitialized project, …) turns every
 //! later tool call in that session into "Timed out waiting for connection"
 //! until the user toggles the server or reloads the window. The stdio spawn
-//! happens outside tracedecay's control, so `tracedecay doctor --agent
-//! cursor` inspects Cursor's own logs to surface that failure class with
+//! happens outside tracedecay's control, so `tracedecay doctor` inspects
+//! Cursor's own logs to surface that failure class with
 //! concrete remediation.
 //!
 //! Everything here is best-effort: missing directories, unreadable files, and
@@ -17,12 +17,15 @@ use std::path::{Path, PathBuf};
 
 use super::DoctorCounters;
 
-const LEGACY_DEGRADED_SERVE_STDERR_MARKER: &str =
+/// Legacy marker recognized in existing Cursor logs by doctor diagnostics.
+///
+/// Proxy-only `serve` no longer emits it, but older logs remain actionable, so
+/// the scanner below still has to recognize it. The literal moved down here
+/// with the Cursor diagnostics that are its only reader; `serve` itself stays
+/// in the root crate. Root wiring: `src/serve.rs` re-exports this constant
+/// instead of declaring its own copy.
+pub const DEGRADED_SERVE_STDERR_MARKER: &str =
     "[tracedecay] serve: staying alive in degraded MCP mode";
-
-fn degraded_serve_stderr_marker() -> &'static str {
-    crate::ports::degraded_serve_stderr_marker().unwrap_or(LEGACY_DEGRADED_SERVE_STDERR_MARKER)
-}
 
 /// How many of the newest Cursor log sessions to scan. Each session directory
 /// corresponds to one Cursor launch; older sessions describe long-fixed runs.
@@ -39,9 +42,12 @@ pub(crate) struct CursorMcpLogFindings {
     /// Log lines where tracedecay was spawned with a literal, unexpanded
     /// `${workspaceFolder}` argument.
     pub literal_placeholder_lines: usize,
-    /// "Connection failed: MCP error -32000" lines — each one is a failed
-    /// spawn whose scope Cursor will never retry.
+    /// Failed MCP spawns whose scope Cursor will not retry, including generic
+    /// connection closure and managed-daemon transport failures.
     pub connection_failures: usize,
+    /// Connection failures where the stdio shim reached the managed daemon,
+    /// but the daemon socket reset or broke before initialization completed.
+    pub daemon_transport_failures: usize,
     /// Legacy degraded-mode marker lines retained in recent Cursor logs.
     pub degraded_mode_notices: usize,
     /// Log files (newest session first) that contained at least one finding.
@@ -55,6 +61,7 @@ impl CursorMcpLogFindings {
     pub(crate) fn has_findings(&self) -> bool {
         self.literal_placeholder_lines > 0
             || self.connection_failures > 0
+            || self.daemon_transport_failures > 0
             || self.degraded_mode_notices > 0
     }
 }
@@ -96,11 +103,18 @@ pub(crate) fn scan_cursor_mcp_logs(logs_root: &Path) -> CursorMcpLogFindings {
                     findings.literal_placeholder_lines += 1;
                     affected = true;
                 }
-                if line.contains("Connection failed: MCP error -32000") {
+                let daemon_transport_failure = line.contains("Connection failed: MCP error -32603")
+                    && line.contains("TraceDecay daemon connection failed")
+                    && (line.contains("Broken pipe") || line.contains("Connection reset by peer"));
+                if line.contains("Connection failed: MCP error -32000") || daemon_transport_failure
+                {
                     findings.connection_failures += 1;
                     affected = true;
                 }
-                if line.contains(degraded_serve_stderr_marker()) && !stale_ambiguity {
+                if daemon_transport_failure {
+                    findings.daemon_transport_failures += 1;
+                }
+                if line.contains(DEGRADED_SERVE_STDERR_MARKER) && !stale_ambiguity {
                     findings.degraded_mode_notices += 1;
                     affected = true;
                 }
@@ -120,7 +134,7 @@ fn stale_degraded_ambiguity(contents: &str) -> bool {
     let ambiguity = &contents[ambiguity_start..];
     let mut paths = Vec::new();
     for line in ambiguity.lines().skip(1) {
-        if line.contains(degraded_serve_stderr_marker()) {
+        if line.contains(DEGRADED_SERVE_STDERR_MARKER) {
             break;
         }
         let trimmed = line.trim();
@@ -140,6 +154,7 @@ pub(crate) fn report_cursor_mcp_log_findings(dc: &mut DoctorCounters, home: &Pat
         let scanned = scan_cursor_mcp_logs(&root);
         findings.literal_placeholder_lines += scanned.literal_placeholder_lines;
         findings.connection_failures += scanned.connection_failures;
+        findings.daemon_transport_failures += scanned.daemon_transport_failures;
         findings.degraded_mode_notices += scanned.degraded_mode_notices;
         findings.scanned_any_log |= scanned.scanned_any_log;
         findings.affected_logs.extend(scanned.affected_logs);
@@ -166,6 +181,15 @@ pub(crate) fn report_cursor_mcp_log_findings(dc: &mut DoctorCounters, home: &Pat
              retries a failed MCP server, so affected sessions report \"Timed out waiting \
              for connection\" on every tool call",
             findings.connection_failures
+        ));
+    }
+    if findings.daemon_transport_failures > 0 {
+        dc.info(&format!(
+            "    {} failure(s) reached the managed daemon but its socket reset or broke; \
+             run `tracedecay daemon status` and \
+             `journalctl --user -u tracedecay.service` to check for saturation, restart, \
+             or OOM evidence before reloading Cursor",
+            findings.daemon_transport_failures
         ));
     }
     if findings.degraded_mode_notices > 0 {
@@ -280,6 +304,11 @@ mod tests {
 2026-07-02 02:46:22.474 [warning] Connection failed: MCP error -32000: Connection closed\n\
 2026-07-02 02:46:23.271 [info] Successfully connected to stdio server\n";
 
+    const LIVE_DAEMON_RESET_LOG: &str = "\
+2026-07-19 18:37:52.834 [info] connecting stdio for \"tracedecay\" (plugin-tracedecay-tracedecay)\n\
+2026-07-19 18:37:52.979 [warning] Connection failed: MCP error -32603: TraceDecay daemon connection failed: io error: Broken pipe (os error 32)\n\
+2026-07-19 18:37:54.946 [warning] Connection failed: MCP error -32603: TraceDecay daemon connection failed: io error: Connection reset by peer (os error 104)\n";
+
     #[test]
     fn scan_detects_literal_placeholder_and_connection_failure() {
         let logs = TempDir::new().unwrap();
@@ -299,8 +328,26 @@ mod tests {
         assert!(findings.has_findings());
     }
 
+    #[test]
+    fn scan_detects_daemon_transport_failures_that_cursor_caches() {
+        let logs = TempDir::new().unwrap();
+        write_session_log(
+            logs.path(),
+            "20260719T183752",
+            "mcp-server-plugin-tracedecay-tracedecay.log",
+            LIVE_DAEMON_RESET_LOG,
+        );
+
+        let findings = scan_cursor_mcp_logs(logs.path());
+        assert!(findings.scanned_any_log);
+        assert_eq!(findings.connection_failures, 2);
+        assert_eq!(findings.daemon_transport_failures, 2);
+        assert_eq!(findings.affected_logs.len(), 1);
+        assert!(findings.has_findings());
+    }
+
     /// The scanner must match the exact marker older `serve` versions emitted;
-    /// `degraded_serve_stderr_marker` retains that legacy log contract.
+    /// [`DEGRADED_SERVE_STDERR_MARKER`] retains that legacy log contract.
     #[test]
     fn scan_detects_degraded_mode_notice() {
         let logs = TempDir::new().unwrap();
@@ -309,8 +356,8 @@ mod tests {
             "20260702T030000",
             "mcp-server-plugin-tracedecay-tracedecay.log",
             &format!(
-                "2026-07-02 03:00:00.000 [warning] {} — MCP handshake will complete\n",
-                degraded_serve_stderr_marker(),
+                "2026-07-02 03:00:00.000 [warning] {DEGRADED_SERVE_STDERR_MARKER} — MCP \
+                 handshake will complete\n"
             ),
         );
 
@@ -334,10 +381,9 @@ mod tests {
                  projects found — pass -p <path> to select one:\n\
                    {}\n\
                    {}\n\
-                 {} — MCP handshake will complete\n",
+                 {DEGRADED_SERVE_STDERR_MARKER} — MCP handshake will complete\n",
                 repo.display(),
-                stale_worktree.display(),
-                degraded_serve_stderr_marker(),
+                stale_worktree.display()
             ),
         );
 
@@ -363,10 +409,9 @@ mod tests {
                  projects found — pass -p <path> to select one:\n\
                    {}\n\
                    {}\n\
-                 {} — MCP handshake will complete\n",
+                 {DEGRADED_SERVE_STDERR_MARKER} — MCP handshake will complete\n",
                 repo.display(),
-                worktree.display(),
-                degraded_serve_stderr_marker(),
+                worktree.display()
             ),
         );
 

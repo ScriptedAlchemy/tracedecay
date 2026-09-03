@@ -2,7 +2,43 @@
 name = "tracedecay-capture"
 version = "0.1.0"
 publish = false
-edition = "2024"
+edition.workspace = true
+license = "MIT"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+homepage = "https://github.com/ScriptedAlchemy/tracedecay"
+description = "Bounded event capture primitives for TraceDecay"
+readme = "README.md"
+keywords = ["ai", "code-intelligence", "observability", "capture"]
+categories = ["development-tools", "parsing"]
+include = ["/src/**", "/tests/**", "/README.md"]
 
-[lib]
-path = "src/lib.rs"
+[features]
+# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
+# the feature off, so instrumented call sites compile identically both ways.
+hotpath = [
+    "tracedecay-domain/hotpath",
+    "hotpath/hotpath",
+    "tracedecay-store/hotpath",
+]
+hotpath-alloc = [
+    "tracedecay-domain/hotpath-alloc",
+    "hotpath",
+    "hotpath/hotpath-alloc",
+    "tracedecay-store/hotpath-alloc",
+]
+hotpath-cpu = [
+    "tracedecay-domain/hotpath-cpu",
+    "hotpath",
+    "hotpath/hotpath-cpu",
+    "tracedecay-store/hotpath-cpu",
+]
+
+[dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
+hex = "0.4"
+hotpath.workspace = true
+serde_json = "1"
+sha2 = "0.11"
+thiserror = "2"
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }

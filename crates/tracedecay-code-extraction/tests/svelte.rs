@@ -110,10 +110,7 @@ interface Props {
 
 #[test]
 fn test_svelte_fixture() {
-    let source = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.svelte"
-    ));
+    let source = include_str!("../fixtures/sample.svelte");
     let result = SvelteExtractor.extract("sample.svelte", source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let names: Vec<_> = result.nodes.iter().map(|n| n.name.as_str()).collect();
@@ -132,7 +129,6 @@ fn test_svelte_fixture() {
         "expected prerender const in {:?}",
         names
     );
-    // Props interface
     assert!(
         names.contains(&"Props"),
         "expected Props interface in {:?}",

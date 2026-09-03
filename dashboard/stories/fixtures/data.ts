@@ -1,0 +1,4514 @@
+/**
+ * Canonical fixture payloads for the dashboard `/api` surfaces. These stand in
+ * for a running daemon so the visual audit and DOM/MSW tests never require the
+ * live API to be up. Both the MSW handlers (`handlers.ts`) and the
+ * Playwright route interceptor (`route.ts`) resolve from this single source, so
+ * fixtures stay consistent across test transports.
+ *
+ * Shapes are hand-matched, endpoint by endpoint, to the Rust producers in
+ * `src/dashboard/*`, and two suites hold them there: `data.test.ts` parses
+ * every fixture against the generated contract for its route, and
+ * `src/workspaces/endpoint-fixtures.test.ts` parses it against what the
+ * consuming workspace decodes and how densely the surface needs it populated.
+ * Every route the 12 workspaces read is modeled with data-dense, wire-true
+ * payloads so audited surfaces render populated content rather than empty /
+ * "unsupported schema" states.
+ *
+ * Determinism: fixtures never call `Math.random`; array shapes derive from the
+ * row index, so the parse-gate test and screenshots are stable across runs.
+ * Wall-clock (`nowSecs` / `nowMicros`) is the only time source, matching the
+ * pre-existing fixtures.
+ */
+
+const nowSecs = Math.floor(Date.now() / 1000);
+const nowMicros = Date.now() * 1000;
+const DAY = 86_400;
+
+const PLAN26_OBSERVATORY_METRICS = [
+  'adoption_eligible',
+  'adoption_enabled',
+  'adoption_available',
+  'adoption_invoked',
+  'adoption_terminal',
+  'adoption_independently_useful',
+  'adoption_repeat_useful',
+  'adoption_correct_abstention',
+  'adoption_censored_outcomes',
+  'adoption_unknown_outcomes',
+  'retriever_consumed_candidates',
+  'retriever_returned_candidates',
+  'retriever_candidate_rank',
+  'retriever_unique_contributions',
+  'retrieval_planner_span_p95',
+  'retrieval_fanout_span_p95',
+  'retrieval_synthesis_span_p95',
+  'retrieval_context_precision',
+  'retrieval_task_outcome_linkage',
+  'retrieval_equal_budget_ablation',
+  'operation_latency_p50',
+  'operation_latency_p95',
+  'operation_latency_p99',
+  'queue_span_p95',
+  'store_lock_span_p95',
+  'index_lock_span_p95',
+  'provider_negotiation_span_p95',
+  'process_rss_peak',
+  'cpu_time_total',
+  'io_amplification',
+  'no_progress_outcomes',
+  'accepted_budget_revision',
+  'comparison_baseline_build',
+  'comparison_candidate_build',
+  'comparison_workload_corpus',
+  'comparison_environment_platform',
+  'comparison_oracle',
+  'comparison_rollback_profile',
+  'comparison_outcome_counts',
+  'comparison_stratum_support',
+  'comparison_intervals',
+  'comparison_calibration',
+  'comparison_risk_coverage',
+  'comparison_flaky_indeterminate',
+  'comparison_deviations',
+  'comparison_paired_outcomes',
+  'analytics_share_staging_age_seconds',
+  'analytics_egress_failures',
+] as const;
+
+/** Cyclic array access with a non-undefined element type (fixtures always index
+ * a non-empty constant array, so the bounds are known-good). */
+function pick<T>(arr: readonly T[], i: number): T {
+  return arr[((i % arr.length) + arr.length) % arr.length]!;
+}
+
+/** DashboardEnvelopeV1 wrapper (see DashboardEnvelopeV1Schema in generated.ts). */
+function envelope<T>(
+  payload: T,
+  domainState = 'ready',
+  legalActions: ReadonlyArray<Record<string, unknown>> = [
+    { kind: 'refresh', operation: 'storage.refresh' },
+  ],
+): Record<string, unknown> {
+  return {
+    schema_revision: 1,
+    scope: {
+      project_id: 'tracedecay',
+      storage_mode: 'project',
+      store_root: '/fast/projects/tracedecay/.tracedecay',
+    },
+    version: { entity_version: 'v-42', graph_version: 'g-42' },
+    time: { valid_time_micros: nowMicros, observation_time_micros: nowMicros },
+    source_watermark: { source: 'daemon', watermark: 'wm-42' },
+    authorization: { outcome: 'authorized' },
+    coverage: {
+      completeness: 'complete',
+      eligible: 12,
+      examined: 12,
+      matched: 12,
+      excluded: 0,
+      omitted: 0,
+      unknown: 0,
+      denominator: 12,
+      unit: 'stores',
+      omission_reasons: [],
+    },
+    freshness: { state: 'fresh', observed_at_micros: nowMicros, watermark: 'wm-42' },
+    domain_state: domainState,
+    legal_actions: legalActions,
+    payload,
+  };
+}
+
+/** A canonical read that has no safe payload until its owning authority mounts. */
+function unavailableEnvelope(reason: string): Record<string, unknown> {
+  return {
+    ...envelope(null, 'unknown', []),
+    coverage: {
+      completeness: 'unknown',
+      eligible: null,
+      examined: null,
+      matched: null,
+      excluded: null,
+      omitted: null,
+      unknown: null,
+      denominator: null,
+      unit: 'records',
+      omission_reasons: [reason],
+    },
+    freshness: { state: 'unknown', observed_at_micros: null, watermark: null },
+  };
+}
+
+function projectEntry(
+  id: string,
+  label: string,
+  root: string,
+  ageSecs: number,
+  mass?: { stores: number; artifacts: number },
+): Record<string, unknown> {
+  return {
+    project_id: id,
+    label,
+    project_root: root,
+    canonical_root: root,
+    kind: 'git',
+    default_branch: 'master',
+    branches: ['master', 'codex/tracedecay-total-redesign-plan'],
+    store_count: mass?.stores ?? 3,
+    artifact_count: mass?.artifacts ?? 7,
+    alias_count: 1,
+    last_seen_at: nowSecs - ageSecs,
+    is_active: id === 'tracedecay',
+  };
+}
+
+/**
+ * The real registry is dozens of repositories with one checkout each, spread
+ * across months of last-contact and three orders of magnitude of indexed mass.
+ * Brain's field is a composition OF that spread, so a three-repo fixture could
+ * not exercise it: every audited screenshot would show one column and tell a
+ * reviewer nothing about the layout being reviewed. These entries are generated
+ * from the same `projectEntry` shape as the hand-written ones above (so they
+ * stay gated by the parse test), and their ages and masses are derived from the
+ * index — deterministic, never random — to land bodies in every recency column
+ * and across the mass axis.
+ */
+const SYNTHETIC_REPOS: ReadonlyArray<{
+  name: string;
+  ageSecs: number;
+  mass: number;
+  branches: number;
+}> =
+  [
+    'rslint', 'vite-rsbuild', 'mold', 'core', 'ai-train', 'browser-linux',
+    'cargo-slot', 'ci-runner-orchestrator', 'claude-code', 'codex-cli',
+    'graphology-fork', 'hermes-lcm', 'lynx-stack', 'module-federation',
+    'nextjs-app', 'rspack', 'sigma-fork', 'turbo-cache', 'wasm-host',
+    'zed-extensions', 'polars-bench', 'sqlite-vfs', 'tokio-probe',
+  ].map((name, index) => ({
+    name,
+    // 0.6h · 1.9 ^ index — a geometric spread from "minutes ago" out past a
+    // year, so every recency column is occupied and none is crowded.
+    ageSecs: Math.round(2_160 * 1.9 ** index),
+    // Masses that cycle through four magnitudes rather than tracking age, so
+    // the two axes stay independent and the field is not a diagonal line.
+    mass: [1, 4, 9, 22, 58, 140, 310][index % 7]!,
+    // Branch counts spanning the real registry's range (1 to 242 on the
+    // owner's profile) rather than the flat `['main']` this fixture used to
+    // give every repository. The Delivery field's y axis is a log of this
+    // number; with every repo on one branch the axis was a single line and the
+    // scale was never exercised. Cycled on a different period from `mass` so
+    // branch count and indexed mass stay independent measurements.
+    branches: [1, 3, 71, 8, 242, 20, 2, 56, 5, 36, 10][index % 11]!,
+  }));
+
+/** Branch names for a repository, shaped like a real one: `main`, then a
+ * spread of the prefixes this registry actually carries. */
+function branchNames(count: number): string[] {
+  const prefixes = ['feat', 'fix', 'refactor', 'test', 'wt', 'integrate'];
+  return [
+    'main',
+    ...Array.from(
+      { length: Math.max(count - 1, 0) },
+      (_, index) => `${prefixes[index % prefixes.length]}/branch-${index}`,
+    ),
+  ];
+}
+
+function syntheticGroup(repo: {
+  name: string;
+  ageSecs: number;
+  mass: number;
+  branches: number;
+}) {
+  const root = `/fast/projects/${repo.name}`;
+  return {
+    label: repo.name,
+    git_common_dir: `${root}/.git`,
+    project_count: 1,
+    branches: branchNames(repo.branches),
+    projects: [
+      {
+        ...projectEntry(`proj_${repo.name}`, repo.name, root, repo.ageSecs, {
+          stores: 1,
+          artifacts: Math.max(1, repo.mass),
+        }),
+        kind: 'primary',
+      },
+    ],
+  };
+}
+
+/** GET /api/projects — brain/delivery registry (`DashboardEnvelopeV1<
+ * ProjectsPayloadV1>`; src/dashboard/projects.rs `list`). */
+const projectTree: ReadonlyArray<Record<string, unknown>> = [
+    {
+      label: 'tracedecay',
+      git_common_dir: '/fast/projects/tracedecay/.git',
+      project_count: 2,
+      branches: ['master', 'codex/tracedecay-total-redesign-plan'],
+      projects: [
+        { ...projectEntry('tracedecay', 'tracedecay', '/fast/projects/tracedecay', 900), kind: 'primary' },
+        {
+          ...projectEntry(
+            'tracedecay-wt',
+            'tracedecay (worktree)',
+            '/fast/projects/tracedecay-wt',
+            6 * DAY,
+          ),
+          kind: 'worktree',
+        },
+      ],
+    },
+    {
+      label: 'lynx-module-federation',
+      git_common_dir: '/fast/projects/lynx/.git',
+      project_count: 1,
+      branches: ['main'],
+      projects: [
+        { ...projectEntry('lynx-mf', 'lynx-module-federation', '/fast/projects/lynx', 40 * DAY), kind: 'primary' },
+      ],
+    },
+    {
+      label: 'hermes',
+      git_common_dir: '/fast/projects/hermes/.git',
+      project_count: 1,
+      branches: ['main', 'release/2.4'],
+      projects: [
+        { ...projectEntry('hermes', 'hermes', '/fast/projects/hermes', 2 * DAY), kind: 'primary' },
+      ],
+    },
+    ...SYNTHETIC_REPOS.map(syntheticGroup),
+    // Registry entries that are NOT git checkouts. TraceDecay indexes plain
+    // directories too, and eight of the forty-four entries on the owner's real
+    // profile are in this class. Their branch count is UNKNOWN, not zero, and
+    // the Delivery field draws them in a fenced band below the measured plot —
+    // so the fixture has to contain some, or that band never renders under
+    // audit and the distinction goes unverified.
+    {
+      label: '.hermes',
+      git_common_dir: null,
+      project_count: 1,
+      branches: [],
+      projects: [
+        {
+          ...projectEntry('proj_hermes_home', '.hermes', '/home/zack/.hermes', 20 * DAY, {
+            stores: 1,
+            artifacts: 3,
+          }),
+          kind: 'project',
+          default_branch: null,
+        },
+      ],
+    },
+    {
+      label: 'notes',
+      git_common_dir: null,
+      project_count: 1,
+      branches: [],
+      projects: [
+        {
+          ...projectEntry('proj_notes', 'notes', '/home/zack/notes', 3 * DAY, {
+            stores: 1,
+            artifacts: 1,
+          }),
+          kind: 'project',
+          default_branch: null,
+        },
+      ],
+    },
+];
+
+/** `projects.rs` answers with BOTH shapes: the grouped `project_tree` the Brain
+ * field draws, and a flat `projects` list of `PublicCodeProject` — a narrower
+ * record with `created_at`, `display_root` and `git_common_dir` that the
+ * registry entries do not carry. Derived from the tree so the two views can
+ * never disagree about which projects exist. */
+const flatProjects: ReadonlyArray<Record<string, unknown>> = projectTree.flatMap((group) =>
+  (group['projects'] as ReadonlyArray<Record<string, unknown>>).map((entry) => ({
+    project_id: entry['project_id'],
+    label: entry['label'],
+    project_root: entry['project_root'],
+    canonical_root: entry['canonical_root'],
+    display_root: entry['project_root'],
+    git_common_dir: group['git_common_dir'],
+    default_branch: entry['default_branch'],
+    created_at: (entry['last_seen_at'] as number) - 30 * DAY,
+    last_seen_at: entry['last_seen_at'],
+    is_active: entry['is_active'],
+  })),
+);
+
+const projectsPayload: Record<string, unknown> = {
+  status: 'ok',
+  limit: 100,
+  truncated: false,
+  projects: flatProjects,
+  active_project_id: 'tracedecay',
+  active_project_root: '/fast/projects/tracedecay',
+  summary: {
+    // tracedecay (2 checkouts) + lynx + hermes + the two non-git entries.
+    project_count: 6 + SYNTHETIC_REPOS.length,
+    repo_count: 5 + SYNTHETIC_REPOS.length,
+    truncated: false,
+  },
+  project_tree: projectTree,
+};
+
+/* ==========================================================================
+ * /api/plugins/holographic/ — memory overview + facts + entities
+ * (memory_api.rs::overview; facts.rs fact_summary_json / entity_json /
+ * overview_payload / trust_histogram). Consumed by KnowledgePage
+ * (MemoryOverviewPayloadV1Schema) and ExplorerPage memory source.
+ * ========================================================================== */
+
+const FACT_CATEGORIES = [
+  'project',
+  'decision',
+  'code_area',
+  'tool',
+  'user_pref',
+  'general',
+] as const;
+
+const FACT_CONTENTS = [
+  'For native split Lynx Module Federation remotes, the external .lynx.bundle must encode both the background container entry and a main-thread synthetic container entry.',
+  'Lynx Module Federation CI separates native and Web Linux jobs so Rspeedy builds and browser setup run in parallel.',
+  'The non-eager startup failure was a registration race, not a malformed lazy bundle — the shared background chunk is a valid Webpack {ids, modules} chunk.',
+  'The Orbit Control demo exercises three genuine Module Federation consumption forms without eager shares.',
+  'Web and native public-path contracts differ; Web builds set output.assetPrefix to auto.',
+  'The iOS GitHub Actions job uses pinned actions/cache v5 restore/save for one atomic exact-key cache.',
+  'Concurrent agents share the repo target/; waiting on cargo’s directory lock is expected.',
+  'Never add --locked to local or agent Cargo commands; CI and packaging own lockfile reproducibility.',
+  'Route literal/regex text to tracedecay_grep, symbol names to tracedecay_search, and concepts to tracedecay_context.',
+  'Prefer file-edit tools over inline python heredocs for on-disk changes.',
+  'Detach long verification runs and poll with Monitor; keep an ~1h budget in the main session.',
+  'Record durable facts by feature+date in one doc so sibling commits never trigger a redo.',
+  'The storage boundary routes repository reads through the runtime port after sole-daemon ownership lands.',
+  'Compaction defaults to gpt-5.6-terra with extra-high reasoning for LCM summarization.',
+  'Empty and Unavailable temporal roots are distinct; do not collapse them in the registry mapping.',
+  'Binary slot staleness manifests as stale hook logs; check the resolved graph DB path first.',
+  'Pathspec-scoped commits (git commit -- <paths>) avoid sweeping others’ staged work in shared trees.',
+  'Hook-driven incremental indexing triggers on agent hooks; gix reconciles lazily without always-on watchers.',
+] as const;
+
+const FACT_TAGS = [
+  ['lynx', 'module-federation'],
+  ['ci', 'linux'],
+  ['startup', 'federation'],
+  ['demo', 'orbit'],
+  ['web', 'native'],
+  ['ios', 'cache'],
+  ['cargo', 'concurrency'],
+  ['cargo', 'lockfile'],
+  ['tracedecay', 'routing'],
+  ['tooling'],
+  ['verification'],
+  ['memory'],
+  ['storage'],
+  ['compaction'],
+  ['registry'],
+  ['ci', 'debug'],
+  ['git'],
+  ['indexing'],
+] as const;
+
+/** Deterministic trust spread across [0.08, 0.99], intentionally uneven so the
+ * histogram and the trust bars read as a real distribution rather than a ramp. */
+const TRUST_SPREAD = [
+  0.99, 0.97, 0.96, 0.94, 0.91, 0.88, 0.86, 0.82, 0.79, 0.74, 0.71, 0.66, 0.62,
+  0.58, 0.53, 0.49, 0.44, 0.4, 0.36, 0.31, 0.27, 0.22, 0.19, 0.16, 0.13, 0.1,
+  0.09, 0.08,
+] as const;
+
+function memoryFacts() {
+  return TRUST_SPREAD.map((trust, i) => {
+    const helpful = 12 - (i % 9);
+    const unhelpful = i % 4;
+    const createdAtMicros = nowMicros - (i + 3) * DAY * 1_000_000;
+    return {
+      fact_id: `fact.${'a'.repeat(64)}.${i.toString(16).padStart(64, '0')}`,
+      payload_access: 'eligible',
+      trust_score: trust,
+      retrieval_count: 60 - i * 2 + (i % 3) * 4,
+      access_count: 90 - i * 2,
+      helpful_count: Math.max(helpful, 0),
+      unhelpful_count: unhelpful,
+      created_at: createdAtMicros,
+      updated_at: createdAtMicros + (i % 5) * DAY * 1_000_000,
+      projected_as_of: nowMicros,
+      last_recalled_at: i % 6 === 5 ? null : nowMicros - i * 3_600_000_000,
+      content: FACT_CONTENTS[i % FACT_CONTENTS.length],
+      category: FACT_CATEGORIES[i % FACT_CATEGORIES.length],
+      tags: FACT_TAGS[i % FACT_TAGS.length],
+      entities: [],
+      linked_entities: null,
+      metadata: {},
+      source_label: 'story-fixture',
+    };
+  });
+}
+
+/** 10 fixed-width buckets (facts.rs trust_histogram), counts bucketed from the
+ * trust spread above so the distribution stays internally consistent. */
+function trustHistogram(facts: Record<string, unknown>[]): Record<string, unknown>[] {
+  const counts = new Array(10).fill(0) as number[];
+  for (const fact of facts) {
+    const idx = Math.min(9, Math.floor(Number(fact['trust_score']) * 10));
+    counts[idx] = (counts[idx] ?? 0) + 1;
+  }
+  return counts.map((count, i) => ({
+    bucket: i,
+    label: `${(i / 10).toFixed(1)}–${((i + 1) / 10).toFixed(1)}`,
+    count,
+  }));
+}
+
+const ENTITY_NAMES: ReadonlyArray<readonly [string, number]> = [
+  ['Module Federation', 34],
+  ['Rspeedy', 21],
+  ['tracedecay', 58],
+  ['ForceAtlas2', 6],
+  ['rusqlite', 14],
+  ['axum', 19],
+  ['GitHub Actions', 27],
+  ['LCM store', 31],
+  ['holographic memory', 40],
+  ['Sigma', 8],
+  ['gpt-5.6-terra', 11],
+  ['cargo', 24],
+];
+
+function memoryEntities(): Record<string, unknown>[] {
+  return ENTITY_NAMES.map(([name, factCount]) => ({
+    entity_id: name,
+    name,
+    fact_count: factCount,
+  }));
+}
+
+function memoryPayload(query = ''): Record<string, unknown> {
+  const facts = memoryFacts();
+  const entities = memoryEntities();
+  const graphNodes = facts.map((fact) => ({
+    id: `fact:${fact.fact_id}`,
+    kind: 'fact',
+    label: fact.content,
+    fact_id: fact.fact_id,
+    payload_access: fact.payload_access,
+    projected_as_of: fact.projected_as_of,
+    content: fact.content,
+    category: fact.category,
+    trust_score: fact.trust_score,
+    retrieval_count: fact.retrieval_count,
+    helpful_count: fact.helpful_count,
+  }));
+  return {
+    providers: {
+      memory_provider: 'tracedecay',
+      memory_options: [
+        {
+          name: 'tracedecay',
+          description: 'TraceDecay holographic memory store (resolved project memory_facts).',
+        },
+      ],
+      context_engine: 'tracedecay',
+      context_options: [],
+      plugin_context_engine: null,
+      curator_tools: { enabled: false, count: 0, available: 0, tools: [] },
+    },
+    query,
+    limit: 100,
+    holographic: {
+      path: '/fast/projects/tracedecay/.tracedecay/memory.db',
+      exists: true,
+      overview: {
+        facts: 4128,
+        entities: 612,
+        categories: FACT_CATEGORIES.map((category, i) => ({
+          category,
+          count: 900 - i * 120,
+        })),
+        trust_histogram: trustHistogram(facts),
+        growth: Array.from({ length: 12 }, (_, i) => {
+          const facts = 30 + i * 6 + (i % 3) * 5;
+          return {
+            date: new Date((nowSecs - (11 - i) * 7 * DAY) * 1000).toISOString().slice(0, 10),
+            facts,
+            cumulative_facts: 3200 + i * 78,
+          };
+        }),
+      },
+      facts,
+      entities,
+      graph: {
+        nodes: graphNodes,
+        edges: [],
+        coverage: {
+          completeness: 'unknown',
+          eligible: null,
+          examined: null,
+          matched: null,
+          excluded: null,
+          omitted: null,
+          unknown: null,
+          denominator: null,
+          unit: null,
+          omission_reasons: ['fact_universe_bounded'],
+        },
+        fact_universe_count: 4128,
+        fact_candidates_examined: facts.length,
+        unavailable_fact_candidates: 0,
+        root_count: facts.length,
+        relation_limit: 100,
+        relation_count: 0,
+      },
+      // Per-read outcome, seeded `pending` and overwritten as each of the three
+      // reads lands (memory_api.rs::overview). All three succeeded here.
+      reads: {
+        facts: { state: 'ready' },
+        entities: { state: 'ready' },
+        graph: { state: 'ready' },
+      },
+      // The fixture carries only a bounded projection of the eligible facts,
+      // so the current coverage contract reports that partial observation.
+      facts_coverage: {
+        completeness: 'partial',
+        limit: 100,
+        examined: facts.length,
+        eligible: 4128,
+      },
+      error: '',
+    },
+  };
+}
+
+/* ==========================================================================
+ * /api/plugins/graph/* — overview / search / subgraph
+ * (graph_service.rs overview_payload / search_payload / subgraph_payload;
+ * graph_queries.rs NODE_COLUMNS, edge_rows_for_ids, top_connected_rows).
+ * Consumed by CodePage (GraphOverview/GraphSearch/Subgraph) and ExplorerPage.
+ * ========================================================================== */
+
+const GRAPH_KINDS = [
+  'function',
+  'method',
+  'struct',
+  'trait',
+  'module',
+  'enum',
+  'impl',
+  'field',
+] as const;
+
+const GRAPH_FILES = [
+  'src/dashboard/graph_service.rs',
+  'src/dashboard/lcm_api.rs',
+  'src/dashboard/memory_api.rs',
+  'src/dashboard/mod.rs',
+  'src/storage/runtime.rs',
+  'src/automation/scheduler.rs',
+  'dashboard/src/app/routes.tsx',
+  'dashboard/src/workspaces/code/CodePage.tsx',
+] as const;
+
+/**
+ * Realistic symbol names, cycled by node index. The audit's Code and Explorer
+ * shots print these in the most-connected list, the search results and the
+ * canvas labels — `sym_0`-style placeholders there would put a fixture
+ * artifact into every review screenshot where a plausible daemon symbol
+ * belongs. Names are invented but shaped like this codebase's own.
+ */
+const GRAPH_SYMBOL_NAMES = [
+  'subgraph_payload',
+  'resolve_scope',
+  'StoreLayout',
+  'EvidenceRef',
+  'graph_service',
+  'RetentionConfig',
+  'ScopedStore',
+  'watermark_at',
+  'overview_payload',
+  'attach_degrees',
+  'DoctorReport',
+  'TelemetryRead',
+  'scheduler_tick',
+  'lease_renewal',
+  'SessionLedger',
+  'compose_report',
+  'edge_rows_for_ids',
+  'neighbors_payload',
+  'GraphGeneration',
+  'BudgetEvaluation',
+  'ingest_refusal',
+  'store_size_sample',
+  'CaptureRuntime',
+  'HookOutcome',
+  'search_payload',
+  'rank_candidates',
+  'ProjectRegistry',
+  'WorktreeIdentity',
+  'apply_migration',
+  'collect_findings',
+  'AnchorIndex',
+  'SpanEvidence',
+  'route_dispatch',
+  'validate_grant',
+  'LcmSummaryNode',
+  'TrustHistogram',
+  'commit_batch',
+  'sweep_orphans',
+  'QueryDeadline',
+  'FreshnessGate',
+] as const;
+
+/**
+ * Every `GraphNodeV1` key at its absent value.
+ *
+ * A query that selects a subset of `NODE_COLUMNS` still deserializes into the
+ * full struct, so the columns it left out reach the browser as explicit nulls.
+ * Spreading this first is what keeps a partial row wire-true instead of merely
+ * short.
+ */
+const GRAPH_NODE_ABSENT = {
+  name: null,
+  qualified_name: null,
+  file_path: null,
+  start_line: null,
+  end_line: null,
+  start_column: null,
+  end_column: null,
+  attrs_start_line: null,
+  doc: null,
+  signature: null,
+  visibility: null,
+  is_async: null,
+  branches: null,
+  loops: null,
+  returns: null,
+  max_nesting: null,
+  unsafe_blocks: null,
+  unchecked_calls: null,
+  assertions: null,
+  updated_at: null,
+  parent_id: null,
+  degree: null,
+  span: null,
+  edge_kind: null,
+  edge_line: null,
+} as const;
+
+/**
+ * One node exactly as `GraphNodeV1` serializes it.
+ *
+ * Every key is present because none of the Rust fields is
+ * `skip_serializing_if`: an absent column reaches the browser as an explicit
+ * null, not as a missing key. The metric columns are SQLite integers, so
+ * `is_async` is 0/1 rather than a boolean — a fixture that sent `true` here
+ * would be testing the surface against a payload the daemon cannot produce.
+ * `edge_kind` and `edge_line` are null on every row except the caller/callee
+ * rows of the neighbors route, which set them per edge.
+ */
+function graphNode(i: number, prefix: string, degree: number): Record<string, unknown> {
+  const kind = pick(GRAPH_KINDS, i);
+  const file = pick(GRAPH_FILES, i);
+  const name = pick(GRAPH_SYMBOL_NAMES, i);
+  const startLine = 40 + i * 7;
+  const callable = kind === 'function' || kind === 'method';
+  return {
+    id: `${prefix}-${i}`,
+    kind,
+    name,
+    qualified_name: `${file.replace(/[/.]/g, '::')}::${name}`,
+    file_path: file,
+    start_line: startLine,
+    end_line: startLine + 12 + (i % 20),
+    start_column: 0,
+    end_column: 4,
+    attrs_start_line: startLine - 1,
+    doc: i % 3 === 0 ? `Doc for ${name}.` : null,
+    signature: callable ? `fn ${name}(state: &DashboardState) -> Value` : null,
+    visibility: i % 4 === 0 ? 'pub' : 'pub(crate)',
+    is_async: i % 5 === 0 ? 1 : 0,
+    // Complexity columns are extracted for callables only; everything else
+    // carries the nulls the extractor left behind.
+    branches: callable ? i % 7 : null,
+    loops: callable ? i % 3 : null,
+    returns: callable ? 1 + (i % 2) : null,
+    max_nesting: callable ? 1 + (i % 4) : null,
+    unsafe_blocks: callable ? 0 : null,
+    unchecked_calls: callable ? i % 5 : null,
+    assertions: callable ? i % 2 : null,
+    updated_at: 1_784_000_000 + i * 37,
+    parent_id: i % 6 === 0 ? null : `${prefix}-${Math.max(i - (i % 6), 0)}`,
+    degree,
+    span: {
+      start_line: startLine,
+      end_line: startLine + 12 + (i % 20),
+      start_column: 0,
+      end_column: 4,
+      attrs_start_line: startLine - 1,
+    },
+    edge_kind: null,
+    edge_line: null,
+  };
+}
+
+/** Deterministic hub-and-cluster subgraph: a few high-degree hubs, overlapping
+ * clusters, and a long tail — visually interesting for the Sigma canvas on
+ * /code (graph_service.rs default_subgraph). */
+interface BaseGraph {
+  nodes: Record<string, unknown>[];
+  edges: Record<string, unknown>[];
+  degreeById: Map<string, number>;
+  adjacency: Map<string, Set<string>>;
+}
+
+function buildBaseGraph(): BaseGraph {
+  const NODE_COUNT = 40;
+  const ids = Array.from({ length: NODE_COUNT }, (_, i) => `sym-${i}`);
+  const edgeSet = new Set<string>();
+  const edges: Record<string, unknown>[] = [];
+  const addEdge = (a: number, b: number, kind: string) => {
+    if (a === b) return;
+    const key = `${ids[a]}→${ids[b]}→${kind}`;
+    if (edgeSet.has(key)) return;
+    edgeSet.add(key);
+    // `edge_rows_for_ids` groups on (source, target, kind) and never joins
+    // `nodes`, so the subgraph's edges carry null names — unlike the neighbors
+    // route, which does resolve them.
+    edges.push({
+      source: ids[a],
+      target: ids[b],
+      kind,
+      line: 20 + ((a * 7 + b) % 300),
+      source_name: null,
+      target_name: null,
+    });
+  };
+
+  // Four hubs radiating to overlapping ranges of leaves.
+  for (let i = 4; i < 16; i += 1) addEdge(0, i, 'calls');
+  for (let i = 12; i < 24; i += 1) addEdge(1, i, 'calls');
+  for (let i = 22; i < 32; i += 1) addEdge(2, i, 'references');
+  for (let i = 30; i < 40; i += 1) addEdge(3, i, 'calls');
+  // Inter-hub spine.
+  const spine: ReadonlyArray<readonly [number, number]> = [
+    [0, 1], [1, 2], [2, 3], [0, 2], [0, 3], [1, 3],
+  ];
+  for (const [a, b] of spine) addEdge(a, b, 'references');
+  // Cluster tails + a few long-range links for texture.
+  for (let i = 4; i < 39; i += 3) addEdge(i, i + 1, 'references');
+  for (let i = 5; i < 40; i += 4) addEdge(i, (i * 7) % NODE_COUNT, 'calls');
+  for (let i = 6; i < 40; i += 5) addEdge(i, (i * 3 + 2) % NODE_COUNT, 'contains');
+
+  const degreeById = new Map<string, number>(ids.map((id) => [id, 0]));
+  const adjacency = new Map<string, Set<string>>(ids.map((id) => [id, new Set<string>()]));
+  for (const edge of edges) {
+    const s = edge['source'] as string;
+    const t = edge['target'] as string;
+    degreeById.set(s, (degreeById.get(s) ?? 0) + 1);
+    degreeById.set(t, (degreeById.get(t) ?? 0) + 1);
+    adjacency.get(s)?.add(t);
+    adjacency.get(t)?.add(s);
+  }
+
+  const nodes = ids.map((id, i) => graphNode(i, 'sym', degreeById.get(id) ?? 0));
+  return { nodes, edges, degreeById, adjacency };
+}
+
+const BASE_GRAPH = buildBaseGraph();
+
+/* ---- GET /api/plugins/graph/node/{id}/neighbors -------------------------
+ *
+ * Wire-true against `graph_service.rs::neighbors_payload`, which composes
+ * three `graph_queries.rs` reads. The shape details this fixture exists to
+ * reproduce, because the TRACE drill-in derives every figure it prints from
+ * them:
+ *
+ *  - `caller_rows` / `callee_rows` select `NODE_COLUMNS_N` plus `edge_kind`
+ *    and `edge_line`, filtered to `e.kind = 'calls'`, joined through `edges`.
+ *    So they emit ONE ROW PER EDGE: a caller with four call sites appears
+ *    four times, same node columns, different `edge_line`. The call-site
+ *    count of a pair is the number of its rows, and nothing else on the wire
+ *    carries it.
+ *  - each row then passes through `node_with_span` (adds `span`) and
+ *    `attach_degrees` (adds `degree`, the node's total in+out edge count over
+ *    ALL edge kinds — 0 when the node has none).
+ *  - `neighborhood_edge_rows` returns `source, target, kind, line,
+ *    source_name, target_name` for every edge kind where `source = ?1 OR
+ *    target = ?1`. That WHERE clause is why a `contains` row in this payload
+ *    always has the requested node as one endpoint: it is the container OF
+ *    the requested node, never a sibling's container.
+ *  - `neighborhood_edge_counts` groups the same incident set by kind.
+ *
+ * The generated neighbourhood is deterministic in the node id, so hop-2
+ * expansion (the drill-in fetches its hop-1 neighbours' neighbours) resolves
+ * to a stable field for the audit and the DOM tests.
+ */
+
+function fixtureHash(value: string): number {
+  let hash = 0;
+  for (let i = 0; i < value.length; i += 1) hash = (hash * 31 + value.charCodeAt(i)) >>> 0;
+  return hash;
+}
+
+/** Container pool, so several neighbours share an enclosure and the drill-in
+ * can derive a membrane from real `contains` rows rather than from guesswork. */
+const GRAPH_CONTAINERS = [
+  { id: 'impl-retrieval', name: 'impl RetrievalService' },
+  { id: 'impl-graph-routes', name: 'impl GraphRoutes' },
+  { id: 'trait-context-source', name: 'trait ContextSource' },
+] as const;
+
+interface NeighborPair {
+  readonly index: number;
+  readonly id: string;
+  readonly calls: number;
+}
+
+/** The distinct neighbours of a node on one side, with their call-site counts. */
+function neighborPairs(nodeId: string, side: 'callers' | 'callees'): NeighborPair[] {
+  const hash = fixtureHash(`${nodeId}:${side}`);
+  const count = 3 + (hash % 5);
+  const pairs: NeighborPair[] = [];
+  const seen = new Set<number>();
+  for (let i = 0; i < count; i += 1) {
+    const index = (hash + i * 11 + (side === 'callers' ? 0 : 5)) % 40;
+    if (seen.has(index)) continue;
+    seen.add(index);
+    // Call sites per pair: power-law-ish, one dominant channel then a tail —
+    // the shape a real `calls` edge multiset has, and what makes the channel
+    // widths and spring stiffnesses on this surface tellable apart.
+    const id = `sym-${index}`;
+    pairs.push({ index, id, calls: 1 + (fixtureHash(`${nodeId}->${id}:${side}`) % 11) });
+  }
+  return pairs;
+}
+
+/** GET /api/plugins/graph/node/{node_id}/neighbors. */
+function neighborsPayload(nodeId: string, limit: number): Record<string, unknown> {
+  const callerPairs = neighborPairs(nodeId, 'callers');
+  const calleePairs = neighborPairs(nodeId, 'callees');
+  const edges: Record<string, unknown>[] = [];
+  const byKind = new Map<string, number>();
+  const bump = (kind: string) => byKind.set(kind, (byKind.get(kind) ?? 0) + 1);
+
+  const expand = (pairs: NeighborPair[], side: 'callers' | 'callees') =>
+    pairs.flatMap((pair) => {
+      const degree = BASE_GRAPH.degreeById.get(pair.id) ?? 0;
+      const base = graphNode(pair.index, 'sym', degree);
+      return Array.from({ length: pair.calls }, (_, site) => {
+        const line = 60 + pair.index * 13 + site * 4;
+        edges.push({
+          source: side === 'callers' ? pair.id : nodeId,
+          target: side === 'callers' ? nodeId : pair.id,
+          kind: 'calls',
+          line,
+          source_name: side === 'callers' ? base['name'] : nodeId,
+          target_name: side === 'callers' ? nodeId : base['name'],
+        });
+        bump('calls');
+        return { ...base, edge_kind: 'calls', edge_line: line };
+      });
+    });
+
+  const callers = expand(callerPairs, 'callers').slice(0, limit);
+  const callees = expand(calleePairs, 'callees').slice(0, limit);
+
+  // The container OF this node — one `contains` row, with this node as the
+  // target, exactly as the endpoint's `source = ?1 OR target = ?1` filter
+  // allows. Membranes on the drill-in are the transitive result of collecting
+  // these across the focus and its expanded neighbours.
+  const container = pick(GRAPH_CONTAINERS, fixtureHash(nodeId) % 3);
+  edges.push({
+    source: container.id,
+    target: nodeId,
+    kind: 'contains',
+    line: 12,
+    source_name: container.name,
+    target_name: nodeId,
+  });
+  bump('contains');
+  // One non-call, non-contains kind, so a consumer that assumes `edges` is
+  // homogeneous fails here rather than in production.
+  edges.push({
+    source: nodeId,
+    target: `sym-${(fixtureHash(nodeId) + 3) % 40}`,
+    kind: 'references',
+    line: 240,
+    source_name: nodeId,
+    target_name: `sym_${(fixtureHash(nodeId) + 3) % 40}`,
+  });
+  bump('references');
+
+  return {
+    node_id: nodeId,
+    depth: 1,
+    limit,
+    callers,
+    callees,
+    edges: edges.slice(0, limit),
+    edges_by_kind: [...byKind]
+      .map(([kind, count]) => ({ kind, count }))
+      .sort((a, b) => b.count - a.count || a.kind.localeCompare(b.kind)),
+  };
+}
+
+/** GET /api/plugins/graph/subgraph[?node_id=]. Unseeded returns the full hub
+ * overview (mode "default"); a node_id returns that node’s neighborhood
+ * (mode "seeded"), matching graph_service.rs subgraph_payload. */
+// `coerce_limit(params.limit_nodes, 80, 250)` / `(params.limit_edges, 120,
+// 500)` in graph_api.rs: the defaults are 80 and 120, not 40. The Code
+// workspace now prints these limits in the canvas caption, so a wrong number
+// here would be a wrong number on screen.
+function subgraphPayload(nodeId: string | null): Record<string, unknown> {
+  if (!nodeId) {
+    return {
+      seed_id: null,
+      mode: 'default',
+      nodes: BASE_GRAPH.nodes,
+      edges: BASE_GRAPH.edges,
+      capped: { nodes: false, edges: false },
+      limits: { nodes: 80, edges: 120 },
+    };
+  }
+  const neighbors = BASE_GRAPH.adjacency.get(nodeId);
+  if (!neighbors) {
+    return {
+      seed_id: null,
+      mode: 'seeded',
+      nodes: [],
+      edges: [],
+      capped: { nodes: false, edges: false },
+      limits: { nodes: 80, edges: 120 },
+    };
+  }
+  const keep = new Set<string>([nodeId, ...neighbors]);
+  const nodes = BASE_GRAPH.nodes.filter((n) => keep.has(n['id'] as string));
+  const edges = BASE_GRAPH.edges.filter(
+    (e) => keep.has(e['source'] as string) && keep.has(e['target'] as string),
+  );
+  return {
+    seed_id: nodeId,
+    mode: 'seeded',
+    nodes,
+    edges,
+    capped: { nodes: false, edges: false },
+    limits: { nodes: 40, edges: 120 },
+  };
+}
+
+function graphOverviewPayload(): Record<string, unknown> {
+  // top_connected: highest-degree hubs first. This row set had drifted away
+  // from its own stated contract — it emitted 18 full node records, while
+  // `graph_queries::top_connected_rows` selects exactly FIVE columns from a
+  // `LIMIT 12` subquery and never joins `qualified_name`. The Code workspace
+  // renders these rows directly, so the audit was judging a payload the daemon
+  // cannot produce. Restored to the real shape, including the real curve:
+  // degree in a symbol graph is power-law, not linear — one run-away hub, a
+  // steep fall, then near-ties bunching at the bottom of the twelve.
+  //
+  // The row still deserializes into the whole `GraphNodeV1`, so the twenty-two
+  // columns the query never asked for go out as nulls rather than as absent
+  // keys. Only those five carry a value.
+  //
+  // The NAMES matter as much as the degrees, and `hub_0 … hub_11` hid the
+  // single hardest thing about this row set. On a real Rust graph the most
+  // connected symbols are language primitives and one-word generics — `path`,
+  // `json`, `u64`, `Value`, `trim`, `kind` — and two of the owner's twelve are
+  // literally the same word in different files. `top_connected_rows` does not
+  // serve `qualified_name`, so the file is the ONLY thing that can tell them
+  // apart, and a fixture of unique invented names meant the card never had to.
+  const HUBS: ReadonlyArray<readonly [string, string, string, number]> = [
+    ['path', 'function', 'src/dashboard/graph_api.rs', 1840],
+    ['path', 'method', 'src/automation/skill_materialization.rs', 1461],
+    ['json', 'function', 'crates/tracedecay-rusqlite-runtime/src/repair/sqlite.rs', 1218],
+    ['Value', 'enum_variant', 'src/dashboard/code_diagnostics_api.rs', 1093],
+    ['u64', 'method', 'src/application/session/refresh.rs', 837],
+    ['as_str', 'method', 'src/memory/types.rs', 811],
+    ['trim', 'function', 'scripts/render-codex-hook-inputs.py', 704],
+    ['i64', 'method', 'src/application/session/refresh.rs', 551],
+    ['kind', 'method', 'crates/tracedecay-tool-catalog/src/profile.rs', 546],
+    ['find_direct_child_by_kind', 'function', 'src/extraction/traversal.rs', 545],
+    ['test', 'annotation_usage', 'src/branch/admin/tests.rs', 399],
+    ['u32', 'impl', 'src/db/engine/value.rs', 390],
+  ];
+  const topConnected = HUBS.map(([name, kind, file_path, degree], i) => ({
+    ...GRAPH_NODE_ABSENT,
+    id: `${kind}:hub-${i}`,
+    name,
+    kind,
+    file_path,
+    degree,
+  }));
+  return {
+    totals: { nodes: 12_873, edges: 41_206, files: 642 },
+    nodes_by_kind: [
+      { kind: 'function', count: 4210 },
+      { kind: 'method', count: 3180 },
+      { kind: 'struct', count: 1420 },
+      { kind: 'field', count: 1380 },
+      { kind: 'impl', count: 980 },
+      { kind: 'trait', count: 540 },
+      { kind: 'enum', count: 470 },
+      { kind: 'module', count: 393 },
+    ],
+    edges_by_kind: [
+      { kind: 'calls', count: 21_400 },
+      { kind: 'references', count: 12_600 },
+      { kind: 'contains', count: 5_206 },
+      { kind: 'implements', count: 2_000 },
+    ],
+    files_by_language: [
+      { language: 'rust', count: 512 },
+      { language: 'typescript', count: 96 },
+      { language: 'toml', count: 18 },
+      { language: 'markdown', count: 16 },
+    ],
+    top_connected: topConnected,
+    largest_files: GRAPH_FILES.map((path, i) => ({
+      path,
+      node_count: 420 - i * 30,
+      size: 84_000 - i * 6_000,
+    })),
+    path: '/fast/projects/tracedecay/.tracedecay/graph.db',
+  };
+}
+
+/** ≥250 rows so CodePage / ExplorerPage exercise list virtualization. */
+function graphSearchPayload(query = ''): Record<string, unknown> {
+  const results = Array.from({ length: 260 }, (_, i) =>
+    graphNode(i, 'match', 120 - Math.floor(i / 3)),
+  );
+  return {
+    query,
+    limit: 100,
+    offset: 0,
+    total: 1043,
+    count: results.length,
+    results,
+  };
+}
+
+/**
+ * `/api/plugins/graph/path` (graph_api.rs::path). Consumed by `SymbolPath`.
+ *
+ * A found route, because the absent one is the trivial shape and the found one
+ * is where the panel can lie. Two things about it are deliberate:
+ *
+ * - the hops do NOT all run forwards. `find_path` walks bidirectionally, so a
+ *   real route regularly reaches a node through an edge pointing back at its
+ *   predecessor; a fixture of uniformly forward edges would let a panel that
+ *   ignores direction pass every audit.
+ * - the edge kinds are NOT all `calls`. This route searches every kind, which
+ *   is the entire difference between it and `/api/plugins/graph/call-chain`,
+ *   and a calls-only fixture would erase that difference in every shot.
+ *
+ * `max_depth` is the route's own default (`coerce_limit(params.max_depth, 6,
+ * 10)`), since the panel prints it verbatim in the negative case.
+ */
+function graphPathPayload(): Record<string, unknown> {
+  const nodes = [graphNode(3, 'match', 118), graphNode(11, 'match', 96), graphNode(24, 'match', 71)];
+  const ids = nodes.map((node) => node['id'] as string);
+  return {
+    from: ids[0],
+    to: ids[2],
+    found: true,
+    path: ids,
+    nodes,
+    edges: [
+      { kind: 'calls', line: 212, source: ids[0], target: ids[1], source_name: nodes[0]?.['name'] ?? null, target_name: nodes[1]?.['name'] ?? null },
+      // Reversed against the walk: the third symbol imports the second, and the
+      // route reaches it by traversing that edge backwards.
+      { kind: 'imports', line: null, source: ids[2], target: ids[1], source_name: nodes[2]?.['name'] ?? null, target_name: nodes[1]?.['name'] ?? null },
+    ],
+    max_depth: 6,
+  };
+}
+
+/* ==========================================================================
+ * /api/plugins/savings/overview (savings_api.rs::overview). Consumed by
+ * CostsPage (SavingsOverviewPayloadV1Schema).
+ * ========================================================================== */
+
+/**
+ * Per-project lifetime savings at the SHAPE the real ledger has, not a smooth
+ * ramp.
+ *
+ * On a machine where every worktree of one repository shares a cache, every
+ * worktree records almost exactly the same lifetime saving: twenty of the
+ * owner's twenty-five rows sit within a few percent of 1.80B. The fixture used
+ * to ramp evenly from 8.4M down to 1.1M, which made twenty-five equal-length
+ * rails look like a legitimate ranking in every audit shot. Two rows genuinely
+ * deviate — the primary checkout above and a small unrelated repository well
+ * below — and those are the only rows worth drawing.
+ */
+const SAVINGS_PROJECTS: ReadonlyArray<readonly [string, number]> = [
+  ['/fast/projects/tracedecay', 2_939_894_592],
+  ['/fast/projects/tracedecay/.worktrees/sqlite-storage-runtime', 2_140_723_247],
+  ['/fast/projects/tracedecay/.worktrees/live-repair', 2_078_590_272],
+  ['/fast/projects/tracedecay/.worktrees/runtime-hardening', 1_946_100_344],
+  ['/fast/projects/tracedecay/.worktrees/pr8-migration', 1_831_192_520],
+  ['/fast/projects/tracedecay/.worktrees/pr8-acceptance-runner', 1_824_171_535],
+  ['/fast/projects/tracedecay/.worktrees/pr8-live-tools', 1_824_065_209],
+  ['/fast/projects/tracedecay/.worktrees/pr8-move-symbol', 1_802_722_260],
+  ['/fast/projects/tracedecay/.worktrees/pr8-kernel', 1_801_796_023],
+  ['/fast/projects/tracedecay/.worktrees/plan-topology-integration', 1_799_923_909],
+  ['/fast/projects/tracedecay/.worktrees/pr8-refresh', 1_799_813_188],
+  ['/fast/projects/tracedecay/.worktrees/pr8-runtime', 1_799_356_160],
+  ['/fast/projects/tracedecay/.worktrees/pr8-compat', 1_796_821_496],
+  ['/fast/projects/tracedecay/.worktrees/plan-dashboard', 1_799_400_112],
+  ['/fast/projects/tracedecay/.worktrees/plan-task-runtime', 1_799_402_004],
+  ['/fast/projects/tracedecay/.worktrees/plan-lsp-hooks', 1_799_398_771],
+  ['/fast/projects/tracedecay/.worktrees/plan-git-stack', 1_799_401_330],
+  ['/fast/projects/tracedecay/.worktrees/plan-policy-anchors', 1_799_399_006],
+  ['/fast/projects/tracedecay/.worktrees/pr8-automation', 1_799_400_845],
+  ['/fast/projects/tracedecay/.worktrees/pr8-benchmark', 1_799_397_612],
+  ['/fast/projects/tracedecay/.worktrees/pr8-transport', 1_799_400_501],
+  ['/fast/projects/tracedecay/.worktrees/pr8-context', 1_799_400_009],
+  ['/fast/projects/lynx', 1_802_004_118],
+  ['/fast/projects/hermes', 1_796_100_530],
+  ['/fast/projects/tracedecay-astgrep', 380_112_004],
+];
+
+/**
+ * `unavailable_provider_latency` from the canonical Costs projector. The
+ * mounted Savings/Costs callers do not pass a project scope to the latency
+ * projector; that absence must remain a typed latency result, never an
+ * omitted field.
+ */
+function unavailableProviderLatency(horizon: Record<string, number>): Record<string, unknown> {
+  const reason = 'provider_latency_scope_unavailable';
+  const provenance = {
+    source: 'observability_envelope',
+    source_revision: 'operation-resource-observation.v1',
+    projector_revision: 'costs-provider-latency-projector.v1',
+    watermark: 'analytics:unavailable',
+  };
+  const metric = (stage: string, percentile: number) => ({
+    descriptor_revision: 'provider-latency.v1',
+    metric: `provider_${stage}_latency_p${percentile}`,
+    value: null,
+    unit: 'microseconds',
+    denominator: 'provider_operation_resource_observations',
+    denominator_value: null,
+    coverage: {
+      state: 'unknown',
+      eligible: null,
+      observed: 0,
+      completed: 0,
+      censored: 0,
+      excluded: 0,
+      unknown: 1,
+    },
+    evidence_class: 'measurement',
+    provenance,
+    cohort: {
+      descriptor_revision: 'provider_operation_resource_observations.v1',
+      eligible_population: 'provider_operation_resource_observations',
+    },
+    temporal: { horizon, baseline_watermark: null, delta: null },
+    uncertainty: { lower: null, upper: null, reason },
+    calibration: null,
+    unavailable_reason: reason,
+  });
+  const distribution = (stage: string) => ({
+    p50: metric(stage, 50),
+    p95: metric(stage, 95),
+    p99: metric(stage, 99),
+  });
+  return {
+    provider: null,
+    model: null,
+    identity_provenance: provenance,
+    identity_unavailable_reason: reason,
+    queue: distribution('queue'),
+    start: distribution('start'),
+    first_progress: distribution('first_progress'),
+    service: distribution('service'),
+    terminal: distribution('terminal'),
+  };
+}
+
+function savingsPayload(): Record<string, unknown> {
+  const sum = (saved: number, calls: number) => ({ saved_tokens: saved, calls });
+  return {
+    savings: {
+      available: true,
+      db: '/home/zack/.tracedecay/global.db',
+      error: null,
+      recording: { enabled: true, mode: 'auto' },
+      ledger: {
+        today: sum(27_897_298, 222),
+        last_7d: sum(1_850_569_717, 52_371),
+        last_30d: sum(4_410_909_252, 134_767),
+        all_time: sum(4_902_796_408, 147_230),
+      },
+      lifetime_counters: {
+        total_tokens_saved: SAVINGS_PROJECTS.reduce((sum, [, saved]) => sum + saved, 0),
+        projects: SAVINGS_PROJECTS.map(([path, tokens_saved]) => ({ path, tokens_saved })),
+        // `savings_api` lists at most `PROJECT_LIMIT` (25) project rows and
+        // reports the true distinct-project count beside them, so the surface
+        // can say how many it is not showing.
+        project_total: SAVINGS_PROJECTS.length,
+        projects_limit: 25,
+        projects_truncated: false,
+      },
+    },
+    // Session content sizing and provider billing evidence remain separate.
+    sessions: {
+      available: true,
+      db: '/fast/projects/tracedecay/.tracedecay/sessions.db',
+      scope: 'profile_sharded',
+      // `status`/`error` carry `read_failed` and a message when the session
+      // ledger read fails; a successful read leaves both null.
+      status: null,
+      error: null,
+      session_count: 6_054,
+      model_count: 41,
+      unknown_model_messages: 187_066,
+      token_counting: true,
+      messages: 1_751_214,
+      provider_usage_events: 57_704,
+      tokenized_messages: 0,
+      estimated_messages: 1_612_897,
+      cost_basis: 'estimated',
+      provider_actual: {
+        cache_read_tokens: 365_936_726_111,
+        cache_write_tokens: 243_694_418,
+        input_tokens: 7_256_407_982,
+        output_tokens: 858_386_349,
+      },
+      estimated: {
+        input_tokens: 118_484_292,
+        output_tokens: 51_104_049,
+      },
+      tokenized: { input_tokens: 0, output_tokens: 0 },
+    },
+    provider_usage: {
+      available: true,
+      status: null,
+      error: null,
+      usage_event_count: 57_704,
+      total_cost_usd: 8148.9744974,
+      total_tokens: 683_965_063,
+      cost_basis: 'provider_reported_priced',
+    },
+    pricing: {
+      source: 'bundled',
+      revision: 'sha256:fixture-pricing',
+      fetched_at: null,
+      offline: true,
+      model_count: 214,
+    },
+    costs: costsReadModel(),
+  };
+}
+
+/** The canonical Costs projection embedded by `savings_api::overview`.
+ * Savings and exact project provider usage come from separate retained stores;
+ * the composite read reuses one provider aggregate for every sibling panel. */
+function costsReadModel(): Record<string, unknown> {
+  const observedAtMicros = nowMicros;
+  const horizon = { since_micros: 0, until_micros: observedAtMicros };
+  const accountingWatermark = 'provider-usage:57704';
+  const savingsWatermark = 'savings:1784052117';
+  const known = (eligible: number) => ({
+    eligible,
+    observed: eligible,
+    completed: eligible,
+    censored: 0,
+    unknown: 0,
+    excluded: 0,
+    state: 'known',
+  });
+  const measurement = (
+    metric: string,
+    value: number | null,
+    unit: string,
+    denominator: string,
+    coverage: Record<string, unknown>,
+    source: string,
+    sourceRevision: string,
+    watermark: string,
+    unavailableReason: string | null,
+  ) => ({
+    descriptor_revision: 'provider-costs.v1',
+    metric,
+    value,
+    unit,
+    denominator,
+    denominator_value: coverage['eligible'],
+    coverage,
+    evidence_class: 'measurement',
+    provenance: {
+      source,
+      source_revision: sourceRevision,
+      projector_revision: 'costs-projector.v1',
+      watermark,
+    },
+    cohort: { descriptor_revision: `${denominator}.v1`, eligible_population: denominator },
+    temporal: { horizon, baseline_watermark: null, delta: null },
+    uncertainty:
+      value === null
+        ? { lower: null, upper: null, reason: unavailableReason }
+        : { lower: value, upper: value, reason: null },
+    calibration: null,
+    unavailable_reason: unavailableReason,
+  });
+  return {
+    authorized_scope_ref: 'all',
+    horizon,
+    watermark: `${accountingWatermark};${savingsWatermark}`,
+    observed_at_micros: observedAtMicros,
+    // The mounted route has no project scope for the latency projector, so
+    // its canonical latency cohort is unknown and the composite is not current.
+    current: false,
+    usage: [
+      measurement(
+        'provider_tokens',
+        683_965_063,
+        'tokens',
+        'provider_usage_observations',
+        known(57_704),
+        'provider_usage_observation',
+        'provider-usage-observation.v1',
+        accountingWatermark,
+        null,
+      ),
+      measurement(
+        'saved_tokens',
+        4_902_796_408,
+        'tokens',
+        'eligible_savings_calls',
+        known(147_230),
+        'savings_ledger',
+        'savings-ledger.v1',
+        savingsWatermark,
+        null,
+      ),
+    ],
+    estimated_cost: [
+      measurement(
+        'provider_cost',
+        8148.9744974,
+        'usd',
+        'priced_provider_usage_observations',
+        known(57_704),
+        'provider_usage_observation',
+        'provider-usage-observation.v1',
+        accountingWatermark,
+        null,
+      ),
+    ],
+    latency: [unavailableProviderLatency(horizon)],
+    pricing_revision: 'sha256:fixture-pricing',
+  };
+}
+
+/* ==========================================================================
+ * /api/plugins/analytics/{usage,hints} (analytics_api.rs usage_summary /
+ * hint_summary_from_events). Consumed by AgentsPage (UsagePayload/HintsPayload).
+ * ========================================================================== */
+
+/**
+ * The categories `usage_summary_from_events` actually emits, at the
+ * proportions a real store actually holds them in (captured 2026-07-25).
+ *
+ * This replaces a sixteen-row fixture that ramped smoothly from 1,840 to 86 —
+ * a distribution no analytics store produces, and one that let a linear bar
+ * chart look perfectly reasonable in every audit shot while the real payload
+ * (6,774 against 1) rendered eleven invisible slivers. `record_event_usage`
+ * only ever categorizes `tool`, `mcp_tool_call` and `skill` events, and on
+ * this profile that resolves to exactly four buckets, one of which carries
+ * nine tenths of them.
+ */
+const USAGE_ROWS: ReadonlyArray<readonly [string, string, number]> = [
+  ['tool', 'tracedecay_mcp', 6774],
+  ['tool', 'memory', 643],
+  ['tool', 'lcm_session', 52],
+  ['skill', 'workflow_skill', 1],
+];
+
+function analyticsUsagePayload(): Record<string, unknown> {
+  return {
+    available: true,
+    source: 'analytics_events',
+    // `ANALYTICS_EVENT_LIMIT`, not a total, and deliberately larger than the
+    // categorized sum: the remaining events are hook routing, which carries no
+    // tool or skill name to bucket.
+    message_count: 10_000,
+    event_count: 10_000,
+    by_category: USAGE_ROWS.map(([kind, category, evts]) => ({ kind, category, events: evts })),
+  };
+}
+
+const HINT_CATEGORIES = [
+  'search',
+  'semantic_search',
+  'file_read',
+  'broad_read',
+  'call_graph',
+  'impact',
+  'symbol_lookup',
+  'file_lookup',
+  'explore_subagent',
+  'subagent_start_context',
+] as const;
+
+/** GET /api/plugins/analytics/agents (analytics_api::agents). */
+function analyticsAgentsPayload(): Record<string, unknown> {
+  return {
+    available: true,
+    source: 'sessions',
+    by_agent: [
+      { agent: 'Codex', sessions: 42 },
+      { agent: 'Claude', sessions: 31 },
+      { agent: 'Cursor', sessions: 7 },
+    ],
+  };
+}
+
+/**
+ * GET /api/plugins/analytics/subagent-tree (analytics_api::subagent_tree).
+ *
+ * Pre-order, exactly as the daemon serves it: a two-level Codex tree, a Claude
+ * session whose parent was never ingested, and one flat session. The abnormal
+ * links are in the fixture on purpose — they are the states the surface has to
+ * keep apart, and a fixture holding only clean edges would never exercise them.
+ */
+function analyticsSubagentTreePayload(): Record<string, unknown> {
+  return {
+    available: true,
+    source: 'sessions',
+    error: null,
+    nodes: [
+      {
+        provider: 'codex',
+        session_id: 'session.codex.root',
+        parent_session_id: null,
+        agent: 'Codex',
+        title: 'RC dashboard sweep',
+        started_at: 1_760_000_000,
+        ended_at: 1_760_003_600,
+        is_subagent: false,
+        parent_tool_use_id: null,
+        depth: 0,
+        descendants: 2,
+        link: 'root',
+      },
+      {
+        provider: 'codex',
+        session_id: 'session.codex.child',
+        parent_session_id: 'session.codex.root',
+        agent: 'Codex',
+        title: 'contract regeneration',
+        started_at: 1_760_000_600,
+        ended_at: 1_760_002_000,
+        is_subagent: true,
+        parent_tool_use_id: 'toolu_codex_01',
+        depth: 1,
+        descendants: 1,
+        link: 'linked',
+      },
+      {
+        provider: 'codex',
+        session_id: 'session.codex.grandchild',
+        parent_session_id: 'session.codex.child',
+        agent: 'Codex',
+        title: null,
+        started_at: 1_760_000_900,
+        ended_at: null,
+        is_subagent: true,
+        parent_tool_use_id: 'toolu_codex_02',
+        depth: 2,
+        descendants: 0,
+        link: 'linked',
+      },
+      {
+        provider: 'claude',
+        session_id: 'session.claude.orphan',
+        parent_session_id: 'session.claude.never-ingested',
+        agent: 'Claude',
+        title: 'subagent sweep',
+        started_at: 1_760_001_000,
+        ended_at: 1_760_001_500,
+        is_subagent: true,
+        parent_tool_use_id: 'toolu_claude_07',
+        depth: 0,
+        descendants: 0,
+        link: 'missing_parent',
+      },
+      {
+        provider: 'cursor',
+        session_id: 'session.cursor.solo',
+        parent_session_id: null,
+        agent: 'Cursor',
+        title: null,
+        started_at: 1_760_002_400,
+        ended_at: 1_760_002_500,
+        is_subagent: false,
+        parent_tool_use_id: null,
+        depth: 0,
+        descendants: 0,
+        link: 'root',
+      },
+    ],
+    sessions_read: 5,
+    root_count: 2,
+    edge_count: 2,
+    max_depth: 2,
+    missing_parent_count: 1,
+    cycle_count: 0,
+    truncated: false,
+  };
+}
+
+function analyticsHintsPayload(): Record<string, unknown> {
+  return {
+    available: true,
+    source: 'analytics_events',
+    error: null,
+    by_category: HINT_CATEGORIES.map((category, i) => ({
+      category,
+      emitted: 120 - i * 8,
+      followed: 80 - i * 6,
+      ignored: 20 - (i % 5) * 2,
+      suppressed: i % 4,
+    })),
+  };
+}
+
+/* ==========================================================================
+ * /api/automation/* (automation_scheduler_api.rs status, automation_jobs_api.rs
+ * list, automation_skills_api.rs list, automatic_fact_receipts_api.rs list).
+ * Consumed by AutomationsPage.
+ * ========================================================================== */
+
+/** `AutomationSchedulerStatusV1` (automation_scheduler_api.rs). */
+function schedulerStatusPayload(): Record<string, unknown> {
+  return {
+    status: 'configured',
+    paused: false,
+    enabled: true,
+    scheduler_tick_secs: 900,
+    now: nowSecs,
+    last_session_activity: nowSecs - 1200,
+    configuration_revision_id: 'configuration.revision.automation.fixture',
+    control_path: '/fast/projects/tracedecay/.tracedecay/automation.control.json',
+    tasks: [
+      { task: 'memory_curator', due: false, skip_reason: 'cooldown', last_scheduler_run: null },
+      { task: 'session_reflector', due: true, skip_reason: null, last_scheduler_run: null },
+      { task: 'skill_writer', due: false, skip_reason: 'no_new_sessions', last_scheduler_run: null },
+    ],
+  };
+}
+
+const AUTOMATION_JOBS: ReadonlyArray<Record<string, unknown>> = [
+  { id: 'memory-curator', name: 'Memory curator', schedule: '0 */6 * * *', enabled: true, interval_secs: null },
+  { id: 'session-reflector', name: 'Session reflector', schedule: null, enabled: true, interval_secs: 3600 },
+  { id: 'skill-writer', name: 'Skill writer', schedule: '0 3 * * *', enabled: false, interval_secs: null },
+  { id: 'nightly-health', name: 'Nightly code-health sweep', schedule: '0 2 * * *', enabled: true, interval_secs: null },
+  { id: 'pr-triage', name: 'PR triage digest', schedule: null, enabled: false, interval_secs: null },
+];
+
+// AutomationsPage's root is `overflow-auto` with no focusable child, so once
+// its content is tall enough to scroll at the 320px audit width axe raises
+// `scrollable-region-focusable` (a missing-tabindex component gap, flagged in
+// the report). Job/skill/proposal counts are held just under that height so the
+// audited surface stays populated AND at zero axe violations.
+function jobsPayload(): Record<string, unknown> {
+  const jobs = AUTOMATION_JOBS.slice(0, 4).map((job) => ({
+    ...job,
+    prompt: `Run the ${job['name']} automation task.`,
+    cooldown_secs: 1800,
+    skill_ids: [],
+    delivery: { kind: 'none' },
+    created_at: nowSecs - 30 * DAY,
+    updated_at: nowSecs - 2 * DAY,
+  }));
+  return { jobs, count: jobs.length };
+}
+
+/** `automation_run_api::run_list` — the run-history ledger tail, projected by
+ * `run_history_row`. Two terminal states so the audit shoots both the applied
+ * row and the failed row with its error sentence. */
+function automationRunsPayload(): Record<string, unknown> {
+  const runs = [
+    {
+      run_id: 'run-20260805-193042-memory-curator',
+      task: 'memory_curator',
+      trigger: 'scheduler',
+      backend: 'claude',
+      model: 'claude-sonnet-5',
+      status: 'succeeded',
+      reviewed_count: 6,
+      accepted_count: 4,
+      rejected_count: 2,
+      skipped_count: 0,
+      error: null,
+      started_at: String(nowSecs - 2 * DAY),
+      completed_at: String(nowSecs - 2 * DAY + 240),
+      artifact_kinds: ['traces', 'feedback', 'validation_gate'],
+    },
+    {
+      run_id: 'run-20260804-071133-skill-writing',
+      task: 'skill_writing',
+      trigger: 'manual_cli',
+      backend: 'codex',
+      model: null,
+      status: 'failed',
+      reviewed_count: 0,
+      accepted_count: 0,
+      rejected_count: 0,
+      skipped_count: 0,
+      error: 'the backend refused the run: model quota exhausted',
+      started_at: String(nowSecs - 3 * DAY),
+      completed_at: String(nowSecs - 3 * DAY + 31),
+      artifact_kinds: [],
+    },
+  ];
+  return {
+    runs,
+    count: runs.length,
+    limit: 50,
+    has_more: false,
+    malformed_row_count: 0,
+    completeness: 'known',
+    error: '',
+  };
+}
+
+function automationOutcomesPayload(): Record<string, unknown> {
+  return {
+    generated_at: nowSecs,
+    skills: [],
+    facts: [],
+    snapshot: {
+      available: true,
+      skills_refreshed_at: nowSecs - DAY,
+      facts_refreshed_at: nowSecs - DAY,
+    },
+    error: '',
+  };
+}
+
+function automaticCuratorRunPayload(): Record<string, unknown> {
+  return {
+    kind: 'success',
+    value: {
+      binding_id: 'binding.http.fact_store_curate.v1',
+      contract: {
+        schema_id: 'schema.application.retained.fact-store-curate.result',
+        schema_revision: 1,
+      },
+      request_id: 'request.story.fact-store-curate',
+      scope: {
+        project_id: 'project.story',
+        repository_id: 'repository.story',
+        worktree_id: 'worktree.story',
+        reference: null,
+        scope_digest:
+          'sha256:e174c69787e410a452c13540b131bf291d25017a21e37aebf7f26eeb8e77fbe5',
+      },
+      outcome: {
+        outcome: 'effect',
+        value: {
+          payload: {
+            run_id: 'run-story-memory-curator',
+            task: 'memory_curator',
+            request_digest:
+              'sha256:a566bcd0eee410d55c935f0e4b1964d052603493ef9fbbd4295747aa351f6571',
+            terminal: {
+              status: 'completed',
+              summary: {
+                reviewed_count: 0,
+                accepted_count: 0,
+                rejected_count: 0,
+                skipped_count: 0,
+              },
+            },
+            committed_receipts: [],
+          },
+        },
+      },
+    },
+  };
+}
+
+const SKILL_ROWS: ReadonlyArray<readonly [string, string, string, string]> = [
+  ['agent-hook-hint-quality-review', 'Agent Hook Hint Quality Review', 'active', 'automation'],
+  ['cargo-build-cache-coordination', 'Cargo Build Cache Coordination', 'active', 'build'],
+  ['code-slop-cleanup', 'Code Slop Cleanup', 'active', 'review'],
+  ['isolated-worktree-task-flow', 'Isolated Worktree Task Flow', 'disabled', 'workflow'],
+  ['mcp-tool-output-rendering-design', 'MCP Tool Output Rendering Design', 'active', 'design'],
+  ['multi-agent-model-orchestration', 'Multi-Agent Model Orchestration', 'disabled', 'orchestration'],
+];
+
+/** Wire-true ManagedSkill rows (managed_skill_model.rs): id/title/state nest
+ * under `metadata`. AutomationsPage reads those top-level, so titles render as
+ * index fallbacks — flagged in the report as a component/wire mismatch. */
+function skillsPayload(): Record<string, unknown> {
+  const skills = SKILL_ROWS.slice(0, 4).map(([id, title, state, category]) => ({
+    metadata: {
+      id,
+      title,
+      summary: `${title} — managed automation skill.`,
+      category,
+      targets: ['claude', 'codex'],
+      state,
+      pinned: false,
+      checksum: `sha256:${id}`,
+      created_at: nowSecs - 40 * DAY,
+      updated_at: nowSecs - 3 * DAY,
+      provenance: { source: 'skill_writer', actor: 'automation', run_id: null },
+    },
+    body_markdown: `# ${title}\n\nManaged skill body.`,
+    support_files: [],
+  }));
+  return {
+    profile_root: '/home/zack/.tracedecay',
+    skills_root: '/home/zack/.tracedecay/managed-skills',
+    count: skills.length,
+    skills,
+    skill_metadata: skills.map((s) => s.metadata),
+    usage_summaries: [],
+    stale_recommendations: [],
+    improvement_recommendations: [],
+  };
+}
+
+/** Wire-true automatic fact receipt rows. */
+function automaticFactReceiptsPayload(): Record<string, unknown> {
+  const receipts = Array.from({ length: 3 }, (_, i) => ({
+    schema_version: 1,
+    apply_id: `apply-2026-07-${String(20 + i).padStart(2, '0')}-${i}`,
+    run_id: `session-reflector-${i}`,
+    state: i === 2 ? 'quarantined' : 'applied',
+    add_fact_request: {
+      content: FACT_CONTENTS[i % FACT_CONTENTS.length],
+      category: FACT_CATEGORIES[i % FACT_CATEGORIES.length],
+    },
+    quarantine_reason: i === 2 ? 'validation failed' : undefined,
+    applied_fact_id: i === 2 ? undefined : `fact.project.story.${i}`,
+    recorded_at_micros: (nowSecs - i * DAY) * 1_000_000,
+  }));
+  return { receipts, count: receipts.length, limit: 50, error: '' };
+}
+
+/* ==========================================================================
+ * /api/doctor/findings (doctor_findings_api.rs::findings). Consumed by
+ * DoctorInspector on the Observatory surface (DoctorFindingsPayloadV1Schema).
+ * ========================================================================== */
+
+const DOCTOR_FAMILIES = [
+  'advisory',
+  'configuration',
+  'storage_runtime',
+  'storage',
+  'language_server',
+  'semantic_index',
+  'observability',
+] as const;
+
+/**
+ * `GET /api/doctor/findings` with an admitted report reader — the populated
+ * report, not the empty one.
+ *
+ * This fixture used to be deliberately empty, and said so: the inspector
+ * painted each evidence badge's label in `doctorModel.ts` `tokenClass`, those
+ * indicator hues miss WCAG AA as 11px text on `--surface-2`, and an empty
+ * envelope was the only way to keep the audited surface at zero axe violations.
+ * It kept the gate green by keeping the defective markup off the page. The
+ * badge now follows the `StateChip` idiom — hue on the lamp and glyph, label on
+ * an AA token — so the findings can be served and actually scanned.
+ *
+ * All eight `DoctorEvidenceStateV1` values appear exactly once, so every badge
+ * variant is on screen for the axe scan rather than a representative few. Only
+ * `healthy_complete_coverage` carries complete coverage, which is the invariant
+ * `DoctorFindingV1::new` enforces: missing or partial truth never presents as
+ * healthy.
+ *
+ * The dashboard carries diagnosis evidence and coverage only. Corrective
+ * actions remain outside this read-only route.
+ */
+function doctorFindingsEnvelope(): Record<string, unknown> {
+  const entry = (
+    family: (typeof DOCTOR_FAMILIES)[number],
+    state: string,
+    completeness: 'complete' | 'partial' | 'unknown',
+    statement: string,
+    evidence: ReadonlyArray<string>,
+    options: { storageKind?: string } = {},
+  ): Record<string, unknown> => ({
+    finding: {
+      family,
+      state,
+      coverage: { completeness, statement },
+      evidence: evidence.map((reference) => ({ family, reference })),
+    },
+    storage_kind: options.storageKind ?? null,
+  });
+
+  const entries = [
+    entry(
+      'storage',
+      'partial',
+      'partial',
+      'two of three stores reported a size; the third could not be opened for measurement',
+      ['store:lcm:size-observation:wm-41', 'store:memory:size-observation:wm-41'],
+      { storageKind: 'over_budget_store' },
+    ),
+    entry(
+      'configuration',
+      'degraded',
+      'complete',
+      'effective configuration diverges from the desired revision on two protected keys',
+      ['configuration:revision:r-317', 'configuration:revision:r-318'],
+    ),
+    // A second storage finding: the same family can report more than one
+    // observation, and `stale` needs a badge on screen like the other seven.
+    entry(
+      'storage',
+      'stale',
+      'complete',
+      'the session-store size observation was taken at watermark wm-38, three syncs behind the current wm-41',
+      ['store:sessions:size-observation:wm-38'],
+    ),
+    entry(
+      'semantic_index',
+      'unknown',
+      'unknown',
+      'the semantic index did not report a mount state, so its freshness is unknown',
+      ['semantic-index:mount-probe:absent'],
+    ),
+    entry(
+      'storage_runtime',
+      'denied',
+      'unknown',
+      'this identity is not permitted to read the storage runtime health surface',
+      ['storage-runtime:authority:denied'],
+    ),
+    entry(
+      'language_server',
+      'absent',
+      'unknown',
+      'no language server evidence source is present in this scope',
+      ['language-server:probe:absent'],
+    ),
+    entry(
+      'observability',
+      'unsupported',
+      'unknown',
+      'the observability envelope source is not wired for this dashboard scope',
+      ['observability:envelope:unwired'],
+    ),
+    entry(
+      'advisory',
+      'healthy_complete_coverage',
+      'complete',
+      'every advisory source was consulted and none reported a finding',
+      ['advisory:feedback-finding:none', 'advisory:policy:none'],
+    ),
+  ];
+
+  // Two families answered nothing. These render as coverage-gap chips above the
+  // cards, which is the report saying which sources it never reached — a report
+  // that dropped them would read as a clean bill of health for all seven.
+  const consulted = ['advisory', 'configuration', 'storage_runtime', 'storage', 'semantic_index'];
+  const payload = {
+    family_filter: null,
+    entries,
+    report_coverage: {
+      completeness: 'partial',
+      statement: {
+        completeness: 'partial',
+        statement: 'five of seven finding families were consulted for this report',
+      },
+      families: DOCTOR_FAMILIES.map((family) => ({
+        family,
+        consultation: consulted.includes(family)
+          ? { status: 'consulted' }
+          : {
+              status: 'unavailable',
+              reason: family === 'language_server' ? 'absent' : 'unwired',
+            },
+      })),
+    },
+    known_families: [...DOCTOR_FAMILIES],
+    note: 'five of seven finding families were consulted; two reported no evidence source',
+  };
+  return envelope(payload, 'partial', [
+    { kind: 'refresh', operation: 'use-case.dashboard.doctor.findings.refresh' },
+  ]);
+}
+
+/* ==========================================================================
+ * Observatory storage telemetry / findings (already wired; kept intact).
+ * ========================================================================== */
+
+/** The owner setting a soft store budget comes from, and the wording the daemon
+ * emits for an unset budget — copied verbatim from
+ * `storage_telemetry_api.rs` so these fixtures stay wire-true. */
+const BUDGET_SETTING_KEY = 'sync.retention.v1 store_soft_budgets_bytes';
+const BUDGET_UNSET_REASON =
+  'no soft size budget is configured by the owner for this store (set sync.retention.v1 store_soft_budgets_bytes for the store key to configure one)';
+const GROWTH_UNKNOWN_REASON =
+  'no execution-owned store-size watermark is available; dashboard reads never establish one';
+const GROWTH_NOTE =
+  'store growth requires bounded execution-owned watermarks; dashboard reads observe current size but never establish a baseline or a historical series';
+const storeGrowthUnknown = {
+  state: 'unknown',
+  reason: GROWTH_UNKNOWN_REASON,
+} as const;
+const TABLE_GROWTH_COVERAGE = {
+  completeness: 'complete',
+  eligible: 1,
+  examined: 1,
+  matched: null,
+  excluded: null,
+  omitted: 0,
+  unknown: null,
+  denominator: 1,
+  unit: 'store_table_growth_reads',
+  omission_reasons: [],
+};
+const TABLE_GROWTH_STATES = [
+  {
+    state: 'observed',
+    // Two of this store's three current tables had a previous watermark, so the
+    // observed read is partial and says so.
+    coverage: {
+      ...TABLE_GROWTH_COVERAGE,
+      completeness: 'partial',
+      eligible: 3,
+      examined: 2,
+      omitted: 1,
+      denominator: 3,
+      unit: 'current_tables',
+      omission_reasons: ['embeddings: no previous table watermark exists; baseline pending'],
+    },
+    significant_samples: [
+      {
+        table: 'messages',
+        previous_bytes: 10_485_760,
+        current_bytes: 11_534_336,
+        growth_bytes: 1_048_576,
+        previous_observed_at: nowMicros - 3_600_000_000,
+        current_observed_at: nowMicros,
+      },
+    ],
+    omissions: [
+      {
+        kind: 'below_threshold',
+        table: 'metadata',
+        previous_bytes: 104_857_600,
+        current_bytes: 105_381_888,
+        growth_bytes: 524_288,
+        previous_observed_at: nowMicros - 3_600_000_000,
+        current_observed_at: nowMicros,
+        reason: 'observed growth was below the informational significance threshold',
+      },
+      {
+        kind: 'baseline_pending',
+        table: 'embeddings',
+        current_bytes: 4_194_304,
+        observed_at: nowMicros,
+        reason: 'embeddings: no previous table watermark exists; baseline pending',
+      },
+    ],
+    omission_reasons: [
+      'metadata: observed growth was below the informational significance threshold',
+      'embeddings: no previous table watermark exists; baseline pending',
+    ],
+  },
+  {
+    state: 'denied',
+    coverage: { ...TABLE_GROWTH_COVERAGE, completeness: 'partial', examined: 0, omitted: 1 },
+    omission_reasons: ['per-table payload growth measurement was denied for this store'],
+  },
+  {
+    state: 'baseline_established',
+    coverage: { ...TABLE_GROWTH_COVERAGE, completeness: 'partial', examined: 0, omitted: 1 },
+    observed_at: nowMicros,
+    tables_observed: 7,
+    omission_reasons: [
+      'no baseline yet; this read established the first per-table payload watermark',
+    ],
+  },
+  {
+    state: 'unsupported',
+    coverage: { ...TABLE_GROWTH_COVERAGE, completeness: 'partial', examined: 0, omitted: 1 },
+    omission_reasons: ['per-table payload growth measurement is unsupported for this store'],
+  },
+  {
+    state: 'unknown',
+    coverage: { ...TABLE_GROWTH_COVERAGE, completeness: 'partial', examined: 0, omitted: 1 },
+    omission_reasons: ['per-table payload growth measurement is unavailable for this store'],
+  },
+] as const;
+
+/** GET /api/storage/telemetry — observatory (StorageTelemetryPayloadV1Schema).
+ *
+ * One entry per distinct store *file*: the graph and project-memory roles share
+ * a database in project storage mode and are therefore one card carrying both
+ * roles, not two cards with byte-identical sizes. The five entries below model
+ * every budget state the endpoint can emit; per-store growth is always typed
+ * unknown on a dashboard read because execution-owned watermarks are required
+ * for a growth claim. Per-table growth below still exercises its own states. */
+const storageTelemetry = envelope({
+  stores: [
+    {
+      // Shared store file: graph + project memory, budget within its soft
+      // limit. A dashboard status read does not create a growth baseline.
+      store: 'graph.db',
+      role: 'graph',
+      roles: ['graph', 'memory'],
+      path: '/fast/projects/tracedecay/.tracedecay/graph.db',
+      read: {
+        kind: 'observed',
+        sample: {
+          store: 'graph.db',
+          page_size_bytes: 4096,
+          page_count: 52_400,
+          freelist_pages: 1_280,
+          observed_at: nowMicros,
+        },
+      },
+      total_bytes: 214_630_400,
+      free_bytes: 5_242_880,
+      free_page_ratio: 0.024,
+      budget: {
+        state: 'evaluated',
+        evaluation: {
+          state: 'within_budget',
+          observed: 214_630_400,
+          soft_limit: 536_870_912,
+        },
+        setting_key: BUDGET_SETTING_KEY,
+        reason: 'evaluated against the owner-configured soft limit of 536870912 bytes',
+      },
+      growth: storeGrowthUnknown,
+    },
+    {
+      // Over its owner-configured soft limit, with a real overage.
+      store: 'lcm.db',
+      role: 'lcm',
+      roles: ['lcm'],
+      path: '/home/zack/.tracedecay/lcm.db',
+      read: {
+        kind: 'observed',
+        sample: {
+          store: 'lcm.db',
+          page_size_bytes: 4096,
+          page_count: 180_224,
+          freelist_pages: 2_048,
+          observed_at: nowMicros,
+        },
+      },
+      total_bytes: 738_197_504,
+      free_bytes: 8_388_608,
+      free_page_ratio: 0.011,
+      budget: {
+        state: 'evaluated',
+        evaluation: {
+          state: 'over_budget',
+          observed: 738_197_504,
+          soft_limit: 536_870_912,
+          overage: 201_326_592,
+        },
+        setting_key: BUDGET_SETTING_KEY,
+        reason: 'evaluated against the owner-configured soft limit of 536870912 bytes',
+      },
+      growth: storeGrowthUnknown,
+    },
+    {
+      // No owner entry: a missing *setting*, never a fabricated pass.
+      store: 'savings.db',
+      role: 'savings',
+      roles: ['savings'],
+      path: '/home/zack/.tracedecay/savings.db',
+      read: {
+        kind: 'observed',
+        sample: {
+          store: 'savings.db',
+          page_size_bytes: 4096,
+          page_count: 18_200,
+          freelist_pages: 420,
+          observed_at: nowMicros,
+        },
+      },
+      total_bytes: 74_547_200,
+      free_bytes: 1_720_320,
+      free_page_ratio: 0.023,
+      budget: {
+        state: 'unset',
+        reason: BUDGET_UNSET_REASON,
+        setting_key: BUDGET_SETTING_KEY,
+      },
+      growth: storeGrowthUnknown,
+    },
+    {
+      // The configured budget is unreadable, so the budget is unknown — the
+      // dashboard never renders that as "within budget".
+      store: 'sessions.db',
+      role: 'sessions',
+      roles: ['sessions'],
+      path: '/home/zack/.tracedecay/sessions.db',
+      read: {
+        kind: 'observed',
+        sample: {
+          store: 'sessions.db',
+          page_size_bytes: 4096,
+          page_count: 9_600,
+          freelist_pages: 96,
+          observed_at: nowMicros,
+        },
+      },
+      total_bytes: 39_321_600,
+      free_bytes: 393_216,
+      free_page_ratio: 0.01,
+      budget: {
+        state: 'unknown',
+        reason:
+          'the resolved runtime configuration could not be read, so a configured budget could not be determined',
+      },
+      growth: storeGrowthUnknown,
+    },
+    {
+      // The pragma read failed: sizes stay null and both dimensions are typed
+      // unknown rather than collapsing to zero.
+      store: 'incident.db',
+      role: 'incident',
+      roles: ['incident'],
+      path: '/home/zack/.tracedecay/incident.db',
+      read: { kind: 'unknown', store: 'incident.db' },
+      total_bytes: null,
+      free_bytes: null,
+      free_page_ratio: null,
+      budget: {
+        state: 'unknown',
+        reason: 'no observed size sample, so a configured budget could not be evaluated',
+      },
+      growth: storeGrowthUnknown,
+    },
+  ].map((store, index) => ({ ...store, table_growth: TABLE_GROWTH_STATES[index] })),
+  budget_note:
+    'budgets are owner configuration: sync.retention.v1 store_soft_budgets_bytes, keyed by store key; a store with no entry reports unset (no budget configured), never a fabricated pass',
+  growth_note: GROWTH_NOTE,
+  table_growth_threshold: {
+    absolute_bytes: 67_108_864,
+    relative_floor_bytes: 1_048_576,
+    relative_percent: 10,
+  },
+  table_growth_coverage: {
+    completeness: 'partial',
+    eligible: 5,
+    examined: 1,
+    matched: null,
+    excluded: null,
+    omitted: 4,
+    unknown: null,
+    denominator: 5,
+    unit: 'store_table_growth_reads',
+    omission_reasons: [
+      'lcm.db: denied',
+      'savings.db: no baseline yet',
+      'sessions.db: unsupported',
+      'incident.db: unavailable',
+    ],
+  },
+});
+
+/** One of the five stores failed its pragma read, so the endpoint's coverage is
+ * partial over the enumerated store set — wire-true to
+ * `DashboardCoverageV1::partial` and the endpoint's own refresh legal action. */
+const storageTelemetryEnvelope = {
+  ...storageTelemetry,
+  coverage: {
+    completeness: 'partial',
+    eligible: 5,
+    examined: 4,
+    matched: null,
+    excluded: null,
+    omitted: 1,
+    unknown: null,
+    denominator: 5,
+    unit: 'stores',
+    omission_reasons: ['store telemetry read failed (pragma unavailable)'],
+  },
+  legal_actions: [
+    { kind: 'refresh', operation: 'use-case.dashboard.storage.telemetry.refresh' },
+  ],
+};
+
+/** GET /api/storage/findings — observatory canonical Doctor projection plus
+ * per-producer source coverage. This fixture follows the production parser
+ * path; source state is not inferred from an empty finding list. */
+const storageFindings = envelope({
+  family_filter: 'storage',
+  entries: [],
+  report_coverage: null,
+  known_families: [
+    'advisory',
+    'configuration',
+    'storage_runtime',
+    'storage',
+    'language_server',
+    'semantic_index',
+    'observability',
+  ],
+  note: 'storage producers reported independent source coverage',
+  kind_statuses: [
+    {
+      kind: 'over_budget_store',
+      state: 'partial',
+      observed_entries: 0,
+      reason: 'the canonical report did not carry per-producer completion evidence',
+    },
+    {
+      kind: 'orphan_store',
+      state: 'real',
+      observed_entries: 1,
+      reason: 'canonical Doctor producer returned one observed entry with complete coverage',
+    },
+    {
+      kind: 'incident_debris_present',
+      state: 'unsupported',
+      observed_entries: 0,
+      reason: 'canonical Doctor storage source is unavailable (unsupported)',
+    },
+    {
+      kind: 'retention_backlog',
+      state: 'real',
+      observed_entries: 0,
+      reason: 'owner retention windows were evaluated with complete coverage',
+    },
+    {
+      kind: 'table_growth',
+      state: 'partial',
+      observed_entries: 1,
+      reason: 'canonical Doctor producer returned table growth evidence with partial coverage',
+    },
+  ],
+});
+
+/* ==========================================================================
+ * /api/settings (settings_api.rs::get_settings) and /api/capabilities
+ * (mod.rs::capabilities). Settings answers a DashboardEnvelopeV1 whose
+ * payload is `SettingsPayloadV1`. Project and ordinary user settings use the
+ * cataloged `configuration_batch` control plane; code-index workers are a
+ * separately revisioned ProfileSessions resource.
+ * ========================================================================== */
+
+const settingsPayload: Record<string, unknown> = {
+  project: {
+    config_path: '/fast/projects/tracedecay/.tracedecay/config.toml',
+    legacy_config_path: '/fast/projects/tracedecay/.tracedecay/config.toml',
+    legacy_config_read_only: true,
+    configuration_snapshot_id: 'snap-42',
+    configuration_revision_id: 'rev-42',
+    config: {
+      include: ['src/**', 'dashboard/src/**'],
+      exclude: ['target/**', 'node_modules/**'],
+      max_file_size: 1_048_576,
+      extract_docstrings: true,
+      track_call_sites: true,
+      git_ignore: true,
+      context_scout: false,
+      telemetry: { timings: false },
+      sync: { auto_track_pr_branches: true, auto_track_pr_poll_secs: 120 },
+    },
+    tracedecay_dir_gitignored: true,
+    pr_autotrack: { tracked: [] },
+  },
+  user: {
+    config_path: '/home/zack/.tracedecay/config.toml',
+    legacy_config_path: '/home/zack/.tracedecay/config.toml',
+    legacy_config_read_only: true,
+    configuration_snapshot_id: 'user-snap-7',
+    configuration_revision_id: 'user-rev-7',
+    code_index_worker_configuration_snapshot_id: 'profile-worker-snap-7',
+    code_index_worker_configuration_revision_id: 'profile-worker-rev-7',
+    upload_enabled: false,
+    code_index_workers: { mode: 'automatic' },
+    code_index_worker_status: {
+      configured: { mode: 'automatic' },
+      environment_override_workers: null,
+      effective_workers: 4,
+      available_logical_cpus: 4,
+      memory_safe_workers: 6,
+      limiting_reason: 'automatic_all_cores',
+    },
+    watcher_debounce: '2s',
+    extraction_timeout_secs: 30,
+    installed_agents: ['claude', 'codex', 'cursor'],
+  },
+  automation: {
+    config_endpoint: '/api/plugins/holographic/curation/config',
+    availability: { available: true, reason: null, required_authority: null },
+    source_coverage: {
+      global: 'available',
+      project: 'available',
+      effective: 'available',
+    },
+    enabled: true,
+    backend: 'codex_app_server',
+    host_mode: 'standalone_backend',
+  },
+  environment: {
+    global_accounting_mode: 'auto',
+    global_accounting_enabled: true,
+    // Pricing is an immutable bundled authority and never performs a network
+    // read, so this is a capability fact rather than an environment override.
+    pricing_offline: true,
+    variables: [
+      { name: 'TRACEDECAY_ENABLE_GLOBAL_DB', active: false, value: null, description: 'Force-enables or disables global savings-ledger recording.' },
+      { name: 'TRACEDECAY_DATA_DIR', active: false, value: null, description: 'Pins the user-level TraceDecay data directory.' },
+    ],
+  },
+  storage: {
+    project_id: 'tracedecay',
+    project_root: '/fast/projects/tracedecay',
+    storage_mode: 'project',
+    store_root: '/fast/projects/tracedecay/.tracedecay',
+    dashboard_root: '/fast/projects/tracedecay/.tracedecay/dashboard',
+    graph_db: '/fast/projects/tracedecay/.tracedecay/graph.db',
+    memory_db: '/fast/projects/tracedecay/.tracedecay/memory.db',
+    lcm_db: '/fast/projects/tracedecay/.tracedecay/sessions.db',
+    lcm_scope: 'project',
+    savings_db: '/home/zack/.tracedecay/global.db',
+  },
+  version: { version: '2.0.0', channel: 'stable', cached_latest_version: null },
+};
+
+const settings: Record<string, unknown> = envelope(settingsPayload, 'ready', [
+  { kind: 'request_apply', operation: 'configuration_batch' },
+  { kind: 'request_apply', operation: 'profile_code_index_worker_selection' },
+  { kind: 'refresh', operation: 'configuration_list' },
+]);
+
+const capabilities: Record<string, unknown> = {
+  name: 'tracedecay-dashboard',
+  version: '2.0.0',
+  mode: 'standalone',
+  project_id: 'tracedecay',
+  project_root: '/fast/projects/tracedecay',
+  storage_mode: 'project',
+  store_root: '/fast/projects/tracedecay/.tracedecay',
+  dashboard_root: '/fast/projects/tracedecay/.tracedecay/dashboard',
+  memory_db: '/fast/projects/tracedecay/.tracedecay/memory.db',
+  graph_db: '/fast/projects/tracedecay/.tracedecay/graph.db',
+  lcm_db: '/fast/projects/tracedecay/.tracedecay/sessions.db',
+  lcm_scope: 'project',
+  // `MultiRootCapabilityV1`, which `mod.rs::capabilities` has always sent and
+  // this fixture omitted. Mounted, because the state worth screenshotting is
+  // the one with figures in it; the `unavailable` arm is a state chip whose
+  // only content is the daemon's sentence, and `MultiRootPanel.dom.test.tsx`
+  // covers it directly.
+  multi_root: {
+    status: 'mounted',
+    scope_set_id: 'scope-set.tracedecay.primary',
+    revision: 7,
+    scope_set_digest: 'sha256:0b91f7c4a2e85d31c6470fb2e9d18a5c',
+    root_count: 3,
+  },
+  features: {
+    memory: true,
+    lcm: true,
+    graph: true,
+    analytics: true,
+    code_diagnostics: true,
+    curation: true,
+    automation: true,
+    llm_curation: true,
+    managed_skills: true,
+    savings: true,
+    settings: true,
+    multi_root: true,
+  },
+  automation: {
+    enabled: true,
+    mode: 'standalone_backend',
+    backend: 'codex_app_server',
+    // `host_mode` is an `AutomationHostMode` — `standalone` or
+    // `delegated_host`. `standalone_backend` belongs to the sibling `mode`
+    // field and is not a value this key can hold.
+    host_mode: 'standalone',
+    // `AgentBackendAvailability` always carries `backend`; `executable` and
+    // `reason` are skipped when unset rather than sent as null.
+    availability: { backend: 'codex_app_server', available: true, executable: 'codex' },
+  },
+  // One canonical embedded dashboard. The five entries here were the legacy
+  // plugin bundles that `44ef9e182` deleted.
+  dashboards: ['tracedecay'],
+};
+
+/* ==========================================================================
+ * /api/plugins/savings/sessions (savings_api.rs::sessions) and
+ * /api/plugins/hermes-lcm/session/{id} (lcm_api.rs::session).
+ *
+ * The Loom weave's two sources, mirrored from a real daemon response captured
+ * on 2026-07-25 (`tracedecay dashboard --port 7341`, profile-sharded store,
+ * 6,053 sessions). Shapes are exact; the population is shaped to the same
+ * DISTRIBUTION the real store has —
+ * fixtures that differ only in size systematically under-test the surface:
+ *
+ *   - Message counts are heavily skewed (a handful in the hundreds, a long
+ *     tail in the tens), because the weave's width channel is log-scaled and a
+ *     uniform fixture would never show that it needed to be.
+ *   - `last_message_at` is null on most rows. On the real profile only 14 of
+ *     100 sessions carry an end later than their start, and drawing open
+ *     threads correctly is the single most load-bearing honesty behaviour on
+ *     the surface — a fixture where every session has an end would render a
+ *     weave that cannot exist.
+ *   - Some rows report zero messages, which the weave draws hollow.
+ *   - Two rows are subagents.
+ *
+ * One deliberate deviation from the captured payload, recorded here rather
+ * than hidden: the real store served a single provider ("cursor"), so its host
+ * axis has one column. The fixture carries three providers so the audit
+ * actually exercises column layout, dividers and the per-host readout row.
+ * ========================================================================== */
+
+const LOOM_PROVIDERS = ['claude', 'codex', 'cursor'] as const;
+const LOOM_MODELS = [
+  'gpt-5.6-sol-high',
+  'composer-2.5-fast',
+  'cursor-grok-4.5-high-fast',
+  'gpt-5.6-terra-max',
+] as const;
+const LOOM_TITLES = [
+  'Verify QUERY scheduler',
+  'Deliver Git primitive runtime',
+  'Normalize daemon service logging',
+  'Bound and validate Hermes snapshots',
+  'Preserve curated correction provenance',
+  'Bind managed test runs to content',
+] as const;
+
+/** Deterministic session id, so screenshots and manifests are stable. */
+function loomSessionId(index: number): string {
+  return `0${(35 + index).toString(16).padStart(2, '0')}c8f3c-d4e6-4176-afea-${String(
+    770_501 + index,
+  ).padStart(12, '0')}`;
+}
+
+function loomModelRow(model: string | null, messages: number) {
+  return {
+    model,
+    messages,
+    estimated_messages: messages,
+    provider_usage_events: 0,
+    tokenized_messages: 0,
+    cost_basis: 'estimated',
+    provider_actual: null,
+    estimated: { input_tokens: messages * 11, output_tokens: messages * 14 },
+    tokenized: { input_tokens: 0, output_tokens: 0 },
+    tokenizer: { encoder: 'o200k_base', exact: false },
+  };
+}
+
+function loomSessionRows(count = 34): Record<string, unknown>[] {
+  return Array.from({ length: count }, (_, i) => {
+    const provider = LOOM_PROVIDERS[i % LOOM_PROVIDERS.length]!;
+    const startedAt = nowSecs - i * 5 * 3600 - (i % 7) * 1300;
+    // Skewed: three heavy sessions, then a long tail.
+    const messages = i === 0 ? 998 : i === 3 ? 405 : i === 7 ? 169 : Math.max(2, 44 - i);
+    // Only every fourth session carries an end later than its start.
+    const hasEnd = i % 4 === 1;
+    return {
+      session_id: loomSessionId(i),
+      provider,
+      title: i % 5 === 4 ? null : LOOM_TITLES[i % LOOM_TITLES.length],
+      started_at: startedAt,
+      last_message_at: hasEnd ? startedAt + 900 + (i % 6) * 1500 : null,
+      messages: i === 11 || i === 23 ? 0 : messages,
+      is_subagent: i === 5 || i === 17,
+      cost_basis: 'estimated',
+      estimated_messages: messages,
+      provider_usage_events: 0,
+      tokenized_messages: 0,
+      models: [
+        loomModelRow(null, Math.max(messages - 5, 0)),
+        loomModelRow(LOOM_MODELS[i % LOOM_MODELS.length]!, Math.min(messages, 5)),
+      ],
+    };
+  });
+}
+
+function loomSessionsPayload(): Record<string, unknown> {
+  return {
+    available: true,
+    db: '/home/zack/.tracedecay/projects/proj_a5b3d7e3ebe14ca7/sessions.db',
+    scope: 'profile_sharded',
+    range: 'all',
+    since: 0,
+    total: 6053,
+    sessions: loomSessionRows(),
+  };
+}
+
+/* ==========================================================================
+ * /api/plugins/hermes-lcm/{overview,timeline} (lcm_api.rs overview / timeline).
+ *
+ * The Sessions workspace's two standing reads, modeled as a MOUNTED temporal
+ * retrieval store: wire-true to `LcmOverviewPayloadV1` / `LcmTimelinePayloadV1`
+ * and populated with the same skewed distribution the Loom fixture carries, so
+ * the audited surface renders a real session ledger rather than the
+ * `lcm_temporal_retrieval_not_mounted` refusal (which the search and
+ * session-detail routes below still model — those states must stay reachable).
+ * ========================================================================== */
+
+/** ISO day bucket `daysAgo` days back — the timeline's bucket key. */
+function lcmDateBucket(daysAgo: number): string {
+  return new Date((nowSecs - daysAgo * DAY) * 1000).toISOString().slice(0, 10);
+}
+
+/** Deterministic skewed daily volume: a few heavy days, a long tail, and two
+ * zero days so the columns exercise their empty rendering. */
+function lcmDailyCount(daysAgo: number): number {
+  if (daysAgo % 17 === 3) return 0;
+  if (daysAgo % 11 === 0) return 640 - daysAgo * 4;
+  return Math.max(18, 190 - daysAgo * 3 - (daysAgo % 5) * 11);
+}
+
+function lcmTimelinePayload(): Record<string, unknown> {
+  const buckets = Array.from({ length: 46 }, (_, index) => {
+    const daysAgo = 45 - index;
+    const count = lcmDailyCount(daysAgo);
+    // Roughly one message in twelve predates token accounting.
+    const unknown = Math.floor(count / 12);
+    const known = count - unknown;
+    return {
+      bucket: lcmDateBucket(daysAgo),
+      count,
+      known_message_count: known,
+      unknown_message_count: unknown,
+      token_count: known > 0 ? known * 212 : null,
+      token_count_provenance: known > 0 ? 'o200k_approximate' : 'unavailable',
+    };
+  });
+  return {
+    bucket: 'day',
+    buckets,
+    coverage: {
+      limit: 60,
+      next_before_bucket: null,
+      ordering: 'newest_last',
+      returned_buckets: buckets.length,
+      total_dated_buckets: buckets.length,
+      truncated: false,
+    },
+    exists: true,
+    node_buckets: [
+      { bucket: lcmDateBucket(2), count: 14 },
+      { bucket: lcmDateBucket(1), count: 9 },
+      { bucket: null, count: 3 },
+    ],
+    path: '/home/zack/.tracedecay/lcm.db',
+    session_id: null,
+    storage_scope: 'profile_sharded',
+    undated: {
+      count: 12,
+      known_message_count: 10,
+      token_count: 2_120,
+      token_count_provenance: 'o200k_approximate',
+      unknown_message_count: 2,
+    },
+  };
+}
+
+const LCM_SUMMARY_CATEGORIES = ['decision', 'code_area', 'workflow'] as const;
+
+function lcmOverviewPayload(): Record<string, unknown> {
+  // The same identity scheme and skew as the Loom threads: three heavy
+  // sessions and a long tail, so the per-row magnitude rails have a shape.
+  const latestSessions = Array.from({ length: 40 }, (_, i) => ({
+    session_id: loomSessionId(i),
+    message_count: i === 0 ? 998 : i === 3 ? 405 : i === 7 ? 169 : Math.max(2, 44 - i),
+    last_timestamp: nowSecs - i * 5 * 3600 - (i % 7) * 1300,
+    last_store_id: 181_402 - i * 97,
+  }));
+  return {
+    exists: true,
+    latest_sessions: latestSessions,
+    latest_summary_nodes: Array.from({ length: 3 }, (_, i) => ({
+      category: pick(LCM_SUMMARY_CATEGORIES, i),
+      created_at: nowSecs - i * 7_200,
+      depth: i === 2 ? 1 : 0,
+      expand_hint: 'lcm_expand',
+      latest_at: nowSecs - i * 7_100,
+      node_id: `node.summary.${i + 1}`,
+      recency: i,
+      session_id: loomSessionId(i),
+      snippet: 'compressed span of the session transcript',
+      source_token_count: 48_000 - i * 9_000,
+      source_type: 'messages',
+      summary: pick(LOOM_TITLES, i),
+      token_count: 1_800 - i * 300,
+    })),
+    limit: 40,
+    matches: { messages: [], summary_nodes: [] },
+    overview: {
+      compression: {
+        node_count: 412,
+        ratio: 0.18,
+        source_token_count: 8_400_000,
+        token_count: 1_512_000,
+      },
+      depth_counts: [
+        { depth: 0, count: 331 },
+        { depth: 1, count: 68 },
+        { depth: 2, count: 13 },
+      ],
+      max_summary_depth: 2,
+      messages_total: 181_402,
+      role_counts: [
+        { role: 'assistant', count: 88_290 },
+        { role: 'user', count: 64_112 },
+        { role: 'tool', count: 29_000 },
+      ],
+      sessions_total: 6_053,
+      source_counts: [
+        { source: 'claude', count: 2_401 },
+        { source: 'codex', count: 2_204 },
+        { source: 'cursor', count: 1_448 },
+      ],
+      summary_node_sessions_total: 512,
+      summary_nodes_total: 412,
+    },
+    path: '/home/zack/.tracedecay/lcm.db',
+    query: '',
+    storage_scope: 'profile_sharded',
+  };
+}
+
+/* ==========================================================================
+ * GET /api/loom/temporal (loom_api.rs::temporal) — the weave's canonical
+ * read: sessions plus durable causal relations (commits, edited files,
+ * branch/worktree spans) with per-source coverage. Wire-true to
+ * `LoomTemporalPayloadV1`; the session population reuses the same skewed
+ * distribution as the savings fixture so the weave has real structure.
+ * ========================================================================== */
+
+function loomTemporalPayload(): Record<string, unknown> {
+  const rows = loomSessionRows();
+  const sessions = rows.map((row, i) => ({
+    session_id: row['session_id'],
+    provider: row['provider'],
+    title: row['title'],
+    started_at: row['started_at'],
+    last_message_at: row['last_message_at'],
+    // A recorded end exists on a minority of rows, and never without a last
+    // message — the weave draws open threads from exactly this distinction.
+    ended_at: i % 8 === 1 ? (row['last_message_at'] as number | null) : null,
+    messages: row['messages'],
+    models: [{ model: null }, { model: pick(LOOM_MODELS, i) }],
+    is_subagent: row['is_subagent'],
+    edited_files_recorded: i % 3 !== 2,
+  }));
+  const commits = sessions.slice(0, 6).map((session, i) => ({
+    session_id: session.session_id,
+    provider: session.provider,
+    commit_sha: `${(0xa1c3f0 + i * 0x91).toString(16)}${'0'.repeat(28)}`.slice(0, 40),
+    committed_at: (session.started_at as number) + 1_800 + i * 240,
+    branch: i % 2 === 0 ? 'master' : `feat/branch-${i}`,
+    worktree: i % 3 === 0 ? '/fast/projects/tracedecay' : null,
+    relation: i % 2 === 0 ? 'authored_during' : 'observed_near',
+    evidence: 'session_span_overlap',
+    span_overlap_kind: i % 2 === 0 ? 'contained' : 'adjacent',
+    confidence: 0.92 - i * 0.07,
+  }));
+  const editedFiles = sessions.slice(0, 5).flatMap((session, i) => [
+    {
+      session_id: session.session_id,
+      provider: session.provider,
+      path: pick(GRAPH_FILES, i),
+      change_type: i % 2 === 0 ? 'modified' : 'added',
+      hunks: 1 + (i % 4),
+    },
+  ]);
+  const branchSpans = sessions.slice(0, 4).map((session, i) => ({
+    session_id: session.session_id,
+    provider: session.provider,
+    source: 'git_watch',
+    branch: i === 3 ? null : i % 2 === 0 ? 'master' : `feat/branch-${i}`,
+    worktree: '/fast/projects/tracedecay',
+    first_at: session.started_at,
+    last_at: (session.started_at as number) + 3_600,
+    event_count: 4 + i * 3,
+  }));
+  const coverage = (matched: number, eligible: number, unit: string, reason: string) => ({
+    completeness: matched === eligible ? 'complete' : 'partial',
+    eligible,
+    examined: eligible,
+    matched,
+    omitted: eligible - matched,
+    reason,
+    unit,
+  });
+  return {
+    available: true,
+    sessions,
+    commits,
+    edited_files: editedFiles,
+    branch_spans: branchSpans,
+    source_statuses: [
+      {
+        id: 'sessions',
+        label: 'Sessions',
+        state: 'ready',
+        granularity: 'session',
+        authority: 'session_store',
+        required_authority: null,
+        providers: [...LOOM_PROVIDERS],
+        item_count: sessions.length,
+        reason: null,
+        coverage: coverage(sessions.length, sessions.length, 'sessions', 'every eligible session was read'),
+      },
+      {
+        id: 'commits',
+        label: 'Commit attributions',
+        state: 'ready',
+        granularity: 'commit',
+        authority: 'git_watch',
+        required_authority: null,
+        providers: ['codex', 'claude'],
+        item_count: commits.length,
+        reason: null,
+        coverage: coverage(commits.length, commits.length, 'commits', 'every attributed commit was read'),
+      },
+      {
+        id: 'edited_files',
+        label: 'Edited files',
+        state: 'partial',
+        granularity: 'file',
+        authority: 'session_store',
+        required_authority: null,
+        providers: ['codex'],
+        item_count: editedFiles.length,
+        reason: 'two providers record no per-file edit evidence',
+        coverage: coverage(editedFiles.length, editedFiles.length + 4, 'files', 'two providers record no per-file edit evidence'),
+      },
+      {
+        id: 'branch_spans',
+        label: 'Branch spans',
+        state: 'ready',
+        granularity: 'span',
+        authority: 'git_watch',
+        required_authority: null,
+        providers: [...LOOM_PROVIDERS],
+        item_count: branchSpans.length,
+        reason: null,
+        coverage: coverage(branchSpans.length, branchSpans.length, 'spans', 'every recorded span was read'),
+      },
+    ],
+    temporal_refresh: {
+      authority: 'loom_temporal_projection',
+      state: 'ready',
+      active_generations: 1,
+      latest_activated_at_micros: nowMicros - 90_000_000,
+    },
+    total: 6_053,
+  };
+}
+
+/* ==========================================================================
+ * GET /api/delivery/overview (delivery_api.rs::overview) — the Delivery
+ * pipeline plate. Local git-authority stages are measured; the stages that
+ * require an external forge authority are modeled `not_published` with the
+ * authority named, which is the honest reading of a local-only daemon and
+ * exactly the state the plate must render without pretending it is zero.
+ * ========================================================================== */
+
+function deliveryOverviewPayload(): Record<string, unknown> {
+  const notPublished = (authority: string) => ({
+    state: 'not_published',
+    reason: `no landed read route serves this projection without ${authority}`,
+    required_authority: authority,
+  });
+  return {
+    changes: {
+      state: 'ready',
+      value: {
+        schema_version: 'delivery.git-status.v1',
+        repository: '/fast/projects/tracedecay',
+        head: { state: 'attached', branch: 'master', commit: 'a1c3f09'.padEnd(40, '0') },
+        operation: 'none',
+        staged: 3,
+        unstaged: 7,
+        untracked: 2,
+        conflicted: 0,
+        ignored: 41,
+        changed_paths: [
+          'dashboard/src/theme/tokens.css',
+          'dashboard/src/workspaces/observatory/ObservatoryPage.tsx',
+          'crates/tracedecay/src/daemon/doctor_kernel.rs',
+        ],
+      },
+    },
+    commits: {
+      state: 'ready',
+      value: {
+        truncated: false,
+        items: Array.from({ length: 5 }, (_, i) => ({
+          commit: `${(0xb2d4e0 + i * 0x73).toString(16)}`.padEnd(40, '0'),
+          subject: pick(LOOM_TITLES, i),
+          author_name: 'Zack Jackson',
+          author_email: 'zack@example.com',
+          author_at_micros: nowMicros - i * 5_400_000_000,
+          committer_at_micros: nowMicros - i * 5_400_000_000,
+        })),
+      },
+    },
+    generation_freshness: {
+      state: 'ready',
+      value: {
+        comparison: 'current',
+        head_commit: 'a1c3f09'.padEnd(40, '0'),
+        indexed_commit: 'a1c3f09'.padEnd(40, '0'),
+      },
+    },
+    pull_requests: notPublished('github_read_authority'),
+    review_comments: notPublished('github_read_authority'),
+    ci_checks: notPublished('ci_provider_read_authority'),
+    releases: notPublished('github_read_authority'),
+    failure_localization: notPublished('ci_provider_read_authority'),
+  };
+}
+
+/* ==========================================================================
+ * GET /api/plugins/graph/strata (graph_structure_api.rs::strata) — the CORTEX
+ * relief's one reading: file depth strata plus per-directory boundary totals,
+ * wrapped in the measurement-grade `StructureReadV1` union. Modeled as a real
+ * measurement so the terrain draws; the unmeasured and failed states stay
+ * reachable through fault injection.
+ * ========================================================================== */
+
+const STRATA_DIRECTORIES = [
+  { directory: 'src/domain', files: 14, base: 0 },
+  { directory: 'src/storage', files: 12, base: 1 },
+  { directory: 'src/capture', files: 8, base: 1 },
+  { directory: 'src/query', files: 10, base: 2 },
+  { directory: 'src/application', files: 16, base: 3 },
+  { directory: 'src/dashboard', files: 18, base: 4 },
+  { directory: 'src/automation', files: 9, base: 4 },
+  { directory: 'dashboard/src/workspaces', files: 22, base: 5 },
+] as const;
+
+function strataPayload(): Record<string, unknown> {
+  const files = STRATA_DIRECTORIES.flatMap((cluster, clusterIndex) =>
+    Array.from({ length: cluster.files }, (_, i) => {
+      const depth = cluster.base + (i % 3);
+      const stem = `${cluster.directory}/${pick(GRAPH_SYMBOL_NAMES, clusterIndex * 7 + i)
+        .replace(/([a-z])([A-Z])/g, '$1_$2')
+        .toLowerCase()}`;
+      return {
+        path: `${stem}.rs`,
+        depth,
+        // One deliberate cycle: three storage files share a strongly
+        // connected component, which the relief hatches differently.
+        scc_size: cluster.directory === 'src/storage' && i < 3 ? 3 : 1,
+        chain: Array.from({ length: Math.min(depth, 3) }, (_, link) => `${stem}.rs#${link}`),
+      };
+    }),
+  );
+  return {
+    status: 'measured',
+    measurement: {
+      algorithm: 'longest_path_layering',
+      cluster_ordering: 'boundary_edges_desc',
+      granularity: 'file',
+      graph_generation: 'generation.2026-08-27.001',
+      ideal_depth: 5,
+      max_depth: 7,
+      dependency_edge_kinds: ['imports', 'calls'],
+      clusters: STRATA_DIRECTORIES.map((cluster, i) => ({
+        directory: cluster.directory,
+        file_count: cluster.files,
+        order: i,
+        internal_edges: cluster.files * 3 + i,
+        incoming_edges: 12 + i * 5,
+        outgoing_edges: 9 + i * 4,
+        boundary_edges: 21 + i * 9,
+      })),
+      files,
+      scan: {
+        budget_ms: 250,
+        cache_scope: 'sealed_generation',
+        cache_state: 'warm',
+        dependency_edges_examined: 1_872,
+        files_examined: files.length,
+        max_dependency_edges: 50_000,
+        max_files: 10_000,
+      },
+    },
+  };
+}
+
+const LOOM_CHAIN_TOOLS = [
+  'Read',
+  'Bash',
+  'Grep',
+  'Edit',
+  'tracedecay_context',
+  null,
+] as const;
+
+/** One session's transcript. `timestamp` is null on every message, exactly as
+ * the daemon serves it — the chain rail reads that and prints "ordinal order",
+ * so a fixture with timestamps would hide the behaviour under audit. */
+function loomChainPayload(): Record<string, unknown> {
+  const sessionId = loomSessionId(0);
+  const messages = Array.from({ length: 46 }, (_, i) => {
+    const tool = i === 0 ? null : LOOM_CHAIN_TOOLS[i % LOOM_CHAIN_TOOLS.length];
+    return {
+      message_id: `${sessionId}:${String(i).padStart(4, '0')}`,
+      session_id: sessionId,
+      role: i === 0 ? 'user' : i === 1 ? 'system' : 'assistant',
+      content:
+        i === 0
+          ? 'Verify durable code-generation restart and worktree reconciliation. Fix gaps. No git mutations.'
+          : tool
+            ? `Invoking ${tool} against the workspace to confirm the reconciliation path.`
+            : 'Summarising the reconciliation result and the remaining gap.',
+      ordinal: i,
+      timestamp: null,
+      tool_name: tool,
+      token_estimate: 18 + (i % 9) * 7,
+      // `lcm_queries` selects a literal `0 AS pinned`: pinning is not tracked
+      // yet, and the column is an integer, not a boolean.
+      pinned: 0,
+      source: 'cursor',
+      storage_kind: 'message',
+      store_id: 90_000 + i,
+      summary_node_ids: [],
+      metadata_json: '{"provider":"cursor","version":1}',
+    };
+  });
+  return {
+    exists: true,
+    session_id: sessionId,
+    path: '/home/zack/.tracedecay/projects/proj_a5b3d7e3ebe14ca7/sessions.db',
+    storage_scope: 'profile_sharded',
+    order: 'asc',
+    limit: 200,
+    offset: 0,
+    has_more: false,
+    has_more_messages: false,
+    has_more_summary_nodes: false,
+    counts: {
+      message_count: 998,
+      source_token_count: 18_400,
+      summary_node_count: LOOM_CHAIN_SUMMARY_NODES.length,
+      summary_token_count: 1_020,
+      token_estimate_total: 21_460,
+    },
+    messages,
+    summary_nodes: LOOM_CHAIN_SUMMARY_NODES.map((node) => ({ ...node, session_id: sessionId })),
+  };
+}
+
+/**
+ * LCM compaction boundaries for the transcript above.
+ *
+ * The Sessions drill-down reads these as the compactor's cuts: each names the
+ * source tokens it replaced and the token count it replaced them with, so the
+ * audit exercises a real boundary rather than the zero state. `expand_hint` is
+ * the producer's own recovery instruction and is rendered verbatim.
+ */
+const LOOM_CHAIN_SUMMARY_NODES = [
+  {
+    node_id: 'sn-recon-0001',
+    category: 'tool_activity',
+    depth: 1,
+    summary:
+      'Read and grepped the worktree reconciliation path, then confirmed the durable restart branch against the scheduler registry.',
+    source_type: 'messages',
+    source_token_count: 9_800,
+    token_count: 540,
+    created_at: 1_752_988_400,
+    latest_at: 1_752_989_050,
+    expand_hint: 'lcm expand node:sn-recon-0001',
+  },
+  {
+    node_id: 'sn-recon-0002',
+    category: 'code_change',
+    depth: 1,
+    summary:
+      'Edits to the generation-publication path and the reconciliation guard, with the tests that cover them.',
+    source_type: 'messages',
+    source_token_count: 6_200,
+    token_count: 330,
+    created_at: 1_752_989_600,
+    latest_at: 1_752_990_100,
+    expand_hint: 'lcm expand node:sn-recon-0002',
+  },
+  {
+    node_id: 'sn-recon-0003',
+    category: 'outcome',
+    depth: 2,
+    summary:
+      'Session outcome: reconciliation verified, one gap left open against the hook-hint queue drain.',
+    source_type: 'summary_nodes',
+    source_token_count: 2_400,
+    token_count: 150,
+    created_at: 1_752_990_400,
+    latest_at: null,
+    expand_hint: 'lcm expand node:sn-recon-0003',
+  },
+] as const;
+
+/** Thirty days back, matching `analytics_api::observatory_model`. Declared
+ * above the fixture map because the map is built at module init and a `const`
+ * is not hoisted the way the builder functions below it are. */
+const OBSERVATORY_SINCE_MICROS = nowMicros - 30 * 86_400 * 1_000_000;
+
+/** The Work projection generation both read routes report. Declared here for
+ * the same hoisting reason as the constant above it. */
+const WORK_GENERATION_ID = 'work-generation-0007';
+
+// The graph version `/api/work/views` answers with, and the instant it was
+// observed at. Declared here rather than beside `workGraphViewsPayload` below
+// because `FIXTURES` is a module-level object literal that calls that builder
+// during initialization, and a `const` declared after it is still in its
+// temporal dead zone when the call runs.
+const WORK_GRAPH_VERSION = 6;
+const WORK_GRAPH_OBSERVED_AT = nowMicros;
+const WORK_HOUR_MICROS = 3_600_000_000;
+
+const ANALYTICS_DESCRIPTOR = 'analytics-observability.v1';
+const FEEDBACK_DESCRIPTOR = 'feedback-system-quality.v1';
+const COST_DESCRIPTOR = 'accounting-cost.v1';
+
+/**
+ * The same freshness endpoint at four truthful mounted-registry moments. The
+ * static visual-audit route stays ready/absent; the remaining snapshots give
+ * DOM and endpoint-contract tests a complete active, rate-unavailable, and
+ * superseded-generation read without inventing query parameters the API does
+ * not accept.
+ */
+export const CODE_INDEX_FRESHNESS_FIXTURES = {
+  active: codeIndexFreshnessEnvelope(codeIndexBuildProgressFixture()),
+  unavailable_rate: codeIndexFreshnessEnvelope(
+    codeIndexBuildProgressFixture({
+      files_per_second: null,
+      lexical_bytes_per_second: null,
+      estimated_remaining_seconds: null,
+      blocked_reason: 'retry_backoff',
+    }),
+  ),
+  ready_absent: codeIndexFreshnessEnvelope(null),
+  generation_replacement: [
+    codeIndexFreshnessEnvelope(codeIndexBuildProgressFixture()),
+    codeIndexFreshnessEnvelope(
+      codeIndexBuildProgressFixture({
+        generation_id: 'generation.catchup.02',
+        progress_epoch: 2,
+        completed_files: 1,
+      }),
+    ),
+    // A delayed pre-supersession read. Consumers must retain the newer epoch.
+    codeIndexFreshnessEnvelope(codeIndexBuildProgressFixture()),
+  ],
+} as const;
+
+/**
+ * Exact-path fixture map. Keys are the pathname (query string stripped by the
+ * resolver). Anything not listed resolves to the prefix table, then to {}.
+ */
+export const FIXTURES: Readonly<Record<string, unknown>> = {
+  '/api/projects': envelope(projectsPayload),
+  '/api/storage/telemetry': storageTelemetryEnvelope,
+  '/api/storage/findings': storageFindings,
+  '/api/doctor/findings': doctorFindingsEnvelope(),
+  '/api/settings': settings,
+  '/api/capabilities': capabilities,
+  // Memory (holographic) — consumed with a trailing slash by KnowledgePage and
+  // ExplorerPage (`/api/plugins/holographic/?...`).
+  '/api/plugins/holographic/': envelope(memoryPayload()),
+  '/api/plugins/holographic': envelope(memoryPayload()),
+  '/api/plugins/holographic/overview': envelope(memoryPayload()),
+  // LCM standing reads model a MOUNTED temporal-retrieval store, so the
+  // Sessions ledger renders populated; search stays explicitly unavailable so
+  // the refusal state remains a modeled, reachable surface.
+  '/api/plugins/hermes-lcm/overview': envelope(lcmOverviewPayload()),
+  '/api/plugins/hermes-lcm/timeline': envelope(lcmTimelinePayload()),
+  '/api/plugins/hermes-lcm/search': unavailableEnvelope(
+    'lcm_temporal_retrieval_not_mounted',
+  ),
+  // Graph.
+  '/api/plugins/graph/overview': envelope(graphOverviewPayload()),
+  '/api/plugins/graph/search': envelope(graphSearchPayload()),
+  '/api/plugins/graph/subgraph': envelope(subgraphPayload(null)),
+  '/api/plugins/graph/path': envelope(graphPathPayload()),
+  '/api/plugins/graph/strata': envelope(strataPayload()),
+  // Loom's canonical temporal read.
+  '/api/loom/temporal': envelope(loomTemporalPayload()),
+  // Delivery's pipeline overview: local git stages measured, forge-authority
+  // stages explicitly not_published.
+  '/api/delivery/overview': envelope(deliveryOverviewPayload()),
+  // Savings. `sessions` is the Loom weave's thread source, not a costs route.
+  '/api/plugins/savings/overview': envelope(savingsPayload()),
+  '/api/plugins/savings/sessions': loomSessionsPayload(),
+  // Canonical memory status (memory_api.rs::status) — the scoped Brain's fact and
+  // entity readouts. Distinct from the overview payload above.
+  '/api/plugins/holographic/status': envelope(memoryStatusPayload()),
+  // Analytics reads are envelope-only. Their generated inner contracts follow
+  // the backend schema floor; fixtures keep the same outer wire authority now.
+  '/api/plugins/analytics/overview': envelope(analyticsOverviewPayload()),
+  '/api/plugins/analytics/usage': envelope(analyticsUsagePayload()),
+  '/api/plugins/analytics/agents': envelope(analyticsAgentsPayload()),
+  '/api/plugins/analytics/subagent-tree': envelope(analyticsSubagentTreePayload()),
+  '/api/plugins/analytics/hints': envelope(analyticsHintsPayload()),
+  '/api/plugins/analytics/underused': envelope(analyticsUnderusedPayload()),
+  '/api/plugins/analytics/diagnostics': envelope(analyticsDiagnosticsPayload()),
+  // Automation.
+  '/api/automation/scheduler/status': schedulerStatusPayload(),
+  '/api/automation/jobs': jobsPayload(),
+  '/api/automation/skills': skillsPayload(),
+  '/api/automation/automatic-fact-receipts': automaticFactReceiptsPayload(),
+  '/api/automation/runs': automationRunsPayload(),
+  '/api/automation/outcomes': automationOutcomesPayload(),
+  '/api/application/retained/fact_store_curate': automaticCuratorRunPayload(),
+  // Plan 26 canonical read models. These are the projections the CLI and MCP
+  // also serve, so their fixtures carry the mixed available/unavailable metric
+  // set the real projector emits rather than a fully-populated one.
+  '/api/observatory': observatoryEnvelope(),
+  '/api/costs': costsEnvelope(),
+  // Code-index freshness. Served against a mounted daemon scheduler, which is
+  // the state the audit needs to shoot — the unattached case is a state chip
+  // with no reading behind it.
+  '/api/code-index/freshness': CODE_INDEX_FRESHNESS_FIXTURES.ready_absent,
+  '/api/remote/status': remoteOperationalStatusEnvelope(),
+  // Work. The two mounted read routes. Unlike every other fixture here these
+  // are wrapped in the application's `HttpJsonEnvelope` rather than
+  // `DashboardEnvelopeV1`, because `mod.rs` nests the Work routes straight
+  // onto the application router — see `workApi.ts`, which walks that wrapper.
+  // The work-product graph read. Serves the Work projections and the Agents
+  // workspace's handoff frontier and attempt failures.
+  '/api/work/views': workEnvelope(workGraphViewsPayload()),
+  // The Workflows workspace's standing read (`operation.workflow.
+  // list_definitions`), through the same application envelope walker.
+  '/api/application/workflow/list-definitions': workEnvelope(workflowDefinitionsPayload()),
+};
+
+/** Two registered workflow definitions with real step graphs, so the audited
+ * surface renders a definition ledger rather than an unsupported-schema well.
+ * Digests are fixture-stable; steps reference each other's outputs the way
+ * plan 32's fan-out examples do. */
+function workflowDefinitionsPayload(): Record<string, unknown>[] {
+  const digest = (label: string): string => `sha256:${label.padEnd(8, '0')}${'0'.repeat(56)}`.slice(0, 71);
+  const step = (
+    stepId: string,
+    operation: string,
+    predecessors: string[],
+    inputs: { output_name: string; producer_step_id: string }[],
+    outputs: string[],
+    fanOut: number | null,
+  ) => ({
+    step_id: stepId,
+    operation,
+    predecessors,
+    inputs,
+    outputs,
+    fan_out: fanOut == null ? null : { max_width: fanOut },
+  });
+  return [
+    {
+      definition_id: 'workflow.review-sweep',
+      definition_version: 3,
+      project_id: 'project.tracedecay',
+      pinned_catalog_digest: digest('catalog'),
+      pinned_configuration_digest: digest('config'),
+      pinned_policy_digest: digest('policy'),
+      steps: [
+        step('collect-diff', 'operation.git.change_context', [], [], ['diff'], null),
+        step(
+          'review-fanout',
+          'operation.agents.review',
+          ['collect-diff'],
+          [{ output_name: 'diff', producer_step_id: 'collect-diff' }],
+          ['findings'],
+          4,
+        ),
+        step(
+          'synthesize',
+          'operation.memory.curate',
+          ['review-fanout'],
+          [{ output_name: 'findings', producer_step_id: 'review-fanout' }],
+          ['facts'],
+          null,
+        ),
+      ],
+    },
+    {
+      definition_id: 'workflow.isolated-worktree-task',
+      definition_version: 1,
+      project_id: 'project.tracedecay',
+      pinned_catalog_digest: digest('catalog2'),
+      pinned_configuration_digest: digest('config2'),
+      pinned_policy_digest: digest('policy2'),
+      steps: [
+        step('mint-worktree', 'operation.git.create_worktree', [], [], ['worktree'], null),
+        step(
+          'execute',
+          'operation.work.run_attempt',
+          ['mint-worktree'],
+          [{ output_name: 'worktree', producer_step_id: 'mint-worktree' }],
+          ['attempt'],
+          null,
+        ),
+      ],
+    },
+  ];
+}
+
+/** Prefix fixtures for query-bearing / dynamic routes. The resolver falls back
+ * to these when there is no exact-path match. */
+export const FIXTURE_PREFIXES: ReadonlyArray<readonly [string, unknown]> = [
+  ['/api/plugins/graph/search', FIXTURES['/api/plugins/graph/search']],
+  // Ahead of the generic `/api/plugins/graph` fallback below, which serves the
+  // OVERVIEW payload: a path request resolving to an overview body would reach
+  // the panel as `unsupported_schema` and be audited as a broken surface.
+  ['/api/plugins/graph/path', FIXTURES['/api/plugins/graph/path']],
+  ['/api/plugins/hermes-lcm/search', FIXTURES['/api/plugins/hermes-lcm/search']],
+  // Dynamic: `/session/{session_id}` — the Loom thread chain. One transcript
+  // answers for every id, which is what a fixture can honestly be.
+  ['/api/plugins/hermes-lcm/session/', unavailableEnvelope(
+    'lcm_temporal_retrieval_not_mounted',
+  )],
+  ['/api/plugins/holographic', envelope(memoryPayload())],
+  ['/api/plugins/graph', envelope(graphOverviewPayload())],
+  ['/api/plugins/savings', envelope(savingsPayload())],
+];
+
+/* ==========================================================================
+ * Work product graph (`/api/work/views`).
+ *
+ * The Work routes are the one family on this dashboard that does not answer
+ * with `DashboardEnvelopeV1`. `src/dashboard/mod.rs` nests them onto the
+ * application router, so they carry the application's own `HttpJsonEnvelope`
+ * — a `kind`/`value` union whose outcome packet holds the generated contract
+ * under `payload`. `workApi.ts` walks exactly that structure and hands what it
+ * finds to the generated schema, so a fixture that wrapped the payload any
+ * other way would be refused as `unsupported_schema` and the audit would
+ * screenshot a boundary plate for a surface that works.
+ * ========================================================================== */
+
+/** The application envelope, in the shape `workPayload()` walks. */
+function workEnvelope(payload: unknown): Record<string, unknown> {
+  return {
+    kind: 'success',
+    value: {
+      binding_id: 'binding.http.work.fixture',
+      contract: { schema_id: 'schema.work.fixture.result', schema_revision: 1 },
+      request_id: 'request.work.fixture',
+      scope: {
+        project_id: 'project.tracedecay',
+        repository_id: 'repository.tracedecay',
+        worktree_id: 'worktree.primary',
+        reference: null,
+        scope_digest: 'sha256:work-fixture-scope',
+      },
+      // Reads answer as evidence; commands as effects. Both put the contract
+      // in the same place, which is why `workApi.ts` checks the tag for
+      // presence and does not branch on it.
+      outcome: { outcome: 'evidence', value: { payload } },
+    },
+  };
+}
+
+/* --------------------------------------------------------------------------
+ * `/api/work/views` (`operation.work.views`, `current` mode).
+ *
+ * Read by the Work workspace's four projections and by the Agents workspace,
+ * which derives its handoff frontier and its attempt failures from this one
+ * response. The density spec is what those two surfaces exist to render:
+ *
+ *   - handoffs on more than one task and between more than two actors, each
+ *     carrying BOTH an evidence frontier and declared unknowns, because a
+ *     handoff with no open questions is the case the surface is least likely
+ *     to get wrong;
+ *   - one task with no handoff at all, so the frontier is visibly a subset of
+ *     the graph rather than the whole of it;
+ *   - runtime attempts in a mix of clean and unclean states, so the failure
+ *     panel has both to account for.
+ * ------------------------------------------------------------------------ */
+
+function workGraphItem(spec: {
+  taskId: string;
+  title: string;
+  effort: number;
+  handoffs?: ReadonlyArray<Record<string, unknown>>;
+  dependencies?: readonly string[];
+}): Record<string, unknown> {
+  return {
+    accepted_at: null,
+    accepted_attempts: [],
+    accepted_criteria: {},
+    accepted_proposal: null,
+    accepted_route: null,
+    archived_at: null,
+    evidence_links: [],
+    execution_admitted_at: null,
+    handoffs: spec.handoffs ?? [],
+    input: {
+      acceptance_criteria: [],
+      causal_candidates: [],
+      created_at: WORK_GRAPH_OBSERVED_AT - 96 * WORK_HOUR_MICROS,
+      deadline: null,
+      dependencies: [...(spec.dependencies ?? [])],
+      effort: spec.effort,
+      hierarchy: {
+        initiative_id: 'initiative.v2-dashboard',
+        milestone_id: 'milestone.agents-surface',
+        plan_id: 'plan.11-dashboard-frontend',
+      },
+      informational_relations: [],
+      scheduled_at: null,
+      task_id: spec.taskId,
+      title: spec.title,
+      updated_at: WORK_GRAPH_OBSERVED_AT - 6 * WORK_HOUR_MICROS,
+    },
+  };
+}
+
+function workGraphItems(): ReadonlyArray<Record<string, unknown>> {
+  return [
+    workGraphItem({
+      taskId: 'task.agents-handoff-surface',
+      title: 'Draw the handoff frontier on Agents',
+      effort: 5,
+      handoffs: [
+        {
+          evidence_frontier: [
+            'evidence.work-views-route-mounted',
+            'evidence.handoff-record-on-work-item',
+          ],
+          from_actor: 'actor.dashboard-owner',
+          handed_off_at: WORK_GRAPH_OBSERVED_AT - 9 * WORK_HOUR_MICROS,
+          handoff_id: 'handoff.agents-frontier.1',
+          task_id: 'task.agents-handoff-surface',
+          to_actor: 'actor.agents-lane',
+          unknowns: [
+            'whether the token-redemption handoff operations can ever enumerate a frontier',
+            'which actor identity the daemon stamps on a dashboard-issued handoff',
+          ],
+        },
+        {
+          evidence_frontier: ['evidence.frontier-table-accessible'],
+          from_actor: 'actor.agents-lane',
+          handed_off_at: WORK_GRAPH_OBSERVED_AT - 2 * WORK_HOUR_MICROS,
+          handoff_id: 'handoff.agents-frontier.2',
+          task_id: 'task.agents-handoff-surface',
+          to_actor: 'actor.review',
+          unknowns: [],
+        },
+      ],
+    }),
+    workGraphItem({
+      taskId: 'task.agents-failure-context',
+      title: 'Account for failures on both authorities',
+      effort: 3,
+      dependencies: ['task.agents-handoff-surface'],
+      handoffs: [
+        {
+          evidence_frontier: [
+            'evidence.by-outcome-served',
+            'evidence.runtime-attempt-states',
+            'evidence.coverage-unavailable-is-not-zero',
+          ],
+          from_actor: 'actor.dashboard-owner',
+          handed_off_at: WORK_GRAPH_OBSERVED_AT - 5 * WORK_HOUR_MICROS,
+          handoff_id: 'handoff.agents-failures.1',
+          task_id: 'task.agents-failure-context',
+          to_actor: 'actor.agents-lane',
+          unknowns: ['which outcome words the fold may emit that this build does not classify'],
+        },
+      ],
+    }),
+    workGraphItem({
+      taskId: 'task.agents-tool-activity',
+      title: 'Attribute tool activity to agents',
+      effort: 2,
+      handoffs: [],
+    }),
+  ];
+}
+
+function workGraphRuntime(): Record<string, unknown> {
+  return {
+    attempts: [
+      {
+        identity: {
+          attempt_id: 'attempt.frontier.1',
+          run_id: 'run.frontier',
+          task_id: 'task.agents-handoff-surface',
+        },
+        state: 'succeeded',
+      },
+      {
+        identity: {
+          attempt_id: 'attempt.frontier.2',
+          run_id: 'run.frontier',
+          task_id: 'task.agents-handoff-surface',
+        },
+        state: 'failed',
+      },
+      {
+        identity: {
+          attempt_id: 'attempt.failures.1',
+          run_id: 'run.failures',
+          task_id: 'task.agents-failure-context',
+        },
+        state: 'timed_out',
+      },
+      {
+        identity: {
+          attempt_id: 'attempt.failures.2',
+          run_id: 'run.failures',
+          task_id: 'task.agents-failure-context',
+        },
+        state: 'running',
+      },
+      {
+        identity: {
+          attempt_id: 'attempt.activity.1',
+          run_id: 'run.activity',
+          task_id: 'task.agents-tool-activity',
+        },
+        state: 'recovery_required',
+      },
+    ],
+    // Partial, deliberately: the daemon naming an attempt it could not observe
+    // is what turns every count on the failure panel into a floor, and a
+    // fixture that only ever answered `complete` would never show that.
+    coverage: {
+      coverage: 'partial',
+      unavailable_attempts: [
+        {
+          attempt_id: 'attempt.activity.2',
+          run_id: 'run.activity',
+          task_id: 'task.agents-tool-activity',
+        },
+      ],
+    },
+    generation_id: WORK_GENERATION_ID,
+    graph_version: WORK_GRAPH_VERSION,
+    observed_at: WORK_GRAPH_OBSERVED_AT,
+    sequence: 6,
+  };
+}
+
+function workGraphViewsPayload(): Record<string, unknown> {
+  const items = workGraphItems();
+  const taskIds = items.map((item) => (item['input'] as Record<string, unknown>)['task_id']);
+  const runtime = workGraphRuntime();
+  return {
+    authorized_scope: {
+      owner_brain_id: 'brain.tracedecay',
+      owner_profile_id: 'profile.default',
+      selection: { selection: 'profile_owned_no_git' },
+    },
+    mode: 'current',
+    // The whole journal is inside this selection, so the reading withholds
+    // nothing.
+    selection_coverage: { coverage: 'complete', covered_events: 6 },
+    snapshot: {
+      graph: {
+        evidence: [],
+        initiatives: [
+          {
+            created_at: WORK_GRAPH_OBSERVED_AT - 30 * 24 * WORK_HOUR_MICROS,
+            id: 'initiative.v2-dashboard',
+            title: 'TraceDecay V2 dashboard',
+          },
+        ],
+        items,
+        milestones: [
+          {
+            created_at: WORK_GRAPH_OBSERVED_AT - 20 * 24 * WORK_HOUR_MICROS,
+            id: 'milestone.agents-surface',
+            plan_id: 'plan.11-dashboard-frontend',
+            title: 'Agents surface completeness',
+          },
+        ],
+        plans: [
+          {
+            created_at: WORK_GRAPH_OBSERVED_AT - 25 * 24 * WORK_HOUR_MICROS,
+            id: 'plan.11-dashboard-frontend',
+            initiative_id: 'initiative.v2-dashboard',
+            title: 'Dashboard frontend',
+          },
+        ],
+        proposal_decisions: [],
+        relation_replan_decisions: [],
+        version: WORK_GRAPH_VERSION,
+      },
+      observed_at: WORK_GRAPH_OBSERVED_AT,
+      projected_at: WORK_GRAPH_OBSERVED_AT,
+      projections: {
+        causal: { candidate_edges: [], graph_version: WORK_GRAPH_VERSION },
+        critical_path: {
+          graph_version: WORK_GRAPH_VERSION,
+          task_ids: ['task.agents-handoff-surface', 'task.agents-failure-context'],
+          total_effort: 8,
+        },
+        dag: {
+          gating_edges: [
+            {
+              dependency: 'task.agents-handoff-surface',
+              dependent: 'task.agents-failure-context',
+            },
+          ],
+          graph_version: WORK_GRAPH_VERSION,
+          task_ids: taskIds,
+        },
+        graph_version: WORK_GRAPH_VERSION,
+        kanban: {
+          cards: [
+            { effort: 5, lane: 'running', legal_actions: ['handoff'], task_id: taskIds[0] },
+            { effort: 3, lane: 'blocked', legal_actions: ['handoff'], task_id: taskIds[1] },
+            { effort: 2, lane: 'todo', legal_actions: [], task_id: taskIds[2] },
+          ],
+          graph_version: WORK_GRAPH_VERSION,
+        },
+        runtime,
+        timeline: {
+          entries: items.map((item) => {
+            const input = item['input'] as Record<string, unknown>;
+            return {
+              created_at: input['created_at'],
+              deadline: null,
+              scheduled_at: null,
+              task_id: input['task_id'],
+              updated_at: input['updated_at'],
+            };
+          }),
+          graph_version: WORK_GRAPH_VERSION,
+        },
+        workload: {
+          // Runtime coverage is partial, so the authority withholds every
+          // runtime-gated figure rather than answering it over a partial
+          // observation — exactly what it does live.
+          actual_concurrency: null,
+          blocked_effort: null,
+          graph_version: WORK_GRAPH_VERSION,
+          ready_effort: null,
+          requested_concurrency: null,
+          running_effort: null,
+          total_effort: 10,
+        },
+      },
+      runtime,
+      valid_at: WORK_GRAPH_OBSERVED_AT,
+      verified_version: {
+        event_sequence: 6,
+        graph_version: WORK_GRAPH_VERSION,
+        recovered_graph_digest: 'digest.work-graph.6',
+        source_watermark: { work_events: 6 },
+      },
+    },
+  };
+}
+
+/* ==========================================================================
+ * Plan 26 canonical read models (`/api/observatory`, `/api/costs`).
+ *
+ * Shapes come from `src/application/observability.rs`. Two of its behaviours
+ * are deliberately reproduced here rather than smoothed away, because they are
+ * the behaviours the workspaces exist to render honestly:
+ *
+ *   - a metric the projector could not complete carries `value: null` and an
+ *     `unavailable_reason`, and its coverage goes `unknown` with a null
+ *     eligible population;
+ *   - every completed metric carries a degenerate uncertainty interval
+ *     (`lower == upper == value`), which the plate must drop rather than draw.
+ * ========================================================================== */
+
+/** One `MetricValueV1`. `value: null` also nulls the coverage denominator, as
+ * the projector's `coverage(None, 0, 1, Unknown)` does. */
+function metricValue(spec: {
+  metric: string;
+  value: number | null;
+  unit: string;
+  denominator: string;
+  eligible: number | null;
+  source: string;
+  sourceRevision: string;
+  projectorRevision: string;
+  watermark: string;
+  descriptorRevision: string;
+  unavailableReason?: string | null;
+}): Record<string, unknown> {
+  const available = spec.value != null;
+  return {
+    descriptor_revision: spec.descriptorRevision,
+    metric: spec.metric,
+    value: spec.value,
+    unit: spec.unit,
+    denominator: spec.denominator,
+    denominator_value: available ? spec.eligible : null,
+    coverage: {
+      state: available ? 'known' : 'unknown',
+      eligible: available ? spec.eligible : null,
+      observed: available ? (spec.eligible ?? 0) : 0,
+      completed: available ? (spec.eligible ?? 0) : 0,
+      censored: 0,
+      excluded: 0,
+      unknown: available ? 0 : 1,
+    },
+    evidence_class: 'measurement',
+    provenance: {
+      source: spec.source,
+      source_revision: spec.sourceRevision,
+      projector_revision: spec.projectorRevision,
+      watermark: spec.watermark,
+    },
+    cohort: {
+      descriptor_revision: `${spec.denominator}.v1`,
+      eligible_population: spec.denominator,
+    },
+    temporal: {
+      horizon: { since_micros: OBSERVATORY_SINCE_MICROS, until_micros: nowMicros },
+      baseline_watermark: null,
+      delta: null,
+    },
+    uncertainty: available
+      ? { lower: spec.value, upper: spec.value, reason: null }
+      : { lower: null, upper: null, reason: spec.unavailableReason ?? null },
+    calibration: null,
+    unavailable_reason: spec.unavailableReason ?? null,
+  };
+}
+
+function observabilityMetric(
+  metric: string,
+  value: number | null,
+  reason: string | null = null,
+): Record<string, unknown> {
+  return metricValue({
+    metric,
+    value,
+    unit: 'events',
+    denominator: 'eligible_observability_events',
+    eligible: 6_142,
+    source: 'observability_envelope',
+    sourceRevision: 'observability-envelope.v1',
+    projectorRevision: 'observatory-projector.v1',
+    watermark: 'analytics:918422',
+    descriptorRevision: ANALYTICS_DESCRIPTOR,
+    unavailableReason: reason,
+  });
+}
+
+function plan26UnknownMetric(metric: string): Record<string, unknown> {
+  const microseconds = metric.includes('latency') || metric.includes('span');
+  return metricValue({
+    metric,
+    value: null,
+    unit: microseconds ? 'microseconds' : 'events',
+    denominator: 'eligible_observations',
+    eligible: null,
+    source: 'observability_envelope',
+    sourceRevision: 'observability-envelope.v1',
+    projectorRevision: 'observatory-plan26-projector.v1',
+    watermark: 'analytics:918422',
+    descriptorRevision: 'observatory-plan26.v1',
+    unavailableReason: 'observation_family_not_recorded',
+  });
+}
+
+function analyticsModeReadModel(): Record<string, unknown> {
+  return {
+    current: 'local_only',
+    transition_watermark: 'analytics:918421',
+    coverage: {
+      eligible: 1,
+      observed: 1,
+      completed: 1,
+      censored: 0,
+      unknown: 0,
+      excluded: 0,
+      state: 'known',
+    },
+    unavailable_reason: null,
+  };
+}
+
+function comparisonReadModel(): Record<string, unknown> {
+  return {
+    baseline_build: null,
+    candidate_build: null,
+    workload: null,
+    corpus: null,
+    environment: null,
+    oracle: null,
+    configuration: null,
+    platform: null,
+    rollback_profile: null,
+    eligible_outcomes: null,
+    paired_outcomes: null,
+    regression_observed: null,
+    disposition: 'insufficient_evidence',
+    coverage: {
+      eligible: null,
+      observed: 0,
+      completed: 0,
+      censored: 0,
+      unknown: 1,
+      excluded: 0,
+      state: 'unknown',
+    },
+    unavailable_reason: 'comparison_evidence_not_recorded',
+  };
+}
+
+function feedbackMetric(spec: {
+  metric: string;
+  value: number | null;
+  unit: string;
+  denominator: string;
+  eligible: number | null;
+  reason?: string | null;
+}): Record<string, unknown> {
+  return metricValue({
+    ...spec,
+    source: 'feedback_observations',
+    sourceRevision: 'feedback-observations.v1',
+    projectorRevision: 'feedback-system-quality-projector.v1',
+    watermark: 'feedback:31204',
+    descriptorRevision: FEEDBACK_DESCRIPTOR,
+    unavailableReason: spec.reason ?? null,
+  });
+}
+
+/** GET /api/observatory (src/dashboard/analytics_api.rs `observatory`). */
+function observatoryEnvelope(): Record<string, unknown> {
+  const metrics = [
+    observabilityMetric('observability_eligible_events', 6_142),
+    observabilityMetric('observability_events', 6_142),
+    observabilityMetric('observability_late_arrivals', 14),
+    observabilityMetric('observability_failures', 23),
+    observabilityMetric('telemetry_drops_lower_bound', 0),
+    feedbackMetric({
+      metric: 'feedback_coverage',
+      value: 0.9127,
+      unit: 'ratio',
+      denominator: 'eligible_observations',
+      eligible: 1_884,
+    }),
+    feedbackMetric({
+      metric: 'feedback_relevance',
+      value: 0.7431,
+      unit: 'ratio',
+      denominator: 'relevance_labels',
+      eligible: 612,
+    }),
+    feedbackMetric({
+      metric: 'feedback_diversity',
+      value: 0.6208,
+      unit: 'ratio',
+      denominator: 'eligible_source_families',
+      eligible: 8,
+    }),
+    feedbackMetric({
+      metric: 'feedback_latency_p95',
+      value: 214_800,
+      unit: 'microseconds',
+      denominator: 'latency_samples',
+      eligible: 1_884,
+    }),
+    feedbackMetric({
+      metric: 'feedback_omission_rate',
+      value: 0.0412,
+      unit: 'ratio',
+      denominator: 'returned_and_omitted_items',
+      eligible: 9_260,
+    }),
+    feedbackMetric({
+      metric: 'feedback_denial_rate',
+      value: 0.0,
+      unit: 'ratio',
+      denominator: 'outcome_observations',
+      eligible: 1_884,
+    }),
+    feedbackMetric({
+      metric: 'feedback_staleness_rate',
+      value: 0.0217,
+      unit: 'ratio',
+      denominator: 'outcome_observations',
+      eligible: 1_884,
+    }),
+    // Two the projector genuinely could not complete on a store with no
+    // revocation or stack-transition observations. The audit needs these: a
+    // fully-populated fixture never shoots the unavailable plate.
+    feedbackMetric({
+      metric: 'feedback_revocation_propagation_p95',
+      value: null,
+      unit: 'microseconds',
+      denominator: 'revocation_observations',
+      eligible: null,
+      reason: 'no_revocation_observations',
+    }),
+    feedbackMetric({
+      metric: 'feedback_stack_transitions',
+      value: null,
+      unit: 'transitions',
+      denominator: 'stack_transition_observations',
+      eligible: null,
+      reason: 'no_stack_transition_observations',
+    }),
+    ...PLAN26_OBSERVATORY_METRICS.map(plan26UnknownMetric),
+  ];
+  const payload = {
+    authorized_scope_ref: 'proj_a5b3d7e3ebe14ca7',
+    horizon: { since_micros: OBSERVATORY_SINCE_MICROS, until_micros: nowMicros },
+    watermark: 'analytics:918422;feedback:31204',
+    observed_at_micros: nowMicros,
+    current: false,
+    metrics,
+    analytics_mode: analyticsModeReadModel(),
+    comparison: comparisonReadModel(),
+    rejected_arguments: {
+      coverage: {
+        eligible: null,
+        observed: 0,
+        completed: 0,
+        censored: 0,
+        unknown: 1,
+        excluded: 0,
+        state: 'unknown',
+      },
+      projector_revision: 'observatory-rejected-argument-projector.v1',
+      watermark: 'analytics:918422',
+      eligible_attempts: null,
+      rejected_total: null,
+      rejection_rate: null,
+      redacted_name_count: 0,
+      groups: [],
+      unavailable_reason: 'rejected_argument_observations_not_recorded',
+    },
+  };
+  return {
+    ...envelope(payload, 'partial', [
+      { kind: 'refresh', operation: 'use-case.dashboard.observatory.refresh' },
+    ]),
+    coverage: {
+      completeness: 'partial',
+      eligible: metrics.length,
+      examined: metrics.length - 2,
+      matched: null,
+      excluded: null,
+      omitted: 2,
+      unknown: null,
+      denominator: metrics.length,
+      unit: 'metrics',
+      omission_reasons: ['incomplete_metric_coverage'],
+    },
+  };
+}
+
+/** GET /api/costs (src/dashboard/savings_api.rs `costs`). The projector asks
+ * for an all-time window, which reaches the wire as `since_micros: 0`. */
+function costsEnvelope(): Record<string, unknown> {
+  const usage = [
+    metricValue({
+      metric: 'provider_tokens',
+      value: 41_882_140,
+      unit: 'tokens',
+      denominator: 'provider_usage_observations',
+      eligible: 27_401,
+      source: 'provider_usage_observation',
+      sourceRevision: 'provider-usage-observation.v1',
+      projectorRevision: 'costs-projector.v1',
+      watermark: 'provider-usage:27401',
+      descriptorRevision: COST_DESCRIPTOR,
+    }),
+    metricValue({
+      metric: 'saved_tokens',
+      value: 30_144_802,
+      unit: 'tokens',
+      denominator: 'eligible_savings_calls',
+      eligible: 12_608,
+      source: 'savings_ledger',
+      sourceRevision: 'savings-ledger.v1',
+      projectorRevision: 'costs-projector.v1',
+      watermark: 'savings:1752990400',
+      descriptorRevision: COST_DESCRIPTOR,
+    }),
+  ];
+  // Usage without an exact provider/model price produces a null cost with
+  // this exact reason — never a zero bill.
+  const estimatedCost = [
+    metricValue({
+      metric: 'provider_cost',
+      value: null,
+      unit: 'usd',
+      denominator: 'priced_provider_usage_observations',
+      eligible: null,
+      source: 'provider_usage_observation',
+      sourceRevision: 'provider-usage-observation.v1',
+      projectorRevision: 'costs-projector.v1',
+      watermark: 'provider-usage:27401',
+      descriptorRevision: COST_DESCRIPTOR,
+      unavailableReason: 'pricing_revision_unavailable',
+    }),
+  ];
+  const payload = {
+    authorized_scope_ref: 'all',
+    horizon: { since_micros: 0, until_micros: nowMicros },
+    watermark: 'provider-usage:27401;savings:1752990400',
+    observed_at_micros: nowMicros,
+    current: false,
+    usage,
+    estimated_cost: estimatedCost,
+    latency: [
+      unavailableProviderLatency({ since_micros: 0, until_micros: nowMicros }),
+    ],
+    pricing_revision: null,
+  };
+  return {
+    ...envelope(payload, 'partial', [
+      { kind: 'refresh', operation: 'use-case.dashboard.costs.refresh' },
+    ]),
+    coverage: {
+      completeness: 'partial',
+      eligible: 3,
+      examined: 2,
+      matched: null,
+      excluded: null,
+      omitted: 1,
+      unknown: null,
+      denominator: 3,
+      unit: 'metrics',
+      omission_reasons: ['incomplete_metric_coverage'],
+    },
+  };
+}
+
+/** GET /api/remote/status — Settings Remote Brain operational plane. */
+function remoteOperationalStatusEnvelope(): Record<string, unknown> {
+  return envelope(
+    {
+      kind: 'observed',
+      listener: 'serving',
+      coverage: 'complete',
+      readiness: 'ready',
+      enrollment_configured: true,
+      authority: {
+        state: 'available',
+        fence: {
+          brain_id: 'brain.fixture',
+          shard_id: 'shard.fixture',
+          generation_id: 'generation.fixture',
+          placement_revision: 1,
+          authority_epoch: 3,
+          authority_node_id: 'node.fixture',
+        },
+      },
+      spool: { pending_count: 0, quarantined_count: 0, has_sequence_gap: false },
+      replay_coverage_complete: true,
+      current_backup_verified: true,
+      failover_in_progress: false,
+      recovery_required: false,
+      observed_at: nowMicros,
+    },
+    'ready',
+    [{ kind: 'refresh', operation: 'use-case.dashboard.remote.status.refresh' }],
+  );
+}
+
+/** GET /api/code-index/freshness (src/dashboard/code_index_freshness_api.rs). */
+function codeIndexFreshnessEnvelope(progress: Record<string, unknown> | null): Record<string, unknown> {
+  const active = progress !== null;
+  const payload = {
+    worktrees: [
+      {
+        worktree_root: '/fast/projects/tracedecay',
+        repository_id: 'repository.b41f2c9d',
+        worktree_id: 'worktree.primary',
+        source_reference: 'refs/heads/codex/tracedecay-total-redesign-plan',
+        source_revision: null,
+        latest_generation_id: active ? null : 'generation.2f8c41ab',
+        snapshot_content_identity: active ? null : 'sha256:9c1f4a2e7b05',
+        sealed_at_micros: active ? null : nowMicros - 214_000_000,
+        last_reconcile_micros: nowMicros - 8_400_000,
+        staleness_state: active ? 'indexing' : 'fresh',
+        rebuild_in_flight: active,
+        hook_hint_count: 0,
+        coverage: 'complete',
+        progress,
+        parked: null,
+      },
+    ],
+    note: 'live daemon scheduler state; generation and scope come from the durable sealed generation',
+  };
+  return {
+    ...envelope(payload, active ? 'loading' : 'ready', [
+      { kind: 'refresh', operation: 'use-case.dashboard.code-index.freshness.refresh' },
+    ]),
+    coverage: {
+      completeness: active ? 'unknown' : 'complete',
+      eligible: active ? null : 1,
+      examined: active ? null : 1,
+      matched: active ? null : 1,
+      excluded: active ? null : 0,
+      omitted: active ? null : 0,
+      unknown: active ? null : 0,
+      denominator: active ? null : 1,
+      unit: 'mounted_worktree',
+      omission_reasons: [],
+    },
+  };
+}
+
+function codeIndexBuildProgressFixture(
+  overrides: Partial<Record<string, unknown>> = {},
+): Record<string, unknown> {
+  return {
+    generation_id: 'generation.catchup.01',
+    daemon_incarnation: 1,
+    producer_incarnation: 1,
+    progress_epoch: 1,
+    sealed_source_digest: 'sha256:sealed-source-catchup',
+    phase: 'bulk_commit',
+    committed_pages: 16,
+    committed_chunks: 10_000,
+    committed_imports: 480,
+    committed_payload_bytes: 16 * 1024 * 1024,
+    completed_files: 250,
+    total_files: 500,
+    completed_lexical_bytes: 32 * 1024 * 1024,
+    total_lexical_bytes: 64 * 1024 * 1024,
+    current_batch_pages: 4,
+    current_batch_payload_bytes: 4 * 1024 * 1024,
+    elapsed_micros: 120_000_000,
+    last_commit_latency_micros: 240_000,
+    files_per_second: 250,
+    lexical_bytes_per_second: 16 * 1024 * 1024,
+    estimated_remaining_seconds: 120,
+    last_progress_micros: nowMicros - 1_000_000,
+    blocked_reason: null,
+    ...overrides,
+  };
+}
+
+/** GET /api/plugins/holographic/status (src/dashboard/memory_api.rs `status`). */
+function memoryStatusPayload(): Record<string, unknown> {
+  return {
+    error: '',
+    exists: true,
+    path: '/fast/projects/tracedecay/.tracedecay/memory.db',
+    memory: {
+      algebra: {
+        name: 'amari_fhrr',
+        hrr_dim: 2048,
+        estimated_capacity: 354_304,
+      },
+      entity_count: 1186,
+      fact_count: 173,
+      below_default_recall_threshold_count: 4,
+      trust_0_025_count: 0,
+      trust_025_050_count: 6,
+      trust_050_075_count: 21,
+      trust_075_100_count: 146,
+      helpful_count: 153,
+      unhelpful_count: 2,
+      feedback_funnel: {
+        access_count_total: 2275,
+        feedback_total: 155,
+        rated_fact_count: 56,
+        retrieval_count_total: 3207,
+        retrieved_fact_count: 170,
+        seen_to_feedback_ratio: 35,
+      },
+    },
+  };
+}
+
+/** GET /api/plugins/analytics/overview (src/dashboard/analytics_api.rs). */
+function analyticsOverviewPayload(): Record<string, unknown> {
+  return {
+    available: true,
+    db: '/fast/projects/tracedecay/.tracedecay/sessions.db',
+    scope: 'profile_sharded',
+    hints: analyticsHintsPayload(),
+    usage: analyticsUsagePayload(),
+    agents: {
+      available: true,
+      source: 'sessions',
+      by_agent: [
+        { agent: 'Codex', sessions: 42 },
+        { agent: 'Claude', sessions: 31 },
+        { agent: 'Cursor', sessions: 7 },
+      ],
+    },
+    diagnostics: analyticsDiagnosticsPayload(),
+    underused_tool_families: analyticsUnderusedPayload()['families'],
+    observatory: observatoryReadModel(),
+  };
+}
+
+/** The Plan 26 Observatory projection `analytics_api::overview` embeds
+ * (`application::observability::observatory_read_model`). It is never absent on
+ * this route — a missing store yields the `analytics:unavailable` model with
+ * `current: false`, not a null — so the fixture carries the complete-coverage
+ * variant: every envelope in the horizon parsed, so each metric reports an
+ * exact value and `unavailable_reason` stays null. */
+function observatoryReadModel(): Record<string, unknown> {
+  const horizon = {
+    since_micros: nowMicros - 30 * DAY * 1_000_000,
+    until_micros: nowMicros,
+  };
+  const observed = 4182;
+  const watermark = 'analytics:evt_9f31c4';
+  // `complete` coverage: nothing invalid, nothing dropped, so `eligible` is the
+  // exact observed count and the interval collapses onto the value.
+  const coverage = {
+    eligible: observed,
+    observed,
+    completed: observed,
+    censored: 0,
+    unknown: 0,
+    excluded: 0,
+    state: 'known',
+  };
+  const metric = (name: string, value: number) => ({
+    descriptor_revision: 'analytics-events.v1',
+    metric: name,
+    value,
+    unit: 'events',
+    denominator: 'eligible_observability_events',
+    denominator_value: coverage.eligible,
+    coverage,
+    evidence_class: 'measurement',
+    provenance: {
+      source: 'observability_envelope',
+      source_revision: 'observability-envelope.v1',
+      projector_revision: 'observatory-projector.v1',
+      watermark,
+    },
+    cohort: {
+      descriptor_revision: 'eligible_observability_events.v1',
+      eligible_population: 'eligible_observability_events',
+    },
+    temporal: { horizon, baseline_watermark: null, delta: null },
+    uncertainty: { lower: value, upper: value, reason: null },
+    calibration: null,
+    unavailable_reason: null,
+  });
+  return {
+    authorized_scope_ref: 'proj_a5b3d7e3ebe14ca7',
+    horizon,
+    watermark,
+    observed_at_micros: nowMicros,
+    current: true,
+    metrics: [
+      metric('observability_eligible_events', observed),
+      metric('observability_events', observed),
+      metric('observability_late_arrivals', 0),
+      metric('observability_failures', 37),
+      metric('telemetry_drops_lower_bound', 0),
+      ...PLAN26_OBSERVATORY_METRICS.map(plan26UnknownMetric),
+    ],
+    analytics_mode: analyticsModeReadModel(),
+    comparison: comparisonReadModel(),
+    rejected_arguments: {
+      coverage: {
+        eligible: null,
+        observed: 0,
+        completed: 0,
+        censored: 0,
+        unknown: 1,
+        excluded: 0,
+        state: 'unknown',
+      },
+      projector_revision: 'observatory-rejected-argument-projector.v1',
+      watermark,
+      eligible_attempts: null,
+      rejected_total: null,
+      rejection_rate: null,
+      redacted_name_count: 0,
+      groups: [],
+      unavailable_reason: 'rejected_argument_observations_not_recorded',
+    },
+  };
+}
+
+/** Empty-but-valid fallback for any unmapped /api route. */
+export const EMPTY_FIXTURE: Record<string, unknown> = {};
+
+/**
+ * GET /api/projects/{project_id} — the registry backbone (src/dashboard/
+ * projects.rs `context`). Resolves for every registered project regardless of
+ * whether its graph is mounted, which is exactly the property the scoped Brain
+ * depends on, so the fixture answers for any id rather than only known ones.
+ */
+function projectContextPayload(projectId: string): Record<string, unknown> {
+  // `context` answers with a `PublicCodeProject`, the same narrow record the
+  // list route's flat `projects` carries — not the registry entry the tree
+  // holds — so the two routes are read from one source here.
+  const known = flatProjects.find((entry) => entry['project_id'] === projectId);
+  const root = `/fast/projects/${projectId}`;
+  const entry = known ?? {
+    project_id: projectId,
+    label: projectId,
+    project_root: root,
+    canonical_root: root,
+    display_root: root,
+    git_common_dir: `${root}/.git`,
+    default_branch: 'master',
+    created_at: nowSecs - 33 * DAY,
+    last_seen_at: nowSecs - 3 * DAY,
+    is_active: false,
+  };
+  const canonicalRoot = entry['canonical_root'] as string;
+  const lastSeen = entry['last_seen_at'] as number;
+  const linkedCheckouts = ['review', 'release'];
+  return envelope({
+    status: 'ok',
+    is_active: entry['is_active'] === true,
+    project: entry,
+    aliases: [
+      { project_id: projectId, alias_path: canonicalRoot, last_seen_at: lastSeen },
+      ...linkedCheckouts.map((checkout, i) => ({
+        project_id: projectId,
+        alias_path: `${canonicalRoot}/.worktrees/${checkout}`,
+        last_seen_at: lastSeen - (i + 1) * 4 * 3600,
+      })),
+    ],
+  });
+}
+
+/**
+ * Resolve a request pathname to its fixture payload. `search` is the raw query
+ * string (e.g. `?node_id=sym-0`); it is used only for routes whose response
+ * body legitimately varies by query (the graph subgraph neighborhood), and is
+ * otherwise ignored so all other routes resolve by pathname alone.
+ */
+export function resolveFixture(pathname: string, search = ''): unknown {
+  // The project-scoped gateway. The daemon binds `/api/projects/{id}/{tail}`
+  // and serves `/api/{tail}` against that project's own state
+  // (src/dashboard/mod.rs `project_scoped_api_gateway`), so the fixture layer
+  // has to perform the same rewrite — otherwise every scoped read a workspace
+  // makes would resolve to the registry payload and the scoped surfaces would
+  // be audited against a shape the daemon never sends. `/api/projects/{id}`
+  // with no tail is a different route (`projects::context`) and is handled
+  // below, not here.
+  const scoped = /^\/api\/projects\/([^/]+)\/(.+)$/.exec(pathname);
+  if (scoped) return resolveFixture(`/api/${scoped[2]}`, search);
+  const contextMatch = /^\/api\/projects\/([^/]+)$/.exec(pathname);
+  if (contextMatch) return projectContextPayload(contextMatch[1]!);
+
+  if (pathname === '/api/plugins/graph/subgraph') {
+    const nodeId = new URLSearchParams(search).get('node_id');
+    return envelope(subgraphPayload(nodeId));
+  }
+  // Must precede the FIXTURE_PREFIXES sweep: `/api/plugins/graph` is a prefix
+  // fixture, so without this branch every neighbors read would resolve to the
+  // overview payload and the TRACE drill-in would be audited against a shape
+  // the daemon never sends on this route.
+  const neighbors = /^\/api\/plugins\/graph\/node\/([^/]+)\/neighbors$/.exec(pathname);
+  if (neighbors) {
+    // `coerce_limit(params.limit, 50, 200)` in graph_api.rs: default 50, hard
+    // cap 200, and a non-positive or unparsable value falls back to default.
+    const raw = Number(new URLSearchParams(search).get('limit'));
+    const limit = Number.isFinite(raw) && raw > 0 ? Math.min(200, Math.trunc(raw)) : 50;
+    return envelope(neighborsPayload(decodeURIComponent(neighbors[1]!), limit));
+  }
+  if (pathname in FIXTURES) return FIXTURES[pathname];
+  for (const [prefix, payload] of FIXTURE_PREFIXES) {
+    if (pathname.startsWith(prefix)) return payload;
+  }
+  return EMPTY_FIXTURE;
+}
+
+/* ==========================================================================
+ * /api/plugins/analytics/{underused,diagnostics} (analytics_api.rs
+ * `underused` / `diagnostics_summary`). Consumed by AgentsPage.
+ *
+ * Both were previously unmapped and resolved to `{}`, so the audit never once
+ * rendered the plates that depend on them. Shapes and — more importantly —
+ * DISTRIBUTIONS are taken from a real daemon response captured on 2026-07-25
+ * (profile-sharded store, 10,000-event window):
+ *
+ *   - `event_count` is exactly `ANALYTICS_EVENT_LIMIT`, because on any store
+ *     with real traffic it always is. The page has to render the capped case.
+ *   - `by_mcp_tool` spans 1,945 calls down to 1 across a long tail. A fixture
+ *     with an even spread would never show that a linear rail cannot draw it.
+ *   - `by_event_kind` sums to the window while the usage payload's categories
+ *     sum to less, because hook-routing events carry nothing to categorize.
+ *     The plate that reconciles those two totals only exists because of it.
+ *   - `recent_events` is newest-first with real second-resolution stamps.
+ *
+ * The families payload deliberately carries three of the four verdict states
+ * (under-used, covered, and the two families that have no substitute detector
+ * at all and therefore cannot ever be flagged) so one audit shot exercises the
+ * whole row vocabulary.
+ * ========================================================================== */
+
+function analyticsUnderusedPayload(): Record<string, unknown> {
+  return {
+    available: true,
+    db: '/fast/projects/tracedecay/.tracedecay/sessions.db',
+    families: [
+      // Has a detector, and it fired more often than the family was used.
+      {
+        family: 'code_context',
+        usage_events: 138,
+        relevant_events: 191,
+        missed_events: 53,
+        underused: true,
+      },
+      // Has a detector; the family outran it.
+      {
+        family: 'code_search',
+        usage_events: 226,
+        relevant_events: 84,
+        missed_events: -142,
+        underused: false,
+      },
+      // No detector exists for these two, so `relevant_events` is structurally
+      // zero and `underused` can never become true however they are used.
+      {
+        family: 'call_graph',
+        usage_events: 66,
+        relevant_events: 0,
+        missed_events: -66,
+        underused: false,
+      },
+      {
+        family: 'impact_analysis',
+        usage_events: 0,
+        relevant_events: 0,
+        missed_events: 0,
+        underused: false,
+      },
+    ],
+  };
+}
+
+function analyticsDiagnosticsPayload(): Record<string, unknown> {
+  const AGENT_TOOL_CALLS: ReadonlyArray<readonly [string, number]> = [
+    ['tracedecay_grep', 1945],
+    ['tracedecay_read', 1180],
+    ['tracedecay_body', 1152],
+    ['tracedecay_fact_store', 644],
+    ['tracedecay_hook_runtime', 587],
+    ['tracedecay_outline', 460],
+    ['tracedecay_search', 306],
+    ['tracedecay_context', 200],
+    ['tracedecay_status', 183],
+    ['tracedecay_diagnostics', 81],
+    ['tracedecay_files', 80],
+    ['tracedecay_retrieve', 74],
+    ['tracedecay_callers', 60],
+    ['tracedecay_impact', 41],
+    ['tracedecay_active_project', 27],
+    ['tracedecay_affected', 18],
+    ['tracedecay_health', 9],
+    ['tracedecay_call_chain', 6],
+    ['tracedecay_circular', 3],
+    ['tracedecay_recursion', 1],
+  ];
+  const AGENT_TAPE: ReadonlyArray<readonly [number, string, string]> = [
+    [0, 'tracedecay_fact_store', 'success'],
+    [0, 'tracedecay_fact_store', 'success'],
+    [4, 'tracedecay_hook_runtime', 'success'],
+    [11, 'tracedecay_grep', 'success'],
+    [17, 'tracedecay_body', 'success'],
+    [23, 'tracedecay_grep', 'error'],
+    [29, 'tracedecay_read', 'success'],
+    [38, 'tracedecay_outline', 'success'],
+    [44, 'tracedecay_context', 'success'],
+    [51, 'tracedecay_grep', 'success'],
+    [63, 'tracedecay_body', 'success'],
+    [70, 'tracedecay_search', 'success'],
+    [82, 'tracedecay_read', 'success'],
+    [96, 'tracedecay_hook_runtime', 'success'],
+    [109, 'tracedecay_grep', 'success'],
+    [124, 'tracedecay_body', 'success'],
+    [141, 'tracedecay_status', 'success'],
+    [163, 'tracedecay_read', 'error'],
+    [188, 'tracedecay_hook_runtime', 'success'],
+    [222, 'tracedecay_status', 'success'],
+  ];
+  /** Anchored to a fixed offset so the tape's stamps are stable across a
+   * screenshot pair. */
+  const AGENT_TAPE_ANCHOR = nowSecs - 240;
+  const toolCalls = AGENT_TOOL_CALLS.reduce((sum, [, count]) => sum + count, 0);
+  const hookCallCount = 444_038;
+  return {
+    available: true,
+    source: 'analytics_events',
+    event_count: 10_000,
+    message_count: 10_000,
+    events_per_hour: 135.36531714965764,
+    hook_call_count: hookCallCount,
+    mcp_tool_call_count: toolCalls,
+    tool_call_count: toolCalls,
+    tracedecay_call_count: toolCalls,
+    ratios: {
+      events_per_message: 1,
+      tool_calls_per_message: toolCalls / 10_000,
+      mcp_tool_calls_per_message: toolCalls / 10_000,
+      hook_calls_per_message: hookCallCount / 10_000,
+    },
+    by_event_kind: [
+      { event_kind: 'mcp_tool_call', count: toolCalls },
+      { event_kind: 'hook_route', count: 10_000 - toolCalls },
+    ],
+    // Outcomes partition the window exactly: every tool call succeeded or
+    // errored, and every hook-routing event is 'observed'. Derived from the
+    // tool total rather than hard-coded so the three always sum to 10,000.
+    by_outcome: [
+      { outcome: 'success', count: toolCalls - 268 },
+      { outcome: 'observed', count: 10_000 - toolCalls },
+      { outcome: 'error', count: 268 },
+    ],
+    by_mcp_tool: AGENT_TOOL_CALLS.map(([tool_name, count]) => ({ tool_name, count })),
+    by_tool: AGENT_TOOL_CALLS.map(([tool_name, count]) => ({ tool_name, count })),
+    hook_window: {
+      window_rows: 10_000,
+      rows_scanned: 10_000,
+      rows_included: 10_000,
+      truncated: true,
+      total_rows_known: false,
+      oldest_ts_unix_ms: (nowSecs - 3600) * 1000,
+      newest_ts_unix_ms: nowSecs * 1000,
+    },
+    recent_events: AGENT_TAPE.map(([ago, tool_name, outcome]) => ({
+      event_kind: 'mcp_tool_call',
+      hook_name: '',
+      outcome,
+      timestamp: AGENT_TAPE_ANCHOR - ago,
+      tool_name,
+    })),
+    hook_sources: [],
+    hook_readiness: {
+      schema_version: 1,
+      source_event: 'hook_completed',
+      collection_status: 'unavailable',
+      input_rows_received: 0,
+      input_rows_processed: 0,
+      input_rows_dropped_at_cap: 0,
+      events_considered: 0,
+      events_skipped_non_completed: 0,
+      unavailable_metrics: [],
+    },
+    by_tool_category: [{ tool_category: 'mcp', count: toolCalls }],
+    by_hook: [],
+    by_prompt_category: [],
+    hint_efficacy: {
+      available: false,
+      source: 'analytics_events',
+      totals: { emitted: 0, acted: 0, ignored: 0, unresolved: 0 },
+      by_category: [],
+    },
+    recent_hooks: [],
+  };
+}

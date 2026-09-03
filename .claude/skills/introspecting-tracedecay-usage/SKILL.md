@@ -21,10 +21,11 @@ failure mode, then code, tests, or bundled skills encode the fix.
    `tracedecay:inspecting-managed-skills`. Start with
    `tracedecay_skill_list`; view skills or run artifacts only when the list
    points to a specific stale, patched, failed, or unused item.
-4. **Durable memory:** Use `tracedecay:project-memory`. Search with
-   `tracedecay_fact_store` before re-deriving project decisions. For curation,
-   run read-only inventory and dry-runs first; never remove facts without
-   explicit approval.
+4. **Durable memory:** Use `tracedecay:project-memory`. Recall prior decisions
+   with `tracedecay_fact_store_search`; record durable decisions and corrections
+   with `tracedecay_fact_store_add`. Delegate broad curation to
+   `tracedecay:project-memory` and inspect its automatic validation and
+   application receipts.
 5. **Code-health and implementation target:** Use `tracedecay:code-health`.
    Let weak dimensions and hotspots decide whether the fix is code, tests,
    docs, evals, or skill guidance.
@@ -38,8 +39,9 @@ failure mode, then code, tests, or bundled skills encode the fix.
   or add a bundled operator skill that prevents the repeated mistake.
 - LCM depth and compression ratios are health signals, not direct quality
   scores. Use raw/session recall to confirm what agents actually missed.
-- Memory curation candidates are proposals, not permission. Prefer merge or
-  update when provenance matters; deletion needs fresh user approval.
+- Memory curation is automation-owned after validation. Inspect validation and
+  applied operation receipts; use `tracedecay:project-memory` for any direct
+  operator override.
 - Analytics fields can be global. `project_id: null` means the run was global,
   not broken.
 

@@ -2,13 +2,23 @@
 name = "tracedecay-automation"
 version = "0.1.0"
 publish = false
-edition = "2024"
+edition.workspace = true
+license = "MIT"
+description = "TraceDecay automation configuration and evidence contracts"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
-[lib]
-path = "src/lib.rs"
+[features]
+# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
+# the feature off, so instrumented call sites compile identically both ways.
+hotpath = ["hotpath/hotpath", "hotpath/tokio", "tracedecay-domain/hotpath"]
+hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc", "tracedecay-domain/hotpath-alloc"]
+hotpath-cpu = ["hotpath", "hotpath/hotpath-cpu", "tracedecay-domain/hotpath-cpu"]
 
 [dependencies]
+hotpath.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
-hex = "0.4"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt", "time"] }
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }

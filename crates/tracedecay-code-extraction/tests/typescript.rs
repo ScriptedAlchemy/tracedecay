@@ -1037,3 +1037,59 @@ export const compute = (x: number) => transform(x);
         "expression-bodied arrow should attribute transform() call"
     );
 }
+
+/// Reduced from a real `test.describe("", ...)` suite.
+#[test]
+fn test_ts_empty_test_title_uses_anonymous_placeholder() {
+    let source = r#"
+import { add } from "./math";
+
+test.describe("", () => {
+  test("adds", () => {
+    add(1, 2);
+  });
+});
+"#;
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract("integration/fs-routes-test.ts", source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let fns = ts_functions(&result);
+    assert!(
+        fns.iter().all(|f| !f.name.is_empty()),
+        "no extracted node may carry an empty name; got {:?}",
+        fns.iter().map(|f| &f.name).collect::<Vec<_>>()
+    );
+    let suite = fns
+        .iter()
+        .find(|f| f.name == "<anonymous>")
+        .expect("empty-titled describe should be named <anonymous>");
+    let inner = fns.iter().find(|f| f.name == "adds").expect("inner test");
+
+    // The anonymous suite is kept, not dropped: its containment and call
+    // attribution are exactly what a titled suite would produce.
+    assert!(
+        has_contains(&result, &suite.id, &inner.id),
+        "anonymous suite should still contain its inner test"
+    );
+    assert!(
+        has_call_ref(&result, &inner.id, "add"),
+        "inner test keeps call attribution; refs: {:?}",
+        result.unresolved_refs
+    );
+}
+
+/// A whitespace-only title must not leak a blank display name either.
+#[test]
+fn test_ts_whitespace_only_test_title_uses_anonymous_placeholder() {
+    let source = "describe('   ', () => {\n  it('x', () => {});\n});\n";
+    let extractor = TypeScriptExtractor;
+    let result = extractor.extract("blank.test.ts", source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let fns = ts_functions(&result);
+    assert!(
+        fns.iter().any(|f| f.name == "<anonymous>"),
+        "whitespace-only title should be <anonymous>; got {:?}",
+        fns.iter().map(|f| &f.name).collect::<Vec<_>>()
+    );
+}

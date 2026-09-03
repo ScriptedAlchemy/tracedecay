@@ -1,561 +1,924 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::sync::{Arc, OnceLock};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+use tracedecay_application::{CallableCodeOperationKind, callable_code_operation};
+use tracedecay_code_index::graph_projection::{
+    CodeGraphInteractiveReader, CodeGraphSemanticEdgeV1, CodeGraphSymbolSummaryV1,
+};
+use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
+use tracedecay_graph_db::GraphCancellation;
+use tracedecay_graph_query::{
+    CodeGraphReadAdmissionRequest, CodeGraphReadError, CodeGraphReadRequest,
+    application_graph_cancellation, map_projection_error,
+};
 
-use serde_json::{Map, Value, json};
+use super::{DashboardHttpRequestControlV1, DashboardState};
 
-use super::DashboardState;
-use super::graph_queries;
-use super::util::{i64_field, str_field};
+const MAX_GRAPH_SYMBOLS: usize = 50_000;
+const MAX_GRAPH_FILES: usize = 50_000;
+const MAX_GRAPH_RELATIONS: usize = tracedecay_graph_db::MAX_VERIFIED_GENERATION_RELATIONS;
 
-/// Safety cap on the BFS visited set for `GET /path`.
-const PATH_VISITED_CAP: usize = 20_000;
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub(super) struct GraphSpanV1 {
+    start_line: i64,
+    end_line: i64,
+    start_column: Option<i64>,
+    end_column: Option<i64>,
+    attrs_start_line: Option<i64>,
+}
 
-/// Cap on the cached top-degree pool: the default subgraph's candidate pool
-/// is at most `node_limit * 2 = 500`, and the overview needs the top 12.
-const DEGREE_POOL_CAP: i64 = 500;
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub(super) struct GraphNodeV1 {
+    id: String,
+    kind: String,
+    name: Option<String>,
+    qualified_name: Option<String>,
+    file_path: Option<String>,
+    start_line: Option<i64>,
+    end_line: Option<i64>,
+    start_column: Option<i64>,
+    end_column: Option<i64>,
+    attrs_start_line: Option<i64>,
+    doc: Option<String>,
+    signature: Option<String>,
+    visibility: Option<String>,
+    is_async: Option<i64>,
+    branches: Option<i64>,
+    loops: Option<i64>,
+    returns: Option<i64>,
+    max_nesting: Option<i64>,
+    unsafe_blocks: Option<i64>,
+    unchecked_calls: Option<i64>,
+    assertions: Option<i64>,
+    updated_at: Option<i64>,
+    parent_id: Option<String>,
+    degree: Option<i64>,
+    span: Option<GraphSpanV1>,
+    edge_kind: Option<String>,
+    edge_line: Option<i64>,
+}
 
-/// Cap on edges fetched among the default-mode candidate pool before the
-/// per-response `limit_edges` cap is applied.
-const DEFAULT_POOL_EDGE_CAP: i64 = 4_000;
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub(super) struct GraphEdgeV1 {
+    source: String,
+    target: String,
+    kind: String,
+    line: Option<i64>,
+    source_name: Option<String>,
+    target_name: Option<String>,
+}
 
-fn language_for_path(path: &str) -> &'static str {
-    let Some((_, ext)) = path.rsplit_once('.') else {
-        return "unknown";
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct GraphKindCountV1 {
+    kind: String,
+    count: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct GraphLanguageCountV1 {
+    language: String,
+    count: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct GraphLargestFileV1 {
+    path: String,
+    node_count: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct GraphTotalsV1 {
+    nodes: u64,
+    edges: u64,
+    files: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub(super) struct GraphOverviewPayloadV1 {
+    totals: GraphTotalsV1,
+    nodes_by_kind: Vec<GraphKindCountV1>,
+    edges_by_kind: Vec<GraphKindCountV1>,
+    files_by_language: Vec<GraphLanguageCountV1>,
+    largest_files: Vec<GraphLargestFileV1>,
+    path: String,
+    top_connected: Vec<GraphNodeV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub(super) struct GraphSearchPayloadV1 {
+    query: String,
+    limit: i64,
+    offset: i64,
+    pub(super) total: i64,
+    count: usize,
+    pub(super) results: Vec<GraphNodeV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub(super) struct GraphNodePayloadV1 {
+    pub(super) node: GraphNodeV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub(super) struct GraphNeighborsPayloadV1 {
+    node_id: String,
+    depth: i64,
+    limit: i64,
+    callers: Vec<GraphNodeV1>,
+    callees: Vec<GraphNodeV1>,
+    edges: Vec<GraphEdgeV1>,
+    edges_by_kind: Vec<GraphKindCountV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct GraphCappedV1 {
+    nodes: bool,
+    edges: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct GraphLimitsV1 {
+    nodes: i64,
+    edges: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub(super) struct GraphSubgraphPayloadV1 {
+    seed_id: Option<String>,
+    mode: String,
+    nodes: Vec<GraphNodeV1>,
+    edges: Vec<GraphEdgeV1>,
+    capped: GraphCappedV1,
+    limits: GraphLimitsV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub(super) struct GraphPathPayloadV1 {
+    from: String,
+    to: String,
+    found: bool,
+    path: Vec<String>,
+    nodes: Vec<GraphNodeV1>,
+    edges: Vec<GraphEdgeV1>,
+    max_depth: i64,
+}
+
+pub(super) struct GraphServiceReadV1<T> {
+    pub(super) payload: T,
+    pub(super) generation: String,
+    pub(super) freshness: crate::graph::CodeGraphReadFreshnessV1,
+}
+
+/// Envelope freshness for a verified graph read: a proven-current open is
+/// fresh, while a last-complete stale serve is marked stale so the dashboard
+/// carries the same caveat the MCP `code_graph_freshness` trailer does
+/// instead of presenting a rebuild-window answer as current.
+pub(super) fn graph_envelope_freshness(
+    freshness: crate::graph::CodeGraphReadFreshnessV1,
+) -> super::read_model::DashboardFreshnessV1 {
+    if freshness.is_stale() {
+        super::read_model::DashboardFreshnessV1::stale_now()
+    } else {
+        super::read_model::DashboardFreshnessV1::fresh_now()
+    }
+}
+
+struct AdmittedGraphReadV1 {
+    reader: CodeGraphInteractiveReader,
+    cancellation: Arc<dyn GraphCancellation>,
+    freshness: crate::graph::CodeGraphReadFreshnessV1,
+}
+
+#[hotpath::measure(label = "dashboard_api.graph.admitted_read", future = true)]
+async fn admitted_graph(
+    state: &DashboardState,
+    control: &DashboardHttpRequestControlV1,
+    operation_kind: CallableCodeOperationKind,
+) -> Result<AdmittedGraphReadV1, CodeGraphReadError> {
+    let (Some(admission), Some(projection)) = (
+        state.code_graph_read_admission.as_ref(),
+        state.code_graph_projection_read_port.as_ref(),
+    ) else {
+        return Err(CodeGraphReadError::MissingRegistry);
     };
-    match ext {
-        "rs" => "rust",
-        "ts" | "tsx" => "typescript",
-        "js" | "jsx" | "mjs" | "cjs" => "javascript",
-        "py" => "python",
-        "go" => "go",
-        "java" => "java",
-        "scala" | "sc" => "scala",
-        "c" | "h" => "c",
-        "cc" | "cpp" | "cxx" | "hpp" | "hh" | "hxx" => "cpp",
-        "kt" | "kts" => "kotlin",
-        "cs" => "csharp",
-        "swift" => "swift",
-        "rb" => "ruby",
-        "php" => "php",
-        "lua" => "lua",
-        "zig" => "zig",
-        "sh" | "bash" | "zsh" => "shell",
-        "md" | "mdx" => "markdown",
-        "json" => "json",
-        "toml" => "toml",
-        "yaml" | "yml" => "yaml",
-        "sql" => "sql",
-        "html" | "css" => "web",
-        _ => "other",
-    }
+    let operation = callable_code_operation(operation_kind).map_err(|error| {
+        CodeGraphReadError::InvalidRequest {
+            detail: error.to_string(),
+        }
+    })?;
+    // Admission and projection-open are the per-request store-open cost every
+    // explorer route pays before any graph work; separate spans let a flat
+    // profile distinguish them from the traversal itself.
+    let context = hotpath::future!(
+        admission.admit(CodeGraphReadAdmissionRequest::new(
+            &operation,
+            control.request_id(),
+            control.deadline(),
+            control.cancellation(),
+            control.observed_at(),
+        )),
+        label = "dashboard_api.graph.explorer_admission"
+    )
+    .await?;
+    let cancellation = application_graph_cancellation(control.cancellation());
+    let verified = hotpath::future!(
+        projection.open(CodeGraphReadRequest::new(
+            &context,
+            control.observed_at(),
+            Arc::clone(&cancellation),
+        )),
+        label = "dashboard_api.graph.explorer_open"
+    )
+    .await?;
+    let freshness = verified.freshness();
+    let reader = verified.reader_with_cancellation(
+        &context,
+        control.observed_at(),
+        Arc::clone(&cancellation),
+    )?;
+    Ok(AdmittedGraphReadV1 {
+        reader,
+        cancellation,
+        freshness,
+    })
 }
 
-fn rows_by_language(files: &[Value]) -> Vec<Value> {
-    let mut counts: BTreeMap<&'static str, i64> = BTreeMap::new();
-    for file in files {
-        let language = language_for_path(str_field(file, "path"));
-        let count = counts.entry(language).or_insert(0);
-        *count += 1;
-    }
-    let mut rows: Vec<Value> = counts
-        .into_iter()
-        .map(|(language, count)| json!({ "language": language, "count": count }))
-        .collect();
-    rows.sort_by(|a, b| {
-        i64_field(b, "count")
-            .cmp(&i64_field(a, "count"))
-            .then_with(|| str_field(a, "language").cmp(str_field(b, "language")))
-    });
-    rows
-}
-
-fn add_span(row: &mut Map<String, Value>) {
-    let span = json!({
-        "start_line": row.get("start_line").and_then(Value::as_i64).unwrap_or(0),
-        "end_line": row.get("end_line").and_then(Value::as_i64).unwrap_or(0),
-        "start_column": row.get("start_column").and_then(Value::as_i64).unwrap_or(0),
-        "end_column": row.get("end_column").and_then(Value::as_i64).unwrap_or(0),
-        "attrs_start_line": row
-            .get("attrs_start_line")
-            .and_then(Value::as_i64)
-            .unwrap_or(0),
-    });
-    row.insert("span".into(), span);
-}
-
-fn node_with_span(row: Value) -> Value {
-    let Value::Object(mut obj) = row else {
-        return row;
-    };
-    add_span(&mut obj);
-    Value::Object(obj)
-}
-
-fn attach_degrees(nodes: Vec<Value>, degrees: &BTreeMap<String, i64>) -> Vec<Value> {
-    nodes
-        .into_iter()
-        .map(|node| match node {
-            Value::Object(mut obj) => {
-                let degree = obj
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .and_then(|id| degrees.get(id))
-                    .copied()
-                    .unwrap_or(0);
-                obj.insert("degree".into(), json!(degree));
-                Value::Object(obj)
-            }
-            other => other,
-        })
-        .collect()
-}
-
-fn collect_node_ids(nodes: &[Value]) -> Vec<String> {
-    nodes
+pub async fn overview_payload(
+    state: &DashboardState,
+    control: &DashboardHttpRequestControlV1,
+) -> Result<GraphServiceReadV1<GraphOverviewPayloadV1>, CodeGraphReadError> {
+    let graph = admitted_graph(state, control, CallableCodeOperationKind::Facets).await?;
+    let symbols = all_symbols(&graph)?;
+    let occurrences: Vec<_> = symbols
         .iter()
-        .filter_map(|row| row.get("id").and_then(Value::as_str))
-        .map(ToOwned::to_owned)
-        .collect()
-}
-
-async fn nodes_by_ids(state: &DashboardState, ids: &[String]) -> Vec<Value> {
-    graph_queries::node_rows_by_ids(&state.graph_conn, ids)
-        .await
-        .into_iter()
-        .map(node_with_span)
-        .collect()
-}
-
-async fn edges_for_ids(state: &DashboardState, ids: &[String], limit: i64) -> Vec<Value> {
-    graph_queries::edge_rows_for_ids(&state.graph_conn, ids, limit).await
-}
-
-/// Total (in + out) edge count per node, for the given ids. Drives the UI's
-/// size encoding and the "+N collapsed neighbors" affordance.
-async fn degrees_for_ids(state: &DashboardState, ids: &[String]) -> BTreeMap<String, i64> {
-    let mut degrees = BTreeMap::new();
-    for row in graph_queries::degree_rows_for_ids(&state.graph_conn, ids).await {
-        if let (Some(id), Some(degree)) = (
-            row.get("node_id").and_then(Value::as_str),
-            row.get("degree").and_then(Value::as_i64),
-        ) {
-            degrees.insert(id.to_string(), degree);
-        }
-    }
-    degrees
-}
-
-/// Cached whole-graph degree aggregation feeding the overview's
-/// `top_connected` and the default subgraph's candidate pool. Both used to
-/// double-scan the full `edges` table (UNION ALL + GROUP BY) on every Graph
-/// tab open/reset, for a result that only changes when the index is synced.
-struct DegreeSummary {
-    /// `(COUNT(*), MAX(id))` of `edges` at compute time. Edge ids are
-    /// AUTOINCREMENT (never reused), so inserts raise the max and deletes
-    /// shrink the count; node-only edits without any edge change are not
-    /// detected until the next sync rewrites edges.
-    fingerprint: (i64, i64),
-    /// Top [`DEGREE_POOL_CAP`] `(node_id, degree)` rows, ordered by degree
-    /// descending then qualified name ascending (zero-degree nodes included,
-    /// like the pool query they replace).
-    pool: Vec<(String, i64)>,
-    /// Overview `top_connected` rows (top 12 by degree, joined to `nodes`).
-    top_connected: Vec<Value>,
-}
-
-static DEGREE_CACHE: OnceLock<tokio::sync::Mutex<HashMap<String, Arc<DegreeSummary>>>> =
-    OnceLock::new();
-
-async fn degree_summary(state: &DashboardState) -> Arc<DegreeSummary> {
-    let fingerprint = (
-        graph_queries::total_edges(&state.graph_conn).await,
-        graph_queries::max_edge_id(&state.graph_conn).await,
-    );
-    let cache = DEGREE_CACHE.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()));
-    // Held across the rebuild so concurrent requests share one aggregation.
-    let mut guard = cache.lock().await;
-    if let Some(existing) = guard.get(&state.graph_db_path) {
-        if existing.fingerprint == fingerprint {
-            return existing.clone();
-        }
-    }
-
-    let pool = graph_queries::degree_pool_rows(&state.graph_conn, DEGREE_POOL_CAP)
-        .await
-        .iter()
-        .filter_map(|row| {
-            row.get("id")
-                .and_then(Value::as_str)
-                .map(|id| (id.to_string(), i64_field(row, "degree")))
-        })
+        .map(|symbol| symbol.occurrence.clone())
         .collect();
-    let top_connected = graph_queries::top_connected_rows(&state.graph_conn).await;
+    let edges = graph
+        .reader
+        .edges_among(
+            &occurrences,
+            &[],
+            MAX_GRAPH_RELATIONS,
+            Arc::clone(&graph.cancellation),
+        )
+        .map_err(map_projection_error)?;
+    let files = graph
+        .reader
+        .files(MAX_GRAPH_FILES, Arc::clone(&graph.cancellation))
+        .map_err(map_projection_error)?;
 
-    let summary = Arc::new(DegreeSummary {
-        fingerprint,
-        pool,
-        top_connected,
-    });
-    guard.insert(state.graph_db_path.clone(), summary.clone());
-    summary
-}
-
-pub async fn overview_payload(state: &DashboardState) -> Value {
-    let files = graph_queries::overview_file_rows(&state.graph_conn).await;
-    let summary = degree_summary(state).await;
-
-    json!({
-        "path": state.graph_db_path,
-        "totals": {
-            "nodes": graph_queries::total_nodes(&state.graph_conn).await,
-            "edges": graph_queries::total_edges(&state.graph_conn).await,
-            "files": graph_queries::total_files(&state.graph_conn).await,
-        },
-        "nodes_by_kind": graph_queries::node_counts_by_kind(&state.graph_conn).await,
-        "edges_by_kind": graph_queries::edge_counts_by_kind(&state.graph_conn).await,
-        "files_by_language": rows_by_language(&files),
-        "top_connected": summary.top_connected,
-        "largest_files": graph_queries::largest_files(&state.graph_conn).await,
-    })
-}
-
-pub async fn search_payload(state: &DashboardState, query: &str, limit: i64, offset: i64) -> Value {
-    let total = graph_queries::search_total(&state.graph_conn, query).await;
-    let results = graph_queries::search_rows(&state.graph_conn, query, limit, offset).await;
-    let ids = collect_node_ids(&results);
-    let degrees = degrees_for_ids(state, &ids).await;
-    let results = attach_degrees(results.into_iter().map(node_with_span).collect(), &degrees);
-
-    json!({
-        "query": query,
-        "limit": limit,
-        "offset": offset,
-        "total": total,
-        "count": results.len(),
-        "results": results,
-    })
-}
-
-pub async fn node_exists(state: &DashboardState, node_id: &str) -> bool {
-    graph_queries::node_exists(&state.graph_conn, node_id).await
-}
-
-pub async fn node_payload(state: &DashboardState, node_id: &str) -> Option<Value> {
-    let row = graph_queries::node_row(&state.graph_conn, node_id).await?;
-    let degrees = degrees_for_ids(state, &[node_id.to_string()]).await;
-    let node = attach_degrees(vec![node_with_span(row)], &degrees)
-        .into_iter()
-        .next()
-        .unwrap_or(Value::Null);
-    Some(json!({ "node": node }))
-}
-
-pub async fn neighbors_payload(state: &DashboardState, node_id: &str, limit: i64) -> Value {
-    let callers = graph_queries::caller_rows(&state.graph_conn, node_id, limit).await;
-    let callees = graph_queries::callee_rows(&state.graph_conn, node_id, limit).await;
-    let edges = graph_queries::neighborhood_edge_rows(&state.graph_conn, node_id, limit).await;
-    let edges_by_kind = graph_queries::neighborhood_edge_counts(&state.graph_conn, node_id).await;
-
-    let mut neighbor_ids = collect_node_ids(&callers);
-    neighbor_ids.extend(collect_node_ids(&callees));
-    neighbor_ids.sort();
-    neighbor_ids.dedup();
-    let degrees = degrees_for_ids(state, &neighbor_ids).await;
-    let callers = attach_degrees(callers.into_iter().map(node_with_span).collect(), &degrees);
-    let callees = attach_degrees(callees.into_iter().map(node_with_span).collect(), &degrees);
-
-    json!({
-        "node_id": node_id,
-        "depth": 1,
-        "limit": limit,
-        "callers": callers,
-        "callees": callees,
-        "edges": edges,
-        "edges_by_kind": edges_by_kind,
-    })
-}
-
-/// Seedless "project overview" slice: the most-connected symbols plus the
-/// edges among them, so the canvas has something informative to show before
-/// the user searches.
-///
-/// Selection grows greedily by adjacency over a top-degree candidate pool:
-/// prefer the highest-degree pool node touching the current selection
-/// (recording the edge that connects it, so the edge cap can never strand
-/// it), seed a new cluster from the highest-degree connected node when
-/// nothing touches the selection, and let isolated nodes fill whatever
-/// capacity is left (which also keeps tiny or edge-free indexes non-empty).
-async fn default_subgraph(state: &DashboardState, node_limit: i64, edge_limit: i64) -> Value {
-    // Candidate pool: 2x the node budget so selection has room to work with,
-    // served as a prefix of the cached top-degree summary.
-    let pool_limit = usize::try_from((node_limit * 2).min(DEGREE_POOL_CAP)).unwrap_or(0);
-    let summary = degree_summary(state).await;
-
-    let mut pool_ids = Vec::new();
-    let mut degrees: BTreeMap<String, i64> = BTreeMap::new();
-    for (id, degree) in summary.pool.iter().take(pool_limit) {
-        pool_ids.push(id.clone());
-        degrees.insert(id.clone(), *degree);
-    }
-
-    let pool_edges = edges_for_ids(state, &pool_ids, DEFAULT_POOL_EDGE_CAP).await;
-
-    // Adjacency over the pool: node id -> indices of touching edges
-    // (self-loops don't make a node "connected" for selection purposes).
-    let mut adjacency: HashMap<&str, Vec<usize>> = HashMap::new();
-    for (idx, edge) in pool_edges.iter().enumerate() {
-        let source = str_field(edge, "source");
-        let target = str_field(edge, "target");
-        if source == target {
-            continue;
+    let mut nodes_by_kind = BTreeMap::<String, i64>::new();
+    let mut nodes_by_file = BTreeMap::<String, i64>::new();
+    for symbol in &symbols {
+        if let Some(metadata) = &symbol.metadata {
+            *nodes_by_kind.entry(metadata.kind.clone()).or_default() += 1;
         }
-        adjacency.entry(source).or_default().push(idx);
-        adjacency.entry(target).or_default().push(idx);
-    }
-
-    let budget = usize::try_from(node_limit).unwrap_or(0);
-    let mut selected: Vec<String> = Vec::new();
-    let mut selected_set: HashSet<&str> = HashSet::new();
-    // Edges recorded while growing the selection; emitted first so the edge
-    // cap cannot leave a selected node without any visible edge.
-    let mut connecting_edges: Vec<usize> = Vec::new();
-    while selected.len() < budget {
-        let mut adjacent_pick: Option<(&str, usize)> = None;
-        let mut seed_pick: Option<&str> = None;
-        for id in pool_ids.iter().map(String::as_str) {
-            if selected_set.contains(id) {
-                continue;
-            }
-            let Some(edge_idxs) = adjacency.get(id) else {
-                continue;
-            };
-            let touching = edge_idxs.iter().copied().find(|&idx| {
-                let edge = &pool_edges[idx];
-                let source = str_field(edge, "source");
-                let other = if source == id {
-                    str_field(edge, "target")
-                } else {
-                    source
-                };
-                selected_set.contains(other)
-            });
-            if let Some(idx) = touching {
-                adjacent_pick = Some((id, idx));
-                break;
-            }
-            if seed_pick.is_none() {
-                seed_pick = Some(id);
-            }
-        }
-        let Some(id) = adjacent_pick.map(|(id, _)| id).or(seed_pick) else {
-            break;
-        };
-        if let Some((_, edge_idx)) = adjacent_pick {
-            connecting_edges.push(edge_idx);
-        }
-        selected.push(id.to_string());
-        selected_set.insert(id);
-    }
-    if selected.len() < budget {
-        for id in &pool_ids {
-            if selected.len() >= budget {
-                break;
-            }
-            if !selected_set.contains(id.as_str()) {
-                selected.push(id.clone());
-                selected_set.insert(id);
-            }
-        }
-    }
-
-    let mut edge_order = connecting_edges;
-    let used: HashSet<usize> = edge_order.iter().copied().collect();
-    for (idx, edge) in pool_edges.iter().enumerate() {
-        if used.contains(&idx) {
-            continue;
-        }
-        if selected_set.contains(str_field(edge, "source"))
-            && selected_set.contains(str_field(edge, "target"))
+        if let Some(path) = symbol
+            .binding
+            .as_ref()
+            .and_then(|binding| binding.logical_path.clone())
         {
-            edge_order.push(idx);
+            *nodes_by_file.entry(path).or_default() += 1;
         }
     }
-    let capped_edges = edge_order.len() > edge_limit as usize;
-    let visible_edges: Vec<Value> = edge_order
+    let mut edges_by_kind = BTreeMap::<String, i64>::new();
+    for edge in &edges {
+        *edges_by_kind
+            .entry(relation_kind_str(edge.edge.kind).to_owned())
+            .or_default() += 1;
+    }
+    let mut files_by_language = BTreeMap::<String, i64>::new();
+    for file in &files {
+        if let Some(language) = &file.language {
+            *files_by_language
+                .entry(language.as_str().to_owned())
+                .or_default() += 1;
+        }
+    }
+    let ranking = graph
+        .reader
+        .degree_ranking(12, MAX_GRAPH_SYMBOLS, Arc::clone(&graph.cancellation))
+        .map_err(map_projection_error)?;
+    if !ranking.complete {
+        return Err(CodeGraphReadError::BudgetExhausted {
+            detail: format!(
+                "dashboard overview examined {} symbols without completing the generation",
+                ranking.symbols_examined
+            ),
+        });
+    }
+    let mut top_connected = Vec::with_capacity(ranking.ranked.len());
+    for degree in ranking.ranked {
+        let Some(summary) = graph
+            .reader
+            .symbol_summary(&degree.occurrence, Arc::clone(&graph.cancellation))
+            .map_err(map_projection_error)?
+        else {
+            return Err(CodeGraphReadError::Corrupt {
+                detail: format!("ranked symbol {} is absent", degree.occurrence),
+            });
+        };
+        top_connected.push(node_from_summary(
+            &summary,
+            Some(degree.outgoing.saturating_add(degree.incoming)),
+        )?);
+    }
+    let mut largest_files: Vec<_> = nodes_by_file
         .into_iter()
-        .take(edge_limit as usize)
-        .map(|idx| pool_edges[idx].clone())
+        .map(|(path, node_count)| GraphLargestFileV1 { path, node_count })
         .collect();
-
-    let nodes = attach_degrees(nodes_by_ids(state, &selected).await, &degrees);
-    let total_nodes = graph_queries::total_nodes(&state.graph_conn).await;
-
-    json!({
-        "seed_id": Value::Null,
-        "mode": "default",
-        "nodes": nodes,
-        "edges": visible_edges,
-        "capped": {
-            "nodes": total_nodes > selected.len() as i64,
-            "edges": capped_edges,
+    largest_files.sort_by(|left, right| {
+        right
+            .node_count
+            .cmp(&left.node_count)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    largest_files.truncate(20);
+    let generation = graph.reader.generation().as_str().to_owned();
+    Ok(GraphServiceReadV1 {
+        payload: GraphOverviewPayloadV1 {
+            totals: GraphTotalsV1 {
+                nodes: symbols.len() as u64,
+                edges: edges.len() as u64,
+                files: files.len() as u64,
+            },
+            nodes_by_kind: nodes_by_kind
+                .into_iter()
+                .map(|(kind, count)| GraphKindCountV1 { kind, count })
+                .collect(),
+            edges_by_kind: edges_by_kind
+                .into_iter()
+                .map(|(kind, count)| GraphKindCountV1 { kind, count })
+                .collect(),
+            files_by_language: files_by_language
+                .into_iter()
+                .map(|(language, count)| GraphLanguageCountV1 { language, count })
+                .collect(),
+            largest_files,
+            path: generation.clone(),
+            top_connected,
         },
-        "limits": {
-            "nodes": node_limit,
-            "edges": edge_limit,
+        generation,
+        freshness: graph.freshness,
+    })
+}
+
+pub async fn search_payload(
+    state: &DashboardState,
+    control: &DashboardHttpRequestControlV1,
+    query: &str,
+    limit: i64,
+    offset: i64,
+) -> Result<GraphServiceReadV1<GraphSearchPayloadV1>, CodeGraphReadError> {
+    let graph = admitted_graph(state, control, CallableCodeOperationKind::SymbolSearch).await?;
+    let matched: Vec<_> = all_symbols(&graph)?
+        .into_iter()
+        .filter(|symbol| query.is_empty() || symbol_matches(symbol, query))
+        .collect();
+    let total = matched.len() as i64;
+    let start = non_negative_usize(offset, "graph search offset")?.min(matched.len());
+    let end = start
+        .saturating_add(non_negative_usize(limit, "graph search limit")?)
+        .min(matched.len());
+    let selected = &matched[start..end];
+    let occurrences: Vec<_> = selected
+        .iter()
+        .map(|symbol| symbol.occurrence.clone())
+        .collect();
+    let degree_by_id = degree_map(&graph, &occurrences)?;
+    let results = selected
+        .iter()
+        .map(|symbol| node_from_summary(symbol, degree_by_id.get(&symbol.occurrence).copied()))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(GraphServiceReadV1 {
+        payload: GraphSearchPayloadV1 {
+            query: query.to_owned(),
+            limit,
+            offset,
+            total,
+            count: results.len(),
+            results,
         },
+        generation: graph.reader.generation().as_str().to_owned(),
+        freshness: graph.freshness,
+    })
+}
+
+pub async fn node_payload(
+    state: &DashboardState,
+    control: &DashboardHttpRequestControlV1,
+    node_id: &str,
+) -> Result<GraphServiceReadV1<Option<GraphNodePayloadV1>>, CodeGraphReadError> {
+    let graph = admitted_graph(state, control, CallableCodeOperationKind::ExactOccurrence).await?;
+    let occurrence = parse_occurrence(node_id)?;
+    let summary = graph
+        .reader
+        .symbol_summary(&occurrence, Arc::clone(&graph.cancellation))
+        .map_err(map_projection_error)?;
+    let payload = if let Some(summary) = summary {
+        let degrees = degree_map(&graph, std::slice::from_ref(&occurrence))?;
+        Some(GraphNodePayloadV1 {
+            node: node_from_summary(&summary, degrees.get(&occurrence).copied())?,
+        })
+    } else {
+        None
+    };
+    Ok(GraphServiceReadV1 {
+        payload,
+        generation: graph.reader.generation().as_str().to_owned(),
+        freshness: graph.freshness,
+    })
+}
+
+pub async fn neighbors_payload(
+    state: &DashboardState,
+    control: &DashboardHttpRequestControlV1,
+    node_id: &str,
+    limit: i64,
+) -> Result<GraphServiceReadV1<Option<GraphNeighborsPayloadV1>>, CodeGraphReadError> {
+    let graph = admitted_graph(state, control, CallableCodeOperationKind::Callers).await?;
+    let occurrence = parse_occurrence(node_id)?;
+    if graph
+        .reader
+        .symbol_summary(&occurrence, Arc::clone(&graph.cancellation))
+        .map_err(map_projection_error)?
+        .is_none()
+    {
+        return Ok(GraphServiceReadV1 {
+            payload: None,
+            generation: graph.reader.generation().as_str().to_owned(),
+            freshness: graph.freshness,
+        });
+    }
+    let seeds = [occurrence.clone()];
+    let callers = single_seed(
+        graph
+            .reader
+            .callers(
+                &seeds,
+                &[],
+                MAX_GRAPH_RELATIONS,
+                Arc::clone(&graph.cancellation),
+            )
+            .map_err(map_projection_error)?,
+    )?;
+    let callees = single_seed(
+        graph
+            .reader
+            .callees(
+                &seeds,
+                &[],
+                MAX_GRAPH_RELATIONS,
+                Arc::clone(&graph.cancellation),
+            )
+            .map_err(map_projection_error)?,
+    )?;
+    let mut neighbor_occurrences = BTreeSet::new();
+    for edge in callers.iter().chain(&callees) {
+        neighbor_occurrences.insert(edge.neighbor.occurrence.clone());
+    }
+    let neighbor_occurrences: Vec<_> = neighbor_occurrences.into_iter().collect();
+    let degrees = degree_map(&graph, &neighbor_occurrences)?;
+    let row_limit = non_negative_usize(limit, "graph neighbor limit")?;
+    let hydrate =
+        |edges: &[CodeGraphSemanticEdgeV1]| -> Result<Vec<GraphNodeV1>, CodeGraphReadError> {
+            let mut rows: Vec<_> = edges
+                .iter()
+                .filter(|edge| edge.edge.kind == RelationEdgeKindV1::Calls)
+                .map(|edge| {
+                    let mut node = node_from_summary(
+                        &edge.neighbor,
+                        degrees.get(&edge.neighbor.occurrence).copied(),
+                    )?;
+                    node.edge_kind = Some(relation_kind_str(edge.edge.kind).to_owned());
+                    Ok(node)
+                })
+                .collect::<Result<Vec<_>, CodeGraphReadError>>()?;
+            rows.sort_by(|left, right| {
+                left.qualified_name
+                    .cmp(&right.qualified_name)
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+            rows.truncate(row_limit);
+            Ok(rows)
+        };
+    let counts = graph
+        .reader
+        .edge_kind_counts(&occurrence, Arc::clone(&graph.cancellation))
+        .map_err(map_projection_error)?;
+    let mut merged = counts.outgoing;
+    for (kind, count) in counts.incoming {
+        *merged.entry(kind).or_default() += count;
+    }
+    let mut edges = Vec::with_capacity(callers.len() + callees.len());
+    edges.extend(callers.iter().map(edge_from_semantic));
+    edges.extend(callees.iter().map(edge_from_semantic));
+    Ok(GraphServiceReadV1 {
+        payload: Some(GraphNeighborsPayloadV1 {
+            node_id: node_id.to_owned(),
+            depth: 1,
+            limit,
+            callers: hydrate(&callers)?,
+            callees: hydrate(&callees)?,
+            edges,
+            edges_by_kind: merged
+                .into_iter()
+                .map(|(kind, count)| GraphKindCountV1 {
+                    kind: relation_kind_str(kind).to_owned(),
+                    count: count as i64,
+                })
+                .collect(),
+        }),
+        generation: graph.reader.generation().as_str().to_owned(),
+        freshness: graph.freshness,
     })
 }
 
 pub async fn subgraph_payload(
     state: &DashboardState,
+    control: &DashboardHttpRequestControlV1,
     node_id: Option<String>,
     query: &str,
     node_limit: i64,
     edge_limit: i64,
-) -> Value {
-    let seed_id = match node_id.filter(|id| !id.trim().is_empty()) {
-        Some(id) => Some(id),
-        None if !query.is_empty() => {
-            let Some(id) = graph_queries::first_node_for_query(&state.graph_conn, query).await
-            else {
-                // Explicit query with no hit: an empty payload, not the
-                // default slice, so a failed search reads as "no match".
-                return json!({
-                    "seed_id": Value::Null,
-                    "mode": "seeded",
-                    "nodes": [],
-                    "edges": [],
-                    "capped": { "nodes": false, "edges": false },
-                    "limits": { "nodes": node_limit, "edges": edge_limit },
-                });
-            };
-            Some(id)
-        }
-        None => None,
+) -> Result<GraphServiceReadV1<GraphSubgraphPayloadV1>, CodeGraphReadError> {
+    let graph = admitted_graph(state, control, CallableCodeOperationKind::Facets).await?;
+    let node_budget = non_negative_usize(node_limit, "graph subgraph node limit")?;
+    let edge_budget = non_negative_usize(edge_limit, "graph subgraph edge limit")?;
+    let explicit_seed = node_id.filter(|value| !value.trim().is_empty());
+    let seed = if let Some(seed) = explicit_seed {
+        Some(parse_occurrence(&seed)?)
+    } else if query.is_empty() {
+        None
+    } else {
+        all_symbols(&graph)?
+            .into_iter()
+            .find(|symbol| symbol_matches(symbol, query))
+            .map(|symbol| symbol.occurrence)
     };
-    let Some(seed_id) = seed_id else {
-        return default_subgraph(state, node_limit, edge_limit).await;
-    };
-
-    let candidate_rows = graph_queries::subgraph_candidate_rows(&state.graph_conn, &seed_id).await;
-    let mut all_ids = Vec::new();
-    let mut seen = BTreeSet::new();
-    for row in candidate_rows {
-        if let Some(id) = row.get("id").and_then(Value::as_str) {
-            if seen.insert(id.to_string()) {
-                all_ids.push(id.to_string());
+    let (mode, seed_id, selected, nodes_capped) = if let Some(seed) = seed {
+        if graph
+            .reader
+            .symbol_summary(&seed, Arc::clone(&graph.cancellation))
+            .map_err(map_projection_error)?
+            .is_none()
+        {
+            ("seeded", Some(seed.as_str().to_owned()), Vec::new(), false)
+        } else {
+            let seeds = [seed.clone()];
+            let incoming = single_seed(
+                graph
+                    .reader
+                    .callers(
+                        &seeds,
+                        &[],
+                        MAX_GRAPH_RELATIONS,
+                        Arc::clone(&graph.cancellation),
+                    )
+                    .map_err(map_projection_error)?,
+            )?;
+            let outgoing = single_seed(
+                graph
+                    .reader
+                    .callees(
+                        &seeds,
+                        &[],
+                        MAX_GRAPH_RELATIONS,
+                        Arc::clone(&graph.cancellation),
+                    )
+                    .map_err(map_projection_error)?,
+            )?;
+            let mut candidates = vec![seed.clone()];
+            let mut seen: BTreeSet<&SymbolOccurrenceId> = BTreeSet::new();
+            seen.insert(&seed);
+            for edge in incoming.iter().chain(&outgoing) {
+                if seen.insert(&edge.neighbor.occurrence) {
+                    candidates.push(edge.neighbor.occurrence.clone());
+                }
             }
+            let capped = candidates.len() > node_budget;
+            candidates.truncate(node_budget);
+            ("seeded", Some(seed.as_str().to_owned()), candidates, capped)
         }
-    }
-
-    let selected_ids: Vec<String> = all_ids.iter().take(node_limit as usize).cloned().collect();
-    let degrees = degrees_for_ids(state, &selected_ids).await;
-    let nodes = attach_degrees(nodes_by_ids(state, &selected_ids).await, &degrees);
-    let edges = edges_for_ids(state, &selected_ids, edge_limit + 1).await;
-    let edge_count = edges.len();
-    let capped_edges = edge_count > edge_limit as usize;
-    let visible_edges: Vec<Value> = edges.into_iter().take(edge_limit as usize).collect();
-
-    json!({
-        "seed_id": seed_id,
-        "mode": "seeded",
-        "nodes": nodes,
-        "edges": visible_edges,
-        "capped": {
-            "nodes": all_ids.len() > node_limit as usize,
-            "edges": capped_edges,
+    } else if !query.is_empty() {
+        ("seeded", None, Vec::new(), false)
+    } else {
+        let ranking = graph
+            .reader
+            .degree_ranking(
+                node_budget.max(1),
+                MAX_GRAPH_SYMBOLS,
+                Arc::clone(&graph.cancellation),
+            )
+            .map_err(map_projection_error)?;
+        if !ranking.complete {
+            return Err(CodeGraphReadError::BudgetExhausted {
+                detail: "dashboard subgraph could not rank the complete generation".to_owned(),
+            });
+        }
+        // The completed ranking already measured every symbol of the
+        // generation, so its examination count is the census size — no second
+        // full `all_symbols` scan is needed to know whether the budget cut.
+        let census_size = ranking.symbols_examined;
+        let selected = ranking
+            .ranked
+            .into_iter()
+            .take(node_budget)
+            .map(|degree| degree.occurrence)
+            .collect::<Vec<_>>();
+        ("default", None, selected, census_size > node_budget)
+    };
+    let summaries = summaries_for(&graph, &selected)?;
+    let degrees = degree_map(&graph, &selected)?;
+    let mut edges = if selected.is_empty() {
+        Vec::new()
+    } else {
+        graph
+            .reader
+            .edges_among(
+                &selected,
+                &[],
+                MAX_GRAPH_RELATIONS,
+                Arc::clone(&graph.cancellation),
+            )
+            .map_err(map_projection_error)?
+    };
+    let edges_capped = edges.len() > edge_budget;
+    edges.truncate(edge_budget);
+    Ok(GraphServiceReadV1 {
+        payload: GraphSubgraphPayloadV1 {
+            seed_id,
+            mode: mode.to_owned(),
+            nodes: summaries
+                .iter()
+                .map(|summary| {
+                    node_from_summary(summary, degrees.get(&summary.occurrence).copied())
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            edges: edges.iter().map(edge_from_semantic).collect(),
+            capped: GraphCappedV1 {
+                nodes: nodes_capped,
+                edges: edges_capped,
+            },
+            limits: GraphLimitsV1 {
+                nodes: node_limit,
+                edges: edge_limit,
+            },
         },
-        "limits": {
-            "nodes": node_limit,
-            "edges": edge_limit,
-        },
+        generation: graph.reader.generation().as_str().to_owned(),
+        freshness: graph.freshness,
     })
 }
 
-/// Undirected shortest path between two nodes via breadth-first search over
-/// the edges table. Depth defaults to 6 (max 10); the visited set is capped
-/// so pathological graphs cannot stall the server.
-pub async fn path_payload(state: &DashboardState, from: &str, to: &str, max_depth: i64) -> Value {
-    let mut payload = json!({
-        "from": from,
-        "to": to,
-        "found": false,
-        "path": [],
-        "nodes": [],
-        "edges": [],
-        "max_depth": max_depth,
-    });
-    if from.is_empty() || to.is_empty() {
-        return payload;
+pub async fn path_payload(
+    state: &DashboardState,
+    control: &DashboardHttpRequestControlV1,
+    from: &str,
+    to: &str,
+    max_depth: i64,
+) -> Result<GraphServiceReadV1<GraphPathPayloadV1>, CodeGraphReadError> {
+    let graph = admitted_graph(state, control, CallableCodeOperationKind::Callees).await?;
+    let from_occurrence = parse_occurrence(from)?;
+    let to_occurrence = parse_occurrence(to)?;
+    let path = graph
+        .reader
+        .shortest_path(
+            &from_occurrence,
+            &to_occurrence,
+            &[],
+            u32::try_from(max_depth).map_err(|error| CodeGraphReadError::InvalidRequest {
+                detail: format!("graph path depth is invalid: {error}"),
+            })?,
+            MAX_GRAPH_RELATIONS,
+            Arc::clone(&graph.cancellation),
+        )
+        .map_err(map_projection_error)?;
+    let (ids, summaries, edges) = if let Some(edges) = path.path {
+        let mut ids = vec![from_occurrence.clone()];
+        ids.extend(edges.iter().map(|edge| edge.to_occurrence.clone()));
+        let summaries = summaries_for(&graph, &ids)?;
+        (ids, summaries, edges)
+    } else {
+        (Vec::new(), Vec::new(), Vec::new())
+    };
+    let degrees = degree_map(&graph, &ids)?;
+    Ok(GraphServiceReadV1 {
+        payload: GraphPathPayloadV1 {
+            from: from.to_owned(),
+            to: to.to_owned(),
+            found: !ids.is_empty(),
+            path: ids.iter().map(|id| id.as_str().to_owned()).collect(),
+            nodes: summaries
+                .iter()
+                .map(|summary| {
+                    node_from_summary(summary, degrees.get(&summary.occurrence).copied())
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            edges: edges
+                .iter()
+                .map(|edge| GraphEdgeV1 {
+                    source: edge.from_occurrence.as_str().to_owned(),
+                    target: edge.to_occurrence.as_str().to_owned(),
+                    kind: relation_kind_str(edge.kind).to_owned(),
+                    line: None,
+                    source_name: None,
+                    target_name: None,
+                })
+                .collect(),
+            max_depth,
+        },
+        generation: graph.reader.generation().as_str().to_owned(),
+        freshness: graph.freshness,
+    })
+}
+
+fn all_symbols(
+    graph: &AdmittedGraphReadV1,
+) -> Result<Vec<CodeGraphSymbolSummaryV1>, CodeGraphReadError> {
+    let page = graph
+        .reader
+        .symbols_page(None, MAX_GRAPH_SYMBOLS, Arc::clone(&graph.cancellation))
+        .map_err(map_projection_error)?;
+    if page.has_more {
+        return Err(CodeGraphReadError::BudgetExhausted {
+            detail: format!("dashboard graph exceeds the {MAX_GRAPH_SYMBOLS}-symbol census budget"),
+        });
     }
+    Ok(page.symbols)
+}
 
-    // child -> (parent, edge row) back-pointers for path reconstruction.
-    let mut parents: HashMap<String, (String, Value)> = HashMap::new();
-    let mut visited: HashSet<String> = HashSet::new();
-    visited.insert(from.to_string());
-    let mut frontier = vec![from.to_string()];
-    let mut found = from == to;
+fn parse_occurrence(value: &str) -> Result<SymbolOccurrenceId, CodeGraphReadError> {
+    SymbolOccurrenceId::new(value.to_owned()).map_err(|error| CodeGraphReadError::InvalidRequest {
+        detail: error.to_string(),
+    })
+}
 
-    'search: for _ in 0..max_depth {
-        if found || frontier.is_empty() {
-            break;
-        }
-        let mut next = Vec::new();
-        for chunk in frontier.chunks(400) {
-            for row in graph_queries::frontier_edge_rows(&state.graph_conn, chunk).await {
-                let Some(source) = row.get("source").and_then(Value::as_str) else {
-                    continue;
-                };
-                let Some(target) = row.get("target").and_then(Value::as_str) else {
-                    continue;
-                };
-                let (known, discovered) = if visited.contains(source) && !visited.contains(target) {
-                    (source.to_string(), target.to_string())
-                } else if visited.contains(target) && !visited.contains(source) {
-                    (target.to_string(), source.to_string())
-                } else {
-                    continue;
-                };
-                visited.insert(discovered.clone());
-                parents.insert(discovered.clone(), (known, row.clone()));
-                if discovered == to {
-                    found = true;
-                    break 'search;
-                }
-                next.push(discovered);
-                if visited.len() > PATH_VISITED_CAP {
-                    break 'search;
-                }
-            }
-        }
-        frontier = next;
+fn single_seed(
+    mut batches: Vec<Vec<CodeGraphSemanticEdgeV1>>,
+) -> Result<Vec<CodeGraphSemanticEdgeV1>, CodeGraphReadError> {
+    if batches.len() != 1 {
+        return Err(CodeGraphReadError::Corrupt {
+            detail: format!(
+                "graph adjacency returned {} batches for one seed",
+                batches.len()
+            ),
+        });
     }
+    Ok(batches.remove(0))
+}
 
-    if !found {
-        return payload;
-    }
-
-    let mut path_ids = vec![to.to_string()];
-    let mut path_edges = Vec::new();
-    let mut cursor = to.to_string();
-    while cursor != from {
-        let Some((parent, edge)) = parents.get(&cursor) else {
-            break;
+fn summaries_for(
+    graph: &AdmittedGraphReadV1,
+    occurrences: &[SymbolOccurrenceId],
+) -> Result<Vec<CodeGraphSymbolSummaryV1>, CodeGraphReadError> {
+    let mut summaries = Vec::with_capacity(occurrences.len());
+    for occurrence in occurrences {
+        let Some(summary) = graph
+            .reader
+            .symbol_summary(occurrence, Arc::clone(&graph.cancellation))
+            .map_err(map_projection_error)?
+        else {
+            return Err(CodeGraphReadError::Corrupt {
+                detail: format!("selected symbol {occurrence} is absent"),
+            });
         };
-        path_edges.push(edge.clone());
-        cursor = parent.clone();
-        path_ids.push(cursor.clone());
+        summaries.push(summary);
     }
-    path_ids.reverse();
-    path_edges.reverse();
+    Ok(summaries)
+}
 
-    let degrees = degrees_for_ids(state, &path_ids).await;
-    let nodes = attach_degrees(nodes_by_ids(state, &path_ids).await, &degrees);
-    if let Some(obj) = payload.as_object_mut() {
-        obj.insert("found".into(), json!(true));
-        obj.insert("path".into(), json!(path_ids));
-        obj.insert("nodes".into(), json!(nodes));
-        obj.insert("edges".into(), json!(path_edges));
+fn degree_map(
+    graph: &AdmittedGraphReadV1,
+    occurrences: &[SymbolOccurrenceId],
+) -> Result<BTreeMap<SymbolOccurrenceId, u64>, CodeGraphReadError> {
+    if occurrences.is_empty() {
+        return Ok(BTreeMap::new());
     }
-    payload
+    Ok(graph
+        .reader
+        .degrees(occurrences, Arc::clone(&graph.cancellation))
+        .map_err(map_projection_error)?
+        .into_iter()
+        .map(|degree| {
+            (
+                degree.occurrence,
+                degree.outgoing.saturating_add(degree.incoming),
+            )
+        })
+        .collect())
+}
+
+/// ASCII case-insensitive substring test without allocating lowercased copies
+/// of either side. Non-ASCII bytes must match exactly, which is the right
+/// behavior for code identifiers.
+fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
+    needle.is_empty()
+        || haystack
+            .as_bytes()
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
+fn symbol_matches(symbol: &CodeGraphSymbolSummaryV1, query: &str) -> bool {
+    symbol.metadata.as_ref().is_some_and(|metadata| {
+        contains_ascii_case_insensitive(&metadata.qualified_name, query)
+            || contains_ascii_case_insensitive(&metadata.simple_name, query)
+    })
+}
+
+fn node_from_summary(
+    summary: &CodeGraphSymbolSummaryV1,
+    degree: Option<u64>,
+) -> Result<GraphNodeV1, CodeGraphReadError> {
+    let metadata = summary
+        .metadata
+        .as_ref()
+        .ok_or_else(|| CodeGraphReadError::Corrupt {
+            detail: format!(
+                "dashboard graph symbol {} has no published metadata",
+                summary.occurrence
+            ),
+        })?;
+    let start_line = Some(i64::from(metadata.start_line));
+    let end_line = Some({
+        i64::from(
+            metadata
+                .start_line
+                .saturating_add(metadata.line_span.saturating_sub(1)),
+        )
+    });
+    Ok(GraphNodeV1 {
+        id: summary.occurrence.as_str().to_owned(),
+        kind: metadata.kind.clone(),
+        name: Some(metadata.simple_name.clone()),
+        qualified_name: Some(metadata.qualified_name.clone()),
+        file_path: summary
+            .binding
+            .as_ref()
+            .and_then(|binding| binding.logical_path.clone()),
+        start_line,
+        end_line,
+        start_column: None,
+        end_column: None,
+        attrs_start_line: start_line,
+        doc: None,
+        signature: metadata.signature.clone(),
+        visibility: Some(metadata.visibility.clone()),
+        is_async: None,
+        branches: Some(i64::from(metadata.branches)),
+        loops: Some(i64::from(metadata.loops)),
+        returns: None,
+        max_nesting: Some(i64::from(metadata.max_nesting)),
+        unsafe_blocks: None,
+        unchecked_calls: None,
+        assertions: None,
+        updated_at: None,
+        parent_id: None,
+        degree: degree.map(|value| value as i64),
+        span: start_line
+            .zip(end_line)
+            .map(|(start_line, end_line)| GraphSpanV1 {
+                start_line,
+                end_line,
+                start_column: None,
+                end_column: None,
+                attrs_start_line: None,
+            }),
+        edge_kind: None,
+        edge_line: None,
+    })
+}
+
+fn non_negative_usize(value: i64, field: &'static str) -> Result<usize, CodeGraphReadError> {
+    usize::try_from(value).map_err(|error| CodeGraphReadError::InvalidRequest {
+        detail: format!("{field} is invalid: {error}"),
+    })
+}
+
+fn edge_from_semantic(edge: &CodeGraphSemanticEdgeV1) -> GraphEdgeV1 {
+    let source = &edge.edge.from_occurrence;
+    let target = &edge.edge.to_occurrence;
+    GraphEdgeV1 {
+        source: source.as_str().to_owned(),
+        target: target.as_str().to_owned(),
+        kind: relation_kind_str(edge.edge.kind).to_owned(),
+        line: None,
+        source_name: None,
+        target_name: None,
+    }
+}
+
+fn relation_kind_str(kind: RelationEdgeKindV1) -> &'static str {
+    match kind {
+        RelationEdgeKindV1::Calls => "calls",
+        RelationEdgeKindV1::Uses => "uses",
+        RelationEdgeKindV1::TypeOf => "type_of",
+        RelationEdgeKindV1::Contains => "contains",
+        RelationEdgeKindV1::Implements => "implements",
+        RelationEdgeKindV1::Extends => "extends",
+        RelationEdgeKindV1::Annotates => "annotates",
+        RelationEdgeKindV1::Returns => "returns",
+        RelationEdgeKindV1::Receives => "receives",
+    }
 }

@@ -2,6 +2,12 @@ use tracedecay_code_extraction::LanguageExtractor;
 use tracedecay_code_extraction::PythonExtractor;
 use tracedecay_domain::*;
 
+// Inlined rather than `mod`: each of these files compiles twice — as a
+// module of `main.rs` and as its own test target — and a `#[path] mod`
+// would load the same file as a module four times in the `main` binary,
+// which rustc rejects. `include!` gives each target its own copy in its
+// own namespace, and resolves identically in both compilations.
+include!("support/docstrings.rs");
 #[test]
 fn test_py_file_node_is_root() {
     let source = r#"
@@ -217,81 +223,54 @@ from collections import defaultdict
     );
 }
 
+/// Every docstring shape Python must lift onto the node it documents, across
+/// both the node kinds that carry docstrings. The table is a fixed-size array,
+/// so it can never iterate empty.
 #[test]
-fn test_py_docstring_function() {
-    let source = r#"
+fn test_py_docstring_shapes() {
+    let cases: [(&str, &str, &str, NodeKind, &[&str]); 3] = [
+        (
+            "function triple double quotes",
+            "greet.py",
+            r#"
 def greet(name):
     """Greet someone by name."""
     print(f"Hello, {name}!")
-"#;
-    let extractor = PythonExtractor;
-    let result = extractor.extract("greet.py", source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let fns: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Function)
-        .collect();
-    assert_eq!(fns.len(), 1);
-    let docstring = fns[0].docstring.as_ref().expect("should have docstring");
-    assert!(
-        docstring.contains("Greet someone by name"),
-        "docstring: {}",
-        docstring
-    );
-}
-
-#[test]
-fn test_py_docstring_class() {
-    let source = r#"
+"#,
+            NodeKind::Function,
+            &["Greet someone by name"],
+        ),
+        (
+            "class triple double quotes",
+            "calc.py",
+            r#"
 class Calculator:
     """A simple calculator class."""
 
     def add(self, a, b):
         return a + b
-"#;
-    let extractor = PythonExtractor;
-    let result = extractor.extract("calc.py", source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let classes: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Class)
-        .collect();
-    assert_eq!(classes.len(), 1);
-    let docstring = classes[0]
-        .docstring
-        .as_ref()
-        .expect("class should have docstring");
-    assert!(
-        docstring.contains("simple calculator"),
-        "docstring: {}",
-        docstring
-    );
-}
-
-#[test]
-fn test_py_docstring_triple_single_quotes() {
-    let source = r#"
+"#,
+            NodeKind::Class,
+            &["simple calculator"],
+        ),
+        (
+            "function triple single quotes",
+            "proc.py",
+            r#"
 def process():
     '''Process data using triple single quotes.'''
     pass
-"#;
-    let extractor = PythonExtractor;
-    let result = extractor.extract("proc.py", source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let fns: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Function)
-        .collect();
-    assert_eq!(fns.len(), 1);
-    let docstring = fns[0].docstring.as_ref().expect("should have docstring");
-    assert!(
-        docstring.contains("Process data"),
-        "docstring: {}",
-        docstring
-    );
+"#,
+            NodeKind::Function,
+            &["Process data"],
+        ),
+    ];
+
+    for (shape, path, source, kind, expected) in cases {
+        let extractor = PythonExtractor;
+        let result = extractor.extract(path, source);
+        assert_node_docstring(shape, &result, kind, None, expected);
+    }
 }
 
 #[test]

@@ -1,0 +1,36 @@
+{
+  "tracedecay": {
+    "command": "__TRACEDECAY_BIN__",
+    "args": [
+      "lsp",
+      "bridge",
+      "--stdio",
+      "--project",
+      "."
+    ],
+    "extensionToLanguage": {
+      ".rs": "rust",
+      ".ts": "typescript",
+      ".tsx": "typescriptreact",
+      ".js": "javascript",
+      ".jsx": "javascriptreact",
+      ".py": "python",
+      ".go": "go",
+      ".c": "c",
+      ".h": "c",
+      ".cc": "cpp",
+      ".cpp": "cpp",
+      ".cxx": "cpp",
+      ".hh": "cpp",
+      ".hpp": "cpp",
+      ".hxx": "cpp",
+      ".m": "objective-c",
+      ".mm": "objective-cpp",
+      ".zig": "zig",
+      ".lua": "lua",
+      ".php": "php"
+    },
+    "transport": "stdio",
+    "diagnostics": true
+  }
+}

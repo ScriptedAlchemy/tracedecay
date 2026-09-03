@@ -1,27 +1,13 @@
-#![deny(clippy::all)]
-#![warn(clippy::pedantic)]
-#![cfg_attr(not(test), deny(clippy::unwrap_used))]
-#![cfg_attr(not(test), deny(clippy::expect_used))]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::missing_errors_doc)]
-#![allow(clippy::missing_panics_doc)]
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::cast_precision_loss)]
-#![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::too_many_lines)]
-#![allow(clippy::must_use_candidate)]
-#![allow(clippy::struct_excessive_bools)]
-#![allow(clippy::similar_names)]
-#![allow(clippy::wildcard_imports)]
-#![allow(clippy::collapsible_if)]
-#![allow(clippy::unnecessary_wraps)]
-#![allow(clippy::single_match)]
-#![allow(clippy::needless_borrow)]
-#![allow(clippy::map_unwrap_or)]
-#![allow(clippy::redundant_closure)]
-#![allow(clippy::redundant_closure_for_method_calls)]
-#![allow(clippy::format_push_string)]
+//! Tree-sitter language extraction leaf for TraceDecay code indexing.
+//!
+//! This crate owns parser acquisition and language-specific extraction only.
+//! Sanitized intake capabilities, generation authority, exact admission, and
+//! publication remain in `tracedecay-code-index`.
+
+use std::borrow::Cow;
+use std::collections::HashMap;
+
+mod types;
 
 // Lite — always available (no cfg needed)
 mod astro_extractor;
@@ -43,6 +29,11 @@ pub(crate) mod annotations;
 pub(crate) mod basic_common;
 pub(crate) mod common;
 pub mod complexity;
+mod extraction_artifact;
+pub(crate) mod hotpath_observe;
+pub mod incremental;
+pub mod parsed_extraction;
+pub mod redundancy;
 pub mod source_mask;
 pub(crate) mod traversal;
 pub mod ts_provider;
@@ -101,6 +92,9 @@ mod lean_extractor;
 mod lua_extractor;
 #[cfg(feature = "lang-markdown")]
 mod markdown_extractor;
+/// Grammar-free; always compiled so the retrieval layer can read section
+/// structure without linking a tree-sitter bundle.
+pub mod markdown_structure;
 #[cfg(feature = "lang-metal")]
 mod metal_extractor;
 #[cfg(feature = "lang-msbasic2")]
@@ -133,6 +127,9 @@ pub use astro_extractor::AstroExtractor;
 pub use c_extractor::CExtractor;
 pub use cpp_extractor::CppExtractor;
 pub use csharp_extractor::CSharpExtractor;
+pub use extraction_artifact::{
+    ExtractedImportEvidenceV1, ExtractionArtifactV1, ImportModuleKindV1, ImportNamespaceV1,
+};
 pub use go_extractor::GoExtractor;
 pub use java_extractor::JavaExtractor;
 pub use kotlin_extractor::KotlinExtractor;
@@ -195,7 +192,7 @@ pub use lean_extractor::LeanExtractor;
 #[cfg(feature = "lang-lua")]
 pub use lua_extractor::LuaExtractor;
 #[cfg(feature = "lang-markdown")]
-pub use markdown_extractor::MarkdownExtractor;
+pub use markdown_extractor::{HEADING_PATH_SEPARATOR, MarkdownExtractor};
 #[cfg(feature = "lang-metal")]
 pub use metal_extractor::MetalExtractor;
 #[cfg(feature = "lang-msbasic2")]
@@ -223,7 +220,9 @@ pub use wgsl_extractor::WgslExtractor;
 #[cfg(feature = "lang-zig")]
 pub use zig_extractor::ZigExtractor;
 
-use tracedecay_domain::code_intelligence::ExtractionResult;
+use crate::types::ExtractionResult;
+use parsed_extraction::{ParsedExtraction, ParsedExtractionArtifactV1, ParsedExtractionScope};
+use tree_sitter::Tree;
 
 /// Trait for language-specific source code extractors.
 ///
@@ -236,11 +235,91 @@ pub trait LanguageExtractor: Send + Sync {
     /// Human-readable language name.
     fn language_name(&self) -> &str;
 
+    /// Grammar key used by the shared retained parser for this path.
+    fn retained_grammar_key(&self, file_path: &str) -> String {
+        match self.language_name() {
+            "Astro" | "Svelte" => "typescript".to_owned(),
+            "C#" => "c_sharp".to_owned(),
+            "C++" | "Metal" => "cpp".to_owned(),
+            "F#" => "fsharp".to_owned(),
+            "GW-BASIC" => "gwbasic".to_owned(),
+            "MS BASIC 2.0" => "msbasic2".to_owned(),
+            "Objective-C" => "objc".to_owned(),
+            "QuickBASIC" => "qbasic".to_owned(),
+            "TypeScript" => match file_path.rsplit('.').next() {
+                Some("tsx") => "tsx".to_owned(),
+                Some("js" | "jsx") => "javascript".to_owned(),
+                _ => "typescript".to_owned(),
+            },
+            "VB.NET" => "vbnet".to_owned(),
+            language => language.to_ascii_lowercase(),
+        }
+    }
+
+    /// Source presented to the retained grammar. Composite adapters may mask
+    /// non-code bytes, but must preserve exact byte length and newline offsets
+    /// so InputEdit and source positions remain authoritative.
+    fn prepare_parse_source<'a>(&self, source: &'a str) -> Cow<'a, str> {
+        Cow::Borrowed(source)
+    }
+
     /// Extract nodes, edges, and unresolved refs from source code.
     ///
     /// `file_path` is the relative path used for qualified names and node IDs.
-    /// `source` is the source code to parse.
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult;
+
+    /// Extract the legacy graph and any structured evidence supported by this
+    /// language. The default preserves existing extractors without another
+    /// parse or a parallel evidence authority.
+    fn extract_artifact(&self, file_path: &str, source: &str) -> ExtractionArtifactV1 {
+        crate::hotpath_observe::measure_extract_file(
+            self.language_name(),
+            source.len(),
+            || ExtractionArtifactV1::from_result(self.extract(file_path, source)),
+            crate::hotpath_observe::ExtractOutputCounts::from_artifact,
+        )
+    }
+
+    /// Extract from the shared retained tree. Implementations traverse only
+    /// the requested complete top-level regions and never acquire a parser.
+    ///
+    fn extract_parsed(
+        &self,
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: ParsedExtractionScope<'_>,
+    ) -> ParsedExtraction;
+
+    /// Extract an artifact from an already parser-owned tree. The default
+    /// delegates exactly once to the legacy parsed-tree method.
+    fn extract_parsed_artifact(
+        &self,
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: ParsedExtractionScope<'_>,
+    ) -> ParsedExtractionArtifactV1 {
+        ParsedExtractionArtifactV1::from_parsed(self.extract_parsed(file_path, source, tree, scope))
+    }
+
+    /// Extract from a retained tree together with the exact text the parser
+    /// consumed (the [`LanguageExtractor::prepare_parse_source`] output the
+    /// retained document already holds).
+    ///
+    /// `parsed_source` is byte-identical to `source` for plain grammars;
+    /// composite adapters receive their own mask back and must not re-mask.
+    /// The default ignores it and preserves each extractor's existing path.
+    fn extract_parsed_artifact_prepared(
+        &self,
+        file_path: &str,
+        source: &str,
+        _parsed_source: &str,
+        tree: &Tree,
+        scope: ParsedExtractionScope<'_>,
+    ) -> ParsedExtractionArtifactV1 {
+        self.extract_parsed_artifact(file_path, source, tree, scope)
+    }
 }
 
 /// Registry of all available language extractors.
@@ -248,6 +327,10 @@ pub trait LanguageExtractor: Send + Sync {
 /// Dispatches to the correct extractor based on file extension.
 pub struct LanguageRegistry {
     extractors: Vec<Box<dyn LanguageExtractor>>,
+    /// Extension → index into `extractors`, built once so per-file lookup is
+    /// one hash probe instead of a linear scan across every extractor.
+    /// First-registered extractor wins, matching the previous scan order.
+    by_extension: HashMap<String, usize>,
 }
 
 impl LanguageRegistry {
@@ -351,16 +434,39 @@ impl LanguageRegistry {
         #[cfg(feature = "lang-toml")]
         extractors.push(Box::new(TomlExtractor));
 
-        Self { extractors }
+        Self::from_extractors(extractors)
+    }
+
+    fn from_extractors(extractors: Vec<Box<dyn LanguageExtractor>>) -> Self {
+        let mut by_extension = HashMap::new();
+        for (index, extractor) in extractors.iter().enumerate() {
+            for extension in extractor.extensions() {
+                by_extension.entry((*extension).to_owned()).or_insert(index);
+            }
+        }
+        Self {
+            extractors,
+            by_extension,
+        }
+    }
+
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[doc(hidden)]
+    pub fn from_extractors_for_test(extractors: Vec<Box<dyn LanguageExtractor>>) -> Self {
+        Self::from_extractors(extractors)
     }
 
     /// Returns the extractor for a file path based on its extension.
     pub fn extractor_for_file(&self, path: &str) -> Option<&dyn LanguageExtractor> {
-        let ext = path.rsplit('.').next()?;
-        self.extractors
-            .iter()
-            .find(|e| e.extensions().contains(&ext))
-            .map(std::convert::AsRef::as_ref)
+        let extractor = path.rsplit('.').next().and_then(|ext| {
+            self.by_extension
+                .get(ext)
+                .map(|&index| self.extractors[index].as_ref())
+        });
+        if extractor.is_none() {
+            crate::hotpath_observe::record_dispatch_no_extractor();
+        }
+        extractor
     }
 
     /// Returns all supported file extensions across all extractors.

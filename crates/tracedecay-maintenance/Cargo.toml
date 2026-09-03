@@ -1,0 +1,87 @@
+[package]
+name = "tracedecay-maintenance"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license = "MIT"
+description = "Offline retention, backups, and storage reports for TraceDecay"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+
+[features]
+# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
+# the feature off, so instrumented call sites compile identically both ways.
+hotpath = [
+    "hotpath/hotpath",
+    "hotpath/tokio",
+    "tracedecay-application/hotpath",
+    "tracedecay-automation/hotpath",
+    "tracedecay-domain/hotpath",
+    "tracedecay-global-db/hotpath",
+    "tracedecay-graph-db/hotpath",
+    "tracedecay-private-fs/hotpath",
+    "tracedecay-runtime-core/hotpath",
+    "tracedecay-rusqlite-runtime/hotpath",
+    "tracedecay-code-index-retention/hotpath",
+]
+hotpath-alloc = [
+    "hotpath",
+    "hotpath/hotpath-alloc",
+    "tracedecay-application/hotpath-alloc",
+    "tracedecay-automation/hotpath-alloc",
+    "tracedecay-domain/hotpath-alloc",
+    "tracedecay-global-db/hotpath-alloc",
+    "tracedecay-graph-db/hotpath-alloc",
+    "tracedecay-private-fs/hotpath-alloc",
+    "tracedecay-runtime-core/hotpath-alloc",
+    "tracedecay-rusqlite-runtime/hotpath-alloc",
+    "tracedecay-code-index-retention/hotpath-alloc",
+]
+hotpath-cpu = [
+    "hotpath",
+    "hotpath/hotpath-cpu",
+    "tracedecay-application/hotpath-cpu",
+    "tracedecay-automation/hotpath-cpu",
+    "tracedecay-domain/hotpath-cpu",
+    "tracedecay-global-db/hotpath-cpu",
+    "tracedecay-graph-db/hotpath-cpu",
+    "tracedecay-private-fs/hotpath-cpu",
+    "tracedecay-runtime-core/hotpath-cpu",
+    "tracedecay-rusqlite-runtime/hotpath-cpu",
+    "tracedecay-code-index-retention/hotpath-cpu",
+]
+# Forwards the registered global-db test harness so this crate's unit tests
+# can open a profile store without daemon session-registry types.
+test-helpers = [
+    "tracedecay-global-db/test-helpers",
+    "tracedecay-runtime-core/test-helpers",
+]
+
+[dependencies]
+cap-fs-ext = "4.0.2"
+cap-std = "4.0.2"
+hotpath.workspace = true
+rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+tempfile = "3"
+tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
+tracedecay-automation = { path = "../tracedecay-automation", version = "0.1.0" }
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
+tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
+tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
+tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
+tracedecay-code-index-retention = { path = "../tracedecay-code-index-retention", version = "0.1.0" }
+
+[target.'cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+filetime = "0.2"
+tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }
+tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }

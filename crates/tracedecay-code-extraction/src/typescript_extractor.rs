@@ -4,14 +4,16 @@
 /// emits nodes and edges for the code graph.
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use tree_sitter::{Node as TsNode, Parser, Tree};
+use tree_sitter::{Node as TsNode, Tree};
 
 use crate::complexity::{TYPESCRIPT_COMPLEXITY, count_complexity};
+use crate::extraction_artifact::{ExtractedImportEvidenceV1, ExtractionArtifactV1};
 use crate::traversal::find_direct_child_by_kind;
-use tracedecay_domain::code_intelligence::{
+use crate::types::{
     Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
 };
 
+mod imports;
 mod test_calls;
 
 /// Extracts code graph nodes and edges from TypeScript/JavaScript source files
@@ -19,22 +21,27 @@ mod test_calls;
 pub struct TypeScriptExtractor;
 
 /// Internal state used during AST traversal.
-struct ExtractionState {
+///
+/// Borrows the caller's source for the lifetime of the walk: copying the
+/// whole file here made every `extract_parsed` pass — including incremental
+/// walks of one tiny item — pay a full-file memcpy before visiting a node.
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
     errors: Vec<String>,
+    imports: Vec<ExtractedImportEvidenceV1>,
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
     /// Whether the current declaration is inside an `export_statement`.
     in_export: bool,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -44,21 +51,27 @@ impl ExtractionState {
             edges: Vec::new(),
             unresolved_refs: Vec::new(),
             errors: Vec::new(),
+            imports: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
             in_export: false,
         }
     }
 
     /// Returns the current qualified name prefix from the node stack.
+    ///
+    /// The file root is pushed onto `node_stack` as the first frame when
+    /// extraction begins, so iterating the stack already yields the file
+    /// path as the leading segment — prepending `self.file_path` here was
+    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
-        let mut parts = vec![self.file_path.clone()];
-        for (name, _) in &self.node_stack {
-            parts.push(name.clone());
-        }
-        parts.join("::")
+        self.node_stack
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join("::")
     }
 
     /// Returns the current parent node ID, or None if at file root level.
@@ -66,11 +79,13 @@ impl ExtractionState {
         self.node_stack.last().map(|(_, id)| id.as_str())
     }
 
-    /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    /// Gets the text of a tree-sitter node, borrowed from the source.
+    ///
+    /// The `'s` lifetime is tied to the source, not `&self`, so callers can
+    /// keep the text across mutations of the state. Signature helpers slice
+    /// a small prefix from it and own only that prefix.
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
@@ -78,22 +93,51 @@ impl TypeScriptExtractor {
     /// Extract code graph nodes and edges from a TypeScript/JavaScript source file.
     ///
     /// `file_path` is used for qualified names and node IDs (not for I/O).
-    /// `source` is the source code to parse.
     pub fn extract_typescript(file_path: &str, source: &str) -> ExtractionResult {
-        let start = Instant::now();
-        let mut state = ExtractionState::new(file_path, source);
+        Self::extract_typescript_artifact(file_path, source).result
+    }
 
+    pub(crate) fn extract_typescript_artifact(
+        file_path: &str,
+        source: &str,
+    ) -> ExtractionArtifactV1 {
         let ext = file_path.rsplit('.').next().unwrap_or("ts");
-
         let tree = match Self::parse_source(source, ext) {
             Ok(tree) => tree,
             Err(msg) => {
+                let start = Instant::now();
+                let mut state = ExtractionState::new(file_path, source);
                 state.errors.push(msg);
-                return Self::build_result(state, start);
+                return Self::build_artifact(state, start);
             }
         };
+        Self::extract_tree_artifact(
+            file_path,
+            source,
+            &tree,
+            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
+        )
+        .artifact
+    }
 
-        // Create the File root node.
+    fn extract_tree(
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        Self::extract_tree_artifact(file_path, source, tree, scope).into_parsed()
+    }
+
+    fn extract_tree_artifact(
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        let start = Instant::now();
+        let mut state = ExtractionState::new(file_path, source);
+
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -123,20 +167,24 @@ impl TypeScriptExtractor {
         state.nodes.push(file_node);
         state.node_stack.push((file_path.to_string(), file_node_id));
 
-        // Walk the AST.
-        let root = tree.root_node();
-        Self::visit_children(&mut state, root);
+        let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
+            Self::visit_node(&mut state, child);
+        });
 
         state.node_stack.pop();
 
-        Self::build_result(state, start)
+        crate::parsed_extraction::ParsedExtractionArtifactV1::complete(
+            Self::build_artifact(state, start),
+            scope,
+            metrics,
+        )
     }
 
-    fn node_name(state: &ExtractionState, node: TsNode<'_>) -> String {
-        Self::clean_name(&state.node_text(node))
+    fn node_name(state: &ExtractionState<'_>, node: TsNode<'_>) -> String {
+        Self::clean_name(state.node_text(node))
     }
 
-    fn child_name(state: &ExtractionState, node: Option<TsNode<'_>>) -> String {
+    fn child_name(state: &ExtractionState<'_>, node: Option<TsNode<'_>>) -> String {
         node.map_or_else(Self::anonymous_name, |n| Self::node_name(state, n))
     }
 
@@ -155,25 +203,17 @@ impl TypeScriptExtractor {
 
     /// Parse source code into a tree-sitter AST, selecting grammar by file extension.
     fn parse_source(source: &str, extension: &str) -> Result<Tree, String> {
-        let mut parser = Parser::new();
         let (key, label) = match extension {
             "ts" | "astro" | "svelte" => ("typescript", "TypeScript"),
             "tsx" => ("tsx", "TSX"),
             "js" | "jsx" => ("javascript", "JavaScript"),
             other => (other, other),
         };
-        let language = crate::ts_provider::try_language(key)
-            .map_err(|e| format!("failed to load {label} grammar: {e}"))?;
-        parser
-            .set_language(&language)
-            .map_err(|e| format!("failed to load {label} grammar: {e}"))?;
-        parser
-            .parse(source, None)
-            .ok_or_else(|| "tree-sitter parse returned None".to_string())
+        crate::ts_provider::parse_extractor_source_with_labeled_lookup(key, label, source)
     }
 
     /// Visit all children of a node.
-    fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {
+    fn visit_children(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {
@@ -187,7 +227,7 @@ impl TypeScriptExtractor {
     }
 
     /// Visit a single AST node, dispatching on its type.
-    fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
+    fn visit_node(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
         match node.kind() {
             "export_statement" => Self::visit_export_statement(state, node),
             "function_declaration" => Self::visit_function(state, node),
@@ -196,7 +236,7 @@ impl TypeScriptExtractor {
             "interface_declaration" => Self::visit_interface(state, node),
             "enum_declaration" => Self::visit_enum(state, node),
             "type_alias_declaration" => Self::visit_type_alias(state, node),
-            "import_statement" => Self::visit_import(state, node),
+            "import_statement" => imports::visit_import(state, node),
             "expression_statement" => {
                 // Namespace declarations appear as expression_statement > internal_module.
                 if let Some(internal) = find_direct_child_by_kind(node, "internal_module") {
@@ -219,14 +259,12 @@ impl TypeScriptExtractor {
 
     /// Visit an `export_statement`. Sets `in_export` flag and recurses into the
     /// inner declaration.
-    fn visit_export_statement(state: &mut ExtractionState, node: TsNode<'_>) {
+    fn visit_export_statement(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
         let prev_in_export = state.in_export;
         state.in_export = true;
 
-        // Also create an Export node to track the export itself.
         let start_line = node.start_position().row as u32;
 
-        // Recurse into children to find the actual declaration.
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {
@@ -243,12 +281,8 @@ impl TypeScriptExtractor {
                         let text = state.node_text(node);
                         let name = "export";
                         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-                        let id = generate_node_id(
-                            &state.file_path,
-                            &NodeKind::Export,
-                            &text,
-                            start_line,
-                        );
+                        let id =
+                            generate_node_id(&state.file_path, &NodeKind::Export, text, start_line);
                         let graph_node = Node {
                             id: id.clone(),
                             kind: NodeKind::Export,
@@ -260,7 +294,7 @@ impl TypeScriptExtractor {
                             end_line: node.end_position().row as u32,
                             start_column: node.start_position().column as u32,
                             end_column: node.end_position().column as u32,
-                            signature: Some(text),
+                            signature: Some(text.to_string()),
                             docstring: None,
                             visibility: Visibility::Pub,
                             is_async: false,
@@ -296,7 +330,7 @@ impl TypeScriptExtractor {
     }
 
     /// Extract a function declaration node.
-    fn visit_function(state: &mut ExtractionState, node: TsNode<'_>) {
+    fn visit_function(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
         let name = Self::child_name(state, find_direct_child_by_kind(node, "identifier"));
         let visibility = if state.in_export {
             Visibility::Pub
@@ -312,7 +346,7 @@ impl TypeScriptExtractor {
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &NodeKind::Function, &name, start_line);
-        let metrics = count_complexity(node, &TYPESCRIPT_COMPLEXITY, &state.source);
+        let metrics = count_complexity(node, &TYPESCRIPT_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -341,7 +375,6 @@ impl TypeScriptExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -351,7 +384,6 @@ impl TypeScriptExtractor {
             });
         }
 
-        // Extract type references from parameter and return type annotations.
         Self::extract_type_refs(state, node, &id);
 
         // Extract call sites from the function body. Function declarations
@@ -366,7 +398,7 @@ impl TypeScriptExtractor {
 
     /// Extract a lexical declaration (const/let/var) looking for arrow functions
     /// and constant declarations.
-    fn visit_lexical_declaration(state: &mut ExtractionState, node: TsNode<'_>) {
+    fn visit_lexical_declaration(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
         let is_const = Self::has_child_kind(node, "const");
 
         let mut cursor = node.walk();
@@ -374,7 +406,6 @@ impl TypeScriptExtractor {
             loop {
                 let child = cursor.node();
                 if child.kind() == "variable_declarator" {
-                    // Check if this is an arrow function assignment.
                     if let Some(arrow) = find_direct_child_by_kind(child, "arrow_function") {
                         Self::visit_arrow_function(state, child, arrow);
                     } else if is_const {
@@ -391,7 +422,7 @@ impl TypeScriptExtractor {
 
     /// Extract an arrow function from a `variable_declarator` node.
     fn visit_arrow_function(
-        state: &mut ExtractionState,
+        state: &mut ExtractionState<'_>,
         declarator: TsNode<'_>,
         arrow_node: TsNode<'_>,
     ) {
@@ -422,7 +453,7 @@ impl TypeScriptExtractor {
             &name,
             start_line,
         );
-        let metrics = count_complexity(arrow_node, &TYPESCRIPT_COMPLEXITY, &state.source);
+        let metrics = count_complexity(arrow_node, &TYPESCRIPT_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -451,7 +482,6 @@ impl TypeScriptExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -461,7 +491,6 @@ impl TypeScriptExtractor {
             });
         }
 
-        // Extract type references from parameter and return type annotations.
         Self::extract_type_refs(state, arrow_node, &id);
 
         // Extract call sites from the arrow function body. Block-bodied arrows
@@ -476,7 +505,7 @@ impl TypeScriptExtractor {
     }
 
     /// Extract a const variable declaration (not an arrow function).
-    fn visit_const_variable(state: &mut ExtractionState, declarator: TsNode<'_>) {
+    fn visit_const_variable(state: &mut ExtractionState<'_>, declarator: TsNode<'_>) {
         let name = Self::child_name(state, find_direct_child_by_kind(declarator, "identifier"));
         let visibility = if state.in_export {
             Visibility::Pub
@@ -518,7 +547,6 @@ impl TypeScriptExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -530,7 +558,7 @@ impl TypeScriptExtractor {
     }
 
     /// Extract a class declaration node.
-    fn visit_class(state: &mut ExtractionState, node: TsNode<'_>) {
+    fn visit_class(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
         // TS uses type_identifier, JS uses identifier for class names.
         let name = Self::child_name(
             state,
@@ -578,7 +606,6 @@ impl TypeScriptExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -588,13 +615,10 @@ impl TypeScriptExtractor {
             });
         }
 
-        // Extract decorators from the class declaration itself.
         Self::extract_decorators(state, node, &id);
 
-        // Extract extends/implements from class_heritage.
         Self::extract_class_heritage(state, node, &id);
 
-        // Recurse into class_body for methods and fields.
         if let Some(body) = find_direct_child_by_kind(node, "class_body") {
             state.node_stack.push((name, id.clone()));
             Self::visit_class_body(state, body);
@@ -603,7 +627,7 @@ impl TypeScriptExtractor {
     }
 
     /// Visit the body of a class, extracting methods and fields.
-    fn visit_class_body(state: &mut ExtractionState, body: TsNode<'_>) {
+    fn visit_class_body(state: &mut ExtractionState<'_>, body: TsNode<'_>) {
         let mut cursor = body.walk();
         if cursor.goto_first_child() {
             loop {
@@ -621,7 +645,7 @@ impl TypeScriptExtractor {
     }
 
     /// Extract a `method_definition` from a class body.
-    fn visit_method(state: &mut ExtractionState, node: TsNode<'_>) {
+    fn visit_method(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
         let name = Self::child_name(
             state,
             find_direct_child_by_kind(node, "property_identifier"),
@@ -633,7 +657,6 @@ impl TypeScriptExtractor {
             NodeKind::Method
         };
 
-        // Check for accessibility_modifier (public/private/protected).
         let visibility = Self::extract_ts_accessibility(state, node);
         let is_async = Self::has_child_kind(node, "async");
         let signature = Some(Self::extract_signature(state, node));
@@ -644,7 +667,7 @@ impl TypeScriptExtractor {
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &kind, &name, start_line);
-        let metrics = count_complexity(node, &TYPESCRIPT_COMPLEXITY, &state.source);
+        let metrics = count_complexity(node, &TYPESCRIPT_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -673,7 +696,6 @@ impl TypeScriptExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent (the class).
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -683,17 +705,15 @@ impl TypeScriptExtractor {
             });
         }
 
-        // Extract type references from parameter and return type annotations.
         Self::extract_type_refs(state, node, &id);
 
-        // Extract call sites from the method body.
         if let Some(body) = find_direct_child_by_kind(node, "statement_block") {
             Self::extract_call_sites(state, body, &id);
         }
     }
 
     /// Extract a field from a class body (`public_field_definition`).
-    fn visit_field(state: &mut ExtractionState, node: TsNode<'_>) {
+    fn visit_field(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
         let name = Self::child_name(
             state,
             find_direct_child_by_kind(node, "property_identifier"),
@@ -734,7 +754,6 @@ impl TypeScriptExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent (the class).
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -746,7 +765,7 @@ impl TypeScriptExtractor {
     }
 
     /// Extract an interface declaration node.
-    fn visit_interface(state: &mut ExtractionState, node: TsNode<'_>) {
+    fn visit_interface(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
         let name = Self::child_name(state, find_direct_child_by_kind(node, "type_identifier"));
         let visibility = if state.in_export {
             Visibility::Pub
@@ -789,7 +808,6 @@ impl TypeScriptExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -799,7 +817,6 @@ impl TypeScriptExtractor {
             });
         }
 
-        // Extract methods from interface body.
         if let Some(body) = find_direct_child_by_kind(node, "interface_body") {
             state.node_stack.push((name, id.clone()));
             Self::visit_interface_body(state, body);
@@ -808,7 +825,7 @@ impl TypeScriptExtractor {
     }
 
     /// Visit the body of an interface, extracting method signatures.
-    fn visit_interface_body(state: &mut ExtractionState, body: TsNode<'_>) {
+    fn visit_interface_body(state: &mut ExtractionState<'_>, body: TsNode<'_>) {
         let mut cursor = body.walk();
         if cursor.goto_first_child() {
             loop {
@@ -824,7 +841,7 @@ impl TypeScriptExtractor {
     }
 
     /// Extract a `method_signature` from an interface body.
-    fn visit_interface_method(state: &mut ExtractionState, node: TsNode<'_>) {
+    fn visit_interface_method(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
         let name = Self::child_name(
             state,
             find_direct_child_by_kind(node, "property_identifier"),
@@ -864,7 +881,6 @@ impl TypeScriptExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent (the interface).
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -876,7 +892,7 @@ impl TypeScriptExtractor {
     }
 
     /// Extract an enum declaration node.
-    fn visit_enum(state: &mut ExtractionState, node: TsNode<'_>) {
+    fn visit_enum(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
         let name = Self::child_name(state, find_direct_child_by_kind(node, "identifier"));
         let visibility = if state.in_export {
             Visibility::Pub
@@ -920,7 +936,6 @@ impl TypeScriptExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -930,7 +945,6 @@ impl TypeScriptExtractor {
             });
         }
 
-        // Extract enum members from enum_body.
         if let Some(body) = find_direct_child_by_kind(node, "enum_body") {
             state.node_stack.push((name, id.clone()));
             Self::visit_enum_body(state, body);
@@ -939,7 +953,7 @@ impl TypeScriptExtractor {
     }
 
     /// Visit the body of an enum, extracting variants.
-    fn visit_enum_body(state: &mut ExtractionState, body: TsNode<'_>) {
+    fn visit_enum_body(state: &mut ExtractionState<'_>, body: TsNode<'_>) {
         let mut cursor = body.walk();
         if cursor.goto_first_child() {
             loop {
@@ -955,7 +969,7 @@ impl TypeScriptExtractor {
     }
 
     /// Extract an enum member (variant).
-    fn visit_enum_member(state: &mut ExtractionState, node: TsNode<'_>) {
+    fn visit_enum_member(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
         let name = Self::node_name(state, node);
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -991,7 +1005,6 @@ impl TypeScriptExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent (the enum).
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -1003,7 +1016,7 @@ impl TypeScriptExtractor {
     }
 
     /// Extract a type alias declaration.
-    fn visit_type_alias(state: &mut ExtractionState, node: TsNode<'_>) {
+    fn visit_type_alias(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
         let name = Self::child_name(state, find_direct_child_by_kind(node, "type_identifier"));
         let visibility = if state.in_export {
             Visibility::Pub
@@ -1045,7 +1058,6 @@ impl TypeScriptExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -1056,69 +1068,8 @@ impl TypeScriptExtractor {
         }
     }
 
-    /// Extract an import statement.
-    fn visit_import(state: &mut ExtractionState, node: TsNode<'_>) {
-        let text = state.node_text(node);
-        // Extract the module path from the string literal.
-        let module_path = Self::extract_import_path(state, node);
-        let name = module_path.clone().unwrap_or_else(|| text.clone());
-        let start_line = node.start_position().row as u32;
-        let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
-        let end_column = node.end_position().column as u32;
-        let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Use, &name, start_line);
-
-        let graph_node = Node {
-            id: id.clone(),
-            kind: NodeKind::Use,
-            name: name.clone(),
-            qualified_name,
-            file_path: state.file_path.clone(),
-            start_line,
-            attrs_start_line: start_line,
-            end_line,
-            start_column,
-            end_column,
-            signature: Some(text.trim().to_string()),
-            docstring: None,
-            visibility: Visibility::Private,
-            is_async: false,
-            branches: 0,
-            loops: 0,
-            returns: 0,
-            max_nesting: 0,
-            unsafe_blocks: 0,
-            unchecked_calls: 0,
-            assertions: 0,
-            updated_at: state.timestamp,
-            parent_id: None,
-        };
-        state.nodes.push(graph_node);
-
-        // Contains edge from parent (File).
-        if let Some(parent_id) = state.parent_node_id() {
-            state.edges.push(Edge {
-                source: parent_id.to_string(),
-                target: id.clone(),
-                kind: EdgeKind::Contains,
-                line: Some(start_line),
-            });
-        }
-
-        // Unresolved Uses reference.
-        state.unresolved_refs.push(UnresolvedRef {
-            from_node_id: id.clone(),
-            reference_name: name,
-            reference_kind: EdgeKind::Uses,
-            line: start_line,
-            column: start_column,
-            file_path: state.file_path.clone(),
-        });
-    }
-
     /// Extract a namespace (`internal_module`) declaration.
-    fn visit_namespace(state: &mut ExtractionState, node: TsNode<'_>) {
+    fn visit_namespace(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
         let name = Self::child_name(state, find_direct_child_by_kind(node, "identifier"));
         let visibility = if state.in_export {
             Visibility::Pub
@@ -1162,7 +1113,6 @@ impl TypeScriptExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -1172,7 +1122,6 @@ impl TypeScriptExtractor {
             });
         }
 
-        // Recurse into the namespace body.
         if let Some(body) = find_direct_child_by_kind(node, "statement_block") {
             state.node_stack.push((name, id));
             Self::visit_children(state, body);
@@ -1185,19 +1134,18 @@ impl TypeScriptExtractor {
     // ----------------------------
 
     /// Extract decorators from a class or method declaration.
-    fn extract_decorators(state: &mut ExtractionState, node: TsNode<'_>, parent_id: &str) {
+    fn extract_decorators(state: &mut ExtractionState<'_>, node: TsNode<'_>, parent_id: &str) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {
                 let child = cursor.node();
                 if child.kind() == "decorator" {
                     let text = state.node_text(child);
-                    // Get the decorator name (strip @ and potential arguments).
                     let name = Self::clean_name(
                         text.trim_start_matches('@')
                             .split('(')
                             .next()
-                            .unwrap_or(&text),
+                            .unwrap_or(text),
                     );
                     let start_line = child.start_position().row as u32;
                     let end_line = child.end_position().row as u32;
@@ -1218,7 +1166,7 @@ impl TypeScriptExtractor {
                         end_line,
                         start_column,
                         end_column,
-                        signature: Some(text),
+                        signature: Some(text.to_string()),
                         docstring: None,
                         visibility: Visibility::Private,
                         is_async: false,
@@ -1234,7 +1182,6 @@ impl TypeScriptExtractor {
                     };
                     state.nodes.push(graph_node);
 
-                    // Annotates edge from decorator to parent.
                     state.edges.push(Edge {
                         source: id,
                         target: parent_id.to_string(),
@@ -1250,7 +1197,7 @@ impl TypeScriptExtractor {
     }
 
     /// Extract extends/implements from a class heritage clause.
-    fn extract_class_heritage(state: &mut ExtractionState, node: TsNode<'_>, class_id: &str) {
+    fn extract_class_heritage(state: &mut ExtractionState<'_>, node: TsNode<'_>, class_id: &str) {
         if let Some(heritage) = find_direct_child_by_kind(node, "class_heritage") {
             let mut cursor = heritage.walk();
             if cursor.goto_first_child() {
@@ -1261,7 +1208,7 @@ impl TypeScriptExtractor {
                             // Find the extended class name (identifier or type_identifier).
                             let ext_name = find_direct_child_by_kind(child, "identifier")
                                 .or_else(|| find_direct_child_by_kind(child, "type_identifier"))
-                                .map(|n| state.node_text(n));
+                                .map(|n| state.node_text(n).to_string());
                             if let Some(name) = ext_name {
                                 state.unresolved_refs.push(UnresolvedRef {
                                     from_node_id: class_id.to_string(),
@@ -1280,7 +1227,7 @@ impl TypeScriptExtractor {
                                 loop {
                                     let iface = inner.node();
                                     if iface.kind() == "type_identifier" {
-                                        let name = state.node_text(iface);
+                                        let name = state.node_text(iface).to_string();
                                         state.unresolved_refs.push(UnresolvedRef {
                                             from_node_id: class_id.to_string(),
                                             reference_name: name,
@@ -1306,33 +1253,18 @@ impl TypeScriptExtractor {
         }
     }
 
-    /// Extract the import path from an `import_statement`.
-    fn extract_import_path(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        // The string child contains the module path.
-        if let Some(string_node) = find_direct_child_by_kind(node, "string") {
-            let text = state.node_text(string_node);
-            // Strip quotes.
-            let path = text.trim().trim_matches('\'').trim_matches('"').to_string();
-            if !path.is_empty() {
-                return Some(path);
-            }
-        }
-        None
-    }
-
     /// Recursively find `call_expression` nodes inside a node and create
     /// unresolved Calls references.
-    fn extract_call_sites(state: &mut ExtractionState, node: TsNode<'_>, fn_node_id: &str) {
+    fn extract_call_sites(state: &mut ExtractionState<'_>, node: TsNode<'_>, fn_node_id: &str) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {
                 let child = cursor.node();
                 match child.kind() {
                     "call_expression" => {
-                        // Get the callee name.
                         let callee = child.named_child(0);
                         if let Some(callee) = callee {
-                            let callee_name = state.node_text(callee);
+                            let callee_name = state.node_text(callee).to_string();
                             state.unresolved_refs.push(UnresolvedRef {
                                 from_node_id: fn_node_id.to_string(),
                                 reference_name: callee_name,
@@ -1342,7 +1274,6 @@ impl TypeScriptExtractor {
                                 file_path: state.file_path.clone(),
                             });
                         }
-                        // Also recurse into the call expression for nested calls.
                         Self::extract_call_sites(state, child, fn_node_id);
                     }
                     // Skip nested arrow functions to avoid polluting call sites.
@@ -1363,7 +1294,7 @@ impl TypeScriptExtractor {
     /// In tree-sitter-typescript, type annotations appear as `type_annotation`
     /// children on parameter nodes and on the function itself (return type).
     /// Each `type_identifier` inside creates a "uses" unresolved ref.
-    fn extract_type_refs(state: &mut ExtractionState, node: TsNode<'_>, fn_node_id: &str) {
+    fn extract_type_refs(state: &mut ExtractionState<'_>, node: TsNode<'_>, fn_node_id: &str) {
         let mut cursor = node.walk();
         if !cursor.goto_first_child() {
             return;
@@ -1389,7 +1320,11 @@ impl TypeScriptExtractor {
     }
 
     /// Recursively collect `type_identifier` nodes and emit "uses" refs.
-    fn collect_type_identifiers(state: &mut ExtractionState, node: TsNode<'_>, fn_node_id: &str) {
+    fn collect_type_identifiers(
+        state: &mut ExtractionState<'_>,
+        node: TsNode<'_>,
+        fn_node_id: &str,
+    ) {
         let mut cursor = node.walk();
         if !cursor.goto_first_child() {
             return;
@@ -1400,7 +1335,7 @@ impl TypeScriptExtractor {
                 let type_name = state.node_text(child);
                 // Skip built-in types
                 if !matches!(
-                    type_name.as_str(),
+                    type_name,
                     "string"
                         | "number"
                         | "boolean"
@@ -1416,7 +1351,7 @@ impl TypeScriptExtractor {
                 ) {
                     state.unresolved_refs.push(UnresolvedRef {
                         from_node_id: fn_node_id.to_string(),
-                        reference_name: type_name,
+                        reference_name: type_name.to_string(),
                         reference_kind: EdgeKind::Uses,
                         line: child.start_position().row as u32,
                         column: child.start_position().column as u32,
@@ -1433,22 +1368,38 @@ impl TypeScriptExtractor {
     }
 
     /// Extract the function/method signature (everything up to the body `{`).
-    fn extract_signature(state: &ExtractionState, node: TsNode<'_>) -> String {
+    fn extract_signature(state: &ExtractionState<'_>, node: TsNode<'_>) -> String {
         let text = state.node_text(node);
-        if let Some(brace_pos) = text.find('{') {
+        if let Some(body) = node.child_by_field_name("body") {
+            // Prefer the body child's start so a `{` in a parameter type
+            // (`x: { a: number }`) cannot truncate the header, and the
+            // (possibly huge) body is never scanned.
+            let body_offset = body.start_byte() - node.start_byte();
+            text[..body_offset].trim().to_string()
+        } else if let Some(brace_pos) = text.find('{') {
             text[..brace_pos].trim().to_string()
         } else {
+            // Signature-only declaration: the whole (small) text is the
+            // signature.
             text.trim().to_string()
         }
     }
 
     /// Extract the signature for an arrow function from its `variable_declarator`.
-    fn extract_arrow_signature(state: &ExtractionState, declarator: TsNode<'_>) -> String {
+    fn extract_arrow_signature(state: &ExtractionState<'_>, declarator: TsNode<'_>) -> String {
         let text = state.node_text(declarator);
         // For arrow functions, the signature is "name = (params) => ..."
         // We want everything up to the arrow body.
         if let Some(arrow_pos) = text.find("=>") {
             text[..arrow_pos + 2].trim().to_string()
+        } else if let Some(body) = find_direct_child_by_kind(declarator, "arrow_function")
+            .and_then(|arrow| arrow.child_by_field_name("body"))
+        {
+            // Arrow shapes where the `=>` token is not found in the text:
+            // own only the header before the body child instead of copying
+            // the whole item.
+            let body_offset = body.start_byte() - declarator.start_byte();
+            text[..body_offset].trim().to_string()
         } else {
             text.trim().to_string()
         }
@@ -1456,22 +1407,22 @@ impl TypeScriptExtractor {
 
     /// Extract `JSDoc` docstrings from preceding comment nodes.
     /// Only picks up `/** ... */` style comments (`JSDoc`).
-    fn extract_jsdoc(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
+    fn extract_jsdoc(state: &ExtractionState<'_>, node: TsNode<'_>) -> Option<String> {
         // In TS, we also need to check the parent if this is inside an export_statement.
         let mut target = node;
-        if let Some(parent) = node.parent() {
-            if parent.kind() == "export_statement" {
-                target = parent;
-            }
+        if let Some(parent) = node.parent()
+            && parent.kind() == "export_statement"
+        {
+            target = parent;
         }
 
         let current = target.prev_named_sibling();
-        if let Some(sibling) = current {
-            if sibling.kind() == "comment" {
-                let text = state.node_text(sibling);
-                if text.starts_with("/**") {
-                    return Some(Self::clean_jsdoc(&text));
-                }
+        if let Some(sibling) = current
+            && sibling.kind() == "comment"
+        {
+            let text = state.node_text(sibling);
+            if text.starts_with("/**") {
+                return Some(Self::clean_jsdoc(text));
             }
         }
         None
@@ -1503,10 +1454,10 @@ impl TypeScriptExtractor {
     }
 
     /// Extract TypeScript accessibility modifier (public/private/protected).
-    fn extract_ts_accessibility(state: &ExtractionState, node: TsNode<'_>) -> Visibility {
+    fn extract_ts_accessibility(state: &ExtractionState<'_>, node: TsNode<'_>) -> Visibility {
         if let Some(modifier) = find_direct_child_by_kind(node, "accessibility_modifier") {
             let text = state.node_text(modifier);
-            match text.as_str() {
+            match text {
                 "private" => Visibility::Private,
                 "protected" => Visibility::PubSuper,
                 _ => Visibility::Pub,
@@ -1533,14 +1484,17 @@ impl TypeScriptExtractor {
         false
     }
 
-    /// Build the final `ExtractionResult` from the accumulated state.
-    fn build_result(state: ExtractionState, start: Instant) -> ExtractionResult {
-        ExtractionResult {
-            nodes: state.nodes,
-            edges: state.edges,
-            unresolved_refs: state.unresolved_refs,
-            errors: state.errors,
-            duration_ms: start.elapsed().as_millis() as u64,
+    /// Build the graph and parser-backed evidence accumulated in one traversal.
+    fn build_artifact(state: ExtractionState<'_>, start: Instant) -> ExtractionArtifactV1 {
+        ExtractionArtifactV1 {
+            result: ExtractionResult {
+                nodes: state.nodes,
+                edges: state.edges,
+                unresolved_refs: state.unresolved_refs,
+                errors: state.errors,
+                duration_ms: start.elapsed().as_millis() as u64,
+            },
+            imports: state.imports,
         }
     }
 }
@@ -1556,5 +1510,34 @@ impl crate::LanguageExtractor for TypeScriptExtractor {
 
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         TypeScriptExtractor::extract_typescript(file_path, source)
+    }
+
+    fn extract_artifact(&self, file_path: &str, source: &str) -> ExtractionArtifactV1 {
+        crate::hotpath_observe::measure_extract_file(
+            self.language_name(),
+            source.len(),
+            || TypeScriptExtractor::extract_typescript_artifact(file_path, source),
+            crate::hotpath_observe::ExtractOutputCounts::from_artifact,
+        )
+    }
+
+    fn extract_parsed(
+        &self,
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        TypeScriptExtractor::extract_tree(file_path, source, tree, scope)
+    }
+
+    fn extract_parsed_artifact(
+        &self,
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        TypeScriptExtractor::extract_tree_artifact(file_path, source, tree, scope)
     }
 }

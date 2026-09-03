@@ -5,7 +5,15 @@
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
-use tree_sitter::Language;
+use tree_sitter::{Language, Parser, Tree};
+
+/// Patched Rust grammar.
+pub mod rust_grammar {
+    /// The Rust grammar with struct-pattern field attribute support, served by
+    /// the git-pinned `tree-sitter-rust` fork in the workspace
+    /// `[patch.crates-io]` table.
+    pub use tree_sitter_rust::LANGUAGE;
+}
 
 // tree-sitter-wgsl 0.0.6 was built against tree-sitter 0.20, whose Language
 // type is not assignment-compatible with 0.26. Re-declare the raw C symbol so
@@ -21,7 +29,6 @@ mod wgsl_grammar {
     pub const LANGUAGE: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_wgsl) };
 }
 
-#[cfg(test)]
 fn has_large_grammar_tier() -> bool {
     cfg!(any(
         feature = "lang-pascal",
@@ -57,7 +64,6 @@ fn has_large_grammar_tier() -> bool {
     ))
 }
 
-#[cfg(test)]
 fn has_medium_grammar_tier() -> bool {
     cfg!(any(
         feature = "lite",
@@ -70,8 +76,11 @@ fn has_medium_grammar_tier() -> bool {
 }
 
 /// Cached map of language key -> `Language` built once from the enabled grammar tiers.
-static LANGUAGES: LazyLock<HashMap<&'static str, Language>> = LazyLock::new(|| {
-    let mut map: HashMap<&'static str, Language> = HashMap::new();
+static LANGUAGES: LazyLock<HashMap<&'static str, Language>> =
+    LazyLock::new(|| crate::hotpath_observe::measure_grammar_table_init(build_language_table));
+
+fn build_language_table() -> HashMap<&'static str, Language> {
+    let languages = std::iter::empty::<(&'static str, Language)>();
 
     #[cfg(any(
         feature = "lite",
@@ -81,9 +90,10 @@ static LANGUAGES: LazyLock<HashMap<&'static str, Language>> = LazyLock::new(|| {
         feature = "lang-bash",
         feature = "lang-lua"
     ))]
-    map.extend(
+    let languages = languages.chain(
         tracedecay_medium_treesitters::all_languages()
             .into_iter()
+            .filter(|(name, _)| *name != "rust")
             .map(|(name, lang_fn)| (name, lang_fn.into())),
     );
 
@@ -119,21 +129,30 @@ static LANGUAGES: LazyLock<HashMap<&'static str, Language>> = LazyLock::new(|| {
         feature = "lang-toml",
         feature = "lang-lean"
     ))]
-    map.extend(
+    let languages = languages.chain(
         tracedecay_large_treesitters::all_languages()
             .into_iter()
+            .filter(|(name, _)| *name != "rust")
             .map(|(name, lang_fn)| (name, lang_fn.into())),
     );
 
+    let languages = languages.chain(
+        std::iter::once(("rust", rust_grammar::LANGUAGE.into()))
+            .filter(|_| has_medium_grammar_tier() || has_large_grammar_tier()),
+    );
+
     #[cfg(feature = "lang-wgsl")]
-    map.insert("wgsl", wgsl_grammar::LANGUAGE.into());
+    let languages = languages.chain(std::iter::once(("wgsl", wgsl_grammar::LANGUAGE.into())));
 
     // HLSL uses the newer LanguageFn API.
     #[cfg(feature = "lang-hlsl")]
-    map.insert("hlsl", tree_sitter_hlsl::LANGUAGE_HLSL.into());
+    let languages = languages.chain(std::iter::once((
+        "hlsl",
+        tree_sitter_hlsl::LANGUAGE_HLSL.into(),
+    )));
 
-    map
-});
+    languages.collect()
+}
 
 /// Returns the `tree_sitter::Language` for the given extractor language key.
 pub fn try_language(key: &str) -> Result<Language, String> {
@@ -146,6 +165,67 @@ pub fn try_language(key: &str) -> Result<Language, String> {
 /// Backward-compatible fallible alias for extractor parser call sites.
 pub fn language(key: &str) -> Result<Language, String> {
     try_language(key)
+}
+
+/// Parse one file with the shared grammar table.
+///
+/// Language load and `set_language` are the `code_extraction.language` phase.
+/// The tree-sitter parse itself is the existing `code_extraction.parse_file`
+/// span. Callers keep their grammar-key and error-label strings so failure
+/// text stays byte-identical.
+pub(crate) fn parse_extractor_source(
+    language_key: &str,
+    grammar_label: &str,
+    source: &str,
+) -> Result<Tree, String> {
+    parse_extractor_source_inner(language_key, grammar_label, source, false)
+}
+
+pub(crate) fn parse_extractor_source_with_labeled_lookup(
+    language_key: &str,
+    grammar_label: &str,
+    source: &str,
+) -> Result<Tree, String> {
+    parse_extractor_source_inner(language_key, grammar_label, source, true)
+}
+
+fn parse_extractor_source_inner(
+    language_key: &str,
+    grammar_label: &str,
+    source: &str,
+    label_lookup_error: bool,
+) -> Result<Tree, String> {
+    let mut parser = crate::hotpath_observe::measure_language(|| {
+        let mut parser = Parser::new();
+        let language = try_language(language_key).map_err(|error| {
+            crate::hotpath_observe::record_grammar_lookup_miss();
+            if label_lookup_error {
+                format!("failed to load {grammar_label} grammar: {error}")
+            } else {
+                error
+            }
+        })?;
+        parser.set_language(&language).map_err(|e| {
+            crate::hotpath_observe::record_grammar_rejected();
+            format!("failed to load {grammar_label} grammar: {e}")
+        })?;
+        Ok::<_, String>(parser)
+    })?;
+    crate::hotpath_observe::measure_parse_file(
+        grammar_label,
+        source.len(),
+        || {
+            parser
+                .parse(source, None)
+                .ok_or_else(|| "tree-sitter parse returned None".to_string())
+        },
+        |result| match result {
+            Ok(tree) => {
+                crate::hotpath_observe::ParseFileOutcome::from_parsed_root(tree.root_node())
+            }
+            Err(_) => crate::hotpath_observe::ParseFileOutcome::NoTree,
+        },
+    )
 }
 
 #[cfg(test)]
@@ -256,6 +336,21 @@ mod tests {
         };
         assert!(err.contains("unknown language key"));
         Ok(())
+    }
+
+    #[test]
+    fn labeled_parser_preserves_the_extractor_lookup_error_context() {
+        let error = super::parse_extractor_source_with_labeled_lookup(
+            "definitely-not-registered",
+            "fixture",
+            "",
+        )
+        .expect_err("an unknown extractor grammar must fail before parsing");
+        assert_eq!(
+            error,
+            "failed to load fixture grammar: ts_provider: unknown language key \
+             'definitely-not-registered'"
+        );
     }
 
     #[test]

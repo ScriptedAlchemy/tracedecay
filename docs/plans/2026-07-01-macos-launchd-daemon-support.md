@@ -1,5 +1,12 @@
 # Final Plan: macOS launchd Support for the TraceDecay Daemon
 
+> **Archived record — not implementation authority.** This document preserves
+> historical intent and evidence. Current requirements come only from the
+> `docs/plans/tracedecay-v2/` hierarchy. Exact tests and counts, source-string
+> checks, branch/commit/worktree choreography, snapshots, receipts,
+> attestations, PR packets, and gate matrices below are not rebuild
+> instructions; validate current parser, runtime, and product behavior directly.
+
 **Status:** Final implementation plan
 **Target branch:** `main`
 **Scope:** `src/daemon.rs`, focused tests, README / user guide / security docs

@@ -1,25 +1,48 @@
 //! Cline agent integration.
 //!
-//! Handles registration of the tracedecay MCP server in Cline's
-//! `cline_mcp_settings.json` under the `mcpServers.tracedecay` key.
+//! Owns the profile-wide `~/.cline/mcp.json` MCP registration lifecycle.
+//!
+//! Cline documents this JSON registry as its MCP authority. TraceDecay merges
+//! only `mcpServers.tracedecay` and removes only that key, preserving sibling
+//! servers and settings. Native Cline hooks remain outside this integration
+//! until a real installed-runtime fixture proves their event contract.
 
 use std::path::{Path, PathBuf};
 
-use serde_json::json;
-
-use crate::errors::{Result, TraceDecayError};
+use crate::errors::Result;
 
 use super::{
-    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, backup_and_write_json,
-    backup_config_file, load_json_file, load_json_file_strict, safe_write_json_file,
+    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
+    McpDoctorLabels, McpUninstallPolicy, config_backup_path, install_mcp_server_entry,
+    load_json_file, mcp_servers_registration_state, report_mcp_registration,
+    uninstall_mcp_server_entry,
 };
 
-/// Cline agent.
 pub struct ClineIntegration;
 
-/// Returns the Cline VS Code extension global storage directory.
-fn cline_ext_dir(home: &Path) -> PathBuf {
-    super::vscode_data_dir(home).join("User/globalStorage/saoudrizwan.claude-dev")
+/// Current Cline CLI/IDE user MCP settings path documented by Cline.
+fn cline_mcp_settings_path(home: &Path) -> PathBuf {
+    home.join(".cline/mcp.json")
+}
+
+/// Legacy VS Code extension storage path retained only for migration diagnosis.
+fn legacy_cline_mcp_settings_path(home: &Path) -> PathBuf {
+    super::vscode_data_dir(home)
+        .join("User/globalStorage/saoudrizwan.claude-dev")
+        .join("settings/cline_mcp_settings.json")
+}
+
+fn cline_settings_paths(home: &Path) -> [PathBuf; 2] {
+    [
+        cline_mcp_settings_path(home),
+        legacy_cline_mcp_settings_path(home),
+    ]
+}
+
+/// Cline accepts any `mcpServers.tracedecay` entry, so this deliberately skips
+/// the object-shape filter [`super::doctor_check_mcp_registration`] applies.
+fn settings_have_tracedecay(path: &Path) -> bool {
+    super::mcp_config_has_tracedecay(path, "mcpServers", load_json_file)
 }
 
 impl AgentIntegration for ClineIntegration {
@@ -31,146 +54,90 @@ impl AgentIntegration for ClineIntegration {
         "cline"
     }
 
-    fn install(&self, ctx: &InstallContext) -> Result<()> {
-        let settings_path = cline_ext_dir(&ctx.home).join("settings/cline_mcp_settings.json");
-        install_mcp_server(&settings_path, &ctx.tracedecay_bin)?;
-
-        eprintln!();
-        eprintln!("Setup complete. Next steps:");
-        eprintln!("  1. cd into your project and run: tracedecay init");
-        eprintln!("  2. Restart VS Code — tracedecay tools are now available in Cline");
-        Ok(())
-    }
-
-    fn supports_local_install(&self) -> bool {
-        false
-    }
-
-    fn install_local(&self, _ctx: &InstallContext, _project_path: &Path) -> Result<()> {
-        Err(TraceDecayError::Config {
-            message: "Cline does not currently document or ship a project-local MCP config path. \
-                      `tracedecay install --local --agent cline` is unsupported. \
-                      Run `tracedecay install --agent cline` for a global install."
-                .to_string(),
-        })
-    }
-
-    fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
-        let settings_path = cline_ext_dir(&ctx.home).join("settings/cline_mcp_settings.json");
-        uninstall_mcp_server(&settings_path);
-
-        eprintln!();
-        eprintln!("Uninstall complete. Tracedecay has been removed from Cline.");
-        eprintln!("Restart VS Code for changes to take effect.");
-        Ok(())
-    }
-
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         eprintln!("\n\x1b[1mCline integration\x1b[0m");
         doctor_check_settings(dc, &ctx.home);
     }
 
+    fn host_component_registration(
+        &self,
+        component: super::host_bundle_v2::HostBundleComponentV1,
+        ctx: &HealthcheckContext,
+    ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
+        if component != super::host_bundle_v2::HostBundleComponentV1::ContextMcp {
+            return super::host_bundle_v2::HostBundleRegistrationStateV1::Missing;
+        }
+        mcp_servers_registration_state(&cline_mcp_settings_path(&ctx.home))
+    }
+
     fn is_detected(&self, home: &Path) -> bool {
-        cline_ext_dir(home).is_dir()
+        home.join(".cline").is_dir()
+            || legacy_cline_mcp_settings_path(home)
+                .parent()
+                .is_some_and(Path::is_dir)
     }
 
     fn primary_config_path(&self, home: &Path) -> Option<PathBuf> {
-        Some(cline_ext_dir(home).join("settings/cline_mcp_settings.json"))
+        Some(cline_mcp_settings_path(home))
+    }
+
+    fn host_component_registration_paths(
+        &self,
+        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        home: &Path,
+    ) -> Vec<PathBuf> {
+        if components == [super::host_bundle_v2::HostBundleComponentV1::ContextMcp] {
+            let path = cline_mcp_settings_path(home);
+            vec![path.clone(), config_backup_path(&path)]
+        } else {
+            Vec::new()
+        }
+    }
+
+    #[hotpath::measure(label = "cline_mcp_install")]
+    fn activate_deployed_host_component_registration(
+        &self,
+        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        ctx: &InstallContext,
+    ) -> Result<()> {
+        if components.contains(&super::host_bundle_v2::HostBundleComponentV1::ContextMcp) {
+            install_mcp_server_entry(
+                &cline_mcp_settings_path(&ctx.home),
+                "mcpServers",
+                serde_json::json!({
+                    "command": ctx.tracedecay_bin.clone(),
+                    "args": ["serve"],
+                    "env": {},
+                    "disabled": false,
+                    "autoApprove": []
+                }),
+                "Cline",
+                JsonConfigDialect::Json,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn deactivate_deployed_host_component_registration(
+        &self,
+        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        ctx: &InstallContext,
+    ) -> Result<()> {
+        if components.contains(&super::host_bundle_v2::HostBundleComponentV1::ContextMcp) {
+            uninstall_mcp_server_entry(
+                &cline_mcp_settings_path(&ctx.home),
+                "mcpServers",
+                JsonConfigDialect::Json,
+                McpUninstallPolicy::default(),
+            )?;
+        }
+        Ok(())
     }
 
     fn has_tracedecay(&self, home: &Path) -> bool {
-        let settings_path = cline_ext_dir(home).join("settings/cline_mcp_settings.json");
-        if !settings_path.exists() {
-            return false;
-        }
-        let json = load_json_file(&settings_path);
-        let servers = json.get("mcpServers");
-        servers.and_then(|v| v.get("tracedecay")).is_some()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Uninstall helpers
-// ---------------------------------------------------------------------------
-
-fn install_mcp_server(settings_path: &Path, tracedecay_bin: &str) -> Result<()> {
-    if let Some(parent) = settings_path.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-
-    let backup = backup_config_file(settings_path)?;
-    let mut settings = match load_json_file_strict(settings_path) {
-        Ok(v) => v,
-        Err(e) => {
-            if let Some(ref b) = backup {
-                eprintln!("  Backup preserved at: {}", b.display());
-            }
-            return Err(e);
-        }
-    };
-    settings["mcpServers"]["tracedecay"] = json!({
-        "command": tracedecay_bin,
-        "args": ["serve"],
-        "disabled": false
-    });
-
-    safe_write_json_file(settings_path, &settings, backup.as_deref())?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Added tracedecay MCP server to {}",
-        settings_path.display()
-    );
-    Ok(())
-}
-
-/// Remove MCP server entry from Cline's `cline_mcp_settings.json`.
-fn uninstall_mcp_server(settings_path: &Path) {
-    if !settings_path.exists() {
-        eprintln!("  {} not found, skipping", settings_path.display());
-        return;
-    }
-
-    let Ok(contents) = std::fs::read_to_string(settings_path) else {
-        return;
-    };
-    let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(&contents) else {
-        return;
-    };
-
-    let Some(servers) = settings
-        .get_mut("mcpServers")
-        .and_then(|v| v.as_object_mut())
-    else {
-        eprintln!(
-            "  No tracedecay MCP server in {}, skipping",
-            settings_path.display()
-        );
-        return;
-    };
-
-    if servers.remove("tracedecay").is_none() {
-        eprintln!(
-            "  No tracedecay MCP server in {}, skipping",
-            settings_path.display()
-        );
-        return;
-    }
-
-    let is_empty = settings.as_object().is_some_and(|o| {
-        o.iter()
-            .all(|(k, v)| k == "mcpServers" && v.as_object().is_some_and(serde_json::Map::is_empty))
-    });
-
-    if is_empty {
-        std::fs::remove_file(settings_path).ok();
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed {} (was empty)",
-            settings_path.display()
-        );
-    } else if backup_and_write_json(settings_path, &settings) {
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
-            settings_path.display()
-        );
+        cline_settings_paths(home)
+            .iter()
+            .any(|path| settings_have_tracedecay(path))
     }
 }
 
@@ -178,30 +145,33 @@ fn uninstall_mcp_server(settings_path: &Path) {
 // Healthcheck helpers
 // ---------------------------------------------------------------------------
 
-/// Check Cline's `cline_mcp_settings.json` has tracedecay MCP server registered.
+/// Unlike the plain [`super::doctor_check_mcp_registration`] flow, an absent
+/// primary settings file is not a warning on its own: Cline falls through to
+/// the legacy VS Code extension path first and only then reports a failure.
 fn doctor_check_settings(dc: &mut DoctorCounters, home: &Path) {
-    let settings_path = cline_ext_dir(home).join("settings/cline_mcp_settings.json");
+    let settings_path = cline_mcp_settings_path(home);
+    let registered = settings_have_tracedecay(&settings_path);
 
-    if !settings_path.exists() {
-        dc.warn(&format!(
-            "{} not found — run `tracedecay install --agent cline` if you use Cline",
-            settings_path.display()
-        ));
-        return;
+    if !registered {
+        let legacy_path = legacy_cline_mcp_settings_path(home);
+        if settings_have_tracedecay(&legacy_path) {
+            dc.warn(&format!(
+                "legacy Cline MCP registration found in {} — configure or remove it through Cline's supported flow",
+                legacy_path.display()
+            ));
+            return;
+        }
     }
 
-    let settings = load_json_file(&settings_path);
-    let server = settings.get("mcpServers").and_then(|v| v.get("tracedecay"));
-
-    if server.and_then(|v| v.as_object()).is_some() {
-        dc.pass(&format!(
-            "MCP server registered in {}",
-            settings_path.display()
-        ));
-    } else {
-        dc.fail(&format!(
-            "MCP server NOT registered in {} — run `tracedecay install --agent cline`",
-            settings_path.display()
-        ));
-    }
+    report_mcp_registration(
+        dc,
+        &settings_path,
+        registered,
+        &McpDoctorLabels {
+            agent_id: "cline",
+            product: "Cline",
+            registered: "MCP server registered",
+            missing: "MCP server NOT registered",
+        },
+    );
 }

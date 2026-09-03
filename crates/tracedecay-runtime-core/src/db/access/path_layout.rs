@@ -1,7 +1,6 @@
-use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use crate::errors::Result;
+use tracedecay_domain::errors::Result;
 
 use super::access_io_error;
 
@@ -19,54 +18,72 @@ pub(super) fn canonical_profile_root(profile_root: &Path) -> Result<PathBuf> {
 }
 
 pub(super) fn platform_identity_key(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    crate::lifecycle_lease::canonical_or_original(path)
 }
 
-pub(super) fn bootstrap_database_key(parent: &Path, file_name: &OsStr) -> Option<PathBuf> {
-    #[cfg(any(windows, target_os = "macos"))]
-    {
-        Some(parent.join(file_name.to_string_lossy().to_lowercase()))
-    }
-    #[cfg(not(any(windows, target_os = "macos")))]
-    {
-        let _ = (parent, file_name);
-        None
-    }
-}
-
-pub(super) fn database_lock_root(database_path: &Path, fallback_parent: &Path) -> PathBuf {
-    if let Some(profile_root) = profile_project_root(database_path) {
-        return profile_root.join(".tracedecay-database-locks");
-    }
-    database_path
-        .parent()
-        .unwrap_or(fallback_parent)
-        .join(".tracedecay-database-locks")
+pub(super) fn database_profile_root(database_path: &Path, fallback_parent: &Path) -> PathBuf {
+    profile_project_root(database_path)
+        .or_else(|| profile_remote_node_root(database_path))
+        .unwrap_or_else(|| database_path.parent().unwrap_or(fallback_parent))
+        .to_path_buf()
 }
 
 fn profile_project_root(database_path: &Path) -> Option<&Path> {
     let parent = database_path.parent()?;
-    let data_root = if parent.file_name().is_some_and(|name| name == "branches")
-        || (parent
-            .file_name()
-            .is_some_and(|name| name == ".consolidation-input")
-            && database_path
-                .file_name()
-                .is_some_and(|name| name == "source-sessions.db" || name == "target-sessions.db"))
-    {
-        parent.parent()?
-    } else {
-        parent
-    };
-    let projects_root = data_root.parent()?;
-    if projects_root
+    // Branch graphs live one level below their project data root and share
+    // its profile authority scope. Consolidation staging shares it only for
+    // the two session snapshots consolidation itself creates; every other
+    // file under `.consolidation-input/` keeps its independent database
+    // identity rather than inheriting profile maintenance authority.
+    let staged_session_snapshot = parent
         .file_name()
-        .is_some_and(|name| name == "projects")
+        .is_some_and(|name| name == ".consolidation-input")
+        && database_path
+            .file_name()
+            .is_some_and(|name| name == "source-sessions.db" || name == "target-sessions.db");
+    let data_root =
+        if staged_session_snapshot || parent.file_name().is_some_and(|name| name == "branches") {
+            parent.parent()?
+        } else {
+            parent
+        };
+    let shard_root = data_root.parent()?;
+    if shard_root
+        .file_name()
+        .is_some_and(|name| name == "projects" || name == "stores")
     {
-        projects_root.parent()
+        // `stores/` is the pre-project-id profile-sharded layout retained by
+        // registry rows that have not yet converged to `projects/`. It has
+        // the same profile authority boundary; treating the store leaf as a
+        // standalone profile would make read snapshots fail closed as
+        // unverifiable and strand otherwise collectable orphan data.
+        shard_root.parent()
     } else {
         None
     }
+}
+
+fn profile_remote_node_root(database_path: &Path) -> Option<&Path> {
+    if database_path
+        .file_name()
+        .is_none_or(|name| name != "remote.db")
+    {
+        return None;
+    }
+    let node_directory = database_path.parent()?;
+    let node_digest = node_directory.file_name()?.to_str()?;
+    if node_digest.len() != 64 || !node_digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let nodes_root = node_directory.parent()?;
+    if nodes_root.file_name().is_none_or(|name| name != "nodes") {
+        return None;
+    }
+    let remote_root = nodes_root.parent()?;
+    if remote_root.file_name().is_none_or(|name| name != "remote") {
+        return None;
+    }
+    remote_root.parent()
 }
 
 pub(super) fn is_legacy_repository_database(database_path: &Path) -> bool {
@@ -92,48 +109,4 @@ pub(super) fn is_legacy_repository_database(database_path: &Path) -> bool {
     data_root
         .file_name()
         .is_some_and(|name| name == ".tracedecay")
-}
-
-pub(super) fn stable_path_hash(path: &Path) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    for byte in native_path_bytes(path) {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x0100_0000_01b3);
-    }
-    hash
-}
-
-pub(super) fn stable_path_set_hash<'a>(paths: impl IntoIterator<Item = &'a Path>) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    for path in paths {
-        for byte in native_path_bytes(path) {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x0100_0000_01b3);
-        }
-        hash ^= u64::from(b'\0');
-        hash = hash.wrapping_mul(0x0100_0000_01b3);
-    }
-    hash
-}
-
-#[cfg(unix)]
-fn native_path_bytes(path: &Path) -> Vec<u8> {
-    use std::os::unix::ffi::OsStrExt;
-
-    path.as_os_str().as_bytes().to_vec()
-}
-
-#[cfg(windows)]
-fn native_path_bytes(path: &Path) -> Vec<u8> {
-    use std::os::windows::ffi::OsStrExt;
-
-    path.as_os_str()
-        .encode_wide()
-        .flat_map(u16::to_le_bytes)
-        .collect()
-}
-
-#[cfg(not(any(unix, windows)))]
-fn native_path_bytes(path: &Path) -> Vec<u8> {
-    path.to_string_lossy().into_owned().into_bytes()
 }

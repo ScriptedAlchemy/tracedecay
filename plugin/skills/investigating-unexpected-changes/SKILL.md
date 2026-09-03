@@ -77,8 +77,8 @@ With the actor, their intent, and the delta in hand, choose:
   `produced` commit destroys unmerged work.
 
 If a durable ownership convention emerges (for example "branch `codex/*` is
-owned by the Codex worktree"), record it with `tracedecay_fact_store` so the
-next session inherits it — see `tracedecay:project-memory`.
+owned by the Codex worktree"), record it with `tracedecay_fact_store_add` so
+the next session inherits it — see `tracedecay:project-memory`.
 
 ## If tools are deferred or MCP fails
 

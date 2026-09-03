@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "provider": "codex",
+  "native_record_kind": "event_msg",
+  "stable_record_id": "$STABLE_RECORD_ID",
+  "relations": {
+    "session_id": "codex-golden-session",
+    "thread_id": "codex-golden-session",
+    "message_id": "$STABLE_RECORD_ID"
+  },
+  "facts": [
+    {
+      "kind": "message",
+      "role": "assistant",
+      "content": "The billing pipeline regression is fixed.",
+      "timestamp": 1767225602
+    }
+  ],
+  "evidence": {
+    "ordering_domain": "file_bytes",
+    "range": {
+      "start": 0,
+      "end": 1
+    },
+    "native_timestamp": 1767225602
+  }
+}

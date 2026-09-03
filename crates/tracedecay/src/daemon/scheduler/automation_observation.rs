@@ -1,0 +1,175 @@
+use std::path::Path;
+
+use tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord;
+use tracedecay_domain::ProjectId;
+
+#[cfg(test)]
+use crate::daemon::automation_observation::automation_funnel_observation_from_record;
+use crate::daemon::automation_observation::record_run_with_producer;
+
+use super::{DaemonEngine, log_daemon_scheduler_record};
+
+pub(super) fn record_scheduler_run(
+    engine: &DaemonEngine,
+    project_id: &ProjectId,
+    project_path: &Path,
+    record: &AutomationRunLedgerRecord,
+) {
+    log_daemon_scheduler_record(project_path, record);
+    let producer = engine
+        .invocation
+        .service
+        .observability_producer_for_project_root(project_path)
+        .filter(|producer| producer.identity().authorized_scope_ref == project_id.as_str());
+    record_run_with_producer(producer.as_deref(), project_path, record, "scheduler");
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use tracedecay_automation_runtime::automation::backend::AgentTaskKind;
+    use tracedecay_automation_runtime::automation::run_ledger::{
+        AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
+    };
+    use tracedecay_domain::{AutomationTerminalV1, CoverageStateV1, ObservedTernaryV1, UtcMicros};
+
+    use super::automation_funnel_observation_from_record;
+
+    fn ledger_record(status: AutomationRunStatus) -> AutomationRunLedgerRecord {
+        AutomationRunLedgerRecord {
+            schema_version: 2,
+            run_id: "run-42".to_owned(),
+            trigger: AutomationTrigger::Scheduler,
+            task: AgentTaskKind::MemoryCurator,
+            task_key: Some("memory_curator".to_owned()),
+            backend: "codex_app_server".to_owned(),
+            backend_identity: None,
+            host_mode: Some("app_server".to_owned()),
+            prompt_version: Some("memory_curator.v1".to_owned()),
+            response_schema: Some(json!({"type": "object"})),
+            strict_json: Some(true),
+            model: Some("gpt-5".to_owned()),
+            status,
+            evidence_hash: Some("evidence".to_owned()),
+            input_hash: Some("input".to_owned()),
+            output_hash: Some("output".to_owned()),
+            proposed_ops: None,
+            applied_ops: None,
+            rejected_ops: None,
+            validation_report: None,
+            reviewed_count: 0,
+            accepted_count: 0,
+            rejected_count: 0,
+            skipped_count: 0,
+            error: None,
+            error_classification: None,
+            error_retryable: None,
+            backend_attempt_count: 0,
+            backend_attempts: Vec::new(),
+            fallback_status: None,
+            report_ref: Some(json!({"run_id": "run-42"})),
+            artifacts: Vec::new(),
+            started_at: "1700000000".to_owned(),
+            completed_at: "1700000001".to_owned(),
+            completed_at_micros: Some(1_700_000_001_000_000),
+        }
+    }
+
+    #[test]
+    fn exact_ledger_evidence_does_not_fill_unrecorded_funnel_stages() {
+        let mut record = ledger_record(AutomationRunStatus::Succeeded);
+        record.backend_attempt_count = 1;
+        record.reviewed_count = 3;
+        record.accepted_count = 2;
+        record.rejected_count = 1;
+        record.applied_ops = Some(json!({"edits": [{"path": "src/lib.rs"}]}));
+
+        let (observation, observed_at) =
+            automation_funnel_observation_from_record(&record).expect("valid ledger record");
+
+        assert_eq!(observed_at, UtcMicros(1_700_000_001_000_000));
+        assert_eq!(observation.run_ref, "run-42");
+        assert_eq!(observation.ledger_coverage, CoverageStateV1::Partial);
+        assert_eq!(observation.eligible, ObservedTernaryV1::Unknown);
+        assert_eq!(observation.admitted, ObservedTernaryV1::Unknown);
+        assert_eq!(observation.executed, ObservedTernaryV1::Yes);
+        assert_eq!(observation.useful_work, ObservedTernaryV1::Yes);
+        assert_eq!(observation.effect, ObservedTernaryV1::Yes);
+        assert_eq!(observation.recovery, ObservedTernaryV1::Unknown);
+        assert_eq!(observation.terminal, AutomationTerminalV1::Succeeded);
+    }
+
+    #[test]
+    fn terminal_status_does_not_invent_missing_execution_or_outcome_evidence() {
+        let expected = [
+            (AutomationRunStatus::Queued, AutomationTerminalV1::Queued),
+            (AutomationRunStatus::Running, AutomationTerminalV1::Running),
+            (
+                AutomationRunStatus::Succeeded,
+                AutomationTerminalV1::Succeeded,
+            ),
+            (AutomationRunStatus::Failed, AutomationTerminalV1::Failed),
+            (AutomationRunStatus::Skipped, AutomationTerminalV1::Skipped),
+        ];
+
+        for (status, terminal) in expected {
+            let (observation, _) =
+                automation_funnel_observation_from_record(&ledger_record(status))
+                    .expect("valid ledger record");
+            assert_eq!(observation.terminal, terminal);
+            assert_eq!(observation.executed, ObservedTernaryV1::Unknown);
+            assert_eq!(observation.useful_work, ObservedTernaryV1::Unknown);
+            assert_eq!(observation.effect, ObservedTernaryV1::Unknown);
+            assert_eq!(observation.recovery, ObservedTernaryV1::Unknown);
+        }
+    }
+
+    #[test]
+    fn explicit_review_evidence_classifies_negative_work_without_inventing_recovery() {
+        let mut record = ledger_record(AutomationRunStatus::Skipped);
+        record.reviewed_count = 2;
+        record.rejected_count = 2;
+        record.fallback_status = Some("backend_failed_noop".to_owned());
+        record.applied_ops = Some(json!([]));
+
+        let (observation, _) =
+            automation_funnel_observation_from_record(&record).expect("valid ledger record");
+
+        assert_eq!(observation.useful_work, ObservedTernaryV1::No);
+        assert_eq!(observation.effect, ObservedTernaryV1::No);
+        assert_eq!(observation.recovery, ObservedTernaryV1::Unknown);
+        assert_eq!(observation.terminal, AutomationTerminalV1::Skipped);
+    }
+
+    #[test]
+    fn schema_v2_rfc3339_completion_time_is_rejected_instead_of_retimed() {
+        let mut record = ledger_record(AutomationRunStatus::Succeeded);
+        record.completed_at = "1970-01-01T00:00:01Z".to_owned();
+        record.completed_at_micros = Some(1_000_000);
+
+        assert_eq!(
+            automation_funnel_observation_from_record(&record),
+            Err("invalid_completed_at")
+        );
+    }
+
+    #[test]
+    fn legacy_reused_scheduler_skip_keeps_its_exact_rfc3339_observation_time() {
+        let mut record = ledger_record(AutomationRunStatus::Skipped);
+        record.schema_version = 1;
+        record.run_id = "legacy-reused-scheduler-skip".to_owned();
+        record.started_at = "1970-01-01T00:00:00Z".to_owned();
+        record.completed_at = "1970-01-01T00:00:01.123456Z".to_owned();
+        record.completed_at_micros = None;
+        record.error = Some("scheduler_interval_not_elapsed".to_owned());
+
+        // Reused scheduler skips pass their exact prior row through this same
+        // mapper after durable abandonment; no second timestamp path exists.
+        let (observation, observed_at) =
+            automation_funnel_observation_from_record(&record).expect("valid legacy exact row");
+
+        assert_eq!(observed_at, UtcMicros(1_123_456));
+        assert_eq!(observation.run_ref, "legacy-reused-scheduler-skip");
+        assert_eq!(observation.terminal, AutomationTerminalV1::Skipped);
+    }
+}

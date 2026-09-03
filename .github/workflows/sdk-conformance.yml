@@ -1,0 +1,118 @@
+name: SDK conformance
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+      - ".github/release-targets.json"
+      - "crates/tracedecay-api/**"
+      - "crates/tracedecay-application/**"
+      - "crates/tracedecay-domain/**"
+      - "crates/tracedecay-sdk/**"
+      - "crates/tracedecay-tool-catalog/**"
+      - "sdks/**"
+      - "scripts/check-sdk-codegen.sh"
+      - "scripts/check-sdk-publish-workflow.py"
+      - "scripts/test-check-sdk-publish-workflow.py"
+      - "scripts/check-github-hosted-runners.py"
+      - "scripts/test-check-github-hosted-runners.py"
+      - "scripts/package-release-archive.py"
+      - "scripts/test-package-release-archive.py"
+      - "scripts/plan-release-recovery.py"
+      - "scripts/test-plan-release-recovery.py"
+      - "tests/release_safety_test.sh"
+      - "crates/tracedecay/src/application_surface.rs"
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish-workflow-policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12.13"
+      - run: python3 -m pip install pyyaml==6.0.2
+      - name: Check npm publication authority
+        run: |
+          python3 scripts/test-check-sdk-publish-workflow.py
+          python3 scripts/check-sdk-publish-workflow.py
+      - name: Check GitHub-hosted runner authority
+        run: |
+          python3 scripts/test-check-github-hosted-runners.py
+          python3 scripts/check-github-hosted-runners.py
+      - name: Install pinned actionlint
+        run: |
+          set -euo pipefail
+          version="1.7.12"
+          archive="actionlint_${version}_linux_amd64.tar.gz"
+          expected="8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+          curl -sSLO "https://github.com/rhysd/actionlint/releases/download/v${version}/${archive}"
+          actual="$(sha256sum "$archive" | cut -d' ' -f1)"
+          test "$actual" = "$expected"
+          tar xzf "$archive" actionlint
+      - name: actionlint
+        run: >-
+          ./actionlint
+          .github/workflows/sdk-conformance.yml
+          .github/workflows/release.yml
+          .github/workflows/release-beta.yml
+          .github/workflows/release-please.yml
+          .github/workflows/release-pr-integrity.yml
+  packages:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: sdks/typescript/package-lock.json
+      - run: cargo test --manifest-path sdks/codegen/Cargo.toml
+      - run: scripts/check-sdk-codegen.sh
+      - run: cargo test --manifest-path crates/tracedecay-sdk/Cargo.toml
+      - run: npm ci
+        working-directory: sdks/typescript
+      - run: npm run typecheck
+        working-directory: sdks/typescript
+      - run: npm test
+        working-directory: sdks/typescript
+
+  production-router:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@acdba816b0980ba6b63f1109f89a046e15fc301a # nextest
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            dashboard/package-lock.json
+            sdks/typescript/package-lock.json
+      - run: npm ci
+        working-directory: dashboard
+      - run: npm run build
+        working-directory: dashboard
+      - run: cargo build -p tracedecay-cli --bin tracedecay
+      - run: >-
+          cargo nextest run
+          --manifest-path crates/tracedecay-sdk/Cargo.toml
+          --test production_daemon
+          --run-ignored all
+          --no-tests=fail
+      - run: npm ci
+        working-directory: sdks/typescript
+      - run: npm run test:installed
+        working-directory: sdks/typescript

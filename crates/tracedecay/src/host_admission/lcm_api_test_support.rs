@@ -1,0 +1,246 @@
+use super::*;
+use tracedecay_session_runtime::test_helpers::{lcm_compress, lcm_session_boundary};
+
+impl HostAdmissionTestRuntimeV1 {
+    #[doc(hidden)]
+    pub async fn lcm_compress_for_test(
+        &self,
+        request: tracedecay_lcm::LcmCompressionRequest,
+    ) -> std::result::Result<tracedecay_lcm::LcmCompressionResponse, tracedecay_lcm::LcmError> {
+        lcm_compress(
+            self.project_registered
+                .clone()
+                .unwrap_or_else(|| self.profile_registered.clone()),
+            request,
+        )
+        .await
+    }
+
+    #[doc(hidden)]
+    pub async fn lcm_describe_for_test(
+        &self,
+        request: tracedecay_lcm::LcmDescribeRequest,
+    ) -> std::result::Result<tracedecay_lcm::LcmDescribeResponse, tracedecay_lcm::LcmError> {
+        self.project_registered
+            .as_deref()
+            .unwrap_or(self.profile_registered.as_ref())
+            .lcm_describe(request)
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn lcm_expand_for_test(
+        &self,
+        request: tracedecay_lcm::LcmExpandRequest,
+    ) -> std::result::Result<tracedecay_lcm::LcmExpandResponse, tracedecay_lcm::LcmError> {
+        self.project_registered
+            .as_deref()
+            .unwrap_or(self.profile_registered.as_ref())
+            .lcm_expand(request)
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn lcm_expand_query_for_test(
+        &self,
+        request: tracedecay_lcm::LcmExpandQueryRequest,
+    ) -> std::result::Result<tracedecay_lcm::LcmExpandQueryResponse, tracedecay_lcm::LcmError> {
+        self.project_registered
+            .as_deref()
+            .unwrap_or(self.profile_registered.as_ref())
+            .lcm_expand_query(request)
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn lcm_expand_summary_node_for_test(
+        &self,
+        provider: &str,
+        session_id: &str,
+        node_id: &str,
+    ) -> std::result::Result<tracedecay_lcm::LcmSummaryExpansion, tracedecay_lcm::LcmError> {
+        self.project_registered
+            .as_deref()
+            .unwrap_or(self.profile_registered.as_ref())
+            .lcm_expand_summary_node(provider, session_id, node_id)
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn lcm_grep_for_test(
+        &self,
+        request: tracedecay_lcm::LcmGrepRequest,
+    ) -> std::result::Result<tracedecay_lcm::LcmGrepOutcome, tracedecay_lcm::LcmError> {
+        self.project_registered
+            .as_deref()
+            .unwrap_or(self.profile_registered.as_ref())
+            .lcm_grep(request)
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn lcm_ingest_raw_message_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        message: &tracedecay_sessions::runtime::SessionMessageRecord,
+    ) -> std::result::Result<(), tracedecay_lcm::LcmError> {
+        let database = self
+            .session_database_for_test(scope)
+            .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
+        let storage_root = database.db_path().parent().ok_or_else(|| {
+            tracedecay_lcm::LcmError::Db(
+                "registered session database has no storage root".to_string(),
+            )
+        })?;
+        database.lcm_ingest_raw_message(storage_root, message).await
+    }
+
+    #[doc(hidden)]
+    #[allow(clippy::expect_used)]
+    pub async fn lcm_load_raw_message_for_test(
+        &self,
+        provider: &str,
+        message_id: &str,
+    ) -> Option<tracedecay_lcm::LcmRawMessage> {
+        let database = self
+            .project_registered
+            .as_deref()
+            .unwrap_or(self.profile_registered.as_ref());
+        let snapshot = database
+            .read_snapshot()
+            .await
+            .expect("test raw-message snapshot must remain registered");
+        tracedecay_lcm::schema::load_raw_message(&snapshot, provider, message_id)
+            .await
+            .expect("test raw-message load must not hide database or receipt failure")
+    }
+
+    #[doc(hidden)]
+    pub async fn lcm_load_session_for_test(
+        &self,
+        request: tracedecay_lcm::LcmLoadSessionRequest,
+    ) -> std::result::Result<tracedecay_lcm::LcmLoadSessionPage, tracedecay_lcm::LcmError> {
+        self.project_registered
+            .as_deref()
+            .unwrap_or(self.profile_registered.as_ref())
+            .lcm_load_session(request)
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn lcm_preflight_for_test(
+        &self,
+        request: tracedecay_lcm::LcmPreflightRequest,
+    ) -> std::result::Result<tracedecay_lcm::LcmPreflightResponse, tracedecay_lcm::LcmError> {
+        self.project_registered
+            .as_deref()
+            .unwrap_or(self.profile_registered.as_ref())
+            .lcm_preflight(request)
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn lcm_recent_sessions_for_test(
+        &self,
+        provider: Option<&str>,
+        limit: usize,
+    ) -> std::result::Result<Vec<tracedecay_lcm::LcmRecentSession>, tracedecay_lcm::LcmError> {
+        self.project_registered
+            .as_deref()
+            .unwrap_or(self.profile_registered.as_ref())
+            .lcm_recent_sessions(provider, limit)
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn lcm_run_payload_gc_apply_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        provider: &str,
+        session_id: Option<&str>,
+        config: &tracedecay_lcm::LcmGcConfig,
+        now: i64,
+    ) -> std::result::Result<tracedecay_lcm::LcmGcReport, tracedecay_lcm::LcmError> {
+        let database = self
+            .session_database_for_test(scope)
+            .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
+        let storage_root = database.db_path().parent().ok_or_else(|| {
+            tracedecay_lcm::LcmError::Db(
+                "registered session database has no storage root".to_string(),
+            )
+        })?;
+        database
+            .lcm_run_payload_gc_apply(storage_root, provider, session_id, config, now)
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn lcm_session_boundary_for_test(
+        &self,
+        request: tracedecay_lcm::LcmSessionBoundaryRequest,
+    ) -> std::result::Result<tracedecay_lcm::LcmSessionBoundaryResponse, tracedecay_lcm::LcmError>
+    {
+        lcm_session_boundary(
+            self.project_registered
+                .clone()
+                .unwrap_or_else(|| self.profile_registered.clone()),
+            request,
+        )
+        .await
+    }
+
+    #[doc(hidden)]
+    pub async fn lcm_session_providers_for_test(
+        &self,
+        session_id: &str,
+    ) -> std::result::Result<Vec<String>, tracedecay_lcm::LcmError> {
+        self.project_registered
+            .as_deref()
+            .unwrap_or(self.profile_registered.as_ref())
+            .lcm_session_providers(session_id)
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn lcm_session_replay_slice_for_test(
+        &self,
+        request: &tracedecay_lcm::LcmSessionReplayRequest,
+    ) -> std::result::Result<tracedecay_lcm::LcmSessionReplaySlice, tracedecay_lcm::LcmError> {
+        self.project_registered
+            .as_deref()
+            .unwrap_or(self.profile_registered.as_ref())
+            .lcm_session_replay_slice(request)
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn lcm_status_deep_for_test(
+        &self,
+        provider: &str,
+        session_id: Option<&str>,
+    ) -> std::result::Result<tracedecay_lcm::LcmStatus, tracedecay_lcm::LcmError> {
+        self.project_registered
+            .as_deref()
+            .unwrap_or(self.profile_registered.as_ref())
+            .lcm_status_with_options(
+                provider,
+                session_id,
+                true,
+                &tracedecay_lcm::LcmGcConfig::default(),
+            )
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn lcm_status_for_test(
+        &self,
+        provider: &str,
+        session_id: Option<&str>,
+    ) -> std::result::Result<tracedecay_lcm::LcmStatus, tracedecay_lcm::LcmError> {
+        self.project_registered
+            .as_deref()
+            .unwrap_or(self.profile_registered.as_ref())
+            .lcm_status(provider, session_id)
+            .await
+    }
+}

@@ -1,0 +1,134 @@
+# Narrow Hotpath lane for the runtime-core GitRepositoryAuthority slice.
+#
+# Proves both directions of the profiling contract for this one surface
+# without changing what default/production CI builds:
+#
+#   - feature-off: the git_repository_authority tests and bench run on
+#     default features; the dedicated lane test additionally proves that
+#     report/output variables produce no report file and no listener on
+#     6770/6771, and a dependency-graph check proves the default feature set
+#     never enables Hotpath collection.
+#   - feature-on (--features hotpath): the same tests pass, and the lane
+#     test proves one process-boundary guard emits a JSON exit report
+#     carrying the static runtime_core.git.* probe labels while the metrics
+#     server stays off.
+#
+# The CPU section (FunctionsCpu / samply autospawn) is excluded by the
+# guards in the lane test and bench, and this workflow never sets
+# HOTPATH_REPORT, so CPU sampling cannot be reached from here. Workspace CI
+# (ci.yml) is unchanged: it keeps compiling hotpath surfaces without running
+# them, and nothing here touches default or production feature sets.
+name: hotpath-runtime-core
+
+on:
+  pull_request:
+    paths:
+      - crates/tracedecay-runtime-core/src/git_repository.rs
+      - crates/tracedecay-runtime-core/src/git_repository/**
+      - crates/tracedecay-runtime-core/tests/git_repository_authority*.rs
+      - crates/tracedecay-runtime-core/benches/git_repository_authority.rs
+      - crates/tracedecay-runtime-core/Cargo.toml
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/hotpath-runtime-core.yml
+  workflow_dispatch:
+
+concurrency:
+  group: hotpath-runtime-core-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  # Hotpath binds a localhost metrics server by default; the feature-on test
+  # turns it off itself, and this makes that explicit at the job boundary so
+  # the bench smoke lanes cannot race a fixed port either.
+  HOTPATH_METRICS_SERVER_OFF: "1"
+
+jobs:
+  git-authority:
+    name: git_repository_authority hotpath lanes
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: ./.github/actions/setup-linux-mold
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: hotpath-runtime-core
+          cache-on-failure: true
+
+      - name: kache compiler cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/kache
+            ~/.cache/kache
+          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: kache-${{ runner.os }}-
+      - name: Enable kache
+        shell: bash
+        run: |
+          command -v kache >/dev/null 2>&1 || cargo install kache --locked
+          kache init --no-service
+          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
+
+      # The default dependency graph must resolve the hotpath crate with the
+      # profiler compiled out (macros-only: expected activated feature set is
+      # exactly "threads"). Any hotpath* feature on that crate here means a
+      # default feature set started enabling collection.
+      - name: Default features exclude hotpath collection
+        run: |
+          cargo tree -p tracedecay-runtime-core -e features -f '{p} {f}' \
+            --prefix none --locked | sort -u | grep '^hotpath v'
+          if cargo tree -p tracedecay-runtime-core -e features -f '{p} {f}' \
+            --prefix none --locked | grep -E '^hotpath v[^ ]+ .*hotpath'; then
+            echo "::error::default features enable the hotpath profiler"
+            exit 1
+          fi
+
+      # The report/output variables mirror what the feature-off lane test
+      # sets in-process: nothing may read them, so the post-condition is
+      # that the report path never comes into existence.
+      - name: Feature-off tests
+        env:
+          HOTPATH_OUTPUT_FORMAT: json
+          HOTPATH_OUTPUT_PATH: /tmp/hotpath-feature-off-report.json
+          HOTPATH_REPORT: functions-timing
+        run: |
+          cargo test -p tracedecay-runtime-core --locked \
+            --test git_repository_authority \
+            --test git_repository_authority_hotpath
+          if [ -e /tmp/hotpath-feature-off-report.json ]; then
+            echo "::error::feature-off test run wrote a Hotpath report"
+            exit 1
+          fi
+
+      - name: Feature-off bench smoke (criterion --test mode)
+        run: |
+          cargo bench -p tracedecay-runtime-core --locked \
+            --bench git_repository_authority -- --test
+
+      # One guard per process; the lane binary holds a process-global guard,
+      # so keep every binary in this invocation single-threaded.
+      - name: Feature-on tests (--features hotpath)
+        run: |
+          cargo test -p tracedecay-runtime-core --locked --features hotpath \
+            --test git_repository_authority \
+            --test git_repository_authority_hotpath \
+            -- --test-threads=1
+
+      - name: Feature-on bench smoke (--features hotpath)
+        run: |
+          cargo bench -p tracedecay-runtime-core --locked --features hotpath \
+            --bench git_repository_authority -- --test

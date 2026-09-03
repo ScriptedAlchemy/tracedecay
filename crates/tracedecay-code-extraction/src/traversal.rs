@@ -6,21 +6,8 @@ use tree_sitter::Node as TsNode;
 /// This helper is intentionally language-agnostic: callers provide the raw
 /// `kind()` string they expect, and the traversal checks direct children in
 /// source order without filtering to named nodes.
-#[allow(dead_code)]
 pub(crate) fn has_direct_child_kind(node: TsNode<'_>, kind: &str) -> bool {
     find_direct_child_by_kind(node, kind).is_some()
-}
-
-/// Visits each direct child in source order.
-///
-/// This keeps the raw tree-sitter cursor loop in one place so extractors that
-/// only need to recurse into direct children can share the traversal behavior.
-#[allow(dead_code)]
-pub(crate) fn visit_children<'tree>(node: TsNode<'tree>, mut visit: impl FnMut(TsNode<'tree>)) {
-    visit_children_while(node, |child| {
-        visit(child);
-        true
-    });
 }
 
 /// Returns the first direct child whose tree-sitter kind exactly matches
@@ -29,7 +16,6 @@ pub(crate) fn visit_children<'tree>(node: TsNode<'tree>, mut visit: impl FnMut(T
 /// The match is an exact `Node::kind()` string comparison. Both named and
 /// anonymous children participate so extractor migrations preserve existing
 /// behavior.
-#[allow(dead_code)]
 pub(crate) fn find_direct_child_by_kind<'tree>(
     node: TsNode<'tree>,
     kind: &str,
@@ -51,7 +37,6 @@ pub(crate) fn find_direct_child_by_kind<'tree>(
 /// Descendants are visited with a pre-order depth-first traversal over all
 /// children so callers can replace the duplicated recursive extractor helpers
 /// without changing search order.
-#[allow(dead_code)]
 pub(crate) fn find_descendant_by_kind<'tree>(
     node: TsNode<'tree>,
     kind: &str,
@@ -91,7 +76,8 @@ fn visit_children_while<'tree>(node: TsNode<'tree>, mut visit: impl FnMut(TsNode
 #[allow(clippy::expect_used)]
 mod tests {
     use super::{
-        find_descendant_by_kind, find_direct_child_by_kind, has_direct_child_kind, visit_children,
+        find_descendant_by_kind, find_direct_child_by_kind, has_direct_child_kind,
+        visit_children_while,
     };
     use crate::ts_provider;
     use tree_sitter::{Node as TsNode, Parser};
@@ -140,8 +126,9 @@ mod tests {
         let function = parse_c_function("int answer(void) { return 42; }");
         let mut child_kinds = Vec::new();
 
-        visit_children(function, |child| {
+        visit_children_while(function, |child| {
             child_kinds.push(child.kind().to_owned());
+            true
         });
 
         assert_eq!(

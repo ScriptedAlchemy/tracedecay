@@ -1,31 +1,43 @@
 //! Holographic-memory dashboard API, backed by tracedecay's memory store.
 //!
-//! Port of `plugins/memory/holographic_plus/dashboard/plugin_api.py` (Hermes)
-//! onto the project database tables `memory_facts`, `memory_entities`,
-//! `memory_fact_entities`, and `memory_banks`. Payload shapes mirror the
-//! original routes so the ported UI bundle works unchanged.
-//!
-//! Differences from the Hermes backend, by design:
-//! - `POST /curate/apply` is a generic curation-ops endpoint (`delete` /
-//!   `merge`) for validated agent operations.
-//! - There is no fact archive: deletion is permanent (the original
-//!   `holographic_plus` soft-archived facts; tracedecay does not).
-//! - Banks are named after their category directly (no `cat:` prefix).
+//! Canonical fact payloads come from the relational fact authority, verified
+//! memory topology comes from Grafeo, and FHRR vectors are derived on read.
 
-use axum::extract::{Path, State};
+use std::collections::BTreeMap;
+
+use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::response::Json;
-use serde::Deserialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use super::DashboardState;
-use super::memory_analysis::{SIMILARITY_DEFAULT_THRESHOLD, SIMILARITY_PAIR_CAP};
+use super::memory_analysis::{
+    SIMILARITY_DEFAULT_THRESHOLD, SIMILARITY_PAIR_CAP, empty_score_distribution,
+};
 use super::memory_service;
-use super::util::{JsonPath, JsonQuery, coerce_limit, http_detail, query_i64};
-use crate::memory::encoding::HolographicEncoder;
-use crate::memory::store::MemoryStore;
-use crate::memory::trust::DEFAULT_MIN_TRUST;
-use crate::memory::types::{MemoryFeedbackFunnel, MemoryRepairStats, MemoryStatus};
+use super::read_model::{
+    DashboardCoverageCompletenessV1, DashboardCoverageV1, DashboardDomainStateV1,
+    DashboardEnvelopeV1, DashboardFreshnessV1, scope_from_state,
+};
+use super::util::{JsonPath, JsonQuery, coerce_limit, http_detail};
+use super::{DashboardHttpRequestControlV1, DashboardState};
+use crate::tracedecay::facts::memory_application_for_db;
+use tracedecay_domain::FactId;
+use tracedecay_store::FactReadControl;
+
+pub(crate) mod control;
+mod overview_contract;
+
+use control::{
+    fact_read_control, read_error_envelope, request_deadline_elapsed, request_terminal_state,
+    terminal_read_code,
+};
+pub(super) use overview_contract::MemoryOverviewPayloadV1;
+use overview_contract::{
+    MemoryEntityRowV1, MemoryFactRowV1, MemoryHolographicPayloadV1, MemoryOverviewSummaryV1,
+    MemoryReadStatusV1,
+};
 
 #[derive(Deserialize)]
 pub struct OverviewParams {
@@ -53,234 +65,221 @@ pub struct LimitParams {
     limit: Option<i64>,
 }
 
-#[derive(Deserialize)]
-pub struct FactProposalParams {
-    state: Option<String>,
-    limit: Option<i64>,
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct MemoryAlgebraStatusV1 {
+    name: String,
+    hrr_dim: u64,
+    estimated_capacity: u64,
 }
 
-#[derive(Deserialize, Default)]
-pub struct FactProposalApplyBody {
-    reviewer: Option<String>,
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct MemoryFeedbackFunnelV1 {
+    retrieval_count_total: u64,
+    access_count_total: u64,
+    retrieved_fact_count: u64,
+    rated_fact_count: u64,
+    feedback_total: u64,
+    seen_to_feedback_ratio: Option<u64>,
 }
 
-#[derive(Deserialize, Default)]
-pub struct FactProposalRejectBody {
-    reviewer: Option<String>,
-    reason: Option<String>,
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct MemoryStatusV1 {
+    fact_count: u64,
+    entity_count: u64,
+    algebra: MemoryAlgebraStatusV1,
+    trust_0_025_count: u64,
+    trust_025_050_count: u64,
+    trust_050_075_count: u64,
+    trust_075_100_count: u64,
+    below_default_recall_threshold_count: u64,
+    helpful_count: u64,
+    unhelpful_count: u64,
+    feedback_funnel: MemoryFeedbackFunnelV1,
 }
 
-#[derive(Deserialize)]
-pub struct CurateApplyBody {
-    ops: Vec<Value>,
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct MemoryStatusPayloadV1 {
+    path: String,
+    exists: bool,
+    memory: MemoryStatusV1,
+    error: String,
 }
 
-pub fn default_agent_plan_max_clusters() -> usize {
-    super::memory_curate::CURATION_DEFAULT_MAX_CLUSTERS
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct MemoryFactDetailPayloadV1 {
+    fact: Option<MemoryFactRowV1>,
+    error: String,
 }
 
-pub fn default_agent_plan_min_confidence() -> f64 {
-    super::memory_curate::CURATION_DEFAULT_MIN_CONFIDENCE
+fn owned_fact_id(state: &DashboardState, raw: String) -> Result<FactId, String> {
+    let fact_id = FactId::new(raw).map_err(|error| error.to_string())?;
+    fact_id
+        .validate_owner(&state.memory_owner)
+        .map_err(|error| error.to_string())?;
+    Ok(fact_id)
 }
 
-async fn largest_bank_fact_count(state: &DashboardState) -> Result<i64, String> {
-    let mut rows = state
-        .mem_conn
-        .query("SELECT COALESCE(MAX(fact_count), 0) FROM memory_banks", ())
-        .await
-        .map_err(|e| e.to_string())?;
-    let Some(row) = rows.next().await.map_err(|e| e.to_string())? else {
-        return Ok(0);
-    };
-    Ok(row.get::<i64>(0).unwrap_or(0).max(0))
-}
-
-pub async fn repair_derived_memory(state: &DashboardState) -> Result<MemoryRepairStats, String> {
-    let store = MemoryStore::new(&state.mem_conn);
-    let mut missing_vectors_repaired = 0;
-    loop {
-        let repaired = store
-            .compute_missing_vectors(500)
-            .await
-            .map_err(|e| e.to_string())?;
-        if repaired == 0 {
-            break;
+fn facts_read_status(coverage: &memory_service::MemoryFactsCoverageV1) -> MemoryReadStatusV1 {
+    let graph_complete = matches!(
+        coverage.graph,
+        None | Some(
+            tracedecay_application::memory::FactSearchGraphCoverageV1::Complete { .. }
+                | tracedecay_application::memory::FactSearchGraphCoverageV1::NotApplicable
+        )
+    );
+    if coverage.completeness == DashboardCoverageCompletenessV1::Complete && graph_complete {
+        MemoryReadStatusV1::new(DashboardDomainStateV1::Ready)
+    } else {
+        MemoryReadStatusV1 {
+            state: DashboardDomainStateV1::Partial,
+            code: Some("fact_coverage_incomplete".to_owned()),
+            error: None,
         }
-        missing_vectors_repaired += repaired;
     }
+}
 
-    let banks_rebuilt = store
-        .rebuild_dirty_banks()
+fn graph_read_status(coverage: &DashboardCoverageV1) -> MemoryReadStatusV1 {
+    if coverage.is_complete() {
+        MemoryReadStatusV1::new(DashboardDomainStateV1::Ready)
+    } else {
+        MemoryReadStatusV1 {
+            state: DashboardDomainStateV1::Partial,
+            code: Some("graph_coverage_incomplete".to_owned()),
+            error: None,
+        }
+    }
+}
+
+fn read_failure_status(
+    control: &DashboardHttpRequestControlV1,
+    code: Option<&str>,
+    error: impl Into<String>,
+) -> MemoryReadStatusV1 {
+    let error = error.into();
+    if let Some(state) = request_terminal_state(control) {
+        return MemoryReadStatusV1::failed(state, Some(terminal_read_code(state).0), error);
+    }
+    MemoryReadStatusV1::failed(DashboardDomainStateV1::Error, code, error)
+}
+
+async fn memory_status_payload(
+    state: &DashboardState,
+    read_control: &FactReadControl,
+) -> Result<MemoryStatusPayloadV1, String> {
+    let application = memory_application_for_db(state.memory_owner.clone(), &state.mem_db)
+        .map_err(|error| error.to_string())?;
+    let typed_status = application
+        .dashboard_memory_status(read_control)
         .await
-        .map_err(|e| e.to_string())?;
-
-    Ok(MemoryRepairStats {
-        missing_vectors_repaired,
-        banks_rebuilt,
+        .map_err(|error| error.to_string())?;
+    let funnel = typed_status.feedback_funnel();
+    let status = MemoryStatusV1 {
+        fact_count: typed_status.fact_count(),
+        entity_count: typed_status.entity_count(),
+        algebra: MemoryAlgebraStatusV1 {
+            name: typed_status.algebra().name().to_owned(),
+            hrr_dim: typed_status.algebra().hrr_dim(),
+            estimated_capacity: typed_status.algebra().estimated_capacity(),
+        },
+        trust_0_025_count: typed_status.trust_0_025_count(),
+        trust_025_050_count: typed_status.trust_025_050_count(),
+        trust_050_075_count: typed_status.trust_050_075_count(),
+        trust_075_100_count: typed_status.trust_075_100_count(),
+        below_default_recall_threshold_count: typed_status.below_default_recall_threshold_count(),
+        helpful_count: typed_status.helpful_count(),
+        unhelpful_count: typed_status.unhelpful_count(),
+        feedback_funnel: MemoryFeedbackFunnelV1 {
+            retrieval_count_total: funnel.retrieval_count_total(),
+            access_count_total: funnel.access_count_total(),
+            retrieved_fact_count: funnel.retrieved_fact_count(),
+            rated_fact_count: funnel.rated_fact_count(),
+            feedback_total: funnel.feedback_total(),
+            seen_to_feedback_ratio: funnel.seen_to_feedback_ratio(),
+        },
+    };
+    Ok(MemoryStatusPayloadV1 {
+        path: state.mem_db_path.clone(),
+        exists: true,
+        memory: status,
+        error: String::new(),
     })
-}
-
-/// Fact-store adoption funnel (seen vs. rated) for the dashboard memory
-/// status payload — mirrors the funnel computed in
-/// [`crate::tracedecay::TraceDecay::memory_status_for_conn`] for the MCP
-/// `tracedecay_memory_status` tool, kept as a separate query here since the
-/// dashboard builds `MemoryStatus` from ad-hoc `query_i64` calls rather than
-/// sharing that connection-taking helper.
-async fn memory_feedback_funnel(state: &DashboardState) -> MemoryFeedbackFunnel {
-    let retrieval_count_total = query_i64(
-        &state.mem_conn,
-        "SELECT COALESCE(SUM(retrieval_count), 0) FROM memory_facts",
-        (),
-    )
-    .await;
-    let access_count_total = query_i64(
-        &state.mem_conn,
-        "SELECT COALESCE(SUM(access_count), 0) FROM memory_facts",
-        (),
-    )
-    .await;
-    let retrieved_fact_count = query_i64(
-        &state.mem_conn,
-        "SELECT COALESCE(SUM(retrieval_count > 0), 0) FROM memory_facts",
-        (),
-    )
-    .await
-    .max(0) as usize;
-    let rated_fact_count = query_i64(
-        &state.mem_conn,
-        "SELECT COALESCE(SUM(helpful_count + unhelpful_count > 0), 0) FROM memory_facts",
-        (),
-    )
-    .await
-    .max(0) as usize;
-    let feedback_total = query_i64(
-        &state.mem_conn,
-        "SELECT COALESCE(SUM(helpful_count + unhelpful_count), 0) FROM memory_facts",
-        (),
-    )
-    .await
-    .max(0) as usize;
-    let seen_total = retrieval_count_total + access_count_total;
-    let seen_to_feedback_ratio = if feedback_total > 0 {
-        Some(seen_total / feedback_total as i64)
-    } else {
-        None
-    };
-    MemoryFeedbackFunnel {
-        retrieval_count_total,
-        access_count_total,
-        retrieved_fact_count,
-        rated_fact_count,
-        feedback_total,
-        seen_to_feedback_ratio,
-    }
-}
-
-async fn memory_status_payload(state: &DashboardState) -> Result<Value, String> {
-    let hrr_dim = HolographicEncoder::DIMENSIONS;
-    let repair = repair_derived_memory(state).await?;
-    let feedback_funnel = memory_feedback_funnel(state).await;
-    let status = MemoryStatus {
-        fact_count: query_i64(&state.mem_conn, "SELECT COUNT(*) FROM memory_facts", ()).await
-            as usize,
-        entity_count: query_i64(&state.mem_conn, "SELECT COUNT(*) FROM memory_entities", ()).await
-            as usize,
-        bank_count: query_i64(&state.mem_conn, "SELECT COUNT(*) FROM memory_banks", ()).await
-            as usize,
-        algebra_name: "amari_fhrr".to_string(),
-        hrr_dim,
-        estimated_capacity: (hrr_dim as f64 / (hrr_dim as f64).ln()).round() as usize,
-        trust_0_025_count: query_i64(
-            &state.mem_conn,
-            "SELECT COUNT(*) FROM memory_facts WHERE trust_score < 0.25",
-            (),
-        )
-        .await as usize,
-        trust_025_050_count: query_i64(
-            &state.mem_conn,
-            "SELECT COUNT(*) FROM memory_facts WHERE trust_score >= 0.25 AND trust_score < 0.50",
-            (),
-        )
-        .await as usize,
-        trust_050_075_count: query_i64(
-            &state.mem_conn,
-            "SELECT COUNT(*) FROM memory_facts WHERE trust_score >= 0.50 AND trust_score < 0.75",
-            (),
-        )
-        .await as usize,
-        trust_075_100_count: query_i64(
-            &state.mem_conn,
-            "SELECT COUNT(*) FROM memory_facts WHERE trust_score >= 0.75",
-            (),
-        )
-        .await as usize,
-        below_default_recall_threshold_count: query_i64(
-            &state.mem_conn,
-            "SELECT COUNT(*) FROM memory_facts WHERE trust_score < ?1",
-            libsql::params![DEFAULT_MIN_TRUST],
-        )
-        .await as usize,
-        helpful_count: query_i64(
-            &state.mem_conn,
-            "SELECT COALESCE(SUM(helpful_count), 0) FROM memory_facts",
-            (),
-        )
-        .await as usize,
-        unhelpful_count: query_i64(
-            &state.mem_conn,
-            "SELECT COALESCE(SUM(unhelpful_count), 0) FROM memory_facts",
-            (),
-        )
-        .await as usize,
-        missing_vector_count: query_i64(
-            &state.mem_conn,
-            "SELECT COUNT(*) FROM memory_facts
-             WHERE hrr_vector IS NULL OR hrr_algebra != 'amari_fhrr' OR hrr_dim != ?1",
-            libsql::params![hrr_dim as i64],
-        )
-        .await as usize,
-        legacy_backfill_complete: query_i64(
-            &state.mem_conn,
-            "SELECT COUNT(*) FROM memory_facts
-             WHERE json_extract(metadata, '$.holographic_memory_backfill_v1') = 1",
-            (),
-        )
-        .await
-            > 0,
-        repair,
-        feedback_funnel,
-    };
-    let largest_bank_fact_count = largest_bank_fact_count(state).await?;
-    let largest_bank_utilization_pct = if status.estimated_capacity > 0 {
-        largest_bank_fact_count as f64 / status.estimated_capacity as f64 * 100.0
-    } else {
-        0.0
-    };
-    Ok(json!({
-        "path": state.mem_db_path,
-        "exists": true,
-        "memory": status,
-        "largest_bank_fact_count": largest_bank_fact_count,
-        "largest_bank_utilization_pct": largest_bank_utilization_pct,
-        "error": "",
-    }))
 }
 
 async fn fact_trust_history_payload(
     state: &DashboardState,
-    fact_id: i64,
+    fact_id: FactId,
+    read_control: &FactReadControl,
 ) -> Result<Option<Value>, String> {
-    let store = MemoryStore::new(&state.mem_conn);
-    let Some(_fact) = store.get_fact(fact_id).await.map_err(|e| e.to_string())? else {
+    let application = memory_application_for_db(state.memory_owner.clone(), &state.mem_db)
+        .map_err(|error| error.to_string())?;
+    let Some(_detail) = application
+        .dashboard_fact_detail(fact_id.clone(), read_control)
+        .await
+        .map_err(|error| error.to_string())?
+    else {
         return Ok(None);
     };
-    let trust_history = store
-        .fact_trust_history(fact_id)
+    const HISTORY_LIMIT: usize = 300;
+    let history = application
+        .dashboard_feedback_history(fact_id.clone(), HISTORY_LIMIT, read_control)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| error.to_string())?;
+    let trust_history: Vec<Value> = history
+        .events()
+        .iter()
+        .map(|event| {
+            let action = match event.action() {
+                tracedecay_store::ProjectMemoryFactFeedbackActionV1::Helpful => "helpful",
+                tracedecay_store::ProjectMemoryFactFeedbackActionV1::Unhelpful => "unhelpful",
+            };
+            let availability = match event.details_availability() {
+                tracedecay_store::ProjectMemoryFactFeedbackDetailsAvailabilityV1::Available => {
+                    "available"
+                }
+                tracedecay_store::ProjectMemoryFactFeedbackDetailsAvailabilityV1::Redacted => {
+                    "redacted"
+                }
+                tracedecay_store::ProjectMemoryFactFeedbackDetailsAvailabilityV1::Unknown => {
+                    "unknown"
+                }
+            };
+            let mut row = Map::new();
+            row.insert("event_id".into(), json!(event.event_id().as_str()));
+            row.insert("timestamp".into(), json!(event.occurred_at().0));
+            row.insert("action".into(), json!(action));
+            row.insert("old_trust".into(), json!(event.old_trust().as_f64()));
+            row.insert("new_trust".into(), json!(event.new_trust().as_f64()));
+            row.insert(
+                "delta".into(),
+                json!(event.new_trust().as_f64() - event.old_trust().as_f64()),
+            );
+            row.insert("details_availability".into(), json!(availability));
+            if let Some(source) = event.source() {
+                row.insert("source".into(), json!(source));
+            }
+            if let Some(note) = event.note() {
+                row.insert("note".into(), json!(note));
+            }
+            Value::Object(row)
+        })
+        .collect();
+    let next_after = history.next_after().map(|cursor| {
+        json!({
+            "occurred_at": cursor.occurred_at().0,
+            "event_id": cursor.event_id().as_str(),
+        })
+    });
     Ok(Some(json!({
-        "fact_id": fact_id,
+        "fact_id": fact_id.as_str(),
         "trust_history": trust_history,
+        "limit": HISTORY_LIMIT,
+        "completeness": if next_after.is_some() { "partial" } else { "complete" },
+        "next_after": next_after,
         "error": "",
     })))
 }
@@ -288,59 +287,362 @@ async fn fact_trust_history_payload(
 /// `GET /api/plugins/holographic/` — overview + facts + entities + graph.
 pub async fn overview(
     State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonQuery(params): JsonQuery<OverviewParams>,
-) -> Json<Value> {
-    let limit = coerce_limit(params.limit, 25, 100);
-    let graph_limit = coerce_limit(params.graph_limit, limit, 1000);
+) -> Json<DashboardEnvelopeV1<Option<MemoryOverviewPayloadV1>>> {
+    hotpath::future!(
+        async move {
+            let Some(Extension(control)) = control else {
+                return Json(DashboardEnvelopeV1::error(
+                    scope_from_state(&state),
+                    None,
+                    "dashboard HTTP request admission is unavailable",
+                ));
+            };
+            let read_control = fact_read_control(&control);
+            let limit = coerce_limit(params.limit, 25, memory_service::MEMORY_FACT_LIMIT_MAXIMUM);
+            let graph_limit = coerce_limit(params.graph_limit, limit, 1000);
+            let Ok(fact_limit) = usize::try_from(limit) else {
+                return Json(DashboardEnvelopeV1::error(
+                    scope_from_state(&state),
+                    None,
+                    "memory fact limit is outside the platform range",
+                ));
+            };
+            let Ok(initial_relation_limit) = usize::try_from(graph_limit) else {
+                return Json(DashboardEnvelopeV1::error(
+                    scope_from_state(&state),
+                    None,
+                    "memory graph limit is outside the platform range",
+                ));
+            };
 
-    let mut obj = Map::new();
-    obj.insert("path".into(), json!(state.mem_db_path));
-    obj.insert("exists".into(), json!(true));
-    obj.insert("overview".into(), Value::Null);
-    obj.insert("facts".into(), json!([]));
-    obj.insert("entities".into(), json!([]));
-    obj.insert("graph".into(), json!({ "nodes": [], "edges": [] }));
-    obj.insert("error".into(), json!(""));
-    match memory_service::overview_payload(&state).await {
-        Ok(payload) => {
-            obj.insert("overview".into(), payload);
-        }
-        Err(e) => {
-            obj.insert("error".into(), json!(e));
-        }
-    }
-    if let Ok(facts) = memory_service::fetch_facts(&state, &params.q, limit).await {
-        obj.insert("facts".into(), json!(facts));
-    }
-    if let Ok(entities) = memory_service::fetch_entities(&state, limit).await {
-        obj.insert("entities".into(), json!(entities));
-    }
-    if let Ok(graph) = memory_service::graph_payload(&state, &params.q, graph_limit).await {
-        obj.insert("graph".into(), graph);
-    }
-    let holographic = Value::Object(obj);
-
-    Json(json!({
-        "providers": memory_service::providers_payload(),
-        "query": params.q,
-        "limit": limit,
-        "holographic": holographic,
-    }))
+            let mut reads = BTreeMap::from([
+                (
+                    "facts".to_owned(),
+                    MemoryReadStatusV1::new(DashboardDomainStateV1::Loading),
+                ),
+                (
+                    "entities".to_owned(),
+                    MemoryReadStatusV1::new(DashboardDomainStateV1::Loading),
+                ),
+                (
+                    "graph".to_owned(),
+                    MemoryReadStatusV1::new(DashboardDomainStateV1::Loading),
+                ),
+            ]);
+            let mut holographic = MemoryHolographicPayloadV1 {
+                path: state.mem_db_path.clone(),
+                exists: true,
+                overview: None,
+                facts: Vec::new(),
+                entities: Vec::new(),
+                graph: memory_service::MemoryGraphPayloadV1 {
+                    nodes: Vec::new(),
+                    edges: Vec::new(),
+                    coverage: DashboardCoverageV1::unknown(),
+                    fact_universe_count: 0,
+                    fact_candidates_examined: 0,
+                    unavailable_fact_candidates: 0,
+                    root_count: 0,
+                    relation_limit: initial_relation_limit,
+                    relation_count: 0,
+                },
+                error: String::new(),
+                reads: BTreeMap::new(),
+                facts_coverage: memory_service::MemoryFactsCoverageV1 {
+                    completeness: DashboardCoverageCompletenessV1::Partial,
+                    limit: fact_limit,
+                    graph: None,
+                    examined: None,
+                    eligible: None,
+                },
+            };
+            let mut overview_ready = false;
+            match memory_service::overview_payload(&state, &read_control).await {
+                Ok(payload) => match serde_json::from_value::<MemoryOverviewSummaryV1>(payload) {
+                    Ok(payload) => {
+                        holographic.overview = Some(payload);
+                        overview_ready = true;
+                    }
+                    Err(error) => {
+                        holographic.error = format!("Failed to decode memory summary: {error}");
+                    }
+                },
+                Err(error) => {
+                    holographic.error = error;
+                }
+            }
+            if let Some(state) = request_terminal_state(&control) {
+                reads.insert(
+                    "facts".to_owned(),
+                    MemoryReadStatusV1::failed(state, None, "request lifecycle ended"),
+                );
+            } else {
+                match memory_service::fetch_facts(&state, &params.q, limit, &read_control).await {
+                    Ok(facts) => {
+                        let rows = facts
+                            .rows
+                            .into_iter()
+                            .map(serde_json::from_value::<MemoryFactRowV1>)
+                            .collect::<Result<Vec<_>, _>>();
+                        match rows {
+                            Ok(rows) => {
+                                holographic.facts = rows;
+                                let read_status = facts_read_status(&facts.coverage);
+                                holographic.facts_coverage = facts.coverage;
+                                reads.insert("facts".to_owned(), read_status);
+                            }
+                            Err(error) => {
+                                reads.insert(
+                                    "facts".to_owned(),
+                                    read_failure_status(
+                                        &control,
+                                        Some("fact_contract_decode_failed"),
+                                        error.to_string(),
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        reads.insert(
+                            "facts".to_owned(),
+                            read_failure_status(&control, None, error),
+                        );
+                    }
+                }
+            }
+            if let Some(state) = request_terminal_state(&control) {
+                reads.insert(
+                    "entities".to_owned(),
+                    MemoryReadStatusV1::failed(state, None, "request lifecycle ended"),
+                );
+            } else {
+                match memory_service::fetch_entities(&state, limit, &read_control).await {
+                    Ok(entities) => {
+                        let rows = entities
+                            .rows
+                            .into_iter()
+                            .map(serde_json::from_value::<MemoryEntityRowV1>)
+                            .collect::<Result<Vec<_>, _>>();
+                        match rows {
+                            Ok(rows) => {
+                                holographic.entities = rows;
+                                reads.insert(
+                                    "entities".to_owned(),
+                                    if entities.bounded {
+                                        MemoryReadStatusV1 {
+                                            state: DashboardDomainStateV1::Partial,
+                                            code: Some("entity_limit_reached".to_owned()),
+                                            error: None,
+                                        }
+                                    } else {
+                                        MemoryReadStatusV1::new(DashboardDomainStateV1::Ready)
+                                    },
+                                );
+                            }
+                            Err(error) => {
+                                reads.insert(
+                                    "entities".to_owned(),
+                                    read_failure_status(
+                                        &control,
+                                        Some("entity_contract_decode_failed"),
+                                        error.to_string(),
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        reads.insert(
+                            "entities".to_owned(),
+                            read_failure_status(&control, None, error),
+                        );
+                    }
+                }
+            }
+            if let Some(state) = request_terminal_state(&control) {
+                reads.insert(
+                    "graph".to_owned(),
+                    MemoryReadStatusV1::failed(state, None, "request lifecycle ended"),
+                );
+            } else {
+                match memory_service::graph_payload(
+                    &state,
+                    &params.q,
+                    graph_limit,
+                    &control,
+                    &read_control,
+                )
+                .await
+                {
+                    Ok(graph) => {
+                        let read_status = graph_read_status(&graph.coverage);
+                        holographic.graph = graph;
+                        reads.insert("graph".to_owned(), read_status);
+                    }
+                    Err(error) => {
+                        reads.insert(
+                            "graph".to_owned(),
+                            MemoryReadStatusV1::failed(
+                                error.state(),
+                                Some(error.code()),
+                                error.message(),
+                            ),
+                        );
+                    }
+                }
+            }
+            holographic.reads = reads;
+            let request_timed_out = request_deadline_elapsed(&control);
+            let request_cancelled = control.cancellation().is_cancelled();
+            let ready_read_count = holographic
+                .reads
+                .values()
+                .filter(|read| read.state == DashboardDomainStateV1::Ready)
+                .count();
+            let facts_complete = matches!(
+                holographic.facts_coverage.completeness,
+                DashboardCoverageCompletenessV1::Complete
+            );
+            let graph_complete = holographic.graph.coverage.is_complete();
+            let exact_complete = overview_ready && ready_read_count == 3;
+            let domain_state = if request_timed_out {
+                DashboardDomainStateV1::TimedOut
+            } else if request_cancelled {
+                DashboardDomainStateV1::Cancelled
+            } else if exact_complete {
+                DashboardDomainStateV1::Ready
+            } else if overview_ready || ready_read_count != 0 {
+                DashboardDomainStateV1::Partial
+            } else {
+                holographic
+                    .reads
+                    .get("graph")
+                    .map_or(DashboardDomainStateV1::Error, |read| read.state)
+            };
+            let coverage = if exact_complete && !request_timed_out && !request_cancelled {
+                DashboardCoverageV1::complete(4, "applicable_memory_read_sources")
+            } else {
+                let mut coverage = DashboardCoverageV1::unknown();
+                if request_timed_out {
+                    coverage
+                        .omission_reasons
+                        .push("request_deadline_elapsed".into());
+                } else if request_cancelled {
+                    coverage.omission_reasons.push("request_cancelled".into());
+                }
+                if !overview_ready {
+                    coverage
+                        .omission_reasons
+                        .push("overview_read_failed".into());
+                }
+                for read in ["facts", "entities", "graph"] {
+                    if holographic
+                        .reads
+                        .get(read)
+                        .is_none_or(|status| status.state != DashboardDomainStateV1::Ready)
+                    {
+                        coverage
+                            .omission_reasons
+                            .push(format!("{read}_read_incomplete"));
+                    }
+                }
+                if !facts_complete {
+                    coverage.omission_reasons.push("fact_rows_bounded".into());
+                }
+                if !graph_complete
+                    && holographic
+                        .reads
+                        .get("graph")
+                        .is_some_and(|status| status.state == DashboardDomainStateV1::Ready)
+                {
+                    coverage.omission_reasons.push("graph_rows_bounded".into());
+                }
+                coverage
+            };
+            let freshness = hotpath::measure_block!("dashboard_api.freshness.projection", {
+                if !request_timed_out
+                    && !request_cancelled
+                    && overview_ready
+                    && ready_read_count == 3
+                {
+                    DashboardFreshnessV1::fresh_now()
+                } else {
+                    DashboardFreshnessV1::unknown()
+                }
+            });
+            crate::observe::record_freshness_state(freshness.state);
+            let providers = match serde_json::from_value(memory_service::providers_payload()) {
+                Ok(providers) => providers,
+                Err(error) => {
+                    return Json(DashboardEnvelopeV1::error(
+                        scope_from_state(&state),
+                        None,
+                        format!("Failed to encode memory provider contract: {error}"),
+                    ));
+                }
+            };
+            let payload = MemoryOverviewPayloadV1 {
+                providers,
+                query: params.q,
+                limit,
+                holographic,
+            };
+            Json(DashboardEnvelopeV1::new(
+                scope_from_state(&state),
+                domain_state,
+                coverage,
+                freshness,
+                Some(payload),
+            ))
+        },
+        label = "dashboard_api.memory.overview"
+    )
+    .await
 }
 
-/// `GET /api/plugins/holographic/status` — rich holographic-memory health
-/// derived from `TraceDecay::memory_status()` plus the largest-bank utilization
-/// that operators need for the dashboard health card.
-pub async fn status(State(state): State<DashboardState>) -> (StatusCode, Json<Value>) {
-    match memory_status_payload(&state).await {
-        Ok(payload) => (StatusCode::OK, Json(payload)),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(http_detail(&format!(
-                "Failed to compute memory status: {e}"
-            ))),
-        ),
-    }
+/// `GET /api/plugins/holographic/status` — canonical facts and derived-algebra health.
+pub async fn status(
+    State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
+) -> Json<DashboardEnvelopeV1<Option<MemoryStatusPayloadV1>>> {
+    hotpath::future!(
+        async move {
+            let Some(Extension(control)) = control else {
+                return Json(DashboardEnvelopeV1::error(
+                    scope_from_state(&state),
+                    None,
+                    "dashboard HTTP request admission is unavailable",
+                ));
+            };
+            let result = memory_status_payload(&state, &fact_read_control(&control)).await;
+            if let Some(state_label) = request_terminal_state(&control) {
+                return Json(read_error_envelope(
+                    scope_from_state(&state),
+                    &control,
+                    None,
+                    terminal_read_code(state_label).1,
+                ));
+            }
+            match result {
+                Ok(payload) => Json(DashboardEnvelopeV1::ready(
+                    scope_from_state(&state),
+                    DashboardCoverageV1::complete(1, "memory_stores"),
+                    Some(payload),
+                )),
+                Err(error) => Json(read_error_envelope(
+                    scope_from_state(&state),
+                    &control,
+                    None,
+                    format!("Failed to compute memory status: {error}"),
+                )),
+            }
+        },
+        label = "dashboard_api.memory.status"
+    )
+    .await
 }
 
 /// `GET /api/plugins/holographic/fact/{fact_id}` — full fact detail.
@@ -350,274 +652,371 @@ pub async fn status(State(state): State<DashboardState>) -> (StatusCode, Json<Va
 /// complete row — plus linked entities — from here.
 pub async fn fact_detail(
     State(state): State<DashboardState>,
-    JsonPath(fact_id): JsonPath<i64>,
-) -> (StatusCode, Json<Value>) {
-    match memory_service::fact_detail_payload(&state, fact_id).await {
-        Ok(Some(payload)) => (StatusCode::OK, Json(payload)),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(http_detail(&format!("fact not found: {fact_id}"))),
-        ),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(http_detail(&e))),
-    }
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    JsonPath(fact_id): JsonPath<String>,
+) -> Json<DashboardEnvelopeV1<Option<MemoryFactDetailPayloadV1>>> {
+    hotpath::future!(
+        async move {
+            let Some(Extension(control)) = control else {
+                return Json(DashboardEnvelopeV1::error(
+                    scope_from_state(&state),
+                    None,
+                    "dashboard HTTP request admission is unavailable",
+                ));
+            };
+            let fact_id = match owned_fact_id(&state, fact_id) {
+                Ok(fact_id) => fact_id,
+                Err(error) => {
+                    return Json(DashboardEnvelopeV1::error(
+                        scope_from_state(&state),
+                        None,
+                        format!("invalid canonical fact id: {error}"),
+                    ));
+                }
+            };
+            let result =
+                memory_service::fact_detail_payload(&state, fact_id, &fact_read_control(&control))
+                    .await;
+            if let Some(state_label) = request_terminal_state(&control) {
+                return Json(read_error_envelope(
+                    scope_from_state(&state),
+                    &control,
+                    None,
+                    terminal_read_code(state_label).1,
+                ));
+            }
+            match result {
+                Ok(Some(payload)) => {
+                    match serde_json::from_value::<MemoryFactDetailPayloadV1>(payload) {
+                        Ok(payload) => Json(DashboardEnvelopeV1::ready(
+                            scope_from_state(&state),
+                            DashboardCoverageV1::complete(1, "facts"),
+                            Some(payload),
+                        )),
+                        Err(error) => Json(DashboardEnvelopeV1::error(
+                            scope_from_state(&state),
+                            None,
+                            format!("Failed to encode memory fact detail contract: {error}"),
+                        )),
+                    }
+                }
+                Ok(None) => Json(DashboardEnvelopeV1::complete_zero_findings(
+                    scope_from_state(&state),
+                    DashboardCoverageV1::complete(1, "facts"),
+                    None,
+                )),
+                Err(error) => Json(read_error_envelope(
+                    scope_from_state(&state),
+                    &control,
+                    None,
+                    error,
+                )),
+            }
+        },
+        label = "dashboard_api.memory.fact_detail"
+    )
+    .await
 }
 
 /// `GET /api/plugins/holographic/fact/{fact_id}/trust-history` — append-only
 /// feedback audit rows explaining how a fact's trust changed over time.
 pub async fn fact_trust_history(
     State(state): State<DashboardState>,
-    JsonPath(fact_id): JsonPath<i64>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
+    JsonPath(fact_id): JsonPath<String>,
 ) -> (StatusCode, Json<Value>) {
-    match fact_trust_history_payload(&state, fact_id).await {
-        Ok(Some(payload)) => (StatusCode::OK, Json(payload)),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(http_detail(&format!("fact not found: {fact_id}"))),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(http_detail(&format!(
-                "Failed to load trust history for fact {fact_id}: {e}"
-            ))),
-        ),
-    }
+    hotpath::future!(
+        async move {
+            let Some(Extension(control)) = control else {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(http_detail(
+                        "dashboard HTTP request admission is unavailable",
+                    )),
+                );
+            };
+            let fact_id = match owned_fact_id(&state, fact_id) {
+                Ok(fact_id) => fact_id,
+                Err(error) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(http_detail(&format!("invalid canonical fact id: {error}"))),
+                    );
+                }
+            };
+            let fact_id_label = fact_id.as_str().to_owned();
+            let result =
+                fact_trust_history_payload(&state, fact_id, &fact_read_control(&control)).await;
+            if let Some(state) = request_terminal_state(&control) {
+                let (code, detail) = terminal_read_code(state);
+                return (
+                    if state == DashboardDomainStateV1::TimedOut {
+                        StatusCode::GATEWAY_TIMEOUT
+                    } else {
+                        StatusCode::REQUEST_TIMEOUT
+                    },
+                    Json(json!({"detail": detail, "code": code})),
+                );
+            }
+            match result {
+                Ok(Some(payload)) => (StatusCode::OK, Json(payload)),
+                Ok(None) => (
+                    StatusCode::NOT_FOUND,
+                    Json(http_detail(&format!("fact not found: {fact_id_label}"))),
+                ),
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(http_detail(&format!(
+                        "Failed to load trust history for fact {fact_id_label}: {e}"
+                    ))),
+                ),
+            }
+        },
+        label = "dashboard_api.memory.trust_history"
+    )
+    .await
 }
 
 /// `GET /api/plugins/holographic/projection` — 2D PCA of phase vectors,
 /// embedded as `[cos(p), sin(p)]` so wrapped phases compare correctly.
 pub async fn projection(
     State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonQuery(params): JsonQuery<ProjectionParams>,
 ) -> Json<Value> {
-    let limit = coerce_limit(params.limit, 25, memory_service::projection_point_cap());
-    Json(memory_service::projection_payload(&state, &params.q, limit).await)
+    hotpath::future!(
+        async move {
+            let Some(Extension(control)) = control else {
+                return Json(json!({
+                    "exists": true,
+                    "dim": 0,
+                    "limit": 0,
+                    "method": "none",
+                    "points": [],
+                    "error": "dashboard HTTP request admission is unavailable",
+                }));
+            };
+            let limit = coerce_limit(params.limit, 25, memory_service::projection_point_cap());
+            let payload = memory_service::projection_payload(
+                &state,
+                &params.q,
+                limit,
+                &fact_read_control(&control),
+            )
+            .await;
+            if let Some(state) = request_terminal_state(&control) {
+                let (code, error) = terminal_read_code(state);
+                return Json(json!({
+                    "exists": true,
+                    "dim": 0,
+                    "limit": limit,
+                    "method": "none",
+                    "points": [],
+                    "state": state,
+                    "code": code,
+                    "error": error,
+                }));
+            }
+            Json(payload)
+        },
+        label = "dashboard_api.memory.projection"
+    )
+    .await
 }
 
 /// `GET /api/plugins/holographic/similarity` — pairwise phase-cosine
-/// similarity (`mean(cos(p_i − p_j))`) over all vectored facts.
-///
-/// `min_similarity` is the single floor parameter; the response still emits
-/// the same value under both the `min_similarity` and legacy `threshold`
-/// keys so the payload shape is unchanged.
+/// similarity (`mean(cos(p_i − p_j))`) over query-time derived vectors.
 pub async fn similarity(
     State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonQuery(params): JsonQuery<SimilarityParams>,
 ) -> Json<Value> {
-    let min_similarity = memory_service::coerce_similarity_score(
-        params.min_similarity,
-        SIMILARITY_DEFAULT_THRESHOLD,
-    );
-    let pair_cap = coerce_limit(params.limit, 25, SIMILARITY_PAIR_CAP) as usize;
-    Json(memory_service::similarity_payload(&state, min_similarity, pair_cap).await)
-}
-
-/// `GET /api/plugins/holographic/curation/status` — similarity-dedup curator status.
-pub async fn curation_status(State(state): State<DashboardState>) -> Json<Value> {
-    Json(memory_service::curation_status_payload(&state).await)
-}
-
-/// `GET /api/plugins/holographic/curation/activity` — recent deterministic curator events.
-pub async fn curation_activity(
-    State(state): State<DashboardState>,
-    JsonQuery(params): JsonQuery<LimitParams>,
-) -> Json<Value> {
-    let limit = coerce_limit(params.limit, 100, 300);
-    Json(memory_service::curation_activity_payload(&state, limit).await)
-}
-
-/// `GET /api/plugins/holographic/curation/runs` — recent standalone
-/// automation backend runs, loaded from the append-only project sidecar ledger.
-pub async fn curation_runs(
-    State(state): State<DashboardState>,
-    JsonQuery(params): JsonQuery<LimitParams>,
-) -> Json<Value> {
-    let limit = coerce_limit(params.limit, 50, 200) as usize;
-    match crate::automation::run_ledger::load_run_records(&state.dashboard_root, limit).await {
-        Ok(records) => {
-            let count = records.len();
-            Json(json!({
-                "records": records,
-                "count": count,
-                "limit": limit,
-                "error": "",
-            }))
-        }
-        Err(err) => Json(json!({
-            "records": [],
-            "count": 0,
-            "limit": limit,
-            "error": err.to_string(),
-        })),
-    }
-}
-
-/// `GET /api/plugins/holographic/fact-proposals` — session-reflector fact
-/// proposal telemetry, plus historical applied/rejected decisions.
-pub async fn fact_proposals(
-    State(state): State<DashboardState>,
-    JsonQuery(params): JsonQuery<FactProposalParams>,
-) -> (StatusCode, Json<Value>) {
-    let proposal_state = match parse_fact_proposal_state(params.state.as_deref()) {
-        Ok(state) => state,
-        Err(message) => return (StatusCode::BAD_REQUEST, Json(http_detail(&message))),
-    };
-    let limit = coerce_limit(params.limit, 50, 200) as usize;
-    match crate::automation::fact_proposals::list_fact_proposals(
-        &state.dashboard_root,
-        proposal_state,
-        limit,
-    )
-    .await
-    {
-        Ok(proposals) => (
-            StatusCode::OK,
-            Json(json!({
-                "proposals": proposals,
-                "count": proposals.len(),
-                "limit": limit,
-                "error": "",
-            })),
-        ),
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(http_detail(&err.to_string())),
-        ),
-    }
-}
-
-/// `POST /api/plugins/holographic/fact-proposals/{proposal_id}/apply` —
-/// applies a stored session-reflector fact proposal.
-pub async fn fact_proposal_apply(
-    State(state): State<DashboardState>,
-    Path(proposal_id): Path<String>,
-    body: Option<axum::extract::Json<FactProposalApplyBody>>,
-) -> (StatusCode, Json<Value>) {
-    let reviewer = body.and_then(|body| body.0.reviewer);
-    match crate::automation::fact_proposals::apply_fact_proposal(
-        &state.dashboard_root,
-        &state.mem_conn,
-        &proposal_id,
-        reviewer,
-    )
-    .await
-    {
-        Ok(proposal) => {
-            crate::automation::memory_digest::refresh_memory_digest_after_memory_change(
-                &state.mem_conn,
-                &state.project_root,
+    hotpath::future!(
+        async move {
+            let Some(Extension(control)) = control else {
+                return Json(json!({
+                    "exists": true,
+                    "dim": 0,
+                    "count": 0,
+                    "limit": 0,
+                    "min_similarity": null,
+                    "total_pairs": 0,
+                    "score_distribution": empty_score_distribution(),
+                    "pairs": [],
+                    "error": "dashboard HTTP request admission is unavailable",
+                }));
+            };
+            let min_similarity = memory_service::coerce_similarity_score(
+                params.min_similarity,
+                SIMILARITY_DEFAULT_THRESHOLD,
+            );
+            let pair_cap = coerce_limit(params.limit, 25, SIMILARITY_PAIR_CAP) as usize;
+            let payload = memory_service::similarity_payload(
+                &state,
+                min_similarity,
+                pair_cap,
+                &fact_read_control(&control),
             )
             .await;
-            (
-                StatusCode::OK,
-                Json(json!({
-                    "proposal": proposal,
-                    "error": "",
-                })),
-            )
-        }
-        Err(err) => fact_proposal_error(&err),
-    }
-}
-
-/// `POST /api/plugins/holographic/fact-proposals/{proposal_id}/reject` —
-/// explicit rejection for a pending session-reflector proposal.
-pub async fn fact_proposal_reject(
-    State(state): State<DashboardState>,
-    Path(proposal_id): Path<String>,
-    body: Option<axum::extract::Json<FactProposalRejectBody>>,
-) -> (StatusCode, Json<Value>) {
-    let body = body.map(|body| body.0).unwrap_or_default();
-    match crate::automation::fact_proposals::reject_fact_proposal(
-        &state.dashboard_root,
-        &proposal_id,
-        body.reviewer,
-        body.reason,
+            if let Some(state) = request_terminal_state(&control) {
+                let (code, error) = terminal_read_code(state);
+                return Json(json!({
+                    "exists": true,
+                    "dim": 0,
+                    "count": 0,
+                    "limit": pair_cap,
+                    "min_similarity": min_similarity,
+                    "total_pairs": 0,
+                    "score_distribution": empty_score_distribution(),
+                    "pairs": [],
+                    "state": state,
+                    "code": code,
+                    "error": error,
+                }));
+            }
+            Json(payload)
+        },
+        label = "dashboard_api.memory.similarity"
     )
     .await
-    {
-        Ok(proposal) => (
-            StatusCode::OK,
-            Json(json!({
-                "proposal": proposal,
-                "error": "",
-            })),
-        ),
-        Err(err) => fact_proposal_error(&err),
-    }
 }
 
-fn parse_fact_proposal_state(
-    state: Option<&str>,
-) -> Result<Option<crate::automation::fact_proposals::FactProposalState>, String> {
-    use crate::automation::fact_proposals::FactProposalState;
-
-    let Some(state) = state else {
-        return Ok(None);
-    };
-    match state.trim().to_ascii_lowercase().as_str() {
-        "" => Ok(None),
-        "pending" | "pending_approval" => Ok(Some(FactProposalState::PendingApproval)),
-        "applied" => Ok(Some(FactProposalState::Applied)),
-        "rejected" => Ok(Some(FactProposalState::Rejected)),
-        _ => Err(format!(
-            "unknown fact proposal state '{state}' (expected pending_approval, applied, rejected)"
-        )),
-    }
-}
-
-fn fact_proposal_error(err: &crate::errors::TraceDecayError) -> (StatusCode, Json<Value>) {
-    let message = err.to_string();
-    let status = if message.contains("not found") {
-        StatusCode::NOT_FOUND
-    } else if message.contains("not pending") || message.contains("no add_fact_request") {
-        StatusCode::BAD_REQUEST
-    } else {
-        StatusCode::INTERNAL_SERVER_ERROR
-    };
-    (status, Json(http_detail(&message)))
-}
-
-/// `POST /api/plugins/holographic/curate/apply` — generic curation-ops apply
-/// endpoint. Body: `{"ops": [...]}` where each op is one of:
-///
-/// - `{"op": "delete", "fact_id": <id>, "reason": <string?>}` — hard-deletes
-///   the fact (entity links cascade, FTS rows drop via trigger).
-/// - `{"op": "merge", "winner_id": <id>, "loser_ids": [<id>...],
-///   "merged_content": <string?>}` — optionally rewrites the winner's content
-///   with `merged_content`, then hard-deletes the losers.
-///
-/// Per-op failures are reported in `results` (status stays 200); the request
-/// only fails wholesale on a malformed body. External planners (e.g. the
-/// LLM-backed Hermes wrapper) build against this contract.
-pub async fn curate_apply(
-    State(state): State<DashboardState>,
-    body: Option<axum::extract::Json<CurateApplyBody>>,
-) -> (StatusCode, Json<Value>) {
-    let Some(axum::extract::Json(body)) = body else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(http_detail("Request body must be JSON: {\"ops\": [...]}")),
-        );
-    };
-
-    let payload = memory_service::curate_apply_payload(&state, &body.ops).await;
-    crate::automation::memory_digest::refresh_memory_digest_after_memory_change(
-        &state.mem_conn,
-        &state.project_root,
-    )
-    .await;
-    (StatusCode::OK, Json(payload))
-}
-
-/// `GET /api/plugins/holographic/oplog` — recent memory operations, newest
-/// first. Rows come from `memory_oplog`, the append-only audit written by the
-/// store mutation paths (add/update/remove/feedback) and curation applies.
-/// `detail_json` never carries fact content beyond what the op needs
-/// (deletes record a content hash, not the content).
+/// `GET /api/plugins/holographic/oplog` — recent canonical memory operations,
+/// newest first, with optional canonical fact identity.
 pub async fn oplog(
     State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonQuery(params): JsonQuery<LimitParams>,
 ) -> Json<Value> {
-    let limit = coerce_limit(params.limit, 50, 300);
-    Json(memory_service::oplog_payload(&state, limit).await)
+    hotpath::future!(
+        async move {
+            let Some(Extension(control)) = control else {
+                return Json(json!({
+                    "events": [],
+                    "count": 0,
+                    "limit": 0,
+                    "error": "dashboard HTTP request admission is unavailable",
+                }));
+            };
+            let limit = coerce_limit(params.limit, 50, 300);
+            let payload =
+                memory_service::oplog_payload(&state, limit, &fact_read_control(&control)).await;
+            if let Some(state) = request_terminal_state(&control) {
+                let (code, error) = terminal_read_code(state);
+                return Json(json!({
+                    "events": [],
+                    "count": 0,
+                    "limit": limit,
+                    "state": state,
+                    "code": code,
+                    "error": error,
+                }));
+            }
+            Json(payload)
+        },
+        label = "dashboard_api.memory.oplog"
+    )
+    .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tracedecay_application::memory::{FactSearchGraphCoverageV1, FactSearchGraphDegradationV1};
+
+    fn fact_coverage(
+        completeness: DashboardCoverageCompletenessV1,
+        graph: Option<FactSearchGraphCoverageV1>,
+    ) -> memory_service::MemoryFactsCoverageV1 {
+        memory_service::MemoryFactsCoverageV1 {
+            completeness,
+            limit: 10,
+            graph,
+            examined: None,
+            eligible: None,
+        }
+    }
+
+    fn request_control(
+        cancellation: tracedecay_application::CancellationSignal,
+        deadline: i64,
+    ) -> DashboardHttpRequestControlV1 {
+        DashboardHttpRequestControlV1 {
+            request_id: tracedecay_application::RequestId::new(
+                "request.dashboard-memory-status-test",
+            )
+            .expect("request identity"),
+            deadline: tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(deadline))
+                .expect("request deadline"),
+            cancellation,
+            observed_at: tracedecay_domain::UtcMicros(1),
+        }
+    }
+
+    #[test]
+    fn bounded_or_degraded_memory_reads_are_partial_not_ready() {
+        let graph_complete = FactSearchGraphCoverageV1::Complete {
+            root_count: 1,
+            relation_count: 1,
+            expanded_fact_count: 1,
+        };
+        assert_eq!(
+            facts_read_status(&fact_coverage(
+                DashboardCoverageCompletenessV1::Complete,
+                Some(graph_complete),
+            ))
+            .state,
+            DashboardDomainStateV1::Ready,
+        );
+        assert_eq!(
+            facts_read_status(&fact_coverage(
+                DashboardCoverageCompletenessV1::Partial,
+                None,
+            ))
+            .state,
+            DashboardDomainStateV1::Partial,
+        );
+        assert_eq!(
+            facts_read_status(&fact_coverage(
+                DashboardCoverageCompletenessV1::Complete,
+                Some(FactSearchGraphCoverageV1::Degraded {
+                    reason: FactSearchGraphDegradationV1::Unavailable,
+                }),
+            ))
+            .state,
+            DashboardDomainStateV1::Partial,
+        );
+        assert_eq!(
+            graph_read_status(&DashboardCoverageV1::unknown()).state,
+            DashboardDomainStateV1::Partial,
+        );
+        assert_eq!(
+            graph_read_status(&DashboardCoverageV1::complete(1, "memory_graph_roots")).state,
+            DashboardDomainStateV1::Ready,
+        );
+    }
+
+    #[test]
+    fn read_failures_preserve_live_request_terminal_state() {
+        let cancellation = tracedecay_application::CancellationSignal::active(
+            "cancel.dashboard-memory-status-test",
+        )
+        .expect("cancellation signal");
+        let control = request_control(cancellation.clone(), i64::MAX);
+        assert!(cancellation.cancel(tracedecay_domain::UtcMicros(2)));
+        assert_eq!(
+            read_failure_status(&control, None, "cancelled fixture").state,
+            DashboardDomainStateV1::Cancelled,
+        );
+
+        let cancellation = tracedecay_application::CancellationSignal::active(
+            "cancel.dashboard-memory-timeout-status-test",
+        )
+        .expect("cancellation signal");
+        let control = request_control(cancellation, 0);
+        assert_eq!(
+            read_failure_status(&control, None, "timed out fixture").state,
+            DashboardDomainStateV1::TimedOut,
+        );
+    }
 }

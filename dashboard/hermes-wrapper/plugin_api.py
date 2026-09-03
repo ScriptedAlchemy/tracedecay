@@ -2,13 +2,15 @@
 
 Mounted at /api/plugins/tracedecay/ by the Hermes dashboard plugin system.
 
-This is a THIN reverse proxy onto the canonical implementation: a local
+This is a thin host adapter for the canonical implementation: a local
 ``tracedecay dashboard`` HTTP server (see the tracedecay repo, ``src/dashboard``).
-It does not reimplement any data access. The wrapper:
+It does not ship or reimplement any dashboard UI. The adapter:
 
 - lazily spawns ``tracedecay dashboard --port 0`` bound to 127.0.0.1 (or uses
   an externally managed server via ``TRACEDECAY_DASHBOARD_URL``),
-- forwards ``/holographic/*`` -> upstream ``/api/plugins/holographic/*``,
+- returns the same-origin embed path from ``/dashboard-url`` and reverse-proxies
+  that mount at ``/embed`` so the Hermes iframe never points at loopback, and
+- retains compatibility API forwarding: ``/holographic/*`` -> upstream ``/api/plugins/holographic/*``,
   ``/lcm/*`` -> upstream ``/api/plugins/hermes-lcm/*``,
   ``/graph/*`` -> upstream ``/api/plugins/graph/*``, and
   ``/savings/*`` -> upstream ``/api/plugins/savings/*``,
@@ -56,7 +58,81 @@ from typing import Any, IO
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
+
+try:
+    from embed_proxy import (
+        DASHBOARD_EMBED_PATH,
+        embed_upstream_path,
+        is_event_stream,
+        is_html_content_type,
+        rewrite_dashboard_html,
+    )
+except ImportError:  # pragma: no cover - Hermes deploys this file alone
+    EMBED_MOUNT = "/api/plugins/tracedecay/embed"
+    DASHBOARD_EMBED_PATH = f"{EMBED_MOUNT}/"
+    _ATTR_URL_RE = re.compile(
+        r"""(?P<attr>\b(?:src|href))=(?P<quote>['"])/(?P<path>(?!/))""",
+        re.IGNORECASE,
+    )
+
+    def embed_upstream_path(subpath: str) -> str:
+        tail = subpath.strip("/")
+        return f"/{tail}" if tail else "/"
+
+    def is_html_content_type(content_type: str | None) -> bool:
+        if content_type is None:
+            return False
+        media = content_type.split(";", 1)[0].strip().lower()
+        return media in {"text/html", "application/xhtml+xml"}
+
+    def is_event_stream(upstream_path: str, accept: str) -> bool:
+        if "text/event-stream" in accept.lower():
+            return True
+        return upstream_path.rstrip("/") == "/api/events"
+
+    def _dashboard_bridge_script() -> str:
+        return (
+            "<script>"
+            "(function(){"
+            f"var p={EMBED_MOUNT!r};"
+            "function rw(u){"
+            "if(typeof u!=='string')return u;"
+            "if(u.indexOf('/api/')===0)return p+u;"
+            "return u;"
+            "}"
+            "var f=window.fetch;"
+            "window.fetch=function(i,n){"
+            "if(typeof i==='string')i=rw(i);"
+            "else if(typeof Request!=='undefined'&&i instanceof Request)"
+            "i=new Request(rw(i.url),i);"
+            "return f.call(this,i,n);"
+            "};"
+            "var ES=window.EventSource;"
+            "function P(u,c){return new ES(rw(u),c)}"
+            "P.prototype=ES.prototype;"
+            "P.CONNECTING=ES.CONNECTING;P.OPEN=ES.OPEN;P.CLOSED=ES.CLOSED;"
+            "window.EventSource=P;"
+            "window.__webpack_public_path__=p+'/';"
+            "})();"
+            "</script>"
+        )
+
+    def rewrite_dashboard_html(html: str) -> str:
+        rewritten = _ATTR_URL_RE.sub(
+            lambda match: (
+                f"{match.group('attr')}={match.group('quote')}"
+                f"{EMBED_MOUNT}/{match.group('path')}"
+            ),
+            html,
+        )
+        script = _dashboard_bridge_script()
+        lower = rewritten.lower()
+        idx = lower.find("<head>")
+        if idx == -1:
+            return script + rewritten
+        insert_at = idx + len("<head>")
+        return rewritten[:insert_at] + script + rewritten[insert_at:]
 
 router = APIRouter()
 
@@ -77,6 +153,20 @@ def _env(name: str) -> str | None:
 
 _SPAWN_TIMEOUT_SECONDS = 30.0
 _PROXY_TIMEOUT_SECONDS = 30.0
+_HOP_BY_HOP_HEADERS = frozenset(
+    {
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailers",
+        "transfer-encoding",
+        "upgrade",
+        "host",
+        "content-length",
+    }
+)
 # After the spawned server prints its URL, wait until /api/capabilities
 # actually answers before proxying anything: the listener can be bound while
 # the engine is still warming up (DB opens, graph load), and proxying into
@@ -426,6 +516,138 @@ class _DummyRequest:
     url = _URL()
 
 
+@router.get("/dashboard-url")
+def get_dashboard_url() -> JSONResponse:
+    """Return the same-origin embed path for the Hermes iframe mount.
+
+    The upstream loopback server is started here so a spawn failure is a typed
+    503 rather than a later iframe 502. The URL itself is always the Hermes
+    proxy path — never ``http://127.0.0.1``.
+    """
+    _upstream_base()
+    return JSONResponse({"url": DASHBOARD_EMBED_PATH})
+
+
+_EMBED_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"]
+
+
+@router.api_route("/embed", methods=_EMBED_METHODS)
+@router.api_route("/embed/", methods=_EMBED_METHODS)
+def embed_dashboard_root(request: Request) -> Response:
+    return _embed_proxy(request, "")
+
+
+@router.api_route("/embed/{path:path}", methods=_EMBED_METHODS)
+async def embed_dashboard(path: str, request: Request) -> Response:
+    body = None if request.method in {"GET", "HEAD"} else await request.body()
+    return await run_in_threadpool(_embed_proxy, request, path, body)
+
+
+def _embed_proxy(request: Request, subpath: str, body: bytes | None = None) -> Response:
+    """Byte-preserving reverse proxy onto the spawned dashboard server."""
+    accept = request.headers.get("accept", "")
+    upstream_path = embed_upstream_path(subpath)
+    timeout = (
+        None
+        if is_event_stream(upstream_path, accept)
+        else _PROXY_TIMEOUT_SECONDS
+    )
+    attempts = 2 if request.method == "GET" else 1
+    last_exc: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            return _embed_once(request, upstream_path, body, accept, timeout)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            last_exc = exc
+            if attempt + 1 < attempts:
+                logger.warning(
+                    "tracedecay dashboard embed proxy failed (%s); retrying once",
+                    exc,
+                )
+                continue
+            logger.exception("tracedecay dashboard embed proxy failed")
+    raise HTTPException(
+        status_code=502,
+        detail=f"tracedecay dashboard unreachable: {last_exc}",
+    )
+
+
+def _embed_once(
+    request: Request,
+    upstream_path: str,
+    body: bytes | None,
+    accept: str,
+    timeout: float | None,
+) -> Response:
+    base = _upstream_base()
+    query = request.url.query
+    url = f"{base}{upstream_path}" + (f"?{query}" if query else "")
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(status_code=502, detail="invalid upstream URL scheme")
+    headers: dict[str, str] = {}
+    content_type = request.headers.get("content-type")
+    if content_type:
+        headers["Content-Type"] = content_type
+    if accept:
+        headers["Accept"] = accept
+    last_event_id = request.headers.get("last-event-id")
+    if last_event_id:
+        headers["Last-Event-ID"] = last_event_id
+    req = urllib.request.Request(
+        url,
+        data=None if request.method in {"GET", "HEAD"} else body,
+        method=request.method,
+        headers=headers,
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=timeout)  # noqa: S310 — loopback/configured upstream only
+    except urllib.error.HTTPError as exc:
+        error_body = exc.read()
+        media = "application/octet-stream"
+        if exc.headers is not None:
+            media = exc.headers.get("Content-Type") or media
+        if is_html_content_type(media):
+            return Response(
+                content=rewrite_dashboard_html(
+                    error_body.decode("utf-8", errors="replace")
+                ),
+                status_code=exc.code,
+                media_type="text/html; charset=utf-8",
+            )
+        return Response(content=error_body, status_code=exc.code, media_type=media)
+
+    media = resp.headers.get("Content-Type", "application/octet-stream")
+    if is_html_content_type(media):
+        payload = rewrite_dashboard_html(resp.read().decode("utf-8", errors="replace"))
+        resp.close()
+        return Response(content=payload, status_code=resp.status, media_type=media)
+
+    def iterate() -> Any:
+        try:
+            while True:
+                chunk = resp.read(65_536)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            resp.close()
+
+    outbound = {
+        key: value
+        for key, value in resp.headers.items()
+        if key.lower() not in _HOP_BY_HOP_HEADERS
+    }
+    return StreamingResponse(
+        iterate(),
+        status_code=resp.status,
+        headers=outbound,
+        media_type=media,
+    )
+
+
 @router.get("/capabilities")
 def get_capabilities() -> JSONResponse:
     """Backend feature discovery (proxied from the tracedecay server).
@@ -460,8 +682,8 @@ def get_holographic(path: str, request: Request) -> JSONResponse:
 
     Maps ``/holographic/<path>`` to upstream
     ``GET /api/plugins/holographic/<path>`` (e.g. ``projection``,
-    ``similarity``, ``fact/{id}``, ``curation/status``, ``curation/activity``),
-    preserving the query string.
+    ``similarity``, ``fact/{id}``, ``oplog``), preserving the query
+    string.
     """
     return _proxy("GET", f"/api/plugins/holographic/{path}", request, None)
 
@@ -471,9 +693,8 @@ async def post_holographic(path: str, request: Request) -> JSONResponse:
     """Catch-all POST proxy for the holographic memory API.
 
     Maps ``/holographic/<path>`` to upstream
-    ``POST /api/plugins/holographic/<path>`` (e.g. ``curate/apply``),
-    forwarding the JSON request body unmodified.
-    (There is no archive/restore: curation deletes are permanent.)
+    ``POST /api/plugins/holographic/<path>``. Request bodies are forwarded
+    unmodified.
 
     ``_proxy`` blocks (urllib + possible spawn/ready wait), so it runs on the
     threadpool so a slow apply round-trip does not stall the event loop.

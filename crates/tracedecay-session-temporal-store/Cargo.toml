@@ -1,0 +1,99 @@
+[package]
+name = "tracedecay-session-temporal-store"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license = "MIT"
+description = "Session-temporal projection, retrieval, and LCM hydration store"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+include = ["/src/**"]
+
+[features]
+# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
+# the feature off, so instrumented call sites compile identically both ways.
+hotpath = [
+    "tracedecay-domain/hotpath",
+    "hotpath/hotpath",
+    "hotpath/tokio",
+    "tracedecay-application/hotpath",
+    "tracedecay-capture/hotpath",
+    "tracedecay-graph-db/hotpath",
+    "tracedecay-query/hotpath",
+    "tracedecay-runtime-core/hotpath",
+    "tracedecay-lcm/hotpath",
+    "tracedecay-sessions/hotpath",
+    "tracedecay-store/hotpath",
+    "tracedecay-temporal-query/hotpath",
+]
+hotpath-alloc = [
+    "tracedecay-domain/hotpath-alloc",
+    "hotpath",
+    "hotpath/hotpath-alloc",
+    "tracedecay-application/hotpath-alloc",
+    "tracedecay-capture/hotpath-alloc",
+    "tracedecay-graph-db/hotpath-alloc",
+    "tracedecay-query/hotpath-alloc",
+    "tracedecay-runtime-core/hotpath-alloc",
+    "tracedecay-lcm/hotpath-alloc",
+    "tracedecay-sessions/hotpath-alloc",
+    "tracedecay-store/hotpath-alloc",
+    "tracedecay-temporal-query/hotpath-alloc",
+]
+hotpath-cpu = [
+    "tracedecay-domain/hotpath-cpu",
+    "hotpath",
+    "hotpath/hotpath-cpu",
+    "tracedecay-application/hotpath-cpu",
+    "tracedecay-capture/hotpath-cpu",
+    "tracedecay-graph-db/hotpath-cpu",
+    "tracedecay-query/hotpath-cpu",
+    "tracedecay-runtime-core/hotpath-cpu",
+    "tracedecay-lcm/hotpath-cpu",
+    "tracedecay-sessions/hotpath-cpu",
+    "tracedecay-store/hotpath-cpu",
+    "tracedecay-temporal-query/hotpath-cpu",
+]
+# Exposes package-owned fixture constructors to dependent package tests only.
+test-helpers = [
+    "tracedecay-graph-db/test-helpers",
+    "tracedecay-runtime-core/test-helpers",
+    "tracedecay-sessions/test-helpers",
+    "tracedecay-temporal-query/test-helpers",
+]
+test-transport = [
+    "test-helpers",
+    "tracedecay-runtime-core/test-transport",
+]
+
+[dependencies]
+getrandom = "0.2"
+hex = "0.4"
+hotpath.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+zeroize = "1.9.0"
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
+tracedecay-capture = { path = "../tracedecay-capture", version = "0.1.0" }
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
+tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
+tracedecay-lcm = { path = "../tracedecay-lcm", version = "0.1.0" }
+tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
+tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
+tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }
+tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", features = ["test-helpers"] }
+# Dev-dep cycle is allowed: this crate's unit tests need the registered
+# global-db fixture surface; production never depends on global-db.
+tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0", features = ["test-helpers"] }

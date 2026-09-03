@@ -106,9 +106,9 @@ a throwaway `HOME` and config directory. Only its auth file is copied in, mode
 `0400`; the copy is deleted on runner exit. The real Claude/Codex profile is
 never loaded or mutated.
 
-Live runs build a debug `tracedecay` binary from the checked-out candidate branch
-in the configured Cargo target (the machine-local `/fast/cargo-target` when
-available) and use it for fixture setup, MCP, hooks, and the throwaway Codex plugin install.
+Live runs build a debug `tracedecay` binary from the checked-out candidate
+branch with ordinary Cargo and use it for fixture setup, MCP, hooks, and the
+throwaway Codex plugin install.
 `TRACEDECAY_BIN` is an explicit override for release-binary comparisons. Every
 Claude condition, including `full`, loads the candidate `plugin/` via
 `--plugin-dir`; Codex `full` installs candidate assets into its throwaway
@@ -165,13 +165,13 @@ enriches the copied fixture at setup so more scenario tiers are gradable:
 ### Seeding prior sessions — a gap
 
 Scenarios like `session_recovery` want prior host sessions bound to the fixture
-path (for `message_search` / `sessions_for`). The `tracedecay sessions ingest`
+path (for `message_search` / `sessions_for`). The `tracedecay sessions import`
 CLI **sweeps provider directories under `HOME`** (`~/.claude/projects/...`,
 `~/.codex/...`); it has **no file-input mode**. Seeding a hermetic session would
 mean writing a synthetic transcript into the operator's real `~/.claude` (which
 the harness deliberately leaves untouched for auth) at the exact cwd-encoded
 path, then ingesting — not hermetic and not cheap. So session-recovery packs stay
-**deferred**. The clean fix is a `tracedecay sessions ingest --from-file <jsonl>`
+**deferred**. A future `tracedecay sessions import --from-file <jsonl>`
 affordance; until then this tier is a documented gap.
 
 ## Scenario schema
@@ -230,7 +230,7 @@ tracedecay call**:
 
 | channel | attributed when… |
 |---------|------------------|
-| `hint-driven` | a hook-injected tool hint appears before the first tracedecay call. Matched on distinctive hint phrasing mirrored from `src/hooks/tool_hints.rs` `CATEGORY_SPECS` (e.g. "route by what you're matching", "before reading whole files, consider…"), not the bare word "tracedecay" — so the system tool listing never false-positives. |
+| `hint-driven` | a hook-injected tool hint appears before the first tracedecay call. Matched on distinctive hint phrasing mirrored from `crates/tracedecay-agent-hosts/src/hooks/tool_hints.rs` `CATEGORY_SPECS` (e.g. "route by what you're matching", "before reading whole files, consider…"), not the bare word "tracedecay" — so the system tool listing never false-positives. |
 | `skill-driven` | a `tracedecay:*` skill invocation (a `Skill` tool call) precedes the first tracedecay call. |
 | `steering-or-description` | nothing fired before the call: the session-start CLAUDE.md steering block or the MCP tool descriptions are the only prior mention that could have driven it. |
 | `unprompted` | the `bare` ablation adopted a tracedecay tool with hints + skills + steering all removed — pure tool-description pull. |
@@ -246,7 +246,7 @@ efficacy** table (count + mean score per channel per host) and a per-host
 ### Hint-signature drift guard
 
 `hint-driven` attribution depends on `HINT_SIGNATURES` in `grade.py` staying in
-sync with the hook messages in `src/hooks/tool_hints.rs` `CATEGORY_SPECS`. That
+sync with the hook messages in `crates/tracedecay-agent-hosts/src/hooks/tool_hints.rs` `CATEGORY_SPECS`. That
 mirror is load-bearing and silent when it breaks: if the source wording drifts
 and a signature stops matching, the hint text still fires in live transcripts
 but the grader no longer recognizes it, so genuinely **hint-driven** adoptions

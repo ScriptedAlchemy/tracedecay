@@ -1,0 +1,1072 @@
+use std::path::Path;
+use std::sync::Arc;
+
+use tracedecay_store::{RuntimeMaintenanceStateV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
+
+use super::capacity::drain_and_close_physical;
+use super::{
+    EvictingRuntime, RegistryEntry, StoreRuntimeKey, StoreRuntimeOwnerAttachment,
+    StoreRuntimeRegistry, StoreRuntimeRegistryFailure,
+};
+use crate::db::DatabaseAuthority;
+
+/// Proof that one exact runtime reached `Closed` after all physical `SQLite`
+/// handles joined and before its registry entry was removed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClosedStoreRuntime {
+    binding: StoreRuntimeBindingV1,
+    verified_locator: VerifiedStoreLocatorV1,
+    path: std::path::PathBuf,
+    opened_file_identity: u64,
+}
+
+impl ClosedStoreRuntime {
+    pub fn binding(&self) -> &StoreRuntimeBindingV1 {
+        &self.binding
+    }
+
+    pub fn verified_locator(&self) -> &VerifiedStoreLocatorV1 {
+        &self.verified_locator
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    #[hotpath::skip]
+    pub const fn opened_file_identity(&self) -> u64 {
+        self.opened_file_identity
+    }
+}
+
+struct CloseReservation {
+    key: StoreRuntimeKey,
+    attempt: u64,
+    owner: Arc<StoreRuntimeOwnerAttachment>,
+}
+
+impl StoreRuntimeRegistry {
+    #[hotpath::measure(label = "runtime_core.registry.close_path")]
+    pub async fn close_path(
+        &self,
+        path: &Path,
+    ) -> Result<Option<ClosedStoreRuntime>, StoreRuntimeRegistryFailure> {
+        let selected = {
+            let state = self.lock_state();
+            let mut selected = state.entries.values().filter_map(|entry| match entry {
+                RegistryEntry::Ready(ready) if ready.owner.locator().path() == path => Some(ready),
+                _ => None,
+            });
+            let Some(ready) = selected.next() else {
+                return Ok(None);
+            };
+            if selected.next().is_some() {
+                return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                    operation: "select exact registered runtime close",
+                    message: format!(
+                        "multiple registered runtimes resolve to database path '{}'",
+                        path.display()
+                    ),
+                });
+            }
+            (ready.owner.binding().clone(), Arc::clone(&ready.owner))
+        };
+        let (binding, owner) = selected;
+        let authority = owner.database_authority.as_ref().ok_or_else(|| {
+            StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "close registered runtime by path",
+                message: "registered runtime has no originating database authority".to_owned(),
+            }
+        })?;
+        owner.validate_database_write_authority(authority, "close registered runtime by path")?;
+        self.close_exact(&binding, authority).await.map(Some)
+    }
+
+    /// Closes one exact runtime for an exclusive maintenance handoff.
+    ///
+    /// The caller retains only the binding and originating authority. Any
+    /// issued database facade, direct runtime reference, or client lease
+    /// refuses the close before physical admission is fenced.
+    #[hotpath::skip]
+    pub async fn close_exact(
+        &self,
+        expected: &StoreRuntimeBindingV1,
+        authority: &DatabaseAuthority,
+    ) -> Result<ClosedStoreRuntime, StoreRuntimeRegistryFailure> {
+        self.close_exact_with_opened_identity(expected, authority, None)
+            .await
+    }
+
+    /// Closes an exact retained runtime after the canonical path has already
+    /// advanced to another inode under an exclusive recovery authority.
+    #[hotpath::skip]
+    pub async fn close_exact_stale_attachment(
+        &self,
+        expected: &StoreRuntimeBindingV1,
+        authority: &DatabaseAuthority,
+        expected_opened_file_identity: u64,
+    ) -> Result<ClosedStoreRuntime, StoreRuntimeRegistryFailure> {
+        self.close_exact_with_opened_identity(
+            expected,
+            authority,
+            Some(expected_opened_file_identity),
+        )
+        .await
+    }
+
+    #[hotpath::measure(label = "runtime_core.registry.close_exact")]
+    async fn close_exact_with_opened_identity(
+        &self,
+        expected: &StoreRuntimeBindingV1,
+        authority: &DatabaseAuthority,
+        stale_opened_file_identity: Option<u64>,
+    ) -> Result<ClosedStoreRuntime, StoreRuntimeRegistryFailure> {
+        let reservation =
+            self.reserve_exact_close(expected, authority, stale_opened_file_identity)?;
+        let registry = self.clone();
+        // The completion task owns the reservation. Dropping this caller's
+        // join handle detaches the task, so physical close still reaches the
+        // matching lifecycle transition and `finish_exact_close`.
+        tokio::spawn(async move {
+            let physical = reservation.owner.clone();
+            let mut outcome =
+                tokio::task::spawn_blocking(move || drain_and_close_physical(&physical))
+                    .await
+                    .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                        operation: "join exact registered runtime close",
+                        message: error.to_string(),
+                    })
+                    .and_then(|result| result);
+
+            if outcome.is_ok() {
+                outcome = match stale_opened_file_identity {
+                    Some(expected_identity)
+                        if reservation.owner.opened_file_identity() == Some(expected_identity) =>
+                    {
+                        Ok(())
+                    }
+                    Some(_) => Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                        operation: "complete stale registered runtime close",
+                        message: "retained opened identity changed during stale close".to_owned(),
+                    }),
+                    None => reservation
+                        .owner
+                        .validate_opened_file_identity("complete exact registered runtime close")
+                        .map(|_| ()),
+                };
+            }
+            if outcome.is_ok() {
+                outcome = reservation
+                    .owner
+                    .runtime()
+                    .transition(RuntimeMaintenanceStateV1::Closed)
+                    .map_err(
+                        |error| StoreRuntimeRegistryFailure::RuntimeLifecycleFailed {
+                            message: error.to_string(),
+                        },
+                    );
+            } else {
+                let _ = reservation
+                    .owner
+                    .runtime()
+                    .transition(RuntimeMaintenanceStateV1::Faulted);
+            }
+            registry.finish_exact_close(reservation, outcome)
+        })
+        .await
+        .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+            operation: "join cancellation-safe exact registered runtime close",
+            message: error.to_string(),
+        })?
+    }
+
+    fn reserve_exact_close(
+        &self,
+        expected: &StoreRuntimeBindingV1,
+        authority: &DatabaseAuthority,
+        stale_opened_file_identity: Option<u64>,
+    ) -> Result<CloseReservation, StoreRuntimeRegistryFailure> {
+        let key = StoreRuntimeKey::from_binding(expected);
+        let mut state = self.lock_state();
+        let Some(entry) = state.entries.remove(&key) else {
+            return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "reserve exact registered runtime close",
+                message: "exact registered runtime is not mounted".to_owned(),
+            });
+        };
+        let ready = match entry {
+            RegistryEntry::Ready(ready) => ready,
+            RegistryEntry::Opening(opening) => {
+                state.entries.insert(key, RegistryEntry::Opening(opening));
+                return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                    operation: "reserve exact registered runtime close",
+                    message: "exact registered runtime is still opening".to_owned(),
+                });
+            }
+            RegistryEntry::Retiring(retiring) => {
+                state
+                    .entries
+                    .insert(key.clone(), RegistryEntry::Retiring(retiring));
+                return Err(StoreRuntimeRegistryFailure::RuntimeRetirementInProgress {
+                    key: Box::new(key),
+                });
+            }
+            RegistryEntry::Committing(committing) => {
+                state
+                    .entries
+                    .insert(key.clone(), RegistryEntry::Committing(committing));
+                return Err(StoreRuntimeRegistryFailure::RuntimeRetirementCommitting {
+                    key: Box::new(key),
+                });
+            }
+            RegistryEntry::Faulted(faulted) => {
+                state
+                    .entries
+                    .insert(key.clone(), RegistryEntry::Faulted(faulted));
+                return Err(StoreRuntimeRegistryFailure::RuntimeRetirementFaulted {
+                    key: Box::new(key),
+                });
+            }
+            RegistryEntry::DurabilityUncertain(faulted) => {
+                state
+                    .entries
+                    .insert(key.clone(), RegistryEntry::DurabilityUncertain(faulted));
+                return Err(
+                    StoreRuntimeRegistryFailure::RuntimeRetirementDurabilityUncertain {
+                        key: Box::new(key),
+                    },
+                );
+            }
+            RegistryEntry::Evicting(evicting) => {
+                state
+                    .entries
+                    .insert(key.clone(), RegistryEntry::Evicting(evicting));
+                return Err(StoreRuntimeRegistryFailure::RuntimeEvictionInProgress {
+                    key: Box::new(key),
+                });
+            }
+        };
+        if ready.owner.binding() != expected {
+            let actual = ready.owner.binding().clone();
+            state.entries.insert(key, RegistryEntry::Ready(ready));
+            return Err(StoreRuntimeRegistryFailure::RuntimeBindingMismatch {
+                expected: Box::new(expected.clone()),
+                actual: Box::new(actual),
+            });
+        }
+        let retained_authority = ready.owner.database_authority.as_ref();
+        let authority_matches = retained_authority.is_some_and(|retained| {
+            retained.token() == authority.token()
+                && retained.role() == authority.role()
+                && retained.database_identity_key() == authority.database_identity_key()
+        });
+        if !authority_matches {
+            state.entries.insert(key, RegistryEntry::Ready(ready));
+            return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "reserve exact registered runtime close",
+                message: "close authority does not match the originating runtime authority"
+                    .to_owned(),
+            });
+        }
+        if let Some(expected_identity) = stale_opened_file_identity {
+            if let Err(error) =
+                authority.require_active_write_scope("reserve stale registered runtime close")
+            {
+                state.entries.insert(key, RegistryEntry::Ready(ready));
+                return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                    operation: "reserve stale registered runtime close",
+                    message: error.to_string(),
+                });
+            }
+            if ready.owner.opened_file_identity() != Some(expected_identity) {
+                state.entries.insert(key, RegistryEntry::Ready(ready));
+                return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                    operation: "reserve stale registered runtime close",
+                    message: "retained runtime does not match the expected opened identity"
+                        .to_owned(),
+                });
+            }
+        } else if let Err(failure) = ready
+            .owner
+            .validate_database_write_authority(authority, "reserve exact registered runtime close")
+        {
+            state.entries.insert(key, RegistryEntry::Ready(ready));
+            return Err(failure);
+        }
+
+        // Public leases cannot reveal a raw runtime or a reference count. The
+        // canonical client/operation counters are the retirement authority,
+        // including database facades that retain a client lease.
+        let external_handles = 0;
+        let external_runtime_references = 0;
+        let leases = ready.owner.runtime().health_snapshot();
+        let client_leases = leases.client_leases;
+        let operation_leases = leases.operation_leases;
+        if external_handles != 0
+            || external_runtime_references != 0
+            || client_leases != 0
+            || operation_leases != 0
+        {
+            let binding = ready.owner.binding().clone();
+            state.entries.insert(key, RegistryEntry::Ready(ready));
+            return Err(StoreRuntimeRegistryFailure::RuntimeCloseBlocked {
+                binding: Box::new(binding),
+                external_handles,
+                external_runtime_references,
+                client_leases,
+                operation_leases,
+            });
+        }
+        let Some(attempt) = state.next_eviction_attempt.checked_add(1) else {
+            state.entries.insert(key, RegistryEntry::Ready(ready));
+            return Err(StoreRuntimeRegistryFailure::EvictionAttemptExhausted);
+        };
+        state.next_eviction_attempt = attempt;
+        if let Err(error) = ready
+            .owner
+            .runtime()
+            .transition(RuntimeMaintenanceStateV1::Draining)
+        {
+            state.entries.insert(key, RegistryEntry::Ready(ready));
+            return Err(StoreRuntimeRegistryFailure::RuntimeLifecycleFailed {
+                message: error.to_string(),
+            });
+        }
+        let owner = ready.owner;
+        state.entries.insert(
+            key.clone(),
+            RegistryEntry::Evicting(EvictingRuntime {
+                attempt,
+                owner: owner.clone(),
+            }),
+        );
+        Ok(CloseReservation {
+            key,
+            attempt,
+            owner,
+        })
+    }
+
+    fn finish_exact_close(
+        &self,
+        reservation: CloseReservation,
+        outcome: Result<(), StoreRuntimeRegistryFailure>,
+    ) -> Result<ClosedStoreRuntime, StoreRuntimeRegistryFailure> {
+        if outcome.is_err()
+            && reservation.owner.runtime().maintenance_state() != RuntimeMaintenanceStateV1::Faulted
+        {
+            let _ = reservation
+                .owner
+                .runtime()
+                .transition(RuntimeMaintenanceStateV1::Faulted);
+        }
+        let mut state = self.lock_state();
+        let entry = state.entries.remove(&reservation.key);
+        let evicting = match entry {
+            Some(RegistryEntry::Evicting(evicting))
+                if evicting.attempt == reservation.attempt
+                    && evicting.owner.binding() == reservation.owner.binding() =>
+            {
+                evicting
+            }
+            Some(entry) => {
+                state.entries.insert(reservation.key.clone(), entry);
+                return Err(StoreRuntimeRegistryFailure::EvictionReservationLost {
+                    key: Box::new(reservation.key),
+                });
+            }
+            None => {
+                return Err(StoreRuntimeRegistryFailure::EvictionReservationLost {
+                    key: Box::new(reservation.key),
+                });
+            }
+        };
+        if let Err(failure) = outcome {
+            state.entries.insert(
+                reservation.key,
+                RegistryEntry::Evicting(EvictingRuntime {
+                    attempt: evicting.attempt,
+                    owner: evicting.owner,
+                }),
+            );
+            return Err(failure);
+        }
+        if reservation.key.is_profile()
+            && state
+                .profile_authorities
+                .get(reservation.key.shard_id())
+                .is_some_and(|binding| binding == reservation.owner.binding())
+        {
+            state.profile_authorities.remove(reservation.key.shard_id());
+        }
+        let proof = ClosedStoreRuntime {
+            binding: reservation.owner.binding().clone(),
+            verified_locator: reservation.owner.locator().verified().clone(),
+            path: reservation.owner.locator().path().to_path_buf(),
+            opened_file_identity: reservation.owner.opened_file_identity().unwrap_or_default(),
+        };
+        drop(state);
+        drop(evicting);
+        hotpath::gauge!("runtime_core.registry.runtimes_ready").dec(1.0);
+        Ok(proof)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fmt::Debug;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tracedecay_domain::{
+        BrainId, LocatorDigest, ProjectId, RepositoryId, UserProfileId, UtcMicros, WorktreeId,
+    };
+    use tracedecay_store::{
+        CodeShardScopeV1, RuntimeLeaseIdV1, RuntimeLeaseV1, RuntimeMaintenanceStateV1,
+        StoreClientIdV1, StoreIncarnationV1, StoreShardIdV1, StoreShardScopeV1,
+        VerifiedStoreLocatorV1,
+    };
+
+    use super::*;
+    use crate::store_runtime::registry::{
+        LifecycleShardRuntimePublisher, PhysicalRuntimeAttachment, PhysicalRuntimeSnapshot,
+        ProfileAuthorityPinResult, PublishedShardRuntime, ResolvedStoreLocator,
+        ShardRuntimeBuildRequest, ShardRuntimePublisher, StoreRuntimeClientLease,
+        StoreRuntimeLookup, StoreRuntimeOpenBegin, StoreRuntimeOpenMode, StoreRuntimeOpenRequest,
+        StoreRuntimeOpenResult, StoreRuntimeRegistryConfig, StoreRuntimeRegistryFuture,
+        StoreRuntimeResolver,
+    };
+    use crate::store_runtime::shard::ShardRuntime;
+
+    fn id<T>(value: &str) -> T
+    where
+        T: TryFrom<String>,
+        <T as TryFrom<String>>::Error: Debug,
+    {
+        T::try_from(value.to_owned()).unwrap()
+    }
+
+    fn profile_shard() -> StoreShardIdV1 {
+        StoreShardIdV1::profile(
+            id::<BrainId>("brain.close-exact"),
+            id::<UserProfileId>("profile.close-exact"),
+        )
+    }
+
+    fn code_shard() -> StoreShardIdV1 {
+        code_shard_for("worktree.close-exact")
+    }
+
+    fn code_shard_for(worktree_id: &str) -> StoreShardIdV1 {
+        StoreShardIdV1::code(
+            id::<BrainId>("brain.close-exact"),
+            id::<UserProfileId>("profile.close-exact"),
+            id::<ProjectId>("project.close-exact"),
+            id::<RepositoryId>("repository.close-exact"),
+            CodeShardScopeV1::Worktree {
+                worktree_id: id::<WorktreeId>(worktree_id),
+            },
+        )
+    }
+
+    struct FixtureResolver {
+        profile_path: PathBuf,
+    }
+
+    impl StoreRuntimeResolver for FixtureResolver {
+        fn resolve<'a>(
+            &'a self,
+            key: &'a StoreRuntimeKey,
+            _mode: StoreRuntimeOpenMode,
+            _database_authority: Option<&'a DatabaseAuthority>,
+        ) -> StoreRuntimeRegistryFuture<'a, Result<ResolvedStoreLocator, StoreRuntimeRegistryFailure>>
+        {
+            let verified = VerifiedStoreLocatorV1::new(
+                key.shard_id().clone(),
+                key.incarnation(),
+                LocatorDigest::new(format!("sha256:{}", "c".repeat(64))).unwrap(),
+            );
+            let path = _database_authority.map_or_else(
+                || self.profile_path.clone(),
+                |authority| authority.canonical_database_path().to_path_buf(),
+            );
+            Box::pin(async move { Ok(ResolvedStoreLocator::new(verified, path)) })
+        }
+    }
+
+    async fn seed_final_graph_db(path: PathBuf) -> PathBuf {
+        let connection = crate::db::engine::TestConnection::open(&path);
+        crate::db::migrations::create_schema_connection(&connection)
+            .await
+            .expect("seed exact final graph schema");
+        drop(connection);
+        path.canonicalize().unwrap()
+    }
+
+    async fn mount_code_runtime(
+        path: PathBuf,
+    ) -> (
+        StoreRuntimeRegistry,
+        StoreRuntimeClientLease,
+        StoreRuntimeClientLease,
+        DatabaseAuthority,
+    ) {
+        let path = seed_final_graph_db(path).await;
+        let authority =
+            DatabaseAuthority::for_runtime(&path, "mount exact-close code runtime").unwrap();
+        let profile_path = path.with_file_name("profile.db");
+        rusqlite::Connection::open(&profile_path).unwrap();
+        let profile_path = profile_path.canonicalize().unwrap();
+        let registry = StoreRuntimeRegistry::new(
+            Arc::new(FixtureResolver { profile_path }),
+            Arc::new(LifecycleShardRuntimePublisher),
+        );
+        let incarnation = StoreIncarnationV1::new(1).unwrap();
+        let profile = match registry
+            .open(StoreRuntimeOpenRequest::new(
+                profile_shard(),
+                incarnation,
+                None,
+            ))
+            .await
+        {
+            StoreRuntimeOpenResult::Published(handle) => handle,
+            StoreRuntimeOpenResult::Failed(failure) => {
+                panic!("profile publication failed: {failure:?}")
+            }
+        };
+        let pin = match registry.profile_authority_pin(&profile_shard()) {
+            ProfileAuthorityPinResult::Pinned(pin) => pin,
+            other => panic!("profile pin failed: {other:?}"),
+        };
+        let code = match registry
+            .open(StoreRuntimeOpenRequest::new_authorized(
+                code_shard(),
+                incarnation,
+                Some(pin),
+                authority.clone(),
+            ))
+            .await
+        {
+            StoreRuntimeOpenResult::Published(handle) => handle,
+            StoreRuntimeOpenResult::Failed(failure) => {
+                panic!("code publication failed: {failure:?}")
+            }
+        };
+        (registry, profile, code, authority)
+    }
+
+    fn active_lease(binding: &StoreRuntimeBindingV1) -> RuntimeLeaseV1 {
+        let now = super::super::utc_now();
+        RuntimeLeaseV1 {
+            lease_id: RuntimeLeaseIdV1::new("lease.close-exact").unwrap(),
+            binding: binding.clone(),
+            holder: StoreClientIdV1::new("client.close-exact").unwrap(),
+            acquired_at: UtcMicros(now.0.saturating_sub(1_000_000)),
+            expires_at: UtcMicros(now.0.saturating_add(60_000_000)),
+        }
+    }
+
+    #[tokio::test]
+    async fn close_path_rejects_single_runtime_without_retained_authority() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("runtime.db");
+        let (registry, profile, code, _authority) = mount_code_runtime(path).await;
+        let profile_path = profile.canonical_path().to_path_buf();
+
+        assert!(matches!(
+            registry.close_path(&profile_path).await,
+            Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "close registered runtime by path",
+                message,
+            }) if message == "registered runtime has no originating database authority"
+        ));
+        assert!(matches!(
+            registry.lookup(profile.binding()),
+            StoreRuntimeLookup::Ready(_)
+        ));
+
+        drop(code);
+        drop(profile);
+    }
+
+    #[tokio::test]
+    async fn close_path_detects_duplicate_path_before_authority_validation() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("runtime.db");
+        let path = seed_final_graph_db(path).await;
+        let authority =
+            DatabaseAuthority::for_runtime(&path, "mount duplicate-path code runtime").unwrap();
+        let registry = StoreRuntimeRegistry::new(
+            Arc::new(FixtureResolver {
+                profile_path: path.clone(),
+            }),
+            Arc::new(LifecycleShardRuntimePublisher),
+        );
+        let incarnation = StoreIncarnationV1::new(1).unwrap();
+        let profile = match registry
+            .open(StoreRuntimeOpenRequest::new_read_only(
+                profile_shard(),
+                incarnation,
+                None,
+            ))
+            .await
+        {
+            StoreRuntimeOpenResult::Published(handle) => handle,
+            StoreRuntimeOpenResult::Failed(failure) => {
+                panic!("profile publication failed: {failure:?}")
+            }
+        };
+        let pin = match registry.profile_authority_pin(&profile_shard()) {
+            ProfileAuthorityPinResult::Pinned(pin) => pin,
+            other => panic!("profile pin failed: {other:?}"),
+        };
+        let code = match registry
+            .open(StoreRuntimeOpenRequest::new_authorized(
+                code_shard(),
+                incarnation,
+                Some(pin),
+                authority,
+            ))
+            .await
+        {
+            StoreRuntimeOpenResult::Published(handle) => handle,
+            StoreRuntimeOpenResult::Failed(failure) => {
+                panic!("code publication failed: {failure:?}")
+            }
+        };
+        let shared_path = code.canonical_path().to_path_buf();
+
+        assert!(matches!(
+            registry.close_path(&shared_path).await,
+            Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "select exact registered runtime close",
+                message,
+            }) if message.contains("multiple registered runtimes")
+        ));
+        assert!(matches!(
+            registry.lookup(profile.binding()),
+            StoreRuntimeLookup::Ready(_)
+        ));
+        assert!(matches!(
+            registry.lookup(code.binding()),
+            StoreRuntimeLookup::Ready(_)
+        ));
+
+        drop(code);
+        drop(profile);
+    }
+
+    #[tokio::test]
+    async fn exact_close_refuses_client_and_direct_leases_before_closing() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("runtime.db");
+        let (registry, profile, code, authority) = mount_code_runtime(path.clone()).await;
+        let binding = code.binding().clone();
+
+        assert!(matches!(
+            registry.close_exact(&binding, &authority).await,
+            Err(StoreRuntimeRegistryFailure::RuntimeCloseBlocked {
+                external_handles: 0,
+                external_runtime_references: 0,
+                client_leases: 1,
+                operation_leases: 0,
+                ..
+            })
+        ));
+        assert_eq!(
+            code.health_snapshot().state,
+            RuntimeMaintenanceStateV1::Ready
+        );
+
+        let lease = active_lease(&binding);
+        assert!(matches!(
+            registry.acquire_lease(lease.clone()),
+            super::super::StoreRuntimeLeaseAcquireResult::Acquired(_)
+        ));
+        drop(code);
+        assert!(matches!(
+            registry.close_exact(&binding, &authority).await,
+            Err(StoreRuntimeRegistryFailure::RuntimeCloseBlocked {
+                external_handles: 0,
+                external_runtime_references: 0,
+                client_leases: 1,
+                operation_leases: 0,
+                ..
+            })
+        ));
+        assert!(registry.release_lease(&binding, &lease.lease_id));
+
+        let proof = registry.close_exact(&binding, &authority).await.unwrap();
+        assert_eq!(proof.binding(), &binding);
+        assert_eq!(proof.path(), authority.canonical_database_path());
+        assert_eq!(
+            proof.opened_file_identity(),
+            crate::db::sqlite_generation_identity(proof.path()).unwrap()
+        );
+        assert_eq!(proof.verified_locator().shard_id, binding.shard_id);
+        assert!(matches!(
+            registry.lookup(&binding),
+            StoreRuntimeLookup::Missing { .. }
+        ));
+        drop(profile);
+    }
+
+    #[tokio::test]
+    async fn exact_close_refuses_an_operation_token_after_the_client_drops() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("runtime.db");
+        let (registry, profile, code, authority) = mount_code_runtime(path).await;
+        let binding = code.binding().clone();
+        let operation = code.begin_operation().unwrap();
+        drop(code);
+
+        assert!(matches!(
+            registry.close_exact(&binding, &authority).await,
+            Err(StoreRuntimeRegistryFailure::RuntimeCloseBlocked {
+                external_handles: 0,
+                external_runtime_references: 0,
+                client_leases: 0,
+                operation_leases: 1,
+                ..
+            })
+        ));
+        let StoreRuntimeLookup::Ready(retained) = registry.lookup(&binding) else {
+            panic!("an operation-blocked exact close must leave the runtime ready");
+        };
+        assert_eq!(
+            retained.health_snapshot().state,
+            RuntimeMaintenanceStateV1::Ready
+        );
+        assert_eq!(retained.health_snapshot().operation_leases, 1);
+        drop(retained);
+
+        drop(operation);
+        let proof = registry.close_exact(&binding, &authority).await.unwrap();
+        assert_eq!(proof.binding(), &binding);
+        assert!(matches!(
+            registry.lookup(&binding),
+            StoreRuntimeLookup::Missing { .. }
+        ));
+        drop(profile);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stale_exact_close_uses_retained_binding_authority_and_opened_identity() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("runtime.db");
+        let (registry, profile, code, authority) = mount_code_runtime(path.clone()).await;
+        let binding = code.binding().clone();
+        let opened_identity = code.opened_file_identity().unwrap();
+        let detached = path.with_extension("detached.db");
+        let replacement = path.with_extension("replacement.db");
+        rusqlite::Connection::open(&replacement).unwrap();
+        std::fs::rename(&path, &detached).unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        drop(code);
+
+        let closed = registry
+            .close_exact_stale_attachment(&binding, &authority, opened_identity)
+            .await
+            .unwrap();
+        assert_eq!(closed.binding(), &binding);
+        assert_eq!(closed.opened_file_identity(), opened_identity);
+        drop(profile);
+    }
+
+    #[tokio::test]
+    async fn destructive_reservation_fences_open_until_preserved_store_reopens() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("runtime.db");
+        let (registry, profile, code, authority) = mount_code_runtime(path.clone()).await;
+        let old_runtime_identity = code.runtime_identity();
+        let authority_token = authority.token().to_owned();
+        drop(code);
+
+        let reservation = registry
+            .begin_destructive_maintenance(
+                super::super::DestructiveMaintenanceTarget::new(temporary.path(), [path.clone()])
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reservation.closed().len(), 1);
+
+        let pin = match registry.profile_authority_pin(&profile_shard()) {
+            ProfileAuthorityPinResult::Pinned(pin) => pin,
+            other => panic!("profile pin failed: {other:?}"),
+        };
+        let open_registry = registry.clone();
+        let open_authority = authority.clone();
+        let pending = tokio::spawn(async move {
+            open_registry
+                .open(StoreRuntimeOpenRequest::new_authorized(
+                    code_shard(),
+                    StoreIncarnationV1::new(1).unwrap(),
+                    Some(pin),
+                    open_authority,
+                ))
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !pending.is_finished(),
+            "ordinary opens must wait for destructive maintenance"
+        );
+
+        reservation.abort_preserved().unwrap();
+        let reopened = match tokio::time::timeout(Duration::from_secs(2), pending)
+            .await
+            .expect("reserved open must wake")
+            .unwrap()
+        {
+            StoreRuntimeOpenResult::Published(handle) => handle,
+            StoreRuntimeOpenResult::Failed(failure) => {
+                panic!("reserved open failed after release: {failure:?}")
+            }
+        };
+        assert_ne!(reopened.runtime_identity(), old_runtime_identity);
+        assert_eq!(
+            reopened
+                .database_authority("verify reopened destructive store")
+                .unwrap()
+                .token(),
+            authority_token
+        );
+        drop(reopened);
+        drop(profile);
+    }
+
+    #[tokio::test]
+    async fn destructive_reservation_atomically_rejects_open_begin() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("runtime.db");
+        let (registry, profile, code, authority) = mount_code_runtime(path.clone()).await;
+        drop(code);
+
+        let reservation = registry
+            .begin_destructive_maintenance(
+                super::super::DestructiveMaintenanceTarget::new(temporary.path(), [path]).unwrap(),
+            )
+            .await
+            .unwrap();
+        let pin = match registry.profile_authority_pin(&profile_shard()) {
+            ProfileAuthorityPinResult::Pinned(pin) => pin,
+            other => panic!("profile pin failed: {other:?}"),
+        };
+
+        assert!(matches!(
+            registry.begin_or_join_open(&StoreRuntimeOpenRequest::new_authorized(
+                code_shard(),
+                StoreIncarnationV1::new(1).unwrap(),
+                Some(pin),
+                authority,
+            )),
+            StoreRuntimeOpenBegin::Rejected(
+                StoreRuntimeRegistryFailure::DestructiveMaintenanceInProgress { .. }
+            )
+        ));
+
+        reservation.abort_preserved().unwrap();
+        drop(profile);
+    }
+
+    #[tokio::test]
+    async fn failed_destructive_close_releases_reservation_for_retry() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("runtime.db");
+        let (registry, profile, code, _authority) = mount_code_runtime(path.clone()).await;
+        let target =
+            super::super::DestructiveMaintenanceTarget::new(temporary.path(), [path]).unwrap();
+
+        assert!(matches!(
+            registry.begin_destructive_maintenance(target.clone()).await,
+            Err(StoreRuntimeRegistryFailure::RuntimeCloseBlocked {
+                external_handles: 0,
+                external_runtime_references: 0,
+                client_leases: 1,
+                operation_leases: 0,
+                ..
+            })
+        ));
+
+        drop(code);
+        let retry = registry
+            .begin_destructive_maintenance(target)
+            .await
+            .expect("failed close must release destructive reservation");
+        retry.abort_preserved().unwrap();
+        drop(profile);
+    }
+
+    #[tokio::test]
+    async fn destructive_reservation_does_not_block_unrelated_database_under_same_root() {
+        let temporary = tempfile::tempdir().unwrap();
+        let reserved_path = temporary.path().join("reserved.db");
+        let unrelated_path = seed_final_graph_db(temporary.path().join("unrelated.db")).await;
+        let (registry, profile, code, _authority) = mount_code_runtime(reserved_path.clone()).await;
+        drop(code);
+        let reservation = registry
+            .begin_destructive_maintenance(
+                super::super::DestructiveMaintenanceTarget::new(temporary.path(), [reserved_path])
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let pin = match registry.profile_authority_pin(&profile_shard()) {
+            ProfileAuthorityPinResult::Pinned(pin) => pin,
+            other => panic!("profile pin failed: {other:?}"),
+        };
+        let authority =
+            DatabaseAuthority::for_runtime(&unrelated_path, "mount unrelated database").unwrap();
+
+        let unrelated = tokio::time::timeout(
+            Duration::from_secs(2),
+            registry.open(StoreRuntimeOpenRequest::new_authorized(
+                code_shard_for("worktree.unrelated"),
+                StoreIncarnationV1::new(1).unwrap(),
+                Some(pin),
+                authority,
+            )),
+        )
+        .await
+        .expect("an exact-path reservation must not block another database");
+        let unrelated = match unrelated {
+            StoreRuntimeOpenResult::Published(handle) => handle,
+            StoreRuntimeOpenResult::Failed(failure) => {
+                panic!("unrelated database open failed: {failure:?}")
+            }
+        };
+
+        drop(unrelated);
+        reservation.abort_preserved().unwrap();
+        drop(profile);
+    }
+
+    struct FailingAttachment {
+        opened_file_identity: u64,
+    }
+
+    impl PhysicalRuntimeAttachment for FailingAttachment {
+        fn snapshot(&self) -> PhysicalRuntimeSnapshot {
+            PhysicalRuntimeSnapshot {
+                healthy: true,
+                writer_present: true,
+                ..PhysicalRuntimeSnapshot::default()
+            }
+        }
+
+        fn opened_file_identity(&self) -> Result<u64, String> {
+            Ok(self.opened_file_identity)
+        }
+
+        fn drain(&self) -> Result<(), String> {
+            Err("injected exact-close drain failure".to_owned())
+        }
+
+        fn close_and_join(&self) -> Result<(), String> {
+            panic!("close must not follow a failed drain")
+        }
+    }
+
+    struct FailingPublisher;
+
+    impl ShardRuntimePublisher for FailingPublisher {
+        fn publish(
+            &self,
+            request: ShardRuntimeBuildRequest,
+        ) -> StoreRuntimeRegistryFuture<
+            '_,
+            Result<PublishedShardRuntime, StoreRuntimeRegistryFailure>,
+        > {
+            Box::pin(async move {
+                let runtime = ShardRuntime::new(
+                    request.binding().clone(),
+                    matches!(request.binding().shard_id.scope, StoreShardScopeV1::Profile),
+                );
+                runtime
+                    .transition(RuntimeMaintenanceStateV1::Opening)
+                    .and_then(|()| runtime.transition(RuntimeMaintenanceStateV1::Ready))
+                    .unwrap();
+                let opened_file_identity =
+                    crate::db::sqlite_generation_identity(request.locator().path()).unwrap();
+                Ok(PublishedShardRuntime::new(
+                    runtime,
+                    Box::new(FailingAttachment {
+                        opened_file_identity,
+                    }),
+                ))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_exact_close_retains_a_faulted_evicting_runtime() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("runtime.db");
+        rusqlite::Connection::open(&path).unwrap();
+        let path = path.canonicalize().unwrap();
+        let authority = DatabaseAuthority::for_runtime(&path, "mount failing exact-close").unwrap();
+        let profile_path = path.with_file_name("profile.db");
+        rusqlite::Connection::open(&profile_path).unwrap();
+        let profile_path = profile_path.canonicalize().unwrap();
+        let registry = StoreRuntimeRegistry::with_config(
+            Arc::new(FixtureResolver { profile_path }),
+            Arc::new(FailingPublisher),
+            StoreRuntimeRegistryConfig::default(),
+        )
+        .unwrap();
+        let incarnation = StoreIncarnationV1::new(1).unwrap();
+        let profile = match registry
+            .open(StoreRuntimeOpenRequest::new(
+                profile_shard(),
+                incarnation,
+                None,
+            ))
+            .await
+        {
+            StoreRuntimeOpenResult::Published(handle) => handle,
+            StoreRuntimeOpenResult::Failed(failure) => {
+                panic!("profile publication failed: {failure:?}")
+            }
+        };
+        let pin = match registry.profile_authority_pin(&profile_shard()) {
+            ProfileAuthorityPinResult::Pinned(pin) => pin,
+            other => panic!("profile pin failed: {other:?}"),
+        };
+        let code = match registry
+            .open(StoreRuntimeOpenRequest::new_authorized(
+                code_shard(),
+                incarnation,
+                Some(pin),
+                authority.clone(),
+            ))
+            .await
+        {
+            StoreRuntimeOpenResult::Published(handle) => handle,
+            StoreRuntimeOpenResult::Failed(failure) => {
+                panic!("code publication failed: {failure:?}")
+            }
+        };
+        let binding = code.binding().clone();
+        drop(code);
+
+        assert!(registry.close_exact(&binding, &authority).await.is_err());
+        assert!(matches!(
+            registry.lookup(&binding),
+            StoreRuntimeLookup::Evicting { .. }
+        ));
+        let state = registry.lock_state();
+        let entry = state.entries.get(&StoreRuntimeKey::from_binding(&binding));
+        assert!(matches!(
+            entry,
+            Some(RegistryEntry::Evicting(evicting))
+                if evicting.owner.runtime().maintenance_state()
+                    == RuntimeMaintenanceStateV1::Faulted
+        ));
+        drop(state);
+        drop(profile);
+    }
+}

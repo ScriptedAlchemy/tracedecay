@@ -1,21 +1,24 @@
 //! Kilo CLI agent integration.
 //!
-//! Handles registration of the tracedecay MCP server in Kilo CLI config files.
-//! Kilo uses the `mcp` key (not `mcpServers`) with entries having `type`,
-//! `command` (as array), and `enabled` fields.
+//! Owns the profile-wide Kilo CLI MCP registration lifecycle. Kilo uses the `mcp` key (not
+//! `mcpServers`) with entries having `type`, `command` (as array), and
+//! `enabled` fields.
+//!
+//! Kilo documents local stdio servers directly in `kilo.jsonc`; its CLI does
+//! not expose an equivalent reversible local-server command. TraceDecay merges
+//! only `mcp.tracedecay` and removes only that key. Kilo plugins and hooks stay
+//! uninstalled until a real native fixture admits their protocol.
 
-use std::path::Path;
-
-use serde_json::json;
+use std::path::{Path, PathBuf};
 
 use crate::errors::Result;
 
 use super::{
-    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, backup_and_write_json,
-    backup_config_file, load_jsonc_file, load_jsonc_file_strict, safe_write_json_file,
+    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
+    McpDoctorLabels, McpUninstallPolicy, config_backup_path, doctor_check_mcp_registration,
+    install_mcp_server_entry, load_jsonc_file, uninstall_mcp_server_entry,
 };
 
-/// Kilo CLI agent.
 pub struct KiloIntegration;
 
 fn kilo_config_dir(home: &Path) -> std::path::PathBuf {
@@ -35,42 +38,40 @@ impl AgentIntegration for KiloIntegration {
         "kilo"
     }
 
-    fn install(&self, ctx: &InstallContext) -> Result<()> {
-        let config_dir = kilo_config_dir(&ctx.home);
-        std::fs::create_dir_all(&config_dir).ok();
-        let config_path = kilo_config_path(&ctx.home);
-        install_mcp_server(&config_path, &ctx.tracedecay_bin)?;
-
-        eprintln!();
-        eprintln!("Setup complete. Next steps:");
-        eprintln!("  1. cd into your project and run: tracedecay init");
-        eprintln!("  2. Start a new Kilo CLI session — tracedecay tools are now available");
-        Ok(())
-    }
-
-    fn supports_local_install(&self) -> bool {
-        true
-    }
-
-    fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
-        let mcp_path = project_path.join("kilo.json");
-        super::ensure_project_local_safe_path(project_path, &mcp_path)?;
-        install_mcp_server(&mcp_path, &ctx.tracedecay_bin)
-    }
-
-    fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
-        let config_path = kilo_config_path(&ctx.home);
-        uninstall_mcp_server(&config_path);
-
-        eprintln!();
-        eprintln!("Uninstall complete. Tracedecay has been removed from Kilo CLI.");
-        eprintln!("Start a new Kilo CLI session for changes to take effect.");
-        Ok(())
-    }
-
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         eprintln!("\n\x1b[1mKilo CLI integration\x1b[0m");
         doctor_check_settings(dc, &ctx.home);
+    }
+
+    fn host_component_registration(
+        &self,
+        component: super::host_bundle_v2::HostBundleComponentV1,
+        ctx: &HealthcheckContext,
+    ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
+        use super::host_bundle_v2::HostBundleRegistrationStateV1 as State;
+
+        if component != super::host_bundle_v2::HostBundleComponentV1::ContextMcp {
+            return State::Missing;
+        }
+
+        let path = kilo_config_path(&ctx.home);
+        let Ok(bytes) = std::fs::read_to_string(path) else {
+            return State::Missing;
+        };
+        let settings = super::parse_jsonc(&bytes);
+        if settings
+            .pointer("/mcp/tracedecay/enabled")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+            && settings
+                .pointer("/mcp/tracedecay/command")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|args| args.iter().any(|arg| arg.as_str() == Some("serve")))
+        {
+            State::Current
+        } else {
+            State::Missing
+        }
     }
 
     fn is_detected(&self, home: &Path) -> bool {
@@ -81,98 +82,59 @@ impl AgentIntegration for KiloIntegration {
         Some(kilo_config_path(home))
     }
 
+    fn host_component_registration_paths(
+        &self,
+        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        home: &Path,
+    ) -> Vec<PathBuf> {
+        if components == [super::host_bundle_v2::HostBundleComponentV1::ContextMcp] {
+            let path = kilo_config_path(home);
+            vec![path.clone(), config_backup_path(&path)]
+        } else {
+            Vec::new()
+        }
+    }
+
+    #[hotpath::measure(label = "kilo_mcp_install")]
+    fn activate_deployed_host_component_registration(
+        &self,
+        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        ctx: &InstallContext,
+    ) -> Result<()> {
+        if components.contains(&super::host_bundle_v2::HostBundleComponentV1::ContextMcp) {
+            install_mcp_server_entry(
+                &kilo_config_path(&ctx.home),
+                "mcp",
+                serde_json::json!({
+                    "type": "local",
+                    "command": [ctx.tracedecay_bin.clone(), "serve"],
+                    "enabled": true
+                }),
+                "Kilo",
+                JsonConfigDialect::Jsonc,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn deactivate_deployed_host_component_registration(
+        &self,
+        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        ctx: &InstallContext,
+    ) -> Result<()> {
+        if components.contains(&super::host_bundle_v2::HostBundleComponentV1::ContextMcp) {
+            uninstall_mcp_server_entry(
+                &kilo_config_path(&ctx.home),
+                "mcp",
+                JsonConfigDialect::Jsonc,
+                McpUninstallPolicy::default(),
+            )?;
+        }
+        Ok(())
+    }
+
     fn has_tracedecay(&self, home: &Path) -> bool {
-        let config_path = kilo_config_path(home);
-        if !config_path.exists() {
-            return false;
-        }
-        let json = load_jsonc_file(&config_path);
-        let servers = json.get("mcp");
-        servers.and_then(|v| v.get("tracedecay")).is_some()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Uninstall helpers
-// ---------------------------------------------------------------------------
-
-fn install_mcp_server(config_path: &Path, tracedecay_bin: &str) -> Result<()> {
-    if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-
-    let backup = backup_config_file(config_path)?;
-    let mut settings = match load_jsonc_file_strict(config_path) {
-        Ok(v) => v,
-        Err(e) => {
-            if let Some(ref b) = backup {
-                eprintln!("  Backup preserved at: {}", b.display());
-            }
-            return Err(e);
-        }
-    };
-
-    settings["mcp"]["tracedecay"] = json!({
-        "type": "local",
-        "command": [tracedecay_bin, "serve"],
-        "enabled": true
-    });
-
-    safe_write_json_file(config_path, &settings, backup.as_deref())?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Added tracedecay MCP server to {}",
-        config_path.display()
-    );
-    Ok(())
-}
-
-fn uninstall_mcp_server(config_path: &Path) {
-    if !config_path.exists() {
-        eprintln!("  {} not found, skipping", config_path.display());
-        return;
-    }
-
-    let Ok(contents) = std::fs::read_to_string(config_path) else {
-        return;
-    };
-    let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(&contents) else {
-        // Try JSONC parsing
-        let mut settings = super::parse_jsonc(&contents);
-        let Some(servers) = settings.get_mut("mcp").and_then(|v| v.as_object_mut()) else {
-            return;
-        };
-        let removed = servers.remove("tracedecay").is_some();
-        if removed && backup_and_write_json(config_path, &settings) {
-            eprintln!(
-                "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
-                config_path.display()
-            );
-        }
-        return;
-    };
-
-    let Some(servers) = settings.get_mut("mcp").and_then(|v| v.as_object_mut()) else {
-        eprintln!(
-            "  No tracedecay MCP server in {}, skipping",
-            config_path.display()
-        );
-        return;
-    };
-
-    let removed = servers.remove("tracedecay").is_some();
-    if !removed {
-        eprintln!(
-            "  No tracedecay MCP server in {}, skipping",
-            config_path.display()
-        );
-        return;
-    }
-
-    if backup_and_write_json(config_path, &settings) {
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
-            config_path.display()
-        );
+        super::mcp_config_has_tracedecay(&kilo_config_path(home), "mcp", load_jsonc_file)
     }
 }
 
@@ -181,28 +143,16 @@ fn uninstall_mcp_server(config_path: &Path) {
 // ---------------------------------------------------------------------------
 
 fn doctor_check_settings(dc: &mut DoctorCounters, home: &Path) {
-    let config_path = kilo_config_path(home);
-
-    if !config_path.exists() {
-        dc.warn(&format!(
-            "{} not found — run `tracedecay install --agent kilo` if you use Kilo CLI",
-            config_path.display()
-        ));
-        return;
-    }
-
-    let settings = load_jsonc_file(&config_path);
-    let server = settings.get("mcp").and_then(|v| v.get("tracedecay"));
-
-    if server.and_then(|v| v.as_object()).is_some() {
-        dc.pass(&format!(
-            "MCP server registered in {}",
-            config_path.display()
-        ));
-    } else {
-        dc.fail(&format!(
-            "MCP server NOT registered in {} — run `tracedecay install --agent kilo`",
-            config_path.display()
-        ));
-    }
+    doctor_check_mcp_registration(
+        dc,
+        &kilo_config_path(home),
+        "mcp",
+        load_jsonc_file,
+        &McpDoctorLabels {
+            agent_id: "kilo",
+            product: "Kilo CLI",
+            registered: "MCP server registered",
+            missing: "MCP server NOT registered",
+        },
+    );
 }

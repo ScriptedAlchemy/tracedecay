@@ -1,0 +1,635 @@
+//! Static (per-repo) query catalog used by the criterion bench.
+//!
+//! Queries are constructed once after the production composition publishes a
+//! code-index generation. The `QueryContext` is sampled through mounted MCP
+//! reads, so top-ranked symbols, qualified names, and file prefixes all come
+//! from the same admitted, generation-pinned graph used by the timed calls.
+//!
+//! Write queries (`str_replace`, `multi_str_replace`, `insert_at`,
+//! `ast_grep_rewrite`) declare a `scratch_path` + `init_content`: the bench
+//! harness rewrites the scratch file before *every* timed iteration so the
+//! tool's "match must be unique" precondition keeps holding. A
+//! `git stash --include-untracked` at the end of the run reverts all
+//! scratch-file churn.
+
+use std::fmt::Write as _;
+use std::path::Path;
+
+use serde_json::{Value, json};
+
+use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
+use tracedecay_mcp::JsonRpcResponse;
+
+/// Distinguishes read-only queries from queries that mutate a scratch file.
+#[derive(Clone)]
+pub enum QueryKind {
+    Read,
+    Write {
+        /// File path *relative to the project root* that must be (re)written
+        /// before each timed iteration.
+        scratch_path: String,
+        /// Bytes the scratch file is reset to before each iter.
+        init_content: String,
+    },
+}
+
+/// One concrete tool invocation: the MCP tool name, its args, and the kind
+/// (read vs. write) that drives criterion's iteration strategy.
+#[derive(Clone)]
+pub struct Query {
+    pub label: &'static str,
+    pub tool: &'static str,
+    pub args: Value,
+    pub kind: QueryKind,
+}
+
+impl Query {
+    fn read(label: &'static str, tool: &'static str, args: Value) -> Self {
+        Self {
+            label,
+            tool,
+            args,
+            kind: QueryKind::Read,
+        }
+    }
+
+    fn write(
+        label: &'static str,
+        tool: &'static str,
+        args: Value,
+        scratch_path: String,
+        init_content: String,
+    ) -> Self {
+        Self {
+            label,
+            tool,
+            args,
+            kind: QueryKind::Write {
+                scratch_path,
+                init_content,
+            },
+        }
+    }
+}
+
+/// All queries we run for one tool. The harness invariant is `queries.len() == 5`.
+pub struct ToolGroup {
+    pub tool: &'static str,
+    pub queries: Vec<Query>,
+}
+
+/// Sampled data drawn from a freshly indexed graph. Built once per repo.
+pub struct QueryContext {
+    pub function_ids: Vec<String>,
+    pub struct_ids: Vec<String>,
+    pub any_ids: Vec<String>,
+    pub function_qnames: Vec<String>,
+    pub dir_prefixes: Vec<String>,
+}
+
+impl QueryContext {
+    /// Pick the i-th id with wrap-around. Returns `"missing"` if no samples
+    /// exist — the tool handler will report a not-found error, which is still
+    /// useful timing data (and the bench label keeps the case obvious).
+    fn pick(slice: &[String], i: usize) -> String {
+        if slice.is_empty() {
+            "missing".to_string()
+        } else {
+            slice[i % slice.len()].clone()
+        }
+    }
+}
+
+pub async fn build_context(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project_root: &Path,
+) -> Result<QueryContext, String> {
+    let mut function_ids = Vec::new();
+    let mut struct_ids = Vec::new();
+    let mut any_ids = Vec::new();
+
+    for kind in ["function", "method", "struct", "class", "module"] {
+        let payload = call_json_tool(
+            harness,
+            project_root,
+            "tracedecay_largest",
+            json!({ "node_kind": kind, "limit": 64, "format": "json" }),
+        )
+        .await?;
+        let ranking = payload
+            .get("ranking")
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("tracedecay_largest returned no ranking for kind '{kind}'"))?;
+        for symbol in ranking {
+            let Some(id) = symbol.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            push_unique(&mut any_ids, id);
+            match kind {
+                "function" | "method" => push_unique(&mut function_ids, id),
+                "struct" | "class" => push_unique(&mut struct_ids, id),
+                _ => {}
+            }
+        }
+    }
+
+    function_ids.truncate(64);
+    struct_ids.truncate(64);
+    any_ids.truncate(64);
+
+    let mut function_qnames = Vec::new();
+    for id in &function_ids {
+        let payload = call_json_tool(
+            harness,
+            project_root,
+            "tracedecay_node",
+            json!({ "node_id": id, "format": "json" }),
+        )
+        .await?;
+        if let Some(qualified_name) = payload.get("qualified_name").and_then(Value::as_str)
+            && !qualified_name.is_empty()
+        {
+            push_unique(&mut function_qnames, qualified_name);
+        }
+    }
+
+    let file_payload = call_json_tool(
+        harness,
+        project_root,
+        "tracedecay_files",
+        json!({ "layout": "flat", "format": "json" }),
+    )
+    .await?;
+    let files = file_payload
+        .get("files")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "tracedecay_files returned no files array".to_owned())?;
+
+    // Collect first-segment directory prefixes from the sample files (so
+    // `path_prefix` queries are valid for *this* repo regardless of layout).
+    let mut dir_prefixes: Vec<String> = files
+        .iter()
+        .filter_map(|file| file.get("path").and_then(Value::as_str))
+        .filter_map(|path| {
+            path.split_once('/')
+                .map(|(directory, _)| directory.to_owned())
+        })
+        .collect();
+    dir_prefixes.sort();
+    dir_prefixes.dedup();
+    dir_prefixes.truncate(5);
+
+    require_samples("functions or methods", &function_ids)?;
+    require_samples("structs or classes", &struct_ids)?;
+    require_samples("graph symbols", &any_ids)?;
+    require_samples("qualified function names", &function_qnames)?;
+    require_samples("indexed directory prefixes", &dir_prefixes)?;
+
+    Ok(QueryContext {
+        function_ids,
+        struct_ids,
+        any_ids,
+        function_qnames,
+        dir_prefixes,
+    })
+}
+
+async fn call_json_tool(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project_root: &Path,
+    tool_name: &str,
+    arguments: Value,
+) -> Result<Value, String> {
+    let response = harness
+        .call_tool(project_root, tool_name, arguments)
+        .await
+        .map_err(|error| format!("{tool_name} transport failed: {error}"))?;
+    json_tool_payload(tool_name, &response)
+}
+
+fn json_tool_payload(tool_name: &str, response: &JsonRpcResponse) -> Result<Value, String> {
+    if let Some(error) = &response.error {
+        return Err(format!("{tool_name} JSON-RPC failed: {error:?}"));
+    }
+    let result = response
+        .result
+        .as_ref()
+        .ok_or_else(|| format!("{tool_name} returned no JSON-RPC result"))?;
+    if result.get("isError").and_then(Value::as_bool) == Some(true) {
+        return Err(format!("{tool_name} returned a tool error: {result}"));
+    }
+    let text = result
+        .pointer("/content/0/text")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("{tool_name} returned no text payload"))?;
+    serde_json::from_str(text)
+        .map_err(|error| format!("{tool_name} returned non-JSON output: {error}; text={text}"))
+}
+
+fn push_unique(values: &mut Vec<String>, value: &str) {
+    if !values.iter().any(|existing| existing == value) {
+        values.push(value.to_owned());
+    }
+}
+
+fn require_samples(label: &str, values: &[String]) -> Result<(), String> {
+    if values.is_empty() {
+        Err(format!(
+            "production graph sampling returned no {label}; refusing to benchmark not-found paths"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn five<F: FnMut(usize) -> Query>(mut f: F) -> Vec<Query> {
+    (0..5).map(&mut f).collect()
+}
+
+fn dir(ctx: &QueryContext, i: usize) -> String {
+    if ctx.dir_prefixes.is_empty() {
+        "src".to_string()
+    } else {
+        ctx.dir_prefixes[i % ctx.dir_prefixes.len()].clone()
+    }
+}
+
+/// Root directory (relative to the project root) where all write-query
+/// scratch files live. Kept on a single path so `git stash --include-untracked`
+/// at end-of-bench reverts everything in one shot.
+pub const SCRATCH_DIR: &str = ".tracedecay-bench-scratch";
+
+fn scratch(name: &str) -> String {
+    format!("{SCRATCH_DIR}/{name}")
+}
+
+pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
+    // ── read query inputs ────────────────────────────────────────────────
+    let search_terms = ["main", "init", "parse", "error", "config"];
+    let context_tasks = [
+        "How is configuration loaded at startup?",
+        "Where are command-line arguments parsed?",
+        "How are errors defined and propagated?",
+        "How is logging configured?",
+        "How are tests organized?",
+    ];
+    let kinds_for_largest = ["function", "method", "struct", "class", "module"];
+    let file_globs = ["**/*.rs", "**/*.c", "**/*.py", "**/*.js", "**/*.ts"];
+    let rank_kinds = ["calls", "uses", "contains", "type_of", "implements"];
+
+    let mut groups: Vec<ToolGroup> = Vec::new();
+
+    groups.push(ToolGroup {
+        tool: "tracedecay_search",
+        queries: five(|i| {
+            Query::read(
+                "term",
+                "tracedecay_search",
+                json!({ "query": search_terms[i], "limit": 20 }),
+            )
+        }),
+    });
+
+    groups.push(ToolGroup {
+        tool: "tracedecay_context",
+        queries: five(|i| {
+            Query::read(
+                "task",
+                "tracedecay_context",
+                json!({ "task": context_tasks[i], "max_nodes": 20 }),
+            )
+        }),
+    });
+
+    groups.push(ToolGroup {
+        tool: "tracedecay_callers",
+        queries: five(|i| {
+            Query::read(
+                "by_id",
+                "tracedecay_callers",
+                json!({ "node_id": QueryContext::pick(&ctx.function_ids, i), "max_depth": 3 }),
+            )
+        }),
+    });
+
+    groups.push(ToolGroup {
+        tool: "tracedecay_callees",
+        queries: five(|i| {
+            Query::read(
+                "by_id",
+                "tracedecay_callees",
+                json!({ "node_id": QueryContext::pick(&ctx.function_ids, i), "max_depth": 3 }),
+            )
+        }),
+    });
+
+    groups.push(ToolGroup {
+        tool: "tracedecay_node",
+        queries: five(|i| {
+            Query::read(
+                "by_id",
+                "tracedecay_node",
+                json!({ "node_id": QueryContext::pick(&ctx.any_ids, i) }),
+            )
+        }),
+    });
+
+    groups.push(ToolGroup {
+        tool: "tracedecay_by_qualified_name",
+        queries: five(|i| {
+            Query::read(
+                "qname",
+                "tracedecay_by_qualified_name",
+                json!({ "qualified_name": QueryContext::pick(&ctx.function_qnames, i) }),
+            )
+        }),
+    });
+
+    groups.push(ToolGroup {
+        tool: "tracedecay_signature",
+        queries: five(|i| {
+            Query::read(
+                "by_id",
+                "tracedecay_signature",
+                json!({ "node_id": QueryContext::pick(&ctx.function_ids, i) }),
+            )
+        }),
+    });
+
+    groups.push(ToolGroup {
+        tool: "tracedecay_impact",
+        queries: five(|i| {
+            Query::read(
+                "by_id",
+                "tracedecay_impact",
+                json!({ "node_id": QueryContext::pick(&ctx.function_ids, i), "max_depth": 2 }),
+            )
+        }),
+    });
+
+    groups.push(ToolGroup {
+        tool: "tracedecay_body",
+        queries: five(|i| {
+            Query::read(
+                "by_id",
+                "tracedecay_body",
+                json!({ "symbol": QueryContext::pick(&ctx.function_qnames, i) }),
+            )
+        }),
+    });
+
+    groups.push(ToolGroup {
+        tool: "tracedecay_files",
+        queries: five(|i| {
+            Query::read(
+                "glob",
+                "tracedecay_files",
+                json!({ "pattern": file_globs[i] }),
+            )
+        }),
+    });
+
+    groups.push(ToolGroup {
+        tool: "tracedecay_complexity",
+        queries: {
+            let mut v = Vec::with_capacity(5);
+            v.push(Query::read(
+                "all",
+                "tracedecay_complexity",
+                json!({ "limit": 20 }),
+            ));
+            for i in 0..4 {
+                v.push(Query::read(
+                    "scoped",
+                    "tracedecay_complexity",
+                    json!({ "path": dir(ctx, i), "limit": 20 }),
+                ));
+            }
+            v
+        },
+    });
+
+    groups.push(ToolGroup {
+        tool: "tracedecay_doc_coverage",
+        queries: {
+            let mut v = vec![Query::read("all", "tracedecay_doc_coverage", json!({}))];
+            for i in 0..4 {
+                v.push(Query::read(
+                    "scoped",
+                    "tracedecay_doc_coverage",
+                    json!({ "path": dir(ctx, i) }),
+                ));
+            }
+            v
+        },
+    });
+
+    groups.push(ToolGroup {
+        tool: "tracedecay_largest",
+        queries: five(|i| {
+            Query::read(
+                "by_kind",
+                "tracedecay_largest",
+                json!({ "node_kind": kinds_for_largest[i], "limit": 20 }),
+            )
+        }),
+    });
+
+    groups.push(ToolGroup {
+        tool: "tracedecay_hotspots",
+        queries: five(|i| {
+            Query::read(
+                "limit",
+                "tracedecay_hotspots",
+                json!({ "limit": 10 + (i as u32) * 10 }),
+            )
+        }),
+    });
+
+    groups.push(ToolGroup {
+        tool: "tracedecay_god_class",
+        queries: five(|i| {
+            Query::read(
+                "threshold",
+                "tracedecay_god_class",
+                json!({ "min_methods": 5 + (i as u32) * 5 }),
+            )
+        }),
+    });
+
+    groups.push(ToolGroup {
+        tool: "tracedecay_module_api",
+        queries: five(|i| {
+            Query::read(
+                "scoped",
+                "tracedecay_module_api",
+                json!({ "path": dir(ctx, i) }),
+            )
+        }),
+    });
+
+    groups.push(ToolGroup {
+        tool: "tracedecay_derives",
+        queries: five(|i| {
+            Query::read(
+                "by_id",
+                "tracedecay_derives",
+                json!({ "node_id": QueryContext::pick(&ctx.struct_ids, i) }),
+            )
+        }),
+    });
+
+    groups.push(ToolGroup {
+        tool: "tracedecay_dead_code",
+        queries: five(|i| {
+            Query::read(
+                "scoped",
+                "tracedecay_dead_code",
+                json!({ "path": dir(ctx, i) }),
+            )
+        }),
+    });
+
+    groups.push(ToolGroup {
+        tool: "tracedecay_rank",
+        queries: five(|i| {
+            Query::read(
+                "by_kind",
+                "tracedecay_rank",
+                json!({ "edge_kind": rank_kinds[i], "limit": 20 }),
+            )
+        }),
+    });
+
+    groups.push(ToolGroup {
+        tool: "tracedecay_coupling",
+        queries: five(|i| {
+            Query::read(
+                "scoped",
+                "tracedecay_coupling",
+                json!({ "path": dir(ctx, i), "limit": 20 }),
+            )
+        }),
+    });
+
+    groups.push(ToolGroup {
+        tool: "tracedecay_circular",
+        queries: five(|i| {
+            Query::read(
+                "depth",
+                "tracedecay_circular",
+                json!({ "max_depth": 4 + (i as u32) * 2 }),
+            )
+        }),
+    });
+
+    // ── write queries ────────────────────────────────────────────────────
+    //
+    // Each iteration must start from a known file state because the edit
+    // primitives reject ambiguous/zero matches. The harness re-writes
+    // `scratch_path` from `init_content` before every timed iter
+    // (via `iter_batched`).
+
+    groups.push(ToolGroup {
+        tool: "tracedecay_str_replace",
+        queries: five(|i| {
+            let path = scratch(&format!("str_replace_{i}.txt"));
+            // Body grows with `i` so the 5 cases sweep small → larger payloads.
+            let body = "ALPHA\nBETA\nGAMMA\nDELTA\n".repeat(1 + i * 4);
+            let content = format!("{body}TARGET_{i}\nTAIL\n");
+            Query::write(
+                "vary_size",
+                "tracedecay_str_replace",
+                json!({
+                    "path": path,
+                    "old_str": format!("TARGET_{i}"),
+                    "new_str": format!("REPLACED_{i}"),
+                }),
+                path.clone(),
+                content,
+            )
+        }),
+    });
+
+    groups.push(ToolGroup {
+        tool: "tracedecay_multi_str_replace",
+        queries: five(|i| {
+            let path = scratch(&format!("multi_{i}.txt"));
+            let n = i + 1; // 1..=5 replacements
+            let mut content = String::new();
+            let mut replacements = Vec::with_capacity(n);
+            for k in 0..n {
+                let _ = write!(content, "MARK_{k}\nfiller line {k}\n");
+                replacements.push([format!("MARK_{k}"), format!("DONE_{k}")]);
+            }
+            Query::write(
+                "n_repls",
+                "tracedecay_multi_str_replace",
+                json!({ "path": path, "replacements": replacements }),
+                path.clone(),
+                content,
+            )
+        }),
+    });
+
+    groups.push(ToolGroup {
+        tool: "tracedecay_insert_at",
+        queries: five(|i| {
+            let path = scratch(&format!("insert_{i}.txt"));
+            // 5 distinct anchor lines; each iter inserts after the matching line.
+            let lines: Vec<String> = (0..5).map(|k| format!("LINE_{k}")).collect();
+            let content = format!("{}\n", lines.join("\n"));
+            Query::write(
+                "by_anchor",
+                "tracedecay_insert_at",
+                json!({
+                    "path": path,
+                    "anchor": format!("LINE_{i}"),
+                    "content": "// inserted by bench\n",
+                    "before": false,
+                }),
+                path.clone(),
+                content,
+            )
+        }),
+    });
+
+    if ast_grep_on_path() {
+        groups.push(ToolGroup {
+            tool: "tracedecay_ast_grep_rewrite",
+            queries: five(|i| {
+                let path = scratch(&format!("ast_grep_{i}.rs"));
+                // Provide a small rust source with a function whose name we'll
+                // rewrite. ast-grep's metavariable syntax is `$NAME`.
+                let content = format!("pub fn bench_target_{i}() {{\n    let _ = {i};\n}}\n");
+                Query::write(
+                    "rename_fn",
+                    "tracedecay_ast_grep_rewrite",
+                    json!({
+                        "path": path,
+                        "pattern": format!("fn bench_target_{i}() {{ $$$BODY }}"),
+                        "rewrite": format!("fn bench_renamed_{i}() {{ $$$BODY }}"),
+                    }),
+                    path.clone(),
+                    content,
+                )
+            }),
+        });
+    }
+
+    groups
+}
+
+/// Mirrors `tracedecay_mcp::ast_grep_available` without depending on
+/// internal-module visibility: shells out to `ast-grep --version`. Cached
+/// for the lifetime of the bench process.
+fn ast_grep_on_path() -> bool {
+    use std::sync::OnceLock;
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        std::process::Command::new("ast-grep")
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success())
+    })
+}

@@ -2,27 +2,39 @@
 name = "tracedecay-code-extraction"
 version = "0.1.0"
 publish = false
-edition = "2024"
+edition.workspace = true
 license = "MIT"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
 description = "Tree-sitter language extraction for TraceDecay"
-autotests = false
-
-[[test]]
-name = "extraction"
-path = "tests/main.rs"
+build = "build.rs"
+include = [
+    "/src/**",
+    "/fixtures/**",
+    "/tests/**",
+    "/vendor/tree-sitter-wgsl/src/**",
+    "/build.rs",
+]
 
 [features]
+# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
+# the feature off, so instrumented call sites compile identically both ways.
+hotpath = ["hotpath/hotpath", "tracedecay-domain/hotpath"]
+hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc", "tracedecay-domain/hotpath-alloc"]
+hotpath-cpu = ["hotpath", "hotpath/hotpath-cpu", "tracedecay-domain/hotpath-cpu"]
 default = ["lite", "medium", "full"]
-lite = ["dep:tracedecay-medium-treesitters"]
+test-helpers = []
+# Markdown rides in `lite` as well as `full`: docs are architecture content and
+# every repository has them, so no shipped tier may index code without also
+# indexing its documentation.
+lite = ["dep:tracedecay-medium-treesitters", "lang-markdown"]
 medium = ["lang-dart", "lang-pascal", "lang-php", "lang-ruby", "lang-bash", "lang-protobuf", "lang-powershell", "lang-nix", "lang-vbnet"]
 full = ["medium", "lang-lua", "lang-zig", "lang-objc", "lang-perl", "lang-batch", "lang-fortran", "lang-cobol", "lang-msbasic2", "lang-gwbasic", "lang-qbasic", "lang-dockerfile", "lang-glsl", "lang-wgsl", "lang-hlsl", "lang-metal", "lang-markdown", "lang-r", "lang-sql", "lang-julia", "lang-haskell", "lang-ocaml", "lang-clojure", "lang-erlang", "lang-elixir", "lang-fsharp", "lang-quint", "lang-toml", "lang-lean"]
-
 lang-dart = ["dep:tracedecay-medium-treesitters"]
 lang-pascal = ["dep:tracedecay-large-treesitters"]
 lang-php = ["dep:tracedecay-medium-treesitters"]
 lang-ruby = ["dep:tracedecay-medium-treesitters"]
 lang-bash = ["dep:tracedecay-medium-treesitters"]
-lang-protobuf = ["dep:tracedecay-large-treesitters", "tracedecay-domain/lang-protobuf"]
+lang-protobuf = ["dep:tracedecay-large-treesitters"]
 lang-powershell = ["dep:tracedecay-large-treesitters"]
 lang-nix = ["dep:tracedecay-large-treesitters"]
 lang-vbnet = ["dep:tracedecay-large-treesitters"]
@@ -56,12 +68,22 @@ lang-toml = ["dep:tracedecay-large-treesitters"]
 lang-lean = ["dep:tracedecay-large-treesitters"]
 
 [dependencies]
-tracedecay-domain = { path = "../tracedecay-domain", default-features = false }
-tree-sitter = "0.26"
-tree-sitter-language = "0.1"
-tracedecay-medium-treesitters = { package = "tokensave-medium-treesitters", version = "0.2.0", optional = true }
+hotpath.workspace = true
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.11"
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-large-treesitters = { package = "tokensave-large-treesitters", version = "0.5.0", optional = true }
+tracedecay-medium-treesitters = { package = "tokensave-medium-treesitters", version = "0.2.0", optional = true }
+tree-sitter = "0.26"
 tree-sitter-hlsl = { version = "0.2.0", optional = true }
+tree-sitter-language = "0.1"
+# Resolved through the workspace [patch.crates-io] git pin, which carries the
+# struct-pattern field attribute fix (tree-sitter/tree-sitter-rust#301).
+tree-sitter-rust = "0.24"
+thiserror = "2"
+
+[dev-dependencies]
+serde_json = "1"
 
 [build-dependencies]
 cc = "1"

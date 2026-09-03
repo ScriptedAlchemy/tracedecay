@@ -22,18 +22,31 @@ PY=python3; have "$PY" || PY=python
 # --- Resolve store paths from TraceDecay, not from hardcoded locations. -------
 SS="$(tracedecay tool storage_status --args '{"format":"json"}' 2>/dev/null || true)"
 if [ -z "$SS" ]; then echo "error: could not read 'tracedecay tool storage_status'" >&2; exit 4; fi
-read -r SERVING_DB DATA_ROOT PROJECT_ROOT <<EOF
-$(printf '%s' "$SS" | "$PY" -c 'import sys,json
-d=json.load(sys.stdin); s=d["active_project"]["storage"]
-print(s["graph_db_path"], s["data_root"], d["active_project"]["project_root"])')
+if ! STORAGE_FIELDS="$(printf '%s' "$SS" | "$PY" -c 'import sys,json
+d=json.load(sys.stdin)
+store_path=d.get("store_path")
+project_id=d.get("project_id")
+if not isinstance(store_path, str) or not store_path or not isinstance(project_id, str) or not project_id:
+    raise SystemExit(1)
+print(f"{store_path}\t{project_id}")')"; then
+  echo "error: storage_status is missing required store_path or project_id" >&2
+  exit 5
+fi
+IFS=$'\t' read -r SERVING_DB PROJECT_ID <<EOF
+$STORAGE_FIELDS
 EOF
+if [ ! -f "$SERVING_DB" ]; then
+  echo "error: serving store does not exist: $SERVING_DB" >&2
+  exit 6
+fi
+DATA_ROOT="$(dirname "$SERVING_DB")"
 TD_HOME="$(dirname "$(dirname "$DATA_ROOT")")"     # .../.tracedecay/projects/<proj> -> .../.tracedecay
 GLOBAL_DB="$TD_HOME/global.db"
 
 q() { sqlite3 -noheader -separator '  ' "$1" "$2" 2>/dev/null; }
 
 echo "================================================================"
-echo " TraceDecay usage & fact-store adoption — $PROJECT_ROOT"
+echo " TraceDecay usage & fact-store adoption — $PROJECT_ID"
 echo "================================================================"
 
 # --- 1. MCP tool adoption (per-tool breakdown; the CLI only groups by kind). --
@@ -41,7 +54,7 @@ echo
 echo "## MCP tool calls (analytics_events)"
 if [ -f "$GLOBAL_DB" ]; then
   FILTER="event_kind='mcp_tool_call'"
-  [ "$ALL" -eq 0 ] && FILTER="$FILTER AND project_id='$PROJECT_ROOT'"
+  [ "$ALL" -eq 0 ] && FILTER="$FILTER AND project_id='$PROJECT_ID'"
   SCOPE=$([ "$ALL" -eq 1 ] && echo "ALL PROJECTS" || echo "this project")
   echo "scope: $SCOPE"
   printf '  %-42s %8s %8s\n' "tool" "calls" "errors"

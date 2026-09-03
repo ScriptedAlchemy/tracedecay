@@ -4,11 +4,7 @@ use tracedecay_domain::*;
 
 #[test]
 fn test_batch_extract_labels_as_functions() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.bat"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.bat").unwrap();
     let extractor = BatchExtractor;
     let result = extractor.extract("sample.bat", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -34,11 +30,7 @@ fn test_batch_extract_labels_as_functions() {
 
 #[test]
 fn test_batch_extract_set_consts() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.bat"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.bat").unwrap();
     let extractor = BatchExtractor;
     let result = extractor.extract("sample.bat", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -61,11 +53,7 @@ fn test_batch_extract_set_consts() {
 
 #[test]
 fn test_batch_call_sites() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.bat"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.bat").unwrap();
     let extractor = BatchExtractor;
     let result = extractor.extract("sample.bat", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -76,24 +64,20 @@ fn test_batch_call_sites() {
         .filter(|r| r.reference_kind == EdgeKind::Calls)
         .collect();
     assert!(!call_refs.is_empty(), "should have call refs");
-    // ValidateConfig calls Log
     assert!(
         call_refs.iter().any(|r| r.reference_name == "Log"),
         "should find Log call"
     );
-    // Main calls ValidateConfig
     assert!(
         call_refs
             .iter()
             .any(|r| r.reference_name == "ValidateConfig"),
         "should find ValidateConfig call"
     );
-    // Main calls Connect
     assert!(
         call_refs.iter().any(|r| r.reference_name == "Connect"),
         "should find Connect call"
     );
-    // Main calls Disconnect
     assert!(
         call_refs.iter().any(|r| r.reference_name == "Disconnect"),
         "should find Disconnect call"
@@ -102,16 +86,11 @@ fn test_batch_call_sites() {
 
 #[test]
 fn test_batch_docstrings() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.bat"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.bat").unwrap();
     let extractor = BatchExtractor;
     let result = extractor.extract("sample.bat", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
-    // Log should have a docstring from the preceding REM comment.
     let log_fn = result
         .nodes
         .iter()
@@ -128,7 +107,6 @@ fn test_batch_docstrings() {
         log_fn.docstring
     );
 
-    // ValidateConfig should have a docstring.
     let vc_fn = result
         .nodes
         .iter()
@@ -144,7 +122,6 @@ fn test_batch_docstrings() {
         vc_fn.docstring
     );
 
-    // Main should have a docstring.
     let main_fn = result
         .nodes
         .iter()
@@ -163,11 +140,7 @@ fn test_batch_docstrings() {
 
 #[test]
 fn test_batch_file_node() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.bat"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.bat").unwrap();
     let extractor = BatchExtractor;
     let result = extractor.extract("sample.bat", &source);
     let files: Vec<_> = result
@@ -181,11 +154,7 @@ fn test_batch_file_node() {
 
 #[test]
 fn test_batch_contains_edges() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.bat"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.bat").unwrap();
     let extractor = BatchExtractor;
     let result = extractor.extract("sample.bat", &source);
     let contains: Vec<_> = result
@@ -193,7 +162,6 @@ fn test_batch_contains_edges() {
         .iter()
         .filter(|e| e.kind == EdgeKind::Contains)
         .collect();
-    // File contains: 5 functions + 2 consts = 7 Contains edges
     assert!(
         contains.len() >= 7,
         "should have >= 7 Contains edges, got {}",

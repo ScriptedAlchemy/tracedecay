@@ -1,0 +1,82 @@
+use std::error::Error as _;
+
+use crate::artifact_policy::artifact_policy;
+use crate::backend::AgentTaskKind;
+use crate::text::truncate_chars_for_prompt;
+use crate::{AutomationError, AutomationRunRecord};
+use serde_json::Value;
+
+#[derive(Default)]
+struct TestRunRecord {
+    accepted_count: usize,
+    validation_report: Option<Value>,
+    applied_ops: Option<Value>,
+}
+
+impl AutomationRunRecord for TestRunRecord {
+    fn accepted_count(&self) -> usize {
+        self.accepted_count
+    }
+
+    fn validation_report(&self) -> Option<&Value> {
+        self.validation_report.as_ref()
+    }
+
+    fn applied_ops(&self) -> Option<&Value> {
+        self.applied_ops.as_ref()
+    }
+}
+
+#[test]
+fn automation_error_preserves_port_source() {
+    let error = AutomationError::port(
+        "agent_task_backend",
+        std::io::Error::other("backend disconnected"),
+    );
+
+    assert!(matches!(
+        error,
+        AutomationError::Port {
+            port: "agent_task_backend",
+            ..
+        }
+    ));
+    assert_eq!(
+        error.source().map(ToString::to_string).as_deref(),
+        Some("backend disconnected")
+    );
+}
+
+#[test]
+fn automation_error_preserves_standard_classifications() {
+    let io: AutomationError = std::io::Error::other("disk unavailable").into();
+    assert!(matches!(io, AutomationError::Io(_)));
+
+    let json = serde_json::from_str::<Value>("{").unwrap_err();
+    let json: AutomationError = json.into();
+    assert!(matches!(json, AutomationError::Json(_)));
+
+    let config = AutomationError::config("invalid schedule");
+    assert!(matches!(config, AutomationError::Config { .. }));
+}
+
+#[test]
+fn artifact_policy_changes_handoff_by_acceptance() {
+    let policy = artifact_policy(AgentTaskKind::SkillWriter);
+    let accepted = TestRunRecord {
+        accepted_count: 1,
+        ..TestRunRecord::default()
+    };
+    let rejected = TestRunRecord::default();
+
+    assert!(policy.next_actions(&accepted)[0].contains("managed skill"));
+    assert!(policy.next_actions(&rejected)[0].contains("rejected"));
+    assert_eq!(policy.handoff_tests().len(), 1);
+    assert_eq!(policy.eval_replay_commands().len(), 1);
+}
+
+#[test]
+fn prompt_truncation_counts_unicode_scalars() {
+    assert_eq!(truncate_chars_for_prompt("a☺bc", 2), "a☺");
+    assert_eq!(truncate_chars_for_prompt("a☺bc", 4), "a☺bc");
+}

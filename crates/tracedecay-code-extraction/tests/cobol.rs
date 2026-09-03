@@ -3,11 +3,7 @@ use tracedecay_code_extraction::LanguageExtractor;
 use tracedecay_domain::*;
 
 fn extract_fixture() -> ExtractionResult {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.cob"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.cob").unwrap();
     let extractor = CobolExtractor;
     let result = extractor.extract("sample.cob", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -46,7 +42,6 @@ fn test_cobol_paragraphs_as_functions() {
         .iter()
         .filter(|n| n.kind == NodeKind::Function)
         .collect();
-    // Paragraphs: MAIN-PROGRAM, VALIDATE-CONFIG, LOG-MESSAGE, CONNECT-SERVER, DISCONNECT-SERVER
     assert_eq!(
         fns.len(),
         5,
@@ -127,7 +122,6 @@ fn test_cobol_perform_calls() {
         .filter(|r| r.reference_kind == EdgeKind::Calls)
         .collect();
     assert!(!calls.is_empty(), "expected call site refs");
-    // MAIN-PROGRAM performs VALIDATE-CONFIG, CONNECT-SERVER, DISCONNECT-SERVER
     assert!(
         calls.iter().any(|r| r.reference_name == "VALIDATE-CONFIG"),
         "expected call to VALIDATE-CONFIG, got: {:?}",
@@ -143,7 +137,6 @@ fn test_cobol_perform_calls() {
             .any(|r| r.reference_name == "DISCONNECT-SERVER"),
         "expected call to DISCONNECT-SERVER"
     );
-    // VALIDATE-CONFIG and CONNECT-SERVER call LOG-MESSAGE
     assert!(
         calls.iter().any(|r| r.reference_name == "LOG-MESSAGE"),
         "expected call to LOG-MESSAGE"
@@ -153,7 +146,6 @@ fn test_cobol_perform_calls() {
 #[test]
 fn test_cobol_docstrings() {
     let result = extract_fixture();
-    // VALIDATE-CONFIG, LOG-MESSAGE, CONNECT-SERVER, DISCONNECT-SERVER should have docstrings.
     let validate = result
         .nodes
         .iter()
@@ -194,7 +186,6 @@ fn test_cobol_docstrings() {
         "DISCONNECT-SERVER should have docstring"
     );
 
-    // Data items should also have docstrings.
     let max_retries = result.nodes.iter().find(|n| n.name == "WS-MAX-RETRIES");
     assert!(max_retries.is_some(), "WS-MAX-RETRIES not found");
     assert!(
@@ -212,8 +203,6 @@ fn test_cobol_contains_edges() {
         .filter(|e| e.kind == EdgeKind::Contains)
         .collect();
     assert!(!contains.is_empty(), "expected Contains edges");
-    // File -> Module, Module -> data items + paragraphs
-    // 1 module + 8 data items + 5 paragraphs = 14 Contains edges
     assert!(
         contains.len() >= 10,
         "expected >= 10 Contains edges, got {}",

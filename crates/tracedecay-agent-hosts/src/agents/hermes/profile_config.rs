@@ -1,34 +1,122 @@
-//! Hermes profile config parsing and deterministic transformation helpers.
+//! Hermes profile config manipulation helpers.
 //!
-//! Filesystem and error policy stay in the composition-root façade. This module
-//! accepts profile text and returns deterministic edits so the kernel remains
-//! root-free and reusable.
+//! This module owns the read/patch/write path for Hermes profile `config.yaml`
+//! files. The parent integration module is responsible for plugin artifacts;
+//! config changes stay behind these focused helpers so install/update/uninstall
+//! flows have explicit inputs and preserve the historical error messages.
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
-use crate::agents::backup_config_file;
+use yaml_edit::{Document, Mapping, Sequence, YamlNode};
+
+use crate::agents::{backup_config_file, safe_write_bytes_file};
 use crate::errors::{Result, TraceDecayError};
 
-/// Parses the removed `plugins.tracedecay.project_root` setting solely as
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineEnding {
+    Lf,
+    Crlf,
+}
+
+impl LineEnding {
+    fn detect(contents: &str) -> Self {
+        if contents.contains("\r\n") {
+            Self::Crlf
+        } else {
+            Self::Lf
+        }
+    }
+
+    fn normalize(self, contents: &str) -> String {
+        match self {
+            Self::Lf => contents.to_string(),
+            Self::Crlf => contents.replace("\r\n", "\n"),
+        }
+    }
+
+    fn restore(self, contents: String) -> String {
+        match self {
+            Self::Lf => contents,
+            Self::Crlf => contents.replace('\n', "\r\n"),
+        }
+    }
+}
+
+struct ProfileConfigDocument {
+    root: Mapping,
+}
+
+impl ProfileConfigDocument {
+    fn parse(contents: &str) -> std::result::Result<Self, String> {
+        let normalized = LineEnding::detect(contents).normalize(contents);
+        let document = if normalized.trim().is_empty() {
+            Document::new_mapping()
+        } else {
+            Document::from_str(&normalized)
+                .map_err(|error| format!("invalid Hermes YAML config: {error}"))?
+        };
+        let root = document
+            .as_mapping()
+            .ok_or_else(|| "unsupported Hermes config; expected a top-level mapping".to_string())?;
+        Ok(Self { root })
+    }
+
+    fn root(&self) -> Mapping {
+        self.root.clone()
+    }
+}
+
+/// Reads the removed `plugins.tracedecay.project_root` setting solely as
 /// provenance for one-time data migration and transcript import.
-///
-/// This is the single source of truth for the pin (the same
-/// `plugins.<name>` block bundled Hermes plugins use): install writes it,
-/// reinstalls preserve it, and the generated Python resolves it at runtime.
-pub fn parse_config_pinned_project_root(config: &str) -> Option<String> {
-    let lines: Vec<&str> = config.lines().collect();
-    let (plugins_start, plugins_end) = find_top_level_section_in(&lines, "plugins")?;
-    read_pinned_project_root_from_block(&lines, plugins_start, plugins_end, "tracedecay")
-}
-
 pub fn read_config_pinned_project_root(config_path: &Path) -> Option<String> {
-    let config = std::fs::read_to_string(config_path).ok()?;
-    parse_config_pinned_project_root(&config)
+    let contents = std::fs::read_to_string(config_path).ok()?;
+    let config = ProfileConfigDocument::parse(&contents).ok()?;
+    let plugins = config.root().get_mapping("plugins")?;
+    let tracedecay = plugins.get_mapping("tracedecay")?;
+    string_value(&tracedecay, "project_root")
 }
 
-pub fn enable_plugin(config_path: &Path) -> Result<bool> {
+pub(super) fn registration_state(
+    config_path: &Path,
+) -> crate::agents::host_bundle_v2::HostBundleRegistrationStateV1 {
+    use crate::agents::host_bundle_v2::HostBundleRegistrationStateV1 as State;
+
+    let Ok(contents) = std::fs::read_to_string(config_path) else {
+        return State::Missing;
+    };
+    let Ok(config) = ProfileConfigDocument::parse(&contents) else {
+        return State::Corrupt;
+    };
+    let root = config.root();
+    let enabled = root
+        .get_mapping("plugins")
+        .and_then(|plugins| plugins.get_sequence("enabled"))
+        .is_some_and(|plugins| sequence_contains(&plugins, "tracedecay"));
+    let memory = root
+        .get_mapping("memory")
+        .and_then(|memory| string_value(&memory, "provider"))
+        .as_deref()
+        == Some("tracedecay");
+    let context = root
+        .get_mapping("context")
+        .and_then(|context| string_value(&context, "engine"))
+        .as_deref()
+        == Some("tracedecay");
+    if enabled && memory && context {
+        State::Current
+    } else {
+        State::Repairable
+    }
+}
+
+pub(super) fn enable_plugin(config_path: &Path) -> Result<bool> {
     let existing = std::fs::read_to_string(config_path).unwrap_or_default();
+    let original_path = original_config_path(config_path);
+    if config_path.is_file() && !original_path.exists() {
+        crate::agents::safe_write_bytes_file(&original_path, existing.as_bytes(), None)?;
+    }
     let updated = enable_plugin_config(&existing).map_err(|message| TraceDecayError::Config {
         message: format!(
             "{message} in {}.\nFix the config by hand, then re-run: tracedecay install --agent hermes",
@@ -41,7 +129,7 @@ pub fn enable_plugin(config_path: &Path) -> Result<bool> {
     Ok(true)
 }
 
-pub fn disable_plugin(config_path: &Path) -> Result<()> {
+pub(super) fn disable_plugin(config_path: &Path) -> Result<()> {
     let Ok(existing) = std::fs::read_to_string(config_path) else {
         return Ok(());
     };
@@ -51,10 +139,572 @@ pub fn disable_plugin(config_path: &Path) -> Result<()> {
             config_path.display()
         ),
     })?;
+    let original_path = original_config_path(config_path);
+    if let Ok(original) = std::fs::read(&original_path)
+        && std::str::from_utf8(&original)
+            .is_ok_and(|original| updated.trim_end() == original.trim_end())
+    {
+        crate::agents::safe_write_bytes_file(config_path, &original, None)?;
+        crate::agents::safe_remove_host_file(&original_path).map_err(|error| {
+            TraceDecayError::Config {
+                message: format!("failed to remove {}: {error}", original_path.display()),
+            }
+        })?;
+        return Ok(());
+    }
     if updated != existing {
         write_config_file(config_path, &updated)?;
     }
     Ok(())
+}
+
+pub(super) fn original_config_path(config_path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.tracedecay-original", config_path.display()))
+}
+
+// Error messages preserved from the historical line-oriented implementation so
+// install/update surfaces stay stable.
+const PLUGINS_ERR: &str = "unsupported Hermes plugins config";
+const MEMORY_ERR: &str = "unsupported Hermes memory config";
+const CONTEXT_ERR: &str = "unsupported Hermes context config";
+
+// The mutation path is deliberately text/span oriented rather than CST oriented.
+// The pinned `yaml-edit` (0.2.3) cannot reliably synthesize nested block or flow
+// collections: `Mapping::set`/`Sequence::push` render new members at column 0
+// (their indent is derived from context that is lost through the cloned
+// `get_mapping`/`get_sequence` handles), and node-copying `set` ignores the
+// requested indent. So every mutation is applied as a byte-splice on the source
+// text; `yaml-edit` is used only to parse and locate spans. This keeps comments,
+// anchors, aliases, flow collections and line endings byte-for-byte intact for
+// structure the installer does not own.
+
+fn enable_plugin_config(existing: &str) -> std::result::Result<String, String> {
+    let line_ending = LineEnding::detect(existing);
+    let normalized = line_ending.normalize(existing);
+    let updated = enable_normalized(&normalized)?;
+    Ok(line_ending.restore(updated))
+}
+
+fn disable_plugin_config(existing: &str) -> std::result::Result<String, String> {
+    if existing.trim().is_empty() {
+        return Ok(existing.to_string());
+    }
+    let line_ending = LineEnding::detect(existing);
+    let normalized = line_ending.normalize(existing);
+    let updated = disable_normalized(&normalized)?;
+    Ok(line_ending.restore(updated))
+}
+
+fn enable_normalized(existing: &str) -> std::result::Result<String, String> {
+    let text = remove_legacy_project_pin(existing)?;
+    let text = remove_seq_item(&text, &["plugins", "disabled"], "tracedecay")?;
+    let text = ensure_enabled(&text)?;
+    let text = ensure_scalar(
+        &text,
+        "memory",
+        "provider",
+        "tracedecay",
+        &[],
+        MEMORY_ERR,
+        "Hermes memory provider already configured; refusing to overwrite it",
+    )?;
+    let text = ensure_scalar(
+        &text,
+        "context",
+        "engine",
+        "tracedecay",
+        &["compressor"],
+        CONTEXT_ERR,
+        "Hermes context engine already configured; refusing to overwrite it",
+    )?;
+    Ok(text)
+}
+
+fn disable_normalized(existing: &str) -> std::result::Result<String, String> {
+    let text = remove_seq_item(existing, &["plugins", "enabled"], "tracedecay")?;
+    let text = remove_legacy_project_pin(&text)?;
+    let text = disable_scalar(&text, "context", "engine")?;
+    let text = disable_scalar(&text, "memory", "provider")?;
+    Ok(text)
+}
+
+/// Parse a normalized (LF) profile document, tolerating an empty file as an empty
+/// mapping and preserving the historical top-level error message.
+fn parse_profile(text: &str) -> std::result::Result<Document, String> {
+    if text.trim().is_empty() {
+        return Ok(Document::new_mapping());
+    }
+    let document =
+        Document::from_str(text).map_err(|error| format!("invalid Hermes YAML config: {error}"))?;
+    if document.as_mapping().is_none() {
+        return Err("unsupported Hermes config; expected a top-level mapping".to_string());
+    }
+    Ok(document)
+}
+
+// ---- span/text helpers ----
+
+fn line_start(text: &str, pos: usize) -> usize {
+    text[..pos].rfind('\n').map_or(0, |index| index + 1)
+}
+
+fn line_end_including_newline(text: &str, pos: usize) -> usize {
+    text[pos..]
+        .find('\n')
+        .map_or(text.len(), |index| pos + index + 1)
+}
+
+fn line_end_for_range(text: &str, start: usize, end: usize) -> usize {
+    line_end_including_newline(
+        text,
+        end.checked_sub(1)
+            .filter(|end| *end >= start)
+            .unwrap_or(start),
+    )
+}
+
+fn leading_indent(text: &str, pos: usize) -> String {
+    let start = line_start(text, pos);
+    text[start..].chars().take_while(|ch| *ch == ' ').collect()
+}
+
+/// Append a root-level block, separated from prior content by a blank line.
+fn append_root_block(text: &str, block: &str) -> String {
+    let mut out = text.to_string();
+    if !out.is_empty() {
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+    out.push_str(block);
+    out.push('\n');
+    out
+}
+
+fn value_end(node: &YamlNode) -> Option<usize> {
+    if let Some(scalar) = node.as_scalar() {
+        Some(scalar.byte_range().end as usize)
+    } else if let Some(mapping) = node.as_mapping() {
+        Some(mapping.byte_range().end as usize)
+    } else {
+        node.as_sequence()
+            .map(|sequence| sequence.byte_range().end as usize)
+    }
+}
+
+// ---- enable mutations ----
+
+fn ensure_enabled(text: &str) -> std::result::Result<String, String> {
+    let document = parse_profile(text)?;
+    let root = document
+        .as_mapping()
+        .unwrap_or_else(|| panic!("parse_profile guarantees a mapping"));
+    let Some(plugins_node) = root.get("plugins") else {
+        return Ok(append_root_block(
+            text,
+            "plugins:\n  enabled:\n    - tracedecay",
+        ));
+    };
+    let Some(plugins) = plugins_node.as_mapping() else {
+        return Err(PLUGINS_ERR.to_string());
+    };
+    match plugins.get("enabled") {
+        None => {
+            if plugins.is_flow_style() {
+                Ok(insert_into_flow(
+                    text,
+                    plugins.byte_range().end as usize,
+                    plugins.keys().count() == 0,
+                    "enabled: [tracedecay]",
+                ))
+            } else {
+                insert_block_child(text, &root, "plugins", "enabled:\n{CHILD}  - tracedecay")
+            }
+        }
+        Some(enabled_node) => {
+            let Some(enabled) = enabled_node.as_sequence() else {
+                return Err(PLUGINS_ERR.to_string());
+            };
+            if sequence_contains(enabled, "tracedecay") {
+                return Ok(text.to_string());
+            }
+            let range = enabled.byte_range();
+            if enabled.is_flow_style() {
+                Ok(insert_into_flow(
+                    text,
+                    range.end as usize,
+                    enabled.values().count() == 0,
+                    "tracedecay",
+                ))
+            } else {
+                let item_indent = leading_indent(text, range.start as usize);
+                let end = range.end as usize;
+                let insert_at = if text[..end].ends_with('\n') {
+                    end
+                } else {
+                    line_end_including_newline(text, end.saturating_sub(1))
+                };
+                let insertion = format!("{item_indent}- tracedecay\n");
+                Ok(format!(
+                    "{}{}{}",
+                    &text[..insert_at],
+                    insertion,
+                    &text[insert_at..]
+                ))
+            }
+        }
+    }
+}
+
+fn ensure_scalar(
+    text: &str,
+    container: &str,
+    key: &str,
+    value: &str,
+    allow_overwrite: &[&str],
+    unsupported: &str,
+    conflict: &str,
+) -> std::result::Result<String, String> {
+    let document = parse_profile(text)?;
+    let root = document
+        .as_mapping()
+        .unwrap_or_else(|| panic!("parse_profile guarantees a mapping"));
+    let Some(container_node) = root.get(container) else {
+        return Ok(append_root_block(
+            text,
+            &format!("{container}:\n  {key}: {value}"),
+        ));
+    };
+    let Some(mapping) = container_node.as_mapping() else {
+        return Err(unsupported.to_string());
+    };
+    if !mapping.contains_key(key) {
+        if mapping.is_flow_style() {
+            return Ok(insert_into_flow(
+                text,
+                mapping.byte_range().end as usize,
+                mapping.keys().count() == 0,
+                &format!("{key}: {value}"),
+            ));
+        }
+        return insert_block_child(text, &root, container, &format!("{key}: {value}"));
+    }
+    match string_value(mapping, key).as_deref() {
+        Some(current) if current == value => Ok(text.to_string()),
+        Some(current) if allow_overwrite.contains(&current) => {
+            let entry = mapping
+                .find_entry_by_key(key)
+                .ok_or_else(|| unsupported.to_string())?;
+            let range = entry
+                .value_node()
+                .and_then(|node| node.as_scalar().map(yaml_edit::Scalar::byte_range))
+                .ok_or_else(|| unsupported.to_string())?;
+            Ok(format!(
+                "{}{}{}",
+                &text[..range.start as usize],
+                value,
+                &text[range.end as usize..]
+            ))
+        }
+        Some(_) => Err(conflict.to_string()),
+        None => Err(unsupported.to_string()),
+    }
+}
+
+/// Insert `content` into a flow collection whose byte range ends at `range_end`
+/// (just past the closing `}`/`]`), prefixing `, ` when the collection is not
+/// empty.
+fn insert_into_flow(text: &str, range_end: usize, empty: bool, content: &str) -> String {
+    let at = range_end - 1;
+    let insertion = if empty {
+        content.to_string()
+    } else {
+        format!(", {content}")
+    };
+    format!("{}{}{}", &text[..at], insertion, &text[at..])
+}
+
+/// Insert a new child line under an existing BLOCK mapping `container`. `{CHILD}`
+/// in the template expands to the child indentation for nested continuations.
+fn insert_block_child(
+    text: &str,
+    root: &Mapping,
+    container: &str,
+    child_template: &str,
+) -> std::result::Result<String, String> {
+    let mapping = root
+        .get(container)
+        .and_then(|node| node.as_mapping().cloned())
+        .ok_or_else(|| "unsupported Hermes profile config".to_string())?;
+    let entry = root
+        .find_entry_by_key(container)
+        .ok_or_else(|| "unsupported Hermes profile config".to_string())?;
+    let key_start = entry
+        .key_node()
+        .and_then(|node| {
+            node.as_scalar()
+                .map(|scalar| scalar.byte_range().start as usize)
+        })
+        .ok_or_else(|| "unsupported Hermes profile config".to_string())?;
+    let child_indent = format!("{}  ", leading_indent(text, key_start));
+    let child = child_template.replace("{CHILD}", &child_indent);
+    let insert_at = if mapping.keys().count() == 0 {
+        line_end_including_newline(text, key_start)
+    } else {
+        let end = mapping.byte_range().end as usize;
+        if text[..end].ends_with('\n') {
+            end
+        } else {
+            line_end_including_newline(text, end.saturating_sub(1))
+        }
+    };
+    Ok(format!(
+        "{}{}{}\n{}",
+        &text[..insert_at],
+        child_indent,
+        child,
+        &text[insert_at..]
+    ))
+}
+
+// ---- removals ----
+
+/// Remove the legacy `plugins.tracedecay.project_root` pin, collapsing an
+/// otherwise-empty `tracedecay` mapping when it carries no comments/anchors.
+fn remove_legacy_project_pin(text: &str) -> std::result::Result<String, String> {
+    let document = parse_profile(text)?;
+    let root = document
+        .as_mapping()
+        .unwrap_or_else(|| panic!("parse_profile guarantees a mapping"));
+    let Some(plugins) = root
+        .get("plugins")
+        .and_then(|node| node.as_mapping().cloned())
+    else {
+        return Ok(text.to_string());
+    };
+    let Some(tracedecay) = plugins
+        .get("tracedecay")
+        .and_then(|node| node.as_mapping().cloned())
+    else {
+        return Ok(text.to_string());
+    };
+    if !tracedecay.contains_key("project_root") {
+        return Ok(text.to_string());
+    }
+    let after = remove_map_entry(text, &tracedecay, "project_root")?;
+
+    let document = parse_profile(&after)?;
+    let root = document
+        .as_mapping()
+        .unwrap_or_else(|| panic!("parse_profile guarantees a mapping"));
+    if let Some(plugins) = root
+        .get("plugins")
+        .and_then(|node| node.as_mapping().cloned())
+    {
+        return collapse_if_empty(&after, &plugins, "tracedecay");
+    }
+    Ok(after)
+}
+
+fn remove_seq_item(text: &str, path: &[&str], value: &str) -> std::result::Result<String, String> {
+    let document = parse_profile(text)?;
+    let root = document
+        .as_mapping()
+        .unwrap_or_else(|| panic!("parse_profile guarantees a mapping"));
+    let mut current = root.clone();
+    for (index, key) in path.iter().enumerate() {
+        let Some(node) = current.get(*key) else {
+            return Ok(text.to_string());
+        };
+        if index + 1 == path.len() {
+            let Some(sequence) = node.as_sequence() else {
+                return Ok(text.to_string());
+            };
+            if !sequence_contains(sequence, value) {
+                return Ok(text.to_string());
+            }
+            return remove_one_seq_item(text, sequence, value);
+        }
+        let Some(mapping) = node.as_mapping() else {
+            return Ok(text.to_string());
+        };
+        current = mapping.clone();
+    }
+    Ok(text.to_string())
+}
+
+fn remove_one_seq_item(
+    text: &str,
+    sequence: &Sequence,
+    value: &str,
+) -> std::result::Result<String, String> {
+    let Some(item) = sequence.values().find(|node| {
+        node.as_scalar()
+            .is_some_and(|scalar| scalar.as_string() == value)
+    }) else {
+        return Ok(text.to_string());
+    };
+    let range = item
+        .as_scalar()
+        .map(yaml_edit::Scalar::byte_range)
+        .ok_or_else(|| PLUGINS_ERR.to_string())?;
+    let (start, end) = (range.start as usize, range.end as usize);
+    if sequence.is_flow_style() {
+        let (start, end) = expand_over_flow_separator(text, start, end);
+        Ok(format!("{}{}", &text[..start], &text[end..]))
+    } else {
+        let line_start = line_start(text, start);
+        let line_end = line_end_for_range(text, start, end);
+        Ok(format!("{}{}", &text[..line_start], &text[line_end..]))
+    }
+}
+
+fn remove_map_entry(
+    text: &str,
+    parent: &Mapping,
+    key: &str,
+) -> std::result::Result<String, String> {
+    let Some(entry) = parent.find_entry_by_key(key) else {
+        return Ok(text.to_string());
+    };
+    let key_start = entry
+        .key_node()
+        .and_then(|node| {
+            node.as_scalar()
+                .map(|scalar| scalar.byte_range().start as usize)
+        })
+        .ok_or_else(|| PLUGINS_ERR.to_string())?;
+    // A `key:` whose only child was just removed has a null value and no value
+    // node; fall back to the key position so we still drop the dangling line.
+    let value_end = entry.value_node().and_then(|node| value_end(&node));
+    if parent.is_flow_style() {
+        let value_end = value_end.ok_or_else(|| PLUGINS_ERR.to_string())?;
+        let (start, end) = expand_over_flow_separator(text, key_start, value_end);
+        Ok(format!("{}{}", &text[..start], &text[end..]))
+    } else {
+        let line_start = line_start(text, key_start);
+        let line_end = value_end.map_or_else(
+            || line_end_including_newline(text, key_start),
+            |value_end| line_end_for_range(text, key_start, value_end),
+        );
+        Ok(format!("{}{}", &text[..line_start], &text[line_end..]))
+    }
+}
+
+/// Widen a `start..end` span to absorb one adjacent flow separator (`, `),
+/// preferring the following comma and falling back to the preceding one.
+fn expand_over_flow_separator(text: &str, start: usize, mut end: usize) -> (usize, usize) {
+    let after = &text[end..];
+    let trimmed = after.trim_start_matches(' ');
+    if trimmed.starts_with(',') {
+        end += (after.len() - trimmed.len()) + 1;
+        if text[end..].starts_with(' ') {
+            end += 1;
+        }
+        return (start, end);
+    }
+    let before = &text[..start];
+    let trimmed = before.trim_end_matches(' ');
+    if trimmed.ends_with(',') {
+        return (trimmed.len() - 1, end);
+    }
+    (start, end)
+}
+
+fn disable_scalar(text: &str, container: &str, key: &str) -> std::result::Result<String, String> {
+    let document = parse_profile(text)?;
+    let root = document
+        .as_mapping()
+        .unwrap_or_else(|| panic!("parse_profile guarantees a mapping"));
+    let Some(mapping) = root
+        .get(container)
+        .and_then(|node| node.as_mapping().cloned())
+    else {
+        return Ok(text.to_string());
+    };
+    if string_value(&mapping, key).as_deref() != Some("tracedecay") {
+        return Ok(text.to_string());
+    }
+    let after = remove_map_entry(text, &mapping, key)?;
+
+    let document = parse_profile(&after)?;
+    let root = document
+        .as_mapping()
+        .unwrap_or_else(|| panic!("parse_profile guarantees a mapping"));
+    collapse_if_empty(&after, &root, container)
+}
+
+/// Remove `key` from `parent` when its value is now empty (an empty mapping or
+/// sequence, or a null value left behind after its only child was removed) and
+/// the entry carries no comments, anchors or aliases.
+fn collapse_if_empty(
+    text: &str,
+    parent: &Mapping,
+    key: &str,
+) -> std::result::Result<String, String> {
+    let Some(entry) = parent.find_entry_by_key(key) else {
+        return Ok(text.to_string());
+    };
+    let empty = match entry.value_node() {
+        None => true,
+        Some(node) => {
+            if let Some(mapping) = node.as_mapping() {
+                mapping.keys().count() == 0
+            } else if let Some(sequence) = node.as_sequence() {
+                sequence.values().count() == 0
+            } else if let Some(scalar) = node.as_scalar() {
+                let value = scalar.as_string();
+                value.is_empty() || value == "~" || value == "null"
+            } else {
+                false
+            }
+        }
+    };
+    if !empty {
+        return Ok(text.to_string());
+    }
+    let Some(key_start) = entry.key_node().and_then(|node| {
+        node.as_scalar()
+            .map(|scalar| scalar.byte_range().start as usize)
+    }) else {
+        return Ok(text.to_string());
+    };
+    let value_end = entry
+        .value_node()
+        .and_then(|node| value_end(&node))
+        .unwrap_or(key_start);
+    let span = &text[key_start..value_end.min(text.len())];
+    if span.contains('#') || span.contains('&') || span.contains('*') {
+        return Ok(text.to_string());
+    }
+    if !parent.is_flow_style() {
+        let mut start = line_start(text, key_start);
+        // `value_end` is inside the entry's final line (or at its key when
+        // removing a now-null `key:`). Expand to the line boundary exactly
+        // once so the following line and authored blank lines remain intact.
+        let end = line_end_for_range(text, key_start, value_end);
+        if text[..start].ends_with("\n\n") {
+            start -= 1;
+        }
+        return Ok(format!("{}{}", &text[..start], &text[end..]));
+    }
+    remove_map_entry(text, parent, key)
+}
+
+fn string_value(mapping: &Mapping, key: &str) -> Option<String> {
+    mapping
+        .get(key)?
+        .as_scalar()
+        .map(yaml_edit::Scalar::as_string)
+}
+
+fn sequence_contains(sequence: &Sequence, expected: &str) -> bool {
+    sequence.values().any(|value| {
+        value
+            .as_scalar()
+            .is_some_and(|scalar| scalar.as_string() == expected)
+    })
 }
 
 fn write_config_file(path: &Path, contents: &str) -> Result<()> {
@@ -76,637 +726,18 @@ fn write_config_file(path: &Path, contents: &str) -> Result<()> {
         })?;
     }
     let backup = backup_config_file(path)?;
-    let new_path = PathBuf::from(format!("{}.new", path.display()));
-    if let Err(error) = std::fs::write(&new_path, contents) {
-        std::fs::remove_file(&new_path).ok();
-        return Err(TraceDecayError::Config {
-            message: format!("failed to write {}: {error}", new_path.display()),
-        });
-    }
-    if let Err(error) = std::fs::rename(&new_path, path) {
-        std::fs::remove_file(&new_path).ok();
+    safe_write_bytes_file(path, contents.as_bytes(), backup.as_deref()).map_err(|error| {
         let backup_hint = backup
             .as_ref()
             .map(|path| format!(" Backup is at {}.", path.display()))
             .unwrap_or_default();
-        return Err(TraceDecayError::Config {
+        TraceDecayError::Config {
             message: format!(
-                "failed to replace {} with {}: {error}.{backup_hint}",
-                path.display(),
-                new_path.display()
+                "failed to atomically replace {}: {error}.{backup_hint}",
+                path.display()
             ),
-        });
-    }
-    Ok(())
-}
-
-fn read_pinned_project_root_from_block(
-    lines: &[&str],
-    plugins_start: usize,
-    plugins_end: usize,
-    plugin_key: &str,
-) -> Option<String> {
-    let PluginBlock::Block { start, end } =
-        find_plugin_block_in(lines, plugins_start, plugins_end, plugin_key)?
-    else {
-        return None;
-    };
-    let value = lines
-        .iter()
-        .take(end)
-        .skip(start + 1)
-        .find_map(|line| line.trim().strip_prefix("project_root:"))?
-        .trim();
-    parse_yaml_scalar(value)
-}
-
-/// Decodes a single-line YAML scalar (double-quoted, single-quoted, or plain).
-fn parse_yaml_scalar(value: &str) -> Option<String> {
-    let value = value.trim();
-    if value.is_empty() {
-        return None;
-    }
-    if value.starts_with('"') {
-        return serde_json::from_str::<String>(value).ok();
-    }
-    if value.len() >= 2 && value.starts_with('\'') && value.ends_with('\'') {
-        return Some(value[1..value.len() - 1].replace("''", "'"));
-    }
-    Some(value.to_string())
-}
-
-/// Adds `TraceDecay` to the Hermes plugin, memory-provider, and context-engine
-/// configuration while preserving unrelated profile settings.
-pub fn enable_plugin_config(existing: &str) -> std::result::Result<String, String> {
-    let without_legacy_pin = remove_pinned_project_root_config(existing)?;
-    let enabled = enable_plugin_list_config(&without_legacy_pin)?;
-    let with_memory = enable_memory_provider_config(&enabled)?;
-    enable_context_engine_config(&with_memory)
-}
-
-fn enable_plugin_list_config(existing: &str) -> std::result::Result<String, String> {
-    if existing.trim().is_empty() {
-        return Ok("plugins:\n  enabled:\n    - tracedecay\n".to_string());
-    }
-
-    let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
-    let had_trailing_newline = existing.ends_with('\n');
-
-    validate_top_level_plugins_shape(existing)?;
-
-    if find_top_level_section(existing, "plugins").is_none() {
-        let mut out = existing.trim_end().to_string();
-        if !out.is_empty() {
-            out.push_str("\n\n");
         }
-        out.push_str("plugins:\n  enabled:\n    - tracedecay\n");
-        return Ok(out);
-    }
-
-    let (plugins_start, plugins_end) = find_top_level_section(existing, "plugins")
-        .ok_or_else(|| "unsupported Hermes plugins config".to_string())?;
-    match find_child_section_from_strings(&lines, plugins_start, plugins_end, "disabled")
-        .ok_or_else(|| "unsupported Hermes plugins config".to_string())?
-    {
-        ChildSection::Block { start, end } => {
-            lines = remove_list_item(lines, start, end, "tracedecay");
-        }
-        ChildSection::Missing | ChildSection::EmptyFlow { .. } => {}
-    }
-
-    let (plugins_start, plugins_end) = find_top_level_section_from_strings(&lines, "plugins")
-        .ok_or_else(|| "unsupported Hermes plugins config".to_string())?;
-    match find_child_section_from_strings(&lines, plugins_start, plugins_end, "enabled")
-        .ok_or_else(|| "unsupported Hermes plugins config".to_string())?
-    {
-        ChildSection::Block { start, end } => {
-            if !list_contains_item_strings(&lines, start, end, "tracedecay") {
-                // Match the existing list's item indentation (Hermes writes
-                // 2-space items); only default to 4 when the list is empty.
-                let indent = list_item_indent(&lines, start, end).unwrap_or(4);
-                lines.insert(start + 1, format!("{}- tracedecay", " ".repeat(indent)));
-            }
-        }
-        ChildSection::EmptyFlow { line } => {
-            // Rewrite `enabled: []` into a block list containing tracedecay.
-            lines[line] = "  enabled:".to_string();
-            lines.insert(line + 1, "    - tracedecay".to_string());
-        }
-        ChildSection::Missing => {
-            lines.insert(plugins_start + 1, "  enabled:".to_string());
-            lines.insert(plugins_start + 2, "    - tracedecay".to_string());
-        }
-    }
-
-    Ok(join_lines(&lines, had_trailing_newline))
-}
-
-/// Removes TraceDecay-owned Hermes plugin, memory-provider, and context-engine
-/// settings while preserving unrelated profile settings.
-pub fn disable_plugin_config(existing: &str) -> std::result::Result<String, String> {
-    if existing.trim().is_empty() {
-        return Ok(existing.to_string());
-    }
-    validate_top_level_plugins_shape(existing)?;
-    let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
-    let had_trailing_newline = existing.ends_with('\n');
-    let Some((plugins_start, plugins_end)) = find_top_level_section(existing, "plugins") else {
-        return Ok(existing.to_string());
-    };
-    match find_child_section_from_strings(&lines, plugins_start, plugins_end, "enabled")
-        .ok_or_else(|| "unsupported Hermes plugins config".to_string())?
-    {
-        ChildSection::Block { start, end } => {
-            lines = remove_list_item(lines, start, end, "tracedecay");
-        }
-        ChildSection::Missing | ChildSection::EmptyFlow { .. } => {}
-    }
-    let without_pin = remove_pinned_project_root_config(&join_lines(&lines, had_trailing_newline))?;
-    let without_engine = disable_context_engine_config(&without_pin)?;
-    disable_memory_provider_config(&without_engine)
-}
-
-fn enable_memory_provider_config(existing: &str) -> std::result::Result<String, String> {
-    if existing.trim().is_empty() {
-        return Ok("memory:\n  provider: tracedecay\n".to_string());
-    }
-
-    validate_top_level_memory_shape(existing)?;
-    let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
-    let had_trailing_newline = existing.ends_with('\n');
-
-    let Some((memory_start, memory_end)) = find_top_level_section(existing, "memory") else {
-        let mut out = existing.trim_end().to_string();
-        if !out.is_empty() {
-            out.push_str("\n\n");
-        }
-        out.push_str("memory:\n  provider: tracedecay\n");
-        return Ok(out);
-    };
-
-    let provider_line = find_memory_provider_line(&lines, memory_start, memory_end)
-        .ok_or_else(|| "unsupported Hermes memory config".to_string())?;
-    if let Some(provider_line) = provider_line {
-        let provider = memory_provider_value(&lines[provider_line])
-            .ok_or_else(|| "unsupported Hermes memory config".to_string())?;
-        if provider != "tracedecay" {
-            return Err(
-                "Hermes memory provider already configured; refusing to overwrite it".to_string(),
-            );
-        }
-    } else {
-        lines.insert(memory_start + 1, "  provider: tracedecay".to_string());
-    }
-
-    Ok(join_lines(&lines, had_trailing_newline))
-}
-
-fn memory_provider_value(line: &str) -> Option<&str> {
-    let value = line.trim().strip_prefix("provider:")?.trim();
-    Some(value.trim_matches(['"', '\'']))
-}
-
-fn disable_memory_provider_config(existing: &str) -> std::result::Result<String, String> {
-    if existing.trim().is_empty() {
-        return Ok(existing.to_string());
-    }
-
-    validate_top_level_memory_shape(existing)?;
-    let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
-    let had_trailing_newline = existing.ends_with('\n');
-    let Some((memory_start, memory_end)) = find_top_level_section(existing, "memory") else {
-        return Ok(existing.to_string());
-    };
-    let provider_line = find_memory_provider_line(&lines, memory_start, memory_end)
-        .ok_or_else(|| "unsupported Hermes memory config".to_string())?;
-    let mut removed_provider = false;
-    if let Some(provider_line) = provider_line {
-        let provider = lines[provider_line].trim();
-        if provider == "provider: tracedecay" {
-            lines.remove(provider_line);
-            removed_provider = true;
-        }
-    }
-    if removed_provider {
-        remove_empty_top_level_section(&mut lines, "memory");
-    }
-
-    Ok(join_lines(&lines, had_trailing_newline))
-}
-
-/// Sets `context.engine: tracedecay` so Hermes activates the registered
-/// context engine (selection is config-driven; the host never auto-activates
-/// plugin engines). The built-in default `compressor` is replaced; any other
-/// configured engine is left alone with an error, mirroring the
-/// memory-provider guard.
-fn enable_context_engine_config(existing: &str) -> std::result::Result<String, String> {
-    if existing.trim().is_empty() {
-        return Ok("context:\n  engine: tracedecay\n".to_string());
-    }
-
-    validate_top_level_section_shape(existing, "context")?;
-    let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
-    let had_trailing_newline = existing.ends_with('\n');
-
-    let Some((context_start, context_end)) = find_top_level_section(existing, "context") else {
-        let mut out = existing.trim_end().to_string();
-        if !out.is_empty() {
-            out.push_str("\n\n");
-        }
-        out.push_str("context:\n  engine: tracedecay\n");
-        return Ok(out);
-    };
-
-    let engine_line = find_child_scalar_line(&lines, context_start, context_end, "engine")
-        .ok_or_else(|| "unsupported Hermes context config".to_string())?;
-    if let Some(engine_line) = engine_line {
-        let current = lines[engine_line]
-            .trim()
-            .strip_prefix("engine:")
-            .map(str::trim)
-            .unwrap_or_default();
-        match parse_yaml_scalar(current).as_deref() {
-            None | Some("compressor") => {
-                lines[engine_line] = "  engine: tracedecay".to_string();
-            }
-            Some("tracedecay") => {}
-            Some(_) => {
-                return Err(
-                    "Hermes context engine already configured; refusing to overwrite it"
-                        .to_string(),
-                );
-            }
-        }
-    } else {
-        lines.insert(context_start + 1, "  engine: tracedecay".to_string());
-    }
-
-    Ok(join_lines(&lines, had_trailing_newline))
-}
-
-fn disable_context_engine_config(existing: &str) -> std::result::Result<String, String> {
-    if existing.trim().is_empty() {
-        return Ok(existing.to_string());
-    }
-
-    validate_top_level_section_shape(existing, "context")?;
-    let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
-    let had_trailing_newline = existing.ends_with('\n');
-    let Some((context_start, context_end)) = find_top_level_section(existing, "context") else {
-        return Ok(existing.to_string());
-    };
-    let engine_line = find_child_scalar_line(&lines, context_start, context_end, "engine")
-        .ok_or_else(|| "unsupported Hermes context config".to_string())?;
-    let mut removed_engine = false;
-    if let Some(engine_line) = engine_line {
-        let engine = lines[engine_line].trim();
-        if engine == "engine: tracedecay" {
-            lines.remove(engine_line);
-            removed_engine = true;
-        }
-    }
-    if removed_engine {
-        remove_empty_top_level_section(&mut lines, "context");
-    }
-
-    Ok(join_lines(&lines, had_trailing_newline))
-}
-
-/// Shape of the `plugins.tracedecay` child mapping.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PluginBlock {
-    Missing,
-    /// Block-style `<plugin_name>:` at `start`; entries end (exclusive) at `end`.
-    Block {
-        start: usize,
-        end: usize,
-    },
-    /// Flow-style empty mapping `<plugin_name>: {}` on `line`.
-    EmptyFlow {
-        line: usize,
-    },
-}
-
-fn find_plugin_block_in(
-    lines: &[&str],
-    plugins_start: usize,
-    plugins_end: usize,
-    plugin_name: &str,
-) -> Option<PluginBlock> {
-    let block_header = format!("{plugin_name}:");
-    let mut start = None;
-    for (idx, line) in lines
-        .iter()
-        .enumerate()
-        .take(plugins_end)
-        .skip(plugins_start + 1)
-    {
-        if line.trim_start().starts_with('\t') {
-            return None;
-        }
-        if line_indent(line) == 2 {
-            let trimmed = line.trim();
-            if trimmed == block_header {
-                start = Some(idx);
-                break;
-            }
-            if let Some(rest) = trimmed.strip_prefix(&block_header) {
-                if rest.trim() == "{}" {
-                    return Some(PluginBlock::EmptyFlow { line: idx });
-                }
-                return None;
-            }
-        }
-    }
-    let Some(start) = start else {
-        return Some(PluginBlock::Missing);
-    };
-    // Entries live at indent >= 4; the block ends at the first non-blank,
-    // non-comment line at indent <= 2 (a sibling plugins key or new section).
-    let end = lines
-        .iter()
-        .enumerate()
-        .take(plugins_end)
-        .skip(start + 1)
-        .find_map(|(idx, line)| {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
-                return None;
-            }
-            (line_indent(line) <= 2).then_some(idx)
-        })
-        .unwrap_or(plugins_end);
-    Some(PluginBlock::Block { start, end })
-}
-
-/// Removes `plugins.tracedecay.project_root`, then the `tracedecay:` block when
-/// nothing else (user-added keys) remains in it.
-fn remove_pinned_project_root_config(existing: &str) -> std::result::Result<String, String> {
-    remove_pinned_project_root_from_block(existing, "tracedecay")
-}
-
-fn remove_pinned_project_root_from_block(
-    existing: &str,
-    plugin_key: &str,
-) -> std::result::Result<String, String> {
-    let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
-    let had_trailing_newline = existing.ends_with('\n');
-    let Some((plugins_start, plugins_end)) = find_top_level_section(existing, "plugins") else {
-        return Ok(existing.to_string());
-    };
-    let borrowed: Vec<&str> = lines.iter().map(String::as_str).collect();
-    let PluginBlock::Block { start, end } =
-        find_plugin_block_in(&borrowed, plugins_start, plugins_end, plugin_key)
-            .ok_or_else(|| "unsupported Hermes plugins config".to_string())?
-    else {
-        return Ok(existing.to_string());
-    };
-    let Some(pin_idx) = lines
-        .iter()
-        .enumerate()
-        .take(end)
-        .skip(start + 1)
-        .find_map(|(idx, line)| line.trim().starts_with("project_root:").then_some(idx))
-    else {
-        return Ok(existing.to_string());
-    };
-    lines.remove(pin_idx);
-    let block_is_empty = !lines
-        .iter()
-        .take(end - 1)
-        .skip(start + 1)
-        .any(|line| !line.trim().is_empty() && !line.trim().starts_with('#'));
-    if block_is_empty {
-        lines.remove(start);
-    }
-
-    Ok(join_lines(&lines, had_trailing_newline))
-}
-
-fn validate_top_level_plugins_shape(existing: &str) -> std::result::Result<(), String> {
-    validate_top_level_section_shape(existing, "plugins")
-}
-
-fn validate_top_level_memory_shape(existing: &str) -> std::result::Result<(), String> {
-    validate_top_level_section_shape(existing, "memory")
-}
-
-fn validate_top_level_section_shape(existing: &str, key: &str) -> std::result::Result<(), String> {
-    let target = format!("{key}:");
-    let section_lines = existing
-        .lines()
-        .filter(|line| {
-            let trimmed = line.trim();
-            line_indent(line) == 0 && !trimmed.starts_with('#') && trimmed.starts_with(&target)
-        })
-        .collect::<Vec<_>>();
-    match section_lines.as_slice() {
-        [] => Ok(()),
-        [line] if line.trim() == target => Ok(()),
-        _ => Err(format!(
-            "unsupported Hermes {key} config; expected a block-style `{key}:` mapping"
-        )),
-    }
-}
-
-fn find_top_level_section(config: &str, key: &str) -> Option<(usize, usize)> {
-    let lines: Vec<&str> = config.lines().collect();
-    find_top_level_section_in(&lines, key)
-}
-
-fn find_top_level_section_from_strings(lines: &[String], key: &str) -> Option<(usize, usize)> {
-    let borrowed: Vec<&str> = lines.iter().map(String::as_str).collect();
-    find_top_level_section_in(&borrowed, key)
-}
-
-fn find_top_level_section_in(lines: &[&str], key: &str) -> Option<(usize, usize)> {
-    let target = format!("{key}:");
-    let start = lines
-        .iter()
-        .position(|line| line_indent(line) == 0 && line.trim() == target)?;
-    let end = lines
-        .iter()
-        .enumerate()
-        .skip(start + 1)
-        .find_map(|(idx, line)| {
-            let trimmed = line.trim();
-            (!trimmed.is_empty() && !trimmed.starts_with('#') && line_indent(line) == 0)
-                .then_some(idx)
-        })
-        .unwrap_or(lines.len());
-    Some((start, end))
-}
-
-/// Shape of a `plugins.<key>` child section found by
-/// [`find_child_section_in`]. `None` from the finder means the config is
-/// unsupported/ambiguous.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ChildSection {
-    /// The key is not present inside the parent section.
-    Missing,
-    /// Block-style `key:` at `start`; the section ends (exclusive) at `end`.
-    Block { start: usize, end: usize },
-    /// Flow-style empty list `key: []` (Hermes writes this) on `line`.
-    EmptyFlow { line: usize },
-}
-
-fn find_child_section_from_strings(
-    lines: &[String],
-    plugins_start: usize,
-    plugins_end: usize,
-    key: &str,
-) -> Option<ChildSection> {
-    let borrowed: Vec<&str> = lines.iter().map(String::as_str).collect();
-    find_child_section_in(&borrowed, plugins_start, plugins_end, key)
-}
-
-fn find_child_section_in(
-    lines: &[&str],
-    plugins_start: usize,
-    plugins_end: usize,
-    key: &str,
-) -> Option<ChildSection> {
-    let target = format!("{key}:");
-    let mut start = None;
-    for (idx, line) in lines
-        .iter()
-        .enumerate()
-        .take(plugins_end)
-        .skip(plugins_start + 1)
-    {
-        if line.trim_start().starts_with('\t') {
-            return None;
-        }
-        if line_indent(line) == 2 {
-            let trimmed = line.trim();
-            if trimmed == target {
-                start = Some(idx);
-                break;
-            }
-            if let Some(rest) = trimmed.strip_prefix(&target) {
-                // `key: []` is a flow-style empty list; anything else after
-                // the colon (flow lists with items, scalars) is unsupported.
-                if rest.trim() == "[]" {
-                    return Some(ChildSection::EmptyFlow { line: idx });
-                }
-                return None;
-            }
-        }
-    }
-    let Some(start) = start else {
-        return Some(ChildSection::Missing);
-    };
-    // YAML allows sequence items at the same indent as the parent key
-    // (`enabled:` followed by `  - item`), which Hermes itself writes. The
-    // section therefore ends at the first line that is shallower than the
-    // key, or at key depth without being a list item (e.g. a sibling key).
-    let end = lines
-        .iter()
-        .enumerate()
-        .take(plugins_end)
-        .skip(start + 1)
-        .find_map(|(idx, line)| {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
-                return None;
-            }
-            let indent = line_indent(line);
-            (indent < 2 || (indent == 2 && !trimmed.starts_with("- "))).then_some(idx)
-        })
-        .unwrap_or(plugins_end);
-    Some(ChildSection::Block { start, end })
-}
-
-/// Indent (in spaces) of the first `- ` list item inside a block section, if
-/// the list already has items.
-fn list_item_indent(lines: &[String], start: usize, end: usize) -> Option<usize> {
-    lines
-        .iter()
-        .take(end)
-        .skip(start + 1)
-        .find(|line| line.trim().starts_with("- "))
-        .map(|line| line_indent(line))
-}
-
-#[allow(clippy::option_option)]
-fn find_memory_provider_line(
-    lines: &[String],
-    memory_start: usize,
-    memory_end: usize,
-) -> Option<Option<usize>> {
-    find_child_scalar_line(lines, memory_start, memory_end, "provider")
-}
-
-/// Finds the `  <key>:` scalar line inside a top-level section.
-///
-/// Outer `None` means the section is unsupported (tab indentation); inner
-/// `None` means the key is simply absent.
-#[allow(clippy::option_option)]
-fn find_child_scalar_line(
-    lines: &[String],
-    section_start: usize,
-    section_end: usize,
-    key: &str,
-) -> Option<Option<usize>> {
-    let target = format!("{key}:");
-    for (idx, line) in lines
-        .iter()
-        .enumerate()
-        .take(section_end)
-        .skip(section_start + 1)
-    {
-        if line.trim_start().starts_with('\t') {
-            return None;
-        }
-        if line_indent(line) == 2 && line.trim_start().starts_with(&target) {
-            return Some(Some(idx));
-        }
-    }
-    Some(None)
-}
-
-fn remove_empty_top_level_section(lines: &mut Vec<String>, key: &str) {
-    let Some((start, end)) = find_top_level_section_from_strings(lines, key) else {
-        return;
-    };
-    let has_content = lines.iter().take(end).skip(start + 1).any(|line| {
-        let trimmed = line.trim();
-        !trimmed.is_empty()
-    });
-    if !has_content {
-        lines.drain(start..end);
-    }
-}
-
-fn list_contains_item_strings(lines: &[String], start: usize, end: usize, item: &str) -> bool {
-    lines
-        .iter()
-        .take(end)
-        .skip(start + 1)
-        .any(|line| line.trim() == format!("- {item}"))
-}
-
-fn remove_list_item(lines: Vec<String>, start: usize, end: usize, item: &str) -> Vec<String> {
-    lines
-        .into_iter()
-        .enumerate()
-        .filter_map(|(idx, line)| {
-            let remove = idx > start && idx < end && line.trim() == format!("- {item}");
-            (!remove).then_some(line)
-        })
-        .collect()
-}
-
-fn line_indent(line: &str) -> usize {
-    line.chars().take_while(|ch| *ch == ' ').count()
-}
-
-fn join_lines(lines: &[String], had_trailing_newline: bool) -> String {
-    let mut out = lines.join("\n");
-    if had_trailing_newline || !out.is_empty() {
-        out.push('\n');
-    }
-    out
+    })
 }
 
 #[cfg(test)]
@@ -714,88 +745,365 @@ fn join_lines(lines: &[String], had_trailing_newline: bool) -> String {
 mod tests {
     use super::*;
 
+    use tempfile::TempDir;
+
+    /// A block-collection value's byte range ends one byte past its trailing
+    /// newline, i.e. exactly at the start of the following line. Resolving the
+    /// line end from that exclusive offset used to swallow the following
+    /// authored line; the collapse must remove exactly the entry's own lines.
     #[test]
-    fn enable_plugin_creates_missing_profile_config() {
-        let updated = enable_plugin_config("").unwrap();
-        assert!(updated.contains("plugins:\n  enabled:\n    - tracedecay\n"));
-        assert!(updated.contains("memory:\n  provider: tracedecay\n"));
-        assert!(updated.contains("context:\n  engine: tracedecay\n"));
-    }
-
-    #[test]
-    fn disable_plugin_ignores_missing_config() {
-        assert_eq!(disable_plugin_config(""), Ok(String::new()));
-    }
-
-    #[test]
-    fn enable_plugin_updates_existing_config_without_project_pin() {
-        let updated =
-            enable_plugin_config("theme: dark\nplugins:\n  enabled:\n    - other\n").unwrap();
-        assert!(updated.contains("theme: dark\n"));
-        assert!(updated.contains("    - tracedecay\n    - other\n"));
-        assert!(updated.contains("memory:\n  provider: tracedecay\n"));
-        assert!(updated.contains("context:\n  engine: tracedecay\n"));
-    }
-
-    #[test]
-    fn enable_plugin_removes_legacy_project_pin_but_preserves_behavior_settings() {
-        let updated = enable_plugin_config(
-            "plugins:\n  enabled:\n    - tracedecay\n  tracedecay:\n    project_root: /legacy/repo\n    summary_model: glm-4.7\n",
-        )
-        .unwrap();
-        assert!(!updated.contains("project_root:"), "{updated}");
-        assert!(updated.contains("summary_model: glm-4.7"), "{updated}");
-    }
-
-    #[test]
-    fn enable_plugin_rejects_malformed_config_without_rewrite() {
-        let original = "plugins: {enabled: [other]}\n";
-        let err = enable_plugin_config(original).unwrap_err();
-
-        assert!(err.contains("unsupported Hermes plugins config"));
-    }
-
-    #[test]
-    fn enable_plugin_is_idempotent_on_rerun() {
-        let first = enable_plugin_config(
-            "plugins:\n  enabled:\n  - other\nmemory:\n  provider: tracedecay\ncontext:\n  engine: tracedecay\n",
-        )
-        .unwrap();
-        let second = enable_plugin_config(&first).unwrap();
-
-        assert_eq!(second, first);
-        assert_eq!(second.matches("- tracedecay").count(), 1);
-    }
-
-    #[test]
-    fn enable_plugin_still_rejects_unrelated_memory_provider() {
-        let original = "memory:\n  provider: other\n";
-        let err = enable_plugin_config(original).unwrap_err();
-
-        assert!(err.contains("Hermes memory provider already configured"));
-    }
-
-    #[test]
-    fn read_project_pin_decodes_yaml_scalars() {
+    fn remove_map_entry_at_line_boundary_keeps_following_line() {
+        let text = concat!(
+            "plugins:\n",
+            "  tracedecay:\n",
+            "    project_root: /legacy\n",
+            "  enabled:\n",
+            "    - other\n",
+        );
+        let document = parse_profile(text).unwrap();
+        let root = document.as_mapping().unwrap();
+        let plugins = root.get("plugins").unwrap().as_mapping().cloned().unwrap();
         assert_eq!(
-            parse_config_pinned_project_root(
-                "plugins:\n  tracedecay:\n    project_root: '/repo/it''s-ok'\n",
-            )
-            .as_deref(),
-            Some("/repo/it's-ok")
+            remove_map_entry(text, &plugins, "tracedecay").unwrap(),
+            concat!("plugins:\n", "  enabled:\n", "    - other\n"),
         );
     }
 
     #[test]
-    fn disable_plugin_removes_only_tracedecay_config() {
-        let updated = disable_plugin_config(
-            "theme: dark\nplugins:\n  enabled:\n    - tracedecay\n    - other\nmemory:\n  provider: tracedecay\ncontext:\n  engine: tracedecay\n",
-        )
-        .unwrap();
-        assert!(updated.contains("theme: dark"));
-        assert!(updated.contains("    - other"));
-        assert!(!updated.contains("tracedecay"));
-        assert!(!updated.contains("memory:\n"));
-        assert!(!updated.contains("context:\n"));
+    fn remove_one_seq_item_keeps_following_authored_lines() {
+        let text = concat!(
+            "plugins:\n",
+            "  enabled:\n",
+            "    - tracedecay\n",
+            "    - other\n",
+            "\n",
+            "# authored trailing comment\n",
+        );
+        assert_eq!(
+            remove_seq_item(text, &["plugins", "enabled"], "tracedecay").unwrap(),
+            concat!(
+                "plugins:\n",
+                "  enabled:\n",
+                "    - other\n",
+                "\n",
+                "# authored trailing comment\n",
+            ),
+        );
+    }
+
+    #[test]
+    fn collapse_after_removal_keeps_following_authored_lines() {
+        let text = concat!(
+            "plugins:\n",
+            "  enabled:\n",
+            "    - tracedecay\n",
+            "  tracedecay:\n",
+            "    project_root: /legacy\n",
+            "\n",
+            "memory: keep\n",
+        );
+        assert_eq!(
+            remove_legacy_project_pin(text).unwrap(),
+            concat!(
+                "plugins:\n",
+                "  enabled:\n",
+                "    - tracedecay\n",
+                "\n",
+                "memory: keep\n",
+            ),
+        );
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum Mutation {
+        Enable,
+        Disable,
+    }
+
+    struct CorpusCase {
+        name: &'static str,
+        mutation: Mutation,
+        input: &'static str,
+        preserved: &'static [&'static str],
+        removed: &'static [&'static str],
+        crlf: bool,
+    }
+
+    fn read(path: &Path) -> String {
+        std::fs::read_to_string(path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
+    }
+
+    fn mutate(case: &CorpusCase) -> String {
+        match case.mutation {
+            Mutation::Enable => enable_plugin_config(case.input).unwrap(),
+            Mutation::Disable => disable_plugin_config(case.input).unwrap(),
+        }
+    }
+
+    fn assert_enabled(contents: &str) {
+        let config = ProfileConfigDocument::parse(contents).unwrap();
+        let root = config.root();
+        let plugins = root.get_mapping("plugins").unwrap();
+        assert!(sequence_contains(
+            &plugins.get_sequence("enabled").unwrap(),
+            "tracedecay"
+        ));
+        assert!(
+            plugins
+                .get_sequence("disabled")
+                .is_none_or(|disabled| !sequence_contains(&disabled, "tracedecay"))
+        );
+        assert_eq!(
+            root.get_mapping("memory")
+                .and_then(|memory| string_value(&memory, "provider"))
+                .as_deref(),
+            Some("tracedecay")
+        );
+        assert_eq!(
+            root.get_mapping("context")
+                .and_then(|context| string_value(&context, "engine"))
+                .as_deref(),
+            Some("tracedecay")
+        );
+    }
+
+    fn assert_disabled(contents: &str) {
+        let config = ProfileConfigDocument::parse(contents).unwrap();
+        let root = config.root();
+        if let Some(plugins) = root.get_mapping("plugins") {
+            assert!(
+                plugins
+                    .get_sequence("enabled")
+                    .is_none_or(|enabled| !sequence_contains(&enabled, "tracedecay"))
+            );
+            assert!(
+                plugins
+                    .get_mapping("tracedecay")
+                    .is_none_or(|plugin| !plugin.contains_key("project_root"))
+            );
+        }
+        assert_ne!(
+            root.get_mapping("memory")
+                .and_then(|memory| string_value(&memory, "provider"))
+                .as_deref(),
+            Some("tracedecay")
+        );
+        assert_ne!(
+            root.get_mapping("context")
+                .and_then(|context| string_value(&context, "engine"))
+                .as_deref(),
+            Some("tracedecay")
+        );
+    }
+
+    #[test]
+    fn lossless_profile_config_corpus() {
+        let cases = [
+            CorpusCase {
+                name: "quoted keys and flow collections",
+                mutation: Mutation::Enable,
+                input: concat!(
+                    "# leading comment\n",
+                    "\"plugins\": {enabled: [other], disabled: [tracedecay, blocked], ",
+                    "tracedecay: {project_root: \"/legacy\", keep: yes}}\n",
+                    "memory: {note: \"keep me\"}\n",
+                    "context: {note: 'keep me too'}\n",
+                    "unknown: {quoted: \"value\"}\n",
+                ),
+                preserved: &[
+                    "# leading comment",
+                    "\"plugins\"",
+                    "blocked",
+                    "keep: yes",
+                    "note: \"keep me\"",
+                    "note: 'keep me too'",
+                    "unknown: {quoted: \"value\"}",
+                ],
+                removed: &["project_root:"],
+                crlf: false,
+            },
+            CorpusCase {
+                name: "anchors aliases and merge keys",
+                mutation: Mutation::Enable,
+                input: concat!(
+                    "defaults: &defaults {color: blue, retries: 3}\n",
+                    "plugins:\n",
+                    "  enabled: [other]\n",
+                    "  tracedecay:\n",
+                    "    project_root: /legacy\n",
+                    "    options: *defaults\n",
+                    "consumer:\n",
+                    "  <<: *defaults\n",
+                ),
+                preserved: &[
+                    "&defaults",
+                    "options: *defaults",
+                    "<<: *defaults",
+                    "color: blue",
+                    "retries: 3",
+                ],
+                removed: &["project_root:"],
+                crlf: false,
+            },
+            CorpusCase {
+                name: "crlf and unknown fields",
+                mutation: Mutation::Enable,
+                input: concat!(
+                    "theme: dark\r\n",
+                    "plugins:\r\n",
+                    "  enabled:\r\n",
+                    "    - other\r\n",
+                    "custom:\r\n",
+                    "  nested: true\r\n",
+                ),
+                preserved: &["theme: dark", "custom:", "nested: true"],
+                removed: &[],
+                crlf: true,
+            },
+            CorpusCase {
+                name: "disable only owned paths",
+                mutation: Mutation::Disable,
+                input: concat!(
+                    "# profile comment\n",
+                    "plugins:\n",
+                    "  enabled: [tracedecay, other]\n",
+                    "  tracedecay:\n",
+                    "    project_root: /legacy\n",
+                    "    summary_model: glm-5\n",
+                    "memory: {provider: tracedecay, keep: true}\n",
+                    "context: {engine: tracedecay, budget: 42}\n",
+                    "hooks: &hooks {pre_tool: keep}\n",
+                    "mcp: {servers: *hooks}\n",
+                ),
+                preserved: &[
+                    "# profile comment",
+                    "other",
+                    "summary_model: glm-5",
+                    "keep: true",
+                    "budget: 42",
+                    "hooks: &hooks",
+                    "mcp: {servers: *hooks}",
+                ],
+                removed: &["project_root:"],
+                crlf: false,
+            },
+        ];
+
+        for case in &cases {
+            let updated = mutate(case);
+            for expected in case.preserved {
+                assert!(
+                    updated.contains(expected),
+                    "{} did not preserve {expected:?}:\n{updated}",
+                    case.name
+                );
+            }
+            for removed in case.removed {
+                assert!(
+                    !updated.contains(removed),
+                    "{} retained {removed:?}:\n{updated}",
+                    case.name
+                );
+            }
+            if case.crlf {
+                assert!(
+                    updated
+                        .as_bytes()
+                        .windows(2)
+                        .filter(|window| *window == b"\r\n")
+                        .count()
+                        > 0,
+                    "{} lost CRLF line endings",
+                    case.name
+                );
+                assert!(
+                    !updated.replace("\r\n", "").contains('\n'),
+                    "{} introduced bare LF line endings",
+                    case.name
+                );
+            }
+            match case.mutation {
+                Mutation::Enable => assert_enabled(&updated),
+                Mutation::Disable => assert_disabled(&updated),
+            }
+        }
+    }
+
+    #[test]
+    fn enable_plugin_creates_missing_profile_config() {
+        let dir = TempDir::new().unwrap();
+        let config = dir.path().join(".hermes/profiles/work/config.yaml");
+
+        enable_plugin(&config).unwrap();
+
+        let updated = read(&config);
+        assert_enabled(&updated);
+        assert!(
+            !config.with_extension("yaml.bak").exists(),
+            "first write should not create a backup for a missing config"
+        );
+    }
+
+    #[test]
+    fn disable_plugin_ignores_missing_config() {
+        let dir = TempDir::new().unwrap();
+        let config = dir.path().join(".hermes/profiles/missing/config.yaml");
+
+        disable_plugin(&config).unwrap();
+
+        assert!(!config.exists());
+    }
+
+    #[test]
+    fn enable_then_disable_restores_existing_config_bytes() {
+        let original = "theme: dark\nplugins:\n  enabled:\n    - foreign\n";
+        let enabled = enable_plugin_config(original).unwrap();
+
+        assert_eq!(disable_plugin_config(&enabled).unwrap(), original);
+    }
+
+    #[test]
+    fn disable_empty_mapping_preserves_immediately_following_line() {
+        let input = concat!(
+            "memory:\n",
+            "  provider: tracedecay\n",
+            "user_setting: keep\n",
+        );
+
+        assert_eq!(
+            disable_plugin_config(input).unwrap(),
+            "user_setting: keep\n"
+        );
+    }
+
+    #[test]
+    fn disable_empty_mapping_preserves_following_authored_blank_lines() {
+        let input = concat!(
+            "memory:\n",
+            "  provider: tracedecay\n",
+            "\n",
+            "\n",
+            "user_setting: keep\n",
+        );
+
+        assert_eq!(
+            disable_plugin_config(input).unwrap(),
+            "\n\nuser_setting: keep\n"
+        );
+    }
+
+    #[test]
+    fn enable_plugin_backs_up_existing_config_before_atomic_write() {
+        let dir = TempDir::new().unwrap();
+        let config = dir.path().join("config.yaml");
+        let original = "theme: dark\nplugins:\n  enabled:\n    - other\n";
+        std::fs::write(&config, original).unwrap();
+
+        enable_plugin(&config).unwrap();
+
+        let backup = dir.path().join("config.yaml.bak");
+        assert!(backup.exists());
+        assert_eq!(read(&backup), original);
     }
 }

@@ -25,16 +25,15 @@ use std::path::Path;
 use ast_grep_core::matcher::PatternBuilder;
 use ast_grep_core::tree_sitter::{LanguageExt, StrDoc, TSLanguage};
 use ast_grep_core::{AstGrep, Language, Pattern, PatternError};
-use ignore::WalkBuilder;
-use ignore::overrides::{Override, OverrideBuilder};
 
 use tracedecay_code_extraction::ts_provider;
 
+use crate::grep_search::MAX_INTERACTIVE_SOURCE_BYTES;
+use crate::source_walk::source_walk;
+use tracedecay_domain::repository_path_matches_scope;
+
 /// Bytes sniffed from the head of each file to classify it as binary.
 const BINARY_SNIFF_BYTES: usize = 8_192;
-/// Skip files larger than this; structural search of a multi-MB generated blob
-/// is never what the caller wants and dominates the scan budget.
-const MAX_FILE_BYTES: usize = 2_000_000;
 
 /// A tree-sitter language wired into `ast_grep_core`'s pattern engine.
 ///
@@ -55,7 +54,7 @@ impl Language for TdLang {
     }
 
     fn field_to_id(&self, field: &str) -> Option<u16> {
-        self.ts.field_id_for_name(field).map(|f| f.get())
+        self.ts.field_id_for_name(field).map(std::num::NonZero::get)
     }
 
     fn expando_char(&self) -> char {
@@ -166,6 +165,12 @@ fn lang_key_for_ext(ext: &str) -> Option<&'static str> {
 #[derive(Debug, Clone)]
 pub struct AstGrepSearchMatch {
     pub file: String,
+    /// Exact UTF-8 byte range minted by the bundled tree-sitter authority.
+    pub start_byte: usize,
+    pub end_byte: usize,
+    /// Tree-sitter node kind. Refactoring planners use this to reject
+    /// text-shaped matches that are not identifier syntax.
+    pub node_kind: String,
     /// 1-based line of the match start.
     pub line: u32,
     /// 1-based column (character offset) of the match start.
@@ -184,7 +189,13 @@ pub struct AstGrepSearchMatch {
 pub struct AstGrepSearchResult {
     pub matches: Vec<AstGrepSearchMatch>,
     pub files_scanned: usize,
+    /// Line slices pulled from source text for display. Early caps must
+    /// stop pulling; materializing every line first makes this equal the
+    /// file's line count even when only a few matches are examined.
+    pub lines_visited: usize,
+    pub lines_examined: usize,
     pub truncated: bool,
+    pub cancelled: bool,
 }
 
 /// Why a structural search could not run at all (as opposed to returning zero
@@ -238,6 +249,7 @@ fn build_lang_pattern(key: &str, pattern: &str) -> Option<Result<(TdLang, Patter
 ///   scanned.
 /// * `max_results` — hard cap; one extra match past the cap is collected so
 ///   truncation can be reported honestly.
+#[hotpath::measure(label = "code_index.search.ast_grep")]
 pub fn search_tree(
     project_root: &Path,
     pattern: &str,
@@ -248,8 +260,7 @@ pub fn search_tree(
     search_tree_scoped(project_root, pattern, lang, path_glob, max_results, None)
 }
 
-#[doc(hidden)]
-pub fn search_tree_scoped(
+pub(crate) fn search_tree_scoped(
     project_root: &Path,
     pattern: &str,
     lang: Option<&str>,
@@ -268,7 +279,7 @@ pub fn search_tree_scoped(
     )
 }
 
-#[doc(hidden)]
+#[hotpath::measure(label = "code_index.search.ast_grep_cancel")]
 pub fn search_tree_scoped_with_cancel<F>(
     project_root: &Path,
     pattern: &str,
@@ -307,23 +318,14 @@ where
         }
     }
 
-    let overrides = build_overrides(project_root, path_glob)?;
-
-    let mut builder = WalkBuilder::new(project_root);
-    builder
-        .follow_links(false)
-        .hidden(false)
-        .git_ignore(true)
-        .git_global(true)
-        .git_exclude(true);
-    if let Some(overrides) = overrides {
-        builder.overrides(overrides);
-    }
+    let walker = source_walk(project_root, path_glob)
+        .map_err(|error| AstGrepSearchError::InvalidGlob(error.glob))?;
 
     let mut result = AstGrepSearchResult::default();
 
-    for entry in builder.build() {
+    for entry in walker {
         if is_cancelled() {
+            result.cancelled = true;
             return Ok(result);
         }
         let Ok(entry) = entry else { continue };
@@ -350,14 +352,24 @@ where
             continue;
         };
         let rel_str = rel.to_string_lossy().replace('\\', "/");
-        if !path_matches_scope(&rel_str, scope_prefix) {
+        if !repository_path_matches_scope(&rel_str, scope_prefix) {
             continue;
         }
 
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if metadata.len() > MAX_INTERACTIVE_SOURCE_BYTES {
+            continue;
+        }
+        if is_cancelled() {
+            result.cancelled = true;
+            return Ok(result);
+        }
         let Ok(bytes) = std::fs::read(path) else {
             continue;
         };
-        if bytes.len() > MAX_FILE_BYTES || looks_binary(&bytes) {
+        if looks_binary(&bytes) {
             continue;
         }
         let Ok(source) = String::from_utf8(bytes) else {
@@ -375,70 +387,112 @@ where
             continue;
         };
 
-        result.files_scanned += 1;
-        let source_lines: Vec<&str> = source.lines().collect();
-
-        let Ok(doc) = StrDoc::try_new(&source, td_lang.clone()) else {
-            continue;
+        let stop = if crate::hotpath_observe::sample_hot_loop() {
+            hotpath::measure_block!(
+                "code_index_ast_grep_file",
+                examine_ast_grep_file(
+                    &source,
+                    td_lang,
+                    compiled,
+                    AstGrepFileIdentity {
+                        rel_str: &rel_str,
+                        key,
+                    },
+                    &mut result,
+                    max_results,
+                    &is_cancelled,
+                )
+            )
+        } else {
+            examine_ast_grep_file(
+                &source,
+                td_lang,
+                compiled,
+                AstGrepFileIdentity {
+                    rel_str: &rel_str,
+                    key,
+                },
+                &mut result,
+                max_results,
+                &is_cancelled,
+            )
         };
-        let ast = AstGrep::doc(doc);
-        for node in ast.root().find_all(compiled) {
-            if is_cancelled() {
-                return Ok(result);
-            }
-            let start = node.start_pos();
-            let line0 = start.line();
-            let line_text = source_lines
-                .get(line0)
-                .map(|l| (*l).to_string())
-                .unwrap_or_default();
-            result.matches.push(AstGrepSearchMatch {
-                file: rel_str.clone(),
-                line: (line0 as u32) + 1,
-                column: (start.column(&node) as u32) + 1,
-                matched_text: collapse_snippet(&node.text()),
-                line_text,
-                lang: key.to_string(),
-            });
-            if result.matches.len() > max_results {
-                result.truncated = true;
-                result.matches.truncate(max_results);
-                return Ok(result);
-            }
+        if stop {
+            return Ok(result);
         }
     }
 
     Ok(result)
 }
 
-fn build_overrides(
-    project_root: &Path,
-    path_glob: Option<&str>,
-) -> Result<Option<Override>, AstGrepSearchError> {
-    match path_glob {
-        Some(raw) if !raw.trim().is_empty() => {
-            let mut builder = OverrideBuilder::new(project_root);
-            builder
-                .add(raw)
-                .map_err(|_| AstGrepSearchError::InvalidGlob(raw.to_string()))?;
-            let overrides = builder
-                .build()
-                .map_err(|_| AstGrepSearchError::InvalidGlob(raw.to_string()))?;
-            Ok(Some(overrides))
-        }
-        _ => Ok(None),
-    }
+/// Which file a match is attributed to: its project-relative path and the
+/// language key. Both are only ever copied into the emitted match, and they
+/// always describe the same file, so they travel as one value.
+#[derive(Clone, Copy)]
+struct AstGrepFileIdentity<'file> {
+    rel_str: &'file str,
+    key: &'file str,
 }
 
-fn path_matches_scope(path: &str, scope_prefix: Option<&str>) -> bool {
-    scope_prefix.is_none_or(|prefix| {
-        let with_slash = if prefix.ends_with('/') {
-            prefix.to_string()
-        } else {
-            format!("{prefix}/")
-        };
-        path.starts_with(&with_slash) || path == prefix
-    })
+fn examine_ast_grep_file<C: Fn() -> bool>(
+    source: &str,
+    td_lang: &TdLang,
+    compiled: &Pattern,
+    file: AstGrepFileIdentity<'_>,
+    result: &mut AstGrepSearchResult,
+    max_results: usize,
+    is_cancelled: &C,
+) -> bool {
+    result.files_scanned += 1;
+    let Ok(doc) = StrDoc::try_new(source, td_lang.clone()) else {
+        return false;
+    };
+    let ast = AstGrep::doc(doc);
+    for node in ast.root().find_all(compiled) {
+        if is_cancelled() {
+            result.cancelled = true;
+            return true;
+        }
+        let start = node.start_pos();
+        let range = node.range();
+        let line0 = start.line();
+        result.lines_examined = result.lines_examined.saturating_add(1);
+        result.lines_visited = result.lines_visited.saturating_add(1);
+        let line_text = source_line_at_byte(source, range.start);
+        result.matches.push(AstGrepSearchMatch {
+            file: file.rel_str.to_owned(),
+            start_byte: range.start,
+            end_byte: range.end,
+            node_kind: node.kind().into_owned(),
+            line: (line0 as u32) + 1,
+            column: (start.column(&node) as u32) + 1,
+            matched_text: collapse_snippet(&node.text()),
+            line_text,
+            lang: file.key.to_string(),
+        });
+        if result.matches.len() > max_results {
+            result.truncated = true;
+            result.matches.truncate(max_results);
+            return true;
+        }
+    }
+    false
+}
+
+fn source_line_at_byte(source: &str, byte_offset: usize) -> String {
+    let Some(prefix) = source.get(..byte_offset) else {
+        return String::new();
+    };
+    let line_start = prefix.rfind('\n').map_or(0, |index| index + 1);
+    let suffix = source.get(byte_offset..).unwrap_or_default();
+    let line_end = suffix
+        .find('\n')
+        .map_or(source.len(), |index| byte_offset + index);
+    source
+        .get(line_start..line_end)
+        .unwrap_or_default()
+        .trim_end_matches('\r')
+        .to_owned()
 }
 
 /// Collapses a (possibly multi-line) matched snippet to a single display line,
@@ -527,8 +581,91 @@ mod tests {
         )
         .unwrap();
 
+        assert!(res.cancelled);
         assert_eq!(res.files_scanned, 0);
         assert!(res.matches.is_empty());
+    }
+
+    #[test]
+    fn files_above_two_mibibytes_are_not_parsed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut oversized = b"fn oversized() { target(1); }\n".to_vec();
+        oversized.resize(MAX_INTERACTIVE_SOURCE_BYTES as usize + 1, b' ');
+        fs::write(dir.path().join("oversized.rs"), oversized).unwrap();
+        write(dir.path(), "tracked.rs", "fn tracked() { target(2); }\n");
+
+        let result = search_tree(dir.path(), "target($A)", Some("rust"), None, 50).unwrap();
+
+        assert_eq!(result.files_scanned, 1);
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].file, "tracked.rs");
+    }
+
+    #[test]
+    fn generated_trees_are_pruned_unless_the_path_glob_selects_them() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::create_dir_all(dir.path().join("dist")).unwrap();
+        fs::create_dir_all(dir.path().join("node_modules/pkg")).unwrap();
+        write(
+            dir.path(),
+            "src/tracked.rs",
+            "fn tracked() { target(1); }\n",
+        );
+        write(
+            dir.path(),
+            "dist/generated.rs",
+            "fn generated() { target(2); }\n",
+        );
+        write(
+            dir.path(),
+            "node_modules/pkg/unrelated.rs",
+            "fn unrelated() { target(3); }\n",
+        );
+
+        let default = search_tree(dir.path(), "target($A)", Some("rust"), None, 50).unwrap();
+        assert_eq!(
+            default
+                .matches
+                .iter()
+                .map(|item| item.file.as_str())
+                .collect::<Vec<_>>(),
+            vec!["src/tracked.rs"]
+        );
+
+        let selected =
+            search_tree(dir.path(), "target($A)", Some("rust"), Some("dist/**"), 50).unwrap();
+        assert_eq!(
+            selected
+                .matches
+                .iter()
+                .map(|item| item.file.as_str())
+                .collect::<Vec<_>>(),
+            vec!["dist/generated.rs"]
+        );
+    }
+
+    #[test]
+    fn basename_glob_can_select_a_file_inside_a_generated_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("dist/nested")).unwrap();
+        write(
+            dir.path(),
+            "dist/nested/generated.rs",
+            "fn generated() { target(1); }\n",
+        );
+
+        let selected = search_tree(
+            dir.path(),
+            "target($A)",
+            Some("rust"),
+            Some("generated.rs"),
+            50,
+        )
+        .unwrap();
+
+        assert_eq!(selected.matches.len(), 1);
+        assert_eq!(selected.matches[0].file, "dist/nested/generated.rs");
     }
 
     #[test]
@@ -609,5 +746,39 @@ mod tests {
         let res = search_tree(dir.path(), "g($A)", Some("rust"), None, 2).unwrap();
         assert_eq!(res.matches.len(), 2);
         assert!(res.truncated);
+    }
+
+    #[test]
+    fn early_result_cap_does_not_visit_unexamined_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        const TOTAL_LINES: usize = 8_192;
+        let mut body = String::from("fn f() {\n");
+        for index in 0..TOTAL_LINES {
+            body.push_str(&format!("    target({index});\n"));
+        }
+        body.push_str("}\n");
+        write(dir.path(), "dense.rs", &body);
+
+        let result = search_tree(dir.path(), "target($A)", Some("rust"), None, 1).unwrap();
+
+        assert_eq!(result.matches.len(), 1);
+        assert!(result.truncated);
+        assert_eq!(result.lines_examined, 2);
+        assert!(
+            result.lines_visited <= result.lines_examined,
+            "visited {} lines after examining {}; full collect materializes every line",
+            result.lines_visited,
+            result.lines_examined
+        );
+        assert!(result.lines_visited < TOTAL_LINES);
+    }
+
+    #[test]
+    fn source_line_lookup_uses_the_match_byte_offset() {
+        let source = "first\r\nsecond é\r\nthird\n";
+        let offset = source.find('é').unwrap();
+
+        assert_eq!(source_line_at_byte(source, offset), "second é");
+        assert!(source_line_at_byte(source, source.len() + 1).is_empty());
     }
 }

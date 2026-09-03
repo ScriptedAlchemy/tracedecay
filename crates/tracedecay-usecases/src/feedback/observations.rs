@@ -1,0 +1,1450 @@
+//! Plan-26 source-observation mapping for durable feedback-cycle telemetry.
+//!
+//! This module stops at the canonical, privacy-safe event envelope. Daemon
+//! composition must enqueue that envelope through the existing authoritative
+//! observation/analytics path; it must not write the analytics table directly.
+
+use std::collections::BTreeMap;
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use tracedecay_application::feedback::FeedbackObservationPort;
+use tracedecay_domain::feedback::{
+    FeedbackCycleObservationV1, FeedbackEvaluationInputV1, FeedbackSavedEvaluationV1,
+};
+use tracedecay_domain::{
+    ManifestDigest, RejectedArgumentErrorClassV1, RejectedArgumentNameV1,
+    RejectedArgumentSurfaceV1, UtcMicros, canonical_sha256,
+};
+
+use tracedecay_application::request_identity::{
+    derive_feedback_observation_idempotency, derive_feedback_source_event_idempotency,
+};
+use tracedecay_runtime_core::timeutil::nearest_rank;
+
+use tracedecay_application::feedback::observations::{
+    FeedbackCoverageV1, FeedbackObservationDeliveryV1, FeedbackObservationEnvelopeV1,
+    FeedbackOutcomeV1, FeedbackRelevanceDispositionV1, FeedbackSourceEventV1,
+    rejected_argument_cell,
+};
+
+const SAVED_EVALUATION_DOMAIN: &str = "tracedecay.feedback.saved-evaluation.v1";
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackObservationReadModelV1 {
+    pub schema_version: u16,
+    pub total_count: u64,
+    pub first_observed_at: Option<UtcMicros>,
+    pub last_observed_at: Option<UtcMicros>,
+    pub event_counts: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub rejected_argument_groups: Vec<FeedbackRejectedArgumentGroupV1>,
+    pub coverage: FeedbackCoverageV1,
+    pub watermark: FeedbackObservationWatermarkV1,
+    pub denominators: FeedbackObservationDenominatorsV1,
+    pub system_quality: FeedbackSystemQualityReadModelV1,
+}
+
+/// One surface × operation × argument × error-class cell projected from
+/// dispatcher rejection source events.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackRejectedArgumentGroupV1 {
+    pub surface: RejectedArgumentSurfaceV1,
+    pub operation: String,
+    pub argument: RejectedArgumentNameV1,
+    pub error_class: RejectedArgumentErrorClassV1,
+    pub count: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackObservationWatermarkV1 {
+    pub producer_boot_id: Option<ManifestDigest>,
+    pub producer_sequence: Option<u64>,
+    pub observed_through: Option<UtcMicros>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackObservationDenominatorsV1 {
+    pub eligible: u64,
+    pub persisted: u64,
+    pub emitted: u64,
+    pub delayed: u64,
+    pub dropped: u64,
+    pub retention_dropped: u64,
+    pub incomplete_boots: u64,
+}
+
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum FeedbackSystemMetricKindV1 {
+    Coverage,
+    Relevance,
+    Diversity,
+    Latency,
+    Omission,
+    Denial,
+    Staleness,
+    RevocationPropagation,
+    StackTransitions,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FeedbackSystemMetricUnitV1 {
+    Ratio,
+    Microseconds,
+    Transitions,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FeedbackSystemMetricDenominatorV1 {
+    EligibleObservations,
+    RelevanceLabels,
+    EligibleSourceFamilies,
+    LatencySamples,
+    ReturnedAndOmittedItems,
+    OutcomeObservations,
+    RevocationObservations,
+    StackTransitionObservations,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FeedbackSystemMetricUnavailableReasonV1 {
+    NoEligibleObservations,
+    NoRelevanceLabels,
+    NoDiversityObservations,
+    NoLatencySamples,
+    NoTruncationObservations,
+    NoOutcomeObservations,
+    NoRevocationObservations,
+    NoStackTransitionObservations,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackSystemMetricV1 {
+    pub metric: FeedbackSystemMetricKindV1,
+    pub value: Option<f64>,
+    pub unit: FeedbackSystemMetricUnitV1,
+    pub numerator: Option<u64>,
+    pub denominator: Option<u64>,
+    pub denominator_population: FeedbackSystemMetricDenominatorV1,
+    pub coverage: FeedbackCoverageV1,
+    pub unavailable_reason: Option<FeedbackSystemMetricUnavailableReasonV1>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackSystemQualityReadModelV1 {
+    pub schema_version: u16,
+    pub metrics: Vec<FeedbackSystemMetricV1>,
+}
+
+impl FeedbackObservationReadModelV1 {
+    pub fn empty() -> Self {
+        Self {
+            schema_version: 1,
+            total_count: 0,
+            first_observed_at: None,
+            last_observed_at: None,
+            event_counts: BTreeMap::new(),
+            rejected_argument_groups: Vec::new(),
+            coverage: FeedbackCoverageV1::Unknown,
+            watermark: FeedbackObservationWatermarkV1 {
+                producer_boot_id: None,
+                producer_sequence: None,
+                observed_through: None,
+            },
+            denominators: FeedbackObservationDenominatorsV1 {
+                eligible: 0,
+                persisted: 0,
+                emitted: 0,
+                delayed: 0,
+                dropped: 0,
+                retention_dropped: 0,
+                incomplete_boots: 0,
+            },
+            system_quality: FeedbackSystemQualityReadModelV1::project(
+                &[],
+                0,
+                0,
+                FeedbackCoverageV1::Unknown,
+            ),
+        }
+    }
+
+    pub fn project(observations: &[FeedbackObservationEnvelopeV1]) -> Option<Self> {
+        Self::project_with_accounting(observations, 0, 0)
+    }
+
+    pub fn project_with_accounting(
+        observations: &[FeedbackObservationEnvelopeV1],
+        retention_dropped: u64,
+        incomplete_boots: u64,
+    ) -> Option<Self> {
+        let mut event_counts = BTreeMap::<String, u64>::new();
+        let mut rejected_argument_counts = BTreeMap::<
+            (
+                RejectedArgumentSurfaceV1,
+                String,
+                RejectedArgumentNameV1,
+                RejectedArgumentErrorClassV1,
+            ),
+            u64,
+        >::new();
+        let mut first_observed_at = None;
+        let mut last_observed_at = None;
+        let mut emitted = 0u64;
+        let mut delayed = 0u64;
+        let mut dropped = 0u64;
+        let mut watermark = FeedbackObservationWatermarkV1 {
+            producer_boot_id: None,
+            producer_sequence: None,
+            observed_through: None,
+        };
+        for observation in observations {
+            let kind = observation.event_kind()?;
+            let count = event_counts.entry(kind.to_owned()).or_default();
+            *count = count.saturating_add(1);
+            if let Some(source_event) = observation.source_event.as_ref()
+                && let Some(cell) = rejected_argument_cell(source_event)
+            {
+                let count = rejected_argument_counts.entry(cell).or_default();
+                *count = count.saturating_add(1);
+            }
+            first_observed_at = Some(
+                first_observed_at.map_or(observation.observed_at, |first: UtcMicros| {
+                    first.min(observation.observed_at)
+                }),
+            );
+            last_observed_at = Some(
+                last_observed_at.map_or(observation.observed_at, |last: UtcMicros| {
+                    last.max(observation.observed_at)
+                }),
+            );
+            emitted = emitted.saturating_add(observation.delivery.emitted);
+            delayed = delayed.saturating_add(observation.delivery.delayed);
+            dropped = dropped.saturating_add(observation.delivery.dropped);
+            if let (Some(boot_id), Some(sequence)) = (
+                observation.producer_boot_id.as_ref(),
+                observation.producer_sequence,
+            ) {
+                watermark.producer_boot_id = Some(boot_id.clone());
+                watermark.producer_sequence = Some(sequence);
+                watermark.observed_through = Some(observation.observed_at);
+            }
+        }
+        let persisted = observations.len().try_into().unwrap_or(u64::MAX);
+        let eligible = emitted
+            .max(persisted)
+            .saturating_add(delayed)
+            .saturating_add(dropped)
+            .saturating_add(retention_dropped);
+        let coverage = if incomplete_boots > 0 {
+            FeedbackCoverageV1::Unknown
+        } else if retention_dropped > 0 {
+            FeedbackCoverageV1::Capped
+        } else if delayed > 0 || dropped > 0 {
+            FeedbackCoverageV1::Partial
+        } else if observations.is_empty() {
+            FeedbackCoverageV1::Unknown
+        } else if observations
+            .iter()
+            .all(|observation| observation.producer_sequence.is_some())
+        {
+            FeedbackCoverageV1::Known
+        } else {
+            FeedbackCoverageV1::Unknown
+        };
+        let system_quality =
+            FeedbackSystemQualityReadModelV1::project(observations, eligible, persisted, coverage);
+        Some(Self {
+            schema_version: 1,
+            total_count: persisted,
+            first_observed_at,
+            last_observed_at,
+            event_counts,
+            rejected_argument_groups: rejected_argument_counts
+                .into_iter()
+                .map(|((surface, operation, argument, error_class), count)| {
+                    FeedbackRejectedArgumentGroupV1 {
+                        surface,
+                        operation,
+                        argument,
+                        error_class,
+                        count,
+                    }
+                })
+                .collect(),
+            coverage,
+            watermark,
+            denominators: FeedbackObservationDenominatorsV1 {
+                eligible,
+                persisted,
+                emitted,
+                delayed,
+                dropped,
+                retention_dropped,
+                incomplete_boots,
+            },
+            system_quality,
+        })
+    }
+}
+
+impl FeedbackSystemQualityReadModelV1 {
+    fn project(
+        observations: &[FeedbackObservationEnvelopeV1],
+        eligible_observations: u64,
+        persisted_observations: u64,
+        observation_coverage: FeedbackCoverageV1,
+    ) -> Self {
+        let mut relevance_helpful = 0u64;
+        let mut relevance_total = 0u64;
+        let mut relevance_unknown = 0u64;
+        let mut diversity_represented = 0u64;
+        let mut diversity_eligible = 0u64;
+        let mut latency_samples = Vec::new();
+        let mut returned_items = 0u64;
+        let mut omitted_items = 0u64;
+        let mut outcome_total = 0u64;
+        let mut denied_outcomes = 0u64;
+        let mut stale_outcomes = 0u64;
+        let mut revocation_samples = Vec::new();
+        let mut stack_transitions = 0u64;
+
+        for envelope in observations {
+            if let Some(observation) = &envelope.observation
+                && let Some(latency) = observation.latency_micros
+            {
+                latency_samples.push(latency);
+            }
+            let Some(event) = envelope.source_event.as_ref() else {
+                continue;
+            };
+            if let Some(duration) = source_event_duration_micros(event) {
+                latency_samples.push(duration);
+            }
+            if let Some(outcome) = source_event_outcome(event) {
+                outcome_total = outcome_total.saturating_add(1);
+                denied_outcomes =
+                    denied_outcomes.saturating_add(u64::from(outcome == FeedbackOutcomeV1::Denied));
+                stale_outcomes =
+                    stale_outcomes.saturating_add(u64::from(outcome == FeedbackOutcomeV1::Stale));
+            }
+            match event {
+                FeedbackSourceEventV1::RelevanceFeedback { disposition } => {
+                    relevance_total = relevance_total.saturating_add(1);
+                    match disposition {
+                        FeedbackRelevanceDispositionV1::Helpful => {
+                            relevance_helpful = relevance_helpful.saturating_add(1);
+                        }
+                        FeedbackRelevanceDispositionV1::Unknown => {
+                            relevance_unknown = relevance_unknown.saturating_add(1);
+                        }
+                        FeedbackRelevanceDispositionV1::Stale
+                        | FeedbackRelevanceDispositionV1::Irrelevant
+                        | FeedbackRelevanceDispositionV1::Contradictory => {}
+                    }
+                }
+                FeedbackSourceEventV1::EvidenceDiversity {
+                    eligible_source_families,
+                    represented_source_families,
+                    ..
+                } => {
+                    diversity_eligible =
+                        diversity_eligible.saturating_add(u64::from(*eligible_source_families));
+                    diversity_represented = diversity_represented
+                        .saturating_add(u64::from(*represented_source_families));
+                }
+                FeedbackSourceEventV1::Truncation {
+                    returned_count,
+                    omitted_count,
+                    ..
+                } => {
+                    returned_items = returned_items.saturating_add(u64::from(*returned_count));
+                    omitted_items = omitted_items.saturating_add(u64::from(*omitted_count));
+                }
+                FeedbackSourceEventV1::GitHubStale { item_count } => {
+                    outcome_total = outcome_total.saturating_add(u64::from(*item_count));
+                    stale_outcomes = stale_outcomes.saturating_add(u64::from(*item_count));
+                }
+                FeedbackSourceEventV1::AuthorizationRevoked {
+                    propagation_micros, ..
+                } => revocation_samples.push(*propagation_micros),
+                FeedbackSourceEventV1::StackTransition { .. } => {
+                    stack_transitions = stack_transitions.saturating_add(1);
+                }
+                _ => {}
+            }
+        }
+
+        let metric_coverage = |has_support: bool| {
+            if !has_support {
+                FeedbackCoverageV1::Unknown
+            } else {
+                observation_coverage
+            }
+        };
+        let ratio =
+            |metric, numerator: u64, denominator: u64, population, unavailable_reason, coverage| {
+                let supported = denominator > 0;
+                FeedbackSystemMetricV1 {
+                    metric,
+                    value: supported.then(|| numerator as f64 / denominator as f64),
+                    unit: FeedbackSystemMetricUnitV1::Ratio,
+                    numerator: supported.then_some(numerator),
+                    denominator: supported.then_some(denominator),
+                    denominator_population: population,
+                    coverage: metric_coverage(supported && coverage),
+                    unavailable_reason: (!supported).then_some(unavailable_reason),
+                }
+            };
+        let latency_p95 = percentile_95(&mut latency_samples);
+        let revocation_p95 = percentile_95(&mut revocation_samples);
+        let total_items = returned_items.saturating_add(omitted_items);
+        let stack_supported = stack_transitions > 0;
+        let metrics = vec![
+            ratio(
+                FeedbackSystemMetricKindV1::Coverage,
+                persisted_observations,
+                eligible_observations,
+                FeedbackSystemMetricDenominatorV1::EligibleObservations,
+                FeedbackSystemMetricUnavailableReasonV1::NoEligibleObservations,
+                true,
+            ),
+            ratio(
+                FeedbackSystemMetricKindV1::Relevance,
+                relevance_helpful,
+                relevance_total,
+                FeedbackSystemMetricDenominatorV1::RelevanceLabels,
+                FeedbackSystemMetricUnavailableReasonV1::NoRelevanceLabels,
+                relevance_unknown == 0,
+            ),
+            ratio(
+                FeedbackSystemMetricKindV1::Diversity,
+                diversity_represented,
+                diversity_eligible,
+                FeedbackSystemMetricDenominatorV1::EligibleSourceFamilies,
+                FeedbackSystemMetricUnavailableReasonV1::NoDiversityObservations,
+                true,
+            ),
+            scalar_metric(
+                FeedbackSystemMetricKindV1::Latency,
+                latency_p95,
+                FeedbackSystemMetricUnitV1::Microseconds,
+                latency_samples.len().try_into().unwrap_or(u64::MAX),
+                FeedbackSystemMetricDenominatorV1::LatencySamples,
+                FeedbackSystemMetricUnavailableReasonV1::NoLatencySamples,
+                observation_coverage,
+            ),
+            ratio(
+                FeedbackSystemMetricKindV1::Omission,
+                omitted_items,
+                total_items,
+                FeedbackSystemMetricDenominatorV1::ReturnedAndOmittedItems,
+                FeedbackSystemMetricUnavailableReasonV1::NoTruncationObservations,
+                true,
+            ),
+            ratio(
+                FeedbackSystemMetricKindV1::Denial,
+                denied_outcomes,
+                outcome_total,
+                FeedbackSystemMetricDenominatorV1::OutcomeObservations,
+                FeedbackSystemMetricUnavailableReasonV1::NoOutcomeObservations,
+                true,
+            ),
+            ratio(
+                FeedbackSystemMetricKindV1::Staleness,
+                stale_outcomes,
+                outcome_total,
+                FeedbackSystemMetricDenominatorV1::OutcomeObservations,
+                FeedbackSystemMetricUnavailableReasonV1::NoOutcomeObservations,
+                true,
+            ),
+            scalar_metric(
+                FeedbackSystemMetricKindV1::RevocationPropagation,
+                revocation_p95,
+                FeedbackSystemMetricUnitV1::Microseconds,
+                revocation_samples.len().try_into().unwrap_or(u64::MAX),
+                FeedbackSystemMetricDenominatorV1::RevocationObservations,
+                FeedbackSystemMetricUnavailableReasonV1::NoRevocationObservations,
+                observation_coverage,
+            ),
+            FeedbackSystemMetricV1 {
+                metric: FeedbackSystemMetricKindV1::StackTransitions,
+                value: stack_supported.then_some(stack_transitions as f64),
+                unit: FeedbackSystemMetricUnitV1::Transitions,
+                numerator: stack_supported.then_some(stack_transitions),
+                denominator: stack_supported.then_some(stack_transitions),
+                denominator_population:
+                    FeedbackSystemMetricDenominatorV1::StackTransitionObservations,
+                coverage: metric_coverage(stack_supported),
+                unavailable_reason: (!stack_supported).then_some(
+                    FeedbackSystemMetricUnavailableReasonV1::NoStackTransitionObservations,
+                ),
+            },
+        ];
+        Self {
+            schema_version: 1,
+            metrics,
+        }
+    }
+}
+
+fn scalar_metric(
+    metric: FeedbackSystemMetricKindV1,
+    value: Option<u64>,
+    unit: FeedbackSystemMetricUnitV1,
+    support: u64,
+    denominator_population: FeedbackSystemMetricDenominatorV1,
+    unavailable_reason: FeedbackSystemMetricUnavailableReasonV1,
+    coverage: FeedbackCoverageV1,
+) -> FeedbackSystemMetricV1 {
+    FeedbackSystemMetricV1 {
+        metric,
+        value: value.map(|value| value as f64),
+        unit,
+        numerator: value,
+        denominator: (support > 0).then_some(support),
+        denominator_population,
+        coverage: if support > 0 {
+            coverage
+        } else {
+            FeedbackCoverageV1::Unknown
+        },
+        unavailable_reason: (support == 0).then_some(unavailable_reason),
+    }
+}
+
+fn percentile_95(samples: &mut [u64]) -> Option<u64> {
+    samples.sort_unstable();
+    nearest_rank(samples, 95)
+}
+
+fn source_event_duration_micros(event: &FeedbackSourceEventV1) -> Option<u64> {
+    match event {
+        FeedbackSourceEventV1::LspState {
+            duration_micros, ..
+        }
+        | FeedbackSourceEventV1::Delivery {
+            duration_micros, ..
+        }
+        | FeedbackSourceEventV1::AnchorExpansion {
+            duration_micros, ..
+        }
+        | FeedbackSourceEventV1::GitHubIngress {
+            duration_micros, ..
+        }
+        | FeedbackSourceEventV1::CiLocalization {
+            duration_micros, ..
+        }
+        | FeedbackSourceEventV1::HostDelivery {
+            duration_micros, ..
+        }
+        | FeedbackSourceEventV1::HookScout {
+            duration_micros, ..
+        }
+        | FeedbackSourceEventV1::SseLifecycle {
+            duration_micros, ..
+        } => *duration_micros,
+        FeedbackSourceEventV1::GitHubRateLimit { duration_micros } => *duration_micros,
+        _ => None,
+    }
+}
+
+fn source_event_outcome(event: &FeedbackSourceEventV1) -> Option<FeedbackOutcomeV1> {
+    match event {
+        FeedbackSourceEventV1::ArgumentRejected { outcome, .. }
+        | FeedbackSourceEventV1::SurfaceArgumentRejected { outcome, .. }
+        | FeedbackSourceEventV1::LspState { outcome, .. }
+        | FeedbackSourceEventV1::Dispatch { outcome, .. }
+        | FeedbackSourceEventV1::Delivery { outcome, .. }
+        | FeedbackSourceEventV1::AnchorExpansion { outcome, .. }
+        | FeedbackSourceEventV1::GitHubIngress { outcome, .. }
+        | FeedbackSourceEventV1::CiLocalization { outcome, .. }
+        | FeedbackSourceEventV1::HostDelivery { outcome, .. }
+        | FeedbackSourceEventV1::HookScout { outcome, .. }
+        | FeedbackSourceEventV1::Cancellation { outcome, .. }
+        | FeedbackSourceEventV1::AuthorizationRevoked { outcome, .. }
+        | FeedbackSourceEventV1::StackTransition { outcome, .. } => Some(*outcome),
+        _ => None,
+    }
+}
+
+/// Maps one validated durable saved-content observation into its canonical
+/// Plan-26 source envelope. Overlay and mismatched observations fail closed.
+pub fn feedback_observation_envelope(
+    input: &FeedbackEvaluationInputV1,
+    observation: FeedbackCycleObservationV1,
+) -> Option<FeedbackObservationEnvelopeV1> {
+    let saved = input.saved().ok()?;
+    observation.validate().ok()?;
+    if observation.cycle_id != input.request.cycle_id
+        || observation.scope != input.request.scope
+        || observation.policy_digest != input.request.policy_digest
+        || observation.configuration_digest != input.request.configuration_digest
+        || observation.observed_at != input.observed_at
+    {
+        return None;
+    }
+    observation_envelope(&saved, observation)
+}
+
+fn observation_envelope(
+    saved: &FeedbackSavedEvaluationV1,
+    observation: FeedbackCycleObservationV1,
+) -> Option<FeedbackObservationEnvelopeV1> {
+    let saved_evaluation_digest = canonical_sha256(&(SAVED_EVALUATION_DOMAIN, saved)).ok()?;
+    let idempotency_key =
+        derive_feedback_observation_idempotency(&saved_evaluation_digest, &observation).ok()?;
+    let envelope = FeedbackObservationEnvelopeV1 {
+        schema_version: 1,
+        producer: "feedback_cycle".to_owned(),
+        privacy_class: "operational_no_content".to_owned(),
+        idempotency_key,
+        saved_evaluation_digest,
+        observed_at: observation.observed_at,
+        observation: Some(observation),
+        source_event: None,
+        producer_boot_id: None,
+        producer_sequence: None,
+        delivery: FeedbackObservationDeliveryV1::pending(),
+    };
+    envelope.validate()?;
+    Some(envelope)
+}
+
+/// Maps a content-free owner event onto the same saved-content envelope and
+/// idempotency boundary used by generic feedback-cycle observations.
+pub fn feedback_source_event_envelope(
+    input: &FeedbackEvaluationInputV1,
+    source_event: FeedbackSourceEventV1,
+) -> Option<FeedbackObservationEnvelopeV1> {
+    let saved = input.saved().ok()?;
+    source_event.validate()?;
+    let saved_evaluation_digest = canonical_sha256(&(SAVED_EVALUATION_DOMAIN, saved)).ok()?;
+    feedback_source_event_envelope_for_subject(
+        saved_evaluation_digest,
+        input.observed_at,
+        source_event,
+    )
+}
+
+pub fn feedback_source_event_envelope_for_subject(
+    subject_digest: ManifestDigest,
+    observed_at: UtcMicros,
+    source_event: FeedbackSourceEventV1,
+) -> Option<FeedbackObservationEnvelopeV1> {
+    subject_digest.validate().ok()?;
+    source_event.validate()?;
+    let idempotency_key =
+        derive_feedback_source_event_idempotency(&subject_digest, observed_at, &source_event)
+            .ok()?;
+    let envelope = FeedbackObservationEnvelopeV1 {
+        schema_version: 1,
+        producer: "feedback_source".to_owned(),
+        privacy_class: "operational_no_content".to_owned(),
+        idempotency_key,
+        saved_evaluation_digest: subject_digest,
+        observation: None,
+        source_event: Some(source_event),
+        observed_at,
+        producer_boot_id: None,
+        producer_sequence: None,
+        delivery: FeedbackObservationDeliveryV1::pending(),
+    };
+    envelope.validate()?;
+    Some(envelope)
+}
+
+pub trait FeedbackObservationEmitterV1 {
+    fn observe_source_event(
+        &self,
+        input: &FeedbackEvaluationInputV1,
+        source_event: FeedbackSourceEventV1,
+    );
+
+    fn observe_source_event_for_subject(
+        &self,
+        subject_digest: ManifestDigest,
+        observed_at: UtcMicros,
+        source_event: FeedbackSourceEventV1,
+    );
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FeedbackObservationSinkOutcome {
+    Enqueued,
+    Duplicate,
+    Dropped,
+}
+
+/// Bounded non-blocking daemon queue boundary. Implementations atomically use
+/// `idempotency_key` to converge retries and replay; a plain append-only insert
+/// is not conforming. `Dropped` is the explicit bounded-overflow outcome, not
+/// permission to block or retry on the feedback path. Durable cursor/projection
+/// commit and loss accounting remain daemon-owned.
+pub trait FeedbackObservationQueue {
+    fn enqueue_feedback_observation(
+        &self,
+        envelope: FeedbackObservationEnvelopeV1,
+    ) -> FeedbackObservationSinkOutcome;
+
+    /// Replays one previously accepted envelope through the exact same
+    /// idempotency boundary. A duplicate outcome is successful convergence.
+    fn replay_feedback_observation(
+        &self,
+        envelope: FeedbackObservationEnvelopeV1,
+    ) -> FeedbackObservationSinkOutcome {
+        self.enqueue_feedback_observation(envelope)
+    }
+}
+
+/// Daemon/store-owned durable observation ingress. The sink is responsible for
+/// atomically retaining the idempotency key with the queued observation and
+/// for preserving replay protection across process restart. This adapter has
+/// no database handle, filesystem path, or retry worker of its own.
+pub trait DurableFeedbackObservationSinkV1 {
+    fn enqueue_durable_feedback_observation(
+        &self,
+        envelope: FeedbackObservationEnvelopeV1,
+    ) -> FeedbackObservationSinkOutcome;
+
+    fn replay_durable_feedback_observation(
+        &self,
+        envelope: FeedbackObservationEnvelopeV1,
+    ) -> FeedbackObservationSinkOutcome {
+        self.enqueue_durable_feedback_observation(envelope)
+    }
+}
+
+/// Concrete adapter from the durable daemon ingress to the application's
+/// non-blocking queue boundary. Corrupt or privacy-invalid values are dropped
+/// before the sink receives them, so a replay never turns bad input into state.
+pub struct DurableFeedbackObservationQueueAdapterV1<S> {
+    sink: S,
+}
+
+impl<S> DurableFeedbackObservationQueueAdapterV1<S> {
+    pub fn new(sink: S) -> Self {
+        Self { sink }
+    }
+}
+
+impl<S> FeedbackObservationQueue for DurableFeedbackObservationQueueAdapterV1<S>
+where
+    S: DurableFeedbackObservationSinkV1,
+{
+    fn enqueue_feedback_observation(
+        &self,
+        envelope: FeedbackObservationEnvelopeV1,
+    ) -> FeedbackObservationSinkOutcome {
+        if envelope.validate().is_none() {
+            FeedbackObservationSinkOutcome::Dropped
+        } else {
+            self.sink.enqueue_durable_feedback_observation(envelope)
+        }
+    }
+
+    fn replay_feedback_observation(
+        &self,
+        envelope: FeedbackObservationEnvelopeV1,
+    ) -> FeedbackObservationSinkOutcome {
+        if envelope.validate().is_none() {
+            FeedbackObservationSinkOutcome::Dropped
+        } else {
+            self.sink.replay_durable_feedback_observation(envelope)
+        }
+    }
+}
+
+/// Adapts canonical Plan-26 envelopes to the application's one-way observation
+/// port. Observation loss cannot alter feedback truth or trigger a retry cycle.
+pub struct FeedbackObservationAdapter<S> {
+    sink: S,
+}
+
+impl<S> FeedbackObservationAdapter<S> {
+    pub fn new(sink: S) -> Self {
+        Self { sink }
+    }
+}
+
+impl<S> FeedbackObservationPort for FeedbackObservationAdapter<S>
+where
+    S: FeedbackObservationQueue,
+{
+    fn observe(&self, input: &FeedbackEvaluationInputV1, observation: FeedbackCycleObservationV1) {
+        if let Some(envelope) = feedback_observation_envelope(input, observation) {
+            let _ = self.sink.enqueue_feedback_observation(envelope);
+        }
+    }
+}
+
+impl<S> FeedbackObservationEmitterV1 for FeedbackObservationAdapter<S>
+where
+    S: FeedbackObservationQueue,
+{
+    fn observe_source_event(
+        &self,
+        input: &FeedbackEvaluationInputV1,
+        source_event: FeedbackSourceEventV1,
+    ) {
+        if let Some(envelope) = feedback_source_event_envelope(input, source_event) {
+            let _ = self.sink.enqueue_feedback_observation(envelope);
+        }
+    }
+
+    fn observe_source_event_for_subject(
+        &self,
+        subject_digest: ManifestDigest,
+        observed_at: UtcMicros,
+        source_event: FeedbackSourceEventV1,
+    ) {
+        if let Some(envelope) =
+            feedback_source_event_envelope_for_subject(subject_digest, observed_at, source_event)
+        {
+            let _ = self.sink.enqueue_feedback_observation(envelope);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::cell::RefCell;
+    use std::collections::BTreeSet;
+    use std::rc::Rc;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tracedecay_application::feedback::FeedbackObservationPort;
+    use tracedecay_application::feedback::observations::{
+        FeedbackAdvisoryProviderV1, FeedbackArgumentRejectionClassV1, FeedbackCiProviderV1,
+        FeedbackDeliveryRouteV1, FeedbackGitHubLifecycleV1, FeedbackLspMethodClassV1,
+        FeedbackLspStateV1, FeedbackOperationV1, FeedbackRejectedArgumentV1,
+        FeedbackSseLifecycleV1, FeedbackStackTransitionV1,
+    };
+    use tracedecay_domain::feedback::{
+        CiFailureSourceDegradationV1, FeedbackActorContextV1, FeedbackBudgetV1,
+        FeedbackContentIdentityV1, FeedbackCycleId, FeedbackCycleObservationV1,
+        FeedbackCycleRequestV1, FeedbackEvaluationInputV1, FeedbackObservationKindV1,
+        FeedbackScopeV1, FeedbackTargetV1, FeedbackTriggerV1,
+    };
+    use tracedecay_domain::{
+        CodeGenerationId, CommitId, FileOccurrenceId, HostInstanceId, ManifestDigest, ProjectId,
+        RejectedArgumentErrorClassV1, RejectedArgumentNameV1, RejectedArgumentSurfaceV1,
+        RepositoryId, SessionId, SourceSpan, SymbolOccurrenceId, UtcMicros, WorktreeId,
+    };
+
+    use super::*;
+
+    const SHA256_A: &str =
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const SHA256_B: &str =
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    fn id<T>(value: &str) -> T
+    where
+        T: TryFrom<String>,
+        <T as TryFrom<String>>::Error: std::fmt::Debug,
+    {
+        T::try_from(value.to_owned()).unwrap()
+    }
+
+    fn digest(value: &str) -> ManifestDigest {
+        ManifestDigest::new(value).unwrap()
+    }
+
+    fn scope() -> FeedbackScopeV1 {
+        FeedbackScopeV1 {
+            project_id: id::<ProjectId>("project.feedback.fixture"),
+            repository_id: id::<RepositoryId>("repository.feedback.fixture"),
+            worktree_id: id::<WorktreeId>("worktree.feedback.fixture"),
+            branch_ref: "refs/heads/main".to_owned(),
+            head_commit_id: id::<CommitId>("commit.feedback.fixture"),
+        }
+    }
+
+    fn saved_input() -> FeedbackEvaluationInputV1 {
+        let request = FeedbackCycleRequestV1::new(
+            id::<FeedbackCycleId>("cycle.feedback.observation"),
+            scope(),
+            FeedbackContentIdentityV1::SavedContent {
+                generation_digest: digest(SHA256_A),
+                file_digest: digest(SHA256_B),
+            },
+            FeedbackTriggerV1::PostEditHook,
+            digest(SHA256_A),
+            digest(SHA256_B),
+            FeedbackBudgetV1::bounded(100, 100, 1_000, 1_000),
+        )
+        .unwrap();
+        FeedbackEvaluationInputV1 {
+            request,
+            target: FeedbackTargetV1 {
+                file: id::<FileOccurrenceId>("file.feedback.observation"),
+                span: Some(SourceSpan {
+                    start_byte: 1,
+                    end_byte: 2,
+                }),
+                symbol: Some(id::<SymbolOccurrenceId>("symbol.feedback.observation")),
+                generation_id: Some(id::<CodeGenerationId>("generation.feedback.observation")),
+            },
+            actor: FeedbackActorContextV1::default(),
+            observed_at: UtcMicros(2_000_000),
+        }
+    }
+
+    fn overlay_input() -> FeedbackEvaluationInputV1 {
+        let session_id = id::<SessionId>("session.feedback.observation");
+        let client_id = id::<HostInstanceId>("client.feedback.observation");
+        let request = FeedbackCycleRequestV1::new(
+            id::<FeedbackCycleId>("cycle.feedback.overlay-observation"),
+            scope(),
+            FeedbackContentIdentityV1::EphemeralOverlay {
+                session_id: session_id.clone(),
+                owner_client_id: client_id.clone(),
+                agent_id: None,
+                document_version: 1,
+                overlay_digest: digest(SHA256_A),
+            },
+            FeedbackTriggerV1::DocumentSave,
+            digest(SHA256_A),
+            digest(SHA256_B),
+            FeedbackBudgetV1::bounded(100, 100, 1_000, 1_000),
+        )
+        .unwrap();
+        FeedbackEvaluationInputV1 {
+            request,
+            target: FeedbackTargetV1 {
+                file: id::<FileOccurrenceId>("file.feedback.overlay-observation"),
+                span: None,
+                symbol: None,
+                generation_id: None,
+            },
+            actor: FeedbackActorContextV1 {
+                session_id: Some(session_id),
+                client_id: Some(client_id),
+                agent_id: None,
+                turn_id: None,
+            },
+            observed_at: UtcMicros(2_000_000),
+        }
+    }
+
+    fn overlay_trigger(input: &FeedbackEvaluationInputV1) -> FeedbackCycleObservationV1 {
+        FeedbackCycleObservationV1 {
+            cycle_id: input.request.cycle_id.clone(),
+            scope: input.request.scope.clone(),
+            policy_digest: input.request.policy_digest.clone(),
+            configuration_digest: input.request.configuration_digest.clone(),
+            kind: FeedbackObservationKindV1::Trigger,
+            stage: None,
+            termination: None,
+            dedupe_key: None,
+            observed_at: input.observed_at,
+            latency_micros: None,
+            advisory_only: true,
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingSink(Rc<RefCell<Vec<FeedbackObservationEnvelopeV1>>>);
+
+    impl FeedbackObservationQueue for RecordingSink {
+        fn enqueue_feedback_observation(
+            &self,
+            envelope: FeedbackObservationEnvelopeV1,
+        ) -> FeedbackObservationSinkOutcome {
+            if self
+                .0
+                .borrow()
+                .iter()
+                .any(|record| record.idempotency_key == envelope.idempotency_key)
+            {
+                return FeedbackObservationSinkOutcome::Duplicate;
+            }
+            self.0.borrow_mut().push(envelope);
+            FeedbackObservationSinkOutcome::Enqueued
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct DroppingSink(Rc<Cell<usize>>);
+
+    impl FeedbackObservationQueue for DroppingSink {
+        fn enqueue_feedback_observation(
+            &self,
+            _envelope: FeedbackObservationEnvelopeV1,
+        ) -> FeedbackObservationSinkOutcome {
+            self.0.set(self.0.get() + 1);
+            FeedbackObservationSinkOutcome::Dropped
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct RestartSafeSink {
+        replay_identities: Arc<Mutex<BTreeSet<String>>>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl DurableFeedbackObservationSinkV1 for RestartSafeSink {
+        fn enqueue_durable_feedback_observation(
+            &self,
+            envelope: FeedbackObservationEnvelopeV1,
+        ) -> FeedbackObservationSinkOutcome {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let identity = envelope.replay_identity().unwrap().to_owned();
+            if self.replay_identities.lock().unwrap().insert(identity) {
+                FeedbackObservationSinkOutcome::Enqueued
+            } else {
+                FeedbackObservationSinkOutcome::Duplicate
+            }
+        }
+
+        fn replay_durable_feedback_observation(
+            &self,
+            envelope: FeedbackObservationEnvelopeV1,
+        ) -> FeedbackObservationSinkOutcome {
+            self.enqueue_durable_feedback_observation(envelope)
+        }
+    }
+
+    #[test]
+    fn durable_observation_mapping_is_replay_stable_and_sink_suppresses_overlays() {
+        let input = saved_input();
+        let observation = FeedbackCycleObservationV1::trigger(&input).unwrap();
+        let first = feedback_observation_envelope(&input, observation.clone()).unwrap();
+        let replay = feedback_observation_envelope(&input, observation.clone()).unwrap();
+        assert_eq!(first, replay);
+        assert_eq!(first.schema_version, 1);
+        assert_eq!(first.producer, "feedback_cycle");
+        assert_eq!(first.privacy_class, "operational_no_content");
+
+        let sink = RecordingSink::default();
+        let recorded = sink.0.clone();
+        let adapter = FeedbackObservationAdapter::new(sink);
+        adapter.observe(&input, observation.clone());
+        adapter.observe(&input, observation);
+        let overlay = overlay_input();
+        adapter.observe(&overlay, overlay_trigger(&overlay));
+        assert_eq!(recorded.borrow().as_slice(), &[first]);
+    }
+
+    #[test]
+    fn source_events_are_content_free_and_replay_stable() {
+        let input = saved_input();
+        let event = FeedbackSourceEventV1::CiLocalization {
+            outcome: FeedbackOutcomeV1::Partial,
+            provider: FeedbackCiProviderV1::GitHubActions,
+            exact_evidence: true,
+            coverage: FeedbackCoverageV1::Partial,
+            source_degradation: Some(CiFailureSourceDegradationV1::Failed(
+                tracedecay_domain::feedback::CiFailureSourceFailureV1::Schema,
+            )),
+            localized_count: 2,
+            candidate_count: 3,
+            duration_micros: Some(42),
+        };
+        let first = feedback_source_event_envelope(&input, event.clone()).unwrap();
+        let replay = feedback_source_event_envelope(&input, event).unwrap();
+        assert_eq!(first, replay);
+        assert_eq!(first.producer, "feedback_source");
+        assert!(first.observation.is_none());
+        assert_eq!(
+            first
+                .source_event
+                .as_ref()
+                .map(FeedbackSourceEventV1::event_kind),
+            Some("feedback.ci.localization.observed.v1")
+        );
+        let encoded = serde_json::to_string(&first).unwrap();
+        assert!(encoded.contains("\"source_degradation\":{\"failed\":\"schema\"}"));
+        assert!(!encoded.contains("file.feedback.observation"));
+        assert!(!encoded.contains("symbol.feedback.observation"));
+    }
+
+    #[test]
+    fn github_lifecycle_ingress_rate_limit_and_stale_are_distinct_events() {
+        let input = saved_input();
+        let events = [
+            FeedbackSourceEventV1::GitHubLifecycle {
+                lifecycle: FeedbackGitHubLifecycleV1::Outdated,
+                item_count: 1,
+            },
+            FeedbackSourceEventV1::GitHubIngress {
+                outcome: FeedbackOutcomeV1::Partial,
+                item_count: 1,
+                duration_micros: None,
+            },
+            FeedbackSourceEventV1::GitHubRateLimit {
+                duration_micros: Some(1_000),
+            },
+            FeedbackSourceEventV1::GitHubStale { item_count: 1 },
+        ];
+        let kinds = events
+            .into_iter()
+            .map(|event| {
+                feedback_source_event_envelope(&input, event)
+                    .unwrap()
+                    .source_event
+                    .unwrap()
+                    .event_kind()
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(kinds.len(), 4);
+    }
+
+    #[test]
+    fn advisory_provider_state_is_orthogonal_and_content_free() {
+        let input = saved_input();
+        let events = [
+            FeedbackSourceEventV1::GitHubLifecycle {
+                lifecycle: FeedbackGitHubLifecycleV1::Current,
+                item_count: 1,
+            },
+            FeedbackSourceEventV1::GitHubIngress {
+                outcome: FeedbackOutcomeV1::Completed,
+                item_count: 1,
+                duration_micros: None,
+            },
+            FeedbackSourceEventV1::ProviderState {
+                provider: FeedbackAdvisoryProviderV1::GitHubReview,
+                state: tracedecay_domain::feedback::ProviderEvaluationStateV1::Partial,
+            },
+        ];
+        let envelopes = events
+            .into_iter()
+            .map(|event| feedback_source_event_envelope(&input, event).unwrap())
+            .collect::<Vec<_>>();
+        let kinds = envelopes
+            .iter()
+            .map(|envelope| envelope.event_kind().unwrap())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(kinds.len(), 3);
+
+        let provider = serde_json::to_string(&envelopes[2]).unwrap();
+        assert!(provider.contains("\"provider\":\"github_review\""));
+        assert!(provider.contains("\"state\":\"partial\""));
+        assert!(!provider.contains("\"path\""));
+        assert!(!provider.contains("\"source\""));
+        assert!(!provider.contains("\"message\""));
+        assert!(!provider.contains("\"payload\""));
+    }
+
+    #[test]
+    fn lsp_state_observation_is_bounded_and_content_free() {
+        let input = saved_input();
+        let envelope = feedback_source_event_envelope(
+            &input,
+            FeedbackSourceEventV1::LspState {
+                state: FeedbackLspStateV1::DiagnosticPublished,
+                method: Some(FeedbackLspMethodClassV1::Diagnostics),
+                outcome: FeedbackOutcomeV1::Partial,
+                item_count: 3,
+                duration_micros: Some(17),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            envelope.event_kind(),
+            Some("feedback.lsp.state.observed.v1")
+        );
+        let encoded = serde_json::to_string(&envelope).unwrap();
+        assert!(!encoded.contains("file:///"));
+        assert!(!encoded.contains("\"path\""));
+        assert!(!encoded.contains("\"source\""));
+        assert!(!encoded.contains("\"message\""));
+        assert!(!encoded.contains("\"payload\""));
+    }
+
+    #[test]
+    fn rejected_argument_observation_keeps_only_normalized_metadata() {
+        let input = saved_input();
+        let envelope = feedback_source_event_envelope(
+            &input,
+            FeedbackSourceEventV1::SurfaceArgumentRejected {
+                operation: FeedbackOperationV1::FeedbackDiagnostics,
+                route: Some(FeedbackDeliveryRouteV1::Http),
+                argument: FeedbackRejectedArgumentV1::RequestBody,
+                rejection: FeedbackArgumentRejectionClassV1::InvalidShape,
+                schema_revision: 1,
+                outcome: FeedbackOutcomeV1::Rejected,
+            },
+        )
+        .unwrap();
+
+        let encoded = serde_json::to_string(&envelope).unwrap();
+        assert!(encoded.contains("\"argument\":\"request_body\""));
+        assert!(encoded.contains("\"rejection\":\"invalid_shape\""));
+        assert!(encoded.contains("\"schema_revision\":1"));
+        assert!(!encoded.contains("\"value\""));
+        assert!(!encoded.contains("\"raw\""));
+
+        let model = FeedbackObservationReadModelV1::project(&[envelope]).unwrap();
+        assert_eq!(model.rejected_argument_groups.len(), 1);
+        assert_eq!(
+            model.rejected_argument_groups[0].surface,
+            RejectedArgumentSurfaceV1::Http
+        );
+        assert_eq!(
+            model.rejected_argument_groups[0].argument,
+            RejectedArgumentNameV1::RequestBody
+        );
+        assert_eq!(
+            model.rejected_argument_groups[0].error_class,
+            RejectedArgumentErrorClassV1::InvalidShape
+        );
+        assert_eq!(model.rejected_argument_groups[0].count, 1);
+    }
+
+    #[test]
+    fn read_model_preserves_denominators_and_event_families() {
+        let input = saved_input();
+        let observations = vec![
+            feedback_observation_envelope(
+                &input,
+                FeedbackCycleObservationV1::trigger(&input).unwrap(),
+            )
+            .unwrap(),
+            feedback_source_event_envelope(
+                &input,
+                FeedbackSourceEventV1::Delivery {
+                    operation: FeedbackOperationV1::FeedbackList,
+                    route: FeedbackDeliveryRouteV1::Mcp,
+                    outcome: FeedbackOutcomeV1::Completed,
+                    item_count: 2,
+                    duration_micros: Some(10),
+                },
+            )
+            .unwrap(),
+            feedback_source_event_envelope(
+                &input,
+                FeedbackSourceEventV1::Delivery {
+                    operation: FeedbackOperationV1::FeedbackList,
+                    route: FeedbackDeliveryRouteV1::Http,
+                    outcome: FeedbackOutcomeV1::Completed,
+                    item_count: 2,
+                    duration_micros: Some(12),
+                },
+            )
+            .unwrap(),
+            feedback_source_event_envelope(
+                &input,
+                FeedbackSourceEventV1::SseLifecycle {
+                    lifecycle: FeedbackSseLifecycleV1::Gap,
+                    sequence: Some(7),
+                    item_count: 0,
+                    duration_micros: None,
+                },
+            )
+            .unwrap(),
+        ];
+        let model = FeedbackObservationReadModelV1::project(&observations).unwrap();
+        assert_eq!(model.total_count, 4);
+        assert_eq!(
+            model.event_counts.get("feedback.cycle.triggered.v1"),
+            Some(&1)
+        );
+        assert_eq!(
+            model.event_counts.get("feedback.delivery.observed.v1"),
+            Some(&2)
+        );
+        assert_eq!(
+            model.event_counts.get("feedback.sse.lifecycle.observed.v1"),
+            Some(&1)
+        );
+        assert_eq!(model.first_observed_at, Some(input.observed_at));
+        assert_eq!(model.last_observed_at, Some(input.observed_at));
+    }
+
+    #[test]
+    fn read_model_exposes_delivery_denominators_watermark_and_unknown_boot_gap() {
+        let input = saved_input();
+        let mut envelope = feedback_observation_envelope(
+            &input,
+            FeedbackCycleObservationV1::trigger(&input).unwrap(),
+        )
+        .unwrap();
+        let boot_id = canonical_sha256(&"feedback-observation-boot").unwrap();
+        assert!(
+            envelope
+                .assign_delivery(
+                    boot_id.clone(),
+                    7,
+                    FeedbackObservationDeliveryV1::delivered(2),
+                )
+                .is_some()
+        );
+
+        let model =
+            FeedbackObservationReadModelV1::project_with_accounting(&[envelope], 3, 1).unwrap();
+        assert_eq!(model.coverage, FeedbackCoverageV1::Unknown);
+        assert_eq!(model.watermark.producer_boot_id, Some(boot_id));
+        assert_eq!(model.watermark.producer_sequence, Some(7));
+        assert_eq!(model.denominators.persisted, 1);
+        assert_eq!(model.denominators.emitted, 1);
+        assert_eq!(model.denominators.dropped, 2);
+        assert_eq!(model.denominators.retention_dropped, 3);
+        assert_eq!(model.denominators.incomplete_boots, 1);
+        assert_eq!(model.denominators.eligible, 6);
+    }
+
+    #[test]
+    fn system_quality_projection_is_denominator_safe_and_complete() {
+        let input = saved_input();
+        let source = |event| feedback_source_event_envelope(&input, event).unwrap();
+        let observations = vec![
+            source(FeedbackSourceEventV1::RelevanceFeedback {
+                disposition: FeedbackRelevanceDispositionV1::Helpful,
+            }),
+            source(FeedbackSourceEventV1::EvidenceDiversity {
+                eligible_source_families: 3,
+                represented_source_families: 2,
+                selected_count: 4,
+            }),
+            source(FeedbackSourceEventV1::Delivery {
+                operation: FeedbackOperationV1::FeedbackList,
+                route: FeedbackDeliveryRouteV1::Http,
+                outcome: FeedbackOutcomeV1::Denied,
+                item_count: 0,
+                duration_micros: Some(90),
+            }),
+            source(FeedbackSourceEventV1::Truncation {
+                operation: FeedbackOperationV1::FeedbackList,
+                returned_count: 8,
+                omitted_count: 2,
+            }),
+            source(FeedbackSourceEventV1::AuthorizationRevoked {
+                operation: FeedbackOperationV1::FeedbackGet,
+                outcome: FeedbackOutcomeV1::Completed,
+                propagation_micros: 40,
+            }),
+            source(FeedbackSourceEventV1::StackTransition {
+                transition: FeedbackStackTransitionV1::BaseDrifted,
+                outcome: FeedbackOutcomeV1::Completed,
+            }),
+            source(FeedbackSourceEventV1::GitHubStale { item_count: 1 }),
+        ];
+
+        let projected = FeedbackObservationReadModelV1::project(&observations).unwrap();
+        assert_eq!(projected.system_quality.metrics.len(), 9);
+        let metric = |kind| {
+            projected
+                .system_quality
+                .metrics
+                .iter()
+                .find(|metric| metric.metric == kind)
+                .unwrap()
+        };
+        assert_eq!(
+            metric(FeedbackSystemMetricKindV1::Relevance).value,
+            Some(1.0)
+        );
+        assert_eq!(
+            metric(FeedbackSystemMetricKindV1::Diversity).value,
+            Some(2.0 / 3.0)
+        );
+        assert_eq!(
+            metric(FeedbackSystemMetricKindV1::Latency).value,
+            Some(90.0)
+        );
+        assert_eq!(
+            metric(FeedbackSystemMetricKindV1::Omission).value,
+            Some(0.2)
+        );
+        assert_eq!(metric(FeedbackSystemMetricKindV1::Denial).value, Some(0.25));
+        assert_eq!(
+            metric(FeedbackSystemMetricKindV1::Staleness).value,
+            Some(0.25)
+        );
+        assert_eq!(
+            metric(FeedbackSystemMetricKindV1::RevocationPropagation).value,
+            Some(40.0)
+        );
+        assert_eq!(
+            metric(FeedbackSystemMetricKindV1::StackTransitions).value,
+            Some(1.0)
+        );
+    }
+
+    #[test]
+    fn unsupported_system_metrics_never_fabricate_zero() {
+        let model = FeedbackObservationReadModelV1::project(&[]).unwrap();
+        assert!(
+            model
+                .system_quality
+                .metrics
+                .iter()
+                .all(|metric| metric.value.is_none()
+                    && metric.denominator.is_none()
+                    && metric.coverage == FeedbackCoverageV1::Unknown)
+        );
+    }
+
+    #[test]
+    fn observation_envelope_replay_is_stable_and_drop_never_retries() {
+        let input = saved_input();
+        let observation = FeedbackCycleObservationV1::trigger(&input).unwrap();
+        let envelope = feedback_observation_envelope(&input, observation.clone()).unwrap();
+        assert!(envelope.validate().is_some());
+
+        let encoded = serde_json::to_string(&envelope).unwrap();
+        let replay: FeedbackObservationEnvelopeV1 = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(replay, envelope);
+        assert_eq!(replay.replay_identity(), envelope.replay_identity());
+
+        let dropping = DroppingSink::default();
+        let dropped = dropping.0.clone();
+        let adapter = FeedbackObservationAdapter::new(dropping);
+        adapter.observe(&input, observation);
+        assert_eq!(dropped.get(), 1);
+    }
+
+    #[test]
+    fn durable_sink_adapter_replays_across_restart_and_rejects_corruption() {
+        let input = saved_input();
+        let envelope = feedback_observation_envelope(
+            &input,
+            FeedbackCycleObservationV1::trigger(&input).unwrap(),
+        )
+        .unwrap();
+        let sink = RestartSafeSink::default();
+        let first_adapter = DurableFeedbackObservationQueueAdapterV1::new(sink.clone());
+        assert_eq!(
+            first_adapter.enqueue_feedback_observation(envelope.clone()),
+            FeedbackObservationSinkOutcome::Enqueued
+        );
+
+        let restarted_adapter = DurableFeedbackObservationQueueAdapterV1::new(sink.clone());
+        assert_eq!(
+            restarted_adapter.replay_feedback_observation(envelope.clone()),
+            FeedbackObservationSinkOutcome::Duplicate
+        );
+        assert_eq!(sink.calls.load(Ordering::SeqCst), 2);
+
+        let mut corrupted = envelope;
+        corrupted.schema_version = 0;
+        assert_eq!(
+            restarted_adapter.enqueue_feedback_observation(corrupted),
+            FeedbackObservationSinkOutcome::Dropped
+        );
+        assert_eq!(
+            sink.calls.load(Ordering::SeqCst),
+            2,
+            "corrupt envelopes must not reach a durable sink"
+        );
+    }
+}

@@ -1,0 +1,3123 @@
+use std::fmt;
+use std::future::Future;
+use std::path::Path;
+use std::pin::Pin;
+
+use tracedecay_application::now_micros;
+use tracedecay_domain::{
+    AnchorDurabilityClass, DurableObservationV1, HydrationStateV1, ObservationScopeV1,
+    PayloadAccessState, ProjectId, RetrievalAnchorId, RetrievalAnchorRecord, SessionId,
+};
+use tracedecay_runtime_core::db::{DatabaseEngineReadSnapshot, engine::params};
+use tracedecay_store::SessionMessageRecord;
+use zeroize::Zeroizing;
+
+use crate::relations::{
+    SessionRelationError, SessionRelationGraphStore, SessionRelationScope, SummarySourceVisitKind,
+};
+use crate::support::derive_projection;
+use tracedecay_lcm::payload::read_verified_payload_content;
+use tracedecay_lcm::{LcmStorageKind, raw};
+use tracedecay_query::temporal::hydration::{
+    HydrationAuthorization, HydrationDenial, HydrationError, HydrationFuture, HydrationGrant,
+    HydrationSink, TemporalHydrationPort,
+};
+use tracedecay_query::temporal::ports::{
+    ExecutionControl, TemporalExecutionSnapshot, TemporalPortError, TemporalRetrievalScope,
+    TemporalSourceAccess,
+};
+
+use super::operations::CanonicalPublicationManifest;
+use super::sql::TemporalSqlRead;
+use super::store::execution_control_graph_cancellation;
+
+type BackendFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, HydrationError>> + Send + 'a>>;
+const MAX_SUMMARY_SOURCE_RELATIONS: usize = 256;
+
+mod external;
+use external::resolve_external_manifest;
+pub(super) use external::resolve_external_target;
+
+#[derive(Clone)]
+pub enum HydrationResolution {
+    Available(PayloadDescriptor),
+    Unavailable(HydrationStateV1),
+}
+
+#[derive(Clone)]
+pub struct PayloadDescriptor {
+    pub(super) source: PayloadSource,
+    pub(super) byte_count: usize,
+    pub(super) content_hash: String,
+}
+
+impl fmt::Debug for PayloadDescriptor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PayloadDescriptor")
+            .field("source", &self.source)
+            .field("byte_count", &self.byte_count)
+            .field("content_hash", &self.content_hash)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
+pub(super) enum PayloadSource {
+    Occurrence {
+        provider: String,
+        session_id: String,
+        message_id: String,
+        source_observation_id: String,
+        projection_output_ordinal: i64,
+    },
+    Summary {
+        session_id: String,
+        summary_id: String,
+    },
+    External {
+        provider: String,
+        session_id: String,
+        payload_ref: String,
+        char_count: usize,
+    },
+}
+
+impl fmt::Debug for PayloadSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Occurrence { .. } => formatter.write_str("Occurrence(<redacted>)"),
+            Self::Summary { .. } => formatter.write_str("Summary(<redacted>)"),
+            Self::External { .. } => formatter.write_str("External(<redacted>)"),
+        }
+    }
+}
+
+pub trait TemporalHydrationBackend: Send + Sync {
+    /// Snapshot-backed production reads cannot observe mid-hydration drift, so
+    /// the adapter may skip the post-read `resolve_current` recheck. Mutable
+    /// test doubles keep the default and still exercise revocation.
+    fn snapshot_is_stable(&self) -> bool {
+        false
+    }
+
+    fn resolve_current<'a>(
+        &'a self,
+        snapshot: &'a TemporalExecutionSnapshot,
+        anchor_id: &'a RetrievalAnchorId,
+    ) -> BackendFuture<'a, HydrationResolution>;
+
+    fn read_bounded<'a>(
+        &'a self,
+        descriptor: &'a PayloadDescriptor,
+        max_bytes: usize,
+        control: &'a ExecutionControl,
+    ) -> BackendFuture<'a, Zeroizing<Vec<u8>>>;
+}
+
+pub struct SessionTemporalHydrationAdapter<B> {
+    backend: B,
+}
+
+impl<B> SessionTemporalHydrationAdapter<B> {
+    #[hotpath::skip]
+    pub const fn new(backend: B) -> Self {
+        Self { backend }
+    }
+}
+
+impl<B: TemporalHydrationBackend> SessionTemporalHydrationAdapter<B> {
+    async fn authorize(
+        &self,
+        snapshot: &TemporalExecutionSnapshot,
+        anchor_id: &RetrievalAnchorId,
+    ) -> Result<HydrationAuthorization, HydrationError> {
+        snapshot.request().execution_control().checkpoint()?;
+        let resolution = self.backend.resolve_current(snapshot, anchor_id).await?;
+        snapshot.request().execution_control().checkpoint()?;
+        match resolution {
+            HydrationResolution::Available(_) => Ok(HydrationAuthorization::Authorized),
+            HydrationResolution::Unavailable(state) => {
+                Ok(HydrationAuthorization::Denied(HydrationDenial::new(state)?))
+            }
+        }
+    }
+
+    #[hotpath::skip]
+    async fn read_after_recheck(
+        &self,
+        snapshot: &TemporalExecutionSnapshot,
+        anchor_id: &RetrievalAnchorId,
+        max_bytes: usize,
+        max_chunk_bytes: usize,
+        emit: &mut (dyn FnMut(&[u8]) -> Result<(), HydrationError> + Send),
+    ) -> Result<(), HydrationError> {
+        let control = snapshot.request().execution_control();
+        control.checkpoint()?;
+        let descriptor = match self.backend.resolve_current(snapshot, anchor_id).await? {
+            HydrationResolution::Available(descriptor) => descriptor,
+            HydrationResolution::Unavailable(_) => return Err(HydrationError::Unavailable),
+        };
+        if descriptor.byte_count > max_bytes {
+            return Err(HydrationError::BudgetExceeded {
+                resource: "payload bytes",
+            });
+        }
+        control.checkpoint()?;
+        let bytes = self
+            .backend
+            .read_bounded(&descriptor, max_bytes, control)
+            .await?;
+        if bytes.len() != descriptor.byte_count
+            || !content_hash_matches(&descriptor.content_hash, &bytes)
+        {
+            return Err(HydrationError::Unavailable);
+        }
+        control.checkpoint()?;
+        if !self.backend.snapshot_is_stable() {
+            let current = match self.backend.resolve_current(snapshot, anchor_id).await? {
+                HydrationResolution::Available(current) => current,
+                HydrationResolution::Unavailable(_) => return Err(HydrationError::Unavailable),
+            };
+            if !same_payload_descriptor(&descriptor, &current) {
+                return Err(HydrationError::Unavailable);
+            }
+        }
+        if max_chunk_bytes == 0 && !bytes.is_empty() {
+            return Err(HydrationError::BudgetExceeded {
+                resource: "chunk bytes",
+            });
+        }
+        for chunk in bytes.chunks(max_chunk_bytes.max(1)) {
+            control.checkpoint()?;
+            emit(chunk)?;
+        }
+        Ok(control.checkpoint()?)
+    }
+}
+
+fn same_payload_descriptor(left: &PayloadDescriptor, right: &PayloadDescriptor) -> bool {
+    left.byte_count == right.byte_count
+        && left.content_hash == right.content_hash
+        && match (&left.source, &right.source) {
+            (
+                PayloadSource::Occurrence {
+                    provider: left_provider,
+                    session_id: left_session,
+                    message_id: left_message,
+                    source_observation_id: left_observation,
+                    projection_output_ordinal: left_ordinal,
+                },
+                PayloadSource::Occurrence {
+                    provider: right_provider,
+                    session_id: right_session,
+                    message_id: right_message,
+                    source_observation_id: right_observation,
+                    projection_output_ordinal: right_ordinal,
+                },
+            ) => {
+                left_provider == right_provider
+                    && left_session == right_session
+                    && left_message == right_message
+                    && left_observation == right_observation
+                    && left_ordinal == right_ordinal
+            }
+            (
+                PayloadSource::Summary {
+                    session_id: left_session,
+                    summary_id: left_summary,
+                },
+                PayloadSource::Summary {
+                    session_id: right_session,
+                    summary_id: right_summary,
+                },
+            ) => left_session == right_session && left_summary == right_summary,
+            (
+                PayloadSource::External {
+                    provider: left_provider,
+                    session_id: left_session,
+                    payload_ref: left_ref,
+                    char_count: left_chars,
+                },
+                PayloadSource::External {
+                    provider: right_provider,
+                    session_id: right_session,
+                    payload_ref: right_ref,
+                    char_count: right_chars,
+                },
+            ) => {
+                left_provider == right_provider
+                    && left_session == right_session
+                    && left_ref == right_ref
+                    && left_chars == right_chars
+            }
+            _ => false,
+        }
+}
+
+impl<B: TemporalHydrationBackend> TemporalHydrationPort for SessionTemporalHydrationAdapter<B> {
+    fn authorize_hydration<'a>(
+        &'a self,
+        snapshot: &'a TemporalExecutionSnapshot,
+        anchor_id: &'a RetrievalAnchorId,
+    ) -> HydrationFuture<'a, HydrationAuthorization> {
+        Box::pin(self.authorize(snapshot, anchor_id))
+    }
+
+    fn read_authorized<'a>(
+        &'a self,
+        grant: &'a HydrationGrant<'_>,
+        sink: &'a mut HydrationSink<'_>,
+    ) -> HydrationFuture<'a, ()> {
+        Box::pin(async move {
+            self.read_after_recheck(
+                grant.snapshot(),
+                grant.anchor_id(),
+                grant.max_bytes(),
+                grant.max_chunk_bytes(),
+                &mut |chunk| sink.write_chunk(chunk),
+            )
+            .await
+        })
+    }
+}
+
+pub struct GlobalDbHydrationBackend<'snapshot> {
+    read: TemporalSqlRead<'snapshot>,
+    storage_root: &'snapshot Path,
+    relation_authority: Option<SessionHydrationRelationAuthority<'snapshot>>,
+}
+
+struct SessionHydrationRelationAuthority<'snapshot> {
+    scope: &'snapshot SessionRelationScope,
+    store: SessionRelationGraphStore,
+}
+
+impl<'snapshot> GlobalDbHydrationBackend<'snapshot> {
+    #[hotpath::skip]
+    pub const fn new_registered(
+        read: &'snapshot DatabaseEngineReadSnapshot,
+        storage_root: &'snapshot Path,
+    ) -> Self {
+        Self {
+            read: TemporalSqlRead::registered(read),
+            storage_root,
+            relation_authority: None,
+        }
+    }
+
+    #[hotpath::skip]
+    pub const fn new_registered_with_relations(
+        read: &'snapshot DatabaseEngineReadSnapshot,
+        storage_root: &'snapshot Path,
+        scope: &'snapshot SessionRelationScope,
+        store: SessionRelationGraphStore,
+    ) -> Self {
+        Self {
+            read: TemporalSqlRead::registered(read),
+            storage_root,
+            relation_authority: Some(SessionHydrationRelationAuthority { scope, store }),
+        }
+    }
+}
+
+pub type GlobalDbTemporalHydrationPort<'snapshot> =
+    SessionTemporalHydrationAdapter<GlobalDbHydrationBackend<'snapshot>>;
+
+impl<'snapshot> SessionTemporalHydrationAdapter<GlobalDbHydrationBackend<'snapshot>> {
+    #[hotpath::skip]
+    pub const fn for_registered_snapshot(
+        read: &'snapshot DatabaseEngineReadSnapshot,
+        storage_root: &'snapshot Path,
+    ) -> Self {
+        Self::new(GlobalDbHydrationBackend::new_registered(read, storage_root))
+    }
+
+    #[hotpath::skip]
+    pub const fn for_registered_snapshot_with_relations(
+        read: &'snapshot DatabaseEngineReadSnapshot,
+        storage_root: &'snapshot Path,
+        scope: &'snapshot SessionRelationScope,
+        store: SessionRelationGraphStore,
+    ) -> Self {
+        Self::new(GlobalDbHydrationBackend::new_registered_with_relations(
+            read,
+            storage_root,
+            scope,
+            store,
+        ))
+    }
+}
+
+pub(super) async fn session_message_from_hydrated_bytes(
+    read: &TemporalSqlRead<'_>,
+    snapshot: &TemporalExecutionSnapshot,
+    anchor_id: &RetrievalAnchorId,
+    expected_provider: &str,
+    expected_session: &str,
+    bytes: &[u8],
+) -> Result<SessionMessageRecord, HydrationError> {
+    let text = String::from_utf8(bytes.to_vec()).map_err(hydration_failure)?;
+
+    let generation = i64::try_from(snapshot.watermarks().generation).map_err(hydration_failure)?;
+    let project_key = snapshot
+        .request()
+        .authorized_root()
+        .ok_or(HydrationError::Unavailable)?
+        .project_key();
+    let mut rows = match snapshot.retrieval_scope() {
+        TemporalRetrievalScope::Session(session_id) => {
+            if session_id.as_str() != expected_session {
+                return Err(HydrationError::Unavailable);
+            }
+            read.query(
+                "SELECT occurrence.message_id, occurrence.role,
+                        occurrence.projection_output_ordinal,
+                        source.provider, occurrence.session_id,
+                        message.timestamp, message.kind, message.model,
+                        message.tool_names, message.source_path, message.source_offset,
+                        message.metadata_json, message.role, message.session_id
+                 FROM session_occurrences AS occurrence
+                 JOIN sessions AS source
+                   ON source.session_id = occurrence.session_id
+                 LEFT JOIN session_messages AS message
+                   ON message.provider = source.provider
+                  AND message.message_id = occurrence.message_id
+                  AND message.session_id = occurrence.session_id
+                 WHERE occurrence.session_id = ?1
+                   AND occurrence.generation = ?2
+                   AND occurrence.retrieval_anchor_id = ?3
+                   AND source.project_key = ?4
+                   AND source.provider = ?5
+                 ORDER BY occurrence.occurrence_id
+                 LIMIT 2",
+                params![
+                    session_id.as_str(),
+                    generation,
+                    anchor_id.as_str(),
+                    project_key,
+                    expected_provider
+                ],
+            )
+            .await
+        }
+        TemporalRetrievalScope::AllSessionsInAuthorizedRoot => {
+            read.query(
+                "SELECT occurrence.message_id, occurrence.role,
+                        occurrence.projection_output_ordinal,
+                        source.provider, occurrence.session_id,
+                        message.timestamp, message.kind, message.model,
+                        message.tool_names, message.source_path, message.source_offset,
+                        message.metadata_json, message.role, message.session_id
+                 FROM session_occurrences AS occurrence
+                 JOIN session_temporal_generations AS generation
+                   ON generation.session_id = occurrence.session_id
+                  AND generation.generation = occurrence.generation
+                  AND generation.state = 'active'
+                 JOIN sessions AS source
+                   ON source.session_id = occurrence.session_id
+                 LEFT JOIN session_messages AS message
+                   ON message.provider = source.provider
+                  AND message.message_id = occurrence.message_id
+                  AND message.session_id = occurrence.session_id
+                 WHERE occurrence.retrieval_anchor_id = ?1
+                   AND source.project_key = ?2
+                   AND occurrence.session_id = ?3
+                   AND source.provider = ?4
+                 ORDER BY occurrence.session_id, occurrence.occurrence_id
+                 LIMIT 2",
+                params![
+                    anchor_id.as_str(),
+                    project_key,
+                    expected_session,
+                    expected_provider
+                ],
+            )
+            .await
+        }
+    }
+    .map_err(hydration_failure)?;
+    let row = rows
+        .next()
+        .await
+        .map_err(hydration_failure)?
+        .ok_or(HydrationError::Unavailable)?;
+    let message_id: String = row.get(0).map_err(hydration_failure)?;
+    let role: String = row.get(1).map_err(hydration_failure)?;
+    let ordinal: i64 = row.get(2).map_err(hydration_failure)?;
+    let provider: String = row.get(3).map_err(hydration_failure)?;
+    let session_id: String = row.get(4).map_err(hydration_failure)?;
+    let timestamp = row.get(5).ok();
+    let kind = row.get(6).ok().or_else(|| Some("message".to_string()));
+    let model = row.get(7).ok();
+    let tool_names = row.get(8).ok();
+    let source_path = row.get(9).ok();
+    let source_offset = row.get(10).ok();
+    let metadata_json = row.get(11).ok();
+    let compatibility_role: Option<String> = row.get(12).ok();
+    let compatibility_session: Option<String> = row.get(13).ok();
+    if compatibility_role
+        .as_deref()
+        .is_some_and(|compatibility_role| compatibility_role != role)
+        || compatibility_session
+            .as_deref()
+            .is_some_and(|compatibility_session| compatibility_session != session_id)
+        || rows.next().await.map_err(hydration_failure)?.is_some()
+    {
+        return Err(HydrationError::Unavailable);
+    }
+    Ok(SessionMessageRecord {
+        provider,
+        message_id,
+        session_id,
+        role,
+        timestamp,
+        ordinal,
+        text,
+        kind,
+        model,
+        tool_names,
+        source_path,
+        source_offset,
+        metadata_json,
+    })
+}
+
+fn canonical_projected_message(
+    observation: &DurableObservationV1,
+    message_id: &str,
+    output_ordinal: i64,
+) -> Option<SessionMessageRecord> {
+    let output_ordinal = u32::try_from(output_ordinal).ok()?;
+    let projection = derive_projection(observation).ok()?;
+    projection
+        .messages()
+        .find(|output| {
+            output.output_ordinal() == output_ordinal
+                && output.message().provider == observation.source().provider().as_str()
+                && output.message().session_id == observation.source().session_id().as_str()
+                && output.message().message_id == message_id
+        })
+        .map(|output| output.message().clone())
+}
+
+impl GlobalDbHydrationBackend<'_> {
+    #[hotpath::measure(future = true, label = "session_temporal.hydrate.resolve")]
+    async fn resolve_current(
+        &self,
+        snapshot: &TemporalExecutionSnapshot,
+        anchor_id: &RetrievalAnchorId,
+    ) -> Result<HydrationResolution, HydrationError> {
+        hotpath::gauge!("session_temporal.hydration").inc(1u32);
+        let control = snapshot.request().execution_control();
+        control.checkpoint()?;
+        let resolution = resolve_current(
+            &self.read,
+            self.relation_authority.as_ref(),
+            snapshot,
+            anchor_id,
+        )
+        .await?;
+        control.checkpoint()?;
+        Ok(resolution)
+    }
+
+    #[hotpath::measure(future = true, label = "session_temporal.hydrate.read")]
+    async fn read_bounded(
+        &self,
+        descriptor: &PayloadDescriptor,
+        max_bytes: usize,
+        control: &ExecutionControl,
+    ) -> Result<Zeroizing<Vec<u8>>, HydrationError> {
+        hotpath::gauge!("session_temporal.hydration").inc(1u32);
+        control.checkpoint()?;
+        match &descriptor.source {
+            PayloadSource::Occurrence {
+                provider,
+                session_id,
+                message_id,
+                source_observation_id,
+                projection_output_ordinal,
+            } => {
+                read_occurrence_content(
+                    &self.read,
+                    self.storage_root,
+                    descriptor,
+                    provider,
+                    session_id,
+                    message_id,
+                    source_observation_id,
+                    *projection_output_ordinal,
+                    max_bytes,
+                    control,
+                )
+                .await
+            }
+            PayloadSource::Summary {
+                session_id,
+                summary_id,
+            } => {
+                let mut rows = self
+                    .read
+                    .query(
+                        "SELECT summary_text
+                             FROM session_summary_nodes
+                             WHERE session_id = ?1 AND summary_id = ?2
+                               AND length(CAST(summary_text AS BLOB)) <= ?3",
+                        params![
+                            session_id.as_str(),
+                            summary_id.as_str(),
+                            i64::try_from(max_bytes).unwrap_or(i64::MAX)
+                        ],
+                    )
+                    .await
+                    .map_err(hydration_failure)?;
+                let row = rows
+                    .next()
+                    .await
+                    .map_err(hydration_failure)?
+                    .ok_or(HydrationError::Unavailable)?;
+                let content = Zeroizing::new(row.get::<String>(0).map_err(hydration_failure)?);
+                bounded_copy(content.as_bytes(), max_bytes, control)
+            }
+            PayloadSource::External {
+                provider,
+                session_id,
+                payload_ref,
+                char_count,
+            } => {
+                let content = read_verified_payload_content(
+                    self.storage_root,
+                    payload_ref,
+                    &descriptor.content_hash,
+                    descriptor.byte_count,
+                    *char_count,
+                )
+                .map_err(hydration_failure)?;
+                let _ = (provider, session_id);
+                bounded_copy(content.as_bytes(), max_bytes, control)
+            }
+        }
+    }
+}
+
+impl TemporalHydrationBackend for GlobalDbHydrationBackend<'_> {
+    fn snapshot_is_stable(&self) -> bool {
+        true
+    }
+
+    fn resolve_current<'a>(
+        &'a self,
+        snapshot: &'a TemporalExecutionSnapshot,
+        anchor_id: &'a RetrievalAnchorId,
+    ) -> BackendFuture<'a, HydrationResolution> {
+        Box::pin(self.resolve_current(snapshot, anchor_id))
+    }
+
+    fn read_bounded<'a>(
+        &'a self,
+        descriptor: &'a PayloadDescriptor,
+        max_bytes: usize,
+        control: &'a ExecutionControl,
+    ) -> BackendFuture<'a, Zeroizing<Vec<u8>>> {
+        Box::pin(self.read_bounded(descriptor, max_bytes, control))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn read_occurrence_content(
+    conn: &TemporalSqlRead<'_>,
+    storage_root: &Path,
+    descriptor: &PayloadDescriptor,
+    provider: &str,
+    session_id: &str,
+    message_id: &str,
+    source_observation_id: &str,
+    projection_output_ordinal: i64,
+    max_bytes: usize,
+    control: &ExecutionControl,
+) -> Result<Zeroizing<Vec<u8>>, HydrationError> {
+    control.checkpoint()?;
+    let mut rows = conn
+        .query(
+            "SELECT observation_json
+             FROM observations
+             WHERE observation_id = ?1
+             LIMIT 2",
+            [source_observation_id],
+        )
+        .await
+        .map_err(hydration_failure)?;
+    let row = rows
+        .next()
+        .await
+        .map_err(hydration_failure)?
+        .ok_or(HydrationError::Unavailable)?;
+    let observation_json: String = row.get(0).map_err(hydration_failure)?;
+    if rows.next().await.map_err(hydration_failure)?.is_some() {
+        return Err(HydrationError::Unavailable);
+    }
+    control.checkpoint()?;
+    let observation: DurableObservationV1 =
+        serde_json::from_str(&observation_json).map_err(hydration_failure)?;
+    if observation.observation_id().as_str() != source_observation_id
+        || observation.source().provider().as_str() != provider
+        || observation.source().session_id().as_str() != session_id
+    {
+        return Err(HydrationError::Unavailable);
+    }
+    if let Some(message) =
+        canonical_projected_message(&observation, message_id, projection_output_ordinal)
+        && content_matches_descriptor(message.text.as_bytes(), descriptor)
+    {
+        return bounded_copy(message.text.as_bytes(), max_bytes, control);
+    }
+
+    let raw_payload = raw::load_raw_message_by_identity(conn, provider, session_id, message_id)
+        .await
+        .map_err(hydration_failure)?
+        .ok_or(HydrationError::Unavailable)?;
+    match raw_payload.storage_kind {
+        LcmStorageKind::Inline
+            if content_matches_descriptor(raw_payload.content.as_bytes(), descriptor) =>
+        {
+            bounded_copy(raw_payload.content.as_bytes(), max_bytes, control)
+        }
+        LcmStorageKind::External => {
+            let payload_ref = raw_payload
+                .payload_ref
+                .as_deref()
+                .ok_or(HydrationError::Unavailable)?;
+            let resolution = resolve_external_manifest(
+                conn,
+                provider,
+                session_id,
+                message_id,
+                payload_ref,
+                &raw_payload.content_hash,
+            )
+            .await
+            .map_err(hydration_failure)?;
+            let HydrationResolution::Available(external) = resolution else {
+                return Err(HydrationError::Unavailable);
+            };
+            let PayloadSource::External { char_count, .. } = &external.source else {
+                return Err(HydrationError::Unavailable);
+            };
+            if external.byte_count != descriptor.byte_count
+                || external.content_hash != descriptor.content_hash
+            {
+                return Err(HydrationError::Unavailable);
+            }
+            let content = read_verified_payload_content(
+                storage_root,
+                payload_ref,
+                &descriptor.content_hash,
+                descriptor.byte_count,
+                *char_count,
+            )
+            .map_err(hydration_failure)?;
+            bounded_copy(content.as_bytes(), max_bytes, control)
+        }
+        _ => Err(HydrationError::Unavailable),
+    }
+}
+
+fn content_matches_descriptor(content: &[u8], descriptor: &PayloadDescriptor) -> bool {
+    content.len() == descriptor.byte_count
+        && content_hash_matches(&descriptor.content_hash, content)
+}
+
+pub(super) fn hydration_failure(error: impl std::fmt::Display) -> HydrationError {
+    tracing::error!(error = %error, "session temporal hydration failed");
+    HydrationError::Unavailable
+}
+
+async fn resolve_current(
+    conn: &TemporalSqlRead<'_>,
+    relation_authority: Option<&SessionHydrationRelationAuthority<'_>>,
+    snapshot: &TemporalExecutionSnapshot,
+    requested_anchor: &RetrievalAnchorId,
+) -> Result<HydrationResolution, HydrationError> {
+    let mut anchor_rows = conn
+        .query(
+            "SELECT anchor_json, owner_json
+             FROM retrieval_anchors WHERE anchor_id = ?1",
+            params![requested_anchor.as_str()],
+        )
+        .await
+        .map_err(hydration_failure)?;
+    let Some(anchor_row) = anchor_rows.next().await.map_err(hydration_failure)? else {
+        return Ok(HydrationResolution::Unavailable(
+            HydrationStateV1::Unauthorized,
+        ));
+    };
+    let anchor_json: String = anchor_row.get(0).map_err(hydration_failure)?;
+    let owner_json: String = anchor_row.get(1).map_err(hydration_failure)?;
+    let anchor: RetrievalAnchorRecord = match serde_json::from_str(&anchor_json) {
+        Ok(anchor) => anchor,
+        Err(_) => {
+            return Ok(HydrationResolution::Unavailable(
+                HydrationStateV1::UnverifiableLegacy,
+            ));
+        }
+    };
+    if anchor.validate().is_err()
+        || anchor.anchor_id() != requested_anchor
+        || serde_json::to_string(anchor.owner()).ok().as_deref() != Some(owner_json.as_str())
+    {
+        return Ok(HydrationResolution::Unavailable(
+            HydrationStateV1::UnverifiableLegacy,
+        ));
+    }
+    if anchor.authorization().validate().is_err()
+        || anchor.authorization().access_policy_digest.as_str()
+            != snapshot.request().access_digest().as_str()
+    {
+        return Ok(HydrationResolution::Unavailable(
+            HydrationStateV1::Unauthorized,
+        ));
+    }
+    if matches!(
+        snapshot.retrieval_scope(),
+        TemporalRetrievalScope::AllSessionsInAuthorizedRoot
+    ) && authorized_root_owner(snapshot).as_ref() != Some(anchor.owner())
+    {
+        return Ok(HydrationResolution::Unavailable(
+            HydrationStateV1::Unauthorized,
+        ));
+    }
+    if let Some(state) = classify_current_access(
+        anchor.payload_access(),
+        anchor.durability(),
+        now_micros().0,
+        true,
+        true,
+    ) {
+        return Ok(HydrationResolution::Unavailable(state));
+    }
+
+    if let Some(resolution) =
+        resolve_occurrence(conn, snapshot, requested_anchor, &anchor, &owner_json).await?
+    {
+        return Ok(resolution);
+    }
+    if let Some(resolution) = resolve_summary(
+        conn,
+        relation_authority,
+        snapshot,
+        requested_anchor,
+        &anchor,
+        &owner_json,
+    )
+    .await?
+    {
+        return Ok(resolution);
+    }
+    Ok(HydrationResolution::Unavailable(
+        HydrationStateV1::UnverifiableLegacy,
+    ))
+}
+
+async fn resolve_occurrence(
+    conn: &TemporalSqlRead<'_>,
+    snapshot: &TemporalExecutionSnapshot,
+    anchor_id: &RetrievalAnchorId,
+    anchor: &RetrievalAnchorRecord,
+    owner_json: &str,
+) -> Result<Option<HydrationResolution>, HydrationError> {
+    let generation = i64::try_from(snapshot.watermarks().generation).map_err(hydration_failure)?;
+    let mut rows = match snapshot.retrieval_scope() {
+        TemporalRetrievalScope::Session(session_id) => {
+            conn.query(
+                "SELECT occurrence.session_id, COALESCE(occurrence.message_id, ''),
+                        occurrence.projection_output_ordinal,
+                        occurrence.source_observation_id,
+                        occurrence.source_provider,
+                        occurrence.sanitized_content_digest,
+                        occurrence.sanitized_content_bytes
+                 FROM session_occurrences occurrence
+                 WHERE occurrence.session_id = ?1
+                   AND occurrence.generation = ?2
+                   AND occurrence.retrieval_anchor_id = ?3
+                 ORDER BY occurrence.occurrence_id
+                 LIMIT 2",
+                params![session_id.as_str(), generation, anchor_id.as_str()],
+            )
+            .await
+        }
+        TemporalRetrievalScope::AllSessionsInAuthorizedRoot => {
+            let project_key = snapshot
+                .request()
+                .authorized_root()
+                .ok_or_else(|| {
+                    hydration_failure("authorized root is required for root-scope hydration")
+                })?
+                .project_key();
+            conn.query(
+                "SELECT occurrence.session_id, COALESCE(occurrence.message_id, ''),
+                        occurrence.projection_output_ordinal,
+                        occurrence.source_observation_id,
+                        occurrence.source_provider,
+                        occurrence.sanitized_content_digest,
+                        occurrence.sanitized_content_bytes
+                 FROM session_occurrences occurrence
+                 JOIN session_temporal_generations generation
+                   ON generation.session_id = occurrence.session_id
+                  AND generation.generation = occurrence.generation
+                  AND generation.state = 'active'
+                 JOIN sessions authority_session
+                   ON authority_session.session_id = occurrence.session_id
+                  AND authority_session.provider = occurrence.source_provider
+                  AND authority_session.project_key = ?2
+                 WHERE occurrence.retrieval_anchor_id = ?1
+                   AND (?3 IS NULL OR authority_session.provider = ?3)
+                 ORDER BY occurrence.session_id, occurrence.occurrence_id
+                 LIMIT 2",
+                params![anchor_id.as_str(), project_key, snapshot.provider_scope()],
+            )
+            .await
+        }
+    }
+    .map_err(hydration_failure)?;
+    let Some(row) = rows.next().await.map_err(hydration_failure)? else {
+        return Ok(None);
+    };
+    let session_id: String = row.get(0).map_err(hydration_failure)?;
+    let message_id: String = row.get(1).map_err(hydration_failure)?;
+    let projection_output_ordinal: i64 = row.get(2).map_err(hydration_failure)?;
+    let source_observation_id: String = row.get(3).map_err(hydration_failure)?;
+    let provider: String = row.get(4).map_err(hydration_failure)?;
+    let content_hash: String = row.get(5).map_err(hydration_failure)?;
+    let byte_count = nonnegative_usize(row.get::<Option<i64>>(6).map_err(hydration_failure)?)?;
+    if rows.next().await.map_err(hydration_failure)?.is_some() {
+        return Ok(Some(HydrationResolution::Unavailable(
+            HydrationStateV1::RetainedButUnavailable,
+        )));
+    }
+    if message_id.is_empty()
+        || provider.is_empty()
+        || !is_canonical_sha256_hex(&content_hash)
+        || !anchor
+            .source_observations()
+            .iter()
+            .any(|observation_id| observation_id.as_str() == source_observation_id)
+    {
+        return Ok(Some(HydrationResolution::Unavailable(
+            HydrationStateV1::UnverifiableLegacy,
+        )));
+    }
+    if let Some(state) = participant_access_state(snapshot, &session_id, &provider) {
+        return Ok(Some(HydrationResolution::Unavailable(state)));
+    }
+    let expected_owner = session_owner(conn, &provider, &session_id).await?;
+    let provider_matches = snapshot
+        .provider_scope()
+        .is_none_or(|expected| expected == provider.as_str());
+    if let Some(state) = classify_current_access(
+        anchor.payload_access(),
+        anchor.durability(),
+        now_micros().0,
+        serde_json::to_string(anchor.owner()).ok().as_deref() == Some(owner_json)
+            && expected_owner.as_ref() == Some(anchor.owner()),
+        provider_matches,
+    ) {
+        return Ok(Some(HydrationResolution::Unavailable(state)));
+    }
+    Ok(Some(HydrationResolution::Available(PayloadDescriptor {
+        source: PayloadSource::Occurrence {
+            provider,
+            session_id,
+            message_id,
+            source_observation_id,
+            projection_output_ordinal,
+        },
+        byte_count,
+        content_hash,
+    })))
+}
+
+async fn resolve_summary(
+    conn: &TemporalSqlRead<'_>,
+    relation_authority: Option<&SessionHydrationRelationAuthority<'_>>,
+    snapshot: &TemporalExecutionSnapshot,
+    anchor_id: &RetrievalAnchorId,
+    anchor: &RetrievalAnchorRecord,
+    owner_json: &str,
+) -> Result<Option<HydrationResolution>, HydrationError> {
+    let generation = i64::try_from(snapshot.watermarks().generation).map_err(hydration_failure)?;
+    let mut rows = match snapshot.retrieval_scope() {
+        TemporalRetrievalScope::Session(session_id) => {
+            conn.query(
+                "SELECT node.session_id, ?1, node.summary_id,
+                        CAST(COALESCE(node.publication_json, '') AS TEXT),
+                        COALESCE(length(CAST(node.summary_text AS BLOB)), 0),
+                        CAST(COALESCE(availability.availability, '') AS TEXT)
+                 FROM session_summary_nodes node
+                 LEFT JOIN session_summary_availability availability
+                   ON availability.session_id = node.session_id
+                  AND availability.generation = ?1
+                  AND availability.summary_id = node.summary_id
+                 WHERE node.session_id = ?2 AND node.summary_anchor_id = ?3
+                 LIMIT 2",
+                params![generation, session_id.as_str(), anchor_id.as_str()],
+            )
+            .await
+        }
+        TemporalRetrievalScope::AllSessionsInAuthorizedRoot => {
+            let project_key = snapshot
+                .request()
+                .authorized_root()
+                .ok_or_else(|| {
+                    hydration_failure("authorized root is required for root-scope hydration")
+                })?
+                .project_key();
+            conn.query(
+                "SELECT node.session_id, generation.generation,
+                        node.summary_id,
+                        CAST(COALESCE(node.publication_json, '') AS TEXT),
+                        COALESCE(length(CAST(node.summary_text AS BLOB)), 0),
+                        CAST(COALESCE(availability.availability, '') AS TEXT)
+                 FROM session_summary_nodes node
+                 JOIN session_temporal_generations generation
+                   ON generation.session_id = node.session_id
+                  AND generation.state = 'active'
+                 JOIN sessions authority_session
+                   ON authority_session.session_id = node.session_id
+                  AND authority_session.provider =
+                      json_extract(node.publication_json, '$.provider')
+                  AND authority_session.project_key = ?2
+                 LEFT JOIN session_summary_availability availability
+                   ON availability.session_id = node.session_id
+                  AND availability.generation = generation.generation
+                  AND availability.summary_id = node.summary_id
+                 WHERE node.summary_anchor_id = ?1
+                   AND (?3 IS NULL OR authority_session.provider = ?3)
+                 ORDER BY node.session_id, node.summary_id
+                 LIMIT 2",
+                params![anchor_id.as_str(), project_key, snapshot.provider_scope()],
+            )
+            .await
+        }
+    }
+    .map_err(hydration_failure)?;
+    let Some(row) = rows.next().await.map_err(hydration_failure)? else {
+        return Ok(None);
+    };
+    let session_id: String = row.get(0).map_err(hydration_failure)?;
+    let generation: i64 = row.get(1).map_err(hydration_failure)?;
+    let summary_id: String = row.get(2).map_err(hydration_failure)?;
+    let publication_json: String = row.get(3).map_err(hydration_failure)?;
+    let summary_bytes = row.get::<i64>(4).map_err(hydration_failure)?;
+    let availability: String = row.get(5).map_err(hydration_failure)?;
+    if rows.next().await.map_err(hydration_failure)?.is_some() {
+        return Ok(Some(HydrationResolution::Unavailable(
+            HydrationStateV1::RetainedButUnavailable,
+        )));
+    }
+    if publication_json.is_empty() {
+        return Ok(Some(HydrationResolution::Unavailable(
+            HydrationStateV1::UnverifiableLegacy,
+        )));
+    }
+    let manifest: CanonicalPublicationManifest = match serde_json::from_str(&publication_json) {
+        Ok(manifest) => manifest,
+        Err(_) => {
+            return Ok(Some(HydrationResolution::Unavailable(
+                HydrationStateV1::UnverifiableLegacy,
+            )));
+        }
+    };
+    if let Some(state) = participant_access_state(snapshot, &session_id, manifest.provider.as_str())
+    {
+        return Ok(Some(HydrationResolution::Unavailable(state)));
+    }
+    let expected_owner = session_owner(conn, &manifest.provider, &session_id).await?;
+    let owner_matches = expected_owner.as_ref() == Some(anchor.owner())
+        && serde_json::to_string(anchor.owner()).ok().as_deref() == Some(owner_json);
+    let provider_matches = match snapshot.provider_scope() {
+        Some(provider) => {
+            let relation_authority = relation_authority.ok_or_else(|| {
+                hydration_failure(
+                    "summary relation authority is required for provider-scoped hydration",
+                )
+            })?;
+            let session = SessionId::new(session_id.clone()).map_err(hydration_failure)?;
+            summary_has_provider_evidence(
+                conn,
+                &relation_authority.store,
+                relation_authority.scope,
+                &session,
+                u64::try_from(generation).map_err(hydration_failure)?,
+                &summary_id,
+                provider,
+                snapshot.request().execution_control(),
+            )
+            .await?
+        }
+        None => true,
+    };
+    let session_matches = manifest.session_id == session_id
+        && manifest.summary_anchor_id == anchor_id.as_str()
+        && provider_matches;
+    if let Some(state) = classify_current_access(
+        anchor.payload_access(),
+        anchor.durability(),
+        now_micros().0,
+        owner_matches,
+        session_matches,
+    ) {
+        return Ok(Some(HydrationResolution::Unavailable(state)));
+    }
+    if availability != "available" {
+        return Ok(Some(HydrationResolution::Unavailable(
+            HydrationStateV1::RetainedButUnavailable,
+        )));
+    }
+    Ok(Some(HydrationResolution::Available(PayloadDescriptor {
+        source: PayloadSource::Summary {
+            session_id,
+            summary_id,
+        },
+        byte_count: nonnegative_usize(Some(summary_bytes))?,
+        content_hash: manifest.summary_hash,
+    })))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn summary_has_provider_evidence(
+    conn: &TemporalSqlRead<'_>,
+    relation_store: &SessionRelationGraphStore,
+    scope: &SessionRelationScope,
+    session_id: &SessionId,
+    generation: u64,
+    summary_id: &str,
+    provider: &str,
+    control: &ExecutionControl,
+) -> Result<bool, HydrationError> {
+    control.checkpoint()?;
+    let visits = relation_store
+        .summary_sources(
+            scope,
+            session_id,
+            generation,
+            summary_id,
+            MAX_SUMMARY_SOURCE_RELATIONS,
+            execution_control_graph_cancellation(control),
+        )
+        .map_err(|error| hydration_relation_error(error, control))?;
+    control.checkpoint()?;
+    let source_anchors = visits
+        .into_iter()
+        .filter_map(|visit| match visit.source {
+            SummarySourceVisitKind::Anchor { anchor_id } => Some(anchor_id.to_string()),
+            SummarySourceVisitKind::Summary { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    if source_anchors.is_empty() {
+        return Ok(false);
+    }
+    let encoded_anchors = serde_json::to_string(&source_anchors).map_err(hydration_failure)?;
+    let mut rows = conn
+        .query(
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM json_each(?1) AS retained
+                 JOIN session_occurrences AS source_occurrence
+                   ON source_occurrence.retrieval_anchor_id =
+                      CAST(retained.value AS TEXT)
+                  AND source_occurrence.session_id = ?2
+                  AND source_occurrence.generation = ?3
+                 WHERE source_occurrence.source_provider = ?4
+                 LIMIT 1
+             )",
+            params![
+                encoded_anchors,
+                session_id.as_str(),
+                i64::try_from(generation).map_err(hydration_failure)?,
+                provider
+            ],
+        )
+        .await
+        .map_err(hydration_failure)?;
+    let row = rows
+        .next()
+        .await
+        .map_err(hydration_failure)?
+        .ok_or(HydrationError::Unavailable)?;
+    let matched = row
+        .get::<i64>(0)
+        .map(|value| value == 1)
+        .map_err(hydration_failure)?;
+    control.checkpoint()?;
+    Ok(matched)
+}
+
+fn hydration_relation_error(
+    error: SessionRelationError,
+    control: &ExecutionControl,
+) -> HydrationError {
+    if error == SessionRelationError::Cancelled
+        && let Err(control_error) = control.checkpoint()
+    {
+        return HydrationError::Interrupted(control_error);
+    }
+    match error {
+        SessionRelationError::BudgetExhausted => HydrationError::BudgetExceeded {
+            resource: "summary source relations",
+        },
+        SessionRelationError::Cancelled => {
+            HydrationError::Interrupted(TemporalPortError::Cancelled)
+        }
+        SessionRelationError::DeadlineExceeded => {
+            HydrationError::Interrupted(TemporalPortError::DeadlineExceeded)
+        }
+        SessionRelationError::Invalid
+        | SessionRelationError::Cycle
+        | SessionRelationError::NotFound
+        | SessionRelationError::Unavailable
+        | SessionRelationError::Conflict
+        | SessionRelationError::DurabilityUncertain
+        | SessionRelationError::Corrupt => HydrationError::Unavailable,
+        SessionRelationError::Storage(error) => hydration_failure(error),
+        SessionRelationError::ResetRequired => HydrationError::ResetRequired {
+            resource: "session relation projection",
+        },
+    }
+}
+
+fn authorized_root_owner(snapshot: &TemporalExecutionSnapshot) -> Option<ObservationScopeV1> {
+    snapshot
+        .request()
+        .authorized_root()
+        .and_then(|root| owner_from_project_key(root.project_key().to_string()))
+}
+
+async fn session_owner(
+    conn: &TemporalSqlRead<'_>,
+    provider: &str,
+    session_id: &str,
+) -> Result<Option<ObservationScopeV1>, HydrationError> {
+    let mut rows = conn
+        .query(
+            "SELECT project_key
+             FROM sessions
+             WHERE provider = ?1 AND session_id = ?2
+             LIMIT 2",
+            params![provider, session_id],
+        )
+        .await
+        .map_err(hydration_failure)?;
+    let Some(row) = rows.next().await.map_err(hydration_failure)? else {
+        return Ok(None);
+    };
+    let project_key: String = row.get(0).map_err(hydration_failure)?;
+    if rows.next().await.map_err(hydration_failure)?.is_some() {
+        return Ok(None);
+    }
+    Ok(owner_from_project_key(project_key))
+}
+
+fn owner_from_project_key(project_key: String) -> Option<ObservationScopeV1> {
+    if project_key == "user" {
+        return Some(ObservationScopeV1::Profile);
+    }
+    ProjectId::new(project_key)
+        .ok()
+        .map(|project_id| ObservationScopeV1::Project { project_id })
+}
+
+fn participant_access_state(
+    snapshot: &TemporalExecutionSnapshot,
+    session_id: &str,
+    source_id: &str,
+) -> Option<HydrationStateV1> {
+    if !snapshot.has_authoritative_participant_manifest() {
+        return None;
+    }
+    let Some(participant) = snapshot
+        .participant_manifest()
+        .entries()
+        .iter()
+        .find(|participant| {
+            participant.session_id().as_str() == session_id && participant.source_id() == source_id
+        })
+    else {
+        return Some(HydrationStateV1::Unauthorized);
+    };
+    if !participant.is_authorized_for_snapshot() {
+        return Some(HydrationStateV1::Unauthorized);
+    }
+    source_access_hydration_state(participant.access())
+}
+
+fn source_access_hydration_state(access: TemporalSourceAccess) -> Option<HydrationStateV1> {
+    match access {
+        TemporalSourceAccess::Available => None,
+        TemporalSourceAccess::Unavailable => Some(HydrationStateV1::RetainedButUnavailable),
+        TemporalSourceAccess::Locked => Some(HydrationStateV1::Locked),
+        TemporalSourceAccess::RetentionWithheld => Some(HydrationStateV1::RetentionExpired),
+        TemporalSourceAccess::Deleted => Some(HydrationStateV1::Deleted),
+        TemporalSourceAccess::Redacted => Some(HydrationStateV1::Redacted),
+        TemporalSourceAccess::LegacyUnauthorized => Some(HydrationStateV1::Unauthorized),
+    }
+}
+
+fn classify_current_access(
+    payload_access: PayloadAccessState,
+    durability: &AnchorDurabilityClass,
+    now: i64,
+    owner_matches: bool,
+    session_matches: bool,
+) -> Option<HydrationStateV1> {
+    if !owner_matches || !session_matches {
+        return Some(HydrationStateV1::Unauthorized);
+    }
+    let state = match payload_access {
+        PayloadAccessState::Eligible => None,
+        PayloadAccessState::Redacted => Some(HydrationStateV1::Redacted),
+        PayloadAccessState::Quarantined => Some(HydrationStateV1::Locked),
+        PayloadAccessState::RetentionExpired => Some(HydrationStateV1::RetentionExpired),
+        PayloadAccessState::Deleted => Some(HydrationStateV1::Deleted),
+        PayloadAccessState::Unavailable | PayloadAccessState::Ambiguous => {
+            Some(HydrationStateV1::RetainedButUnavailable)
+        }
+    };
+    if state.is_some() {
+        return state;
+    }
+    match durability {
+        AnchorDurabilityClass::RetentionBound { expires_at } if expires_at.0 <= now => {
+            Some(HydrationStateV1::RetentionExpired)
+        }
+        _ => None,
+    }
+}
+
+fn bounded_copy(
+    bytes: &[u8],
+    max_bytes: usize,
+    control: &ExecutionControl,
+) -> Result<Zeroizing<Vec<u8>>, HydrationError> {
+    if bytes.len() > max_bytes {
+        return Err(HydrationError::BudgetExceeded {
+            resource: "payload bytes",
+        });
+    }
+    control.checkpoint()?;
+    let mut copy = Zeroizing::new(Vec::with_capacity(bytes.len()));
+    for chunk in bytes.chunks(64 * 1024) {
+        control.checkpoint()?;
+        copy.extend_from_slice(chunk);
+    }
+    control.checkpoint()?;
+    Ok(copy)
+}
+
+fn nonnegative_usize(value: Option<i64>) -> Result<usize, HydrationError> {
+    value
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| hydration_failure("payload size is not a nonnegative usize"))
+}
+
+fn content_hash_matches(expected: &str, bytes: &[u8]) -> bool {
+    expected.strip_prefix("sha256:").unwrap_or(expected) == sha256_hex(bytes)
+}
+
+fn is_canonical_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    tracedecay_domain::canonical_text::sha256_hex(bytes)
+}
+
+#[cfg(test)]
+#[path = "hydration/graph_relation_tests.rs"]
+mod graph_relation_tests;
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::future::Future;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll, Wake, Waker};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use serde_json::{Value, json};
+    use sha2::{Digest, Sha256};
+    use tempfile::tempdir;
+    use tracedecay_domain::{
+        CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
+        CanonicalObservationFactV1, CanonicalObservationRelationsV1, DurableObservationV1,
+        ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1,
+        ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceGenerationV1,
+        ObservationSourceIdentityV1, ObservationSourceRangeV1, PayloadReferenceV1,
+        ProjectionGenerationId, ProviderId, RetentionClass, RetrievalGrainV1,
+        SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
+        SanitizerDispositionV1, SensitivityV1, SessionId, TemporalModeV1, UtcMicros,
+    };
+    use tracedecay_runtime_core::db::{
+        DatabaseEngineReadSnapshot,
+        engine::{Executor, params},
+    };
+    use tracedecay_store::{
+        AnchoredObservationWrite, ObservationStore, ObservationWrite,
+        build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
+    };
+
+    use super::*;
+    use tracedecay_global_db::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+    use tracedecay_query::temporal::ports::{
+        BindingDigest, ExecutionLimits, KernelVersions, TemporalAuthorizedRoot, TemporalPortError,
+        TemporalSnapshotRequest, TemporalWatermarks,
+    };
+    use tracedecay_query::temporal::resolution::ValidatedAuthorization;
+
+    struct RegisteredHydrationRead {
+        read: DatabaseEngineReadSnapshot,
+        storage_root: PathBuf,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct HydrationStorageFingerprint {
+        database: [u8; 32],
+        payload: [u8; 32],
+        payload_entries: usize,
+    }
+
+    impl RegisteredHydrationRead {
+        fn adapter(&self) -> GlobalDbTemporalHydrationPort<'_> {
+            GlobalDbTemporalHydrationPort::for_registered_snapshot(
+                &self.read,
+                self.storage_root.as_path(),
+            )
+        }
+    }
+
+    trait HostAdmissionHydrationFixture {
+        async fn hydration_read_for_test(&self) -> RegisteredHydrationRead;
+        async fn activate_temporal_generation_for_hydration_test(&self, session_id: &str);
+        async fn seed_session_occurrence_for_test(
+            &self,
+            provider: &str,
+            session_id: &str,
+            observation: &DurableObservationV1,
+            anchor: &RetrievalAnchorRecord,
+            message_id: &str,
+            canonical_payload: &str,
+        );
+        async fn corrupt_hydration_occurrence_message_id_for_test(
+            &self,
+            session_id: &str,
+            message_id: &str,
+        );
+        async fn corrupt_hydration_observation_json_for_test(&self, observation_id: &str);
+        async fn seed_root_hydration_fixture_for_test(
+            &self,
+            provider: &str,
+            observation: &DurableObservationV1,
+            anchor: &RetrievalAnchorRecord,
+            canonical_payload: &str,
+            legacy_projection_poison: &str,
+        );
+        async fn move_hydration_session_outside_root_for_test(
+            &self,
+            provider: &str,
+            session_id: &str,
+        );
+        async fn seed_snapshot_hydration_fixture_for_test(
+            &self,
+            occurrence_observation: &DurableObservationV1,
+            occurrence_anchor: &RetrievalAnchorRecord,
+            summary_anchor: &RetrievalAnchorRecord,
+            authority_anchor: &RetrievalAnchorRecord,
+        );
+        fn hydration_storage_fingerprint_for_test(&self) -> HydrationStorageFingerprint;
+        async fn drift_hydration_anchor_owner_for_test(&self, anchor_id: &RetrievalAnchorId);
+    }
+
+    impl HostAdmissionHydrationFixture for HostAdmissionTestRuntimeV1 {
+        async fn hydration_read_for_test(&self) -> RegisteredHydrationRead {
+            let database = self
+                .registered_database(HostAdmissionScope::Profile)
+                .expect("registered profile database");
+            RegisteredHydrationRead {
+                read: database.read_snapshot().await.expect("read snapshot"),
+                storage_root: database
+                    .db_path()
+                    .parent()
+                    .expect("registered profile storage root")
+                    .to_path_buf(),
+            }
+        }
+
+        async fn activate_temporal_generation_for_hydration_test(&self, session_id: &str) {
+            let database = self
+                .registered_database(HostAdmissionScope::Profile)
+                .expect("registered profile database");
+            let frozen = serde_json::json!({
+                "active_generation": 1,
+                "cursor_key": null,
+                "projection_frontier": 0,
+                "source_frontier": 0,
+                "summary_frontier": 0
+            })
+            .to_string();
+            let writer = database
+                .writer_connection()
+                .expect("registered profile writer");
+            Executor::execute(
+                &writer,
+                "INSERT INTO session_temporal_generations (
+                    session_id, generation, state, frozen_watermarks_json, created_at,
+                    ready_at, activated_at, completed_at
+                 ) VALUES (?1, 1, 'building', ?2, 1, NULL, NULL, NULL)",
+                params![session_id, frozen],
+            )
+            .await
+            .expect("building generation");
+            Executor::execute(
+                &writer,
+                "UPDATE session_temporal_generations
+                 SET state = 'ready', ready_at = 1
+                 WHERE session_id = ?1 AND generation = 1",
+                [session_id],
+            )
+            .await
+            .expect("ready generation");
+            Executor::execute(
+                &writer,
+                "UPDATE session_temporal_generations
+                 SET state = 'active', activated_at = 1
+                 WHERE session_id = ?1 AND generation = 1",
+                [session_id],
+            )
+            .await
+            .expect("active generation");
+        }
+
+        /// Seed a single-session occurrence whose `message_id` is supplied by
+        /// the caller, so a reproduction can key the row on the stable record id
+        /// exactly as `derive_canonical_projection` does when the envelope omits
+        /// `relations.message_id`.
+        async fn seed_session_occurrence_for_test(
+            &self,
+            provider: &str,
+            session_id: &str,
+            observation: &DurableObservationV1,
+            anchor: &RetrievalAnchorRecord,
+            message_id: &str,
+            canonical_payload: &str,
+        ) {
+            let database = self
+                .registered_database(HostAdmissionScope::Profile)
+                .expect("registered profile database");
+            let writer = database
+                .writer_connection()
+                .expect("registered profile writer");
+            Executor::execute(
+                &writer,
+                "INSERT INTO sessions (
+                    provider, session_id, project_key, project_path
+                 ) VALUES (?1, ?2, 'user', '/session-occurrence-test')",
+                params![provider, session_id],
+            )
+            .await
+            .expect("session owner");
+            self.activate_temporal_generation_for_hydration_test(session_id)
+                .await;
+            Executor::execute(
+                &writer,
+                "INSERT INTO session_occurrences (
+                    session_id, generation, occurrence_id, source_observation_id,
+                    source_provider, projection_output_ordinal, retrieval_anchor_id,
+                    message_id, role, knowledge_at, valid_time_json, evidence_json,
+                    sanitized_content_digest, sanitized_content_bytes,
+                    snippet_text, index_text
+                 ) VALUES (
+                    ?1, 1, 'occurrence-1', ?2, ?3, 0, ?4, ?5,
+                    'assistant', 1, '{\"kind\":\"unknown\"}', '{}', ?6, ?7, ?8, ?8
+                 )",
+                params![
+                    session_id,
+                    observation.observation_id().as_str(),
+                    provider,
+                    anchor.anchor_id().as_str(),
+                    message_id,
+                    hash(canonical_payload.as_bytes()),
+                    i64::try_from(canonical_payload.len()).expect("canonical payload bytes"),
+                    canonical_payload
+                ],
+            )
+            .await
+            .expect("occurrence");
+        }
+
+        /// Rewrite the seeded occurrence's `message_id` to a value that
+        /// corresponds to no projection output of its observation. Authorization
+        /// trusts only immutable projected metadata; the post-authorization
+        /// content read must reject the broken projection binding.
+        async fn corrupt_hydration_occurrence_message_id_for_test(
+            &self,
+            session_id: &str,
+            message_id: &str,
+        ) {
+            let database = self
+                .registered_database(HostAdmissionScope::Profile)
+                .expect("registered profile database");
+            Executor::execute(
+                &database
+                    .writer_connection()
+                    .expect("registered profile writer"),
+                "UPDATE session_occurrences
+                 SET message_id = ?2
+                 WHERE session_id = ?1 AND generation = 1 AND occurrence_id = 'occurrence-1'",
+                params![session_id, message_id],
+            )
+            .await
+            .expect("corrupt occurrence message id");
+        }
+
+        async fn corrupt_hydration_observation_json_for_test(&self, observation_id: &str) {
+            let database = self
+                .registered_database(HostAdmissionScope::Profile)
+                .expect("registered profile database");
+            let writer = database
+                .writer_connection()
+                .expect("registered profile writer");
+            Executor::execute_batch(&writer, "DROP TRIGGER observations_immutable_update;")
+                .await
+                .expect("drop observation immutability for corruption fixture");
+            Executor::execute(
+                &writer,
+                "UPDATE observations
+                 SET observation_json = '{'
+                 WHERE observation_id = ?1",
+                [observation_id],
+            )
+            .await
+            .expect("corrupt observation json");
+        }
+
+        async fn seed_root_hydration_fixture_for_test(
+            &self,
+            provider: &str,
+            observation: &DurableObservationV1,
+            anchor: &RetrievalAnchorRecord,
+            canonical_payload: &str,
+            legacy_projection_poison: &str,
+        ) {
+            let database = self
+                .registered_database(HostAdmissionScope::Profile)
+                .expect("registered profile database");
+            let writer = database
+                .writer_connection()
+                .expect("registered profile writer");
+            Executor::execute(
+                &writer,
+                "INSERT INTO sessions (
+                    provider, session_id, project_key, project_path
+                 ) VALUES
+                    (?1, 'session-1', 'user', '/root-hydration-test'),
+                    (?1, 'session-2', 'user', '/root-hydration-test')",
+                [provider],
+            )
+            .await
+            .expect("session owner");
+            self.activate_temporal_generation_for_hydration_test("session-2")
+                .await;
+            Executor::execute(
+                &writer,
+                "INSERT INTO lcm_raw_messages (
+                    provider, message_id, session_id, role, ordinal, timestamp,
+                    content, content_hash, storage_kind, payload_ref,
+                    snippet_text, index_text, legacy_source, legacy_truncated
+                 ) VALUES (
+                    ?1, 'message-1', 'session-2', 'assistant', 1, 1,
+                    ?2, ?3, 'inline', NULL, ?2, ?2, 0, 0
+                 )",
+                params![
+                    provider,
+                    legacy_projection_poison,
+                    hash(legacy_projection_poison.as_bytes())
+                ],
+            )
+            .await
+            .expect("raw message");
+            Executor::execute(
+                &writer,
+                "INSERT INTO session_occurrences (
+                    session_id, generation, occurrence_id, source_observation_id,
+                    source_provider, projection_output_ordinal, retrieval_anchor_id,
+                    message_id, role, knowledge_at, valid_time_json, evidence_json,
+                    sanitized_content_digest, sanitized_content_bytes,
+                    snippet_text, index_text
+                 ) VALUES (
+                    'session-2', 1, 'occurrence-1', ?1, ?2, 0, ?3, 'message-1',
+                    'assistant', 1, '{\"kind\":\"unknown\"}', '{}', ?4, ?5, ?6, ?6
+                 )",
+                params![
+                    observation.observation_id().as_str(),
+                    provider,
+                    anchor.anchor_id().as_str(),
+                    hash(canonical_payload.as_bytes()),
+                    i64::try_from(canonical_payload.len()).expect("canonical payload bytes"),
+                    canonical_payload
+                ],
+            )
+            .await
+            .expect("occurrence");
+        }
+
+        async fn move_hydration_session_outside_root_for_test(
+            &self,
+            provider: &str,
+            session_id: &str,
+        ) {
+            let database = self
+                .registered_database(HostAdmissionScope::Profile)
+                .expect("registered profile database");
+            Executor::execute(
+                &database
+                    .writer_connection()
+                    .expect("registered profile writer"),
+                "UPDATE sessions
+                 SET project_key = 'different-project'
+                 WHERE provider = ?1 AND session_id = ?2",
+                params![provider, session_id],
+            )
+            .await
+            .expect("move target session outside authorized root");
+        }
+
+        async fn seed_snapshot_hydration_fixture_for_test(
+            &self,
+            occurrence_observation: &DurableObservationV1,
+            occurrence_anchor: &RetrievalAnchorRecord,
+            summary_anchor: &RetrievalAnchorRecord,
+            authority_anchor: &RetrievalAnchorRecord,
+        ) {
+            let database = self
+                .registered_database(HostAdmissionScope::Profile)
+                .expect("registered profile database");
+            let writer = database
+                .writer_connection()
+                .expect("registered profile writer");
+            let provider = occurrence_observation.source().provider().as_str();
+            Executor::execute(
+                &writer,
+                "INSERT INTO sessions (
+                    provider, session_id, project_key, project_path
+                 ) VALUES (?1, 'session-1', 'user', '/snapshot-test')",
+                [provider],
+            )
+            .await
+            .expect("session owner");
+            self.activate_temporal_generation_for_hydration_test("session-1")
+                .await;
+
+            let occurrence_payload = "non-empty occurrence payload";
+            let occurrence_hash = hash(occurrence_payload.as_bytes());
+            let payload_ref = "snapshot-payload.bin";
+            let storage_root = database
+                .db_path()
+                .parent()
+                .expect("registered profile storage root");
+            let payload_dir = storage_root.join("lcm-payloads");
+            fs::create_dir(&payload_dir).expect("payload directory");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+
+                fs::set_permissions(&payload_dir, fs::Permissions::from_mode(0o700))
+                    .expect("private payload directory");
+            }
+            let payload_path = payload_dir.join(payload_ref);
+            fs::write(&payload_path, occurrence_payload).expect("external payload");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+
+                fs::set_permissions(&payload_path, fs::Permissions::from_mode(0o600))
+                    .expect("private payload file");
+            }
+            Executor::execute(
+                &writer,
+                "INSERT INTO lcm_raw_messages (
+                    provider, message_id, session_id, role, ordinal, timestamp,
+                    content, content_hash, storage_kind, payload_ref,
+                    snippet_text, index_text, legacy_source, legacy_truncated
+                 ) VALUES (
+                    ?1, 'message-1', 'session-1', 'assistant', 1, 1,
+                    NULL, ?2, 'external', ?3, ?4, ?4, 0, 0
+                 )",
+                params![
+                    provider,
+                    occurrence_hash.as_str(),
+                    payload_ref,
+                    occurrence_payload
+                ],
+            )
+            .await
+            .expect("raw message");
+            Executor::execute(
+                &writer,
+                "INSERT INTO lcm_external_payloads (
+                    payload_ref, provider, session_id, message_id, kind,
+                    content_hash, byte_count, char_count, created_at
+                 ) VALUES (?1, ?2, 'session-1', 'message-1', 'message', ?3, ?4, ?5, 1)",
+                params![
+                    payload_ref,
+                    provider,
+                    occurrence_hash.as_str(),
+                    i64::try_from(occurrence_payload.len()).expect("payload bytes"),
+                    i64::try_from(occurrence_payload.chars().count()).expect("payload chars")
+                ],
+            )
+            .await
+            .expect("external payload metadata");
+            let external_manifest = serde_json::json!({
+                "provider": provider,
+                "session_id": "session-1",
+                "message_id": "message-1",
+                "byte_count": occurrence_payload.len(),
+                "char_count": occurrence_payload.chars().count()
+            })
+            .to_string();
+            let authority_publication = serde_json::json!({
+                "receipt_id": "receipt-3",
+                "payloads": [{
+                    "payload_ref": payload_ref,
+                    "digest": occurrence_hash.as_str(),
+                    "manifest_json": external_manifest.clone()
+                }]
+            })
+            .to_string();
+            Executor::execute(
+                &writer,
+                "INSERT INTO session_summary_nodes (
+                    summary_id, session_id, summary_anchor_id, summary_text,
+                    index_text, source_horizon_json, publication_json, created_at
+                 ) VALUES (
+                    'summary-authority', 'session-1', ?1, 'authority',
+                    'authority', '{}', ?2, 1
+                 )",
+                params![authority_anchor.anchor_id().as_str(), authority_publication],
+            )
+            .await
+            .expect("payload authority summary");
+            Executor::execute(
+                &writer,
+                "INSERT INTO session_external_payload_manifests (
+                    payload_ref, session_id, payload_digest, manifest_json, receipt_id, created_at
+                 ) VALUES (?1, 'session-1', ?2, ?3, 'receipt-3', 1)",
+                params![
+                    payload_ref,
+                    occurrence_hash.as_str(),
+                    external_manifest.as_str()
+                ],
+            )
+            .await
+            .expect("external payload manifest");
+            Executor::execute(
+                &writer,
+                "INSERT INTO session_occurrences (
+                    session_id, generation, occurrence_id, source_observation_id,
+                    source_provider, projection_output_ordinal, retrieval_anchor_id,
+                    message_id, role, knowledge_at, valid_time_json, evidence_json,
+                    sanitized_content_digest, sanitized_content_bytes,
+                    snippet_text, index_text
+                 ) VALUES (
+                    'session-1', 1, 'occurrence-1', ?1, ?2, 0, ?3, 'message-1',
+                    'assistant', 1, '{\"kind\":\"unknown\"}', '{}',
+                    ?4, ?5,
+                    'non-empty occurrence payload', 'non-empty occurrence payload'
+                 )",
+                {
+                    let canonical =
+                        canonical_projected_message(occurrence_observation, "message-1", 0)
+                            .expect("canonical occurrence projection");
+                    params![
+                        occurrence_observation.observation_id().as_str(),
+                        provider,
+                        occurrence_anchor.anchor_id().as_str(),
+                        hash(canonical.text.as_bytes()),
+                        i64::try_from(canonical.text.len())
+                            .expect("canonical occurrence payload bytes")
+                    ]
+                },
+            )
+            .await
+            .expect("occurrence");
+
+            let summary_payload = "non-empty summary payload";
+            let publication = CanonicalPublicationManifest {
+                version: 1,
+                provider: provider.to_string(),
+                conversation_id: "session-1".to_string(),
+                session_id: "session-1".to_string(),
+                depth: 1,
+                summary_text: summary_payload.to_string(),
+                summary_hash: hash(summary_payload.as_bytes()),
+                source_refs: Vec::new(),
+                canonical_sources: Vec::new(),
+                source_token_count: 1,
+                summary_token_count: 1,
+                source_time_start: None,
+                source_time_end: None,
+                expand_hint: None,
+                metadata_json: None,
+                source_horizon_json: "{}".to_string(),
+                owner_json: serde_json::to_string(summary_anchor.owner()).expect("owner json"),
+                summary_anchor_id: summary_anchor.anchor_id().to_string(),
+                receipt_id: "summary-receipt".to_string(),
+                predecessor_summary_id: None,
+                logical_identity_digest: digest('a'),
+                payloads: Vec::new(),
+                model_route: "snapshot-test".to_string(),
+                configuration_digest: digest('b'),
+                sanitization_receipt: "summary-receipt".to_string(),
+                route: Value::Null,
+            };
+            Executor::execute(
+                &writer,
+                "INSERT INTO session_summary_nodes (
+                    summary_id, session_id, summary_anchor_id, summary_text,
+                    index_text, source_horizon_json, publication_json, created_at
+                 ) VALUES ('summary-1', 'session-1', ?1, ?2, ?2, '{}', ?3, 1)",
+                params![
+                    summary_anchor.anchor_id().as_str(),
+                    summary_payload,
+                    serde_json::to_string(&publication).expect("publication json")
+                ],
+            )
+            .await
+            .expect("summary node");
+            Executor::execute(
+                &writer,
+                "INSERT INTO session_summary_availability (
+                    session_id, generation, summary_id, availability,
+                    source_horizon_json, reason, checked_at
+                 ) VALUES ('session-1', 1, 'summary-1', 'available', '{}', NULL, 1)",
+                (),
+            )
+            .await
+            .expect("summary availability");
+            Executor::execute_batch(&writer, "DROP TRIGGER retrieval_anchors_immutable_update;")
+                .await
+                .expect("allow drift fixture");
+        }
+
+        fn hydration_storage_fingerprint_for_test(&self) -> HydrationStorageFingerprint {
+            let database = self
+                .registered_database(HostAdmissionScope::Profile)
+                .expect("registered profile database");
+            let storage_root = database
+                .db_path()
+                .parent()
+                .expect("registered profile storage root");
+            let payload_dir = storage_root.join("lcm-payloads");
+            HydrationStorageFingerprint {
+                database: Sha256::digest(fs::read(database.db_path()).expect("database bytes"))
+                    .into(),
+                payload: Sha256::digest(
+                    fs::read(payload_dir.join("snapshot-payload.bin")).expect("payload bytes"),
+                )
+                .into(),
+                payload_entries: fs::read_dir(payload_dir).expect("payload entries").count(),
+            }
+        }
+
+        async fn drift_hydration_anchor_owner_for_test(&self, anchor_id: &RetrievalAnchorId) {
+            let database = self
+                .registered_database(HostAdmissionScope::Profile)
+                .expect("registered profile database");
+            Executor::execute(
+                &database
+                    .writer_connection()
+                    .expect("registered profile writer"),
+                "UPDATE retrieval_anchors
+                 SET anchor_json = json_set(
+                     anchor_json,
+                     '$.owner',
+                     json('{\"kind\":\"project\",\"project_id\":\"drifted-project\"}')
+                 )
+                 WHERE anchor_id = ?1",
+                [anchor_id.as_str()],
+            )
+            .await
+            .expect("drift anchor owner");
+        }
+    }
+
+    struct ThreadWake(thread::Thread);
+
+    impl Wake for ThreadWake {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+
+    fn block_on<F: Future>(future: F) -> F::Output {
+        let mut future = Box::pin(future);
+        let waker = Waker::from(Arc::new(ThreadWake(thread::current())));
+        let mut context = Context::from_waker(&waker);
+        loop {
+            match future.as_mut().poll(&mut context) {
+                Poll::Ready(output) => return output,
+                Poll::Pending => thread::park_timeout(Duration::from_millis(10)),
+            }
+        }
+    }
+
+    struct FakeBackend {
+        resolutions: Mutex<Vec<HydrationResolution>>,
+        payload: Mutex<Result<Vec<u8>, HydrationError>>,
+        calls: Mutex<Vec<&'static str>>,
+    }
+
+    impl FakeBackend {
+        fn available(payload: &[u8]) -> Self {
+            Self {
+                resolutions: Mutex::new(vec![
+                    available(payload.len(), &hash(payload)),
+                    available(payload.len(), &hash(payload)),
+                ]),
+                payload: Mutex::new(Ok(payload.to_vec())),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn denied(state: HydrationStateV1) -> Self {
+            Self {
+                resolutions: Mutex::new(vec![HydrationResolution::Unavailable(state)]),
+                payload: Mutex::new(Ok(Vec::new())),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl TemporalHydrationBackend for FakeBackend {
+        fn resolve_current<'a>(
+            &'a self,
+            _snapshot: &'a TemporalExecutionSnapshot,
+            _anchor_id: &'a RetrievalAnchorId,
+        ) -> BackendFuture<'a, HydrationResolution> {
+            Box::pin(async move {
+                self.calls.lock().expect("calls").push("resolve");
+                let mut resolutions = self.resolutions.lock().expect("resolutions");
+                if resolutions.len() > 1 {
+                    Ok(resolutions.remove(0))
+                } else {
+                    Ok(resolutions[0].clone())
+                }
+            })
+        }
+
+        fn read_bounded<'a>(
+            &'a self,
+            _descriptor: &'a PayloadDescriptor,
+            _max_bytes: usize,
+            control: &'a ExecutionControl,
+        ) -> BackendFuture<'a, Zeroizing<Vec<u8>>> {
+            Box::pin(async move {
+                self.calls.lock().expect("calls").push("read");
+                control.checkpoint()?;
+                match &*self.payload.lock().expect("payload") {
+                    Ok(payload) => Ok(Zeroizing::new(payload.clone())),
+                    Err(error) => Err(error.clone()),
+                }
+            })
+        }
+    }
+
+    fn available(byte_count: usize, content_hash: &str) -> HydrationResolution {
+        HydrationResolution::Available(PayloadDescriptor {
+            source: PayloadSource::Summary {
+                session_id: "session-1".to_string(),
+                summary_id: "summary-1".to_string(),
+            },
+            byte_count,
+            content_hash: content_hash.to_string(),
+        })
+    }
+
+    fn anchor() -> RetrievalAnchorId {
+        RetrievalAnchorId::new("anchor-1").expect("anchor")
+    }
+
+    fn digest(byte: char) -> String {
+        format!("sha256:{}", byte.to_string().repeat(64))
+    }
+
+    fn snapshot(control: ExecutionControl) -> TemporalExecutionSnapshot {
+        TemporalExecutionSnapshot::new_authorized(
+            TemporalSnapshotRequest::new(
+                SessionId::new("session-1").expect("session"),
+                digest('0'),
+                digest('1'),
+                digest('2'),
+                TemporalModeV1::Current,
+                RetrievalGrainV1::LogicalMessage,
+            )
+            .expect("request")
+            .with_limits(ExecutionLimits {
+                hydration_payload_bytes: 32,
+                hydration_chunk_bytes: 4,
+                ..ExecutionLimits::default()
+            })
+            .with_execution_control(control),
+            TemporalWatermarks {
+                generation: 1,
+                source: 2,
+                projection: 3,
+                index: 4,
+                summary: 5,
+            },
+            KernelVersions {
+                schema: 1,
+                ranking: 1,
+                configuration_digest: BindingDigest::new("configuration", digest('3'))
+                    .expect("digest"),
+            },
+            None,
+            ValidatedAuthorization::Authorized,
+        )
+        .expect("snapshot")
+    }
+
+    fn hash(bytes: &[u8]) -> String {
+        use std::fmt::Write as _;
+        let digest = Sha256::digest(bytes);
+        digest.iter().fold(String::new(), |mut output, byte| {
+            let _ = write!(output, "{byte:02x}");
+            output
+        })
+    }
+
+    fn receipt(receipt_id: &str, payload: &Value) -> SanitizationReceiptV1 {
+        SanitizationReceiptV1::new(
+            SanitizationReceiptRefV1::new(
+                SanitizationReceiptId::new(receipt_id).expect("receipt id"),
+                tracedecay_domain::ComponentVersion::new("sanitizer.snapshot-test.v1")
+                    .expect("component version"),
+            )
+            .expect("receipt reference"),
+            SanitizerDispositionV1::Accepted,
+            SensitivityV1::NonSensitive,
+            Some(PayloadReferenceV1::for_payload(payload).expect("payload reference")),
+        )
+        .expect("receipt")
+    }
+
+    fn observation_for_session(ordinal: u64, session_id: &str) -> DurableObservationV1 {
+        observation_for_session_with_text(ordinal, session_id, &format!("payload-{ordinal}"))
+    }
+
+    fn observation_for_session_with_text(
+        ordinal: u64,
+        session_id: &str,
+        text: &str,
+    ) -> DurableObservationV1 {
+        let session_id = SessionId::new(session_id).expect("session");
+        let provider = ProviderId::new("provider-1").expect("provider");
+        let source =
+            ObservationSourceIdentityV1::for_provider(provider.clone(), session_id.clone())
+                .expect("source");
+        let range = ObservationSourceRangeV1::new(ordinal, ordinal + 1).expect("source range");
+        let message_id = ObservationId::new(format!("message-{ordinal}")).expect("message");
+        let record_id = ObservationId::new(format!("record-{ordinal}")).expect("record");
+        let relations =
+            CanonicalObservationRelationsV1::new(session_id).with_message_id(message_id);
+        let envelope = CanonicalObservationEnvelopeV1::new(
+            provider,
+            "message",
+            record_id.clone(),
+            relations,
+            vec![CanonicalObservationFactV1::Message {
+                role: CanonicalMessageRoleV1::Assistant,
+                content: json!({"text": text}),
+                model: None,
+                timestamp: Some(ordinal as i64),
+            }],
+            CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::SnapshotOrder, range),
+        )
+        .expect("envelope");
+        let payload = serde_json::to_value(envelope).expect("payload");
+        let identity = ObservationIdentityMaterialV1::for_native_record(
+            source,
+            ObservationScopeV1::Profile,
+            ObservationSourceGenerationV1::new(1).expect("source generation"),
+            range,
+            ObservationOrderingDomainV1::SnapshotOrder,
+            record_id,
+        )
+        .expect("identity");
+        DurableObservationV1::new(
+            identity,
+            receipt(&format!("receipt-{ordinal}"), &payload),
+            RetentionClass::new("retention.snapshot-test").expect("retention"),
+            payload,
+        )
+        .expect("observation")
+    }
+
+    /// Build an observation whose canonical envelope carries no
+    /// `relations.message_id`. `derive_canonical_projection` then keys the
+    /// projected message on the stable record id, so the persisted occurrence's
+    /// `message_id` equals the record id.
+    fn observation_without_relation_message_id(
+        ordinal: u64,
+        session_id: &str,
+    ) -> DurableObservationV1 {
+        let session_id = SessionId::new(session_id).expect("session");
+        let provider = ProviderId::new("provider-1").expect("provider");
+        let source =
+            ObservationSourceIdentityV1::for_provider(provider.clone(), session_id.clone())
+                .expect("source");
+        let range = ObservationSourceRangeV1::new(ordinal, ordinal + 1).expect("source range");
+        let record_id = ObservationId::new(format!("record-{ordinal}")).expect("record");
+        // No `.with_message_id(...)`: the projection must fall back to the
+        // stable record id when deriving the occurrence's message_id.
+        let relations = CanonicalObservationRelationsV1::new(session_id);
+        let envelope = CanonicalObservationEnvelopeV1::new(
+            provider,
+            "message",
+            record_id.clone(),
+            relations,
+            vec![CanonicalObservationFactV1::Message {
+                role: CanonicalMessageRoleV1::Assistant,
+                content: json!({"text": format!("payload-{ordinal}")}),
+                model: None,
+                timestamp: Some(ordinal as i64),
+            }],
+            CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::SnapshotOrder, range),
+        )
+        .expect("envelope");
+        let payload = serde_json::to_value(envelope).expect("payload");
+        let identity = ObservationIdentityMaterialV1::for_native_record(
+            source,
+            ObservationScopeV1::Profile,
+            ObservationSourceGenerationV1::new(1).expect("source generation"),
+            range,
+            ObservationOrderingDomainV1::SnapshotOrder,
+            record_id,
+        )
+        .expect("identity");
+        DurableObservationV1::new(
+            identity,
+            receipt(&format!("receipt-{ordinal}"), &payload),
+            RetentionClass::new("retention.snapshot-test").expect("retention"),
+            payload,
+        )
+        .expect("observation")
+    }
+
+    fn checked_in_goal_observation() -> DurableObservationV1 {
+        let record_id = ObservationId::new("record.goal.fixture").expect("record");
+        let encoded = include_str!(
+            "../../../tests/fixtures/provider_normalization/codex/thread_goal_updated.expected_envelope.json"
+        )
+        .replace("$STABLE_RECORD_ID", record_id.as_str());
+        let envelope: CanonicalObservationEnvelopeV1 =
+            serde_json::from_str(&encoded).expect("checked-in goal envelope");
+        let source = ObservationSourceIdentityV1::for_provider(
+            envelope.provider().clone(),
+            envelope.relations().session_id().clone(),
+        )
+        .expect("source");
+        let range = envelope.evidence().range();
+        let payload = serde_json::to_value(&envelope).expect("payload");
+        let identity = ObservationIdentityMaterialV1::for_native_record(
+            source,
+            ObservationScopeV1::Profile,
+            ObservationSourceGenerationV1::new(1).expect("source generation"),
+            range,
+            envelope.evidence().ordering_domain(),
+            record_id,
+        )
+        .expect("identity");
+        DurableObservationV1::new(
+            identity,
+            receipt("receipt-goal", &payload),
+            RetentionClass::new("retention.snapshot-test").expect("retention"),
+            payload,
+        )
+        .expect("observation")
+    }
+
+    #[test]
+    fn checked_in_codex_goal_hydrates_as_typed_session_message() {
+        let observation = checked_in_goal_observation();
+        let message = canonical_projected_message(&observation, "record.goal.fixture", 0)
+            .expect("canonical goal projection");
+
+        assert_eq!(message.provider, "codex");
+        assert_eq!(message.session_id, "codex-golden-session");
+        assert_eq!(message.message_id, "record.goal.fixture");
+        assert_eq!(message.role, "system");
+        assert_eq!(message.kind.as_deref(), Some("goal"));
+        assert_eq!(
+            message.text,
+            "phlogiston pipeline overhaul and reconciliation"
+        );
+        assert_eq!(message.timestamp, Some(1_783_500_569));
+        assert_eq!(message.ordinal, 0);
+        assert_eq!(message.source_offset, Some(0));
+    }
+
+    /// Pure-projection proof that `canonical_projected_message` is the right
+    /// binding authority: when the canonical envelope omits
+    /// `relations.message_id` the projection keys the occurrence on the stable
+    /// record id, which the projection resolves — yet it still returns `None`
+    /// for a message_id the projection never produced, so acceptance covers
+    /// only projection-verified bindings.
+    #[test]
+    fn stable_record_id_binds_projection_when_relations_message_id_absent() {
+        let observation = observation_without_relation_message_id(1, "session-1");
+        let envelope: CanonicalObservationEnvelopeV1 =
+            serde_json::from_value(observation.payload().clone()).expect("canonical envelope");
+        assert!(
+            envelope.relations().message_id().is_none(),
+            "fixture must omit relations.message_id to exercise the record-id key"
+        );
+        let record_message_id = envelope.stable_record_id().as_str().to_string();
+
+        let bound = canonical_projected_message(&observation, &record_message_id, 0)
+            .expect("stable-record-id message must bind to a projection output");
+        assert_eq!(bound.text, "payload-1");
+        assert_eq!(bound.message_id, record_message_id);
+
+        assert!(
+            canonical_projected_message(&observation, "does-not-project", 0).is_none(),
+            "an unprojected message_id must not bind, preserving the legacy refusal"
+        );
+    }
+
+    async fn persist_anchor(
+        runtime: &HostAdmissionTestRuntimeV1,
+        ordinal: u64,
+    ) -> (DurableObservationV1, RetrievalAnchorRecord) {
+        Box::pin(persist_anchor_for_session(runtime, ordinal, "session-1")).await
+    }
+
+    async fn persist_anchor_for_session(
+        runtime: &HostAdmissionTestRuntimeV1,
+        ordinal: u64,
+        session_id: &str,
+    ) -> (DurableObservationV1, RetrievalAnchorRecord) {
+        let observation = observation_for_session(ordinal, session_id);
+        Box::pin(persist_observation(runtime, observation, ordinal)).await
+    }
+
+    async fn persist_observation(
+        runtime: &HostAdmissionTestRuntimeV1,
+        observation: DurableObservationV1,
+        ordinal: u64,
+    ) -> (DurableObservationV1, RetrievalAnchorRecord) {
+        let identity = observation.identity();
+        let next_cursor = ObservationSourceCursorV1::for_ordering(
+            observation.source().clone(),
+            observation.scope().clone(),
+            identity.generation(),
+            identity.ordering_domain(),
+            identity.position().end(),
+        )
+        .expect("cursor");
+        // Contiguous ranges are [ordinal, ordinal+1); appends must expect the
+        // prior write's next cursor (position == ordinal) or CursorConflict.
+        let expected_cursor = (ordinal > 1).then(|| {
+            ObservationSourceCursorV1::for_ordering(
+                observation.source().clone(),
+                observation.scope().clone(),
+                identity.generation(),
+                identity.ordering_domain(),
+                ordinal,
+            )
+            .expect("expected cursor")
+        });
+        let write = ObservationWrite::new(observation.clone(), expected_cursor, next_cursor)
+            .expect("write");
+        let projection =
+            ProjectionGenerationId::new("projection.snapshot-test.v1").expect("projection");
+        let authorization =
+            build_observation_resolution_authorization_v1(write.observation(), "snapshot-test")
+                .expect("authorization");
+        let anchor = build_observation_retrieval_anchor_v2(
+            write.observation(),
+            projection.clone(),
+            UtcMicros(1),
+            authorization,
+        )
+        .expect("anchor");
+        runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .expect("registered profile observation store")
+            .persist_observation(
+                AnchoredObservationWrite::new(write, anchor.clone(), projection)
+                    .expect("anchored write"),
+            )
+            .await
+            .expect("persist observation");
+        (observation, anchor)
+    }
+
+    #[tokio::test]
+    async fn persist_anchor_appends_two_observations_without_cursor_conflict() {
+        let dir = tempdir().expect("temporary directory");
+        let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
+            .await
+            .expect("registered profile runtime");
+        let (first, first_anchor) = Box::pin(persist_anchor(&runtime, 1)).await;
+        let (second, second_anchor) = Box::pin(persist_anchor(&runtime, 2)).await;
+        assert_ne!(
+            first.observation_id(),
+            second.observation_id(),
+            "two-observation setup must persist distinct observation identities"
+        );
+        assert_ne!(
+            first_anchor.anchor_id(),
+            second_anchor.anchor_id(),
+            "two-observation setup must persist distinct retrieval anchors"
+        );
+        assert_eq!(first.identity().position().end(), 2);
+        assert_eq!(second.identity().position().start(), 2);
+        assert_eq!(second.identity().position().end(), 3);
+    }
+
+    fn authorized_snapshot(anchor: &RetrievalAnchorRecord) -> TemporalExecutionSnapshot {
+        authorized_snapshot_for_scope(
+            anchor,
+            tracedecay_query::temporal::ports::TemporalRetrievalScope::Session(
+                SessionId::new("session-1").expect("session"),
+            ),
+        )
+    }
+
+    fn authorized_root_snapshot(anchor: &RetrievalAnchorRecord) -> TemporalExecutionSnapshot {
+        authorized_snapshot_for_scope(
+            anchor,
+            tracedecay_query::temporal::ports::TemporalRetrievalScope::AllSessionsInAuthorizedRoot,
+        )
+    }
+
+    fn authorized_snapshot_for_scope(
+        anchor: &RetrievalAnchorRecord,
+        scope: tracedecay_query::temporal::ports::TemporalRetrievalScope,
+    ) -> TemporalExecutionSnapshot {
+        TemporalExecutionSnapshot::new_authorized(
+            TemporalSnapshotRequest::new(
+                SessionId::new("session-1").expect("session"),
+                digest('7'),
+                digest('8'),
+                anchor.authorization().access_policy_digest.as_str(),
+                TemporalModeV1::Current,
+                RetrievalGrainV1::LogicalMessage,
+            )
+            .expect("request")
+            .with_authorized_root(
+                TemporalAuthorizedRoot::profile("profile-1", "store-1", "root-1")
+                    .expect("profile root"),
+            )
+            .expect("authorized root")
+            .with_retrieval_scope(scope),
+            TemporalWatermarks {
+                generation: 1,
+                source: 0,
+                projection: 0,
+                index: 0,
+                summary: 0,
+            },
+            KernelVersions {
+                schema: 1,
+                ranking: 1,
+                configuration_digest: BindingDigest::new("configuration", digest('9'))
+                    .expect("configuration"),
+            },
+            None,
+            ValidatedAuthorization::Authorized,
+        )
+        .expect("snapshot")
+    }
+
+    #[tokio::test]
+    async fn root_snapshot_hydrates_an_authorized_cross_session_occurrence() {
+        let dir = tempdir().expect("temporary directory");
+        let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
+            .await
+            .expect("registered profile runtime");
+        let (observation, anchor) =
+            Box::pin(persist_anchor_for_session(&runtime, 1, "session-2")).await;
+        let provider = observation.source().provider().as_str();
+        let canonical_payload = "payload-1";
+        let legacy_projection_poison = "legacy projection poison";
+        runtime
+            .seed_root_hydration_fixture_for_test(
+                provider,
+                &observation,
+                &anchor,
+                canonical_payload,
+                legacy_projection_poison,
+            )
+            .await;
+
+        let snapshot = authorized_root_snapshot(&anchor);
+        let read = runtime.hydration_read_for_test().await;
+        let adapter = read.adapter();
+        assert_eq!(
+            adapter.authorize(&snapshot, anchor.anchor_id()).await,
+            Ok(HydrationAuthorization::Authorized)
+        );
+        let mut output = Vec::new();
+        adapter
+            .read_after_recheck(&snapshot, anchor.anchor_id(), 1024, 7, &mut |chunk| {
+                output.extend_from_slice(chunk);
+                Ok(())
+            })
+            .await
+            .expect("cross-session hydration");
+        assert_eq!(output, canonical_payload.as_bytes());
+
+        drop(read);
+        runtime
+            .move_hydration_session_outside_root_for_test(provider, "session-2")
+            .await;
+        let different_root = runtime.hydration_read_for_test().await;
+        let different_root_adapter = different_root.adapter();
+        let authorization = different_root_adapter
+            .authorize(&snapshot, anchor.anchor_id())
+            .await;
+        assert!(
+            matches!(
+                authorization,
+                Ok(HydrationAuthorization::Denied(ref denial))
+                    if denial.state() == HydrationStateV1::UnverifiableLegacy
+            ),
+            "{authorization:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tampered_raw_fallback_is_typed_unavailable_without_canary_leakage() {
+        let dir = tempdir().expect("temporary directory");
+        let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
+            .await
+            .expect("registered profile runtime");
+        let observation = observation_for_session_with_text(1, "session-1", "");
+        let (observation, anchor) = Box::pin(persist_observation(&runtime, observation, 1)).await;
+        let provider = observation.source().provider().as_str();
+        runtime
+            .seed_session_occurrence_for_test(
+                provider,
+                "session-1",
+                &observation,
+                &anchor,
+                "message-1",
+                "ranked-metadata-canary",
+            )
+            .await;
+        let database = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("registered profile database");
+        Executor::execute(
+            &database
+                .writer_connection()
+                .expect("registered profile writer"),
+            "INSERT INTO lcm_raw_messages (
+                provider, message_id, session_id, role, ordinal, timestamp,
+                content, content_hash, storage_kind, payload_ref,
+                snippet_text, index_text, legacy_source, legacy_truncated
+             ) VALUES (
+                ?1, 'message-1', 'session-1', 'assistant', 1, 1,
+                'raw-content-canary', 'invalid-content-hash', 'inline', NULL,
+                'raw-content-canary', 'raw-content-canary', 0, 0
+             )",
+            [provider],
+        )
+        .await
+        .expect("tampered raw fallback");
+
+        let snapshot = authorized_snapshot(&anchor);
+        let read = runtime.hydration_read_for_test().await;
+        let adapter = read.adapter();
+        let authorization = adapter.authorize(&snapshot, anchor.anchor_id()).await;
+        assert_eq!(
+            authorization,
+            Ok(HydrationAuthorization::Authorized),
+            "authorization must not inspect raw or canonical content"
+        );
+
+        let mut output = Vec::new();
+        assert_eq!(
+            adapter
+                .read_after_recheck(&snapshot, anchor.anchor_id(), 1024, 64, &mut |chunk| {
+                    output.extend_from_slice(chunk);
+                    Ok(())
+                })
+                .await,
+            Err(HydrationError::Unavailable)
+        );
+        assert!(output.is_empty());
+        assert!(!String::from_utf8_lossy(&output).contains("canary"));
+    }
+
+    #[tokio::test]
+    async fn occurrence_authorization_does_not_parse_observation_content() {
+        let dir = tempdir().expect("temporary directory");
+        let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
+            .await
+            .expect("registered profile runtime");
+        let (observation, anchor) =
+            Box::pin(persist_anchor_for_session(&runtime, 1, "session-1")).await;
+        let provider = observation.source().provider().as_str();
+        runtime
+            .seed_session_occurrence_for_test(
+                provider,
+                "session-1",
+                &observation,
+                &anchor,
+                "message-1",
+                "payload-1",
+            )
+            .await;
+        runtime
+            .corrupt_hydration_observation_json_for_test(observation.observation_id().as_str())
+            .await;
+
+        let snapshot = authorized_snapshot(&anchor);
+        let read = runtime.hydration_read_for_test().await;
+        let adapter = read.adapter();
+        assert_eq!(
+            adapter.authorize(&snapshot, anchor.anchor_id()).await,
+            Ok(HydrationAuthorization::Authorized)
+        );
+        let mut output = Vec::new();
+        assert_eq!(
+            adapter
+                .read_after_recheck(&snapshot, anchor.anchor_id(), 1024, 64, &mut |chunk| {
+                    output.extend_from_slice(chunk);
+                    Ok(())
+                })
+                .await,
+            Err(HydrationError::Unavailable)
+        );
+        assert!(output.is_empty());
+    }
+
+    #[tokio::test]
+    async fn one_snapshot_hydrates_occurrence_and_summary_without_request_digest_binding() {
+        let dir = tempdir().expect("temporary directory");
+        let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
+            .await
+            .expect("registered profile runtime");
+        let (occurrence_observation, occurrence_anchor) =
+            Box::pin(persist_anchor(&runtime, 1)).await;
+        let (_, summary_anchor) = Box::pin(persist_anchor(&runtime, 2)).await;
+        let (_, authority_anchor) = Box::pin(persist_anchor(&runtime, 3)).await;
+        runtime
+            .seed_snapshot_hydration_fixture_for_test(
+                &occurrence_observation,
+                &occurrence_anchor,
+                &summary_anchor,
+                &authority_anchor,
+            )
+            .await;
+
+        let snapshot = authorized_snapshot(&occurrence_anchor);
+        assert_ne!(
+            occurrence_anchor
+                .authorization()
+                .canonical_request_digest
+                .as_str(),
+            snapshot.request_digest().as_str()
+        );
+        let before = runtime.hydration_storage_fingerprint_for_test();
+        let read = runtime.hydration_read_for_test().await;
+        let adapter = read.adapter();
+
+        let canonical_occurrence_payload = "payload-1";
+        let summary_payload = "non-empty summary payload";
+        for (anchor, expected) in [
+            (occurrence_anchor.anchor_id(), canonical_occurrence_payload),
+            (summary_anchor.anchor_id(), summary_payload),
+        ] {
+            assert_eq!(
+                adapter.authorize(&snapshot, anchor).await,
+                Ok(HydrationAuthorization::Authorized)
+            );
+            let mut output = Vec::new();
+            adapter
+                .read_after_recheck(&snapshot, anchor, 1024, 7, &mut |chunk| {
+                    output.extend_from_slice(chunk);
+                    Ok(())
+                })
+                .await
+                .expect("hydrate payload");
+            assert_eq!(output, expected.as_bytes());
+        }
+        assert_eq!(runtime.hydration_storage_fingerprint_for_test(), before);
+
+        // Drift embedded owner without rewriting owner_json (composite FKs).
+        runtime
+            .drift_hydration_anchor_owner_for_test(occurrence_anchor.anchor_id())
+            .await;
+
+        let mut frozen_output = Vec::new();
+        adapter
+            .read_after_recheck(
+                &snapshot,
+                occurrence_anchor.anchor_id(),
+                1024,
+                7,
+                &mut |chunk| {
+                    frozen_output.extend_from_slice(chunk);
+                    Ok(())
+                },
+            )
+            .await
+            .expect("frozen snapshot remains authorized");
+        assert_eq!(frozen_output, canonical_occurrence_payload.as_bytes());
+
+        let fresh_read = runtime.hydration_read_for_test().await;
+        let fresh_adapter = fresh_read.adapter();
+        assert!(matches!(
+            fresh_adapter
+                .authorize(&snapshot, occurrence_anchor.anchor_id())
+                .await,
+            Ok(HydrationAuthorization::Denied(ref denial))
+                if denial.state() == HydrationStateV1::UnverifiableLegacy
+        ));
+        let mut denied_output = Vec::new();
+        assert_eq!(
+            fresh_adapter
+                .read_after_recheck(
+                    &snapshot,
+                    occurrence_anchor.anchor_id(),
+                    1024,
+                    7,
+                    &mut |chunk| {
+                        denied_output.extend_from_slice(chunk);
+                        Ok(())
+                    },
+                )
+                .await,
+            Err(HydrationError::Unavailable)
+        );
+        assert!(denied_output.is_empty());
+    }
+
+    /// An occurrence whose `message_id` was projected from the stable record id
+    /// (because the canonical envelope carries no `relations.message_id`) must
+    /// hydrate; refusing it as `UnverifiableLegacy` drops real
+    /// `lcm_grep`/`lcm_expand` matches into
+    /// `omissions: reason=unverifiable_legacy`.
+    #[tokio::test]
+    async fn occurrence_keyed_on_stable_record_id_resolves_when_relations_message_id_absent() {
+        let dir = tempdir().expect("temporary directory");
+        let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
+            .await
+            .expect("registered profile runtime");
+        let observation = observation_without_relation_message_id(1, "session-1");
+        let (observation, anchor) = Box::pin(persist_observation(&runtime, observation, 1)).await;
+        let provider = observation.source().provider().as_str().to_string();
+        let envelope: CanonicalObservationEnvelopeV1 =
+            serde_json::from_value(observation.payload().clone()).expect("canonical envelope");
+        assert!(
+            envelope.relations().message_id().is_none(),
+            "fixture must omit relations.message_id so the projection falls back to the record id"
+        );
+        let record_message_id = envelope.stable_record_id().as_str().to_string();
+        let canonical_payload = "payload-1";
+        runtime
+            .seed_session_occurrence_for_test(
+                &provider,
+                "session-1",
+                &observation,
+                &anchor,
+                &record_message_id,
+                canonical_payload,
+            )
+            .await;
+
+        let snapshot = authorized_snapshot(&anchor);
+        let read = runtime.hydration_read_for_test().await;
+        let adapter = read.adapter();
+        // The stable-record-id-keyed occurrence must resolve.
+        assert_eq!(
+            adapter.authorize(&snapshot, anchor.anchor_id()).await,
+            Ok(HydrationAuthorization::Authorized)
+        );
+        let mut output = Vec::new();
+        adapter
+            .read_after_recheck(&snapshot, anchor.anchor_id(), 1024, 7, &mut |chunk| {
+                output.extend_from_slice(chunk);
+                Ok(())
+            })
+            .await
+            .expect("stable-record-id occurrence hydration");
+        assert_eq!(output, canonical_payload.as_bytes());
+
+        // Authorization consumes only canonical projected metadata. A broken
+        // message binding is discovered during the post-authorization content
+        // read and must emit nothing.
+        drop(read);
+        runtime
+            .corrupt_hydration_occurrence_message_id_for_test("session-1", "does-not-project")
+            .await;
+        let corrupted = runtime.hydration_read_for_test().await;
+        let corrupted_adapter = corrupted.adapter();
+        let authorization = corrupted_adapter
+            .authorize(&snapshot, anchor.anchor_id())
+            .await;
+        assert_eq!(
+            authorization,
+            Ok(HydrationAuthorization::Authorized),
+            "authorization must not project or parse observation content"
+        );
+        let mut corrupted_output = Vec::new();
+        assert_eq!(
+            corrupted_adapter
+                .read_after_recheck(&snapshot, anchor.anchor_id(), 1024, 7, &mut |chunk| {
+                    corrupted_output.extend_from_slice(chunk);
+                    Ok(())
+                })
+                .await,
+            Err(HydrationError::Unavailable)
+        );
+        assert!(corrupted_output.is_empty());
+    }
+
+    #[test]
+    fn authorization_precedes_recheck_and_read() {
+        block_on(async {
+            let adapter = SessionTemporalHydrationAdapter::new(FakeBackend::available(b"abcdefgh"));
+            let snapshot = snapshot(ExecutionControl::default());
+            assert_eq!(
+                adapter.authorize(&snapshot, &anchor()).await,
+                Ok(HydrationAuthorization::Authorized)
+            );
+            let mut output = Vec::new();
+            adapter
+                .read_after_recheck(&snapshot, &anchor(), 32, 4, &mut |chunk| {
+                    output.extend_from_slice(chunk);
+                    Ok(())
+                })
+                .await
+                .expect("read");
+            assert_eq!(output, b"abcdefgh");
+            assert_eq!(
+                adapter.backend.calls.lock().expect("calls").as_slice(),
+                ["resolve", "resolve", "read", "resolve"]
+            );
+        });
+    }
+
+    #[test]
+    fn authorization_revocation_before_sink_recheck_emits_no_payload() {
+        block_on(async {
+            let payload = b"must-never-cross-the-sink";
+            let backend = FakeBackend {
+                resolutions: Mutex::new(vec![
+                    available(payload.len(), &hash(payload)),
+                    HydrationResolution::Unavailable(HydrationStateV1::Unauthorized),
+                ]),
+                payload: Mutex::new(Ok(payload.to_vec())),
+                calls: Mutex::new(Vec::new()),
+            };
+            let adapter = SessionTemporalHydrationAdapter::new(backend);
+            let snapshot = snapshot(ExecutionControl::default());
+
+            assert_eq!(
+                adapter.authorize(&snapshot, &anchor()).await,
+                Ok(HydrationAuthorization::Authorized)
+            );
+            let mut output = Vec::new();
+            assert_eq!(
+                adapter
+                    .read_after_recheck(&snapshot, &anchor(), payload.len(), 8, &mut |chunk| {
+                        output.extend_from_slice(chunk);
+                        Ok(())
+                    })
+                    .await,
+                Err(HydrationError::Unavailable)
+            );
+            assert!(output.is_empty());
+            assert_eq!(
+                adapter.backend.calls.lock().expect("calls").as_slice(),
+                ["resolve", "resolve"]
+            );
+        });
+    }
+
+    #[test]
+    fn authorization_revocation_after_read_emits_no_payload() {
+        block_on(async {
+            let payload = b"buffered-until-live-recheck";
+            let backend = FakeBackend {
+                resolutions: Mutex::new(vec![
+                    available(payload.len(), &hash(payload)),
+                    available(payload.len(), &hash(payload)),
+                    HydrationResolution::Unavailable(HydrationStateV1::Unauthorized),
+                ]),
+                payload: Mutex::new(Ok(payload.to_vec())),
+                calls: Mutex::new(Vec::new()),
+            };
+            let adapter = SessionTemporalHydrationAdapter::new(backend);
+            let snapshot = snapshot(ExecutionControl::default());
+
+            assert_eq!(
+                adapter.authorize(&snapshot, &anchor()).await,
+                Ok(HydrationAuthorization::Authorized)
+            );
+            let mut output = Vec::new();
+            assert_eq!(
+                adapter
+                    .read_after_recheck(&snapshot, &anchor(), payload.len(), 8, &mut |chunk| {
+                        output.extend_from_slice(chunk);
+                        Ok(())
+                    })
+                    .await,
+                Err(HydrationError::Unavailable)
+            );
+            assert!(output.is_empty());
+            assert_eq!(
+                adapter.backend.calls.lock().expect("calls").as_slice(),
+                ["resolve", "resolve", "read", "resolve"]
+            );
+        });
+    }
+
+    #[test]
+    fn denial_has_no_payload_and_never_reads() {
+        block_on(async {
+            let adapter = SessionTemporalHydrationAdapter::new(FakeBackend::denied(
+                HydrationStateV1::Redacted,
+            ));
+            let snapshot = snapshot(ExecutionControl::default());
+            let authorization = adapter
+                .authorize(&snapshot, &anchor())
+                .await
+                .expect("typed denial");
+            assert!(matches!(
+                authorization,
+                HydrationAuthorization::Denied(ref denial)
+                    if denial.state() == HydrationStateV1::Redacted
+            ));
+            assert_eq!(
+                adapter.backend.calls.lock().expect("calls").as_slice(),
+                ["resolve"]
+            );
+        });
+    }
+
+    #[test]
+    fn declared_oversize_is_rejected_before_read() {
+        block_on(async {
+            let backend = FakeBackend {
+                resolutions: Mutex::new(vec![available(9, &hash(b"123456789"))]),
+                payload: Mutex::new(Ok(b"123456789".to_vec())),
+                calls: Mutex::new(Vec::new()),
+            };
+            let adapter = SessionTemporalHydrationAdapter::new(backend);
+            let snapshot = snapshot(ExecutionControl::default());
+            let mut output = Vec::new();
+            assert_eq!(
+                adapter
+                    .read_after_recheck(&snapshot, &anchor(), 8, 4, &mut |chunk| {
+                        output.extend_from_slice(chunk);
+                        Ok(())
+                    })
+                    .await,
+                Err(HydrationError::BudgetExceeded {
+                    resource: "payload bytes"
+                })
+            );
+            assert!(output.is_empty());
+            assert_eq!(
+                adapter.backend.calls.lock().expect("calls").as_slice(),
+                ["resolve"]
+            );
+        });
+    }
+
+    #[test]
+    fn verified_payload_crosses_sink_in_bounded_chunks() {
+        block_on(async {
+            let adapter =
+                SessionTemporalHydrationAdapter::new(FakeBackend::available(b"123456789"));
+            let snapshot = snapshot(ExecutionControl::default());
+            let mut chunks = Vec::new();
+            adapter
+                .read_after_recheck(&snapshot, &anchor(), 9, 4, &mut |chunk| {
+                    chunks.push(chunk.to_vec());
+                    Ok(())
+                })
+                .await
+                .expect("chunked read");
+            assert_eq!(
+                chunks,
+                vec![b"1234".to_vec(), b"5678".to_vec(), b"9".to_vec()]
+            );
+        });
+    }
+
+    #[test]
+    fn integrity_failure_emits_no_payload() {
+        block_on(async {
+            let backend = FakeBackend {
+                resolutions: Mutex::new(vec![available(4, &hash(b"good"))]),
+                payload: Mutex::new(Ok(b"evil".to_vec())),
+                calls: Mutex::new(Vec::new()),
+            };
+            let adapter = SessionTemporalHydrationAdapter::new(backend);
+            let snapshot = snapshot(ExecutionControl::default());
+            let mut output = Vec::new();
+            assert_eq!(
+                adapter
+                    .read_after_recheck(&snapshot, &anchor(), 4, 4, &mut |chunk| {
+                        output.extend_from_slice(chunk);
+                        Ok(())
+                    })
+                    .await,
+                Err(HydrationError::Unavailable)
+            );
+            assert!(output.is_empty());
+        });
+    }
+
+    #[test]
+    fn owner_mismatch_is_unauthorized() {
+        assert_eq!(
+            classify_current_access(
+                PayloadAccessState::Eligible,
+                &AnchorDurabilityClass::DurableEvidence,
+                1,
+                false,
+                true,
+            ),
+            Some(HydrationStateV1::Unauthorized)
+        );
+    }
+
+    #[test]
+    fn cross_session_source_is_unauthorized() {
+        assert_eq!(
+            classify_current_access(
+                PayloadAccessState::Eligible,
+                &AnchorDurabilityClass::DurableEvidence,
+                1,
+                true,
+                false,
+            ),
+            Some(HydrationStateV1::Unauthorized)
+        );
+    }
+
+    #[test]
+    fn retention_is_rechecked_at_read_time() {
+        assert_eq!(
+            classify_current_access(
+                PayloadAccessState::Eligible,
+                &AnchorDurabilityClass::RetentionBound {
+                    expires_at: UtcMicros(10),
+                },
+                10,
+                true,
+                true,
+            ),
+            Some(HydrationStateV1::RetentionExpired)
+        );
+    }
+
+    #[test]
+    fn participant_lifecycle_states_surface_without_hydrating_payloads() {
+        for (access, expected) in [
+            (TemporalSourceAccess::Locked, HydrationStateV1::Locked),
+            (
+                TemporalSourceAccess::RetentionWithheld,
+                HydrationStateV1::RetentionExpired,
+            ),
+            (TemporalSourceAccess::Deleted, HydrationStateV1::Deleted),
+            (TemporalSourceAccess::Redacted, HydrationStateV1::Redacted),
+            (
+                TemporalSourceAccess::Unavailable,
+                HydrationStateV1::RetainedButUnavailable,
+            ),
+        ] {
+            assert_eq!(source_access_hydration_state(access), Some(expected));
+        }
+    }
+
+    #[test]
+    fn cancellation_and_deadline_interrupt_before_read() {
+        block_on(async {
+            let cancelled = ExecutionControl::default();
+            cancelled.cancel();
+            let cancelled_adapter =
+                SessionTemporalHydrationAdapter::new(FakeBackend::available(b"payload"));
+            assert_eq!(
+                cancelled_adapter
+                    .authorize(&snapshot(cancelled), &anchor())
+                    .await,
+                Err(HydrationError::Interrupted(TemporalPortError::Cancelled))
+            );
+            assert!(
+                cancelled_adapter
+                    .backend
+                    .calls
+                    .lock()
+                    .expect("calls")
+                    .is_empty()
+            );
+
+            let deadline = ExecutionControl::new(Some(
+                Instant::now()
+                    .checked_sub(Duration::from_millis(1))
+                    .expect("past deadline"),
+            ));
+            let deadline_adapter =
+                SessionTemporalHydrationAdapter::new(FakeBackend::available(b"payload"));
+            assert_eq!(
+                deadline_adapter
+                    .authorize(&snapshot(deadline), &anchor())
+                    .await,
+                Err(HydrationError::Interrupted(
+                    TemporalPortError::DeadlineExceeded
+                ))
+            );
+            assert!(
+                deadline_adapter
+                    .backend
+                    .calls
+                    .lock()
+                    .expect("calls")
+                    .is_empty()
+            );
+        });
+    }
+
+    #[test]
+    fn debug_output_never_contains_source_identifiers() {
+        let descriptor = PayloadDescriptor {
+            source: PayloadSource::External {
+                provider: "private-provider".to_string(),
+                session_id: "private-session".to_string(),
+                payload_ref: "/private/canary".to_string(),
+                char_count: 1,
+            },
+            byte_count: 1,
+            content_hash: "hash".to_string(),
+        };
+        assert!(!format!("{descriptor:?}").contains("private/canary"));
+    }
+}

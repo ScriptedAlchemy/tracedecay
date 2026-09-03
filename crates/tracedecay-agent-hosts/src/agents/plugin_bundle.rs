@@ -5,11 +5,12 @@
 //! agent format.
 //!
 //! Layout of `plugin/`:
-//! - `plugin/skills/*/SKILL.md` — the 15 shared model-invocable skills. All
-//!   three hosts deploy the full set; the workflow dispatcher skills were
-//!   removed (their behavior lives in the native slash commands below), so no
-//!   host filters the skill set today. The `cursor_skill_files` filter is kept
-//!   as a guard against a dispatcher skill being reintroduced.
+//! - `plugin/skills/*/SKILL.md` — the shared model-invocable skills (every
+//!   `SKILL.md` directory under `plugin/skills/`). All five hosts deploy the
+//!   full set; the workflow dispatcher skills were removed (their behavior
+//!   lives in the native slash commands below), so no host filters the skill
+//!   set today. The `cursor_skill_files` filter is kept as a guard against a
+//!   dispatcher skill being reintroduced.
 //! - `plugin/overlays/cursor/commands/tracedecay-*.md` — Cursor 1.6+ native
 //!   slash commands, one per workflow slug, deployed to `commands/<slug>.md`.
 //!   These provide the explicit workflow dispatch (no dispatcher *skills*).
@@ -20,18 +21,25 @@
 //! - `plugin/hooks/hooks-<host>.json` — per-host hook wiring; each deploys to
 //!   `hooks/hooks.json`.
 //! - `plugin/.claude-plugin/{plugin,marketplace}.json`,
-//!   `plugin/.cursor-plugin/plugin.json`, `plugin/.codex-plugin/plugin.json` —
-//!   host manifests (deploy to the same dot-dir path).
+//!   `plugin/.cursor-plugin/plugin.json`, `plugin/.codex-plugin/plugin.json`,
+//!   `plugin/.kimi-plugin/plugin.json` — host manifests (deploy to the same
+//!   dot-dir path). Kimi's manifest also carries its MCP server and hooks
+//!   inline (`mcpServers.tracedecay`, `PostToolUse`/`Stop`), so there is no
+//!   separate Kimi MCP or hooks file.
+//! - `plugin/opencode/{tracedecay.ts,tracedecay-mcp.ts,opencode.registration.json}`
+//!   — OpenCode native plugin, MCP companion, and MCP/LSP registration.
+//!   OpenCode has no `plugin.json`.
 //! - `plugin/.mcp.json` — shared Claude/Codex MCP config (byte-identical);
 //!   `plugin/mcp-cursor.json` — Cursor MCP config (deploys to `mcp.json`).
-//! - `plugin/README-<host>.md` — per-host README (deploys to `README.md`).
+//! - `plugin/README-<host>.md` — per-host README (Claude/Cursor/Codex/Kimi
+//!   deploy to `README.md`; OpenCode's README is source documentation).
 //!
 //! Composed per-host view = `GENERATED_SKILL_FILES` (recursively embedded from
 //! `plugin/skills/`, filtered per host) ∪ `<HOST>_MANIFEST_FILES` and extras.
 
 use crate::errors::Result;
 
-/// Stamp the plugin manifest `version` field with the product version, returning
+/// Stamp the plugin manifest `version` field with the crate version, returning
 /// pretty-printed JSON with a trailing newline. Shared by every host installer
 /// (Claude/Cursor/Codex), which all render the same manifest round-trip.
 pub(crate) fn stamp_manifest_version(raw: &str) -> Result<String> {
@@ -47,7 +55,7 @@ pub(crate) fn stamp_manifest_version_with(
     mutate: impl FnOnce(&mut serde_json::Value),
 ) -> Result<String> {
     let mut manifest: serde_json::Value = serde_json::from_str(raw)?;
-    manifest["version"] = serde_json::json!(env!("TRACEDECAY_PRODUCT_VERSION"));
+    manifest["version"] = serde_json::json!(crate::PRODUCT_VERSION);
     mutate(&mut manifest);
     Ok(format!("{}\n", serde_json::to_string_pretty(&manifest)?))
 }
@@ -61,6 +69,8 @@ pub(crate) fn stamp_manifest_version_with(
 ///   rather than the redundant `tracedecay tracedecay`.
 /// - Cursor uses `tracedecay` because Settings surfaces the MCP server key
 ///   literally (`plugin-tracedecay-graph` looked like a bare "graph" entry).
+/// - Kimi uses `tracedecay` and embeds `mcpServers` inline in its manifest,
+///   so the installer rewrites the command on the manifest itself.
 pub(crate) fn set_mcp_command(raw: &str, bin: &str) -> Result<String> {
     let mut mcp: serde_json::Value = serde_json::from_str(raw)?;
     let servers = mcp
@@ -92,6 +102,36 @@ pub(crate) fn set_mcp_command(raw: &str, bin: &str) -> Result<String> {
     Ok(format!("{}\n", serde_json::to_string_pretty(&mcp)?))
 }
 
+/// Hook/plugin template token replaced with the resolved tracedecay binary.
+pub(crate) const TRACEDECAY_BIN_PLACEHOLDER: &str = "__TRACEDECAY_BIN__";
+/// Hook template token replaced with the host's sync/event hook command.
+pub(crate) const TRACEDECAY_SYNC_PLACEHOLDER: &str = "__TRACEDECAY_SYNC__";
+/// Hook template token replaced with the host's stop hook command.
+pub(crate) const TRACEDECAY_STOP_PLACEHOLDER: &str = "__TRACEDECAY_STOP__";
+
+const TRACEDECAY_COMMAND_PLACEHOLDERS: &[&str] = &[
+    TRACEDECAY_BIN_PLACEHOLDER,
+    TRACEDECAY_SYNC_PLACEHOLDER,
+    TRACEDECAY_STOP_PLACEHOLDER,
+];
+
+/// Fail closed when a rendered host file still carries a TraceDecay placeholder.
+///
+/// Claude, Cursor, OpenCode, and Gemini used to substitute and ship; only Kimi
+/// rejected leftovers. One residual check keeps an unresolved token from
+/// reaching a host config.
+pub(crate) fn reject_unresolved_placeholders(rendered: &str, host: &str) -> Result<()> {
+    if TRACEDECAY_COMMAND_PLACEHOLDERS
+        .iter()
+        .any(|placeholder| rendered.contains(*placeholder))
+    {
+        return Err(crate::errors::TraceDecayError::Config {
+            message: format!("{host} retained an unresolved TraceDecay placeholder"),
+        });
+    }
+    Ok(())
+}
+
 /// One embedded plugin file: `relative` is its deploy path; `contents` may come
 /// from a different source path in the shared `plugin/` tree.
 #[derive(Clone, Copy)]
@@ -104,24 +144,26 @@ macro_rules! plugin_file {
     ($relative:literal, $source:literal) => {
         PluginFile {
             relative: $relative,
-            contents: include_str!(concat!(
-                env!("TRACEDECAY_REPOSITORY_ROOT"),
-                "/plugin/",
-                $source
-            )),
+            contents: include_str!(concat!("../../../../plugin/", $source)),
         }
     };
 }
 
-// Every shared skill and canonical/generated agent file, embedded by build.rs.
-include!(concat!(env!("OUT_DIR"), "/plugin_bundle_generated.rs"));
+// Every shared skill and canonical/generated agent file, embedded by build.rs
+// into an isolated module so Hawk can exclude the OUT_DIR surface.
+mod plugin_bundle_generated {
+    use super::PluginFile;
+
+    include!(concat!(env!("OUT_DIR"), "/plugin_bundle_generated.rs"));
+}
+use plugin_bundle_generated::*;
 
 pub(crate) fn codex_agent_files() -> &'static [PluginFile] {
     GENERATED_CODEX_AGENT_FILES
 }
 
 /// Prefix of the dispatcher skills that Cursor does **not** deploy (they are
-/// native commands on Cursor). Claude/Codex deploy every skill.
+/// native commands on Cursor). Claude/Codex/Kimi/OpenCode deploy every skill.
 const CURSOR_EXCLUDED_SKILL_PREFIX: &str = "skills/tracedecay-";
 
 fn all_skill_files() -> impl Iterator<Item = &'static PluginFile> {
@@ -214,10 +256,8 @@ const CLAUDE_COMMAND_FILES: &[PluginFile] = &[
 ];
 
 /// Cursor `.mdc` rules.
-const CURSOR_RULE_FILES: &[PluginFile] = &[
-    plugin_file!("rules/tracedecay.mdc", "rules/tracedecay.mdc"),
-    plugin_file!("rules/tracedecay-memory.mdc", "rules/tracedecay-memory.mdc"),
-];
+const CURSOR_RULE_FILES: &[PluginFile] =
+    &[plugin_file!("rules/tracedecay.mdc", "rules/tracedecay.mdc")];
 
 /// Claude manifest dir + shared MCP + Claude hooks + README.
 pub const CLAUDE_MANIFEST_FILES: &[PluginFile] = &[
@@ -231,6 +271,11 @@ pub const CLAUDE_MANIFEST_FILES: &[PluginFile] = &[
     plugin_file!("hooks/hooks.json", "hooks/hooks-claude.json"),
 ];
 
+/// Claude's one configured-language LSP bridge. It is part of the MCP-free
+/// core bundle and is deployed separately from the compatibility manifest
+/// inventory so existing aggregate installers keep their stable file set.
+pub const CLAUDE_LSP_FILES: &[PluginFile] = &[plugin_file!(".lsp.json", ".lsp.json")];
+
 /// Cursor manifest + Cursor MCP + Cursor hooks + README.
 pub const CURSOR_MANIFEST_FILES: &[PluginFile] = &[
     plugin_file!(".cursor-plugin/plugin.json", ".cursor-plugin/plugin.json"),
@@ -239,12 +284,31 @@ pub const CURSOR_MANIFEST_FILES: &[PluginFile] = &[
     plugin_file!("hooks/hooks.json", "hooks/hooks-cursor.json"),
 ];
 
+/// Cursor's unpacked desktop extension. The host-component lifecycle deploys
+/// these assets to Cursor's extension root rather than the plugin root.
+const CURSOR_NATIVE_EXTENSION_FILES: &[PluginFile] = &[
+    plugin_file!("package.json", "cursor-native-extension/package.json"),
+    plugin_file!(
+        "dist/extension.js",
+        "cursor-native-extension/embedded/extension.js"
+    ),
+    plugin_file!("README.md", "cursor-native-extension/README.md"),
+    plugin_file!("LICENSE", "cursor-native-extension/LICENSE"),
+];
+
 /// Codex manifest + shared MCP + Codex hooks + README.
 pub const CODEX_MANIFEST_FILES: &[PluginFile] = &[
     plugin_file!(".codex-plugin/plugin.json", ".codex-plugin/plugin.json"),
     plugin_file!(".mcp.json", ".mcp.json"),
     plugin_file!("README.md", "README-codex.md"),
     plugin_file!("hooks/hooks.json", "hooks/hooks-codex.json"),
+];
+
+/// Kimi manifest + README. The manifest embeds `mcpServers.tracedecay`
+/// inline, so Kimi needs no separate MCP config file.
+pub const KIMI_MANIFEST_FILES: &[PluginFile] = &[
+    plugin_file!(".kimi-plugin/plugin.json", ".kimi-plugin/plugin.json"),
+    plugin_file!("README.md", "README-kimi.md"),
 ];
 
 /// Compose a host's deploy set as deterministic `(relative, contents)` tuples.
@@ -261,7 +325,7 @@ fn compose(
 }
 
 /// Files Claude deploys: manifest + Claude agents + Claude commands + every
-/// skill file (all 30 skills incl. dispatchers, plus any support files).
+/// file under `plugin/skills/` (`SKILL.md` plus support files).
 pub fn claude_files() -> Vec<(&'static str, &'static str)> {
     compose(
         &[
@@ -271,6 +335,29 @@ pub fn claude_files() -> Vec<(&'static str, &'static str)> {
         ],
         all_skill_files(),
     )
+}
+
+/// MCP-free Claude core: plugin metadata, hooks, skills, agents, commands, and
+/// the single configured-language `TraceDecay` LSP bridge.
+pub fn claude_core_files() -> Vec<(&'static str, &'static str)> {
+    claude_files()
+        .into_iter()
+        .filter(|(relative, _)| *relative != ".mcp.json")
+        .chain(
+            CLAUDE_LSP_FILES
+                .iter()
+                .map(|file| (file.relative, file.contents)),
+        )
+        .collect()
+}
+
+/// Independently installable Claude MCP companion inventory.
+pub fn claude_mcp_companion_files() -> Vec<(&'static str, &'static str)> {
+    CLAUDE_MANIFEST_FILES
+        .iter()
+        .filter(|file| file.relative == ".mcp.json")
+        .map(|file| (file.relative, file.contents))
+        .collect()
 }
 
 /// Files Cursor deploys: manifest + Cursor rules + Cursor agents + Cursor
@@ -288,10 +375,48 @@ pub fn cursor_files() -> Vec<(&'static str, &'static str)> {
     )
 }
 
-/// Files Codex deploys: manifest + every skill file (all 30 skills incl.
-/// dispatchers, plus any support files). Codex ships no agents/commands/rules.
+/// Unpacked VS Code/Cursor extension files for the native-diagnostics host
+/// component. Its bundle includes `vscode-languageclient` and leaves only the
+/// host-provided `vscode` module external.
+pub fn cursor_native_extension_files() -> Vec<(&'static str, &'static str)> {
+    CURSOR_NATIVE_EXTENSION_FILES
+        .iter()
+        .map(|file| (file.relative, file.contents))
+        .collect()
+}
+
+/// Files Codex deploys: manifest + every file under `plugin/skills/`
+/// (`SKILL.md` plus support files). Codex ships no agents/commands/rules.
+/// The host-bundle catalog deploys the rendered variants of this inventory via
+/// `agents::codex::rendered_global_plugin_files` — the raw templates here are
+/// not directly installable (`hooks/hooks.json` is an empty scaffold).
 pub fn codex_files() -> Vec<(&'static str, &'static str)> {
     compose(&[CODEX_MANIFEST_FILES], all_skill_files())
+}
+
+/// Files Kimi deploys: manifest + README + the shared Claude command Markdown
+/// (Kimi plugin commands use the same frontmatter/`$ARGUMENTS` format, so the
+/// shared sources ship verbatim) + every skill file. Hooks live inline in
+/// `.kimi-plugin/plugin.json` (`PostToolUse`, `Stop`); Kimi ships no
+/// agents/rules and no separate hooks file.
+pub fn kimi_files() -> Vec<(&'static str, &'static str)> {
+    compose(
+        &[KIMI_MANIFEST_FILES, CLAUDE_COMMAND_FILES],
+        all_skill_files(),
+    )
+}
+
+/// `OpenCode` Agent component: host-loadable skills, agent definitions, and
+/// command prompt templates. `AGENTS.md` remains Core instruction content.
+///
+/// Agents deploy in the OpenCode-derived form: stock OpenCode validates agent
+/// frontmatter against its own schema and rejects the Claude `tools:` string,
+/// which would invalidate the host's entire configuration.
+pub fn opencode_agent_files() -> Vec<(&'static str, &'static str)> {
+    compose(
+        &[GENERATED_OPENCODE_AGENT_FILES, CLAUDE_COMMAND_FILES],
+        all_skill_files(),
+    )
 }
 
 #[cfg(test)]
@@ -320,8 +445,10 @@ mod tests {
         GENERATED_SKILL_FILES
             .iter()
             .find(|file| file.relative == relative)
-            .map(|file| file.contents)
-            .unwrap_or_else(|| panic!("shared skill should be embedded: {relative}"))
+            .map_or_else(
+                || panic!("shared skill should be embedded: {relative}"),
+                |file| file.contents,
+            )
     }
 
     #[test]
@@ -363,6 +490,7 @@ mod tests {
         assert_unique_relatives(&claude_files(), "claude");
         assert_unique_relatives(&cursor_files(), "cursor");
         assert_unique_relatives(&codex_files(), "codex");
+        assert_unique_relatives(&kimi_files(), "kimi");
     }
 
     #[test]
@@ -388,7 +516,7 @@ mod tests {
         // The macro embeds at compile time, so a missing source fails the build.
         // Every file we ship (skills, manifests, mcp, hooks, README) is
         // non-empty, so an empty embed signals a truncated or wrong source.
-        for host in [claude_files(), cursor_files(), codex_files()] {
+        for host in [claude_files(), cursor_files(), codex_files(), kimi_files()] {
             for (relative, contents) in host {
                 assert!(!contents.is_empty(), "{relative} embedded empty");
             }
@@ -396,54 +524,119 @@ mod tests {
     }
 
     #[test]
-    fn each_host_composes_the_expected_file_count() {
-        // Skill files are embedded recursively (SKILL.md + support files), so
-        // the skill count is derived from the generated set rather than a
-        // frozen literal. The `tracedecay-*` dispatcher skills were removed, so
-        // Cursor's subset now equals the full skill set; the filter is kept as a
-        // guard against a dispatcher skill ever being reintroduced.
-        let all_skills = GENERATED_SKILL_FILES.len();
-        let cursor_skills = cursor_skill_files().count();
-
-        // Claude: skills + 5 manifest (2 dot + mcp + hooks + README) + native
-        // agents + 13 commands.
-        assert_eq!(
-            claude_files().len(),
-            all_skills + 5 + GENERATED_CLAUDE_AGENT_FILES.len() + 13
+    fn kimi_manifest_declares_identity_and_inline_mcp_server() {
+        let manifest = kimi_files()
+            .into_iter()
+            .find(|(relative, _)| *relative == ".kimi-plugin/plugin.json")
+            .map(|(_, contents)| contents)
+            .expect("kimi deploy set must include .kimi-plugin/plugin.json");
+        let parsed: serde_json::Value = serde_json::from_str(manifest).unwrap();
+        assert_eq!(parsed["name"], "tracedecay");
+        assert_eq!(parsed["version"], "0.0.0");
+        let server = &parsed["mcpServers"]["tracedecay"];
+        assert!(
+            server.is_object(),
+            "kimi manifest must declare mcpServers.tracedecay"
         );
-        // Cursor: cursor-subset skills + 4 manifest (dot + mcp + hooks +
-        //   README) + 2 rules + native agents + 13 native commands.
-        assert_eq!(
-            cursor_files().len(),
-            cursor_skills + 4 + 2 + GENERATED_CURSOR_AGENT_FILES.len() + 13
+        assert_eq!(server["command"], "tracedecay");
+        assert_eq!(server["args"], serde_json::json!(["serve"]));
+        assert!(
+            parsed["mcpServers"].get("graph").is_none(),
+            "kimi manifest must not declare mcpServers.graph"
         );
-        // Codex: skills + 4 manifest (dot + mcp + hooks + README).
-        assert_eq!(codex_files().len(), all_skills + 4);
     }
 
     #[test]
-    fn capability_discovery_skill_is_shared_and_cli_native() {
+    fn kimi_files_ship_every_skill_command_and_the_readme() {
+        let files = kimi_files();
+
+        // Every embedded skill file deploys under its shared skills/ path.
+        for skill in GENERATED_SKILL_FILES {
+            assert!(
+                files
+                    .iter()
+                    .any(|(relative, _)| *relative == skill.relative),
+                "kimi deploy set is missing {}",
+                skill.relative
+            );
+        }
+
+        // The shared Claude commands deploy verbatim under commands/.
+        for command in CLAUDE_COMMAND_FILES {
+            let deployed = files
+                .iter()
+                .find(|(relative, _)| *relative == command.relative)
+                .map_or_else(
+                    || panic!("kimi deploy set is missing {}", command.relative),
+                    |(_, contents)| *contents,
+                );
+            assert_eq!(
+                deployed, command.contents,
+                "kimi must ship {} verbatim",
+                command.relative
+            );
+        }
+
+        // The Kimi README deploys as README.md.
+        let readme = files
+            .iter()
+            .find(|(relative, _)| *relative == "README.md")
+            .map(|(_, contents)| *contents)
+            .expect("kimi deploy set must include README.md");
+        assert!(
+            readme.contains("# TraceDecay Kimi Code Plugin"),
+            "kimi README.md must come from README-kimi.md"
+        );
+    }
+
+    /// The installer helpers operate on the manifest directly: the version
+    /// stamp rewrites `version`, and `set_mcp_command` rewrites the inline
+    /// `mcpServers.tracedecay.command`.
+    #[test]
+    fn kimi_manifest_round_trips_through_installer_rewrites() {
+        let raw = KIMI_MANIFEST_FILES
+            .iter()
+            .find(|file| file.relative == ".kimi-plugin/plugin.json")
+            .map(|file| file.contents)
+            .expect("kimi manifest must be embedded");
+
+        let stamped = stamp_manifest_version(raw).unwrap();
+        let stamped: serde_json::Value = serde_json::from_str(&stamped).unwrap();
+        assert_eq!(stamped["version"], crate::PRODUCT_VERSION);
+
+        let rewired = set_mcp_command(raw, "/abs/tracedecay").unwrap();
+        let rewired: serde_json::Value = serde_json::from_str(&rewired).unwrap();
+        assert_eq!(
+            rewired["mcpServers"]["tracedecay"]["command"],
+            "/abs/tracedecay"
+        );
+    }
+
+    #[test]
+    fn capability_discovery_skill_is_shared_and_matches_plugin_source() {
         let relative = "skills/discovering-tracedecay/SKILL.md";
         let source = embedded_skill(relative);
-
-        assert!(source.contains("`tracedecay tool`"));
-        assert!(source.contains("`tracedecay tool <name> --help`"));
-        assert!(source.contains("`tracedecay --help`"));
-        assert!(
-            !source.contains("tool describe"),
-            "the CLI has no `tool describe` subcommand"
+        let on_disk = std::fs::read_to_string(plugin_source_root().join(relative))
+            .expect("discovering-tracedecay skill must exist on disk");
+        assert_eq!(
+            source, on_disk,
+            "embedded discovering-tracedecay skill must match plugin source"
         );
 
         for (host, files) in [
             ("claude", claude_files()),
             ("cursor", cursor_files()),
             ("codex", codex_files()),
+            ("kimi", kimi_files()),
+            ("opencode", opencode_agent_files()),
         ] {
             let deployed = files
                 .iter()
                 .find(|(path, _)| *path == relative)
-                .map(|(_, contents)| *contents)
-                .unwrap_or_else(|| panic!("{host} is missing {relative}"));
+                .map_or_else(
+                    || panic!("{host} is missing {relative}"),
+                    |(_, contents)| *contents,
+                );
             assert_eq!(
                 deployed, source,
                 "{host} must ship the shared source verbatim"
@@ -452,11 +645,15 @@ mod tests {
     }
 
     #[test]
-    fn using_cli_skill_supports_intentional_mcp_absence() {
-        let source = embedded_skill("skills/using-the-cli/SKILL.md");
-
-        assert!(source.contains("MCP is optional"));
-        assert!(source.contains("intentionally unavailable"));
+    fn using_cli_skill_matches_plugin_source() {
+        let relative = "skills/using-the-cli/SKILL.md";
+        let source = embedded_skill(relative);
+        let on_disk = std::fs::read_to_string(plugin_source_root().join(relative))
+            .expect("using-the-cli skill must exist on disk");
+        assert_eq!(
+            source, on_disk,
+            "embedded using-the-cli skill must match plugin source"
+        );
     }
 
     /// Every embedded skill file maps to an on-disk source under `plugin/`.
@@ -498,6 +695,28 @@ mod tests {
             embedded, on_disk,
             "GENERATED_SKILL_FILES must match every file under plugin/skills/ exactly"
         );
+    }
+
+    #[test]
+    fn first_party_plugin_assets_fit_host_bundle_artifact_bound() {
+        use tracedecay_host_integration::MAX_ARTIFACT_CONTENT_BYTES;
+
+        for (host, files) in [
+            ("claude", claude_files()),
+            ("cursor", cursor_files()),
+            ("cursor-native", cursor_native_extension_files()),
+            ("codex", codex_files()),
+            ("kimi", kimi_files()),
+            ("opencode-agent", opencode_agent_files()),
+        ] {
+            for (relative, contents) in files {
+                assert!(
+                    contents.len() <= MAX_ARTIFACT_CONTENT_BYTES,
+                    "{host} {relative} is {} bytes, exceeds MAX_ARTIFACT_CONTENT_BYTES ({MAX_ARTIFACT_CONTENT_BYTES})",
+                    contents.len()
+                );
+            }
+        }
     }
 
     fn collect_relative(base: &Path, dir: &Path, out: &mut BTreeSet<String>) {

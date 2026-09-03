@@ -1,0 +1,26 @@
+{
+  "session_id": "00000000-0000-4000-8000-000000000001",
+  "transcript_path": "/workspace/.claude/transcripts/session.jsonl",
+  "cwd": "/workspace/project",
+  "prompt_id": "toolu_000000000000000000000000",
+  "permission_mode": "acceptEdits",
+  "effort": {
+    "level": "<REDACTED>"
+  },
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": "/workspace/project/capture.txt",
+    "content": "authentic hook capture\n"
+  },
+  "tool_response": {
+    "type": "<REDACTED>",
+    "filePath": "/workspace/project/capture.txt",
+    "content": "authentic hook capture\n",
+    "structuredPatch": [],
+    "originalFile": null,
+    "userModified": false
+  },
+  "tool_use_id": "toolu_000000000000000000000000",
+  "duration_ms": 0
+}

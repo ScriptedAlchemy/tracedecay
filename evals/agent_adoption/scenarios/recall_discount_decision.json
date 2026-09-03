@@ -10,7 +10,7 @@
   "prompt": "Did we decide anything about discount limits on orders? Check the project's recorded decisions.",
   "expected_tools": {
     "required_first": [
-      "tracedecay_fact_store",
+      "tracedecay_fact_store_search",
       "tracedecay_context"
     ],
     "acceptable": [

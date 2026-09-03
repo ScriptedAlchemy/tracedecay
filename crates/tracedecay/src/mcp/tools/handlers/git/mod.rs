@@ -1,0 +1,100 @@
+//! Git-backed tool handlers.
+//!
+//! `shell` owns every `git` subprocess call; the other siblings turn its output
+//! into tool payloads. This module holds the shared imports (siblings pick them
+//! up through `use super::*`), the two shapes `shell` returns, and the argument
+//! helpers used across siblings.
+
+mod affected;
+mod branch;
+mod context;
+mod pr_context_cursor;
+mod shell;
+
+pub(super) use affected::handle_affected;
+pub(super) use branch::{handle_branch_diff, handle_branch_list, handle_branch_search};
+pub(super) use context::{
+    handle_changelog, handle_commit_context, handle_diff_context, handle_pr_context,
+};
+
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
+
+use serde_json::{Value, json};
+
+use super::support::{generic_tool_result, require_object_args, unique_file_paths};
+use crate::tracedecay::TraceDecay;
+use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_mcp::ToolResult;
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+struct GitFileChange {
+    path: String,
+    status: &'static str,
+}
+
+struct GitPrComparison {
+    base_oid: String,
+    head_oid: String,
+    merge_base: String,
+    changes: Vec<GitFileChange>,
+    commits: Vec<Value>,
+}
+
+fn git_error_result(cg: &TraceDecay, args: &Value, operation: &str, message: &str) -> ToolResult {
+    let output = json!({
+        "error": {
+            "kind": "git",
+            "operation": operation,
+            "message": message,
+        }
+    });
+    generic_tool_result(Some(cg.project_root()), args, &output, vec![])
+        .with_semantic_error(true)
+        .with_failure_message(message)
+}
+
+/// Typed result returned when a git-dispatched tool exhausts the dispatch
+/// deadline the daemon carried into `dispatch_git_tools`.
+///
+/// Git tree walks, revwalks, diffs, and the branch-add index build are
+/// unbounded on pathological or diverged inputs. When the carried deadline
+/// elapses the caller must receive the same shaped, semantic error every other
+/// git failure surfaces — never a bare hang or a panic.
+pub(crate) fn git_dispatch_deadline_result(cg: &TraceDecay, tool_name: &str) -> ToolResult {
+    let message =
+        format!("git tool '{tool_name}' exceeded its dispatch deadline and was cancelled");
+    git_error_result(cg, &json!({ "tool": tool_name }), "deadline", &message)
+}
+
+fn require_string_array_arg(args: &Value, name: &str) -> Result<Vec<String>> {
+    args.get(name)
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(std::string::ToString::to_string))
+                .collect()
+        })
+        .ok_or_else(|| TraceDecayError::Config {
+            message: format!("missing required parameter: {name} (array of strings)"),
+        })
+}
+
+fn clamped_depth_arg(args: &Value, name: &str, default: usize, max: usize) -> usize {
+    args.get(name)
+        .and_then(serde_json::Value::as_u64)
+        .map_or(default, |v| v.min(max as u64) as usize)
+}
+
+fn matches_test_file(
+    path: &str,
+    custom_glob: Option<&glob::Pattern>,
+    files_with_inline_tests: &HashSet<String>,
+) -> bool {
+    if let Some(glob) = custom_glob {
+        glob.matches(path)
+    } else {
+        crate::tracedecay::is_test_file(path) || files_with_inline_tests.contains(path)
+    }
+}
