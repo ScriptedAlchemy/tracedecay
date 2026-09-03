@@ -965,6 +965,8 @@ pub enum DaemonSemanticRuntimeRegistrationError {
     AlreadyRegistered,
     #[error("the daemon project runtime registry is closed")]
     RegistryClosed,
+    #[error("a concurrent semantic runtime build failed: {detail}")]
+    ConcurrentBuildFailed { detail: String },
 }
 
 impl From<ProjectRuntimeAlreadyRegistered> for DaemonSemanticRuntimeRegistrationError {
@@ -975,7 +977,12 @@ impl From<ProjectRuntimeAlreadyRegistered> for DaemonSemanticRuntimeRegistration
 
 impl From<ProjectRuntimeRegistryError> for DaemonSemanticRuntimeRegistrationError {
     fn from(error: ProjectRuntimeRegistryError) -> Self {
-        registry_registration_refusal(error, Self::AlreadyRegistered, Self::RegistryClosed)
+        registry_registration_refusal(
+            error,
+            Self::AlreadyRegistered,
+            Self::RegistryClosed,
+            |detail| Self::ConcurrentBuildFailed { detail },
+        )
     }
 }
 
@@ -1003,7 +1010,7 @@ impl DaemonSemanticRuntimeRegistrar {
                 |_: &mut tracedecay_semantic::DaemonSemanticRuntimeHandleV1| {
                     Err(DaemonSemanticRuntimeRegistrationError::AlreadyRegistered)
                 },
-                || {
+                || async {
                     // The process-wide table is only joined once the project slot
                     // is known to be free, so a refused registration cannot
                     // replace a live handle there.

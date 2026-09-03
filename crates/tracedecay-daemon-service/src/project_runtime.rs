@@ -4,10 +4,11 @@
 use std::any::Any;
 use std::any::TypeId;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex as StdMutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex as StdMutex};
 
 use tokio::sync::{Mutex as AsyncMutex, watch};
 use tracedecay_usecases::feedback::FeedbackCycleRuntime;
@@ -158,6 +159,7 @@ pub struct ProjectRuntime {
     >,
     observability: Option<RegisteredObservabilityProducerV1>,
     reservations: Vec<TypeId>,
+    registration_builds: BTreeMap<TypeId, Arc<ProjectRuntimeBuildReservationV1>>,
     #[cfg(test)]
     test_first: Option<TestFirst>,
     #[cfg(test)]
@@ -544,10 +546,14 @@ impl RegisteredDeliveryReadAuthorityV1 {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ProjectRuntimeRegistryError {
+    #[error("a project runtime component is already registered")]
     AlreadyRegistered,
+    #[error("the daemon project runtime registry is closed")]
     Closed,
+    #[error("a concurrent project runtime component build failed: {detail}")]
+    ConcurrentBuildFailed { detail: String },
 }
 
 #[derive(Debug)]
@@ -589,10 +595,10 @@ impl ProjectRuntimeRootFencesV1 {
 
 #[derive(Clone)]
 pub struct ProjectRuntimeRegistryV1 {
-    runtimes: Arc<StdMutex<BTreeMap<PathBuf, ProjectRuntime>>>,
+    runtimes: Arc<ProfiledMutex<BTreeMap<PathBuf, ProjectRuntime>>>,
     /// Permanent deletion fences and temporary recovery fences share one lock,
     /// so dropping a recovery guard cannot undo a concurrent deletion.
-    root_fences: Arc<StdMutex<ProjectRuntimeRootFencesV1>>,
+    root_fences: Arc<ProfiledMutex<ProjectRuntimeRootFencesV1>>,
     reservation_changed: watch::Sender<u64>,
     reservation_blocking_changed: Arc<(StdMutex<u64>, Condvar)>,
     /// The blocking drain is retained independently of whichever async
@@ -613,8 +619,14 @@ impl Default for ProjectRuntimeRegistryV1 {
         let (reservation_changed, _) = watch::channel(0);
         let (shutdown_complete, _) = watch::channel(ShutdownState::Pending);
         Self {
-            runtimes: Arc::new(StdMutex::new(BTreeMap::new())),
-            root_fences: Arc::new(StdMutex::new(ProjectRuntimeRootFencesV1::default())),
+            runtimes: Arc::new(hotpath::mutex!(
+                StdMutex::new(BTreeMap::new()),
+                label = "daemon.service.project_runtime.runtimes"
+            )),
+            root_fences: Arc::new(hotpath::mutex!(
+                StdMutex::new(ProjectRuntimeRootFencesV1::default()),
+                label = "daemon.service.project_runtime.root_fences"
+            )),
             reservation_changed,
             reservation_blocking_changed: Arc::new((StdMutex::new(0), Condvar::new())),
             shutdown_task: Arc::new(AsyncMutex::new(None)),
@@ -629,10 +641,47 @@ impl Default for ProjectRuntimeRegistryV1 {
     }
 }
 
+type ProfiledMutex<T> = hotpath::mutexes::Mutex<T>;
+type ProfiledMutexGuard<'a, T> = hotpath::mutexes::MutexGuard<'a, T>;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ProjectRuntimeBuildOutcomeV1 {
+    Pending,
+    Succeeded,
+    Failed { detail: String },
+}
+
+struct ProjectRuntimeBuildReservationV1 {
+    outcome: watch::Sender<ProjectRuntimeBuildOutcomeV1>,
+}
+
+impl ProjectRuntimeBuildReservationV1 {
+    fn new() -> Arc<Self> {
+        let (outcome, _) = watch::channel(ProjectRuntimeBuildOutcomeV1::Pending);
+        Arc::new(Self { outcome })
+    }
+
+    fn subscribe(&self) -> watch::Receiver<ProjectRuntimeBuildOutcomeV1> {
+        self.outcome.subscribe()
+    }
+
+    fn complete(&self, outcome: ProjectRuntimeBuildOutcomeV1) {
+        self.outcome.send_replace(outcome);
+    }
+}
+
 struct ProjectRuntimeReservationLease {
     registry: ProjectRuntimeRegistryV1,
     project_root: PathBuf,
     reservation: ProjectRuntimeReservation,
+    active: bool,
+}
+
+struct ProjectRuntimeBuildReservationLeaseV1 {
+    registry: ProjectRuntimeRegistryV1,
+    project_root: PathBuf,
+    type_id: TypeId,
+    reservation: Arc<ProjectRuntimeBuildReservationV1>,
     active: bool,
 }
 
@@ -787,15 +836,119 @@ impl Drop for ProjectRuntimeReservationLease {
     }
 }
 
+impl ProjectRuntimeBuildReservationLeaseV1 {
+    fn commit<C>(mut self, component: C) -> Result<(), ProjectRuntimeRegistryError>
+    where
+        C: ProjectRuntimeComponent,
+    {
+        let root_fences = self.registry.lock_root_fences();
+        let mut runtimes = self.registry.lock_runtimes();
+        let result =
+            if self.registry.closed.load(Ordering::Acquire)
+                || root_fences.contains(&self.project_root)
+            {
+                Err(ProjectRuntimeRegistryError::Closed)
+            } else {
+                match runtimes.get_mut(&self.project_root) {
+                    Some(runtime)
+                        if runtime.registration_builds.get(&self.type_id).is_some_and(
+                            |reservation| Arc::ptr_eq(reservation, &self.reservation),
+                        ) && C::peek(runtime).is_none() =>
+                    {
+                        *C::slot(runtime) = Some(component);
+                        Ok(())
+                    }
+                    _ => Err(ProjectRuntimeRegistryError::AlreadyRegistered),
+                }
+            };
+        Self::release_reservation(
+            &mut runtimes,
+            &self.project_root,
+            self.type_id,
+            &self.reservation,
+        );
+        drop(runtimes);
+        drop(root_fences);
+        self.active = false;
+        let outcome = match &result {
+            Ok(()) => ProjectRuntimeBuildOutcomeV1::Succeeded,
+            Err(error) => ProjectRuntimeBuildOutcomeV1::Failed {
+                detail: error.to_string(),
+            },
+        };
+        self.reservation.complete(outcome);
+        self.registry.signal_reservation_changed();
+        result
+    }
+
+    fn fail(mut self, detail: String) {
+        let mut runtimes = self.registry.lock_runtimes();
+        Self::release_reservation(
+            &mut runtimes,
+            &self.project_root,
+            self.type_id,
+            &self.reservation,
+        );
+        drop(runtimes);
+        self.active = false;
+        self.reservation
+            .complete(ProjectRuntimeBuildOutcomeV1::Failed { detail });
+        self.registry.signal_reservation_changed();
+    }
+
+    fn release_reservation(
+        runtimes: &mut BTreeMap<PathBuf, ProjectRuntime>,
+        project_root: &Path,
+        type_id: TypeId,
+        reservation: &Arc<ProjectRuntimeBuildReservationV1>,
+    ) {
+        let mut remove_project = false;
+        if let Some(runtime) = runtimes.get_mut(project_root)
+            && runtime
+                .registration_builds
+                .get(&type_id)
+                .is_some_and(|current| Arc::ptr_eq(current, reservation))
+        {
+            runtime.registration_builds.remove(&type_id);
+            runtime.reservations.retain(|reserved| *reserved != type_id);
+            remove_project = runtime.reservations.is_empty() && !runtime.has_components();
+        }
+        if remove_project {
+            runtimes.remove(project_root);
+        }
+    }
+}
+
+impl Drop for ProjectRuntimeBuildReservationLeaseV1 {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let mut runtimes = self.registry.lock_runtimes();
+        Self::release_reservation(
+            &mut runtimes,
+            &self.project_root,
+            self.type_id,
+            &self.reservation,
+        );
+        drop(runtimes);
+        self.reservation
+            .complete(ProjectRuntimeBuildOutcomeV1::Failed {
+                detail: "project runtime component build was cancelled".to_owned(),
+            });
+        self.registry.signal_reservation_changed();
+    }
+}
+
 impl ProjectRuntimeRegistryV1 {
-    fn lock_root_fences(&self) -> MutexGuard<'_, ProjectRuntimeRootFencesV1> {
+    fn lock_root_fences(&self) -> ProfiledMutexGuard<'_, ProjectRuntimeRootFencesV1> {
         match self.root_fences.lock() {
             Ok(fences) => fences,
             Err(poisoned) => poisoned.into_inner(),
         }
     }
 
-    fn lock_runtimes(&self) -> MutexGuard<'_, BTreeMap<PathBuf, ProjectRuntime>> {
+    fn lock_runtimes(&self) -> ProfiledMutexGuard<'_, BTreeMap<PathBuf, ProjectRuntime>> {
         self.runtimes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1119,16 +1272,18 @@ impl ProjectRuntimeRegistryV1 {
     }
 
     /// Register a component, or accept an incumbent the caller recognizes as
-    /// the same authority, under one lock.
+    /// the same authority.
     ///
     /// `reconcile` sees the incumbent and either accepts it — returning `Ok`,
-    /// having refreshed whatever the caller renews — or refuses. `build` runs
-    /// only when the slot is empty, so a component that owns processes or
-    /// connections is never constructed just to be dropped on the reconcile
-    /// path. Splitting the check from the insert would let a second
-    /// registration land in between.
-    #[hotpath::skip]
-    pub(crate) async fn register_or_reconcile<C, E, R, B>(
+    /// having refreshed whatever the caller renews — or refuses. An empty slot
+    /// is reserved under the registry locks, then `build` runs after both
+    /// locks are released. Registrations for the same typed slot join that
+    /// reservation and receive its exact terminal outcome.
+    #[hotpath::measure(
+        label = "daemon.service.project_runtime.register_or_reconcile",
+        future = true
+    )]
+    pub(crate) async fn register_or_reconcile<C, E, R, B, Fut>(
         &self,
         project_root: PathBuf,
         reconcile: R,
@@ -1136,31 +1291,79 @@ impl ProjectRuntimeRegistryV1 {
     ) -> Result<(), E>
     where
         C: ProjectRuntimeComponent,
-        E: From<ProjectRuntimeRegistryError>,
+        E: From<ProjectRuntimeRegistryError> + fmt::Display,
         R: FnOnce(&mut C) -> Result<(), E>,
-        B: FnOnce() -> Result<C, E>,
+        B: FnOnce() -> Fut,
+        Fut: Future<Output = Result<C, E>>,
     {
         loop {
             let mut reservation_changed = self.reservation_changed.subscribe();
-            {
+            let mut concurrent_build = None;
+            let mut build_lease = None;
+            let wait_for_publication = {
                 let root_fences = self.lock_root_fences();
                 let mut runtimes = self.lock_runtimes();
                 if self.closed.load(Ordering::Acquire) || root_fences.contains(&project_root) {
                     return Err(ProjectRuntimeRegistryError::Closed.into());
                 }
                 let runtime = runtimes.entry(project_root.clone()).or_default();
-                if !runtime.reservations.contains(&TypeId::of::<C>()) {
+                let type_id = TypeId::of::<C>();
+                if let Some(reservation) = runtime.registration_builds.get(&type_id) {
+                    concurrent_build = Some(reservation.subscribe());
+                    false
+                } else if runtime.reservations.contains(&type_id) {
+                    true
+                } else {
                     let slot = C::slot(runtime);
-                    return match slot.as_mut() {
-                        Some(incumbent) => reconcile(incumbent),
-                        None => {
-                            *slot = Some(build()?);
-                            Ok(())
-                        }
-                    };
+                    if let Some(incumbent) = slot.as_mut() {
+                        return reconcile(incumbent);
+                    }
+                    let reservation = ProjectRuntimeBuildReservationV1::new();
+                    runtime.reservations.push(type_id);
+                    runtime
+                        .registration_builds
+                        .insert(type_id, Arc::clone(&reservation));
+                    build_lease = Some(ProjectRuntimeBuildReservationLeaseV1 {
+                        registry: self.clone(),
+                        project_root: project_root.clone(),
+                        type_id,
+                        reservation,
+                        active: true,
+                    });
+                    false
                 }
+            };
+            if let Some(mut outcome) = concurrent_build {
+                loop {
+                    match outcome.borrow_and_update().clone() {
+                        ProjectRuntimeBuildOutcomeV1::Pending => {}
+                        ProjectRuntimeBuildOutcomeV1::Succeeded => break,
+                        ProjectRuntimeBuildOutcomeV1::Failed { detail } => {
+                            return Err(ProjectRuntimeRegistryError::ConcurrentBuildFailed {
+                                detail,
+                            }
+                            .into());
+                        }
+                    }
+                    if outcome.changed().await.is_err() {
+                        return Err(ProjectRuntimeRegistryError::ConcurrentBuildFailed {
+                            detail: "concurrent project runtime build outcome was lost".to_owned(),
+                        }
+                        .into());
+                    }
+                }
+                continue;
             }
-            if reservation_changed.changed().await.is_err() {
+            if let Some(lease) = build_lease {
+                return match build().await {
+                    Ok(component) => lease.commit::<C>(component).map_err(Into::into),
+                    Err(error) => {
+                        lease.fail(error.to_string());
+                        Err(error)
+                    }
+                };
+            }
+            if wait_for_publication && reservation_changed.changed().await.is_err() {
                 return Err(ProjectRuntimeRegistryError::Closed.into());
             }
         }
