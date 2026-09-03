@@ -48,9 +48,28 @@ impl From<McpCatalogError> for McpDispatchMetadataError {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static ATTACH_DISPATCH_METADATA_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn attach_dispatch_metadata_calls_for_test() -> u64 {
+    ATTACH_DISPATCH_METADATA_CALLS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_attach_dispatch_metadata_calls_for_test() {
+    ATTACH_DISPATCH_METADATA_CALLS.with(|calls| calls.set(0));
+}
+
 pub(crate) fn attach_dispatch_metadata(
     definitions: &mut [ToolDefinition],
 ) -> Result<(), McpDispatchMetadataError> {
+    #[cfg(test)]
+    {
+        ATTACH_DISPATCH_METADATA_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
+    }
     let catalog = super::binding::mcp_dispatch_catalog()?;
     let version = catalog.version();
     let fingerprint = catalog.fingerprint().to_string();

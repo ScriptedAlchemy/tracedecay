@@ -22,8 +22,7 @@ use crate::mcp::server::{
     classify_mcp_method, initialize_result,
 };
 use crate::mcp::tools::{
-    default_catalog_discovery_authority, get_catalog_filtered_tool_definitions_with_budget,
-    get_catalog_filtered_tool_definitions_with_warming_budget,
+    catalog_discovery_tools_list_payload, default_catalog_discovery_authority,
 };
 use branch_add::{branch_add_response, parse_branch_add_request};
 use branch_admin::{StoreAdministration, parse_branch_admin_request, write_branch_admin_response};
