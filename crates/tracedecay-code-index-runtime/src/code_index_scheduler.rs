@@ -4850,6 +4850,10 @@ pub struct CodeIndexWorktreeSchedulerV1 {
     production_config: CodeIndexProductionConfigV1,
     owner: ProductionOwner,
     hints: Arc<Mutex<PendingHintsV1>>,
+    /// gix "unchanged" is relative to the index, while active rows may have
+    /// been captured from dirty content, so the exact snapshot identity keeps
+    /// those paths excluded from reuse after they are reverted.
+    active_snapshot_changed_paths: Mutex<Option<(ContentDigest, BTreeSet<String>)>>,
     wake: Arc<tokio::sync::Notify>,
     epoch: Arc<AtomicU64>,
     shutting_down: Arc<AtomicBool>,
@@ -5075,6 +5079,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             production_config,
             owner,
             hints,
+            active_snapshot_changed_paths: Mutex::new(None),
             wake,
             epoch,
             shutting_down: Arc::new(AtomicBool::new(false)),
@@ -6342,9 +6347,9 @@ impl CodeIndexWorktreeSchedulerV1 {
             // Only the content identity and changed-path count are needed after
             // the build request takes ownership of the captured snapshot, so
             // keep those instead of cloning every file record and changed path.
-            let snapshot_content_identity = captured.snapshot.content_identity.clone();
-            let reextracted_files = captured.changed_paths.len();
-            let generation = self.owner.build_and_publish(
+            let mut snapshot_content_identity = captured.snapshot.content_identity.clone();
+            let mut reextracted_files = captured.changed_paths.len();
+            let mut generation = self.owner.build_and_publish(
                 CodeIndexBuildRequestV1 {
                     snapshot: captured.snapshot,
                     captured_files: captured.captured_files,
@@ -6357,6 +6362,33 @@ impl CodeIndexWorktreeSchedulerV1 {
                 },
                 &control,
             );
+            if matches!(
+                &generation,
+                Err(CodeIndexProductionErrorV1::Input(
+                    CodeIndexInputErrorV1::MissingCapturedFile
+                ))
+            ) {
+                tracing::warn!(
+                    "code-index incremental build missing captured file bytes; retrying without active-generation reuse"
+                );
+                captured =
+                    self.capture_authoritative_snapshot_without_active_generation_reuse(None)?;
+                snapshot_content_identity = captured.snapshot.content_identity.clone();
+                reextracted_files = captured.changed_paths.len();
+                generation = self.owner.build_and_publish(
+                    CodeIndexBuildRequestV1 {
+                        snapshot: captured.snapshot,
+                        captured_files: captured.captured_files,
+                        changed_files: captured.changed_paths,
+                        invalidations: BTreeSet::new(),
+                        repository_parse_identity: captured.repository_parse_identity,
+                        ignored_source_admissions: self.ignored_source_admissions.clone(),
+                        sealed_at: now_micros(),
+                        target_projection_key: projection_key()?,
+                    },
+                    &control,
+                );
+            }
             let generation = match generation {
                 Ok(generation) => generation,
                 Err(CodeIndexProductionErrorV1::Interrupted(
@@ -7122,34 +7154,48 @@ impl CodeIndexWorktreeSchedulerV1 {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(cancelled_code_index_reconcile());
         }
-        let reusable_active =
-            if allow_active_generation_reuse && self.ignored_source_admissions.is_empty() {
-                match self
-                    .publication
-                    .load_active_shared()
-                    .map_err(CodeIndexProductionErrorV1::Publication)?
-                {
-                    Some(active) => {
-                        self.validate_generation_identity(&active)?;
-                        let current_scope = CodeIndexGenerationScopeV1 {
-                            repository: self.repository_id.clone(),
-                            reference: self.identity.head_ref().cloned(),
-                            worktree: Some(self.worktree_id.clone()),
-                        };
-                        (active.sealed_scope() == current_scope
-                            && active
-                                .compatibility_with(&self.production_config)
-                                .is_reusable()
-                            && active.ignored_source_admissions().is_empty()
-                            && active.repository_parse_identity().tree.as_ref()
-                                == self.identity.head_tree())
-                        .then_some(active)
-                    }
-                    None => None,
+        let remembered_active_capture = self
+            .active_snapshot_changed_paths
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let reusable_active = if allow_active_generation_reuse
+            && self.ignored_source_admissions.is_empty()
+        {
+            match self
+                .publication
+                .load_active_shared()
+                .map_err(CodeIndexProductionErrorV1::Publication)?
+            {
+                Some(active) => {
+                    self.validate_generation_identity(&active)?;
+                    let current_scope = CodeIndexGenerationScopeV1 {
+                        repository: self.repository_id.clone(),
+                        reference: self.identity.head_ref().cloned(),
+                        worktree: Some(self.worktree_id.clone()),
+                    };
+                    (active.sealed_scope() == current_scope
+                        && active
+                            .compatibility_with(&self.production_config)
+                            .is_reusable()
+                        && active.ignored_source_admissions().is_empty()
+                        && active.repository_parse_identity().tree.as_ref()
+                            == self.identity.head_tree())
+                    .then_some(active)
+                    .filter(|active| {
+                        active.repository_parse_identity().dirty == RepositoryDirtyStateV1::Clean
+                            || remembered_active_capture.as_ref().is_some_and(
+                                |(content_identity, _)| {
+                                    content_identity == &active.snapshot().content_identity
+                                },
+                            )
+                    })
                 }
-            } else {
-                None
-            };
+                None => None,
+            }
+        } else {
+            None
+        };
         if reusable_active.is_none()
             && allow_active_generation_reuse
             && self.ignored_source_admissions.is_empty()
@@ -7160,7 +7206,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 self.identity.head_tree(),
             )
         {
-            return self
+            let captured = self
                 .capture_exact_git_tree_snapshot(
                     &git_tree_capture::ExactGitTreeSourceV1 {
                         reference: reference.clone(),
@@ -7183,7 +7229,15 @@ impl CodeIndexWorktreeSchedulerV1 {
                         "immutable HEAD-tree capture failed: {}",
                         reason.as_str()
                     )),
-                });
+                })?;
+            *self
+                .active_snapshot_changed_paths
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((
+                captured.snapshot.content_identity.clone(),
+                captured.changed_paths.clone(),
+            ));
+            return Ok(captured);
         }
         let source_revision = (self.ignored_source_admissions.is_empty()
             && classification.changes().is_empty())
@@ -7216,6 +7270,15 @@ impl CodeIndexWorktreeSchedulerV1 {
         };
 
         let registry = StaticLanguageRegistry::new();
+        let remembered_dirty_paths = reusable_active.as_ref().and_then(|active| {
+            (active.repository_parse_identity().dirty != RepositoryDirtyStateV1::Clean)
+                .then(|| {
+                    remembered_active_capture
+                        .as_ref()
+                        .map(|(_, changed_paths)| changed_paths)
+                })
+                .flatten()
+        });
         let active_files = reusable_active
             .as_ref()
             .map(|active| {
@@ -7224,6 +7287,10 @@ impl CodeIndexWorktreeSchedulerV1 {
                     .files
                     .iter()
                     .filter(|file| file.disposition == SnapshotFileDispositionV1::Present)
+                    .filter(|file| {
+                        remembered_dirty_paths
+                            .is_none_or(|paths| !paths.contains(&file.logical_path))
+                    })
                     .map(|file| (file.logical_path.as_str(), file))
                     .collect::<BTreeMap<_, _>>()
             })
@@ -7274,17 +7341,52 @@ impl CodeIndexWorktreeSchedulerV1 {
         })?;
 
         let mut captured_files = Vec::new();
-        let mut sanitization_receipts = reusable_active
-            .as_ref()
-            .map(|active| {
-                active
-                    .snapshot()
-                    .sanitization_receipts
-                    .iter()
-                    .cloned()
-                    .collect::<BTreeSet<_>>()
-            })
-            .unwrap_or_default();
+        let mut sanitization_receipts = BTreeSet::new();
+        if let Some(active) = reusable_active.as_ref() {
+            sanitization_receipts.extend(active.snapshot().sanitization_receipts.iter().cloned());
+            let reused_occurrences = files
+                .iter()
+                .map(|file| &file.file_occurrence_id)
+                .collect::<BTreeSet<_>>();
+            let mut replaced_receipts = BTreeSet::new();
+            for file in active.snapshot().files.iter().filter(|file| {
+                file.disposition == SnapshotFileDispositionV1::Present
+                    && !reused_occurrences.contains(&file.file_occurrence_id)
+            }) {
+                for receipt in &active.snapshot().sanitization_receipts {
+                    if file_occurrence_id(
+                        &self.repository_id,
+                        &self.worktree_id,
+                        &file.logical_path,
+                        &file.content_digest,
+                        receipt,
+                    )? == file.file_occurrence_id
+                    {
+                        replaced_receipts.insert(receipt.clone());
+                        break;
+                    }
+                }
+            }
+            for receipt in replaced_receipts {
+                let mut still_reused = false;
+                for file in &files {
+                    if file_occurrence_id(
+                        &self.repository_id,
+                        &self.worktree_id,
+                        &file.logical_path,
+                        &file.content_digest,
+                        &receipt,
+                    )? == file.file_occurrence_id
+                    {
+                        still_reused = true;
+                        break;
+                    }
+                }
+                if !still_reused {
+                    sanitization_receipts.remove(&receipt);
+                }
+            }
+        }
         // A privacy refusal is evidence about one file. Withholding it keeps
         // the rest of the worktree indexable; only a genuine capture fault
         // still terminates the pass.
@@ -7322,7 +7424,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             .sort_by(|left, right| left.file_occurrence_id.cmp(&right.file_occurrence_id));
         let sanitization_receipts = sanitization_receipts.into_iter().collect::<Vec<_>>();
         let content_identity = snapshot_content_identity(&files, &sanitization_receipts);
-        Ok(CapturedSnapshotV1 {
+        let captured = CapturedSnapshotV1 {
             repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
                 tree: self.identity.head_tree().cloned(),
                 dirty,
@@ -7342,7 +7444,15 @@ impl CodeIndexWorktreeSchedulerV1 {
             changed_paths,
             retained_bytes,
             retained_reservations,
-        })
+        };
+        *self
+            .active_snapshot_changed_paths
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((
+            captured.snapshot.content_identity.clone(),
+            captured.changed_paths.clone(),
+        ));
+        Ok(captured)
     }
 }
 

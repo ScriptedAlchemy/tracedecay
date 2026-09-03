@@ -413,6 +413,135 @@ fn one_file_increment_captures_only_edited_bytes_with_one_thousand_unchanged_fil
         edited_source.len(),
         "captured bytes must be proportional to the one edited file"
     );
+    let full_capture = scheduler
+        .capture_authoritative_snapshot_without_active_generation_reuse(None)
+        .expect("capture full comparison snapshot");
+    assert_eq!(
+        captured.snapshot.content_identity, full_capture.snapshot.content_identity,
+        "active-row reuse must preserve the full capture's byte-exact snapshot identity"
+    );
+    let untouched_row = captured
+        .snapshot
+        .files
+        .iter()
+        .find(|file| file.logical_path == "src/unchanged_0001.rs")
+        .expect("untouched snapshot row")
+        .clone();
+
+    published(
+        scheduler
+            .reconcile_now()
+            .expect("publish first dirty generation"),
+    );
+    fixture.edit(
+        "src/unchanged_0000.rs",
+        "pub fn unchanged_0000() -> usize { 10_000 }\n",
+    );
+    scheduler.notify_hook_paths([PathBuf::from("src/unchanged_0000.rs")]);
+
+    let second = scheduler
+        .capture_authoritative_snapshot(None)
+        .expect("capture second consecutive edit");
+    assert_eq!(
+        second.snapshot.files.len(),
+        1_001,
+        "the second complete snapshot must retain every file row"
+    );
+    assert_eq!(
+        second.captured_files.len(),
+        2,
+        "the previously dirty file and newly edited file must both be captured"
+    );
+    assert_eq!(
+        second
+            .snapshot
+            .files
+            .iter()
+            .find(|file| file.logical_path == "src/unchanged_0001.rs"),
+        Some(&untouched_row),
+        "an untouched file row must still be reused from the dirty active generation"
+    );
+}
+
+#[test]
+fn reverted_dirty_file_is_recaptured_from_clean_content() {
+    let committed = "pub fn alpha() -> u32 { 1 }\n";
+    let fixture = GitFixture::new(&[
+        ("src/lib.rs", committed),
+        ("src/other.rs", "pub fn other() -> u32 { 2 }\n"),
+    ]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let clean_row = |captured: &super::CapturedSnapshotV1| {
+        captured
+            .snapshot
+            .files
+            .iter()
+            .find(|file| file.logical_path == "src/lib.rs")
+            .expect("lib.rs snapshot row")
+            .content_digest
+            .clone()
+    };
+    let clean_digest = clean_row(
+        &scheduler
+            .capture_authoritative_snapshot(None)
+            .expect("capture clean tree"),
+    );
+
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 99 }\n");
+    scheduler.notify_hook_paths([PathBuf::from("src/lib.rs")]);
+    published(scheduler.reconcile_now().expect("publish dirty generation"));
+
+    // Revert to the committed bytes: the path is git-clean again, but the
+    // active generation still carries the dirty row.
+    fixture.edit("src/lib.rs", committed);
+    scheduler.notify_hook_paths([PathBuf::from("src/lib.rs")]);
+    let captured = scheduler
+        .capture_authoritative_snapshot(None)
+        .expect("capture reverted tree");
+    assert_eq!(
+        clean_row(&captured),
+        clean_digest,
+        "a file reverted to its committed content must be recaptured, not carried from the dirty active generation"
+    );
+    assert!(
+        captured
+            .captured_files
+            .iter()
+            .any(|file| file.sanitized_bytes.as_ref() == committed.as_bytes()),
+        "the reverted file must be re-read from disk"
+    );
+
+    // The served index must reflect the revert: the dirty body is gone and
+    // the committed body is back in the lexical chunks.
+    published(
+        scheduler
+            .reconcile_now()
+            .expect("publish reverted generation"),
+    );
+    let latest = scheduler.latest_complete().expect("reverted generation");
+    let lib_chunks = latest
+        .lexical()
+        .iter()
+        .filter(|chunk| chunk.sanitized_text.as_str().contains("fn alpha"))
+        .map(|chunk| chunk.sanitized_text.as_str().to_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        !lib_chunks.is_empty(),
+        "the reverted file must still be indexed"
+    );
+    assert!(
+        lib_chunks.iter().all(|text| text.contains("{ 1 }")),
+        "queries must serve the committed body after the revert, got {lib_chunks:?}"
+    );
+    assert!(
+        lib_chunks.iter().all(|text| !text.contains("{ 99 }")),
+        "queries must not serve the reverted dirty body, got {lib_chunks:?}"
+    );
 }
 
 #[test]
