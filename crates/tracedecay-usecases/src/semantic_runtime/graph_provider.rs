@@ -11,7 +11,8 @@ use tracedecay_domain::{
 };
 use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphGenerationDependency, GraphNamespace, GraphProjectionId,
-    GraphProjectionIdentity, GraphWriteBatch, VerifiedGenerationBatchCommit, VerifiedGraphSnapshot,
+    GraphProjectionIdentity, GraphWriteBatch, VerifiedGenerationBatchCommit,
+    VerifiedGenerationBeginV1, VerifiedGraphSnapshot,
 };
 use tracedecay_store::{
     GraphPublicationKeyV1, GraphVerifiedHeadV1, SemanticVectorPublishedGenerationKey,
@@ -19,8 +20,7 @@ use tracedecay_store::{
     SemanticVectorStageCancelOutcome, SemanticVectorStageCensusRevision, SemanticVectorStageKey,
     SemanticVectorStagePlan, SemanticVectorStagePublicationPrepareOutcome,
     SemanticVectorStagePublishOutcome, SemanticVectorStagePublishSettlement,
-    SemanticVectorStageRecord, SemanticVectorStageResumeOutcome, StoreRuntimeBindingV1,
-    StoreShardIdV1,
+    SemanticVectorStageResumeOutcome, StoreRuntimeBindingV1, StoreShardIdV1,
 };
 
 use super::config_inventory::{
@@ -249,7 +249,7 @@ pub trait VerifiedSemanticVectorGraphRuntimeV1: Send + Sync {
         &self,
         plan: &SemanticVectorStagePlan,
         authority: &SemanticGraphExecutionAuthorityV1,
-    ) -> Result<SemanticVectorStageRecord, GraphDbError>;
+    ) -> Result<VerifiedGenerationBeginV1, GraphDbError>;
 
     fn resume_stage(
         &self,

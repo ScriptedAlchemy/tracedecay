@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphDbRegistration, GraphDbRegistry,
     SemanticVectorRetentionAction, SemanticVectorRetentionCensus, SemanticVectorRetentionStep,
+    VerifiedGenerationBeginV1,
 };
 #[cfg(feature = "test-helpers")]
 use tracedecay_graph_db::{
@@ -617,6 +618,39 @@ fn native_apply_then_cancel_removes_before_settlement() {
                 )
                 .unwrap(),
             SemanticVectorStageResumeOutcome::Cancelled(_)
+        ));
+    });
+}
+
+#[test]
+fn occupied_pending_stage_reports_the_superseded_record() {
+    let fixture = ContractFixture::new();
+    let mut authority = fixture.authority();
+    let first = fixture.plan("occupied-first", "semantic-occupied-first", None);
+    let (batch, receipt) = fixture.batch_and_receipt(&first, 2.25);
+    fixture.begin_and_append(&mut authority, &first, &receipt, "occupied-first");
+    fixture
+        .apply(&mut authority, &receipt, batch, "occupied-first.native")
+        .unwrap();
+
+    let second = fixture.plan("occupied-second", "semantic-occupied-second", None);
+    with_context("occupied-second.begin", |context| {
+        let outcome = fixture
+            .graph
+            .registry
+            .begin_verified_generation(
+                fixture.registration(),
+                &mut authority,
+                context,
+                &second,
+            )
+            .expect("occupied projection must return its pending stage");
+        assert!(matches!(
+            outcome,
+            VerifiedGenerationBeginV1::Occupied { existing }
+                if existing.plan == first
+                    && existing.state == SemanticVectorStageState::Pending
+                    && existing.recorded_chunk_count == 1
         ));
     });
 }

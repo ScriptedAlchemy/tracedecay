@@ -42,7 +42,9 @@ mod support;
 #[path = "registry/vector_retirement.rs"]
 mod vector_retirement;
 pub use publication::{GraphPublicationPreparationV1, ProvenGraphPublicationV1};
-pub use staging::{VerifiedGenerationBatchApply, VerifiedGenerationBatchCommit};
+pub use staging::{
+    VerifiedGenerationBatchApply, VerifiedGenerationBatchCommit, VerifiedGenerationBeginV1,
+};
 pub use vector_retirement::{
     SemanticVectorRetentionAction, SemanticVectorRetentionCensus, SemanticVectorRetentionStep,
     SemanticVectorRetirementReservation,
