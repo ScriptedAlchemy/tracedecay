@@ -868,9 +868,14 @@ impl McpServer {
         // a full project walk; on very large indexes (especially when
         // node_modules was intentionally included) that turns diagnostics and
         // search into sync operations.
-        if !project_reader_preselected && needs_lazy_sync_before_dispatch(tool_name) {
+        let skip_graph_freshness = crate::mcp::tools::binding::tool_branch_sensitivity(tool_name)
+            == crate::mcp::tools::binding::BranchSensitivity::Independent;
+        if !skip_graph_freshness
+            && !project_reader_preselected
+            && needs_lazy_sync_before_dispatch(tool_name)
+        {
             self.maybe_sync_if_stale().await;
-        } else if !project_reader_preselected {
+        } else if !skip_graph_freshness && !project_reader_preselected {
             // D4: sync-on-read (never blocking). Read tools serve the current
             // answer IMMEDIATELY and, when the read-refresh cooldown has
             // elapsed, kick a single-flighted background refresh so the *next*
