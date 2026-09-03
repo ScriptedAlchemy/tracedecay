@@ -126,8 +126,7 @@ fn root_v2_membership_reads_the_mount_root_ceiling() {
     let cgroup_root = directory.path().join("sys-fs-cgroup");
     fs::create_dir_all(&cgroup_root).expect("cgroup mount fixture");
     fs::write(&proc_self_cgroup, "0::/\n").expect("root process cgroup membership fixture");
-    fs::write(cgroup_root.join("memory.max"), "32212254720\n")
-        .expect("root memory.max fixture");
+    fs::write(cgroup_root.join("memory.max"), "32212254720\n").expect("root memory.max fixture");
     fs::write(cgroup_root.join("memory.high"), "max\n").expect("root memory.high fixture");
 
     assert_eq!(

@@ -1277,8 +1277,8 @@ mod tests {
 
     use super::*;
     use crate::mcp_admission::{
-        CodeIndexMcpAdmissionUnavailableV1, CodeIndexMcpReadAdmissionV1,
-        CodeIndexMcpReadGrantV1, CodeIndexScopeResolverV1, CodeIndexScopeUnavailableV1,
+        CodeIndexMcpAdmissionUnavailableV1, CodeIndexMcpReadAdmissionV1, CodeIndexMcpReadGrantV1,
+        CodeIndexScopeResolverV1, CodeIndexScopeUnavailableV1,
     };
 
     #[derive(Clone)]
@@ -1309,10 +1309,8 @@ mod tests {
         fn search_authority(&self) -> CodeIndexSearchAuthorityV1 {
             CodeIndexSearchAuthorityV1 {
                 principal: PrincipalId::new("principal.unreachable").expect("principal"),
-                authorization_revision: AuthorizationRevision::new(
-                    "authorization.unreachable",
-                )
-                .expect("authorization revision"),
+                authorization_revision: AuthorizationRevision::new("authorization.unreachable")
+                    .expect("authorization revision"),
             }
         }
     }
@@ -1368,14 +1366,16 @@ mod tests {
             ],
         );
 
-        let activation = Arc::new(code_index_scheduler::CodeIndexActivationV1::new_with_admission(
-            repository.path(),
-            Arc::new(AtomicBool::new(true)),
-            CancellationToken::new(),
-            code_index_scheduler::CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled,
-            Arc::new(|| Box::pin(async { panic!("disabled activation must not mount") })),
-            Arc::new(|_| Box::pin(async { false })),
-        ));
+        let activation = Arc::new(
+            code_index_scheduler::CodeIndexActivationV1::new_with_admission(
+                repository.path(),
+                Arc::new(AtomicBool::new(true)),
+                CancellationToken::new(),
+                code_index_scheduler::CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled,
+                Arc::new(|| Box::pin(async { panic!("disabled activation must not mount") })),
+                Arc::new(|_| Box::pin(async { false })),
+            ),
+        );
         let identity = activation.identity().expect("repository identity");
         let project_id = ProjectId::new("project.linked-worktree-disabled").expect("project id");
         let scope = ResolvedScope::new(
