@@ -5951,6 +5951,7 @@ dependencies = [
  "tracedecay-application",
  "tracedecay-automation",
  "tracedecay-automation-runtime",
+ "tracedecay-capture",
  "tracedecay-code-extraction",
  "tracedecay-code-index",
  "tracedecay-code-index-retention",
