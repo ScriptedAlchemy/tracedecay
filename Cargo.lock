@@ -6861,6 +6861,7 @@ dependencies = [
  "tracedecay-domain",
  "tracedecay-store",
  "tracedecay-tool-catalog",
+ "tracing",
 ]
 
 [[package]]
