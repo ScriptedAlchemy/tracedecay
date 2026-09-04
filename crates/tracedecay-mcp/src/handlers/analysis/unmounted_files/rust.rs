@@ -1485,6 +1485,26 @@ mod tests {
         );
     }
 
+    /// Report whether `directory`'s filesystem accepts a file name that is
+    /// not valid UTF-8.
+    ///
+    /// `cfg(unix)` is a compile gate, not a filesystem capability: APFS
+    /// refuses such a name outright with `EILSEQ`, so a macOS run failed at
+    /// the fixture instead of exercising the audit. Probing keeps the coverage
+    /// everywhere the bytes are really accepted and makes the skip visible
+    /// where they are not.
+    #[cfg(unix)]
+    fn non_utf8_file_names_supported(directory: &Path) -> bool {
+        let probe = directory.join(OsStr::from_bytes(b"probe-\xFF"));
+        match std::fs::write(&probe, b"") {
+            Ok(()) => {
+                let _ = std::fs::remove_file(&probe);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
     /// A file whose name is not valid UTF-8 must be answered, not panicked on.
     /// Nothing can declare it, so it is a finding — with a repair line that
     /// admits it cannot spell the module name.
@@ -1493,6 +1513,13 @@ mod tests {
     fn a_non_utf8_file_name_is_reported_without_panicking() {
         let temp = tempfile::tempdir().expect("tempdir");
         let root = temp.path();
+        if !non_utf8_file_names_supported(root) {
+            println!(
+                "skipping a_non_utf8_file_name_is_reported_without_panicking: \
+                 this filesystem refuses non-UTF-8 file names"
+            );
+            return;
+        }
         package_manifest(root, "fixture");
         write(root, "src/lib.rs", "");
         std::fs::create_dir_all(root.join("src")).expect("src");
