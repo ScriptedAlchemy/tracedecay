@@ -413,3 +413,105 @@ fn a_store_persisted_under_the_legacy_layout_opens_and_drains_its_per_generation
         Ok(GraphReplayCollectionOutcome::Absent)
     );
 }
+
+/// A completed legacy replay remains sufficient authority to release its
+/// duplicate staging rows after migration removed the retired projection's
+/// head. The sealed artifact must still reproduce the replay's exact digest;
+/// a pending, dependency-bearing, ambiguous, or non-legacy replay stays
+/// fail-closed.
+///
+/// Fails if release checks only `verified_head` and returns
+/// `NoVerifiedLease` before inspecting the shipped legacy replay evidence.
+#[cfg(feature = "graph-sealed-store")]
+#[test]
+fn legacy_replay_without_a_head_releases_its_verified_sealed_staging_rows() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = legacy_per_generation_projection('d');
+    let code_generation = CodeGenerationId::new("code-generation.legacy-no-head").unwrap();
+    let sealed_digest =
+        SealedGraphStateDigest::try_from(format!("sha256:{}", "8".repeat(64))).unwrap();
+    let generation = manifest(
+        identity,
+        "legacy-no-head-g1",
+        "legacy-no-head",
+        vec![],
+        vec![],
+    );
+    let replay = authority.stage(
+        generation
+            .relational_sealed_replay(
+                registered.binding.shard_id.clone(),
+                GraphIdempotencyKey::new("publish:legacy-no-head-g1").unwrap(),
+                digest('8'),
+                None,
+                sealed_source(&code_generation, &sealed_digest),
+                &|| Ok(()),
+            )
+            .unwrap(),
+    );
+    let (control, probe) = control_and_probe();
+    let commit = registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &fresh_context(&control, &probe),
+            &replay.publication.key,
+            Some(Arc::new(generation.clone())),
+        )
+        .unwrap();
+    drop(commit);
+
+    assert!(registered.close().unwrap());
+    drop(registered);
+    authority
+        .heads
+        .remove(&replay.publication.key.projection)
+        .expect("the completed replay had a relational head before migration");
+
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    authority
+        .pending
+        .insert(replay.publication.key.projection.clone(), replay.clone());
+    let (control, probe) = control_and_probe();
+    assert_eq!(
+        registered.registry.release_sealed_generation_staging_rows(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &fresh_context(&control, &probe),
+            &replay.publication.key.projection,
+        ),
+        Ok(SealedStagingRelease::Retained(
+            SealedStagingRetentionReason::NoVerifiedLease,
+        )),
+        "a no-head replay that is still pending cannot authorize deletion"
+    );
+    authority.pending.remove(&replay.publication.key.projection);
+
+    let (control, probe) = control_and_probe();
+    assert_eq!(
+        registered.registry.release_sealed_generation_staging_rows(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &fresh_context(&control, &probe),
+            &replay.publication.key.projection,
+        ),
+        Ok(SealedStagingRelease::Released {
+            entities: 1,
+            relations: 0,
+        })
+    );
+    let database = registered
+        .registry
+        .resolve(registration(registered.binding.clone(), temp.path()))
+        .unwrap();
+    assert_eq!(
+        database
+            .staging_generation_row_counts(&generation.identity())
+            .unwrap(),
+        (0, 0),
+        "the replay-verified sealed artifact makes the staging copy redundant"
+    );
+}
