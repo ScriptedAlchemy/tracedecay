@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
-use tokio::time::{Duration, Instant};
+use tokio::time::{Duration, Instant, timeout};
 use tracedecay_daemon_control::default_socket_path;
 #[cfg(not(unix))]
 use tracedecay_daemon_identity::current_daemon_connection;
@@ -82,13 +82,51 @@ fn wire_request_deadline_micros(request_deadline: Instant) -> tracedecay_domain:
 pub(crate) const DAEMON_RESTART_GRACE: Duration = Duration::from_secs(8);
 pub(crate) const DAEMON_RESTART_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
+/// How long a liveness probe waits for the daemon endpoint to accept a
+/// connection before the in-flight request is declared unreachable.
+const DAEMON_TOOL_HEALTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Liveness for a one-shot request that is already on the wire.
+///
+/// Two independent facts have to hold, and neither implies the other:
+///
+/// * the authority record that named this endpoint is still the current one,
+///   which catches a daemon that restarted under a rotated epoch while its
+///   old connection was never closed; and
+/// * the endpoint still accepts connections, which catches a daemon that
+///   stopped listening (socket unlinked, listener dropped) while holding this
+///   connection open. Nothing on the read half distinguishes that from a
+///   healthy daemon still computing a long answer, so without the probe the
+///   caller waits out its whole deadline on a daemon that can never answer.
+///
+/// The one-shot tool-call and stdio-proxy clients open exactly one connection
+/// per request, so a probe connection here costs one accept per poll interval
+/// and never competes with a pooled connection budget.
 #[hotpath::measure(label = "daemon.core.ensure_connection_live", future = true)]
 pub(crate) async fn ensure_daemon_connection_live(
     connection: &DaemonConnection,
     request_label: &str,
 ) -> Result<()> {
     connection.ensure_authority_current(request_label)?;
-    Ok(())
+
+    timeout(
+        DAEMON_TOOL_HEALTH_CONNECT_TIMEOUT,
+        BrokerStream::connect(&connection.endpoint),
+    )
+    .await
+    .map_err(|_| TraceDecayError::Config {
+        message: format!(
+            "daemon health check timed out at '{}' while request '{request_label}' was awaiting a response; the request was already sent and was not retried",
+            connection.endpoint
+        ),
+    })?
+    .map(|_| ())
+    .map_err(|error| TraceDecayError::Config {
+        message: format!(
+            "daemon became unreachable at '{}' while request '{request_label}' was awaiting a response: {error}; the request was already sent and was not retried",
+            connection.endpoint
+        ),
+    })
 }
 
 #[hotpath::measure(label = "daemon.core.next_response", future = true)]
