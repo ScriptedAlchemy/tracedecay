@@ -7,9 +7,8 @@ use tracedecay_store::{
     TranscriptWriteBatch, TranscriptWriteKind,
 };
 
-use tracedecay_global_db::{
-    GlobalDbGitCorrelationStore, RegisteredGlobalDb, TranscriptPersistenceError,
-};
+use tracedecay_global_db::{RegisteredGlobalDb, TranscriptPersistenceError};
+use tracedecay_sessions::runtime::TranscriptGitEvidence;
 use tracedecay_sessions::runtime::git_correlation::{CommitSessionRecord, SpanObservation};
 use tracedecay_sessions::runtime::store_port::TranscriptIngestStore;
 
@@ -147,22 +146,25 @@ where
                 next_offset,
             } => {
                 self.db()
-                    .persist_transcript_batch_result(
+                    .persist_transcript_batch_with_git_evidence_result(
                         &session,
                         &messages,
                         &cursor_key,
                         expected_offset,
                         next_offset,
+                        TranscriptGitEvidence::new(
+                            "transcript-git-evidence",
+                            commit_records,
+                            span_observations,
+                        ),
                     )
                     .await
                     .map_err(|error| Self::persistence_error(&cursor_path, error))?;
 
-                GlobalDbGitCorrelationStore::new(self.db())
-                    .publish_transcript_evidence(
-                        "transcript-git-evidence",
-                        commit_records,
-                        span_observations,
-                    )
+                self.db()
+                    .replay_pending_git_evidence_publications()
+                    .await
+                    .map(|_| ())
                     .map_err(|error| TranscriptStoreError::Storage {
                         operation: "publish transcript git evidence",
                         source: Box::new(error),

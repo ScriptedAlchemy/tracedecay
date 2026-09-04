@@ -1,6 +1,7 @@
 use super::{ParseOffset, RegisteredGlobalDb, TranscriptBatch};
 use tracedecay_sessions::runtime::{
-    SessionMessageRecord, SessionRecord, SessionStoreAccess, TranscriptPersistenceError,
+    SessionMessageRecord, SessionRecord, SessionStoreAccess, TranscriptGitEvidence,
+    TranscriptPersistenceError,
 };
 
 pub(super) use tracedecay_sessions::runtime::store_access::{
@@ -60,6 +61,31 @@ impl RegisteredGlobalDb {
                 parse_offset_path,
                 expected_offset,
                 parse_offset,
+            )
+            .await
+    }
+
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.transcript.persist_batch_with_git_evidence"
+    )]
+    pub async fn persist_transcript_batch_with_git_evidence_result(
+        &self,
+        session: &SessionRecord,
+        messages: &[SessionMessageRecord],
+        parse_offset_path: &str,
+        expected_offset: ParseOffset,
+        parse_offset: ParseOffset,
+        git_evidence: TranscriptGitEvidence<'_>,
+    ) -> Result<(), TranscriptPersistenceError> {
+        SessionStoreAccess::new(self)
+            .persist_transcript_batch_with_git_evidence_result(
+                session,
+                messages,
+                parse_offset_path,
+                expected_offset,
+                parse_offset,
+                git_evidence,
             )
             .await
     }

@@ -370,7 +370,7 @@ impl git_correlation::GitCorrelationSessionStore for GraphBackedTestStore {
 
     fn git_evidence_publication_lock(
         &self,
-    ) -> Result<&std::sync::Mutex<()>, git_correlation::GitCorrelationError> {
+    ) -> Result<std::sync::Arc<std::sync::Mutex<()>>, git_correlation::GitCorrelationError> {
         Ok(self.graph.git_evidence_publication_lock())
     }
 

@@ -15,6 +15,7 @@ use std::process::Command;
 use tempfile::TempDir;
 
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_domain::ObservationScopeV1;
 use tracedecay_domain::ProjectId;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::git_correlation::{
@@ -22,6 +23,7 @@ use tracedecay_sessions::runtime::git_correlation::{
     SessionsForQuery, normalize_worktree,
 };
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
+use tracedecay_usecases::observation::ObservationCancellation;
 
 use crate::common;
 
@@ -481,9 +483,48 @@ async fn incremental_backfill_advances_watermark_and_is_idempotent() {
 }
 
 #[tokio::test]
-async fn incremental_backfill_cap_drains_history_oldest_first_across_passes() {
+async fn project_host_admission_drain_bootstraps_retained_git_evidence() {
     let (_base, repo, _main, _feature) = build_repo();
     let (_db_tmp, db, _project) = open_seeded_db(&repo).await;
+    let scope = ObservationScopeV1::Project {
+        project_id: ProjectId::new("project.git-backfill").unwrap(),
+    };
+
+    let drained = db
+        .facade()
+        .drain_projection_queue("claude", &scope, &ObservationCancellation::default(), 16)
+        .await
+        .unwrap();
+    assert!(!drained.deferred, "the two-session history fits one page");
+    assert_eq!(
+        db.git_correlation_meta_for_test(AUTO_BACKFILL_WATERMARK_KEY)
+            .await
+            .unwrap(),
+        Some(T_BASE + 850),
+        "the production host-admission caller must advance the durable watermark"
+    );
+    let hits = db
+        .git_sessions_for_for_test(
+            &SessionsForQuery {
+                git_ref: GitRefFilter::Branch("main".to_owned()),
+                since: None,
+                until: None,
+                limit: 20,
+            },
+            CommitRelationFilter::Observed,
+        )
+        .await
+        .unwrap();
+    assert!(
+        hits.iter().any(|hit| hit.session_id == "s_main"),
+        "retained session metadata must become queryable Git evidence"
+    );
+}
+
+#[tokio::test]
+async fn incremental_backfill_cap_drains_history_oldest_first_across_passes() {
+    let (_base, repo, main_shas, _feature) = build_repo();
+    let (db_tmp, db, _project) = open_seeded_db(&repo).await;
     let git = incremental_git(&repo);
 
     // A cap of one session per pass drains oldest-first. s_main's activity
@@ -500,6 +541,38 @@ async fn incremental_backfill_cap_drains_history_oldest_first_across_passes() {
         Some(T_BASE + 200),
         "oldest session processed first"
     );
+    let first_commit = main_shas.last().expect("first main commit");
+    let first_page_hits = db
+        .git_sessions_for_for_test(
+            &SessionsForQuery {
+                git_ref: GitRefFilter::Commit(first_commit.clone()),
+                since: None,
+                until: None,
+                limit: 20,
+            },
+            CommitRelationFilter::Observed,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        first_page_hits
+            .iter()
+            .map(|hit| hit.session_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["s_main"],
+        "the first bounded page must publish a queryable span and commit generation"
+    );
+
+    // Release and reopen the complete registered runtime to prove that the
+    // second page resumes from the durable tuple watermark, not process state.
+    drop(db);
+    let db = HostAdmissionTestRuntimeV1::project(
+        db_tmp.path().join(".tracedecay"),
+        &repo,
+        ProjectId::new("project.git-backfill").unwrap(),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("restart registered sessions runtime: {error}"));
 
     let pass2 = db
         .run_incremental_git_backfill_for_test(&git, 1)
