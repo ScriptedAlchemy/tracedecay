@@ -15,7 +15,8 @@ use tracedecay_semantic_contracts::SemanticRuntimeScheduleFailureV1;
 
 use super::embedding_backend::{ProductionEmbeddingRuntime, production_embedding_runtime_factory};
 use super::fastembed_adapter::{
-    AdmittedProjectionArtifactV1, SemanticExecutionAuthority, SemanticExecutionInterruptionV1,
+    AdmittedProjectionArtifactV1, EmbeddingRuntime, SemanticExecutionAuthority,
+    SemanticExecutionInterruptionV1,
 };
 use super::projector::{
     CanonicalChunkVectorEncoderV1, PreparedVectorGenerationV1, prepare_vector_generation,
@@ -421,8 +422,32 @@ pub struct PreparedSemanticEvaluationProjectionV1 {
 /// Process-local resource ceilings for one evaluator projection runtime.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SemanticEvaluationProjectionResourcesV1 {
-    pub max_sessions: usize,
     pub memory_ceiling_bytes: u64,
+}
+
+fn semantic_evaluation_runtime<R>(
+    authority: Arc<AdmittedProjectionArtifactV1>,
+    factory: SharedEmbeddingRuntimeFactory<R>,
+    resources: SemanticEvaluationProjectionResourcesV1,
+) -> Result<Arc<SemanticRuntimeService<R>>, SemanticRuntimeScheduleFailureV1>
+where
+    R: EmbeddingRuntime + Send + Sync + 'static,
+{
+    SemanticRuntimeService::new_owned(
+        authority,
+        factory,
+        SessionPoolConfigV1 {
+            // Qualification is one request-scoped model owner. Projection
+            // groups and genuine queries reuse that one session; inheriting
+            // the serving/indexing fan-out would construct another complete
+            // model for the same ephemeral request.
+            max_sessions: 1,
+            max_queued_waiters: 0,
+            idle_timeout: std::time::Duration::from_mins(5),
+            memory_ceiling_bytes: resources.memory_ceiling_bytes,
+        },
+    )
+    .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)
 }
 
 #[expect(
@@ -461,17 +486,7 @@ pub fn prepare_semantic_evaluation_projection(
             )
         }
         None => {
-            let runtime = SemanticRuntimeService::new_owned(
-                Arc::clone(&authority),
-                factory,
-                SessionPoolConfigV1 {
-                    max_sessions: resources.max_sessions,
-                    max_queued_waiters: 0,
-                    idle_timeout: std::time::Duration::from_mins(5),
-                    memory_ceiling_bytes: resources.memory_ceiling_bytes,
-                },
-            )
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?;
+            let runtime = semantic_evaluation_runtime(Arc::clone(&authority), factory, resources)?;
             let query_factory = SemanticEvaluationQueryFactoryV1::from_runtime(
                 PooledSemanticQueryEmbedderFactory::new(Arc::clone(&runtime)),
             );
@@ -732,10 +747,14 @@ mod tests {
     use tracedecay_domain::{
         BoundedSanitizedText, ChangedCodeChunkSetV1, ChangedCodeChunkV1, ChunkerRevision,
         CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId,
-        ContentDigest, EmbeddingDocumentCompositionV1, FileOccurrenceId,
-        LanguageDescriptorRevision, ManifestDigest, PolicyRevisionId, ProjectionBatchRequestV1,
-        ProjectionReplayReasonV1, SanitizerRevision, SensitivityDecision, SensitivityLevelV1,
+        ContentDigest, EmbeddingDocumentCompositionV1, EphemeralSanitizedQueryViewV1,
+        FileOccurrenceId, LanguageDescriptorRevision, ManifestDigest, PolicyRevisionId,
+        ProjectionBatchRequestV1, ProjectionReplayReasonV1, QueryDigest, QueryMac,
+        QueryNormalizationRevision, SanitizerRevision, SensitivityDecision, SensitivityLevelV1,
         SourceSpan,
+    };
+    use tracedecay_query::retrieval::semantic::{
+        SemanticQueryEmbeddingPort, SemanticQueryEmbeddingRequestV1,
     };
     use tracedecay_semantic_contracts::SemanticResourceCeilings;
 
@@ -743,11 +762,21 @@ mod tests {
         CachedSemanticEvaluationChunkEncoderV1, CanonicalChunkVectorEncoderV1, CodeSearchChunkV1,
         EmbeddingProjectionKeyV1, SemanticEvaluationCancellationV1,
         SemanticEvaluationProjectionBatchCachePolicyV1, SemanticEvaluationProjectionBatchCacheV1,
-        SemanticExecutionAuthority, SemanticExecutionInterruptionV1, prepare_vector_generation,
+        SemanticEvaluationProjectionResourcesV1, SemanticExecutionAuthority,
+        SemanticExecutionInterruptionV1, prepare_vector_generation, semantic_evaluation_runtime,
     };
     use crate::AdmittedProjectionArtifactV1;
+    use crate::RuntimeChunkVectorEncoderV1;
+    use crate::embedding_parallelism::{
+        EmbeddingExecutionPlanV1, EmbeddingSessionLimitingReasonV1,
+    };
+    use crate::fastembed_adapter::{FakeEmbeddingRuntime, ManualCancellation};
     use crate::model_catalog::{
         CatalogMemberPinV1, CatalogSourceV1, CatalogedEmbeddingBackendV1, CatalogedFastEmbedModelV1,
+    };
+    use crate::runtime_query::PooledSemanticQueryEmbedderFactory;
+    use crate::runtime_service::{
+        SemanticRuntimeScheduleCancellationV1, SharedEmbeddingRuntimeFactory,
     };
 
     struct ActiveCancellation;
@@ -1061,6 +1090,69 @@ mod tests {
             cancellation(),
             documents(),
         )
+    }
+
+    #[test]
+    fn native_qualification_projection_and_query_share_exactly_one_model_session() {
+        let authority = Arc::new(crate::session_pool::test_support::authority());
+        let factory: SharedEmbeddingRuntimeFactory<FakeEmbeddingRuntime> =
+            Arc::new(|| Ok(FakeEmbeddingRuntime::new().with_resident_bytes_per_session(1_024)));
+        let runtime = semantic_evaluation_runtime(
+            Arc::clone(&authority),
+            factory,
+            SemanticEvaluationProjectionResourcesV1 {
+                memory_ceiling_bytes: 1 << 20,
+            },
+        )
+        .expect("evaluation runtime");
+        let first = chunk('a', "first native qualification group");
+        let second = chunk('b', "second native qualification group");
+        let first_group = [&first];
+        let second_group = [&second];
+        let mut encoder = RuntimeChunkVectorEncoderV1::new(
+            Arc::clone(&runtime),
+            Arc::new(SemanticRuntimeScheduleCancellationV1::new(2)),
+            EmbeddingExecutionPlanV1 {
+                intra_threads: 1,
+                sessions: 2,
+                limiting_reason: EmbeddingSessionLimitingReasonV1::ConfiguredMaximum,
+            },
+            documents(),
+        );
+        encoder
+            .encode_batches(
+                authority.projection().embedding_key(),
+                &[first_group.as_slice(), second_group.as_slice()],
+            )
+            .expect("multi-group qualification projection");
+        drop(encoder);
+
+        let query_factory = PooledSemanticQueryEmbedderFactory::new(Arc::clone(&runtime));
+        let query = query_factory.create(Arc::new(ManualCancellation::new()));
+        let query_view = EphemeralSanitizedQueryViewV1::sanitize(
+            "reuse the qualification model",
+            SanitizerRevision::new("sanitizer.v1").expect("sanitizer fixture"),
+            QueryNormalizationRevision::new("normalizer.v1").expect("normalizer fixture"),
+        )
+        .expect("bounded query");
+        let query_digest = QueryDigest::new(
+            authority.projection().privacy_domain().clone(),
+            authority.projection().privacy_key_epoch(),
+            QueryMac::new(format!("hmac-sha256:{}", "11".repeat(32))).expect("query MAC"),
+        );
+        query
+            .embed_query(SemanticQueryEmbeddingRequestV1 {
+                query_digest: &query_digest,
+                query_view: &query_view,
+                projection: authority.projection(),
+            })
+            .expect("genuine qualification query");
+
+        assert_eq!(
+            runtime.stats().sessions_opened,
+            1,
+            "one qualification request must construct one model session even when the admitted runtime can fan out",
+        );
     }
 
     struct LifecycleAuthorityFixtureV1 {
