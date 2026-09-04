@@ -120,20 +120,33 @@ pub(crate) async fn handle_real_server_tool_call(
     if let Some(text) = result["content"][0]["text"].as_str()
         && let Some(handle) = truncated_response_handle(text)
     {
-        let retrieved = handle_real_server_tool_call_raw(
-            server,
-            "tracedecay_retrieve",
-            json!({ "handle": handle }),
-        )
-        .await;
-        assert!(retrieved["error"].is_null(), "{retrieved}");
-        let record: Value = serde_json::from_str(
-            retrieved["result"]["content"][0]["text"]
-                .as_str()
-                .expect("retrieved response text"),
-        )
-        .expect("retrieved response JSON");
-        result["content"][0]["text"] = record["content"].clone();
+        // `tracedecay_retrieve` pages the stored response so every page fits
+        // the response budget; reassemble the pages exactly as an agent would.
+        let mut content = String::new();
+        let mut offset = 0_u64;
+        loop {
+            let retrieved = handle_real_server_tool_call_raw(
+                server,
+                "tracedecay_retrieve",
+                json!({ "handle": handle, "offset": offset }),
+            )
+            .await;
+            assert!(retrieved["error"].is_null(), "{retrieved}");
+            let page: Value = serde_json::from_str(
+                retrieved["result"]["content"][0]["text"]
+                    .as_str()
+                    .expect("retrieved response text"),
+            )
+            .expect("retrieved response JSON");
+            content.push_str(page["content"].as_str().expect("retrieved page content"));
+            if page["has_more"] != Value::Bool(true) {
+                break;
+            }
+            offset = page["next_offset"]
+                .as_u64()
+                .expect("retrieved page next_offset");
+        }
+        result["content"][0]["text"] = Value::String(content);
     }
     // Retained tools answer with the versioned `schema.application.retained.*`
     // envelope; these tests assert the owner's payload, so unwrap evidence and
