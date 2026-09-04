@@ -412,7 +412,7 @@ impl SessionTemporalRefreshWakeState {
             SessionHistoricalIngestOutcome::Retryable { reason_code, .. } => {
                 SessionHistoricalServingState::Retryable(reason_code.to_owned())
             }
-            SessionHistoricalIngestOutcome::Blocked { reason_code } => {
+            SessionHistoricalIngestOutcome::Blocked { reason_code, .. } => {
                 SessionHistoricalServingState::Blocked(reason_code.to_owned())
             }
             SessionHistoricalIngestOutcome::Cancelled => return,

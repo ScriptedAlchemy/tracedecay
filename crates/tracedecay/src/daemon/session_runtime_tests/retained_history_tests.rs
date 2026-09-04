@@ -6,13 +6,30 @@ use std::sync::PoisonError;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
+use serde_json::json;
 use tempfile::TempDir;
 
 use super::SessionTemporalRefreshTestAuthority;
+use tracedecay_domain::{
+    CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
+    CanonicalObservationFactV1, CanonicalObservationRelationsV1, ComponentVersion,
+    DurableObservationV1, ObservationId, ObservationIdentityMaterialV1,
+    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
+    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
+    PayloadReferenceV1, ProjectionGenerationId, ProviderId, RetentionClass, SanitizationReceiptId,
+    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
+    SessionId, UtcMicros,
+};
+use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::history::{
     SessionHistoricalIngestOutcome, SessionHistoricalIngestPass, SessionHistoricalIngestor,
 };
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::registry::SessionTemporalRefreshSchedulerRegistry;
+use tracedecay_store::{
+    AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStore,
+    ObservationStore, ObservationWrite, build_observation_resolution_authorization_v1,
+    build_observation_retrieval_anchor_v2,
+};
 
 use crate::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
@@ -72,6 +89,79 @@ struct PanicOnceHistoricalIngestor {
     passes: AtomicUsize,
 }
 
+/// Uses the real observation and projection authorities so this scheduler
+/// journey catches a lost `made_progress` bit rather than testing a mock's
+/// call count. The permanent Cursor failure is represented only in the
+/// aggregate history result: its raw record was rejected, while Claude and
+/// Codex each admitted one durable observation.
+struct HealthyProvidersWithBlockedCursorIngestor {
+    database: RegisteredGlobalDbLeaseV1,
+    passes: AtomicUsize,
+    committed: AtomicUsize,
+    duplicates: AtomicUsize,
+}
+
+impl HealthyProvidersWithBlockedCursorIngestor {
+    fn new(database: RegisteredGlobalDbLeaseV1) -> Self {
+        Self {
+            database,
+            passes: AtomicUsize::new(0),
+            committed: AtomicUsize::new(0),
+            duplicates: AtomicUsize::new(0),
+        }
+    }
+
+    async fn admit_healthy_provider(&self, provider: &str, session: &str) -> bool {
+        let store = self.database.as_ref().observation_store();
+        match store
+            .persist_observation(healthy_provider_observation(provider, session))
+            .await
+            .expect("fixture observation persistence")
+        {
+            ObservationPersistOutcome::Committed(_) => {
+                self.committed.fetch_add(1, Ordering::AcqRel);
+                let observation_id = store
+                    .next_queued_observation()
+                    .await
+                    .expect("fixture observation queue")
+                    .expect("newly committed fixture observation");
+                store
+                    .project_observation(&observation_id)
+                    .await
+                    .expect("fixture observation projection");
+                true
+            }
+            ObservationPersistOutcome::ExactDuplicate(_) => {
+                self.duplicates.fetch_add(1, Ordering::AcqRel);
+                false
+            }
+            ObservationPersistOutcome::CoveredDuplicate(_) => {
+                panic!("fixture replay must be an exact duplicate")
+            }
+        }
+    }
+}
+
+impl SessionHistoricalIngestor for HealthyProvidersWithBlockedCursorIngestor {
+    fn run_pass(&self) -> SessionHistoricalIngestPass<'_> {
+        Box::pin(async move {
+            self.passes.fetch_add(1, Ordering::AcqRel);
+            let claude_progress = self
+                .admit_healthy_provider("claude", "session.healthy.claude")
+                .await;
+            let codex_progress = self
+                .admit_healthy_provider("codex", "session.healthy.codex")
+                .await;
+            SessionHistoricalIngestOutcome::Blocked {
+                reason_code: "observation_cursor_advance_collision",
+                made_progress: claude_progress || codex_progress,
+            }
+        })
+    }
+
+    fn cancel(&self) {}
+}
+
 impl SessionHistoricalIngestor for PanicOnceHistoricalIngestor {
     fn run_pass(&self) -> SessionHistoricalIngestPass<'_> {
         Box::pin(async move {
@@ -119,6 +209,7 @@ impl SessionHistoricalIngestor for BlockThirdHistoricalIngestor {
                     self.release_third.notified().await;
                     SessionHistoricalIngestOutcome::Blocked {
                         reason_code: "fixture_complete",
+                        made_progress: false,
                     }
                 }
             }
@@ -182,6 +273,97 @@ impl SessionHistoricalIngestor for CancelAwareHistoricalIngestor {
         self.cancelled.store(true, Ordering::Release);
         self.wake.notify_waiters();
     }
+}
+
+fn healthy_provider_observation(provider: &str, session: &str) -> AnchoredObservationWrite {
+    let provider = ProviderId::new(provider).expect("fixture provider");
+    let session_id = SessionId::new(session).expect("fixture session");
+    let source = ObservationSourceIdentityV1::for_provider(provider.clone(), session_id.clone())
+        .expect("fixture source identity");
+    let generation = ObservationSourceGenerationV1::new(1).expect("fixture source generation");
+    let range = ObservationSourceRangeV1::new(0, 1).expect("fixture source range");
+    let record_id = ObservationId::new(format!("record.healthy.{}", provider.as_str()))
+        .expect("fixture record identity");
+    let envelope = CanonicalObservationEnvelopeV1::new(
+        provider.clone(),
+        "message",
+        record_id.clone(),
+        CanonicalObservationRelationsV1::new(session_id),
+        vec![CanonicalObservationFactV1::Message {
+            role: CanonicalMessageRoleV1::Assistant,
+            content: json!({"text": "healthy historical catch-up"}),
+            model: Some("fixture-model".to_owned()),
+            timestamp: Some(1_750_000_000),
+        }],
+        CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::SnapshotOrder, range),
+    )
+    .expect("fixture observation envelope");
+    let payload = serde_json::to_value(envelope).expect("fixture observation payload");
+    let observation = DurableObservationV1::new(
+        ObservationIdentityMaterialV1::for_native_record(
+            source,
+            ObservationScopeV1::Profile,
+            generation,
+            range,
+            ObservationOrderingDomainV1::SnapshotOrder,
+            record_id,
+        )
+        .expect("fixture observation identity"),
+        SanitizationReceiptV1::new(
+            SanitizationReceiptRefV1::new(
+                SanitizationReceiptId::new(format!("receipt.healthy.{}", provider.as_str()))
+                    .expect("fixture receipt identity"),
+                ComponentVersion::new("sanitizer.history-scheduler-fixture.v1")
+                    .expect("fixture sanitizer version"),
+            )
+            .expect("fixture receipt reference"),
+            SanitizerDispositionV1::Accepted,
+            SensitivityV1::NonSensitive,
+            Some(PayloadReferenceV1::for_payload(&payload).expect("fixture payload reference")),
+        )
+        .expect("fixture sanitization receipt"),
+        RetentionClass::new("retention.history-scheduler-fixture")
+            .expect("fixture retention class"),
+        payload,
+    )
+    .expect("fixture durable observation");
+    let identity = observation.identity();
+    let next_cursor = ObservationSourceCursorV1::for_ordering(
+        observation.source().clone(),
+        observation.scope().clone(),
+        identity.generation(),
+        identity.ordering_domain(),
+        identity.position().end(),
+    )
+    .expect("fixture next cursor");
+    let write = ObservationWrite::new(observation, None, next_cursor).expect("fixture write");
+    let generation = ProjectionGenerationId::new("projection.history-scheduler-fixture.v1")
+        .expect("fixture projection generation");
+    let authorization =
+        build_observation_resolution_authorization_v1(write.observation(), "history-scheduler")
+            .expect("fixture resolution authorization");
+    let anchor = build_observation_retrieval_anchor_v2(
+        write.observation(),
+        generation.clone(),
+        UtcMicros(1),
+        authorization,
+    )
+    .expect("fixture retrieval anchor");
+    AnchoredObservationWrite::new(write, anchor, generation).expect("fixture anchored write")
+}
+
+async fn scalar(database: &RegisteredGlobalDb, query: &str) -> i64 {
+    let mut rows = database
+        .read_connection()
+        .query(query, ())
+        .await
+        .expect("fixture scalar query");
+    rows.next()
+        .await
+        .expect("fixture scalar row read")
+        .expect("fixture scalar row")
+        .get(0)
+        .expect("fixture scalar decode")
 }
 
 async fn profile_authority(temp: &TempDir, label: &str) -> SessionTemporalRefreshTestAuthority {
@@ -518,4 +700,105 @@ async fn retrying_history_is_typed_stale() {
     );
 
     registry.shutdown().await;
+}
+
+#[tokio::test]
+async fn blocked_cursor_failure_projects_healthy_provider_progress_once_across_restart() {
+    let temp = TempDir::new().unwrap();
+    let authority = profile_authority(&temp, "history-blocked-progress").await;
+    let ingestor = Arc::new(HealthyProvidersWithBlockedCursorIngestor::new(
+        authority.database.clone(),
+    ));
+    let registry = SessionTemporalRefreshSchedulerRegistry::default();
+
+    let wake = registry
+        .ensure_profile_with_history(
+            authority.database().db_path().to_path_buf(),
+            authority.database.clone(),
+            ingestor.clone(),
+        )
+        .await;
+    assert!(
+        wait_until(
+            || ingestor.passes.load(Ordering::Acquire) >= 1,
+            Duration::from_secs(2),
+        )
+        .await,
+        "the initial historical sweep must run"
+    );
+    assert!(
+        registry
+            .wait_profile_idle(authority.database().db_path(), Duration::from_secs(2))
+            .await,
+        "healthy provider progress must request temporal projection even while Cursor is blocked"
+    );
+    assert_eq!(
+        wake.serving_status().state,
+        SessionProjectionServingState::Stale {
+            reason: SessionProjectionStaleReason::HistoricalBlocked {
+                reason_code: "observation_cursor_advance_collision".to_owned(),
+            },
+        },
+        "a permanent Cursor failure remains typed blocked"
+    );
+    assert!(
+        wake.serving_status().last_progress_at_unix_micros.is_some(),
+        "the healthy Claude and Codex rows must be recorded as progress"
+    );
+    assert_eq!(
+        scalar(
+            authority.database(),
+            "SELECT COUNT(*) FROM session_occurrences
+             WHERE session_id IN ('session.healthy.claude', 'session.healthy.codex')",
+        )
+        .await,
+        2,
+        "both healthy providers must advance the temporal projection"
+    );
+    registry.shutdown().await;
+
+    let restarted = SessionTemporalRefreshSchedulerRegistry::default();
+    let restarted_wake = restarted
+        .ensure_profile_with_history(
+            authority.database().db_path().to_path_buf(),
+            authority.database.clone(),
+            ingestor.clone(),
+        )
+        .await;
+    assert!(
+        wait_until(
+            || ingestor.passes.load(Ordering::Acquire) >= 2,
+            Duration::from_secs(2),
+        )
+        .await,
+        "the restarted worker must replay the retained historical source"
+    );
+    assert!(
+        restarted
+            .wait_profile_idle(authority.database().db_path(), Duration::from_secs(2))
+            .await
+    );
+    assert_eq!(
+        restarted_wake.serving_status().state,
+        SessionProjectionServingState::Stale {
+            reason: SessionProjectionStaleReason::HistoricalBlocked {
+                reason_code: "observation_cursor_advance_collision".to_owned(),
+            },
+        },
+        "restart preserves the typed blocked Cursor state"
+    );
+    assert_eq!(
+        scalar(
+            authority.database(),
+            "SELECT COUNT(*) FROM session_occurrences
+             WHERE session_id IN ('session.healthy.claude', 'session.healthy.codex')",
+        )
+        .await,
+        2,
+        "replayed Claude and Codex inputs must not duplicate temporal occurrences"
+    );
+    assert_eq!(ingestor.committed.load(Ordering::Acquire), 2);
+    assert_eq!(ingestor.duplicates.load(Ordering::Acquire), 2);
+
+    restarted.shutdown().await;
 }
