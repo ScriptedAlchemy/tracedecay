@@ -312,6 +312,102 @@ impl RegisteredGlobalDb {
     }
 
     #[hotpath::skip]
+    pub async fn lcm_compress_retained_page_guarded<F>(
+        &self,
+        request: LcmCompressionRequest,
+        control: &ExecutionControl,
+        before_commit: F,
+        row_limit: usize,
+        byte_limit: u64,
+        convergence_candidate: Option<
+            &tracedecay_lcm::summary_convergence::LcmSummaryConvergenceCandidate,
+        >,
+    ) -> Result<tracedecay_lcm::summary_convergence::LcmBoundedCompressionResponse, LcmError>
+    where
+        F: FnOnce() -> Result<(), LcmError>,
+    {
+        check_execution(control)?;
+        let storage_root = self.lcm_storage_root()?;
+        let session_id = SessionId::new(request.session_id.clone()).map_err(|error| {
+            LcmError::Db(format!(
+                "invalid retained LCM compression session identity '{}': {error}",
+                request.session_id
+            ))
+        })?;
+        let transaction = self
+            .begin_write_transaction()
+            .await
+            .map_err(|error| LcmError::Db(error.to_string()))?;
+        let mut payload_rollback =
+            payload::PayloadFileRollback::begin_cancellation_safe(storage_root);
+        let relation_projection = seed_session_relation_projection(
+            self,
+            &transaction,
+            &session_id,
+            execution_control_graph_cancellation(control),
+        )
+        .await
+        .map_err(|error| {
+            LcmError::Db(format!(
+                "seed native retained LCM relation projection: {error}"
+            ))
+        })?;
+        check_execution(control)?;
+        let publisher = session_temporal_operations::GlobalDbLcmSummaryPublication::for_scope(
+            &transaction,
+            relation_projection,
+        );
+        let mut bounded = compression::compress_retained_page(
+            &transaction,
+            &publisher,
+            storage_root,
+            request,
+            &mut payload_rollback,
+            row_limit,
+            byte_limit,
+        )
+        .await?;
+        if bounded.response.status != "needs_summary"
+            && let Some(candidate) = convergence_candidate
+        {
+            let state = if bounded.has_more {
+                tracedecay_lcm::summary_convergence::LcmSummaryConvergenceQueueState::Pending
+            } else {
+                tracedecay_lcm::summary_convergence::LcmSummaryConvergenceQueueState::Current
+            };
+            tracedecay_lcm::summary_convergence::record_outcome(
+                &transaction,
+                candidate,
+                state,
+                None,
+                0,
+                0,
+            )
+            .await?;
+        }
+        check_execution(control)?;
+        before_commit()?;
+        transaction.commit().await?;
+        payload_rollback.disarm();
+        if !bounded.response.summary_nodes.is_empty() {
+            check_execution(control)?;
+            self.apply_active_session_relation_projection(
+                &session_id,
+                execution_control_graph_cancellation(control),
+            )
+            .await
+            .map_err(|error| {
+                LcmError::Db(format!(
+                    "apply native retained LCM relation projection: {error}"
+                ))
+            })?;
+            bounded.response.relation_projection_status = LcmRelationProjectionStatus::Applied;
+            check_execution(control)?;
+        }
+        Ok(bounded)
+    }
+
+    #[hotpath::skip]
     pub async fn lcm_payload_health_detail(
         &self,
         storage_root: &Path,
@@ -362,6 +458,26 @@ impl RegisteredGlobalDb {
     ) -> Result<u64, LcmError> {
         SessionStoreAccess::new(self)
             .lcm_protect_session_raw_messages(provider, session_id)
+            .await
+    }
+
+    #[hotpath::skip]
+    pub async fn lcm_protect_session_raw_messages_page(
+        &self,
+        provider: &str,
+        session_id: &str,
+        after_store_id: i64,
+        page_limit: usize,
+        page_max_bytes: u64,
+    ) -> Result<tracedecay_lcm::summary_convergence::LcmRawProtectionPage, LcmError> {
+        SessionStoreAccess::new(self)
+            .lcm_protect_session_raw_messages_page(
+                provider,
+                session_id,
+                after_store_id,
+                page_limit,
+                page_max_bytes,
+            )
             .await
     }
 
