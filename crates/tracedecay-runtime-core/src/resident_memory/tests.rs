@@ -1,6 +1,6 @@
 use std::fs;
 use std::num::NonZeroU64;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
 
@@ -769,6 +769,47 @@ fn reaching_the_high_watermark_runs_pressure_reclaimers_with_the_measurement() {
 }
 
 #[test]
+fn post_reclaim_observation_replaces_pressure_state_without_reentering_reclaimers() {
+    let (authority, pressure) = pressure_authority();
+    let calls = Arc::new(Mutex::new(0_u64));
+    let callback_calls = Arc::clone(&calls);
+    let callback_pressure = Arc::downgrade(&pressure);
+    let after_reclaim = pressure.low_watermark_bytes();
+    let _registration = pressure
+        .register_pressure_reclaimer(
+            10,
+            Arc::new(move |_| {
+                *callback_calls.lock().expect("call count") += 1;
+                callback_pressure
+                    .upgrade()
+                    .expect("pressure authority remains live")
+                    .publish_post_reclaim_observed_resident_bytes(after_reclaim);
+                4096
+            }),
+        )
+        .expect("pressure reclaimer registration");
+
+    let state = pressure.publish_observed_resident_bytes(pressure.high_watermark_bytes());
+
+    assert_eq!(*calls.lock().expect("call count"), 1);
+    assert_eq!(
+        state,
+        ResidentMemoryPressureStateV1::Nominal {
+            observed_bytes: after_reclaim,
+            limit_bytes: PRESSURE_TEST_LIMIT_BYTES,
+            high_watermark_bytes: pressure.high_watermark_bytes(),
+        },
+        "admission must consume the observation measured after reclaim"
+    );
+    authority
+        .reserve(
+            key("project-a", "worktree-a", "generation-a", "canonical"),
+            growth_request(),
+        )
+        .expect("post-reclaim nominal RSS must immediately re-admit growth");
+}
+
+#[test]
 fn dropped_pressure_reclaimer_registration_is_not_called() {
     let (_authority, pressure) = pressure_authority();
     let calls = Arc::new(Mutex::new(0_u64));
@@ -825,10 +866,33 @@ fn allocator_trim_reclaimer_runs_under_pressure_and_reports_only_measured_releas
 
 #[test]
 fn process_allocator_pressure_reclaimer_installs_once() {
-    let first = super::install_process_allocator_pressure_reclaimer_v1();
-    let second = super::install_process_allocator_pressure_reclaimer_v1();
+    let first = super::install_process_allocator_pressure_reclaimer_v1()
+        .expect("allocator pressure reclaimer installation");
+    let second = super::install_process_allocator_pressure_reclaimer_v1()
+        .expect("installed allocator pressure reclaimer remains available");
     assert!(!second, "a second install must be a no-op");
     // Another test in this process may have installed it first; either way
     // exactly one call reports the installation.
     let _ = first;
+}
+
+#[test]
+fn allocator_pressure_reclaimer_installation_preserves_registration_failure() {
+    let pressure = Arc::new(ResidentMemoryPressureV1::new(bytes(
+        PRESSURE_TEST_LIMIT_BYTES,
+    )));
+    pressure.lock_state().next_sequence = u64::MAX;
+    let registration = OnceLock::new();
+
+    let failure =
+        super::install_process_allocator_pressure_reclaimer_on_v1(&registration, &pressure)
+            .expect_err("sequence exhaustion must not report an installed reclaimer");
+
+    assert_eq!(failure, super::ResidentMemoryPressureRegistrationFailureV1);
+    assert!(registration.get().is_some_and(Result::is_err));
+    assert_eq!(
+        super::install_process_allocator_pressure_reclaimer_on_v1(&registration, &pressure)
+            .expect_err("a stored registration failure must remain truthful"),
+        failure
+    );
 }
