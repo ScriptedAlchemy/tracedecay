@@ -452,6 +452,20 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
     ) -> Result<tracedecay_lcm::summary_convergence::LcmRawProtectionPage, LcmError> {
         let storage_root = self.lcm_storage_root()?.to_path_buf();
         let snapshot = self.lcm_read_snapshot().await?;
+        let mut generation_rows = snapshot
+            .query(
+                "SELECT raw_revision_generation
+                 FROM lcm_summary_convergence_queue
+                 WHERE provider = ?1 AND session_id = ?2",
+                params![provider, session_id],
+            )
+            .await?;
+        let expected_raw_revision_generation = generation_rows
+            .next()
+            .await?
+            .map(|row| row.get::<i64>(0))
+            .transpose()?;
+        drop(generation_rows);
         let mut rows = QueryExecutor::query(
             &snapshot,
             "SELECT raw.store_id,
@@ -574,6 +588,17 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
         drop(snapshot);
         let has_more = byte_limited || rows_scanned == page_limit.max(1);
         if unprotected.is_empty() {
+            if rows_scanned == 0 && expected_raw_revision_generation.is_none() {
+                return Ok(tracedecay_lcm::summary_convergence::LcmRawProtectionPage {
+                    rows_scanned,
+                    rows_protected: 0,
+                    bytes_scanned,
+                    frontier_store_id,
+                    has_more,
+                });
+            }
+            let expected_raw_revision_generation =
+                expected_raw_revision_generation.ok_or(LcmError::LifecycleStateNotFound)?;
             let transaction = self
                 .begin_write_transaction()
                 .await
@@ -586,6 +611,7 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
                 provider,
                 session_id,
                 frontier_store_id,
+                expected_raw_revision_generation,
             )
             .await?;
             SessionWriteTxn::commit(transaction).await?;
@@ -617,14 +643,21 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
         for input in &unprotected {
             require_current_protection_input(&transaction, input).await?;
         }
+        let protection_revision_count = i64::try_from(unprotected.len())
+            .map_err(|error| LcmError::Db(format!("LCM protection revision overflow: {error}")))?;
         for (input, staged) in unprotected.iter().zip(staged) {
             raw::commit_staged_raw_message(&transaction, &input.message, staged).await?;
         }
+        let expected_raw_revision_generation = expected_raw_revision_generation
+            .ok_or(LcmError::LifecycleStateNotFound)?
+            .checked_add(protection_revision_count)
+            .ok_or_else(|| LcmError::Db("LCM protection generation overflow".to_string()))?;
         tracedecay_lcm::summary_convergence::record_current_protection_progress(
             &transaction,
             provider,
             session_id,
             frontier_store_id,
+            expected_raw_revision_generation,
         )
         .await?;
         SessionWriteTxn::commit(transaction).await?;

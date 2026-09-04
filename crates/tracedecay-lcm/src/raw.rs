@@ -394,6 +394,19 @@ async fn persist_raw_predecessor_range(
     conn: &(impl Executor + ?Sized),
     message: &SessionMessageRecord,
 ) -> Result<(), LcmError> {
+    persist_raw_predecessor_range_for_identity(
+        conn,
+        message.provider.as_str(),
+        message.message_id.as_str(),
+    )
+    .await
+}
+
+pub(crate) async fn persist_raw_predecessor_range_for_identity(
+    conn: &(impl Executor + ?Sized),
+    provider: &str,
+    message_id: &str,
+) -> Result<(), LcmError> {
     // Capture the exact preceding raw interval in the same ingest transaction.
     // Host recognizers decide whether this row is native compaction evidence;
     // the generic raw authority only preserves its bounded provenance.
@@ -429,7 +442,7 @@ async fn persist_raw_predecessor_range(
              session_id = excluded.session_id,
              from_store_id = excluded.from_store_id,
              to_store_id = excluded.to_store_id",
-        params![message.provider.as_str(), message.message_id.as_str()],
+        params![provider, message_id],
     )
     .await?;
     Ok(())

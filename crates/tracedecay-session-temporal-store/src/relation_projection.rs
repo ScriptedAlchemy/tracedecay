@@ -31,7 +31,14 @@ const DEFAULT_MAX_RELATIONS: usize = 100_000;
 // reconstruction and its receipt acknowledgement; each retry re-reads the
 // refreshed generation, so the bound only limits back-to-back supersessions.
 const APPLY_PUBLICATION_RACE_ATTEMPTS: usize = 3;
-const RELATION_RECOVERY_PERMANENT_AFTER: i64 = 5;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SessionRelationRecoveryPage {
+    pub recovered: usize,
+    pub processed: usize,
+    pub has_more: bool,
+    pub next_retry_at_unix_seconds: Option<i64>,
+}
 
 struct PendingRelationRecovery {
     session_id: String,
@@ -154,6 +161,21 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         limit: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> SessionStoreResult<usize> {
+        Ok(self
+            .recover_pending_session_relation_projection_page(limit, cancellation)
+            .await?
+            .recovered)
+    }
+
+    #[hotpath::measure(
+        future = true,
+        label = "session_temporal.persist.recover_relation_page"
+    )]
+    pub async fn recover_pending_session_relation_projection_page(
+        &self,
+        limit: usize,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> SessionStoreResult<SessionRelationRecoveryPage> {
         if limit == 0 {
             return Err(storage(
                 RECONSTRUCT_OPERATION,
@@ -183,9 +205,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                    AND receipt.recovery_next_attempt_at <= unixepoch()
                  ORDER BY receipt.created_at, receipt.session_id, receipt.generation
                  LIMIT ?1",
-                params![
-                    i64::try_from(limit).map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
-                ],
+                params![bounded_query_limit(limit)?],
             )
             .await
             .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
@@ -223,9 +243,13 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             SessionRelationScope::ProjectSessions { .. } => "project_sessions",
             SessionRelationScope::ProfileSessions { .. } => "profile_sessions",
         };
+        let has_more = pending.len() > limit;
+        pending.truncate(limit);
         let mut recovered = 0_usize;
+        let mut processed = 0_usize;
         for candidate in &pending {
             require_not_cancelled(&cancellation)?;
+            processed = processed.saturating_add(1);
             let session_id = match SessionId::new(candidate.session_id.clone()) {
                 Ok(session_id) => session_id,
                 Err(_) => {
@@ -290,20 +314,46 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 Err(SessionStoreError::DeadlineExceeded) => {
                     return Err(SessionStoreError::DeadlineExceeded);
                 }
-                Err(_) => {
-                    let permanent = candidate.failure_count.saturating_add(1)
-                        >= RELATION_RECOVERY_PERMANENT_AFTER;
-                    self.settle_relation_recovery_failure(
-                        candidate,
-                        "relation_apply_failed",
-                        permanent,
-                    )
-                    .await?;
+                Err(error) => {
+                    let (failure_code, permanent) = relation_apply_failure_disposition(&error);
+                    self.settle_relation_recovery_failure(candidate, failure_code, permanent)
+                        .await?;
                 }
             }
         }
         crate::support::record_output_sessions(u64::try_from(recovered).unwrap_or(u64::MAX));
-        Ok(recovered)
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        let mut retry_rows = snapshot
+            .query(
+                "SELECT MIN(recovery_next_attempt_at)
+                 FROM session_relation_receipts
+                 WHERE state = 'pending'
+                   AND recovery_state IN ('pending', 'retryable')",
+                (),
+            )
+            .await
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        let next_retry_at_unix_seconds = retry_rows
+            .next()
+            .await
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
+            .ok_or_else(|| {
+                storage_message(
+                    RECONSTRUCT_OPERATION,
+                    "relation retry query returned no aggregate row",
+                )
+            })?
+            .get(0)
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        Ok(SessionRelationRecoveryPage {
+            recovered,
+            processed,
+            has_more,
+            next_retry_at_unix_seconds,
+        })
     }
 
     async fn settle_relation_recovery_failure(
@@ -1064,12 +1114,34 @@ fn bounded_query_limit(limit: usize) -> SessionStoreResult<i64> {
 
 fn require_not_cancelled(cancellation: &Arc<dyn GraphCancellation>) -> SessionStoreResult<()> {
     if cancellation.is_cancelled() {
-        Err(storage(
-            RECONSTRUCT_OPERATION,
-            SessionRelationError::Cancelled,
-        ))
+        Err(SessionStoreError::Cancelled)
     } else {
         Ok(())
+    }
+}
+
+fn relation_apply_failure_disposition(error: &SessionStoreError) -> (&'static str, bool) {
+    match error {
+        SessionStoreError::UnsupportedCapability { .. } => ("relation_apply_unsupported", true),
+        SessionStoreError::BudgetExceeded { .. } => ("relation_apply_budget_exhausted", true),
+        SessionStoreError::ReceiptIdentityMismatch { .. } => ("relation_receipt_mismatch", true),
+        SessionStoreError::SessionMismatch { .. } => ("relation_scope_mismatch", true),
+        SessionStoreError::Storage { source, .. } => {
+            match source.downcast_ref::<SessionRelationError>() {
+                Some(SessionRelationError::Invalid) => ("relation_apply_invalid", true),
+                Some(SessionRelationError::Cycle) => ("relation_apply_cycle", true),
+                Some(SessionRelationError::Conflict) => ("relation_apply_conflict", true),
+                Some(SessionRelationError::ResetRequired) => {
+                    ("relation_apply_reset_required", true)
+                }
+                Some(SessionRelationError::Corrupt) => ("relation_apply_corrupt", true),
+                Some(SessionRelationError::BudgetExhausted) => {
+                    ("relation_apply_budget_exhausted", true)
+                }
+                _ => ("relation_apply_failed", false),
+            }
+        }
+        _ => ("relation_apply_failed", false),
     }
 }
 

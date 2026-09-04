@@ -30,9 +30,23 @@ CREATE TABLE IF NOT EXISTS lcm_summary_convergence_dirty_raw (
     provider TEXT NOT NULL,
     session_id TEXT NOT NULL,
     store_id INTEGER NOT NULL,
+    rewind_frontier_store_id INTEGER NOT NULL,
     PRIMARY KEY(provider, session_id, store_id),
     FOREIGN KEY(provider, session_id)
         REFERENCES sessions(provider, session_id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS lcm_summary_convergence_invalidation_work (
+    provider TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    raw_store_id INTEGER NOT NULL,
+    source_kind TEXT NOT NULL CHECK(source_kind IN ('raw_message', 'summary_node')),
+    source_id TEXT NOT NULL,
+    depth INTEGER NOT NULL CHECK(depth >= 0),
+    after_node_id TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY(provider, session_id, raw_store_id, source_kind, source_id),
+    FOREIGN KEY(provider, session_id, raw_store_id)
+        REFERENCES lcm_summary_convergence_dirty_raw(provider, session_id, store_id)
+        ON DELETE CASCADE
 );
 "#;
 
@@ -42,6 +56,20 @@ CREATE INDEX IF NOT EXISTS idx_lcm_summary_convergence_due
         next_attempt_at_ms, attempt_generation, queue_id
     )
     WHERE state IN ('pending', 'retryable');
+CREATE INDEX IF NOT EXISTS idx_lcm_summary_sources_source_node
+    ON lcm_summary_sources(source_kind, source_id, node_id);
+CREATE TRIGGER IF NOT EXISTS lcm_summary_convergence_dirty_raw_seed
+    AFTER INSERT ON lcm_summary_convergence_dirty_raw BEGIN
+        INSERT INTO lcm_summary_convergence_invalidation_work (
+            provider, session_id, raw_store_id,
+            source_kind, source_id, depth, after_node_id
+        ) VALUES (
+            NEW.provider, NEW.session_id, NEW.store_id,
+            'raw_message', CAST(NEW.store_id AS TEXT), 0, ''
+        )
+        ON CONFLICT(provider, session_id, raw_store_id, source_kind, source_id)
+        DO NOTHING;
+    END;
 CREATE TRIGGER IF NOT EXISTS lcm_summary_convergence_raw_insert
     AFTER INSERT ON lcm_raw_messages BEGIN
         INSERT INTO lcm_summary_convergence_queue (
@@ -94,8 +122,10 @@ CREATE TRIGGER IF NOT EXISTS lcm_summary_convergence_raw_unprotected_update
       OR OLD.metadata_json IS NOT NEW.metadata_json
     BEGIN
         INSERT INTO lcm_summary_convergence_dirty_raw (
-            provider, session_id, store_id
-        ) VALUES (NEW.provider, NEW.session_id, NEW.store_id)
+            provider, session_id, store_id, rewind_frontier_store_id
+        ) VALUES (
+            NEW.provider, NEW.session_id, NEW.store_id, MAX(0, NEW.store_id - 1)
+        )
         ON CONFLICT(provider, session_id, store_id) DO NOTHING;
         INSERT INTO lcm_summary_convergence_queue (
             provider, session_id, newest_raw_store_id,
@@ -260,7 +290,7 @@ pub async fn ensure_schema(conn: &(impl Executor + ?Sized)) -> Result<(), LcmErr
         ),
         (
             "lcm_summary_convergence_raw_unprotected_update",
-            "lcm_summary_convergence_dirty_raw",
+            "rewind_frontier_store_id",
         ),
     ] {
         let mut rows = conn
@@ -281,13 +311,52 @@ pub async fn ensure_schema(conn: &(impl Executor + ?Sized)) -> Result<(), LcmErr
                 .await?;
         }
     }
+    let mut dirty_column_rows = conn
+        .query(
+            "SELECT COUNT(*) FROM pragma_table_info('lcm_summary_convergence_dirty_raw')
+             WHERE name = 'rewind_frontier_store_id'",
+            (),
+        )
+        .await?;
+    let dirty_column_exists = dirty_column_rows
+        .next()
+        .await?
+        .ok_or_else(|| LcmError::Db("dirty raw column query returned no row".into()))?
+        .get::<i64>(0)?
+        != 0;
+    drop(dirty_column_rows);
+    if !dirty_column_exists {
+        conn.execute_batch(
+            "ALTER TABLE lcm_summary_convergence_dirty_raw
+             ADD COLUMN rewind_frontier_store_id INTEGER NOT NULL DEFAULT 0;
+             UPDATE lcm_summary_convergence_dirty_raw
+             SET rewind_frontier_store_id = MAX(0, store_id - 1)",
+        )
+        .await?;
+    }
     conn.execute_batch(SUMMARY_CONVERGENCE_WORK_SQL).await?;
     conn.execute_batch(
-        "INSERT INTO lcm_summary_convergence_dirty_raw (provider, session_id, store_id)
-         SELECT provider, session_id, stale_from_store_id
+        "INSERT INTO lcm_summary_convergence_dirty_raw (
+             provider, session_id, store_id, rewind_frontier_store_id
+         )
+         SELECT provider, session_id, stale_from_store_id,
+                MAX(0, stale_from_store_id - 1)
          FROM lcm_summary_convergence_queue
          WHERE stale_from_store_id IS NOT NULL
          ON CONFLICT(provider, session_id, store_id) DO NOTHING",
+    )
+    .await?;
+    conn.execute_batch(
+        "INSERT INTO lcm_summary_convergence_invalidation_work (
+             provider, session_id, raw_store_id,
+             source_kind, source_id, depth, after_node_id
+         )
+         SELECT provider, session_id, store_id,
+                'raw_message', CAST(store_id AS TEXT), 0, ''
+         FROM lcm_summary_convergence_dirty_raw
+         WHERE true
+         ON CONFLICT(provider, session_id, raw_store_id, source_kind, source_id)
+         DO NOTHING",
     )
     .await?;
     Ok(())
@@ -313,7 +382,7 @@ pub async fn backfill_queue_page(
         .unwrap_or(0);
     let mut rows = conn
         .query(
-            "SELECT provider, session_id, store_id
+            "SELECT provider, session_id, message_id, store_id
              FROM lcm_raw_messages
              WHERE store_id > ?1
              ORDER BY store_id
@@ -326,14 +395,16 @@ pub async fn backfill_queue_page(
         queued.push((
             row.get::<String>(0)?,
             row.get::<String>(1)?,
-            row.get::<i64>(2)?,
+            row.get::<String>(2)?,
+            row.get::<i64>(3)?,
         ));
     }
     drop(rows);
-    for (provider, session_id, store_id) in &queued {
+    for (provider, session_id, message_id, store_id) in &queued {
         queue_raw_session(conn, provider, session_id, *store_id).await?;
+        crate::raw::persist_raw_predecessor_range_for_identity(conn, provider, message_id).await?;
     }
-    if let Some((_, _, store_id)) = queued.last() {
+    if let Some((_, _, _, store_id)) = queued.last() {
         schema::set_gc_meta(conn, BACKFILL_FRONTIER_KEY, &store_id.to_string()).await?;
     }
     Ok(LcmSummaryQueueBackfillPage {
@@ -454,17 +525,40 @@ pub async fn record_current_protection_progress(
     provider: &str,
     session_id: &str,
     protection_frontier_store_id: i64,
+    expected_raw_revision_generation: i64,
 ) -> Result<(), LcmError> {
-    conn.execute(
-        "UPDATE lcm_summary_convergence_queue
+    let changed = conn
+        .execute(
+            "UPDATE lcm_summary_convergence_queue
          SET protection_frontier_store_id = MAX(
                  protection_frontier_store_id, ?3
              ),
              attempt_generation = attempt_generation + 1
-         WHERE provider = ?1 AND session_id = ?2",
-        params![provider, session_id, protection_frontier_store_id],
-    )
-    .await?;
+         WHERE provider = ?1 AND session_id = ?2
+           AND raw_revision_generation = ?4",
+            params![
+                provider,
+                session_id,
+                protection_frontier_store_id,
+                expected_raw_revision_generation,
+            ],
+        )
+        .await?;
+    if changed != 1 {
+        let mut rows = conn
+            .query(
+                "SELECT raw_revision_generation
+                 FROM lcm_summary_convergence_queue
+                 WHERE provider = ?1 AND session_id = ?2",
+                params![provider, session_id],
+            )
+            .await?;
+        let actual = rows.next().await?.map(|row| row.get(0)).transpose()?;
+        return Err(LcmError::StaleRawRevision {
+            expected: expected_raw_revision_generation,
+            actual,
+        });
+    }
     Ok(())
 }
 

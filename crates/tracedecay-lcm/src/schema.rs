@@ -469,6 +469,8 @@ async fn ensure_raw_identity_schema(conn: &(impl Executor + ?Sized)) -> Result<(
             FOREIGN KEY(provider, session_id)
                 REFERENCES sessions(provider, session_id) ON DELETE CASCADE
         );
+        CREATE INDEX IF NOT EXISTS idx_lcm_raw_predecessor_session_to
+            ON lcm_raw_predecessor_ranges(provider, session_id, to_store_id, message_id);
         ",
     )
     .await?;
@@ -943,6 +945,12 @@ mod tests {
                 .map_err(|error| error.to_string())?,
             "fresh LCM schema is missing native source-range provenance"
         );
+        assert!(
+            schema_object_exists(&*conn, "idx_lcm_raw_predecessor_session_to")
+                .await
+                .map_err(|error| error.to_string())?,
+            "fresh LCM schema is missing the bounded native-range lookup index"
+        );
         conn.execute_batch("DROP TABLE lcm_raw_predecessor_ranges;")
             .await
             .map_err(|error| error.to_string())?;
@@ -954,6 +962,12 @@ mod tests {
                 .await
                 .map_err(|error| error.to_string())?,
             "current LCM schema did not repair native source-range provenance"
+        );
+        assert!(
+            schema_object_exists(&*conn, "idx_lcm_raw_predecessor_session_to")
+                .await
+                .map_err(|error| error.to_string())?,
+            "current LCM schema did not repair the bounded native-range lookup index"
         );
         Ok(())
     }

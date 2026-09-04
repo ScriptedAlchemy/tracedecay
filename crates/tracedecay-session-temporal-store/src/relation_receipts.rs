@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tracedecay_domain::{SessionId, SessionProjectionGenerationV1};
 use tracedecay_graph_db::{GraphCancellation, GraphWatermark};
 use tracedecay_runtime_core::db::engine::params;
-use tracedecay_store::SessionStoreResult;
+use tracedecay_store::{SessionStoreError, SessionStoreResult};
 
 use super::query::{generation_i64, now_micros, storage, storage_message};
 use super::relations::{SessionRelationProjection, projection_watermark};
@@ -124,28 +124,31 @@ pub async fn apply_relation_projection(
     let actual =
         projection_watermark(projection).map_err(|error| storage(RECEIPT_OPERATION, error))?;
     if actual != expected {
-        return Err(storage_message(
-            RECEIPT_OPERATION,
-            "reconstructed relations do not match the durable graph receipt",
-        ));
+        return Err(SessionStoreError::ReceiptIdentityMismatch {
+            context: "relation projection watermark",
+        });
     }
     let (scope, store) = database
         .session_relation_store()
         .map_err(|error| storage(RECEIPT_OPERATION, error))?;
     if scope != projection.scope {
-        return Err(storage_message(
-            RECEIPT_OPERATION,
-            "relation receipt project does not match mounted graph identity",
-        ));
+        return Err(SessionStoreError::SessionMismatch {
+            context: "relation receipt graph scope",
+        });
     }
     let applied = store
         .replace_with_cancellation(projection, cancellation)
-        .map_err(|error| storage(RECEIPT_OPERATION, error))?;
+        .map_err(|error| match error {
+            super::relations::SessionRelationError::Cancelled => SessionStoreError::Cancelled,
+            super::relations::SessionRelationError::DeadlineExceeded => {
+                SessionStoreError::DeadlineExceeded
+            }
+            error => storage(RECEIPT_OPERATION, error),
+        })?;
     if applied != expected {
-        return Err(storage_message(
-            RECEIPT_OPERATION,
-            "native graph acknowledged a different relation watermark",
-        ));
+        return Err(SessionStoreError::ReceiptIdentityMismatch {
+            context: "native relation graph watermark",
+        });
     }
     let transaction = hotpath::measure_block!("session_temporal.txn.begin", {
         database

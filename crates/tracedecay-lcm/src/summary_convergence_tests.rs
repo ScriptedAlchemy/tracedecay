@@ -57,6 +57,25 @@ async fn retained_queue_page_is_keyset_bounded_and_candidate_read_avoids_raw_cor
         .unwrap();
     assert_eq!(page.rows_scanned, LCM_SCAN_PAGE_ROWS as usize);
     assert!(page.has_more);
+    let mut range_rows = conn
+        .query(
+            "SELECT COUNT(*) FROM lcm_raw_predecessor_ranges
+             WHERE provider = 'cursor' AND session_id = 'large-corpus'",
+            (),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        range_rows
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<i64>(0)
+            .unwrap(),
+        LCM_SCAN_PAGE_ROWS - 1,
+        "the bounded queue backfill must durably derive native predecessor ranges"
+    );
 
     let mut plan = conn
         .query(
@@ -125,7 +144,18 @@ async fn current_profiles_install_the_unreleased_queue_shape_in_place() {
     conn.execute_batch(
         "DROP TRIGGER lcm_summary_convergence_raw_insert;
          DROP TRIGGER lcm_summary_convergence_raw_unprotected_update;
+         DROP TRIGGER lcm_summary_convergence_dirty_raw_seed;
+         DROP TABLE lcm_summary_convergence_invalidation_work;
+         DROP TABLE lcm_summary_convergence_dirty_raw;
          DROP TABLE lcm_summary_convergence_queue;
+         CREATE TABLE lcm_summary_convergence_dirty_raw (
+            provider TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            store_id INTEGER NOT NULL,
+            PRIMARY KEY(provider, session_id, store_id),
+            FOREIGN KEY(provider, session_id)
+                REFERENCES sessions(provider, session_id) ON DELETE CASCADE
+         );
          CREATE TABLE lcm_summary_convergence_queue (
             queue_id INTEGER PRIMARY KEY AUTOINCREMENT,
             provider TEXT NOT NULL,
@@ -188,6 +218,38 @@ async fn current_profiles_install_the_unreleased_queue_shape_in_place() {
         rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
         1
     );
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*)
+             FROM pragma_table_info('lcm_summary_convergence_dirty_raw')
+             WHERE name = 'rewind_frontier_store_id'",
+            (),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+        1,
+        "missing durable invalidation rewind frontier"
+    );
+    for object in [
+        "lcm_summary_convergence_invalidation_work",
+        "lcm_summary_convergence_dirty_raw_seed",
+        "idx_lcm_summary_sources_source_node",
+    ] {
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE name = ?1",
+                params![object],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            1,
+            "missing in-place invalidation authority {object}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -282,6 +344,75 @@ async fn protected_content_revision_requeues_a_current_session() {
         .unwrap(),
         "an outcome from the superseded raw generation must lose its CAS"
     );
+}
+
+#[tokio::test]
+async fn protection_progress_cannot_overwrite_a_concurrent_raw_rewind() {
+    let temp = tempfile::tempdir().unwrap();
+    let conn = TestConnection::open(&temp.path().join("sessions.db"));
+    conn.execute_batch(
+        "CREATE TABLE sessions (
+            provider TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            project_key TEXT NOT NULL,
+            project_path TEXT NOT NULL,
+            PRIMARY KEY(provider, session_id)
+         );
+         CREATE TABLE session_messages (
+            provider TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            timestamp INTEGER,
+            ordinal INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            metadata_json TEXT,
+            PRIMARY KEY(provider, message_id)
+         );
+         INSERT INTO sessions(provider, session_id, project_key, project_path)
+         VALUES ('cursor', 'protection-cas', 'project.cas', '/cas');",
+    )
+    .await
+    .unwrap();
+    schema::ensure_lcm_schema(&conn).await.unwrap();
+    conn.execute(
+        "INSERT INTO lcm_raw_messages (
+            provider, message_id, session_id, role, ordinal, content,
+            content_hash, storage_kind, snippet_text, index_text, metadata_json
+         ) VALUES ('cursor', 'message-1', 'protection-cas', 'assistant', 1,
+                   'old', 'old-hash', 'inline', 'old', 'old',
+                   '{\"ingest_protection\":{\"sanitization_receipt\":{}}}')",
+        (),
+    )
+    .await
+    .unwrap();
+    let candidate = summary_convergence::next_candidate(&conn, i64::MAX)
+        .await
+        .unwrap()
+        .unwrap();
+
+    conn.execute(
+        "UPDATE lcm_raw_messages SET content_hash = 'new-hash'
+         WHERE provider = 'cursor' AND message_id = 'message-1'",
+        (),
+    )
+    .await
+    .unwrap();
+    let error = summary_convergence::record_current_protection_progress(
+        &conn,
+        "cursor",
+        "protection-cas",
+        999,
+        candidate.raw_revision_generation,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, crate::LcmError::StaleRawRevision { .. }));
+    let refreshed = summary_convergence::candidate_for_session(&conn, "cursor", "protection-cas")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(refreshed.protection_frontier_store_id, 0);
 }
 
 #[tokio::test]

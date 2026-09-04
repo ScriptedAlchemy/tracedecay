@@ -435,6 +435,7 @@ impl RegisteredGlobalDb {
             };
             let invalidation = session_temporal_operations::invalidate_raw_summary_revision(
                 &transaction,
+                current.provider.as_str(),
                 current.session_id.as_str(),
                 stale_from_store_id,
                 budget.saturating_sub(work).max(1),
@@ -458,7 +459,7 @@ impl RegisteredGlobalDb {
                 .await
                 .map_err(|error| LcmError::Db(error.to_string()))?;
             if invalidation.has_more {
-                work = work.saturating_add(invalidation.stale_summary_count);
+                work = work.saturating_add(invalidation.work_count);
                 break;
             }
             tracedecay_lcm::summary_convergence::complete_stale_raw_revision(
@@ -467,7 +468,7 @@ impl RegisteredGlobalDb {
             )
             .await?;
             let affected_summary = invalidation.stale_summary_count > 0;
-            work = work.saturating_add(invalidation.stale_summary_count.max(1));
+            work = work.saturating_add(invalidation.work_count.max(1));
             let Some(next) = tracedecay_lcm::summary_convergence::candidate_for_session(
                 &transaction,
                 current.provider.as_str(),

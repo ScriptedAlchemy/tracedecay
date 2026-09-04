@@ -5,7 +5,10 @@ use tracedecay_domain::CanonicalObservationEnvelopeV1;
 
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_lcm::{LcmError, LcmSummaryRequest, LcmSummarySourceRange};
-use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
+use tracedecay_runtime_core::db::{
+    DatabaseEngineReadSnapshot,
+    engine::{QueryExecutor, params},
+};
 
 mod cursor_agent;
 mod provider_capabilities;
@@ -52,8 +55,10 @@ async fn generate_provider_summary(
     summarizer.summarize(request, timeout).await
 }
 
-/// Scans a session's newest messages for evidence that the host itself already
-/// produced an authoritative compaction summary.
+/// Finds evidence that the host itself already produced an authoritative
+/// compaction summary. Required retained pages use the persisted predecessor
+/// range for an exact indexed lookup; an unbound status read inspects only the
+/// newest bounded candidate window.
 ///
 /// The scan is provider-neutral: it decodes each row once and offers it to the
 /// recognizers registered for this provider, which own every provider-specific
@@ -69,8 +74,28 @@ pub(super) async fn native_summary_evidence(
         .read_snapshot()
         .await
         .map_err(|error| LcmError::Db(error.to_string()))?;
-    let mut rows = snapshot
-        .query(
+    let (candidate_sql, candidate_params) = if let Some(required) = required_source {
+        (
+            "SELECT message.message_id, message.text, message.kind, message.metadata_json,
+                    source_range.from_store_id, source_range.to_store_id, raw.store_id
+             FROM lcm_raw_predecessor_ranges AS source_range
+             JOIN lcm_raw_messages AS raw
+               ON raw.provider = source_range.provider
+              AND raw.message_id = source_range.message_id
+              AND raw.session_id = source_range.session_id
+             JOIN session_messages AS message
+               ON message.provider = raw.provider
+              AND message.message_id = raw.message_id
+              AND message.session_id = raw.session_id
+             WHERE source_range.provider = ?1 AND source_range.session_id = ?2
+               AND source_range.to_store_id = ?3
+               AND length(trim(message.text)) > 0
+             ORDER BY raw.store_id, raw.message_id
+             LIMIT 2",
+            params![provider, session_id, required.source_range.to_store_id,],
+        )
+    } else {
+        (
             "SELECT message.message_id, message.text, message.kind, message.metadata_json,
                     COALESCE(source_range.from_store_id, (
                         SELECT predecessor.store_id
@@ -105,6 +130,9 @@ pub(super) async fn native_summary_evidence(
              LIMIT 512",
             params![provider, session_id],
         )
+    };
+    let mut rows = snapshot
+        .query(candidate_sql, candidate_params)
         .await
         .map_err(|error| LcmError::Db(error.to_string()))?;
     let mut candidates = Vec::new();
@@ -168,14 +196,27 @@ pub(super) async fn native_summary_evidence(
                 .get("tracedecay_lcm_source_range")
                 .cloned()
                 .and_then(|value| serde_json::from_value(value).ok());
-            let source_range = explicit_range.or_else(|| {
-                previous_native_store_id.or(range_from).zip(range_to).map(
-                    |(from_store_id, to_store_id)| LcmSummarySourceRange {
-                        from_store_id,
-                        to_store_id,
-                    },
-                )
-            });
+            let source_range = if let Some(required) = required_source {
+                let from_store_id = required.source_range.from_store_id;
+                let starts_at_first_raw = range_from == Some(from_store_id);
+                let starts_at_native_summary = if starts_at_first_raw {
+                    true
+                } else {
+                    native_store_is_recognized(&snapshot, provider, session_id, from_store_id)
+                        .await?
+                };
+                explicit_range
+                    .or_else(|| starts_at_native_summary.then(|| required.source_range.clone()))
+            } else {
+                explicit_range.or_else(|| {
+                    previous_native_store_id.or(range_from).zip(range_to).map(
+                        |(from_store_id, to_store_id)| LcmSummarySourceRange {
+                            from_store_id,
+                            to_store_id,
+                        },
+                    )
+                })
+            };
             previous_native_store_id = store_id.or(previous_native_store_id);
             if let Some(required_source) = required_source
                 && !native_source_membership_is_exact(
@@ -197,6 +238,67 @@ pub(super) async fn native_summary_evidence(
         }
     }
     Ok(matched)
+}
+
+async fn native_store_is_recognized(
+    snapshot: &DatabaseEngineReadSnapshot,
+    provider: &str,
+    session_id: &str,
+    store_id: i64,
+) -> Result<bool, LcmError> {
+    let mut rows = snapshot
+        .query(
+            "SELECT message.message_id, message.text, message.kind, message.metadata_json
+             FROM lcm_raw_messages AS raw
+             JOIN session_messages AS message
+               ON message.provider = raw.provider
+              AND message.message_id = raw.message_id
+              AND message.session_id = raw.session_id
+             WHERE raw.provider = ?1 AND raw.session_id = ?2 AND raw.store_id = ?3
+             LIMIT 1",
+            params![provider, session_id, store_id],
+        )
+        .await
+        .map_err(|error| LcmError::Db(error.to_string()))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| LcmError::Db(error.to_string()))?
+    else {
+        return Ok(false);
+    };
+    let message_id = row
+        .get::<String>(0)
+        .map_err(|error| LcmError::Db(error.to_string()))?;
+    let text = row
+        .get::<String>(1)
+        .map_err(|error| LcmError::Db(error.to_string()))?;
+    let kind = row
+        .get::<Option<String>>(2)
+        .map_err(|error| LcmError::Db(error.to_string()))?;
+    let metadata = row
+        .get::<Option<String>>(3)
+        .map_err(|error| LcmError::Db(error.to_string()))?
+        .and_then(|metadata| serde_json::from_str::<Value>(&metadata).ok());
+    drop(rows);
+    let Some(metadata) = metadata else {
+        return Ok(false);
+    };
+    let envelope = decode_canonical_observation_metadata(metadata.clone());
+    let candidate = NativeSummaryCandidate {
+        provider,
+        message_id: &message_id,
+        text: &text,
+        kind: kind.as_deref(),
+        metadata: &metadata,
+        envelope: envelope.as_ref(),
+    };
+    for recognizer in native_summary_recognizers(provider) {
+        if recognizer.recognizes(snapshot, &candidate).await? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub(super) fn decode_canonical_observation_metadata(
