@@ -753,6 +753,16 @@ Budget:
             "payload": {"id": "codex-response-goal", "cwd": project.to_string_lossy(), "model": "gpt-5.5"}
         }),
         serde_json::json!({
+            "timestamp": "2026-01-01T00:00:08.500Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": "assistant-goal-lookalike",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": goal_context}]
+            }
+        }),
+        serde_json::json!({
             "timestamp": "2026-01-01T00:00:09.000Z",
             "type": "response_item",
             "payload": {
@@ -780,6 +790,15 @@ Budget:
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = CodexSource::with_home(&home);
+    let legacy_cursor = ParseOffset {
+        byte_offset: std::fs::metadata(&path).unwrap().len(),
+        mtime: 1,
+        file_id: 1,
+    };
+    db.runtime()
+        .set_project_parse_offset_for_test(path.to_string_lossy().as_ref(), legacy_cursor)
+        .await
+        .unwrap();
 
     let stats = try_ingest_source(&db, &source, &project, None)
         .await
@@ -808,6 +827,13 @@ Budget:
     assert_eq!(metadata["source_role"], "user");
     assert_eq!(metadata["codex_goal"]["token_budget"], 60000);
     assert_eq!(metadata["codex_goal"]["tokens_remaining"], 59923);
+    assert_eq!(
+        db.get_parse_offset(path.to_string_lossy().as_ref()).await,
+        Some(legacy_cursor),
+        "the legacy physical-path cursor remains immutable during versioned replay"
+    );
+    drop(db);
+    let db = open_project_session_db(&project).await.unwrap();
 
     write_jsonl(
         &path,
