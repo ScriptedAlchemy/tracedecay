@@ -3,7 +3,8 @@
 //! The seam has exactly two dispositions for an admitted frame that fails:
 //!
 //! 1. A deterministic content refusal covers past the frame with a durable
-//!    `AdmissionRefused` coverage row so the stream converges.
+//!    typed reason (`ObservationIdentityCollision` for that exact refusal,
+//!    otherwise `AdmissionRefused`) so the stream converges.
 //! 2. Everything else — store commit/read-back failures, unbound authorities,
 //!    retryable races — is a typed [`TranscriptIngestError::HostAdmission`]
 //!    block: the frontier does not advance and no coverage is written over a
@@ -1114,6 +1115,103 @@ async fn eligible_identity_collision_retries_once_with_normalizer_fallback() {
 }
 
 #[tokio::test]
+async fn exhausted_identity_collision_retry_uses_its_exact_terminal_coverage_reason() {
+    super::install_test_shared_jsonl_preparation_authority();
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("cursor-repeated-no-id-terminal.jsonl");
+    let bytes = b"{\"role\":\"user\",\"content\":\"repeated\"}\n";
+    std::fs::write(&path, bytes).unwrap();
+    let spy = SeamSpyAdmission::default();
+    spy.script_batch_error(HostAdmissionOutcome::batch_requires_scalar_fallback(
+        ObservationBatchFallbackCause::IntraBatchIdentityCollision,
+    ));
+    spy.script_capture_error(HostAdmissionOutcome::deterministic_content_refusal(
+        "observation_identity_collision",
+    ));
+    let source = ObservationSourceIdentityV1::for_provider(
+        ProviderId::new("cursor").unwrap(),
+        SessionId::new("session.cursor-repeated-no-id-terminal").unwrap(),
+    )
+    .unwrap();
+    let request = super::JsonlObservationAdmissionRequest::new(
+        "cursor",
+        &path,
+        &spy,
+        source,
+        ObservationScopeV1::Profile,
+        RetentionClass::new("test").unwrap(),
+    );
+
+    let progress = super::admit_jsonl_observations(
+        request,
+        |_| (),
+        move |_, bytes, range, _, _, hints| {
+            let native_record_id = ObservationId::new(if hints.identity_collision_retry {
+                "record.positional-fallback-terminal"
+            } else {
+                "record.legacy-content-hash-terminal"
+            })
+            .unwrap();
+            let parsed = tracedecay_runtime_core::privacy::parse_normalized_observation_record_v1(
+                bytes,
+                range,
+                ObservationOrderingDomainV1::FileBytes,
+                |native| {
+                    CanonicalObservationEnvelopeV1::new(
+                        ProviderId::new("cursor").unwrap(),
+                        "message",
+                        native_record_id.clone(),
+                        CanonicalObservationRelationsV1::new(
+                            SessionId::new("session.cursor-repeated-no-id-terminal").unwrap(),
+                        )
+                        .with_message_id(native_record_id.clone()),
+                        vec![CanonicalObservationFactV1::Message {
+                            role: CanonicalMessageRoleV1::User,
+                            content: native,
+                            model: None,
+                            timestamp: None,
+                        }],
+                        CanonicalObservationEvidenceV1::new(
+                            ObservationOrderingDomainV1::FileBytes,
+                            range,
+                        ),
+                    )
+                    .map_err(|_| {
+                        tracedecay_runtime_core::privacy::ObservationRecordParseErrorV1::NormalizationFailed
+                    })
+                },
+            )
+            .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: "cursor" })?;
+            if hints.identity_collision_retry {
+                Ok(super::JsonlFrameAdmission::durable(
+                    parsed,
+                    native_record_id,
+                ))
+            } else {
+                Ok(
+                    super::JsonlFrameAdmission::durable_with_identity_collision_retry(
+                        parsed,
+                        native_record_id,
+                    ),
+                )
+            }
+        },
+    )
+    .await
+    .expect("the exhausted deterministic collision must settle terminal coverage");
+
+    assert_eq!(progress.frames_persisted, 0);
+    assert_eq!(progress.frames_refused, 1);
+    assert_eq!(spy.capture_count(), 2, "primary plus one fallback only");
+    let advances = spy.cover_past_advances();
+    assert_eq!(advances.len(), 1);
+    assert_eq!(
+        advances[0].reason(),
+        ObservationCoverageReason::ObservationIdentityCollision
+    );
+}
+
+#[tokio::test]
 async fn content_refusals_cover_past_so_the_stream_converges() {
     let (_temp, path, len) = rollout_fixture();
     let spy = SeamSpyAdmission::default();
@@ -1245,7 +1343,7 @@ async fn batch_refusal_reuses_pre_context_switch_frames() {
         .expect("the A-scoped message must receive a durable disposition");
     assert_eq!(
         a_message_advance.reason(),
-        ObservationCoverageReason::AdmissionRefused,
+        ObservationCoverageReason::ObservationIdentityCollision,
         "the A-scoped frame must keep its pre-window disposition after the B context switch"
     );
 }

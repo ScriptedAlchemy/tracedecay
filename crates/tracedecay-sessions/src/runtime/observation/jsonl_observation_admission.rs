@@ -1754,7 +1754,11 @@ impl ActiveAdmission<'_> {
                 self.advance_coverage(
                     expected_cursor,
                     checkpoint,
-                    ObservationCoverageReason::AdmissionRefused,
+                    if outcome.reason_code == Some("observation_identity_collision") {
+                        ObservationCoverageReason::ObservationIdentityCollision
+                    } else {
+                        ObservationCoverageReason::AdmissionRefused
+                    },
                     None,
                 )
                 .await?;
@@ -2503,8 +2507,9 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
 
 /// Non-retryable admission failures that are verdicts about the record's
 /// content. Only these may be covered past: they re-fail identically on every
-/// sweep, so a durable `AdmissionRefused` coverage row is what lets the
-/// stream converge. Every other failure — store commit/read-back failures,
+/// sweep, so a durable typed refusal reason is what lets the stream converge.
+/// Identity collisions retain their exact reason; other deterministic content
+/// refusals use `AdmissionRefused`. Every other failure — store commit/read-back failures,
 /// unbound authorities, retryable races — says nothing about the record and
 /// must surface as a typed block instead of writing coverage over a commit
 /// that never landed (or one that already landed and advanced the cursor).
