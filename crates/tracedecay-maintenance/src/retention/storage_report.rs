@@ -1133,8 +1133,21 @@ mod tests {
             .unwrap();
     }
 
+    /// A full pass over a directory mutated mid-iteration must miss nothing
+    /// and stay bounded.
+    ///
+    /// Repeat-freedom is deliberately *not* asserted. `read_project_directory_page`
+    /// resumes with `seekdir` on a `telldir` cookie, and its own SAFETY note
+    /// records the contract: a cookie invalidated by a concurrent mutation may
+    /// yield a repeated page. APFS does exactly that, while glibc happens not
+    /// to — so a no-repeats assertion tested the platform, not the contract.
+    /// Deduplicating inside the reader would require carrying every name seen
+    /// so far, which is the unbounded state paging exists to avoid, so the
+    /// tolerance stays in the contract and both consumers absorb it: orphan
+    /// collection re-checks each candidate before acting, and the storage
+    /// report may double-count a directory in one page's estimate.
     #[test]
-    fn project_directory_pages_visit_each_entry_once() {
+    fn project_directory_pages_cover_every_entry_within_a_bounded_pass() {
         for page_size in [64, 256] {
             let tmp = tempfile::TempDir::new().unwrap();
             let profile_root = tmp.path().join("profile");
@@ -1149,16 +1162,15 @@ mod tests {
             let mut cursor = String::new();
             let mut observed = BTreeSet::new();
             let mut entries_scanned = 0usize;
+            let mut returned = 0usize;
             let mut first_page = true;
             loop {
                 let page =
                     list_project_directories_page(&profile_root, &cursor, page_size).unwrap();
                 entries_scanned = entries_scanned.saturating_add(page.entries_scanned);
                 for (name, _) in page.directories {
-                    assert!(
-                        observed.insert(name.clone()),
-                        "page size {page_size} visited {name} twice"
-                    );
+                    returned = returned.saturating_add(1);
+                    observed.insert(name);
                 }
 
                 let Some(next_cursor) = page.next_cursor else {
@@ -1181,12 +1193,19 @@ mod tests {
                 observed.is_superset(&expected_without_removed),
                 "page size {page_size} skipped an original directory"
             );
-            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+            // A replay is permitted, an unbounded one is not: the whole pass
+            // must still cost within a constant factor of the directory.
+            assert!(
+                returned <= (expected.len() + 1).saturating_mul(2),
+                "page size {page_size} returned {returned} entries for {} directories",
+                expected.len()
+            );
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
             assert!(
                 entries_scanned <= expected.len() + 1,
                 "page size {page_size} rescanned entries: {entries_scanned}"
             );
-            #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
+            #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
             assert!(
                 entries_scanned <= (expected.len() + 1).saturating_mul(2),
                 "page size {page_size} rescanned directory or inventory entries: {entries_scanned}"

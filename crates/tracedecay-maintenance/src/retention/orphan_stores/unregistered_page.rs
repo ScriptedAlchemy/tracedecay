@@ -385,6 +385,16 @@ async fn census_unregistered_project_dirs_page(
 /// capability opened beneath the profile root. The POSIX directory offset is
 /// opaque; it is accepted only when the directory identity still matches, so
 /// a replacement restarts safely instead of seeking a stale location.
+///
+/// # Contract
+///
+/// A full pass misses no entry that existed for its whole duration, and costs
+/// within a constant factor of the directory. It is **not** repeat-free: a
+/// `telldir` cookie invalidated by a concurrent mutation may replay a page
+/// (APFS does; glibc happens not to). Deduplicating here would mean carrying
+/// every name seen so far, which is the unbounded state paging exists to
+/// avoid, so callers must tolerate a repeated name — re-check each candidate
+/// before acting on it, and treat per-page counts as estimates.
 #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
 pub(in crate::retention) fn read_project_directory_page(
     profile_root: &Path,
