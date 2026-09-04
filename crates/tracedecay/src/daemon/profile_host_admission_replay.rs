@@ -16,6 +16,7 @@ use tokio::task::JoinHandle;
 #[cfg(test)]
 use tokio::task::JoinSet;
 
+use tracedecay_daemon_identity::authority;
 use tracedecay_host_admission::{
     REPLAY_BACKOFF_SHIFT_CAP, ReplayPassDecision, SharedHostAdmissionBroker, classify_replay_pass,
     replay_backoff,
@@ -42,6 +43,33 @@ const BOOTSTRAP_TERMINAL_CACHE_FOR: Duration = Duration::from_secs(2);
 /// `bootstrap_terminal_cache_for`, so the next admission that needs this
 /// profile starts a fresh worker, and a daemon restart always retries.
 const BOOTSTRAP_RETRY_BUDGET: Duration = Duration::from_mins(1);
+
+/// Resolve the spelling the bootstrap registry keys a profile by.
+///
+/// Handshake callers already canonicalize, but a test (or any caller holding
+/// the operator's own spelling) hands over the raw path. On macOS the two
+/// differ — `/var/folders/...` versus `/private/var/folders/...` — so keying
+/// on the raw path silently splits one profile into two registry entries and
+/// turns every lookup into a miss. Resolving on both the storing and the
+/// reading side makes the registry answer for the profile, not the spelling.
+/// A path that cannot be resolved keeps its literal form so an unresolvable
+/// root still coalesces with itself.
+fn bootstrap_key(profile_root: &Path) -> PathBuf {
+    authority::canonical_identity_path(profile_root).unwrap_or_else(|_| profile_root.to_path_buf())
+}
+
+/// Outcome of waiting for a bootstrap worker to publish a terminal state.
+///
+/// `Missing` is distinct from `TimedOut` on purpose: a lookup that finds no
+/// worker is an absence of evidence, not a completed bootstrap, and reporting
+/// it as success turned a keying bug into a passing assertion.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BootstrapCompletion {
+    Completed,
+    TimedOut,
+    Missing,
+}
 
 pub(super) type ProfileHostAdmissionBootstrapOperation = Arc<
     dyn Fn() -> Pin<Box<dyn Future<Output = tracedecay_domain::errors::Result<()>> + Send>>
@@ -154,6 +182,7 @@ impl ProfileHostAdmissionReplayRegistry {
         if self.shutting_down.load(Ordering::Acquire) {
             return;
         }
+        let profile_root = bootstrap_key(profile_root);
         let mut workers = self.bootstrap_workers.lock().await;
         if self.shutting_down.load(Ordering::Acquire) {
             return;
@@ -172,7 +201,7 @@ impl ProfileHostAdmissionReplayRegistry {
                 _ => false,
             }
         });
-        if workers.contains_key(profile_root) {
+        if workers.contains_key(&profile_root) {
             return;
         }
 
@@ -188,7 +217,7 @@ impl ProfileHostAdmissionReplayRegistry {
             label = "daemon.authority.host_admission.bootstrap.run"
         ));
         workers.insert(
-            profile_root.to_path_buf(),
+            profile_root,
             ProfileHostAdmissionBootstrapEntry { worker, task },
         );
     }
@@ -198,9 +227,10 @@ impl ProfileHostAdmissionReplayRegistry {
         &self,
         profile_root: &Path,
     ) -> Option<ProfileHostAdmissionBootstrapStatus> {
+        let profile_root = bootstrap_key(profile_root);
         let workers = self.bootstrap_workers.lock().await;
         workers
-            .get(profile_root)
+            .get(&profile_root)
             .and_then(|entry| entry.worker.status())
     }
 
@@ -391,7 +421,7 @@ impl ProfileHostAdmissionReplayRegistry {
         self.bootstrap_workers
             .lock()
             .await
-            .get(profile_root)
+            .get(&bootstrap_key(profile_root))
             .map_or(0, |entry| {
                 entry.worker.attempt_count.load(Ordering::Acquire)
             })
@@ -403,7 +433,7 @@ impl ProfileHostAdmissionReplayRegistry {
         self.bootstrap_workers
             .lock()
             .await
-            .get(profile_root)
+            .get(&bootstrap_key(profile_root))
             .map_or(0, |entry| {
                 entry.worker.backoff_count.load(Ordering::Acquire)
             })
@@ -415,30 +445,37 @@ impl ProfileHostAdmissionReplayRegistry {
         &self,
         profile_root: &Path,
         timeout: Duration,
-    ) -> bool {
+    ) -> BootstrapCompletion {
         let worker = {
             let workers = self.bootstrap_workers.lock().await;
             workers
-                .get(profile_root)
+                .get(&bootstrap_key(profile_root))
                 .map(|entry| Arc::clone(&entry.worker))
         };
         let Some(worker) = worker else {
-            return true;
+            return BootstrapCompletion::Missing;
+        };
+        let settled = |worker: &ProfileHostAdmissionBootstrapWorker| {
+            if worker.state.load(Ordering::Acquire) == BOOTSTRAP_RUNNING {
+                BootstrapCompletion::TimedOut
+            } else {
+                BootstrapCompletion::Completed
+            }
         };
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let completed = worker.completed.notified();
             if worker.state.load(Ordering::Acquire) != BOOTSTRAP_RUNNING {
-                return true;
+                return BootstrapCompletion::Completed;
             }
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
-                return false;
+                return BootstrapCompletion::TimedOut;
             }
             tokio::select! {
                 () = completed => {}
                 () = tokio::time::sleep(remaining) => {
-                    return worker.state.load(Ordering::Acquire) != BOOTSTRAP_RUNNING;
+                    return settled(&worker);
                 }
             }
         }
@@ -867,10 +904,11 @@ mod tests {
             });
         }
         while tasks.join_next().await.is_some() {}
-        assert!(
+        assert_eq!(
             registry
                 .wait_bootstrap_completed(&profile_root, Duration::from_secs(2))
                 .await,
+            BootstrapCompletion::Completed,
             "coalesced bootstrap must complete"
         );
         assert_eq!(attempts.load(Ordering::Acquire), 1);
@@ -906,17 +944,19 @@ mod tests {
         registry
             .ensure_bootstrap(&profile_root, Arc::clone(&operation))
             .await;
-        assert!(
+        assert_eq!(
             registry
                 .wait_bootstrap_completed(&profile_root, Duration::from_secs(1))
-                .await
+                .await,
+            BootstrapCompletion::Completed,
         );
         tokio::time::sleep(Duration::from_millis(30)).await;
         registry.ensure_bootstrap(&profile_root, operation).await;
-        assert!(
+        assert_eq!(
             registry
                 .wait_bootstrap_completed(&profile_root, Duration::from_secs(1))
-                .await
+                .await,
+            BootstrapCompletion::Completed,
         );
         assert_eq!(attempts.load(Ordering::Acquire), 2);
         assert_eq!(registry.bootstrap_worker_count().await, 1);
@@ -949,10 +989,11 @@ mod tests {
         registry
             .ensure_bootstrap(&profile_root, Arc::clone(&operation))
             .await;
-        assert!(
+        assert_eq!(
             registry
                 .wait_bootstrap_completed(&profile_root, Duration::from_secs(1))
-                .await
+                .await,
+            BootstrapCompletion::Completed,
         );
         registry
             .ensure_bootstrap(&profile_root, Arc::clone(&operation))
@@ -961,10 +1002,11 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(30)).await;
         registry.ensure_bootstrap(&profile_root, operation).await;
-        assert!(
+        assert_eq!(
             registry
                 .wait_bootstrap_completed(&profile_root, Duration::from_secs(1))
-                .await
+                .await,
+            BootstrapCompletion::Completed,
         );
         assert_eq!(attempts.load(Ordering::Acquire), 2);
         registry.shutdown().await;
@@ -990,10 +1032,11 @@ mod tests {
         });
 
         registry.ensure_bootstrap(&profile_root, operation).await;
-        assert!(
+        assert_eq!(
             registry
                 .wait_bootstrap_completed(&profile_root, Duration::from_secs(1))
-                .await
+                .await,
+            BootstrapCompletion::Completed,
         );
 
         assert_eq!(attempts.load(Ordering::Acquire), 1);
@@ -1043,10 +1086,11 @@ mod tests {
         registry
             .ensure_bootstrap(&retryable_profile, retryable_operation)
             .await;
-        assert!(
+        assert_eq!(
             registry
                 .wait_bootstrap_completed(&retryable_profile, Duration::from_secs(1))
-                .await
+                .await,
+            BootstrapCompletion::Completed,
         );
         assert_eq!(retryable_attempts.load(Ordering::Acquire), 2);
         assert_eq!(
@@ -1070,10 +1114,11 @@ mod tests {
         registry
             .ensure_bootstrap(&terminal_profile, terminal_operation)
             .await;
-        assert!(
+        assert_eq!(
             registry
                 .wait_bootstrap_completed(&terminal_profile, Duration::from_secs(1))
-                .await
+                .await,
+            BootstrapCompletion::Completed,
         );
         assert_eq!(registry.bootstrap_attempt_count(&terminal_profile).await, 1);
         assert_eq!(registry.bootstrap_backoff_count(&terminal_profile).await, 0);
@@ -1118,10 +1163,11 @@ mod tests {
         });
 
         registry.ensure_bootstrap(&profile_root, operation).await;
-        assert!(
+        assert_eq!(
             registry
                 .wait_bootstrap_completed(&profile_root, Duration::from_secs(2))
                 .await,
+            BootstrapCompletion::Completed,
             "retrying bootstrap must recover without another request"
         );
         assert_eq!(attempts.load(Ordering::Acquire), 3);
@@ -1154,10 +1200,11 @@ mod tests {
         });
 
         registry.ensure_bootstrap(&profile_root, operation).await;
-        assert!(
+        assert_eq!(
             registry
                 .wait_bootstrap_completed(&profile_root, Duration::from_secs(5))
                 .await,
+            BootstrapCompletion::Completed,
             "a permanently retryable bootstrap must still terminate"
         );
         let Some(ProfileHostAdmissionBootstrapStatus::Terminal(error)) =

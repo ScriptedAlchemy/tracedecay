@@ -1801,6 +1801,7 @@ pub(super) async fn write_branch_admin_response(
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
+    use super::super::profile_host_admission_replay::BootstrapCompletion;
     use super::super::{AuthenticatedFirstRequest, ProjectRouteKey, StoreOwnerKey};
     use super::*;
     use std::time::Duration;
@@ -1974,11 +1975,12 @@ mod tests {
         // can surface the spool error, so give it a generous (still bounded)
         // wait; completion notifies immediately, so a healthy run never
         // sleeps this long.
-        assert!(
+        assert_eq!(
             administration
                 .profile_host_admission_replay
                 .wait_bootstrap_completed(&profile_root, Duration::from_mins(1))
                 .await,
+            BootstrapCompletion::Completed,
             "production bootstrap worker must publish its terminal state"
         );
         assert_eq!(
