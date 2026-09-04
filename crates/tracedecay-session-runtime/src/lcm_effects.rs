@@ -830,6 +830,7 @@ mod tests {
             &db,
             "cursor",
             "cursor-native-session",
+            None,
         )
         .await
         .unwrap()
@@ -841,6 +842,7 @@ mod tests {
                 &db,
                 "claude",
                 "claude-native-session",
+                None,
             )
             .await
             .unwrap()
@@ -852,6 +854,7 @@ mod tests {
                 &db,
                 "codex",
                 "codex-native-session",
+                None,
             )
             .await
             .unwrap()
@@ -875,6 +878,7 @@ mod tests {
             &db,
             "codex",
             "codex-native-session",
+            None,
         )
         .await
         .unwrap()
@@ -916,6 +920,7 @@ mod tests {
             &db,
             "claude",
             "claude-native-session",
+            None,
         )
         .await
         .unwrap()
@@ -978,11 +983,12 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let evidence =
-            super::super::lcm_summarization::native_summary_evidence(&db, "codex", session_id)
-                .await
-                .unwrap()
-                .unwrap();
+        let evidence = super::super::lcm_summarization::native_summary_evidence(
+            &db, "codex", session_id, None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
 
         assert_eq!(evidence.text, "production Codex compaction text");
         assert_eq!(
@@ -1016,6 +1022,121 @@ mod tests {
             row.get::<Option<String>>(1).unwrap().as_deref(),
             Some("codex_native_compaction")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_compaction_requires_exact_selected_raw_membership() {
+        run_with_test_env_lock(async {
+            let harness = RegisteredGlobalDbHarness::open("lcm-native-membership").await;
+            let db = harness.registered.clone();
+            let session_id = "codex-native-membership-session";
+            let mut messages = Vec::new();
+            for ordinal in 1..=4 {
+                let mut record = message(session_id, ordinal);
+                record.provider = "codex".to_string();
+                record.message_id = format!("native-membership-message-{ordinal}");
+                if ordinal == 2 {
+                    record.role = "system".to_string();
+                }
+                messages.push(record);
+            }
+            let mut compaction = message(session_id, 5);
+            compaction.provider = "codex".to_string();
+            compaction.message_id = "native-membership-compaction".to_string();
+            compaction.kind = Some("summary".to_string());
+            compaction.text = "native text covering the full predecessor interval".to_string();
+            compaction.metadata_json = Some(
+                serde_json::json!({
+                    "source": "codex_context_compacted",
+                    "summary_body": "plaintext"
+                })
+                .to_string(),
+            );
+            messages.push(compaction);
+            let mut tail = message(session_id, 6);
+            tail.provider = "codex".to_string();
+            tail.message_id = "native-membership-tail".to_string();
+            messages.push(tail);
+            assert!(
+                db.upsert_transcript_batch(
+                    &session("codex", session_id),
+                    &messages,
+                    "/tmp/codex-native-membership-session.jsonl",
+                    ParseOffset::default(),
+                )
+                .await
+            );
+            let policy_anchor_store_id = db
+                .lcm_raw_message_store_id("codex", "native-membership-message-2")
+                .await
+                .unwrap()
+                .unwrap();
+
+            let temporary = tempfile::tempdir().unwrap();
+            let codex_bin = temporary.path().join("codex");
+            std::fs::write(
+                &codex_bin,
+                r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"id":0'*) printf '%s\n' '{"id":0,"result":{}}' ;;
+    *'"id":1'*) printf '%s\n' '{"id":1,"result":{"thread":{"id":"thread-1","model":"codex-membership-model"}}}' ;;
+    *'"id":2'*)
+      printf '%s\n' '{"method":"item/completed","params":{"model":"codex-membership-model","item":{"content":[{"type":"output_text","text":"auxiliary membership-bound summary"}]}}}'
+      printf '%s\n' '{"method":"turn/completed"}'
+      ;;
+  esac
+done
+"#,
+            )
+            .unwrap();
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&codex_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let codex_bin_env = codex_bin.to_string_lossy().into_owned();
+            let _env = TestEnvironment::set([
+                ("TRACEDECAY_CODEX_BIN", codex_bin_env.as_str()),
+                ("TRACEDECAY_CODEX_SUMMARY_TIMEOUT_SECS", "5"),
+            ]);
+
+            let converged =
+                super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
+                    .await
+                    .unwrap();
+            assert_eq!(converged.sessions[0].summary_nodes_created, 1);
+            let snapshot = db.read_snapshot().await.unwrap();
+            let mut rows = snapshot
+                .query(
+                    "SELECT node_id, summary_text
+                     FROM lcm_summary_nodes
+                     WHERE provider = 'codex' AND session_id = ?1",
+                    params![session_id],
+                )
+                .await
+                .unwrap();
+            let row = rows.next().await.unwrap().unwrap();
+            let node_id = row.get::<String>(0).unwrap();
+            assert_eq!(
+                row.get::<String>(1).unwrap(),
+                "auxiliary membership-bound summary"
+            );
+            drop(rows);
+            let mut sources = snapshot
+                .query(
+                    "SELECT source_id FROM lcm_summary_sources
+                     WHERE node_id = ?1 AND source_kind = 'raw_message'
+                     ORDER BY ordinal",
+                    params![node_id],
+                )
+                .await
+                .unwrap();
+            let mut source_ids = Vec::new();
+            while let Some(row) = sources.next().await.unwrap() {
+                source_ids.push(row.get::<String>(0).unwrap());
+            }
+            assert_eq!(source_ids.len(), 3);
+            assert!(!source_ids.contains(&policy_anchor_store_id.to_string()));
+        });
     }
 
     #[tokio::test]
@@ -1870,7 +1991,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn retained_summary_rejects_a_raw_revision_during_model_generation() {
+    fn retained_summary_rejects_a_role_revision_during_model_generation() {
         run_with_test_env_lock(async {
             let harness = RegisteredGlobalDbHarness::open("lcm-summary-revision-barrier").await;
             let db = harness.registered.clone();
@@ -1929,7 +2050,7 @@ mod tests {
 
             let mut revised = message(session_id, 1);
             revised.message_id = format!("{session_id}-message-1");
-            revised.text = "authoritative content revised during model generation".to_string();
+            revised.role = "system".to_string();
             db.lcm_ingest_raw_message(&storage_root, &revised)
                 .await
                 .unwrap();
@@ -1948,7 +2069,7 @@ mod tests {
                 .unwrap();
             assert!(
                 rows.next().await.unwrap().is_none(),
-                "text generated from an older raw revision must never be published"
+                "text generated before a role-only raw revision must never be published"
             );
             drop(rows);
             drop(snapshot);
@@ -2187,6 +2308,114 @@ mod tests {
                 .raw_message_count,
             RAW_ROWS
         );
+    }
+
+    #[test]
+    fn concurrent_raw_revision_cannot_be_overwritten_by_staged_protection() {
+        run_with_test_env_lock(async {
+            const RAW_ROWS: i64 = 32;
+            let harness = RegisteredGlobalDbHarness::open("lcm-protection-revision-barrier").await;
+            let db = harness.registered.clone();
+            let storage_root = db.db_path().parent().unwrap().to_path_buf();
+            let session_id = "protection-revision-barrier-session";
+            assert!(db.upsert_session(&session("cursor", session_id)).await);
+            let transaction = db.begin_write_transaction().await.unwrap();
+            for ordinal in 1..=RAW_ROWS {
+                let text = format!("source-a-{ordinal}:{}", "x".repeat(768 * 1024));
+                transaction
+                    .execute(
+                        "INSERT INTO session_messages (
+                            provider, message_id, session_id, role, timestamp, ordinal, text, kind
+                         ) VALUES ('cursor', ?1, ?2, 'tool', ?3, ?3, ?4, 'tool_result')",
+                        params![
+                            format!("barrier-message-{ordinal}"),
+                            session_id,
+                            ordinal,
+                            text
+                        ],
+                    )
+                    .await
+                    .unwrap();
+                transaction
+                    .execute(
+                        "INSERT INTO lcm_raw_messages (
+                            provider, message_id, session_id, role, ordinal, timestamp,
+                            content, content_hash, storage_kind, snippet_text, index_text,
+                            metadata_json
+                         ) VALUES ('cursor', ?1, ?2, 'tool', ?3, ?3, '', ?1,
+                                   'inline', '', '', '{}')",
+                        params![format!("barrier-message-{ordinal}"), session_id, ordinal],
+                    )
+                    .await
+                    .unwrap();
+            }
+            transaction.commit().await.unwrap();
+
+            let protection_db = db.clone();
+            let protection = tokio::spawn(async move {
+                protection_db
+                    .lcm_protect_session_raw_messages_page(
+                        "cursor",
+                        session_id,
+                        0,
+                        RAW_ROWS as usize,
+                        tracedecay_lcm::LCM_SCAN_PAGE_MAX_BYTES as u64,
+                    )
+                    .await
+            });
+            let payload_dir = tracedecay_lcm::payload::payload_dir(&storage_root);
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    if payload_dir
+                        .read_dir()
+                        .is_ok_and(|mut entries| entries.next().is_some())
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("protection did not reach staged payload persistence");
+
+            let mut revised = message(session_id, 1);
+            revised.message_id = "barrier-message-1".to_string();
+            revised.role = "tool".to_string();
+            revised.kind = Some("tool_result".to_string());
+            revised.text = format!("source-b: {}", "y".repeat(768 * 1024));
+            let expected_hash =
+                tracedecay_lcm::retrieval_content::projected_content_hash(&revised.text);
+            let revision_db = db.clone();
+            let revision_storage = storage_root.clone();
+            let revision = tokio::spawn(async move {
+                revision_db
+                    .lcm_ingest_raw_message(&revision_storage, &revised)
+                    .await
+            });
+
+            let protected = protection.await.unwrap().unwrap();
+            assert_eq!(protected.rows_protected, RAW_ROWS as usize);
+            revision.await.unwrap().unwrap();
+            let snapshot = db.read_snapshot().await.unwrap();
+            let mut rows = snapshot
+                .query(
+                    "SELECT store_id, content_hash FROM lcm_raw_messages
+                     WHERE provider = 'cursor' AND message_id = 'barrier-message-1'",
+                    (),
+                )
+                .await
+                .unwrap();
+            let row = rows.next().await.unwrap().unwrap();
+            let revised_store_id = row.get::<i64>(0).unwrap();
+            assert_eq!(row.get::<String>(1).unwrap(), expected_hash);
+            drop(rows);
+            let candidate =
+                tracedecay_lcm::summary_convergence::next_candidate(&snapshot, i64::MAX)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(candidate.stale_from_store_id, Some(revised_store_id));
+        });
     }
 
     fn canonical_envelope(
