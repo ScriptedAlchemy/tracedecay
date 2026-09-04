@@ -430,6 +430,27 @@ pub trait HostAdmission: Send + Sync {
         Box::pin(async { Err(HostAdmissionOutcome::registered_authority_unavailable()) })
     }
 
+    /// Reads one bounded keyset page from the canonical session-backfill
+    /// authority, excluding entries whose JSON status is `complete`.
+    fn list_session_backfill_state_page<'a>(
+        &'a self,
+        _scope: &'a ObservationScopeV1,
+        _key_prefix: &'a str,
+        _after_key: Option<&'a str>,
+        _through_key: &'a str,
+    ) -> AdmissionFuture<'a, Vec<(String, String)>> {
+        Box::pin(async { Err(HostAdmissionOutcome::registered_authority_unavailable()) })
+    }
+
+    /// Returns the greatest incomplete key currently present under a prefix.
+    fn session_backfill_state_high_water<'a>(
+        &'a self,
+        _scope: &'a ObservationScopeV1,
+        _key_prefix: &'a str,
+    ) -> AdmissionFuture<'a, Option<String>> {
+        Box::pin(async { Err(HostAdmissionOutcome::registered_authority_unavailable()) })
+    }
+
     /// Inserts or atomically replaces one canonical session-backfill value.
     /// `expected = None` means the key must still be absent.
     fn compare_and_swap_session_backfill_state<'a>(
@@ -438,6 +459,16 @@ pub trait HostAdmission: Send + Sync {
         _key: &'a str,
         _expected: Option<&'a str>,
         _replacement: &'a str,
+    ) -> AdmissionFuture<'a, bool> {
+        Box::pin(async { Err(HostAdmissionOutcome::registered_authority_unavailable()) })
+    }
+
+    /// Deletes one canonical session-backfill value only if it is unchanged.
+    fn compare_and_delete_session_backfill_state<'a>(
+        &'a self,
+        _scope: &'a ObservationScopeV1,
+        _key: &'a str,
+        _expected: &'a str,
     ) -> AdmissionFuture<'a, bool> {
         Box::pin(async { Err(HostAdmissionOutcome::registered_authority_unavailable()) })
     }
@@ -528,6 +559,8 @@ pub(crate) mod test_support {
         AnchoredObservationWrite, ObservationBatchPersistOutcome, ObservationProjectionStatus,
         ObservationReplayRequest, ObservationStore, StoredObservation,
     };
+
+    type SessionBackfillPagePause = (Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>);
 
     use crate::observation::{
         AdvanceNonDurableSourceCursorRequest, ObservationApplication, ObservationApplicationError,
@@ -807,6 +840,7 @@ pub(crate) mod test_support {
         cancel_on_cursor_read: Arc<Mutex<Option<ObservationCancellation>>>,
         projection_failure: Arc<Mutex<Option<(HostAdmissionOutcome, ObservationCancellation)>>>,
         cancel_on_discovery_queue_read: Arc<Mutex<Option<ObservationCancellation>>>,
+        session_backfill_page_pause: Arc<Mutex<Option<SessionBackfillPagePause>>>,
     }
 
     impl MemoryHostAdmission {
@@ -868,6 +902,30 @@ pub(crate) mod test_support {
 
         pub(crate) fn session_message_read_count(&self) -> usize {
             self.store.state().session_message_reads
+        }
+
+        pub(crate) fn session_backfill_state_entries(
+            &self,
+            key_prefix: &str,
+        ) -> Vec<(ObservationScopeV1, String, String)> {
+            self.store
+                .state()
+                .session_backfill_state
+                .iter()
+                .filter(|(_, key, _)| key.starts_with(key_prefix))
+                .cloned()
+                .collect()
+        }
+
+        pub(crate) fn pause_next_session_backfill_page(
+            &self,
+            entered: Arc<tokio::sync::Barrier>,
+            release: Arc<tokio::sync::Barrier>,
+        ) {
+            *self
+                .session_backfill_page_pause
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some((entered, release));
         }
 
         fn application(
@@ -1107,6 +1165,75 @@ pub(crate) mod test_support {
             })
         }
 
+        fn list_session_backfill_state_page<'a>(
+            &'a self,
+            scope: &'a ObservationScopeV1,
+            key_prefix: &'a str,
+            after_key: Option<&'a str>,
+            through_key: &'a str,
+        ) -> AdmissionFuture<'a, Vec<(String, String)>> {
+            Box::pin(async move {
+                let mut entries = {
+                    let state = self.store.state();
+                    state
+                        .session_backfill_state
+                        .iter()
+                        .filter(|(stored_scope, key, value)| {
+                            stored_scope == scope
+                                && key.starts_with(key_prefix)
+                                && after_key.is_none_or(|after| key.as_str() > after)
+                                && key.as_str() <= through_key
+                                && !serde_json::from_str::<serde_json::Value>(value)
+                                    .ok()
+                                    .is_some_and(|value| {
+                                        value.get("status").and_then(serde_json::Value::as_str)
+                                            == Some("complete")
+                                    })
+                        })
+                        .map(|(_, key, value)| (key.clone(), value.clone()))
+                        .collect::<Vec<_>>()
+                };
+                entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+                entries.truncate(8);
+                let pause = self
+                    .session_backfill_page_pause
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .take();
+                if let Some((entered, release)) = pause {
+                    entered.wait().await;
+                    release.wait().await;
+                }
+                Ok(entries)
+            })
+        }
+
+        fn session_backfill_state_high_water<'a>(
+            &'a self,
+            scope: &'a ObservationScopeV1,
+            key_prefix: &'a str,
+        ) -> AdmissionFuture<'a, Option<String>> {
+            Box::pin(async move {
+                Ok(self
+                    .store
+                    .state()
+                    .session_backfill_state
+                    .iter()
+                    .filter(|(stored_scope, key, value)| {
+                        stored_scope == scope
+                            && key.starts_with(key_prefix)
+                            && !serde_json::from_str::<serde_json::Value>(value)
+                                .ok()
+                                .is_some_and(|value| {
+                                    value.get("status").and_then(serde_json::Value::as_str)
+                                        == Some("complete")
+                                })
+                    })
+                    .map(|(_, key, _)| key.clone())
+                    .max())
+            })
+        }
+
         fn compare_and_swap_session_backfill_state<'a>(
             &'a self,
             scope: &'a ObservationScopeV1,
@@ -1134,6 +1261,26 @@ pub(crate) mod test_support {
                     }
                     _ => Ok(false),
                 }
+            })
+        }
+
+        fn compare_and_delete_session_backfill_state<'a>(
+            &'a self,
+            scope: &'a ObservationScopeV1,
+            key: &'a str,
+            expected: &'a str,
+        ) -> AdmissionFuture<'a, bool> {
+            Box::pin(async move {
+                let mut state = self.store.state();
+                let Some(index) = state.session_backfill_state.iter().position(
+                    |(stored_scope, stored_key, value)| {
+                        stored_scope == scope && stored_key == key && value == expected
+                    },
+                ) else {
+                    return Ok(false);
+                };
+                state.session_backfill_state.remove(index);
+                Ok(true)
             })
         }
 

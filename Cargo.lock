@@ -7048,6 +7048,7 @@ dependencies = [
  "criterion",
  "dirs",
  "filetime",
+ "getrandom 0.2.17",
  "gix",
  "hex",
  "hotpath",
