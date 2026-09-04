@@ -267,6 +267,19 @@ jobs:
       # moment that dev-dependency changes, and nextest would then silently
       # select zero of them and report green having run nothing. Asking for the
       # feature explicitly makes the selection independent of that accident.
+      # `tracedecay-search-eval` ships two binaries and has no integration
+      # tests of its own, so cargo never links them for a test build: cargo
+      # only builds a package's bin targets when that same package has a test
+      # or bench target selected. The evaluator acceptance tests
+      # (`runtime_acceptance_suite::search_eval_cli_test`,
+      # `product_surface_suite::packaged_semantic_evaluator`) execute those
+      # binaries out of the profile directory and fail closed naming this
+      # command when they are absent. Building them here is the deterministic
+      # prerequisite; the tests keep asserting the binary exists rather than
+      # skipping, so a dropped step is a red lane, not a silent no-op.
+      - name: Build search-eval binaries
+        run: cargo build -p tracedecay-search-eval --bins --locked
+
       - name: Run tests
         run: cargo nextest run --workspace --profile ci --locked --features tracedecay/test-helpers
 
