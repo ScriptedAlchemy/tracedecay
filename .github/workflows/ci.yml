@@ -280,6 +280,21 @@ jobs:
       - name: Build search-eval binaries
         run: cargo build -p tracedecay-search-eval --bins --locked
 
+      # `nested_chunk_fanout_admits_stolen_workers_without_exceeding_width`
+      # installs the process-global background CPU authority at width 2, and
+      # that authority is a set-once `OnceLock` with no uninstall. Inside the
+      # shared `tracedecay-code-index` lib binary every later test that nests
+      # `with_background_cpu_permit` then queues behind a width-2 gate, which
+      # deadlocked the binary under libtest fan-out. It is therefore `#[ignore]`d
+      # and run here on its own, single-threaded, so the coverage is kept
+      # without letting one test's process-global install decide the width for
+      # every sibling.
+      - name: Run isolated background-CPU width test
+        run: |
+          cargo test -p tracedecay-code-index --locked --lib \
+            nested_chunk_fanout_admits_stolen_workers_without_exceeding_width \
+            -- --ignored --test-threads=1
+
       - name: Run tests
         run: cargo nextest run --workspace --profile ci --locked --features tracedecay/test-helpers
 
