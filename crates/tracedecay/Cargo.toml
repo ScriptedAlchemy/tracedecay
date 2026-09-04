@@ -600,6 +600,13 @@ harness = false
 required-features = ["test-transport"]
 test = false
 
+[[bench]]
+name = "rmcp_connection_pipeline"
+path = "benches/rmcp_connection_pipeline.rs"
+harness = false
+required-features = ["test-transport"]
+test = false
+
 [[test]]
 name = "runtime_acceptance_suite"
 path = "tests/runtime_acceptance_suite/main.rs"
