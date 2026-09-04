@@ -3987,7 +3987,7 @@ case "${1-}:${2-}" in
       exit 64
     fi
     command="$6"
-    if [ -f "$config" ] && /bin/grep -q '"other"' "$config"; then
+    if [ -f "$config" ] && /usr/bin/grep -q '"other"' "$config"; then
       printf '{"mcpServers":{"other":{"command":"other","args":[]},"tracedecay":{"command":"%s","args":["serve"]}}}\n' "$command" > "$config"
     else
       printf '{"mcpServers":{"tracedecay":{"command":"%s","args":["serve"]}}}\n' "$command" > "$config"
@@ -3998,7 +3998,7 @@ case "${1-}:${2-}" in
       echo "unexpected kiro-cli mcp remove arguments: $*" >&2
       exit 64
     fi
-    if [ -f "$config" ] && /bin/grep -q '"other"' "$config"; then
+    if [ -f "$config" ] && /usr/bin/grep -q '"other"' "$config"; then
       printf '{"mcpServers":{"other":{"command":"other","args":[]}}}\n' > "$config"
     else
       /bin/rm -f "$config"

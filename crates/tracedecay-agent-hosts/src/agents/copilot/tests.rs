@@ -41,20 +41,20 @@ fn fake_copilot_cli(bin: &Path, log: &Path, body: &str) {
 const FAKE_REGISTRY_BODY: &str = r#"case "$1 $2" in
   "mcp add")
     [ "$4" = "--" ] || { echo 'missing -- separator before the server command' >&2; exit 64; }
-    if [ -f "$HOME/.copilot/mcp-config.json" ] && /bin/grep -q '"tracedecay"' "$HOME/.copilot/mcp-config.json"; then
+    if [ -f "$HOME/.copilot/mcp-config.json" ] && /usr/bin/grep -q '"tracedecay"' "$HOME/.copilot/mcp-config.json"; then
       echo 'cannot update an existing MCP registration in place' >&2
       exit 9
     fi
     command="$5"
     /bin/mkdir -p "$HOME/.copilot"
-    if [ -f "$HOME/.copilot/mcp-config.json" ] && /bin/grep -q '"other"' "$HOME/.copilot/mcp-config.json"; then
+    if [ -f "$HOME/.copilot/mcp-config.json" ] && /usr/bin/grep -q '"other"' "$HOME/.copilot/mcp-config.json"; then
       printf '{"mcpServers":{"other":{"command":"other","args":[]},"tracedecay":{"command":"%s","args":["serve"]}}}\n' "$command" > "$HOME/.copilot/mcp-config.json"
     else
       printf '{"mcpServers":{"tracedecay":{"command":"%s","args":["serve"]}}}\n' "$command" > "$HOME/.copilot/mcp-config.json"
     fi
     ;;
   "mcp remove")
-    if [ -f "$HOME/.copilot/mcp-config.json" ] && /bin/grep -q '"other"' "$HOME/.copilot/mcp-config.json"; then
+    if [ -f "$HOME/.copilot/mcp-config.json" ] && /usr/bin/grep -q '"other"' "$HOME/.copilot/mcp-config.json"; then
       printf '%s\n' '{"mcpServers":{"other":{"tools":["*"],"command":"other","args":[]}}}' > "$HOME/.copilot/mcp-config.json"
     else
       /bin/rm -f "$HOME/.copilot/mcp-config.json"

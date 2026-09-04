@@ -244,17 +244,17 @@ peer=''
 mcp=''
 hooks=''
 if [ -f "$config" ]; then
-  if /bin/grep -q 'plugins.other' "$config"; then
+  if /usr/bin/grep -q 'plugins.other' "$config"; then
     peer='[plugins.other]
 enabled = true
 '
   fi
-  if /bin/grep -q 'mcp_servers.tracedecay' "$config"; then
+  if /usr/bin/grep -q 'mcp_servers.tracedecay' "$config"; then
     mcp='[mcp_servers.tracedecay]
 command = "/bin/tracedecay"
 '
   fi
-  if /bin/grep -q '^\[hooks' "$config"; then
+  if /usr/bin/grep -q '^\[hooks' "$config"; then
     hooks='[hooks.state."keep"]
 trusted_hash = "sha256:keep"
 '

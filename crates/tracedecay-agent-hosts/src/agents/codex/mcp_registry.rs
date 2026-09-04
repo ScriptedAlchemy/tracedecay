@@ -329,12 +329,12 @@ mod tests {
 peer=''
 kept=''
 if [ -f "$config" ]; then
-  if /bin/grep -q 'mcp_servers.other' "$config"; then
+  if /usr/bin/grep -q 'mcp_servers.other' "$config"; then
     peer='[mcp_servers.other]
 command = "other"
 '
   fi
-  if /bin/grep -q '^\[plugins' "$config"; then
+  if /usr/bin/grep -q '^\[plugins' "$config"; then
     kept='[plugins."tracedecay@personal"]
 enabled = true
 '

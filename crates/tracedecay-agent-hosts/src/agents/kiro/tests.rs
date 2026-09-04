@@ -274,14 +274,14 @@ const FAKE_REGISTRY_BODY: &str = r#"case "$1 $2" in
     [ "${11-}" = "--force" ] || { echo 'missing --force' >&2; exit 64; }
     command="$6"
     /bin/mkdir -p "$HOME/.kiro/settings"
-    if [ -f "$HOME/.kiro/settings/mcp.json" ] && /bin/grep -q '"other"' "$HOME/.kiro/settings/mcp.json"; then
+    if [ -f "$HOME/.kiro/settings/mcp.json" ] && /usr/bin/grep -q '"other"' "$HOME/.kiro/settings/mcp.json"; then
       printf '{"mcpServers":{"other":{"command":"other","args":[]},"tracedecay":{"command":"%s","args":["serve"],"disabled":false}}}\n' "$command" > "$HOME/.kiro/settings/mcp.json"
     else
       printf '{"mcpServers":{"tracedecay":{"command":"%s","args":["serve"],"disabled":false}}}\n' "$command" > "$HOME/.kiro/settings/mcp.json"
     fi
     ;;
   "mcp remove")
-    if [ -f "$HOME/.kiro/settings/mcp.json" ] && /bin/grep -q '"other"' "$HOME/.kiro/settings/mcp.json"; then
+    if [ -f "$HOME/.kiro/settings/mcp.json" ] && /usr/bin/grep -q '"other"' "$HOME/.kiro/settings/mcp.json"; then
       printf '%s\n' '{"mcpServers":{"other":{"command":"other","args":[]}}}' > "$HOME/.kiro/settings/mcp.json"
     else
       /bin/rm -f "$HOME/.kiro/settings/mcp.json"
