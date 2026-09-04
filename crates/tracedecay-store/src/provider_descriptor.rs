@@ -48,6 +48,7 @@ pub(crate) struct ProviderMessageSemantics {
 
 pub(crate) fn provider_message_semantics(
     provider: &str,
+    native_record_kind: &str,
     role: &str,
     content: &serde_json::Value,
     has_native_item_identity: bool,
@@ -66,10 +67,21 @@ pub(crate) fn provider_message_semantics(
         "codex_internal_context".to_owned(),
         serde_json::Value::String("goal".to_owned()),
     );
-    if has_native_item_identity {
+    let source_event = match native_record_kind {
+        "event_msg" if has_native_item_identity => Some("item_completed"),
+        "response_item" => Some("response_item"),
+        _ => None,
+    };
+    if let Some(source_event) = source_event {
         metadata.insert(
             "source_event".to_owned(),
-            serde_json::Value::String("item_completed".to_owned()),
+            serde_json::Value::String(source_event.to_owned()),
+        );
+    }
+    if native_record_kind == "response_item" {
+        metadata.insert(
+            "source_role".to_owned(),
+            serde_json::Value::String("user".to_owned()),
         );
     }
     metadata.insert("codex_goal".to_owned(), goal.metadata());
