@@ -82,12 +82,17 @@ impl GlobalDbObservationStore {
         write: &AnchoredObservationWrite,
         retained_digest: &PayloadDigestV1,
         actual_cursor: Option<&ClaudeSourceCursorV1>,
-    ) -> ObservationStoreResult<()> {
+    ) -> ObservationStoreResult<RefusalCoverageOutcome> {
         const OPERATION: &str = "record refused admission terminal and coverage";
         let candidate = write.observation();
         let identity = candidate.identity();
-        let Some(mut advance) = refused_scan_frontier(write, actual_cursor)? else {
-            return Ok(());
+        let mut advance = match refused_scan_frontier(write, actual_cursor)? {
+            RefusedScanFrontier::AtFrontier(advance) => *advance,
+            RefusedScanFrontier::NotAtFrontier => {
+                return Ok(RefusalCoverageOutcome::NotAtFrontier {
+                    actual: actual_cursor.cloned(),
+                });
+            }
         };
         match (
             write.next_cursor().file_identity(),
@@ -150,7 +155,9 @@ impl GlobalDbObservationStore {
                 .rollback()
                 .await
                 .map_err(|error| runtime_storage_error(OPERATION, error))?;
-            return Ok(());
+            return Ok(RefusalCoverageOutcome::NotAtFrontier {
+                actual: durable_cursor,
+            });
         }
         transaction
             .execute(
@@ -234,7 +241,7 @@ impl GlobalDbObservationStore {
             .commit()
             .await
             .map_err(|error| runtime_storage_error(OPERATION, error))?;
-        Ok(())
+        Ok(RefusalCoverageOutcome::Recorded)
     }
 
     #[hotpath::skip]
@@ -263,7 +270,11 @@ impl GlobalDbObservationStore {
             preflight.admission_refusal(&observation_id, observation.payload_reference().digest())
         {
             let cursor = actual_cursor();
-            self.record_refusal_with_coverage(&write, retained_digest, cursor.as_ref())
+            // The exact refusal marker is already durable. A later stale
+            // reader may no longer stand at its original scan frontier, but
+            // that does not invalidate the terminal content verdict.
+            let _ = self
+                .record_refusal_with_coverage(&write, retained_digest, cursor.as_ref())
                 .await?;
             return Err(identity_collision(
                 observation_id,
@@ -320,8 +331,15 @@ impl GlobalDbObservationStore {
             };
             if pending.is_none() {
                 let cursor = actual_cursor();
-                self.record_refusal_with_coverage(&write, retained_digest, cursor.as_ref())
-                    .await?;
+                if let RefusalCoverageOutcome::NotAtFrontier { actual } = self
+                    .record_refusal_with_coverage(&write, retained_digest, cursor.as_ref())
+                    .await?
+                {
+                    return Err(ObservationStoreError::CursorConflict {
+                        expected: Box::new(write.expected_cursor().cloned()),
+                        actual: Box::new(actual),
+                    });
+                }
             }
             return Err(identity_collision(
                 observation_id,
@@ -1496,7 +1514,7 @@ fn read_runtime_source_cursor(
 /// the caller's expected cursor matches the durable one. Generation values
 /// are opaque source identities, not ordered counters.
 ///
-/// `Ok(None)` is the not-at-frontier verdict — a covered replay or a stale
+/// `NotAtFrontier` is the not-at-frontier verdict — a covered replay or a stale
 /// expected view — and leaves every ledger untouched. Gaps and generation
 /// jumps never reach the advance constructor here: `ObservationWrite::new`
 /// already validated that this write's expected→next cursor transition
@@ -1505,10 +1523,22 @@ fn read_runtime_source_cursor(
 /// construction failure is therefore a contract violation, and it surfaces
 /// as the typed store error — silently answering "not at the scan frontier"
 /// would record no coverage and leave the refused record re-read forever.
+enum RefusedScanFrontier {
+    AtFrontier(Box<ObservationCursorAdvance>),
+    NotAtFrontier,
+}
+
+enum RefusalCoverageOutcome {
+    Recorded,
+    NotAtFrontier {
+        actual: Option<ClaudeSourceCursorV1>,
+    },
+}
+
 fn refused_scan_frontier(
     write: &AnchoredObservationWrite,
     actual_cursor: Option<&ClaudeSourceCursorV1>,
-) -> ObservationStoreResult<Option<ObservationCursorAdvance>> {
+) -> ObservationStoreResult<RefusedScanFrontier> {
     let identity = write.observation().identity();
     let candidate_covered = actual_cursor.is_some_and(|cursor| {
         cursor.generation() == identity.generation()
@@ -1516,7 +1546,7 @@ fn refused_scan_frontier(
             && cursor.position() >= identity.position().end()
     });
     if candidate_covered || actual_cursor != write.expected_cursor() {
-        return Ok(None);
+        return Ok(RefusedScanFrontier::NotAtFrontier);
     }
     ObservationCursorAdvance::for_ordering(
         identity.source().clone(),
@@ -1527,7 +1557,8 @@ fn refused_scan_frontier(
         identity.position(),
         ObservationCoverageReason::AdmissionRefused,
     )
-    .map(Some)
+    .map(Box::new)
+    .map(RefusedScanFrontier::AtFrontier)
 }
 
 fn read_runtime_stored_observation(

@@ -141,6 +141,7 @@ pub(in crate::runtime) enum JsonlFrameAdmission {
     Durable {
         parsed_record: ParsedObservationRecordV1,
         native_record_id: ObservationId,
+        identity_collision_retry: bool,
     },
     NonDurable {
         reason: ObservationCoverageReason,
@@ -157,9 +158,29 @@ impl JsonlFrameAdmission {
         parsed_record: ParsedObservationRecordV1,
         native_record_id: ObservationId,
     ) -> Self {
+        let mut admission =
+            Self::durable_with_identity_collision_retry(parsed_record, native_record_id);
+        if let Self::Durable {
+            identity_collision_retry,
+            ..
+        } = &mut admission
+        {
+            *identity_collision_retry = false;
+        }
+        admission
+    }
+
+    /// Marks a frame whose provider proved that its primary stable identity
+    /// was derived without a native record id and may therefore be retried
+    /// once with the provider's positional collision fallback.
+    pub(in crate::runtime) fn durable_with_identity_collision_retry(
+        parsed_record: ParsedObservationRecordV1,
+        native_record_id: ObservationId,
+    ) -> Self {
         Self::Durable {
             parsed_record,
             native_record_id,
+            identity_collision_retry: true,
         }
     }
 
@@ -427,6 +448,7 @@ pub(in crate::runtime) struct SharedJsonlFileIdentity {
 #[derive(Clone, Copy)]
 pub(in crate::runtime) struct JsonlFrameHints {
     pub may_change_codex_context: bool,
+    pub identity_collision_retry: bool,
 }
 
 fn jsonl_frame_hints(bytes: &[u8]) -> JsonlFrameHints {
@@ -443,6 +465,7 @@ fn jsonl_frame_hints(bytes: &[u8]) -> JsonlFrameHints {
             }));
     JsonlFrameHints {
         may_change_codex_context,
+        identity_collision_retry: false,
     }
 }
 
@@ -1773,14 +1796,26 @@ impl ActiveAdmission<'_> {
         persisted_cursor_update: PersistedCursorUpdate,
     ) -> TranscriptIngestResult<DurableFrameDisposition> {
         let checkpoint = frame.checkpoint;
+        let result = self
+            .capture_attempt(expected_cursor.clone(), frame, retention_class)
+            .await?;
+        self.apply_capture_result(expected_cursor, checkpoint, result, persisted_cursor_update)
+            .await
+    }
+
+    #[hotpath::skip]
+    async fn capture_attempt(
+        &self,
+        expected_cursor: Option<ObservationSourceCursorV1>,
+        frame: DurableJsonlFrame,
+        retention_class: &RetentionClass,
+    ) -> TranscriptIngestResult<Result<CaptureObservationOutcome, HostAdmissionOutcome>> {
         crate::runtime::pipeline_metrics::record_capture_single();
         hotpath::gauge!("jsonl_admission_batch_frames").inc(1.0);
         hotpath::gauge!("jsonl_admission_batch_bytes").inc(frame.bytes.len() as f64);
         hotpath::gauge!("jsonl_admission_writer_submits").inc(1.0);
-        let request = self.capture_request(expected_cursor.clone(), frame, retention_class)?;
-        let result = self.admission.capture_observation(request).await;
-        self.apply_capture_result(expected_cursor, checkpoint, result, persisted_cursor_update)
-            .await
+        let request = self.capture_request(expected_cursor, frame, retention_class)?;
+        Ok(self.admission.capture_observation(request).await)
     }
 
     #[hotpath::skip]
@@ -2060,35 +2095,104 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
                             provider: active.provider,
                         });
                     }
+                    let frame_start_state = fallback_state.clone();
                     match normalize(
                         &mut fallback_state,
                         bytes.as_ref(),
                         range,
                         checkpoint.offset,
-                        prepared,
+                        prepared.clone(),
                         hints,
                     )? {
                         JsonlFrameAdmission::Durable {
                             parsed_record,
                             native_record_id,
+                            identity_collision_retry,
                         } => {
-                            match active
-                                .capture(
-                                    expected_cursor,
+                            let first = active
+                                .capture_attempt(
+                                    expected_cursor.clone(),
                                     DurableJsonlFrame {
                                         checkpoint,
                                         range,
                                         parsed_record,
                                         native_record_id,
-                                        bytes,
+                                        bytes: Arc::clone(&bytes),
                                         fallback_prepared: None,
                                         fallback_hints: hints,
                                     },
                                     policy.retention_class,
-                                    policy.persisted_cursor_update,
                                 )
-                                .await?
-                            {
+                                .await?;
+                            let disposition = match first {
+                                Err(outcome)
+                                    if identity_collision_retry
+                                        && matches!(
+                                            &outcome,
+                                            HostAdmissionOutcome {
+                                                reason_code: Some("observation_identity_collision"),
+                                                retryable: false,
+                                                ..
+                                            }
+                                        ) =>
+                                {
+                                    // The provider explicitly proved that the
+                                    // primary identity had no native record
+                                    // id. Re-normalize from the frame's input
+                                    // state so provider carry is applied once,
+                                    // then try exactly one positional identity.
+                                    let mut retry_state = frame_start_state;
+                                    let mut retry_hints = hints;
+                                    retry_hints.identity_collision_retry = true;
+                                    let retry = normalize(
+                                        &mut retry_state,
+                                        bytes.as_ref(),
+                                        range,
+                                        checkpoint.offset,
+                                        prepared,
+                                        retry_hints,
+                                    )?;
+                                    let JsonlFrameAdmission::Durable {
+                                        parsed_record,
+                                        native_record_id,
+                                        ..
+                                    } = retry
+                                    else {
+                                        return Err(TranscriptIngestError::InvalidFrameState {
+                                            provider: active.provider,
+                                        });
+                                    };
+                                    let disposition = active
+                                        .capture(
+                                            expected_cursor,
+                                            DurableJsonlFrame {
+                                                checkpoint,
+                                                range,
+                                                parsed_record,
+                                                native_record_id,
+                                                bytes,
+                                                fallback_prepared: None,
+                                                fallback_hints: retry_hints,
+                                            },
+                                            policy.retention_class,
+                                            policy.persisted_cursor_update,
+                                        )
+                                        .await?;
+                                    fallback_state = retry_state;
+                                    disposition
+                                }
+                                result => {
+                                    active
+                                        .apply_capture_result(
+                                            expected_cursor,
+                                            checkpoint,
+                                            result,
+                                            policy.persisted_cursor_update,
+                                        )
+                                        .await?
+                                }
+                            };
+                            match disposition {
                                 DurableFrameDisposition::Persisted => {
                                     progress.frames_accepted =
                                         progress.frames_accepted.saturating_add(1);
@@ -2242,6 +2346,7 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
             JsonlFrameAdmission::Durable {
                 parsed_record,
                 native_record_id,
+                ..
             } => (parsed_record, native_record_id),
             JsonlFrameAdmission::NonDurable {
                 reason,
