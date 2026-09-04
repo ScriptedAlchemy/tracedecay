@@ -1132,6 +1132,24 @@ impl GraphDb {
     /// A later lease reopens and revalidates the same container on first use.
     #[hotpath::measure(label = "graph_db.runtime.hibernate", impl_type = "GraphDb")]
     pub(crate) fn hibernate_if_lazy(&self) -> Result<(), GraphDbError> {
+        self.hibernate_if_lazy_with(SnapshotGateClaim::Blocking)
+            .map(|_| ())
+    }
+
+    /// Hibernates only when no reader currently holds this database.
+    ///
+    /// The blocking variant waits on the exclusive snapshot claim, which is
+    /// exactly what a live serving lease holds; waiting there would stall the
+    /// caller behind whatever that reader is doing and would evict an engine
+    /// a query is reading from the moment it finished. Bounding the retained
+    /// engine set must never do either, so this variant declines instead:
+    /// `Ok(false)` means "still resident, still serving", and the next sweep
+    /// (or the reader's own lease drop) releases it.
+    pub(crate) fn hibernate_if_lazy_when_idle(&self) -> Result<bool, GraphDbError> {
+        self.hibernate_if_lazy_with(SnapshotGateClaim::WhenIdle)
+    }
+
+    fn hibernate_if_lazy_with(&self, claim: SnapshotGateClaim) -> Result<bool, GraphDbError> {
         if self
             .inner
             .lazy_store_state
@@ -1139,16 +1157,28 @@ impl GraphDb {
             .map_err(|_| GraphDbError::unavailable("lazy graph state lock is poisoned"))?
             .is_none()
         {
-            return Ok(());
+            return Ok(false);
         }
-        let _snapshot_gate = self.wait_snapshot_gate_write();
+        let _snapshot_gate = match claim {
+            SnapshotGateClaim::Blocking => self.wait_snapshot_gate_write(),
+            SnapshotGateClaim::WhenIdle => {
+                // The marker retirement `wait_snapshot_gate_write` performs is
+                // deliberate there and would be wrong here: a declined attempt
+                // must leave the admitted proofs exactly as it found them.
+                let Some(gate) = self.inner.snapshot_gate.try_write() else {
+                    return Ok(false);
+                };
+                self.inner.markers.mark_container_mutated();
+                gate
+            }
+        };
         let mut database = crate::hotpath_observe::wait_lock(
             crate::hotpath_observe::LOCK_WAIT_DATABASE_WRITE,
             || self.inner.database.write(),
         )
         .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
         let Some(database_to_close) = database.take() else {
-            return Ok(());
+            return Ok(false);
         };
         self.inner.identity_indexes.invalidate();
         if let Err(error) = hotpath::measure_block!(
@@ -1177,16 +1207,24 @@ impl GraphDb {
         *self.inner.verified_generations.write().map_err(|_| {
             GraphDbError::unavailable("verified graph generation state lock is poisoned")
         })? = VerifiedGenerationState::default();
+        // Sealed per-generation readers are separate containers with their own
+        // reopen authority; nothing about them depends on this staging engine
+        // being resident. Uninstalling them here (which is what closing them
+        // amounted to) meant the next release sweep found no sealed store for
+        // any generation and retained every one of them, and a later read had
+        // to re-adopt the artifact from disk under a fresh digest proof. They
+        // hibernate alongside this engine instead: identity retained, nothing
+        // resident, first read reopens.
         let sealed = self
             .inner
             .sealed_generations
-            .write()
-            .map(|mut sealed| std::mem::take(&mut *sealed))
+            .read()
+            .map(|sealed| sealed.values().cloned().collect::<Vec<_>>())
             .unwrap_or_default();
-        for store in sealed.into_values() {
-            let _ = store.database().close();
+        for store in sealed {
+            let _ = store.database().hibernate_if_lazy();
         }
-        Ok(())
+        Ok(true)
     }
 
     /// One shared snapshot-gate choreography for every batch that is derived
@@ -1798,6 +1836,17 @@ impl GraphDb {
         }
         Ok(())
     }
+}
+
+/// How a hibernation attempt claims the exclusive snapshot gate.
+///
+/// A retirement-driven hibernation must land, so it waits. A retained-set
+/// sweep must never wait on — or evict — a generation a reader is serving
+/// from, so it declines when the gate is busy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SnapshotGateClaim {
+    Blocking,
+    WhenIdle,
 }
 
 /// Which runtime path materialized a native engine. Operator-visible on the
