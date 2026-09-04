@@ -425,7 +425,7 @@ pub(super) async fn evaluate_native_profile(
             }
             tracedecay_daemon_protocol::DaemonInvocationOutcome::ApplicationProblem {
                 problem: tracedecay_application::ApplicationProblem::Conflict { .. },
-            } if attempt == 0 => continue,
+            } if attempt == 0 => {}
             outcome => panic!("native semantic profile publication failed: {outcome:?}"),
         }
     }
@@ -492,7 +492,7 @@ async fn activate_native_profile(
             }
             tracedecay_daemon_protocol::DaemonInvocationOutcome::ApplicationProblem {
                 problem: tracedecay_application::ApplicationProblem::Conflict { .. },
-            } if attempt == 0 => continue,
+            } if attempt == 0 => {}
             outcome => panic!("composed semantic activation failed: {outcome:?}"),
         }
     }
@@ -652,7 +652,7 @@ async fn wait_for_semantic_runtime_ready(
     project: &Path,
 ) -> Value {
     let mut latest = semantic_runtime_status(harness, project).await;
-    let ready = tokio::time::timeout(Duration::from_secs(60), async {
+    let ready = tokio::time::timeout(Duration::from_mins(1), async {
         loop {
             let status = semantic_runtime_status(harness, project).await;
             if status["state"]["state"] == "ready" {
