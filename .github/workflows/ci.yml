@@ -330,13 +330,10 @@ jobs:
     needs: scope-gate
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: windows-latest
-    # Full-workspace `nextest archive` on hosted windows-latest has been
-    # dying at the job timeout with no failed step: first at 30m, then at 45m
-    # (run 32789438873 burned 44m08s in `Build nextest archive` on a cold
-    # Swatinem cache -- the restore step took 12s, i.e. a miss -- and was
-    # killed mid-compile). Earlier runs only "finished" faster because a
-    # resolution error aborted the `tracedecay` lib-test unit early. 75m fits
-    # a genuinely cold cache while still failing loudly on a hung linker.
+    # Build every Windows test once, then shard execution from the archive.
+    # Keep a bounded guard around the hosted build; Cargo timings are retained
+    # below so a slow or failed archive can be attributed instead of treating
+    # the timeout itself as the defect.
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v7
@@ -344,7 +341,14 @@ jobs:
       - name: Tune Windows runner for build I/O
         uses: ./.github/actions/tune-windows-runner
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Install only the toolchain pinned by rust-toolchain.toml. Installing
+      # `stable` as well makes Swatinem/rust-cache include an unused compiler
+      # in its environment key, fragmenting the cache whenever stable moves.
+      - name: Install pinned toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
 
       - name: Use lld-link linker
         shell: pwsh
@@ -388,7 +392,16 @@ jobs:
           echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
       - name: Build nextest archive
         shell: pwsh
-        run: cargo nextest archive --workspace --locked --features tracedecay/test-helpers --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst"
+        run: cargo nextest archive --workspace --locked --features tracedecay/test-helpers --timings --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst"
+
+      - name: Upload Windows archive build timings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-nextest-build-timings
+          path: target/cargo-timings/cargo-timing.html
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Upload nextest archive
         uses: actions/upload-artifact@v4
