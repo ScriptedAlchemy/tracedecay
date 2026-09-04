@@ -242,6 +242,28 @@ pub(super) async fn production_project_server(
     .await
 }
 
+/// The primary checkout this route must be served from, when a linked worktree
+/// is checked out on the *same* branch as its primary.
+///
+/// `ProjectServerKey` is root-bound so distinct linked worktrees keep exact
+/// root-bound servers over one shared `StoreOwnerKey` — a worktree on another
+/// branch (or detached) serves a different generation and must not be answered
+/// from the primary's graph. A worktree on the same branch serves the same
+/// branch content from the same store owner and the same graph database, so a
+/// second physical server for it is a duplicate owner over one authority, not
+/// an exact route: the route belongs in the alias map beside the primary's.
+///
+/// Returns `None` for a primary checkout, a non-worktree path, a detached or
+/// unborn checkout, and any worktree whose branch differs from the primary's.
+fn shared_primary_checkout_root(project_path: &std::path::Path) -> Option<PathBuf> {
+    let primary = tracedecay_runtime_core::worktree::repository_identity_root(project_path)?;
+    let branch = tracedecay_runtime_core::branch::current_branch(project_path)?;
+    if tracedecay_runtime_core::branch::current_branch(&primary)? != branch {
+        return None;
+    }
+    tracedecay_daemon_identity::authority::canonical_identity_path(&primary).ok()
+}
+
 async fn production_project_server_inner(
     store_administration: &StoreAdministration,
     project_open_gates: &tokio::sync::Mutex<ProjectOpenGates>,
@@ -322,7 +344,10 @@ async fn production_project_server_inner(
         store_administration,
     ))
     .await?;
-    let key = ProjectServerKey::from_open_project(&cg, handshake)?;
+    let mut key = ProjectServerKey::from_open_project(&cg, handshake)?;
+    if let Some(shared_root) = shared_primary_checkout_root(canonical_project_path) {
+        key.project_root = shared_root;
+    }
     let cg = Arc::new(cg);
     log_daemon_event(
         "project_open_phase",

@@ -1540,12 +1540,28 @@ async fn released_automation_tombstone_allows_one_eventual_replacement() {
         .await
         .expect("noncooperative owner start timed out")
         .expect("noncooperative owner start sender dropped");
-    engine
-        .store_administration
-        .automation_schedulers()
-        .lock()
-        .await
-        .insert(old.clone(), test_automation_scheduler_handle(task));
+    // Project open publishes the live scheduler owner for this project, so the
+    // map already holds `new` before the tombstone goes in. This fixture is
+    // about a retiring predecessor standing alone: leaving the published owner
+    // beside it gives the reconcile two logical owners for one project and
+    // lets it answer for whichever the map yields first.
+    if let Some(retirement) = engine.retire_automation_scheduler_locked(&new).await {
+        tokio::time::timeout(std::time::Duration::from_secs(10), retirement.wait())
+            .await
+            .expect("the published scheduler owner must retire before the tombstone stands in");
+    }
+    {
+        let mut schedulers = engine
+            .store_administration
+            .automation_schedulers()
+            .lock()
+            .await;
+        assert!(
+            schedulers.is_empty(),
+            "the tombstone must be the only scheduler owner in this fixture"
+        );
+        schedulers.insert(old.clone(), test_automation_scheduler_handle(task));
+    }
 
     let retirement_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(4);
     let retirement = {

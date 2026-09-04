@@ -165,11 +165,23 @@ fn assert_work_routes_mounted<'a>(
             ),
         )
         .await;
+        // A freshly opened project has published no Work graph version, and a
+        // verified version identity requires a real event sequence, so there
+        // is no representable empty current graph to answer with: the mounted
+        // owner answers the authorized absence as a concealed
+        // not-found-or-not-authorized. That still proves routing — an
+        // unmounted owner never reaches the Work application and answers
+        // `Problem::Unavailable` instead, exactly as the unregistered-project
+        // test below asserts.
+        let routed_to_mounted_owner = match &work.outcome {
+            DaemonInvocationOutcome::WorkApplication { .. } => true,
+            DaemonInvocationOutcome::ApplicationProblem { problem } => {
+                problem.kind() == ApplicationProblemKind::NotFoundOrNotAuthorized
+            }
+            _ => false,
+        };
         assert!(
-            matches!(
-                work.outcome,
-                DaemonInvocationOutcome::WorkApplication { .. }
-            ),
+            routed_to_mounted_owner,
             "project-open must route Work through the mounted daemon owner: {work:?}"
         );
     })

@@ -150,13 +150,15 @@ async fn fresh_v2_project_starts_the_required_automation_scheduler() {
         &handshake.client_identity.profile_root,
         "scheduler-fresh-default-test",
     );
-    let cg = super::super::open_project_for_handshake(
-        &project,
-        &handshake,
-        &engine.store_administration,
-    )
-    .await
-    .expect("open scheduler fixture through daemon authority");
+    // Scheduler reconcile resolves its graph from the retained project server,
+    // so the fixture has to open through the engine: a graph opened beside the
+    // owner registry is not an owner, and reconcile correctly answers
+    // `OwnerUnavailable` for it.
+    let server = engine
+        .project_server(&handshake)
+        .await
+        .expect("open scheduler fixture through the daemon owner");
+    let cg = server.cg().await;
     let key =
         super::super::ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
 

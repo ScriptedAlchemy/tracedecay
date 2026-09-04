@@ -1789,13 +1789,30 @@ async fn linked_route_reuses_primary_authority_while_shadow_writer_is_held() {
     release_writer.send(()).expect("release shadow writer");
     blocker.await.expect("shadow writer blocker joins");
 
+    let servers = engine.store_administration.project_servers().lock().await;
+    let server_keys = servers.servers.keys().cloned().collect::<Vec<_>>();
+    let route_aliases = servers
+        .aliases
+        .iter()
+        .map(|(route, key)| (route.project_path.clone(), key.project_root.clone()))
+        .collect::<Vec<_>>();
+    drop(servers);
     assert!(
         Arc::ptr_eq(&primary_server, &linked_server),
-        "both routes must resolve one retained project server"
+        "both routes must resolve one retained project server; \
+         server keys: {server_keys:?}; route aliases: {route_aliases:?}"
     );
     let servers = engine.store_administration.project_servers().lock().await;
-    assert_eq!(servers.servers.len(), 1, "one physical project server key");
-    assert_eq!(servers.aliases.len(), 2, "primary and linked route aliases");
+    assert_eq!(
+        servers.servers.len(),
+        1,
+        "one physical project server key: {server_keys:?}"
+    );
+    assert_eq!(
+        servers.aliases.len(),
+        2,
+        "primary and linked route aliases: {route_aliases:?}"
+    );
     drop(servers);
     assert!(
         !linked.join(".tracedecay").exists(),
@@ -2400,8 +2417,13 @@ async fn project_open_shutdown_waits_for_inflight_unit_then_joins() {
         .expect_err("cancelled project open must report a terminal failure");
 }
 
+/// A task that ignores its cancellation token but still suspends at an await
+/// point is reachable by abort, so shutdown forces it at the backstop instead
+/// of leaking a tracked route past daemon shutdown. Work that abort cannot
+/// reach — a synchronous body that never yields — is the retained case, and
+/// `project_open_shutdown_retains_synchronous_work_after_deadline` owns it.
 #[tokio::test]
-async fn project_open_shutdown_retains_noncooperative_task_until_retry_joins_it() {
+async fn project_open_shutdown_aborts_a_noncooperative_task_at_the_backstop() {
     let tasks = super::super::ProjectOpenTasks::default();
     let route = project_open_test_route("shutdown-backstop");
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
@@ -2420,25 +2442,24 @@ async fn project_open_shutdown_retains_noncooperative_task_until_retry_joins_it(
     }
     started_rx.await.expect("noncooperative task started");
 
-    assert!(
-        !tasks
-            .shutdown_with_deadline(
-                tokio::time::Duration::ZERO,
-                tokio::time::Duration::from_millis(25),
-            )
-            .await
-    );
-    assert_eq!(tasks.tracked_route_count().await, 1);
-    release_tx.send(()).expect("release retained task");
+    // Zero cooperative budget: the task never observes its cancellation, so
+    // the cooperative phase must expire and the abort phase must settle it.
     assert!(
         tasks
             .shutdown_with_deadline(
-                tokio::time::Duration::from_secs(1),
                 tokio::time::Duration::ZERO,
+                tokio::time::Duration::from_secs(1),
             )
-            .await
+            .await,
+        "the abort backstop must join a task that ignored its cancellation"
     );
     assert_eq!(tasks.tracked_route_count().await, 0);
+    // The abort dropped the task body, and with it the release receiver:
+    // there is nothing left for a retry to join.
+    assert!(
+        release_tx.send(()).is_err(),
+        "an aborted open must not still be waiting on its release"
+    );
 }
 
 #[tokio::test]
@@ -3351,6 +3372,13 @@ fn production_composition_tool_text(response: &JsonRpcResponse) -> &str {
 /// whole payload must redeem that handle exactly as a real client does. A
 /// `tracedecay_search` result sits close enough to the cap that whether it
 /// truncates is not a property the test should depend on.
+///
+/// A stored response exists only because it exceeded the response cap, so one
+/// retrieve can never carry the whole body: every page is clamped to the same
+/// cap and reports `next_offset`/`has_more`. Walk the handle to its end and
+/// parse the reassembled body, exactly as
+/// `mcp::tools::handlers::dispatch_tests::selected_project_retrieve_finds_selected_project_response_handle`
+/// does.
 async fn production_composition_tool_json(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &std::path::Path,
@@ -3366,21 +3394,44 @@ async fn production_composition_tool_json(
         json!(true),
         "only a truncation envelope may carry a response handle: {payload}"
     );
-    let retrieved = harness
-        .call_tool(
-            project,
-            "tracedecay_retrieve",
-            json!({"handle": handle, "format": "json"}),
+    let mut offset = 0_u64;
+    let mut body = String::new();
+    let mut pages = 0_u32;
+    loop {
+        let retrieved = harness
+            .call_tool(
+                project,
+                "tracedecay_retrieve",
+                json!({"handle": handle, "offset": offset, "format": "json"}),
+            )
+            .await
+            .expect("retrieve truncated production response");
+        let retrieved: serde_json::Value =
+            serde_json::from_str(production_composition_tool_text(&retrieved))
+                .expect("retrieved envelope json");
+        assert_eq!(
+            retrieved["expired"],
+            json!(false),
+            "a live production handle must not read back expired: {retrieved}"
+        );
+        body.push_str(
+            retrieved["content"]
+                .as_str()
+                .unwrap_or_else(|| panic!("retrieved envelope must carry a page: {retrieved}")),
+        );
+        pages += 1;
+        assert!(pages < 64, "production retrieve paging did not settle");
+        match retrieved["next_offset"].as_u64() {
+            Some(next) => offset = next,
+            None => break,
+        }
+    }
+    serde_json::from_str(&body).unwrap_or_else(|error| {
+        panic!(
+            "retrieved payload json ({} chars over {pages} page(s)): {error}",
+            body.len()
         )
-        .await
-        .expect("retrieve truncated production response");
-    let retrieved: serde_json::Value =
-        serde_json::from_str(production_composition_tool_text(&retrieved))
-            .expect("retrieved envelope json");
-    let content = retrieved["content"]
-        .as_str()
-        .unwrap_or_else(|| panic!("retrieved envelope must carry the stored body: {retrieved}"));
-    serde_json::from_str(content).expect("retrieved payload json")
+    })
 }
 
 fn production_composition_probe_candidate(
