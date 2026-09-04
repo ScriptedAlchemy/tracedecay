@@ -71,12 +71,12 @@ use crate::{
             CodeIndexGenerationScopeV1, CodeIndexIgnoredSourceAdmissionV1, CodeIndexInputErrorV1,
             CodeIndexProductionConfigV1, CodeIndexProductionErrorV1,
             CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
-            CodeIndexRepositoryParseIdentityV1, SealedGenerationSegmentPublicationV1,
-            SealedGenerationSegmentReadV1, SharedPhysicalCodeArtifactPoolV1,
-            UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalCursorRestoreErrorV1,
-            VerifiedSealedLexicalPageBatchBoundsV1, VerifiedSealedLexicalPageBatchReadV1,
-            VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalSourceReceiptV1,
-            VerifiedSealedTextGenerationMetadataV1,
+            CodeIndexRepositoryParseIdentityV1, DAEMON_CODE_INDEX_CHUNKER_REVISION,
+            SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1,
+            SharedPhysicalCodeArtifactPoolV1, UninterruptibleCodeIndexControlV1,
+            VerifiedSealedLexicalCursorRestoreErrorV1, VerifiedSealedLexicalPageBatchBoundsV1,
+            VerifiedSealedLexicalPageBatchReadV1, VerifiedSealedLexicalPageSourceV1,
+            VerifiedSealedLexicalSourceReceiptV1, VerifiedSealedTextGenerationMetadataV1,
         },
         projection::{
             ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -5559,6 +5559,18 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
         latest
     }
 
+    /// Load an exact durable code generation even after a newer capture has
+    /// superseded every process-local retained slot.
+    #[hotpath::measure(label = "daemon.code_index.historical.published_generation")]
+    pub(crate) fn published_generation(
+        &self,
+        generation_id: &CodeGenerationId,
+    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexSchedulerErrorV1> {
+        self.publication
+            .load_generation(generation_id)
+            .map_err(|error| CodeIndexProductionErrorV1::Publication(error).into())
+    }
+
     /// Resolve the sealed replay binding for one already-published generation
     /// through the retained publication clone. A sealed binding is an
     /// immutable pointer-file read, so it stays answerable while a reconcile
@@ -5639,7 +5651,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             // conservative cross-file edges at generation sealing. V2
             // artifacts remain decodable, but cannot be reused as a current
             // graph because they never recorded that evidence.
-            chunker_revision: id::<ChunkerRevision>("chunker.daemon.v3")?,
+            chunker_revision: id::<ChunkerRevision>(DAEMON_CODE_INDEX_CHUNKER_REVISION)?,
             privacy_domain: id::<PrivacyDomainId>("privacy.local-code-index")?,
             privacy_key_epoch: 1,
             max_snapshot_age_micros: None,

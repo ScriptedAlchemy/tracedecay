@@ -196,6 +196,34 @@ async fn committed_query_routes_install_and_rollback_as_one_revision() {
         "redundancy roots and authority publish under the installed query revision"
     );
 
+    registry
+        .begin_committed_query_activation(
+            project.path(),
+            &scope,
+            semantic.epoch,
+            semantic.state.configuration_revision(),
+            &semantic.transition_digest,
+            &prepare_project_semantic_redundancy_authority(&semantic),
+        )
+        .await
+        .expect("reserve exact semantic reobservation");
+    assert_eq!(
+        registry
+            .query_authority_installation_for_scope(&scope)
+            .await,
+        Some((
+            true,
+            true,
+            Some(semantic.state.configuration_revision().clone())
+        )),
+        "an exact reobservation must not open a calibration-unavailable serving window"
+    );
+    assert_eq!(
+        project_committed_semantic_pins(project.path()).map(|pins| pins.vector_generation_id),
+        Some(semantic_generation.clone()),
+        "an exact reobservation must preserve the coherent semantic authority"
+    );
+
     let rollback = query_rollback_committed_state(&semantic);
     let prepared = provider
         .prepare_after_successful_activation(

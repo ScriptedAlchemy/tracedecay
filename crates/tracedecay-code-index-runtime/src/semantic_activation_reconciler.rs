@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -13,11 +14,41 @@ const REOBSERVATION_UNIT_DEADLINE: Duration = Duration::from_secs(15);
 const REOBSERVATION_INITIAL_BACKOFF: Duration = Duration::from_millis(50);
 const REOBSERVATION_MAX_BACKOFF: Duration = Duration::from_secs(5);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReobservationFailureDispositionV1 {
+    Retry,
+    Refuse,
+}
+
+fn classify_reobservation_failure(
+    error: &SemanticActivationCoordinationErrorV1,
+) -> ReobservationFailureDispositionV1 {
+    match error {
+        SemanticActivationCoordinationErrorV1::Rejected
+        | SemanticActivationCoordinationErrorV1::RejectedDetail(_) => {
+            ReobservationFailureDispositionV1::Refuse
+        }
+        SemanticActivationCoordinationErrorV1::Unavailable
+        | SemanticActivationCoordinationErrorV1::Runtime(_)
+        | SemanticActivationCoordinationErrorV1::Conflict => {
+            ReobservationFailureDispositionV1::Retry
+        }
+    }
+}
+
 fn should_reconcile_ready_event(
     handled_epoch: Option<u64>,
     event: &SemanticLifecycleVerifiedReadyEventV1,
 ) -> bool {
     event.artifact_digest.is_some() && handled_epoch.is_none_or(|handled| event.epoch > handled)
+}
+
+fn should_reconcile(
+    handled_epoch: Option<u64>,
+    event: &SemanticLifecycleVerifiedReadyEventV1,
+    committed_activation_changed: bool,
+) -> bool {
+    committed_activation_changed || should_reconcile_ready_event(handled_epoch, event)
 }
 
 /// One cancellable recovery owner for one mounted project.
@@ -34,15 +65,21 @@ impl DaemonSemanticActivationReconcilerV1 {
     pub fn spawn(
         coordinator: Arc<ProductionSemanticActivationCoordinatorV1>,
         mut lifecycle_events: tokio::sync::watch::Receiver<SemanticLifecycleVerifiedReadyEventV1>,
+        committed_activation_wake: Arc<Notify>,
     ) -> Self {
         let cancellation = CancellationToken::new();
         let worker_cancellation = cancellation.clone();
+        let worker_committed_activation_wake = Arc::clone(&committed_activation_wake);
         let reconciler_loop = async move {
             let mut handled_epoch = None;
+            let mut committed_activation_changed = false;
             loop {
                 let event = lifecycle_events.borrow_and_update().clone();
-                if should_reconcile_ready_event(handled_epoch, &event) {
-                    handled_epoch = Some(event.epoch);
+                if should_reconcile(handled_epoch, &event, committed_activation_changed) {
+                    if should_reconcile_ready_event(handled_epoch, &event) {
+                        handled_epoch = Some(event.epoch);
+                    }
+                    committed_activation_changed = false;
                     let mut backoff = REOBSERVATION_INITIAL_BACKOFF;
                     loop {
                         // One static label times each bounded reobservation
@@ -66,26 +103,45 @@ impl DaemonSemanticActivationReconcilerV1 {
                                 .inc(1_u64);
                                 break;
                             }
-                            Ok(Err(
-                                SemanticActivationCoordinationErrorV1::Rejected
-                                | SemanticActivationCoordinationErrorV1::RejectedDetail(_)
-                                | SemanticActivationCoordinationErrorV1::Conflict,
-                            )) => {
-                                hotpath::gauge!(
-                                    "daemon.semantic.activation_reconciler.reobserve.refused_total"
-                                )
-                                .inc(1_u64);
-                                break;
-                            }
-                            Ok(Err(
-                                SemanticActivationCoordinationErrorV1::Unavailable
-                                | SemanticActivationCoordinationErrorV1::Runtime(_),
-                            ))
-                            | Err(_) => {
+                            Ok(Err(error)) => match classify_reobservation_failure(&error) {
+                                ReobservationFailureDispositionV1::Refuse => {
+                                    hotpath::gauge!(
+                                        "daemon.semantic.activation_reconciler.reobserve.refused_total"
+                                    )
+                                    .inc(1_u64);
+                                    tracing::warn!(
+                                        event = "semantic_activation_reobserve",
+                                        outcome = "refused",
+                                        error = %error,
+                                        "committed semantic activation could not be observed by the runtime"
+                                    );
+                                    break;
+                                }
+                                ReobservationFailureDispositionV1::Retry => {
+                                    hotpath::gauge!(
+                                        "daemon.semantic.activation_reconciler.reobserve.retried_total"
+                                    )
+                                    .inc(1_u64);
+                                    tracing::warn!(
+                                        event = "semantic_activation_reobserve",
+                                        outcome = "retry",
+                                        error = %error,
+                                        backoff_ms = backoff.as_millis() as u64,
+                                        "committed semantic activation observation failed; retrying"
+                                    );
+                                }
+                            },
+                            Err(_) => {
                                 hotpath::gauge!(
                                     "daemon.semantic.activation_reconciler.reobserve.retried_total"
                                 )
                                 .inc(1_u64);
+                                tracing::warn!(
+                                    event = "semantic_activation_reobserve",
+                                    outcome = "timed_out",
+                                    deadline_ms = REOBSERVATION_UNIT_DEADLINE.as_millis() as u64,
+                                    "committed semantic activation observation exceeded its deadline; retrying"
+                                );
                             }
                         }
                         tokio::select! {
@@ -100,12 +156,19 @@ impl DaemonSemanticActivationReconcilerV1 {
                         }
                     }
                 }
+                enum WakeV1 {
+                    Lifecycle(Result<(), tokio::sync::watch::error::RecvError>),
+                    CommittedActivation,
+                }
                 let changed = tokio::select! {
                     () = worker_cancellation.cancelled() => return,
-                    changed = lifecycle_events.changed() => changed,
+                    changed = lifecycle_events.changed() => WakeV1::Lifecycle(changed),
+                    () = worker_committed_activation_wake.notified() => WakeV1::CommittedActivation,
                 };
-                if changed.is_err() {
-                    return;
+                match changed {
+                    WakeV1::Lifecycle(Ok(())) => {}
+                    WakeV1::Lifecycle(Err(_)) => return,
+                    WakeV1::CommittedActivation => committed_activation_changed = true,
                 }
             }
         };
@@ -166,5 +229,35 @@ mod tests {
                 artifact_digest: current.artifact_digest,
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn committed_activation_before_reconciler_subscription_is_retained() {
+        let current = SemanticLifecycleVerifiedReadyEventV1 {
+            epoch: 7,
+            artifact_digest: Some(format!("sha256:{}", "a".repeat(64))),
+        };
+        assert!(!should_reconcile(Some(7), &current, false));
+        assert!(should_reconcile(Some(7), &current, true));
+
+        let registered_configuration_wake = Arc::new(tokio::sync::Notify::new());
+        registered_configuration_wake.notify_one();
+        let reconciler_wake = Arc::clone(&registered_configuration_wake);
+
+        tokio::time::timeout(Duration::from_millis(100), reconciler_wake.notified())
+            .await
+            .expect("a pre-install activation must wake reconciliation at the same ready epoch");
+    }
+
+    #[test]
+    fn coordination_conflict_retries_canonical_reobservation() {
+        assert_eq!(
+            classify_reobservation_failure(&SemanticActivationCoordinationErrorV1::Conflict),
+            ReobservationFailureDispositionV1::Retry
+        );
+        assert_eq!(
+            classify_reobservation_failure(&SemanticActivationCoordinationErrorV1::Rejected),
+            ReobservationFailureDispositionV1::Refuse
+        );
     }
 }
