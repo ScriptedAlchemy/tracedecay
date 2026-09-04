@@ -58,9 +58,10 @@ use tracedecay_code_index::production::{
     CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
     CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1, CodeIndexProductionConfigV1,
     CodeIndexProductionOwnerV1, CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
-    CodeIndexRepositoryParseIdentityV1, VerifiedSealedLexicalPageBatchBoundsV1,
-    VerifiedSealedLexicalPageBatchReadV1, VerifiedSealedLexicalPageSourceV1,
-    VerifiedSealedLexicalPageV1, VerifiedSealedLexicalSourceReceiptV1,
+    CodeIndexRepositoryParseIdentityV1, SealedGenerationSegmentPublicationV1,
+    VerifiedSealedLexicalPageBatchBoundsV1, VerifiedSealedLexicalPageBatchReadV1,
+    VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalPageV1,
+    VerifiedSealedLexicalSourceReceiptV1,
 };
 use tracedecay_code_index::projection::{
     ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -82,7 +83,7 @@ use tracedecay_query::retrieval::lexical::{
 
 /// Bumped whenever the workload shape changes, so a profile comparison
 /// across a shape change is visibly not comparable.
-const WORKLOAD_REVISION: &str = "index-bench.v1";
+const WORKLOAD_REVISION: &str = "index-bench.v2";
 const DEFAULT_CORPUS_RELATIVE: &str = "benchmark_data/index-bench/corpus";
 const CORPUS_ENV: &str = "TRACEDECAY_INDEX_BENCH_CORPUS";
 const REPLICAS_ENV: &str = "TRACEDECAY_INDEX_BENCH_REPLICAS";
@@ -584,16 +585,14 @@ fn run(options: &Options) -> Result<String, String> {
     let increment_wall = increment_started.elapsed();
 
     let seal_started = Instant::now();
-    let sealed = increment
-        .encode_sealed()
-        .map_err(|error| format!("encode sealed generation: {error}"))?;
+    let sealed = encode_partitioned(&increment)?;
     let seal_wall = seal_started.elapsed();
-    let sealed_len = sealed.len() as u64;
-    let state_digest = sealed_state_digest(&sealed)?;
+    let sealed_len = sealed.total_bytes()?;
+    let state_digest = sealed_state_digest(&sealed.manifest)?;
 
     // Pass 3 - drain the sealed generation as bounded page batches.
     let drain_started = Instant::now();
-    let (pages, source_receipt) = drain_pages(&sealed, sealed_len, &state_digest, &control)?;
+    let (pages, source_receipt) = drain_pages(&sealed, &state_digest, &control)?;
     let drain_wall = drain_started.elapsed();
 
     // Pass 4 - ingest the pages into an isolated on-disk lexical artifact.
@@ -714,13 +713,64 @@ fn sealed_state_digest(sealed: &[u8]) -> Result<ManifestDigest, String> {
         .map_err(|error| format!("sealed generation state digest: {error:?}"))
 }
 
+struct PartitionedSealedGeneration {
+    manifest: Vec<u8>,
+    segments: BTreeMap<String, Vec<u8>>,
+}
+
+impl PartitionedSealedGeneration {
+    fn total_bytes(&self) -> Result<u64, String> {
+        self.segments.values().try_fold(
+            u64::try_from(self.manifest.len())
+                .map_err(|error| format!("partitioned manifest size: {error}"))?,
+            |total, segment| {
+                total
+                    .checked_add(
+                        u64::try_from(segment.len())
+                            .map_err(|error| format!("partitioned segment size: {error}"))?,
+                    )
+                    .ok_or_else(|| "partitioned generation size overflowed".to_owned())
+            },
+        )
+    }
+}
+
+fn encode_partitioned(
+    generation: &CodeIndexPublishedGenerationV1,
+) -> Result<PartitionedSealedGeneration, String> {
+    let mut segments = BTreeMap::new();
+    let mut evidence_pack = Vec::new();
+    let manifest = generation
+        .encode_partitioned_sealed(|publication| {
+            match publication {
+                SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
+                    segments.insert(digest.as_str().to_owned(), bytes.to_vec());
+                }
+                SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
+                    evidence_pack.extend_from_slice(bytes);
+                }
+                SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
+                    segment_digest,
+                    ..
+                } => {
+                    segments.insert(
+                        segment_digest.as_str().to_owned(),
+                        std::mem::take(&mut evidence_pack),
+                    );
+                }
+            }
+            Ok(())
+        })
+        .map_err(|error| format!("encode partitioned sealed generation: {error}"))?;
+    Ok(PartitionedSealedGeneration { manifest, segments })
+}
+
 /// Drain the sealed generation through the bounded batch path, which is the
 /// shape the daemon's artifact ingestion uses. The single-page path is
 /// asserted to agree on the source receipt so a regression that desynchronizes
 /// the two cursors fails here instead of skewing the comparison.
 fn drain_pages(
-    sealed: &[u8],
-    sealed_len: u64,
+    sealed: &PartitionedSealedGeneration,
     state_digest: &ManifestDigest,
     control: &ActiveControl,
 ) -> Result<
@@ -733,15 +783,33 @@ fn drain_pages(
     let bounds =
         VerifiedSealedLexicalPageBatchBoundsV1::new(BATCH_MAX_PAGES, BATCH_MAX_RETAINED_BYTES)
             .map_err(|error| format!("sealed lexical batch bounds: {error}"))?;
-    let mut source = VerifiedSealedLexicalPageSourceV1::open(
-        Cursor::new(sealed.to_vec()),
-        sealed_len,
+    let mut source = VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
+        Cursor::new(sealed.manifest.clone()),
+        &sealed.manifest,
         state_digest.clone(),
+        |digest, expected_size, buffer| {
+            let segment = sealed.segments.get(digest.as_str()).ok_or_else(|| {
+                tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(
+                    "partitioned benchmark segment is missing".to_owned(),
+                )
+            })?;
+            if segment.len() as u64 != expected_size {
+                return Err(
+                    tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(
+                        "partitioned benchmark segment size disagrees with its descriptor"
+                            .to_owned(),
+                    ),
+                );
+            }
+            buffer.clear();
+            buffer.extend_from_slice(segment);
+            Ok(())
+        },
         MAX_PAGE_CHUNKS,
         MAX_PAGE_BYTES,
-        control,
     )
-    .map_err(|error| format!("open sealed lexical page source: {error}"))?;
+    .map_err(|error| format!("open partitioned sealed lexical page source: {error}"))?
+    .ok_or_else(|| "partitioned sealed lexical source is incompatible".to_owned())?;
     let mut pages = Vec::new();
     loop {
         let read = source
