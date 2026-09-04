@@ -63,6 +63,7 @@ pub async fn invalidate_raw_summary_revision(
                 "SELECT source_kind, source_id, depth, after_node_id
                  FROM lcm_summary_convergence_invalidation_work
                  WHERE provider = ?1 AND session_id = ?2 AND raw_store_id = ?3
+                   AND state = 'pending'
                  ORDER BY depth, source_kind, source_id
                  LIMIT 1",
                 params![provider, session_id, raw_store_id],
@@ -103,7 +104,8 @@ pub async fn invalidate_raw_summary_revision(
         discovered.truncate(remaining);
         if discovered.is_empty() {
             conn.execute(
-                "DELETE FROM lcm_summary_convergence_invalidation_work
+                "UPDATE lcm_summary_convergence_invalidation_work
+                 SET state = 'drained'
                  WHERE provider = ?1 AND session_id = ?2 AND raw_store_id = ?3
                    AND source_kind = ?4 AND source_id = ?5",
                 params![provider, session_id, raw_store_id, source_kind, source_id],
@@ -171,7 +173,8 @@ pub async fn invalidate_raw_summary_revision(
         work_count = work_count.saturating_add(discovered.len());
         if source_drained {
             conn.execute(
-                "DELETE FROM lcm_summary_convergence_invalidation_work
+                "UPDATE lcm_summary_convergence_invalidation_work
+                 SET state = 'drained'
                  WHERE provider = ?1 AND session_id = ?2 AND raw_store_id = ?3
                    AND source_kind = ?4 AND source_id = ?5",
                 params![provider, session_id, raw_store_id, source_kind, source_id],
@@ -199,6 +202,7 @@ pub async fn invalidate_raw_summary_revision(
         .query(
             "SELECT 1 FROM lcm_summary_convergence_invalidation_work
              WHERE provider = ?1 AND session_id = ?2 AND raw_store_id = ?3
+               AND state = 'pending'
              LIMIT 1",
             params![provider, session_id, raw_store_id],
         )
@@ -692,6 +696,7 @@ mod tests {
                 source_id TEXT NOT NULL,
                 depth INTEGER NOT NULL,
                 after_node_id TEXT NOT NULL DEFAULT '',
+                state TEXT NOT NULL DEFAULT 'pending',
                 PRIMARY KEY(provider, session_id, raw_store_id, source_kind, source_id)
              );
              INSERT INTO session_temporal_generations(session_id, generation, state)
@@ -750,5 +755,91 @@ mod tests {
         );
         assert_eq!(affected, SUMMARY_COUNT as usize);
         assert_eq!(final_rewind, Some(4));
+    }
+
+    #[tokio::test]
+    async fn raw_revision_invalidation_visits_diamond_nodes_once_across_pages() {
+        const PAGE_LIMIT: usize = 1;
+        let temp = tempfile::tempdir().unwrap();
+        let conn = TestConnection::open(&temp.path().join("sessions.db"));
+        conn.execute_batch(
+            "CREATE TABLE session_temporal_generations (
+                session_id TEXT NOT NULL,
+                generation INTEGER NOT NULL,
+                state TEXT NOT NULL
+             );
+             CREATE TABLE lcm_summary_sources (
+                node_id TEXT NOT NULL,
+                source_kind TEXT NOT NULL,
+                source_id TEXT NOT NULL
+             );
+             CREATE TABLE session_summary_availability (
+                session_id TEXT NOT NULL,
+                generation INTEGER NOT NULL,
+                summary_id TEXT NOT NULL,
+                availability TEXT NOT NULL,
+                reason TEXT,
+                checked_at INTEGER NOT NULL
+             );
+             CREATE TABLE lcm_summary_convergence_dirty_raw (
+                provider TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                store_id INTEGER NOT NULL,
+                rewind_frontier_store_id INTEGER NOT NULL,
+                PRIMARY KEY(provider, session_id, store_id)
+             );
+             CREATE TABLE lcm_summary_convergence_invalidation_work (
+                provider TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                raw_store_id INTEGER NOT NULL,
+                source_kind TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                depth INTEGER NOT NULL,
+                after_node_id TEXT NOT NULL DEFAULT '',
+                state TEXT NOT NULL DEFAULT 'pending',
+                PRIMARY KEY(provider, session_id, raw_store_id, source_kind, source_id)
+             );
+             INSERT INTO session_temporal_generations(session_id, generation, state)
+             VALUES ('diamond', 1, 'active');
+             INSERT INTO lcm_summary_convergence_dirty_raw(
+                 provider, session_id, store_id, rewind_frontier_store_id
+             ) VALUES ('cursor', 'diamond', 100, 99);
+             INSERT INTO lcm_summary_sources(node_id, source_kind, source_id) VALUES
+                 ('a', 'raw_message', '100'),
+                 ('d', 'raw_message', '100'),
+                 ('b', 'summary_node', 'a'),
+                 ('d', 'summary_node', 'b'),
+                 ('e', 'summary_node', 'd');
+             INSERT INTO session_summary_availability(
+                 session_id, generation, summary_id, availability, reason, checked_at
+             ) VALUES
+                 ('diamond', 1, 'a', 'available', NULL, 0),
+                 ('diamond', 1, 'b', 'available', NULL, 0),
+                 ('diamond', 1, 'd', 'available', NULL, 0),
+                 ('diamond', 1, 'e', 'available', NULL, 0);",
+        )
+        .await
+        .unwrap();
+
+        let mut work_count = 0_usize;
+        let mut stale_count = 0_usize;
+        let mut pages = Vec::new();
+        for _ in 0..16 {
+            let page = invalidate_raw_summary_revision(&conn, "cursor", "diamond", 100, PAGE_LIMIT)
+                .await
+                .unwrap();
+            work_count = work_count.saturating_add(page.work_count);
+            stale_count = stale_count.saturating_add(page.stale_summary_count);
+            pages.push((page.work_count, page.stale_summary_count, page.has_more));
+            if !page.has_more {
+                break;
+            }
+        }
+
+        assert_eq!(stale_count, 4, "unexpected invalidation pages: {pages:?}");
+        assert_eq!(
+            work_count, 6,
+            "the longer path must not retraverse an already drained shortcut node"
+        );
     }
 }
