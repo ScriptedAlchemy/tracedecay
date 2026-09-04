@@ -19,6 +19,7 @@ use tracedecay_code_index::{
         CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1, CodeIndexProductionConfigV1,
         CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1, CodeIndexPublicationStoreErrorV1,
         CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
+        SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1,
         VerifiedSealedLexicalPageSourceV1,
     },
     projection::{
@@ -395,8 +396,25 @@ fn encode_once(
     generation: &CodeIndexPublishedGenerationV1,
 ) -> Result<EncodedFixture, CodeIndexProductionErrorV1> {
     let mut segments = BTreeMap::new();
-    let manifest = generation.encode_partitioned_sealed(|digest, bytes| {
-        segments.insert(digest.as_str().to_owned(), bytes.to_vec());
+    let mut evidence_pack = Vec::new();
+    let manifest = generation.encode_partitioned_sealed(|publication| {
+        match publication {
+            SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
+                segments.insert(digest.as_str().to_owned(), bytes.to_vec());
+            }
+            SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
+                evidence_pack.extend_from_slice(bytes);
+            }
+            SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
+                segment_digest,
+                ..
+            } => {
+                segments.insert(
+                    segment_digest.as_str().to_owned(),
+                    std::mem::take(&mut evidence_pack),
+                );
+            }
+        }
         Ok(())
     })?;
     Ok(EncodedFixture { manifest, segments })
@@ -405,12 +423,28 @@ fn encode_once(
 fn decode_and_open(fixture: &EncodedFixture) -> Result<(), CodeIndexProductionErrorV1> {
     let decoded = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
         &fixture.manifest,
-        |digest, _, buffer| {
+        |request, buffer| {
+            let (digest, offset, length) = match request {
+                SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
+                    (digest, 0, size_bytes)
+                }
+                SealedGenerationSegmentReadV1::Range {
+                    digest,
+                    offset,
+                    length,
+                    ..
+                } => (digest, offset, length),
+            };
             let bytes = fixture.segments.get(digest.as_str()).ok_or_else(|| {
                 CodeIndexProductionErrorV1::Contract("benchmark segment is missing".to_owned())
             })?;
+            let start = usize::try_from(offset)
+                .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+            let end = start
+                + usize::try_from(length)
+                    .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
             buffer.clear();
-            buffer.extend_from_slice(bytes);
+            buffer.extend_from_slice(&bytes[start..end]);
             Ok(())
         },
     )?

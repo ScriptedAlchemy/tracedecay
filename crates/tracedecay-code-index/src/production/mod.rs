@@ -87,7 +87,10 @@ pub use lexical_page_source::{
     VerifiedSealedTextGenerationMetadataV1,
 };
 mod partitioned_codec;
-pub use partitioned_codec::{SealedGenerationSegmentIdentityV1, SealedGenerationSegmentKindV1};
+pub use partitioned_codec::{
+    SealedGenerationSegmentIdentityV1, SealedGenerationSegmentPublicationV1,
+    SealedGenerationSegmentReadV1,
+};
 mod sealed_codec;
 pub use sealed_codec::{
     MAX_SEALED_CODE_GENERATION_BYTES_V1, SEALED_GENERATION_FORMAT_REVISION_V1,

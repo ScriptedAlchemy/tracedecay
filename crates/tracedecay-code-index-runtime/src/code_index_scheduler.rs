@@ -71,11 +71,12 @@ use crate::{
             CodeIndexGenerationScopeV1, CodeIndexIgnoredSourceAdmissionV1, CodeIndexInputErrorV1,
             CodeIndexProductionConfigV1, CodeIndexProductionErrorV1,
             CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
-            CodeIndexRepositoryParseIdentityV1, SealedGenerationSegmentKindV1,
-            SharedPhysicalCodeArtifactPoolV1, UninterruptibleCodeIndexControlV1,
-            VerifiedSealedLexicalCursorRestoreErrorV1, VerifiedSealedLexicalPageBatchBoundsV1,
-            VerifiedSealedLexicalPageBatchReadV1, VerifiedSealedLexicalPageSourceV1,
-            VerifiedSealedLexicalSourceReceiptV1, VerifiedSealedTextGenerationMetadataV1,
+            CodeIndexRepositoryParseIdentityV1, SealedGenerationSegmentPublicationV1,
+            SealedGenerationSegmentReadV1, SharedPhysicalCodeArtifactPoolV1,
+            UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalCursorRestoreErrorV1,
+            VerifiedSealedLexicalPageBatchBoundsV1, VerifiedSealedLexicalPageBatchReadV1,
+            VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalSourceReceiptV1,
+            VerifiedSealedTextGenerationMetadataV1,
         },
         projection::{
             ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -636,6 +637,8 @@ pub struct DaemonCodeIndexPublicationStoreV1 {
     active_encoded_bytes: Arc<AtomicU64>,
     seal_encoded_segment_bytes: Arc<AtomicU64>,
     seal_existing_segment_bytes_read: Arc<AtomicU64>,
+    seal_evidence_page_count: Arc<AtomicU64>,
+    seal_evidence_durable_transaction_count: Arc<AtomicU64>,
     active_path: PathBuf,
     generations_root: PathBuf,
     segments_root: PathBuf,
@@ -659,6 +662,152 @@ enum CodeIndexPublicationDispositionV1 {
 struct TemporaryGenerationFileV1 {
     path: PathBuf,
     committed: bool,
+}
+
+struct TemporaryEvidencePackV1 {
+    path: PathBuf,
+    file: Option<File>,
+    hasher: Sha256,
+    size_bytes: u64,
+    page_count: u32,
+    committed: bool,
+}
+
+impl TemporaryEvidencePackV1 {
+    fn create(path: PathBuf) -> Result<Self, CodeIndexPublicationStoreErrorV1> {
+        let file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+            .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
+        Ok(Self {
+            path,
+            file: Some(file),
+            hasher: Sha256::new(),
+            size_bytes: 0,
+            page_count: 0,
+            committed: false,
+        })
+    }
+
+    fn append_page(
+        &mut self,
+        page_ordinal: u32,
+        page_digest: &ManifestDigest,
+        bytes: &[u8],
+    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        if page_ordinal != self.page_count {
+            return Err(DaemonCodeIndexPublicationStoreV1::corruption(
+                "sealed evidence pages are not canonically ordered",
+            ));
+        }
+        if DaemonCodeIndexPublicationStoreV1::state_digest(bytes) != page_digest.as_str() {
+            return Err(DaemonCodeIndexPublicationStoreV1::corruption(
+                "sealed evidence page bytes do not match their content address",
+            ));
+        }
+        self.file
+            .as_mut()
+            .ok_or_else(|| {
+                DaemonCodeIndexPublicationStoreV1::unavailable(
+                    "sealed evidence pack temporary file is already closed",
+                )
+            })?
+            .write_all(bytes)
+            .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
+        self.hasher.update(bytes);
+        self.size_bytes = self
+            .size_bytes
+            .checked_add(
+                u64::try_from(bytes.len())
+                    .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?,
+            )
+            .ok_or_else(|| {
+                DaemonCodeIndexPublicationStoreV1::unavailable(
+                    "sealed evidence pack length exceeds u64",
+                )
+            })?;
+        self.page_count = self.page_count.checked_add(1).ok_or_else(|| {
+            DaemonCodeIndexPublicationStoreV1::unavailable(
+                "sealed evidence pack page count exceeds u32",
+            )
+        })?;
+        Ok(())
+    }
+
+    fn commit(
+        &mut self,
+        root: &Path,
+        segment_digest: &ManifestDigest,
+        segment_size_bytes: u64,
+        page_count: u32,
+    ) -> Result<bool, CodeIndexPublicationStoreErrorV1> {
+        let actual_digest = ManifestDigest::from_sha256_bytes(
+            &std::mem::replace(&mut self.hasher, Sha256::new()).finalize(),
+        )
+        .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
+        if self.page_count != page_count
+            || self.size_bytes != segment_size_bytes
+            || &actual_digest != segment_digest
+        {
+            return Err(DaemonCodeIndexPublicationStoreV1::corruption(
+                "sealed evidence pack does not match its commit identity",
+            ));
+        }
+        let digest_hex = segment_digest
+            .as_str()
+            .strip_prefix("sha256:")
+            .ok_or_else(|| {
+                DaemonCodeIndexPublicationStoreV1::unavailable(
+                    "sealed evidence pack digest is not sha256",
+                )
+            })?;
+        let final_path = root.join(format!("segment-{digest_hex}.json"));
+        match final_path.symlink_metadata() {
+            Ok(metadata) => {
+                if !metadata.file_type().is_file()
+                    || metadata.len() != segment_size_bytes
+                    || DaemonCodeIndexPublicationStoreV1::state_digest_file(&final_path)?
+                        != segment_digest.as_str()
+                {
+                    return Err(DaemonCodeIndexPublicationStoreV1::corruption(
+                        "existing sealed evidence pack does not match its content address",
+                    ));
+                }
+                drop(self.file.take());
+                std::fs::remove_file(&self.path)
+                    .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
+                self.committed = true;
+                return Ok(false);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(DaemonCodeIndexPublicationStoreV1::unavailable(error)),
+        }
+        self.file
+            .as_ref()
+            .ok_or_else(|| {
+                DaemonCodeIndexPublicationStoreV1::unavailable(
+                    "sealed evidence pack temporary file is already closed",
+                )
+            })?
+            .sync_all()
+            .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
+        drop(self.file.take());
+        std::fs::rename(&self.path, final_path)
+            .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
+        DaemonCodeIndexPublicationStoreV1::sync_directory(root)?;
+        self.committed = true;
+        Ok(true)
+    }
+}
+
+impl Drop for TemporaryEvidencePackV1 {
+    fn drop(&mut self) {
+        if !self.committed {
+            drop(self.file.take());
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
 }
 
 impl TemporaryGenerationFileV1 {
@@ -692,11 +841,17 @@ impl DaemonCodeIndexPublicationStoreV1 {
         std::fs::create_dir_all(&generations_root)?;
         let segments_root = store_root.join("code-generation-segments-v1");
         std::fs::create_dir_all(&segments_root)?;
+        let _store_lock = acquire_code_generation_store_lock(store_root)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        Self::remove_abandoned_evidence_packs(&segments_root)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
         Ok(Self {
             cache: Arc::new(DecodedGenerationCacheV1::default()),
             active_encoded_bytes: Arc::new(AtomicU64::new(0)),
             seal_encoded_segment_bytes: Arc::new(AtomicU64::new(0)),
             seal_existing_segment_bytes_read: Arc::new(AtomicU64::new(0)),
+            seal_evidence_page_count: Arc::new(AtomicU64::new(0)),
+            seal_evidence_durable_transaction_count: Arc::new(AtomicU64::new(0)),
             active_path: store_root.join("active-code-generation-v1.json"),
             generations_root,
             segments_root,
@@ -736,6 +891,34 @@ impl DaemonCodeIndexPublicationStoreV1 {
         CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(error.to_string())
     }
 
+    fn remove_abandoned_evidence_packs(
+        segments_root: &Path,
+    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        let mut removed = false;
+        for entry in std::fs::read_dir(segments_root).map_err(Self::unavailable)? {
+            let entry = entry.map_err(Self::unavailable)?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if !name.starts_with(".evidence-pack-publication.") || !name.ends_with(".tmp") {
+                continue;
+            }
+            let metadata = entry.path().symlink_metadata().map_err(Self::unavailable)?;
+            if !metadata.file_type().is_file() {
+                return Err(Self::unavailable(
+                    "sealed evidence pack temporary path is not a regular file",
+                ));
+            }
+            std::fs::remove_file(entry.path()).map_err(Self::unavailable)?;
+            removed = true;
+        }
+        if removed {
+            Self::sync_directory(segments_root)?;
+        }
+        Ok(())
+    }
+
     fn sync_directory(path: &Path) -> Result<(), CodeIndexPublicationStoreErrorV1> {
         tracedecay_private_fs::framed_log::sync_directory(path, DirectorySyncPolicy::Strict)
             .map_err(Self::unavailable)
@@ -755,7 +938,6 @@ impl DaemonCodeIndexPublicationStoreV1 {
     #[hotpath::measure(label = "code_index.generation.publish.segment")]
     fn publish_segment_durable(
         &self,
-        kind: SealedGenerationSegmentKindV1,
         digest: &ManifestDigest,
         bytes: &[u8],
     ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
@@ -774,10 +956,8 @@ impl DaemonCodeIndexPublicationStoreV1 {
             .join(format!("segment-{digest_hex}.json"));
         match final_path.symlink_metadata() {
             Ok(metadata) => {
-                if kind == SealedGenerationSegmentKindV1::File {
-                    self.seal_existing_segment_bytes_read
-                        .fetch_add(metadata.len(), Ordering::Relaxed);
-                }
+                self.seal_existing_segment_bytes_read
+                    .fetch_add(metadata.len(), Ordering::Relaxed);
                 if !metadata.file_type().is_file()
                     || metadata.len() != u64::try_from(bytes.len()).map_err(Self::unavailable)?
                     || Self::state_digest_file(&final_path)? != expected_digest
@@ -1096,10 +1276,28 @@ impl DaemonCodeIndexPublicationStoreV1 {
     #[hotpath::measure(label = "code_index.generation.decode.segment")]
     fn read_partitioned_segment(
         &self,
-        digest: &ManifestDigest,
-        expected_size: u64,
+        request: SealedGenerationSegmentReadV1<'_>,
         buffer: &mut Vec<u8>,
     ) -> Result<(), CodeIndexProductionErrorV1> {
+        let (digest, expected_size, offset, length) = match request {
+            SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
+                (digest, size_bytes, 0, size_bytes)
+            }
+            SealedGenerationSegmentReadV1::Range {
+                digest,
+                size_bytes,
+                offset,
+                length,
+            } => (digest, size_bytes, offset, length),
+        };
+        if offset
+            .checked_add(length)
+            .is_none_or(|end| end > expected_size)
+        {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed generation segment range exceeds its manifest identity".to_owned(),
+            ));
+        }
         let digest_hex = digest.as_str().strip_prefix("sha256:").ok_or_else(|| {
             CodeIndexProductionErrorV1::Contract("sealed segment digest is not sha256".to_owned())
         })?;
@@ -1117,9 +1315,17 @@ impl DaemonCodeIndexPublicationStoreV1 {
             ));
         }
         buffer.clear();
+        let length = usize::try_from(length).map_err(|_| {
+            CodeIndexProductionErrorV1::Contract(
+                "sealed generation segment range exceeds addressable memory".to_owned(),
+            )
+        })?;
+        buffer.resize(length, 0);
         File::open(path)
-            .and_then(|mut file| file.read_to_end(buffer))
-            .map(|_| ())
+            .and_then(|mut file| {
+                file.seek(SeekFrom::Start(offset))?;
+                file.read_exact(buffer)
+            })
             .map_err(|error| {
                 CodeIndexProductionErrorV1::Contract(format!(
                     "sealed generation segment read failed: {error}"
@@ -1183,12 +1389,9 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 "sealed generation manifest filename digest does not match its bytes".to_owned(),
             ));
         }
-        CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
-            &manifest,
-            |digest, expected_size, buffer| {
-                self.read_partitioned_segment(digest, expected_size, buffer)
-            },
-        )
+        CodeIndexPublishedGenerationV1::decode_partitioned_sealed(&manifest, |request, buffer| {
+            self.read_partitioned_segment(request, buffer)
+        })
     }
 
     /// Serve one sealed generation by identity, decoding it at most once.
@@ -1735,28 +1938,75 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
             Err(error) => return Err(Self::unavailable(error)),
         }
         let mut temporary = TemporaryGenerationFileV1::new(temporary_path);
+        let evidence_temporary_path = self.segments_root.join(format!(
+            ".evidence-pack-publication.{}.tmp",
+            std::process::id()
+        ));
+        let mut evidence_pack = TemporaryEvidencePackV1::create(evidence_temporary_path)?;
         let mut referenced_segment_bytes = 0_u64;
         self.seal_encoded_segment_bytes.store(0, Ordering::Relaxed);
         self.seal_existing_segment_bytes_read
+            .store(0, Ordering::Relaxed);
+        self.seal_evidence_page_count.store(0, Ordering::Relaxed);
+        self.seal_evidence_durable_transaction_count
             .store(0, Ordering::Relaxed);
         let manifest_bytes = hotpath::measure_block!(
             "code_index.generation.publish.segment_encode",
             generation.encode_partitioned_sealed_with_parent(
                 parent_manifest_bytes.as_deref(),
-                |kind, digest, bytes| {
-                    let segment_size = u64::try_from(bytes.len()).map_err(|_| {
-                        CodeIndexProductionErrorV1::Contract(
-                            "sealed segment length exceeds u64".to_owned(),
-                        )
-                    })?;
-                    if kind == SealedGenerationSegmentKindV1::File {
-                        self.seal_encoded_segment_bytes
-                            .fetch_add(segment_size, Ordering::Relaxed);
+                |publication| {
+                    match publication {
+                        SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
+                            let segment_size = u64::try_from(bytes.len()).map_err(|_| {
+                                CodeIndexProductionErrorV1::Contract(
+                                    "sealed segment length exceeds u64".to_owned(),
+                                )
+                            })?;
+                            self.publish_segment_durable(digest, bytes)
+                                .map_err(|error| {
+                                    CodeIndexProductionErrorV1::Contract(error.to_string())
+                                })?;
+                            referenced_segment_bytes =
+                                referenced_segment_bytes.saturating_add(segment_size);
+                            self.seal_encoded_segment_bytes
+                                .fetch_add(segment_size, Ordering::Relaxed);
+                        }
+                        SealedGenerationSegmentPublicationV1::GenerationEvidencePage {
+                            page_ordinal,
+                            page_digest,
+                            bytes,
+                        } => {
+                            evidence_pack
+                                .append_page(page_ordinal, page_digest, bytes)
+                                .map_err(|error| {
+                                    CodeIndexProductionErrorV1::Contract(error.to_string())
+                                })?;
+                            self.seal_evidence_page_count
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
+                        SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
+                            segment_digest,
+                            segment_size_bytes,
+                            page_count,
+                        } => {
+                            if evidence_pack
+                                .commit(
+                                    &self.segments_root,
+                                    segment_digest,
+                                    segment_size_bytes,
+                                    page_count,
+                                )
+                                .map_err(|error| {
+                                    CodeIndexProductionErrorV1::Contract(error.to_string())
+                                })?
+                            {
+                                self.seal_evidence_durable_transaction_count
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                            referenced_segment_bytes =
+                                referenced_segment_bytes.saturating_add(segment_size_bytes);
+                        }
                     }
-                    self.publish_segment_durable(kind, digest, bytes)
-                        .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-                    referenced_segment_bytes =
-                        referenced_segment_bytes.saturating_add(segment_size);
                     Ok(())
                 },
             )
@@ -1768,6 +2018,12 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                 .set(self.seal_encoded_segment_bytes.load(Ordering::Relaxed));
             hotpath::gauge!("code_index.generation.publish.existing_file_segment_bytes_read").set(
                 self.seal_existing_segment_bytes_read
+                    .load(Ordering::Relaxed),
+            );
+            hotpath::gauge!("code_index.generation.publish.evidence_pages")
+                .set(self.seal_evidence_page_count.load(Ordering::Relaxed));
+            hotpath::gauge!("code_index.generation.publish.evidence_durable_transactions").set(
+                self.seal_evidence_durable_transaction_count
                     .load(Ordering::Relaxed),
             );
         }
@@ -3034,8 +3290,13 @@ impl DaemonCodeTextArtifactStoreV1 {
                     &manifest_bytes,
                     identity.digest.clone(),
                     |digest, expected_size, buffer| {
-                        self.publication
-                            .read_partitioned_segment(digest, expected_size, buffer)
+                        self.publication.read_partitioned_segment(
+                            SealedGenerationSegmentReadV1::Whole {
+                                digest,
+                                size_bytes: expected_size,
+                            },
+                            buffer,
+                        )
                     },
                     TEXT_ARTIFACT_PAGE_CHUNKS_V1,
                     TEXT_ARTIFACT_PAGE_BYTES_V1,
@@ -3101,8 +3362,13 @@ impl DaemonCodeTextArtifactStoreV1 {
                     &manifest_bytes,
                     identity.digest.clone(),
                     |digest, expected_size, buffer| {
-                        self.publication
-                            .read_partitioned_segment(digest, expected_size, buffer)
+                        self.publication.read_partitioned_segment(
+                            SealedGenerationSegmentReadV1::Whole {
+                                digest,
+                                size_bytes: expected_size,
+                            },
+                            buffer,
+                        )
                     },
                     TEXT_ARTIFACT_PAGE_CHUNKS_V1,
                     TEXT_ARTIFACT_PAGE_BYTES_V1,

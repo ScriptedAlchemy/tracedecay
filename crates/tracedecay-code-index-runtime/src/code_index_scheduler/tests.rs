@@ -883,6 +883,11 @@ fn reverted_dirty_file_is_recaptured_from_clean_content() {
 #[test]
 fn partitioned_publication_reuses_unchanged_file_segments() {
     let unchanged = (0..256).fold(String::new(), |mut source, index| {
+        writeln!(
+            source,
+            "// stable unchanged body padding xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        )
+        .expect("write generated fixture padding");
         writeln!(source, "pub fn unchanged_{index}() -> usize {{ {index} }}")
             .expect("write generated fixture source");
         source
@@ -1028,6 +1033,16 @@ fn partitioned_publication_reuses_unchanged_file_segments() {
     };
     let first_components = component_sizes(&first_manifest);
     let second_components = component_sizes(&second_manifest);
+    let first_evidence_pack = first_manifest["generation"]["generation_evidence"]["segment_digest"]
+        .as_str()
+        .expect("first evidence pack digest")
+        .to_owned();
+    let second_evidence_pack =
+        second_manifest["generation"]["generation_evidence"]["segment_digest"]
+            .as_str()
+            .expect("second evidence pack digest")
+            .to_owned();
+    assert_ne!(first_evidence_pack, second_evidence_pack);
     let second_generation_growth = std::fs::metadata(&second_manifest_path)
         .expect("second manifest metadata")
         .len()
@@ -1118,6 +1133,316 @@ fn partitioned_publication_reuses_unchanged_file_segments() {
     assert!(
         !segment_path(&retired_edited_segment).exists(),
         "retention must collect a segment referenced only by the retired generation"
+    );
+    assert!(
+        segment_path(&second_evidence_pack).is_file(),
+        "retention must preserve the active generation's packed evidence"
+    );
+    assert!(
+        !segment_path(&first_evidence_pack).exists(),
+        "retention must collect packed evidence referenced only by the retired generation"
+    );
+}
+
+#[test]
+fn multi_page_evidence_uses_one_durable_pack_and_survives_restart() {
+    let source = (0..1_600).fold(String::new(), |mut source, index| {
+        writeln!(
+            source,
+            "pub fn evidence_{index}(value: usize) -> usize {{ value + {index} }}"
+        )
+        .expect("write generated fixture source");
+        source
+    });
+    let fixture = GitFixture::new(&[("src/evidence.rs", source.as_str())]);
+    let store = TempDir::new().expect("store root");
+    let (generation_id, evidence_pack_path) = {
+        let mut scheduler = scheduler(
+            &fixture,
+            store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(
+            scheduler
+                .reconcile_now()
+                .expect("publish multi-page generation"),
+        );
+        let latest = scheduler
+            .latest_complete_already_decoded()
+            .expect("multi-page generation remains decoded");
+        let generation_id = latest.generation.manifest().generation_id.clone();
+        let pointer: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(store.path().join("active-code-generation-v1.json"))
+                .expect("read active pointer"),
+        )
+        .expect("decode active pointer");
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(
+                store.path().join("code-generations-v1").join(
+                    pointer["generation_file"]
+                        .as_str()
+                        .expect("generation manifest path"),
+                ),
+            )
+            .expect("read partitioned manifest"),
+        )
+        .expect("decode partitioned manifest");
+        let pages = manifest["generation"]["generation_evidence"]["pages"]
+            .as_array()
+            .expect("evidence page descriptors");
+        assert!(pages.len() > 1, "the production fixture must span pages");
+        let segments_root = store.path().join("code-generation-segments-v1");
+        let file_segment_count = manifest["generation"]["file_segments"]
+            .as_array()
+            .expect("file segment descriptors")
+            .len();
+        assert_eq!(
+            std::fs::read_dir(&segments_root)
+                .expect("read segment objects")
+                .count(),
+            file_segment_count + 1,
+            "pages must be ranges in one pack, never separate filesystem objects"
+        );
+        for page in pages {
+            let page_digest = page["page_digest"]
+                .as_str()
+                .expect("page digest")
+                .strip_prefix("sha256:")
+                .expect("tagged page digest");
+            assert!(
+                !segments_root
+                    .join(format!("segment-{page_digest}.json"))
+                    .exists(),
+                "an evidence page must not receive its own durable transaction"
+            );
+        }
+        assert_eq!(
+            scheduler
+                .publication
+                .seal_evidence_page_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            pages.len() as u64,
+            "the scale counter must report every streamed page"
+        );
+        assert_eq!(
+            scheduler
+                .publication
+                .seal_evidence_durable_transaction_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "all evidence pages must use one fsync/rename transaction"
+        );
+        let evidence_digest = manifest["generation"]["generation_evidence"]["segment_digest"]
+            .as_str()
+            .expect("evidence pack digest")
+            .strip_prefix("sha256:")
+            .expect("tagged evidence pack digest");
+        (
+            generation_id,
+            store
+                .path()
+                .join("code-generation-segments-v1")
+                .join(format!("segment-{evidence_digest}.json")),
+        )
+    };
+
+    let reopened = super::DaemonCodeIndexPublicationStoreV1::new(
+        store.path(),
+        fixture.path(),
+        SanitizerRevision::new(tracedecay_runtime_core::privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
+            .expect("sanitizer revision"),
+    )
+    .expect("reopen publication store");
+    assert!(
+        reopened
+            .load_generation(&generation_id)
+            .expect("decode multi-page evidence after restart")
+            .is_some(),
+        "the one-pack generation must remain restart-readable"
+    );
+    drop(reopened);
+
+    let evidence_len = std::fs::metadata(&evidence_pack_path)
+        .expect("evidence pack metadata")
+        .len();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&evidence_pack_path)
+        .expect("open evidence pack for truncation")
+        .set_len(evidence_len - 1)
+        .expect("truncate one evidence byte");
+    let corrupted = super::DaemonCodeIndexPublicationStoreV1::new(
+        store.path(),
+        fixture.path(),
+        SanitizerRevision::new(tracedecay_runtime_core::privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
+            .expect("sanitizer revision"),
+    )
+    .expect("reopen corrupted publication store");
+    assert!(
+        corrupted.load_generation(&generation_id).is_err(),
+        "a pack missing any page byte must fail closed after restart"
+    );
+}
+
+#[test]
+fn failed_and_crashed_evidence_pack_temporaries_are_removed() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn fixture() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let segments_root = store.path().join("code-generation-segments-v1");
+    std::fs::create_dir_all(&segments_root).expect("create segment root");
+    let temporary_path = segments_root.join(".evidence-pack-publication.injected.tmp");
+    {
+        let mut pack = super::TemporaryEvidencePackV1::create(temporary_path.clone())
+            .expect("create temporary evidence pack");
+        for ordinal in 0..3 {
+            let bytes = format!("page-{ordinal}");
+            let digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(bytes.as_bytes()))
+                .expect("page digest");
+            pack.append_page(ordinal, &digest, bytes.as_bytes())
+                .expect("append page before injected failure");
+        }
+    }
+    assert!(
+        !temporary_path.exists(),
+        "a failure after N pages must remove the incomplete pack"
+    );
+
+    std::fs::write(&temporary_path, b"crash orphan").expect("write crash orphan");
+    let _reopened = super::DaemonCodeIndexPublicationStoreV1::new(
+        store.path(),
+        fixture.path(),
+        SanitizerRevision::new(tracedecay_runtime_core::privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
+            .expect("sanitizer revision"),
+    )
+    .expect("restart publication store");
+    assert!(
+        !temporary_path.exists(),
+        "restart must durably clean an abandoned evidence pack"
+    );
+}
+
+#[test]
+fn evidence_pack_failure_after_pages_never_publishes_manifest_or_pointer() {
+    let source = (0..1_600).fold(String::new(), |mut source, index| {
+        writeln!(
+            source,
+            "pub fn failed_evidence_{index}(value: usize) -> usize {{ value + {index} }}"
+        )
+        .expect("write generated fixture source");
+        source
+    });
+    let fixture = GitFixture::new(&[("src/evidence.rs", source.as_str())]);
+    let source_store = TempDir::new().expect("source store root");
+    let generation = {
+        let mut scheduler = scheduler(
+            &fixture,
+            source_store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(
+            scheduler
+                .reconcile_now()
+                .expect("build multi-page generation"),
+        );
+        Arc::clone(
+            &scheduler
+                .latest_complete_already_decoded()
+                .expect("multi-page generation remains decoded")
+                .generation,
+        )
+    };
+    let source_pointer: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(source_store.path().join("active-code-generation-v1.json"))
+            .expect("read source pointer"),
+    )
+    .expect("decode source pointer");
+    let source_manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            source_store.path().join("code-generations-v1").join(
+                source_pointer["generation_file"]
+                    .as_str()
+                    .expect("source generation manifest path"),
+            ),
+        )
+        .expect("read source manifest"),
+    )
+    .expect("decode source manifest");
+    let evidence = &source_manifest["generation"]["generation_evidence"];
+    let evidence_page_count = evidence["pages"]
+        .as_array()
+        .expect("evidence page descriptors")
+        .len();
+    assert!(
+        evidence_page_count > 1,
+        "the failure fixture must append multiple pages before commit"
+    );
+    let evidence_digest = evidence["segment_digest"]
+        .as_str()
+        .expect("evidence pack digest")
+        .strip_prefix("sha256:")
+        .expect("tagged evidence pack digest");
+
+    let failed_store = TempDir::new().expect("failed publication store root");
+    let mut publication = super::DaemonCodeIndexPublicationStoreV1::new(
+        failed_store.path(),
+        fixture.path(),
+        SanitizerRevision::new(tracedecay_runtime_core::privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
+            .expect("sanitizer revision"),
+    )
+    .expect("open failed publication store");
+    let segments_root = failed_store.path().join("code-generation-segments-v1");
+    let colliding_pack = segments_root.join(format!("segment-{evidence_digest}.json"));
+    std::fs::write(&colliding_pack, b"wrong immutable evidence pack")
+        .expect("seed corrupt immutable evidence target");
+
+    let error = publication
+        .publish_atomically(&generation.sealed_scope(), None, Arc::clone(&generation))
+        .expect_err("a conflicting aggregate pack must fail publication");
+    assert!(
+        error
+            .to_string()
+            .contains("existing sealed evidence pack does not match its content address"),
+        "the real pack commit must reject the conflicting aggregate: {error}"
+    );
+    assert_eq!(
+        publication
+            .seal_evidence_page_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        evidence_page_count as u64,
+        "publication must fail only after every evidence page was appended"
+    );
+    assert_eq!(
+        publication
+            .seal_evidence_durable_transaction_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "a rejected pack must not claim a completed durability transaction"
+    );
+    assert!(
+        !failed_store
+            .path()
+            .join("active-code-generation-v1.json")
+            .exists(),
+        "a failed aggregate commit must not publish a pointer"
+    );
+    assert_eq!(
+        std::fs::read_dir(failed_store.path().join("code-generations-v1"))
+            .expect("read failed generation directory")
+            .count(),
+        0,
+        "a failed aggregate commit must not publish a manifest or leave its temporary"
+    );
+    assert!(
+        std::fs::read_dir(&segments_root)
+            .expect("read failed segment directory")
+            .all(|entry| {
+                !entry
+                    .expect("failed segment directory entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".evidence-pack-publication.")
+            }),
+        "a failed aggregate commit must remove its incomplete evidence temporary"
     );
 }
 
@@ -9022,6 +9347,13 @@ fn durable_publication_writes_partitioned_manifest_and_reuses_immutable_targets(
             Arc::clone(&latest.generation),
         )
         .expect("identical immutable generation republishes");
+    assert_eq!(
+        reopened
+            .seal_evidence_durable_transaction_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "an identical evidence pack retry must not repeat a durability transaction"
+    );
 
     assert_eq!(
         std::fs::read(&generation_path).expect("read republished generation"),
