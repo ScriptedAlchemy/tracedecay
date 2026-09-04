@@ -114,18 +114,15 @@ jobs:
       - name: Reject tracked ignored files
         run: scripts/check-release-pr-integrity.sh HEAD HEAD
 
+      - name: Test bounded commit range linting
+        run: python3 scripts/test-lint-commit-range.py
+
       - name: Validate PR commit messages
         if: github.event_name == 'pull_request'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          set -euo pipefail
-          commit_shas=$(git rev-list --no-merges "$BASE_SHA..$HEAD_SHA")
-          while IFS= read -r commit_sha; do
-            [[ -n "$commit_sha" ]] || continue
-            git show --no-patch --format=%B "$commit_sha" | npm run --silent lint:commit --
-          done <<<"$commit_shas"
+        run: scripts/lint-commit-range.sh "$BASE_SHA" "$HEAD_SHA"
 
       - name: Validate pushed commit messages
         if: github.event_name == 'push'
@@ -136,19 +133,15 @@ jobs:
           set -euo pipefail
           if [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
             if git rev-parse "${HEAD_SHA}^" >/dev/null 2>&1; then
-              range="${HEAD_SHA}^..${HEAD_SHA}"
+              base_sha="${HEAD_SHA}^"
             else
               git show --no-patch --format=%B "$HEAD_SHA" | npm run lint:commit --
               exit 0
             fi
           else
-            range="$BEFORE_SHA..$HEAD_SHA"
+            base_sha="$BEFORE_SHA"
           fi
-          commit_shas=$(git rev-list --no-merges "$range")
-          while IFS= read -r commit_sha; do
-            [[ -n "$commit_sha" ]] || continue
-            git show --no-patch --format=%B "$commit_sha" | npm run --silent lint:commit --
-          done <<<"$commit_shas"
+          scripts/lint-commit-range.sh "$base_sha" "$HEAD_SHA"
 
   release-version-drift:
     name: Release Version Drift
