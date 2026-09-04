@@ -677,8 +677,7 @@ impl GraphDb {
         // identity so the count of concurrently materialized graphs stays
         // bounded by what is actually being read, not by how many
         // generations this process has ever sealed.
-        self.hibernate_idle_sealed_generation_engines(Some(&locator));
-        self.publish_sealed_generation_census();
+        self.reap_idle_sealed_generation_engines(Some(&locator));
         Ok(())
     }
 
@@ -691,7 +690,7 @@ impl GraphDb {
     /// locator, digest, row counts and canonical byte census, and the next
     /// read reopens the same container. A generation whose snapshot gate is
     /// busy is left resident.
-    pub(crate) fn hibernate_idle_sealed_generation_engines(
+    pub(crate) fn reap_idle_sealed_generation_engines(
         &self,
         serving: Option<&GenerationLocator>,
     ) -> usize {
@@ -717,6 +716,7 @@ impl GraphDb {
                 }
             }
         }
+        self.publish_sealed_generation_census();
         released
     }
 
@@ -1340,6 +1340,84 @@ fn sealed_copy_proof(
         canonical_bytes,
     );
     Ok(canonical_bytes)
+}
+
+#[cfg(test)]
+mod hibernation_tests {
+    use std::sync::Arc;
+
+    use super::SealedGenerationStore;
+    use crate::lease::GenerationLocator;
+    use crate::location::PersistentGraphStoreState;
+    use crate::{
+        GraphDb, GraphDbLocation, GraphDbOpenOptions, GraphDurability, GraphFormatVersion,
+        GraphGenerationId, GraphNamespace, GraphProjectionId, GraphProjectionIdentity,
+        NeverCancelled,
+    };
+
+    #[test]
+    fn bounded_reaper_retries_a_sealed_engine_skipped_while_its_reader_was_busy() {
+        let temp = tempfile::tempdir().unwrap();
+        let child_path = temp.path().join("sealed-reader.grafeo");
+        let child_options = || GraphDbOpenOptions {
+            location: GraphDbLocation::Persistent(child_path.clone()),
+            expected_format: GraphFormatVersion::current(),
+            durability: GraphDurability::WalSync,
+            cancellation: Arc::new(NeverCancelled),
+        };
+        let created = GraphDb::open(child_options()).unwrap();
+        created.close().unwrap();
+        drop(created);
+        let child = GraphDb::open_lazy_with_store_state(
+            child_options(),
+            PersistentGraphStoreState::Existing,
+        )
+        .unwrap();
+        child.ensure_opened().unwrap();
+
+        let parent = GraphDb::open(GraphDbOpenOptions {
+            location: GraphDbLocation::Memory,
+            expected_format: GraphFormatVersion::current(),
+            durability: GraphDurability::Memory,
+            cancellation: Arc::new(NeverCancelled),
+        })
+        .unwrap();
+        let locator = GenerationLocator::new(
+            GraphProjectionIdentity::new(
+                GraphNamespace::new("sealed-reader-retry").unwrap(),
+                GraphProjectionId::new("code").unwrap(),
+            ),
+            GraphGenerationId::new("g1").unwrap(),
+        );
+        parent.inner.sealed_generations.write().unwrap().insert(
+            locator.clone(),
+            Arc::new(SealedGenerationStore {
+                locator,
+                recovered_digest: format!("sha256:{}", "a".repeat(64)),
+                entity_count: 0,
+                relation_count: 0,
+                canonical_bytes: 0,
+                directory: temp.path().join("sealed-reader"),
+                database: Arc::clone(&child),
+            }),
+        );
+
+        let active_reader = child.inner.snapshot_gate.read();
+        assert_eq!(
+            parent.reap_idle_sealed_generation_engines(None),
+            0,
+            "the bounded pass must not block or evict an active reader"
+        );
+        assert!(child.native_engine_open().unwrap());
+        drop(active_reader);
+
+        assert_eq!(
+            parent.reap_idle_sealed_generation_engines(None),
+            1,
+            "the next maintenance pass must retry the reader after it becomes idle"
+        );
+        assert!(!child.native_engine_open().unwrap());
+    }
 }
 
 /// Measurement harness for the sealed-store verification path, phase by
