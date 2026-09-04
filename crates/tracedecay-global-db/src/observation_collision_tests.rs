@@ -63,6 +63,7 @@ use tracing::{Dispatch, Event, Metadata, Subscriber};
 
 use crate::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay_runtime_core::db::engine::params;
+use tracedecay_rusqlite_runtime::repository::observation_cursor_authority::COMMIT_SOURCE_CURSOR_SQL;
 
 const COLLISION_PROVIDER: &str = "collision-test";
 const OBSERVATION_DISPATCH_TRACE_TARGET: &str = "tracedecay::observation_admission_work";
@@ -1384,13 +1385,12 @@ async fn run_catch_up_pass(
     (decoded, receipts)
 }
 
-/// Linux P1-3, covered-replay shape: an identity collision whose range the
-/// durable cursor already covers is a replayed verification probe, not the
-/// scan frontier. It must stay a typed fail-closed error and leave every
-/// coverage ledger untouched — no `admission_refused` advance row, no
-/// refusal-authority row, no cursor movement.
+/// A collision read from a stale preflight after another writer already moved
+/// the cursor is a retryable cursor race, not proof that the candidate itself
+/// is permanently invalid. With no matching refusal terminal, the loser must
+/// leave every coverage ledger untouched and retry from the winning cursor.
 #[tokio::test]
-async fn covered_replay_collision_leaves_coverage_state_untouched() {
+async fn covered_collision_without_a_terminal_is_a_retryable_cursor_conflict() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
         .await
@@ -1428,14 +1428,8 @@ async fn covered_replay_collision_leaves_coverage_state_untouched() {
     );
     let error = store.persist_observation(covered_write).await.unwrap_err();
     assert!(
-        matches!(
-            error,
-            ObservationStoreError::ObservationCollision {
-                outcome: ObservationCollisionOutcomeV1::IdentityCollision,
-                ..
-            }
-        ),
-        "{error:?}"
+        matches!(error, ObservationStoreError::CursorConflict { .. }),
+        "a stale writer must retry from the winning cursor, got {error:?}"
     );
 
     assert_eq!(
@@ -1454,12 +1448,11 @@ async fn covered_replay_collision_leaves_coverage_state_untouched() {
     );
 }
 
-/// Linux P1-3, stale-expected shape: a colliding candidate whose expected
-/// cursor does not match the durable one is not the scan frontier. The
-/// refusal must stay the typed identity collision — never a cursor conflict,
-/// never recorded coverage.
+/// A colliding candidate whose expected cursor does not match the durable one
+/// has not established a terminal content refusal. It must surface the typed
+/// retryable cursor conflict and never record coverage.
 #[tokio::test]
-async fn stale_expected_cursor_collision_stays_a_typed_collision() {
+async fn stale_expected_cursor_collision_is_a_retryable_cursor_conflict() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
         .await
@@ -1509,14 +1502,8 @@ async fn stale_expected_cursor_collision_stays_a_typed_collision() {
     );
     let error = store.persist_observation(gap_write).await.unwrap_err();
     assert!(
-        matches!(
-            error,
-            ObservationStoreError::ObservationCollision {
-                outcome: ObservationCollisionOutcomeV1::IdentityCollision,
-                ..
-            }
-        ),
-        "a stale-expected collision must stay the typed collision, got {error:?}"
+        matches!(error, ObservationStoreError::CursorConflict { .. }),
+        "a stale-expected collision must retry from durable authority, got {error:?}"
     );
 
     assert_eq!(
@@ -1530,6 +1517,112 @@ async fn stale_expected_cursor_collision_stays_a_typed_collision() {
             .await
             .unwrap(),
         committed_cursor
+    );
+}
+
+/// Two writers may classify against the same committed cursor before either
+/// enters the canonical writer lane. If the winner advances that cursor while
+/// the collision loser is waiting for the refusal transaction, the loser has
+/// lost a CAS; it has not established a permanent content refusal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refusal_cursor_cas_loser_is_retryable_and_writes_no_terminal() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let session_id = SessionId::new("session.identity-collision.lost-cas").unwrap();
+    let (original, original_write) = collision_candidate(
+        &session_id,
+        "record.lost-cas",
+        1,
+        "original transcript record",
+        "receipt.lost-cas.original",
+        None,
+    );
+    assert!(matches!(
+        store.persist_observation(original_write).await.unwrap(),
+        ObservationPersistOutcome::Committed(_)
+    ));
+    let committed_cursor = store
+        .get_source_cursor(original.source(), original.scope())
+        .await
+        .unwrap();
+    let (rewritten, rewritten_write) = collision_candidate(
+        &session_id,
+        "record.lost-cas",
+        2,
+        "rewritten transcript record",
+        "receipt.lost-cas.rewritten",
+        committed_cursor.clone(),
+    );
+
+    // Hold the canonical writer lane before starting the loser. Its immutable
+    // preflight snapshot can still read the committed cursor, but its refusal
+    // transaction cannot enter until this winner publishes the next cursor.
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database");
+    let winner = database.begin_write_transaction().await.unwrap();
+    let losing_store = store.clone();
+    let mut losing_write =
+        tokio::spawn(async move { losing_store.persist_observation(rewritten_write).await });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut losing_write)
+            .await
+            .is_err(),
+        "the loser must wait behind the held writer lane"
+    );
+
+    let source_json = serde_json::to_string(rewritten.source()).unwrap();
+    let scope_json = serde_json::to_string(rewritten.scope()).unwrap();
+    let winning_cursor = ObservationSourceCursorV1::for_ordering(
+        rewritten.source().clone(),
+        rewritten.scope().clone(),
+        rewritten.identity().generation(),
+        rewritten.identity().ordering_domain(),
+        rewritten.identity().position().end(),
+    )
+    .unwrap();
+    let winning_cursor_json = serde_json::to_string(&winning_cursor).unwrap();
+    winner
+        .execute(
+            COMMIT_SOURCE_CURSOR_SQL,
+            params![
+                source_json.as_str(),
+                scope_json.as_str(),
+                winning_cursor_json.as_str()
+            ],
+        )
+        .await
+        .unwrap();
+    winner.commit().await.unwrap();
+
+    let error = losing_write.await.unwrap().unwrap_err();
+    assert!(
+        matches!(
+            error,
+            ObservationStoreError::CursorConflict {
+                ref expected,
+                ref actual,
+            } if **expected == committed_cursor && **actual == Some(winning_cursor.clone())
+        ),
+        "the CAS loser must retry from the winner's exact cursor, got {error:?}"
+    );
+    assert_eq!(admission_refusal_rows(&runtime).await, Vec::new());
+    assert_eq!(
+        admission_refused_advance_count(&runtime, &rewritten).await,
+        0,
+        "a lost CAS must not be made permanent through refusal coverage"
+    );
+    assert_eq!(
+        store
+            .get_source_cursor(original.source(), original.scope())
+            .await
+            .unwrap(),
+        Some(winning_cursor)
     );
 }
 
