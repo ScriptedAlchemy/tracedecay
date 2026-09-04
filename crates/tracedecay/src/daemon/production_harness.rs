@@ -1063,16 +1063,37 @@ async fn wait_for_production_composition_code_index(
                 .code_index_schedulers
                 .dashboard_freshness(project_root)
                 .await;
+            // The scope gate is the usual reason a Ready generation is never
+            // admitted: report both sides of the identity comparison so a
+            // mismatch is diagnosable from the failure message alone.
+            let mounted_identity = invocation
+                .code_index_schedulers
+                .latest_complete_ready(project_root)
+                .await
+                .map(|latest| {
+                    let generation = latest.generation();
+                    format!(
+                        "project_id={:?}, repository={:?}, worktree={:?}",
+                        generation.manifest().project_id,
+                        generation.snapshot().repository,
+                        generation.snapshot().worktree,
+                    )
+                });
             Err(TraceDecayError::Config {
                 message: format!(
                     "production-composition code index did not publish for '{}' \
                      after {} ms; composition gate capacity={}, admitted={}, waiting={}; \
-                     scheduler_state={scheduler_state:?}",
+                     scheduler_state={scheduler_state:?}; \
+                     awaited_scope=project_id={:?}, repository={:?}, worktree={:?}; \
+                     mounted_generation={mounted_identity:?}",
                     project_root.display(),
                     elapsed_wait.as_millis(),
                     admission.capacity,
                     admission.admitted,
                     admission.waiting,
+                    scope.project_id,
+                    scope.repository_id,
+                    scope.worktree_id,
                 ),
             })
         }
