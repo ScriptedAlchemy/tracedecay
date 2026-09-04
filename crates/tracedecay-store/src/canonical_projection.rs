@@ -335,6 +335,7 @@ fn canonical_message_metadata(
         .find(|fact| matches!(fact, CanonicalObservationFactV1::Message { .. }))
         && let Some(semantics) = provider_message_semantics(
             envelope.provider().as_str(),
+            envelope.native_record_kind(),
             canonical_role(*role),
             content,
             envelope.relations().message_id() != Some(envelope.stable_record_id()),
@@ -712,6 +713,7 @@ fn canonical_message_fields(
         let text = canonical_fact_text(content)?;
         if let Some(semantics) = provider_message_semantics(
             envelope.provider().as_str(),
+            envelope.native_record_kind(),
             role,
             content,
             envelope.relations().message_id() != Some(envelope.stable_record_id()),
