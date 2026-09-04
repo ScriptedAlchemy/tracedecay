@@ -100,7 +100,9 @@ impl CodeIndexSchedulerRegistryV1 {
         }
         hotpath::gauge!("daemon.code_index.watch.ingress.woke_total").inc(1_u64);
         Self::note_wake(&pending_wake, &wake, CodeIndexCadenceTriggerV1::GitWatcher);
-        scheduler.request_background_reconcile();
+        // The watcher reported a Git state change and the freshness ladder
+        // agreed, so this wake carries observed source movement.
+        scheduler.request_background_reconcile_for_observed_change();
         drop(scheduler);
         GitStateChangeRequestV1::Accepted
     }

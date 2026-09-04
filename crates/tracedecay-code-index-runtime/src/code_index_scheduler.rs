@@ -5969,7 +5969,33 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.wake.notify_one();
     }
 
+    /// Ask the retained owner for a background pass without claiming that the
+    /// worktree moved.
+    ///
+    /// The epoch is the cancellation authority every admitted index and text
+    /// pass carries, so advancing it here cancelled bounded text projection
+    /// already admitted for the current generation on every *source-neutral*
+    /// wake: an incompatible-generation observation, a dirty-remount seat, an
+    /// elapsed staleness tier, a retained-frontier decline. None of those
+    /// observed a source change, and none of them may supersede work bound to
+    /// source state that is still current.
     pub fn request_background_reconcile(&self) {
+        self.request_background_reconcile_with_change(false);
+    }
+
+    /// [`Self::request_background_reconcile`] for a caller that has already
+    /// proven the worktree moved.
+    ///
+    /// The clean-to-dirty transition advances the canonical worktree-change
+    /// generation diagnostics caches key on, and supersedes index work bound
+    /// to the source state that change replaced. Freshness requests coalesce
+    /// until reconciliation drains the marker through `take()`, so a repeated
+    /// read of the same pending drift keeps the same generation.
+    pub fn request_background_reconcile_for_observed_change(&self) {
+        self.request_background_reconcile_with_change(true);
+    }
+
+    fn request_background_reconcile_with_change(&self, source_changed: bool) {
         let newly_dirty = {
             let mut hints = self
                 .hints
@@ -5979,11 +6005,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             hints.overflow();
             newly_dirty
         };
-        // Overflow is the dirty marker. Freshness requests coalesce until
-        // reconciliation drains it through `take()`, so only the clean-to-dirty
-        // transition mints a generation. While its wake is pending, registry
-        // reads return that generation without running another probe.
-        if newly_dirty {
+        if source_changed && newly_dirty {
             DaemonCodeIndexControlV1::advance(&self.epoch);
         }
         // `Notify` already coalesces stored permits. Always refresh the permit:
@@ -7380,7 +7402,9 @@ impl CodeIndexWorktreeSchedulerV1 {
         if !self.freshness_probe_requires_reconcile() {
             return false;
         }
-        self.request_background_reconcile();
+        // The ladder proved this worktree moved, so this is the wake that may
+        // advance the canonical change generation and supersede index work.
+        self.request_background_reconcile_for_observed_change();
         true
     }
 
