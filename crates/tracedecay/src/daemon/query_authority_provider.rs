@@ -200,51 +200,9 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
                 .map_err(|_| RetrievalProfileActivationObserverErrorV1::Conflict)?;
             let observed = async {
                 let redundancy_ready = prepared_redundancy.has_active_authority();
-                let prepared_cache = if semantic_enabled {
-                    let pins = committed
-                        .current_activation
-                        .as_ref()
-                        .map(|activation| &activation.compatibility)
-                        .ok_or(RetrievalProfileActivationObserverErrorV1::Rejected)?;
-                    if !redundancy_ready {
-                        return Err(RetrievalProfileActivationObserverErrorV1::Rejected);
-                    }
-                    let runtime = project_semantic_production_runtime(&project_root)
-                        .ok_or(RetrievalProfileActivationObserverErrorV1::Unavailable)?;
-                    let vectors = runtime
-                        .active_vector_generation(pins)
-                        .await
-                        .ok_or(RetrievalProfileActivationObserverErrorV1::Unavailable)?;
-                    let source_generation = vectors.source_generation().clone();
-                    if !runtime.cache_ready_for(pins, &source_generation) {
-                        let code = project_semantic_retained_code_generation(
-                            &project_root,
-                            &source_generation,
-                        )
-                        .ok_or(RetrievalProfileActivationObserverErrorV1::Unavailable)?;
-                        Some(
-                            runtime
-                                .prepare_restore_current(&code, &pins.vector_generation_id)
-                                .await
-                                .map_err(|_| {
-                                    RetrievalProfileActivationObserverErrorV1::Unavailable
-                                })?
-                                .ok_or(
-                                    RetrievalProfileActivationObserverErrorV1::Unavailable,
-                                )?,
-                        )
-                    } else {
-                        Some(
-                            runtime
-                                .prepare_current_cache_observation(pins, &source_generation)
-                                .ok_or(
-                                    RetrievalProfileActivationObserverErrorV1::Unavailable,
-                                )?,
-                        )
-                    }
-                } else {
-                    None
-                };
+                if semantic_enabled && !redundancy_ready {
+                    return Err(RetrievalProfileActivationObserverErrorV1::Rejected);
+                }
                 let serving = registry
                     .serving_code_scope(&project_root)
                     .await
@@ -283,6 +241,52 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
                     .map_err(|_| RetrievalProfileActivationObserverErrorV1::Unavailable)?
                     .map_err(|_| RetrievalProfileActivationObserverErrorV1::Rejected)?;
                     Some(Arc::new(authority))
+                } else {
+                    None
+                };
+                // Cache observations are an exact CAS over the live semantic
+                // pointer and query-runtime binding. All of the preparation
+                // above may await or warm shared state, so observe only when
+                // the coherent install is ready to consume this snapshot.
+                let prepared_cache = if semantic_enabled {
+                    let pins = committed
+                        .current_activation
+                        .as_ref()
+                        .map(|activation| &activation.compatibility)
+                        .ok_or(RetrievalProfileActivationObserverErrorV1::Rejected)?;
+                    let runtime = project_semantic_production_runtime(&project_root)
+                        .ok_or(RetrievalProfileActivationObserverErrorV1::Unavailable)?;
+                    let vectors = runtime
+                        .active_vector_generation(pins)
+                        .await
+                        .ok_or(RetrievalProfileActivationObserverErrorV1::Unavailable)?;
+                    let source_generation = vectors.source_generation().clone();
+                    if !runtime.cache_ready_for(pins, &source_generation) {
+                        let code = project_semantic_retained_code_generation(
+                            &project_root,
+                            &source_generation,
+                        )
+                        .ok_or(RetrievalProfileActivationObserverErrorV1::Unavailable)?;
+                        Some(
+                            runtime
+                                .prepare_restore_current(&code, &pins.vector_generation_id)
+                                .await
+                                .map_err(|_| {
+                                    RetrievalProfileActivationObserverErrorV1::Unavailable
+                                })?
+                                .ok_or(
+                                    RetrievalProfileActivationObserverErrorV1::Unavailable,
+                                )?,
+                        )
+                    } else {
+                        Some(
+                            runtime
+                                .prepare_current_cache_observation(pins, &source_generation)
+                                .ok_or(
+                                    RetrievalProfileActivationObserverErrorV1::Unavailable,
+                                )?,
+                        )
+                    }
                 } else {
                     None
                 };
