@@ -2,7 +2,7 @@ use std::io::Write as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use tracedecay_runtime_core::db::engine::{
@@ -27,6 +27,7 @@ impl GitCorrelationWriteTxn for Transaction {
 struct TestStore {
     connection: TestConnection,
     graph: std::sync::Arc<MemoryEvidenceGraphRuntime>,
+    fail_next_write: AtomicBool,
 }
 
 impl TestStore {
@@ -43,7 +44,12 @@ impl TestStore {
         Self {
             connection: TestConnection::open(path),
             graph,
+            fail_next_write: AtomicBool::new(false),
         }
+    }
+
+    fn fail_next_write(&self) {
+        self.fail_next_write.store(true, Ordering::Release);
     }
 }
 
@@ -63,6 +69,11 @@ impl GitCorrelationSessionStore for TestStore {
     }
 
     async fn open_write_transaction(&self) -> Result<Transaction, GitCorrelationError> {
+        if self.fail_next_write.swap(false, Ordering::AcqRel) {
+            return Err(GitCorrelationError::Db(
+                "injected frontier transaction failure".to_owned(),
+            ));
+        }
         self.connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
@@ -339,6 +350,35 @@ async fn later_attribution_failure_returns_committed_backfill_progress() {
         .unwrap();
     assert_eq!(retried.sessions_scanned, 0);
     assert_eq!(retried.skipped_git_error, 0);
+}
+
+#[tokio::test]
+async fn later_frontier_failure_returns_committed_graph_progress() {
+    let repository = repository_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    store.fail_next_write();
+
+    let partial = run_incremental_backfill_outcome(&store, &SystemGit, 1)
+        .await
+        .unwrap();
+    assert!(partial.stats.spans_written > 0);
+    assert!(!partial.stats.frontier_advanced);
+    assert!(matches!(
+        partial.later_failure,
+        Some(GitCorrelationError::Db(_))
+    ));
+    assert_eq!(
+        read_meta_value(&store.connection, AUTO_BACKFILL_WATERMARK_KEY)
+            .await
+            .unwrap(),
+        None
+    );
+
+    let retried = run_incremental_backfill(&store, &SystemGit, 1)
+        .await
+        .unwrap();
+    assert!(retried.frontier_advanced);
 }
 
 #[tokio::test]
