@@ -102,53 +102,6 @@ pub(super) struct ReadOnlyDb {
     pub canonical_path: PathBuf,
 }
 
-pub(super) fn open_readonly_immutable_verified_sync(
-    db_path: &Path,
-    open: impl FnOnce(&Path) -> Result<rusqlite::Connection, String>,
-) -> Result<ReadOnlyDb, String> {
-    let canonical_before = db_path.canonicalize().map_err(|error| {
-        format!(
-            "could not resolve '{}' before immutable open: {error}",
-            db_path.display()
-        )
-    })?;
-    let before = tracedecay_runtime_core::db::sqlite_generation_identity(&canonical_before)
-        .map_err(|_| {
-            format!(
-                "could not identify '{}' before immutable open",
-                db_path.display()
-            )
-        })?;
-    let conn = open(db_path)?;
-    let canonical_after = db_path.canonicalize().map_err(|error| {
-        format!(
-            "could not resolve '{}' after immutable open: {error}",
-            db_path.display()
-        )
-    })?;
-    let after = tracedecay_runtime_core::db::sqlite_generation_identity(&canonical_after).map_err(
-        |_| {
-            format!(
-                "could not identify '{}' after immutable open",
-                db_path.display()
-            )
-        },
-    )?;
-    if before != after || canonical_before != canonical_after {
-        return Err(format!(
-            "SQLite path '{}' was replaced during immutable open",
-            db_path.display()
-        ));
-    }
-    let generation = ObservationSourceGenerationV1::new(before)
-        .map_err(|error| format!("invalid SQLite generation identity: {error}"))?;
-    Ok(ReadOnlyDb {
-        conn: CursorConn::new(conn),
-        generation,
-        canonical_path: canonical_before,
-    })
-}
-
 /// Open a `SQLite` file strictly read-only and immutable (no locking, no
 /// `-wal`/`-shm` writes) via a `file:…?immutable=1&mode=ro` URI. The runtime
 /// helper also pins `busy_timeout = 0` and verifies `query_only = ON`.
@@ -159,9 +112,15 @@ pub(super) fn open_readonly_immutable_verified_sync(
 pub(super) async fn open_readonly_immutable(db_path: &Path) -> Result<ReadOnlyDb, String> {
     let path = db_path.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        open_readonly_immutable_verified_sync(&path, |path| {
-            tracedecay_rusqlite_runtime::open_immutable_reader(path)
-                .map_err(|error| format!("could not open '{}' read-only: {error}", path.display()))
+        let opened = tracedecay_rusqlite_runtime::open_verified_immutable_reader(&path)
+            .map_err(|error| format!("could not open '{}' read-only: {error}", path.display()))?;
+        let (conn, canonical_path, file_identity) = opened.into_parts();
+        let generation = ObservationSourceGenerationV1::new(file_identity)
+            .map_err(|error| format!("invalid SQLite generation identity: {error}"))?;
+        Ok(ReadOnlyDb {
+            conn: CursorConn::new(conn),
+            generation,
+            canonical_path,
         })
     })
     .await
@@ -278,7 +237,9 @@ pub(super) async fn fetch_bubble_bounded(
 ) -> BoundedSqliteValue<Value> {
     let key = format!("bubbleId:{composer_id}:{bubble_id}");
     if key.len() as u64 > MAX_COMPOSER_SQLITE_KEY_BYTES {
-        return BoundedSqliteValue::Missing;
+        return BoundedSqliteValue::Malformed {
+            byte_len: key.len() as u64,
+        };
     }
     match fetch_kv_text_bounded(conn, &key, max_composer_record_bytes(), remaining).await {
         BoundedSqliteValue::Missing => BoundedSqliteValue::Missing,

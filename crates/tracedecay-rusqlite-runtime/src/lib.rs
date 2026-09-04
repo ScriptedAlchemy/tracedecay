@@ -5,7 +5,10 @@ mod authority;
 pub mod backup;
 mod checkpoint;
 mod connection;
-pub use connection::{ConnectionPolicyError, OpenedDatabaseFileError, open_immutable_reader};
+pub use connection::{
+    ConnectionPolicyError, OpenedDatabaseFileError, VerifiedImmutableReader,
+    VerifiedImmutableReaderError, open_immutable_reader, open_verified_immutable_reader,
+};
 mod content_digest;
 pub use content_digest::{CanonicalContentDigestError, canonical_session_domain_content_sha256};
 #[doc(hidden)]
