@@ -7137,6 +7137,7 @@ dependencies = [
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
+ "tracedecay-semantic",
  "tracedecay-session-memory",
  "tracedecay-session-runtime",
  "tracedecay-session-temporal-store",

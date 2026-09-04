@@ -275,14 +275,64 @@ impl GraphVectorGenerationStoreV1 {
                                         format!("stage={:?}", existing.plan.key),
                                     )));
                                 }
+                                if existing.plan.writer_fence.binding
+                                    == stage_plan.writer_fence.binding
+                                {
+                                    return Err(map_graph_error(GraphDbError::conflict_observed(
+                                        "usecases.store.begin_generation.occupied_stage_active_writer",
+                                        format!("writer_fence={:?}", stage_plan.writer_fence),
+                                        format!("writer_fence={:?}", existing.plan.writer_fence),
+                                    )));
+                                }
+                                let adopted = match self
+                                    .runtime
+                                    .resume_stage(&existing.plan.key, &authority)
+                                    .map_err(map_graph_error)?
+                                {
+                                    SemanticVectorStageResumeOutcome::Pending(record) => record,
+                                    SemanticVectorStageResumeOutcome::Ready(record)
+                                    | SemanticVectorStageResumeOutcome::Cancelled(record) => {
+                                        return Err(map_graph_error(
+                                            GraphDbError::conflict_observed(
+                                                "usecases.store.begin_generation.adopt_superseded",
+                                                "state=Pending",
+                                                format!("state={:?}", record.state),
+                                            ),
+                                        ));
+                                    }
+                                    SemanticVectorStageResumeOutcome::Published {
+                                        record, ..
+                                    } => {
+                                        return Err(map_graph_error(
+                                            GraphDbError::conflict_observed(
+                                                "usecases.store.begin_generation.adopt_superseded",
+                                                "state=Pending",
+                                                format!("state={:?}", record.state),
+                                            ),
+                                        ));
+                                    }
+                                    SemanticVectorStageResumeOutcome::Missing => {
+                                        return Err(map_graph_error(GraphDbError::conflict(
+                                            "usecases.store.begin_generation.adopt_superseded_missing",
+                                        )));
+                                    }
+                                };
+                                require_resumed_plan(&adopted, &existing.plan)?;
+                                if adopted.plan.writer_fence != stage_plan.writer_fence {
+                                    return Err(map_graph_error(GraphDbError::conflict_observed(
+                                        "usecases.store.begin_generation.adopt_superseded_fence",
+                                        format!("writer_fence={:?}", stage_plan.writer_fence),
+                                        format!("writer_fence={:?}", adopted.plan.writer_fence),
+                                    )));
+                                }
                                 match self
                                     .runtime
-                                    .cancel_stage(&existing.plan.key, &authority)
+                                    .cancel_stage(&adopted.plan.key, &authority)
                                     .map_err(map_graph_error)?
                                 {
                                     SemanticVectorStageCancelOutcome::Cancelled(record)
                                     | SemanticVectorStageCancelOutcome::ExactReplay(record)
-                                        if record.plan == existing.plan =>
+                                        if record.plan == adopted.plan =>
                                     {
                                         superseded_stage = true;
                                         continue;
