@@ -16,6 +16,9 @@ use tracedecay_store::ObservationCoverageReason;
 use crate::RegisteredGlobalDb;
 
 /// Refused source records recorded under one provider/reason pair.
+///
+/// `reason` is either a known durable coverage code or the fixed-size opaque
+/// fingerprint of an unrecognized durable value.
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct ObservationRefusalCountV1 {
     pub provider: String,
@@ -42,9 +45,9 @@ impl RegisteredGlobalDb {
     ///
     /// A store without the observation authority schema truthfully has an
     /// empty census: coverage never advanced past anything there. A reason
-    /// string this binary does not recognize is counted conservatively — an
-    /// unknown disposition must stay visible, never silently classified as
-    /// benign.
+    /// string this binary does not recognize is counted conservatively under
+    /// a fixed-size fingerprint, so an unknown disposition stays visible
+    /// without letting corrupt durable text escape through Doctor.
     #[hotpath::skip]
     pub async fn observation_refusal_census(&self) -> ObservationRefusalCensusV1 {
         let snapshot = match self.read_snapshot().await {
@@ -94,11 +97,11 @@ async fn census_from_snapshot(conn: &impl QueryExecutor) -> ObservationRefusalCe
         ) else {
             return ObservationRefusalCensusV1::Unavailable;
         };
-        let is_refusal = ObservationCoverageReason::try_from(reason.as_str())
-            .map_or(true, ObservationCoverageReason::is_refusal);
-        if !is_refusal {
-            continue;
-        }
+        let reason = match ObservationCoverageReason::try_from(reason.as_str()) {
+            Ok(reason) if !reason.is_refusal() => continue,
+            Ok(reason) => reason.as_str().to_owned(),
+            Err(unknown) => unknown.fingerprint().as_str().to_owned(),
+        };
         refusals.push(ObservationRefusalCountV1 {
             provider,
             reason,

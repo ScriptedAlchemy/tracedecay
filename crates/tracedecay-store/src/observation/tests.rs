@@ -334,6 +334,31 @@ fn observation_identity_collision_is_a_receiptless_refusal_reason() {
 }
 
 #[test]
+fn unknown_coverage_reason_error_does_not_retain_private_wire_text() {
+    let short_secret = "provider-private-transcript-secret";
+    let long_secret = format!("provider-private-transcript-{}", "x".repeat(16 * 1024));
+
+    for secret in [short_secret, long_secret.as_str()] {
+        let error = ObservationCoverageReason::try_from(secret).expect_err("unknown reason");
+
+        assert!(
+            !error.to_string().contains(secret),
+            "display error must not retain unknown wire text"
+        );
+        assert!(
+            !format!("{error:?}").contains(secret),
+            "debug error must not retain unknown wire text"
+        );
+        let serialized = serde_json::to_string(&error).expect("serialize unknown reason error");
+        assert!(
+            !serialized.contains(secret),
+            "serialized error must not retain unknown wire text"
+        );
+        assert!(serialized.contains("sha256:"));
+    }
+}
+
+#[test]
 fn cursor_ledger_identity_keeps_canonical_values_typed() {
     let receipt = observation("ledger", ObservationScopeV1::Profile)
         .receipt()
