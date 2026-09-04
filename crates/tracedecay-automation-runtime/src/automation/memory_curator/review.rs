@@ -103,6 +103,16 @@ pub(super) async fn memory_curator_review<A: ProjectMemoryFactStore + ProjectMem
         })
         .collect::<Vec<_>>();
     let next_after_fact_id = page.next_after_fact_id().cloned();
+    if allowed_facts.is_empty() {
+        let mut review =
+            memory_curator_review_value(facts, unavailable_count, next_after_fact_id.is_some());
+        review["relations"] = Value::Array(Vec::new());
+        return Ok(MemoryCuratorReviewPage {
+            review,
+            allowed_facts,
+            resume_after_fact_id: next_after_fact_id,
+        });
+    }
     let graph = memory
         .project_memory_graph(
             ProjectMemoryGraphQueryV1::new(
