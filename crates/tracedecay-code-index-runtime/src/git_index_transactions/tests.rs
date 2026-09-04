@@ -93,7 +93,34 @@ fn configured_merge_diff_and_filter_drivers_are_preview_only() {
             .expect("git init starts")
             .success()
     );
+    fs::write(directory.path().join("tracked.txt"), b"tracked\n").expect("tracked file");
+    fs::write(
+        directory.path().join(".gitattributes"),
+        b"tracked.txt diff=tracedecay merge=tracedecay filter=tracedecay\n",
+    )
+    .expect("bind every driver kind to a path");
     let runner = FixedGitIndexRunner::new(directory.path()).expect("runner");
+
+    let set = |key: &str| {
+        assert!(
+            Command::new("git")
+                .current_dir(directory.path())
+                .args(["config", "--local", key, "external-driver"])
+                .status()
+                .expect("git config starts")
+                .success()
+        );
+    };
+    let unset = |key: &str| {
+        assert!(
+            Command::new("git")
+                .current_dir(directory.path())
+                .args(["config", "--local", "--unset-all", key])
+                .status()
+                .expect("git config unset starts")
+                .success()
+        );
+    };
 
     for key in [
         "diff.external",
@@ -104,29 +131,50 @@ fn configured_merge_diff_and_filter_drivers_are_preview_only() {
         "filter.tracedecay.smudge",
         "filter.tracedecay.process",
     ] {
-        assert!(
-            Command::new("git")
-                .current_dir(directory.path())
-                .args(["config", "--local", key, "external-driver"])
-                .status()
-                .expect("git config starts")
-                .success()
-        );
+        set(key);
         assert!(
             runner
                 .has_external_drivers()
-                .expect("driver classification")
+                .expect("driver classification"),
+            "{key} is bound to a path by gitattributes and must refuse a preview"
         );
-        assert!(
-            Command::new("git")
-                .current_dir(directory.path())
-                .args(["config", "--local", "--unset-all", key])
-                .status()
-                .expect("git config unset starts")
-                .success()
-        );
+        unset(key);
         assert!(!runner.has_external_drivers().expect("driver removed"));
     }
+
+    // A driver definition no attribute binds cannot rewrite this repository's
+    // content. `git lfs install --system` puts exactly such a definition in
+    // `/etc/gitconfig` on every GitHub-hosted runner and most developer
+    // machines; classifying it as applied refused every preview there.
+    for key in [
+        "filter.lfs.clean",
+        "filter.lfs.smudge",
+        "filter.lfs.process",
+        "merge.unbound.driver",
+        "diff.unbound.command",
+        "diff.unbound.textconv",
+    ] {
+        set(key);
+        assert!(
+            !runner
+                .has_external_drivers()
+                .expect("unbound driver classification"),
+            "{key} binds no path in this repository and must not refuse a preview"
+        );
+        unset(key);
+    }
+
+    // `diff.external` names no driver to bind: it replaces the diff machinery
+    // for every diff, so it refuses with no attribute at all.
+    fs::remove_file(directory.path().join(".gitattributes")).expect("drop attribute bindings");
+    set("merge.tracedecay.driver");
+    assert!(!runner.has_external_drivers().expect("unbound named driver"));
+    set("diff.external");
+    assert!(
+        runner
+            .has_external_drivers()
+            .expect("unconditional external diff driver")
+    );
 }
 
 #[test]

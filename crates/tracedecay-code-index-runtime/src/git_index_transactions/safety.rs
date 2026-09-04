@@ -139,22 +139,111 @@ impl FixedGitIndexRunner {
         canonical_sha256(&attributes.stdout).map_err(Into::into)
     }
 
+    /// Whether an external driver can rewrite this repository's content.
+    ///
+    /// `git config --get-regexp` answers over the whole configuration stack,
+    /// `/etc/gitconfig` included. `git lfs install --system` — what every
+    /// GitHub-hosted runner image and most developer installs do — defines
+    /// `filter.lfs.clean|smudge|process` for every repository on the host, so
+    /// treating a *defined* driver as an *applied* one refused every preview
+    /// and apply on such a machine, permanently and repository-independently.
+    ///
+    /// A named driver only runs where gitattributes bind its name to a path,
+    /// so the fence intersects the configured driver names with the names this
+    /// repository's attributes actually bind. The intersection stays
+    /// fail-closed: an ambient definition that some attribute *does* bind is
+    /// still refused, wherever that definition or that attribute came from.
+    /// `diff.external` has no name to bind — it replaces the diff machinery
+    /// for every diff — so it refuses unconditionally.
     pub fn has_external_drivers(&self) -> Result<bool, NativeGitIndexError> {
+        let (external_diff_driver, named_drivers) = self.configured_drivers()?;
+        if external_diff_driver {
+            return Ok(true);
+        }
+        if named_drivers.is_empty() {
+            return Ok(false);
+        }
+        let bound = self.attribute_bound_driver_names()?;
+        Ok(!named_drivers.is_disjoint(&bound))
+    }
+
+    /// `(diff.external is configured, configured named driver subsections)`.
+    fn configured_drivers(&self) -> Result<(bool, BTreeSet<String>), NativeGitIndexError> {
         let output = self.run_git_output(&[
             "config",
+            "--null",
             "--get-regexp",
             r"^(diff\.external|merge\..*\.driver|diff\..*\.(command|textconv)|filter\..*\.(clean|smudge|process))$",
         ])?;
-        if output.status.success() {
-            return Ok(!output.stdout.is_empty());
+        let records = if output.status.success() {
+            output.stdout
+        } else if output.status.code() == Some(1) {
+            Vec::new()
+        } else {
+            return Err(NativeGitIndexError::GitFailed {
+                operation: "config",
+                status: output.status.to_string(),
+            });
+        };
+        let mut external_diff_driver = false;
+        let mut named_drivers = BTreeSet::new();
+        // `--null` emits `key NL value NUL` per record; a valueless key emits
+        // `key NUL`. Only the key selects the driver, so the value is ignored.
+        for record in records.split(|byte| *byte == 0).filter(|record| !record.is_empty()) {
+            let key = record.split(|byte| *byte == b'\n').next().unwrap_or_default();
+            let key =
+                std::str::from_utf8(key).map_err(|_| NativeGitIndexError::MalformedOutput {
+                    operation: "config",
+                })?;
+            if key == "diff.external" {
+                external_diff_driver = true;
+            } else if let Some(name) = driver_subsection_name(key) {
+                named_drivers.insert(name.to_owned());
+            }
         }
-        if output.status.code() == Some(1) {
-            return Ok(false);
+        Ok((external_diff_driver, named_drivers))
+    }
+
+    /// Driver names this repository's gitattributes bind to a path.
+    ///
+    /// The path domain is the same one `tracked_worktree_digest` binds —
+    /// tracked entries plus non-ignored untracked entries — because an
+    /// untracked path may become an index entry during the intended
+    /// publication and must be fenced before, not after, it is staged.
+    fn attribute_bound_driver_names(&self) -> Result<BTreeSet<String>, NativeGitIndexError> {
+        let mut paths = nul_paths(&self.run_git("ls-files", &["ls-files", "-z"])?.stdout);
+        paths.extend(self.other_paths(false)?);
+        if paths.is_empty() {
+            return Ok(BTreeSet::new());
         }
-        Err(NativeGitIndexError::GitFailed {
-            operation: "config",
-            status: output.status.to_string(),
-        })
+        let mut stdin = Vec::new();
+        for path in &paths {
+            stdin.extend_from_slice(path);
+            stdin.push(0);
+        }
+        let mut command = self.command();
+        command
+            .args(["check-attr", "-z", "--stdin", "diff", "merge", "filter"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let output = run_command_with_stdin(command, "check-attr", &stdin)?;
+        // `-z` emits `path NUL attribute NUL value NUL` triples.
+        let fields = output
+            .stdout
+            .split(|byte| *byte == 0)
+            .collect::<Vec<_>>();
+        let mut bound = BTreeSet::new();
+        for triple in fields.chunks_exact(3) {
+            let Ok(value) = std::str::from_utf8(triple[2]) else {
+                continue;
+            };
+            if matches!(value, "unspecified" | "unset" | "set" | "") {
+                continue;
+            }
+            bound.insert(value.to_owned());
+        }
+        Ok(bound)
     }
 
     pub fn sparse_digest(&self) -> Result<ManifestDigest, NativeGitIndexError> {
@@ -222,6 +311,29 @@ impl FixedGitIndexRunner {
                     && identity.common_dir == self.common_dir
         )
     }
+}
+
+/// The subsection of a named-driver configuration key, or `None` when the key
+/// names no driver. Git subsection names may themselves contain `.`, so the
+/// name is whatever the fixed prefix and suffix leave behind.
+fn driver_subsection_name(key: &str) -> Option<&str> {
+    for (prefix, suffix) in [
+        ("merge.", ".driver"),
+        ("diff.", ".command"),
+        ("diff.", ".textconv"),
+        ("filter.", ".clean"),
+        ("filter.", ".smudge"),
+        ("filter.", ".process"),
+    ] {
+        if let Some(name) = key
+            .strip_prefix(prefix)
+            .and_then(|rest| rest.strip_suffix(suffix))
+            && !name.is_empty()
+        {
+            return Some(name);
+        }
+    }
+    None
 }
 
 fn nul_paths(bytes: &[u8]) -> BTreeSet<Vec<u8>> {
