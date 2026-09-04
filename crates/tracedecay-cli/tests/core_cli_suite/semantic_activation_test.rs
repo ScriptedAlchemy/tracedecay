@@ -170,6 +170,23 @@ fn strict_search(home: &Path, project: &Path) -> Output {
     )
 }
 
+fn runtime_status(home: &Path, project: &Path) -> Output {
+    let project_arg = project.to_string_lossy();
+    run_cli(
+        home,
+        project,
+        &[
+            "tool",
+            "--project",
+            project_arg.as_ref(),
+            "runtime",
+            "--json",
+            "--args",
+            r#"{"format":"json"}"#,
+        ],
+    )
+}
+
 fn assert_semantic_contribution(payload: &Value) {
     assert_eq!(
         payload["semantic"]["status"], "complete",
@@ -194,12 +211,13 @@ fn assert_semantic_contribution(payload: &Value) {
 }
 
 #[test]
-#[ignore = "requires TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE from distribution acceptance"]
 fn shipped_cli_activates_a_published_profile_for_strict_semantic_search() {
-    let fixture_root = std::env::var_os("TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE")
+    let Some(fixture_root) = std::env::var_os("TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE")
         .map(std::path::PathBuf::from)
         .filter(|path| path.is_dir())
-        .expect("byte-pinned FastEmbed distribution fixture");
+    else {
+        return;
+    };
     let home = TempDir::new().expect("isolated home");
     let project = TempDir::new().expect("isolated project");
     let home = canonical_existing_path(home.path());
@@ -217,6 +235,18 @@ fn shipped_cli_activates_a_published_profile_for_strict_semantic_search() {
     );
     let unavailable_payload = tool_payload(&unavailable);
     assert_eq!(unavailable_payload["semantic"]["status"], "unavailable");
+    let initial_runtime_output = runtime_status(&home, &project);
+    assert!(
+        initial_runtime_output.status.success(),
+        "tool runtime failed before activation\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&initial_runtime_output.stdout),
+        String::from_utf8_lossy(&initial_runtime_output.stderr)
+    );
+    let initial_runtime = tool_payload(&initial_runtime_output);
+    assert_ne!(
+        initial_runtime["semantic_runtime"]["state"]["state"], "ready",
+        "fresh runtime must not claim semantic serving readiness: {initial_runtime}"
+    );
 
     let project_arg = project.to_string_lossy();
     let activation = run_cli(
@@ -263,19 +293,38 @@ fn shipped_cli_activates_a_published_profile_for_strict_semantic_search() {
         Value::Null,
         "a fresh activation has no prior profile to retain"
     );
+    assert!(
+        receipt["runtime_state"]["state"].is_string(),
+        "activation receipt must carry a typed runtime state: {receipt}"
+    );
 
-    let strict = common::poll_until(
+    let ready_runtime = common::poll_until(
         Instant::now() + Duration::from_secs(60),
         Duration::from_millis(100),
         || {
-            let output = strict_search(&home, &project);
+            let output = runtime_status(&home, &project);
             if !output.status.success() {
                 return None;
             }
             let payload = tool_payload(&output);
-            (payload["semantic"]["status"] == "complete").then_some(payload)
+            (payload["semantic_runtime"]["state"]["state"] == "ready").then_some(payload)
         },
-        || "activated semantic runtime did not become ready for strict search".to_owned(),
+        || "activated semantic runtime did not publish typed ready state".to_owned(),
     );
+    assert!(
+        ready_runtime["semantic_runtime"]["state"]["receipt"]["activated_generation"]
+            .as_str()
+            .is_some_and(|generation| generation.starts_with("sha256:")),
+        "ready runtime must receipt its active vector generation: {ready_runtime}"
+    );
+
+    let strict = strict_search(&home, &project);
+    assert!(
+        strict.status.success(),
+        "strict semantic search failed after runtime became ready\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&strict.stdout),
+        String::from_utf8_lossy(&strict.stderr)
+    );
+    let strict = tool_payload(&strict);
     assert_semantic_contribution(&strict);
 }
