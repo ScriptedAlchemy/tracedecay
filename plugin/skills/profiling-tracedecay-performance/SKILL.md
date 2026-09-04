@@ -115,7 +115,9 @@ operation.
 
 ## Prove the baseline first
 
-Use `scripts/efficiency-scorecard.py` before changing production code. It owns
+Use the TraceDecay checkout's `efficiency-scorecard.py` (in the repository's
+`scripts` directory — it ships with the repository, not with this skill)
+before changing production code. It owns
 the pinned fixture, isolated HOME/XDG/data/global DB/socket, readiness polling,
 and JSON schema. It measures cold index, incremental sync, seal to activation,
 tool-call p50/p95, startup/restart, store size, and peak RSS.
@@ -126,9 +128,10 @@ in `flock`, or set `CARGO_TARGET_DIR`.
 
 ```bash
 PROFILE_ID="${PROFILE_ID:-$(date -u +%Y%m%dT%H%M%SZ)-${USER}-$$}"
+SCORECARD_DIR="${SCORECARD_DIR:-$PWD/scripts}"
 cargo build --locked --release -p tracedecay-cli --bin tracedecay
 
-scripts/efficiency-scorecard.py \
+"$SCORECARD_DIR/efficiency-scorecard.py" \
   --binary target/release/tracedecay \
   --label baseline \
   --output "target/efficiency-scorecard-$PROFILE_ID-baseline"
@@ -361,4 +364,4 @@ earn permanent diagnostic value.
   prefixing `kache cargo`.
 - Sharing a report path with another agent.
 - Adding a second sandbox/scorecard wrapper instead of using the maintained
-  `scripts/efficiency-scorecard.py`.
+  `efficiency-scorecard.py` in the checkout's `scripts` directory.

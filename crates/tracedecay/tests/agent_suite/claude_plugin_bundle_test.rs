@@ -29,7 +29,7 @@ fn bundle_root() -> PathBuf {
     crate::common::repository_path("plugin")
 }
 
-/// The 14 model-invocable skills the bundle ships (also the Codex skill set),
+/// The 18 model-invocable skills the bundle ships (also the Codex skill set),
 /// kept in sync across every skill-bundling surface. The `tracedecay-*`
 /// workflow dispatcher skills were removed (their behavior lives in the native
 /// slash commands), the memory write/read skills were folded into
@@ -48,6 +48,7 @@ const EXPECTED_SKILLS: &[&str] = &[
     "managing-session-context",
     "managing-work",
     "managing-workflows",
+    "profiling-tracedecay-performance",
     "project-memory",
     "reviewing-changes",
     "tracing-functions",
@@ -464,9 +465,19 @@ fn claude_agents_allow_only_live_read_only_mcp_tools() {
     const PLUGIN_PREFIX: &str = "mcp__plugin_tracedecay_graph__";
 
     let source_agents = crate::common::repository_path("plugin/agents");
+    // `read_only_tool_names()` reads the MCP catalog through the registered
+    // `ports::mcp_tools` slot, which answers empty until the composition root
+    // wires it. Only the root can register it and no test binary runs `main`,
+    // so an unwired process would fail every agent on its first tool.
+    tracedecay::agents::register_mcp_tool_catalog_ports().expect("MCP tool catalog ports");
     let live_read_only: BTreeSet<String> = tracedecay::agents::read_only_tool_names()
         .into_iter()
         .collect();
+    assert!(
+        !live_read_only.is_empty(),
+        "the advertised catalog must expose read-only tools; an empty set would \
+         pass every allowlist vacuously"
+    );
     for agent in EXPECTED_AGENTS {
         let path = source_agents.join(agent);
         let raw = fs::read_to_string(&path)

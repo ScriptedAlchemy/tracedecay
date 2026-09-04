@@ -76,8 +76,14 @@ fn tool_is_read_only(definition: &ToolDefinition) -> bool {
 #[test]
 fn plugin_tool_mentions_resolve_to_registered_tools() {
     // `tracedecay_metrics` is the savings-report line prefix in tool
-    // output, not a tool name.
-    const NON_TOOL_MENTIONS: &[&str] = &["tracedecay_metrics"];
+    // output; `tracedecay_code_index_runtime` and `tracedecay_graph_db` are
+    // Rust crate log targets the profiling skill puts in `RUST_LOG`. None of
+    // the three is a tool name.
+    const NON_TOOL_MENTIONS: &[&str] = &[
+        "tracedecay_metrics",
+        "tracedecay_code_index_runtime",
+        "tracedecay_graph_db",
+    ];
     let known = registered_tool_names();
     let unknown: Vec<String> = embedded_plugin_tool_mentions()
         .into_iter()

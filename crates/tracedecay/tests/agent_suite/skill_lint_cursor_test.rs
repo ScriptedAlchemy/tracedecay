@@ -97,10 +97,16 @@ fn copy_dir(src: &std::path::Path, dst: &std::path::Path) {
     }
 }
 
-/// `tracedecay_*` identifiers that are documented output artifacts or tool-family
-/// globs, not single MCP tools (skills tell agents to report the
-/// `tracedecay_metrics:` line, and may reference the `tracedecay_lcm_*` family).
-const NON_TOOL_IDENTIFIERS: &[&str] = &["tracedecay_metrics", "tracedecay_lcm"];
+/// `tracedecay_*` identifiers that are documented output artifacts, tool-family
+/// globs, or Rust crate log targets, not single MCP tools (skills tell agents to
+/// report the `tracedecay_metrics:` line, may reference the `tracedecay_lcm_*`
+/// family, and the profiling skill sets `RUST_LOG` to per-crate targets).
+const NON_TOOL_IDENTIFIERS: &[&str] = &[
+    "tracedecay_metrics",
+    "tracedecay_lcm",
+    "tracedecay_code_index_runtime",
+    "tracedecay_graph_db",
+];
 
 #[test]
 fn cursor_skill_references_resolve() {
