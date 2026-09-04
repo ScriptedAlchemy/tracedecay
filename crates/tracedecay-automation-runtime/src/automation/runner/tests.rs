@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::json;
@@ -18,19 +19,22 @@ use tracedecay_session_memory::context::{
 };
 use tracedecay_session_memory::memory::MemoryApplication;
 use tracedecay_session_memory::session::{
-    SessionAccess, SessionAuthorizationError, SessionAuthorizationGrant, SessionFreshnessPolicy,
-    SessionRequestBinding, SessionRetrievalConfiguration, SessionRetrievalOutcome,
-    SessionRetrievalService, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
-    SessionTemporalExecutionPort, SessionTemporalQuery,
+    AuthorizationGrantId, SessionAccess, SessionAuthorizationError, SessionAuthorizationGrant,
+    SessionFreshnessPolicy, SessionRequestBinding, SessionRetrievalConfiguration,
+    SessionRetrievalOutcome, SessionRetrievalService, SessionScopeAuthorizationRequest,
+    SessionScopeAuthorizer, SessionTemporalExecutionError, SessionTemporalExecutionPort,
+    SessionTemporalQuery,
 };
 use tracedecay_temporal_query::TemporalKernelResult;
 use tracedecay_temporal_query::context::VersionedTokenEstimator;
+use tracedecay_temporal_query::ports::ExecutionLimits;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::super::automatic_facts::{AutomaticFactState, record_session_automatic_facts};
 use super::super::run_ledger::AutomationRunLedgerRecord;
 use super::evidence::{
-    AutomationEvidenceFilters, SESSION_REPLAY_SNIPPET_CHARS,
+    AutomationEvidenceFilters, SESSION_REPLAY_SNIPPET_CHARS, SessionReflectorEvidenceOutcome,
+    SkillWriterEvidenceOutcome, build_session_reflector_evidence, build_skill_writer_evidence,
     serialize_automation_temporal_evidence, validate_complete_evidence,
 };
 use super::retrieval::{
@@ -41,8 +45,9 @@ use super::{
     AuthorizedAutomationSessionRetrieval, AutomationRunControl, AutomationSessionRetrieval,
     AutomationSessionRetrievalFuture, AutomationTemporalEvidence, AutomationTemporalEvidenceItem,
     AutomationTemporalRetrieval, CombinedReviewDispatch, canonical_evidence_hash,
-    combined_asymmetric_failure, combined_reflector_failure_projection,
-    combined_skill_failure_projection, split_skill_runtime_failure,
+    combined_asymmetric_failure, combined_reflector_evidence_or_not_combined,
+    combined_reflector_failure_projection, combined_skill_failure_projection,
+    combined_skill_writer_evidence_or_not_combined, split_skill_runtime_failure,
     validate_session_fact_candidates,
 };
 use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
@@ -173,6 +178,43 @@ impl SessionTemporalExecutionPort for NeverAutomationExecution {
     }
 }
 
+struct PermitAutomationAuthorizer;
+
+impl SessionScopeAuthorizer for PermitAutomationAuthorizer {
+    fn authorize(
+        &self,
+        context: &RequestContext,
+        binding: &SessionRequestBinding,
+        request: &SessionScopeAuthorizationRequest,
+    ) -> std::result::Result<SessionAuthorizationGrant, SessionAuthorizationError> {
+        SessionAuthorizationGrant::issue(
+            AuthorizationGrantId::new("grant.automation.execution.test")?,
+            1,
+            context,
+            binding,
+            request,
+        )
+    }
+}
+
+struct CountingUnavailableAutomationExecution {
+    calls: Arc<AtomicUsize>,
+}
+
+impl SessionTemporalExecutionPort for CountingUnavailableAutomationExecution {
+    fn execute<'a, E>(
+        &'a self,
+        _request: tracedecay_session_memory::session::AuthorizedTemporalExecutionRequest,
+        _estimator: &'a E,
+    ) -> tracedecay_session_memory::session::TemporalExecutionFuture<'a>
+    where
+        E: VersionedTokenEstimator + Sync + 'a,
+    {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Err(SessionTemporalExecutionError::Unavailable) })
+    }
+}
+
 fn authorized_retrieval_context() -> (RequestContext, SessionRequestBinding) {
     let actor = ActorId::new("automation.session-evidence").unwrap();
     let request_id = RequestId::new("request.automation.session-evidence.test").unwrap();
@@ -192,7 +234,7 @@ fn authorized_retrieval_context() -> (RequestContext, SessionRequestBinding) {
     let policy = PolicyDigest::new([0x22; 32]);
     let configuration = ConfigurationDigest::new([0x33; 32]);
     let cancellation = CancellationToken::for_application_request(request_id.as_str());
-    let budgets = RequestBudgets::new(128, AUTOMATION_SESSION_MAX_BYTES, 10_000).unwrap();
+    let budgets = RequestBudgets::new(64, AUTOMATION_SESSION_MAX_BYTES, 10_000).unwrap();
     let grant = CapabilityGrantSnapshot::new(
         CapabilityGrantId::new("grant.automation.session-evidence.test").unwrap(),
         1,
@@ -279,6 +321,110 @@ async fn real_authorized_service_path_denies_before_execution() {
     assert_eq!(requests[0].access(), SessionAccess::Hydrate);
 }
 
+#[tokio::test]
+async fn automation_evidence_request_within_2mib_reaches_authorized_execution() {
+    let execution_calls = Arc::new(AtomicUsize::new(0));
+    let service = SessionRetrievalService::new(
+        PermitAutomationAuthorizer,
+        CountingUnavailableAutomationExecution {
+            calls: Arc::clone(&execution_calls),
+        },
+        AutomationWordEstimator,
+        SessionRetrievalConfiguration::new(1, 1).unwrap(),
+    );
+    let (context, binding) = authorized_retrieval_context();
+    let adapter = AuthorizedAutomationSessionRetrieval::new(
+        &service,
+        &context,
+        &binding,
+        SessionId::new("session.automation.admitted").unwrap(),
+    );
+
+    let outcome = retrieve_automation_session_evidence(
+        &adapter,
+        "admitted bounded automation evidence",
+        LcmScope::All,
+        AutomationEvidenceFilters {
+            provider: "cursor",
+            session_id: None,
+            include_summaries: true,
+            evidence_limit: 5,
+            include_recent_sessions: false,
+            recent_sessions_limit: 1,
+            role: None,
+            start_time: None,
+            end_time: None,
+            sort: LcmGrepSort::Relevance,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        outcome,
+        AutomationTemporalRetrieval::Rejected("session_evidence_unavailable")
+    ));
+    assert_eq!(execution_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn oversized_automation_request_preserves_candidate_stage_without_execution() {
+    let execution_calls = Arc::new(AtomicUsize::new(0));
+    let service = SessionRetrievalService::new(
+        PermitAutomationAuthorizer,
+        CountingUnavailableAutomationExecution {
+            calls: Arc::clone(&execution_calls),
+        },
+        AutomationWordEstimator,
+        SessionRetrievalConfiguration::new(1, 1).unwrap(),
+    );
+    let (context, binding) = authorized_retrieval_context();
+    let adapter = AuthorizedAutomationSessionRetrieval::new(
+        &service,
+        &context,
+        &binding,
+        SessionId::new("session.automation.oversized").unwrap(),
+    );
+    let query = SessionTemporalQuery::new(
+        SessionId::new("session.automation.oversized").unwrap(),
+        Some("cursor".to_owned()),
+        "oversized automation evidence",
+        None,
+        tracedecay_domain::TemporalModeV1::Forensic,
+        RetrievalGrainV1::LogicalMessage,
+        1,
+        tracedecay_temporal_query::ranking::DiversityLimits {
+            per_logical_message: 1,
+            per_turn: 1,
+            per_session: 1,
+            per_source: 1,
+            per_evidence_role: 1,
+        },
+        tracedecay_temporal_query::context::ContextBudget {
+            max_bytes: AUTOMATION_SESSION_MAX_BYTES,
+            max_tokens: AUTOMATION_SESSION_MAX_BYTES / 4,
+            estimator_version: "automation-words-v1".to_owned(),
+        },
+    )
+    .unwrap()
+    .with_execution_limits(ExecutionLimits {
+        candidate_total_bytes: usize::try_from(AUTOMATION_SESSION_MAX_BYTES + 1).unwrap(),
+        ..ExecutionLimits::default()
+    });
+
+    let outcome = adapter.retrieve(query).await;
+
+    assert!(matches!(
+        outcome,
+        AutomationTemporalRetrieval::StructuralRefusal(
+            tracedecay_application::retrieval::SessionRetrievalStructuralRefusalV1::BudgetExhausted {
+                stage: tracedecay_application::retrieval::SessionRetrievalBudgetStageV1::RequestCandidateBytes,
+            }
+        )
+    ));
+    assert_eq!(execution_calls.load(Ordering::SeqCst), 0);
+}
+
 #[test]
 fn temporal_automation_evidence_fails_closed_for_non_complete_outcomes() {
     for (outcome, expected_reason) in [
@@ -290,10 +436,7 @@ fn temporal_automation_evidence_fails_closed_for_non_complete_outcomes() {
             },
             "session_evidence_stale",
         ),
-        (
-            SessionRetrievalOutcome::CursorStale,
-            "session_cursor_stale",
-        ),
+        (SessionRetrievalOutcome::CursorStale, "session_cursor_stale"),
         (
             SessionRetrievalOutcome::Partial {
                 items: Vec::new(),
@@ -303,12 +446,6 @@ fn temporal_automation_evidence_fails_closed_for_non_complete_outcomes() {
             "session_evidence_partial",
         ),
         (SessionRetrievalOutcome::Denied, "session_evidence_denied"),
-        (
-            SessionRetrievalOutcome::BudgetExhausted {
-                stage: tracedecay_session_memory::session::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
-            },
-            "session_evidence_budget_exhausted",
-        ),
         (
             SessionRetrievalOutcome::Cancelled,
             "session_evidence_cancelled",
@@ -327,6 +464,19 @@ fn temporal_automation_evidence_fails_closed_for_non_complete_outcomes() {
             AutomationTemporalRetrieval::Rejected(reason) if reason == expected_reason
         ));
     }
+    let refusal = accept_automation_temporal_outcome(
+        SessionRetrievalOutcome::<TemporalKernelResult>::BudgetExhausted {
+            stage: tracedecay_session_memory::session::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
+        },
+    );
+    assert!(matches!(
+        refusal,
+        AutomationTemporalRetrieval::StructuralRefusal(
+            tracedecay_application::retrieval::SessionRetrievalStructuralRefusalV1::BudgetExhausted {
+                stage: tracedecay_application::retrieval::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
+            }
+        )
+    ));
     assert!(matches!(
         accept_automation_temporal_outcome(
             SessionRetrievalOutcome::<TemporalKernelResult>::CompleteZero {
@@ -410,6 +560,154 @@ impl AutomationSessionRetrieval for RecordingRejectedAutomationRetrieval {
     }
 }
 
+struct StructuralRefusalAutomationRetrieval {
+    anchor_session_id: SessionId,
+    refusal: tracedecay_application::retrieval::SessionRetrievalStructuralRefusalV1,
+    calls: AtomicUsize,
+}
+
+impl AutomationSessionRetrieval for StructuralRefusalAutomationRetrieval {
+    fn anchor_session_id(&self) -> &SessionId {
+        &self.anchor_session_id
+    }
+
+    fn retrieve(&self, _query: SessionTemporalQuery) -> AutomationSessionRetrievalFuture<'_> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let refusal = self.refusal;
+        Box::pin(async move { AutomationTemporalRetrieval::StructuralRefusal(refusal) })
+    }
+}
+
+#[tokio::test]
+async fn reflector_evidence_keeps_budget_stage_in_terminal_reason() {
+    let retrieval = StructuralRefusalAutomationRetrieval {
+        anchor_session_id: SessionId::new("session.automation.reflector-budget").unwrap(),
+        refusal:
+            tracedecay_application::retrieval::SessionRetrievalStructuralRefusalV1::BudgetExhausted {
+                stage: tracedecay_application::retrieval::SessionRetrievalBudgetStageV1::RequestCandidateBytes,
+            },
+        calls: AtomicUsize::new(0),
+    };
+
+    let outcome = build_session_reflector_evidence(
+        &retrieval,
+        &super::SessionReflectorAutomationOptions::default(),
+    )
+    .await
+    .expect("structural refusal is a terminal skip");
+
+    assert!(matches!(
+        outcome,
+        SessionReflectorEvidenceOutcome::Skipped {
+            reason: "session_evidence_budget_exhausted_request_candidate_bytes",
+            evidence_hash: None,
+        }
+    ));
+    assert_eq!(retrieval.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn skill_writer_evidence_keeps_budget_stage_in_terminal_reason() {
+    let profile = tempfile::tempdir().expect("skill writer profile root");
+    let retrieval = StructuralRefusalAutomationRetrieval {
+        anchor_session_id: SessionId::new("session.automation.skill-budget").unwrap(),
+        refusal:
+            tracedecay_application::retrieval::SessionRetrievalStructuralRefusalV1::BudgetExhausted {
+                stage: tracedecay_application::retrieval::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
+            },
+        calls: AtomicUsize::new(0),
+    };
+
+    let outcome = build_skill_writer_evidence(
+        &retrieval,
+        None,
+        None,
+        super::SkillWriterAutomationOptions {
+            profile_root: Some(profile.path().to_path_buf()),
+            ..super::SkillWriterAutomationOptions::default()
+        },
+    )
+    .await
+    .expect("structural refusal is a terminal skip");
+
+    assert!(matches!(
+        outcome,
+        SkillWriterEvidenceOutcome::Skipped {
+            reason: "session_evidence_budget_exhausted_execution_work_exhausted",
+            evidence_hash: None,
+        }
+    ));
+    assert_eq!(retrieval.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn combined_reflector_first_preserves_budget_stage_for_sequential_fallback() {
+    let retrieval = StructuralRefusalAutomationRetrieval {
+        anchor_session_id: SessionId::new("session.automation.combined-reflector-budget").unwrap(),
+        refusal:
+            tracedecay_application::retrieval::SessionRetrievalStructuralRefusalV1::BudgetExhausted {
+                stage: tracedecay_application::retrieval::SessionRetrievalBudgetStageV1::RequestCandidateBytes,
+            },
+        calls: AtomicUsize::new(0),
+    };
+    let evidence = build_session_reflector_evidence(
+        &retrieval,
+        &super::SessionReflectorAutomationOptions::default(),
+    )
+    .await
+    .expect("structural refusal is a terminal skip");
+
+    let dispatch = match combined_reflector_evidence_or_not_combined(evidence) {
+        Ok(_) => panic!("reflector refusal must fall back to the per-task runner"),
+        Err(dispatch) => dispatch,
+    };
+
+    assert!(matches!(
+        dispatch,
+        CombinedReviewDispatch::NotCombined {
+            reason: "session_evidence_budget_exhausted_request_candidate_bytes",
+        }
+    ));
+    assert_eq!(retrieval.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn combined_skill_second_preserves_distinct_budget_stage_for_sequential_fallback() {
+    let profile = tempfile::tempdir().expect("combined skill writer profile root");
+    let retrieval = StructuralRefusalAutomationRetrieval {
+        anchor_session_id: SessionId::new("session.automation.combined-skill-budget").unwrap(),
+        refusal:
+            tracedecay_application::retrieval::SessionRetrievalStructuralRefusalV1::BudgetExhausted {
+                stage: tracedecay_application::retrieval::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
+            },
+        calls: AtomicUsize::new(0),
+    };
+    let evidence = build_skill_writer_evidence(
+        &retrieval,
+        None,
+        None,
+        super::SkillWriterAutomationOptions {
+            profile_root: Some(profile.path().to_path_buf()),
+            ..super::SkillWriterAutomationOptions::default()
+        },
+    )
+    .await
+    .expect("structural refusal is a terminal skip");
+
+    let dispatch = match combined_skill_writer_evidence_or_not_combined(evidence) {
+        Ok(_) => panic!("skill refusal must fall back to the per-task runner"),
+        Err(dispatch) => dispatch,
+    };
+
+    assert!(matches!(
+        dispatch,
+        CombinedReviewDispatch::NotCombined {
+            reason: "session_evidence_budget_exhausted_execution_work_exhausted",
+        }
+    ));
+    assert_eq!(retrieval.calls.load(Ordering::SeqCst), 1);
+}
+
 #[tokio::test]
 async fn automation_retrieval_requests_fresh_forensic_evidence_and_preserves_rejection() {
     let retrieval = RecordingRejectedAutomationRetrieval {
@@ -424,7 +722,7 @@ async fn automation_retrieval_requests_fresh_forensic_evidence_and_preserves_rej
             provider: "cursor",
             session_id: None,
             include_summaries: true,
-            evidence_limit: 5,
+            evidence_limit: 128,
             include_recent_sessions: true,
             recent_sessions_limit: 3,
             role: None,
@@ -451,6 +749,11 @@ async fn automation_retrieval_requests_fresh_forensic_evidence_and_preserves_rej
         SessionFreshnessPolicy::RequireFresh
     );
     assert_eq!(queries[0].grain(), RetrievalGrainV1::LogicalMessage);
+    assert_eq!(queries[0].limit(), 64);
+    let execution_limits = queries[0].execution_limits();
+    assert_eq!(execution_limits.candidate_limit, 64);
+    assert_eq!(execution_limits.record_limit, 64);
+    assert_eq!(execution_limits.hydration_limit, 64);
 }
 
 #[test]

@@ -45,6 +45,55 @@ impl AutomationSessionRetrieval for CountingAutomationSessionRetrieval {
     }
 }
 
+struct CombinedBudgetRefusalRetrieval {
+    inner: FixtureAutomationSessionRetrieval,
+    refusal_call: usize,
+    stage: tracedecay_application::retrieval::SessionRetrievalBudgetStageV1,
+    calls: AtomicUsize,
+}
+
+impl CombinedBudgetRefusalRetrieval {
+    fn new(
+        cg: &TraceDecay,
+        refusal_call: usize,
+        stage: tracedecay_application::retrieval::SessionRetrievalBudgetStageV1,
+    ) -> Self {
+        Self {
+            inner: FixtureAutomationSessionRetrieval::new(cg),
+            refusal_call,
+            stage,
+            calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl AutomationSessionRetrieval for CombinedBudgetRefusalRetrieval {
+    fn anchor_session_id(&self) -> &SessionId {
+        self.inner.anchor_session_id()
+    }
+
+    fn retrieve(
+        &self,
+        query: tracedecay_session_memory::session::SessionTemporalQuery,
+    ) -> AutomationSessionRetrievalFuture<'_> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == self.refusal_call {
+            let stage = self.stage;
+            return Box::pin(async move {
+                AutomationTemporalRetrieval::StructuralRefusal(
+                    tracedecay_application::retrieval::SessionRetrievalStructuralRefusalV1::BudgetExhausted {
+                        stage,
+                    },
+                )
+            });
+        }
+        self.inner.retrieve(query)
+    }
+}
+
 fn combined_options(profile_root: &Path) -> CombinedReviewAutomationOptions {
     CombinedReviewAutomationOptions {
         run_id: Some("combined-run-1".to_string()),
@@ -620,7 +669,7 @@ async fn combined_review_falls_back_when_evidence_is_unavailable() {
     let CombinedReviewDispatch::NotCombined { reason } = dispatch else {
         panic!("expected combined dispatch to fall back, got {dispatch:?}");
     };
-    assert_eq!(reason, "session_reflector_evidence_unavailable");
+    assert_eq!(reason, "no_session_evidence");
 }
 
 #[tokio::test]
@@ -654,12 +703,13 @@ async fn combined_review_terminal_evidence_matrix_has_zero_effects() {
             .await
             .unwrap();
 
-        assert!(matches!(
-            dispatch,
-            CombinedReviewDispatch::NotCombined {
-                reason: "session_reflector_evidence_unavailable"
-            }
-        ));
+        let CombinedReviewDispatch::NotCombined {
+            reason: actual_reason,
+        } = dispatch
+        else {
+            panic!("terminal evidence must fall back, got {dispatch:?}");
+        };
+        assert_eq!(actual_reason, reason);
         assert_eq!(backend.calls(), 0);
         assert!(
             load_run_records(&cg.store_layout().dashboard_root, 10)
@@ -689,12 +739,98 @@ async fn combined_review_terminal_evidence_matrix_has_zero_effects() {
         )
         .await
         .unwrap();
+    let CombinedReviewDispatch::NotCombined { reason } = dispatch else {
+        panic!("empty evidence must fall back, got {dispatch:?}");
+    };
+    assert_eq!(reason, "no_session_evidence");
+    assert_eq!(backend.calls(), 0);
+    assert!(
+        load_run_records(&cg.store_layout().dashboard_root, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(!profile_root.exists());
+}
+
+#[tokio::test]
+async fn combined_review_preserves_reflector_budget_stage_for_fallback() {
+    let _env_lock = ENV_LOCK.lock().await;
+    let temp = tempdir().unwrap();
+    let profile_root = temp.path().join("profile");
+    let cg = init_project(temp.path()).await;
+    seed_project_session_activity(&cg).await;
+    let config = scheduler_config(Some(3600), None);
+    let backend = CombinedJsonBackend::new(json!({"facts": [], "skills": []}));
+    let retrieval = CombinedBudgetRefusalRetrieval::new(
+        &cg,
+        0,
+        tracedecay_application::retrieval::SessionRetrievalBudgetStageV1::RequestCandidateBytes,
+    );
+
+    let dispatch = run_combined_review_with_backend_and_retrieval(
+        &cg,
+        &config,
+        &test_configuration_revision(),
+        &backend,
+        &retrieval,
+        combined_options(&profile_root),
+        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
+    )
+    .await
+    .unwrap();
+
     assert!(matches!(
         dispatch,
         CombinedReviewDispatch::NotCombined {
-            reason: "session_reflector_evidence_unavailable"
+            reason: "session_evidence_budget_exhausted_request_candidate_bytes",
         }
     ));
+    assert_eq!(retrieval.calls(), 1);
+    assert_eq!(backend.calls(), 0);
+    assert!(
+        load_run_records(&cg.store_layout().dashboard_root, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(!profile_root.exists());
+}
+
+#[tokio::test]
+async fn combined_review_preserves_skill_budget_stage_for_fallback() {
+    let _env_lock = ENV_LOCK.lock().await;
+    let temp = tempdir().unwrap();
+    let profile_root = temp.path().join("profile");
+    let cg = init_project(temp.path()).await;
+    seed_project_session_activity(&cg).await;
+    let config = scheduler_config(Some(3600), None);
+    let backend = CombinedJsonBackend::new(json!({"facts": [], "skills": []}));
+    let retrieval = CombinedBudgetRefusalRetrieval::new(
+        &cg,
+        1,
+        tracedecay_application::retrieval::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
+    );
+
+    let dispatch = run_combined_review_with_backend_and_retrieval(
+        &cg,
+        &config,
+        &test_configuration_revision(),
+        &backend,
+        &retrieval,
+        combined_options(&profile_root),
+        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        dispatch,
+        CombinedReviewDispatch::NotCombined {
+            reason: "session_evidence_budget_exhausted_execution_work_exhausted",
+        }
+    ));
+    assert_eq!(retrieval.calls(), 2);
     assert_eq!(backend.calls(), 0);
     assert!(
         load_run_records(&cg.store_layout().dashboard_root, 10)

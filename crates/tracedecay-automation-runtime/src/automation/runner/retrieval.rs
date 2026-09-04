@@ -19,7 +19,6 @@ use tracedecay_application::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     ProfileIdentityReadPort, RequestContext, RequestId,
 };
-use tracedecay_automation::evidence_budget::SESSION_EVIDENCE_BUDGET_EXHAUSTED;
 use tracedecay_domain::{
     ActorId, ProjectId, RepositoryId, RetrievalGrainV1, SessionId, TemporalCoverageCountsV1,
     TemporalModeV1, UtcMicros, WorktreeId,
@@ -47,11 +46,29 @@ use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_session_temporal_store::RegisteredGlobalDbSessionTemporalExecution;
 use tracedecay_temporal_query::TemporalKernelResult;
 use tracedecay_temporal_query::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
+use tracedecay_temporal_query::ports::ExecutionLimits;
 use tracedecay_temporal_query::ranking::DiversityLimits;
 
 pub(super) const AUTOMATION_SESSION_MAX_BYTES: u64 = 2 * 1024 * 1024;
-const AUTOMATION_SESSION_MAX_RESULTS: u64 = 128;
+const AUTOMATION_SESSION_MAX_RESULTS: u64 = 64;
 const AUTOMATION_SESSION_MAX_WORK_UNITS: u64 = 100_000;
+const AUTOMATION_SESSION_EXECUTION_LIMITS: ExecutionLimits = ExecutionLimits {
+    candidate_limit: AUTOMATION_SESSION_MAX_RESULTS as usize,
+    candidate_total_bytes: AUTOMATION_SESSION_MAX_BYTES as usize,
+    candidate_item_bytes: 256 * 1024,
+    candidate_key_bytes: 256,
+    candidate_stable_id_bytes: 4 * 1024,
+    candidate_anchor_id_bytes: 4 * 1024,
+    candidate_metadata_field_bytes: 64 * 1024,
+    record_limit: AUTOMATION_SESSION_MAX_RESULTS as usize,
+    record_total_bytes: AUTOMATION_SESSION_MAX_BYTES as usize,
+    record_item_bytes: 1024 * 1024,
+    record_key_bytes: 256,
+    hydration_limit: AUTOMATION_SESSION_MAX_RESULTS as usize,
+    hydration_total_bytes: AUTOMATION_SESSION_MAX_BYTES as usize,
+    hydration_payload_bytes: 1024 * 1024,
+    hydration_chunk_bytes: 64 * 1024,
+};
 const AUTOMATION_SESSION_TIMEOUT: Duration = Duration::from_secs(30);
 const AUTOMATION_SESSION_ESTIMATOR_VERSION: &str = "automation-words-v1";
 const AUTOMATION_SESSION_ACTOR_ID: &str = "automation.session-evidence";
@@ -366,7 +383,7 @@ pub(super) async fn retrieve_automation_session_evidence(
         .max(filters.recent_sessions_limit.clamp(1, 10).saturating_mul(
             SESSION_REPLAY_HEAD_TURNS + SESSION_REPLAY_TAIL_TURNS + SESSION_REPLAY_SUMMARY_NODES,
         ))
-        .clamp(1, 128);
+        .clamp(1, AUTOMATION_SESSION_MAX_RESULTS as usize);
     let temporal_query = SessionTemporalQuery::new(
         anchor_session_id,
         provider,
@@ -393,6 +410,7 @@ pub(super) async fn retrieve_automation_session_evidence(
     .map_err(|error| TraceDecayError::Config {
         message: format!("invalid automation session forensic query: {error}"),
     })?
+    .with_execution_limits(AUTOMATION_SESSION_EXECUTION_LIMITS)
     .with_retrieval_scope(retrieval_scope)
     .with_freshness_policy(SessionFreshnessPolicy::RequireFresh);
     Ok(retrieval.retrieve(temporal_query).await)
@@ -524,8 +542,10 @@ pub(super) fn accept_automation_temporal_outcome(
                 maximum,
             },
         ),
-        SessionRetrievalOutcome::BudgetExhausted { .. } => {
-            AutomationTemporalRetrieval::Rejected(SESSION_EVIDENCE_BUDGET_EXHAUSTED)
+        SessionRetrievalOutcome::BudgetExhausted { stage } => {
+            AutomationTemporalRetrieval::StructuralRefusal(
+                SessionRetrievalStructuralRefusalV1::BudgetExhausted { stage },
+            )
         }
         SessionRetrievalOutcome::TimedOut => {
             AutomationTemporalRetrieval::Rejected("session_evidence_timed_out")
@@ -548,8 +568,59 @@ pub(super) const fn automation_structural_refusal_reason(
             kind: tracedecay_domain::CursorManifestLimitKindV1::CanonicalBytes,
             ..
         } => "session_cursor_manifest_canonical_bytes_limit_exceeded",
-        SessionRetrievalStructuralRefusalV1::BudgetExhausted { .. } => {
-            SESSION_EVIDENCE_BUDGET_EXHAUSTED
+        SessionRetrievalStructuralRefusalV1::BudgetExhausted { stage } => {
+            automation_budget_refusal_reason(stage)
+        }
+    }
+}
+
+const fn automation_budget_refusal_reason(
+    stage: tracedecay_application::retrieval::SessionRetrievalBudgetStageV1,
+) -> &'static str {
+    use tracedecay_application::retrieval::SessionRetrievalBudgetStageV1;
+
+    match stage {
+        SessionRetrievalBudgetStageV1::RequestResultLimit => {
+            "session_evidence_budget_exhausted_request_result_limit"
+        }
+        SessionRetrievalBudgetStageV1::RequestHydrationLimit => {
+            "session_evidence_budget_exhausted_request_hydration_limit"
+        }
+        SessionRetrievalBudgetStageV1::RequestContextBytes => {
+            "session_evidence_budget_exhausted_request_context_bytes"
+        }
+        SessionRetrievalBudgetStageV1::RequestCandidateBytes => {
+            "session_evidence_budget_exhausted_request_candidate_bytes"
+        }
+        SessionRetrievalBudgetStageV1::RequestRecordBytes => {
+            "session_evidence_budget_exhausted_request_record_bytes"
+        }
+        SessionRetrievalBudgetStageV1::RequestHydrationBytes => {
+            "session_evidence_budget_exhausted_request_hydration_bytes"
+        }
+        SessionRetrievalBudgetStageV1::EstimatorVersionMismatch => {
+            "session_evidence_budget_exhausted_estimator_version_mismatch"
+        }
+        SessionRetrievalBudgetStageV1::ExecutionWorkExhausted => {
+            "session_evidence_budget_exhausted_execution_work_exhausted"
+        }
+        SessionRetrievalBudgetStageV1::KernelResultLimit => {
+            "session_evidence_budget_exhausted_kernel_result_limit"
+        }
+        SessionRetrievalBudgetStageV1::ParticipantManifestParticipants => {
+            "session_evidence_budget_exhausted_participant_manifest_participants"
+        }
+        SessionRetrievalBudgetStageV1::ParticipantManifestCanonicalBytes => {
+            "session_evidence_budget_exhausted_participant_manifest_canonical_bytes"
+        }
+        SessionRetrievalBudgetStageV1::HydrationBytes => {
+            "session_evidence_budget_exhausted_hydration_bytes"
+        }
+        SessionRetrievalBudgetStageV1::ContextBytes => {
+            "session_evidence_budget_exhausted_context_bytes"
+        }
+        SessionRetrievalBudgetStageV1::ContextTokens => {
+            "session_evidence_budget_exhausted_context_tokens"
         }
     }
 }

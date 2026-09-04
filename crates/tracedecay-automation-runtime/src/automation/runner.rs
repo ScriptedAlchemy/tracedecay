@@ -556,6 +556,28 @@ async fn acquire_combined_task_lock(
     })
 }
 
+fn combined_reflector_evidence_or_not_combined(
+    outcome: SessionReflectorEvidenceOutcome,
+) -> std::result::Result<SessionReflectorEvidenceBundle, CombinedReviewDispatch> {
+    match outcome {
+        SessionReflectorEvidenceOutcome::Ready(bundle) => Ok(bundle),
+        SessionReflectorEvidenceOutcome::Skipped { reason, .. } => {
+            Err(CombinedReviewDispatch::NotCombined { reason })
+        }
+    }
+}
+
+fn combined_skill_writer_evidence_or_not_combined(
+    outcome: SkillWriterEvidenceOutcome,
+) -> std::result::Result<SkillWriterEvidenceBundle, CombinedReviewDispatch> {
+    match outcome {
+        SkillWriterEvidenceOutcome::Ready(bundle) => Ok(bundle),
+        SkillWriterEvidenceOutcome::Skipped { reason, .. } => {
+            Err(CombinedReviewDispatch::NotCombined { reason })
+        }
+    }
+}
+
 #[hotpath::measure(future = true, label = "automation.run.combined_review.inner")]
 async fn run_combined_review_for_retrieval(
     cg: &TraceDecay,
@@ -653,29 +675,23 @@ fn run_combined_review_for_retrieval_inner<'a>(
         })?;
         let started_at = current_timestamp().to_string();
 
-        let reflector_bundle =
-            match build_session_reflector_evidence(retrieval, &options.session_reflector).await? {
-                SessionReflectorEvidenceOutcome::Ready(bundle) => bundle,
-                SessionReflectorEvidenceOutcome::Skipped { .. } => {
-                    return Ok(CombinedReviewDispatch::NotCombined {
-                        reason: "session_reflector_evidence_unavailable",
-                    });
-                }
-            };
-        let skill_bundle = match build_skill_writer_evidence(
-            retrieval,
-            Some(cg.project_root()),
-            Some(cg.profile_database().as_ref()),
-            options.skill_writer,
-        )
-        .await?
-        {
-            SkillWriterEvidenceOutcome::Ready(bundle) => bundle,
-            SkillWriterEvidenceOutcome::Skipped { .. } => {
-                return Ok(CombinedReviewDispatch::NotCombined {
-                    reason: "skill_writer_evidence_unavailable",
-                });
-            }
+        let reflector_bundle = match combined_reflector_evidence_or_not_combined(
+            build_session_reflector_evidence(retrieval, &options.session_reflector).await?,
+        ) {
+            Ok(bundle) => bundle,
+            Err(dispatch) => return Ok(dispatch),
+        };
+        let skill_bundle = match combined_skill_writer_evidence_or_not_combined(
+            build_skill_writer_evidence(
+                retrieval,
+                Some(cg.project_root()),
+                Some(cg.profile_database().as_ref()),
+                options.skill_writer,
+            )
+            .await?,
+        ) {
+            Ok(bundle) => bundle,
+            Err(dispatch) => return Ok(dispatch),
         };
         let evidence_bundles = CombinedReviewEvidence {
             reflector: &reflector_bundle,
