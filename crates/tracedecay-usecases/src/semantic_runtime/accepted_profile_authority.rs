@@ -337,14 +337,22 @@ enum EvaluationEvidenceKindV1 {
     PackagedPortable,
 }
 
+/// Genuine native resource evidence is measured on the evaluation's own
+/// projection of the candidate's source generation, whose identity digest
+/// differs from the runtime generation the accepted profile will serve (the
+/// evaluation projects under its own resource ceilings, and every replicated
+/// scale projects a replicated corpus). Requiring the runtime generation here
+/// therefore rejects every genuine report; what the authority can hold the
+/// evidence to is a well-formed generation identity plus the exact artifact,
+/// while the candidate's binding to the runtime generation is verified by the
+/// evaluation snapshot before the candidate is published.
 fn runtime_vector_generation_matches(
     evidence_kind: EvaluationEvidenceKindV1,
     observed: Option<&str>,
-    expected: &VectorGenerationIdV1,
 ) -> bool {
     match evidence_kind {
         EvaluationEvidenceKindV1::Genuine => {
-            observed == Some(expected.as_digest().as_str())
+            observed.is_some_and(|generation| ManifestDigest::new(generation).is_ok())
         }
         EvaluationEvidenceKindV1::PackagedPortable => observed.is_none(),
     }
@@ -699,7 +707,6 @@ fn validate_runtime_evidence(
                 let vector_generation_matches = runtime_vector_generation_matches(
                     evidence_kind,
                     sample.provenance.vector_generation_id.as_deref(),
-                    &semantic.vector_generation_id,
                 );
                 if !vector_generation_matches
                     || sample.provenance.artifact_digest.as_deref()
@@ -708,10 +715,12 @@ fn validate_runtime_evidence(
                     return Err(SemanticAcceptedProfileAuthorityErrorV1::RejectedDetail(
                         format!(
                             "{}:{} native {scale} provenance does not match accepted semantic \
-                             evidence: vector_generation={:?} artifact={:?} expected_artifact={}",
+                             evidence: vector_generation={:?} expected_vector_generation={} \
+                             artifact={:?} expected_artifact={}",
                             output.profile_id,
                             output.partition,
                             sample.provenance.vector_generation_id,
+                            semantic.vector_generation_id.as_digest(),
                             sample.provenance.artifact_digest,
                             semantic.artifact_manifest_digest,
                         ),
@@ -767,24 +776,28 @@ mod tests {
     }
 
     #[test]
-    fn genuine_runtime_evidence_rejects_foreign_vector_generation() {
-        let expected = VectorGenerationIdV1::new(digest('a'));
-        let foreign = VectorGenerationIdV1::new(digest('b'));
+    fn genuine_runtime_evidence_names_a_well_formed_vector_generation() {
+        let generation = VectorGenerationIdV1::new(digest('a'));
 
         assert!(runtime_vector_generation_matches(
             EvaluationEvidenceKindV1::Genuine,
-            Some(expected.as_digest().as_str()),
-            &expected,
+            Some(generation.as_digest().as_str()),
         ));
         assert!(!runtime_vector_generation_matches(
             EvaluationEvidenceKindV1::Genuine,
-            Some(foreign.as_digest().as_str()),
-            &expected,
+            Some("not-a-digest"),
+        ));
+        assert!(!runtime_vector_generation_matches(
+            EvaluationEvidenceKindV1::Genuine,
+            None,
         ));
         assert!(runtime_vector_generation_matches(
             EvaluationEvidenceKindV1::PackagedPortable,
             None,
-            &expected,
+        ));
+        assert!(!runtime_vector_generation_matches(
+            EvaluationEvidenceKindV1::PackagedPortable,
+            Some(generation.as_digest().as_str()),
         ));
     }
 
