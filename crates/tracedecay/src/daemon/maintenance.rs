@@ -1439,7 +1439,15 @@ impl MaintenanceCoordinator {
         // sampled on its own short cadence regardless of whether retention
         // maintenance runs: the retention tick is hours apart, and a cold
         // index climbs from nothing to the admission watermark in minutes.
-        tracedecay_runtime_core::resident_memory::install_process_allocator_pressure_reclaimer_v1();
+        if let Err(error) =
+            tracedecay_runtime_core::resident_memory::install_process_allocator_pressure_reclaimer_v1()
+        {
+            tracing::error!(
+                event = "process_allocator_pressure_reclaimer_unavailable",
+                error = %error,
+                "could not install the allocator pressure reclaimer"
+            );
+        }
         let sampler_owner = coordinator.clone();
         let sampler = tokio::spawn(hotpath::future!(
             async move {
@@ -1509,25 +1517,13 @@ impl MaintenanceCoordinator {
     /// a cold index into released memory instead of refused admissions.
     #[hotpath::skip]
     async fn run_resident_memory_sampler(&self) {
-        loop {
-            tokio::select! {
-                () = self.cancellation.cancelled() => return,
-                () = tokio::time::sleep(RESIDENT_MEMORY_SAMPLE_INTERVAL_V1) => {}
-            }
-            if self.cancellation.is_cancelled() {
-                return;
-            }
-            let log = Arc::clone(&self.resident_memory_log);
-            // Reclaimers run inside the publish and an allocator trim over a
-            // multi-gigabyte heap takes real time; keep it off the runtime.
-            let sampled = tokio::task::spawn_blocking(move || {
-                record_process_resident_memory_gauge(&log);
-            })
-            .await;
-            if sampled.is_err() {
-                return;
-            }
-        }
+        let log = Arc::clone(&self.resident_memory_log);
+        run_resident_memory_sampler_loop(
+            &self.cancellation,
+            RESIDENT_MEMORY_SAMPLE_INTERVAL_V1,
+            Arc::new(move || record_process_resident_memory_gauge(&log)),
+        )
+        .await;
     }
 
     #[hotpath::skip]
@@ -1566,11 +1562,6 @@ impl MaintenanceCoordinator {
         branch_gc: BranchStoreGcCadenceV1,
         continuation: Option<MaintenanceContinuation>,
     ) -> MaintenanceTickOutcome {
-        // Piggybacks on the retention tick's existing cadence instead of a
-        // dedicated timer thread: this is the daemon's only always-running
-        // periodic loop, so it is where a slow RSS climb toward the
-        // admission limit becomes visible between full telemetry snapshots.
-        record_process_resident_memory_gauge(&self.resident_memory_log);
         administration
             .store_telemetry_sampling()
             .begin_retention_tick_log_window();
@@ -1843,13 +1834,12 @@ impl MaintenanceCoordinator {
 /// Hotpath gauge, and feeds it to the resident-memory admission authority.
 ///
 /// A 20G RSS overrun past the admission limit was visible only to `ps` during
-/// a 2026-08 incident; this closes that gap using the retention tick's
-/// existing cadence rather than a new background timer. Publishing the same
-/// sample to
+/// a 2026-08 incident; the dedicated sampler closes that gap on a short
+/// cadence. Publishing the same sample to
 /// [`process_resident_memory_pressure_v1`](tracedecay_runtime_core::resident_memory::process_resident_memory_pressure_v1)
 /// closes the loop: admission stops trusting its reservation model once the
-/// measurement says the process is over budget. There is exactly one reader
-/// here — the gauge and the admission cell consume the same sample.
+/// measurement says the process is over budget. The post-reclaim observation
+/// returned by the pressure cell is the authority for the gauge and logs.
 #[cfg(target_os = "linux")]
 fn record_process_resident_memory_gauge(log: &std::sync::Mutex<ResidentMemoryLogStateV1>) {
     use tracedecay_runtime_core::resident_memory::ResidentMemoryPressureStateV1;
@@ -1858,9 +1848,11 @@ fn record_process_resident_memory_gauge(log: &std::sync::Mutex<ResidentMemoryLog
     else {
         return;
     };
-    hotpath::gauge!("daemon.process.resident_bytes").set(bytes);
     let pressure = tracedecay_runtime_core::resident_memory::process_resident_memory_pressure_v1();
     let state = pressure.publish_observed_resident_bytes(bytes);
+    if let Some(observed_bytes) = state.observed_bytes() {
+        hotpath::gauge!("daemon.process.resident_bytes").set(observed_bytes);
+    }
     let over_budget = matches!(state, ResidentMemoryPressureStateV1::OverBudget { .. });
     let transition = {
         let mut log = log
@@ -1878,23 +1870,21 @@ fn record_process_resident_memory_gauge(log: &std::sync::Mutex<ResidentMemoryLog
                 ..
             },
         ) => {
-            // Reclaimers already ran inside the publish; report what they
-            // left behind, since that is the figure admission now judges by.
-            let after_reclaim_bytes =
-                tracedecay_runtime_core::resident_memory::sampled_process_resident_bytes_v1();
             tracing::warn!(
                 event = "daemon_resident_memory_over_budget",
                 observed_bytes,
-                after_reclaim_bytes,
                 limit_bytes,
                 high_watermark_bytes,
                 "measured process RSS reached the admission high watermark; refusing new growth and releasing reclaimable retained state"
             );
         }
-        (Some(ResidentMemoryLogTransitionV1::ReturnedToNominal), _) => {
+        (
+            Some(ResidentMemoryLogTransitionV1::ReturnedToNominal),
+            ResidentMemoryPressureStateV1::Nominal { observed_bytes, .. },
+        ) => {
             tracing::info!(
                 event = "daemon_resident_memory_nominal",
-                observed_bytes = bytes,
+                observed_bytes,
                 low_watermark_bytes = pressure.low_watermark_bytes(),
                 "measured process RSS fell back under the admission low watermark"
             );
@@ -1905,6 +1895,38 @@ fn record_process_resident_memory_gauge(log: &std::sync::Mutex<ResidentMemoryLog
 
 #[cfg(not(target_os = "linux"))]
 fn record_process_resident_memory_gauge(_log: &std::sync::Mutex<ResidentMemoryLogStateV1>) {}
+
+type ResidentMemorySampleV1 = Arc<dyn Fn() + Send + Sync + 'static>;
+
+async fn run_resident_memory_sampler_loop(
+    cancellation: &tracedecay_session_memory::context::CancellationToken,
+    interval: Duration,
+    sample: ResidentMemorySampleV1,
+) {
+    loop {
+        tokio::select! {
+            () = cancellation.cancelled() => return,
+            () = tokio::time::sleep(interval) => {}
+        }
+        if cancellation.is_cancelled() {
+            return;
+        }
+        let sample = Arc::clone(&sample);
+        // Reclaimers run inside the publish and an allocator trim over a
+        // multi-gigabyte heap takes real time; keep it off the runtime. A
+        // shutdown stops awaiting that blocking pass but cannot unsafely
+        // interrupt allocator maintenance already running on its worker.
+        let mut sampled = tokio::task::spawn_blocking(move || sample());
+        tokio::select! {
+            () = cancellation.cancelled() => return,
+            result = &mut sampled => {
+                if result.is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
 
 /// Cadence of the measured-RSS sampler. Reading `/proc/self/status` is
 /// microseconds; a cold index of a few thousand files climbs from nothing to
@@ -2147,8 +2169,8 @@ pub(crate) fn now_secs_i64() -> Result<i64, &'static str> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Condvar, Mutex as StdMutex};
     use std::time::Duration;
 
     use tokio::sync::Notify;
@@ -2165,7 +2187,7 @@ mod tests {
         StoreTelemetrySamplingRegistry, TableGrowthObservation, checkpoint_path,
         classify_cold_store_state, compare_table_growth, cursor_after_attempted_units, load_cursor,
         next_cold_store_cursor, persist_cursor, retention_failure_is_by_design,
-        run_maintenance_loop, select_store_window,
+        run_maintenance_loop, run_resident_memory_sampler_loop, select_store_window,
     };
 
     #[test]
@@ -3227,5 +3249,71 @@ mod tests {
             Some(ResidentMemoryLogTransitionV1::EnteredOverBudget),
             "a fresh overrun after recovery logs again"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn blocked_resident_memory_reclaimer_never_stalls_runtime_or_sampler_cancellation() {
+        let cancellation = tracedecay_session_memory::context::CancellationToken::new();
+        let started = Arc::new(Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new((StdMutex::new(false), Condvar::new()));
+        let callback_started = Arc::clone(&started);
+        let callback_calls = Arc::clone(&calls);
+        let callback_release = Arc::clone(&release);
+        let fake_reclaimer = Arc::new(move || {
+            callback_calls.fetch_add(1, Ordering::SeqCst);
+            callback_started.notify_one();
+            let (released, ready) = &*callback_release;
+            let mut released = released
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while !*released {
+                released = ready
+                    .wait(released)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+        });
+        let task_cancellation = cancellation.clone();
+        let sampler = tokio::spawn(async move {
+            run_resident_memory_sampler_loop(
+                &task_cancellation,
+                Duration::from_secs(30),
+                fake_reclaimer,
+            )
+            .await;
+        });
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(Duration::from_secs(29)).await;
+        tokio::task::yield_now().await;
+        let calls_before_deadline = calls.load(Ordering::SeqCst);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let started_on_deadline =
+            tokio::time::timeout(Duration::from_secs(1), started.notified()).await;
+        let heartbeat = tokio::spawn(async { 7_u8 });
+        let heartbeat_result = heartbeat.await;
+
+        cancellation.cancel();
+        tokio::task::yield_now().await;
+        let cancelled_while_blocked = sampler.is_finished();
+
+        let (released, ready) = &*release;
+        *released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        ready.notify_all();
+        let sampler_result = sampler.await;
+
+        assert_eq!(calls_before_deadline, 0);
+        assert!(
+            started_on_deadline.is_ok(),
+            "the sampler must preserve its thirty-second cadence"
+        );
+        assert_eq!(heartbeat_result.expect("runtime heartbeat"), 7);
+        assert!(
+            cancelled_while_blocked,
+            "cancellation must not wait for a blocked pressure reclaimer"
+        );
+        sampler_result.expect("sampler joins after cancellation");
     }
 }

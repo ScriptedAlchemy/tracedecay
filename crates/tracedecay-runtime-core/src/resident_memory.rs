@@ -201,8 +201,8 @@ pub fn resident_memory_watermark_bytes_v1(limit_bytes: NonZeroU64, permille: u64
 
 /// Sample this process's resident set size directly from the kernel.
 ///
-/// The one `/proc/self/status` `VmRSS` parser in the workspace: the daemon
-/// retention tick publishes its samples into
+/// The one `/proc/self/status` `VmRSS` parser in the workspace: the daemon's
+/// dedicated resident-memory sampler publishes its samples into
 /// [`process_resident_memory_pressure_v1`], and load-scoped watchdogs (the
 /// semantic session pool's cold-load resident bound) sample it directly.
 /// Returns `None` where the kernel surface is unavailable (non-Linux hosts),
@@ -299,10 +299,10 @@ pub struct ResidentMemoryPressureRegistrationFailureV1;
 
 /// The measured side of the memory accounting loop.
 ///
-/// One reader samples real RSS (`/proc/self/status` `VmRSS` on Linux, from the
-/// daemon retention tick that already publishes the
-/// `daemon.process.resident_bytes` gauge) and publishes it here. Admission
-/// reads this cell; there is no second parser and no second timer.
+/// One dedicated reader samples real RSS (`/proc/self/status` `VmRSS` on
+/// Linux), publishes the `daemon.process.resident_bytes` gauge, and feeds this
+/// cell. Admission reads the same canonical observation; there is no second
+/// parser or publisher.
 pub struct ResidentMemoryPressureV1 {
     limit_bytes: NonZeroU64,
     high_watermark_bytes: u64,
@@ -381,19 +381,43 @@ impl ResidentMemoryPressureV1 {
         &self,
         observed_bytes: u64,
     ) -> ResidentMemoryPressureStateV1 {
+        self.publish_observation(observed_bytes);
+        if observed_bytes >= self.high_watermark_bytes {
+            self.run_pressure_reclaimers(observed_bytes);
+        }
+        self.publish_over_budget_gauge();
+        self.state()
+    }
+
+    /// Publish RSS measured by a reclaimer after it released memory.
+    ///
+    /// This updates the canonical admission observation without running the
+    /// reclaimer registry again. Reclaimers that can measure their process
+    /// effect use this path from inside the original pressure pass.
+    fn publish_post_reclaim_observed_resident_bytes(
+        &self,
+        observed_bytes: u64,
+    ) -> ResidentMemoryPressureStateV1 {
+        self.publish_observation(observed_bytes);
+        self.publish_over_budget_gauge();
+        self.state()
+    }
+
+    fn publish_observation(&self, observed_bytes: u64) {
         self.observed_bytes.store(observed_bytes, Ordering::Release);
         self.observed.store(true, Ordering::Release);
         hotpath::gauge!("daemon.memory.observed_resident_bytes").set(observed_bytes as f64);
         if observed_bytes >= self.high_watermark_bytes {
             self.over_budget.store(true, Ordering::Release);
-            self.run_pressure_reclaimers(observed_bytes);
         } else if observed_bytes <= self.low_watermark_bytes {
             self.over_budget.store(false, Ordering::Release);
         }
+    }
+
+    fn publish_over_budget_gauge(&self) {
         hotpath::gauge!("daemon.memory.over_budget").set(f64::from(u8::from(
             self.over_budget.load(Ordering::Acquire),
         )));
-        self.state()
     }
 
     #[must_use]
@@ -525,7 +549,7 @@ pub fn process_resident_memory_pressure_v1() -> &'static Arc<ResidentMemoryPress
 pub const PROCESS_ALLOCATOR_TRIM_PRESSURE_PRIORITY_V1: u32 = u32::MAX;
 
 static PROCESS_ALLOCATOR_TRIM_REGISTRATION_V1: OnceLock<
-    Option<ResidentMemoryPressureRegistrationV1>,
+    Result<ResidentMemoryPressureRegistrationV1, ResidentMemoryPressureRegistrationFailureV1>,
 > = OnceLock::new();
 
 /// Bytes of RSS returned by one allocator trim.
@@ -593,10 +617,15 @@ pub fn release_process_allocator_memory_v1() -> ProcessAllocatorTrimV1 {
 pub fn register_process_allocator_pressure_reclaimer_v1(
     pressure: &Arc<ResidentMemoryPressureV1>,
 ) -> Result<ResidentMemoryPressureRegistrationV1, ResidentMemoryPressureRegistrationFailureV1> {
+    let pressure_weak = Arc::downgrade(pressure);
     pressure.register_pressure_reclaimer(
         PROCESS_ALLOCATOR_TRIM_PRESSURE_PRIORITY_V1,
-        Arc::new(|request| {
+        Arc::new(move |request| {
             let trim = release_process_allocator_memory_v1();
+            if let (Some(after_bytes), Some(pressure)) = (trim.after_bytes, pressure_weak.upgrade())
+            {
+                pressure.publish_post_reclaim_observed_resident_bytes(after_bytes);
+            }
             tracing::info!(
                 event = "process_allocator_trimmed",
                 trimmed = trim.trimmed,
@@ -613,14 +642,31 @@ pub fn register_process_allocator_pressure_reclaimer_v1(
 /// Install the allocator trim reclaimer on the process pressure cell, once.
 ///
 /// Returns whether this call installed it; later calls are no-ops that
-/// return `false`. The registration lives for the process.
-pub fn install_process_allocator_pressure_reclaimer_v1() -> bool {
+/// return `false`. Registration failure remains typed, and the registration
+/// lives for the process.
+pub fn install_process_allocator_pressure_reclaimer_v1()
+-> Result<bool, ResidentMemoryPressureRegistrationFailureV1> {
+    install_process_allocator_pressure_reclaimer_on_v1(
+        &PROCESS_ALLOCATOR_TRIM_REGISTRATION_V1,
+        process_resident_memory_pressure_v1(),
+    )
+}
+
+fn install_process_allocator_pressure_reclaimer_on_v1(
+    registration: &OnceLock<
+        Result<ResidentMemoryPressureRegistrationV1, ResidentMemoryPressureRegistrationFailureV1>,
+    >,
+    pressure: &Arc<ResidentMemoryPressureV1>,
+) -> Result<bool, ResidentMemoryPressureRegistrationFailureV1> {
     let mut installed = false;
-    PROCESS_ALLOCATOR_TRIM_REGISTRATION_V1.get_or_init(|| {
+    let result = registration.get_or_init(|| {
         installed = true;
-        register_process_allocator_pressure_reclaimer_v1(process_resident_memory_pressure_v1()).ok()
+        register_process_allocator_pressure_reclaimer_v1(pressure)
     });
-    installed
+    result
+        .as_ref()
+        .map(|_| installed)
+        .map_err(|failure| *failure)
 }
 
 /// Stable component label inside one exact generation identity.
