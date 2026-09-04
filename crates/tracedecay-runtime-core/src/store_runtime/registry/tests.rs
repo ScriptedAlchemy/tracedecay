@@ -429,12 +429,111 @@ fn exact_sql_authority_rechecks_opened_file_identity() {
     let authority = RuntimeDatabaseWriteAuthority {
         authority,
         canonical_path: database_path.canonicalize().unwrap(),
-        opened_file_identity: current_identity.wrapping_add(1),
+        opened_file_identity: current_identity,
     };
+
+    let retained_path = directory.path().join("retained-original.db");
+    std::fs::rename(&database_path, retained_path).unwrap();
+    std::fs::write(&database_path, []).unwrap();
 
     assert!(matches!(
         ExactSqlWriteAuthority::verify(&authority, ExactSqlWriteIntent::Execute),
         Err(ExactSqlError::AuthorityDenied(message))
             if message == "database file identity changed after registry attachment"
+    ));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn registered_identity_inspection_failures_preserve_operation_and_safe_category() {
+    use crate::db::{
+        Database, DatabaseAuthority, TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
+    };
+    use tracedecay_rusqlite_runtime::exact_sql::{ExactSqlError, ExactSqlStatement};
+
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("private-provider-session.sqlite3");
+    let authority =
+        DatabaseAuthority::acquire_test(&database_path, "identity classification").unwrap();
+    let fixture = Database::publish_registered_test_runtime_with_retirement_control(
+        &database_path,
+        &authority,
+        TestDatabaseRuntimeMode::Initialize,
+        TestDatabaseRuntimeScope::ProfileMemory,
+    )
+    .await
+    .unwrap();
+    let (owner, runtime, _retirement) = fixture.into_parts();
+    let exact_sql = runtime
+        .authorized_exact_sql_handle(authority.clone())
+        .unwrap();
+    let database = owner.issue_lease().unwrap();
+
+    std::fs::remove_file(&database_path).unwrap();
+
+    let registry_failure = runtime
+        .validate_registered_read("read registered metadata")
+        .unwrap_err();
+    assert!(matches!(
+        &registry_failure,
+        StoreRuntimeRegistryFailure::SqliteFileIdentityInspectionFailed {
+            operation: "read registered metadata",
+            source,
+        } if source.operation() == crate::db::SqliteFileIdentityOperation::Inspect
+            && source.category() == crate::db::SqliteFileIdentityErrorCategory::NotFound
+    ));
+    let diagnostic = format!("{registry_failure:?}");
+    assert!(diagnostic.contains("read registered metadata"));
+    assert!(diagnostic.contains("NotFound"));
+    assert!(!diagnostic.contains("private-provider-session"));
+    assert!(!diagnostic.contains(&database_path.display().to_string()));
+    assert!(!diagnostic.contains("No such file"));
+
+    let exact_sql_attachment_failure = runtime
+        .validate_registered_read("authorize exact SQL channel")
+        .unwrap_err();
+    assert!(
+        matches!(
+            &exact_sql_attachment_failure,
+            StoreRuntimeRegistryFailure::SqliteFileIdentityInspectionFailed {
+                operation: "authorize exact SQL channel",
+                source,
+            } if source.category() == crate::db::SqliteFileIdentityErrorCategory::NotFound
+        ),
+        "unexpected exact-SQL attachment failure: {exact_sql_attachment_failure:?}"
+    );
+
+    let checkpoint = database.checkpoint().await.unwrap_err();
+    let checkpoint_diagnostic = format!("{checkpoint:?}");
+    assert!(checkpoint_diagnostic.contains("authorize registered checkpoint"));
+    assert!(checkpoint_diagnostic.contains("NotFound"));
+    assert!(!checkpoint_diagnostic.contains("private-provider-session"));
+    assert!(!checkpoint_diagnostic.contains("No such file"));
+
+    let metadata = database
+        .set_metadata("private-provider-key", "private-session-content")
+        .await
+        .unwrap_err();
+    let metadata_diagnostic = format!("{metadata:?}");
+    assert!(metadata_diagnostic.contains("begin registered exact SQL transaction"));
+    assert!(metadata_diagnostic.contains("not_found"));
+    assert!(!metadata_diagnostic.contains("private-provider-session"));
+    assert!(!metadata_diagnostic.contains("private-provider-key"));
+    assert!(!metadata_diagnostic.contains("private-session-content"));
+    assert!(!metadata_diagnostic.contains("No such file"));
+
+    let exact_sql_error = exact_sql
+        .execute(
+            ExactSqlStatement::new(
+                "CREATE TABLE should_not_execute (id INTEGER)".to_owned(),
+                Vec::new(),
+            )
+            .unwrap(),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        exact_sql_error,
+        ExactSqlError::AuthorityDenied(message)
+            if message == "execute registered exact SQL statement: registered SQLite file identity inspection failed: inspect failed (not_found)"
     ));
 }
