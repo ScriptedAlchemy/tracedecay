@@ -106,7 +106,7 @@ pub fn truncated_json_envelope_with_handle(project_root: Option<&Path>, formatte
                 object.insert(
                     "retrieve_instruction".to_string(),
                     serde_json::json!(format!(
-                        "This response was truncated: `preview` contains only the first {} of {} characters. The full original response is stored locally in this project and expires at {} (TTL {} seconds). To recover it, call `{RESPONSE_RETRIEVE_TOOL}` with required argument `handle` set to `{}`. If the original call used `project_selector.project_id`, pass the same selector so the handle is read from that project cache. Only call it if the missing details are needed.",
+                        "This response was truncated: `preview` contains only the first {} of {} characters. The full original response is stored locally in this project and expires at {} (TTL {} seconds). To recover it, call `{RESPONSE_RETRIEVE_TOOL}` with required argument `handle` set to `{}`. The stored body is by definition larger than one response frame, so each call returns one page: repeat the call with `offset` set to the `next_offset` the previous page reported until `has_more` is false, then join the pages in order. If the original call used `project_selector.project_id`, pass the same selector so the handle is read from that project cache. Only call it if the missing details are needed.",
                         preview.chars().count(),
                         original_chars,
                         record.expires_at,
