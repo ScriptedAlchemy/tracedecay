@@ -57,6 +57,34 @@ impl HostAdmissionFacade<'_> {
     }
 
     #[hotpath::skip]
+    pub(super) async fn list_session_backfill_state_page(
+        &self,
+        scope: &ObservationScopeV1,
+        key_prefix: &str,
+        after_key: Option<&str>,
+        through_key: &str,
+    ) -> Result<Vec<(String, String)>, HostAdmissionOutcome> {
+        let database = self.discovery_database(scope)?;
+        database
+            .list_incomplete_session_sync_journal_page_through(key_prefix, after_key, through_key)
+            .await
+            .map_err(|error| unavailable("list backfill-state page", error.to_string()))
+    }
+
+    #[hotpath::skip]
+    pub(super) async fn session_backfill_state_high_water(
+        &self,
+        scope: &ObservationScopeV1,
+        key_prefix: &str,
+    ) -> Result<Option<String>, HostAdmissionOutcome> {
+        let database = self.discovery_database(scope)?;
+        database
+            .session_sync_journal_high_water(key_prefix)
+            .await
+            .map_err(|error| unavailable("read backfill-state high water", error.to_string()))
+    }
+
+    #[hotpath::skip]
     pub(super) async fn compare_and_swap_session_backfill_state(
         &self,
         scope: &ObservationScopeV1,
@@ -77,6 +105,23 @@ impl HostAdmissionFacade<'_> {
             tracing::warn!(%error, "registered host backfill-state CAS failed");
             HostAdmissionOutcome::registered_authority_unavailable()
         })
+    }
+
+    #[hotpath::skip]
+    pub(super) async fn compare_and_delete_session_backfill_state(
+        &self,
+        scope: &ObservationScopeV1,
+        key: &str,
+        expected: &str,
+    ) -> Result<bool, HostAdmissionOutcome> {
+        let database = self.discovery_database(scope)?;
+        database
+            .compare_and_delete_session_sync_journal(key, expected)
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "registered host backfill-state delete failed");
+                HostAdmissionOutcome::registered_authority_unavailable()
+            })
     }
 
     #[hotpath::measure(label = "usecases.admission.get_parse_offset", future = true)]

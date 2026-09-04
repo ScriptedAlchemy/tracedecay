@@ -46,11 +46,31 @@ use super::{CursorComposerSweepOutcome, CursorComposerSweepResult, PROVIDER};
 pub const DEFAULT_COMPOSER_ENVELOPE_CAP: usize = 256;
 
 const COMPOSER_SCAN_FRONTIER_KEY_PREFIX: &str = "cursor-composer.scan.";
+pub(super) const COMPOSER_RETRY_KEY_PREFIX: &str = "cursor-composer.retry.";
+const COMPOSER_RETRY_NONCE_BYTES: usize = 16;
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ComposerScanFrontier {
     after_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    retry_after_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    retry_high_water_key: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    retry_first: bool,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ComposerRetryState {
+    composer_key: String,
+    owner_generation: u64,
+    nonce: String,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 pub(super) fn directory_entry_is_real_dir(entry: &std::fs::DirEntry) -> bool {
@@ -104,15 +124,15 @@ fn discover_chat_store_dbs(
     stores
 }
 
-struct ComposerIngestContext<'facade, 'root> {
-    facade: &'facade dyn HostAdmission,
-    scope: ObservationScopeV1,
-    project_root: Option<&'root Path>,
-    registered_roots: &'root [PathBuf],
-    cancellation: &'root ObservationCancellation,
+pub(super) struct ComposerIngestContext<'facade, 'root> {
+    pub(super) facade: &'facade dyn HostAdmission,
+    pub(super) scope: ObservationScopeV1,
+    pub(super) project_root: Option<&'root Path>,
+    pub(super) registered_roots: &'root [PathBuf],
+    pub(super) cancellation: &'root ObservationCancellation,
     /// The source's matcher cache, so repeated sweeps reuse one git identity
     /// resolution per root/workspace path.
-    matchers: &'root ProjectRootMatcherCache,
+    pub(super) matchers: &'root ProjectRootMatcherCache,
 }
 
 impl ComposerIngestContext<'_, '_> {
@@ -187,9 +207,14 @@ fn composer_scan_frontier_key(
     ))
 }
 
-fn decode_composer_scan_frontier(value: Option<&str>) -> Result<Option<String>, String> {
+fn decode_composer_scan_frontier(value: Option<&str>) -> Result<ComposerScanFrontier, String> {
     let Some(value) = value else {
-        return Ok(None);
+        return Ok(ComposerScanFrontier {
+            after_key: None,
+            retry_after_key: None,
+            retry_high_water_key: None,
+            retry_first: false,
+        });
     };
     let frontier = serde_json::from_str::<ComposerScanFrontier>(value)
         .map_err(|error| format!("invalid Cursor composer scan frontier: {error}"))?;
@@ -199,7 +224,196 @@ fn decode_composer_scan_frontier(value: Option<&str>) -> Result<Option<String>, 
     }) {
         return Err("invalid Cursor composer scan frontier key".to_string());
     }
-    Ok(frontier.after_key)
+    Ok(frontier)
+}
+
+pub(super) fn composer_retry_key_prefix(canonical_path: &Path) -> String {
+    let path_identity = canonical_framed_sha256(
+        b"cursor-composer-retry-path",
+        &[canonical_path.as_os_str().as_encoded_bytes()],
+    );
+    format!("{COMPOSER_RETRY_KEY_PREFIX}{path_identity}.")
+}
+
+pub(super) fn composer_retry_key(retry_prefix: &str, composer_key: &str) -> String {
+    let digest = canonical_framed_sha256(b"cursor-composer-unresolved", &[composer_key.as_bytes()]);
+    format!("{retry_prefix}{digest}")
+}
+
+fn composer_retry_journal_key_is_valid(retry_prefix: &str, retry_key: &str) -> bool {
+    retry_key.strip_prefix(retry_prefix).is_some_and(|suffix| {
+        suffix.len() == 64 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
+
+fn next_composer_retry_nonce() -> Result<String, String> {
+    let mut nonce = [0_u8; COMPOSER_RETRY_NONCE_BYTES];
+    getrandom::getrandom(&mut nonce)
+        .map_err(|error| format!("could not mint Cursor composer retry nonce: {error}"))?;
+    Ok(hex::encode(nonce))
+}
+
+fn encode_composer_retry(
+    composer_key: &str,
+    owner_generation: ObservationSourceGenerationV1,
+    nonce: String,
+) -> Result<String, String> {
+    serde_json::to_string(&ComposerRetryState {
+        composer_key: composer_key.to_string(),
+        owner_generation: owner_generation.file_id(),
+        nonce,
+    })
+    .map_err(|error| format!("could not encode Cursor composer retry: {error}"))
+}
+
+fn decode_composer_retry(value: &str) -> Result<ComposerRetryState, String> {
+    let retry = serde_json::from_str::<ComposerRetryState>(value)
+        .map_err(|error| format!("invalid Cursor composer retry: {error}"))?;
+    if composer_id_from_envelope_key(&retry.composer_key).is_none()
+        || retry.composer_key.len() as u64 > MAX_COMPOSER_SQLITE_KEY_BYTES
+        || retry.owner_generation == 0
+        || retry.nonce.is_empty()
+        || retry.nonce.len() != COMPOSER_RETRY_NONCE_BYTES * 2
+        || !retry.nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("invalid Cursor composer retry key".to_string());
+    }
+    Ok(retry)
+}
+
+async fn state_path_matches_generation(
+    canonical_path: &Path,
+    generation: ObservationSourceGenerationV1,
+) -> bool {
+    let canonical_path = canonical_path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        tracedecay_runtime_core::db::sqlite_generation_identity(&canonical_path)
+            .is_ok_and(|identity| identity == generation.file_id())
+    })
+    .await
+    .unwrap_or(false)
+}
+
+pub(super) async fn ensure_composer_retry(
+    context: &ComposerIngestContext<'_, '_>,
+    retry_prefix: &str,
+    composer_key: &str,
+    canonical_path: &Path,
+    generation: ObservationSourceGenerationV1,
+) -> Result<(), String> {
+    if !state_path_matches_generation(canonical_path, generation).await {
+        return Err("Cursor composer retry generation is no longer current".to_string());
+    }
+    let retry_key = composer_retry_key(retry_prefix, composer_key);
+    let queued = encode_composer_retry(composer_key, generation, next_composer_retry_nonce()?)?;
+    let current = context
+        .facade
+        .read_session_backfill_state(&context.scope, &retry_key)
+        .await
+        .map_err(|_| "Cursor composer retry authority unavailable".to_string())?;
+    if let Some(current) = current.as_deref() {
+        let retry = decode_composer_retry(current)?;
+        if retry.composer_key != composer_key {
+            return Err("Cursor composer retry identity collision".to_string());
+        }
+    }
+    let changed = context
+        .facade
+        .compare_and_swap_session_backfill_state(
+            &context.scope,
+            &retry_key,
+            current.as_deref(),
+            &queued,
+        )
+        .await
+        .map_err(|_| "Cursor composer retry authority unavailable".to_string())?;
+    if !changed {
+        return Err("Cursor composer retry enqueue CAS lost authority".to_string());
+    }
+    state_path_matches_generation(canonical_path, generation)
+        .await
+        .then_some(())
+        .ok_or_else(|| "Cursor composer retry generation changed during enqueue".to_string())
+}
+
+async fn claim_composer_retry(
+    context: &ComposerIngestContext<'_, '_>,
+    retry_key: &str,
+    expected: &str,
+    composer_key: &str,
+    canonical_path: &Path,
+    generation: ObservationSourceGenerationV1,
+) -> Result<String, String> {
+    if !state_path_matches_generation(canonical_path, generation).await {
+        return Err("Cursor composer retry generation is no longer current".to_string());
+    }
+    let claimed = encode_composer_retry(composer_key, generation, next_composer_retry_nonce()?)?;
+    if !context
+        .facade
+        .compare_and_swap_session_backfill_state(
+            &context.scope,
+            retry_key,
+            Some(expected),
+            &claimed,
+        )
+        .await
+        .map_err(|_| "Cursor composer retry authority unavailable".to_string())?
+    {
+        return Err("Cursor composer retry claim CAS lost authority".to_string());
+    }
+    state_path_matches_generation(canonical_path, generation)
+        .await
+        .then_some(claimed)
+        .ok_or_else(|| "Cursor composer retry generation changed during claim".to_string())
+}
+
+pub(super) async fn complete_composer_retry(
+    context: &ComposerIngestContext<'_, '_>,
+    retry_key: &str,
+    expected: &str,
+    canonical_path: &Path,
+    generation: ObservationSourceGenerationV1,
+) -> Result<(), String> {
+    if !state_path_matches_generation(canonical_path, generation).await {
+        return Err("Cursor composer retry generation is no longer current".to_string());
+    }
+    if context
+        .facade
+        .compare_and_delete_session_backfill_state(&context.scope, retry_key, expected)
+        .await
+        .map_err(|_| "Cursor composer retry authority unavailable".to_string())?
+    {
+        return state_path_matches_generation(canonical_path, generation)
+            .await
+            .then_some(())
+            .ok_or_else(|| {
+                "Cursor composer retry generation changed during completion".to_string()
+            });
+    }
+    if context
+        .facade
+        .read_session_backfill_state(&context.scope, retry_key)
+        .await
+        .map_err(|_| "Cursor composer retry authority unavailable".to_string())?
+        .is_none()
+    {
+        Ok(())
+    } else {
+        Err("Cursor composer retry completion CAS lost authority".to_string())
+    }
+}
+
+async fn complete_retry_entry(
+    context: &ComposerIngestContext<'_, '_>,
+    retry_journal: &Option<(String, String)>,
+    canonical_path: &Path,
+    generation: ObservationSourceGenerationV1,
+) -> Result<Option<String>, String> {
+    let Some((retry_key, expected)) = retry_journal else {
+        return Ok(None);
+    };
+    complete_composer_retry(context, retry_key, expected, canonical_path, generation).await?;
+    Ok(Some(retry_key.clone()))
 }
 
 struct ComposerCoverageContext<'facade> {
@@ -440,7 +654,7 @@ impl CursorComposerSource {
                 return;
             }
         };
-        let initial_after = match decode_composer_scan_frontier(expected_frontier.as_deref()) {
+        let initial_frontier = match decode_composer_scan_frontier(expected_frontier.as_deref()) {
             Ok(frontier) => frontier,
             Err(error) => {
                 tracing::debug!(
@@ -452,6 +666,72 @@ impl CursorComposerSource {
                 return;
             }
         };
+        let initial_after = initial_frontier.after_key.clone();
+        let initial_retry_after = initial_frontier.retry_after_key.clone();
+        let initial_retry_high_water = initial_frontier.retry_high_water_key.clone();
+        let initial_retry_first = initial_frontier.retry_first;
+        // Retry rows survive physical replacement of this same canonical
+        // state path. The discovery frontier above remains generation-scoped,
+        // while a new generation can finish and reclaim unresolved work from
+        // its predecessor through this path-scoped namespace.
+        let retry_prefix = composer_retry_key_prefix(&ro.canonical_path);
+        if initial_retry_after.is_some() && initial_retry_high_water.is_none()
+            || initial_retry_after
+                .as_ref()
+                .is_some_and(|key| !composer_retry_journal_key_is_valid(&retry_prefix, key))
+            || initial_retry_high_water
+                .as_ref()
+                .is_some_and(|key| !composer_retry_journal_key_is_valid(&retry_prefix, key))
+            || initial_retry_after
+                .as_ref()
+                .zip(initial_retry_high_water.as_ref())
+                .is_some_and(|(after, high_water)| after > high_water)
+        {
+            byte_budget.defer();
+            return;
+        }
+        let retry_high_water = match initial_retry_high_water.clone() {
+            Some(high_water) => Some(high_water),
+            None => match context
+                .facade
+                .session_backfill_state_high_water(&context.scope, &retry_prefix)
+                .await
+            {
+                Ok(high_water) => high_water,
+                Err(_) => {
+                    byte_budget.defer();
+                    return;
+                }
+            },
+        };
+        if retry_high_water
+            .as_ref()
+            .is_some_and(|key| !composer_retry_journal_key_is_valid(&retry_prefix, key))
+        {
+            byte_budget.defer();
+            return;
+        }
+        let retry_page = if let Some(high_water) = retry_high_water.as_deref() {
+            match context
+                .facade
+                .list_session_backfill_state_page(
+                    &context.scope,
+                    &retry_prefix,
+                    initial_retry_after.as_deref(),
+                    high_water,
+                )
+                .await
+            {
+                Ok(page) => page,
+                Err(_) => {
+                    byte_budget.defer();
+                    return;
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        let retry_first = initial_retry_first && !retry_page.is_empty();
         let scope_matcher = hotpath::measure_block!(
             "sessions.hosts.cursor_composer.state_scope_blocking",
             run_blocking_transcript_section(|| context.scope_matcher())
@@ -466,17 +746,41 @@ impl CursorComposerSource {
         let mut scan_after = initial_after.clone();
         let mut last_scanned_key = initial_after.clone();
         let mut reached_end = false;
+        let mut discovery_complete = retry_first;
+        let mut retries_complete = retry_page.is_empty();
+        let mut retry_index = 0usize;
+        let mut last_retry_key = initial_retry_after.clone();
+        let mut retry_work_observed = retry_high_water.is_some();
         'scan: loop {
             if context.cancellation.is_cancelled() {
                 break;
             }
-            if scanned_this_pass >= MAX_COMPOSER_STORE_BLOB_VISITS {
-                byte_budget.defer();
+            if discovery_complete && !retries_complete && retry_index >= retry_page.len() {
+                retries_complete = true;
+                if retry_first {
+                    discovery_complete = false;
+                    continue;
+                }
+            }
+            if discovery_complete && retries_complete {
                 break;
             }
-            let page =
-                match scan_composer_keys_page(conn, scan_after.as_deref(), COMPOSER_KEY_SCAN_PAGE)
-                    .await
+            if !discovery_complete && scanned_this_pass >= MAX_COMPOSER_STORE_BLOB_VISITS {
+                byte_budget.defer();
+                discovery_complete = true;
+                continue;
+            }
+            // Priority alternates durably while retry rows remain. A retry can
+            // therefore consume one bounded pass without starving discovery,
+            // and a growing discovery tail cannot starve retries. Both reuse
+            // this same envelope/header path and immutable connection.
+            let (page, retrying_unresolved) = if !discovery_complete {
+                let page = match scan_composer_keys_page(
+                    conn,
+                    scan_after.as_deref(),
+                    COMPOSER_KEY_SCAN_PAGE,
+                )
+                .await
                 {
                     Ok(page) => page,
                     Err(error) => {
@@ -489,27 +793,129 @@ impl CursorComposerSource {
                         break;
                     }
                 };
-            let Some(last_key) = page.last().map(|(key, _)| key.clone()) else {
-                reached_end = true;
+                (
+                    page.into_iter()
+                        .map(|(key, nbytes)| (key, nbytes, None, None))
+                        .collect::<Vec<_>>(),
+                    false,
+                )
+            } else if let Some((retry_key, retry_value)) = retry_page.get(retry_index) {
+                retry_index += 1;
+                let retry = match decode_composer_retry(retry_value) {
+                    Ok(retry)
+                        if composer_retry_key(&retry_prefix, &retry.composer_key) == *retry_key =>
+                    {
+                        retry
+                    }
+                    _ => {
+                        if complete_composer_retry(
+                            context,
+                            retry_key,
+                            retry_value,
+                            &ro.canonical_path,
+                            state_generation,
+                        )
+                        .await
+                        .is_err()
+                        {
+                            byte_budget.defer();
+                            break;
+                        }
+                        last_retry_key = Some(retry_key.clone());
+                        continue;
+                    }
+                };
+                let key = retry.composer_key;
+                let claimed = match claim_composer_retry(
+                    context,
+                    retry_key,
+                    retry_value,
+                    &key,
+                    &ro.canonical_path,
+                    state_generation,
+                )
+                .await
+                {
+                    Ok(claimed) => claimed,
+                    Err(_) => {
+                        byte_budget.defer();
+                        break;
+                    }
+                };
+                match fetch_kv_text_bounded(
+                    conn,
+                    &key,
+                    MAX_COMPOSER_ENVELOPE_BYTES,
+                    byte_budget.remaining(),
+                )
+                .await
+                {
+                    BoundedSqliteValue::Ready { byte_len, value } => (
+                        vec![(
+                            key,
+                            byte_len,
+                            Some(value),
+                            Some((retry_key.clone(), claimed.clone())),
+                        )],
+                        true,
+                    ),
+                    BoundedSqliteValue::Missing
+                    | BoundedSqliteValue::Oversized { .. }
+                    | BoundedSqliteValue::Malformed { .. } => {
+                        if complete_composer_retry(
+                            context,
+                            retry_key,
+                            &claimed,
+                            &ro.canonical_path,
+                            state_generation,
+                        )
+                        .await
+                        .is_err()
+                        {
+                            byte_budget.defer();
+                            break;
+                        }
+                        last_retry_key = Some(retry_key.clone());
+                        continue;
+                    }
+                    BoundedSqliteValue::BudgetExceeded { .. } => {
+                        byte_budget.defer();
+                        break;
+                    }
+                    BoundedSqliteValue::Corrupt => {
+                        byte_budget.defer();
+                        break;
+                    }
+                }
+            } else {
                 break;
             };
+            let Some(last_key) = page.last().map(|(key, _, _, _)| key.clone()) else {
+                reached_end = true;
+                discovery_complete = true;
+                continue;
+            };
             let page_full = page.len() == COMPOSER_KEY_SCAN_PAGE;
-            for (key, nbytes) in page {
+            for (key, nbytes, preloaded_value, retry_journal) in page {
                 if context.cancellation.is_cancelled() {
                     break 'scan;
                 }
-                if scanned_this_pass >= MAX_COMPOSER_STORE_BLOB_VISITS {
+                if !retrying_unresolved && scanned_this_pass >= MAX_COMPOSER_STORE_BLOB_VISITS {
                     byte_budget.defer();
                     break 'scan;
                 }
-                scanned_this_pass += 1;
+                if !retrying_unresolved {
+                    scanned_this_pass += 1;
+                }
                 if nbytes > MAX_COMPOSER_ENVELOPE_BYTES {
                     if !byte_budget
                         .try_consume(nbytes.min(MAX_COMPOSER_ENVELOPE_BYTES.saturating_add(1)))
                     {
                         break 'scan;
                     }
-                    last_scanned_key = Some(key);
+                    if !retrying_unresolved {
+                        last_scanned_key = Some(key);
+                    }
                     continue;
                 }
                 if byte_budget.exhausted() {
@@ -523,35 +929,58 @@ impl CursorComposerSource {
                     byte_budget.defer();
                     break 'scan;
                 }
-                let value = match fetch_kv_text_bounded(
-                    conn,
-                    &key,
-                    MAX_COMPOSER_ENVELOPE_BYTES,
-                    byte_budget.remaining(),
-                )
-                .await
-                {
-                    BoundedSqliteValue::Ready { value, .. } => value,
-                    BoundedSqliteValue::BudgetExceeded { .. } => {
-                        byte_budget.defer();
-                        break 'scan;
-                    }
-                    BoundedSqliteValue::Oversized { .. }
-                    | BoundedSqliteValue::Malformed { .. }
-                    | BoundedSqliteValue::Missing => {
-                        last_scanned_key = Some(key);
-                        continue;
-                    }
-                    BoundedSqliteValue::Corrupt => {
-                        byte_budget.defer();
-                        break 'scan;
+                let value = if let Some(value) = preloaded_value {
+                    value
+                } else {
+                    match fetch_kv_text_bounded(
+                        conn,
+                        &key,
+                        MAX_COMPOSER_ENVELOPE_BYTES,
+                        byte_budget.remaining(),
+                    )
+                    .await
+                    {
+                        BoundedSqliteValue::Ready { value, .. } => value,
+                        BoundedSqliteValue::BudgetExceeded { .. } => {
+                            byte_budget.defer();
+                            break 'scan;
+                        }
+                        BoundedSqliteValue::Oversized { .. }
+                        | BoundedSqliteValue::Malformed { .. }
+                        | BoundedSqliteValue::Missing => {
+                            if !retrying_unresolved {
+                                last_scanned_key = Some(key);
+                            }
+                            continue;
+                        }
+                        BoundedSqliteValue::Corrupt => {
+                            byte_budget.defer();
+                            break 'scan;
+                        }
                     }
                 };
                 if !byte_budget.try_consume(nbytes) {
                     break 'scan;
                 }
                 let Ok(envelope) = serde_json::from_str::<Value>(&value) else {
-                    last_scanned_key = Some(key);
+                    match complete_retry_entry(
+                        context,
+                        &retry_journal,
+                        &ro.canonical_path,
+                        state_generation,
+                    )
+                    .await
+                    {
+                        Ok(Some(completed)) => last_retry_key = Some(completed),
+                        Ok(None) => {}
+                        Err(_) => {
+                            byte_budget.defer();
+                            break 'scan;
+                        }
+                    }
+                    if !retrying_unresolved {
+                        last_scanned_key = Some(key);
+                    }
                     continue;
                 };
                 let Some(composer_id) = envelope
@@ -561,11 +990,45 @@ impl CursorComposerSource {
                     .map(str::to_string)
                     .or_else(|| composer_id_from_envelope_key(&key).map(str::to_string))
                 else {
-                    last_scanned_key = Some(key);
+                    match complete_retry_entry(
+                        context,
+                        &retry_journal,
+                        &ro.canonical_path,
+                        state_generation,
+                    )
+                    .await
+                    {
+                        Ok(Some(completed)) => last_retry_key = Some(completed),
+                        Ok(None) => {}
+                        Err(_) => {
+                            byte_budget.defer();
+                            break 'scan;
+                        }
+                    }
+                    if !retrying_unresolved {
+                        last_scanned_key = Some(key);
+                    }
                     continue;
                 };
                 let Some(project) = envelope_project(&envelope) else {
-                    last_scanned_key = Some(key);
+                    match complete_retry_entry(
+                        context,
+                        &retry_journal,
+                        &ro.canonical_path,
+                        state_generation,
+                    )
+                    .await
+                    {
+                        Ok(Some(completed)) => last_retry_key = Some(completed),
+                        Ok(None) => {}
+                        Err(_) => {
+                            byte_budget.defer();
+                            break 'scan;
+                        }
+                    }
+                    if !retrying_unresolved {
+                        last_scanned_key = Some(key);
+                    }
                     continue;
                 };
                 if let Some(ws_hash) = workspace_hash(&envelope) {
@@ -591,7 +1054,24 @@ impl CursorComposerSource {
                 match project_membership {
                     ProjectMembership::Match => {}
                     ProjectMembership::NoMatch => {
-                        last_scanned_key = Some(key);
+                        match complete_retry_entry(
+                            context,
+                            &retry_journal,
+                            &ro.canonical_path,
+                            state_generation,
+                        )
+                        .await
+                        {
+                            Ok(Some(completed)) => last_retry_key = Some(completed),
+                            Ok(None) => {}
+                            Err(_) => {
+                                byte_budget.defer();
+                                break 'scan;
+                            }
+                        }
+                        if !retrying_unresolved {
+                            last_scanned_key = Some(key);
+                        }
                         continue;
                     }
                     ProjectMembership::Unknown => {
@@ -657,6 +1137,7 @@ impl CursorComposerSource {
                 }
                 let generation = state_generation;
                 let mut session_accepted = false;
+                let mut composer_unresolved = false;
                 if composer_todos_have_admittable_items(&envelope)
                     && let Some(todo_checkpoint) = composer_envelope_todo_checkpoint(&envelope)
                     && let Ok(envelope_source) = cursor_composer_envelope_source(&composer_id)
@@ -749,7 +1230,8 @@ impl CursorComposerSource {
                     {
                         BoundedSqliteValue::Missing => {
                             byte_budget.defer();
-                            break 'scan;
+                            composer_unresolved = true;
+                            break;
                         }
                         BoundedSqliteValue::Oversized { byte_len } => {
                             if !byte_budget.try_consume(composer_source_charge(byte_len)) {
@@ -903,14 +1385,57 @@ impl CursorComposerSource {
                 if session_accepted {
                     ingested_this_pass += 1;
                 }
-                // All headers are now durable duplicates, persisted, or covered by
-                // a terminal disposition. Transient exits above leave this key as
-                // the next pass's first candidate.
-                last_scanned_key = Some(key);
+                if composer_unresolved {
+                    retry_work_observed = true;
+                    if !retrying_unresolved
+                        && ensure_composer_retry(
+                            context,
+                            &retry_prefix,
+                            &key,
+                            &ro.canonical_path,
+                            state_generation,
+                        )
+                        .await
+                        .is_err()
+                    {
+                        byte_budget.defer();
+                        break 'scan;
+                    }
+                } else {
+                    match complete_retry_entry(
+                        context,
+                        &retry_journal,
+                        &ro.canonical_path,
+                        state_generation,
+                    )
+                    .await
+                    {
+                        Ok(Some(completed)) => last_retry_key = Some(completed),
+                        Ok(None) => {}
+                        Err(_) => {
+                            byte_budget.defer();
+                            break 'scan;
+                        }
+                    }
+                }
+                if let Some((retry_key, _)) = &retry_journal {
+                    last_retry_key = Some(retry_key.clone());
+                }
+                // All headers are now durable duplicates, persisted, covered by a
+                // terminal disposition, or durably scheduled for retry. Other
+                // transient exits above leave a discovered key as the next pass's
+                // first candidate.
+                if !retrying_unresolved {
+                    last_scanned_key = Some(key);
+                }
+            }
+            if retrying_unresolved {
+                continue;
             }
             if !page_full {
                 reached_end = true;
-                break;
+                discovery_complete = true;
+                continue;
             }
             scan_after = Some(last_key);
         }
@@ -918,9 +1443,24 @@ impl CursorComposerSource {
             return;
         }
         let next_after = (!reached_end).then_some(last_scanned_key).flatten();
-        if next_after != initial_after {
+        let retry_cycle_complete =
+            retry_page.is_empty() || last_retry_key.as_deref() == retry_high_water.as_deref();
+        let (next_retry_after, next_retry_high_water) = if retry_cycle_complete {
+            (None, None)
+        } else {
+            (last_retry_key, retry_high_water)
+        };
+        let next_retry_first = retry_work_observed && !initial_retry_first;
+        if next_after != initial_after
+            || next_retry_after != initial_retry_after
+            || next_retry_high_water != initial_retry_high_water
+            || next_retry_first != initial_retry_first
+        {
             let replacement = match serde_json::to_string(&ComposerScanFrontier {
                 after_key: next_after,
+                retry_after_key: next_retry_after,
+                retry_high_water_key: next_retry_high_water,
+                retry_first: next_retry_first,
             }) {
                 Ok(replacement) => replacement,
                 Err(_) => {

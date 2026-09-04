@@ -492,6 +492,32 @@ impl tracedecay_sessions::admission::HostAdmission for HostAdmissionFacade<'_> {
         ))
     }
 
+    fn list_session_backfill_state_page<'a>(
+        &'a self,
+        scope: &'a ObservationScopeV1,
+        key_prefix: &'a str,
+        after_key: Option<&'a str>,
+        through_key: &'a str,
+    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, Vec<(String, String)>> {
+        Box::pin(HostAdmissionFacade::list_session_backfill_state_page(
+            self,
+            scope,
+            key_prefix,
+            after_key,
+            through_key,
+        ))
+    }
+
+    fn session_backfill_state_high_water<'a>(
+        &'a self,
+        scope: &'a ObservationScopeV1,
+        key_prefix: &'a str,
+    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, Option<String>> {
+        Box::pin(HostAdmissionFacade::session_backfill_state_high_water(
+            self, scope, key_prefix,
+        ))
+    }
+
     fn compare_and_swap_session_backfill_state<'a>(
         &'a self,
         scope: &'a ObservationScopeV1,
@@ -506,6 +532,19 @@ impl tracedecay_sessions::admission::HostAdmission for HostAdmissionFacade<'_> {
                 key,
                 expected,
                 replacement,
+            ),
+        )
+    }
+
+    fn compare_and_delete_session_backfill_state<'a>(
+        &'a self,
+        scope: &'a ObservationScopeV1,
+        key: &'a str,
+        expected: &'a str,
+    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, bool> {
+        Box::pin(
+            HostAdmissionFacade::compare_and_delete_session_backfill_state(
+                self, scope, key, expected,
             ),
         )
     }

@@ -129,6 +129,80 @@ async fn session_sync_journal_survives_remount_and_compare_and_swap() {
     );
 }
 
+#[tokio::test]
+async fn session_sync_journal_cycle_bound_and_exact_delete_are_authoritative() {
+    let harness = RegisteredGlobalDbHarness::open("session-sync-journal-cycle-bound").await;
+    for suffix in ["a", "m", "z"] {
+        assert!(
+            harness
+                .registered
+                .insert_session_sync_journal(
+                    &format!("cursor-composer.retry.{suffix}"),
+                    &format!(r#"{{"nonce":"{suffix}"}}"#),
+                )
+                .await
+                .unwrap()
+        );
+    }
+
+    let high_water = harness
+        .registered
+        .session_sync_journal_high_water("cursor-composer.retry.")
+        .await
+        .unwrap();
+    assert_eq!(high_water.as_deref(), Some("cursor-composer.retry.z"));
+
+    assert!(
+        harness
+            .registered
+            .insert_session_sync_journal("cursor-composer.retry.zz", r#"{"nonce":"later"}"#,)
+            .await
+            .unwrap()
+    );
+    let page = harness
+        .registered
+        .list_incomplete_session_sync_journal_page_through(
+            "cursor-composer.retry.",
+            Some("cursor-composer.retry.m"),
+            high_water.as_deref().unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        page,
+        vec![(
+            "cursor-composer.retry.z".to_string(),
+            r#"{"nonce":"z"}"#.to_string(),
+        )]
+    );
+
+    assert!(
+        !harness
+            .registered
+            .compare_and_delete_session_sync_journal(
+                "cursor-composer.retry.z",
+                r#"{"nonce":"stale"}"#,
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        harness
+            .registered
+            .compare_and_delete_session_sync_journal("cursor-composer.retry.z", r#"{"nonce":"z"}"#,)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        harness
+            .registered
+            .read_session_sync_journal("cursor-composer.retry.z")
+            .await
+            .unwrap(),
+        None
+    );
+}
+
 /// A profile store keeps one `source_cursors` row per observed session
 /// source, so a long-lived profile holds far more rows than the `SQLite`
 /// runtime materializes for a single exact-SQL query. The frontier listing
