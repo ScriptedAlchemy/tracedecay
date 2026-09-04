@@ -2,7 +2,7 @@
 //! mount through [`LifecycleShardRuntimePublisher`] and serve health over the
 //! reserved reader data port.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -20,7 +20,9 @@ use tracedecay_store::{
 };
 
 use super::super::*;
-use super::support::{id, incarnation, open_published, profile_shard, project_request};
+use super::support::{
+    id, incarnation, open_published, profile_shard, project_request, project_shard,
+};
 
 struct Probe {
     cancellation: RuntimeCancellationIdentityV1,
@@ -558,4 +560,109 @@ async fn distinct_logical_shards_cannot_publish_two_writers_for_one_database() {
             StoreRuntimeRegistryFailure::DatabaseRuntimeIdentityConflict { path, .. }
         ) if path == shared_path
     ));
+}
+
+/// Rewinds a final-shape graph store to the pre-digest shape a v34 binary
+/// left behind: the payload-digest objects are dropped and the stamp moved
+/// back one step.
+async fn rewind_to_pre_digest_shape(path: &Path) {
+    let connection = crate::db::engine::TestConnection::open(path);
+    connection
+        .execute_batch(
+            "DROP TRIGGER memory_v2_payloads_digest_delete;
+             DROP TRIGGER memory_v2_assertion_payload_digests_no_update;
+             DROP INDEX memory_v2_assertion_payload_digests_lookup;
+             DROP TABLE memory_v2_assertion_payload_digests;
+             PRAGMA user_version = 34;",
+        )
+        .await
+        .expect("rewind graph store to the pre-digest shape");
+}
+
+fn user_version(path: &Path) -> u32 {
+    Connection::open(path)
+        .unwrap()
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn existing_store_one_step_behind_is_stepped_by_write_authorized_admission() {
+    let root = TempDir::new().unwrap();
+    let resolver = Arc::new(FileResolver::default());
+    resolver.push(seed_final_graph_db(&root, "profile.db").await);
+    let project_path = seed_final_graph_db(&root, "project.db").await;
+    rewind_to_pre_digest_shape(&project_path).await;
+    resolver.push(project_path.clone());
+    let registry = StoreRuntimeRegistry::new(resolver, Arc::new(LifecycleShardRuntimePublisher));
+    let _profile = open_published(
+        &registry,
+        StoreRuntimeOpenRequest::new(profile_shard(), incarnation(), None),
+    )
+    .await;
+    let pin = match registry.profile_authority_pin(&profile_shard()) {
+        ProfileAuthorityPinResult::Pinned(pin) => pin,
+        other => panic!("profile was not pinned: {other:?}"),
+    };
+    let authority =
+        crate::db::DatabaseAuthority::acquire_test(&project_path, "step an existing v34 store")
+            .expect("test database authority");
+
+    let project = open_published(
+        &registry,
+        StoreRuntimeOpenRequest::new_authorized(
+            project_shard("project.one-step-behind"),
+            incarnation(),
+            Some(pin),
+            authority,
+        ),
+    )
+    .await;
+
+    assert_health_route(&project, true).await;
+    assert_eq!(
+        user_version(&project_path),
+        crate::db::migrations::SCHEMA_VERSION,
+        "write-authorized admission must step the store to the final shape"
+    );
+}
+
+#[tokio::test]
+async fn existing_store_one_step_behind_is_refused_without_write_authority() {
+    let root = TempDir::new().unwrap();
+    let resolver = Arc::new(FileResolver::default());
+    resolver.push(seed_final_graph_db(&root, "profile.db").await);
+    let project_path = seed_final_graph_db(&root, "project.db").await;
+    rewind_to_pre_digest_shape(&project_path).await;
+    resolver.push(project_path.clone());
+    let registry = StoreRuntimeRegistry::new(resolver, Arc::new(LifecycleShardRuntimePublisher));
+    let _profile = open_published(
+        &registry,
+        StoreRuntimeOpenRequest::new(profile_shard(), incarnation(), None),
+    )
+    .await;
+    let pin = match registry.profile_authority_pin(&profile_shard()) {
+        ProfileAuthorityPinResult::Pinned(pin) => pin,
+        other => panic!("profile was not pinned: {other:?}"),
+    };
+
+    let outcome = registry
+        .open(project_request("project.one-step-behind", &pin))
+        .await;
+
+    match outcome {
+        StoreRuntimeOpenResult::Failed(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+            message,
+            ..
+        }) => assert!(
+            message.contains("payload digest step is pending"),
+            "an unauthorized open must name the pending writer-side step: {message}"
+        ),
+        other => panic!("an open without write authority must not step the store: {other:?}"),
+    }
+    assert_eq!(
+        user_version(&project_path),
+        34,
+        "an open without write authority must leave the stamp alone"
+    );
 }

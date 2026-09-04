@@ -48,7 +48,7 @@ fn profile_memory_shard() -> StoreShardIdV1 {
     )
 }
 
-fn project_shard(project: &str) -> StoreShardIdV1 {
+pub(super) fn project_shard(project: &str) -> StoreShardIdV1 {
     StoreShardIdV1::project(
         id::<BrainId>("brain.registry"),
         id::<UserProfileId>("profile.registry"),
