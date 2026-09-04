@@ -3,8 +3,11 @@
 //! The durable workload is implemented inside the composition crate so it can
 //! drive the private daemon broker routing authority without exposing a
 //! shipped benchmark API. It reports persistent `tools/call` p50/p95 and full
-//! reconnect churn p50/p95. Build with `hotpath-alloc` to also emit exact
-//! allocation bytes per measured RMCP dispatch future:
+//! reconnect churn p50/p95. The process-global dispatch catalog is warmed
+//! before sampling, so the output explicitly reports steady-state typed RMCP
+//! cost; constructor/cold-start cost is a separate lifecycle measurement.
+//! Build with `hotpath-alloc` to also emit exact allocation bytes per measured
+//! RMCP dispatch future:
 //!
 //! ```sh
 //! source scripts/hotpath-rustflags.sh
