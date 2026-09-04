@@ -266,7 +266,12 @@ pub enum WriterOwnerSnapshot {
     Idle,
     Active {
         pid: u32,
-        started_epoch_ms: u128,
+        /// Unix epoch milliseconds. Kept at `u64` on purpose: the owner
+        /// record stores `u128`, but `serde_json::to_value` cannot represent
+        /// a 128-bit integer, and one active writer used to collapse the
+        /// whole runtime payload into `{}` (doctor then reported "omitted
+        /// database telemetry").
+        started_epoch_ms: u64,
         version: String,
         intent: String,
     },
@@ -834,6 +839,22 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+
+    /// `serde_json::to_value` refuses 128-bit integers, and the runtime tool
+    /// builds its payload through it; an active writer owner must therefore
+    /// stay representable or the whole status collapses to `{}`.
+    #[test]
+    fn active_writer_owner_serializes_to_a_json_value() {
+        let owner = WriterOwnerSnapshot::Active {
+            pid: 4242,
+            started_epoch_ms: 1_788_500_000_000,
+            version: "0.1.0-test".to_owned(),
+            intent: "daemon".to_owned(),
+        };
+        let value = serde_json::to_value(&owner).expect("active writer owner must serialize");
+        assert_eq!(value["state"], "active");
+        assert_eq!(value["started_epoch_ms"], 1_788_500_000_000_u64);
+    }
 
     fn test_process_snapshot() -> ProcessSnapshot {
         ProcessSnapshot {
