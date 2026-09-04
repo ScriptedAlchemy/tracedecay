@@ -20,14 +20,15 @@
 //!
 //! ## Read-only safety
 //!
-//! The live `state.vscdb` here is ~21 GB / 1.4M rows. We open it with a
-//! `file:…?immutable=1&mode=ro` URI (`SQLite` skips all locking and never writes
-//! a `-wal`/`-shm`), and we only ever issue **indexed** lookups: a single
-//! bounded range scan over the `composerData:` key prefix and primary-key
-//! (`key = ?`) point lookups for bubbles. No full-table scans. Every `TEXT` /
-//! `BLOB` payload is length-gated in SQL (`length` + conditional materialize)
-//! against the shared observation / JSONL frame ceilings and the pass byte
-//! budget before any Rust `String`/`Vec`/`serde_json::Value` allocation.
+//! Cursor databases can grow far beyond the amount one ingest pass may read.
+//! We open `state.vscdb` with a `file:…?immutable=1&mode=ro` URI (`SQLite`
+//! skips all locking and never writes a `-wal`/`-shm`), and issue only indexed
+//! lookups: bounded resumable range scans over the `composerData:` key prefix
+//! and primary-key (`key = ?`) point lookups for bubbles. No full-table scans.
+//! Every `TEXT` / `BLOB` payload is byte-length-gated in SQL (`octet_length` +
+//! conditional materialization) against the shared observation / JSONL frame
+//! ceilings and the pass byte budget before any Rust
+//! `String`/`Vec`/`serde_json::Value` allocation.
 //! `store.db` blobs are fetched by id while walking the reachable DAG — never
 //! collected via `SELECT id, data FROM blobs`.
 //!

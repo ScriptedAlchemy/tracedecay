@@ -397,6 +397,51 @@ pub trait HostAdmission: Send + Sync {
         message_id: &'a str,
     ) -> AdmissionFuture<'a, bool>;
 
+    /// Reads the durable subset of one bounded provider message-id window.
+    /// The default preserves compatibility for narrow test seams; production
+    /// authorities override it with one indexed batch query.
+    fn existing_session_message_ids<'a>(
+        &'a self,
+        scope: &'a ObservationScopeV1,
+        provider: &'a str,
+        message_ids: Vec<String>,
+    ) -> AdmissionFuture<'a, Vec<String>> {
+        Box::pin(async move {
+            let mut existing = Vec::new();
+            for message_id in message_ids {
+                if self
+                    .has_session_message(scope, provider, &message_id)
+                    .await?
+                {
+                    existing.push(message_id);
+                }
+            }
+            Ok(existing)
+        })
+    }
+
+    /// Reads one provider-owned value from the canonical session-backfill
+    /// authority selected by `scope`.
+    fn read_session_backfill_state<'a>(
+        &'a self,
+        _scope: &'a ObservationScopeV1,
+        _key: &'a str,
+    ) -> AdmissionFuture<'a, Option<String>> {
+        Box::pin(async { Err(HostAdmissionOutcome::registered_authority_unavailable()) })
+    }
+
+    /// Inserts or atomically replaces one canonical session-backfill value.
+    /// `expected = None` means the key must still be absent.
+    fn compare_and_swap_session_backfill_state<'a>(
+        &'a self,
+        _scope: &'a ObservationScopeV1,
+        _key: &'a str,
+        _expected: Option<&'a str>,
+        _replacement: &'a str,
+    ) -> AdmissionFuture<'a, bool> {
+        Box::pin(async { Err(HostAdmissionOutcome::registered_authority_unavailable()) })
+    }
+
     /// Reads the durable parse offset recorded for one transcript path.
     fn get_parse_offset<'a>(
         &'a self,
@@ -568,6 +613,7 @@ pub(crate) mod test_support {
         batch_capture_calls: usize,
         session_message_failures_remaining: usize,
         session_message_reads: usize,
+        session_backfill_state: Vec<(ObservationScopeV1, String, String)>,
     }
 
     #[derive(Clone, Default)]
@@ -1008,6 +1054,86 @@ pub(crate) mod test_support {
                             .to_string()
                             .contains(message_id)
                 }))
+            })
+        }
+
+        fn existing_session_message_ids<'a>(
+            &'a self,
+            scope: &'a ObservationScopeV1,
+            provider: &'a str,
+            message_ids: Vec<String>,
+        ) -> AdmissionFuture<'a, Vec<String>> {
+            Box::pin(async move {
+                {
+                    let mut state = self.store.state();
+                    if state.session_message_failures_remaining > 0 {
+                        state.session_message_failures_remaining -= 1;
+                        return Err(HostAdmissionOutcome::registered_authority_unavailable());
+                    }
+                }
+                let state = self.store.state();
+                Ok(message_ids
+                    .into_iter()
+                    .filter(|message_id| {
+                        state.observations.iter().any(|stored| {
+                            stored.observation().scope() == scope
+                                && stored.observation().source().provider().as_str() == provider
+                                && stored
+                                    .observation()
+                                    .payload()
+                                    .to_string()
+                                    .contains(message_id)
+                        })
+                    })
+                    .collect())
+            })
+        }
+
+        fn read_session_backfill_state<'a>(
+            &'a self,
+            scope: &'a ObservationScopeV1,
+            key: &'a str,
+        ) -> AdmissionFuture<'a, Option<String>> {
+            Box::pin(async move {
+                Ok(self
+                    .store
+                    .state()
+                    .session_backfill_state
+                    .iter()
+                    .find(|(stored_scope, stored_key, _)| {
+                        stored_scope == scope && stored_key == key
+                    })
+                    .map(|(_, _, value)| value.clone()))
+            })
+        }
+
+        fn compare_and_swap_session_backfill_state<'a>(
+            &'a self,
+            scope: &'a ObservationScopeV1,
+            key: &'a str,
+            expected: Option<&'a str>,
+            replacement: &'a str,
+        ) -> AdmissionFuture<'a, bool> {
+            Box::pin(async move {
+                let mut state = self.store.state();
+                let current = state.session_backfill_state.iter_mut().find(
+                    |(stored_scope, stored_key, _)| stored_scope == scope && stored_key == key,
+                );
+                match (current, expected) {
+                    (None, None) => {
+                        state.session_backfill_state.push((
+                            scope.clone(),
+                            key.to_string(),
+                            replacement.to_string(),
+                        ));
+                        Ok(true)
+                    }
+                    (Some((_, _, current)), Some(expected)) if current == expected => {
+                        *current = replacement.to_string();
+                        Ok(true)
+                    }
+                    _ => Ok(false),
+                }
             })
         }
 

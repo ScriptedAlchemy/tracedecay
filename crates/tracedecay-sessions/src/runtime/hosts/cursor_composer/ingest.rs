@@ -2,9 +2,10 @@
 //! `state.vscdb` envelope/bubble ingestion, `store.db` sweeps, and coverage
 //! advancement.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracedecay_capture::cursor_composer::composer_todos_have_admittable_items;
 use tracedecay_domain::{
@@ -18,8 +19,10 @@ use crate::observation::{CaptureObservationOutcome, ObservationCancellation};
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
 use crate::runtime::shared::{ProjectMembership, ProjectRootMatcherCache, TranscriptScopeMatcher};
 use crate::runtime::source::{
-    TranscriptIngestError, TranscriptIngestResult, run_blocking_transcript_section,
+    TranscriptIngestError, TranscriptIngestResult, canonical_framed_sha256,
+    run_blocking_transcript_section,
 };
+use crate::runtime::store_access::SESSION_MESSAGE_ID_LOOKUP_MAX;
 
 use super::capture::{
     build_cursor_composer_capture_request_for_project,
@@ -41,6 +44,14 @@ use super::{CursorComposerSweepOutcome, CursorComposerSweepResult, PROVIDER};
 /// ingests, so the first backfill of thousands of sessions never blocks
 /// startup; already-watermarked sessions are skipped cheaply and do not count.
 pub const DEFAULT_COMPOSER_ENVELOPE_CAP: usize = 256;
+
+const COMPOSER_SCAN_FRONTIER_KEY_PREFIX: &str = "cursor-composer.scan.";
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ComposerScanFrontier {
+    after_key: Option<String>,
+}
 
 pub(super) fn directory_entry_is_real_dir(entry: &std::fs::DirEntry) -> bool {
     entry.file_type().is_ok_and(|kind| kind.is_dir())
@@ -153,6 +164,41 @@ fn cursor_composer_source(composer_id: &str) -> Result<ObservationSourceIdentity
 pub(super) fn snapshot_generation(path: &Path) -> Option<ObservationSourceGenerationV1> {
     let identity = tracedecay_runtime_core::db::sqlite_generation_identity(path).ok()?;
     ObservationSourceGenerationV1::new(identity).ok()
+}
+
+fn composer_scan_frontier_key(
+    path: &Path,
+    generation: ObservationSourceGenerationV1,
+) -> Result<String, String> {
+    let canonical = path.canonicalize().map_err(|error| {
+        format!(
+            "could not resolve Cursor composer state identity '{}': {error}",
+            path.display()
+        )
+    })?;
+    let generation_bytes = generation.file_id().to_be_bytes();
+    let path_identity = canonical_framed_sha256(
+        b"cursor-composer-scan-frontier",
+        &[canonical.as_os_str().as_encoded_bytes(), &generation_bytes],
+    );
+    Ok(format!(
+        "{COMPOSER_SCAN_FRONTIER_KEY_PREFIX}{path_identity}"
+    ))
+}
+
+fn decode_composer_scan_frontier(value: Option<&str>) -> Result<Option<String>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let frontier = serde_json::from_str::<ComposerScanFrontier>(value)
+        .map_err(|error| format!("invalid Cursor composer scan frontier: {error}"))?;
+    if frontier.after_key.as_ref().is_some_and(|key| {
+        composer_id_from_envelope_key(key).is_none()
+            || key.len() as u64 > MAX_COMPOSER_SQLITE_KEY_BYTES
+    }) {
+        return Err("invalid Cursor composer scan frontier key".to_string());
+    }
+    Ok(frontier.after_key)
 }
 
 struct ComposerCoverageContext<'facade> {
@@ -369,10 +415,48 @@ impl CursorComposerSource {
             }
         };
         let conn = &ro.conn;
-        let state_generation = hotpath::measure_block!(
+        let Some(state_generation) = hotpath::measure_block!(
             "sessions.hosts.cursor_composer.state_generation_blocking",
             run_blocking_transcript_section(|| snapshot_generation(&self.state_db_path))
-        );
+        ) else {
+            byte_budget.defer();
+            return;
+        };
+        let frontier_key = match composer_scan_frontier_key(&self.state_db_path, state_generation) {
+            Ok(key) => key,
+            Err(error) => {
+                tracing::debug!(
+                    state_db = %self.state_db_path.display(),
+                    error,
+                    "Cursor composer scan frontier identity failed closed"
+                );
+                byte_budget.defer();
+                return;
+            }
+        };
+        let expected_frontier = match context
+            .facade
+            .read_session_backfill_state(&context.scope, &frontier_key)
+            .await
+        {
+            Ok(frontier) => frontier,
+            Err(_) => {
+                byte_budget.defer();
+                return;
+            }
+        };
+        let initial_after = match decode_composer_scan_frontier(expected_frontier.as_deref()) {
+            Ok(frontier) => frontier,
+            Err(error) => {
+                tracing::debug!(
+                    state_db = %self.state_db_path.display(),
+                    error,
+                    "Cursor composer scan frontier is invalid"
+                );
+                byte_budget.defer();
+                return;
+            }
+        };
         let scope_matcher = hotpath::measure_block!(
             "sessions.hosts.cursor_composer.state_scope_blocking",
             run_blocking_transcript_section(|| context.scope_matcher())
@@ -384,9 +468,15 @@ impl CursorComposerSource {
         // while holding at most one page of keys in memory.
         let mut ingested_this_pass = 0usize;
         let mut scanned_this_pass = 0usize;
-        let mut scan_after: Option<String> = None;
+        let mut scan_after = initial_after.clone();
+        let mut last_scanned_key = initial_after.clone();
+        let mut reached_end = false;
         'scan: loop {
             if context.cancellation.is_cancelled() {
+                break;
+            }
+            if scanned_this_pass >= MAX_COMPOSER_STORE_BLOB_VISITS {
+                byte_budget.defer();
                 break;
             }
             let page =
@@ -405,6 +495,7 @@ impl CursorComposerSource {
                     }
                 };
             let Some(last_key) = page.last().map(|(key, _)| key.clone()) else {
+                reached_end = true;
                 break;
             };
             let page_full = page.len() == COMPOSER_KEY_SCAN_PAGE;
@@ -423,6 +514,7 @@ impl CursorComposerSource {
                     {
                         break 'scan;
                     }
+                    last_scanned_key = Some(key);
                     continue;
                 }
                 if byte_budget.exhausted() {
@@ -451,7 +543,10 @@ impl CursorComposerSource {
                     }
                     BoundedSqliteValue::Oversized { .. }
                     | BoundedSqliteValue::Malformed { .. }
-                    | BoundedSqliteValue::Missing => continue,
+                    | BoundedSqliteValue::Missing => {
+                        last_scanned_key = Some(key);
+                        continue;
+                    }
                     BoundedSqliteValue::Corrupt => {
                         byte_budget.defer();
                         break 'scan;
@@ -460,6 +555,7 @@ impl CursorComposerSource {
                 if !byte_budget.try_consume(nbytes) {
                     break 'scan;
                 }
+                last_scanned_key = Some(key.clone());
                 let Ok(envelope) = serde_json::from_str::<Value>(&value) else {
                     continue;
                 };
@@ -521,9 +617,41 @@ impl CursorComposerSource {
                     byte_budget.defer();
                     continue;
                 }
-                let Some(generation) = state_generation else {
+                let mut message_ids = headers
+                    .iter()
+                    .filter_map(|header| header.get("bubbleId").and_then(Value::as_str))
+                    .filter(|bubble_id| {
+                        format!("bubbleId:{composer_id}:{bubble_id}").len() as u64
+                            <= MAX_COMPOSER_SQLITE_KEY_BYTES
+                    })
+                    .map(|bubble_id| format!("{composer_id}:{bubble_id}"))
+                    .collect::<Vec<_>>();
+                message_ids.sort_unstable();
+                message_ids.dedup();
+                let mut existing_message_ids = HashSet::with_capacity(message_ids.len());
+                let mut identity_lookup_available = true;
+                for message_id_batch in message_ids.chunks(SESSION_MESSAGE_ID_LOOKUP_MAX) {
+                    match context
+                        .facade
+                        .existing_session_message_ids(
+                            &context.scope,
+                            PROVIDER,
+                            message_id_batch.to_vec(),
+                        )
+                        .await
+                    {
+                        Ok(existing) => existing_message_ids.extend(existing),
+                        Err(_) => {
+                            byte_budget.defer();
+                            identity_lookup_available = false;
+                            break;
+                        }
+                    }
+                }
+                if !identity_lookup_available {
                     continue;
-                };
+                }
+                let generation = state_generation;
                 let mut session_accepted = false;
                 if composer_todos_have_admittable_items(&envelope)
                     && let Some(todo_checkpoint) = composer_envelope_todo_checkpoint(&envelope)
@@ -570,28 +698,8 @@ impl CursorComposerSource {
                     let Some(bubble_id) = header.get("bubbleId").and_then(Value::as_str) else {
                         continue;
                     };
-                    match context
-                        .facade
-                        .has_session_message(
-                            &context.scope,
-                            PROVIDER,
-                            &format!("{composer_id}:{bubble_id}"),
-                        )
-                        .await
-                    {
-                        Ok(true) => continue,
-                        Ok(false) => {}
-                        // A store error is unavailability, not an answer.
-                        // Reading it as "already ingested" would drop the
-                        // bubble permanently: every later header in this
-                        // composer advances the source cursor past this
-                        // position, so no catch-up pass would revisit it.
-                        // Defer instead — stop before the cursor can move,
-                        // and let the next pass retry from here.
-                        Err(_) => {
-                            byte_budget.defer();
-                            break;
-                        }
+                    if existing_message_ids.contains(&format!("{composer_id}:{bubble_id}")) {
+                        continue;
                     }
                     let header_position = position as u64;
                     let Ok(source) = cursor_composer_source(&composer_id) else {
@@ -779,9 +887,38 @@ impl CursorComposerSource {
                 }
             }
             if !page_full {
+                reached_end = true;
                 break;
             }
             scan_after = Some(last_key);
+        }
+        if context.cancellation.is_cancelled() {
+            return;
+        }
+        let next_after = (!reached_end).then_some(last_scanned_key).flatten();
+        if next_after != initial_after {
+            let replacement = match serde_json::to_string(&ComposerScanFrontier {
+                after_key: next_after,
+            }) {
+                Ok(replacement) => replacement,
+                Err(_) => {
+                    byte_budget.defer();
+                    return;
+                }
+            };
+            match context
+                .facade
+                .compare_and_swap_session_backfill_state(
+                    &context.scope,
+                    &frontier_key,
+                    expected_frontier.as_deref(),
+                    &replacement,
+                )
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) | Err(_) => byte_budget.defer(),
+            }
         }
     }
 

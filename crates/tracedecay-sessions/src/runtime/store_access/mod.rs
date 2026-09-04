@@ -14,6 +14,9 @@ pub use search::{
     SESSION_MESSAGE_SEARCH_MAX_FETCH, downrank_inventory_messages,
     interleave_workflow_search_results, session_fts_query,
 };
+#[cfg(test)]
+pub(crate) use sessions::EXISTING_SESSION_MESSAGE_IDS_SQL;
+pub(crate) use sessions::SESSION_MESSAGE_ID_LOOKUP_MAX;
 pub use sessions::SESSION_MESSAGES_AFTER_SQL;
 pub use transcript::{get_parse_offset, require_expected_offset, set_parse_offset};
 pub use types::{

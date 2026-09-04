@@ -24,6 +24,19 @@ use super::types::{
 
 const SESSION_INGEST_HEALTH_PAGE_SIZE: i64 = 512;
 
+/// Largest durable message-id window admitted to one indexed lookup.
+pub(crate) const SESSION_MESSAGE_ID_LOOKUP_MAX: usize = 256;
+
+/// The JSON rowset is the outer loop and every value probes the canonical
+/// `(provider, message_id)` primary key. Keeping this authority here lets
+/// provider ingest batch identity reads without duplicating session schema.
+pub(crate) const EXISTING_SESSION_MESSAGE_IDS_SQL: &str = "SELECT messages.message_id
+     FROM json_each(?2) AS requested
+     CROSS JOIN session_messages AS messages
+     WHERE requested.type = 'text'
+       AND messages.provider = ?1
+       AND messages.message_id = requested.value";
+
 fn session_db_operation_error(
     operation: &'static str,
     source: impl std::error::Error + Send + Sync + 'static,
@@ -298,6 +311,44 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         row.get::<i64>(0)
             .map(|exists| exists != 0)
             .map_err(|error| format!("failed to decode session message existence: {error}"))
+    }
+
+    #[hotpath::measure(future = true, label = "global_db.registered_sessions.exists_batch")]
+    pub async fn existing_session_message_ids(
+        &self,
+        provider: &str,
+        message_ids: &[String],
+    ) -> Result<Vec<String>, String> {
+        if message_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        if message_ids.len() > SESSION_MESSAGE_ID_LOOKUP_MAX {
+            return Err(format!(
+                "session message identity batch has {} rows; maximum is {SESSION_MESSAGE_ID_LOOKUP_MAX}",
+                message_ids.len()
+            ));
+        }
+        let encoded = serde_json::to_string(message_ids)
+            .map_err(|error| format!("failed to encode session message identity batch: {error}"))?;
+        let mut rows = self
+            .read_connection()
+            .query(
+                EXISTING_SESSION_MESSAGE_IDS_SQL,
+                tracedecay_runtime_core::db::engine::params![provider, encoded],
+            )
+            .await
+            .map_err(|error| format!("failed to query session message identity batch: {error}"))?;
+        let mut existing = Vec::with_capacity(message_ids.len());
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| format!("failed to read session message identity batch: {error}"))?
+        {
+            existing.push(row.get::<String>(0).map_err(|error| {
+                format!("failed to decode session message identity batch: {error}")
+            })?);
+        }
+        Ok(existing)
     }
 
     #[hotpath::measure(future = true, label = "global_db.registered_sessions.count")]
