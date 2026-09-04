@@ -390,6 +390,7 @@ pub(super) async fn query_candidate_clause(
         .map_or(SqlValue::Null, |value| SqlValue::Text(value.to_string()));
     let root_project_key =
         root_project_key.map(|project_key| SqlValue::Text(project_key.to_string()));
+    let temporal_mode = SqlValue::Text(snapshot_request.temporal_mode().as_str().to_string());
     let (sql, params) = match (scope, clause.channel) {
         (TemporalRetrievalScope::AllSessionsInAuthorizedRoot, CandidateChannel::Scope) => {
             return Err(read_message(
@@ -497,6 +498,7 @@ pub(super) async fn query_candidate_clause(
                     SqlValue::Integer(item_cap),
                     SqlValue::Integer(stable_cap),
                     SqlValue::Integer(limit),
+                    temporal_mode.clone(),
                 ],
             )
         }
@@ -516,6 +518,7 @@ pub(super) async fn query_candidate_clause(
                 SqlValue::Integer(item_cap),
                 SqlValue::Integer(stable_cap),
                 SqlValue::Integer(limit),
+                temporal_mode.clone(),
             ],
         ),
         (
@@ -567,6 +570,7 @@ pub(super) async fn query_candidate_clause(
                 SqlValue::Integer(cursor.knowledge_at),
                 SqlValue::Text(cursor.stable_id.clone()),
                 SqlValue::Integer(limit),
+                temporal_mode.clone(),
             ],
         ),
         (TemporalRetrievalScope::Session(session_id), CandidateChannel::Scope) => (
@@ -641,6 +645,7 @@ pub(super) async fn query_candidate_clause(
                     SqlValue::Integer(metadata_cap),
                     SqlValue::Integer(item_cap),
                     SqlValue::Integer(limit),
+                    temporal_mode.clone(),
                 ],
             )
         }
@@ -657,6 +662,7 @@ pub(super) async fn query_candidate_clause(
                 SqlValue::Integer(metadata_cap),
                 SqlValue::Integer(item_cap),
                 SqlValue::Integer(limit),
+                temporal_mode,
             ],
         ),
         (
