@@ -1418,6 +1418,40 @@ struct PublicationMeasurementScopeV1 {
     sealed_state_digest: tracedecay_graph_db::SealedGraphStateDigest,
 }
 
+/// Resident bytes the *first* publication may still hold once its build permit
+/// is released, on the 600-file / 7,200-function measurement corpus.
+///
+/// Publishing at all has a fixed cost that does not repeat: allocator arenas
+/// sized for one corpus build, the shared staging container's own resident
+/// state, and the caches the first pass fills. Measured at 0.35 GB; the
+/// allowance leaves room for allocator and page-cache noise.
+const PUBLICATION_FIRST_SCOPE_RETAINED_LIMIT: u64 = 448 * 1024 * 1024;
+
+/// Resident bytes each *additional* published worktree scope may add once its
+/// own build permit is released.
+///
+/// This is the number #830 is about. The builds are serialized by the permit,
+/// so a scope that released everything it built would add only its served
+/// state. Before the sealed-generation and permit-boundary release work this
+/// marginal cost was ~0.59 GB per scope — a whole build's worth, retained.
+/// It is now ~0.15 GB, which is still above the served-index size and is
+/// tracked as remaining work; the bound is set to catch a regression back
+/// toward build-sized retention, not to certify the residue as correct.
+const PUBLICATION_MARGINAL_RETAINED_PER_SCOPE_LIMIT: u64 = 256 * 1024 * 1024;
+
+/// Resident growth one corpus-sized publication may show while it runs, over
+/// and above what the finished scopes retain.
+///
+/// The permit serializes builds, so exactly one of these transients can be
+/// live at a time regardless of how many scopes publish.
+const PUBLICATION_SINGLE_BUILD_TRANSIENT_LIMIT: u64 = 384 * 1024 * 1024;
+
+/// What every scope published so far may hold once its permit is released.
+fn publication_retained_ceiling(scope_count: usize) -> u64 {
+    PUBLICATION_FIRST_SCOPE_RETAINED_LIMIT
+        + PUBLICATION_MARGINAL_RETAINED_PER_SCOPE_LIMIT * (scope_count as u64 - 1)
+}
+
 fn publication_measurement_parameter(name: &str, default: usize) -> usize {
     match std::env::var(name) {
         Ok(value) => value
@@ -1758,6 +1792,12 @@ async fn concurrent_worktree_scopes_publish_with_one_corpus_build_and_bounded_rs
     stop_sampler.store(true, Ordering::Release);
     sampler.join().expect("join resident memory sampler");
     let rss_peak_sampled = rss_peak.load(Ordering::Acquire);
+    // What every published scope still holds now that each one has released
+    // its build permit. This is the number #830 is about: the publishes do
+    // not overlap, so anything here beyond one scope's served index is
+    // publish-time memory that outlived its permit.
+    let rss_after = tracedecay_runtime_core::resident_memory::sampled_process_resident_bytes_v1()
+        .expect("Linux sampled RSS after publication");
     let vm_hwm_after = process_vm_hwm_kib().expect("Linux VmHWM after publication");
     let peak_overlapping_projections = take_publication_projection_overlap_peak();
 
@@ -1778,6 +1818,8 @@ async fn concurrent_worktree_scopes_publish_with_one_corpus_build_and_bounded_rs
         "peak_overlapping_projections": peak_overlapping_projections,
         "rss_before_bytes": rss_before,
         "rss_peak_sampled_bytes": rss_peak_sampled,
+        "rss_after_bytes": rss_after,
+        "retained_bytes_per_scope": rss_after.saturating_sub(rss_before) / scope_count as u64,
         "vm_hwm_before_kb": vm_hwm_before,
         "vm_hwm_after_kb": vm_hwm_after,
         "wall_ms": wall_ms,
@@ -1790,5 +1832,30 @@ async fn concurrent_worktree_scopes_publish_with_one_corpus_build_and_bounded_rs
     assert!(
         peak_overlapping_projections <= 1,
         "one project publication shard must admit at most one manifest projection"
+    );
+    // Retention bound. Publishing N worktree scopes serializes N corpus
+    // builds behind one permit, so what the process still holds afterwards
+    // must be N served indexes, not N builds. A scope that leaks its
+    // projection manifest, its staged rows, its sealed copy or its arenas
+    // past the permit shows up here as growth per scope, which is exactly
+    // how #830 was found.
+    let retained_bytes = rss_after.saturating_sub(rss_before);
+    let retained_ceiling = publication_retained_ceiling(scope_count);
+    assert!(
+        retained_bytes <= retained_ceiling,
+        "{scope_count} published worktree scopes must retain at most {retained_ceiling} bytes \
+         after their build permits are released (one fixed publication cost plus a bounded \
+         marginal per additional scope); observed {retained_bytes} bytes"
+    );
+    // Peak bound. With the permit serializing builds, the peak is one build's
+    // transient on top of what the finished scopes retain — never one
+    // transient per scope.
+    let peak_growth = rss_peak_sampled.saturating_sub(rss_before);
+    let peak_ceiling = PUBLICATION_SINGLE_BUILD_TRANSIENT_LIMIT + retained_ceiling;
+    assert!(
+        peak_growth <= peak_ceiling,
+        "peak resident growth across {scope_count} serialized publications must stay within one \
+         build transient plus the retention ceiling ({peak_ceiling} bytes); observed \
+         {peak_growth} bytes"
     );
 }
