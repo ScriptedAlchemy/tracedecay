@@ -156,6 +156,19 @@ async fn current_profiles_install_the_unreleased_queue_shape_in_place() {
             FOREIGN KEY(provider, session_id)
                 REFERENCES sessions(provider, session_id) ON DELETE CASCADE
          );
+         CREATE TABLE lcm_summary_convergence_invalidation_work (
+            provider TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            raw_store_id INTEGER NOT NULL,
+            source_kind TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            depth INTEGER NOT NULL,
+            after_node_id TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY(provider, session_id, raw_store_id, source_kind, source_id),
+            FOREIGN KEY(provider, session_id, raw_store_id)
+                REFERENCES lcm_summary_convergence_dirty_raw(provider, session_id, store_id)
+                ON DELETE CASCADE
+         );
          CREATE TABLE lcm_summary_convergence_queue (
             queue_id INTEGER PRIMARY KEY AUTOINCREMENT,
             provider TEXT NOT NULL,
@@ -250,6 +263,20 @@ async fn current_profiles_install_the_unreleased_queue_shape_in_place() {
             "missing in-place invalidation authority {object}"
         );
     }
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*)
+             FROM pragma_table_info('lcm_summary_convergence_invalidation_work')
+             WHERE name = 'state'",
+            (),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+        1,
+        "missing durable invalidation visited state"
+    );
 }
 
 #[tokio::test]
