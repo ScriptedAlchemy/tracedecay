@@ -35,9 +35,8 @@ use super::{
 use crate::register_registered_schema_installer;
 use tracedecay_domain::errors::TraceDecayError;
 
-/// Test-only hold installed at the tail of the background session
-/// relation-graph open task, immediately after settlement is published and
-/// announced.
+/// Test-only hold installed immediately after the background session
+/// relation-graph open task publishes its settled state.
 ///
 /// It exists so a fixture can pin that task in the exact window that used to
 /// leak a counted client lease past settlement: with the task parked here, any
@@ -45,14 +44,14 @@ use tracedecay_domain::errors::TraceDecayError;
 /// reservation instead of depending on how quickly the task future happens to
 /// be dropped on another worker thread.
 #[cfg(any(test, feature = "test-helpers"))]
-pub(super) struct SessionGraphSettleTestGateState {
+pub(super) struct SessionGraphPublicationTestGateState {
     blocked: AtomicBool,
     blocked_notify: tokio::sync::Notify,
     release: tokio::sync::Semaphore,
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
-impl SessionGraphSettleTestGateState {
+impl SessionGraphPublicationTestGateState {
     async fn block(&self) {
         self.blocked.store(true, Ordering::Release);
         self.blocked_notify.notify_waiters();
@@ -65,15 +64,15 @@ impl SessionGraphSettleTestGateState {
 }
 
 /// Handle returned by
-/// [`DaemonSessionRuntimeRegistryV1::block_session_graph_settle_for_test`].
+/// [`DaemonSessionRuntimeRegistryV1::block_session_graph_publication_for_test`].
 #[cfg(any(test, feature = "test-helpers"))]
-pub struct SessionGraphSettleTestGate {
-    state: Arc<SessionGraphSettleTestGateState>,
+pub struct SessionGraphPublicationTestGate {
+    state: Arc<SessionGraphPublicationTestGateState>,
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
-impl SessionGraphSettleTestGate {
-    /// Awaits the graph-open task reaching the post-settlement hold.
+impl SessionGraphPublicationTestGate {
+    /// Awaits the graph-open task reaching the post-publication hold.
     pub async fn wait_until_blocked(&self) {
         loop {
             let notified = self.state.blocked_notify.notified();
@@ -221,7 +220,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             remote_recovery_project_lifecycle: Arc::new(std::sync::OnceLock::new()),
             long_lived_session_maintenance,
             #[cfg(any(test, feature = "test-helpers"))]
-            session_graph_settle_gate: std::sync::Mutex::new(None),
+            session_graph_publication_gate: std::sync::Mutex::new(None),
         };
         registry.mount_registered_remote_nodes().await?;
         Ok(registry)
@@ -272,21 +271,21 @@ impl DaemonSessionRuntimeRegistryV1 {
 
 impl DaemonSessionRuntimeRegistryV1 {
     /// Holds every subsequently mounted session owner's relation-graph open
-    /// task at the tail of its body, after settlement is published and
-    /// announced. Fixtures use it to observe what the task still owns at the
-    /// instant a settlement waiter is released.
+    /// task immediately after its settled state becomes observable. Fixtures
+    /// use it to exercise the state fast path while the publishing task is
+    /// still parked.
     #[cfg(any(test, feature = "test-helpers"))]
-    pub fn block_session_graph_settle_for_test(&self) -> SessionGraphSettleTestGate {
-        let state = Arc::new(SessionGraphSettleTestGateState {
+    pub fn block_session_graph_publication_for_test(&self) -> SessionGraphPublicationTestGate {
+        let state = Arc::new(SessionGraphPublicationTestGateState {
             blocked: AtomicBool::new(false),
             blocked_notify: tokio::sync::Notify::new(),
             release: tokio::sync::Semaphore::new(0),
         });
         *self
-            .session_graph_settle_gate
+            .session_graph_publication_gate
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&state));
-        SessionGraphSettleTestGate { state }
+        SessionGraphPublicationTestGate { state }
     }
 
     /// Mints one independently counted registered-session client and its
@@ -320,8 +319,8 @@ impl DaemonSessionRuntimeRegistryV1 {
         let task_graph_settled = Arc::clone(&graph_settled);
         let task_published_lease = published_lease.clone();
         #[cfg(any(test, feature = "test-helpers"))]
-        let task_settle_gate = self
-            .session_graph_settle_gate
+        let task_publication_gate = self
+            .session_graph_publication_gate
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
@@ -366,22 +365,21 @@ impl DaemonSessionRuntimeRegistryV1 {
                         error: error.to_string(),
                     },
                 };
+                // The settled state itself is observable: a waiter arriving
+                // after publication takes the state fast path without awaiting
+                // the notification. Release this task's counted client lease
+                // before publishing that state so every observer sees the
+                // completed open and lease release through the same mutex
+                // boundary.
+                drop(task_published_lease);
                 *task_relation_graph
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = state;
-                // Settlement is the observable boundary that retirement waits
-                // on, so this task's counted client lease must be released
-                // *before* the notification, never as an incidental drop of
-                // the task future afterwards. Releasing it later lets a woken
-                // retirement observe a `ClientLeases` blocker for a lease that
-                // has already done its job of holding the shard open across
-                // the background graph open.
-                drop(task_published_lease);
-                task_graph_settled.notify_waiters();
                 #[cfg(any(test, feature = "test-helpers"))]
-                if let Some(gate) = task_settle_gate {
+                if let Some(gate) = task_publication_gate {
                     gate.block().await;
                 }
+                task_graph_settled.notify_waiters();
             },
         );
         if !retained {
