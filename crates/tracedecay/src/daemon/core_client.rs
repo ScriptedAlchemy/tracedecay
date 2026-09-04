@@ -73,12 +73,12 @@ fn wire_request_deadline_micros(request_deadline: Instant) -> tracedecay_domain:
 
 /// How long daemon clients keep retrying a failed connect before giving up.
 ///
-/// `tracedecay update` restarts the daemon service (`systemctl --user restart`);
-/// between the old daemon unlinking its socket and the new one binding it,
-/// connects fail with `NotFound` or `ConnectionRefused`. Long-lived MCP
-/// sessions (Cursor's `tracedecay serve` stdio proxy) reconnect per request,
-/// so retrying inside this window lets a live session ride out a self-update
-/// instead of surfacing a hard JSON-RPC error.
+/// An explicit restart, or an update of a service that was already running,
+/// briefly unlinks the socket before the replacement binds it. Connects in
+/// that bounded window fail with `NotFound` or `ConnectionRefused`. Long-lived
+/// MCP sessions (Cursor's `tracedecay serve` stdio proxy) reconnect per request
+/// so a live session can ride out replacement without surfacing a hard
+/// JSON-RPC error. This grace does not start an intentionally held service.
 pub(crate) const DAEMON_RESTART_GRACE: Duration = Duration::from_secs(8);
 pub(crate) const DAEMON_RESTART_POLL_INTERVAL: Duration = Duration::from_millis(200);
 

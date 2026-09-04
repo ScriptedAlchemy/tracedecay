@@ -84,9 +84,10 @@ authority. Hard rules that always apply:
 
 - Deferred: one ToolSearch call —
   `select:tracedecay_fact_store_search,tracedecay_fact_store_add,tracedecay_fact_store_get,tracedecay_fact_store_list,tracedecay_fact_store_probe,tracedecay_memory_status,tracedecay_message_search,tracedecay_fact_feedback,tracedecay_fact_store_curate`.
-- MCP error: `tracedecay tool tracedecay_fact_store_search --query …` (see
-  `tracedecay:using-the-cli`). An MCP failure is not a reason to write
-  MEMORY.md — the CLI reaches the same store.
+- MCP transport error: use the equivalent CLI tool only while the daemon
+  remains available (see `tracedecay:using-the-cli`). An unavailable or
+  intentionally held daemon is not a reason to retry, change lifecycle, or
+  write MEMORY.md; report that durable memory is unavailable.
 
 ## Deliverable
 

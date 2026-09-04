@@ -38,8 +38,10 @@ Announce: "Using tracedecay:tracing-functions to trace <symbol>."
 
 - Deferred: one ToolSearch call —
   `select:tracedecay_callers,tracedecay_callees,tracedecay_call_chain,tracedecay_find_exact_symbol,tracedecay_rename_preview`.
-- MCP error: `tracedecay tool callers --node-id …` etc. (see
-  `tracedecay:using-the-cli`). Never fall back to grepping call sites.
+- MCP transport error: use the equivalent CLI tool only while the daemon
+  remains available (see `tracedecay:using-the-cli`). Preserve an unavailable
+  or intentionally held daemon; report the gap instead of retrying or changing
+  lifecycle. Never fall back to broad call-site grep.
 
 ## Deliverable
 

@@ -16,9 +16,12 @@ Explain whether TraceDecay data and discovery surfaces are changing agent behavi
 3. Compare native file reads and shell search against graph, session, fact, agent, and CLI discovery paths. Measure first useful action and avoid inventory-only conclusions.
 4. Use read-only skill and automation artifact views to explain adoption gaps without mutating facts or managed content.
 
-MCP is optional. If a TraceDecay MCP tool is unavailable, ask the parent to
-discover and run the equivalent `tracedecay tool <name> --help` command. This
-agent must not execute shell commands. Never query `.tracedecay` databases directly.
+MCP is optional. If only MCP transport is unavailable while the daemon remains
+available, ask the parent to run the equivalent
+`tracedecay tool <name> --help` command. If the daemon is unavailable or
+intentionally held, report that state; do not ask for retries or lifecycle
+changes. This agent must not
+execute shell commands. Never query `.tracedecay` databases directly.
 
 ## Rules
 

@@ -51,7 +51,10 @@ Start with `tracedecay_workflow_start_run`. Control an existing run with
 
 - Deferred: one ToolSearch call —
   `select:tracedecay_workflow_list_definitions,tracedecay_workflow_validate_definition,tracedecay_workflow_register_definition,tracedecay_workflow_start_run,tracedecay_workflow_get_run`.
-- MCP error: `tracedecay tool <name>` (see `tracedecay:using-the-cli`).
+- MCP transport error: use `tracedecay tool <name>` only while the daemon
+  remains available (see `tracedecay:using-the-cli`). Preserve an unavailable
+  or intentionally held daemon; report the gap instead of retrying or changing
+  lifecycle.
 
 ## Deliverable
 

@@ -16,9 +16,12 @@ Review code changes against their intended behavior and actual dependency radius
 3. Use `tracedecay_callers`, `tracedecay_impact`, `tracedecay_affected`, and `tracedecay_test_map` to prove blast radius and test coverage.
 4. For captured compiler output, use `tracedecay_diagnose`; use fresh diagnostics, unsafe-pattern, redundancy, and simplify scans only where the changed surface warrants them.
 
-MCP is optional. If a TraceDecay MCP tool is unavailable, ask the parent to
-discover and run the equivalent `tracedecay tool <name> --help` command. This
-agent must not execute shell commands. Never query `.tracedecay` databases directly.
+MCP is optional. If only MCP transport is unavailable while the daemon remains
+available, ask the parent to run the equivalent
+`tracedecay tool <name> --help` command. If the daemon is unavailable or
+intentionally held, report that state; do not ask for retries or lifecycle
+changes. This agent must not
+execute shell commands. Never query `.tracedecay` databases directly.
 
 ## Rules
 

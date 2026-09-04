@@ -544,6 +544,16 @@ Use `tracedecay daemon start`, `stop`, or `restart` for explicit lifecycle contr
 tracedecay daemon uninstall-service
 ```
 
+Install without activation with `tracedecay daemon install-service --no-start`.
+Updates and post-update maintenance preserve the exact captured service state:
+running services return to running, stopped-enabled services stay stopped and
+enabled, stopped-disabled services stay stopped and disabled, and masked or
+missing services remain untouched. Passive commands and integrations (`status`,
+`doctor`, `tool`, `serve`, MCP proxying, and hooks) never start or enable the
+service. If the daemon is unavailable, it may be intentionally held; report the
+typed state instead of retrying or changing lifecycle. Use `start` or `restart`
+only when you intentionally want the daemon running.
+
 ### CLI-Only Workflows
 
 If you don't keep an agent attached, install the supported daemon service and
@@ -1043,6 +1053,12 @@ Your AI agent doesn't see tracedecay tools.
 1. Run `tracedecay doctor` to check the integration
 2. Verify `tracedecay` is on your PATH: `which tracedecay`
 3. Re-run `tracedecay install` and restart your agent completely
+
+The CLI fallback is another client of the same daemon, not a guarantee that
+the daemon is available. If Doctor reports a stopped, missing, or unavailable
+daemon, preserve that state unless you explicitly intend to start it. Do not
+loop on MCP/CLI retries or treat a held daemon as permission to run a lifecycle
+command.
 
 ### Missing symbols in search
 

@@ -68,9 +68,14 @@ indexed code. Use `tracedecay_search` for symbol names, `tracedecay_context`
 for concepts, `tracedecay_files` for path discovery, and `tracedecay_read` or
 `tracedecay_outline` for bounded reads after a file is known.
 
-Every MCP tool also has a CLI fallback:
+Every MCP tool also has a CLI transport:
 
 ```bash
 tracedecay tool
 tracedecay tool tracedecay_grep --help
 ```
+
+The CLI uses the same daemon authority as MCP and is not an availability
+guarantee. Neither transport starts a missing or stopped daemon service. If the
+daemon is unavailable or intentionally held, report that state and use scoped
+native tools; do not retry or change daemon lifecycle unless the operator asks.

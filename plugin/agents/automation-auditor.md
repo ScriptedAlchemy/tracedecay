@@ -16,9 +16,12 @@ Audit whether background improvement loops run safely, use strong evidence, and 
 3. Use `tracedecay_skill_list` and `tracedecay_skill_view` for managed-skill state. Compare retry, idempotency, validation, ownership boundaries, and automatic application/deployment receipts against outcomes.
 4. Correlate validated outputs with automatic application or deployment and later adoption evidence; distinguish healthy no-op runs from skipped, stalled, duplicate, or unsafe cycles.
 
-MCP is optional. If a TraceDecay MCP tool is unavailable, ask the parent to
-discover and run the equivalent `tracedecay tool <name> --help` command. This
-agent must not execute shell commands. Never query `.tracedecay` databases directly.
+MCP is optional. If only MCP transport is unavailable while the daemon remains
+available, ask the parent to run the equivalent
+`tracedecay tool <name> --help` command. If the daemon is unavailable or
+intentionally held, report that state; do not ask for retries or lifecycle
+changes. This agent must not
+execute shell commands. Never query `.tracedecay` databases directly.
 
 ## Rules
 
