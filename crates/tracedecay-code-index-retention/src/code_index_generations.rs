@@ -386,19 +386,19 @@ pub enum GenerationDigestVerificationV1 {
 /// the same multi-gigabyte read [`GenerationDigestVerificationV1::MetadataOnly`]
 /// exists to avoid, and one that fails closed when a manifest no longer matches
 /// its content-addressed file name. A metadata-only census therefore refuses to
-/// guess: it reports [`Self::NoneFound`] only from the bounded directory listing
-/// that proves no segment file exists at all, and [`Self::Unknown`] otherwise.
-/// `Unknown` counts as collectable work so the segment sweep is still reached,
-/// never skipped.
+/// guess: it reports [`Self::NoneFound`] when the directory is absent or its
+/// one-entry observation proves it empty, and [`Self::Unknown`] for any observed
+/// entry without classifying its name. `Unknown` counts as collectable work so
+/// the segment sweep is still reached, never skipped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GenerationSegmentCensusV1 {
-    /// The mark-and-sweep proved no unreferenced segment exists, or the store
-    /// holds no segment files at all.
+    /// The mark-and-sweep proved no unreferenced segment exists, or the segment
+    /// directory is absent or empty.
     NoneFound,
     /// The mark-and-sweep found at least one unreferenced segment.
     Present,
-    /// Segment files exist and this census did not pay the mark phase that
-    /// would classify them. Only a full-verification census resolves this.
+    /// The segment directory contains at least one unclassified entry. Only a
+    /// full-verification census resolves whether it is collectable segment work.
     Unknown,
 }
 
