@@ -2945,8 +2945,8 @@ impl CodeIndexSchedulerRegistryV1 {
             let mut graph_seat_attempted: Option<tracedecay_domain::CodeGenerationId> = None;
             // A retained revision-7 graph gets one verified-head attempt
             // before ordinary source reconciliation owns any repair. A failed
-            // verification must rebuild its successor rather than repeating
-            // the same retained-head attempt forever.
+            // verification falls through to one canonical replay of the same
+            // sealed generation rather than repeating the head read forever.
             let mut retained_graph_head_recovery_attempted = false;
             // The conflict verdict of the previous failed seat attempt. A
             // Conflict can be a race (a concurrent publisher advanced the
@@ -3655,7 +3655,6 @@ impl CodeIndexSchedulerRegistryV1 {
                 {
                     prepare_graph = false;
                 }
-                let mut retained_graph_head_recovery_needs_successor_rebuild = false;
                 if prepare_graph
                     && !published_pass
                     && !retained_graph_head_recovery_attempted
@@ -3711,14 +3710,12 @@ impl CodeIndexSchedulerRegistryV1 {
                                 }
                                 Ok(false) => {}
                                 Err(error) => {
-                                    prepare_graph = false;
-                                    retained_graph_head_recovery_needs_successor_rebuild = true;
                                     tracing::warn!(
                                         event = "code_index_graph_head_recovery_degraded",
                                         error = %error,
                                         "verified graph head did not match the revision-7 \
-                                         manifest; rebuild its successor instead of replaying \
-                                         the quarantined retained generation"
+                                         manifest; replay the exact sealed generation to \
+                                         repair its quarantined graph projection"
                                     );
                                 }
                             }
@@ -3739,34 +3736,6 @@ impl CodeIndexSchedulerRegistryV1 {
                                  pending while the admitted worker repairs the generation"
                             );
                         }
-                    }
-                }
-                if retained_graph_head_recovery_needs_successor_rebuild {
-                    let rebuild_scheduler = Arc::clone(&worker_scheduler);
-                    let shutting_down = Arc::clone(&worker_shutting_down);
-                    let scheduled = tokio::task::spawn_blocking(move || {
-                        Self::lock_scheduler_unless_shutting_down(
-                            &rebuild_scheduler,
-                            &shutting_down,
-                        )
-                        .map(|scheduler| scheduler.request_background_reconcile())
-                    })
-                    .await;
-                    if worker_shutting_down.load(Ordering::Acquire) {
-                        return;
-                    }
-                    match scheduled {
-                        Ok(Ok(())) => {}
-                        Ok(Err(error)) => tracing::warn!(
-                            event = "code_index_graph_head_recovery_rebuild_schedule_failed",
-                            error = %error,
-                            "revision-7 graph recovery failed and its successor rebuild could not be scheduled"
-                        ),
-                        Err(error) => tracing::warn!(
-                            event = "code_index_graph_head_recovery_rebuild_schedule_task_failed",
-                            error = %error,
-                            "revision-7 graph recovery failed and its successor rebuild scheduling task failed"
-                        ),
                     }
                 }
                 let mut result = match source_result {
