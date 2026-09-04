@@ -20,8 +20,9 @@ use crate::runtime::shared::{append_tool_calls_metadata, content_storage_text_an
 /// `source_offset`.
 const TOOL_EVENT_PREVIEW_BYTES: usize = 2000;
 
-/// Map one rollout line to a provider-neutral message, or `None` for non-message
-/// events (`response_item`, tool calls, token counts, …).
+/// Map one current or legacy rollout message event to a provider-neutral row,
+/// or `None` for non-message events (`response_item`, tool calls, token counts,
+/// …).
 pub(super) fn message_from_line(
     record: &Value,
     meta: &CodexMeta,
@@ -33,19 +34,46 @@ pub(super) fn message_from_line(
         return None;
     }
     let payload = record.get("payload")?;
-    let role = match payload.get("type").and_then(Value::as_str)? {
-        "user_message" => "user",
-        "agent_message" => "assistant",
-        _ => return None,
-    };
-    let content = payload.get("message")?;
-    let (text, tool_names) = content_storage_text_and_tools(content, payload.get("tool_calls"));
+    let (role, content, source_item_id, source_event, metadata_payload) =
+        match payload.get("type").and_then(Value::as_str)? {
+            "user_message" => ("user", payload.get("message")?, None, None, payload),
+            "agent_message" => ("assistant", payload.get("message")?, None, None, payload),
+            "item_completed" => {
+                let item = payload.get("item")?;
+                if item.get("type").and_then(Value::as_str) != Some("UserMessage") {
+                    return None;
+                }
+                let item_id = item
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|item_id| !item_id.is_empty())?;
+                let content = item.get("content")?;
+                if collect_response_item_text(content).trim().is_empty() {
+                    return None;
+                }
+                ("user", content, Some(item_id), Some("item_completed"), item)
+            }
+            _ => return None,
+        };
+    let (text, tool_names) =
+        content_storage_text_and_tools(content, metadata_payload.get("tool_calls"));
     if text.trim().is_empty() {
         return None;
     }
+    let metadata = |goal_context| {
+        let mut metadata = message_metadata(metadata_payload, goal_context);
+        if let (Some(source_event), Value::Object(map)) = (source_event, &mut metadata) {
+            map.insert(
+                "source_event".to_string(),
+                Value::String(source_event.to_string()),
+            );
+        }
+        metadata
+    };
 
     let timestamp = timestamp_from_record(record);
     if let Some(goal_context) = codex_goal_context_from_text(&text) {
+        let metadata = metadata(Some(&goal_context));
         return Some(goal_context_message(
             meta,
             model,
@@ -53,13 +81,16 @@ pub(super) fn message_from_line(
             offset,
             timestamp,
             &goal_context,
-            &message_metadata(payload, Some(&goal_context)),
+            &metadata,
         ));
     }
 
     Some(SessionMessageRecord {
         provider: PROVIDER.to_string(),
-        message_id: format!("{}:{offset}", meta.session_id),
+        message_id: source_item_id.map_or_else(
+            || format!("{}:{offset}", meta.session_id),
+            |item_id| format!("{}:{item_id}", meta.session_id),
+        ),
         session_id: meta.session_id.clone(),
         role: role.to_string(),
         timestamp,
@@ -70,7 +101,7 @@ pub(super) fn message_from_line(
         tool_names: (!tool_names.is_empty()).then(|| tool_names.join(",")),
         source_path: Some(path.to_string_lossy().to_string()),
         source_offset: Some(offset),
-        metadata_json: serde_json::to_string(&message_metadata(payload, None)).ok(),
+        metadata_json: serde_json::to_string(&metadata(None)).ok(),
     })
 }
 
