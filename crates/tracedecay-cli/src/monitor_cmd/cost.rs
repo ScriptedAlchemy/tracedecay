@@ -392,6 +392,7 @@ mod tests {
 
     #[test]
     fn cost_handshake_preserves_discovered_project_identity() {
+        crate::product_runtime::register_for_tests();
         let handshake = global_cost_handshake().unwrap();
         assert_eq!(
             handshake.project_path,
