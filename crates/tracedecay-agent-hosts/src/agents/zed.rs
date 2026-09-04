@@ -234,6 +234,11 @@ fn zed_mcp_registration_state(
     }
 }
 
+/// A host that is not installed is an informational finding, exactly as the
+/// shared `doctor_check_mcp_registration` treats every other host: only a
+/// present-but-foreign or unparsable registration is an issue. Grading an
+/// absent Zed settings file as a failure made `tracedecay doctor` exit 1 on
+/// every machine without Zed (the stock Hermes integration job included).
 fn doctor_check_registration(
     dc: &mut DoctorCounters,
     config: &Path,
@@ -241,6 +246,14 @@ fn doctor_check_registration(
     registered: &'static str,
     missing: &'static str,
 ) {
+    if !config.exists() {
+        dc.warn(&format!(
+            "{} not found — run `tracedecay install --agent zed` if you use {}",
+            config.display(),
+            product
+        ));
+        return;
+    }
     report_mcp_registration(
         dc,
         config,

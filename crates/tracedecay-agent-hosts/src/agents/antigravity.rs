@@ -211,6 +211,11 @@ fn antigravity_registration_state(
     }
 }
 
+/// An absent Antigravity config is an informational finding, as for every
+/// other host in `doctor_check_mcp_registration`; only a present-but-foreign
+/// or unparsable registration is an issue. Grading the absent files as
+/// failures made `tracedecay doctor` exit 1 on every machine without
+/// Antigravity (the stock Hermes integration job included).
 fn doctor_check_registration(
     dc: &mut DoctorCounters,
     config: &Path,
@@ -218,6 +223,14 @@ fn doctor_check_registration(
     registered: &'static str,
     missing: &'static str,
 ) {
+    if !config.exists() {
+        dc.warn(&format!(
+            "{} not found — run `tracedecay install --agent antigravity` if you use {}",
+            config.display(),
+            product
+        ));
+        return;
+    }
     report_mcp_registration(
         dc,
         config,
