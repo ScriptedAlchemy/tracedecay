@@ -5024,6 +5024,23 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
     /// through the retained publication clone. A sealed binding is an
     /// immutable pointer-file read, so it stays answerable while a reconcile
     /// owns the scheduler mutex for its whole pass.
+    /// Load one exact published generation from this worktree's durable store
+    /// without taking the scheduler mutex.
+    ///
+    /// The process-local semantic retained map keeps only the latest capture
+    /// until the retention proof runs, so a vector generation built from a
+    /// source that a newer capture has since superseded is only reachable
+    /// through the publication store's pointer index.
+    #[hotpath::measure(label = "daemon.code_index.historical.published_generation")]
+    pub(crate) fn published_generation(
+        &self,
+        generation_id: &CodeGenerationId,
+    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexSchedulerErrorV1> {
+        self.publication
+            .load_generation(generation_id)
+            .map_err(|error| CodeIndexProductionErrorV1::Publication(error).into())
+    }
+
     #[hotpath::measure(label = "daemon.code_index.historical.replay_binding")]
     pub(crate) fn sealed_replay_binding(
         &self,
