@@ -831,6 +831,21 @@ TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE="$fastembed_fixture" \
   -E 'test(~semantic_activation_journey_test::public_semantic_activation_rollback_and_exact_retry_preserve_graph_authority)' \
   --no-tests=fail
 
+echo "distribution acceptance: exercising shipped CLI semantic activation"
+TRACEDECAY_TEST_BIN="$packaged_cli_bin" \
+  TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE="$fastembed_fixture" \
+  CARGO_NET_OFFLINE=true \
+  HF_HUB_OFFLINE=1 \
+  cargo nextest run \
+  --manifest-path "$cli_package/Cargo.toml" \
+  --release \
+  "${release_cli_cargo_args[@]}" \
+  --test core_cli_suite \
+  --config "$patch_config" \
+  --run-ignored all \
+  -E 'test(=semantic_activation_test::shipped_cli_activates_a_published_profile_for_strict_semantic_search)' \
+  --no-tests=fail
+
 install_root="$work/install"
 echo "distribution acceptance: installing packaged CLI with release facilities"
 TRACEDECAY_RELEASE_GIT_SHA="$source_git_sha" cargo install \
