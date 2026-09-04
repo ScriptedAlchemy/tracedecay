@@ -1403,6 +1403,7 @@ mod tests {
         ("tracedecay_fact_store_update", BranchSensitivity::Independent),
         ("tracedecay_fact_store_remove", BranchSensitivity::Independent),
         ("tracedecay_fact_store_list", BranchSensitivity::Independent),
+        ("tracedecay_fact_store_supersede", BranchSensitivity::Independent),
         ("tracedecay_fact_feedback", BranchSensitivity::Independent),
         ("tracedecay_memory_status", BranchSensitivity::Independent),
         ("tracedecay_session_refresh", BranchSensitivity::Independent),
