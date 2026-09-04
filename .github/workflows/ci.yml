@@ -267,18 +267,25 @@ jobs:
       # moment that dev-dependency changes, and nextest would then silently
       # select zero of them and report green having run nothing. Asking for the
       # feature explicitly makes the selection independent of that accident.
-      # `tracedecay-search-eval` ships two binaries and has no integration
-      # tests of its own, so cargo never links them for a test build: cargo
-      # only builds a package's bin targets when that same package has a test
-      # or bench target selected. The evaluator acceptance tests
+      # `tracedecay-search-eval` ships two binaries and has no test target of
+      # its own, and cargo only links a package's bins for a test build when
+      # that same package has a test or bench selected. `cargo nextest run`
+      # therefore never produced them, and the acceptance tests that execute
+      # them out of the profile directory
       # (`runtime_acceptance_suite::search_eval_cli_test`,
-      # `product_surface_suite::packaged_semantic_evaluator`) execute those
-      # binaries out of the profile directory and fail closed naming this
-      # command when they are absent. Building them here is the deterministic
-      # prerequisite; the tests keep asserting the binary exists rather than
-      # skipping, so a dropped step is a red lane, not a silent no-op.
-      - name: Build search-eval binaries
-        run: cargo build -p tracedecay-search-eval --bins --locked
+      # `product_surface_suite::packaged_semantic_evaluator`) failed closed.
+      #
+      # The package selection and features must match the test lane below
+      # exactly. `tracedecay-search-eval` depends on `tracedecay-code-index`
+      # with `default-features = false`, so a `-p tracedecay-search-eval` build
+      # resolves without the language tiers and produces an evaluator that
+      # cannot parse Rust ("no bundled Tree-sitter grammar is available for
+      # language rust", exit 2 where the contract is exit 1). Only the same
+      # `--workspace --features tracedecay/test-helpers` resolution turns the
+      # tiers back on, and it makes these artifacts a cache hit for the run
+      # that follows rather than a second, differently-featured build.
+      - name: Build workspace binaries for the test lane
+        run: cargo build --workspace --bins --locked --features tracedecay/test-helpers
 
       # `nested_chunk_fanout_admits_stolen_workers_without_exceeding_width`
       # installs the process-global background CPU authority at width 2, and
@@ -642,9 +649,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
+      # Judge formatting with the toolchain `rust-toolchain.toml` pins, not
+      # whatever `stable` is on the runner. rustfmt's output changes between
+      # releases — 1.98.1 breaks a `.unwrap_or_else(|err| { ... })` chain that
+      # 1.97.1 keeps inline — so a `stable` rustfmt rejects a tree the pinned
+      # rustfmt developers run formats exactly, and every contributor sees a
+      # red lane they cannot reproduce. `dtolnay/rust-toolchain@stable` also
+      # exports `RUSTUP_TOOLCHAIN`, which overrides the toolchain file rather
+      # than deferring to it. Installing through rustup with no override keeps
+      # the pin in one place: the toolchain file, components included.
+      - name: Install the repository's pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
       - run: cargo fmt --all -- --check
 
   dashboard:
