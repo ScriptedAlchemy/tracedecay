@@ -639,11 +639,9 @@ static SHARED_JSONL_PREPARED_BYTES: std::sync::atomic::AtomicU64 =
 static SHARED_JSONL_PEAK_PREPARED_BYTES: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 #[cfg(test)]
-static SHARED_JSONL_ACTIVE_BUILDS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-#[cfg(test)]
-static SHARED_JSONL_PEAK_BUILDS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+static SHARED_JSONL_BUILD_OBSERVERS: OnceLock<
+    Mutex<HashMap<PathBuf, std::sync::Weak<SharedJsonlBuildObservation>>>,
+> = OnceLock::new();
 #[cfg(test)]
 static SHARED_JSONL_ACTIVE_FRAME_PREPARATIONS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
@@ -664,16 +662,99 @@ static SHARED_JSONL_BUILD_GATES: OnceLock<Mutex<HashMap<PathBuf, Arc<std::sync::
     OnceLock::new();
 
 #[cfg(test)]
-struct SharedJsonlBuildGuard;
+#[derive(Default)]
+struct SharedJsonlBuildObservation {
+    active: std::sync::atomic::AtomicUsize,
+    peak: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(test)]
+struct SharedJsonlBuildObserver {
+    observation: Arc<SharedJsonlBuildObservation>,
+    paths: Vec<PathBuf>,
+}
+
+#[cfg(test)]
+impl SharedJsonlBuildObserver {
+    fn for_paths(paths: &[PathBuf]) -> Self {
+        let mut unique_paths = Vec::with_capacity(paths.len());
+        for path in paths {
+            if !unique_paths.contains(path) {
+                unique_paths.push(path.clone());
+            }
+        }
+        let observation = Arc::new(SharedJsonlBuildObservation::default());
+        let observers = SHARED_JSONL_BUILD_OBSERVERS.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut observers = observers.lock().unwrap_or_else(PoisonError::into_inner);
+        for path in &unique_paths {
+            assert!(
+                observers
+                    .get(path)
+                    .and_then(std::sync::Weak::upgrade)
+                    .is_none(),
+                "a shared JSONL path may have only one active build observer"
+            );
+            observers.insert(path.clone(), Arc::downgrade(&observation));
+        }
+        drop(observers);
+        Self {
+            observation,
+            paths: unique_paths,
+        }
+    }
+
+    fn active(&self) -> usize {
+        self.observation
+            .active
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn peak(&self) -> usize {
+        self.observation
+            .peak
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+#[cfg(test)]
+impl Drop for SharedJsonlBuildObserver {
+    fn drop(&mut self) {
+        let observers = SHARED_JSONL_BUILD_OBSERVERS.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut observers = observers.lock().unwrap_or_else(PoisonError::into_inner);
+        for path in &self.paths {
+            let belongs_to_observer = observers
+                .get(path)
+                .and_then(std::sync::Weak::upgrade)
+                .is_some_and(|observation| Arc::ptr_eq(&observation, &self.observation));
+            if belongs_to_observer {
+                observers.remove(path);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+struct SharedJsonlBuildGuard {
+    observation: Option<Arc<SharedJsonlBuildObservation>>,
+}
 
 #[cfg(test)]
 impl SharedJsonlBuildGuard {
-    fn enter() -> Self {
+    fn enter(path: &Path) -> Self {
         use std::sync::atomic::Ordering;
 
-        let active = SHARED_JSONL_ACTIVE_BUILDS.fetch_add(1, Ordering::AcqRel) + 1;
-        SHARED_JSONL_PEAK_BUILDS.fetch_max(active, Ordering::AcqRel);
-        Self
+        let observers = SHARED_JSONL_BUILD_OBSERVERS.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut observers = observers.lock().unwrap_or_else(PoisonError::into_inner);
+        let observation = observers.get(path).and_then(std::sync::Weak::upgrade);
+        if observation.is_none() {
+            observers.remove(path);
+        }
+        drop(observers);
+        if let Some(observation) = &observation {
+            let active = observation.active.fetch_add(1, Ordering::AcqRel) + 1;
+            observation.peak.fetch_max(active, Ordering::AcqRel);
+        }
+        Self { observation }
     }
 }
 
@@ -682,13 +763,10 @@ impl Drop for SharedJsonlBuildGuard {
     fn drop(&mut self) {
         use std::sync::atomic::Ordering;
 
-        SHARED_JSONL_ACTIVE_BUILDS.fetch_sub(1, Ordering::AcqRel);
+        if let Some(observation) = &self.observation {
+            observation.active.fetch_sub(1, Ordering::AcqRel);
+        }
     }
-}
-
-#[cfg(test)]
-fn shared_jsonl_peak_builds_for_test() -> usize {
-    SHARED_JSONL_PEAK_BUILDS.load(std::sync::atomic::Ordering::Acquire)
 }
 
 #[cfg(test)]
@@ -927,8 +1005,6 @@ fn build_shared_jsonl_page(
         cancellation,
     } = options;
     #[cfg(test)]
-    let _build_guard = SharedJsonlBuildGuard::enter();
-    #[cfg(test)]
     let build_gate = {
         SHARED_JSONL_BUILD_GATES
             .get_or_init(|| Mutex::new(HashMap::new()))
@@ -937,6 +1013,8 @@ fn build_shared_jsonl_page(
             .get(&path)
             .cloned()
     };
+    #[cfg(test)]
+    let _build_guard = SharedJsonlBuildGuard::enter(&path);
     #[cfg(test)]
     if let Some(gate) = build_gate {
         gate.wait();
