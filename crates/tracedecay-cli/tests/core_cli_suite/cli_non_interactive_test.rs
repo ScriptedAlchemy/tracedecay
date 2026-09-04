@@ -74,7 +74,7 @@ fn assert_namespace_absent(path: &Path, context: &str) {
 /// profile-sharded fixture no longer plants one — a fixture that must model
 /// the "registry-backed, no repo marker" shape treats an already-absent
 /// directory as exactly that shape rather than a setup failure.
-fn remove_repo_local_marker_dir_if_present(project: &Path) {
+pub(crate) fn remove_repo_local_marker_dir_if_present(project: &Path) {
     match std::fs::remove_dir_all(project.join(".tracedecay")) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -347,6 +347,15 @@ fn sessions_unfinished_lists_workflow_state_evidence() {
                 .await
                 .expect("session message fixture write")
         );
+        // The daemon started below opens this database as a separate process.
+        // Checkpoint and release the writer here so it sees the fixture rows
+        // and can take the single-writer authority, the same discipline the
+        // profile-scoped fixtures in this file already follow.
+        runtime
+            .checkpoint_session_database_for_test(HostAdmissionScope::Project)
+            .await
+            .expect("session fixture checkpoint");
+        drop(runtime);
     });
 
     let mut command = tracedecay_command(home.path(), &project_root);
@@ -370,7 +379,14 @@ fn sessions_search_omits_absent_optional_filters_and_preserves_provider() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let project_root = canonical_temp_path(project.path());
-    std::fs::write(project_root.join("lib.rs"), "pub fn indexed() {}\n").unwrap();
+    // Commit the fixture before `init`, for two reasons that both end in
+    // `application.retained.authority-unavailable` otherwise: the daemon's
+    // full project open reads an attached git HEAD before it exposes the
+    // registered session authority, and `HostAdmissionTestRuntimeV1::project`
+    // below `git init`s any project root that is not already a repository —
+    // which would move the repository identity out from under the project id
+    // `init` just registered.
+    write_git_fixture(&project_root);
     init_project_fixture(home.path(), &project_root);
     let project_id = default_profile_project_id(&project_root);
 
@@ -405,6 +421,13 @@ fn sessions_search_omits_absent_optional_filters_and_preserves_provider() {
             )
             .await
             .expect("session message fixture write");
+        // Same reason as `sessions_unfinished_lists_workflow_state_evidence`:
+        // the daemon below is a separate process opening this database.
+        runtime
+            .checkpoint_session_database_for_test(HostAdmissionScope::Project)
+            .await
+            .expect("session fixture checkpoint");
+        drop(runtime);
     });
 
     let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
@@ -583,6 +606,12 @@ fn init_skips_gitignore_prompt_when_stdin_not_a_terminal() {
     let project = TempDir::new().unwrap();
     std::fs::create_dir_all(project.path().join("src")).unwrap();
     std::fs::write(project.path().join("src/lib.rs"), "pub fn marker() {}\n").unwrap();
+    // The `.gitignore` offer only exists for a repository, and code indexing
+    // is git-backed: without a committed repository `init` can only report
+    // that indexing is unavailable, so neither half of this test's subject
+    // would be exercised.
+    git(project.path(), &["init", "-b", "main"]);
+    commit_all(project.path(), "fixture repository");
 
     let mut command = tracedecay_command(home.path(), project.path());
     command.arg("init");
@@ -606,8 +635,12 @@ fn init_skips_gitignore_prompt_when_stdin_not_a_terminal() {
         "non-interactive init must not add .gitignore by default"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
+    // `init` is brokered through the daemon now: it admits the project and
+    // then asks the daemon-owned code-index scheduler to reconcile, so the
+    // confirmation names the reconciliation it actually requested rather than
+    // an index it wrote itself.
     assert!(
-        stderr.contains("initialized and indexed"),
+        stderr.contains("daemon code-index reconciliation requested"),
         "stderr should confirm non-interactive initialization\nstderr:\n{stderr}"
     );
 }
@@ -1041,8 +1074,34 @@ fn fact_store_curate_records_backend_disabled_skip_and_preserves_read_only_inspe
 
     init_project_fixture(home.path(), project.path());
 
+    // A backend-disabled skip is the subject here, and the shipped automation
+    // default is now `codex_app_server` with the curation loop scheduled
+    // (`AutomationSettingsV1::default`). Arrange the condition instead of
+    // inheriting it, or the manual run reports whatever the default backend
+    // reached (`nothing_to_review`) and proves nothing about the skip.
+    let mut disable = tracedecay_command(home.path(), project.path());
+    disable.args(["automation", "config", "set", "--backend", "disabled"]);
+    let disable_output = run_with_timeout(disable, cli_timeout());
+    assert!(
+        disable_output.status.success(),
+        "disabling the automation backend should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&disable_output.stdout),
+        String::from_utf8_lossy(&disable_output.stderr)
+    );
+
     let mut run = tracedecay_command(home.path(), project.path());
-    run.args(["tool", "fact_store_curate", "--json", "--args", "{}"]);
+    // `tracedecay tool` reaches a retained operation over the MCP
+    // compatibility binding, which answers with the tool-result envelope;
+    // `format: "json"` is what makes the retained document travel inside the
+    // content block instead of its elided markdown rendering. `--json` only
+    // decides whether the CLI prints that envelope or joins its text.
+    run.args([
+        "tool",
+        "fact_store_curate",
+        "--json",
+        "--args",
+        r#"{"format":"json"}"#,
+    ]);
     let run_output = run_with_timeout(run, cli_timeout());
     assert!(
         run_output.status.success(),
@@ -1050,8 +1109,14 @@ fn fact_store_curate_records_backend_disabled_skip_and_preserves_read_only_inspe
         String::from_utf8_lossy(&run_output.stdout),
         String::from_utf8_lossy(&run_output.stderr)
     );
-    let payload: serde_json::Value =
+    let envelope: serde_json::Value =
         serde_json::from_slice(&run_output.stdout).expect("fact_store_curate should print JSON");
+    let document = envelope["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("fact_store_curate returned no content text: {envelope}"))
+        .to_owned();
+    let payload: serde_json::Value =
+        serde_json::from_str(&document).expect("content block should carry the document");
     let run = &payload["outcome"]["value"]["payload"];
     assert_eq!(run["task"], "memory_curator");
     assert_eq!(run["terminal"]["status"], "skipped");
@@ -1072,17 +1137,26 @@ fn fact_store_curate_records_backend_disabled_skip_and_preserves_read_only_inspe
         1,
         "automation run should write one run ledger, got {ledger_paths:?}"
     );
+    let run_id = run["run_id"]
+        .as_str()
+        .expect("automation run payload should include a run_id");
+    // The scheduled curation loop writes its own records into the same
+    // ledger, so identify this run by the id the manual call returned rather
+    // than by being the only line in the file.
     let ledger = std::fs::read_to_string(&ledger_paths[0]).unwrap();
-    let record: serde_json::Value =
-        serde_json::from_str(ledger.trim()).expect("ledger should contain one JSON record");
-    assert_eq!(record["run_id"], run["run_id"]);
+    let record = ledger
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .expect("every ledger line should be a JSON record")
+        })
+        .find(|record| record["run_id"] == run_id)
+        .unwrap_or_else(|| panic!("ledger should record run {run_id}:\n{ledger}"));
     assert_eq!(record["status"], "skipped");
     assert_eq!(record["error"], "backend_disabled");
     assert_eq!(record["trigger"], "application");
 
-    let run_id = run["run_id"]
-        .as_str()
-        .expect("automation run payload should include a run_id");
     let mut list = tracedecay_command(home.path(), project.path());
     list.args(["automation", "runs", "list", "--json", "--limit", "5"]);
     let list_output = run_with_timeout(list, cli_timeout());
@@ -1094,9 +1168,13 @@ fn fact_store_curate_records_backend_disabled_skip_and_preserves_read_only_inspe
     );
     let list_payload: serde_json::Value =
         serde_json::from_slice(&list_output.stdout).expect("runs list should print JSON");
-    assert_eq!(list_payload["count"], 1);
-    assert_eq!(list_payload["records"][0]["run_id"], run_id);
-    assert_eq!(list_payload["records"][0]["status"], "skipped");
+    let listed = list_payload["records"]
+        .as_array()
+        .expect("runs list should return records")
+        .iter()
+        .find(|entry| entry["run_id"] == run_id)
+        .unwrap_or_else(|| panic!("runs list should surface {run_id}: {list_payload}"));
+    assert_eq!(listed["status"], "skipped");
 
     let mut view = tracedecay_command(home.path(), project.path());
     view.args(["automation", "runs", "view", run_id, "--json"]);
@@ -1117,7 +1195,7 @@ fn fact_store_curate_records_backend_disabled_skip_and_preserves_read_only_inspe
         .expect("ledger should live under dashboard root")
         .to_path_buf();
     let mut artifact_record: AutomationRunLedgerRecord =
-        serde_json::from_str(ledger.trim()).expect("ledger should deserialize as run record");
+        serde_json::from_value(record).expect("ledger should deserialize as run record");
     let artifact_payload = serde_json::json!({
         "loop_stage": "codex_handoff",
         "run_id": run_id,

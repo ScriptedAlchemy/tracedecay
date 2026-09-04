@@ -270,6 +270,39 @@ fn init_project_with_cli(home: &Path, project: &Path) {
     crate::common::initialize_tracedecay_cli_project(home, project);
 }
 
+/// [`init_project_with_cli`] over a committed repository.
+///
+/// The daemon's project-scoped retained authorities (LCM, sessions) and its
+/// code index are all git-backed: a project that is not a committed repository
+/// opens with those authorities unmounted, and `init` reports that code
+/// indexing is unavailable rather than requesting reconciliation. Journeys
+/// whose subject is one of those authorities need the repository, or they only
+/// ever observe the degraded open.
+fn init_committed_git_project_with_cli(home: &Path, project: &Path) {
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(
+        project.join("src/lib.rs"),
+        "pub fn answer() -> u32 { 42 }\n",
+    )
+    .unwrap();
+    git(project, &["init", "-b", "main"]);
+    git(project, &["add", "."]);
+    git(
+        project,
+        &[
+            "-c",
+            "user.name=TraceDecay Tests",
+            "-c",
+            "user.email=tests@tracedecay.local",
+            "commit",
+            "-m",
+            "seed committed project fixture",
+        ],
+    );
+
+    crate::common::initialize_tracedecay_cli_project(home, project);
+}
+
 fn git(project: &Path, args: &[&str]) {
     let git = crate::common::git_program();
     // Retry a transient spawn ENOENT under heavy parallel load.
@@ -1489,13 +1522,19 @@ fn daemon_reuses_project_engine_across_tool_clients() {
     let first_tool_calls = tool_status_server_tool_calls(&home_path, &project_path);
     let second_tool_calls = tool_status_server_tool_calls(&home_path, &project_path);
 
-    assert_eq!(
-        first_tool_calls, 1,
-        "first status call should see itself counted"
-    );
+    // `init` is brokered through the daemon now (`tracedecay_status` then
+    // `tracedecay_admin_sync`), so the fixture has already spent tool calls on
+    // this engine and the first status here is no longer call number one. What
+    // this test is about survives that: the counter is the engine's, so the
+    // first call sees itself and a second client sees exactly one more.
     assert!(
-        second_tool_calls >= 2,
-        "second status call should reuse daemon engine and see accumulated tool calls, got {second_tool_calls}"
+        first_tool_calls >= 1,
+        "first status call should see itself counted, got {first_tool_calls}"
+    );
+    assert_eq!(
+        second_tool_calls,
+        first_tool_calls + 1,
+        "second status call should reuse the daemon engine and see exactly one more tool call"
     );
 }
 
@@ -1505,7 +1544,11 @@ fn doctor_keeps_live_daemon_database_healthy_without_compaction() {
     let project = TempDir::new().unwrap();
     let home_path = canonical_existing_path(home.path());
     let project_path = canonical_existing_path(project.path());
-    init_project_with_cli(&home_path, &project_path);
+    // Doctor's SemanticIndex family reports an unmounted code index as an
+    // issue, and `doctor` exits nonzero on any issue. The index is git-backed,
+    // so a non-repository fixture would fail this journey on the fixture's own
+    // shape rather than on anything doctor did to the live database.
+    init_committed_git_project_with_cli(&home_path, &project_path);
 
     let data_root = profile_sharded_data_root(
         &home_path.join(".tracedecay"),
@@ -1658,7 +1701,11 @@ fn daemon_project_handshake_uses_registry_backed_profile_store_without_marker() 
     pin_fixture_repository_identity(&project_path, "proj_daemon_registry").unwrap();
 
     crate::common::initialize_tracedecay_cli_project(&client_home_path, &project_path);
-    std::fs::remove_dir_all(project_path.join(".tracedecay")).unwrap();
+    // Repository identity lives in the git common dir now, so the fixture no
+    // longer plants a repo-local marker directory. "No marker" is exactly the
+    // shape this test needs, so an already-absent directory is the modeled
+    // state rather than a setup failure.
+    crate::cli_non_interactive_test::remove_repo_local_marker_dir_if_present(&project_path);
 
     let _daemon = spawn_tracedecay_daemon(&daemon_home_path);
     let socket_path = common::daemon_socket_path(&daemon_home_path);
@@ -2044,7 +2091,11 @@ fn hermes_read_only_preflight_keeps_project_lcm_grep_available() {
     let project = TempDir::new().unwrap();
     let home_path = canonical_existing_path(home.path());
     let project_path = canonical_existing_path(project.path());
-    init_project_with_cli(&home_path, &project_path);
+    // The project-scoped LCM read authority this test must keep attached only
+    // mounts for a committed repository; without one it is never mounted and
+    // `lcm_grep` answers `application.retained.authority-unavailable` whether
+    // or not the user-scoped preflight detached anything.
+    init_committed_git_project_with_cli(&home_path, &project_path);
     let _daemon = spawn_tracedecay_daemon(&home_path);
     let project_arg = project_path.to_string_lossy().to_string();
     let socket = common::daemon_socket_path(&home_path);
