@@ -48,9 +48,17 @@ run_smoke() {
     shift
     # Run from the fixture so the spawned server's cwd matches the indexed
     # project (otherwise tool results gain a cwd-mismatch warning block).
-    (cd "$fixture" && timeout "$timeout_secs" \
+    # The spawned server inherits the inspector's stderr, which the callers
+    # capture and print when a call fails or times out; ask it for
+    # progress-level logging so a hung call leaves evidence in CI.
+    (cd "$fixture" && RUST_LOG="${SMOKE_SERVE_LOG:-warn,tracedecay=info}" timeout "$timeout_secs" \
       npx -y "@modelcontextprotocol/inspector@$INSPECTOR_VERSION" --cli \
       "$TRACEDECAY_BIN" serve -p "$fixture" "$@")
+    local status=$?
+    if ((status == 124)); then
+      echo "error: inspector call timed out after ${timeout_secs}s: $*" >&2
+    fi
+    return "$status"
   }
 
   # json_assert <file> <node expression over parsed json `j`>
