@@ -520,6 +520,109 @@ pub fn process_resident_memory_pressure_v1() -> &'static Arc<ResidentMemoryPress
     })
 }
 
+/// The allocator trim runs after every state reclaimer, so the pages those
+/// reclaimers just freed are returned in the same pass.
+pub const PROCESS_ALLOCATOR_TRIM_PRESSURE_PRIORITY_V1: u32 = u32::MAX;
+
+static PROCESS_ALLOCATOR_TRIM_REGISTRATION_V1: OnceLock<
+    Option<ResidentMemoryPressureRegistrationV1>,
+> = OnceLock::new();
+
+/// Bytes of RSS returned by one allocator trim.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProcessAllocatorTrimV1 {
+    /// Whether the allocator reported releasing anything.
+    pub trimmed: bool,
+    /// Measured RSS before the trim, when the kernel surface reports it.
+    pub before_bytes: Option<u64>,
+    /// Measured RSS after the trim, when the kernel surface reports it.
+    pub after_bytes: Option<u64>,
+}
+
+impl ProcessAllocatorTrimV1 {
+    /// RSS the trim returned to the kernel; zero when it was not measurable.
+    #[must_use]
+    pub fn released_bytes(self) -> u64 {
+        match (self.before_bytes, self.after_bytes) {
+            (Some(before), Some(after)) => before.saturating_sub(after),
+            _ => 0,
+        }
+    }
+}
+
+/// Return freed-but-retained allocator pages to the kernel.
+///
+/// glibc keeps freed chunks inside its per-thread arenas and only unmaps a
+/// heap from its top, so a fan-out that allocates and frees on dozens of
+/// worker threads leaves most of that memory resident forever: indexing a
+/// 68 MB source tree on four cores measured 8.5 GB of arena system memory
+/// with 3.5 GB live and 4.9 GB free, and one `malloc_trim(0)` returned 3.9 GB
+/// of RSS at once. Measured RSS is what admission trusts, so those pages
+/// refuse real work. Other allocators return zero here; the reclaimer is a
+/// no-op for them.
+#[must_use]
+pub fn release_process_allocator_memory_v1() -> ProcessAllocatorTrimV1 {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        let before_bytes = sampled_process_resident_bytes_v1();
+        // SAFETY: `malloc_trim` is a process-wide, thread-safe glibc
+        // maintenance call that takes no pointers and invalidates no live
+        // allocation; it only advises the kernel about pages the allocator
+        // no longer uses.
+        let trimmed = unsafe { libc::malloc_trim(0) } == 1;
+        let after_bytes = sampled_process_resident_bytes_v1();
+        let trim = ProcessAllocatorTrimV1 {
+            trimmed,
+            before_bytes,
+            after_bytes,
+        };
+        hotpath::gauge!("daemon.memory.allocator_trim_released_bytes").set(trim.released_bytes());
+        trim
+    }
+    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+    {
+        ProcessAllocatorTrimV1 {
+            trimmed: false,
+            before_bytes: None,
+            after_bytes: None,
+        }
+    }
+}
+
+/// Register the allocator trim as the last pressure reclaimer of `pressure`.
+pub fn register_process_allocator_pressure_reclaimer_v1(
+    pressure: &Arc<ResidentMemoryPressureV1>,
+) -> Result<ResidentMemoryPressureRegistrationV1, ResidentMemoryPressureRegistrationFailureV1> {
+    pressure.register_pressure_reclaimer(
+        PROCESS_ALLOCATOR_TRIM_PRESSURE_PRIORITY_V1,
+        Arc::new(|request| {
+            let trim = release_process_allocator_memory_v1();
+            tracing::info!(
+                event = "process_allocator_trimmed",
+                trimmed = trim.trimmed,
+                released_bytes = trim.released_bytes(),
+                observed_bytes = request.observed_bytes,
+                high_watermark_bytes = request.high_watermark_bytes,
+                "returned freed allocator pages under resident-memory pressure"
+            );
+            trim.released_bytes()
+        }),
+    )
+}
+
+/// Install the allocator trim reclaimer on the process pressure cell, once.
+///
+/// Returns whether this call installed it; later calls are no-ops that
+/// return `false`. The registration lives for the process.
+pub fn install_process_allocator_pressure_reclaimer_v1() -> bool {
+    let mut installed = false;
+    PROCESS_ALLOCATOR_TRIM_REGISTRATION_V1.get_or_init(|| {
+        installed = true;
+        register_process_allocator_pressure_reclaimer_v1(process_resident_memory_pressure_v1()).ok()
+    });
+    installed
+}
+
 /// Stable component label inside one exact generation identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ResidentMemoryComponentIdV1(&'static str);

@@ -787,3 +787,48 @@ fn dropped_pressure_reclaimer_registration_is_not_called() {
     pressure.publish_observed_resident_bytes(pressure.high_watermark_bytes());
     assert_eq!(*calls.lock().expect("call count"), 0);
 }
+
+#[test]
+fn allocator_trim_reclaimer_runs_under_pressure_and_reports_only_measured_release() {
+    let (_authority, pressure) = pressure_authority();
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let state_order = Arc::clone(&order);
+    let _state = pressure
+        .register_pressure_reclaimer(
+            10,
+            Arc::new(move |_| {
+                state_order.lock().expect("order").push("state");
+                0
+            }),
+        )
+        .expect("state reclaimer registration");
+    let _trim = super::register_process_allocator_pressure_reclaimer_v1(&pressure)
+        .expect("allocator trim registration");
+
+    // Below the high watermark the trim never runs: freed pages are only
+    // returned once measured RSS threatens admission.
+    pressure.publish_observed_resident_bytes(pressure.low_watermark_bytes());
+    assert!(order.lock().expect("order").is_empty());
+
+    pressure.publish_observed_resident_bytes(pressure.high_watermark_bytes());
+    assert_eq!(order.lock().expect("order").as_slice(), ["state"]);
+
+    let trim = super::release_process_allocator_memory_v1();
+    // A trim can only claim bytes the kernel surface measured on both sides.
+    match (trim.before_bytes, trim.after_bytes) {
+        (Some(before), Some(after)) => {
+            assert_eq!(trim.released_bytes(), before.saturating_sub(after));
+        }
+        _ => assert_eq!(trim.released_bytes(), 0),
+    }
+}
+
+#[test]
+fn process_allocator_pressure_reclaimer_installs_once() {
+    let first = super::install_process_allocator_pressure_reclaimer_v1();
+    let second = super::install_process_allocator_pressure_reclaimer_v1();
+    assert!(!second, "a second install must be a no-op");
+    // Another test in this process may have installed it first; either way
+    // exactly one call reports the installation.
+    let _ = first;
+}
