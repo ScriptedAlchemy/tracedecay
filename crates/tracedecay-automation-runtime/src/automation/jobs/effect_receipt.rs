@@ -600,13 +600,41 @@ mod tests {
         ));
     }
 
+    /// Report whether this host offers a device that accepts an open and then
+    /// refuses every write.
+    ///
+    /// `/dev/full` is the only portable-enough way to force `ENOSPC` *after*
+    /// the delivery file is open. Linux has it; macOS does not, and there the
+    /// symlink made the failure land at open instead — an unattempted
+    /// delivery, which is a different outcome than the one under test. Probe
+    /// for the device rather than assuming every unix has it.
+    #[cfg(unix)]
+    fn post_open_write_failure_device() -> Option<&'static str> {
+        let path = "/dev/full";
+        match std::fs::OpenOptions::new().write(true).open(path) {
+            Ok(mut file) => {
+                use std::io::Write as _;
+                let refuses_writes = file.write_all(b"probe").is_err();
+                refuses_writes.then_some(path)
+            }
+            Err(_) => None,
+        }
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn file_write_failure_after_open_is_a_bound_partial_effect() {
+        let Some(full_device) = post_open_write_failure_device() else {
+            println!(
+                "skipping file_write_failure_after_open_is_a_bound_partial_effect: \
+                 this host has no device that fails writes after a successful open"
+            );
+            return;
+        };
         let temp = tempfile::tempdir().expect("tempdir");
         let output_root = temp.path().join(JOB_OUTPUT_DIR);
         std::fs::create_dir_all(&output_root).expect("job output root");
-        std::os::unix::fs::symlink("/dev/full", output_root.join("sink")).expect("full device");
+        std::os::unix::fs::symlink(full_device, output_root.join("sink")).expect("full device");
         let job: AutomationJob = serde_json::from_value(json!({
             "id": "private-file",
             "name": "Private file",
