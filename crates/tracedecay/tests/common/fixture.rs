@@ -190,21 +190,18 @@ impl TestProfile {
             }),
         );
 
-        // Initialize through that same runtime wherever the registered seam
-        // exists, so a fixture never opens a second database scope on one
-        // profile. The public entry point is the fallback for builds without
-        // the seam; it resolves the same identity from the marker just written.
+        // Initialize through that same runtime, so a fixture never opens a
+        // second database scope on one profile. The public entry point is not
+        // an alternative here: outside `test-transport` builds
+        // `TraceDecay::init_with_options` takes a *maintenance* database scope
+        // on this profile root, the registered runtime above already holds a
+        // *daemon* scope on it, and every later exact-scoped call (the
+        // `upsert_code_project` below first of all) then fails with "daemon and
+        // maintenance database scopes overlap".
         let open_options = self.open_options();
-        #[cfg(feature = "test-transport")]
         let graph = Box::pin(
             registry.initialize_project_graph_for_test(&project_root, open_options.clone()),
         )
-        .await;
-        #[cfg(not(feature = "test-transport"))]
-        let graph = Box::pin(TraceDecay::init_with_options(
-            &project_root,
-            open_options.clone(),
-        ))
         .await;
         let graph = graph.unwrap_or_else(|err| {
             panic!(
