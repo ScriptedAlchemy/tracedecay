@@ -1554,7 +1554,11 @@ mod recent_first_discovery_tests {
     fn exact_hook_session_lookup_converges_in_bounded_retained_slices() {
         crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
         let temp = TempDir::new().unwrap();
-        let home = temp.path();
+        // Discovery reports resolved paths, so the fixture must be built on a
+        // resolved home: macOS hands out `/var/folders/...` for a tempdir the
+        // filesystem itself names `/private/var/folders/...`.
+        let resolved_home = temp.path().canonicalize().unwrap();
+        let home = resolved_home.as_path();
         let directory = home.join(".codex/sessions/2026/08/23");
         std::fs::create_dir_all(&directory).unwrap();
         for index in 0..4_100 {
@@ -1602,7 +1606,11 @@ mod recent_first_discovery_tests {
         use std::os::unix::fs::symlink;
 
         let temp = TempDir::new().unwrap();
-        let home = temp.path();
+        // Discovery reports resolved paths, so the fixture must be built on a
+        // resolved home: macOS hands out `/var/folders/...` for a tempdir the
+        // filesystem itself names `/private/var/folders/...`.
+        let resolved_home = temp.path().canonicalize().unwrap();
+        let home = resolved_home.as_path();
         let directory = home.join(".codex/sessions/2026/08/23");
         std::fs::create_dir_all(&directory).unwrap();
         let session_id = "0198-symlink-session";
@@ -1625,7 +1633,11 @@ mod recent_first_discovery_tests {
     fn distinct_exact_hook_ids_share_one_monotonic_source_index() {
         crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
         let temp = TempDir::new().unwrap();
-        let home = temp.path();
+        // Discovery reports resolved paths, so the fixture must be built on a
+        // resolved home: macOS hands out `/var/folders/...` for a tempdir the
+        // filesystem itself names `/private/var/folders/...`.
+        let resolved_home = temp.path().canonicalize().unwrap();
+        let home = resolved_home.as_path();
         let directory = home.join(".codex/sessions/2026/08/23");
         std::fs::create_dir_all(&directory).unwrap();
         let target_id = "indexed-before-late-request";
