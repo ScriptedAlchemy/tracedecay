@@ -131,36 +131,67 @@ async fn recover_truncated_payload(
                 "daemon tool {tool_name} returned truncated JSON without a retrieval handle"
             ),
         })?;
-    let arguments = serde_json::json!({ "handle": handle, "format": "json" });
-    let retrieved = match deadline {
-        Some(deadline) => {
-            hotpath::future!(
-                tracedecay::daemon::call_default_tool_awaiting_project_open(
-                    handshake,
-                    "tracedecay_retrieve",
-                    arguments,
-                    deadline,
+    // `tracedecay_retrieve` pages the stored response so every page fits the
+    // response budget; reassemble the pages through `offset` / `next_offset`
+    // / `has_more` before parsing, exactly as an agent does.
+    let mut content = String::new();
+    let mut offset: u64 = 0;
+    loop {
+        let arguments = serde_json::json!({ "handle": handle, "format": "json", "offset": offset });
+        let retrieved = match deadline {
+            Some(deadline) => {
+                hotpath::future!(
+                    tracedecay::daemon::call_default_tool_awaiting_project_open(
+                        handshake,
+                        "tracedecay_retrieve",
+                        arguments,
+                        deadline,
+                    ),
+                    label = "cli.daemon.recovery_fetch"
+                )
+                .await?
+            }
+            None => {
+                hotpath::future!(
+                    tracedecay::daemon::call_default_tool(
+                        handshake,
+                        "tracedecay_retrieve",
+                        arguments
+                    ),
+                    label = "cli.daemon.recovery_fetch"
+                )
+                .await?
+            }
+        };
+        let page = tracedecay::daemon::tool_json_payload(&retrieved, "tracedecay_retrieve")?;
+        let page_content = page
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!("daemon retrieval for {tool_name} omitted response content"),
+            })?;
+        content.push_str(page_content);
+        if page.get("has_more").and_then(serde_json::Value::as_bool) != Some(true) {
+            break;
+        }
+        let next_offset = page
+            .get("next_offset")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!(
+                    "daemon retrieval for {tool_name} reported more pages without a next offset"
                 ),
-                label = "cli.daemon.recovery_fetch"
-            )
-            .await?
+            })?;
+        if next_offset <= offset {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!(
+                    "daemon retrieval for {tool_name} did not advance past offset {offset}"
+                ),
+            });
         }
-        None => {
-            hotpath::future!(
-                tracedecay::daemon::call_default_tool(handshake, "tracedecay_retrieve", arguments),
-                label = "cli.daemon.recovery_fetch"
-            )
-            .await?
-        }
-    };
-    let retrieved = tracedecay::daemon::tool_json_payload(&retrieved, "tracedecay_retrieve")?;
-    let content = retrieved
-        .get("content")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("daemon retrieval for {tool_name} omitted response content"),
-        })?;
-    serde_json::from_str(content).map_err(Into::into)
+        offset = next_offset;
+    }
+    serde_json::from_str(&content).map_err(Into::into)
 }
 
 /// Recover a truncated MCP tool result while keeping the MCP envelope shape
