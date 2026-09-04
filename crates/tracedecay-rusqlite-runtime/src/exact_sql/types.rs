@@ -311,6 +311,7 @@ impl fmt::Display for MemoryReleaseNoOpReason {
 pub enum ExactSqlError {
     AuthorityMismatch,
     AuthorityDenied(String),
+    IsolatedSemanticEvaluationAuthorityClosed,
     InvalidAttachment,
     InvalidStatement,
     RequestLimitExceeded,
@@ -337,6 +338,9 @@ impl fmt::Display for ExactSqlError {
             }
             Self::AuthorityDenied(reason) => {
                 write!(formatter, "exact SQL write authority denied: {reason}")
+            }
+            Self::IsolatedSemanticEvaluationAuthorityClosed => {
+                formatter.write_str("isolated semantic evaluation authority is closed")
             }
             Self::InvalidAttachment => formatter.write_str("exact SQL attachment is invalid"),
             Self::InvalidStatement => formatter.write_str("exact SQL statement is empty"),
