@@ -10,7 +10,7 @@
 //! source scripts/hotpath-rustflags.sh
 //! HOTPATH_METRICS_SERVER_OFF=1 \
 //! cargo bench -p tracedecay --bench rmcp_connection_pipeline \
-//!   --no-default-features --features production,test-transport,hotpath-alloc
+//!   --no-default-features --features production,rmcp-benchmark,hotpath-alloc
 //! ```
 
 #[cfg(feature = "hotpath")]

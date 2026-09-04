@@ -354,6 +354,15 @@ test-transport = [
     "tracedecay-code-index-runtime/test-transport",
 ]
 
+# The typed RMCP benchmark is the only consumer of the client-side RMCP
+# transport. Keep that surface out of ordinary integration-fixture builds:
+# the benchmark enables its complete client/runtime dependency set explicitly.
+rmcp-benchmark = [
+    "test-transport",
+    "rmcp/client",
+    "rmcp/transport-async-rw",
+]
+
 # SEMANTIC FastEmbed adapter (Plan 31). Bundles ORT while leaving FastEmbed's
 # image defaults disabled. Runtime inference still loads only from locally
 # verified artifact bytes; daemon-owned acquisition uses hf-hub against the
@@ -604,7 +613,7 @@ test = false
 name = "rmcp_connection_pipeline"
 path = "benches/rmcp_connection_pipeline.rs"
 harness = false
-required-features = ["test-transport"]
+required-features = ["rmcp-benchmark"]
 test = false
 
 [[test]]

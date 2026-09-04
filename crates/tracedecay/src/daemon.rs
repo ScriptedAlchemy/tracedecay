@@ -210,7 +210,7 @@ use tracedecay_code_index_runtime::code_index_task_support::{
     code_index_scope_unavailable, code_index_search_hydration_budget,
 };
 mod connection_serving;
-#[cfg(feature = "test-transport")]
+#[cfg(feature = "rmcp-benchmark")]
 #[doc(hidden)]
 pub use connection_serving::rmcp_benchmark;
 #[cfg(unix)]
