@@ -48,6 +48,19 @@ fn enroll_profile_project(project_root: &Path, project_id: &str) {
     pin_fixture_repository_identity(project_root, project_id).unwrap();
 }
 
+/// Installs the composition-root runtime ports the hook implementation reads.
+///
+/// Hook and host behavior moved into `tracedecay-agent-hosts`, which reaches
+/// registered project identity and the canonical store layout through the
+/// `ports::hook_runtime` slots the root fills at startup. Unregistered, those
+/// slots answer "no project" and "no layout", so an in-process hook test sees
+/// every event as a generic workspace. Only the composition root can register
+/// them, and no test binary runs `main`; registration is `OnceLock::set`, so
+/// calling this from every hook fixture is idempotent.
+fn register_hook_runtime_ports() {
+    tracedecay::register_runtime_ports().expect("root runtime ports");
+}
+
 #[test]
 fn test_blocks_explore_agent() {
     let input = r#"{"subagent_type": "Explore", "prompt": "find files"}"#;
@@ -512,10 +525,15 @@ async fn test_codex_user_prompt_submit_generic_workspace_suppresses_code_hints()
     })
     .to_string();
 
+    register_hook_runtime_ports();
     let context = codex_user_prompt_submit_context_for_event(&event).await;
 
-    assert!(context.contains("TraceDecay session context"));
-    assert!(context.contains("tracedecay_lcm_expand_query"));
+    // Prompt steering is turn-local: UserPromptSubmit no longer repeats the
+    // session bootstrap, so a generic workspace produces no context at all.
+    assert!(
+        context.is_empty(),
+        "generic workspaces should emit no prompt steering: {context}"
+    );
     assert!(
         !context.contains("tracedecay hint:"),
         "generic workspaces should suppress prompt-derived code hints: {context}"
@@ -536,6 +554,7 @@ async fn test_codex_user_prompt_submit_generic_workspace_suppresses_code_hints()
 #[allow(clippy::await_holding_lock)]
 async fn test_codex_user_prompt_submit_records_workspace_status_and_missing_session_hint() {
     let _lock = lock_global_db_env();
+    register_hook_runtime_ports();
     let project = tempfile::tempdir().unwrap();
     let generic = tempfile::tempdir().unwrap();
     let profile = tempfile::tempdir().unwrap();
@@ -553,8 +572,12 @@ async fn test_codex_user_prompt_submit_records_workspace_status_and_missing_sess
     })
     .to_string();
     let generic_context = codex_user_prompt_submit_context_for_event(&generic_event).await;
-    assert!(generic_context.contains("TraceDecay session context"));
-    assert!(!generic_context.contains("tracedecay hint:"));
+    // Turn-local steering: a generic workspace still records its workspace
+    // status but emits no prompt context.
+    assert!(
+        generic_context.is_empty(),
+        "generic workspaces should emit no prompt steering: {generic_context}"
+    );
 
     let prompt_event = serde_json::json!({
         "cwd": project_root,
@@ -861,6 +884,7 @@ fn test_codex_subagent_start_no_history_does_not_suppress_later_research_context
 #[test]
 fn test_codex_subagent_start_counts_and_formats_log_line() {
     let _lock = lock_global_db_env();
+    register_hook_runtime_ports();
     let project = tempfile::tempdir().unwrap();
     let profile = tempfile::tempdir().unwrap();
     let project_root = project.path().canonicalize().unwrap();
