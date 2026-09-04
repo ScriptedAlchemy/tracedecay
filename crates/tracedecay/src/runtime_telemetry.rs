@@ -11,8 +11,9 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_session_memory::runtime_telemetry::{
     DatabaseSnapshot, GenerationCensusReader, GenerationCensusSnapshot,
     GenerationCensusUnavailableReason, ReaderPoolOccupancy, RuntimeRegistrySnapshot,
-    RuntimeSnapshot, WriterOwnerSnapshot, file_size, read_cached_process_sample, read_dirty_marker,
-    unix_epoch_secs, with_suffix,
+    RuntimeSnapshot, WriterOwnerSnapshot, file_size, read_cached_process_sample,
+    read_cached_process_sample_at_response_boundary, read_dirty_marker, unix_epoch_secs,
+    with_suffix,
 };
 
 /// Capture a runtime snapshot for the given project.
@@ -38,10 +39,18 @@ pub(crate) async fn collect_with_integrity_and_generation_census(
     include_integrity: bool,
     generation_census_reader: Option<&GenerationCensusReader>,
 ) -> Result<RuntimeSnapshot> {
-    let process = read_cached_process_sample();
+    // Start any required process-cache refresh before unrelated graph work.
+    // The response boundary below reads it again, which can observe the
+    // completed replacement without coupling the sampler's CPU window to the
+    // graph census or its deadline.
+    read_cached_process_sample();
     let database =
         collect_database_with_generation_census(cg, include_integrity, generation_census_reader)
             .await?;
+    // At the response boundary, wait only within the bounded process-sample
+    // completion window for a refresh already started above. A timeout
+    // remains a typed stale or unavailable process state.
+    let process = read_cached_process_sample_at_response_boundary().await;
     let captured_at = unix_epoch_secs()?;
     Ok(RuntimeSnapshot {
         captured_at,
