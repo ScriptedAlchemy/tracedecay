@@ -114,6 +114,16 @@ impl GitFixture {
             root.path(),
             &["config", "user.email", "tracedecay@example.invalid"],
         );
+        // `git commit` runs `git maintenance run --auto`, and with the default
+        // `maintenance.autoDetach` that child outlives the commit we waited on.
+        // It touches `.git` (its own lock, `gc.log`) after `git commit` has
+        // already returned, which races `from_template`'s directory walk: an
+        // entry listed by `read_dir` can be gone by the time it is copied, and
+        // the fixture fails with a bare `NotFound`. Fixtures need no
+        // maintenance at all, so switch it off in the repository itself; the
+        // setting is inherited by every copy taken from this template.
+        git(root.path(), &["config", "maintenance.auto", "false"]);
+        git(root.path(), &["config", "gc.auto", "0"]);
         for (path, source) in files {
             write(root.path(), path, source);
         }
@@ -165,11 +175,22 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
     for entry in std::fs::read_dir(src).expect("read fixture template") {
         let entry = entry.expect("fixture template entry");
         let file_type = entry.file_type().expect("fixture template entry type");
+        let source = entry.path();
         let destination = dst.join(entry.file_name());
         if file_type.is_dir() {
-            copy_dir_recursive(&entry.path(), &destination);
+            copy_dir_recursive(&source, &destination);
         } else {
-            std::fs::copy(entry.path(), &destination).expect("copy fixture template file");
+            // `file_type` is the un-followed type, so a symlink lands here and
+            // `fs::copy` would resolve it; name the entry either way so a
+            // failure identifies the exact template path rather than reporting
+            // a bare errno.
+            std::fs::copy(&source, &destination).unwrap_or_else(|error| {
+                panic!(
+                    "copy fixture template file '{}' to '{}': {error}",
+                    source.display(),
+                    destination.display()
+                )
+            });
         }
     }
 }
