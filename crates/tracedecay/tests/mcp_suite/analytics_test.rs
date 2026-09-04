@@ -114,7 +114,11 @@ async fn analytics_reports_tool_tiers_top_tools_and_zero_call_tools() {
     );
     let tools = &payload["tools"];
     assert_eq!(tools["available"].as_bool(), Some(true));
-    assert_eq!(tools["distinct_tools_called"].as_i64(), Some(2));
+    assert_eq!(tools["raw_distinct_event_name_count"].as_i64(), Some(2));
+    assert_eq!(
+        tools["called_available_defined_tool_count"].as_i64(),
+        Some(2)
+    );
 
     let tiers = tools["tiers"].as_array().expect("tiers array");
     let navigation = tiers
@@ -139,7 +143,7 @@ async fn analytics_reports_tool_tiers_top_tools_and_zero_call_tools() {
     assert_eq!(grep["errors"].as_i64(), Some(1));
     assert_eq!(grep["tier"].as_str(), Some("navigation"));
 
-    let zero_call = &tools["zero_call_tools"];
+    let zero_call = &tools["zero_call_available_defined_tools"];
     assert!(zero_call["count"].as_i64().unwrap_or(0) > 0);
     let sample = zero_call["sample"]
         .as_array()
@@ -175,7 +179,7 @@ async fn analytics_reports_tool_tiers_top_tools_and_zero_call_tools() {
     assert!(text.contains("memory"), "missing memory tier: {text}");
     assert!(text.contains("tracedecay_grep"), "missing top tool: {text}");
     assert!(
-        text.contains("Zero-Call Defined Tools"),
+        text.contains("Zero-Call Available Defined Tools"),
         "missing zero-call section: {text}"
     );
     drop(server);
@@ -303,6 +307,236 @@ async fn analytics_degrades_gracefully_for_a_zero_data_project() {
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
+async fn analytics_reconciles_public_catalog_with_alias_internal_and_unknown_or_retired_events() {
+    let fixture = production_composition_fixture().await;
+    let project_id = HostAdmissionTestRuntimeV1::canonical_project_key(&fixture.project_root);
+    let timestamp = current_timestamp() - 60;
+    let events = [
+        tool_call_event(&project_id, "tracedecay_grep", "ok", timestamp),
+        tool_call_event(&project_id, "grep", "error", timestamp),
+        tool_call_event(
+            &project_id,
+            "mcp__tracedecay__tracedecay_context",
+            "ok",
+            timestamp,
+        ),
+        tool_call_event(&project_id, "tracedecay_admin_cli", "ok", timestamp),
+        tool_call_event(&project_id, "tracedecay_removed_tool", "error", timestamp),
+    ];
+    fixture
+        .harness
+        .append_profile_analytics_events_for_test(&events)
+        .await
+        .expect("seeding analytics classification events should succeed");
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
+
+    let response = handle_real_server_tool_call(
+        &server,
+        "tracedecay_analytics",
+        json!({"section": "tools", "format": "json"}),
+    )
+    .await;
+    let payload = extract_json(&response);
+    let tools = &payload["tools"];
+    assert_eq!(tools["raw_distinct_event_name_count"].as_i64(), Some(5));
+    assert_eq!(
+        tools["distinct_tools_called"], tools["raw_distinct_event_name_count"],
+        "the shipped distinct-tools key remains a raw event-name count"
+    );
+    assert_eq!(
+        tools["called_available_defined_tool_count"].as_i64(),
+        Some(2)
+    );
+    let available_defined_tool_count = tools["available_defined_tool_count"]
+        .as_i64()
+        .expect("available defined tool count");
+    let maximal_defined_tool_count = tools["maximal_defined_tool_count"]
+        .as_i64()
+        .expect("maximal defined tool count");
+    assert_eq!(
+        tools["defined_tool_count"].as_i64(),
+        Some(available_defined_tool_count),
+        "the shipped defined count remains an alias for current available definitions"
+    );
+    let zero_call_count = tools["zero_call_available_defined_tools"]["count"]
+        .as_i64()
+        .expect("zero-call available defined tool count");
+    assert_eq!(
+        tools["zero_call_tools"], tools["zero_call_available_defined_tools"],
+        "the shipped zero-call object remains an alias for available definitions"
+    );
+    assert_eq!(
+        available_defined_tool_count,
+        tools["called_available_defined_tool_count"]
+            .as_i64()
+            .expect("called available-defined tool count")
+            + zero_call_count,
+        "available catalog membership must partition into called and zero-call tools"
+    );
+    assert!(maximal_defined_tool_count >= available_defined_tool_count);
+
+    assert_eq!(
+        tools["aliased_call_names"],
+        json!([
+            {
+                "event_name": "grep",
+                "canonical_tool_name": "tracedecay_grep",
+                "calls": 1,
+                "errors": 1,
+            },
+            {
+                "event_name": "mcp__tracedecay__tracedecay_context",
+                "canonical_tool_name": "tracedecay_context",
+                "calls": 1,
+                "errors": 0,
+            },
+        ])
+    );
+    assert_eq!(
+        tools["bound_internal_call_names"],
+        json!([{
+            "event_name": "tracedecay_admin_cli",
+            "calls": 1,
+            "errors": 0,
+        }])
+    );
+    assert_eq!(
+        tools["unknown_or_retired_call_names"],
+        json!([{
+            "event_name": "tracedecay_removed_tool",
+            "calls": 1,
+            "errors": 1,
+        }])
+    );
+    assert_eq!(
+        tools["tiers"],
+        json!([
+            {"tier": "navigation", "calls": 3, "errors": 1},
+            {"tier": "other", "calls": 2, "errors": 1},
+        ])
+    );
+    assert_eq!(
+        tools["top_tools"],
+        json!([
+            {
+                "tool_name": "tracedecay_grep",
+                "tier": "navigation",
+                "calls": 2,
+                "errors": 1,
+            },
+            {
+                "tool_name": "tracedecay_admin_cli",
+                "tier": "other",
+                "calls": 1,
+                "errors": 0,
+            },
+            {
+                "tool_name": "tracedecay_context",
+                "tier": "navigation",
+                "calls": 1,
+                "errors": 0,
+            },
+            {
+                "tool_name": "tracedecay_removed_tool",
+                "tier": "other",
+                "calls": 1,
+                "errors": 1,
+            },
+        ])
+    );
+
+    let markdown = handle_real_server_tool_call(
+        &server,
+        "tracedecay_analytics",
+        json!({"section": "tools", "format": "markdown"}),
+    )
+    .await;
+    let text = extract_text(&markdown);
+    for heading in [
+        "raw distinct event names",
+        "called available defined tools",
+        "available defined tool count",
+        "maximal defined tool count",
+        "Aliased Call Names",
+        "Bound Internal Call Names",
+        "Unavailable Public Call Names",
+        "Unknown or Retired Call Names",
+    ] {
+        assert!(text.contains(heading), "missing {heading}: {text}");
+    }
+
+    drop(server);
+    fixture.harness.shutdown().await;
+}
+
+#[cfg(feature = "test-transport")]
+#[tokio::test]
+async fn analytics_keeps_host_unavailable_public_routes_out_of_internal_calls() {
+    let fixture = production_composition_fixture().await;
+    let project_id = HostAdmissionTestRuntimeV1::canonical_project_key(&fixture.project_root);
+    let timestamp = current_timestamp() - 60;
+    let event = tool_call_event(
+        &project_id,
+        "tracedecay_ast_grep_rewrite",
+        "error",
+        timestamp,
+    );
+    fixture
+        .harness
+        .append_profile_analytics_events_for_test(&[event])
+        .await
+        .expect("seeding a maximal public route event should succeed");
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
+
+    let response = handle_real_server_tool_call(
+        &server,
+        "tracedecay_analytics",
+        json!({"section": "tools", "format": "json"}),
+    )
+    .await;
+    let payload = extract_json(&response);
+    let tools = &payload["tools"];
+    let ast_grep_rewrite_is_available = tracedecay_mcp::get_tool_definitions()
+        .expect("available tool definitions")
+        .iter()
+        .any(|definition| definition.name == "tracedecay_ast_grep_rewrite");
+
+    if ast_grep_rewrite_is_available {
+        assert_eq!(
+            tools["called_available_defined_tool_count"].as_i64(),
+            Some(1)
+        );
+        assert_eq!(tools["unavailable_public_call_names"], json!([]));
+    } else {
+        assert_eq!(
+            tools["called_available_defined_tool_count"].as_i64(),
+            Some(0)
+        );
+        assert_eq!(
+            tools["unavailable_public_call_names"],
+            json!([{
+                "event_name": "tracedecay_ast_grep_rewrite",
+                "canonical_tool_name": "tracedecay_ast_grep_rewrite",
+                "calls": 1,
+                "errors": 1,
+            }])
+        );
+    }
+    assert_eq!(tools["bound_internal_call_names"], json!([]));
+    assert_eq!(tools["unknown_or_retired_call_names"], json!([]));
+
+    drop(server);
+    fixture.harness.shutdown().await;
+}
+
+#[cfg(feature = "test-transport")]
+#[tokio::test]
 async fn analytics_aggregates_sections_before_any_event_sample_cap() {
     let fixture = production_composition_fixture().await;
     let project_id = HostAdmissionTestRuntimeV1::canonical_project_key(&fixture.project_root);
@@ -360,7 +594,14 @@ async fn analytics_aggregates_sections_before_any_event_sample_cap() {
     assert_eq!(search["followed"].as_i64(), Some(1));
     assert_eq!(search["suppressed"].as_i64(), Some(1));
 
-    assert_eq!(payload["tools"]["distinct_tools_called"].as_i64(), Some(1));
+    assert_eq!(
+        payload["tools"]["raw_distinct_event_name_count"].as_i64(),
+        Some(1)
+    );
+    assert_eq!(
+        payload["tools"]["called_available_defined_tool_count"].as_i64(),
+        Some(1)
+    );
     assert_eq!(
         payload["tools"]["top_tools"][0]["tool_name"],
         "tracedecay_grep"

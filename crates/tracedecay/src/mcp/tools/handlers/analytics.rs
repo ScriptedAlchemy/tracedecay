@@ -10,7 +10,7 @@
 //! [`tracedecay_automation_runtime::automation::run_ledger::load_run_records`]) rather than
 //! re-implementing queries against those tables.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -195,9 +195,94 @@ fn tool_tier(tool_name: &str) -> &'static str {
     "other"
 }
 
+/// Maps host-neutral public names and short aliases to their canonical route.
+fn public_name_to_canonical(definitions: &[String]) -> BTreeMap<String, String> {
+    let mut names = BTreeMap::new();
+    for canonical_name in definitions {
+        names.insert(
+            tracedecay_automation::analytics::normalize_tool_name(canonical_name),
+            canonical_name.clone(),
+        );
+        names
+            .entry(tracedecay_automation::analytics::normalize_tool_name(
+                tracedecay_mcp::short_tool_name(canonical_name),
+            ))
+            .or_insert_with(|| canonical_name.clone());
+    }
+    names
+}
+
+/// Bound routes which are intentionally absent from the maximal public MCP catalog.
+///
+/// Dispatch binding is the authority for whether a persisted event name was a
+/// real daemon route. Subtracting advertised definitions leaves the private
+/// host/runtime routes without duplicating a route inventory here.
+fn bound_but_unadvertised_tool_names(maximal_defined: &[String]) -> BTreeSet<&'static str> {
+    let maximal_public_names: BTreeSet<String> = maximal_defined
+        .iter()
+        .map(|name| tracedecay_automation::analytics::normalize_tool_name(name))
+        .collect();
+    crate::mcp::tools::binding::MCP_TOOL_BINDINGS
+        .iter()
+        .map(|binding| binding.name)
+        .filter(|name| {
+            !maximal_public_names
+                .contains(&tracedecay_automation::analytics::normalize_tool_name(name))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::tool_tier;
+    use super::{bound_but_unadvertised_tool_names, public_name_to_canonical, tool_tier};
+
+    #[test]
+    fn bound_unadvertised_tool_names_use_the_maximal_public_catalog() {
+        let maximal_defined: Vec<String> = tracedecay_mcp::get_maximal_tool_definitions()
+            .expect("tool definitions are available")
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect();
+
+        let bound_unadvertised = bound_but_unadvertised_tool_names(&maximal_defined);
+
+        assert!(
+            crate::mcp::tools::binding::MCP_TOOL_BINDINGS
+                .iter()
+                .any(|binding| binding.name == "tracedecay_admin_cli")
+        );
+        assert!(
+            !maximal_defined
+                .iter()
+                .any(|name| name == "tracedecay_admin_cli")
+        );
+        assert!(bound_unadvertised.contains("tracedecay_admin_cli"));
+        assert!(
+            maximal_defined
+                .iter()
+                .any(|name| name == "tracedecay_ast_grep_rewrite")
+        );
+        assert!(!bound_unadvertised.contains("tracedecay_ast_grep_rewrite"));
+    }
+
+    #[test]
+    fn public_lookup_normalizes_host_namespaces() {
+        let defined: Vec<String> = tracedecay_mcp::get_maximal_tool_definitions()
+            .expect("tool definitions are available")
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect();
+
+        let names = public_name_to_canonical(&defined);
+
+        let namespaced_context = tracedecay_automation::analytics::normalize_tool_name(
+            "mcp__tracedecay__tracedecay_context",
+        );
+        assert_eq!(
+            names.get(&namespaced_context),
+            Some(&"tracedecay_context".to_string())
+        );
+    }
 
     #[test]
     fn exact_fact_store_routes_remain_in_the_memory_tier() {
@@ -436,8 +521,75 @@ fn tools_section(rows: &[AnalyticsToolCounts]) -> Result<Value> {
         counts.errors += row.errors;
     }
 
+    let available_defined: Vec<String> = tracedecay_mcp::get_tool_definitions()
+        .map_err(config_error)?
+        .into_iter()
+        .map(|definition| definition.name)
+        .collect();
+    let maximal_defined: Vec<String> = tracedecay_mcp::get_maximal_tool_definitions()
+        .map_err(config_error)?
+        .into_iter()
+        .map(|definition| definition.name)
+        .collect();
+    let available_public_name_to_canonical = public_name_to_canonical(&available_defined);
+    let maximal_public_name_to_canonical = public_name_to_canonical(&maximal_defined);
+    let bound_but_unadvertised = bound_but_unadvertised_tool_names(&maximal_defined);
+    let mut called_available_defined = BTreeSet::new();
+    let mut aliased_call_names = Vec::new();
+    let mut bound_internal_call_names = Vec::new();
+    let mut unavailable_public_call_names = Vec::new();
+    let mut unknown_or_retired_call_names = Vec::new();
+    let mut logical_tool_counts: BTreeMap<String, ToolCallCounts> = BTreeMap::new();
+    for (event_name, counts) in &per_tool {
+        let normalized_event_name =
+            tracedecay_automation::analytics::normalize_tool_name(event_name);
+        let logical_tool_name = if let Some(canonical_tool_name) =
+            available_public_name_to_canonical.get(&normalized_event_name)
+        {
+            called_available_defined.insert(canonical_tool_name.clone());
+            if event_name != canonical_tool_name {
+                aliased_call_names.push(json!({
+                    "event_name": event_name,
+                    "canonical_tool_name": canonical_tool_name,
+                    "calls": counts.calls,
+                    "errors": counts.errors,
+                }));
+            }
+            canonical_tool_name
+        } else if let Some(canonical_tool_name) =
+            maximal_public_name_to_canonical.get(&normalized_event_name)
+        {
+            unavailable_public_call_names.push(json!({
+                "event_name": event_name,
+                "canonical_tool_name": canonical_tool_name,
+                "calls": counts.calls,
+                "errors": counts.errors,
+            }));
+            canonical_tool_name
+        } else if bound_but_unadvertised.contains(normalized_event_name.as_str()) {
+            bound_internal_call_names.push(json!({
+                "event_name": event_name,
+                "calls": counts.calls,
+                "errors": counts.errors,
+            }));
+            event_name
+        } else {
+            unknown_or_retired_call_names.push(json!({
+                "event_name": event_name,
+                "calls": counts.calls,
+                "errors": counts.errors,
+            }));
+            event_name
+        };
+        let logical_counts = logical_tool_counts
+            .entry(logical_tool_name.clone())
+            .or_default();
+        logical_counts.calls += counts.calls;
+        logical_counts.errors += counts.errors;
+    }
+
     let mut per_tier: BTreeMap<&'static str, ToolCallCounts> = BTreeMap::new();
-    for (tool_name, counts) in &per_tool {
+    for (tool_name, counts) in &logical_tool_counts {
         let tier = per_tier.entry(tool_tier(tool_name)).or_default();
         tier.calls += counts.calls;
         tier.errors += counts.errors;
@@ -453,7 +605,7 @@ fn tools_section(rows: &[AnalyticsToolCounts]) -> Result<Value> {
         })
         .collect();
 
-    let mut top_tools: Vec<(&String, &ToolCallCounts)> = per_tool.iter().collect();
+    let mut top_tools: Vec<(&String, &ToolCallCounts)> = logical_tool_counts.iter().collect();
     top_tools.sort_by(|a, b| b.1.calls.cmp(&a.1.calls).then_with(|| a.0.cmp(b.0)));
     let top_tools: Vec<Value> = top_tools
         .into_iter()
@@ -468,31 +620,41 @@ fn tools_section(rows: &[AnalyticsToolCounts]) -> Result<Value> {
         })
         .collect();
 
-    let defined: Vec<String> = tracedecay_mcp::get_tool_definitions()
-        .map_err(config_error)?
-        .into_iter()
-        .map(|definition| definition.name)
-        .collect();
-    let mut zero_call: Vec<&String> = defined
+    let mut zero_call: Vec<&String> = available_defined
         .iter()
-        .filter(|name| !per_tool.contains_key(*name))
+        .filter(|name| !called_available_defined.contains(*name))
         .collect();
     zero_call.sort();
     let zero_call_count = zero_call.len();
     let zero_call_sample: Vec<&String> =
         zero_call.into_iter().take(ZERO_CALL_SAMPLE_LIMIT).collect();
+    let zero_call_tools = json!({
+        "count": zero_call_count,
+        "sample": zero_call_sample,
+        "sample_truncated": zero_call_count > zero_call_sample.len(),
+    });
 
     Ok(json!({
         "available": !rows.is_empty(),
         "tiers": tiers,
         "top_tools": top_tools,
+        "raw_distinct_event_name_count": per_tool.len(),
+        // Deprecated shipped key: this was always a count of raw persisted
+        // event names, not a public-catalog adoption numerator.
         "distinct_tools_called": per_tool.len(),
-        "defined_tool_count": defined.len(),
-        "zero_call_tools": {
-            "count": zero_call_count,
-            "sample": zero_call_sample,
-            "sample_truncated": zero_call_count > zero_call_sample.len(),
-        },
+        "called_available_defined_tool_count": called_available_defined.len(),
+        "available_defined_tool_count": available_defined.len(),
+        // Deprecated shipped key: it remains the current host-available
+        // catalog count, which the explicit field above now names directly.
+        "defined_tool_count": available_defined.len(),
+        "maximal_defined_tool_count": maximal_defined.len(),
+        "aliased_call_names": aliased_call_names,
+        "bound_internal_call_names": bound_internal_call_names,
+        "unavailable_public_call_names": unavailable_public_call_names,
+        "unknown_or_retired_call_names": unknown_or_retired_call_names,
+        // Deprecated shipped key preserved as an exact object alias.
+        "zero_call_tools": zero_call_tools.clone(),
+        "zero_call_available_defined_tools": zero_call_tools,
     }))
 }
 
