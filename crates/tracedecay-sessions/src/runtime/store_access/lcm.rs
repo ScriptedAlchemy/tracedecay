@@ -305,6 +305,38 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
         provider: &str,
         session_id: &str,
     ) -> Result<u64, LcmError> {
+        let mut frontier_store_id = 0;
+        let mut protected = 0_u64;
+        loop {
+            let page = self
+                .lcm_protect_session_raw_messages_page(
+                    provider,
+                    session_id,
+                    frontier_store_id,
+                    tracedecay_lcm::LCM_SCAN_PAGE_ROWS as usize,
+                    tracedecay_lcm::LCM_SCAN_PAGE_MAX_BYTES as u64,
+                )
+                .await?;
+            protected =
+                protected.saturating_add(u64::try_from(page.rows_protected).map_err(|error| {
+                    LcmError::Db(format!("invalid protection page size: {error}"))
+                })?);
+            frontier_store_id = page.frontier_store_id;
+            if !page.has_more {
+                return Ok(protected);
+            }
+        }
+    }
+
+    #[hotpath::skip]
+    pub async fn lcm_protect_session_raw_messages_page(
+        &self,
+        provider: &str,
+        session_id: &str,
+        after_store_id: i64,
+        page_limit: usize,
+        page_max_bytes: u64,
+    ) -> Result<tracedecay_lcm::summary_convergence::LcmRawProtectionPage, LcmError> {
         let storage_root = self.lcm_storage_root()?.to_path_buf();
         let transaction = self
             .begin_write_transaction()
@@ -312,45 +344,115 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
             .map_err(|error| LcmError::Db(error.to_string()))?;
         let mut rows = QueryExecutor::query(
             &transaction,
-            "SELECT message.provider, message.message_id, message.session_id, message.role,
+            "SELECT raw.store_id,
+                        CASE WHEN json_extract(
+                            raw.metadata_json,
+                            '$.ingest_protection.sanitization_receipt'
+                        ) IS NULL THEN 1 ELSE 0 END,
+                        COALESCE(length(CAST(message.text AS BLOB)), 0),
+                        message.provider, message.message_id, message.session_id, message.role,
                         message.timestamp, message.ordinal, message.text, message.kind,
                         message.model, message.tool_names, message.source_path,
                         message.source_offset, message.metadata_json
-                 FROM session_messages AS message
-                 JOIN lcm_raw_messages AS raw
+                 FROM lcm_raw_messages AS raw
+                 LEFT JOIN session_messages AS message
                    ON raw.provider = message.provider
                   AND raw.message_id = message.message_id
-                 WHERE message.provider = ?1 AND message.session_id = ?2
-                   AND json_extract(
-                           raw.metadata_json,
-                           '$.ingest_protection.sanitization_receipt'
-                       ) IS NULL
-                 ORDER BY message.ordinal, message.message_id",
-            params![provider, session_id],
+                 WHERE raw.provider = ?1 AND raw.session_id = ?2
+                   AND raw.store_id > ?3
+                 ORDER BY raw.store_id
+                 LIMIT ?4",
+            params![
+                provider,
+                session_id,
+                after_store_id,
+                i64::try_from(page_limit.max(1)).map_err(|_| {
+                    LcmError::Db("LCM protection page limit overflow".to_string())
+                })?,
+            ],
         )
         .await?;
         let mut unprotected = Vec::new();
+        let mut rows_scanned = 0_usize;
+        let mut bytes_scanned = 0_u64;
+        let mut frontier_store_id = after_store_id;
+        let mut byte_limited = false;
         while let Some(row) = rows.next().await? {
+            let store_id: i64 = row.get(0)?;
+            let needs_protection = row.get::<i64>(1)? != 0;
+            let row_bytes = u64::try_from(row.get::<i64>(2)?).map_err(|error| {
+                LcmError::Db(format!("invalid LCM protection row byte count: {error}"))
+            })?;
+            if bytes_scanned.saturating_add(row_bytes) > page_max_bytes {
+                if rows_scanned == 0 {
+                    return Err(LcmError::BudgetExhausted);
+                }
+                byte_limited = true;
+                break;
+            }
+            rows_scanned = rows_scanned.saturating_add(1);
+            bytes_scanned = bytes_scanned.saturating_add(row_bytes);
+            frontier_store_id = store_id;
+            if !needs_protection {
+                continue;
+            }
             unprotected.push(SessionMessageRecord {
-                provider: row.get(0)?,
-                message_id: row.get(1)?,
-                session_id: row.get(2)?,
-                role: row.get(3)?,
-                timestamp: row.get(4)?,
-                ordinal: row.get(5)?,
-                text: row.get(6)?,
-                kind: row.get(7)?,
-                model: row.get(8)?,
-                tool_names: row.get(9)?,
-                source_path: row.get(10)?,
-                source_offset: row.get(11)?,
-                metadata_json: row.get(12)?,
+                provider: row.get::<Option<String>>(3)?.ok_or_else(|| {
+                    LcmError::SummarySourceUnavailable {
+                        source_id: store_id.to_string(),
+                        reason: "canonical_session_message_missing".to_string(),
+                    }
+                })?,
+                message_id: row.get::<Option<String>>(4)?.ok_or_else(|| {
+                    LcmError::SummarySourceUnavailable {
+                        source_id: store_id.to_string(),
+                        reason: "canonical_session_message_missing".to_string(),
+                    }
+                })?,
+                session_id: row.get::<Option<String>>(5)?.ok_or_else(|| {
+                    LcmError::SummarySourceUnavailable {
+                        source_id: store_id.to_string(),
+                        reason: "canonical_session_message_missing".to_string(),
+                    }
+                })?,
+                role: row.get::<Option<String>>(6)?.ok_or_else(|| {
+                    LcmError::SummarySourceUnavailable {
+                        source_id: store_id.to_string(),
+                        reason: "canonical_session_message_missing".to_string(),
+                    }
+                })?,
+                timestamp: row.get(7)?,
+                ordinal: row.get::<Option<i64>>(8)?.ok_or_else(|| {
+                    LcmError::SummarySourceUnavailable {
+                        source_id: store_id.to_string(),
+                        reason: "canonical_session_message_missing".to_string(),
+                    }
+                })?,
+                text: row.get::<Option<String>>(9)?.ok_or_else(|| {
+                    LcmError::SummarySourceUnavailable {
+                        source_id: store_id.to_string(),
+                        reason: "canonical_session_message_missing".to_string(),
+                    }
+                })?,
+                kind: row.get(10)?,
+                model: row.get(11)?,
+                tool_names: row.get(12)?,
+                source_path: row.get(13)?,
+                source_offset: row.get(14)?,
+                metadata_json: row.get(15)?,
             });
         }
         drop(rows);
         SessionWriteTxn::commit(transaction).await?;
+        let has_more = byte_limited || rows_scanned == page_limit.max(1);
         if unprotected.is_empty() {
-            return Ok(0);
+            return Ok(tracedecay_lcm::summary_convergence::LcmRawProtectionPage {
+                rows_scanned,
+                rows_protected: 0,
+                bytes_scanned,
+                frontier_store_id,
+                has_more,
+            });
         }
         let mut payload_rollback =
             payload::PayloadFileRollback::begin_cancellation_safe(&storage_root);
@@ -366,14 +468,18 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
             .begin_write_transaction()
             .await
             .map_err(|error| LcmError::Db(error.to_string()))?;
-        let protected = u64::try_from(unprotected.len())
-            .map_err(|error| LcmError::Db(format!("invalid protection batch size: {error}")))?;
         for (message, staged) in unprotected.iter().zip(staged) {
             raw::commit_staged_raw_message(&transaction, message, staged).await?;
         }
         SessionWriteTxn::commit(transaction).await?;
         payload_rollback.disarm();
-        Ok(protected)
+        Ok(tracedecay_lcm::summary_convergence::LcmRawProtectionPage {
+            rows_scanned,
+            rows_protected: unprotected.len(),
+            bytes_scanned,
+            frontier_store_id,
+            has_more,
+        })
     }
 
     #[hotpath::measure(future = true, label = "global_db.registered.lcm.ingest")]

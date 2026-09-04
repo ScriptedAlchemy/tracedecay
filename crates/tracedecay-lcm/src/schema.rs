@@ -253,7 +253,10 @@ pub async fn ensure_lcm_schema_in_transaction(
     conn: &(impl Executor + ?Sized),
 ) -> Result<(), LcmError> {
     match require_admissible_lcm_schema(conn).await? {
-        LcmSchemaAdmission::Current => return Ok(()),
+        LcmSchemaAdmission::Current => {
+            super::summary_convergence::ensure_schema(conn).await?;
+            return Ok(());
+        }
         LcmSchemaAdmission::Fresh => {}
     }
 
@@ -437,6 +440,7 @@ pub async fn ensure_lcm_schema_in_transaction(
     )
     .await?;
     conn.execute_batch(RAW_FTS_DDL).await?;
+    super::summary_convergence::ensure_schema(conn).await?;
     for sql in LCM_STATUS_PERFORMANCE_INDEX_SQL {
         conn.execute_batch(sql).await?;
     }
@@ -944,7 +948,7 @@ mod tests {
             .await
             .expect_err("receipt mismatch must not return a raw row");
 
-        assert!(matches!(error, LcmError::Db(message) if message.contains("does not match")));
+        assert_eq!(error, LcmError::PayloadIntegrityMismatch);
         Ok(())
     }
 

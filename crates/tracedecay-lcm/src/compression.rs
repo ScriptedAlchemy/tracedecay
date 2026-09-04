@@ -85,6 +85,15 @@ struct CompressionTransactionContext {
     window: CompressionWindow,
     plan: compression_decision::CompressionPlan,
     overflow_assembly_cap: Option<i64>,
+    raw_rows_scanned: usize,
+    raw_bytes_scanned: u64,
+    raw_has_more: bool,
+}
+
+#[derive(Clone, Copy)]
+struct RetainedRawScanLimit {
+    rows: usize,
+    bytes: u64,
 }
 
 pub async fn update_lifecycle(
@@ -365,9 +374,50 @@ pub async fn compress(
     request: LcmCompressionRequest,
     payload_rollback: &mut payload::PayloadFileRollback,
 ) -> Result<LcmCompressionResponse, LcmError> {
-    let response = compress_inner(conn, publisher, storage_root, request, payload_rollback).await;
+    let response = compress_inner(
+        conn,
+        publisher,
+        storage_root,
+        request,
+        payload_rollback,
+        None,
+    )
+    .await
+    .map(|bounded| bounded.response);
     // A failed compression discarded its ingest writes, assembled backlog,
     // and summary drafts; success-only gauges would hide exactly that waste.
+    if response.is_err() {
+        crate::metrics::record_lcm_compress_failed();
+    }
+    response
+}
+
+/// Runs canonical compression over one bounded retained-session raw page.
+///
+/// This is the background-convergence entry point. Interactive compression
+/// keeps its complete replay contract, while retained convergence advances the
+/// same lifecycle CAS without materializing a mega-session in one future.
+pub async fn compress_retained_page(
+    conn: &impl Executor,
+    publisher: &impl dag::LcmSummaryPublicationPort,
+    storage_root: &Path,
+    request: LcmCompressionRequest,
+    payload_rollback: &mut payload::PayloadFileRollback,
+    row_limit: usize,
+    byte_limit: u64,
+) -> Result<super::summary_convergence::LcmBoundedCompressionResponse, LcmError> {
+    let response = compress_inner(
+        conn,
+        publisher,
+        storage_root,
+        request,
+        payload_rollback,
+        Some(RetainedRawScanLimit {
+            rows: row_limit.max(1),
+            bytes: byte_limit,
+        }),
+    )
+    .await;
     if response.is_err() {
         crate::metrics::record_lcm_compress_failed();
     }
@@ -380,7 +430,8 @@ async fn compress_inner(
     storage_root: &Path,
     request: LcmCompressionRequest,
     payload_rollback: &mut payload::PayloadFileRollback,
-) -> Result<LcmCompressionResponse, LcmError> {
+    retained_scan: Option<RetainedRawScanLimit>,
+) -> Result<super::summary_convergence::LcmBoundedCompressionResponse, LcmError> {
     let mut request = request;
     request.max_assembly_tokens =
         compression_decision::effective_assembly_token_cap(AssemblyCapInput {
@@ -400,15 +451,20 @@ async fn compress_inner(
             &request.session_id,
         )
         .await?;
-        return Ok(record_compression_gauges(compression_response(
-            "ok",
-            reason,
-            Vec::new(),
-            request.messages,
-            frontier,
-            None,
-            request.max_assembly_tokens,
-        )));
+        return Ok(super::summary_convergence::LcmBoundedCompressionResponse {
+            response: record_compression_gauges(compression_response(
+                "ok",
+                reason,
+                Vec::new(),
+                request.messages,
+                frontier,
+                None,
+                request.max_assembly_tokens,
+            )),
+            rows_scanned: 0,
+            bytes_scanned: 0,
+            has_more: false,
+        });
     }
 
     ensure_session(conn, &request.provider, &request.session_id).await?;
@@ -442,12 +498,22 @@ async fn compress_inner(
             None,
             request.max_assembly_tokens,
         );
-        return Ok(record_compression_gauges(response));
+        return Ok(super::summary_convergence::LcmBoundedCompressionResponse {
+            response: record_compression_gauges(response),
+            rows_scanned: 0,
+            bytes_scanned: 0,
+            has_more: false,
+        });
     }
 
-    Ok(record_compression_gauges(
-        compress_in_transaction(conn, publisher, request, &summarizer).await?,
-    ))
+    let (response, rows_scanned, bytes_scanned, has_more) =
+        compress_in_transaction(conn, publisher, request, &summarizer, retained_scan).await?;
+    Ok(super::summary_convergence::LcmBoundedCompressionResponse {
+        response: record_compression_gauges(response),
+        rows_scanned,
+        bytes_scanned,
+        has_more,
+    })
 }
 
 fn record_compression_gauges(response: LcmCompressionResponse) -> LcmCompressionResponse {
@@ -464,24 +530,33 @@ async fn compress_in_transaction(
     publisher: &impl dag::LcmSummaryPublicationPort,
     request: LcmCompressionRequest,
     summarizer: &CompressionSummarizerAdapter,
-) -> Result<LcmCompressionResponse, LcmError> {
-    let context = prepare_compression_context(conn, &request).await?;
+    retained_scan: Option<RetainedRawScanLimit>,
+) -> Result<(LcmCompressionResponse, usize, u64, bool), LcmError> {
+    let context = prepare_compression_context(conn, &request, retained_scan).await?;
+    let scan = (
+        context.raw_rows_scanned,
+        context.raw_bytes_scanned,
+        context.raw_has_more,
+    );
     if let Some(response) = frontier_changed_response(&request, &context) {
-        return Ok(response);
+        return Ok((response, scan.0, scan.1, scan.2));
     }
     if let Some(response) =
         no_backlog_compression_response(conn, publisher, &request, summarizer, &context).await?
     {
-        return Ok(response);
+        return Ok((response, scan.0, scan.1, scan.2));
     }
     if let Some(response) = backlog_below_threshold_response(conn, &request, &context).await? {
-        return Ok(response);
+        return Ok((response, scan.0, scan.1, scan.2));
     }
     if let Some(response) = auxiliary_summary_response(&request, summarizer, &context) {
-        return Ok(response);
+        return Ok((response, scan.0, scan.1, scan.2));
     }
 
-    persist_and_replay_backlog_compression(conn, publisher, request, summarizer, context).await
+    let response =
+        persist_and_replay_backlog_compression(conn, publisher, request, summarizer, context)
+            .await?;
+    Ok((response, scan.0, scan.1, scan.2))
 }
 
 // The read phase: whole-session raw load plus window/plan derivation.
@@ -491,6 +566,7 @@ async fn compress_in_transaction(
 async fn prepare_compression_context(
     conn: &impl QueryExecutor,
     request: &LcmCompressionRequest,
+    retained_scan: Option<RetainedRawScanLimit>,
 ) -> Result<CompressionTransactionContext, LcmError> {
     let conversation_id = request.session_id.clone();
     let existing_frontier = lifecycle_state_or_default(
@@ -500,8 +576,28 @@ async fn prepare_compression_context(
         &request.session_id,
     )
     .await?;
-    let raw_messages =
-        load_raw_messages_for_session(conn, &request.provider, &request.session_id).await?;
+    let (raw_messages, raw_rows_scanned, raw_bytes_scanned, raw_has_more) =
+        if let Some(limit) = retained_scan {
+            let page = load_raw_messages_for_session_page(
+                conn,
+                &request.provider,
+                &request.session_id,
+                existing_frontier.current_frontier_store_id.unwrap_or(0),
+                limit,
+            )
+            .await?;
+            (
+                page.messages,
+                page.rows_scanned,
+                page.bytes_scanned,
+                page.has_more,
+            )
+        } else {
+            let messages =
+                load_raw_messages_for_session(conn, &request.provider, &request.session_id).await?;
+            let rows_scanned = messages.len();
+            (messages, rows_scanned, 0, false)
+        };
     let window = compression_window(
         &raw_messages,
         existing_frontier.current_frontier_store_id,
@@ -527,6 +623,9 @@ async fn prepare_compression_context(
         window,
         plan,
         overflow_assembly_cap,
+        raw_rows_scanned,
+        raw_bytes_scanned,
+        raw_has_more,
     })
 }
 
@@ -2352,6 +2451,64 @@ async fn load_raw_messages_for_session(
             .iter()
             .map(raw::verified_raw_message_from_row)
             .collect::<Result<Vec<_>, _>>()
+    })
+}
+
+struct RetainedRawMessagePage {
+    messages: Vec<LcmRawMessage>,
+    rows_scanned: usize,
+    bytes_scanned: u64,
+    has_more: bool,
+}
+
+async fn load_raw_messages_for_session_page(
+    conn: &impl QueryExecutor,
+    provider: &str,
+    session_id: &str,
+    after_store_id: i64,
+    limit: RetainedRawScanLimit,
+) -> Result<RetainedRawMessagePage, LcmError> {
+    let row_limit = i64::try_from(limit.rows)
+        .map_err(|_| LcmError::Db("retained compression row limit overflow".to_string()))?;
+    let mut rows = conn
+        .query(
+            "SELECT provider, message_id, session_id, store_id, role, ordinal,
+                    timestamp, content, content_hash, storage_kind, payload_ref,
+                    snippet_text, legacy_source, legacy_truncated, metadata_json,
+                    length(CAST(COALESCE(content, '') AS BLOB))
+                      + length(CAST(snippet_text AS BLOB))
+                      + length(CAST(index_text AS BLOB))
+                      + length(CAST(COALESCE(metadata_json, '') AS BLOB))
+             FROM lcm_raw_messages
+             WHERE provider = ?1 AND session_id = ?2 AND store_id > ?3
+             ORDER BY store_id
+             LIMIT ?4",
+            params![provider, session_id, after_store_id, row_limit],
+        )
+        .await?;
+    let mut messages = Vec::new();
+    let mut bytes_scanned = 0_u64;
+    let mut byte_limited = false;
+    while let Some(row) = rows.next().await? {
+        let row_bytes = u64::try_from(row.get::<i64>(15)?).map_err(|error| {
+            LcmError::Db(format!("invalid retained compression byte count: {error}"))
+        })?;
+        if bytes_scanned.saturating_add(row_bytes) > limit.bytes {
+            if messages.is_empty() {
+                return Err(LcmError::BudgetExhausted);
+            }
+            byte_limited = true;
+            break;
+        }
+        bytes_scanned = bytes_scanned.saturating_add(row_bytes);
+        messages.push(raw::verified_raw_message_from_row(&row)?);
+    }
+    let rows_scanned = messages.len();
+    Ok(RetainedRawMessagePage {
+        messages,
+        rows_scanned,
+        bytes_scanned,
+        has_more: byte_limited || rows_scanned == limit.rows,
     })
 }
 
