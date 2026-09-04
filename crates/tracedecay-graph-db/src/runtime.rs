@@ -1159,6 +1159,7 @@ impl GraphDb {
         {
             return Ok(false);
         }
+        let when_idle = claim == SnapshotGateClaim::WhenIdle;
         let _snapshot_gate = match claim {
             SnapshotGateClaim::Blocking => self.wait_snapshot_gate_write(),
             SnapshotGateClaim::WhenIdle => {
@@ -1168,15 +1169,32 @@ impl GraphDb {
                 let Some(gate) = self.inner.snapshot_gate.try_write() else {
                     return Ok(false);
                 };
-                self.inner.markers.mark_container_mutated();
                 gate
             }
         };
-        let mut database = crate::hotpath_observe::wait_lock(
-            crate::hotpath_observe::LOCK_WAIT_DATABASE_WRITE,
-            || self.inner.database.write(),
-        )
-        .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
+        let mut database = if when_idle {
+            match self.inner.database.try_write() {
+                Ok(database) => database,
+                Err(std::sync::TryLockError::WouldBlock) => return Ok(false),
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    return Err(GraphDbError::unavailable(
+                        "graph database write lock is poisoned",
+                    ));
+                }
+            }
+        } else {
+            crate::hotpath_observe::wait_lock(
+                crate::hotpath_observe::LOCK_WAIT_DATABASE_WRITE,
+                || self.inner.database.write(),
+            )
+            .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?
+        };
+        if when_idle {
+            // A declined attempt leaves markers untouched. Once both the
+            // snapshot and database gates are exclusively held, hibernation
+            // has the same marker consequence as the blocking path.
+            self.inner.markers.mark_container_mutated();
+        }
         let Some(database_to_close) = database.take() else {
             return Ok(false);
         };
@@ -1478,15 +1496,25 @@ impl GraphDb {
     }
 
     pub(crate) fn read_guard(&self) -> Result<RwLockReadGuard<'_, Option<GrafeoDB>>, GraphDbError> {
-        self.ensure_available()?;
-        self.ensure_opened()?;
-        let guard = crate::hotpath_observe::wait_lock(
-            crate::hotpath_observe::LOCK_WAIT_DATABASE_READ,
-            || self.inner.database.read(),
-        )
-        .map_err(|_| GraphDbError::unavailable("graph database read lock is poisoned"))?;
-        self.ensure_available()?;
-        Ok(guard)
+        loop {
+            self.ensure_available()?;
+            self.ensure_opened()?;
+            let guard = crate::hotpath_observe::wait_lock(
+                crate::hotpath_observe::LOCK_WAIT_DATABASE_READ,
+                || self.inner.database.read(),
+            )
+            .map_err(|_| GraphDbError::unavailable("graph database read lock is poisoned"))?;
+            self.ensure_available()?;
+            if guard.is_some() {
+                return Ok(guard);
+            }
+            // A non-blocking hibernation pass can win after `ensure_opened`
+            // drops the database write lock but before this reader acquires
+            // its read lock. The retained reopen authority is unchanged, so
+            // retry that narrow transition instead of surfacing a fabricated
+            // `Closed` state to a valid sealed-store reader.
+            drop(guard);
+        }
     }
 
     /// Reports whether the native staging engine is already resident without
