@@ -6,15 +6,17 @@ use std::pin::Pin;
 use serde_json::Value;
 #[cfg(test)]
 pub use tracedecay_capture::cursor::normalize_cursor_observation;
+#[cfg(test)]
+use tracedecay_capture::cursor::observation_native_record_id;
 use tracedecay_capture::cursor::{
-    cursor_projected_message_id, normalize_cursor_observation_with_message_id,
-    observation_native_record_id, timestamp_tag_from_record,
+    cursor_observation_identity, cursor_projected_message_id,
+    normalize_cursor_observation_with_message_id, timestamp_tag_from_record,
 };
 #[cfg(test)]
 use tracedecay_domain::CanonicalObservationFactV1;
 use tracedecay_domain::{
-    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceIdentityV1, ProjectId,
-    ProviderId, RetentionClass, SessionId,
+    ObservationId, ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceIdentityV1,
+    ObservationSourceRangeV1, ProjectId, ProviderId, RetentionClass, SessionId,
 };
 use tracedecay_store::cursor_dispatch::{
     cursor_dispatch_model, cursor_model_string, dispatch_text, is_subagent_dispatch_tool,
@@ -160,6 +162,23 @@ struct CursorJsonlAdmitState {
     carry: TimestampCarry,
 }
 
+fn cursor_admission_record_id(
+    native: &Value,
+    session_id: &str,
+    range: ObservationSourceRangeV1,
+    identity_collision_retry: bool,
+) -> Result<(ObservationId, bool), ObservationRecordParseErrorV1> {
+    let identity = cursor_observation_identity(session_id, native, range)?;
+    if identity_collision_retry {
+        return identity
+            .into_collision_disambiguation()
+            .map(|record_id| (record_id, false))
+            .ok_or(ObservationRecordParseErrorV1::NormalizationFailed);
+    }
+    let retry_eligible = identity.collision_disambiguation().is_some();
+    Ok((identity.into_primary(), retry_eligible))
+}
+
 // Cursor JSONL admission chokepoint: the whole per-file admission future is
 // boxed here so the per-file sweep loop no longer pins each call, keeping the
 // debug poll frame bounded through the deep ingest recursion chain.
@@ -214,8 +233,9 @@ fn admit_cursor_jsonl_observations<'a>(
                 namespace_replacement: scan.replacement_rescan,
                 carry: TimestampCarry::new(i64::try_from(scan.mtime).ok()),
             },
-            |state, bytes, range, source_offset, _prepared, _hints| {
+            |state, bytes, range, source_offset, _prepared, hints| {
                 let mut stable_record_id = None;
+                let mut identity_collision_retry = false;
                 let mut unsupported_record = false;
                 let parsed = parse_normalized_observation_record_v1(
                     bytes,
@@ -226,9 +246,12 @@ fn admit_cursor_jsonl_observations<'a>(
                             unsupported_record = true;
                             return Err(ObservationRecordParseErrorV1::NormalizationFailed);
                         }
-                        let record_id =
-                            observation_native_record_id("cursor", native_session_id, &native)
-                                .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?;
+                        let (record_id, retry_eligible) = cursor_admission_record_id(
+                            &native,
+                            native_session_id,
+                            range,
+                            hints.identity_collision_retry,
+                        )?;
                         let message_id = cursor_projected_message_id(
                             &native,
                             native_session_id,
@@ -259,16 +282,25 @@ fn admit_cursor_jsonl_observations<'a>(
                             parent_agent_id,
                         )?;
                         stable_record_id = Some(record_id);
+                        identity_collision_retry = retry_eligible;
                         Ok(envelope)
                     },
                 );
                 match parsed {
-                    Ok(parsed) => Ok(JsonlFrameAdmission::durable(
-                        parsed,
-                        stable_record_id.ok_or(TranscriptIngestError::InvalidFrameState {
-                            provider: "cursor",
-                        })?,
-                    )),
+                    Ok(parsed) => {
+                        let stable_record_id =
+                            stable_record_id.ok_or(TranscriptIngestError::InvalidFrameState {
+                                provider: "cursor",
+                            })?;
+                        Ok(if identity_collision_retry {
+                            JsonlFrameAdmission::durable_with_identity_collision_retry(
+                                parsed,
+                                stable_record_id,
+                            )
+                        } else {
+                            JsonlFrameAdmission::durable(parsed, stable_record_id)
+                        })
+                    }
                     Err(_) => Ok(JsonlFrameAdmission::non_durable(if unsupported_record {
                         ObservationCoverageReason::UnsupportedFact
                     } else {
@@ -994,7 +1026,7 @@ impl TranscriptSource for CursorSweepSource {
                 remaining_bytes = remaining_bytes.saturating_sub(report.bytes_charged);
                 paths.extend(report.paths);
             }
-            return paths;
+            return select_cursor_session_authorities(paths);
         }
         let Some(slug) = cursor_project_slug(project_root) else {
             return Vec::new();
@@ -1098,6 +1130,45 @@ impl TranscriptSource for CursorSweepSource {
             self.parse_new(path, prev, project_root, max_new_bytes)
         })
     }
+}
+
+fn select_cursor_session_authorities(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut authorities = std::collections::BTreeMap::<String, PathBuf>::new();
+    for path in paths {
+        let Some(session_id) = path
+            .file_stem()
+            .and_then(std::ffi::OsStr::to_str)
+            .filter(|session_id| !session_id.is_empty())
+        else {
+            continue;
+        };
+        match authorities.entry(session_id.to_owned()) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(path);
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry)
+                if cursor_transcript_authority_rank(&path)
+                    > cursor_transcript_authority_rank(entry.get()) =>
+            {
+                entry.insert(path);
+            }
+            std::collections::btree_map::Entry::Occupied(_) => {}
+        }
+    }
+    authorities.into_values().collect()
+}
+
+fn cursor_transcript_authority_rank(path: &Path) -> (bool, std::time::SystemTime, u64, &Path) {
+    let metadata = std::fs::metadata(path).ok();
+    (
+        is_subagent_transcript(path),
+        metadata
+            .as_ref()
+            .and_then(|metadata| metadata.modified().ok())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+        metadata.as_ref().map_or(0, std::fs::Metadata::len),
+        path,
+    )
 }
 
 /// Synthesizes the minimal hook-shaped event used by startup sweeps so their
