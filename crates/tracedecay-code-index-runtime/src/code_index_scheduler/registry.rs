@@ -4787,6 +4787,34 @@ impl CodeIndexSchedulerRegistryV1 {
         )
     }
 
+    /// Load one exact published code generation for `project_root` from its
+    /// durable store, even after a newer capture superseded it in every
+    /// process-local retained map.
+    ///
+    /// Reads through the historical generation owner so a reconcile that owns
+    /// the scheduler mutex never blocks the caller; the decode runs on the
+    /// blocking pool because it is an O(store) sealed read.
+    pub async fn published_generation(
+        &self,
+        project_root: &Path,
+        generation_id: &CodeGenerationId,
+    ) -> Option<Arc<CodeIndexPublishedGenerationV1>> {
+        let project_root = project_root.canonicalize().ok()?;
+        let owner = {
+            let mounted = self.mounted.lock().await;
+            mounted
+                .get(&project_root)?
+                .historical_generation_owner
+                .clone()
+        };
+        let generation_id = generation_id.clone();
+        tokio::task::spawn_blocking(move || owner.published_generation(&generation_id))
+            .await
+            .ok()?
+            .ok()
+            .flatten()
+    }
+
     pub async fn latest_generation_id(&self, project_root: &Path) -> Option<CodeGenerationId> {
         let project_root = project_root.canonicalize().ok()?;
         // Read the O(1) serving slot instead of the scheduler mutex. This used
