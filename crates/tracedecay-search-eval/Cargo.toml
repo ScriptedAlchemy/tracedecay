@@ -32,6 +32,14 @@ tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
 
 [features]
+# The controlled-workload parity test resolves this feature in a separate
+# Cargo invocation from its feature-off run. Keep it narrower than the full
+# evaluator `hotpath` feature so the test proves capture/private-fs durability
+# without rebuilding unrelated evaluator dependencies.
+controlled-workload-hotpath = [
+    "tracedecay-capture/hotpath",
+    "tracedecay-private-fs/hotpath",
+]
 # Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
 # the feature off, so instrumented call sites compile identically both ways.
 hotpath = [
