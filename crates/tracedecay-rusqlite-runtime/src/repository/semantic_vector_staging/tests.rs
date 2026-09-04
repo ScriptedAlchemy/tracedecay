@@ -509,9 +509,7 @@ fn exact_sql_authority_denial_diagnostics_bound_reason_and_operation() {
     assert_eq!(
         super::support::classify_exact_sql_failure(
             super::support::ExactSqlFailureOperation::Query,
-            &ExactSqlError::AuthorityDenied(
-                "isolated semantic evaluation authority is closed".to_owned(),
-            ),
+            &ExactSqlError::IsolatedSemanticEvaluationAuthorityClosed,
         ),
         super::support::ExactSqlFailureDiagnostic {
             operation: super::support::ExactSqlFailureOperation::Query,
@@ -519,6 +517,7 @@ fn exact_sql_authority_denial_diagnostics_bound_reason_and_operation() {
             authority_denial_reason: Some(
                 super::support::ExactSqlAuthorityDeniedReason::IsolatedEvaluationClosed,
             ),
+            sqlite: None,
         }
     );
     assert_eq!(
@@ -530,6 +529,32 @@ fn exact_sql_authority_denial_diagnostics_bound_reason_and_operation() {
             operation: super::support::ExactSqlFailureOperation::Execute,
             kind: "authority_denied",
             authority_denial_reason: Some(super::support::ExactSqlAuthorityDeniedReason::Other,),
+            sqlite: None,
+        }
+    );
+}
+
+#[test]
+fn exact_sql_sqlite_diagnostics_preserve_safe_operation_and_codes() {
+    assert_eq!(
+        super::support::classify_exact_sql_failure(
+            super::support::ExactSqlFailureOperation::Execute,
+            &ExactSqlError::Sqlite {
+                operation: "advance query",
+                code: Some(5),
+                extended_code: Some(517),
+                message: "fixture-private SQLite text".to_owned(),
+            },
+        ),
+        super::support::ExactSqlFailureDiagnostic {
+            operation: super::support::ExactSqlFailureOperation::Execute,
+            kind: "sqlite",
+            authority_denial_reason: None,
+            sqlite: Some(super::support::ExactSqliteFailureDiagnostic {
+                operation: "advance query",
+                code: Some(5),
+                extended_code: Some(517),
+            }),
         }
     );
 }
