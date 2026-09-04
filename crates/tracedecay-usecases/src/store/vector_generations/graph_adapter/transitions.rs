@@ -44,7 +44,8 @@ use super::native_records::{
 use super::persistence::{map_graph_error, storage_error};
 use super::stage_identity::next_stage_attempt;
 use super::{
-    GRAPH_OPERATION_DEADLINE, GraphVectorGenerationStoreV1, VectorGenerationBeginOutcomeV1,
+    GRAPH_BACKGROUND_OPERATION_BUDGET, GRAPH_OPERATION_DEADLINE, GraphVectorGenerationStoreV1,
+    VectorGenerationBeginOutcomeV1,
 };
 use crate::semantic_runtime::SemanticGraphExecutionAuthorityV1;
 
@@ -691,9 +692,13 @@ impl GraphVectorGenerationStoreV1 {
                     .ok_or(VectorGenerationStoreErrorV1::IncompleteGeneration)?,
             )
         };
+        let prepare_authority = SemanticGraphExecutionAuthorityV1::new(
+            Arc::clone(&cancellation),
+            Instant::now() + GRAPH_BACKGROUND_OPERATION_BUDGET,
+        );
         match self
             .runtime
-            .prepare_publication_from_staged_native(&stage.plan.key, &authority)
+            .prepare_publication_from_staged_native(&stage.plan.key, &prepare_authority)
             .map_err(map_graph_error)?
         {
             SemanticVectorStagePublicationPrepareOutcome::ReadyToPublish(_)
@@ -715,9 +720,13 @@ impl GraphVectorGenerationStoreV1 {
                 )));
             }
         }
+        let publish_authority = SemanticGraphExecutionAuthorityV1::new(
+            Arc::clone(&cancellation),
+            Instant::now() + GRAPH_BACKGROUND_OPERATION_BUDGET,
+        );
         let snapshot = self
             .runtime
-            .publish_ready_stage(&stage.plan.key, &authority)
+            .publish_ready_stage(&stage.plan.key, &publish_authority)
             .map_err(map_graph_error)?;
         let verified_head = snapshot.verified_head().clone();
         if verified_head.key != stage.plan.publication_key {
