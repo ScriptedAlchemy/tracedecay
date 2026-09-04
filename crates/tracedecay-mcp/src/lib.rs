@@ -90,7 +90,8 @@ pub use jsonrpc::{ErrorCode, JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpT
 pub use lifecycle::{McpConnectionLifecyclePort, McpLifecycleDrainFuture, McpRequestActivity};
 pub use project_access::registered_project_reader_tool_names;
 pub use tool_call_deadline::{
-    TOOL_CALL_DEADLINE_META_KEY, caller_tool_call_deadline, tool_call_deadline_meta,
+    TOOL_CALL_DEADLINE_META_KEY, caller_tool_call_deadline, caller_tool_call_deadline_from_meta,
+    tool_call_deadline_meta,
 };
 pub use tool_errors::{
     mark_semantic_tool_error, semantic_failure_reason, serialize_response_line,

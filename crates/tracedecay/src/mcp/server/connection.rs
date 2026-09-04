@@ -376,24 +376,14 @@ fn current_cancellable_request_key(
 
 #[hotpath::measure(label = "mcp.server.connection.classify")]
 pub(super) fn request_is_independent_read(request: &JsonRpcRequest) -> bool {
-    match classify_mcp_method(&request.method) {
-        McpMethod::ToolsCall => request
+    super::dispatch_envelope::dispatch_is_independent_read(
+        classify_mcp_method(&request.method),
+        request
             .params
             .as_ref()
             .and_then(|params| params.get("name"))
-            .and_then(Value::as_str)
-            .and_then(|tool_name| crate::mcp::tools::mcp_dispatch_contract(tool_name).ok())
-            .is_some_and(tracedecay_tool_catalog::McpDispatchContractV1::read_only),
-        McpMethod::ToolsList
-        | McpMethod::ResourcesList
-        | McpMethod::ResourcesRead
-        | McpMethod::TrivialAck => true,
-        McpMethod::Initialize
-        | McpMethod::InitializedAck
-        | McpMethod::HookEvent
-        | McpMethod::Cancelled
-        | McpMethod::Unknown => false,
-    }
+            .and_then(Value::as_str),
+    )
 }
 
 struct ConcurrentReadCompletion {

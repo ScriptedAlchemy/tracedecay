@@ -48,6 +48,7 @@ use tracedecay_session_memory::session::SessionRefreshServicePort;
 
 mod connection;
 mod construction;
+mod dispatch_envelope;
 mod dispatch_settlement;
 mod hook_dispatch;
 mod hook_writes;
@@ -70,6 +71,7 @@ pub(crate) use project_registry::DaemonProjectRegistryReadService;
 pub(crate) use workflow_index::DaemonWorkflowIndexReadService;
 
 pub(crate) use construction::*;
+use dispatch_envelope::{McpDispatchRequest, ToolCallParams};
 use dispatch_settlement::RetainedDispatchAuthority;
 pub(crate) use hook_writes::*;
 pub(crate) use ledger::McpToolErrorAnalyticsRequest;

@@ -35,10 +35,21 @@ pub fn tool_call_deadline_meta(expires_at: UtcMicros) -> Value {
 /// the daemon falls back to the tool's canonical ceiling exactly as before.
 #[must_use]
 pub fn caller_tool_call_deadline(params: Option<&Value>) -> Option<Deadline> {
-    let micros = params?
-        .get("_meta")?
-        .get(TOOL_CALL_DEADLINE_META_KEY)?
-        .as_i64()?;
+    caller_tool_call_deadline_from_meta(params?.get("_meta")?.as_object())
+}
+
+/// The caller's request deadline read straight from an already-typed `_meta`
+/// object.
+///
+/// A typed `tools/call` transport (the `rmcp` adapter) hands the daemon the
+/// `_meta` map itself, with no surrounding params document to index into.
+/// Both entry points read the same key through this one authority so a typed
+/// caller and a raw JSON-RPC caller can never disagree about their deadline.
+#[must_use]
+pub fn caller_tool_call_deadline_from_meta(
+    meta: Option<&serde_json::Map<String, Value>>,
+) -> Option<Deadline> {
+    let micros = meta?.get(TOOL_CALL_DEADLINE_META_KEY)?.as_i64()?;
     Deadline::new(UtcMicros(micros)).ok()
 }
 
