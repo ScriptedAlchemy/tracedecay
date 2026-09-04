@@ -856,6 +856,18 @@ impl McpServer {
             #[cfg(any(test, feature = "test-transport"))]
             host_admission_test_runtime,
         } = context;
+        // The typed RMCP route consults these immutable contracts before it
+        // chooses a connection ownership mode. Materialize them while the
+        // server is constructed so accepting the first request never has to
+        // build the complete application catalog on that request's path.
+        // Dispatch retains its existing typed initialization error if this
+        // build fails; name the early failure for the operator as well.
+        if let Err(error) = crate::mcp::tools::binding::mcp_dispatch_catalog() {
+            tracing::warn!(
+                %error,
+                "MCP dispatch catalog could not be initialized during server construction"
+            );
+        }
         let file_token_map = HashMap::new();
         let response_handle_project_root = cg.project_root().to_path_buf();
         let persisted_tokens_saved = match cg.get_tokens_saved().await {
