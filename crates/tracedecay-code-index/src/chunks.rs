@@ -2165,7 +2165,15 @@ mod tests {
 
     struct AlwaysCancelled;
 
+    /// Installs the process-global background CPU authority at width 2. That
+    /// authority is set once per process and never uninstalled, so inside the
+    /// shared `--lib` binary every later test that nests
+    /// `with_background_cpu_permit` starves behind a width-2 gate; under
+    /// libtest fan-out that deadlocked the whole binary (159 threads parked in
+    /// futex waits for 16+ minutes). It therefore runs only in isolation:
+    /// `cargo test -p tracedecay-code-index --lib nested_chunk_fanout -- --ignored --test-threads=1`.
     #[test]
+    #[ignore = "installs the process-global background CPU width; run alone with --ignored --test-threads=1"]
     fn nested_chunk_fanout_admits_stolen_workers_without_exceeding_width() {
         assert!(
             process_background_cpu().is_none(),
@@ -2218,7 +2226,15 @@ mod tests {
             .expect("nested chunk fan-out");
 
         assert_eq!(mapped.len(), chunks.len());
-        assert_eq!(maximum.load(Ordering::SeqCst), authority.width().get());
+        // Stolen workers may never exceed the installed width; whether the
+        // scheduler reaches the full width is a timing outcome on a loaded
+        // host, not the contract under test.
+        let observed = maximum.load(Ordering::SeqCst);
+        assert!(
+            (1..=authority.width().get()).contains(&observed),
+            "observed concurrency {observed} must stay within width {}",
+            authority.width().get()
+        );
         assert!(parent_completed.load(Ordering::SeqCst) > 0);
         assert!(stolen_completed.load(Ordering::SeqCst) > 0);
         assert_eq!(authority.active_units(), 0);
