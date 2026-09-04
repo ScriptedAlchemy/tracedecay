@@ -1533,8 +1533,6 @@ fn writer_revision_toggle_preserves_v11_v12_lexical_results() {
 /// a raw `term_id` SQL error is not an upgrade path.
 #[test]
 fn reader_serves_historical_v10_writer_artifact() {
-    use std::os::unix::fs::PermissionsExt;
-
     let checked_in =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lexical-artifact-v10.sqlite");
     let control = ArtifactControl { cancelled: false };
@@ -1551,8 +1549,10 @@ fn reader_serves_historical_v10_writer_artifact() {
     let directory = tempfile::tempdir().expect("private v10 reopen dir");
     let artifact_path = directory.path().join("lexical-artifact-v10.sqlite");
     std::fs::copy(&checked_in, &artifact_path).expect("copy historical v10 fixture");
-    std::fs::set_permissions(&artifact_path, std::fs::Permissions::from_mode(0o600))
-        .expect("restore private-file mode for content-addressed open");
+    drop(
+        tracedecay_private_fs::make_private_file(&artifact_path)
+            .expect("restore private-file protection for content-addressed open"),
+    );
     let bytes = std::fs::read(&artifact_path).expect("read historical v10 fixture");
     let file_size_bytes = u64::try_from(bytes.len()).expect("v10 fixture length");
     let digest = ManifestDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(&bytes))))
