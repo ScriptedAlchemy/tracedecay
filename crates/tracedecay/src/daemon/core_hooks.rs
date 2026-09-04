@@ -111,6 +111,13 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn missing_hook_socket_returns_typed_unavailable_without_retry_delay() {
+        // Delivery builds the client handshake first, and that handshake reads
+        // the registered product runtime for its truthful binary version. Every
+        // real hook-notifying process registers one at its entry point; a
+        // per-test process that does not would classify the socket outcome as
+        // Malformed (no advertisable version) before it ever reaches the
+        // connect this test covers.
+        crate::product_runtime::register_fixture_product_runtime();
         let socket_dir = tempfile::tempdir().unwrap();
         let missing_socket = socket_dir.path().join("missing.sock");
         let connection = connection_for_socket_path(&missing_socket);
