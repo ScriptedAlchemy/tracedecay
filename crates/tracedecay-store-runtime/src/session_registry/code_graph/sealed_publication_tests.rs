@@ -882,7 +882,7 @@ async fn offered_decode_hydrates_without_reading_the_sealed_payload_again() {
         project_id.clone(),
     );
     let provider = DaemonCodeGraphManifestProviderV1::default();
-    provider
+    let _route = provider
         .bind(
             shard.clone(),
             project_id.clone(),
