@@ -813,6 +813,7 @@ pub(crate) fn proxy_initialize_metadata(
     proxy_initialize_metadata_for_request(request.parsed.as_ref(), responses)
 }
 
+#[cfg(unix)]
 fn proxy_initialize_metadata_for_request(
     request: Option<&JsonRpcRequest>,
     responses: &[String],
@@ -860,6 +861,7 @@ pub(crate) fn daemon_version_skew_warning(
     daemon_version_skew_warning_for_request(request.parsed.as_ref(), responses, client_version)
 }
 
+#[cfg(unix)]
 fn daemon_version_skew_warning_for_request(
     request: Option<&JsonRpcRequest>,
     responses: &[String],
