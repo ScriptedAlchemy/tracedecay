@@ -250,16 +250,27 @@ impl HostAdmissionFacade<'_> {
                         "git_evidence_convergence_unavailable",
                     )
                 })?;
+            if let Some(error) = convergence.later_failure() {
+                tracing::warn!(%error, "Git evidence convergence made partial progress during host drain");
+            }
             if cancellation.is_cancelled() {
                 return Err(classify_error(&ObservationApplicationError::Cancelled));
             }
-            outcome.deferred |= convergence.pending_publications > 0
-                || convergence.backfill_page_saturated
-                || convergence.backfill.skipped_total() > 0;
+            outcome.deferred |= git_evidence_convergence_deferred(&convergence);
         }
         outcome.session_ids = session_ids.into_iter().collect();
         Ok(outcome)
     }
+}
+
+fn git_evidence_convergence_deferred(
+    convergence: &tracedecay_global_db::GitEvidenceConvergenceOutcome,
+) -> bool {
+    let stats = convergence.stats();
+    convergence.later_failure().is_some()
+        || stats.pending_publications.is_none_or(|pending| pending > 0)
+        || stats.backfill_page_saturated
+        || stats.backfill.skipped_git_error > 0
 }
 
 #[cfg(test)]
@@ -287,7 +298,9 @@ fn simulate_drain_project_calls(batch: &[SimulatedProjectOutcome]) -> (u64, usiz
 
 #[cfg(test)]
 mod tests {
-    use super::{SimulatedProjectOutcome, simulate_drain_project_calls};
+    use super::{
+        SimulatedProjectOutcome, git_evidence_convergence_deferred, simulate_drain_project_calls,
+    };
 
     #[test]
     fn multi_item_batch_continues_after_durable_refusals() {
@@ -305,5 +318,36 @@ mod tests {
             batch.len(),
             "durably refused items must not stall healthy items later in the batch"
         );
+    }
+
+    #[test]
+    fn permanent_git_exclusions_do_not_defer_host_admission() {
+        let convergence = tracedecay_global_db::GitEvidenceConvergenceOutcome::Complete(
+            tracedecay_global_db::GitEvidenceConvergenceStats {
+                replayed_publications: 0,
+                pending_publications: Some(0),
+                backfill: tracedecay_sessions::runtime::git_correlation::BackfillStats {
+                    skipped_no_window: 1,
+                    skipped_not_worktree: 1,
+                    ..Default::default()
+                },
+                backfill_page_saturated: false,
+            },
+        );
+
+        assert!(!git_evidence_convergence_deferred(&convergence));
+
+        let transient = tracedecay_global_db::GitEvidenceConvergenceOutcome::Complete(
+            tracedecay_global_db::GitEvidenceConvergenceStats {
+                replayed_publications: 0,
+                pending_publications: Some(0),
+                backfill: tracedecay_sessions::runtime::git_correlation::BackfillStats {
+                    skipped_git_error: 1,
+                    ..Default::default()
+                },
+                backfill_page_saturated: false,
+            },
+        );
+        assert!(git_evidence_convergence_deferred(&transient));
     }
 }
