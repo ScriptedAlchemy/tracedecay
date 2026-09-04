@@ -289,6 +289,7 @@ pub struct SemanticCompatibleCurrentGenerationSnapshotV1 {
 pub struct SemanticEvaluationCurrentGenerationSnapshotV1 {
     pub vector_state_revision: i64,
     pub vector_generation_id: VectorGenerationIdV1,
+    pub source_manifest_digest: ManifestDigest,
 }
 
 /// Exact pre-acceptance target certified against the live semantic runtime.
@@ -1641,6 +1642,7 @@ impl ProductionSemanticRuntimeV1 {
             vector_state_revision: i64::try_from(verified.revision())
                 .map_err(|_| SemanticRuntimeBackendErrorV1::Rejected)?,
             vector_generation_id: verified.generation().generation_id().clone(),
+            source_manifest_digest: verified.generation().source_manifest_digest().clone(),
         })
     }
 
