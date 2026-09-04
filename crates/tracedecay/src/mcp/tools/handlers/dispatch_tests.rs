@@ -1022,44 +1022,65 @@ async fn selected_project_retrieve_finds_selected_project_response_handle() {
         "selected-project envelopes should tell clients to retrieve from the same project: {retrieve_instruction}"
     );
 
-    let retrieved = server
-        .handle_request(&tracedecay_mcp::transport::JsonRpcRequest {
-            jsonrpc: "2.0".to_owned(),
-            id: Some(json!(2)),
-            method: "tools/call".to_owned(),
-            params: Some(json!({
-                "name": "tracedecay_retrieve",
-                "arguments": {
-                    "handle": handle,
-                    "project_selector": {"project_id": target_project_id},
-                    "format": "json"
-                }
-            })),
-        })
-        .await
-        .expect("selected-project retrieve response");
-    let retrieved = retrieved
-        .result
-        .unwrap_or_else(|| panic!("selected-project retrieve failed: {:?}", retrieved.error));
-    let payload: Value = retrieved["content"]
-        .as_array()
-        .and_then(|items| {
-            items.iter().find_map(|item| {
-                item["text"]
-                    .as_str()
-                    .and_then(|text| serde_json::from_str(text).ok())
+    // A stored response is by definition larger than one MCP response frame,
+    // so `tracedecay_retrieve` hands it back a page at a time. Walk
+    // `next_offset` to the end: the whole selected-project response, through
+    // its last returned marker, must be reachable from the target project.
+    let mut offset = 0_u64;
+    let mut retrieved_content = String::new();
+    let mut pages = 0_u32;
+    loop {
+        let retrieved = server
+            .handle_request(&tracedecay_mcp::transport::JsonRpcRequest {
+                jsonrpc: "2.0".to_owned(),
+                id: Some(json!(2)),
+                method: "tools/call".to_owned(),
+                params: Some(json!({
+                    "name": "tracedecay_retrieve",
+                    "arguments": {
+                        "handle": handle,
+                        "project_selector": {"project_id": target_project_id},
+                        "offset": offset,
+                        "format": "json"
+                    }
+                })),
             })
-        })
-        .expect("retrieve JSON payload");
+            .await
+            .expect("selected-project retrieve response");
+        let retrieved = retrieved
+            .result
+            .unwrap_or_else(|| panic!("selected-project retrieve failed: {:?}", retrieved.error));
+        let payload: Value = retrieved["content"]
+            .as_array()
+            .and_then(|items| {
+                items.iter().find_map(|item| {
+                    item["text"]
+                        .as_str()
+                        .and_then(|text| serde_json::from_str(text).ok())
+                })
+            })
+            .expect("retrieve JSON payload");
 
-    assert_eq!(payload["expired"], false);
+        assert_eq!(payload["expired"], false);
+        retrieved_content.push_str(
+            payload["content"]
+                .as_str()
+                .unwrap_or_else(|| panic!("retrieve page content: {payload}")),
+        );
+        pages += 1;
+        assert!(pages < 64, "selected-project retrieve paging did not settle");
+        match payload["next_offset"].as_u64() {
+            Some(next) => offset = next,
+            None => break,
+        }
+    }
     assert!(
-        payload["content"]
-            .as_str()
-            .is_some_and(|content| content.contains(&format!(
-                "selected_project_handle_marker_{LAST_RETURNED_RESPONSE_MARKER:03}"
-            ))),
-        "selected project retrieve should return the full selected-project response: {payload}"
+        retrieved_content.contains(&format!(
+            "selected_project_handle_marker_{LAST_RETURNED_RESPONSE_MARKER:03}"
+        )),
+        "selected project retrieve should return the full selected-project response \
+         ({} chars over {pages} page(s))",
+        retrieved_content.len()
     );
 
     for (id, label, arguments) in [
