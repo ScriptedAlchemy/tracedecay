@@ -575,6 +575,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires feature-off/on executables built by the workflow helper"]
     fn hotpath_off_vs_on_durable_results_are_identical() {
         let scratch = tempfile::tempdir().expect("identity scratch");
         let off_dir = scratch.path().join("off");

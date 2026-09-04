@@ -285,15 +285,14 @@ jobs:
       # the first executable in target/debug/examples.
       - name: Build controlled-workload hotpath parity executables
         shell: bash
+        run: python3 scripts/build-controlled-workload-hotpath-helpers.py --profile test
+
+      - name: Verify controlled-workload hotpath parity
         run: |
-          set -euo pipefail
-          helper_dir=target/controlled-workload-hotpath
-          example=target/debug/examples/emit_controlled_workload_reports
-          mkdir -p "$helper_dir"
-          cargo build -p tracedecay-search-eval --profile test --example emit_controlled_workload_reports --locked
-          cp "$example" "$helper_dir/hotpath-off"
-          cargo build -p tracedecay-search-eval --profile test --example emit_controlled_workload_reports --locked --features controlled-workload-hotpath
-          cp "$example" "$helper_dir/hotpath-on"
+          cargo nextest run -p tracedecay-search-eval --locked \
+            --run-ignored only \
+            -E 'test(=controlled_workloads::tests::hotpath_off_vs_on_durable_results_are_identical)' \
+            --no-tests=fail
 
       # `nested_chunk_fanout_admits_stolen_workers_without_exceeding_width`
       # installs the process-global background CPU authority at width 2, and
@@ -380,6 +379,10 @@ jobs:
           cache: npm
           cache-dependency-path: dashboard/package-lock.json
 
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
@@ -417,16 +420,11 @@ jobs:
       # builds the ordinary feature-off workspace and packages the pair.
       - name: Build controlled-workload hotpath parity executables
         shell: pwsh
-        run: |
-          $helperDir = Join-Path "target" "controlled-workload-hotpath"
-          $example = Join-Path "target" "debug/examples/emit_controlled_workload_reports.exe"
-          New-Item -ItemType Directory -Force -Path $helperDir | Out-Null
-          cargo build -p tracedecay-search-eval --profile test --example emit_controlled_workload_reports --locked
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Copy-Item -Force $example (Join-Path $helperDir "hotpath-off.exe")
-          cargo build -p tracedecay-search-eval --profile test --example emit_controlled_workload_reports --locked --features controlled-workload-hotpath
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Copy-Item -Force $example (Join-Path $helperDir "hotpath-on.exe")
+        run: python3 scripts/build-controlled-workload-hotpath-helpers.py --profile test
+
+      - name: Verify controlled-workload hotpath parity
+        shell: pwsh
+        run: cargo nextest run -p tracedecay-search-eval --locked --run-ignored only -E 'test(=controlled_workloads::tests::hotpath_off_vs_on_durable_results_are_identical)' --no-tests=fail
 
       - name: Build nextest archive
         shell: pwsh
