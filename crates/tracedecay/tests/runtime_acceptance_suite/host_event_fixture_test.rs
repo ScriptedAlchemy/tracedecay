@@ -934,6 +934,138 @@ async fn current_codex_user_pair_projects_once_and_rejects_malformed_items() {
     assert_eq!(messages[0].message.message_id, "user-item-1");
 }
 
+#[tokio::test]
+async fn current_codex_goal_pair_projects_once_with_native_identity_and_goal_semantics() {
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let project_id = ProjectId::new("project.codex-current-goal-pair").unwrap();
+    assert!(
+        Command::new(git_program())
+            .arg("init")
+            .arg(&project)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        tracedecay_runtime_core::storage::write_repository_identity_marker(
+            &project,
+            project_id.as_str()
+        )
+        .unwrap()
+    );
+    let runtime = HostAdmissionTestRuntimeV1::project(
+        tmp.path().join("profile"),
+        &project,
+        project_id.clone(),
+    )
+    .await
+    .unwrap();
+    let facade = runtime.facade();
+    let transcript = tmp.path().join("codex-current-goal-pair.jsonl");
+    let goal = concat!(
+        "<codex_internal_context source=\"goal\">",
+        "<objective>finish the canonical admission fix</objective>\n",
+        "Token budget: 12000\nTokens remaining: 11000",
+        "</codex_internal_context>"
+    );
+    let lines = [
+        json!({
+            "timestamp": "2026-09-04T12:00:00.000Z",
+            "type": "session_meta",
+            "payload": {"id": "session-current-goal-pair", "cwd": project}
+        }),
+        json!({
+            "timestamp": "2026-09-04T12:00:01.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": "msg-goal-1",
+                "role": "user",
+                "content": [{"type": "input_text", "text": goal}]
+            }
+        }),
+        json!({
+            "timestamp": "2026-09-04T12:00:01.004Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": "thread-1",
+                "turn_id": "turn-1",
+                "item": {
+                    "type": "UserMessage",
+                    "id": "goal-user-item-1",
+                    "content": [{"type": "text", "text": goal}]
+                }
+            }
+        }),
+    ];
+    std::fs::write(
+        &transcript,
+        lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
+
+    codex::try_admit_codex_jsonl_observations_for_project_with_admission(
+        &transcript,
+        &project,
+        project_id.clone(),
+        &facade,
+        None,
+    )
+    .await
+    .unwrap();
+    let scope = ObservationScopeV1::Project { project_id };
+    let projection = facade
+        .drain_projection_queue("codex", &scope, &ObservationCancellation::default(), 16)
+        .await
+        .unwrap();
+
+    assert_eq!(projection.projected_outputs, 1);
+    assert_eq!(
+        runtime
+            .session_message_count_for_test(HostAdmissionScope::Project, None)
+            .await
+            .unwrap(),
+        1
+    );
+    let messages = runtime
+        .search_session_messages_for_test(
+            HostAdmissionScope::Project,
+            "codex",
+            None,
+            "canonical admission fix",
+            8,
+        )
+        .await
+        .unwrap();
+    assert_eq!(messages.len(), 1);
+    let message = &messages[0].message;
+    assert_eq!(message.message_id, "goal-user-item-1");
+    assert_eq!(message.role, "system");
+    assert_eq!(message.kind.as_deref(), Some("goal_context"));
+    assert_eq!(
+        message.text,
+        "Codex active goal: finish the canonical admission fix"
+    );
+    let metadata: serde_json::Value =
+        serde_json::from_str(message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["codex_internal_context"], "goal");
+    assert_eq!(metadata["source_event"], "item_completed");
+    assert_eq!(
+        metadata["codex_goal"]["objective"],
+        "finish the canonical admission fix"
+    );
+    assert_eq!(metadata["codex_goal"]["token_budget"], 12000);
+    assert_eq!(metadata["codex_goal"]["tokens_remaining"], 11000);
+}
+
 fn encode_workspace_path(path: &Path) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut output = String::new();

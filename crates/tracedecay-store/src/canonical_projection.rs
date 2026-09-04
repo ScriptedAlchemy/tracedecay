@@ -9,7 +9,9 @@ use tracedecay_domain::{
 };
 
 use crate::cursor_dispatch::{cursor_dispatch_model, dispatch_text, is_subagent_dispatch_tool};
-use crate::provider_descriptor::{synthesizes_native_record_id, tool_metadata_normalizer};
+use crate::provider_descriptor::{
+    provider_message_semantics, synthesizes_native_record_id, tool_metadata_normalizer,
+};
 use crate::{
     ObservationProjection, ProjectionSkipReason, ProjectionStoreError, ProjectionStoreResult,
     SessionMessageRecord, SessionRecord, WorkflowFactRecord,
@@ -326,6 +328,19 @@ fn canonical_message_metadata(
         tool_metadata_normalizer(metadata.get("source").and_then(serde_json::Value::as_str))
     {
         normalize(&mut metadata, envelope.facts())?;
+    }
+    if let Some(CanonicalObservationFactV1::Message { role, content, .. }) = envelope
+        .facts()
+        .iter()
+        .find(|fact| matches!(fact, CanonicalObservationFactV1::Message { .. }))
+        && let Some(semantics) = provider_message_semantics(
+            envelope.provider().as_str(),
+            canonical_role(*role),
+            content,
+            envelope.relations().message_id() != Some(envelope.stable_record_id()),
+        )
+    {
+        metadata.extend(semantics.metadata);
     }
     serde_json::to_string(&metadata)
         .map_err(|_| ProjectionStoreError::Contract(ObservationContractError::CanonicalEncoding))
@@ -693,9 +708,26 @@ fn canonical_message_fields(
         .iter()
         .find(|fact| matches!(fact, CanonicalObservationFactV1::Message { .. }))
     {
+        let role = canonical_role(*role);
+        let text = canonical_fact_text(content)?;
+        if let Some(semantics) = provider_message_semantics(
+            envelope.provider().as_str(),
+            role,
+            content,
+            envelope.relations().message_id() != Some(envelope.stable_record_id()),
+        ) {
+            return Ok(Some(CanonicalMessageFields {
+                role: semantics.role.to_owned(),
+                text: semantics.text,
+                kind: semantics.kind.to_owned(),
+                model: model.clone(),
+                timestamp: *timestamp,
+                tool_names,
+            }));
+        }
         return Ok(Some(CanonicalMessageFields {
-            role: canonical_role(*role).to_owned(),
-            text: canonical_fact_text(content)?,
+            role: role.to_owned(),
+            text,
             kind: "message".to_owned(),
             model: model.clone(),
             timestamp: *timestamp,
@@ -1232,6 +1264,42 @@ mod tests {
         assert_eq!(fields.timestamp, Some(1_783_500_569));
         assert!(fields.model.is_none());
         assert!(fields.tool_names.is_none());
+    }
+
+    #[test]
+    fn canonical_projection_renders_codex_goal_context_like_direct_ingest() {
+        let envelope = envelope(vec![CanonicalObservationFactV1::Message {
+            role: CanonicalMessageRoleV1::User,
+            content: json!([{
+                "type": "text",
+                "text": concat!(
+                    "<codex_internal_context source=\"goal\">",
+                    "<objective>finish canonical projection</objective>\n",
+                    "Token budget: 12000\nTokens remaining: 11000",
+                    "</codex_internal_context>"
+                )
+            }]),
+            model: Some("gpt-5.6-sol".to_owned()),
+            timestamp: Some(44),
+        }]);
+
+        let fields = canonical_message_fields(&envelope).unwrap().unwrap();
+        assert_eq!(fields.role, "system");
+        assert_eq!(
+            fields.text,
+            "Codex active goal: finish canonical projection"
+        );
+        assert_eq!(fields.kind, "goal_context");
+        let metadata: serde_json::Value =
+            serde_json::from_str(&canonical_message_metadata(&envelope, None).unwrap()).unwrap();
+        assert_eq!(metadata["source"], "codex_rollout");
+        assert_eq!(metadata["codex_internal_context"], "goal");
+        assert_eq!(
+            metadata["codex_goal"]["objective"],
+            "finish canonical projection"
+        );
+        assert_eq!(metadata["codex_goal"]["token_budget"], 12000);
+        assert_eq!(metadata["codex_goal"]["tokens_remaining"], 11000);
     }
 
     #[test]

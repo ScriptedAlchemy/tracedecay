@@ -764,9 +764,7 @@ mod goal_event_tests {
     }
 
     #[test]
-    fn goal_context_response_item_remains_message_only() {
-        // Goal-context prose is not a fixture-backed native lifecycle record.
-        // It must remain a Message rather than becoming inferred Goal state.
+    fn goal_context_response_item_defers_to_stable_user_item() {
         let native = json!({
             "timestamp": "2026-01-01T00:00:15.100Z",
             "type": "response_item",
@@ -789,15 +787,13 @@ mod goal_event_tests {
             range,
         )
         .unwrap();
-        let facts = envelope.facts();
-        assert_eq!(facts.len(), 1);
-        assert!(matches!(
-            &facts[0],
-            CanonicalObservationFactV1::Message {
-                role: CanonicalMessageRoleV1::User,
-                ..
-            }
-        ));
+        assert_eq!(
+            envelope.facts(),
+            &[CanonicalObservationFactV1::Unknown {
+                native_kind: "response_item.message.user".to_owned(),
+                state: CanonicalUnknownStateV1::Unsupported,
+            }]
+        );
     }
 
     #[tokio::test]

@@ -50,27 +50,7 @@ pub fn codex_current_user_message(payload: &Value) -> Option<CodexCurrentUserMes
 
 /// Collect the visible text carried by current and legacy Codex content bags.
 pub fn codex_message_visible_text(value: &Value) -> String {
-    match value {
-        Value::String(text) => text.clone(),
-        Value::Array(items) => items
-            .iter()
-            .map(codex_message_visible_text)
-            .filter(|text| !text.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n"),
-        Value::Object(map) => {
-            if let Some(text) = map.get("text").and_then(Value::as_str) {
-                return text.to_string();
-            }
-            ["content", "message", "item"]
-                .iter()
-                .filter_map(|key| map.get(*key))
-                .map(codex_message_visible_text)
-                .find(|text| !text.is_empty())
-                .unwrap_or_default()
-        }
-        _ => String::new(),
-    }
+    tracedecay_store::codex_message_visible_text(value)
 }
 
 pub fn codex_observation_record_supported(value: &Value) -> bool {
@@ -697,16 +677,10 @@ fn append_codex_response_item_facts(
         "message" => {
             if let Some(content) = payload.get("content").cloned() {
                 let role = payload.get("role").and_then(Value::as_str);
-                let visible_text = codex_message_visible_text(&content);
-                let visible_text = visible_text.trim();
-                let is_goal_context = visible_text
-                    .starts_with("<codex_internal_context source=\"goal\">")
-                    && visible_text.ends_with("</codex_internal_context>");
-                // Current Codex repeats ordinary user prompts as an
-                // `item_completed/UserMessage`; only that event carries the
-                // stable item identity. Goal context remains response-only in
-                // some rollouts, so retain that synthetic message here.
-                if role == Some("user") && !is_goal_context {
+                // Current Codex emits user response items as precursors to
+                // `item_completed/UserMessage`; only the latter carries the
+                // stable native item identity used by canonical projection.
+                if role == Some("user") {
                     facts.push(CanonicalObservationFactV1::Unknown {
                         native_kind: "response_item.message.user".to_string(),
                         state: CanonicalUnknownStateV1::Unsupported,
@@ -722,9 +696,6 @@ fn append_codex_response_item_facts(
                         .map(str::to_string),
                     timestamp,
                 });
-                // Goal-context response_item messages stay Message-only.
-                // WorkflowLifecycle Goal is reserved for nested thread_goal_updated
-                // (write_codex_rollout_with_goal_events), not synthetic goal-context text.
             }
         }
         "function_call" | "custom_tool_call" | "tool_search_call" | "web_search_call" => {
