@@ -380,6 +380,30 @@ fn git(repo: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?} failed");
 }
 
+/// Runs one Git command and reports only whether it succeeded. Used for
+/// options whose availability depends on the installed Git version.
+fn git_succeeds(repo: &Path, args: &[&str]) -> bool {
+    std::process::Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+/// Runs one Git command and returns its trimmed stdout.
+fn git_output(repo: &Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .expect("spawn git");
+    assert!(output.status.success(), "git {args:?} failed");
+    String::from_utf8(output.stdout)
+        .expect("git output")
+        .trim()
+        .to_owned()
+}
+
 #[tokio::test]
 async fn reconcile_is_idempotent_for_already_managed_pr() {
     let data_root = tempfile::tempdir().unwrap();
@@ -487,7 +511,13 @@ async fn partial_discovery_suppresses_removals() {
 }
 
 fn init_manual_branch_repo(repo: &Path, branch: &str) {
-    git(repo, &["init", "-q", "-b", "main"]);
+    // Pin the files ref backend. This suite's exact-ref coverage opens the
+    // loose ref file directly, which a reftable repository never materializes.
+    // Git versions that predate `--ref-format` reject the option and already
+    // create files-backed repositories.
+    if !git_succeeds(repo, &["init", "-q", "-b", "main", "--ref-format=files"]) {
+        git(repo, &["init", "-q", "-b", "main"]);
+    }
     git(repo, &["config", "user.name", "TraceDecay Test"]);
     git(
         repo,
@@ -1171,13 +1201,29 @@ async fn cancelled_activation_keeps_its_lifecycle_owner_bounded_during_stalled_e
         .await
         .expect("initial activation creates exact artifacts");
     let artifacts = ManualBranchArtifactsV1::for_branch(&data_root, branch);
-    let ref_path = repo.path().join(".git").join(
-        artifacts
-            .tracking_ref
-            .strip_prefix("refs/")
-            .expect("manual tracking ref is rooted under refs"),
-    );
-    std::fs::remove_file(&ref_path).expect("replace exact tracking ref with a FIFO");
+    // Ask Git for the loose-ref path rather than assuming the ref stayed loose
+    // after activation: a loose entry is what Git's exact-ref reader opens
+    // first, and it takes precedence over any packed entry, so the FIFO stalls
+    // that read whether or not the ref was packed away.
+    let ref_path = {
+        let reported = std::path::PathBuf::from(git_output(
+            repo.path(),
+            &["rev-parse", "--git-path", &artifacts.tracking_ref],
+        ));
+        if reported.is_absolute() {
+            reported
+        } else {
+            repo.path().join(reported)
+        }
+    };
+    if let Some(parent) = ref_path.parent() {
+        std::fs::create_dir_all(parent).expect("loose exact-ref directory");
+    }
+    match std::fs::remove_file(&ref_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("replace exact tracking ref with a FIFO: {error}"),
+    }
     assert!(
         std::process::Command::new("mkfifo")
             .arg(&ref_path)
