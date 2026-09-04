@@ -51,7 +51,9 @@ async fn retrieve_tool_returns_full_stored_response() {
     let markdown = handle_tool_call(
         &cg,
         "tracedecay_retrieve",
-        json!({"handle": stored.handle, "offset": 2, "max_chars": 7}),
+        // The suite helper defaults every non-markdown-owning tool to JSON;
+        // ask for markdown explicitly, as an agent wanting the page header does.
+        json!({"format": "markdown", "handle": stored.handle, "offset": 2, "max_chars": 7}),
         None,
         None,
     )
