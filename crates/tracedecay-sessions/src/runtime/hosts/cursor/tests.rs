@@ -70,9 +70,12 @@ fn native_id_content_conflict_has_no_positional_retry() {
         "message": {"content": "first content"}
     });
     let changed = json!({
-        "id": "cursor-native-conflict",
+        "id": null,
         "role": "assistant",
-        "message": {"content": "changed content"}
+        "message": {
+            "id": "cursor-native-conflict",
+            "content": "changed content"
+        }
     });
     let first_range = tracedecay_domain::ObservationSourceRangeV1::new(0, 80).unwrap();
     let changed_range = tracedecay_domain::ObservationSourceRangeV1::new(80, 160).unwrap();

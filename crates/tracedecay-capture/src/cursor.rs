@@ -547,9 +547,14 @@ pub fn observation_native_record_id(
 fn cursor_native_record_id(value: &Value) -> Option<&str> {
     value
         .get("id")
-        .or_else(|| value.pointer("/message/id"))
         .and_then(Value::as_str)
         .filter(|id| !id.is_empty())
+        .or_else(|| {
+            value
+                .pointer("/message/id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+        })
 }
 
 pub fn cursor_projected_message_id(
@@ -559,11 +564,7 @@ pub fn cursor_projected_message_id(
     generation: u64,
     namespace_replacement: bool,
 ) -> Result<ObservationId, ObservationRecordParseErrorV1> {
-    let base = native
-        .get("id")
-        .or_else(|| native.pointer("/message/id"))
-        .and_then(Value::as_str)
-        .filter(|id| !id.is_empty())
+    let base = cursor_native_record_id(native)
         .map_or_else(|| format!("{session_id}:{source_offset}"), str::to_string);
     // Truncate/rename replacements reuse byte offsets across file generations.
     // Namespace only on replacement rescans so first-generation ids stay stable.

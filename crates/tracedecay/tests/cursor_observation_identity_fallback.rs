@@ -1,7 +1,10 @@
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay_capture::cursor::{cursor_observation_identity, normalize_cursor_observation};
+use tracedecay_capture::cursor::{
+    cursor_observation_identity, cursor_projected_message_id,
+    normalize_cursor_observation_with_message_id,
+};
 use tracedecay_domain::{
     ComponentVersion, DurableObservationV1, ObservationCollisionOutcomeV1, ObservationId,
     ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
@@ -39,10 +42,13 @@ fn cursor_observation(
     record_id: ObservationId,
     receipt_id: &str,
 ) -> DurableObservationV1 {
-    let envelope = normalize_cursor_observation(
+    let projected_message_id =
+        cursor_projected_message_id(native, session_id.as_str(), range.start(), 1, false).unwrap();
+    let envelope = normalize_cursor_observation_with_message_id(
         native,
         session_id.as_str(),
         record_id.clone(),
+        projected_message_id,
         range,
         None,
         None,
@@ -204,4 +210,118 @@ async fn cursor_positional_identity_retries_without_consuming_the_primary_fronti
         store.persist_observation(fallback_write).await.unwrap(),
         ObservationPersistOutcome::ExactDuplicate(_)
     ));
+}
+
+#[tokio::test]
+async fn cursor_native_replay_across_offsets_is_covered_but_changed_content_fails_closed() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
+        .await
+        .unwrap();
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let session_id = SessionId::new("session.cursor-native-conflict").unwrap();
+    let first_native = json!({
+        "id": "cursor-native-conflict",
+        "role": "assistant",
+        "message": {"content": "first content"}
+    });
+    let mirrored_native = json!({
+        "id": null,
+        "role": "assistant",
+        "message": {
+            "id": "cursor-native-conflict",
+            "content": "first content"
+        }
+    });
+    let changed_native = json!({
+        "id": null,
+        "role": "assistant",
+        "message": {
+            "id": "cursor-native-conflict",
+            "content": "changed content"
+        }
+    });
+    let first_range = ObservationSourceRangeV1::new(0, 64).unwrap();
+    let mirrored_range = ObservationSourceRangeV1::new(64, 128).unwrap();
+    let changed_range = ObservationSourceRangeV1::new(128, 192).unwrap();
+    let first_identity =
+        cursor_observation_identity(session_id.as_str(), &first_native, first_range).unwrap();
+    let mirrored_identity =
+        cursor_observation_identity(session_id.as_str(), &mirrored_native, mirrored_range).unwrap();
+    let changed_identity =
+        cursor_observation_identity(session_id.as_str(), &changed_native, changed_range).unwrap();
+    assert_eq!(first_identity.primary(), mirrored_identity.primary());
+    assert_eq!(first_identity.primary(), changed_identity.primary());
+    assert!(first_identity.collision_disambiguation().is_none());
+    assert!(mirrored_identity.collision_disambiguation().is_none());
+    assert!(changed_identity.collision_disambiguation().is_none());
+
+    let original = cursor_observation(
+        &first_native,
+        &session_id,
+        first_range,
+        first_identity.into_primary(),
+        "receipt.cursor-native-conflict.original",
+    );
+    assert!(matches!(
+        store
+            .persist_observation(anchored_write(original.clone(), None))
+            .await
+            .unwrap(),
+        ObservationPersistOutcome::Committed(_)
+    ));
+    let first_frontier = store
+        .get_source_cursor(original.source(), original.scope())
+        .await
+        .unwrap();
+    let mirrored = cursor_observation(
+        &mirrored_native,
+        &session_id,
+        mirrored_range,
+        mirrored_identity.into_primary(),
+        "receipt.cursor-native-conflict.mirrored",
+    );
+    assert_eq!(mirrored.observation_id(), original.observation_id());
+    assert_eq!(
+        mirrored.payload().pointer("/relations/message_id"),
+        original.payload().pointer("/relations/message_id")
+    );
+    assert!(matches!(
+        store
+            .persist_observation(anchored_write(mirrored, first_frontier))
+            .await
+            .unwrap(),
+        ObservationPersistOutcome::CoveredDuplicate(_)
+    ));
+    let mirrored_frontier = store
+        .get_source_cursor(original.source(), original.scope())
+        .await
+        .unwrap();
+    let changed = cursor_observation(
+        &changed_native,
+        &session_id,
+        changed_range,
+        changed_identity.into_primary(),
+        "receipt.cursor-native-conflict.changed",
+    );
+    let error = store
+        .persist_observation(anchored_write(changed, mirrored_frontier))
+        .await
+        .expect_err("changed content under one native id must fail closed");
+    assert!(matches!(
+        error,
+        ObservationStoreError::ObservationCollision {
+            outcome: ObservationCollisionOutcomeV1::IdentityCollision,
+            ..
+        }
+    ));
+
+    let retained = store
+        .get_observation(original.observation_id())
+        .await
+        .unwrap()
+        .expect("the original native record must remain authoritative");
+    assert_eq!(retained.observation().payload(), original.payload());
 }
