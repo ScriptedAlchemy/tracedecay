@@ -867,13 +867,26 @@ pub(super) fn verify_sealed_generation_source_from_roots(
     )
 }
 
+/// One worktree route's sealed-generation roots under a project shard.
+///
+/// A linked worktree shares its project's shard but keeps its own code-index
+/// store, so the same shard legitimately owns several root pairs. The roots are
+/// only *where* to look: every read below is still gated on the exact
+/// content-addressed digest and on the decoded manifest's own project,
+/// repository, and generation identity.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct CodeGenerationRootsV1 {
+    generations_root: PathBuf,
+    replay_root: PathBuf,
+}
+
 #[derive(Clone)]
 struct BoundCodeGenerationSourceV1 {
     project_shard: StoreShardIdV1,
     project_id: ProjectId,
     repositories: BTreeSet<RepositoryId>,
-    generations_root: PathBuf,
-    replay_root: PathBuf,
+    /// Every worktree route bound under this shard, in a deterministic order.
+    roots: BTreeSet<CodeGenerationRootsV1>,
 }
 
 /// One already-decoded sealed generation — offered by the code-index
@@ -1187,15 +1200,22 @@ impl DaemonCodeGraphManifestProviderV1 {
         let mut sources = self.sources.write().map_err(|_| {
             GraphDbError::unavailable("code generation manifest provider lock is poisoned")
         })?;
+        let roots = CodeGenerationRootsV1 {
+            generations_root,
+            replay_root,
+        };
         if let Some(existing) = sources.get_mut(&project_shard) {
-            if existing.project_shard != project_shard
-                || existing.project_id != project_id
-                || existing.generations_root != generations_root
-                || existing.replay_root != replay_root
-            {
+            // Different roots under one shard are the ordinary linked-worktree
+            // shape: a branch worktree shares the primary's project shard while
+            // sealing into its own code-index store. Treating that rebind as a
+            // conflict refused every branch publication with
+            // `code_graph_manifest.bind`. A different project identity under the
+            // same shard is still a genuinely different source and stays fatal.
+            if existing.project_shard != project_shard || existing.project_id != project_id {
                 return Err(GraphDbError::conflict("code_graph_manifest.bind"));
             }
             existing.repositories.insert(repository);
+            existing.roots.insert(roots);
             return Ok(());
         }
         sources.insert(
@@ -1204,8 +1224,7 @@ impl DaemonCodeGraphManifestProviderV1 {
                 project_shard,
                 project_id,
                 repositories: BTreeSet::from([repository]),
-                generations_root,
-                replay_root,
+                roots: BTreeSet::from([roots]),
             },
         );
         Ok(())
@@ -1363,12 +1382,39 @@ impl GraphGenerationManifestProvider for DaemonCodeGraphManifestProviderV1 {
                     .strip_prefix("sha256:")
                     .ok_or_else(|| GraphDbError::invalid("sealed state digest is not sha256"))?;
                 let seal_file = format!("generation-{digest}.json");
-                Arc::new(decode_verified_seal_from_roots(
-                    &binding.generations_root.join(&seal_file),
-                    &binding.replay_root.join(&seal_file),
-                    digest,
-                    check,
-                )?)
+                // One shard can own several worktree routes. The seal is
+                // content-addressed, so a route whose store simply does not hold
+                // this generation abstains (`unavailable`) and the next route is
+                // tried; every other verdict — a corrupt payload, a cancelled
+                // read, a blown deadline — is terminal here and is reported as
+                // it stands rather than papered over by a sibling worktree.
+                let mut decoded = None;
+                let mut first_abstention = None;
+                for roots in &binding.roots {
+                    match decode_verified_seal_from_roots(
+                        &roots.generations_root.join(&seal_file),
+                        &roots.replay_root.join(&seal_file),
+                        digest,
+                        check,
+                    ) {
+                        Ok(generation) => {
+                            decoded = Some(generation);
+                            break;
+                        }
+                        Err(error @ GraphDbError::Unavailable { .. }) => {
+                            first_abstention.get_or_insert(error);
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                let Some(generation) = decoded else {
+                    return Err(first_abstention.unwrap_or_else(|| {
+                        GraphDbError::unavailable(
+                            "sealed code generation replay source is not mounted for this projection",
+                        )
+                    }));
+                };
+                Arc::new(generation)
             }
         };
         if generation.manifest().project_id != binding.project_id
@@ -1555,6 +1601,72 @@ mod tests {
         assert!(matches!(
             provider.hydrate_sealed_code_generation(&owner, &source, &|| Ok(())),
             Err(GraphDbError::Corrupt { .. })
+        ));
+    }
+
+    /// A linked worktree shares its project's shard while sealing into its own
+    /// code-index store. Rebinding that shard with the worktree's roots used to
+    /// be refused as `code_graph_manifest.bind`, which failed every branch
+    /// publication; the roots are a lookup route, not the source identity.
+    #[test]
+    fn one_shard_admits_every_worktree_route_and_reads_the_seal_from_each() {
+        let temp = TempDir::new().unwrap();
+        let primary_generations = temp.path().join("primary/generations");
+        let primary_replay = temp.path().join("primary/replay");
+        let branch_generations = temp.path().join("branch/generations");
+        let branch_replay = temp.path().join("branch/replay");
+        for root in [
+            &primary_generations,
+            &primary_replay,
+            &branch_generations,
+            &branch_replay,
+        ] {
+            std::fs::create_dir_all(root).unwrap();
+        }
+        let (provider, owner, source) = fixture(primary_generations, primary_replay);
+
+        provider
+            .bind(
+                owner.shard_id.clone(),
+                ProjectId::new("project.provider").unwrap(),
+                source.repository.clone(),
+                branch_generations.clone(),
+                branch_replay.clone(),
+            )
+            .expect("a worktree route under the same project shard is not a conflict");
+
+        // Neither route holds the seal: the shard abstains rather than claiming
+        // corruption.
+        assert!(matches!(
+            provider.hydrate_sealed_code_generation(&owner, &source, &|| Ok(())),
+            Err(GraphDbError::Unavailable { .. })
+        ));
+
+        // Only the branch worktree's store holds it, and the read reaches there.
+        let seal_file = format!(
+            "generation-{}.json",
+            source
+                .sealed_state_digest
+                .as_str()
+                .strip_prefix("sha256:")
+                .unwrap()
+        );
+        std::fs::write(branch_generations.join(&seal_file), b"corrupt").unwrap();
+        assert!(matches!(
+            provider.hydrate_sealed_code_generation(&owner, &source, &|| Ok(())),
+            Err(GraphDbError::Corrupt { .. })
+        ));
+
+        // A genuinely different source under the same shard stays fatal.
+        assert!(matches!(
+            provider.bind(
+                owner.shard_id.clone(),
+                ProjectId::new("project.foreign").unwrap(),
+                source.repository.clone(),
+                branch_generations,
+                branch_replay,
+            ),
+            Err(GraphDbError::Conflict { .. })
         ));
     }
 
