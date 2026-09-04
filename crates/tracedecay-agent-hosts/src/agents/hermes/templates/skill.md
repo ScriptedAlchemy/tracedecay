@@ -78,7 +78,12 @@ is required, invoke `tracedecay_session_refresh_begin` only with clear host or
 user intent. It returns the opaque handle used by
 `tracedecay_session_refresh_status` and `tracedecay_session_refresh_cancel`.
 The CLI equivalents are `tracedecay sessions refresh begin`, `status`, and
-`cancel`, using the same selectors and returned handle.
+`cancel`, using the same selectors and returned handle. Preserve the scope the
+read returned: for an authorized profile-root read, use the compatibility
+`tracedecay_session_refresh` lifecycle (`action`: `start` / `join` / `resume` /
+`begin`, then `status` or `cancel`) with the same profile selectors, because the
+split tools require project identity and must not redirect a profile refresh
+through whichever project happens to be active.
 Leave host context-window
 preflight, compression, and boundaries to the Hermes context engine rather
 than triggering them during recall.
