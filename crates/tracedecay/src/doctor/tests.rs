@@ -6,7 +6,7 @@ use crate::agents::AgentIntegration;
 use tracedecay_runtime_core::text::format_bytes;
 
 #[test]
-fn supported_kimi_and_kiro_absence_reaches_doctor_without_host_directories() {
+fn supported_optional_host_absences_reach_doctor_without_host_directories() {
     let home = tempfile::tempdir().expect("isolated home");
     let reported = agents::all_integrations()
         .into_iter()
@@ -14,10 +14,20 @@ fn supported_kimi_and_kiro_absence_reaches_doctor_without_host_directories() {
         .map(|agent| agent.id())
         .collect::<std::collections::BTreeSet<_>>();
 
+    // Every host whose integration sets `reports_absence_to_doctor()`. Adding a
+    // host here is a deliberate product decision: an absent optional host stays
+    // an informational Doctor warning, and every other absent host stays quiet.
     assert_eq!(
         reported,
-        std::collections::BTreeSet::from(["kimi", "kiro"]),
-        "supported Kimi and Kiro absences must remain visible while unrelated absent hosts stay quiet"
+        std::collections::BTreeSet::from([
+            "antigravity",
+            "devin",
+            "kimi",
+            "kiro",
+            "vibe",
+            "zed"
+        ]),
+        "supported optional-host absences must remain visible while unrelated absent hosts stay quiet"
     );
 
     let context = HealthcheckContext {
@@ -35,7 +45,7 @@ fn supported_kimi_and_kiro_absence_reaches_doctor_without_host_directories() {
         counters.issues, 0,
         "an absent optional host is a truthful Doctor warning, not a broken installation"
     );
-    assert_eq!(counters.warnings, 2);
+    assert_eq!(counters.warnings, 6);
 }
 
 #[test]
