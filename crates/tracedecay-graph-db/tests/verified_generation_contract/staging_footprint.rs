@@ -935,14 +935,16 @@ fn hibernated_engine_defers_retirement_without_opening() {
     );
 }
 
-/// The sealed-staging release sweep must retain with
-/// `StagingEngineHibernated` and must not open the engine.
+/// The sealed-staging release sweep on a hibernated engine opens it once,
+/// answers from the durable rows, and leaves it hibernated again.
 ///
-/// Fails if `release_sealed_generation_staging_rows` reintroduces
-/// `recover_verified_snapshot` / `read_guard` on a hibernated engine, or if
-/// the typed reason is removed.
+/// A repeat sweep after the rows were released must report
+/// `AlreadyReleased` from the absent rows, not re-report a release or hide
+/// behind a `StagingEngineHibernated` refusal (which is what left fifteen
+/// sealed generations' rows in one production container: the sweep only
+/// ever ran while the engine happened to be open).
 #[test]
-fn hibernated_engine_release_sweep_retains_without_opening() {
+fn hibernated_engine_release_sweep_opens_once_and_rehibernates() {
     let temp = TempDir::new().unwrap();
     let registered = RegisteredGraph::new_mounted_lazy(temp.path()).unwrap();
     let mut authority = RelationalAuthority::default();
@@ -979,7 +981,8 @@ fn hibernated_engine_release_sweep_retains_without_opening() {
             &mut authority,
             &record.publication.key.projection,
         ),
-        SealedStagingRelease::Retained(SealedStagingRetentionReason::StagingEngineHibernated)
+        SealedStagingRelease::AlreadyReleased,
+        "a repeat sweep must answer from the absent rows, not refuse on hibernation"
     );
     assert_engine_hibernated(&registered, temp.path());
 }
