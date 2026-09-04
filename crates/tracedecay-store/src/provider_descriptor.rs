@@ -8,7 +8,8 @@
 //! * whether a record may omit its native record id, because the provider
 //!   synthesizes a stable one instead;
 //! * whether a provider's tool invocations are normalized into the
-//!   cross-provider `tool_calls` / `tool_events` message-metadata shape.
+//!   cross-provider `tool_calls` / `tool_events` message-metadata shape;
+//! * whether provider-authored context has a typed session-message rendering.
 //!
 //! Session-location metadata keys are deliberately absent from that list: every
 //! provider writes them under `{provider}_session`, so the reducer formats the
@@ -23,7 +24,10 @@
 use tracedecay_domain::{CanonicalObservationFactV1, ObservationContractError};
 
 use crate::cursor_dispatch::is_subagent_dispatch_tool;
-use crate::{ProjectionStoreError, ProjectionStoreResult};
+use crate::{
+    ProjectionStoreError, ProjectionStoreResult, codex_goal_context_from_text,
+    codex_message_visible_text,
+};
 
 /// Provider that derives a stable record id from record content rather than
 /// carrying a provider-native one, so its identity material legitimately omits
@@ -32,6 +36,50 @@ const SYNTHESIZED_RECORD_ID_PROVIDER: &str = "claude";
 
 /// Capture source naming Cursor records read from its transcript.
 const CURSOR_TRANSCRIPT_SOURCE: &str = "cursor_transcript";
+
+const CODEX_PROVIDER: &str = "codex";
+
+pub(crate) struct ProviderMessageSemantics {
+    pub role: &'static str,
+    pub text: String,
+    pub kind: &'static str,
+    pub metadata: serde_json::Map<String, serde_json::Value>,
+}
+
+pub(crate) fn provider_message_semantics(
+    provider: &str,
+    role: &str,
+    content: &serde_json::Value,
+    has_native_item_identity: bool,
+) -> Option<ProviderMessageSemantics> {
+    if provider != CODEX_PROVIDER || role != "user" {
+        return None;
+    }
+    let visible_text = codex_message_visible_text(content);
+    let goal = codex_goal_context_from_text(&visible_text)?;
+    let mut metadata = serde_json::Map::new();
+    metadata.insert(
+        "source".to_owned(),
+        serde_json::Value::String("codex_rollout".to_owned()),
+    );
+    metadata.insert(
+        "codex_internal_context".to_owned(),
+        serde_json::Value::String("goal".to_owned()),
+    );
+    if has_native_item_identity {
+        metadata.insert(
+            "source_event".to_owned(),
+            serde_json::Value::String("item_completed".to_owned()),
+        );
+    }
+    metadata.insert("codex_goal".to_owned(), goal.metadata());
+    Some(ProviderMessageSemantics {
+        role: "system",
+        text: goal.storage_text(),
+        kind: "goal_context",
+        metadata,
+    })
+}
 
 /// Normalizes a provider's tool invocations into the cross-provider message
 /// metadata shape. Selected by capture source, then applied to the merged
