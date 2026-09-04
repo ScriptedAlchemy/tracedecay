@@ -9,8 +9,11 @@
 //! * `session_meta` — first line; `payload.cwd`, session `id`. Real rollouts
 //!   carry no `model` here (only `model_provider`); the active model is on
 //!   `turn_context` lines and can change mid-session.
-//! * `event_msg` with `payload.type == "user_message"` — a real user prompt
-//!   (`payload.message`).
+//! * `event_msg` with `payload.type == "item_completed"` and
+//!   `payload.item.type == "UserMessage"` — a current Codex user prompt
+//!   (`payload.item.content`). The stable item id is retained as message
+//!   identity. Legacy `payload.type == "user_message"` records remain
+//!   supported through `payload.message`.
 //! * `event_msg` with `payload.type == "agent_message"` — a real assistant reply
 //!   (`payload.message`).
 //! * `event_msg` with `payload.type == "token_count"` — provider usage captured
@@ -36,13 +39,14 @@
 //!   `session_meta` has `thread_source == "subagent"` and parent ids in
 //!   `forked_from_id` / `source.subagent.thread_spawn.parent_thread_id`.
 //!
-//! `response_item` entries are intentionally skipped except for Codex goal
-//! context blocks: they usually carry auto-injected synthetic context and
-//! duplicate the `agent_message`/`user_message` turns, so ingesting them would
-//! double-count the conversation. Goal context blocks are cataloged as compact
-//! `goal_context` rows because real rollouts often record them only in
-//! `response_item` form. This append-only JSONL is read with the shared
-//! byte-offset machinery and scoped per turn by the latest Codex cwd context.
+//! Conversational `response_item` entries are intentionally skipped except for
+//! Codex goal context blocks: they usually carry auto-injected synthetic
+//! context and duplicate the `item_completed`/legacy message turns, so
+//! ingesting them would double-count the conversation. Goal context blocks are
+//! cataloged as compact `goal_context` rows because real rollouts often record
+//! them only in `response_item` form. This append-only JSONL is read with the
+//! shared byte-offset machinery and scoped per turn by the latest Codex cwd
+//! context.
 
 mod context;
 mod events;
