@@ -340,6 +340,33 @@ fn two_reader_budget() -> tracedecay_store::ReaderBudgetV1 {
     budget
 }
 
+#[test]
+fn reader_startup_recovers_a_retained_wal_before_reporting_ready() {
+    let store = TestStore::new();
+    let writer = crate::connection::open(&store.path, crate::connection::ConnectionMode::Writer)
+        .expect("open policy writer");
+    writer
+        .execute("INSERT INTO markers VALUES (1)", [])
+        .expect("write retained WAL frame");
+    drop(writer);
+    let mut shm = store.path.as_os_str().to_os_string();
+    shm.push("-shm");
+    let shm = PathBuf::from(shm);
+    std::fs::remove_file(&shm).expect("remove stale WAL index");
+
+    let _pool = ReaderPool::start(
+        store.locator(),
+        AdmissionConfigV1::default().readers,
+        CountExecutor,
+    )
+    .expect("start readers over retained WAL");
+
+    assert!(
+        shm.exists(),
+        "ready readers must have completed the first WAL-backed schema read"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn pinned_reader_accepts_an_equivalent_hard_link_spelling() {
