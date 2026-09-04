@@ -1,7 +1,7 @@
 {
   "name": "tracedecay",
   "version": "0.0.0",
-  "description": "Kimi Code integration for TraceDecay semantic code intelligence: MCP server plus a `tracedecay tool` CLI fallback exposing the same tools when MCP is unavailable.",
+  "description": "Kimi Code integration for TraceDecay semantic code intelligence: MCP and CLI clients that preserve explicit daemon lifecycle state.",
   "skills": [
     "./skills/"
   ],

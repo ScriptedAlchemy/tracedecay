@@ -490,8 +490,8 @@ fn print_database_recovery_guidance(dc: &DoctorCounters, db_path: &Path) {
 
 /// Diagnose the managed user-service unit without contacting the daemon.
 ///
-/// A stopped or disabled installed unit is the outage shape that the generic
-/// "run install-service and ensure the service is running" text used to hide.
+/// A stopped or disabled unit is visible without treating it as permission to
+/// activate the service; it may be an intentional operator hold.
 fn check_daemon_service(dc: &mut DoctorCounters) {
     eprintln!("\n\x1b[1mDaemon service\x1b[0m");
     match tracedecay_daemon_control::installed_service_state() {
@@ -500,7 +500,6 @@ fn check_daemon_service(dc: &mut DoctorCounters) {
             match daemon_service_doctor_verdict(state) {
                 DaemonServiceDoctorVerdict::Pass => dc.pass(&message),
                 DaemonServiceDoctorVerdict::Warn => dc.warn(&message),
-                DaemonServiceDoctorVerdict::Fail => dc.fail(&message),
             }
         }
         Err(error) => dc.warn(&format!("Daemon service state could not be read: {error}")),
@@ -511,7 +510,6 @@ fn check_daemon_service(dc: &mut DoctorCounters) {
 enum DaemonServiceDoctorVerdict {
     Pass,
     Warn,
-    Fail,
 }
 
 fn daemon_service_doctor_verdict(
@@ -522,12 +520,10 @@ fn daemon_service_doctor_verdict(
             DaemonServiceDoctorVerdict::Pass
         }
         tracedecay_daemon_control::DaemonServiceState::Missing
-        | tracedecay_daemon_control::DaemonServiceState::RunningDisabled => {
-            DaemonServiceDoctorVerdict::Warn
-        }
-        tracedecay_daemon_control::DaemonServiceState::StoppedEnabled
+        | tracedecay_daemon_control::DaemonServiceState::RunningDisabled
+        | tracedecay_daemon_control::DaemonServiceState::StoppedEnabled
         | tracedecay_daemon_control::DaemonServiceState::StoppedDisabled
-        | tracedecay_daemon_control::DaemonServiceState::Masked => DaemonServiceDoctorVerdict::Fail,
+        | tracedecay_daemon_control::DaemonServiceState::Masked => DaemonServiceDoctorVerdict::Warn,
     }
 }
 

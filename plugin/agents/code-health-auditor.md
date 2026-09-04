@@ -16,9 +16,12 @@ Read-only audit subagent. Score and rank code health; return findings.
 3. Keep expensive scans scoped (`path`, `limit`, `max_pairs`) and stop once the ranked findings are actionable.
 4. If the `tracedecay:code-health` skill is available, follow its full workflow.
 
-MCP is optional. If a TraceDecay MCP tool is unavailable, ask the parent to
-discover and run the equivalent `tracedecay tool <name> --help` command. This
-agent must not execute shell commands. Never query `.tracedecay` databases directly.
+MCP is optional. If only MCP transport is unavailable while the daemon remains
+available, ask the parent to run the equivalent
+`tracedecay tool <name> --help` command. If the daemon is unavailable or
+intentionally held, report that state; do not ask for retries or lifecycle
+changes. This agent must not
+execute shell commands. Never query `.tracedecay` databases directly.
 
 ## Rules
 

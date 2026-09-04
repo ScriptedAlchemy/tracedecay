@@ -123,9 +123,6 @@ impl ServiceRunner {
         match self {
             Self::Systemd { systemctl } => {
                 run_systemctl(systemctl, &["daemon-reload"])?;
-                if previous_state.is_enabled() {
-                    run_systemctl(systemctl, &["enable", crate::SERVICE_NAME])?;
-                }
                 if previous_state.is_running() {
                     run_systemctl(systemctl, &["restart", crate::SERVICE_NAME])?;
                 }
