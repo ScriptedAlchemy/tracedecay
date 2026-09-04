@@ -104,13 +104,43 @@ async fn assert_fresh_project_open_owners(label: &str, git_state: ProjectGitStat
             .is_some(),
         "fresh project open must retain its LSP owner"
     );
-    assert_eq!(
-        engine
-            .invocation
-            .service
-            .feedback_cycle(Some(&canonical_project))
+    // Project open publishes the route as soon as its owners are registered and
+    // lets the cold code-index mount finish behind it, so the feedback cycle —
+    // which is minted against a sealed generation — arrives with that
+    // generation rather than inside the open. Sampling the instant the open
+    // returns therefore measures mount latency, not ownership. Wait for the
+    // deferred mount for the one Git state that must reach it; the other two
+    // refuse synchronously (`register_project_open_dependent_owners` returns
+    // before any feedback work when HEAD is not attached), so their absence is
+    // already settled.
+    let feedback_cycle = match git_state {
+        ProjectGitState::Committed => {
+            tokio::time::timeout(std::time::Duration::from_secs(90), async {
+                loop {
+                    if let Some(cycle) = engine
+                        .invocation
+                        .service
+                        .feedback_cycle(Some(&canonical_project))
+                        .await
+                    {
+                        return cycle;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+            })
             .await
-            .is_some(),
+            .ok()
+        }
+        ProjectGitState::NonGit | ProjectGitState::Unborn => {
+            engine
+                .invocation
+                .service
+                .feedback_cycle(Some(&canonical_project))
+                .await
+        }
+    };
+    assert_eq!(
+        feedback_cycle.is_some(),
         matches!(git_state, ProjectGitState::Committed),
         "feedback cycle presence must follow exact committed Git identity"
     );

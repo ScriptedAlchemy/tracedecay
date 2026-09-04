@@ -3,10 +3,26 @@ use std::sync::Arc;
 
 use super::super::{project_open_lsp_scope_grant, register_production_lsp_owner};
 use super::{
-    DaemonInvocationState, ProjectOpenDependentOwnerState,
-    register_production_feedback_and_advisory,
+    DaemonInvocationState, ProjectOpenDependentOwnerState, register_production_advisory_owner,
+    register_production_feedback_and_advisory, register_production_feedback_cycle,
 };
+use crate::daemon::log_daemon_event;
 use tracedecay_application::now_micros;
+
+/// The deferred advisory owner is a detached background task: when it gives up
+/// (or never sees a publication) nothing in the request path reports it, and a
+/// project silently serves without a feedback cycle. Record every attempt
+/// outcome on the daemon event stream so that state is diagnosable.
+fn log_deferred_attempt(project_root: &Path, phase: &str, attempt: &str) {
+    log_daemon_event(
+        "advisory_deferred_attempt",
+        &[
+            ("project", project_root.display().to_string()),
+            ("phase", phase.to_owned()),
+            ("attempt", attempt.to_owned()),
+        ],
+    );
+}
 
 pub(super) fn spawn(
     owner: &crate::mcp::McpServer,
@@ -89,6 +105,11 @@ async fn try_mount(
         .latest_complete_ready_decoded_for_root_scope(project_root, &state.scope)
         .await
     else {
+        log_deferred_attempt(
+            project_root,
+            "generation_unavailable",
+            "await_next_publication",
+        );
         return Attempt::AwaitNextPublication;
     };
     let mut indexed_files = generation
@@ -105,6 +126,29 @@ async fn try_mount(
         state.mounted_providers = broker.mounted_providers_for_files(&indexed_files);
         admitted
     };
+    // Feedback first, then the LSP owner it feeds. The published feedback
+    // cycle is what every reader (and `DaemonInvocationService::feedback_cycle`)
+    // treats as "this project's diagnostics authority"; upgrading the LSP owner
+    // ahead of it publishes a provider-backed gateway for a project whose
+    // feedback cycle is still the typed-unavailable placeholder, so a
+    // diagnostics publication that lands in that window has nowhere truthful to
+    // go. The cycle depends only on the sealed generation this attempt already
+    // holds, not on the session factory — only the advisory owner needs that.
+    let (feedback_cycle, feedback_scope) =
+        match register_production_feedback_cycle(invocation, project_root, state).await {
+            Ok(mounted) => mounted,
+            Err(error) => {
+                tracing::warn!(
+                    event = "feedback_advisory_mount",
+                    outcome = "deferred_failed",
+                    project = %project_root.display(),
+                    reason = %error,
+                    "deferred feedback cycle could not mount"
+                );
+                log_deferred_attempt(project_root, "feedback_cycle_failed", &error.to_string());
+                return classify_failure(invocation, project_root, state).await;
+            }
+        };
     let scope_grant = match project_open_lsp_scope_grant(&state.access, now_micros()) {
         Ok(grant) => grant,
         Err(error) => {
@@ -143,10 +187,12 @@ async fn try_mount(
         }
     };
     state.lsp_session_factory = Some(Arc::clone(&lsp_session_factory));
-    match register_production_feedback_and_advisory(
+    match register_production_advisory_owner(
         invocation,
         project_root,
         state,
+        feedback_cycle,
+        feedback_scope,
         lsp_session_factory,
     )
     .await
@@ -158,6 +204,7 @@ async fn try_mount(
                 project = %project_root.display(),
                 deferred = true,
             );
+            log_deferred_attempt(project_root, "mounted", "terminal");
         }
         Err(error) => {
             tracing::warn!(
