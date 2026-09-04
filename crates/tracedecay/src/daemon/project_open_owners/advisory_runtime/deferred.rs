@@ -100,17 +100,37 @@ async fn try_mount(
             Err(_) => classify_failure(invocation, project_root, state).await,
         };
     }
-    let Some(generation) = invocation
+    // Two lookups, in this order, because passive waiting alone deadlocks a
+    // fresh project. The decoded-for-root-scope probe is the cheap arm: it
+    // reads an already-seated complete generation and asks the scheduler for
+    // nothing. When nothing is seated it answers `None` and demands nothing,
+    // so a deferred owner that only ever took this arm waited for a
+    // publication that only demand produces — the project then served
+    // indefinitely with the typed-unavailable feedback cycle.
+    // `latest_complete_ready_for_scope` is the authenticated demand boundary
+    // every other first-generation consumer resolves through, so take it
+    // before giving up and going back to sleep.
+    let generation = match invocation
         .code_index_schedulers
         .latest_complete_ready_decoded_for_root_scope(project_root, &state.scope)
         .await
-    else {
-        log_deferred_attempt(
-            project_root,
-            "generation_unavailable",
-            "await_next_publication",
-        );
-        return Attempt::AwaitNextPublication;
+    {
+        Some(generation) => generation,
+        None => match invocation
+            .code_index_schedulers
+            .latest_complete_ready_for_scope(&state.scope)
+            .await
+        {
+            Some(generation) => generation,
+            None => {
+                log_deferred_attempt(
+                    project_root,
+                    "generation_unavailable",
+                    "await_next_publication",
+                );
+                return Attempt::AwaitNextPublication;
+            }
+        },
     };
     let mut indexed_files = generation
         .generation()
