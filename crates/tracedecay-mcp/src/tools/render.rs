@@ -333,18 +333,23 @@ fn truncation_handle_status(
     }
 }
 
-/// Runs the durable handle write at this synchronous rendering boundary
-/// without pinning a runtime worker. On a multi-thread runtime the worker
-/// steps aside with `block_in_place` so the pool keeps polling other tasks
-/// while the file is written; a current-thread runtime and plain threads run
-/// the write inline (parking a worker on a channel receive there would stall
-/// every other task the runtime owns).
+/// Runs the synchronous response-handle disk write without stalling the async
+/// executor worker that renders the response.
+///
+/// The truncating render path is synchronous by design (it sits under dozens
+/// of sync handler helpers), but it usually executes on a tokio worker.
+/// `block_in_place` hands that worker's run queue to another thread for the
+/// duration of the write; it panics outside a multi-thread runtime, so the
+/// flavor is checked first and everything else (current-thread runtimes,
+/// plain threads) keeps the previous inline behavior. The remaining
+/// `block_in_place` panic case is a `LocalSet` on a multi-thread runtime,
+/// which this workspace does not use.
 fn run_blocking_handle_store<T>(work: impl FnOnce() -> T) -> T {
     match tokio::runtime::Handle::try_current() {
         Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
             tokio::task::block_in_place(work)
         }
-        Ok(_) | Err(_) => work(),
+        _ => work(),
     }
 }
 
@@ -353,10 +358,9 @@ fn prepare_truncated_response_handle(
     text: &str,
 ) -> TruncatedResponseHandle {
     if let Some(root) = project_root {
-        let now = current_timestamp();
         match hotpath::measure_block!(
             "mcp.server.response.handle_store",
-            run_blocking_handle_store(|| store_response_handle(root, text, now))
+            run_blocking_handle_store(|| store_response_handle(root, text, current_timestamp()))
         ) {
             Ok(record) => TruncatedResponseHandle {
                 record: Some(record),
@@ -364,18 +368,15 @@ fn prepare_truncated_response_handle(
             },
             // The adapter records the full typed error in internal telemetry.
             // Public output must not disclose project-local filesystem paths.
-            Err(error) => {
-                tracing::warn!(error = %error, "response-handle store failed");
-                TruncatedResponseHandle {
-                    record: None,
-                    unavailable: Some(serde_json::json!({
-                        "reason_code": "handle_store_failed",
-                        "message": "The full response could not be cached locally, so no retrieval handle is available.",
-                        "retryable": true,
-                        "retry_instruction": "Fix the local project cache path or filesystem error, then re-run the original MCP tool to regenerate the full response and a fresh handle."
-                    })),
-                }
-            }
+            Err(_) => TruncatedResponseHandle {
+                record: None,
+                unavailable: Some(serde_json::json!({
+                    "reason_code": "handle_store_failed",
+                    "message": "The full response could not be cached locally, so no retrieval handle is available.",
+                    "retryable": true,
+                    "retry_instruction": "Fix the local project cache path or filesystem error, then re-run the original MCP tool to regenerate the full response and a fresh handle."
+                })),
+            },
         }
     } else {
         note_response_handle_store_skipped_no_project_root();

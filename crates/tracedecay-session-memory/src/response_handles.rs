@@ -95,19 +95,6 @@ pub fn store_response_handle(
     store_response_handle_in_root(&root, content, now)
 }
 
-/// Owned-argument variant for callers that must move the payload onto
-/// another thread (a `'static` blocking task) instead of borrowing it.
-pub fn store_response_handle_owned(
-    project_root: PathBuf,
-    content: String,
-    now: i64,
-) -> Result<ResponseHandleRecord> {
-    let root = prepared_response_handle_root(&project_root)?;
-    with_exclusive_lock(&root, || {
-        store_response_handle_locked_owned(&root, content, now)
-    })
-}
-
 fn prepared_response_handle_root(project_root: &Path) -> Result<PathBuf> {
     let root = resolve_response_handle_root(project_root)?;
     PrivateStoreIo::create_dir_all_durable(&root)
@@ -128,20 +115,12 @@ fn store_response_handle_locked(
     content: &str,
     now: i64,
 ) -> Result<ResponseHandleRecord> {
-    store_response_handle_locked_owned(root, content.to_owned(), now)
-}
-
-fn store_response_handle_locked_owned(
-    root: &Path,
-    content: String,
-    now: i64,
-) -> Result<ResponseHandleRecord> {
-    let handle = response_handle_for(&content);
+    let handle = response_handle_for(content);
     let path = response_handle_path(root, &handle)?;
     let stored = StoredResponseHandleRecord {
         created_at: now,
         expires_at: now.saturating_add(RESPONSE_HANDLE_TTL_SECS),
-        content,
+        content: content.to_owned(),
     };
     let payload = serde_json::to_vec_pretty(&stored)?;
 
