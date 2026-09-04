@@ -40,6 +40,43 @@ print_compact_file() {
   fi
 }
 
+# One line of code-index progress from a status payload, for the attempts
+# log: which phase the index is in and how far along, so a timeout report
+# shows where the journey stalled without rerunning it.
+summarize_status_progress() {
+  local path="$1"
+  [[ -s "$path" ]] || {
+    echo "progress=unavailable"
+    return 0
+  }
+  python3 -S - "$path" <<'PY' 2>/dev/null || echo "progress=unparsed"
+import json, sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        payload = json.load(handle)
+except (OSError, ValueError):
+    print("progress=unparsed")
+    raise SystemExit(0)
+freshness = payload.get("code_index_freshness") or {}
+worktree = freshness.get("worktree") or {}
+progress = worktree.get("progress") or {}
+serving = worktree.get("code_graph_serving") or {}
+print(
+    "status=%s serving=%s phase=%s files=%s/%s pages=%s blocked=%s"
+    % (
+        freshness.get("status"),
+        serving.get("state"),
+        progress.get("phase"),
+        progress.get("completed_files"),
+        progress.get("total_files"),
+        progress.get("committed_pages"),
+        progress.get("blocked_reason"),
+    )
+)
+PY
+}
+
 run_timed() {
   local label="$1"
   local timeout_seconds="$2"
@@ -133,10 +170,18 @@ raise SystemExit(0 if math.isfinite(value) and value > 0 else 1)
     : >"$output_dir/status.validation.stdout"
     : >"$output_dir/status.validation.stderr"
     command_status=0
+    probe_started_ms="$(python3 -S "$PROCESS_HELPER" monotonic-ms)"
+    # Probe into its own files: a probe the deadline kills must not erase
+    # the last complete payload, which is the evidence a timeout report needs.
     python3 -S "$PROCESS_HELPER" run \
       --timeout "$probe_timeout" --kill-after 5 -- \
       "$binary" status --json "$project_root" \
-      >"$output_dir/status.json" 2>"$output_dir/status.stderr" || command_status=$?
+      >"$output_dir/status.probe.json" 2>"$output_dir/status.probe.stderr" || command_status=$?
+    probe_ms="$(elapsed_ms "$probe_started_ms")"
+    if ((command_status == 0)) && [[ -s "$output_dir/status.probe.json" ]]; then
+      mv -f "$output_dir/status.probe.json" "$output_dir/status.json"
+      mv -f "$output_dir/status.probe.stderr" "$output_dir/status.stderr"
+    fi
     validation_status=1
     if ((command_status == 0)); then
       validation_status=0
@@ -145,6 +190,10 @@ raise SystemExit(0 if math.isfinite(value) and value > 0 else 1)
         >"$output_dir/status.validation.stdout" \
         2>"$output_dir/status.validation.stderr" || validation_status=$?
     fi
+    printf 'attempt=%s elapsed_ms=%s probe_ms=%s status_rc=%s validation_rc=%s %s\n' \
+      "$attempts" "$(elapsed_ms "$started_ms")" "$probe_ms" "$command_status" \
+      "$validation_status" "$(summarize_status_progress "$output_dir/status.json")" \
+      >>"$output_dir/status.attempts.log"
     if ((command_status == 0 && validation_status == 0)); then
       duration_ms="$(elapsed_ms "$started_ms")"
       cat "$output_dir/status.json"
@@ -165,9 +214,11 @@ raise SystemExit(0 if math.isfinite(value) and value > 0 else 1)
   duration_ms="$(elapsed_ms "$started_ms")"
   echo "tracedecay_ci_timing phase=status elapsed_ms=$duration_ms status=1"
   echo "error: TraceDecay PR dogfood did not reach strict index readiness within ${timeout_seconds}s" >&2
-  print_compact_file "last status output" "$output_dir/status.json"
-  print_compact_file "last status stderr" "$output_dir/status.stderr"
+  print_compact_file "status readiness attempts" "$output_dir/status.attempts.log"
+  print_compact_file "last complete status output" "$output_dir/status.json"
+  print_compact_file "last complete status stderr" "$output_dir/status.stderr"
   print_compact_file "last status validator" "$output_dir/status.validation.stderr"
+  print_compact_file "last status probe stderr" "$output_dir/status.probe.stderr"
   return 1
 }
 
