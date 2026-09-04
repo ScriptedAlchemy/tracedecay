@@ -41,6 +41,7 @@ ring = "0.17.14"
 sha2 = "0.11.0"
 thiserror = "2"
 tokio = { version = "1", default-features = false, features = ["rt", "sync", "time"] }
+tracing = "0.1"
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
