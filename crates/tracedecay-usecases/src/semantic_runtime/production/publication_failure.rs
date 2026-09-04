@@ -328,8 +328,7 @@ impl SemanticPublicationFailureRecorderV1 {
     }
 
     pub(super) fn receipt(&self) -> Option<SemanticPublicationFailureReceiptV1> {
-        self
-            .first
+        self.first
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
@@ -507,9 +506,7 @@ mod tests {
         );
 
         let commit = SemanticPublicationFailureRecorderV1::default();
-        let failure = commit.commit_batch(&concurrent_mutation(
-            "staging.resume_generation_stage",
-        ));
+        let failure = commit.commit_batch(&concurrent_mutation("staging.resume_generation_stage"));
         assert_eq!(failure, SemanticRuntimeScheduleFailureV1::Publication);
         let receipt = commit.receipt().expect("commit_batch receipt");
         assert_eq!(receipt.stage, SemanticPublicationStageV1::CommitBatch);
