@@ -45,7 +45,7 @@ mod registered_provider_usage;
 mod stack_delivery_tests;
 mod support;
 pub use discovery_queue::HostDiscoveryQueueEntry;
-pub use git_correlation_adapter::GlobalDbGitCorrelationStore;
+pub use git_correlation_adapter::{GitEvidenceConvergenceStats, GlobalDbGitCorrelationStore};
 pub use git_topology_anchor::RegisteredGitTopologyAnchorAuthorityV2;
 pub use observability_rollup::{
     ObservabilityRollupCompactionCandidateV1, ObservabilityRollupCompactionReceiptV1,

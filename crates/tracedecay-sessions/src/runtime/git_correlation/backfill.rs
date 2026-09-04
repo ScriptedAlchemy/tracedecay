@@ -419,7 +419,9 @@ where
     session_store.require_project_sessions_authority()?;
     let mut stats = BackfillStats::default();
     if limit_sessions == 0 {
-        return Ok(stats);
+        return Err(GitCorrelationError::InvalidArgument(
+            "Incremental Git correlation backfill limit must be positive".to_owned(),
+        ));
     }
     let snapshot = session_store.read_snapshot().await?;
     let watermark = super::read_meta_value(&snapshot, AUTO_BACKFILL_WATERMARK_KEY)

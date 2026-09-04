@@ -15,7 +15,9 @@ pub use search::{
     interleave_workflow_search_results, session_fts_query,
 };
 pub use sessions::SESSION_MESSAGES_AFTER_SQL;
-pub use transcript::{get_parse_offset, require_expected_offset, set_parse_offset};
+pub use transcript::{
+    TranscriptGitEvidence, get_parse_offset, require_expected_offset, set_parse_offset,
+};
 pub use types::{
     SessionActivityRow, SessionIngestHealth, SessionProviderCoverage, SessionProviderCoverageState,
     TranscriptBatch, TranscriptPersistenceError, UNIX_TIMESTAMP_MILLIS_THRESHOLD,

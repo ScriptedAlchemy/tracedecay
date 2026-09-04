@@ -159,7 +159,7 @@ pub trait GitCorrelationSessionStore: Sync {
     /// starts after the caller has recovered its base generation, so it cannot
     /// by itself prevent two callers from replacing one another with sibling
     /// generations derived from the same head.
-    fn git_evidence_publication_lock(&self) -> Result<&Mutex<()>, GitCorrelationError>;
+    fn git_evidence_publication_lock(&self) -> Result<Arc<Mutex<()>>, GitCorrelationError>;
 
     fn graph_runtime(&self) -> Result<&dyn VerifiedGraphRuntimePortV1, GitCorrelationError>;
 }

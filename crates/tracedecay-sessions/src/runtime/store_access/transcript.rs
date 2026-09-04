@@ -1,10 +1,13 @@
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, WriteStatement, params};
-use tracedecay_store::{ParseOffset, SessionMessageRecord, SessionRecord};
+use tracedecay_store::{ParseOffset, SessionMessageRecord, SessionRecord, StoreShardScopeV1};
 
 use tracedecay_lcm::payload::PayloadFileRollback;
 use tracedecay_lcm::raw;
 use tracedecay_lcm::retrieval_content::derived_text_for_index;
 
+use super::super::git_correlation::{
+    CommitSessionRecord, SpanObservation, enqueue_git_evidence_publication,
+};
 use super::super::registered_db::{SessionRegisteredDb, SessionStoreAccess, SessionWriteTxn};
 use super::types::{TranscriptBatch, TranscriptPersistenceError};
 
@@ -12,6 +15,28 @@ use super::types::{TranscriptBatch, TranscriptPersistenceError};
 enum TranscriptWritePolicy {
     Full { expected_offset: ParseOffset },
     ProjectionOnly,
+}
+
+/// Exact Git evidence staged atomically with one transcript write.
+#[derive(Debug, Clone, Copy)]
+pub struct TranscriptGitEvidence<'a> {
+    publication_prefix: &'a str,
+    commit_records: &'a [CommitSessionRecord],
+    span_observations: &'a [SpanObservation],
+}
+
+impl<'a> TranscriptGitEvidence<'a> {
+    pub const fn new(
+        publication_prefix: &'a str,
+        commit_records: &'a [CommitSessionRecord],
+        span_observations: &'a [SpanObservation],
+    ) -> Self {
+        Self {
+            publication_prefix,
+            commit_records,
+            span_observations,
+        }
+    }
 }
 
 const TRANSCRIPT_STATEMENT_WINDOW: usize = 64;
@@ -468,6 +493,47 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             parse_offset_path,
             parse_offset,
             TranscriptWritePolicy::Full { expected_offset },
+            None,
+        )
+        .await
+    }
+
+    /// Atomically commits parsed transcript rows, the parse cursor, and the
+    /// exact receipt needed to publish derived Git evidence after commit.
+    #[hotpath::skip]
+    pub async fn persist_transcript_batch_with_git_evidence_result(
+        &self,
+        session: &SessionRecord,
+        messages: &[SessionMessageRecord],
+        parse_offset_path: &str,
+        expected_offset: ParseOffset,
+        parse_offset: ParseOffset,
+        git_evidence: TranscriptGitEvidence<'_>,
+    ) -> Result<(), TranscriptPersistenceError> {
+        if (!git_evidence.commit_records.is_empty() || !git_evidence.span_observations.is_empty())
+            && !matches!(
+                &self.registered_binding().shard_id.scope,
+                StoreShardScopeV1::ProjectSessions { .. }
+            )
+        {
+            return Err(TranscriptPersistenceError::storage(
+                "stage transcript git evidence",
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "transcript Git evidence requires ProjectSessions authority",
+                ),
+            ));
+        }
+        let batch = TranscriptBatch {
+            session: session.clone(),
+            messages: messages.to_vec(),
+        };
+        self.upsert_transcript_batches_inner(
+            std::slice::from_ref(&batch),
+            parse_offset_path,
+            parse_offset,
+            TranscriptWritePolicy::Full { expected_offset },
+            Some(git_evidence),
         )
         .await
     }
@@ -503,6 +569,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             parse_offset_path,
             parse_offset,
             TranscriptWritePolicy::ProjectionOnly,
+            None,
         )
         .await
         .map_err(|error| error.to_string())
@@ -515,6 +582,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         parse_offset_path: &str,
         parse_offset: ParseOffset,
         policy: TranscriptWritePolicy,
+        git_evidence: Option<TranscriptGitEvidence<'_>>,
     ) -> Result<(), TranscriptPersistenceError> {
         let storage_root = self
             .db_path()
@@ -588,6 +656,18 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
                     "upsert LCM raw message",
                     "staged transcript message count exceeded the write batch",
                 ));
+            }
+            if let Some(evidence) = git_evidence {
+                enqueue_git_evidence_publication(
+                    &transaction,
+                    evidence.publication_prefix,
+                    evidence.commit_records,
+                    evidence.span_observations,
+                )
+                .await
+                .map_err(|error| {
+                    TranscriptPersistenceError::storage("stage transcript git evidence", error)
+                })?;
             }
             if matches!(policy, TranscriptWritePolicy::Full { .. }) {
                 set_parse_offset(&transaction, parse_offset_path, parse_offset).await?;

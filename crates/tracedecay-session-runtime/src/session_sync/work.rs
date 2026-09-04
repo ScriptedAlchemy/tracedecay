@@ -528,12 +528,58 @@ impl SessionSyncProjectContext {
             let project = self
                 .ingest_project_transcripts(&project_authority, &pass_cancellation)
                 .await;
-            let project_stats = SessionSyncStatsV1 {
+            let git_convergence = if pass_cancellation.is_cancelled() {
+                None
+            } else {
+                Some(
+                    GlobalDbGitCorrelationStore::new(project_sessions.clone())
+                        .converge_session_git_evidence(
+                            &tracedecay_sessions::runtime::git_correlation::SystemGit,
+                            tracedecay_sessions::runtime::git_correlation::DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS,
+                            tracedecay_sessions::runtime::git_correlation::DEFAULT_GIT_EVIDENCE_PUBLICATION_REPLAY_LIMIT,
+                        )
+                        .await,
+                )
+            };
+            let mut project_stats = SessionSyncStatsV1 {
                 sessions_imported: project.stats.sessions_upserted,
                 messages_imported: project.stats.messages_upserted,
                 ..SessionSyncStatsV1::default()
             };
-            let project_coverage = vec![source_coverage("project", project.coverage)];
+            let git_deferred_units = match git_convergence.as_ref() {
+                Some(Ok(convergence)) => {
+                    project_stats.sessions_scanned =
+                        saturating_usize_to_u64(convergence.backfill.sessions_scanned);
+                    project_stats.spans_written =
+                        saturating_usize_to_u64(convergence.backfill.spans_written);
+                    project_stats.commits_attributed =
+                        saturating_usize_to_u64(convergence.backfill.commits_attributed);
+                    project_stats.skipped =
+                        saturating_usize_to_u64(convergence.backfill.skipped_total());
+                    convergence
+                        .pending_publications
+                        .saturating_add(u64::from(convergence.backfill_page_saturated))
+                        .saturating_add(project_stats.skipped)
+                }
+                Some(Err(error)) => {
+                    tracing::warn!(%error, "startup session Git convergence failed");
+                    1
+                }
+                None => 1,
+            };
+            let project_coverage = vec![
+                source_coverage("project", project.coverage),
+                SessionSyncSourceCoverageV1 {
+                    store_scope: "git".to_owned(),
+                    coverage: if git_deferred_units == 0 {
+                        SessionSyncCoverageV1::Complete
+                    } else {
+                        SessionSyncCoverageV1::Partial {
+                            deferred_units: git_deferred_units,
+                        }
+                    },
+                },
+            ];
             let project_progress = hotpath::future!(
                 service.persist_progress(
                     self,
@@ -547,6 +593,11 @@ impl SessionSyncProjectContext {
             .await;
             let project_progress_failed = project_progress.is_err();
             let project_frontiers = project_progress.unwrap_or_default();
+            let git_convergence_committed = git_convergence.as_ref().is_some_and(|result| {
+                result
+                    .as_ref()
+                    .is_ok_and(|convergence| convergence.replayed_publications > 0)
+            });
 
             let profile_sweep_satisfied = {
                 let completed_profile_sweeps = service
@@ -633,6 +684,9 @@ impl SessionSyncProjectContext {
                 source_frontiers,
                 project_frontiers,
                 project_progress_failed,
+                git_convergence.is_some_and(|result| result.is_err()),
+                git_deferred_units > 0,
+                git_convergence_committed,
             )
         };
         let pass = async {
@@ -661,11 +715,15 @@ impl SessionSyncProjectContext {
             source_frontiers,
             project_frontiers,
             project_progress_failed,
+            git_convergence_failed,
+            git_convergence_incomplete,
+            git_convergence_committed,
         ) = outcomes;
         let committed = project.scheduling_state_written
             || user
                 .as_ref()
                 .is_some_and(|outcome| outcome.scheduling_state_written)
+            || git_convergence_committed
             || stats != SessionSyncStatsV1::default();
         let mut failure_codes = project
             .failures
@@ -675,6 +733,11 @@ impl SessionSyncProjectContext {
             .collect::<Vec<_>>();
         if project_progress_failed || source_frontiers.is_err() {
             failure_codes.push("session_sync_frontier_persist_failed".to_owned());
+        }
+        if git_convergence_failed {
+            failure_codes.push("git_convergence_failed".to_owned());
+        } else if git_convergence_incomplete {
+            failure_codes.push("git_convergence_incomplete".to_owned());
         }
         let source_frontiers = source_frontiers.unwrap_or(project_frontiers);
         if committed {

@@ -1,6 +1,10 @@
 use std::collections::BTreeSet;
 
 use tracedecay_sessions::admission::{HostAdmissionOutcome, HostProjectionDrainOutcome};
+use tracedecay_sessions::runtime::git_correlation::{
+    DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS, DEFAULT_GIT_EVIDENCE_PUBLICATION_REPLAY_LIMIT,
+    SystemGit,
+};
 use tracedecay_store::ProjectionPersistOutcome;
 
 use super::*;
@@ -229,6 +233,30 @@ impl HostAdmissionFacade<'_> {
             }
         }
         outcome.deferred |= observation_deferred;
+        if max > 0 && matches!(scope, ObservationScopeV1::Project { .. }) {
+            if cancellation.is_cancelled() {
+                return Err(classify_error(&ObservationApplicationError::Cancelled));
+            }
+            let convergence = database
+                .converge_session_git_evidence(
+                    &SystemGit,
+                    DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS,
+                    DEFAULT_GIT_EVIDENCE_PUBLICATION_REPLAY_LIMIT,
+                )
+                .await
+                .map_err(|error| {
+                    tracing::warn!(%error, "Git evidence convergence failed during host drain");
+                    HostAdmissionOutcome::retained_unavailable(
+                        "git_evidence_convergence_unavailable",
+                    )
+                })?;
+            if cancellation.is_cancelled() {
+                return Err(classify_error(&ObservationApplicationError::Cancelled));
+            }
+            outcome.deferred |= convergence.pending_publications > 0
+                || convergence.backfill_page_saturated
+                || convergence.backfill.skipped_total() > 0;
+        }
         outcome.session_ids = session_ids.into_iter().collect();
         Ok(outcome)
     }

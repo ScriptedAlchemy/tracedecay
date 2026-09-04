@@ -6,7 +6,7 @@
 //! typed `Ok(None)` empty start as the production registry so recovery paths
 //! exercise their real fallback.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -93,9 +93,11 @@ pub(crate) struct MemoryEvidenceGraphRuntime {
     binding: StoreRuntimeBindingV1,
     locator: VerifiedStoreLocatorV1,
     snapshot: Mutex<Option<VerifiedGraphSnapshot>>,
-    publication_lock: Mutex<()>,
+    publication_lock: Arc<Mutex<()>>,
     cancelled: AtomicBool,
     cancel_after_publish: AtomicBool,
+    fail_next_publication: AtomicBool,
+    successful_publications: AtomicUsize,
     read_gate: SnapshotReadGate,
 }
 
@@ -119,21 +121,31 @@ impl Default for MemoryEvidenceGraphRuntime {
                 LocatorDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
             ),
             snapshot: Mutex::new(None),
-            publication_lock: Mutex::new(()),
+            publication_lock: Arc::new(Mutex::new(())),
             cancelled: AtomicBool::new(false),
             cancel_after_publish: AtomicBool::new(false),
+            fail_next_publication: AtomicBool::new(false),
+            successful_publications: AtomicUsize::new(0),
             read_gate: SnapshotReadGate::default(),
         }
     }
 }
 
 impl MemoryEvidenceGraphRuntime {
-    pub(crate) fn git_evidence_publication_lock(&self) -> &Mutex<()> {
-        &self.publication_lock
+    pub(crate) fn git_evidence_publication_lock(&self) -> Arc<Mutex<()>> {
+        Arc::clone(&self.publication_lock)
     }
 
     pub(crate) fn cancel_request_after_next_publish(&self) {
         self.cancel_after_publish.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn fail_next_publication(&self) {
+        self.fail_next_publication.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn successful_publications(&self) -> usize {
+        self.successful_publications.load(Ordering::Acquire)
     }
 
     /// Holds every subsequent `verified_snapshot` read at a gate until
@@ -176,11 +188,17 @@ impl VerifiedGraphRuntimePortV1 for MemoryEvidenceGraphRuntime {
         _idempotency_key: GraphIdempotencyKey,
         cancelled: Arc<AtomicBool>,
     ) -> Result<VerifiedGraphSnapshot, GraphDbError> {
+        if self.fail_next_publication.swap(false, Ordering::AcqRel) {
+            return Err(GraphDbError::unavailable(
+                "injected Git evidence publication failure",
+            ));
+        }
         if cancelled.load(Ordering::Acquire) || self.cancelled.load(Ordering::Acquire) {
             return Err(GraphDbError::Cancelled);
         }
         let snapshot = VerifiedGraphSnapshot::memory(manifest.clone(), Arc::new(NeverCancelled))?;
         *self.snapshot.lock().unwrap() = Some(snapshot.clone());
+        self.successful_publications.fetch_add(1, Ordering::AcqRel);
         if self.cancel_after_publish.swap(false, Ordering::AcqRel) {
             cancelled.store(true, Ordering::Release);
         }
