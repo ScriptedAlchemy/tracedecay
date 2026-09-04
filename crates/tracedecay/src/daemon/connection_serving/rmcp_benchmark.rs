@@ -13,6 +13,7 @@ use std::path::Path;
 use std::pin::Pin;
 use std::process::Command;
 use std::sync::Arc;
+use std::time::Duration;
 use std::time::Instant;
 
 use rmcp::model::CallToolRequestParams;
@@ -56,6 +57,63 @@ pub struct RmcpConnectionPipelineMeasurement {
     pub reconnect_measured_rounds: usize,
     pub persistent_status_round_trip: LatencyDistribution,
     pub reconnect_initialize_status_close: LatencyDistribution,
+}
+
+struct BenchmarkServerFixture {
+    _sandbox: tempfile::TempDir,
+    server: Arc<McpServer>,
+}
+
+impl BenchmarkServerFixture {
+    async fn open() -> Result<Self, String> {
+        crate::product_runtime::register_fixture_product_runtime();
+        let sandbox = tempfile::TempDir::new()
+            .map_err(|error| format!("create benchmark sandbox: {error}"))?;
+        let project = sandbox.path().join("project");
+        let profile = sandbox.path().join("profile");
+        initialize_project(&project)?;
+        let runtime = HostAdmissionTestRuntimeV1::project_scoped(
+            &profile,
+            &project,
+            ProjectId::new("rmcp-connection-benchmark")
+                .map_err(|error| format!("create benchmark project identity: {error}"))?,
+        )
+        .await
+        .map_err(|error| format!("open registered benchmark runtime: {error}"))?;
+        let graph = runtime
+            .initialize_project_graph_for_test(
+                &project,
+                TraceDecayOpenOptions {
+                    profile_root: Some(profile),
+                    global_db_path: None,
+                },
+            )
+            .await
+            .map_err(|error| format!("initialize registered benchmark graph: {error}"))?;
+        let server = McpServer::new_with_host_admission_test_runtime_for_test(graph, None, runtime)
+            .await
+            .map_err(|error| format!("resolve production benchmark server: {error}"))?;
+        Ok(Self {
+            _sandbox: sandbox,
+            server,
+        })
+    }
+}
+
+/// Opens the production MCP composition without binding a listener or using RMCP.
+///
+/// Keeping the server alive for a caller-selected sampling interval makes the
+/// constructor's retained process state measurable independently from the
+/// first request, where the process-global dispatch catalog remains lazy.
+pub fn run_mcp_server_construction_fixture(
+    retain_for: Duration,
+) -> Pin<Box<dyn Future<Output = Result<(), String>>>> {
+    Box::pin(async move {
+        let fixture = BenchmarkServerFixture::open().await?;
+        tokio::time::sleep(retain_for).await;
+        fixture.server.shutdown().await;
+        Ok(())
+    })
 }
 
 struct BenchmarkConnection {
@@ -171,33 +229,8 @@ pub fn run_rmcp_connection_pipeline<'a>(
             );
         }
 
-        crate::product_runtime::register_fixture_product_runtime();
-        let sandbox = tempfile::TempDir::new()
-            .map_err(|error| format!("create benchmark sandbox: {error}"))?;
-        let project = sandbox.path().join("project");
-        let profile = sandbox.path().join("profile");
-        initialize_project(&project)?;
-        let runtime = HostAdmissionTestRuntimeV1::project_scoped(
-            &profile,
-            &project,
-            ProjectId::new("rmcp-connection-benchmark")
-                .map_err(|error| format!("create benchmark project identity: {error}"))?,
-        )
-        .await
-        .map_err(|error| format!("open registered benchmark runtime: {error}"))?;
-        let graph = runtime
-            .initialize_project_graph_for_test(
-                &project,
-                TraceDecayOpenOptions {
-                    profile_root: Some(profile),
-                    global_db_path: None,
-                },
-            )
-            .await
-            .map_err(|error| format!("initialize registered benchmark graph: {error}"))?;
-        let server = McpServer::new_with_host_admission_test_runtime_for_test(graph, None, runtime)
-            .await
-            .map_err(|error| format!("resolve production benchmark server: {error}"))?;
+        let fixture = BenchmarkServerFixture::open().await?;
+        let server = fixture.server;
         let (listener, endpoint) = BrokerListener::bind(&default_loopback_endpoint())
             .await
             .map_err(|error| format!("bind benchmark RMCP broker listener: {error}"))?;
