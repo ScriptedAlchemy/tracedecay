@@ -546,6 +546,13 @@ async fn retrieve_summary_page(
               AND availability.availability = 'available'
              WHERE node.session_id = ?1
                AND (?3 <> 'as_of' OR node.created_at <= ?4)
+               AND (?3 <> 'current' OR NOT EXISTS (
+                   SELECT 1
+                   FROM lcm_summary_convergence_dirty_raw AS dirty
+                   WHERE dirty.provider =
+                       json_extract(node.publication_json, '$.provider')
+                     AND dirty.session_id = node.session_id
+               ))
              ORDER BY node.created_at, node.summary_id
              LIMIT ?5",
             params![

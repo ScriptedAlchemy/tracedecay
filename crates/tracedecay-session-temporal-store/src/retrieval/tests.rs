@@ -1334,6 +1334,7 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
         SqlValue::Integer(128),
         SqlValue::Integer(1_024),
         SqlValue::Integer(10),
+        SqlValue::Text("current".to_string()),
     ];
     assert_eq!(
         read.text_column(SUMMARY_CANDIDATE_QUERY, summary_params.clone(), 0)
@@ -1450,6 +1451,7 @@ async fn summary_and_derived_candidate_queries_enforce_live_boundaries_and_plans
         SqlValue::Integer(1_024),
         SqlValue::Integer(128),
         SqlValue::Integer(10),
+        SqlValue::Text("current".to_string()),
     ];
     assert_eq!(
         read.text_column(ROOT_SUMMARY_CANDIDATE_QUERY, root_summary_params.clone(), 0)
@@ -1495,6 +1497,7 @@ async fn summary_and_derived_candidate_queries_enforce_live_boundaries_and_plans
         SqlValue::Integer(1_024),
         SqlValue::Integer(128),
         SqlValue::Integer(10),
+        SqlValue::Text("current".to_string()),
     ];
     assert!(
         read.text_column(ROOT_SUMMARY_CANDIDATE_QUERY, root_summary_missing_phrase, 0)
