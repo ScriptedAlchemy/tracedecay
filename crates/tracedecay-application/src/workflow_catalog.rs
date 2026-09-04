@@ -113,13 +113,14 @@ pub const WORKFLOW_APPLICATION_OPERATION_IDS: [(&str, &str, &str); 16] = [
 /// regenerates and cross-validates schemars schemas, so assembly is
 /// expensive. Per-operation lookups used to rebuild the whole registry per
 /// call, making operation-table iteration quadratic in schema generations on
-/// the daemon startup path. Build it once per process and clone the
-/// assembled value instead.
+/// first global MCP catalog construction. The registry is immutable, so callers
+/// borrow the one process-lifetime authority instead of cloning every schema
+/// body.
 pub fn workflow_executable_binding_registry()
--> Result<ExecutableBindingRegistryV1, CatalogValidationError> {
+-> Result<&'static ExecutableBindingRegistryV1, CatalogValidationError> {
     static REGISTRY: LazyLock<Result<ExecutableBindingRegistryV1, CatalogValidationError>> =
         LazyLock::new(build_workflow_executable_binding_registry);
-    REGISTRY.clone()
+    REGISTRY.as_ref().map_err(Clone::clone)
 }
 
 fn build_workflow_executable_binding_registry()
@@ -434,11 +435,31 @@ const fn invalid_catalog_value(
 mod tests {
     use tracedecay_tool_catalog::{
         CancellationContract, CancellationPoint, DeadlineBehavior, EffectClass,
-        IdempotencyContract, LifecycleClass, ReceiptContract, ReconciliationContract,
-        TerminalState,
+        ExecutableBindingRegistryV1, IdempotencyContract, LifecycleClass, ReceiptContract,
+        ReconciliationContract, TerminalState,
     };
 
     use super::{workflow_executable_binding_registry, workflow_manifest};
+
+    fn first_binding_address(registry: &ExecutableBindingRegistryV1) -> usize {
+        registry
+            .iter()
+            .next()
+            .map(|binding| std::ptr::from_ref(binding) as usize)
+            .expect("Workflow registry is not empty")
+    }
+
+    #[test]
+    fn repeated_workflow_registry_reads_borrow_one_process_authority() {
+        let first = workflow_executable_binding_registry().unwrap();
+        let second = workflow_executable_binding_registry().unwrap();
+
+        assert_eq!(
+            first_binding_address(first),
+            first_binding_address(second),
+            "reading the process-static registry must not clone every schema-rich binding",
+        );
+    }
 
     #[test]
     fn workflow_registry_advertises_every_mounted_application_route() {

@@ -25,7 +25,8 @@ pub(crate) fn workflow_operation_for_tool(
 /// Resolve the executable Workflow binding that names an MCP tool.
 pub(super) fn workflow_executable_binding_for_tool(
     tool_name: &str,
-) -> Result<Option<ExecutableBindingV1>, super::super::dispatch::McpDispatchMetadataError> {
+) -> Result<Option<&'static ExecutableBindingV1>, super::super::dispatch::McpDispatchMetadataError>
+{
     let Some(operation) = workflow_operation_for_tool(tool_name) else {
         return Ok(None);
     };
@@ -36,8 +37,7 @@ pub(super) fn workflow_executable_binding_for_tool(
         .map_err(super::super::dispatch::McpDispatchMetadataError::CatalogValidation)?;
     Ok(registry
         .get(&operation_id)
-        .and_then(|availability| availability.binding())
-        .cloned())
+        .and_then(|availability| availability.binding()))
 }
 
 /// Project every canonical Workflow executable into a dispatch entry.
@@ -61,7 +61,6 @@ pub(super) fn dispatch_catalog_bindings()
             let binding = registry
                 .get(&operation_id)
                 .and_then(|availability| availability.binding())
-                .cloned()
                 .ok_or_else(|| {
                     invalid_workflow_binding("canonical Workflow operation is not executable")
                 })?;

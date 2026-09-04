@@ -199,14 +199,15 @@ pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 32] = [
 /// its request/result schemas, so assembling it is expensive. Per-operation
 /// lookups such as [`work_executable_binding`] used to rebuild the whole
 /// registry per call, which made every consumer that iterates the operation
-/// table quadratic in schema generations and put multiple seconds of pure CPU
-/// on the daemon startup path. Build it once per process and clone the
-/// assembled value instead.
+/// table quadratic in schema generations and added hundreds of megabytes of
+/// allocator churn to first global MCP catalog construction. The registry is
+/// immutable, so callers borrow the one process-lifetime authority instead of
+/// cloning every schema body.
 pub fn work_executable_binding_registry()
--> Result<ExecutableBindingRegistryV1, CatalogValidationError> {
+-> Result<&'static ExecutableBindingRegistryV1, CatalogValidationError> {
     static REGISTRY: LazyLock<Result<ExecutableBindingRegistryV1, CatalogValidationError>> =
         LazyLock::new(build_work_executable_binding_registry);
-    REGISTRY.clone()
+    REGISTRY.as_ref().map_err(Clone::clone)
 }
 
 fn build_work_executable_binding_registry()
@@ -447,11 +448,10 @@ fn build_work_executable_binding_registry()
 /// contract beside their own name normalization.
 pub fn work_executable_binding(
     operation_id: &OperationId,
-) -> Result<Option<ExecutableBindingV1>, CatalogValidationError> {
+) -> Result<Option<&'static ExecutableBindingV1>, CatalogValidationError> {
     Ok(work_executable_binding_registry()?
         .get(operation_id)
-        .and_then(|availability| availability.binding())
-        .cloned())
+        .and_then(|availability| availability.binding()))
 }
 
 pub fn work_executable_catalog_digest() -> Result<ManifestDigest, CatalogValidationError> {
@@ -652,12 +652,34 @@ fn schema_ref(id: String) -> Result<SchemaRef, CatalogValidationError> {
 
 #[cfg(test)]
 mod tests {
-    use tracedecay_tool_catalog::{CancellationPoint, RouteExposureV1};
+    use tracedecay_tool_catalog::{
+        CancellationPoint, ExecutableBindingRegistryV1, RouteExposureV1,
+    };
 
     use super::{
         WORK_APPLICATION_OPERATION_IDS_V1, work_executable_binding,
         work_executable_binding_registry,
     };
+
+    fn first_binding_address(registry: &ExecutableBindingRegistryV1) -> usize {
+        registry
+            .iter()
+            .next()
+            .map(|binding| std::ptr::from_ref(binding) as usize)
+            .expect("Work registry is not empty")
+    }
+
+    #[test]
+    fn repeated_work_registry_reads_borrow_one_process_authority() {
+        let first = work_executable_binding_registry().unwrap();
+        let second = work_executable_binding_registry().unwrap();
+
+        assert_eq!(
+            first_binding_address(first),
+            first_binding_address(second),
+            "reading the process-static registry must not clone every schema-rich binding",
+        );
+    }
 
     #[test]
     fn work_registry_advertises_only_mounted_application_operations() {

@@ -459,6 +459,7 @@ impl RegisteredHttpOperation for WorkOperation {
     ) -> Result<tracedecay_tool_catalog::ExecutableBindingRegistryV1, ApplicationSurfaceAdapterError>
     {
         tracedecay_application::work_executable_binding_registry()
+            .cloned()
             .map_err(ApplicationSurfaceAdapterError::CatalogValidation)
     }
 }
@@ -485,6 +486,7 @@ impl RegisteredHttpOperation for WorkflowOperation {
     ) -> Result<tracedecay_tool_catalog::ExecutableBindingRegistryV1, ApplicationSurfaceAdapterError>
     {
         tracedecay_application::workflow_executable_binding_registry()
+            .cloned()
             .map_err(ApplicationSurfaceAdapterError::CatalogValidation)
     }
 }
