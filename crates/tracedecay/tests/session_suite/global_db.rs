@@ -17,6 +17,21 @@ async fn open_isolated_db(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
         .expect("registered profile runtime")
 }
 
+/// Opens a `ProjectSessions`-scoped runtime for the cases that publish or read
+/// derived Git evidence, which profile scope refuses by design.
+async fn open_isolated_project_db(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
+    let profile_root = tmp.path().join("profile");
+    let project_root = tmp.path().join("project");
+    std::fs::create_dir_all(&project_root).expect("project root");
+    HostAdmissionTestRuntimeV1::project(
+        &profile_root,
+        &project_root,
+        tracedecay_domain::ProjectId::new("project.global-db-git-scope").expect("project id"),
+    )
+    .await
+    .expect("registered project session runtime")
+}
+
 fn sha256_hex(content: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content.as_bytes());
@@ -60,20 +75,6 @@ trait RegisteredSessionTestExt {
         limit: usize,
         filters: SessionSearchFilters<'_>,
     ) -> Vec<SessionMessageSearchResult>;
-    async fn search_session_messages_git_scoped(
-        &self,
-        provider: Option<&str>,
-        project_key: Option<&str>,
-        query: &str,
-        limit: usize,
-        filters: SessionSearchFilters<'_>,
-        git_filter: &tracedecay_sessions::runtime::git_correlation::GitScopeFilter,
-    ) -> Vec<SessionMessageSearchResult>;
-    async fn git_record_span_observation(
-        &self,
-        observation: &tracedecay_sessions::runtime::git_correlation::SpanObservation,
-        merge_gap_secs: i64,
-    ) -> tracedecay_domain::errors::Result<i64>;
     async fn session_message_count(&self) -> tracedecay_domain::errors::Result<i64>;
     async fn session_message_count_for_project(
         &self,
@@ -175,37 +176,6 @@ impl RegisteredSessionTestExt for HostAdmissionTestRuntimeV1 {
         )
         .await
         .expect("registered filtered session message search")
-    }
-
-    async fn search_session_messages_git_scoped(
-        &self,
-        provider: Option<&str>,
-        project_key: Option<&str>,
-        query: &str,
-        limit: usize,
-        filters: SessionSearchFilters<'_>,
-        git_filter: &tracedecay_sessions::runtime::git_correlation::GitScopeFilter,
-    ) -> Vec<SessionMessageSearchResult> {
-        self.search_session_messages_git_scoped_for_test(
-            HostAdmissionScope::Profile,
-            provider,
-            project_key,
-            query,
-            limit,
-            filters,
-            git_filter,
-        )
-        .await
-        .expect("registered git-scoped session message search")
-    }
-
-    async fn git_record_span_observation(
-        &self,
-        observation: &tracedecay_sessions::runtime::git_correlation::SpanObservation,
-        merge_gap_secs: i64,
-    ) -> tracedecay_domain::errors::Result<i64> {
-        self.record_session_span_for_test(HostAdmissionScope::Profile, observation, merge_gap_secs)
-            .await
     }
 
     async fn session_message_count(&self) -> tracedecay_domain::errors::Result<i64> {
@@ -978,21 +948,31 @@ async fn search_session_messages_git_scoped_by_branch_with_hyphen_term() {
         SpanObservation, SpanSource, git_scope_filter_from_args,
     };
 
+    // Git evidence is only publishable under `ProjectSessions` authority, so
+    // this case has to run against a project-scoped runtime; recording a span
+    // in profile scope is refused by design.
     let tmp = TempDir::new().unwrap();
-    let db = open_isolated_db(&tmp).await;
+    let db = open_isolated_project_db(&tmp).await;
     let session = sample_session("cursor", "cursor-scoped", "project-a");
-    db.upsert_session(&session).await;
-    db.upsert_session_message(&sample_message(
-        "cursor",
-        "scoped-msg",
-        "cursor-scoped",
-        "the literal foo-bar marker on a scoped branch",
-    ))
-    .await;
+    db.upsert_session_for_test(HostAdmissionScope::Project, &session)
+        .await
+        .expect("registered project session upsert");
+    db.upsert_session_message_for_test(
+        HostAdmissionScope::Project,
+        &sample_message(
+            "cursor",
+            "scoped-msg",
+            "cursor-scoped",
+            "the literal foo-bar marker on a scoped branch",
+        ),
+    )
+    .await
+    .expect("registered project session message upsert");
 
     // The session was active on `feat/x`; record a span so the scoping EXISTS
     // subquery has a row to match against.
-    db.git_record_span_observation(
+    db.record_session_span_for_test(
+        HostAdmissionScope::Project,
         &SpanObservation {
             provider: "cursor".to_string(),
             session_id: "cursor-scoped".to_string(),
@@ -1017,7 +997,8 @@ async fn search_session_messages_git_scoped_by_branch_with_hyphen_term() {
     // A hyphenated query term appends a numbered placeholder *after* the git
     // EXISTS predicate's anonymous placeholders; the match must still resolve.
     let matched = db
-        .search_session_messages_git_scoped(
+        .search_session_messages_git_scoped_for_test(
+            HostAdmissionScope::Project,
             Some("cursor"),
             Some("project-a"),
             "foo-bar",
@@ -1025,13 +1006,15 @@ async fn search_session_messages_git_scoped_by_branch_with_hyphen_term() {
             filters,
             &git_scope_filter_from_args(Some("feat/x"), None, None).unwrap(),
         )
-        .await;
+        .await
+        .expect("registered git-scoped session message search");
     assert_eq!(matched.len(), 1);
     assert_eq!(matched[0].message.message_id, "scoped-msg");
 
     // A branch the session was never on excludes the message.
     let excluded = db
-        .search_session_messages_git_scoped(
+        .search_session_messages_git_scoped_for_test(
+            HostAdmissionScope::Project,
             Some("cursor"),
             Some("project-a"),
             "foo-bar",
@@ -1039,7 +1022,8 @@ async fn search_session_messages_git_scoped_by_branch_with_hyphen_term() {
             filters,
             &git_scope_filter_from_args(Some("other"), None, None).unwrap(),
         )
-        .await;
+        .await
+        .expect("registered git-scoped session message search");
     assert!(excluded.is_empty());
 }
 
