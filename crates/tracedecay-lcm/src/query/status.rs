@@ -41,6 +41,11 @@ struct StatusCounts {
     frontier_count: i64,
     legacy_truncated_count: i64,
     lossy_ingest_records: i64,
+    summary_pending_count: i64,
+    summary_retryable_count: i64,
+    summary_current_count: i64,
+    summary_unavailable_count: i64,
+    summary_permanent_count: i64,
 }
 
 pub(super) async fn status_for_provider(
@@ -226,14 +231,29 @@ fn status_counts_query(provider: &str, session_id: Option<&str>) -> (String, Vec
                WHERE metadata_json IS NOT NULL
                  AND json_valid(metadata_json)
                  AND json_type(metadata_json, '$.ingest_protection.lossy') = 'true'\
-                 {content_and})"
+                 {content_and}),
+             (SELECT COUNT(*)
+                FROM lcm_summary_convergence_queue
+               WHERE state = 'pending'{content_and}),
+             (SELECT COUNT(*)
+                FROM lcm_summary_convergence_queue
+               WHERE state = 'retryable'{content_and}),
+             (SELECT COUNT(*)
+                FROM lcm_summary_convergence_queue
+               WHERE state = 'current'{content_and}),
+             (SELECT COUNT(*)
+                FROM lcm_summary_convergence_queue
+               WHERE state = 'unavailable'{content_and}),
+             (SELECT COUNT(*)
+                FROM lcm_summary_convergence_queue
+               WHERE state = 'permanent'{content_and})"
     );
     // Bound in the placeholders' textual order: the four EXISTS probes, the
-    // raw/summary counts, the debt join, both lifecycle counts, and the two
-    // redaction counts.
-    let scopes_in_sql_order: [&LcmScopeSql; 11] = [
+    // raw/summary counts, the debt join, both lifecycle counts, two redaction
+    // counts, and five disjoint summary-convergence states.
+    let scopes_in_sql_order: [&LcmScopeSql; 16] = [
         &content, &content, &content, &lifecycle, &content, &content, &debt, &lifecycle,
-        &lifecycle, &content, &content,
+        &lifecycle, &content, &content, &content, &content, &content, &content, &content,
     ];
     let mut values = Vec::new();
     for scope in scopes_in_sql_order {
@@ -263,6 +283,11 @@ async fn status_counts(
         frontier_count: row.get(5)?,
         legacy_truncated_count: row.get(6)?,
         lossy_ingest_records: row.get(7)?,
+        summary_pending_count: row.get(8)?,
+        summary_retryable_count: row.get(9)?,
+        summary_current_count: row.get(10)?,
+        summary_unavailable_count: row.get(11)?,
+        summary_permanent_count: row.get(12)?,
     })
 }
 
@@ -300,6 +325,13 @@ fn status_from_parts(
             current_frontier_store_id: lifecycle_metadata.current_frontier_store_id,
             last_finalized_session_id: lifecycle_metadata.last_finalized_session_id,
             last_finalized_frontier_store_id: lifecycle_metadata.last_finalized_frontier_store_id,
+        },
+        summary_convergence: LcmSummaryConvergenceStatus {
+            pending_session_count: counts.summary_pending_count,
+            retryable_session_count: counts.summary_retryable_count,
+            current_session_count: counts.summary_current_count,
+            unavailable_session_count: counts.summary_unavailable_count,
+            permanent_session_count: counts.summary_permanent_count,
         },
         redaction: LcmRedactionStatus {
             enabled: lossy_records > 0,
@@ -348,6 +380,16 @@ fn merge_lcm_status(target: &mut LcmStatus, source: LcmStatus) {
     target.lifecycle.lifecycle_state_count += source.lifecycle.lifecycle_state_count;
     target.lifecycle.frontier_count += source.lifecycle.frontier_count;
     target.lifecycle.maintenance_debt_count += source.lifecycle.maintenance_debt_count;
+    target.summary_convergence.pending_session_count +=
+        source.summary_convergence.pending_session_count;
+    target.summary_convergence.retryable_session_count +=
+        source.summary_convergence.retryable_session_count;
+    target.summary_convergence.current_session_count +=
+        source.summary_convergence.current_session_count;
+    target.summary_convergence.unavailable_session_count +=
+        source.summary_convergence.unavailable_session_count;
+    target.summary_convergence.permanent_session_count +=
+        source.summary_convergence.permanent_session_count;
     target.redaction.lossy_records += source.redaction.lossy_records;
     target.redaction.legacy_truncated_count += source.redaction.legacy_truncated_count;
 }
@@ -515,6 +557,7 @@ pub(super) fn empty_status(schema_version: i64, gc_config: &LcmGcConfig) -> LcmS
             last_finalized_session_id: None,
             last_finalized_frontier_store_id: None,
         },
+        summary_convergence: LcmSummaryConvergenceStatus::default(),
         redaction: LcmRedactionStatus {
             enabled: false,
             lossy_records: 0,

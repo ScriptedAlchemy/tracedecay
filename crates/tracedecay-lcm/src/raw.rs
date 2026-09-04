@@ -57,15 +57,15 @@ fn verify_raw_message_receipt(message: &LcmRawMessage) -> Result<(), LcmError> {
     let metadata = message
         .metadata_json
         .as_deref()
-        .ok_or_else(|| LcmError::Db("missing LCM sanitization receipt".to_owned()))?;
+        .ok_or(LcmError::PayloadIntegrityMismatch)?;
     let metadata = serde_json::from_str::<JsonValue>(metadata)
-        .map_err(|_| LcmError::Db("invalid LCM sanitization metadata".to_owned()))?;
+        .map_err(|_| LcmError::PayloadIntegrityMismatch)?;
     let receipt = metadata
         .get("ingest_protection")
         .and_then(|protection| protection.get("sanitization_receipt"))
-        .ok_or_else(|| LcmError::Db("missing LCM sanitization receipt".to_owned()))?;
-    let receipt: SanitizationReceiptV1 = serde_json::from_value(receipt.clone())
-        .map_err(|_| LcmError::Db("invalid LCM sanitization receipt".to_owned()))?;
+        .ok_or(LcmError::PayloadIntegrityMismatch)?;
+    let receipt: SanitizationReceiptV1 =
+        serde_json::from_value(receipt.clone()).map_err(|_| LcmError::PayloadIntegrityMismatch)?;
     let expected_revision = ComponentVersion::new(LCM_PAYLOAD_SANITIZER_VERSION_V1)
         .map_err(|_| LcmError::Db("invalid canonical LCM sanitizer revision".to_owned()))?;
     if message.storage_kind == LcmStorageKind::Inline {
@@ -74,7 +74,7 @@ fn verify_raw_message_receipt(message: &LcmRawMessage) -> Result<(), LcmError> {
             &receipt,
             &expected_revision,
         )
-        .map_err(|error| LcmError::Db(format!("invalid LCM sanitization receipt: {error}")))?;
+        .map_err(|_| LcmError::PayloadIntegrityMismatch)?;
     } else {
         let quarantined = metadata
             .get("ingest_protection")
@@ -88,9 +88,7 @@ fn verify_raw_message_receipt(message: &LcmRawMessage) -> Result<(), LcmError> {
             && receipt.disposition() == SanitizerDispositionV1::Quarantined
             && receipt.payload().is_none());
         if receipt.receipt().sanitizer_version() != &expected_revision || !disposition_is_valid {
-            return Err(LcmError::Db(
-                "invalid LCM sanitization receipt for external payload".to_owned(),
-            ));
+            return Err(LcmError::PayloadIntegrityMismatch);
         }
     }
     Ok(())
