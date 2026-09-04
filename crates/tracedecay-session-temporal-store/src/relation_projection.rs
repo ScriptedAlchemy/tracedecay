@@ -400,6 +400,7 @@ async fn reconstruct_summaries(
               AND node.session_id = availability.session_id
              WHERE availability.session_id = ?1
                AND availability.generation = ?2
+               AND availability.availability = 'available'
              ORDER BY node.created_at, node.summary_id
              LIMIT ?3",
             params![

@@ -12,6 +12,123 @@ use crate::sql::GENERATION_COPY_STATEMENTS;
 const MAX_LINEAGE_DEPTH: usize = 64;
 const MAX_LINEAGE_NODES: usize = 4_096;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RawSummaryInvalidation {
+    pub rewind_frontier_store_id: i64,
+    pub stale_summary_count: usize,
+}
+
+/// Starts a new canonical generation in which every summary transitively
+/// derived from a revised raw source is stale. The immutable historical nodes
+/// remain auditable, but no active-generation retrieval can return them.
+pub async fn invalidate_raw_summary_revision(
+    conn: &impl crate::handle::SessionTemporalExec,
+    session_id: &str,
+    raw_store_id: i64,
+    max_affected: usize,
+) -> Result<RawSummaryInvalidation, LcmError> {
+    if max_affected == 0 {
+        return Err(lineage_limit(
+            session_id,
+            "raw_revision_invalidation_budget_exhausted",
+        ));
+    }
+    let Some(active) = active_generation(conn, session_id).await? else {
+        return Ok(RawSummaryInvalidation {
+            rewind_frontier_store_id: raw_store_id.saturating_sub(1).max(0),
+            stale_summary_count: 0,
+        });
+    };
+    let limit = i64::try_from(max_affected.saturating_add(1))
+        .map_err(|_| lineage_limit(session_id, "raw_revision_invalidation_budget_exhausted"))?;
+    let mut rows = conn
+        .query(
+            "WITH RECURSIVE affected(node_id, depth) AS (
+               SELECT source.node_id, 0
+               FROM lcm_summary_sources AS source
+               JOIN session_summary_availability AS availability
+                 ON availability.session_id = ?2
+                AND availability.generation = ?3
+                AND availability.summary_id = source.node_id
+                AND availability.availability = 'available'
+               WHERE source.source_kind = 'raw_message' AND source.source_id = ?1
+               UNION
+               SELECT parent.node_id, affected.depth + 1
+               FROM affected
+               JOIN lcm_summary_sources AS parent
+                 ON parent.source_kind = 'summary_node'
+                AND parent.source_id = affected.node_id
+               JOIN session_summary_availability AS availability
+                 ON availability.session_id = ?2
+                AND availability.generation = ?3
+                AND availability.summary_id = parent.node_id
+                AND availability.availability = 'available'
+               WHERE affected.depth < ?4
+               LIMIT ?5
+             )
+             SELECT node_id FROM affected ORDER BY node_id",
+            params![
+                raw_store_id.to_string(),
+                session_id,
+                active,
+                i64::try_from(MAX_LINEAGE_DEPTH).unwrap_or(i64::MAX),
+                limit,
+            ],
+        )
+        .await?;
+    let mut affected = Vec::new();
+    while let Some(row) = rows.next().await? {
+        affected.push(row.get::<String>(0)?);
+    }
+    drop(rows);
+    if affected.len() > max_affected {
+        return Err(lineage_limit(
+            session_id,
+            "raw_revision_invalidation_budget_exhausted",
+        ));
+    }
+    if affected.is_empty() {
+        return Ok(RawSummaryInvalidation {
+            rewind_frontier_store_id: raw_store_id.saturating_sub(1).max(0),
+            stale_summary_count: 0,
+        });
+    }
+
+    let affected_json = serde_json::to_string(&affected)
+        .map_err(|error| LcmError::Db(format!("encode affected summary ids: {error}")))?;
+    let mut source_rows = conn
+        .query(
+            "SELECT MIN(CAST(source.source_id AS INTEGER))
+             FROM lcm_summary_sources AS source
+             WHERE source.source_kind = 'raw_message'
+               AND source.node_id IN (SELECT value FROM json_each(?1))",
+            params![affected_json],
+        )
+        .await?;
+    let first_source = source_rows
+        .next()
+        .await?
+        .ok_or_else(|| LcmError::Db("raw summary source range query returned no row".into()))?
+        .get::<Option<i64>>(0)?
+        .unwrap_or(raw_store_id);
+    drop(source_rows);
+
+    let now = super::unixepoch(conn).await?;
+    for summary_id in &affected {
+        conn.execute(
+            "UPDATE session_summary_availability
+             SET availability = 'stale', reason = 'raw_source_revised', checked_at = ?4
+             WHERE session_id = ?1 AND generation = ?2 AND summary_id = ?3",
+            params![session_id, active, summary_id.as_str(), now],
+        )
+        .await?;
+    }
+    Ok(RawSummaryInvalidation {
+        rewind_frontier_store_id: first_source.saturating_sub(1).max(0),
+        stale_summary_count: affected.len(),
+    })
+}
+
 pub(super) fn validate_lineage_projection(
     projection: &SessionRelationProjection,
     publication: &LcmImmutableSummaryPublication,
@@ -85,10 +202,18 @@ pub(super) async fn validate_current_predecessor(
         .collect::<BTreeSet<_>>();
     let mut matching = conn
         .query(
-            "SELECT summary_id, publication_json
-             FROM session_summary_nodes
-             WHERE session_id = ?1
-             ORDER BY created_at, summary_id",
+            "SELECT node.summary_id, node.publication_json
+             FROM session_summary_nodes AS node
+             JOIN session_temporal_generations AS generation
+               ON generation.session_id = node.session_id
+              AND generation.state = 'active'
+             JOIN session_summary_availability AS availability
+               ON availability.session_id = node.session_id
+              AND availability.generation = generation.generation
+              AND availability.summary_id = node.summary_id
+              AND availability.availability = 'available'
+             WHERE node.session_id = ?1
+             ORDER BY node.created_at, node.summary_id",
             params![publication.draft.session_id.as_str()],
         )
         .await?;

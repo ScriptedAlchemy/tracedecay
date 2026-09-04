@@ -340,6 +340,34 @@ impl RegisteredGlobalDb {
             .map_err(|error| LcmError::Db(error.to_string()))?;
         let mut payload_rollback =
             payload::PayloadFileRollback::begin_cancellation_safe(storage_root);
+        if let Some(stale_from_store_id) =
+            convergence_candidate.and_then(|candidate| candidate.stale_from_store_id)
+        {
+            let invalidation = session_temporal_operations::invalidate_raw_summary_revision(
+                &transaction,
+                request.session_id.as_str(),
+                stale_from_store_id,
+                row_limit.max(1),
+            )
+            .await?;
+            transaction
+                .execute(
+                    "UPDATE lcm_lifecycle_state
+                     SET current_frontier_store_id = CASE
+                           WHEN current_frontier_store_id IS NULL THEN NULL
+                           ELSE MIN(current_frontier_store_id, ?3)
+                         END,
+                         updated_at = unixepoch()
+                     WHERE provider = ?1 AND conversation_id = ?2",
+                    tracedecay_runtime_core::db::engine::params![
+                        request.provider.as_str(),
+                        request.session_id.as_str(),
+                        invalidation.rewind_frontier_store_id,
+                    ],
+                )
+                .await
+                .map_err(|error| LcmError::Db(error.to_string()))?;
+        }
         let relation_projection = seed_session_relation_projection(
             self,
             &transaction,
@@ -357,7 +385,7 @@ impl RegisteredGlobalDb {
             &transaction,
             relation_projection,
         );
-        let mut bounded = compression::compress_retained_page(
+        let bounded = compression::compress_retained_page(
             &transaction,
             &publisher,
             storage_root,
@@ -389,21 +417,10 @@ impl RegisteredGlobalDb {
         before_commit()?;
         transaction.commit().await?;
         payload_rollback.disarm();
-        if !bounded.response.summary_nodes.is_empty() {
-            check_execution(control)?;
-            self.apply_active_session_relation_projection(
-                &session_id,
-                execution_control_graph_cancellation(control),
-            )
-            .await
-            .map_err(|error| {
-                LcmError::Db(format!(
-                    "apply native retained LCM relation projection: {error}"
-                ))
-            })?;
-            bounded.response.relation_projection_status = LcmRelationProjectionStatus::Applied;
-            check_execution(control)?;
-        }
+        // Retained convergence publishes the durable relation effect journal
+        // atomically with the summary, lifecycle frontier, and queue outcome.
+        // Applying that potentially session-wide graph is recovered by the
+        // scheduler's separately bounded relation page.
         Ok(bounded)
     }
 

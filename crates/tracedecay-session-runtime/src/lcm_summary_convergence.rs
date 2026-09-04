@@ -48,6 +48,12 @@ pub(crate) async fn run_summary_convergence_page(
     database: RegisteredGlobalDbLeaseV1,
     page_limit: usize,
 ) -> Result<LcmSummaryConvergencePage, LcmError> {
+    // Relation effects from a prior summary transaction are their own
+    // session-bounded, work-budgeted page. The scheduler calls this function
+    // only while holding the daemon-wide historical-work admission.
+    super::lcm_effects::DaemonLcmEffectService::new(database.clone(), None, None)
+        .recover_retained_relation_projection_page()
+        .await?;
     let backfill = backfill_queue(&database).await?;
     let now_unix_ms = unix_millis()?;
     let page_limit = page_limit.max(1);
