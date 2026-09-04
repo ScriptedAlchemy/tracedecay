@@ -9,8 +9,8 @@ use std::time::Duration;
 use tokio::task::JoinHandle;
 use tracedecay_application::ResolvedScope;
 use tracedecay_domain::{
-    CalibrationProfileId, CodeGenerationId, ComponentRevision, SemanticSearchIndexProfileV1,
-    VectorGenerationIdV1, canonical_sha256,
+    CalibrationProfileId, CodeGenerationId, ComponentRevision, ManifestDigest,
+    SemanticSearchIndexProfileV1, VectorGenerationIdV1, canonical_sha256,
 };
 use tracedecay_query::retrieval::semantic::SemanticCalibrationProfileV1;
 use tracedecay_runtime_core::cancellation::CancellationToken;
@@ -33,9 +33,9 @@ use crate::search_eval::{
 };
 use tracedecay_usecases::semantic_runtime::{
     SemanticActivationCoordinationErrorV1, SemanticEvaluationAuthorityPublicationV1,
-    SemanticEvaluationProfileCandidateV1, SemanticEvaluationPublicationSnapshotPortV1,
-    SemanticEvaluationPublicationSnapshotV1, SemanticEvaluationSnapshotPortV1,
-    SemanticRuntimeBackendErrorV1, SemanticRuntimeFuture,
+    SemanticEvaluationCurrentGenerationSnapshotV1, SemanticEvaluationProfileCandidateV1,
+    SemanticEvaluationPublicationSnapshotPortV1, SemanticEvaluationPublicationSnapshotV1,
+    SemanticEvaluationSnapshotPortV1, SemanticRuntimeBackendErrorV1, SemanticRuntimeFuture,
 };
 use tracedecay_usecases::store::vector_generations::{
     BaseGenerationIncompatibilityV1, GraphVectorGenerationStoreV1, PublishedVectorGenerationV1,
@@ -217,6 +217,15 @@ fn coordination_error_from_runtime(
     }
 }
 
+fn vector_runtime_identity_matches(
+    expected_generation: &VectorGenerationIdV1,
+    expected_source_manifest: &ManifestDigest,
+    observed: &SemanticEvaluationCurrentGenerationSnapshotV1,
+) -> bool {
+    &observed.vector_generation_id == expected_generation
+        && &observed.source_manifest_digest == expected_source_manifest
+}
+
 pub async fn build_daemon_semantic_evaluation_candidate(
     project_root: &Path,
     scope: &ResolvedScope,
@@ -336,10 +345,34 @@ pub async fn build_daemon_semantic_evaluation_candidate(
         );
         coordination_error_from_runtime(error)
     })?;
-    hotpath::measure_block!(
+    let candidate = hotpath::measure_block!(
         "daemon.semantic.evaluation.candidate.materialize",
         daemon_semantic_evaluation_candidate(evaluated_profile_id, &code, &vector, resources)
-    )
+    )?;
+    let semantic = candidate.compatibility.semantic.as_ref().ok_or_else(|| {
+        SemanticActivationCoordinationErrorV1::RejectedDetail(
+            "semantic evaluation candidate omits semantic compatibility".to_owned(),
+        )
+    })?;
+    let runtime_vector = control
+        .interruptible(hotpath::future!(
+            runtime.inspect_evaluation_current_generation_snapshot(
+                semantic,
+                &snapshot.source_generation,
+                vector.source_manifest_digest(),
+            ),
+            label = "daemon.semantic.evaluation.candidate.verify_vector_runtime"
+        ))
+        .await?
+        .map_err(coordination_error_from_runtime)?;
+    if !vector_runtime_identity_matches(
+        vector.generation_id(),
+        vector.source_manifest_digest(),
+        &runtime_vector,
+    ) {
+        return Err(SemanticActivationCoordinationErrorV1::Conflict);
+    }
+    Ok(candidate)
 }
 
 fn record_vector_generation_failure(error: &VectorGenerationStoreErrorV1) {
@@ -1632,6 +1665,32 @@ fn read_linux_process_lifetime_peak_rss_bytes() -> Option<u64> {
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+
+    fn digest(byte: char) -> ManifestDigest {
+        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
+    }
+
+    #[test]
+    fn candidate_vector_identity_requires_runtime_manifest_match() {
+        let generation = VectorGenerationIdV1::new(digest('a'));
+        let vector_manifest = digest('b');
+        let runtime = SemanticEvaluationCurrentGenerationSnapshotV1 {
+            vector_state_revision: 7,
+            vector_generation_id: generation.clone(),
+            source_manifest_digest: digest('c'),
+        };
+
+        assert!(!vector_runtime_identity_matches(
+            &generation,
+            &vector_manifest,
+            &runtime,
+        ));
+        assert!(vector_runtime_identity_matches(
+            &generation,
+            &runtime.source_manifest_digest,
+            &runtime,
+        ));
+    }
 
     #[test]
     fn packaged_candidate_uses_its_evaluated_semantic_calibration() {
