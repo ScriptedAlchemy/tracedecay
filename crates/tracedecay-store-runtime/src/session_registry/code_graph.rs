@@ -40,6 +40,7 @@ use tracedecay_code_index_runtime::{
 use tracedecay_usecases::semantic_runtime::{
     SemanticVectorGraphScopeV1, VerifiedSemanticVectorGraphRuntimeV1,
 };
+use tracedecay_usecases::store::vector_generations::GRAPH_BACKGROUND_OPERATION_BUDGET;
 
 mod memory_runtime;
 pub(super) use memory_runtime::{
@@ -59,10 +60,6 @@ use seals::{
 use semantic_vector_runtime::DaemonVerifiedSemanticVectorGraphRuntimeV1;
 
 const GRAPH_OPERATION_DEADLINE: Duration = Duration::from_secs(30);
-
-/// Effectively-unbounded budget for background graph work (sealed projection
-/// and generation publication); cancellation is the governing mechanism.
-const GRAPH_BACKGROUND_OPERATION_BUDGET: Duration = Duration::from_hours(168);
 const GRAPH_OPEN_DEADLINE: Duration = Duration::from_secs(30);
 /// How many orphaned pending predecessors one publication attempt will
 /// complete before reporting Conflict. Each completion advances the verified
