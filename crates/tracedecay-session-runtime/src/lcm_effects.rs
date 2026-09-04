@@ -327,24 +327,28 @@ impl DaemonLcmEffectService {
 
     pub(super) async fn recover_retained_relation_projection_page(
         &self,
-    ) -> Result<usize, LcmError> {
+    ) -> Result<tracedecay_session_temporal_store::SessionRelationRecoveryPage, LcmError> {
         const RELATION_PAGE_LIMIT: usize = 1;
         let execution = self.control.execution_control();
         let recovered = self
             .control
             .execute(&execution, async {
                 self.db
-                    .recover_pending_session_relation_projections(
+                    .recover_pending_session_relation_projection_page(
                         RELATION_PAGE_LIMIT,
                         tracedecay_session_temporal_store::store::execution_control_graph_cancellation(
                             &execution,
                         ),
                     )
                     .await
-                    .map_err(|error| {
-                        LcmError::Db(format!(
+                    .map_err(|error| match error {
+                        tracedecay_store::SessionStoreError::Cancelled => LcmError::Cancelled,
+                        tracedecay_store::SessionStoreError::DeadlineExceeded => {
+                            LcmError::DeadlineExceeded
+                        }
+                        error => LcmError::Db(format!(
                             "recover bounded retained LCM relation projection: {error}"
-                        ))
+                        )),
                     })
             })
             .await?;
@@ -559,6 +563,32 @@ mod tests {
             .await;
 
         assert_eq!(result.unwrap(), "committed");
+    }
+
+    #[tokio::test]
+    async fn retained_relation_recovery_preserves_typed_cancellation() {
+        let harness = RegisteredGlobalDbHarness::open("lcm-relation-recovery-cancelled").await;
+        let cancellation =
+            CancellationSignal::active("cancellation.lcm-relation-recovery").unwrap();
+        assert!(cancellation.cancel(tracedecay_domain::UtcMicros(2)));
+        let control = LcmEffectControl::new(None, Some(&cancellation));
+        let execution = control.execution_control();
+
+        let error = harness
+            .registered
+            .recover_pending_session_relation_projection_page(
+                1,
+                tracedecay_session_temporal_store::store::execution_control_graph_cancellation(
+                    &execution,
+                ),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            tracedecay_store::SessionStoreError::Cancelled
+        ));
     }
 
     #[tokio::test]
@@ -1083,7 +1113,7 @@ mod tests {
             .to_string(),
         );
         messages.push(first_summary);
-        for ordinal in 6..=7 {
+        for ordinal in 6..=520 {
             let mut record = message(session_id, ordinal);
             record.provider = "claude".to_string();
             record.message_id = format!("claude-between-{ordinal}");
@@ -1091,7 +1121,7 @@ mod tests {
         }
         let second_summary_id = "claude-second-summary";
         let second_boundary_id = "claude-second-boundary";
-        let mut second_boundary = message(session_id, 8);
+        let mut second_boundary = message(session_id, 521);
         second_boundary.provider = "claude".to_string();
         second_boundary.message_id = second_boundary_id.to_string();
         second_boundary.kind = Some("compaction".to_string());
@@ -1115,7 +1145,7 @@ mod tests {
             .to_string(),
         );
         messages.push(second_boundary);
-        let mut second_summary = message(session_id, 9);
+        let mut second_summary = message(session_id, 522);
         second_summary.provider = "claude".to_string();
         second_summary.message_id = second_summary_id.to_string();
         second_summary.text = "second authoritative Claude compaction".to_string();
@@ -1442,18 +1472,12 @@ done
                     .unwrap();
             }
             let summary_text = format!("native summary for {session_id}");
-            let metadata = serde_json::json!({
-                "source": "codex_context_compacted",
-                "summary_body": "plaintext"
-            });
-            insert_summary_evidence(
-                (&db, "codex"),
+            ingest_codex_compaction_evidence(
+                &db,
                 session_id,
                 &format!("{session_id}-summary"),
                 5,
                 &summary_text,
-                "summary",
-                &metadata,
             )
             .await;
         }
@@ -1497,7 +1521,7 @@ done
                 .lcm_status("codex", Some(session_id))
                 .await
                 .unwrap();
-            assert_eq!(status.raw_message_count, 4, "{session_id}");
+            assert_eq!(status.raw_message_count, 6, "{session_id}");
             assert_eq!(status.summary_node_count, 1, "{session_id}");
         }
     }
@@ -1518,20 +1542,8 @@ done
                 .unwrap();
         }
         let summary_text = "native summary committed with queue settlement";
-        let metadata = serde_json::json!({
-            "source": "codex_context_compacted",
-            "summary_body": "plaintext"
-        });
-        insert_summary_evidence(
-            (&db, "codex"),
-            session_id,
-            "crash-window-summary",
-            5,
-            summary_text,
-            "summary",
-            &metadata,
-        )
-        .await;
+        ingest_codex_compaction_evidence(&db, session_id, "crash-window-summary", 5, summary_text)
+            .await;
 
         let snapshot = db.read_snapshot().await.unwrap();
         let candidate = tracedecay_lcm::summary_convergence::next_candidate(&snapshot, i64::MAX)
@@ -1705,18 +1717,12 @@ done
                 .unwrap();
         }
         let summary_text = "native summary consumed by the mounted scheduler";
-        let metadata = serde_json::json!({
-            "source": "codex_context_compacted",
-            "summary_body": "plaintext"
-        });
-        insert_summary_evidence(
-            (&db, "codex"),
+        ingest_codex_compaction_evidence(
+            &db,
             session_id,
             "mounted-convergence-summary",
             5,
             summary_text,
-            "summary",
-            &metadata,
         )
         .await;
 
@@ -1735,7 +1741,7 @@ done
         registry.shutdown().await;
 
         assert_eq!(status.summary_node_count, 1);
-        assert_eq!(status.raw_message_count, 4);
+        assert_eq!(status.raw_message_count, 6);
     }
 
     #[tokio::test]
@@ -1747,39 +1753,48 @@ done
             ))
             .await;
             let db = harness.registered.clone();
-            let storage_root = db.db_path().parent().unwrap();
             let session_id = format!("admission-session-{index}");
-            assert!(db.upsert_session(&session("codex", &session_id)).await);
+            let mut messages = Vec::new();
             for ordinal in 1..=4 {
                 let mut record = message(&session_id, ordinal);
                 record.message_id = format!("{session_id}-message-{ordinal}");
                 record.provider = "codex".to_string();
-                db.lcm_ingest_raw_message(storage_root, &record)
-                    .await
-                    .unwrap();
+                messages.push(record);
             }
             let summary_text = format!("native admission summary {index}");
-            let metadata = serde_json::json!({
-                "source": "codex_context_compacted",
-                "summary_body": "plaintext"
-            });
-            insert_summary_evidence(
-                (&db, "codex"),
-                &session_id,
-                &format!("{session_id}-summary"),
-                5,
-                &summary_text,
-                "summary",
-                &metadata,
-            )
-            .await;
+            let mut compaction = message(&session_id, 5);
+            compaction.provider = "codex".to_string();
+            compaction.message_id = format!("{session_id}-summary");
+            compaction.kind = Some("summary".to_string());
+            compaction.text = summary_text;
+            compaction.metadata_json = Some(
+                serde_json::json!({
+                    "source": "codex_context_compacted",
+                    "summary_body": "plaintext"
+                })
+                .to_string(),
+            );
+            messages.push(compaction);
+            let mut tail = message(&session_id, 6);
+            tail.provider = "codex".to_string();
+            tail.message_id = format!("{session_id}-tail");
+            messages.push(tail);
+            assert!(
+                db.upsert_transcript_batch(
+                    &session("codex", &session_id),
+                    &messages,
+                    &format!("/tmp/{session_id}.jsonl"),
+                    ParseOffset::default(),
+                )
+                .await
+            );
             stores.push((harness, db, session_id));
         }
 
         let registry = super::super::session_temporal_refresh_scheduler::registry::SessionTemporalRefreshSchedulerRegistry::default();
         let admission = registry.historical_ingest_admission();
         let permit_count = admission.available_permits();
-        let held = admission
+        let held = std::sync::Arc::clone(&admission)
             .acquire_many_owned(u32::try_from(permit_count).unwrap())
             .await
             .unwrap();
@@ -1790,9 +1805,21 @@ done
         }
         for (_, db, session_id) in &stores {
             assert!(
-                registry
-                    .wait_profile_idle(db.db_path(), Duration::from_secs(10))
-                    .await
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        if registry.profile_pass_count(db.db_path()).await >= 1
+                            && registry
+                                .wait_profile_idle(db.db_path(), Duration::from_millis(25))
+                                .await
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .is_ok(),
+                "worker must reach the occupied shared admission before it is released"
             );
             assert_eq!(
                 db.lcm_status("codex", Some(session_id))
@@ -1834,7 +1861,10 @@ done
                     registry.profile_pass_count(db.db_path()).await,
                 ));
             }
-            panic!("admission release should wake every bounded worker: {states:?}");
+            panic!(
+                "admission release should wake every bounded worker (available={}): {states:?}",
+                admission.available_permits()
+            );
         }
         registry.shutdown().await;
     }
@@ -1855,18 +1885,12 @@ done
                     .unwrap();
             }
             let summary_text = format!("native summary for {session_id}");
-            let metadata = serde_json::json!({
-                "source": "codex_context_compacted",
-                "summary_body": "plaintext"
-            });
-            insert_summary_evidence(
-                (&db, "codex"),
+            ingest_codex_compaction_evidence(
+                &db,
                 session_id,
                 &format!("{session_id}-summary"),
                 5,
                 &summary_text,
-                "summary",
-                &metadata,
             )
             .await;
         }
@@ -1956,6 +1980,24 @@ done
             .await
             .unwrap();
         assert_eq!(poison.response.summary_nodes_created, 1);
+        let snapshot = db.read_snapshot().await.unwrap();
+        let mut projection_rows = snapshot
+            .query(
+                "SELECT projection_json FROM session_relation_effect_journal
+                 WHERE session_id = ?1",
+                params![poison_session],
+            )
+            .await
+            .unwrap();
+        let valid_projection_json = projection_rows
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap();
+        drop(projection_rows);
+        drop(snapshot);
         let transaction = db.begin_write_transaction().await.unwrap();
         transaction
             .execute(
@@ -1978,17 +2020,12 @@ done
                 .await
                 .unwrap();
         }
-        insert_summary_evidence(
-            (&db, "codex"),
+        ingest_codex_compaction_evidence(
+            &db,
             healthy_session,
             "relation-poison-healthy-summary",
             5,
             "healthy summary after poisoned relation receipt",
-            "summary",
-            &serde_json::json!({
-                "source": "codex_context_compacted",
-                "summary_body": "plaintext"
-            }),
         )
         .await;
 
@@ -2013,6 +2050,80 @@ done
         assert_eq!(
             row.get::<Option<String>>(1).unwrap().as_deref(),
             Some("journal_malformed")
+        );
+        drop(rows);
+        drop(snapshot);
+        let mut cyclic_projection =
+            serde_json::from_str::<serde_json::Value>(&valid_projection_json).unwrap();
+        cyclic_projection["parent_session_id"] = serde_json::json!(poison_session);
+        let transaction = db.begin_write_transaction().await.unwrap();
+        transaction
+            .execute(
+                "UPDATE session_relation_effect_journal
+                 SET projection_json = ?2
+                 WHERE session_id = ?1",
+                params![poison_session, cyclic_projection.to_string()],
+            )
+            .await
+            .unwrap();
+        transaction
+            .execute(
+                "UPDATE session_relation_receipts
+                 SET recovery_state = 'pending', recovery_failure_code = NULL,
+                     recovery_failure_count = 0, recovery_next_attempt_at = 0
+                 WHERE session_id = ?1",
+                params![poison_session],
+            )
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        db.recover_pending_session_relation_projection_page(
+            16,
+            std::sync::Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .await
+        .unwrap();
+        let snapshot = db.read_snapshot().await.unwrap();
+        let mut rows = snapshot
+            .query(
+                "SELECT recovery_state, recovery_failure_code
+                 FROM session_relation_receipts
+                 WHERE session_id = ?1",
+                params![poison_session],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<String>(0).unwrap(), "permanent");
+        assert_eq!(
+            row.get::<Option<String>>(1).unwrap().as_deref(),
+            Some("relation_receipt_mismatch")
+        );
+        drop(rows);
+        drop(snapshot);
+        let transaction = db.begin_write_transaction().await.unwrap();
+        transaction
+            .execute(
+                "UPDATE session_relation_receipts
+                 SET recovery_state = 'retryable', recovery_next_attempt_at = unixepoch() + 60
+                 WHERE session_id = ?1",
+                params![poison_session],
+            )
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        let sleeping =
+            super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
+                .await
+                .unwrap();
+        assert!(sleeping.sessions.is_empty());
+        assert!(
+            sleeping.next_retry_delay.is_some_and(
+                |delay| !delay.is_zero() && delay <= std::time::Duration::from_secs(60)
+            ),
+            "the scheduler must retain the isolated relation retry deadline"
         );
     }
 
@@ -3090,6 +3201,39 @@ done
             .await
             .unwrap();
         transaction.commit().await.unwrap();
+    }
+
+    async fn ingest_codex_compaction_evidence(
+        db: &RegisteredGlobalDb,
+        session_id: &str,
+        message_id: &str,
+        ordinal: i64,
+        text: &str,
+    ) {
+        let mut compaction = message(session_id, ordinal);
+        compaction.provider = "codex".to_string();
+        compaction.message_id = message_id.to_string();
+        compaction.kind = Some("summary".to_string());
+        compaction.text = text.to_string();
+        compaction.metadata_json = Some(
+            serde_json::json!({
+                "source": "codex_context_compacted",
+                "summary_body": "plaintext"
+            })
+            .to_string(),
+        );
+        let mut tail = message(session_id, ordinal.saturating_add(1));
+        tail.provider = "codex".to_string();
+        tail.message_id = format!("{message_id}-tail");
+        assert!(
+            db.upsert_transcript_batch(
+                &session("codex", session_id),
+                &[compaction, tail],
+                &format!("/tmp/{session_id}.jsonl"),
+                ParseOffset::default(),
+            )
+            .await
+        );
     }
 
     #[cfg(unix)]

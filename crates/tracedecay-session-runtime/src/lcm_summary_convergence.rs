@@ -41,6 +41,7 @@ pub(crate) struct LcmSummaryConvergencePage {
     pub(crate) has_more: bool,
     pub(crate) next_retry_delay: Option<Duration>,
     pub(crate) backfill_rows_scanned: usize,
+    pub(crate) relation_receipts_processed: usize,
 }
 
 #[hotpath::measure(label = "daemon.lcm.summary_convergence.page", future = true)]
@@ -51,9 +52,10 @@ pub(crate) async fn run_summary_convergence_page(
     // Relation effects from a prior summary transaction are their own
     // session-bounded, work-budgeted page. The scheduler calls this function
     // only while holding the daemon-wide historical-work admission.
-    super::lcm_effects::DaemonLcmEffectService::new(database.clone(), None, None)
-        .recover_retained_relation_projection_page()
-        .await?;
+    let relation_recovery =
+        super::lcm_effects::DaemonLcmEffectService::new(database.clone(), None, None)
+            .recover_retained_relation_projection_page()
+            .await?;
     let backfill = backfill_queue(&database).await?;
     let now_unix_ms = unix_millis()?;
     let page_limit = page_limit.max(1);
@@ -64,20 +66,30 @@ pub(crate) async fn run_summary_convergence_page(
         };
         sessions.push(process_candidate(&database, candidate, now_unix_ms).await?);
     }
-    let next_retry_delay = load_next_retry(&database)
-        .await?
+    let summary_retry_at = load_next_retry(&database).await?;
+    let relation_retry_at = relation_recovery
+        .next_retry_at_unix_seconds
+        .map(|seconds| seconds.saturating_mul(1_000));
+    let next_retry_at = match (summary_retry_at, relation_retry_at) {
+        (Some(summary), Some(relation)) => Some(summary.min(relation)),
+        (Some(summary), None) => Some(summary),
+        (None, Some(relation)) => Some(relation),
+        (None, None) => None,
+    };
+    let next_retry_delay = next_retry_at
         .map(|retry_at| {
-            u64::try_from(retry_at.saturating_sub(now_unix_ms))
+            u64::try_from(retry_at.saturating_sub(now_unix_ms).max(0))
                 .map(Duration::from_millis)
                 .map_err(|error| LcmError::Db(format!("invalid retry delay: {error}")))
         })
         .transpose()?;
-    let has_more = backfill.has_more || !sessions.is_empty();
+    let has_more = backfill.has_more || !sessions.is_empty() || relation_recovery.has_more;
     Ok(LcmSummaryConvergencePage {
         sessions,
         has_more,
         next_retry_delay,
         backfill_rows_scanned: backfill.rows_scanned,
+        relation_receipts_processed: relation_recovery.processed,
     })
 }
 
