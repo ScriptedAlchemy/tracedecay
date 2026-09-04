@@ -109,6 +109,12 @@ impl DaemonSemanticActivationReconcilerV1 {
                                         "daemon.semantic.activation_reconciler.reobserve.refused_total"
                                     )
                                     .inc(1_u64);
+                                    tracing::warn!(
+                                        event = "semantic_activation_reobserve",
+                                        outcome = "refused",
+                                        error = %error,
+                                        "committed semantic activation could not be observed by the runtime"
+                                    );
                                     break;
                                 }
                                 ReobservationFailureDispositionV1::Retry => {
@@ -116,6 +122,13 @@ impl DaemonSemanticActivationReconcilerV1 {
                                         "daemon.semantic.activation_reconciler.reobserve.retried_total"
                                     )
                                     .inc(1_u64);
+                                    tracing::warn!(
+                                        event = "semantic_activation_reobserve",
+                                        outcome = "retry",
+                                        error = %error,
+                                        backoff_ms = backoff.as_millis() as u64,
+                                        "committed semantic activation observation failed; retrying"
+                                    );
                                 }
                             },
                             Err(_) => {
@@ -123,6 +136,12 @@ impl DaemonSemanticActivationReconcilerV1 {
                                     "daemon.semantic.activation_reconciler.reobserve.retried_total"
                                 )
                                 .inc(1_u64);
+                                tracing::warn!(
+                                    event = "semantic_activation_reobserve",
+                                    outcome = "timed_out",
+                                    deadline_ms = REOBSERVATION_UNIT_DEADLINE.as_millis() as u64,
+                                    "committed semantic activation observation exceeded its deadline; retrying"
+                                );
                             }
                         }
                         tokio::select! {

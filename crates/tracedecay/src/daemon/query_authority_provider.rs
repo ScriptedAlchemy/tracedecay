@@ -198,44 +198,60 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
                 )
                 .await
                 .map_err(|_| RetrievalProfileActivationObserverErrorV1::Conflict)?;
+            // Each refusal names the step that refused, so an activation that
+            // never converges is diagnosable from the daemon log instead of
+            // collapsing every cause into one `Unavailable`.
+            type ObserverError = RetrievalProfileActivationObserverErrorV1;
             let observed = async {
                 let prepared_cache = if semantic_enabled {
                     let pins = committed
                         .current_activation
                         .as_ref()
                         .map(|activation| &activation.compatibility)
-                        .ok_or(RetrievalProfileActivationObserverErrorV1::Rejected)?;
+                        .ok_or(("current_activation", ObserverError::Rejected))?;
                     let runtime = project_semantic_production_runtime(&project_root)
-                        .ok_or(RetrievalProfileActivationObserverErrorV1::Unavailable)?;
+                        .ok_or(("semantic_production_runtime", ObserverError::Unavailable))?;
                     let vectors = runtime
                         .active_vector_generation(pins)
                         .await
-                        .ok_or(RetrievalProfileActivationObserverErrorV1::Unavailable)?;
+                        .ok_or(("active_vector_generation", ObserverError::Unavailable))?;
                     let source_generation = vectors.source_generation().clone();
                     if !runtime.cache_ready_for(pins, &source_generation) {
                         let code = project_semantic_retained_code_generation(
                             &project_root,
                             &source_generation,
                         )
-                        .ok_or(RetrievalProfileActivationObserverErrorV1::Unavailable)?;
+                        .ok_or_else(|| {
+                            tracing::warn!(
+                                event = "semantic_query_activation",
+                                step = "retained_code_generation",
+                                project_root = %project_root.display(),
+                                source_generation = %source_generation,
+                                vector_generation = ?pins.vector_generation_id,
+                                "the activated vector generation cites a source code generation this daemon does not retain"
+                            );
+                            ("retained_code_generation", ObserverError::Unavailable)
+                        })?;
                         Some(
                             runtime
                                 .prepare_restore_current(&code, &pins.vector_generation_id)
                                 .await
                                 .map_err(|_| {
-                                    RetrievalProfileActivationObserverErrorV1::Unavailable
+                                    ("prepare_restore_current", ObserverError::Unavailable)
                                 })?
-                                .ok_or(
-                                    RetrievalProfileActivationObserverErrorV1::Unavailable,
-                                )?,
+                                .ok_or((
+                                    "prepare_restore_current_stale",
+                                    ObserverError::Unavailable,
+                                ))?,
                         )
                     } else {
                         Some(
                             runtime
                                 .prepare_current_cache_observation(pins, &source_generation)
-                                .ok_or(
-                                    RetrievalProfileActivationObserverErrorV1::Unavailable,
-                                )?,
+                                .ok_or((
+                                    "prepare_current_cache_observation",
+                                    ObserverError::Unavailable,
+                                ))?,
                         )
                     }
                 } else {
@@ -244,20 +260,20 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
                 let serving = registry
                     .serving_code_scope(&project_root)
                     .await
-                    .ok_or(RetrievalProfileActivationObserverErrorV1::Unavailable)?;
+                    .ok_or(("serving_code_scope", ObserverError::Unavailable))?;
                 if serving.repository_id != scope.repository_id
                     || serving.worktree_id != scope.worktree_id
                 {
-                    return Err(RetrievalProfileActivationObserverErrorV1::Rejected);
+                    return Err(("serving_scope_mismatch", ObserverError::Rejected));
                 }
                 let generation = serving
                     .serving_generation
-                    .ok_or(RetrievalProfileActivationObserverErrorV1::Unavailable)?;
+                    .ok_or(("serving_generation", ObserverError::Unavailable))?;
                 let cursor_keys = Arc::new(
                     session_db
                         .load_session_cursor_key_provider_result()
                         .await
-                        .map_err(|_| RetrievalProfileActivationObserverErrorV1::Unavailable)?,
+                        .map_err(|_| ("session_cursor_keys", ObserverError::Unavailable))?,
                 );
                 let prepared = provider
                     .prepare_after_successful_activation(
@@ -267,7 +283,12 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
                         cursor_keys,
                         &generation.manifest().privacy_domain,
                     )
-                    .map_err(map_update_observer_error)?;
+                    .map_err(|error| {
+                        (
+                            "prepare_after_successful_activation",
+                            map_update_observer_error(error),
+                        )
+                    })?;
                 let semantic_authority = if semantic_enabled {
                     let committed = committed.clone();
                     let authority = task::spawn_blocking(move || {
@@ -276,8 +297,8 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
                         )
                     })
                     .await
-                    .map_err(|_| RetrievalProfileActivationObserverErrorV1::Unavailable)?
-                    .map_err(|_| RetrievalProfileActivationObserverErrorV1::Rejected)?;
+                    .map_err(|_| ("semantic_query_authority_join", ObserverError::Unavailable))?
+                    .map_err(|_| ("semantic_query_authority", ObserverError::Rejected))?;
                     Some(Arc::new(authority))
                 } else {
                     None
@@ -305,10 +326,30 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
                         &attempt,
                     )
                     .await
-                    .map_err(|_| RetrievalProfileActivationObserverErrorV1::Conflict)?;
+                    .map_err(|error| {
+                        tracing::warn!(
+                            event = "semantic_query_activation",
+                            step = "install_committed_query_authorities",
+                            error = %error,
+                            "query authority installation refused the committed activation"
+                        );
+                        ("install_committed_query_authorities", ObserverError::Conflict)
+                    })?;
                 Ok(())
             }
-            .await;
+            .await
+            .map_err(|(step, error)| {
+                tracing::warn!(
+                    event = "semantic_query_activation",
+                    outcome = "failed",
+                    step,
+                    error = ?error,
+                    semantic_enabled,
+                    epoch = committed_epoch,
+                    "committed activation could not be installed as the query authority"
+                );
+                error
+            });
             if observed.is_err() {
                 let cache_generation = active_semantic_generation
                     .as_ref()
