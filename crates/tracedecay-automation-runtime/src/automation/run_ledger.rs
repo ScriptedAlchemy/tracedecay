@@ -1263,6 +1263,18 @@ fn is_session_evidence_budget_exhausted_skip(
     status == AutomationRunStatus::Skipped && session_evidence_budget_exhausted_error
 }
 
+/// Classifies the legacy exhaustion anchor and its bounded stage-specific
+/// successors. Scheduler backoff and ledger projection use this same rule.
+pub(super) fn is_session_evidence_budget_exhausted_reason(reason: Option<&str>) -> bool {
+    let Some(reason) = reason else {
+        return false;
+    };
+    reason == SESSION_EVIDENCE_BUDGET_EXHAUSTED
+        || reason
+            .strip_prefix(SESSION_EVIDENCE_BUDGET_EXHAUSTED)
+            .is_some_and(|suffix| suffix.starts_with('_'))
+}
+
 #[hotpath::measure(label = "automation_runtime.run_ledger.scan_task_summary")]
 fn read_run_ledger_task_summary(
     path: &Path,
@@ -1662,7 +1674,7 @@ fn require_projection_identity(
         && record.trigger == projection.trigger
         && record.task == projection.task
         && record.task_key == projection.task_key
-        && (record.error.as_deref() == Some(SESSION_EVIDENCE_BUDGET_EXHAUSTED))
+        && is_session_evidence_budget_exhausted_reason(record.error.as_deref())
             == projection.session_evidence_budget_exhausted_error
         && record.started_at == projection.started_at
         && record.completed_at == projection.completed_at
@@ -1791,7 +1803,11 @@ mod tests {
     #[test]
     fn task_summary_keeps_the_budget_exhausted_anchor_visible_past_newer_skips() {
         let lines = vec![
-            skipped_session_reflector_line("run-budget", SESSION_EVIDENCE_BUDGET_EXHAUSTED, 100),
+            skipped_session_reflector_line(
+                "run-budget-stage",
+                "session_evidence_budget_exhausted_request_candidate_bytes",
+                100,
+            ),
             skipped_session_reflector_line(
                 "run-suppressed",
                 "session_evidence_budget_suppressed",
@@ -1812,17 +1828,41 @@ mod tests {
             "run-suppressed"
         );
         let anchor = summary.latest_session_evidence_budget_exhausted().unwrap();
-        assert_eq!(anchor.run_id, "run-budget");
+        assert_eq!(anchor.run_id, "run-budget-stage");
         assert_eq!(
             anchor.error.as_deref(),
-            Some(SESSION_EVIDENCE_BUDGET_EXHAUSTED)
+            Some("session_evidence_budget_exhausted_request_candidate_bytes")
         );
         assert!(
             summary
                 .records()
                 .iter()
-                .any(|record| record.run_id == "run-budget"),
-            "the anchor record must reach schedule decisions through records()"
+                .any(|record| record.run_id == "run-budget-stage"),
+            "stage-specific budget anchors reach schedule decisions through records()"
+        );
+    }
+
+    #[test]
+    fn task_summary_reads_legacy_budget_exhaustion_anchors() {
+        let lines = vec![skipped_session_reflector_line(
+            "run-budget-legacy",
+            SESSION_EVIDENCE_BUDGET_EXHAUSTED,
+            100,
+        )];
+        let (_temp, path) = write_ledger(&lines);
+
+        let summary = read_run_ledger_task_summary(
+            &path,
+            AgentTaskKind::SessionReflector,
+            "session_reflector",
+        )
+        .unwrap();
+
+        let anchor = summary.latest_session_evidence_budget_exhausted().unwrap();
+        assert_eq!(anchor.run_id, "run-budget-legacy");
+        assert_eq!(
+            anchor.error.as_deref(),
+            Some(SESSION_EVIDENCE_BUDGET_EXHAUSTED)
         );
     }
 
@@ -1841,6 +1881,25 @@ mod tests {
             "session_reflector",
         )
         .unwrap();
+
+        assert!(summary.latest_session_evidence_budget_exhausted().is_none());
+    }
+
+    #[test]
+    fn task_summary_does_not_select_near_prefix_budget_errors() {
+        let lines = vec![skipped_session_reflector_line(
+            "run-budget-near-prefix",
+            "session_evidence_budget_exhaustedX",
+            100,
+        )];
+        let (_temp, path) = write_ledger(&lines);
+
+        let summary = read_run_ledger_task_summary(
+            &path,
+            AgentTaskKind::SessionReflector,
+            "session_reflector",
+        )
+        .expect("near-prefix error must not create a projection/decode mismatch");
 
         assert!(summary.latest_session_evidence_budget_exhausted().is_none());
     }

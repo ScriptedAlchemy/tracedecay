@@ -96,10 +96,11 @@ pub(super) struct RunLedgerRowProjection {
     pub(super) trigger: AutomationTrigger,
     pub(super) task: AgentTaskKind,
     pub(super) task_key: Option<String>,
-    /// True when the row's `error` field equals the session-evidence
-    /// budget-exhausted label. The projection compares while streaming
-    /// instead of capturing the field: failed runs carry arbitrarily long
-    /// backend error messages that must not be bounded or allocated here.
+    /// True when the row's `error` field is an exact or stage-specific
+    /// session-evidence budget-exhausted label. The projection compares while
+    /// streaming instead of capturing the field: failed runs carry
+    /// arbitrarily long backend error messages that must not be bounded or
+    /// allocated here.
     pub(super) session_evidence_budget_exhausted_error: bool,
     pub(super) started_at: String,
     pub(super) completed_at: String,
@@ -1178,15 +1179,34 @@ struct ArtifactFields {
     created_at: bool,
 }
 
-fn compare_decoded_bytes(
+#[derive(Clone, Copy)]
+enum StringMatchMode {
+    Exact,
+    ExactOrUnderscoreSuffix,
+}
+
+fn compare_decoded_bytes_with_match_mode(
     expected: &[u8],
     compared: &mut usize,
     matches: &mut bool,
     decoded: &[u8],
+    mode: StringMatchMode,
 ) {
-    if *matches {
+    if *matches && *compared < expected.len() {
         let end = compared.saturating_add(decoded.len());
-        *matches = end <= expected.len() && expected.get(*compared..end) == Some(decoded);
+        let matched_len = expected.len().saturating_sub(*compared).min(decoded.len());
+        *matches = expected.get(*compared..(*compared + matched_len)) == decoded.get(..matched_len);
+        if *matches && end > expected.len() {
+            *matches = match mode {
+                StringMatchMode::Exact => false,
+                StringMatchMode::ExactOrUnderscoreSuffix => decoded.get(matched_len) == Some(&b'_'),
+            };
+        }
+    } else if *matches && *compared == expected.len() && !decoded.is_empty() {
+        *matches = match mode {
+            StringMatchMode::Exact => false,
+            StringMatchMode::ExactOrUnderscoreSuffix => decoded.first() == Some(&b'_'),
+        };
     }
     *compared = compared.saturating_add(decoded.len());
 }
@@ -1329,7 +1349,7 @@ impl<'a> JsonRangeReader<'a> {
                         self.skip_literal(b"null")?;
                         false
                     } else {
-                        self.read_string_equals(
+                        self.read_string_equals_or_has_underscore_suffix(
                             tracedecay_automation::evidence_budget::SESSION_EVIDENCE_BUDGET_EXHAUSTED,
                         )?
                     };
@@ -2016,6 +2036,14 @@ impl<'a> JsonRangeReader<'a> {
     }
 
     fn read_string_equals(&mut self, expected: &str) -> Result<bool> {
+        self.read_string_matches(expected, StringMatchMode::Exact)
+    }
+
+    fn read_string_equals_or_has_underscore_suffix(&mut self, expected: &str) -> Result<bool> {
+        self.read_string_matches(expected, StringMatchMode::ExactOrUnderscoreSuffix)
+    }
+
+    fn read_string_matches(&mut self, expected: &str, mode: StringMatchMode) -> Result<bool> {
         self.expect_byte(b'"', "expected JSON string")?;
         let expected = expected.as_bytes();
         let mut compared = 0_usize;
@@ -2025,42 +2053,79 @@ impl<'a> JsonRangeReader<'a> {
                 .next_byte()?
                 .ok_or_else(|| config_error("unexpected EOF in JSON string"))?;
             match byte {
-                b'"' => return Ok(matches && compared == expected.len()),
+                b'"' => {
+                    return Ok(matches
+                        && compared >= expected.len()
+                        && (!matches!(mode, StringMatchMode::Exact)
+                            || compared == expected.len()));
+                }
                 b'\\' => {
                     let escaped = self
                         .next_byte()?
                         .ok_or_else(|| config_error("unexpected EOF in JSON escape"))?;
                     match escaped {
                         b'"' | b'\\' | b'/' => {
-                            compare_decoded_bytes(
+                            compare_decoded_bytes_with_match_mode(
                                 expected,
                                 &mut compared,
                                 &mut matches,
                                 &[escaped],
+                                mode,
                             );
                         }
-                        b'b' => compare_decoded_bytes(expected, &mut compared, &mut matches, &[8]),
+                        b'b' => compare_decoded_bytes_with_match_mode(
+                            expected,
+                            &mut compared,
+                            &mut matches,
+                            &[8],
+                            mode,
+                        ),
                         b'f' => {
-                            compare_decoded_bytes(expected, &mut compared, &mut matches, &[12]);
+                            compare_decoded_bytes_with_match_mode(
+                                expected,
+                                &mut compared,
+                                &mut matches,
+                                &[12],
+                                mode,
+                            );
                         }
                         b'n' => {
-                            compare_decoded_bytes(expected, &mut compared, &mut matches, b"\n");
+                            compare_decoded_bytes_with_match_mode(
+                                expected,
+                                &mut compared,
+                                &mut matches,
+                                b"\n",
+                                mode,
+                            );
                         }
                         b'r' => {
-                            compare_decoded_bytes(expected, &mut compared, &mut matches, b"\r");
+                            compare_decoded_bytes_with_match_mode(
+                                expected,
+                                &mut compared,
+                                &mut matches,
+                                b"\r",
+                                mode,
+                            );
                         }
                         b't' => {
-                            compare_decoded_bytes(expected, &mut compared, &mut matches, b"\t");
+                            compare_decoded_bytes_with_match_mode(
+                                expected,
+                                &mut compared,
+                                &mut matches,
+                                b"\t",
+                                mode,
+                            );
                         }
                         b'u' => {
                             let scalar = self.read_unicode_escape()?;
                             let mut encoded = [0_u8; 4];
                             let encoded = scalar.encode_utf8(&mut encoded);
-                            compare_decoded_bytes(
+                            compare_decoded_bytes_with_match_mode(
                                 expected,
                                 &mut compared,
                                 &mut matches,
                                 encoded.as_bytes(),
+                                mode,
                             );
                         }
                         _ => return self.fail("invalid JSON string escape"),
@@ -2068,17 +2133,24 @@ impl<'a> JsonRangeReader<'a> {
                 }
                 0x00..=0x1f => return self.fail("unescaped control byte in JSON string"),
                 0x20..=0x7f => {
-                    compare_decoded_bytes(expected, &mut compared, &mut matches, &[byte]);
+                    compare_decoded_bytes_with_match_mode(
+                        expected,
+                        &mut compared,
+                        &mut matches,
+                        &[byte],
+                        mode,
+                    );
                 }
                 _ => {
                     let scalar = self.read_utf8_scalar(byte)?;
                     let mut encoded = [0_u8; 4];
                     let encoded = scalar.encode_utf8(&mut encoded);
-                    compare_decoded_bytes(
+                    compare_decoded_bytes_with_match_mode(
                         expected,
                         &mut compared,
                         &mut matches,
                         encoded.as_bytes(),
+                        mode,
                     );
                 }
             }

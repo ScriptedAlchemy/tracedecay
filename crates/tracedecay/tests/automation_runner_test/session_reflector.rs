@@ -1,7 +1,42 @@
 use crate::support::*;
+use tracedecay_domain::SessionId;
 
 #[path = "session_reflector/automatic_fact_receipts.rs"]
 mod automatic_fact_receipts;
+
+struct StructuralBudgetRefusalRetrieval {
+    anchor_session_id: SessionId,
+    stage: tracedecay_application::retrieval::SessionRetrievalBudgetStageV1,
+}
+
+impl StructuralBudgetRefusalRetrieval {
+    fn new(stage: tracedecay_application::retrieval::SessionRetrievalBudgetStageV1) -> Self {
+        Self {
+            anchor_session_id: SessionId::new("session.structural-budget-refusal").unwrap(),
+            stage,
+        }
+    }
+}
+
+impl AutomationSessionRetrieval for StructuralBudgetRefusalRetrieval {
+    fn anchor_session_id(&self) -> &SessionId {
+        &self.anchor_session_id
+    }
+
+    fn retrieve(
+        &self,
+        _query: tracedecay_session_memory::session::SessionTemporalQuery,
+    ) -> AutomationSessionRetrievalFuture<'_> {
+        let stage = self.stage;
+        Box::pin(async move {
+            AutomationTemporalRetrieval::StructuralRefusal(
+                tracedecay_application::retrieval::SessionRetrievalStructuralRefusalV1::BudgetExhausted {
+                    stage,
+                },
+            )
+        })
+    }
+}
 
 #[cfg(feature = "test-transport")]
 use std::sync::atomic::Ordering;
@@ -225,6 +260,93 @@ async fn session_reflector_fails_closed_on_stale_temporal_evidence() {
             .exists(),
         "rejected evidence must not refresh fact outcomes"
     );
+}
+
+#[tokio::test]
+async fn project_runners_keep_distinct_budget_stages_in_terminal_reports_and_ledgers() {
+    let temp = tempdir().unwrap();
+    let profile_root = temp.path().join("profile");
+    let cg = init_project(temp.path()).await;
+    let reflector_backend = SessionJsonBackend::new(json!({"facts": []}));
+    let skill_backend = SkillJsonBackend::new(json!({"skills": []}));
+    let config = AutomationConfig {
+        enabled: true,
+        backend: AutomationBackend::CodexAppServer,
+        host_mode: AutomationHostMode::Standalone,
+        tasks: AutomationTaskSet {
+            session_reflector: AutomationTaskConfig {
+                enabled: true,
+                schedule: Some("manual".to_string()),
+                ..AutomationTaskConfig::default()
+            },
+            skill_writer: AutomationTaskConfig {
+                enabled: true,
+                schedule: Some("manual".to_string()),
+                ..AutomationTaskConfig::default()
+            },
+            ..AutomationTaskSet::default()
+        },
+        ..AutomationConfig::default()
+    };
+    let reflector_retrieval = StructuralBudgetRefusalRetrieval::new(
+        tracedecay_application::retrieval::SessionRetrievalBudgetStageV1::RequestCandidateBytes,
+    );
+    let skill_retrieval = StructuralBudgetRefusalRetrieval::new(
+        tracedecay_application::retrieval::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
+    );
+
+    let reflector = tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval(
+        &cg,
+        &config,
+        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
+        &test_configuration_revision(),
+        &reflector_backend,
+        &reflector_retrieval,
+        SessionReflectorAutomationOptions::default(),
+    )
+    .await
+    .unwrap();
+    let skill = tracedecay_automation_runtime::automation::runner::run_skill_writer_with_backend_and_retrieval(
+        &cg,
+        &config,
+        &test_configuration_revision(),
+        &skill_backend,
+        &skill_retrieval,
+        SkillWriterAutomationOptions {
+            profile_root: Some(profile_root.clone()),
+            ..SkillWriterAutomationOptions::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(reflector_backend.calls(), 0);
+    assert_eq!(skill_backend.calls(), 0);
+    assert_eq!(
+        reflector.report["reason"],
+        json!("session_evidence_budget_exhausted_request_candidate_bytes")
+    );
+    assert_eq!(
+        reflector.ledger_record.error.as_deref(),
+        Some("session_evidence_budget_exhausted_request_candidate_bytes")
+    );
+    assert_eq!(
+        skill.report["reason"],
+        json!("session_evidence_budget_exhausted_execution_work_exhausted")
+    );
+    assert_eq!(
+        skill.ledger_record.error.as_deref(),
+        Some("session_evidence_budget_exhausted_execution_work_exhausted")
+    );
+    assert_ne!(reflector.ledger_record.error, skill.ledger_record.error);
+    assert!(
+        load_run_records(&cg.store_layout().dashboard_root, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "unpersisted refusals must leave durable publication to scheduler settlement"
+    );
+    assert!(!profile_root.exists());
 }
 
 #[tokio::test]
