@@ -1644,7 +1644,10 @@ async fn owned_project_replay_worker_is_cancelled_and_joined_on_shutdown() {
             let entered = Arc::clone(&entered);
             let release = Arc::clone(&release);
             Box::pin(async move {
-                entered.notify_waiters();
+                // `notify_one` stores a permit when no waiter is registered
+                // yet; `notify_waiters` would drop the signal whenever the
+                // worker reaches the sink before the test starts awaiting.
+                entered.notify_one();
                 release.notified().await;
                 true
             })
