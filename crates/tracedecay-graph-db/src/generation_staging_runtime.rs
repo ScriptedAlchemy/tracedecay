@@ -387,7 +387,7 @@ impl GraphDb {
         &self,
         plan: &SemanticVectorStagePlan,
         check: &dyn Fn() -> Result<(), GraphDbError>,
-    ) -> Result<(), GraphDbError> {
+    ) -> Result<crate::generation_runtime::GenerationContentsDeletion, GraphDbError> {
         let locator = generation_locator(plan)?;
         self.delete_generation_contents(&locator, check)
     }

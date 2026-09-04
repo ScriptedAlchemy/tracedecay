@@ -142,6 +142,350 @@ fn publish(
         .unwrap()
 }
 
+fn stage_sealed_manifest(
+    authority: &mut RelationalAuthority,
+    binding: &tracedecay_store::StoreRuntimeBindingV1,
+    manifest: &GraphGenerationManifest,
+    idempotency: &str,
+    expected: Option<GraphVerifiedHeadV1>,
+    input: char,
+) -> GraphPublicationReplayRecordV1 {
+    let source = SealedCodeGenerationReplay {
+        repository: RepositoryId::new("repository.graph-staging-release").unwrap(),
+        generation: CodeGenerationId::new(format!(
+            "code-generation.{}",
+            manifest.generation.as_str()
+        ))
+        .unwrap(),
+        sealed_state_digest: SealedGraphStateDigest::try_from(format!(
+            "sha256:{}",
+            input.to_string().repeat(64)
+        ))
+        .unwrap(),
+        projector_revision: GraphProjectorRevision::try_from(
+            "projector.graph-staging-release".to_owned(),
+        )
+        .unwrap(),
+    };
+    authority.stage(
+        manifest
+            .relational_sealed_replay(
+                binding.shard_id.clone(),
+                GraphIdempotencyKey::new(idempotency).unwrap(),
+                digest(input),
+                expected,
+                source,
+                &|| Ok(()),
+            )
+            .unwrap(),
+    )
+}
+
+fn publish_sealed(
+    registered: &RegisteredGraph,
+    root: &Path,
+    authority: &mut RelationalAuthority,
+    record: &GraphPublicationReplayRecordV1,
+    manifest: &GraphGenerationManifest,
+) -> tracedecay_graph_db::VerifiedGraphCommit {
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), root),
+            authority,
+            &context,
+            &record.publication.key,
+            Some(Arc::new(manifest.clone())),
+        )
+        .unwrap()
+}
+
+#[test]
+fn dependency_free_sealed_head_releases_staging_and_keeps_serving() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("sealed-store:release", "code");
+    let manifest = rich_manifest(identity.clone(), "released-g1", "sealed-only");
+    let record = stage_sealed_manifest(
+        &mut authority,
+        &registered.binding,
+        &manifest,
+        "publish:released-g1",
+        None,
+        '1',
+    );
+    let commit = publish_sealed(&registered, temp.path(), &mut authority, &record, &manifest);
+    let database = registered
+        .registry
+        .resolve(registration(registered.binding.clone(), temp.path()))
+        .unwrap();
+    assert_eq!(
+        database
+            .staging_generation_row_counts(&manifest.identity())
+            .unwrap(),
+        (2, 1)
+    );
+
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    assert_eq!(
+        registered
+            .registry
+            .release_sealed_generation_staging_rows(
+                registration(registered.binding.clone(), temp.path()),
+                &mut authority,
+                &context,
+                &record.publication.key.projection,
+            )
+            .unwrap(),
+        SealedStagingRelease::Released {
+            entities: 2,
+            relations: 1,
+        }
+    );
+    assert_eq!(
+        database
+            .staging_generation_row_counts(&manifest.identity())
+            .unwrap(),
+        (0, 0)
+    );
+    assert_snapshot_reads(&commit.snapshot, &identity, "sealed-only");
+    let page = commit
+        .snapshot
+        .read_projection(GraphProjectionReadRequest {
+            namespace: identity.namespace.clone(),
+            projection: identity.projection.clone(),
+            after_entity: None,
+            after_relation: None,
+            max_entities: 8,
+            max_relations: 8,
+            cancellation: Arc::new(TestCancellation),
+        })
+        .unwrap();
+    assert_eq!(page.entities.len(), 2);
+    assert_eq!(page.relations.len(), 1);
+    let telemetry = commit
+        .snapshot
+        .projection_telemetry(GraphProjectionTelemetryRequest {
+            namespace: identity.namespace.clone(),
+            projection: identity.projection.clone(),
+            cancellation: Arc::new(TestCancellation),
+        })
+        .unwrap()
+        .expect("sealed projection telemetry must resolve");
+    assert_eq!(telemetry.entity_count, 2);
+    assert_eq!(telemetry.relation_count, 1);
+
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    assert_eq!(
+        registered
+            .registry
+            .release_sealed_generation_staging_rows(
+                registration(registered.binding.clone(), temp.path()),
+                &mut authority,
+                &context,
+                &record.publication.key.projection,
+            )
+            .unwrap(),
+        SealedStagingRelease::AlreadyReleased
+    );
+}
+
+#[test]
+fn release_retains_rows_without_an_installed_sealed_store() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("sealed-store:no-release", "code");
+    let manifest = rich_manifest(identity, "unsealed-g1", "retained");
+    let record = stage_sealed_manifest(
+        &mut authority,
+        &registered.binding,
+        &manifest,
+        "publish:unsealed-g1",
+        None,
+        '2',
+    );
+    let commit = publish_sealed(&registered, temp.path(), &mut authority, &record, &manifest);
+    let database = registered
+        .registry
+        .resolve(registration(registered.binding.clone(), temp.path()))
+        .unwrap();
+    database
+        .discard_sealed_generation_reader(&manifest.identity())
+        .unwrap();
+    std::fs::remove_dir_all(sealed_store_root(temp.path())).unwrap();
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    assert_eq!(
+        registered
+            .registry
+            .release_sealed_generation_staging_rows(
+                registration(registered.binding.clone(), temp.path()),
+                &mut authority,
+                &context,
+                &record.publication.key.projection,
+            )
+            .unwrap(),
+        SealedStagingRelease::Retained(SealedStagingRetentionReason::NoSealedStore)
+    );
+    assert_eq!(
+        database
+            .staging_generation_row_counts(&manifest.identity())
+            .unwrap(),
+        (2, 1)
+    );
+    assert_snapshot_reads(&commit.snapshot, &manifest.projection, "retained");
+}
+
+#[test]
+fn release_retains_dependency_bearing_generation_rows() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let base_identity = projection("sealed-store:dependency-base", "code");
+    let base = rich_manifest(base_identity.clone(), "base-g1", "base");
+    let base_record = stage_sealed_manifest(
+        &mut authority,
+        &registered.binding,
+        &base,
+        "publish:base-g1",
+        None,
+        '3',
+    );
+    publish_sealed(
+        &registered,
+        temp.path(),
+        &mut authority,
+        &base_record,
+        &base,
+    );
+
+    let identity = projection("sealed-store:dependency-owner", "code");
+    let dependency = GraphGenerationDependency::new(
+        base_identity,
+        base.generation.clone(),
+        GraphIdempotencyKey::new("publish:base-g1").unwrap(),
+    );
+    let manifest = GraphGenerationManifest::new(
+        identity,
+        GraphGenerationId::new("dependent-g1").unwrap(),
+        SourceGeneration::new("source:dependent-g1").unwrap(),
+        GraphWatermark::new("watermark:dependent-g1").unwrap(),
+        vec![dependency],
+        vec![entity("entity:dependent", "dependent")],
+        Vec::new(),
+    )
+    .unwrap();
+    let record = stage_sealed_manifest(
+        &mut authority,
+        &registered.binding,
+        &manifest,
+        "publish:dependent-g1",
+        None,
+        '4',
+    );
+    publish_sealed(&registered, temp.path(), &mut authority, &record, &manifest);
+    let database = registered
+        .registry
+        .resolve(registration(registered.binding.clone(), temp.path()))
+        .unwrap();
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    assert_eq!(
+        registered
+            .registry
+            .release_sealed_generation_staging_rows(
+                registration(registered.binding.clone(), temp.path()),
+                &mut authority,
+                &context,
+                &record.publication.key.projection,
+            )
+            .unwrap(),
+        SealedStagingRelease::Retained(SealedStagingRetentionReason::DependencyBearing)
+    );
+    assert_eq!(
+        database
+            .staging_generation_row_counts(&manifest.identity())
+            .unwrap(),
+        (1, 0)
+    );
+}
+
+#[test]
+fn missing_sealed_only_artifact_requires_reset_and_allows_republish() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("sealed-store:artifact-loss", "code");
+    let manifest = rich_manifest(identity.clone(), "artifact-loss-g1", "restaged");
+    let record = stage_sealed_manifest(
+        &mut authority,
+        &registered.binding,
+        &manifest,
+        "publish:artifact-loss-g1",
+        None,
+        '5',
+    );
+    let commit = publish_sealed(&registered, temp.path(), &mut authority, &record, &manifest);
+    let database = registered
+        .registry
+        .resolve(registration(registered.binding.clone(), temp.path()))
+        .unwrap();
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    assert_eq!(
+        registered
+            .registry
+            .release_sealed_generation_staging_rows(
+                registration(registered.binding.clone(), temp.path()),
+                &mut authority,
+                &context,
+                &record.publication.key.projection,
+            )
+            .unwrap(),
+        SealedStagingRelease::Released {
+            entities: 2,
+            relations: 1,
+        }
+    );
+    drop(commit);
+    database
+        .discard_sealed_generation_reader(&manifest.identity())
+        .unwrap();
+    std::fs::remove_dir_all(sealed_store_root(temp.path())).unwrap();
+
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    assert!(matches!(
+        registered.registry.recover_verified_snapshot(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &record.publication.key.projection,
+        ),
+        Err(GraphDbError::ResetRequired { .. })
+    ));
+
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let republished = registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &record.publication.key,
+            Some(Arc::new(manifest.clone())),
+        )
+        .unwrap();
+    assert_snapshot_reads(&republished.snapshot, &identity, "restaged");
+}
+
 /// The core seal -> compact-isolated-store -> reopen -> read journey, with a
 /// second generation staging and sealing in parallel with reads on the first
 /// generation's sealed store.
@@ -556,12 +900,12 @@ fn retirement_deletes_the_superseded_sealed_artifact() {
     let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
     let mut authority = RelationalAuthority::default();
     let identity = projection("sealed-store:retire", "code");
-    let sealed_generation = CodeGenerationId::new("code-generation.sealed-retire").unwrap();
+    let sealed_generation = CodeGenerationId::new("code-generation.retire-g1").unwrap();
     let sealed_digest =
-        SealedGraphStateDigest::try_from(format!("sha256:{}", "6".repeat(64))).unwrap();
+        SealedGraphStateDigest::try_from(format!("sha256:{}", "7".repeat(64))).unwrap();
 
     let g1 = rich_manifest(identity.clone(), "retire-g1", "old");
-    let g1_record = stage_manifest(
+    let g1_record = stage_sealed_manifest(
         &mut authority,
         &registered.binding,
         &g1,
@@ -569,38 +913,31 @@ fn retirement_deletes_the_superseded_sealed_artifact() {
         None,
         '7',
     );
-    let g1_commit = publish(
-        &registered,
-        temp.path(),
-        &mut authority,
-        &g1_record.publication.key,
-    );
+    let g1_commit = publish_sealed(&registered, temp.path(), &mut authority, &g1_record, &g1);
     let g1_head = g1_commit.head.clone();
-    drop(g1_commit);
-    // Rewrite the journal row as a sealed code generation replay so the
-    // production retirement path owns it.
-    let sealed_publication = g1
-        .relational_sealed_replay(
-            registered.binding.shard_id.clone(),
-            GraphIdempotencyKey::new("publish:retire-g1").unwrap(),
-            digest('7'),
-            None,
-            SealedCodeGenerationReplay {
-                repository: RepositoryId::new("repository.sealed-retire").unwrap(),
-                generation: sealed_generation.clone(),
-                sealed_state_digest: sealed_digest.clone(),
-                projector_revision: GraphProjectorRevision::try_from(
-                    "projector.sealed-retire".to_owned(),
-                )
-                .unwrap(),
-            },
-            &|| Ok(()),
-        )
+    let database = registered
+        .registry
+        .resolve(registration(registered.binding.clone(), temp.path()))
         .unwrap();
-    authority.records.insert(
-        g1_record.publication.key.clone(),
-        GraphPublicationReplayRecordV1::new(g1_record.sequence, sealed_publication).unwrap(),
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    assert_eq!(
+        registered
+            .registry
+            .release_sealed_generation_staging_rows(
+                registration(registered.binding.clone(), temp.path()),
+                &mut authority,
+                &context,
+                &g1_record.publication.key.projection,
+            )
+            .unwrap(),
+        SealedStagingRelease::Released {
+            entities: 2,
+            relations: 1,
+        }
     );
+    assert!(database.is_generation_sealed_only(&g1.identity()).unwrap());
+    drop(g1_commit);
 
     let g2 = rich_manifest(identity.clone(), "retire-g2", "new");
     let g2_record = stage_manifest(
@@ -643,6 +980,10 @@ fn retirement_deletes_the_superseded_sealed_artifact() {
     assert!(
         receipt_for_generation(temp.path(), "retire-g2").is_some(),
         "the successor's sealed artifact must stay"
+    );
+    assert!(
+        !database.is_generation_sealed_only(&g1.identity()).unwrap(),
+        "retirement must remove the locator from sealed-only state"
     );
 }
 

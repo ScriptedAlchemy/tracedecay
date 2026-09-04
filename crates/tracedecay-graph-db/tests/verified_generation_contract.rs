@@ -10,9 +10,11 @@ use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphEntity, GraphEntityId, GraphEntityRef,
     GraphGenerationDependency, GraphGenerationId, GraphGenerationManifest, GraphGenerationRelation,
     GraphIdempotencyKey, GraphNamespace, GraphProjectionId, GraphProjectionIdentity,
-    GraphProjectorRevision, GraphProperty, GraphPropertyName, GraphRelationId, GraphRelationKind,
-    GraphRelationRef, GraphReplayCollectionOutcome, GraphWatermark, SealedCodeGenerationReplay,
-    SealedGraphStateDigest, SourceGeneration, take_graph_db_hydration_counters,
+    GraphProjectionReadRequest, GraphProjectionTelemetryRequest, GraphProjectorRevision,
+    GraphProperty, GraphPropertyName, GraphRelationId, GraphRelationKind, GraphRelationRef,
+    GraphReplayCollectionOutcome, GraphWatermark, SealedCodeGenerationReplay,
+    SealedGraphStateDigest, SealedStagingRelease, SealedStagingRetentionReason, SourceGeneration,
+    take_graph_db_hydration_counters,
 };
 use tracedecay_store::{
     GraphPendingReplayDiscardOutcomeV1, GraphPendingReplayDiscardV1, GraphProjectionIdentityV1,
@@ -37,6 +39,8 @@ mod replay_decode;
 #[cfg(feature = "graph-sealed-store")]
 #[path = "verified_generation_contract/sealed_store.rs"]
 mod sealed_store;
+#[path = "verified_generation_contract/staging_footprint.rs"]
+mod staging_footprint;
 mod support;
 #[path = "verified_generation_contract/verify_once.rs"]
 mod verify_once;

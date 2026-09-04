@@ -1451,6 +1451,41 @@ impl GraphDb {
         Ok(guard)
     }
 
+    /// Reports whether the native staging engine is already resident without
+    /// exercising lazy-open authority.
+    pub(crate) fn native_engine_open(&self) -> Result<bool, GraphDbError> {
+        self.inner
+            .database
+            .read()
+            .map(|database| database.is_some())
+            .map_err(|_| GraphDbError::unavailable("graph database read lock is poisoned"))
+    }
+
+    #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
+    #[must_use]
+    pub fn staging_engine_is_open(&self) -> bool {
+        matches!(self.native_engine_open(), Ok(true))
+    }
+
+    /// Read the resident engine without exercising lazy-open authority.
+    pub(crate) fn try_read_open_engine(
+        &self,
+    ) -> Result<Option<RwLockReadGuard<'_, Option<GrafeoDB>>>, GraphDbError> {
+        if !self.native_engine_open()? {
+            return Ok(None);
+        }
+        let guard = crate::hotpath_observe::wait_lock(
+            crate::hotpath_observe::LOCK_WAIT_DATABASE_READ,
+            || self.inner.database.read(),
+        )
+        .map_err(|_| GraphDbError::unavailable("graph database read lock is poisoned"))?;
+        if guard.is_none() {
+            return Ok(None);
+        }
+        self.ensure_available()?;
+        Ok(Some(guard))
+    }
+
     /// Reports how much vector index the store is holding right now.
     ///
     /// Taken twice per database lifetime, at open and just before close,

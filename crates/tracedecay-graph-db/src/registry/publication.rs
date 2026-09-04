@@ -22,15 +22,15 @@ use super::publication_support::{
 };
 use super::{GraphDbRegistration, GraphDbRegistry, check_registration_request};
 use crate::generation::{metadata_manifest_from_replay, validate_supplied_manifest_binding};
-use crate::generation_runtime::GenerationStageOutcome;
+use crate::generation_runtime::{GenerationContentsDeletion, GenerationStageOutcome};
 use crate::lease::{
     GenerationLocator, VerifiedGenerationLease, VerifiedGraphSnapshot, generation_lease,
 };
-use crate::state::latest_projection;
 use crate::{
     GraphCommit, GraphDb, GraphDbError, GraphDbLeaseV1, GraphGenerationManifest,
     GraphGenerationManifestIdentity, GraphGenerationReplaySource, GraphProjectionIdentity,
-    GraphReplayCollectionOutcome, VerifiedGraphCommit,
+    GraphReplayCollectionOutcome, SealedStagingRelease, SealedStagingRetentionReason,
+    VerifiedGraphCommit,
 };
 
 /// The publication mode choices `publish_verified_inner` varies on.
@@ -162,6 +162,81 @@ impl GraphDbRegistry {
         let lease = generation_lease(&identity, head, BTreeMap::new());
         self.track_direct_sealed_reader(&lease)?;
         Ok(VerifiedGraphSnapshot::new_direct_sealed(database, lease))
+    }
+
+    pub fn release_sealed_generation_staging_rows(
+        &self,
+        registration: GraphDbRegistration,
+        authority: &mut dyn GraphPublicationStoreV1,
+        context: &GraphPublicationOperationContextV1<'_>,
+        projection: &GraphProjectionIdentityV1,
+    ) -> Result<SealedStagingRelease, GraphDbError> {
+        check_all(&registration, context, "generation.release_sealed_staging")?;
+        require_projection_binding(&registration, projection)?;
+        let database = self.resolve(registration.clone())?;
+        let Some(relational_head) = authority
+            .verified_head(projection, context)
+            .map_err(map_publication_error)?
+        else {
+            return Ok(SealedStagingRelease::Retained(
+                SealedStagingRetentionReason::NoVerifiedLease,
+            ));
+        };
+        let replay = authority
+            .replay(&relational_head.key, context)
+            .map_err(map_publication_error)?;
+        let replay = require_active_replay_evidence(
+            replay,
+            "verified graph head has no durable active replay",
+        )?;
+        require_head_replay(&relational_head, &replay)?;
+        if !replay.publication.direct_dependency_generations.is_empty() {
+            return Ok(SealedStagingRelease::Retained(
+                SealedStagingRetentionReason::DependencyBearing,
+            ));
+        }
+        let source = crate::generation::checked_decode_replay_source(
+            &replay.publication.canonical_replay_source,
+            &|| check_all(&registration, context, "generation.release_sealed_staging"),
+        )?;
+        if !matches!(source, GraphGenerationReplaySource::SealedCodeGeneration(_)) {
+            return Ok(SealedStagingRelease::Retained(
+                SealedStagingRetentionReason::NoSealedCodeGenerationReplay,
+            ));
+        }
+        let locator = locator_from_key(&relational_head.key)?;
+        if !database.native_engine_open()? {
+            return Ok(SealedStagingRelease::Retained(
+                SealedStagingRetentionReason::StagingEngineHibernated,
+            ));
+        }
+        let installed = match database.installed_verified_generation(&locator)? {
+            Some(installed) => installed,
+            None => {
+                drop(self.recover_verified_snapshot(
+                    registration.clone(),
+                    authority,
+                    context,
+                    projection,
+                )?);
+                database
+                    .installed_verified_generation(&locator)?
+                    .ok_or_else(|| {
+                        GraphDbError::unavailable(
+                            "verified graph recovery did not install its relational head",
+                        )
+                    })?
+            }
+        };
+        if installed.head.recovered_digest != relational_head.recovered_digest {
+            return Ok(SealedStagingRelease::Retained(
+                SealedStagingRetentionReason::NoVerifiedLease,
+            ));
+        }
+        database.open_installed_sealed_generation_store_if_present(&installed)?;
+        database.release_sealed_generation_staging_rows(&locator, &|| {
+            check_all(&registration, context, "generation.release_sealed_staging")
+        })
     }
 
     /// Retire one replay after its sealed code generation has been deleted.
@@ -348,9 +423,19 @@ impl GraphDbRegistry {
         );
         if candidates.is_empty() {
             for (locator, _) in retired_cleanup {
-                database.delete_generation_contents(&locator, &|| {
-                    check_registration_request(&registration, "publication.retired_cleanup")
-                })?;
+                if matches!(
+                    database.delete_generation_contents(&locator, &|| {
+                        check_registration_request(&registration, "publication.retired_cleanup")
+                    })?,
+                    GenerationContentsDeletion::RetentionPending
+                ) {
+                    tracing::info!(
+                        event = "graph_replay_retirement_pending",
+                        generation = generation.as_str(),
+                        "retired cleanup deferred until the staging engine is already open"
+                    );
+                    return Ok(GraphReplayCollectionOutcome::RetentionPending);
+                }
             }
             return Ok(GraphReplayCollectionOutcome::Absent);
         }
@@ -447,12 +532,27 @@ impl GraphDbRegistry {
                 }
                 // Retirement is the linearization point. A failure after it
                 // may leak derived bytes, but cannot destroy the source of an
-                // active relational replay.
-                if let Err(error) = database.delete_generation_contents(&locator, &|| {
+                // active relational replay. A hibernated engine must not be
+                // opened here: keep the queue entry and finish native delete
+                // on a later tick that already holds the engine open.
+                let deletion = match database.delete_generation_contents(&locator, &|| {
                     check_registration_request(&registration, "publication.replay_retirement")
                 }) {
+                    Ok(deletion) => deletion,
+                    Err(error) => {
+                        clear_retiring_fence(&database, &locator)?;
+                        return Err(error);
+                    }
+                };
+                if matches!(deletion, GenerationContentsDeletion::RetentionPending) {
                     clear_retiring_fence(&database, &locator)?;
-                    return Err(error);
+                    tracing::info!(
+                        event = "graph_replay_retirement_pending",
+                        generation = generation.as_str(),
+                        graph_generation = %locator.generation,
+                        "native row delete deferred until the staging engine is already open"
+                    );
+                    return Ok(GraphReplayCollectionOutcome::RetentionPending);
                 }
                 Ok(GraphReplayCollectionOutcome::Retired(Box::new(source)))
             }
@@ -535,11 +635,22 @@ impl GraphDbRegistry {
             // The journal discard is the linearization point. A failure here
             // may leak partial staged rows, but the reopened journal position
             // means the next publication of this generation restages them.
-            if let Err(error) = database.delete_generation_contents(&locator, &|| {
+            let deletion = match database.delete_generation_contents(&locator, &|| {
                 check_registration_request(&registration, "publication.interrupted_discard")
             }) {
-                clear_retiring_fence(&database, &locator)?;
-                return Err(error);
+                Ok(deletion) => deletion,
+                Err(error) => {
+                    clear_retiring_fence(&database, &locator)?;
+                    return Err(error);
+                }
+            };
+            if matches!(deletion, GenerationContentsDeletion::RetentionPending) {
+                tracing::info!(
+                    event = "graph_interrupted_publication_cleanup_pending",
+                    generation = %locator.generation,
+                    reason = "staging_engine_hibernated",
+                    "interrupted publication rows remain for a later open cleanup"
+                );
             }
         }
         clear_retiring_fence(&database, &locator)?;
@@ -948,24 +1059,15 @@ impl GraphDbRegistry {
                     && lease.head == historical_head
                 {
                     operation.check(self, context)?;
-                    let physical_namespace = locator.physical_namespace()?;
-                    let commit = {
-                        let guard = database.read_guard()?;
-                        let native = guard.as_ref().ok_or(GraphDbError::Closed)?;
-                        latest_projection(
-                            native,
-                            &physical_namespace,
-                            &locator.projection.projection,
-                        )?
-                        .ok_or_else(|| GraphDbError::GenerationMismatch {
+                    let commit = database.generation_commit(&locator)?.ok_or_else(|| {
+                        GraphDbError::GenerationMismatch {
                             namespace: locator.projection.namespace.to_string(),
                             projection: locator.projection.projection.to_string(),
                             generation: locator.generation.to_string(),
                             message: "verified generation rows disappeared under a live lease"
                                 .to_owned(),
-                        })?
-                        .commit
-                    };
+                        }
+                    })?;
                     let recovered_digest = historical_head.recovered_digest.clone();
                     return seat_historical_verified_lease(
                         database,
@@ -1599,8 +1701,22 @@ impl GraphDbRegistry {
     ) -> Result<Arc<VerifiedGenerationLease>, GraphDbError> {
         operation.check(self, context)?;
         let locator = locator_from_key(&head.key)?;
+        if database.is_sealed_only_generation(&locator)? {
+            let sealed = database.sealed_generation_reader(&locator).ok_or_else(|| {
+                GraphDbError::ResetRequired {
+                    message: "sealed-only graph generation lost its serving artifact; republish from the canonical manifest".to_owned(),
+                }
+            })?;
+            if sealed.recovered_digest() != head.recovered_digest.as_str() {
+                return Err(GraphDbError::ResetRequired {
+                    message: "sealed-only graph generation artifact no longer matches its relational head; republish from the canonical manifest".to_owned(),
+                });
+            }
+        }
         if let Some(lease) = database.verified_generation(&locator)?
             && lease.head == head
+            && (!database.is_sealed_only_generation(&locator)?
+                || database.sealed_generation_reader(&locator).is_some())
         {
             return Ok(lease);
         }
@@ -1613,6 +1729,13 @@ impl GraphDbRegistry {
         )?;
         require_head_replay(&head, &replay)?;
         let check = || operation.check(self, context);
+        let sealed_code_generation = matches!(
+            crate::generation::checked_decode_replay_source(
+                &replay.publication.canonical_replay_source,
+                &check,
+            )?,
+            GraphGenerationReplaySource::SealedCodeGeneration(_)
+        );
         let metadata_manifest = metadata_manifest_from_replay(&replay.publication, &check)?;
         let manifest = match metadata_manifest {
             Some(manifest) => manifest,
@@ -1631,7 +1754,10 @@ impl GraphDbRegistry {
         drop(manifest);
         let locator =
             GenerationLocator::new(identity.projection.clone(), identity.generation.clone());
-        if let Some(lease) = database.verified_generation(&locator)? {
+        if let Some(lease) = database.verified_generation(&locator)?
+            && (!database.is_sealed_only_generation(&locator)?
+                || database.sealed_generation_reader(&locator).is_some())
+        {
             return Ok(lease);
         }
         if !visiting.insert(locator.clone()) {
@@ -1642,6 +1768,28 @@ impl GraphDbRegistry {
         let dependencies =
             self.load_dependencies(operation, database, authority, context, &identity, visiting)?;
         operation.check(self, context)?;
+        if sealed_code_generation && !database.staging_generation_has_rows(&locator)? {
+            if !dependencies.is_empty() {
+                return Err(GraphDbError::ResetRequired {
+                    message: "dependency-bearing graph generation lost its staging rows; republish from the canonical manifest".to_owned(),
+                });
+            }
+            database.open_sealed_generation_store_if_present(&identity, &head.recovered_digest)?;
+            let sealed = database.sealed_generation_reader(&locator).ok_or_else(|| {
+                GraphDbError::ResetRequired {
+                    message: "graph generation has neither staging rows nor a usable sealed artifact; republish from the canonical manifest".to_owned(),
+                }
+            })?;
+            if sealed.recovered_digest() != head.recovered_digest.as_str() {
+                return Err(GraphDbError::ResetRequired {
+                    message: "sealed-only graph generation artifact no longer matches its relational head; republish from the canonical manifest".to_owned(),
+                });
+            }
+            let lease = generation_lease(&identity, head, BTreeMap::new());
+            database.remember_sealed_only_generation(&lease)?;
+            visiting.remove(&locator);
+            return Ok(lease);
+        }
         let physical_namespace = locator.physical_namespace()?;
         match database
             .ensure_projection_readable(&physical_namespace, &identity.projection.projection)
