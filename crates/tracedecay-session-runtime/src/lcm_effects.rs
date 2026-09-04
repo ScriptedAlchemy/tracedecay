@@ -2434,6 +2434,23 @@ done
             assert_eq!(current.len(), 1);
             assert_ne!(current[0].0, old_summary_id);
             assert_eq!(current[0].3, "summary of the revised protected content");
+            drop(rows);
+            let replay_summaries = tracedecay_lcm::dag::load_uncondensed_summary_nodes(
+                &snapshot, "cursor", session_id,
+            )
+            .await
+            .unwrap();
+            assert_eq!(replay_summaries.len(), 1);
+            assert_eq!(
+                replay_summaries[0].node.summary_text,
+                "summary of the revised protected content"
+            );
+            assert!(
+                replay_summaries
+                    .iter()
+                    .all(|summary| summary.node.summary_text != old_text),
+                "active replay must exclude stale summary text and provenance"
+            );
         });
     }
 

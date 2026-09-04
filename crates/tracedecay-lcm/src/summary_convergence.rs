@@ -43,6 +43,8 @@ CREATE TABLE IF NOT EXISTS lcm_summary_convergence_invalidation_work (
     source_id TEXT NOT NULL,
     depth INTEGER NOT NULL CHECK(depth >= 0),
     after_node_id TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL DEFAULT 'pending'
+        CHECK(state IN ('pending', 'drained')),
     PRIMARY KEY(provider, session_id, raw_store_id, source_kind, source_id),
     FOREIGN KEY(provider, session_id, raw_store_id)
         REFERENCES lcm_summary_convergence_dirty_raw(provider, session_id, store_id)
@@ -331,6 +333,29 @@ pub async fn ensure_schema(conn: &(impl Executor + ?Sized)) -> Result<(), LcmErr
              ADD COLUMN rewind_frontier_store_id INTEGER NOT NULL DEFAULT 0;
              UPDATE lcm_summary_convergence_dirty_raw
              SET rewind_frontier_store_id = MAX(0, store_id - 1)",
+        )
+        .await?;
+    }
+    let mut work_state_rows = conn
+        .query(
+            "SELECT COUNT(*)
+             FROM pragma_table_info('lcm_summary_convergence_invalidation_work')
+             WHERE name = 'state'",
+            (),
+        )
+        .await?;
+    let work_state_exists = work_state_rows
+        .next()
+        .await?
+        .ok_or_else(|| LcmError::Db("invalidation work column query returned no row".into()))?
+        .get::<i64>(0)?
+        != 0;
+    drop(work_state_rows);
+    if !work_state_exists {
+        conn.execute_batch(
+            "ALTER TABLE lcm_summary_convergence_invalidation_work
+             ADD COLUMN state TEXT NOT NULL DEFAULT 'pending'
+                 CHECK(state IN ('pending', 'drained'))",
         )
         .await?;
     }

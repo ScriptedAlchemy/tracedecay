@@ -1902,11 +1902,24 @@ async fn load_condensation_candidates(
                       n.source_time_end, n.expand_hint, n.metadata_json, n.created_at,
                       source_order.first_source_id
                FROM lcm_summary_nodes n
+               JOIN session_temporal_generations generation
+                 ON generation.session_id = n.session_id
+                AND generation.state = 'active'
+               JOIN session_summary_availability availability
+                 ON availability.session_id = generation.session_id
+                AND availability.generation = generation.generation
+                AND availability.summary_id = n.node_id
+                AND availability.availability = 'available'
                LEFT JOIN source_order ON source_order.node_id = n.node_id
                WHERE n.provider = ?1 AND n.session_id = ?2
                  AND NOT EXISTS (
                    SELECT 1
                    FROM lcm_summary_sources s
+                   JOIN session_summary_availability parent_availability
+                     ON parent_availability.session_id = generation.session_id
+                    AND parent_availability.generation = generation.generation
+                    AND parent_availability.summary_id = s.node_id
+                    AND parent_availability.availability = 'available'
                    WHERE s.source_kind = 'summary_node'
                      AND s.source_id = n.node_id
                  )
@@ -2737,6 +2750,70 @@ mod authority_tests {
             .expect("count row present");
         let stored: i64 = row.get(0).expect("count value");
         assert_eq!(stored, 2, "role-less message must not be stored");
+    }
+
+    #[tokio::test]
+    async fn condensation_uses_only_available_nodes_from_the_active_generation() {
+        let temp = tempfile::TempDir::new().expect("create lcm tempdir");
+        let conn = tracedecay_runtime_core::db::engine::TestConnection::open(
+            &temp.path().join("sessions.db"),
+        );
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                provider TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                project_key TEXT NOT NULL,
+                project_path TEXT NOT NULL,
+                PRIMARY KEY(provider, session_id)
+             );
+             INSERT INTO sessions(provider, session_id, project_key, project_path)
+             VALUES ('cursor', 'active-condensation', 'fixture', 'fixture');",
+        )
+        .await
+        .unwrap();
+        schema::ensure_lcm_schema(&conn).await.unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_temporal_generations (
+                session_id TEXT NOT NULL,
+                generation INTEGER NOT NULL,
+                state TEXT NOT NULL
+             );
+             CREATE TABLE session_summary_availability (
+                session_id TEXT NOT NULL,
+                generation INTEGER NOT NULL,
+                summary_id TEXT NOT NULL,
+                availability TEXT NOT NULL
+             );
+             INSERT INTO session_temporal_generations(session_id, generation, state)
+             VALUES ('active-condensation', 2, 'active');
+             INSERT INTO lcm_summary_nodes(
+                node_id, provider, conversation_id, session_id, depth,
+                summary_text, summary_hash, summary_token_count, source_token_count,
+                created_at
+             ) VALUES
+                ('current', 'cursor', 'active-condensation', 'active-condensation', 0,
+                 'current summary', 'current-hash', 2, 4, 1),
+                ('stale-parent', 'cursor', 'active-condensation', 'active-condensation', 1,
+                 'stale summary', 'stale-hash', 2, 4, 2);
+             INSERT INTO lcm_summary_sources(node_id, source_kind, source_id, ordinal) VALUES
+                ('current', 'raw_message', '1', 0),
+                ('stale-parent', 'summary_node', 'current', 0);
+             INSERT INTO session_summary_availability(
+                session_id, generation, summary_id, availability
+             ) VALUES
+                ('active-condensation', 2, 'current', 'available'),
+                ('active-condensation', 2, 'stale-parent', 'stale');",
+        )
+        .await
+        .unwrap();
+
+        let candidates = load_condensation_candidates(&conn, "cursor", "active-condensation", 1, 8)
+            .await
+            .unwrap();
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].node_id, "current");
+        assert_eq!(candidates[0].summary_text, "current summary");
     }
 
     #[test]
