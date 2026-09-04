@@ -789,18 +789,23 @@ async fn resume_uses_sealed_canonical_worktree_after_alias_repoint() {
 /// `cfg(unix)` is a compile gate, not a filesystem capability: APFS refuses
 /// such a name outright with `EILSEQ`, so a macOS run fails at the fixture
 /// instead of exercising the backfill. Probing keeps the coverage everywhere
-/// the bytes are really accepted and makes the skip visible where they are not.
+/// the bytes are accepted while propagating unrelated storage failures.
 #[cfg(unix)]
-fn non_utf8_file_names_supported(directory: &std::path::Path) -> bool {
+fn non_utf8_file_names_supported(directory: &std::path::Path) -> std::io::Result<bool> {
     use std::os::unix::ffi::OsStringExt as _;
 
     let probe = directory.join(std::ffi::OsString::from_vec(b"probe-\xff".to_vec()));
     match std::fs::write(&probe, b"") {
         Ok(()) => {
-            let _ = std::fs::remove_file(&probe);
-            true
+            std::fs::remove_file(&probe)?;
+            Ok(true)
         }
-        Err(_) => false,
+        // Darwin exposes an invalid byte sequence as EILSEQ. Rust deliberately
+        // leaves that errno uncategorized, so keep this capability exception
+        // local to the one platform whose filesystem rejects the probe name.
+        #[cfg(target_os = "macos")]
+        Err(error) if error.raw_os_error() == Some(92) => Ok(false),
+        Err(error) => Err(error),
     }
 }
 
@@ -812,11 +817,9 @@ async fn non_utf8_canonical_worktree_resumes_exactly_then_fails_typed_publish() 
     use std::os::unix::fs::symlink;
 
     let root = tempfile::tempdir().unwrap();
-    if !non_utf8_file_names_supported(root.path()) {
-        println!(
-            "skipping non_utf8_canonical_worktree_resumes_exactly_then_fails_typed_publish: \
-             this filesystem refuses non-UTF-8 file names"
-        );
+    if !non_utf8_file_names_supported(root.path())
+        .expect("probe non-UTF-8 file-name support without hiding storage failures")
+    {
         return;
     }
     let canonical = root
