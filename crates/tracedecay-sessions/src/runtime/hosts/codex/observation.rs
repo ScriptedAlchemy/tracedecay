@@ -4,7 +4,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 
 pub(super) use tracedecay_capture::codex::codex_native_record_id;
@@ -13,7 +12,7 @@ pub use tracedecay_capture::codex::normalize_codex_observation;
 use tracedecay_capture::codex::{
     CodexObservationLocation, codex_current_user_message, codex_message_visible_text,
     codex_observation_record_supported, codex_response_goal_context,
-    normalize_codex_observation_with_location,
+    normalize_codex_observation_with_location_and_pair,
 };
 use tracedecay_domain::{
     ObservationScopeV1, ObservationSourceIdentityV1, ProjectId, ProviderId, RetentionClass,
@@ -255,56 +254,110 @@ impl CodexObservationAdmission<'_> {
 struct CodexAdmissionState {
     context: CodexContextState,
     scope_verdict: Option<bool>,
-    current_goal_contexts: Arc<HashSet<[u8; 32]>>,
+    paired_response_goal_ids: Arc<HashSet<String>>,
+    paired_current_goal_parents: Arc<HashMap<String, tracedecay_domain::ObservationId>>,
 }
 
 fn goal_context_identity(text: &str) -> Option<[u8; 32]> {
-    let goal = tracedecay_store::codex_goal_context_from_text(text)?;
-    let encoded = serde_json::to_vec(&goal.metadata()).ok()?;
-    Some(Sha256::digest(encoded).into())
+    tracedecay_store::codex_goal_context_from_text(text)?.correlation_identity()
 }
 
-fn current_goal_contexts_in_batch(
+struct CodexGoalPagePairs {
+    response_ids: HashSet<String>,
+    current_parents: HashMap<String, tracedecay_domain::ObservationId>,
+}
+
+fn goal_page_pairs(
     scan: &crate::runtime::jsonl_observation_admission::JsonlObservationScan<'_>,
     mut context: CodexContextState,
     path: &Path,
     meta: &super::meta::CodexMeta,
     scope_matcher: &TranscriptScopeMatcher,
-) -> HashSet<[u8; 32]> {
+) -> CodexGoalPagePairs {
     let mut scope_verdict = None;
-    scan.frame_bytes()
-        .filter_map(|bytes| {
-            // Decode only records that can change scope or carry the paired
-            // current item. Any escape stays eligible because JSON may encode
-            // these discriminators with Unicode escapes.
-            const CANDIDATES: [&[u8]; 3] = [b"session_meta", b"turn_context", b"UserMessage"];
-            if !bytes.contains(&b'\\')
-                && !CANDIDATES.iter().any(|candidate| {
-                    bytes
-                        .windows(candidate.len())
-                        .any(|window| window == *candidate)
-                })
-            {
-                return None;
+    let mut pending_responses = Vec::<([u8; 32], String, tracedecay_domain::ObservationId)>::new();
+    let mut pairs = CodexGoalPagePairs {
+        response_ids: HashSet::new(),
+        current_parents: HashMap::new(),
+    };
+    for bytes in scan.frame_bytes() {
+        // Decode only records that can change scope or carry the paired
+        // current item. Any escape stays eligible because JSON may encode
+        // these discriminators with Unicode escapes.
+        const CANDIDATES: [&[u8]; 4] = [
+            b"session_meta",
+            b"turn_context",
+            b"response_item",
+            b"UserMessage",
+        ];
+        if !bytes.contains(&b'\\')
+            && !CANDIDATES.iter().any(|candidate| {
+                bytes
+                    .windows(candidate.len())
+                    .any(|window| window == *candidate)
+            })
+        {
+            continue;
+        }
+        let Ok(native) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+            continue;
+        };
+        if context.observe_context_record(&native, path, meta) {
+            scope_verdict = None;
+            continue;
+        }
+        if !*scope_verdict.get_or_insert_with(|| scope_matcher.accepts(context.cwd.as_deref())) {
+            continue;
+        }
+        let payload = native.get("payload").unwrap_or(&native);
+        match native.get("type").and_then(serde_json::Value::as_str) {
+            Some("response_item") => {
+                let Some(goal) = codex_response_goal_context(payload) else {
+                    continue;
+                };
+                let Some(identity) = goal_context_identity(&goal.visible_text) else {
+                    continue;
+                };
+                let Ok(record_id) = codex_native_record_id(&meta.session_id, &native) else {
+                    continue;
+                };
+                let response_message_id = goal
+                    .item_id
+                    .and_then(|item_id| tracedecay_domain::ObservationId::new(item_id).ok())
+                    .unwrap_or_else(|| record_id.clone());
+                pending_responses.push((
+                    identity,
+                    record_id.as_str().to_owned(),
+                    response_message_id,
+                ));
             }
-            let native = serde_json::from_slice::<serde_json::Value>(bytes).ok()?;
-            if context.observe_context_record(&native, path, meta) {
-                scope_verdict = None;
-                return None;
+            Some("event_msg") => {
+                let Some(message) = codex_current_user_message(payload) else {
+                    continue;
+                };
+                let visible_text = codex_message_visible_text(message.content);
+                let Some(identity) = goal_context_identity(&visible_text) else {
+                    continue;
+                };
+                let Some(index) = pending_responses
+                    .iter()
+                    .rposition(|(pending, _, _)| *pending == identity)
+                else {
+                    continue;
+                };
+                let (_, response_record_id, response_message_id) = pending_responses.remove(index);
+                let Ok(current_id) = codex_native_record_id(&meta.session_id, &native) else {
+                    continue;
+                };
+                pairs.response_ids.insert(response_record_id);
+                pairs
+                    .current_parents
+                    .insert(current_id.as_str().to_owned(), response_message_id);
             }
-            if !*scope_verdict.get_or_insert_with(|| scope_matcher.accepts(context.cwd.as_deref()))
-            {
-                return None;
-            }
-            if native.get("type").and_then(serde_json::Value::as_str) != Some("event_msg") {
-                return None;
-            }
-            let payload = native.get("payload").unwrap_or(&native);
-            let message = codex_current_user_message(payload)?;
-            let visible_text = codex_message_visible_text(message.content);
-            goal_context_identity(&visible_text)
-        })
-        .collect()
+            _ => {}
+        }
+    }
+    pairs
 }
 
 async fn shared_session_meta_with_provenance(
@@ -464,14 +517,10 @@ async fn try_admit_codex_jsonl_observations(
             } else {
                 CodexContextState::from_meta(&meta)
             };
+            let pairs = goal_page_pairs(&scan, context.clone(), path, &meta, &scope_matcher);
             CodexAdmissionState {
-                current_goal_contexts: Arc::new(current_goal_contexts_in_batch(
-                    &scan,
-                    context.clone(),
-                    path,
-                    &meta,
-                    &scope_matcher,
-                )),
+                paired_response_goal_ids: Arc::new(pairs.response_ids),
+                paired_current_goal_parents: Arc::new(pairs.current_parents),
                 context,
                 scope_verdict: None,
             }
@@ -512,25 +561,26 @@ async fn try_admit_codex_jsonl_observations(
                     non_durable_reason = Some(ObservationCoverageReason::UnsupportedFact);
                     return Err(ObservationRecordParseErrorV1::NormalizationFailed);
                 }
-                let payload = native.get("payload").unwrap_or(native);
+                let record_id = codex_native_record_id(&meta.session_id, native)
+                    .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?;
                 if native.get("type").and_then(serde_json::Value::as_str) == Some("response_item")
-                    && codex_response_goal_context(payload).is_some_and(|goal| {
-                        goal_context_identity(&goal.visible_text)
-                            .is_some_and(|identity| state.current_goal_contexts.contains(&identity))
-                    })
+                    && state.paired_response_goal_ids.contains(record_id.as_str())
                 {
                     non_durable_reason = Some(ObservationCoverageReason::UnsupportedFact);
                     return Err(ObservationRecordParseErrorV1::NormalizationFailed);
                 }
-                let record_id = codex_native_record_id(&meta.session_id, native)
-                    .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?;
-                let envelope = normalize_codex_observation_with_location(
+                let paired_response_id = state
+                    .paired_current_goal_parents
+                    .get(record_id.as_str())
+                    .cloned();
+                let envelope = normalize_codex_observation_with_location_and_pair(
                     native,
                     &meta.session_id,
                     native_thread_id.as_deref(),
                     record_id.clone(),
                     range,
                     source_location,
+                    paired_response_id,
                 )?;
                 stable_record_id = Some(record_id);
                 Ok(envelope)

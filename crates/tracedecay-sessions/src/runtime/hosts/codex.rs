@@ -114,6 +114,30 @@ fn goal_context_dedup_projection(
             == Some("item_completed"),
     ))
 }
+
+fn with_paired_response_goal(
+    current: &mut crate::runtime::SessionMessageRecord,
+    response_message_id: &str,
+) -> bool {
+    let Some(metadata_json) = current.metadata_json.as_deref() else {
+        return false;
+    };
+    let Ok(mut metadata) = serde_json::from_str::<serde_json::Value>(metadata_json) else {
+        return false;
+    };
+    let serde_json::Value::Object(fields) = &mut metadata else {
+        return false;
+    };
+    fields.insert(
+        "paired_response_message_id".to_owned(),
+        serde_json::Value::String(response_message_id.to_owned()),
+    );
+    let Ok(metadata_json) = serde_json::to_string(&metadata) else {
+        return false;
+    };
+    current.metadata_json = Some(metadata_json);
+    true
+}
 #[cfg(test)]
 pub(crate) use meta::session_meta_read_count_for_test;
 pub use meta::{CodexMeta, session_meta_from_record, turn_context_from_record};
@@ -2694,9 +2718,13 @@ impl TranscriptSource for CodexSource {
                     || previous.message_id == message.message_id)
             {
                 if message_is_current && !previous_is_current {
-                    *previous = message;
+                    if with_paired_response_goal(&mut message, &previous.message_id) {
+                        *previous = message;
+                        return;
+                    }
+                } else {
+                    return;
                 }
-                return;
             }
             messages.push(message);
         };

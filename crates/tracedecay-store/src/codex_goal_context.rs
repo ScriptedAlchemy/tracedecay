@@ -1,6 +1,42 @@
 //! Shared parsing and projection semantics for Codex's internal goal context.
 
 use serde_json::Value;
+use sha2::{Digest as _, Sha256};
+
+/// Native Codex record shape that carried a rendered goal context.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CodexGoalContextSource {
+    /// Legacy/user `response_item.message` representation.
+    ResponseItem,
+    /// Current `event_msg.item_completed/UserMessage` representation.
+    ItemCompleted,
+}
+
+/// Content-private semantic identity used to pair Codex's two goal envelopes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CodexGoalContextCorrelation {
+    identity: [u8; 32],
+    source: CodexGoalContextSource,
+    admission_paired: bool,
+}
+
+impl CodexGoalContextCorrelation {
+    /// SHA-256 of the canonical typed goal metadata, never its transcript text.
+    pub fn identity(&self) -> [u8; 32] {
+        self.identity
+    }
+
+    /// Native envelope shape that produced the projected message.
+    pub fn source(&self) -> CodexGoalContextSource {
+        self.source
+    }
+
+    /// Whether canonical page admission already paired and suppressed the
+    /// response precursor for this current item.
+    pub fn admission_paired(&self) -> bool {
+        self.admission_paired
+    }
+}
 
 /// Collect visible text from current and legacy Codex content bags.
 pub fn codex_message_visible_text(value: &Value) -> String {
@@ -71,6 +107,38 @@ impl CodexGoalContext {
         }
         Value::Object(goal)
     }
+
+    /// Content-private identity shared by direct and canonical pairing.
+    pub fn correlation_identity(&self) -> Option<[u8; 32]> {
+        let encoded = serde_json::to_vec(&self.metadata()).ok()?;
+        Some(Sha256::digest(encoded).into())
+    }
+}
+
+/// Read the shared pairing identity from a projected Codex goal message.
+pub fn codex_goal_context_correlation(
+    kind: Option<&str>,
+    metadata_json: Option<&str>,
+) -> Option<CodexGoalContextCorrelation> {
+    if kind != Some("goal_context") {
+        return None;
+    }
+    let metadata = serde_json::from_str::<Value>(metadata_json?).ok()?;
+    let source = match metadata.get("source_event").and_then(Value::as_str)? {
+        "response_item" => CodexGoalContextSource::ResponseItem,
+        "item_completed" => CodexGoalContextSource::ItemCompleted,
+        _ => return None,
+    };
+    let encoded = serde_json::to_vec(metadata.get("codex_goal")?).ok()?;
+    Some(CodexGoalContextCorrelation {
+        identity: Sha256::digest(encoded).into(),
+        source,
+        admission_paired: metadata
+            .pointer("/relations/parent_message_id")
+            .or_else(|| metadata.get("paired_response_message_id"))
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.is_empty()),
+    })
 }
 
 /// Parse Codex's exact internal goal-context wrapper.

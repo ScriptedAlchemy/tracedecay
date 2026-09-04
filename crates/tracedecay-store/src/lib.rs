@@ -36,7 +36,8 @@ pub use canonical_projection::{
     canonical_fact_text, derive_canonical_projection, workflow_semantic_kind,
 };
 pub use codex_goal_context::{
-    CodexGoalContext, codex_goal_context_from_text, codex_message_visible_text,
+    CodexGoalContext, CodexGoalContextCorrelation, CodexGoalContextSource,
+    codex_goal_context_correlation, codex_goal_context_from_text, codex_message_visible_text,
 };
 pub use configuration::{
     ConfigurationCommitV1, ConfigurationMutationReceiptV1, ConfigurationRevisionRecordV1,
