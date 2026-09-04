@@ -111,6 +111,19 @@ async fn load_candidate(
     tracedecay_lcm::summary_convergence::next_candidate(&snapshot, now_unix_ms).await
 }
 
+async fn load_session_candidate(
+    database: &RegisteredGlobalDbLeaseV1,
+    provider: &str,
+    session_id: &str,
+) -> Result<Option<LcmSummaryConvergenceCandidate>, LcmError> {
+    let snapshot = database
+        .read_snapshot()
+        .await
+        .map_err(|error| LcmError::Db(error.to_string()))?;
+    tracedecay_lcm::summary_convergence::candidate_for_session(&snapshot, provider, session_id)
+        .await
+}
+
 async fn load_next_retry(database: &RegisteredGlobalDbLeaseV1) -> Result<Option<i64>, LcmError> {
     let snapshot = database
         .read_snapshot()
@@ -121,7 +134,7 @@ async fn load_next_retry(database: &RegisteredGlobalDbLeaseV1) -> Result<Option<
 
 async fn process_candidate(
     database: &RegisteredGlobalDbLeaseV1,
-    candidate: LcmSummaryConvergenceCandidate,
+    mut candidate: LcmSummaryConvergenceCandidate,
     now_unix_ms: i64,
 ) -> Result<LcmSummaryConvergenceSession, LcmError> {
     let protection = match database
@@ -137,7 +150,31 @@ async fn process_candidate(
         Ok(page) => page,
         Err(error) => return record_candidate_error(database, candidate, error, now_unix_ms).await,
     };
-    persist_protection(database, &candidate, protection.frontier_store_id).await?;
+    let Some(refreshed_candidate) =
+        load_session_candidate(database, &candidate.provider, &candidate.session_id).await?
+    else {
+        return Ok(session_result(
+            candidate,
+            LcmSummaryConvergenceDisposition::Current,
+            0,
+            protection.rows_scanned,
+            protection.bytes_scanned,
+            0,
+            0,
+        ));
+    };
+    if refreshed_candidate.protection_frontier_store_id < protection.frontier_store_id {
+        return Ok(session_result(
+            refreshed_candidate,
+            LcmSummaryConvergenceDisposition::Preparing,
+            0,
+            protection.rows_scanned,
+            protection.bytes_scanned,
+            0,
+            0,
+        ));
+    }
+    candidate = refreshed_candidate;
     if protection.has_more {
         return Ok(session_result(
             candidate,
@@ -318,27 +355,6 @@ fn error_code(error: &LcmError) -> &'static str {
         LcmError::Db(_) => "storage_unavailable",
         LcmError::Io(_) => "io_unavailable",
     }
-}
-
-async fn persist_protection(
-    database: &RegisteredGlobalDbLeaseV1,
-    candidate: &LcmSummaryConvergenceCandidate,
-    frontier_store_id: i64,
-) -> Result<(), LcmError> {
-    let transaction = database
-        .begin_write_transaction()
-        .await
-        .map_err(|error| LcmError::Db(error.to_string()))?;
-    tracedecay_lcm::summary_convergence::record_protection_progress(
-        &transaction,
-        candidate,
-        frontier_store_id,
-    )
-    .await?;
-    transaction
-        .commit()
-        .await
-        .map_err(|error| LcmError::Db(error.to_string()))
 }
 
 async fn persist_outcome(
