@@ -91,6 +91,11 @@ pub(crate) use publication::{
 };
 pub use recovery::VerifiedGraphCommit;
 pub use registry::{
+    CODE_GRAPH_SHARD_NAMESPACE_PREFIX, LEGACY_PER_GENERATION_CODE_GRAPH_NAMESPACE_PREFIX,
+    code_graph_shard_namespace, is_code_graph_shard_namespace,
+    is_legacy_per_generation_code_graph_namespace,
+};
+pub use registry::{
     GraphDbOwnerRegistrationV1, GraphDbRegistration, GraphDbRegistry, GraphDbRegistryCapacity,
     GraphDbRegistryConfig, GraphDbRegistryStatus, GraphDbRetirementCommit,
     GraphDbRetirementOutcome, GraphDbRetirementRefusal, GraphDbRetirementReservation,

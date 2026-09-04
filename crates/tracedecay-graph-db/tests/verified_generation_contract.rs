@@ -32,6 +32,8 @@ use tracedecay_store::{
     RuntimeInterruptionV1, RuntimeRequestControlV1, RuntimeRequestProbeV1, StoreShardIdV1,
 };
 
+#[path = "verified_generation_contract/code_graph_layout.rs"]
+mod code_graph_layout;
 #[path = "verified_generation_contract/metadata_replay.rs"]
 mod metadata_replay;
 #[path = "verified_generation_contract/replay_decode.rs"]
@@ -147,6 +149,7 @@ struct RelationalAuthority {
     cas_reports_own_head_as_conflict: bool,
     cas_calls: usize,
     read_calls: usize,
+    head_retirement_calls: usize,
 }
 
 impl RelationalAuthority {
@@ -289,6 +292,7 @@ impl GraphPublicationStoreV1 for RelationalAuthority {
         expected_head: &GraphVerifiedHeadV1,
         _context: &GraphPublicationOperationContextV1,
     ) -> GraphPublicationStoreResultV1<GraphReplayRetirementOutcomeV1> {
+        self.head_retirement_calls += 1;
         if let Some(tombstone) = self.retired.get(&request.key) {
             return Ok(if tombstone.retirement() == *request {
                 GraphReplayRetirementOutcomeV1::ExactReplay(tombstone.clone())
@@ -689,7 +693,7 @@ fn sealed_code_generation_publishes_with_its_supplied_manifest() {
     let temp = TempDir::new().unwrap();
     let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
     let mut authority = RelationalAuthority::default();
-    let identity = projection("code-scope:sealed-supplied", "code-generation");
+    let identity = projection("code-shard:sealed-supplied", "code-generation");
     let sealed_manifest = manifest(
         identity.clone(),
         "code-graph:sealed-supplied",
