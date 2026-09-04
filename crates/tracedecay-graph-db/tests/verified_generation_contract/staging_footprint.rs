@@ -36,6 +36,29 @@ fn receipt_for_generation(root: &Path, generation: &str) -> Option<String> {
         .find(|receipt| receipt.contains(&format!("\"generation\": \"{generation}\"")))
 }
 
+/// One entity in the shape the code-graph projector actually stages: a
+/// readable marker plus an opaque `Bytes` payload (its packed symbol record).
+/// The `Bytes` variant is what the recovered-digest proof has to read back
+/// byte-for-byte out of a reopened container, so the fixtures that stand in
+/// for a code generation carry one.
+fn evidence_entity(identity: &str, marker: &str) -> GraphEntity {
+    GraphEntity::new(
+        GraphEntityId::new(identity).unwrap(),
+        BTreeSet::new(),
+        BTreeMap::from([
+            (
+                GraphPropertyName::new("marker").unwrap(),
+                GraphProperty::String(marker.to_owned()),
+            ),
+            (
+                GraphPropertyName::new("record").unwrap(),
+                GraphProperty::Bytes((0..=u8::MAX).cycle().take(4_096).collect::<Vec<u8>>()),
+            ),
+        ]),
+    )
+    .unwrap()
+}
+
 fn rich_manifest(
     projection_identity: GraphProjectionIdentity,
     generation: &str,
@@ -55,7 +78,10 @@ fn rich_manifest(
         SourceGeneration::new(format!("source:{generation}")).unwrap(),
         GraphWatermark::new(format!("watermark:{generation}")).unwrap(),
         Vec::new(),
-        vec![entity("entity:a", marker), entity("entity:b", marker)],
+        vec![
+            evidence_entity("entity:a", marker),
+            evidence_entity("entity:b", marker),
+        ],
         vec![
             GraphGenerationRelation::new(
                 GraphRelationId::new("relation:a-b").unwrap(),
@@ -1094,4 +1120,335 @@ fn hibernated_engine_release_sweep_opens_once_and_rehibernates() {
         "a repeat sweep must answer from the absent rows, not refuse on hibernation"
     );
     assert_engine_hibernated(&registered, temp.path());
+}
+
+/// Corrupts every sealed generation container under `root`, leaving each
+/// receipt exactly as the clean seal wrote it. This is the on-disk state the
+/// daemon restart fixture injects: the derived artifact is unreadable while
+/// the relational head, its journaled replay, and the released staging
+/// projection commit are all intact.
+fn corrupt_sealed_containers(root: &Path) -> usize {
+    let mut corrupted = 0;
+    let mut directories = vec![sealed_store_root(root)];
+    while let Some(directory) = directories.pop() {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.map(Result::unwrap) {
+            let path = entry.path();
+            if entry.file_type().unwrap().is_dir() {
+                directories.push(path);
+            } else if entry.file_name() == "generation.grafeo" {
+                std::fs::write(&path, b"corrupt sealed graph").unwrap();
+                corrupted += 1;
+            }
+        }
+    }
+    corrupted
+}
+
+/// A restart that finds its sealed artifact unreadable must repair the
+/// released generation from its canonical replay and reproduce the exact
+/// recovered digest its relational head names.
+///
+/// This is the graph-db half of the daemon's
+/// `corrupt_graph_restart_repairs_through_canonical_serialized_activation`:
+/// publish a sealed code generation, release its duplicate staging rows,
+/// restart, and destroy the sealed container. Recovery then has neither
+/// staging rows nor a usable artifact, so the canonical serialized activation
+/// path republishes the same head with the hydrated manifest.
+///
+/// `retain_manifest` picks which staging arm runs: production hands
+/// publication an `Arc::clone` of a manifest it still holds (the shared arm),
+/// while a sole-owned `Arc` moves its rows into the owned arm. Both must
+/// restore every released row.
+///
+/// Fails if that republication cannot restore the released rows - either
+/// because the staged prefix is refused against the leftover projection
+/// commit, or because the proof runs over a partial row set and reports a
+/// recovered-digest mismatch that quarantines a healthy generation.
+fn corrupt_sealed_artifact_repair_case(retain_manifest: bool, release_staging_rows: bool) {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("code:gen-corrupt-repair", "code");
+    let manifest = rich_manifest(identity.clone(), "corrupt-repair-g1", "repaired");
+    let record = stage_sealed_manifest(
+        &mut authority,
+        &registered.binding,
+        &manifest,
+        "publish:corrupt-repair-g1",
+        None,
+        '3',
+    );
+    let commit = publish_sealed(&registered, temp.path(), &mut authority, &record, &manifest);
+    if release_staging_rows {
+        assert_eq!(
+            release_sealed_head(
+                &registered,
+                temp.path(),
+                &mut authority,
+                &record.publication.key.projection,
+            ),
+            SealedStagingRelease::Released {
+                entities: 2,
+                relations: 1,
+            }
+        );
+    }
+    drop(commit);
+    assert!(registered.close().unwrap());
+    drop(registered);
+
+    assert!(
+        corrupt_sealed_containers(temp.path()) > 0,
+        "the fixture must have sealed a generation to corrupt"
+    );
+
+    let registered = RegisteredGraph::new_mounted_with_manifest_provider(
+        temp.path(),
+        Arc::new(RemountSealedProvider {
+            manifest: manifest.clone(),
+        }),
+    )
+    .unwrap();
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let recovered = registered.registry.recover_verified_snapshot(
+        registration(registered.binding.clone(), temp.path()),
+        &mut authority,
+        &context,
+        &record.publication.key.projection,
+    );
+    if release_staging_rows {
+        assert!(
+            recovered.is_err(),
+            "a corrupt artifact with released rows has nothing to recover from"
+        );
+    } else {
+        // The staging rows are still the authority: a corrupt derived
+        // artifact must be discarded and the stored rows must prove.
+        let snapshot = recovered.expect("retained staging rows must recover a corrupt artifact");
+        assert_snapshot_reads(&snapshot, &identity, "repaired");
+        drop(snapshot);
+    }
+
+    // The canonical serialized activation path: the same head, republished
+    // from the hydrated manifest.
+    let supplied = Arc::new(manifest.clone());
+    let retained = retain_manifest.then(|| Arc::clone(&supplied));
+    let repaired = registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &record.publication.key,
+            Some(supplied),
+        )
+        .expect("republishing the adopted head must repair the released rows");
+    drop(retained);
+    assert_snapshot_reads(&repaired.snapshot, &identity, "repaired");
+    assert_projection_page_and_telemetry(&repaired.snapshot, &identity);
+    drop(repaired);
+
+    let database = probe_lease(&registered, temp.path());
+    assert_eq!(
+        database
+            .staging_generation_row_counts(&manifest.identity())
+            .unwrap(),
+        manifest.row_counts(),
+        "the repair must restore every released row before it proves the digest"
+    );
+}
+
+/// The production arm: the publisher keeps its own `Arc` to the manifest, so
+/// staging borrows the rows instead of moving them.
+#[test]
+fn corrupt_sealed_artifact_repair_restages_shared_manifest_rows() {
+    corrupt_sealed_artifact_repair_case(true, true);
+}
+
+/// The sole-owned arm: staging moves the manifest's rows page by page.
+#[test]
+fn corrupt_sealed_artifact_repair_restages_owned_manifest_rows() {
+    corrupt_sealed_artifact_repair_case(false, true);
+}
+
+/// The retained-rows arm: the sealed artifact is destroyed while the staging
+/// rows it was derived from are still there. Recovery must discard the
+/// artifact and prove the stored rows, and the republish must be a no-op
+/// reseat rather than a recovered-digest mismatch.
+#[test]
+fn corrupt_sealed_artifact_repair_proves_retained_staging_rows() {
+    corrupt_sealed_artifact_repair_case(true, false);
+}
+
+/// A probe that answers `Cancelled` once it has been polled `cancel_after`
+/// times. The staging-row release deletes rows in durable pages and polls the
+/// operation between them, so this interrupts it at an exact page boundary.
+struct CancelAfterPolls {
+    cancellation: RuntimeCancellationIdentityV1,
+    deadline: RuntimeDeadlineV1,
+    polls: AtomicUsize,
+    cancel_after: usize,
+}
+
+impl CancelAfterPolls {
+    fn new(cancel_after: usize) -> Self {
+        Self {
+            cancellation: RuntimeCancellationIdentityV1 {
+                cancellation_id: RuntimeCancellationIdV1::new("release-cancel").unwrap(),
+                generation: 1,
+            },
+            deadline: RuntimeDeadlineV1 {
+                deadline_id: RuntimeDeadlineIdV1::new("release-cancel-deadline").unwrap(),
+            },
+            polls: AtomicUsize::new(0),
+            cancel_after,
+        }
+    }
+
+    fn control(&self) -> RuntimeRequestControlV1 {
+        RuntimeRequestControlV1 {
+            requested_at: UtcMicros(1),
+            deadline: self.deadline.clone(),
+            cancellation: self.cancellation.clone(),
+        }
+    }
+}
+
+impl RuntimeRequestProbeV1 for CancelAfterPolls {
+    fn cancellation_identity(&self) -> &RuntimeCancellationIdentityV1 {
+        &self.cancellation
+    }
+
+    fn deadline_identity(&self) -> &RuntimeDeadlineV1 {
+        &self.deadline
+    }
+
+    fn interruption(&self) -> Option<RuntimeInterruptionV1> {
+        (self.polls.fetch_add(1, Ordering::SeqCst) >= self.cancel_after)
+            .then_some(RuntimeInterruptionV1::Cancelled)
+    }
+
+    fn try_begin_commit(&self) -> bool {
+        self.interruption().is_none()
+    }
+}
+
+/// Interrupting a staging-row release must never leave a generation the
+/// recovered-digest proof will read as corrupt.
+///
+/// The release deletes relation rows and entity rows in separate durable
+/// pages and polls cancellation between them, so an interrupted sweep can
+/// commit some pages and not others. Whatever row set that leaves behind, the
+/// next mount has to end up serving the generation: either the rows are all
+/// there and prove, or they are all gone and the sealed artifact serves. A
+/// row set that is neither hashes to something the head never named, and the
+/// generation is quarantined even though nothing about it is actually wrong.
+///
+/// Fails if any cancellation point leaves a row set neither recovery nor the
+/// canonical republication can serve. The printed
+/// `cancelled_release_partial_row_sets_observed` says whether the sweep
+/// actually produced a partial set at this fixture's page geometry; the
+/// contract is the same either way, and the loop starts catching the partial
+/// case the moment a release page can commit without its siblings.
+#[test]
+fn a_cancelled_release_never_leaves_a_row_set_recovery_cannot_serve() {
+    let mut observed_partial = false;
+    for cancel_after in 0..24 {
+        let temp = TempDir::new().unwrap();
+        let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+        let mut authority = RelationalAuthority::default();
+        let identity = projection("code:gen-release-cancel", "code");
+        let manifest = rich_manifest(identity.clone(), "release-cancel-g1", "interrupted");
+        let record = stage_sealed_manifest(
+            &mut authority,
+            &registered.binding,
+            &manifest,
+            "publish:release-cancel-g1",
+            None,
+            '4',
+        );
+        let commit = publish_sealed(&registered, temp.path(), &mut authority, &record, &manifest);
+        drop(commit);
+
+        let probe = CancelAfterPolls::new(cancel_after);
+        let control = probe.control();
+        let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+        let _ = registered.registry.release_sealed_generation_staging_rows(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &record.publication.key.projection,
+        );
+        let counts = {
+            let database = probe_lease(&registered, temp.path());
+            database
+                .staging_generation_row_counts(&manifest.identity())
+                .unwrap()
+        };
+        let full = manifest.row_counts();
+        if counts != full && counts != (0, 0) {
+            observed_partial = true;
+        }
+        assert!(registered.close().unwrap());
+        drop(registered);
+        // Destroy the derived artifact, as the daemon fixture does. Without
+        // it the remount adopts the sealed copy and never reads the rows the
+        // interrupted sweep left behind, which is exactly the row set this
+        // test is about.
+        assert!(corrupt_sealed_containers(temp.path()) > 0);
+
+        // Remount exactly as a restarted daemon does and take the generation
+        // back to a serving state.
+        let registered = RegisteredGraph::new_mounted_with_manifest_provider(
+            temp.path(),
+            Arc::new(RemountSealedProvider {
+                manifest: manifest.clone(),
+            }),
+        )
+        .unwrap();
+        let (control, probe) = control_and_probe();
+        let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+        let recovered = registered.registry.recover_verified_snapshot(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &record.publication.key.projection,
+        );
+        match recovered {
+            Ok(snapshot) => {
+                assert_snapshot_reads(&snapshot, &identity, "interrupted");
+                drop(snapshot);
+            }
+            Err(error) => {
+                // Recovery may legitimately refuse (the rows are gone and the
+                // artifact alone cannot answer the walk); the canonical
+                // republish is then the repair, and it must succeed.
+                let repaired = registered
+                    .registry
+                    .publish_verified(
+                        registration(registered.binding.clone(), temp.path()),
+                        &mut authority,
+                        &context,
+                        &record.publication.key,
+                        Some(Arc::new(manifest.clone())),
+                    )
+                    .unwrap_or_else(|republish| {
+                        panic!(
+                            "a release cancelled after {cancel_after} polls left \
+                             {counts:?} of {full:?} rows that neither recovery \
+                             ({error}) nor republication ({republish}) could serve"
+                        )
+                    });
+                assert_snapshot_reads(&repaired.snapshot, &identity, "interrupted");
+                drop(repaired);
+            }
+        }
+    }
+    // Not an assertion about the fixture's size, only a record of what the
+    // sweep can actually produce here; the contract above holds either way.
+    eprintln!("cancelled_release_partial_row_sets_observed={observed_partial}");
 }

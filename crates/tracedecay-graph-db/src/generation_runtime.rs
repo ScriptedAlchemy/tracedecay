@@ -718,7 +718,9 @@ impl GraphDb {
                 && index == 0
                 && self.generation_stage_first_page_blocked_without_legacy(
                     identity,
+                    expected,
                     context,
+                    page,
                     adopt_legacy_partial,
                 )?;
             let current = if first_page_blocked {
@@ -810,7 +812,9 @@ impl GraphDb {
         let first_page_blocked = !restaging_sealed_only
             && self.generation_stage_first_page_blocked_without_legacy(
                 identity,
+                expected,
                 context,
+                first_page,
                 adopt_legacy_partial,
             )?;
         let first_rows = rows.take_page(first_page)?;
@@ -832,12 +836,17 @@ impl GraphDb {
             let successor_rows = successor
                 .map(|next_page| rows.take_page(next_page))
                 .transpose()?;
+            // Owned rows are taken from the manifest exactly once and are
+            // gone after this iteration, so a successor's need for a prepared
+            // page is decided by that successor alone. A blocked first page
+            // refuses inside its own batch before any successor runs; letting
+            // it suppress every later construct dropped rows the apply then
+            // demanded ("owned generation stage page was not prepared").
             let successor_needs_construct = match successor {
-                Some(next_page) if !first_page_blocked => !self
-                    .generation_stage_page_already_applied(
-                        identity, expected, context, next_page,
-                    )?,
-                Some(_) | None => false,
+                Some(next_page) => !self.generation_stage_page_already_applied(
+                    identity, expected, context, next_page,
+                )?,
+                None => false,
             };
             current = thread::scope(|scope| {
                 let successor_handle = match (successor, successor_rows) {
@@ -905,7 +914,9 @@ impl GraphDb {
     fn generation_stage_first_page_blocked_without_legacy(
         &self,
         identity: &GraphGenerationManifestIdentity,
+        expected: &GraphRecoveredGenerationDigestV1,
         context: &GenerationStageContext,
+        page: &GenerationStagePage,
         adopt_legacy_partial: bool,
     ) -> Result<bool, GraphDbError> {
         let guard = self.read_guard()?;
@@ -918,11 +929,45 @@ impl GraphDb {
         else {
             return Ok(false);
         };
+        // A durable receipt that binds this exact identity, recovered digest
+        // and page says the leftover projection commit is this generation's
+        // own: the rows behind it were released after its sealed artifact
+        // installed, and restoring them is a restage, not the adoption of a
+        // foreign prefix. `apply_prepared_generation_stage_page` reaches the
+        // same conclusion inside the batch (`reuse_receipt`), so the
+        // pre-flight decision has to agree with it or the page it refuses to
+        // prepare is a page the batch then demands.
+        if Self::generation_stage_page_receipt_binds(database, identity, expected, context, page)? {
+            return Ok(false);
+        }
         let exact_incomplete_legacy = adopt_legacy_partial
             && existing.commit.source_generation == identity.source_generation
             && existing.commit.watermark == identity.watermark
             && existing.commit.generation_dependency_digest.is_none();
         Ok(!exact_incomplete_legacy)
+    }
+
+    /// Whether a durable receipt for `page` already binds this exact manifest
+    /// identity and recovered digest, regardless of whether its rows are
+    /// still resident. This is the single rule for "this page is mine", read
+    /// by the pre-flight block above and by the page apply below.
+    fn generation_stage_page_receipt_binds(
+        database: &grafeo_engine::GrafeoDB,
+        identity: &GraphGenerationManifestIdentity,
+        expected: &GraphRecoveredGenerationDigestV1,
+        context: &GenerationStageContext,
+        page: &GenerationStagePage,
+    ) -> Result<bool, GraphDbError> {
+        let (idempotency_key, input_digest) =
+            generation_stage_page_receipt(identity, expected, page)?;
+        Ok(
+            crate::state::publication(database, &context.physical_namespace, &idempotency_key)?
+                .is_some_and(|existing| {
+                    existing.input_digest == input_digest
+                        && existing.commit.source_generation == identity.source_generation
+                        && existing.commit.watermark == identity.watermark
+                }),
+        )
     }
 
     fn generation_stage_page_already_applied(
@@ -932,26 +977,11 @@ impl GraphDb {
         context: &GenerationStageContext,
         page: &GenerationStagePage,
     ) -> Result<bool, GraphDbError> {
-        let (idempotency_key, input_digest) =
-            generation_stage_page_receipt(identity, expected, page)?;
         let guard = self.read_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
         Ok(
-            match crate::state::publication(
-                database,
-                &context.physical_namespace,
-                &idempotency_key,
-            )? {
-                Some(existing)
-                    if existing.input_digest == input_digest
-                        && existing.commit.source_generation == identity.source_generation
-                        && existing.commit.watermark == identity.watermark
-                        && Self::generation_stage_page_rows_present(database, context, page)? =>
-                {
-                    true
-                }
-                Some(_) | None => false,
-            },
+            Self::generation_stage_page_receipt_binds(database, identity, expected, context, page)?
+                && Self::generation_stage_page_rows_present(database, context, page)?,
         )
     }
 

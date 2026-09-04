@@ -20,7 +20,7 @@ use tracedecay_store::runtime::{
 
 use crate::limits::{MAX_VERIFIED_GENERATION_ENTITIES, MAX_VERIFIED_GENERATION_RELATIONS};
 use crate::schema::{NAMESPACE_PROPERTY, required_string};
-use crate::state::latest_projection;
+use crate::state::{latest_projection, projection_node_counts};
 use crate::{
     GraphBudgetKind, GraphDbError, GraphEntity, GraphEntityId, GraphGenerationId,
     GraphIdempotencyKey, GraphNamespace, GraphProjectionId, GraphProperty, GraphPropertyName,
@@ -971,12 +971,23 @@ fn verify_recovered_rows(
             }
         })?;
     if &actual != expected {
+        // Name the row set the observed digest was taken over. A digest pair
+        // on its own cannot distinguish "these rows changed" from "a
+        // different number of rows was enumerated" — the released-row and
+        // partial-restage failures are exactly the second kind, and without
+        // the counts every such report reads as unexplained corruption.
+        let (entities, relations) = projection_node_counts(
+            database,
+            &physical_namespace,
+            &identity.projection.projection,
+        )?;
         return Err(GraphDbError::GenerationMismatch {
             namespace: identity.projection.namespace.to_string(),
             projection: identity.projection.projection.to_string(),
             generation: identity.generation.to_string(),
             message: format!(
-                "expected recovered digest `{}`, observed `{}`",
+                "expected recovered digest `{}`, observed `{}` over {entities} stored \
+                 entities and {relations} stored relations",
                 expected.as_str(),
                 actual.as_str()
             ),
