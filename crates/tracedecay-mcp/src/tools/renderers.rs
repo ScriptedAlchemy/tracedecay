@@ -307,8 +307,20 @@ fn append_analytics_tools(md: &mut Md, tools: &Value) {
         return;
     }
     md.field(
-        "distinct_tools_called",
-        &render::field_i64(tools, "distinct_tools_called").to_string(),
+        "raw distinct event names",
+        &render::field_i64(tools, "raw_distinct_event_name_count").to_string(),
+    );
+    md.field(
+        "called available defined tools",
+        &render::field_i64(tools, "called_available_defined_tool_count").to_string(),
+    );
+    md.field(
+        "available defined tool count",
+        &render::field_i64(tools, "available_defined_tool_count").to_string(),
+    );
+    md.field(
+        "maximal defined tool count",
+        &render::field_i64(tools, "maximal_defined_tool_count").to_string(),
     );
     if let Some(tiers) = tools.get("tiers").and_then(Value::as_array) {
         md.blank().heading(4, "By Tier");
@@ -337,9 +349,9 @@ fn append_analytics_tools(md: &mut Md, tools: &Value) {
             }
         }
     }
-    if let Some(zero_call) = tools.get("zero_call_tools") {
+    if let Some(zero_call) = tools.get("zero_call_available_defined_tools") {
         let count = render::field_i64(zero_call, "count");
-        md.blank().heading(4, "Zero-Call Defined Tools");
+        md.blank().heading(4, "Zero-Call Available Defined Tools");
         md.field("count", &count.to_string());
         if let Some(sample) = zero_call.get("sample").and_then(Value::as_array) {
             let names: Vec<&str> = sample.iter().filter_map(Value::as_str).collect();
@@ -356,6 +368,49 @@ fn append_analytics_tools(md: &mut Md, tools: &Value) {
                     count as usize - names.len()
                 ));
             }
+        }
+    }
+    for (field, heading, canonical) in [
+        ("aliased_call_names", "Aliased Call Names", true),
+        (
+            "bound_internal_call_names",
+            "Bound Internal Call Names",
+            false,
+        ),
+        (
+            "unavailable_public_call_names",
+            "Unavailable Public Call Names",
+            true,
+        ),
+        (
+            "unknown_or_retired_call_names",
+            "Unknown or Retired Call Names",
+            false,
+        ),
+    ] {
+        let Some(names) = tools.get(field).and_then(Value::as_array) else {
+            continue;
+        };
+        md.blank().heading(4, heading);
+        if names.is_empty() {
+            md.empty_note("None.");
+            continue;
+        }
+        for name in names {
+            let event_name = render::field_str(name, "event_name");
+            let label = if canonical {
+                format!(
+                    "**{event_name}** → **{}**",
+                    render::field_str(name, "canonical_tool_name")
+                )
+            } else {
+                format!("**{event_name}**")
+            };
+            md.bullet(&format!(
+                "{label} - {} calls, {} errors",
+                render::field_i64(name, "calls"),
+                render::field_i64(name, "errors"),
+            ));
         }
     }
 }
