@@ -1754,6 +1754,27 @@ mod tests {
     }
 
     #[test]
+    fn identity_collision_refusals_keep_their_durable_reason_code_in_doctor() {
+        let finding = ingest_refusal_finding(&IngestRefusalCensusReadV1::Observed {
+            refusals: vec![IngestRefusalCountV1 {
+                provider: "cursor".to_owned(),
+                reason: "observation_identity_collision".to_owned(),
+                count: 1,
+            }],
+        })
+        .expect("finding");
+
+        assert_eq!(finding.state(), DoctorEvidenceStateV1::Degraded);
+        assert!(
+            finding
+                .coverage()
+                .statement()
+                .contains("cursor observation_identity_collision=1"),
+            "Doctor must retain the bounded terminal refusal reason"
+        );
+    }
+
+    #[test]
     fn empty_ingest_refusal_census_is_healthy_converged_coverage() {
         let finding = ingest_refusal_finding(&IngestRefusalCensusReadV1::Observed {
             refusals: Vec::new(),

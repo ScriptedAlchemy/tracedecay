@@ -7,8 +7,9 @@ use std::{error::Error, fmt};
 use rusqlite::Savepoint;
 use tracedecay_domain::ObservationSourceCursorV1;
 use tracedecay_store::{
-    OutboxEffectStateV1, RepositoryWritePayloadV1, RuntimeSubmitRequestV1,
-    StorageRuntimeContractErrorV1, TransactionalInboxReceiptV1, TransactionalOutboxEntryV1,
+    CursorAdvanceLedgerDisagreementV1, OutboxEffectStateV1, RepositoryWritePayloadV1,
+    RuntimeSubmitRequestV1, StorageRuntimeContractErrorV1, TransactionalInboxReceiptV1,
+    TransactionalOutboxEntryV1,
 };
 
 /// Executes one store-owned payload through the writer's request savepoint.
@@ -75,6 +76,9 @@ pub enum StorageOperationError {
         expected: Box<Option<ObservationSourceCursorV1>>,
         actual: Box<Option<ObservationSourceCursorV1>>,
     },
+    CursorAdvanceLedgerDisagreement {
+        disagreement: Box<CursorAdvanceLedgerDisagreementV1>,
+    },
 }
 
 impl fmt::Display for StorageOperationError {
@@ -86,6 +90,8 @@ impl fmt::Display for StorageOperationError {
                 formatter,
                 "observation source cursor conflict: expected {expected:?}, found {actual:?}"
             ),
+            Self::CursorAdvanceLedgerDisagreement { .. } => formatter
+                .write_str("observation cursor-advance ledger disagrees with immutable coverage"),
         }
     }
 }
@@ -95,7 +101,8 @@ impl Error for StorageOperationError {
         match self {
             Self::Contract(error) => Some(error),
             Self::Native(error) => Some(error),
-            Self::ObservationSourceCursorConflict { .. } => None,
+            Self::ObservationSourceCursorConflict { .. }
+            | Self::CursorAdvanceLedgerDisagreement { .. } => None,
         }
     }
 }

@@ -9,9 +9,10 @@ use tracedecay_domain::{
     SessionId, UtcMicros,
 };
 use tracedecay_store::{
-    AnchoredObservationWrite, ObservationCoverageReason, ObservationCursorAdvance,
-    ObservationReadOperationV1, ObservationReadResultV1, ObservationWrite,
-    SESSION_MESSAGE_PROJECTOR_VERSION, build_observation_resolution_authorization_v1,
+    AnchoredObservationWrite, CursorAdvanceLedgerReasonV1, CursorAdvanceLedgerReceiptIdV1,
+    ObservationCoverageReason, ObservationCursorAdvance, ObservationReadOperationV1,
+    ObservationReadResultV1, ObservationWrite, SESSION_MESSAGE_PROJECTOR_VERSION,
+    StorageRuntimeErrorV1, build_observation_resolution_authorization_v1,
     build_observation_retrieval_anchor_v2,
 };
 
@@ -516,7 +517,7 @@ fn identity_collision_fails_without_advancing_the_source_cursor() {
 }
 
 #[test]
-fn source_cursor_advance_replays_exactly_and_rejects_reason_collision() {
+fn source_cursor_advance_replays_exactly_and_reports_ledger_disagreement() {
     let mut connection = connection();
     let write = anchored_observation_write("fixture", "receipt.fixture");
     execute(&mut connection, &write).unwrap();
@@ -553,11 +554,189 @@ fn source_cursor_advance_replays_exactly_and_rejects_reason_collision() {
     )
     .unwrap();
     let error = execute_cursor_advance(&mut connection, &conflicting).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("source cursor advance identity collision")
-    );
+    let StorageOperationError::CursorAdvanceLedgerDisagreement { disagreement } = error else {
+        panic!("expected structured immutable ledger disagreement");
+    };
+    assert_eq!(disagreement.source(), write.observation().source());
+    assert_eq!(disagreement.scope(), write.observation().scope());
+    assert_eq!(disagreement.coverage(), conflicting.coverage());
+    assert!(matches!(
+        disagreement.stored().reason(),
+        CursorAdvanceLedgerReasonV1::Known(ObservationCoverageReason::BlankFrame)
+    ));
+    assert!(matches!(
+        disagreement.stored().receipt_id(),
+        CursorAdvanceLedgerReceiptIdV1::Absent
+    ));
+    assert!(matches!(
+        disagreement.candidate().reason(),
+        CursorAdvanceLedgerReasonV1::Known(ObservationCoverageReason::OutOfScope)
+    ));
+    assert!(matches!(
+        disagreement.candidate().receipt_id(),
+        CursorAdvanceLedgerReceiptIdV1::Absent
+    ));
+}
+
+#[test]
+fn canonical_cursor_advance_receipt_remains_typed_after_authority_lookup() {
+    let mut connection = connection();
+    let write = anchored_observation_write("fixture", "receipt.fixture");
+    execute(&mut connection, &write).unwrap();
+    let advance = ObservationCursorAdvance::for_ordering_with_sanitization_receipt(
+        write.observation().source().clone(),
+        write.observation().scope().clone(),
+        write.observation().identity().generation(),
+        write.observation().identity().ordering_domain(),
+        Some(write.next_cursor().clone()),
+        ObservationSourceRangeV1::new(1, 2).unwrap(),
+        ObservationCoverageReason::DuplicateObservation,
+        write.observation().receipt().clone(),
+    )
+    .unwrap();
+    execute_cursor_advance(&mut connection, &advance).unwrap();
+
+    let conflicting = ObservationCursorAdvance::for_ordering_with_sanitization_receipt(
+        write.observation().source().clone(),
+        write.observation().scope().clone(),
+        write.observation().identity().generation(),
+        write.observation().identity().ordering_domain(),
+        Some(write.next_cursor().clone()),
+        ObservationSourceRangeV1::new(1, 2).unwrap(),
+        ObservationCoverageReason::CanonicalPayloadRevision,
+        write.observation().receipt().clone(),
+    )
+    .unwrap();
+
+    let error = execute_cursor_advance(&mut connection, &conflicting).unwrap_err();
+    let StorageOperationError::CursorAdvanceLedgerDisagreement { disagreement } = error else {
+        panic!("expected structured immutable ledger disagreement");
+    };
+    assert!(matches!(
+        disagreement.stored().receipt_id(),
+        CursorAdvanceLedgerReceiptIdV1::Known(receipt_id)
+            if receipt_id.as_str() == "receipt.fixture"
+    ));
+    assert!(matches!(
+        disagreement.candidate().receipt_id(),
+        CursorAdvanceLedgerReceiptIdV1::Known(receipt_id)
+            if receipt_id.as_str() == "receipt.fixture"
+    ));
+}
+
+#[test]
+fn corrupt_cursor_advance_ledger_values_are_opaque_and_content_free() {
+    let mut connection = connection();
+    let write = anchored_observation_write("fixture", "receipt.fixture");
+    execute(&mut connection, &write).unwrap();
+    let advance = ObservationCursorAdvance::for_ordering(
+        write.observation().source().clone(),
+        write.observation().scope().clone(),
+        write.observation().identity().generation(),
+        write.observation().identity().ordering_domain(),
+        Some(write.next_cursor().clone()),
+        ObservationSourceRangeV1::new(1, 2).unwrap(),
+        ObservationCoverageReason::BlankFrame,
+    )
+    .unwrap();
+    execute_cursor_advance(&mut connection, &advance).unwrap();
+
+    let private_ledger_value = format!("provider-private-transcript:{}", "x".repeat(16_384));
+    connection
+        .execute(
+            "UPDATE source_cursor_advances SET reason = ?1, receipt_id = ?2",
+            rusqlite::params![private_ledger_value, private_ledger_value],
+        )
+        .unwrap();
+    let conflicting = ObservationCursorAdvance::for_ordering(
+        write.observation().source().clone(),
+        write.observation().scope().clone(),
+        write.observation().identity().generation(),
+        write.observation().identity().ordering_domain(),
+        Some(write.next_cursor().clone()),
+        ObservationSourceRangeV1::new(1, 2).unwrap(),
+        ObservationCoverageReason::OutOfScope,
+    )
+    .unwrap();
+
+    let error = execute_cursor_advance(&mut connection, &conflicting).unwrap_err();
+    let StorageOperationError::CursorAdvanceLedgerDisagreement { disagreement } = error else {
+        panic!("expected structured immutable ledger disagreement");
+    };
+    assert!(matches!(
+        disagreement.stored().reason(),
+        CursorAdvanceLedgerReasonV1::Opaque { fingerprint }
+            if fingerprint.as_str().starts_with("sha256:")
+    ));
+    assert!(matches!(
+        disagreement.stored().receipt_id(),
+        CursorAdvanceLedgerReceiptIdV1::Opaque { fingerprint }
+            if fingerprint.as_str().starts_with("sha256:")
+    ));
+    assert!(matches!(
+        disagreement.candidate().reason(),
+        CursorAdvanceLedgerReasonV1::Known(ObservationCoverageReason::OutOfScope)
+    ));
+    assert!(matches!(
+        disagreement.candidate().receipt_id(),
+        CursorAdvanceLedgerReceiptIdV1::Absent
+    ));
+    let rendered = serde_json::to_string(&disagreement).unwrap();
+    assert!(rendered.len() < 4_096, "diagnostic must stay bounded");
+    assert!(!rendered.contains("provider-private-transcript"));
+}
+
+#[test]
+fn short_corrupt_ledger_receipt_stays_opaque_across_runtime_boundary() {
+    let mut connection = connection();
+    let write = anchored_observation_write("fixture", "receipt.fixture");
+    execute(&mut connection, &write).unwrap();
+    let advance = ObservationCursorAdvance::for_ordering(
+        write.observation().source().clone(),
+        write.observation().scope().clone(),
+        write.observation().identity().generation(),
+        write.observation().identity().ordering_domain(),
+        Some(write.next_cursor().clone()),
+        ObservationSourceRangeV1::new(1, 2).unwrap(),
+        ObservationCoverageReason::BlankFrame,
+    )
+    .unwrap();
+    execute_cursor_advance(&mut connection, &advance).unwrap();
+
+    let secret = "provider-private-transcript-secret";
+    assert!(SanitizationReceiptId::new(secret).is_ok());
+    connection
+        .execute(
+            "UPDATE source_cursor_advances SET receipt_id = ?1",
+            rusqlite::params![secret],
+        )
+        .unwrap();
+    let conflicting = ObservationCursorAdvance::for_ordering(
+        write.observation().source().clone(),
+        write.observation().scope().clone(),
+        write.observation().identity().generation(),
+        write.observation().identity().ordering_domain(),
+        Some(write.next_cursor().clone()),
+        ObservationSourceRangeV1::new(1, 2).unwrap(),
+        ObservationCoverageReason::OutOfScope,
+    )
+    .unwrap();
+
+    let error = execute_cursor_advance(&mut connection, &conflicting).unwrap_err();
+    let StorageOperationError::CursorAdvanceLedgerDisagreement { disagreement } = error else {
+        panic!("expected structured immutable ledger disagreement");
+    };
+    assert!(matches!(
+        disagreement.stored().receipt_id(),
+        CursorAdvanceLedgerReceiptIdV1::Opaque { fingerprint }
+            if fingerprint.as_str().starts_with("sha256:")
+    ));
+    let disagreement_json = serde_json::to_string(&disagreement).unwrap();
+    assert!(!disagreement_json.contains(secret));
+    let runtime_error =
+        StorageRuntimeErrorV1::ObservationCursorAdvanceLedgerDisagreement { disagreement };
+    let runtime_error_json = serde_json::to_string(&runtime_error).unwrap();
+    assert!(!runtime_error_json.contains(secret));
 }
 
 #[test]

@@ -2,8 +2,15 @@
 
 use std::path::PathBuf;
 
-use tracedecay_domain::ProjectId;
+use tracedecay_domain::{
+    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceGenerationV1,
+    ObservationSourceIdentityV1, ObservationSourceRangeV1, ProjectId, ProviderId, SessionId,
+};
 use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1;
+use tracedecay_store::{
+    CursorAdvanceLedgerDisagreementV1, CursorAdvanceLedgerIdentityV1, ObservationCoverageReason,
+    ObservationCoverageV1, ObservationStoreError,
+};
 
 use crate::observation::ObservationCancellation;
 use crate::runtime::shared::TranscriptIngestStats;
@@ -180,6 +187,44 @@ fn cursor_advance_receipt_collisions_are_permanent() {
 
     assert_eq!(failure.reason_code, "observation_cursor_advance_collision");
     assert!(!failure.retryable);
+}
+
+#[test]
+fn immutable_cursor_ledger_disagreements_are_permanent_and_bounded() {
+    let source = ObservationSourceIdentityV1::for_provider(
+        ProviderId::new("cursor").unwrap(),
+        SessionId::new("session.fixture").unwrap(),
+    )
+    .unwrap();
+    let coverage = ObservationCoverageV1::new(
+        ObservationSourceGenerationV1::new(7).unwrap(),
+        ObservationOrderingDomainV1::FileBytes,
+        ObservationSourceRangeV1::new(10, 20).unwrap(),
+    );
+    let disagreement = CursorAdvanceLedgerDisagreementV1::new(
+        source,
+        ObservationScopeV1::Profile,
+        coverage,
+        CursorAdvanceLedgerIdentityV1::new(ObservationCoverageReason::BlankFrame, None),
+        CursorAdvanceLedgerIdentityV1::new(ObservationCoverageReason::OutOfScope, None),
+    );
+    let error = claude_observation::ClaudeObservationIngestError::Store(
+        ObservationStoreError::CursorAdvanceLedgerDisagreement {
+            disagreement: Box::new(disagreement),
+        },
+    );
+
+    let failure = classify_claude_observation_failure(&error);
+
+    assert_eq!(
+        failure.reason_code,
+        "observation_cursor_advance_ledger_disagreement"
+    );
+    assert!(!failure.retryable);
+    assert_eq!(
+        failure.status,
+        crate::admission::HostAdmissionStatus::Degraded
+    );
 }
 
 #[test]
