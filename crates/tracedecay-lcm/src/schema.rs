@@ -13,7 +13,7 @@ pub const LCM_SCHEMA_VERSION: i64 = 8;
 
 const MIGRATION_NAME: &str = "lcm";
 
-/// Indexes that keep the LCM status probe off the message-body table pages.
+/// Indexes that keep expensive LCM reads off the message-body table pages.
 ///
 /// `lcm_status` aggregates whole-store counts on every probe. Without these
 /// indexes four of its components scan the full `lcm_raw_messages` /
@@ -26,10 +26,11 @@ const MIGRATION_NAME: &str = "lcm";
 /// converge synchronously. The one-time work is one full-table build per
 /// missing index instead of that same scan on every status call.
 ///
-/// The partial-index predicates must stay byte-identical to the WHERE terms
-/// in the status count queries ([`super::query`] status counts): SQLite only
-/// substitutes a partial index when the query's terms structurally imply the
-/// index's WHERE clause.
+/// Each partial-index predicate must stay byte-identical to the query term
+/// that relies on it: SQLite substitutes a partial index only when its query
+/// terms structurally imply the index's WHERE clause. The status predicates
+/// live in [`super::query`]; the raw direct-user candidate predicate lives in
+/// [`super::query::grep`].
 pub const LCM_STATUS_PERFORMANCE_INDEX_SQL: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_lcm_raw_legacy_truncated
          ON lcm_raw_messages(provider, session_id)
@@ -39,6 +40,14 @@ pub const LCM_STATUS_PERFORMANCE_INDEX_SQL: &[&str] = &[
          WHERE metadata_json IS NOT NULL
            AND json_valid(metadata_json)
            AND json_type(metadata_json, '$.ingest_protection.lossy') = 'true';",
+    // Raw LIKE retrieval must retain infix and lossless-content semantics, so
+    // FTS cannot be its candidate authority. Direct-user retrieval instead
+    // admits the complete `role = 'user'` superset through this narrow index,
+    // then applies the metadata-sensitive tool-result exclusion exactly over
+    // that bounded set.
+    "CREATE INDEX IF NOT EXISTS idx_lcm_raw_direct_user_candidate
+         ON lcm_raw_messages(provider, store_id)
+         WHERE role = 'user';",
     "CREATE INDEX IF NOT EXISTS idx_lcm_summary_nodes_depth_tokens
          ON lcm_summary_nodes(
              provider, session_id, depth, summary_token_count, source_token_count
