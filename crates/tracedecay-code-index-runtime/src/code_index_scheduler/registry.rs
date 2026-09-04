@@ -58,7 +58,20 @@ mod scope_identity;
 pub use scope_identity::{latest_matches_scope_identity, text_matches_scope_identity};
 
 const GENERATION_PUBLICATION_CHANNEL_CAPACITY: usize = 128;
-const TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1: usize = 64;
+/// Page/finalization operations one background worker pass hints to the text
+/// projection.
+///
+/// This is the caller hint, and it is what actually sizes the work: the
+/// advance clamps it to `TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1` and the
+/// sealed source then offers `min(hint, TEXT_ARTIFACT_BATCH_PAGES_V1)` pages
+/// per commit and `hint * TEXT_ARTIFACT_FINALIZATION_ROWS_PER_OPERATION_V1`
+/// rows per finalization slice. Pinning it to the advance ceiling keeps the
+/// two in step; as a hardcoded 64 it silently capped every wake at one
+/// 64-page batch, so the ceiling's own "one wake can still commit two
+/// full-sized batches" contract never held and each batch paid a separate
+/// worker round trip (`spawn_blocking`, admission permit, publication lock).
+const TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1: usize =
+    super::TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1;
 
 /// Bounded exponential backoff between activation retries of the same sealed
 /// generation. Activation of a large artifact is minutes of real work, so the
