@@ -264,181 +264,169 @@ async fn run_skill_writer_for_store_with_publication(
     prebuilt_evidence: Option<SkillWriterEvidenceBundle>,
     publication: AutomationRunPublication<'_>,
 ) -> AutomationRunResult<SkillWriterAutomationRun> {
-    let AutomationRunPublication {
-        ledger: ledger_publication,
-        settlement_guard,
-    } = publication;
-    let SkillWriterStoreRuntime {
-        dashboard_root,
-        sessions_db,
-        analytics_project_root,
-        analytics_db,
-        authority,
-    } = runtime;
-    let mut run = AgentTaskRunContext::new(
-        dashboard_root,
-        sessions_db,
-        options.run_id.clone(),
-        "skill_writer",
-        options.trigger,
+    run_skill_writer_for_store_with_publication_inner(
+        runtime,
+        retrieval,
         config,
-        AgentTaskKind::SkillWriter,
-    )
-    .with_ledger_publication(ledger_publication)
-    .with_settlement_guard(settlement_guard);
-    let _run_lock = match run.gate().await? {
-        SchedulerGate::Proceed(lock) => lock,
-        SchedulerGate::Skip(reason) => {
-            return skipped_skill_writer_run(&run, reason, None)
-                .await
-                .map_err(Into::into);
-        }
-    };
-    let evidence_bundle = match prebuilt_evidence {
-        Some(bundle) => bundle,
-        None => match build_skill_writer_evidence(
-            retrieval,
-            analytics_project_root,
-            analytics_db.map(|database| database as &dyn AutomationSessionStore),
-            options,
-        )
-        .await?
-        {
-            SkillWriterEvidenceOutcome::Ready(bundle) => bundle,
-            SkillWriterEvidenceOutcome::Skipped {
-                reason,
-                evidence_hash,
-            } => {
-                return Ok(rejected_skill_writer_run(
-                    &run,
-                    config,
-                    reason,
-                    evidence_hash,
-                ));
-            }
-        },
-    };
-    let SkillWriterEvidenceBundle {
-        profile_root,
-        evidence,
-        evidence_hash,
-    } = evidence_bundle;
-    // Refresh adoption outcomes of previously activated skills so this run's
-    // feedback artifact reports real post-activation quality. Best effort: a
-    // stale snapshot must not block skill writing.
-    if let Err(err) = crate::automation::outcomes::refresh_skill_outcomes(
-        &profile_root,
-        &run.dashboard_root,
-        current_timestamp(),
+        backend,
+        options,
+        prebuilt_evidence,
+        publication,
     )
     .await
-    {
-        tracing::warn!(error = %err, "failed to refresh skill outcomes");
-    }
+}
 
-    let activation_policy = skill_writer_activation_policy();
-    let request = AgentTaskRequest::new(
-        run.run_id.clone(),
-        AgentTaskKind::SkillWriter,
-        build_skill_writer_prompt(&evidence),
-        evidence_hash.clone(),
-        json!({
-            "skill_writer_evidence": evidence,
-            "apply": true,
-            "activation_policy": activation_policy,
-        }),
-    );
-    let input_hash = Some(request.input_hash.clone());
-    let finalizer = run.finalizer(input_hash.clone())?;
-    let (mut response, mut retry_report) = match finalizer
-        .run_backend_or_fallback(backend, &request, evidence_hash.clone())
-        .await?
-    {
-        BackendTaskRun::Response {
-            response,
-            retry_report,
-        } => (response, retry_report),
-        BackendTaskRun::Fallback(record) => {
-            let record = *record;
-            return Ok(SkillWriterAutomationRun {
-                run_id: record.run_id.clone(),
-                report: failed_backend_fallback_report(&record),
-                ledger_record: record,
-                backend_response: None,
-                committed_receipt: None,
-            });
-        }
-    };
-    let (mut proposed_ops, mut proposals) = finalizer
-        .response_output_array(
-            &response,
-            evidence_hash.clone(),
-            &retry_report,
-            "skills",
-            "skill writer output must include a skills array",
-        )
-        .await?;
-    let mut validation_repairs = Vec::new();
-    for attempt in 1..=2 {
-        let validation_errors =
-            validate_skill_proposals(&profile_root, &run.run_id, &proposals).await?;
-        if validation_errors.is_empty() {
-            break;
-        }
-        validation_repairs.push(json!({
-            "attempt": attempt,
-            "errors": validation_errors,
-        }));
-        if attempt == 2 {
-            let error = TraceDecayError::Config {
-                message: "skill proposal validation repair budget exhausted; output quarantined"
-                    .to_string(),
-            };
-            let ledger_record = finalizer
-                .append_failed_record(
-                    response.model.clone(),
-                    evidence_hash,
-                    Some(proposed_ops),
-                    error.to_string(),
-                    &retry_report,
-                )
-                .await?;
-            return Err(AutomationRunError::RecordedFailure {
-                error,
-                ledger_record: Box::new(ledger_record),
-            });
-        }
-        let repair_request = AgentTaskRequest::new(
-            run.run_id.clone(),
+/// Body of [`run_skill_writer_for_store_with_publication`], boxed at
+/// definition; see the scheduler's boxing note.
+#[allow(clippy::too_many_arguments)]
+fn run_skill_writer_for_store_with_publication_inner<'a>(
+    runtime: SkillWriterStoreRuntime<'a>,
+    retrieval: &'a dyn AutomationSessionRetrieval,
+    config: &'a AutomationConfig,
+    backend: &'a dyn AgentTaskBackend,
+    options: SkillWriterAutomationOptions,
+    prebuilt_evidence: Option<SkillWriterEvidenceBundle>,
+    publication: AutomationRunPublication<'a>,
+) -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = AutomationRunResult<SkillWriterAutomationRun>> + Send + 'a,
+    >,
+> {
+    Box::pin(async move {
+        let AutomationRunPublication {
+            ledger: ledger_publication,
+            settlement_guard,
+        } = publication;
+        let SkillWriterStoreRuntime {
+            dashboard_root,
+            sessions_db,
+            analytics_project_root,
+            analytics_db,
+            authority,
+        } = runtime;
+        let mut run = AgentTaskRunContext::new(
+            dashboard_root,
+            sessions_db,
+            options.run_id.clone(),
+            "skill_writer",
+            options.trigger,
+            config,
             AgentTaskKind::SkillWriter,
-            format!(
-                "Repair the previous skill proposal JSON. Return only {{\"skills\": [...]}}. Preserve valid intent, fix every validation error, and do not add unrelated changes.\n{}",
-                serde_json::to_string_pretty(validation_repairs.last().unwrap_or(&Value::Null))
-                    .map_err(TraceDecayError::from)?
-            ),
-            evidence_hash.clone(),
-            json!({
-                "previous_output": proposed_ops.clone(),
-                "validation_errors": validation_repairs.last(),
-                "activation_policy": activation_policy,
-            }),
-        );
-        let repair_policy = BackendRetryPolicy::from_timeout_secs(config.timeout_secs);
-        let mut repair_retry_report = AgentTaskRetryReport::default();
-        response = match run_agent_task_with_retry_report(
-            backend,
-            &repair_request,
-            &repair_policy,
-            &mut repair_retry_report,
+        )
+        .with_ledger_publication(ledger_publication)
+        .with_settlement_guard(settlement_guard);
+        let _run_lock = match run.gate().await? {
+            SchedulerGate::Proceed(lock) => lock,
+            SchedulerGate::Skip(reason) => {
+                return skipped_skill_writer_run(&run, reason, None)
+                    .await
+                    .map_err(Into::into);
+            }
+        };
+        let evidence_bundle = match prebuilt_evidence {
+            Some(bundle) => bundle,
+            None => match build_skill_writer_evidence(
+                retrieval,
+                analytics_project_root,
+                analytics_db.map(|database| database as &dyn AutomationSessionStore),
+                options,
+            )
+            .await?
+            {
+                SkillWriterEvidenceOutcome::Ready(bundle) => bundle,
+                SkillWriterEvidenceOutcome::Skipped {
+                    reason,
+                    evidence_hash,
+                } => {
+                    return Ok(rejected_skill_writer_run(
+                        &run,
+                        config,
+                        reason,
+                        evidence_hash,
+                    ));
+                }
+            },
+        };
+        let SkillWriterEvidenceBundle {
+            profile_root,
+            evidence,
+            evidence_hash,
+        } = evidence_bundle;
+        // Refresh adoption outcomes of previously activated skills so this run's
+        // feedback artifact reports real post-activation quality. Best effort: a
+        // stale snapshot must not block skill writing.
+        if let Err(err) = crate::automation::outcomes::refresh_skill_outcomes(
+            &profile_root,
+            &run.dashboard_root,
+            current_timestamp(),
         )
         .await
         {
-            Ok(response) => response,
-            Err(error) => {
-                retry_report.append(repair_retry_report);
+            tracing::warn!(error = %err, "failed to refresh skill outcomes");
+        }
+
+        let activation_policy = skill_writer_activation_policy();
+        let request = AgentTaskRequest::new(
+            run.run_id.clone(),
+            AgentTaskKind::SkillWriter,
+            build_skill_writer_prompt(&evidence),
+            evidence_hash.clone(),
+            json!({
+                "skill_writer_evidence": evidence,
+                "apply": true,
+                "activation_policy": activation_policy,
+            }),
+        );
+        let input_hash = Some(request.input_hash.clone());
+        let finalizer = run.finalizer(input_hash.clone())?;
+        let (mut response, mut retry_report) = match finalizer
+            .run_backend_or_fallback(backend, &request, evidence_hash.clone())
+            .await?
+        {
+            BackendTaskRun::Response {
+                response,
+                retry_report,
+            } => (response, retry_report),
+            BackendTaskRun::Fallback(record) => {
+                let record = *record;
+                return Ok(SkillWriterAutomationRun {
+                    run_id: record.run_id.clone(),
+                    report: failed_backend_fallback_report(&record),
+                    ledger_record: record,
+                    backend_response: None,
+                    committed_receipt: None,
+                });
+            }
+        };
+        let (mut proposed_ops, mut proposals) = finalizer
+            .response_output_array(
+                &response,
+                evidence_hash.clone(),
+                &retry_report,
+                "skills",
+                "skill writer output must include a skills array",
+            )
+            .await?;
+        let mut validation_repairs = Vec::new();
+        for attempt in 1..=2 {
+            let validation_errors =
+                validate_skill_proposals(&profile_root, &run.run_id, &proposals).await?;
+            if validation_errors.is_empty() {
+                break;
+            }
+            validation_repairs.push(json!({
+                "attempt": attempt,
+                "errors": validation_errors,
+            }));
+            if attempt == 2 {
+                let error = TraceDecayError::Config {
+                    message:
+                        "skill proposal validation repair budget exhausted; output quarantined"
+                            .to_string(),
+                };
                 let ledger_record = finalizer
                     .append_failed_record(
-                        None,
+                        response.model.clone(),
                         evidence_hash,
                         Some(proposed_ops),
                         error.to_string(),
@@ -450,85 +438,128 @@ async fn run_skill_writer_for_store_with_publication(
                     ledger_record: Box::new(ledger_record),
                 });
             }
-        };
-        retry_report.append(repair_retry_report);
-        (proposed_ops, proposals) = finalizer
-            .response_output_array(
-                &response,
+            let repair_request = AgentTaskRequest::new(
+                run.run_id.clone(),
+                AgentTaskKind::SkillWriter,
+                format!(
+                    "Repair the previous skill proposal JSON. Return only {{\"skills\": [...]}}. Preserve valid intent, fix every validation error, and do not add unrelated changes.\n{}",
+                    serde_json::to_string_pretty(validation_repairs.last().unwrap_or(&Value::Null))
+                        .map_err(TraceDecayError::from)?
+                ),
                 evidence_hash.clone(),
-                &retry_report,
-                "skills",
-                "skill writer repair output must include a skills array",
+                json!({
+                    "previous_output": proposed_ops.clone(),
+                    "validation_errors": validation_repairs.last(),
+                    "activation_policy": activation_policy,
+                }),
+            );
+            let repair_policy = BackendRetryPolicy::from_timeout_secs(config.timeout_secs);
+            let mut repair_retry_report = AgentTaskRetryReport::default();
+            response = match run_agent_task_with_retry_report(
+                backend,
+                &repair_request,
+                &repair_policy,
+                &mut repair_retry_report,
             )
-            .await?;
-    }
-    let (report, record, committed_receipt) = match finalize_skill_writer_success(
-        &finalizer,
-        &profile_root,
-        analytics_project_root,
-        config,
-        &authority,
-        activation_policy,
-        ProposedSkillOutput {
-            response: &response,
-            retry_report: &retry_report,
-            evidence: &evidence,
-            evidence_hash: evidence_hash.clone(),
-            proposed_ops: &proposed_ops,
-            proposals: &proposals,
-            validation_repairs: &validation_repairs,
-        },
-    )
-    .await
-    {
-        Ok(SkillWriterFinalization::Completed {
-            report,
-            record,
-            committed_receipt,
-        }) => (report, record, committed_receipt.map(|receipt| *receipt)),
-        Ok(SkillWriterFinalization::FailedRecorded { error, record }) => {
-            return Err(AutomationRunError::RecordedFailure {
-                error,
-                ledger_record: Box::new(record),
-            });
-        }
-        Err(AutomationRunError::Runtime(err)) => {
-            let ledger_record = finalizer
-                .append_failed_record(
-                    response.model.clone(),
-                    evidence_hash,
-                    Some(proposed_ops),
-                    err.to_string(),
+            .await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    retry_report.append(repair_retry_report);
+                    let ledger_record = finalizer
+                        .append_failed_record(
+                            None,
+                            evidence_hash,
+                            Some(proposed_ops),
+                            error.to_string(),
+                            &retry_report,
+                        )
+                        .await?;
+                    return Err(AutomationRunError::RecordedFailure {
+                        error,
+                        ledger_record: Box::new(ledger_record),
+                    });
+                }
+            };
+            retry_report.append(repair_retry_report);
+            (proposed_ops, proposals) = finalizer
+                .response_output_array(
+                    &response,
+                    evidence_hash.clone(),
                     &retry_report,
+                    "skills",
+                    "skill writer repair output must include a skills array",
                 )
                 .await?;
-            return Err(AutomationRunError::RecordedFailure {
-                error: err,
-                ledger_record: Box::new(ledger_record),
-            });
         }
-        Err(error @ AutomationRunError::RecordedFailure { .. }) => return Err(error),
-        Err(error @ AutomationRunError::PartialEffect { .. }) => return Err(error),
-    };
-    let record = finalizer
-        .append_success_record(&request, &response, &retry_report, record)
-        .await
-        .map_err(|error| match committed_receipt.clone() {
-            Some(committed_receipt) => AutomationRunError::PartialEffect {
-                run_id: run.run_id.clone(),
-                committed_receipt: Box::new(committed_receipt),
-                ledger_record: None,
-                detail: "Skill lifecycle changes committed, but their automation terminal could not be published; reconcile the skill receipt before another run.",
+        let (report, record, committed_receipt) = match finalize_skill_writer_success(
+            &finalizer,
+            &profile_root,
+            analytics_project_root,
+            config,
+            &authority,
+            activation_policy,
+            ProposedSkillOutput {
+                response: &response,
+                retry_report: &retry_report,
+                evidence: &evidence,
+                evidence_hash: evidence_hash.clone(),
+                proposed_ops: &proposed_ops,
+                proposals: &proposals,
+                validation_repairs: &validation_repairs,
             },
-            None => AutomationRunError::Runtime(error),
-        })?;
+        )
+        .await
+        {
+            Ok(SkillWriterFinalization::Completed {
+                report,
+                record,
+                committed_receipt,
+            }) => (report, record, committed_receipt.map(|receipt| *receipt)),
+            Ok(SkillWriterFinalization::FailedRecorded { error, record }) => {
+                return Err(AutomationRunError::RecordedFailure {
+                    error,
+                    ledger_record: Box::new(record),
+                });
+            }
+            Err(AutomationRunError::Runtime(err)) => {
+                let ledger_record = finalizer
+                    .append_failed_record(
+                        response.model.clone(),
+                        evidence_hash,
+                        Some(proposed_ops),
+                        err.to_string(),
+                        &retry_report,
+                    )
+                    .await?;
+                return Err(AutomationRunError::RecordedFailure {
+                    error: err,
+                    ledger_record: Box::new(ledger_record),
+                });
+            }
+            Err(error @ AutomationRunError::RecordedFailure { .. }) => return Err(error),
+            Err(error @ AutomationRunError::PartialEffect { .. }) => return Err(error),
+        };
+        let record = finalizer
+            .append_success_record(&request, &response, &retry_report, record)
+            .await
+            .map_err(|error| match committed_receipt.clone() {
+                Some(committed_receipt) => AutomationRunError::PartialEffect {
+                    run_id: run.run_id.clone(),
+                    committed_receipt: Box::new(committed_receipt),
+                    ledger_record: None,
+                    detail: "Skill lifecycle changes committed, but their automation terminal could not be published; reconcile the skill receipt before another run.",
+                },
+                None => AutomationRunError::Runtime(error),
+            })?;
 
-    Ok(SkillWriterAutomationRun {
-        run_id: run.run_id,
-        report,
-        ledger_record: record,
-        backend_response: Some(response),
-        committed_receipt,
+        Ok(SkillWriterAutomationRun {
+            run_id: run.run_id,
+            report,
+            ledger_record: record,
+            backend_response: Some(response),
+            committed_receipt,
+        })
     })
 }
 

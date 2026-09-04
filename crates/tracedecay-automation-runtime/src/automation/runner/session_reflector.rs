@@ -663,260 +663,302 @@ async fn run_session_reflector_for_store_with_publication<A: ProjectMemoryFactSt
     ledger_publication: AutomationRunLedgerPublication,
     settlement_guard: Option<&AutomationRunSettlementGuard>,
 ) -> AutomationRunResult<SessionReflectorAutomationRun> {
-    let mut run = AgentTaskRunContext::new(
+    run_session_reflector_for_store_with_publication_inner(
         dashboard_root,
         sessions_db,
-        options.run_id.clone(),
-        "session_reflector",
-        options.trigger,
+        retrieval,
+        memory,
         config,
-        AgentTaskKind::SessionReflector,
+        run_control,
+        authority,
+        backend,
+        options,
+        prebuilt_evidence,
+        ledger_publication,
+        settlement_guard,
     )
-    .with_ledger_publication(ledger_publication)
-    .with_settlement_guard(settlement_guard);
-    let _run_lock = match run.gate().await? {
-        SchedulerGate::Proceed(lock) => lock,
-        SchedulerGate::Skip(reason) => {
-            return skipped_session_reflector_run(&run, reason, None)
-                .await
-                .map_err(Into::into);
-        }
-    };
-    let evidence_bundle = match prebuilt_evidence {
-        Some(bundle) => bundle,
-        None => match build_session_reflector_evidence(retrieval, &options).await? {
-            SessionReflectorEvidenceOutcome::Ready(bundle) => bundle,
-            SessionReflectorEvidenceOutcome::Skipped {
-                reason,
-                evidence_hash,
-            } => {
-                return Ok(rejected_session_reflector_run(
-                    &run,
-                    config,
+    .await
+}
+
+/// Body of [`run_session_reflector_for_store_with_publication`], boxed at
+/// definition; see the scheduler's boxing note.
+#[allow(clippy::too_many_arguments)]
+fn run_session_reflector_for_store_with_publication_inner<'a, A: ProjectMemoryFactStore + 'a>(
+    dashboard_root: PathBuf,
+    sessions_db: RegisteredGlobalDbLeaseV1,
+    retrieval: &'a dyn AutomationSessionRetrieval,
+    memory: &'a MemoryApplication<A>,
+    config: &'a AutomationConfig,
+    run_control: &'a AutomationRunControl,
+    authority: &'a tracedecay_policy::CurationApplyAuthorityV1,
+    backend: &'a dyn AgentTaskBackend,
+    options: SessionReflectorAutomationOptions,
+    prebuilt_evidence: Option<SessionReflectorEvidenceBundle>,
+    ledger_publication: AutomationRunLedgerPublication,
+    settlement_guard: Option<&'a AutomationRunSettlementGuard>,
+) -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = AutomationRunResult<SessionReflectorAutomationRun>>
+            + Send
+            + 'a,
+    >,
+> {
+    Box::pin(async move {
+        let mut run = AgentTaskRunContext::new(
+            dashboard_root,
+            sessions_db,
+            options.run_id.clone(),
+            "session_reflector",
+            options.trigger,
+            config,
+            AgentTaskKind::SessionReflector,
+        )
+        .with_ledger_publication(ledger_publication)
+        .with_settlement_guard(settlement_guard);
+        let _run_lock = match run.gate().await? {
+            SchedulerGate::Proceed(lock) => lock,
+            SchedulerGate::Skip(reason) => {
+                return skipped_session_reflector_run(&run, reason, None)
+                    .await
+                    .map_err(Into::into);
+            }
+        };
+        let evidence_bundle = match prebuilt_evidence {
+            Some(bundle) => bundle,
+            None => match build_session_reflector_evidence(retrieval, &options).await? {
+                SessionReflectorEvidenceOutcome::Ready(bundle) => bundle,
+                SessionReflectorEvidenceOutcome::Skipped {
                     reason,
                     evidence_hash,
-                ));
-            }
-        },
-    };
-    let SessionReflectorEvidenceBundle {
-        evidence,
-        evidence_hash,
-    } = evidence_bundle;
-    crate::automation::outcomes::refresh_fact_outcomes(
-        &run.dashboard_root,
-        memory,
-        current_timestamp(),
-        run_control.read_control(),
-    )
-    .await?;
-
-    let request = AgentTaskRequest::new(
-        run.run_id.clone(),
-        AgentTaskKind::SessionReflector,
-        build_session_reflector_prompt(&evidence),
-        evidence_hash.clone(),
-        json!({
-            "session_reflection_evidence": evidence,
-            "apply": true,
-        }),
-    );
-    let input_hash = Some(request.input_hash.clone());
-    let finalizer = run.finalizer(input_hash.clone())?;
-    let (mut response, mut retry_report) = match finalizer
-        .run_backend_or_fallback(backend, &request, evidence_hash.clone())
-        .await?
-    {
-        BackendTaskRun::Response {
-            response,
-            retry_report,
-        } => (response, retry_report),
-        BackendTaskRun::Fallback(record) => {
-            let record = *record;
-            return Ok(SessionReflectorAutomationRun {
-                run_id: record.run_id.clone(),
-                report: failed_backend_fallback_report(&record),
-                ledger_record: record,
-                backend_response: None,
-                committed_receipt: None,
-            });
-        }
-    };
-    let (proposed_ops, mut proposals) = finalizer
-        .response_output_array(
-            &response,
-            evidence_hash.clone(),
-            &retry_report,
-            "facts",
-            "session reflector output must include a facts array",
+                } => {
+                    return Ok(rejected_session_reflector_run(
+                        &run,
+                        config,
+                        reason,
+                        evidence_hash,
+                    ));
+                }
+            },
+        };
+        let SessionReflectorEvidenceBundle {
+            evidence,
+            evidence_hash,
+        } = evidence_bundle;
+        crate::automation::outcomes::refresh_fact_outcomes(
+            &run.dashboard_root,
+            memory,
+            current_timestamp(),
+            run_control.read_control(),
         )
         .await?;
-    let retry_policy =
-        crate::automation::backend::BackendRetryPolicy::from_timeout_secs(config.timeout_secs);
-    let mut validation_repairs = Vec::new();
-    let (initial_accepted_facts, rejected_facts) =
-        validate_session_fact_candidates(memory, run_control, &proposals, &evidence).await?;
-    if !rejected_facts.is_empty() {
-        validation_repairs.push(json!({
-            "attempt": 1,
-            "errors": rejected_facts,
-        }));
-        let repair_request = AgentTaskRequest::new(
+
+        let request = AgentTaskRequest::new(
             run.run_id.clone(),
             AgentTaskKind::SessionReflector,
-            "Repair the previous session fact JSON. Return only {\"facts\": [...]}. Preserve valid intent, fix every validation error, cite only the supplied session evidence, and do not add unrelated facts."
-                .to_string(),
+            build_session_reflector_prompt(&evidence),
             evidence_hash.clone(),
             json!({
-                "previous_output": proposed_ops.clone(),
-                "validation_errors": validation_repairs.last(),
-                "session_reflection_evidence": evidence.clone(),
+                "session_reflection_evidence": evidence,
                 "apply": true,
             }),
         );
-        let mut repair_retry_report = AgentTaskRetryReport::default();
-        response = match crate::automation::backend::run_agent_task_with_retry_report(
-            backend,
-            &repair_request,
-            &retry_policy,
-            &mut repair_retry_report,
-        )
-        .await
+        let input_hash = Some(request.input_hash.clone());
+        let finalizer = run.finalizer(input_hash.clone())?;
+        let (mut response, mut retry_report) = match finalizer
+            .run_backend_or_fallback(backend, &request, evidence_hash.clone())
+            .await?
         {
-            Ok(response) => response,
-            Err(error) => {
-                retry_report.append(repair_retry_report);
-                let receipt = SessionFactCurationReceipt {
-                    schema_version: 1,
-                    outcome: SessionFactCurationOutcome::classify(
-                        initial_accepted_facts.len(),
-                        0,
-                        rejected_facts.len(),
-                        true,
-                    ),
-                    repair_attempted: true,
-                    admitted_count: initial_accepted_facts.len(),
-                    applied_count: 0,
-                    quarantined_count: rejected_facts.len(),
-                    retry_required: true,
-                    automatic_fact_receipt_ids: Vec::new(),
-                    applied_fact_ids: Vec::new(),
-                };
-                let ledger_record = finalizer
-                    .append_failed_record_with_effects(
-                        None,
-                        evidence_hash,
-                        Some(session_fact_ledger_summary(
-                            &proposals,
-                            &initial_accepted_facts,
-                            &[],
-                            &rejected_facts,
-                        )?),
-                        error.to_string(),
-                        &retry_report,
-                        None,
-                        Some(fact_collection_summary(&rejected_facts)?),
-                        Some(json!({
-                            "status": receipt.outcome,
-                            "receipt": receipt,
-                            "validation_repairs": validation_repairs_summary(&validation_repairs)?,
-                        })),
-                        initial_accepted_facts.len(),
-                        rejected_facts.len(),
-                    )
-                    .await?;
-                return Err(AutomationRunError::RecordedFailure {
-                    error,
-                    ledger_record: Box::new(ledger_record),
+            BackendTaskRun::Response {
+                response,
+                retry_report,
+            } => (response, retry_report),
+            BackendTaskRun::Fallback(record) => {
+                let record = *record;
+                return Ok(SessionReflectorAutomationRun {
+                    run_id: record.run_id.clone(),
+                    report: failed_backend_fallback_report(&record),
+                    ledger_record: record,
+                    backend_response: None,
+                    committed_receipt: None,
                 });
             }
         };
-        retry_report.append(repair_retry_report);
-        (_, proposals) = finalizer
+        let (proposed_ops, mut proposals) = finalizer
             .response_output_array(
                 &response,
                 evidence_hash.clone(),
                 &retry_report,
                 "facts",
-                "session reflector repair output must include a facts array",
+                "session reflector output must include a facts array",
             )
             .await?;
-    }
-    let (report, record, committed_receipt) = match finalize_session_reflector_success(
-        memory,
-        run_control,
-        config,
-        authority,
-        &finalizer,
-        ProposedAgentOutput {
-            response: &response,
-            retry_report: &retry_report,
-            evidence: &evidence,
-            evidence_hash: evidence_hash.clone(),
-            proposals: &proposals,
-        },
-        &validation_repairs,
-    )
-    .await
-    {
-        Ok(SessionReflectorFinalization::Completed {
-            report,
-            record,
-            committed_receipt,
-        }) => (report, record, committed_receipt),
-        Ok(SessionReflectorFinalization::FailedRecorded {
-            run_id,
-            committed_receipt,
-            record,
-            detail,
-        }) => {
-            return Err(AutomationRunError::PartialEffect {
-                run_id,
-                committed_receipt: Box::new(committed_receipt),
-                ledger_record: record.map(Box::new),
-                detail,
-            });
-        }
-        Err(err) => {
-            let ledger_record = finalizer
-                .append_failed_record(
-                    response.model.clone(),
-                    evidence_hash,
-                    Some(session_fact_finalization_failure_summary(&proposals)?),
-                    err.to_string(),
+        let retry_policy =
+            crate::automation::backend::BackendRetryPolicy::from_timeout_secs(config.timeout_secs);
+        let mut validation_repairs = Vec::new();
+        let (initial_accepted_facts, rejected_facts) =
+            validate_session_fact_candidates(memory, run_control, &proposals, &evidence).await?;
+        if !rejected_facts.is_empty() {
+            validation_repairs.push(json!({
+                "attempt": 1,
+                "errors": rejected_facts,
+            }));
+            let repair_request = AgentTaskRequest::new(
+                run.run_id.clone(),
+                AgentTaskKind::SessionReflector,
+                "Repair the previous session fact JSON. Return only {\"facts\": [...]}. Preserve valid intent, fix every validation error, cite only the supplied session evidence, and do not add unrelated facts."
+                    .to_string(),
+                evidence_hash.clone(),
+                json!({
+                    "previous_output": proposed_ops.clone(),
+                    "validation_errors": validation_repairs.last(),
+                    "session_reflection_evidence": evidence.clone(),
+                    "apply": true,
+                }),
+            );
+            let mut repair_retry_report = AgentTaskRetryReport::default();
+            response = match crate::automation::backend::run_agent_task_with_retry_report(
+                backend,
+                &repair_request,
+                &retry_policy,
+                &mut repair_retry_report,
+            )
+            .await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    retry_report.append(repair_retry_report);
+                    let receipt = SessionFactCurationReceipt {
+                        schema_version: 1,
+                        outcome: SessionFactCurationOutcome::classify(
+                            initial_accepted_facts.len(),
+                            0,
+                            rejected_facts.len(),
+                            true,
+                        ),
+                        repair_attempted: true,
+                        admitted_count: initial_accepted_facts.len(),
+                        applied_count: 0,
+                        quarantined_count: rejected_facts.len(),
+                        retry_required: true,
+                        automatic_fact_receipt_ids: Vec::new(),
+                        applied_fact_ids: Vec::new(),
+                    };
+                    let ledger_record = finalizer
+                        .append_failed_record_with_effects(
+                            None,
+                            evidence_hash,
+                            Some(session_fact_ledger_summary(
+                                &proposals,
+                                &initial_accepted_facts,
+                                &[],
+                                &rejected_facts,
+                            )?),
+                            error.to_string(),
+                            &retry_report,
+                            None,
+                            Some(fact_collection_summary(&rejected_facts)?),
+                            Some(json!({
+                                "status": receipt.outcome,
+                                "receipt": receipt,
+                                "validation_repairs": validation_repairs_summary(&validation_repairs)?,
+                            })),
+                            initial_accepted_facts.len(),
+                            rejected_facts.len(),
+                        )
+                        .await?;
+                    return Err(AutomationRunError::RecordedFailure {
+                        error,
+                        ledger_record: Box::new(ledger_record),
+                    });
+                }
+            };
+            retry_report.append(repair_retry_report);
+            (_, proposals) = finalizer
+                .response_output_array(
+                    &response,
+                    evidence_hash.clone(),
                     &retry_report,
+                    "facts",
+                    "session reflector repair output must include a facts array",
                 )
                 .await?;
-            return Err(AutomationRunError::RecordedFailure {
-                error: err,
-                ledger_record: Box::new(ledger_record),
-            });
         }
-    };
-    let record = match finalizer
-        .append_success_record(&request, &response, &retry_report, record)
+        let (report, record, committed_receipt) = match finalize_session_reflector_success(
+            memory,
+            run_control,
+            config,
+            authority,
+            &finalizer,
+            ProposedAgentOutput {
+                response: &response,
+                retry_report: &retry_report,
+                evidence: &evidence,
+                evidence_hash: evidence_hash.clone(),
+                proposals: &proposals,
+            },
+            &validation_repairs,
+        )
         .await
-    {
-        Ok(record) => record,
-        Err(error) => {
-            if let Some(committed_receipt) = committed_receipt {
+        {
+            Ok(SessionReflectorFinalization::Completed {
+                report,
+                record,
+                committed_receipt,
+            }) => (report, record, committed_receipt),
+            Ok(SessionReflectorFinalization::FailedRecorded {
+                run_id,
+                committed_receipt,
+                record,
+                detail,
+            }) => {
                 return Err(AutomationRunError::PartialEffect {
-                    run_id: run.run_id.clone(),
+                    run_id,
                     committed_receipt: Box::new(committed_receipt),
-                    ledger_record: None,
-                    detail: "Automatic facts committed, but the automation terminal could not be published; reconcile the committed receipt before another run.",
+                    ledger_record: record.map(Box::new),
+                    detail,
                 });
             }
-            return Err(error.into());
-        }
-    };
+            Err(err) => {
+                let ledger_record = finalizer
+                    .append_failed_record(
+                        response.model.clone(),
+                        evidence_hash,
+                        Some(session_fact_finalization_failure_summary(&proposals)?),
+                        err.to_string(),
+                        &retry_report,
+                    )
+                    .await?;
+                return Err(AutomationRunError::RecordedFailure {
+                    error: err,
+                    ledger_record: Box::new(ledger_record),
+                });
+            }
+        };
+        let record = match finalizer
+            .append_success_record(&request, &response, &retry_report, record)
+            .await
+        {
+            Ok(record) => record,
+            Err(error) => {
+                if let Some(committed_receipt) = committed_receipt {
+                    return Err(AutomationRunError::PartialEffect {
+                        run_id: run.run_id.clone(),
+                        committed_receipt: Box::new(committed_receipt),
+                        ledger_record: None,
+                        detail: "Automatic facts committed, but the automation terminal could not be published; reconcile the committed receipt before another run.",
+                    });
+                }
+                return Err(error.into());
+            }
+        };
 
-    Ok(SessionReflectorAutomationRun {
-        run_id: run.run_id,
-        report,
-        ledger_record: record,
-        backend_response: Some(response),
-        committed_receipt,
+        Ok(SessionReflectorAutomationRun {
+            run_id: run.run_id,
+            report,
+            ledger_record: record,
+            backend_response: Some(response),
+            committed_receipt,
+        })
     })
 }
 
