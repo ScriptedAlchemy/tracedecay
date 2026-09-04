@@ -64,6 +64,14 @@ async fn source_reads_reuse_the_cross_session_cache() {
     fs::create_dir_all(root.path().join("src")).expect("source directory");
     let source = "pub fn first() {}\npub fn second() {}\n";
     fs::write(root.path().join("src/lib.rs"), source).expect("fixture source");
+    // The adapter binds a runtime to exactly one registered project identity,
+    // so the fixture checkout must resolve to the same project id the request
+    // scope carries; an unpinned temp dir gets a generated identity instead.
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+        root.path(),
+        "project.retrieval-primitives",
+    )
+    .expect("pin fixture project identity");
     let profile_root = root.path().join(".tracedecay-test-profile");
     let open_options = TraceDecayOpenOptions {
         profile_root: Some(profile_root.clone()),
