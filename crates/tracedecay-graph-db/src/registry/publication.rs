@@ -176,22 +176,82 @@ impl GraphDbRegistry {
         check_all(&registration, context, "generation.release_sealed_staging")?;
         require_projection_binding(&registration, projection)?;
         let database = self.resolve(registration.clone())?;
-        let Some(relational_head) = authority
+        // This bounded maintenance entrypoint is also the retry clock for an
+        // installed sealed reader whose prior non-blocking hibernation pass
+        // met an active operation. Identity and receipt stay installed; only
+        // idle native engines are released.
+        database.reap_idle_sealed_generation_engines(None);
+        let relational_head = authority
             .verified_head(projection, context)
-            .map_err(map_publication_error)?
-        else {
-            return Ok(SealedStagingRelease::Retained(
-                SealedStagingRetentionReason::NoVerifiedLease,
-            ));
-        };
-        let replay = authority
-            .replay(&relational_head.key, context)
             .map_err(map_publication_error)?;
-        let replay = require_active_replay_evidence(
-            replay,
-            "verified graph head has no durable active replay",
-        )?;
-        require_head_replay(&relational_head, &replay)?;
+        let replay = if let Some(head) = &relational_head {
+            let replay = authority
+                .replay(&head.key, context)
+                .map_err(map_publication_error)?;
+            let replay = require_active_replay_evidence(
+                replay,
+                "verified graph head has no durable active replay",
+            )?;
+            require_head_replay(head, &replay)?;
+            replay
+        } else {
+            if !is_legacy_per_generation_code_graph_namespace_str(projection.namespace.as_str())
+                || authority
+                    .pending_replay(projection, context)
+                    .map_err(map_publication_error)?
+                    .is_some()
+            {
+                return Ok(SealedStagingRelease::Retained(
+                    SealedStagingRetentionReason::NoVerifiedLease,
+                ));
+            }
+            // The shipped pre-cutover layout put one code generation in one
+            // projection. After migration drains its head, that completed
+            // active replay is the remaining relational evidence. Accept
+            // exactly one such record; zero, multiple, pending, foreign-page,
+            // dependency-bearing, or non-sealed evidence stays fail-closed.
+            let mut selected = None;
+            let mut after = None;
+            loop {
+                let request = GraphPublicationReplayPageRequestV1::new(
+                    projection.clone(),
+                    after.clone(),
+                    MAX_GRAPH_REPLAY_PAGE_RECORDS_V1,
+                )
+                .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+                let page = authority
+                    .replay_page(&request, context)
+                    .map_err(map_publication_error)?;
+                for replay in page.records {
+                    if replay.publication.key.projection != *projection {
+                        return Err(GraphDbError::Corrupt {
+                            message: "legacy graph replay page escaped its projection".to_owned(),
+                        });
+                    }
+                    if selected.replace(replay).is_some() {
+                        return Ok(SealedStagingRelease::Retained(
+                            SealedStagingRetentionReason::NoVerifiedLease,
+                        ));
+                    }
+                }
+                let Some(continuation) = page.continuation else {
+                    break;
+                };
+                validate_replay_cursor(
+                    projection,
+                    after.as_ref(),
+                    &continuation,
+                    "legacy graph staging release",
+                )?;
+                after = Some(continuation);
+            }
+            let Some(replay) = selected else {
+                return Ok(SealedStagingRelease::Retained(
+                    SealedStagingRetentionReason::NoVerifiedLease,
+                ));
+            };
+            replay
+        };
         if !replay.publication.direct_dependency_generations.is_empty() {
             return Ok(SealedStagingRelease::Retained(
                 SealedStagingRetentionReason::DependencyBearing,
@@ -206,24 +266,46 @@ impl GraphDbRegistry {
                 SealedStagingRetentionReason::NoSealedCodeGenerationReplay,
             ));
         }
-        let locator = locator_from_key(&relational_head.key)?;
-        // The relational head is the authority for which sealed artifact may
-        // stand in for the staging rows: the runtime verifies the sealed
-        // store's recovered digest against it, opens the staging engine if
-        // it is hibernated, releases, and re-hibernates. Requiring an
-        // installed lease here left every scope a freshly opened daemon had
-        // not activated (only the memory head and the serving generation are)
-        // answering NoVerifiedLease forever, which is how a multi-gigabyte
-        // staging container accumulated fifteen sealed generations' rows.
+        let locator = locator_from_key(&replay.publication.key)?;
+        let relational_recovered_digest = relational_head
+            .as_ref()
+            .map_or(&replay.publication.expected_recovered_digest, |head| {
+                &head.recovered_digest
+            });
+        // Relational publication evidence is the authority for which sealed
+        // artifact may stand in for the staging rows: normally the verified
+        // head, or the unique completed replay for a shipped legacy
+        // per-generation projection after its head was drained. The runtime
+        // verifies the sealed store's recovered digest against that evidence,
+        // opens the staging engine if it is hibernated, releases, and
+        // re-hibernates. Requiring an installed lease here left every scope a
+        // freshly opened daemon had not activated (only the memory head and
+        // the serving generation are) answering NoVerifiedLease forever,
+        // which is how a multi-gigabyte staging container accumulated fifteen
+        // sealed generations' rows.
         if database.installed_verified_generation(&locator)?.is_none() {
-            let recovered = self.recover_verified_snapshot(
-                registration.clone(),
-                authority,
-                context,
-                projection,
-            );
-            if let Ok(snapshot) = recovered {
-                drop(snapshot);
+            if relational_head.is_some() {
+                let recovered = self.recover_verified_snapshot(
+                    registration.clone(),
+                    authority,
+                    context,
+                    projection,
+                );
+                if let Ok(snapshot) = recovered {
+                    drop(snapshot);
+                }
+            } else if let Some(commit) = database.staging_generation_commit(&locator)? {
+                let identity = GraphGenerationManifestIdentity::new(
+                    locator.projection.clone(),
+                    locator.generation.clone(),
+                    commit.source_generation,
+                    commit.watermark,
+                    Vec::new(),
+                );
+                database.open_sealed_generation_store_if_present(
+                    &identity,
+                    relational_recovered_digest,
+                )?;
             }
         }
         if let Some(installed) = database.installed_verified_generation(&locator)? {
@@ -231,7 +313,7 @@ impl GraphDbRegistry {
         }
         database.release_sealed_generation_staging_rows_with(
             &locator,
-            Some(relational_head.recovered_digest.as_str()),
+            Some(relational_recovered_digest.as_str()),
             &|| check_all(&registration, context, "generation.release_sealed_staging"),
         )
     }
