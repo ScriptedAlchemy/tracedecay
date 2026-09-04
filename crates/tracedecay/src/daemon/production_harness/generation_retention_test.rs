@@ -639,10 +639,20 @@ async fn linked_worktree_scope_retention_crash_replay_and_pure_inventory_journey
         selection, set_semantic_profile, wait_for_semantic_generation,
     };
 
-    let fixture_root = std::env::var_os("TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE")
+    // Same byte-pinned FastEmbed prerequisite as the semantic activation
+    // journey: skip explicitly rather than fail a lane that has no way to
+    // supply it.
+    let Some(fixture_root) = std::env::var_os("TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE")
         .map(std::path::PathBuf::from)
         .filter(|path| path.is_dir())
-        .expect("linked-worktree retention journey requires the distribution FastEmbed fixture");
+    else {
+        eprintln!(
+            "skipping the linked-worktree retention journey; prepare the \
+             distribution-acceptance package and set \
+             TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE"
+        );
+        return;
+    };
     let _profile = crate::config::PinnedUserDataDir::new();
     let lifecycle_root =
         tracedecay_semantic::default_lifecycle_root().expect("isolated lifecycle root");
