@@ -129,9 +129,7 @@ impl ExactSqlWriteAuthority for EvaluationSqlWriteAuthorityV1 {
         if self.active.load(Ordering::Acquire) {
             Ok(())
         } else {
-            Err(ExactSqlError::AuthorityDenied(
-                "isolated semantic evaluation authority is closed".to_owned(),
-            ))
+            Err(ExactSqlError::IsolatedSemanticEvaluationAuthorityClosed)
         }
     }
 }
@@ -1143,6 +1141,17 @@ mod settlement_tests {
         assert!(
             eval >= requested,
             "eval deadline must not shrink a longer caller deadline"
+        );
+    }
+
+    #[test]
+    fn closed_evaluation_write_authority_returns_typed_denial() {
+        let authority = EvaluationSqlWriteAuthorityV1 {
+            active: AtomicBool::new(false),
+        };
+        assert_eq!(
+            authority.verify(ExactSqlWriteIntent::Execute),
+            Err(ExactSqlError::IsolatedSemanticEvaluationAuthorityClosed)
         );
     }
 }
