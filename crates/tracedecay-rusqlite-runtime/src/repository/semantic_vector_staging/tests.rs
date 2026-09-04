@@ -496,8 +496,41 @@ fn cross_binding_reads_and_writes_are_denied_and_busy_is_preserved() {
         Err(SemanticVectorStagingStoreError::InvalidRequest(_))
     ));
     assert_eq!(
-        super::support::map_exact(ExactSqlError::Busy),
+        super::support::map_exact(
+            super::support::ExactSqlFailureOperation::BeginImmediate,
+            ExactSqlError::Busy,
+        ),
         SemanticVectorStagingStoreError::Busy
+    );
+}
+
+#[test]
+fn exact_sql_authority_denial_diagnostics_bound_reason_and_operation() {
+    assert_eq!(
+        super::support::classify_exact_sql_failure(
+            super::support::ExactSqlFailureOperation::Query,
+            &ExactSqlError::AuthorityDenied(
+                "isolated semantic evaluation authority is closed".to_owned(),
+            ),
+        ),
+        super::support::ExactSqlFailureDiagnostic {
+            operation: super::support::ExactSqlFailureOperation::Query,
+            kind: "authority_denied",
+            authority_denial_reason: Some(
+                super::support::ExactSqlAuthorityDeniedReason::IsolatedEvaluationClosed,
+            ),
+        }
+    );
+    assert_eq!(
+        super::support::classify_exact_sql_failure(
+            super::support::ExactSqlFailureOperation::Execute,
+            &ExactSqlError::AuthorityDenied("fixture-private denial detail".to_owned()),
+        ),
+        super::support::ExactSqlFailureDiagnostic {
+            operation: super::support::ExactSqlFailureOperation::Execute,
+            kind: "authority_denied",
+            authority_denial_reason: Some(super::support::ExactSqlAuthorityDeniedReason::Other,),
+        }
     );
 }
 

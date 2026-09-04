@@ -632,7 +632,10 @@ pub(super) fn begin_read_snapshot(
         Ok(snapshot) => Ok(snapshot),
         Err(error) => {
             ensure_live(context)?;
-            Err(map_exact(error))
+            Err(map_exact(
+                ExactSqlFailureOperation::BeginReadSnapshot,
+                error,
+            ))
         }
     }
 }
@@ -652,15 +655,21 @@ pub(super) fn begin_commit(
 pub(super) fn begin(
     handle: &ExactSqlHandle,
 ) -> SemanticVectorStagingStoreResult<ExactSqlTransaction> {
-    handle.begin_immediate().map_err(map_exact)
+    handle
+        .begin_immediate()
+        .map_err(|error| map_exact(ExactSqlFailureOperation::BeginImmediate, error))
 }
 
 pub(super) fn commit(tx: ExactSqlTransaction) -> SemanticVectorStagingStoreResult<()> {
-    tx.commit().map(|_| ()).map_err(map_exact)
+    tx.commit()
+        .map(|_| ())
+        .map_err(|error| map_exact(ExactSqlFailureOperation::Commit, error))
 }
 
 pub(super) fn rollback(tx: ExactSqlTransaction) -> SemanticVectorStagingStoreResult<()> {
-    tx.rollback().map(|_| ()).map_err(map_exact)
+    tx.rollback()
+        .map(|_| ())
+        .map_err(|error| map_exact(ExactSqlFailureOperation::Rollback, error))
 }
 
 pub(super) fn execute(
@@ -668,7 +677,8 @@ pub(super) fn execute(
     sql: &str,
     params: Vec<ExactSqlValue>,
 ) -> SemanticVectorStagingStoreResult<crate::exact_sql::ExactSqlExecuteResult> {
-    tx.execute(statement(sql, params)?).map_err(map_exact)
+    tx.execute(statement(sql, params)?)
+        .map_err(|error| map_exact(ExactSqlFailureOperation::Execute, error))
 }
 
 pub(super) fn query(
@@ -676,7 +686,9 @@ pub(super) fn query(
     sql: &str,
     params: Vec<ExactSqlValue>,
 ) -> SemanticVectorStagingStoreResult<ExactSqlRows> {
-    authority.run(statement(sql, params)?).map_err(map_exact)
+    authority
+        .run(statement(sql, params)?)
+        .map_err(|error| map_exact(ExactSqlFailureOperation::Query, error))
 }
 
 fn statement(
@@ -828,21 +840,85 @@ pub(super) fn corrupt(message: impl Into<String>) -> SemanticVectorStagingStoreE
     SemanticVectorStagingStoreError::Corrupt(message.into())
 }
 
-pub(super) fn map_exact(error: ExactSqlError) -> SemanticVectorStagingStoreError {
-    match &error {
-        ExactSqlError::Sqlite {
-            operation,
-            code,
-            extended_code,
-            ..
-        } => eprintln!(
-            "[tracedecay] event=semantic_vector_staging_exact_sql_failure kind=sqlite operation={operation} code={code:?} extended_code={extended_code:?}"
-        ),
-        error => eprintln!(
-            "[tracedecay] event=semantic_vector_staging_exact_sql_failure kind={}",
-            exact_sql_error_kind(error)
-        ),
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ExactSqlFailureOperation {
+    BeginReadSnapshot,
+    BeginImmediate,
+    Commit,
+    Rollback,
+    Execute,
+    Query,
+}
+
+impl ExactSqlFailureOperation {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::BeginReadSnapshot => "begin_read_snapshot",
+            Self::BeginImmediate => "begin_immediate",
+            Self::Commit => "commit",
+            Self::Rollback => "rollback",
+            Self::Execute => "execute",
+            Self::Query => "query",
+        }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ExactSqlAuthorityDeniedReason {
+    IsolatedEvaluationClosed,
+    Other,
+}
+
+impl ExactSqlAuthorityDeniedReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::IsolatedEvaluationClosed => "isolated_evaluation_closed",
+            Self::Other => "other",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ExactSqlFailureDiagnostic {
+    pub(super) operation: ExactSqlFailureOperation,
+    pub(super) kind: &'static str,
+    pub(super) authority_denial_reason: Option<ExactSqlAuthorityDeniedReason>,
+}
+
+pub(super) fn classify_exact_sql_failure(
+    operation: ExactSqlFailureOperation,
+    error: &ExactSqlError,
+) -> ExactSqlFailureDiagnostic {
+    let authority_denial_reason = match error {
+        ExactSqlError::AuthorityDenied(reason)
+            if reason == "isolated semantic evaluation authority is closed" =>
+        {
+            Some(ExactSqlAuthorityDeniedReason::IsolatedEvaluationClosed)
+        }
+        ExactSqlError::AuthorityDenied(_) => Some(ExactSqlAuthorityDeniedReason::Other),
+        _ => None,
+    };
+    ExactSqlFailureDiagnostic {
+        operation,
+        kind: exact_sql_error_kind(error),
+        authority_denial_reason,
+    }
+}
+
+pub(super) fn map_exact(
+    operation: ExactSqlFailureOperation,
+    error: ExactSqlError,
+) -> SemanticVectorStagingStoreError {
+    let diagnostic = classify_exact_sql_failure(operation, &error);
+    tracing::warn!(
+        event = "semantic_vector_staging_exact_sql_failure",
+        operation = diagnostic.operation.as_str(),
+        kind = diagnostic.kind,
+        authority_denial_reason = diagnostic
+            .authority_denial_reason
+            .map_or("not_applicable", ExactSqlAuthorityDeniedReason::as_str),
+        "semantic vector staging exact SQL operation failed"
+    );
     match error {
         ExactSqlError::AuthorityDenied(_) | ExactSqlError::AuthorityMismatch => {
             SemanticVectorStagingStoreError::AuthorityLost
