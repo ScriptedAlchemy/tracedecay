@@ -864,6 +864,19 @@ fn semantic_projection_pin_mismatch(
     ))
 }
 
+fn validate_evaluator_model_open_count(
+    model_open_count: usize,
+) -> Result<(), CandidateOutputError> {
+    hotpath::gauge!("search_eval_semantic_model_opens").set(model_open_count);
+    if model_open_count == 1 {
+        Ok(())
+    } else {
+        Err(CandidateOutputError::Contract(format!(
+            "native semantic qualification opened {model_open_count} model sessions; expected exactly one request-scoped session"
+        )))
+    }
+}
+
 impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationSnapshotAuthorityV1 {
     #[hotpath::measure(label = "daemon.semantic.evaluation.with_query_inputs")]
     fn with_query_inputs(
@@ -898,6 +911,10 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
             )
         })?;
         if !prepared.contains_key(context.code_generation) {
+            let query_factory = prepared
+                .values()
+                .next()
+                .map(|generation| generation.query_factory().clone());
             let runtime =
                 tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(
                     &self.project_root,
@@ -910,6 +927,7 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
             let generation = hotpath::measure_block!("search_eval.projection.clean", {
                 runtime.prepare_evaluation_generation_with_cache(
                     context.code,
+                    query_factory.as_ref(),
                     Arc::clone(&self.projection_batch_cache),
                     Arc::clone(&self.control)
                         as Arc<dyn tracedecay_semantic::SemanticEvaluationCancellationV1>,
@@ -971,6 +989,10 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
                 )
             })?;
             if !prepared.contains_key(context.code_generation) {
+                let query_factory = prepared
+                    .values()
+                    .next()
+                    .map(|generation| generation.query_factory().clone());
                 let runtime =
                     tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(
                         &self.project_root,
@@ -983,6 +1005,7 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
                 let generation = hotpath::measure_block!("search_eval.projection.clean", {
                     runtime.prepare_evaluation_generation_with_cache(
                         context.code,
+                        query_factory.as_ref(),
                         Arc::clone(&self.projection_batch_cache),
                         Arc::clone(&self.control)
                             as Arc<dyn tracedecay_semantic::SemanticEvaluationCancellationV1>,
@@ -1143,6 +1166,7 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
                         .clone()
                 }
             };
+            validate_evaluator_model_open_count(prepared.query_factory().model_open_count())?;
             resources
         } else {
             return Ok(SemanticNativeStageResultV1::Pending {
@@ -1576,6 +1600,13 @@ fn read_linux_process_lifetime_peak_rss_bytes() -> Option<u64> {
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+
+    #[test]
+    fn native_qualification_requires_exactly_one_model_open() {
+        assert!(validate_evaluator_model_open_count(1).is_ok());
+        assert!(validate_evaluator_model_open_count(0).is_err());
+        assert!(validate_evaluator_model_open_count(2).is_err());
+    }
 
     #[test]
     fn packaged_candidate_uses_its_evaluated_semantic_calibration() {

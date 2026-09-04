@@ -431,6 +431,7 @@ pub struct SemanticEvaluationProjectionResourcesV1 {
 )]
 pub fn prepare_semantic_evaluation_projection(
     artifact: LoadedSemanticArtifactV1,
+    request_query_factory: Option<&SemanticEvaluationQueryFactoryV1>,
     request: ProjectionBatchRequestV1,
     canonical_chunks: &[Arc<CodeSearchChunkV1>],
     documents: Arc<EmbeddingDocumentComposerV1>,
@@ -448,17 +449,35 @@ pub fn prepare_semantic_evaluation_projection(
     let authority = artifact.into_authority();
     let factory: SharedEmbeddingRuntimeFactory<ProductionEmbeddingRuntime> =
         production_embedding_runtime_factory();
-    let runtime = SemanticRuntimeService::new_owned(
-        Arc::clone(&authority),
-        factory,
-        SessionPoolConfigV1 {
-            max_sessions: resources.max_sessions,
-            max_queued_waiters: 0,
-            idle_timeout: std::time::Duration::from_mins(5),
-            memory_ceiling_bytes: resources.memory_ceiling_bytes,
-        },
-    )
-    .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?;
+    let (runtime, query_factory) = match request_query_factory {
+        Some(query_factory) => {
+            let (_, active_authority, _) = query_factory.inner.runtime().active_snapshot();
+            if active_authority.as_ref() != authority.as_ref() {
+                return Err(SemanticRuntimeScheduleFailureV1::Projection);
+            }
+            (
+                Arc::clone(query_factory.inner.runtime()),
+                query_factory.clone(),
+            )
+        }
+        None => {
+            let runtime = SemanticRuntimeService::new_owned(
+                Arc::clone(&authority),
+                factory,
+                SessionPoolConfigV1 {
+                    max_sessions: resources.max_sessions,
+                    max_queued_waiters: 0,
+                    idle_timeout: std::time::Duration::from_mins(5),
+                    memory_ceiling_bytes: resources.memory_ceiling_bytes,
+                },
+            )
+            .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?;
+            let query_factory = SemanticEvaluationQueryFactoryV1::from_runtime(
+                PooledSemanticQueryEmbedderFactory::new(Arc::clone(&runtime)),
+            );
+            (runtime, query_factory)
+        }
+    };
     let progress = Arc::new(SemanticRuntimeScheduleCancellationV1::new_linked(
         request.changes.added_or_changed.len().max(1) as u64,
         Arc::clone(&cancellation),
@@ -485,30 +504,20 @@ pub fn prepare_semantic_evaluation_projection(
     )
     .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
     drop(encoder);
-    runtime
-        .warm_query_session()
-        .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?;
     Ok(PreparedSemanticEvaluationProjectionV1 {
-        query_factory: SemanticEvaluationQueryFactoryV1::from_runtime(
-            PooledSemanticQueryEmbedderFactory::new(runtime),
-        ),
+        query_factory,
         prepared,
     })
 }
 
 /// Execute one genuine model batch and then cancel before a complete
 /// evaluator projection can be returned or published.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "each argument is a distinct caller-owned authority of one evaluator projection"
-)]
 pub fn measure_semantic_evaluation_projection_cancellation(
     artifact: LoadedSemanticArtifactV1,
+    query_factory: &SemanticEvaluationQueryFactoryV1,
     request: ProjectionBatchRequestV1,
     canonical_chunks: &[Arc<CodeSearchChunkV1>],
     documents: Arc<EmbeddingDocumentComposerV1>,
-    max_sessions: usize,
-    memory_ceiling_bytes: u64,
     cache: &SemanticEvaluationProjectionBatchCacheV1,
     cancellation: Arc<dyn SemanticEvaluationCancellationV1>,
 ) -> Result<SemanticEvaluationProjectionCancellationV1, SemanticRuntimeScheduleFailureV1> {
@@ -522,19 +531,11 @@ pub fn measure_semantic_evaluation_projection_cancellation(
     }
     let chunks_added_or_changed = request.changes.added_or_changed.len() as u64;
     let authority = artifact.into_authority();
-    let factory: SharedEmbeddingRuntimeFactory<ProductionEmbeddingRuntime> =
-        production_embedding_runtime_factory();
-    let runtime = SemanticRuntimeService::new_owned(
-        Arc::clone(&authority),
-        factory,
-        SessionPoolConfigV1 {
-            max_sessions,
-            max_queued_waiters: 0,
-            idle_timeout: std::time::Duration::from_mins(5),
-            memory_ceiling_bytes,
-        },
-    )
-    .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?;
+    let (_, active_authority, _) = query_factory.inner.runtime().active_snapshot();
+    if active_authority.as_ref() != authority.as_ref() {
+        return Err(SemanticRuntimeScheduleFailureV1::Projection);
+    }
+    let runtime = Arc::clone(query_factory.inner.runtime());
     let progress = Arc::new(SemanticRuntimeScheduleCancellationV1::new_linked(
         request.changes.added_or_changed.len() as u64,
         Arc::clone(&cancellation),
@@ -671,6 +672,11 @@ impl SemanticEvaluationQueryFactoryV1 {
 
     pub fn cold_load_micros(&self) -> Option<u64> {
         self.inner.runtime().stats().last_cold_load_micros
+    }
+
+    /// Number of model sessions opened by this request-scoped runtime.
+    pub fn model_open_count(&self) -> usize {
+        self.inner.runtime().stats().sessions_opened
     }
 }
 
