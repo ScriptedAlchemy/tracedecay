@@ -453,10 +453,10 @@ impl GraphVectorGenerationStoreV1 {
             .map_err(map_graph_error)?;
         if snapshot.verified_head() != verified_head.as_ref() {
             return Err(map_graph_error(GraphDbError::conflict_observed(
-                    "usecases.store.read_only_generation.verified_head",
-                    format!("verified_head={verified_head:?}"),
-                    format!("verified_head={:?}", snapshot.verified_head()),
-                )));
+                "usecases.store.read_only_generation.verified_head",
+                format!("verified_head={verified_head:?}"),
+                format!("verified_head={:?}", snapshot.verified_head()),
+            )));
         }
         Ok(Some(Self {
             runtime,
@@ -478,10 +478,10 @@ impl GraphVectorGenerationStoreV1 {
         match current.as_ref() {
             Some(existing) if existing != &descriptor => {
                 Err(map_graph_error(GraphDbError::conflict_observed(
-                        "usecases.store.configure_stage",
-                        format!("descriptor={existing:?}"),
-                        format!("descriptor={descriptor:?}"),
-                    )))
+                    "usecases.store.configure_stage",
+                    format!("descriptor={existing:?}"),
+                    format!("descriptor={descriptor:?}"),
+                )))
             }
             Some(_) => Ok(()),
             None => {
@@ -695,10 +695,10 @@ impl GraphVectorGenerationStoreV1 {
             .map_err(map_graph_error)?;
         if snapshot.verified_head() != verified_head.as_ref() {
             return Err(map_graph_error(GraphDbError::conflict_observed(
-                    "usecases.store.load_published_generation.verified_head",
-                    format!("verified_head={verified_head:?}"),
-                    format!("verified_head={:?}", snapshot.verified_head()),
-                )));
+                "usecases.store.load_published_generation.verified_head",
+                format!("verified_head={verified_head:?}"),
+                format!("verified_head={:?}", snapshot.verified_head()),
+            )));
         }
         Ok(Some(SemanticVectorVerifiedReadV1::new(snapshot)))
     }
