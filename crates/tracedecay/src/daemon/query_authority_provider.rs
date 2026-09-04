@@ -203,6 +203,59 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
             // collapsing every cause into one `Unavailable`.
             type ObserverError = RetrievalProfileActivationObserverErrorV1;
             let observed = async {
+                if semantic_enabled && !prepared_redundancy.has_active_authority() {
+                    return Err(("prepared_redundancy", ObserverError::Rejected));
+                }
+                let serving = registry
+                    .serving_code_scope(&project_root)
+                    .await
+                    .ok_or(("serving_code_scope", ObserverError::Unavailable))?;
+                if serving.repository_id != scope.repository_id
+                    || serving.worktree_id != scope.worktree_id
+                {
+                    return Err(("serving_scope_mismatch", ObserverError::Rejected));
+                }
+                let generation = serving
+                    .serving_generation
+                    .ok_or(("serving_generation", ObserverError::Unavailable))?;
+                let cursor_keys = Arc::new(
+                    session_db
+                        .load_session_cursor_key_provider_result()
+                        .await
+                        .map_err(|_| ("session_cursor_keys", ObserverError::Unavailable))?,
+                );
+                let prepared = provider
+                    .prepare_after_successful_activation(
+                        session_db.binding().shard_id.profile_id.clone(),
+                        scope.clone(),
+                        committed.state.clone(),
+                        cursor_keys,
+                        &generation.manifest().privacy_domain,
+                    )
+                    .map_err(|error| {
+                        (
+                            "prepare_after_successful_activation",
+                            map_update_observer_error(error),
+                        )
+                    })?;
+                let semantic_authority = if semantic_enabled {
+                    let committed = committed.clone();
+                    let authority = task::spawn_blocking(move || {
+                        tracedecay_code_index_runtime::code_index_scheduler::semantic_query_runtime::SemanticQueryAuthorityV1::from_committed(
+                            committed,
+                        )
+                    })
+                    .await
+                    .map_err(|_| ("semantic_query_authority_join", ObserverError::Unavailable))?
+                    .map_err(|_| ("semantic_query_authority", ObserverError::Rejected))?;
+                    Some(Arc::new(authority))
+                } else {
+                    None
+                };
+                // Cache observations are an exact CAS over the live semantic
+                // pointer and query-runtime binding. All of the preparation
+                // above may await or warm shared state, so observe only when
+                // the coherent install is ready to consume this snapshot.
                 let prepared_cache = if semantic_enabled {
                     let pins = committed
                         .current_activation
@@ -271,52 +324,6 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
                                 ))?,
                         )
                     }
-                } else {
-                    None
-                };
-                let serving = registry
-                    .serving_code_scope(&project_root)
-                    .await
-                    .ok_or(("serving_code_scope", ObserverError::Unavailable))?;
-                if serving.repository_id != scope.repository_id
-                    || serving.worktree_id != scope.worktree_id
-                {
-                    return Err(("serving_scope_mismatch", ObserverError::Rejected));
-                }
-                let generation = serving
-                    .serving_generation
-                    .ok_or(("serving_generation", ObserverError::Unavailable))?;
-                let cursor_keys = Arc::new(
-                    session_db
-                        .load_session_cursor_key_provider_result()
-                        .await
-                        .map_err(|_| ("session_cursor_keys", ObserverError::Unavailable))?,
-                );
-                let prepared = provider
-                    .prepare_after_successful_activation(
-                        session_db.binding().shard_id.profile_id.clone(),
-                        scope.clone(),
-                        committed.state.clone(),
-                        cursor_keys,
-                        &generation.manifest().privacy_domain,
-                    )
-                    .map_err(|error| {
-                        (
-                            "prepare_after_successful_activation",
-                            map_update_observer_error(error),
-                        )
-                    })?;
-                let semantic_authority = if semantic_enabled {
-                    let committed = committed.clone();
-                    let authority = task::spawn_blocking(move || {
-                        tracedecay_code_index_runtime::code_index_scheduler::semantic_query_runtime::SemanticQueryAuthorityV1::from_committed(
-                            committed,
-                        )
-                    })
-                    .await
-                    .map_err(|_| ("semantic_query_authority_join", ObserverError::Unavailable))?
-                    .map_err(|_| ("semantic_query_authority", ObserverError::Rejected))?;
-                    Some(Arc::new(authority))
                 } else {
                     None
                 };
