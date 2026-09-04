@@ -38,6 +38,15 @@ pub enum CodeIndexAutomaticAdmissionV1 {
     LinkedWorktreeDisabled,
 }
 
+/// Who asked for this activation: the daemon's own watch/hook plumbing, or an
+/// operator naming the route. Only the former is subject to
+/// [`CodeIndexAutomaticAdmissionV1`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActivationDemandV1 {
+    Automatic,
+    Explicit,
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct CodeIndexActivationHookBatchV1 {
     pub paths: Vec<String>,
@@ -220,9 +229,27 @@ impl CodeIndexActivationV1 {
         self.activate()
     }
 
-    #[hotpath::measure(label = "daemon.code_index.activation.activate")]
     pub fn activate(&self) -> bool {
-        if self.automatic_admission != CodeIndexAutomaticAdmissionV1::Admitted
+        self.activate_with_demand(ActivationDemandV1::Automatic)
+    }
+
+    /// Start the demand-driven mount for a reconciliation an operator asked
+    /// for by name (`tracedecay init`, `tracedecay sync`, the daemon-only
+    /// `tracedecay_admin_sync` entry point).
+    ///
+    /// [`CodeIndexAutomaticAdmissionV1`] answers "may the daemon start
+    /// indexing this route on its own?" — it is a watcher policy, not an
+    /// authorization boundary. Explicit demand skips exactly that question and
+    /// nothing else: route liveness, the indexing identity check inside the
+    /// mount, and the activation state machine all still apply.
+    pub fn activate_on_explicit_demand(&self) -> bool {
+        self.activate_with_demand(ActivationDemandV1::Explicit)
+    }
+
+    #[hotpath::measure(label = "daemon.code_index.activation.activate")]
+    fn activate_with_demand(&self, demand: ActivationDemandV1) -> bool {
+        if (demand == ActivationDemandV1::Automatic
+            && self.automatic_admission != CodeIndexAutomaticAdmissionV1::Admitted)
             || !self.route_is_live()
         {
             return false;
@@ -354,6 +381,31 @@ impl CodeIndexActivationV1 {
         future = true
     )]
     pub async fn notify_hook_overflow(&self, project_root: &Path) -> bool {
+        self.request_reconciliation(project_root, ActivationDemandV1::Automatic)
+            .await
+    }
+
+    /// Explicit operator demand for one authoritative worktree reconciliation.
+    ///
+    /// Same bounded pre-mount queue and same forwarding to a mounted scheduler
+    /// owner as [`Self::notify_hook_overflow`]; the only difference is that a
+    /// route the watcher is not allowed to index automatically (a linked
+    /// worktree under `sync.watch_linked_worktrees = false`) still honours a
+    /// reconciliation the operator asked for by name.
+    #[hotpath::measure(
+        label = "daemon.code_index.activation.notify_explicit_reconciliation",
+        future = true
+    )]
+    pub async fn notify_explicit_reconciliation(&self, project_root: &Path) -> bool {
+        self.request_reconciliation(project_root, ActivationDemandV1::Explicit)
+            .await
+    }
+
+    async fn request_reconciliation(
+        &self,
+        project_root: &Path,
+        demand: ActivationDemandV1,
+    ) -> bool {
         if !self.route_is_live() || !self.accepts_root(project_root) {
             return false;
         }
@@ -375,7 +427,7 @@ impl CodeIndexActivationV1 {
         match direct {
             Some(batch) if self.route_is_live() => (self.hint_sink)(batch).await,
             Some(_) => false,
-            None => self.activate(),
+            None => self.activate_with_demand(demand),
         }
     }
 

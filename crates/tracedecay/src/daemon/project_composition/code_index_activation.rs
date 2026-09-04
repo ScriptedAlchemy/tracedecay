@@ -392,8 +392,19 @@ pub(super) fn code_index_hook_sink(
     sink
 }
 
-/// MCP-facing reconcile sink: an overflowed hook batch asks the activation
-/// owner for a full reconcile instead of enumerating paths.
+/// MCP-facing reconcile sink: a caller that has already decided the whole
+/// worktree must be reconciled asks the activation owner for that pass instead
+/// of enumerating paths.
+///
+/// This is the *explicit demand* channel — `tracedecay init` / `tracedecay
+/// sync` through `tracedecay_admin_sync`, and the hook effects that have
+/// concluded a full reconcile is required. It is therefore not subject to
+/// `CodeIndexAutomaticAdmissionV1`, which answers only "may the daemon start
+/// indexing this route on its own?" and is derived from
+/// `sync.watch_linked_worktrees` — a filesystem-watcher policy. Watch-driven
+/// hints keep that gate: they arrive through [`code_index_hook_sink`] and
+/// [`code_index_freshness_probe_sink`], which still call the automatic
+/// entry points.
 pub(super) fn code_index_reconcile_sink(
     schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
     activation: Arc<code_index_scheduler::CodeIndexActivationV1>,
@@ -405,7 +416,7 @@ pub(super) fn code_index_reconcile_sink(
             if schedulers.notify_hook_overflow(&root).await {
                 true
             } else {
-                activation.notify_hook_overflow(&root).await
+                activation.notify_explicit_reconciliation(&root).await
             }
         })
     });
@@ -524,5 +535,65 @@ mod tests {
         })
         .await
         .expect("pre-mount reconcile must mount the scheduler and flush the overflow request");
+    }
+
+    /// A linked worktree under the default `sync.watch_linked_worktrees = false`
+    /// carries `LinkedWorktreeDisabled` automatic admission, which is the
+    /// filesystem-watcher policy. `tracedecay init` inside that worktree still
+    /// asks for a reconcile by name through this sink, and that demand must
+    /// mount the scheduler: otherwise a daemon-first init from a linked
+    /// worktree reports "code-index reconciliation requested" while nothing is
+    /// ever indexed.
+    #[tokio::test]
+    async fn explicit_reconcile_overrides_linked_worktree_watch_policy() {
+        let repository = repository();
+        let root = repository
+            .path()
+            .canonicalize()
+            .expect("canonical repository root");
+        let mount_attempts = Arc::new(AtomicUsize::new(0));
+        let mount: code_index_scheduler::CodeIndexActivationMountV1 = {
+            let mount_attempts = Arc::clone(&mount_attempts);
+            Arc::new(move || {
+                let mount_attempts = Arc::clone(&mount_attempts);
+                Box::pin(async move {
+                    mount_attempts.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            })
+        };
+        let hint_sink: code_index_scheduler::CodeIndexActivationHintSinkV1 =
+            Arc::new(move |_batch| Box::pin(async move { true }));
+        let activation = Arc::new(
+            code_index_scheduler::CodeIndexActivationV1::new_with_admission(
+                &root,
+                Arc::new(AtomicBool::new(true)),
+                CancellationToken::new(),
+                code_index_scheduler::CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled,
+                mount,
+                hint_sink,
+            ),
+        );
+        // The watch-driven hint path keeps the gate.
+        assert!(
+            !activation
+                .notify_hook_paths(&root, vec!["lib.rs".to_owned()])
+                .await,
+            "a watch-driven hint must still honour the linked-worktree watch policy"
+        );
+
+        let registry = code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1);
+        let sink = code_index_reconcile_sink(registry, Arc::clone(&activation));
+        assert!(
+            sink(root.clone()).await,
+            "explicit reconcile demand must be accepted on a linked worktree"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while mount_attempts.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("explicit reconcile must mount the scheduler on a linked worktree");
     }
 }
