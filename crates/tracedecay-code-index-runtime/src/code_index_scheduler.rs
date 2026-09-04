@@ -152,6 +152,28 @@ const TEXT_ARTIFACT_PAGE_BYTES_V1: usize = 4 * 1024 * 1024;
 /// `CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1` ledger (see
 /// `TEXT_ARTIFACT_BATCH_BYTES_V1` below for the unchanged byte bound that
 /// still caps any single batch regardless of this page count).
+///
+/// Re-measured on this repository's 4925-file checkout (2.6GiB staging
+/// artifact, ~3900 committed pages, one `tracedecay status` sample every 10s
+/// through a `scripts/ci-pr-dogfood-smoke.sh` run) before raising anything
+/// further: the per-transaction cost is not fully fixed. At a constant
+/// 64-page batch `last_commit_latency_micros` rose from 567ms at 64 committed
+/// pages to 4881ms at 2006 in a `dev`-profile binary, and from 861ms at 115
+/// pages to ~1686ms at 3678 in a `release` binary -- with `journal_mode=DELETE`
+/// and a 64MiB page cache, each commit journals and re-flushes every
+/// posting/exact index page the batch dirtied, and that page set widens as the
+/// B-trees outgrow the cache. Even so the whole batch phase was only ~66s of
+/// the 262s source phase (release) / ~118s of 403s (dev), so raising the page
+/// cap again is worth at most a tenth of one phase and was deliberately not
+/// done here. Both timings are dwarfed by the code-graph activation that
+/// strict readiness also requires, which is where the dogfood budget actually
+/// goes. Whoever does raise it must raise the caller hint with it
+/// (`registry::TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1`): the sealed source
+/// offers `min(hint, TEXT_ARTIFACT_BATCH_PAGES_V1)` pages, so a stale hint
+/// silently keeps the old batch size. Offering more pages is otherwise safe by
+/// construction -- [`CodeLexicalArtifactBuilderV1::prepare_admissible_page_prefix`]
+/// returns an accepted prefix clamped against the row cap and the memory
+/// ledger, so the cap is an upper offer, never a reservation.
 const TEXT_ARTIFACT_BATCH_PAGES_V1: usize = 64;
 const TEXT_ARTIFACT_BATCH_BYTES_V1: usize = 64 * 1024 * 1024;
 /// One synchronous activation advances only this many page/finalization
@@ -3806,9 +3828,37 @@ impl LatestCodeTextGenerationV1 {
             snapshot.current_batch_pages = current_batch_pages;
             snapshot.current_batch_payload_bytes = current_batch_payload_bytes;
             snapshot.elapsed_micros = elapsed_micros;
-            snapshot.blocked_reason = None;
+            // Entering a phase is not progress: every retry wake re-publishes
+            // its phase before it re-attempts the work that was refused, so
+            // clearing here erased the reason between two identical refusals
+            // and status reported `blocked_reason: null` throughout a stall.
+            // A committed boundary is the honest clear -- it builds a fresh
+            // snapshot with no blocked reason -- and only that runs after work
+            // actually landed.
             let _ = slot.publish(generation_id, self.text_progress_owner_epoch, snapshot);
         });
+    }
+
+    /// Publish the typed reason a text-artifact wake could not advance.
+    ///
+    /// One classifier for both halves of the build: an under-reported refusal
+    /// in either the batch loop or finalization leaves status showing a phase
+    /// that never changes and `blocked_reason: null`, which reads as slow
+    /// progress rather than a refusal. Anything not classified here is a
+    /// deterministic contract or corruption failure, which the caller
+    /// surfaces as a hard error rather than a stalled phase.
+    fn publish_text_artifact_block(&self, error: &CodeLexicalArtifactErrorV1) {
+        match error {
+            CodeLexicalArtifactErrorV1::Unreserved(_) => {
+                self.publish_text_progress_blocked(CodeIndexBuildBlockedReasonV1::ResidentMemory);
+            }
+            CodeLexicalArtifactErrorV1::Io(_) | CodeLexicalArtifactErrorV1::Missing(_) => {
+                self.publish_text_progress_blocked(
+                    CodeIndexBuildBlockedReasonV1::ArtifactStoreUnavailable,
+                );
+            }
+            _ => {}
+        }
     }
 
     fn publish_text_progress_blocked(&self, reason: CodeIndexBuildBlockedReasonV1) {
@@ -4231,22 +4281,10 @@ impl LatestCodeTextGenerationV1 {
                     hotpath::gauge!("query.artifact.batch.refusal_total").inc(1u64);
                     return Err(map_text_artifact_error(error));
                 }
-                Ok(Err(error @ CodeLexicalArtifactErrorV1::Unreserved(_))) => {
-                    self.publish_text_progress_blocked(
-                        CodeIndexBuildBlockedReasonV1::ResidentMemory,
-                    );
+                Ok(Err(error)) => {
+                    self.publish_text_artifact_block(&error);
                     return Err(map_text_artifact_error(error));
                 }
-                Ok(Err(
-                    error @ (CodeLexicalArtifactErrorV1::Io(_)
-                    | CodeLexicalArtifactErrorV1::Missing(_)),
-                )) => {
-                    self.publish_text_progress_blocked(
-                        CodeIndexBuildBlockedReasonV1::ArtifactStoreUnavailable,
-                    );
-                    return Err(map_text_artifact_error(error));
-                }
-                Ok(Err(error)) => return Err(map_text_artifact_error(error)),
                 Err(error) => return Err(map_sealed_page_source_error(error)),
             };
             match admitted {
@@ -4339,7 +4377,20 @@ impl LatestCodeTextGenerationV1 {
             artifact_build
                 .builder
                 .advance_finalization(source_receipt, finalization_rows, control);
-        let finalized = finalized.map_err(map_text_artifact_error)?;
+        // A finalization wake is what status reports as `index_build` and
+        // `verification`. Returning its refusal bare left those phases
+        // indistinguishable from progress: a build stalled on resident-memory
+        // admission published `phase=verification` with `blocked_reason=null`
+        // forever, which is exactly how the PR-dogfood readiness timeout
+        // presented. Classify the refusal the way the batch path already does
+        // so the phase says why it cannot advance.
+        let finalized = match finalized {
+            Ok(step) => step,
+            Err(error) => {
+                self.publish_text_artifact_block(&error);
+                return Err(map_text_artifact_error(error));
+            }
+        };
         let finalization_phase = match finalized {
             CodeLexicalArtifactFinalizationStepV1::Pending { phase, .. } => {
                 let phase = match phase {
