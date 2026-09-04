@@ -883,6 +883,14 @@ pub(super) struct ExactSqlFailureDiagnostic {
     pub(super) operation: ExactSqlFailureOperation,
     pub(super) kind: &'static str,
     pub(super) authority_denial_reason: Option<ExactSqlAuthorityDeniedReason>,
+    pub(super) sqlite: Option<ExactSqliteFailureDiagnostic>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ExactSqliteFailureDiagnostic {
+    pub(super) operation: &'static str,
+    pub(super) code: Option<i32>,
+    pub(super) extended_code: Option<i32>,
 }
 
 pub(super) fn classify_exact_sql_failure(
@@ -890,18 +898,30 @@ pub(super) fn classify_exact_sql_failure(
     error: &ExactSqlError,
 ) -> ExactSqlFailureDiagnostic {
     let authority_denial_reason = match error {
-        ExactSqlError::AuthorityDenied(reason)
-            if reason == "isolated semantic evaluation authority is closed" =>
-        {
+        ExactSqlError::IsolatedSemanticEvaluationAuthorityClosed => {
             Some(ExactSqlAuthorityDeniedReason::IsolatedEvaluationClosed)
         }
         ExactSqlError::AuthorityDenied(_) => Some(ExactSqlAuthorityDeniedReason::Other),
+        _ => None,
+    };
+    let sqlite = match error {
+        ExactSqlError::Sqlite {
+            operation,
+            code,
+            extended_code,
+            ..
+        } => Some(ExactSqliteFailureDiagnostic {
+            operation,
+            code: *code,
+            extended_code: *extended_code,
+        }),
         _ => None,
     };
     ExactSqlFailureDiagnostic {
         operation,
         kind: exact_sql_error_kind(error),
         authority_denial_reason,
+        sqlite,
     }
 }
 
@@ -910,19 +930,32 @@ pub(super) fn map_exact(
     error: ExactSqlError,
 ) -> SemanticVectorStagingStoreError {
     let diagnostic = classify_exact_sql_failure(operation, &error);
-    tracing::warn!(
-        event = "semantic_vector_staging_exact_sql_failure",
-        operation = diagnostic.operation.as_str(),
-        kind = diagnostic.kind,
-        authority_denial_reason = diagnostic
-            .authority_denial_reason
-            .map_or("not_applicable", ExactSqlAuthorityDeniedReason::as_str),
-        "semantic vector staging exact SQL operation failed"
-    );
+    let authority_denial_reason = diagnostic
+        .authority_denial_reason
+        .map_or("not_applicable", ExactSqlAuthorityDeniedReason::as_str);
+    match diagnostic.sqlite {
+        Some(sqlite) => tracing::warn!(
+            event = "semantic_vector_staging_exact_sql_failure",
+            stage_operation = diagnostic.operation.as_str(),
+            kind = diagnostic.kind,
+            authority_denial_reason,
+            operation = sqlite.operation,
+            code = ?sqlite.code,
+            extended_code = ?sqlite.extended_code,
+            "semantic vector staging exact SQL operation failed"
+        ),
+        None => tracing::warn!(
+            event = "semantic_vector_staging_exact_sql_failure",
+            stage_operation = diagnostic.operation.as_str(),
+            kind = diagnostic.kind,
+            authority_denial_reason,
+            "semantic vector staging exact SQL operation failed"
+        ),
+    }
     match error {
-        ExactSqlError::AuthorityDenied(_) | ExactSqlError::AuthorityMismatch => {
-            SemanticVectorStagingStoreError::AuthorityLost
-        }
+        ExactSqlError::AuthorityDenied(_)
+        | ExactSqlError::IsolatedSemanticEvaluationAuthorityClosed
+        | ExactSqlError::AuthorityMismatch => SemanticVectorStagingStoreError::AuthorityLost,
         ExactSqlError::Busy => SemanticVectorStagingStoreError::Busy,
         _ => SemanticVectorStagingStoreError::Infrastructure,
     }
@@ -932,6 +965,7 @@ fn exact_sql_error_kind(error: &ExactSqlError) -> &'static str {
     match error {
         ExactSqlError::AuthorityMismatch => "authority_mismatch",
         ExactSqlError::AuthorityDenied(_) => "authority_denied",
+        ExactSqlError::IsolatedSemanticEvaluationAuthorityClosed => "authority_denied",
         ExactSqlError::InvalidAttachment => "invalid_attachment",
         ExactSqlError::InvalidStatement => "invalid_statement",
         ExactSqlError::RequestLimitExceeded => "request_limit_exceeded",
