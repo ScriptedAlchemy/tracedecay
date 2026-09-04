@@ -9,8 +9,8 @@ use std::time::Duration;
 use tokio::task::JoinHandle;
 use tracedecay_application::ResolvedScope;
 use tracedecay_domain::{
-    CalibrationProfileId, CodeGenerationId, ComponentRevision, SemanticSearchIndexProfileV1,
-    VectorGenerationIdV1, canonical_sha256,
+    CalibrationProfileId, CodeGenerationId, ComponentRevision, ManifestDigest,
+    SemanticSearchIndexProfileV1, VectorGenerationIdV1, canonical_sha256,
 };
 use tracedecay_query::retrieval::semantic::SemanticCalibrationProfileV1;
 use tracedecay_runtime_core::cancellation::CancellationToken;
@@ -33,9 +33,9 @@ use crate::search_eval::{
 };
 use tracedecay_usecases::semantic_runtime::{
     SemanticActivationCoordinationErrorV1, SemanticEvaluationAuthorityPublicationV1,
-    SemanticEvaluationProfileCandidateV1, SemanticEvaluationPublicationSnapshotPortV1,
-    SemanticEvaluationPublicationSnapshotV1, SemanticEvaluationSnapshotPortV1,
-    SemanticRuntimeBackendErrorV1, SemanticRuntimeFuture,
+    SemanticEvaluationCurrentGenerationSnapshotV1, SemanticEvaluationProfileCandidateV1,
+    SemanticEvaluationPublicationSnapshotPortV1, SemanticEvaluationPublicationSnapshotV1,
+    SemanticEvaluationSnapshotPortV1, SemanticRuntimeBackendErrorV1, SemanticRuntimeFuture,
 };
 use tracedecay_usecases::store::vector_generations::{
     BaseGenerationIncompatibilityV1, GraphVectorGenerationStoreV1, PublishedVectorGenerationV1,
@@ -217,6 +217,15 @@ fn coordination_error_from_runtime(
     }
 }
 
+fn vector_runtime_identity_matches(
+    expected_generation: &VectorGenerationIdV1,
+    expected_source_manifest: &ManifestDigest,
+    observed: &SemanticEvaluationCurrentGenerationSnapshotV1,
+) -> bool {
+    &observed.vector_generation_id == expected_generation
+        && &observed.source_manifest_digest == expected_source_manifest
+}
+
 pub async fn build_daemon_semantic_evaluation_candidate(
     project_root: &Path,
     scope: &ResolvedScope,
@@ -306,13 +315,13 @@ pub async fn build_daemon_semantic_evaluation_candidate(
         );
         return Err(SemanticActivationCoordinationErrorV1::Conflict);
     };
-    if vector.source_generation() != &snapshot.source_generation
-        || vector.source_manifest_digest() != &snapshot.source_manifest_digest
-    {
+    // The vector manifest identifies the canonical semantic chunk corpus,
+    // while the code snapshot manifest identifies the projection change set.
+    // Their digests are intentionally different authorities; the shared code
+    // generation binds both without comparing unlike manifest domains.
+    if vector.source_generation() != &snapshot.source_generation {
         tracing::warn!(
             source_generation_matches = vector.source_generation() == &snapshot.source_generation,
-            source_manifest_matches =
-                vector.source_manifest_digest() == &snapshot.source_manifest_digest,
             "semantic evaluation candidate vector identity conflicts with the code snapshot"
         );
         return Err(SemanticActivationCoordinationErrorV1::Conflict);
@@ -336,10 +345,34 @@ pub async fn build_daemon_semantic_evaluation_candidate(
         );
         coordination_error_from_runtime(error)
     })?;
-    hotpath::measure_block!(
+    let candidate = hotpath::measure_block!(
         "daemon.semantic.evaluation.candidate.materialize",
         daemon_semantic_evaluation_candidate(evaluated_profile_id, &code, &vector, resources)
-    )
+    )?;
+    let semantic = candidate.compatibility.semantic.as_ref().ok_or_else(|| {
+        SemanticActivationCoordinationErrorV1::RejectedDetail(
+            "semantic evaluation candidate omits semantic compatibility".to_owned(),
+        )
+    })?;
+    let runtime_vector = control
+        .interruptible(hotpath::future!(
+            runtime.inspect_evaluation_current_generation_snapshot(
+                semantic,
+                &snapshot.source_generation,
+                vector.source_manifest_digest(),
+            ),
+            label = "daemon.semantic.evaluation.candidate.verify_vector_runtime"
+        ))
+        .await?
+        .map_err(coordination_error_from_runtime)?;
+    if !vector_runtime_identity_matches(
+        vector.generation_id(),
+        vector.source_manifest_digest(),
+        &runtime_vector,
+    ) {
+        return Err(SemanticActivationCoordinationErrorV1::Conflict);
+    }
+    Ok(candidate)
 }
 
 fn record_vector_generation_failure(error: &VectorGenerationStoreErrorV1) {
@@ -530,6 +563,7 @@ fn daemon_semantic_evaluation_candidate(
             }),
             rerank: None,
         },
+        semantic_source_manifest_digest: Some(vector.source_manifest_digest().clone()),
     })
 }
 
@@ -569,9 +603,15 @@ impl Default for SemanticEvaluationWorkersV1 {
     }
 }
 
-#[derive(Default)]
 pub struct DaemonSemanticEvaluationWorkerOwnerV1 {
     workers: Mutex<SemanticEvaluationWorkersV1>,
+    scheduler_admission: Arc<tokio::sync::Semaphore>,
+}
+
+impl Default for DaemonSemanticEvaluationWorkerOwnerV1 {
+    fn default() -> Self {
+        Self::with_scheduler_admission(Arc::new(tokio::sync::Semaphore::new(1)))
+    }
 }
 
 struct SemanticEvaluationActiveGaugeV1;
@@ -590,6 +630,13 @@ impl Drop for SemanticEvaluationActiveGaugeV1 {
 }
 
 impl DaemonSemanticEvaluationWorkerOwnerV1 {
+    pub fn with_scheduler_admission(scheduler_admission: Arc<tokio::sync::Semaphore>) -> Self {
+        Self {
+            workers: Mutex::new(SemanticEvaluationWorkersV1::default()),
+            scheduler_admission,
+        }
+    }
+
     #[hotpath::measure(label = "daemon.semantic.evaluation.execute", future = true)]
     pub async fn execute<Output, Work, WorkFuture>(
         self: &Arc<Self>,
@@ -633,15 +680,26 @@ impl DaemonSemanticEvaluationWorkerOwnerV1 {
             workers.next_sequence = sequence;
             let worker_control = Arc::clone(&control);
             let result_control = Arc::clone(&control);
+            let scheduler_admission = Arc::clone(&self.scheduler_admission);
             let handle = tokio::spawn(async move {
                 if start_rx.await.is_err() {
                     return;
                 }
-                let _active = SemanticEvaluationActiveGaugeV1::enter();
-                let mut evaluation = Box::pin(hotpath::future!(
-                    work(Arc::clone(&worker_control)),
-                    label = "search_eval.daemon.worker"
-                ));
+                let mut evaluation = Box::pin(async {
+                    let _scheduler_admission = worker_control
+                        .interruptible(hotpath::future!(
+                            scheduler_admission.acquire_owned(),
+                            label = "search_eval.daemon.scheduler_admission_wait"
+                        ))
+                        .await?
+                        .map_err(|_| SemanticActivationCoordinationErrorV1::Unavailable)?;
+                    let _active = SemanticEvaluationActiveGaugeV1::enter();
+                    hotpath::future!(
+                        work(Arc::clone(&worker_control)),
+                        label = "search_eval.daemon.worker"
+                    )
+                    .await
+                });
                 let outcome = tokio::select! {
                     result = &mut evaluation => {
                         result.map_err(|error| worker_control.execution_error(error))
@@ -1307,6 +1365,7 @@ impl SemanticEvaluationSnapshotPortV1 for DaemonSemanticEvaluationSnapshotAuthor
                     .ok_or(SemanticActivationCoordinationErrorV1::Unavailable)?;
                 let (
                     semantic_source_generation,
+                    semantic_source_manifest_digest,
                     semantic_ceiling,
                     vector_state_revision,
                     vector_generation_id,
@@ -1314,6 +1373,16 @@ impl SemanticEvaluationSnapshotPortV1 for DaemonSemanticEvaluationSnapshotAuthor
                     semantic_lifecycle_verification,
                 ) = match self.candidate.compatibility.semantic.as_ref() {
                     Some(candidate) => {
+                        let semantic_source_manifest_digest = self
+                            .candidate
+                            .semantic_source_manifest_digest
+                            .clone()
+                            .ok_or_else(|| {
+                                SemanticActivationCoordinationErrorV1::RejectedDetail(
+                                    "semantic evaluation candidate omits its vector corpus manifest"
+                                        .to_owned(),
+                                )
+                            })?;
                         let runtime =
                         tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(
                             &self.project_root,
@@ -1321,7 +1390,8 @@ impl SemanticEvaluationSnapshotPortV1 for DaemonSemanticEvaluationSnapshotAuthor
                         .ok_or(SemanticActivationCoordinationErrorV1::Unavailable)?;
                         let candidate = candidate.clone();
                         let source_generation = code.source_generation.clone();
-                        let source_manifest_digest = code.source_manifest_digest.clone();
+                        let verified_source_manifest_digest =
+                            semantic_source_manifest_digest.clone();
                         let capability_manifest_digest = code.capability_manifest_digest.clone();
                         let cancellation = Arc::clone(&self.control)
                             as Arc<dyn tracedecay_semantic::SemanticEvaluationCancellationV1>;
@@ -1331,7 +1401,7 @@ impl SemanticEvaluationSnapshotPortV1 for DaemonSemanticEvaluationSnapshotAuthor
                                     .inspect_verified_evaluation_target_snapshot(
                                         &candidate,
                                         &source_generation,
-                                        &source_manifest_digest,
+                                        &verified_source_manifest_digest,
                                         &capability_manifest_digest,
                                         cancellation,
                                     )
@@ -1343,6 +1413,7 @@ impl SemanticEvaluationSnapshotPortV1 for DaemonSemanticEvaluationSnapshotAuthor
                         let receipt = await_semantic_task(&self.control, &mut verification).await?;
                         (
                             Some(code.source_generation.clone()),
+                            Some(semantic_source_manifest_digest),
                             Some(receipt.configured_resource_ceiling()),
                             Some(receipt.vector_state_revision()),
                             Some(receipt.vector_generation_id().clone()),
@@ -1350,7 +1421,7 @@ impl SemanticEvaluationSnapshotPortV1 for DaemonSemanticEvaluationSnapshotAuthor
                             Some(receipt.lifecycle_verification().clone()),
                         )
                     }
-                    None => (None, None, None, None, None, None),
+                    None => (None, None, None, None, None, None, None),
                 };
                 let evaluated = hotpath::measure_block!(
                     "daemon.semantic.evaluation.snapshot.profile_material",
@@ -1358,7 +1429,11 @@ impl SemanticEvaluationSnapshotPortV1 for DaemonSemanticEvaluationSnapshotAuthor
                         &self.candidate.evaluated_profile_id,
                     )
                 )
-                .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+                .map_err(|error| {
+                    SemanticActivationCoordinationErrorV1::RejectedDetail(format!(
+                        "semantic evaluation profile material is unavailable: {error}"
+                    ))
+                })?;
                 self.control.checkpoint()?;
                 Ok(SemanticEvaluationPublicationSnapshotV1 {
                     project_root: self.project_root.clone(),
@@ -1368,6 +1443,7 @@ impl SemanticEvaluationSnapshotPortV1 for DaemonSemanticEvaluationSnapshotAuthor
                     code_snapshot_digest: code.snapshot_digest,
                     code_capability_manifest_digest: code.capability_manifest_digest,
                     semantic_source_generation,
+                    semantic_source_manifest_digest,
                     vector_state_revision,
                     vector_generation_id,
                     semantic_lifecycle_verification,
@@ -1460,7 +1536,7 @@ impl SemanticEvaluationPublicationSnapshotPortV1
                     snapshot_digest: expected.code_snapshot_digest.clone(),
                     capability_manifest_digest: expected.code_capability_manifest_digest.clone(),
                 };
-                let _code_lease = self
+                let code_lease = self
                     .snapshot
                     .control
                     .interruptible(hotpath::future!(
@@ -1472,8 +1548,10 @@ impl SemanticEvaluationPublicationSnapshotPortV1
                             ),
                         label = "daemon.semantic.evaluation.publish.code_lease"
                     ))
-                    .await?
-                    .ok_or(SemanticActivationCoordinationErrorV1::Conflict)?;
+                    .await?;
+                let Some(_code_lease) = code_lease else {
+                    return Err(SemanticActivationCoordinationErrorV1::Conflict);
+                };
                 let semantic_lifecycle_verification =
                     expected.semantic_lifecycle_verification.clone();
                 let vector_state_revision = expected.vector_state_revision;
@@ -1493,7 +1571,18 @@ impl SemanticEvaluationPublicationSnapshotPortV1
                         generation,
                     )),
                     (None, None, None) => None,
-                    _ => return Err(SemanticActivationCoordinationErrorV1::Rejected),
+                    (verification, revision, generation) => {
+                        return Err(SemanticActivationCoordinationErrorV1::RejectedDetail(
+                            format!(
+                                "semantic evaluation snapshot is internally inconsistent: \
+                                 lifecycle_verification={} vector_state_revision={} \
+                                 vector_generation={}",
+                                verification.is_some(),
+                                revision.is_some(),
+                                generation.is_some(),
+                            ),
+                        ));
+                    }
                 };
                 let _vector_lease = match runtime.as_ref() {
                     Some((runtime, _, revision, generation)) => Some(
@@ -1600,6 +1689,99 @@ fn read_linux_process_lifetime_peak_rss_bytes() -> Option<u64> {
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+
+    fn digest(byte: char) -> ManifestDigest {
+        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
+    }
+
+    #[test]
+    fn candidate_vector_identity_requires_runtime_manifest_match() {
+        let generation = VectorGenerationIdV1::new(digest('a'));
+        let vector_manifest = digest('b');
+        let runtime = SemanticEvaluationCurrentGenerationSnapshotV1 {
+            vector_state_revision: 7,
+            vector_generation_id: generation.clone(),
+            source_manifest_digest: digest('c'),
+        };
+
+        assert!(!vector_runtime_identity_matches(
+            &generation,
+            &vector_manifest,
+            &runtime,
+        ));
+        assert!(vector_runtime_identity_matches(
+            &generation,
+            &runtime.source_manifest_digest,
+            &runtime,
+        ));
+    }
+
+    #[tokio::test]
+    async fn evaluation_waits_for_scheduler_admission_and_times_out_typed() {
+        let admission = Arc::new(tokio::sync::Semaphore::new(0));
+        let owner =
+            Arc::new(DaemonSemanticEvaluationWorkerOwnerV1::with_scheduler_admission(admission));
+        let work_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed_work_started = Arc::clone(&work_started);
+
+        let result = owner
+            .execute(
+                tokio::time::Instant::now() + Duration::from_millis(5),
+                CancellationToken::new(),
+                move |_control| async move {
+                    observed_work_started.store(true, Ordering::Release);
+                    Ok::<(), SemanticActivationCoordinationErrorV1>(())
+                },
+            )
+            .await;
+
+        assert_eq!(
+            result,
+            Err(DaemonSemanticEvaluationExecutionErrorV1::TimedOut)
+        );
+        assert!(
+            !work_started.load(Ordering::Acquire),
+            "semantic evaluation work must not start without scheduler admission"
+        );
+    }
+
+    #[tokio::test]
+    async fn evaluation_waiting_for_scheduler_admission_cancels_typed() {
+        let admission = Arc::new(tokio::sync::Semaphore::new(0));
+        let owner =
+            Arc::new(DaemonSemanticEvaluationWorkerOwnerV1::with_scheduler_admission(admission));
+        let request_cancellation = CancellationToken::new();
+        let work_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed_work_started = Arc::clone(&work_started);
+        let execution = {
+            let owner = Arc::clone(&owner);
+            let request_cancellation = request_cancellation.clone();
+            tokio::spawn(async move {
+                owner
+                    .execute(
+                        tokio::time::Instant::now() + Duration::from_secs(5),
+                        request_cancellation,
+                        move |_control| async move {
+                            observed_work_started.store(true, Ordering::Release);
+                            Ok::<(), SemanticActivationCoordinationErrorV1>(())
+                        },
+                    )
+                    .await
+            })
+        };
+
+        tokio::task::yield_now().await;
+        request_cancellation.cancel();
+
+        assert_eq!(
+            execution.await.expect("evaluation task"),
+            Err(DaemonSemanticEvaluationExecutionErrorV1::Cancelled)
+        );
+        assert!(
+            !work_started.load(Ordering::Acquire),
+            "cancelled semantic evaluation must not bypass scheduler admission"
+        );
+    }
 
     #[test]
     fn native_qualification_requires_exactly_one_model_open() {

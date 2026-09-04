@@ -1356,6 +1356,12 @@ impl CodeIndexSchedulerRegistryV1 {
         Arc::clone(&self.background_reconcile_admission)
     }
 
+    /// Share the bounded background scheduler admission with semantic
+    /// evaluation so native model work cannot bypass the project-wide limit.
+    pub fn semantic_evaluation_admission(&self) -> Arc<tokio::sync::Semaphore> {
+        Arc::clone(&self.background_reconcile_admission)
+    }
+
     /// Test-only observation of an exact mounted worktree's active owner pass.
     #[cfg(test)]
     pub async fn reconcile_in_progress_for_test(&self, project_root: &Path) -> bool {
@@ -4388,9 +4394,10 @@ impl CodeIndexSchedulerRegistryV1 {
                 "query activation scope does not match the mounted worktree".to_owned(),
             ));
         }
+        let mut exact_retry = false;
         if let Some(desired_epoch) = worktree.query_activation_epoch {
             let advances = epoch > desired_epoch;
-            let exact_retry = epoch == desired_epoch
+            exact_retry = epoch == desired_epoch
                 && worktree.query_activation_revision.as_ref() == Some(result_revision)
                 && worktree.query_activation_transition_digest.as_ref() == Some(transition_digest)
                 && worktree.query_activation_redundancy.as_ref() == Some(prepared_redundancy);
@@ -4417,12 +4424,14 @@ impl CodeIndexSchedulerRegistryV1 {
         worktree.query_activation_epoch = Some(epoch);
         worktree.query_activation_transition_digest = Some(transition_digest.clone());
         worktree.query_activation_redundancy = Some(prepared_redundancy.clone());
-        worktree.semantic_query_authority = None;
-        tracedecay_usecases::semantic_runtime::commit_project_semantic_redundancy_authority_under_gate(
-            project_root,
-            prepared_redundancy,
-            false,
-        );
+        if !exact_retry {
+            worktree.semantic_query_authority = None;
+            tracedecay_usecases::semantic_runtime::commit_project_semantic_redundancy_authority_under_gate(
+                project_root,
+                prepared_redundancy,
+                false,
+            );
+        }
         Ok(QueryActivationAttemptV1 {
             revision: result_revision.clone(),
             token: worktree.query_activation_attempt,
@@ -4893,6 +4902,29 @@ impl CodeIndexSchedulerRegistryV1 {
                     )))
                 }),
         )
+    }
+
+    /// Load one exact code generation through its durable publication store,
+    /// including a source generation superseded in process-local retention.
+    pub async fn published_generation(
+        &self,
+        project_root: &Path,
+        generation_id: &CodeGenerationId,
+    ) -> Option<Arc<CodeIndexPublishedGenerationV1>> {
+        let project_root = project_root.canonicalize().ok()?;
+        let owner = {
+            let mounted = self.mounted.lock().await;
+            mounted
+                .get(&project_root)?
+                .historical_generation_owner
+                .clone()
+        };
+        let generation_id = generation_id.clone();
+        tokio::task::spawn_blocking(move || owner.published_generation(&generation_id))
+            .await
+            .ok()?
+            .ok()
+            .flatten()
     }
 
     pub async fn latest_generation_id(&self, project_root: &Path) -> Option<CodeGenerationId> {
