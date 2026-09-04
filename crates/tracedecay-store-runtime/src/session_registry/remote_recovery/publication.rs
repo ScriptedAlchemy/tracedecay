@@ -734,6 +734,88 @@ mod tests {
         ProjectSessionNativeRetirementV1, ProjectSessionRecoveryPhaseV1,
     };
 
+    /// Settlement of the background session relation-graph open is the
+    /// observable boundary every retirement path awaits before it reserves the
+    /// prior Store owner. The open task holds a counted client lease on that
+    /// same session shard for the duration of the open, so releasing it after
+    /// the settlement announcement — as an incidental drop of the task future
+    /// on another worker — lets a woken retirement observe a `ClientLeases`
+    /// refusal for a lease that is already finished with its job.
+    ///
+    /// The test gate parks the open task at the tail of its body, right after
+    /// it publishes and announces settlement, so whatever the task still owns
+    /// at that instant is deterministic rather than a scheduling race.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn settled_session_graph_open_task_holds_no_session_client_lease() {
+        let temporary = tempfile::tempdir().expect("temporary project parent");
+        let root = temporary
+            .path()
+            .canonicalize()
+            .expect("canonical fixture root");
+        let profile_root = root.join("profile");
+        let project_root = root.join("project");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+            .expect("durable profile identity");
+        let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+            &profile_root,
+            1,
+            "settled session graph client lease",
+        )
+        .expect("daemon database scope");
+        let project_id =
+            ProjectId::new("project.settled-graph-lease").expect("typed project identity");
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+            &project_root,
+            project_id.as_str(),
+        )
+        .expect("project enrollment");
+
+        let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+            .await
+            .expect("session runtime registry");
+        let gate = registry.block_session_graph_settle_for_test();
+        let mounted = registry
+            .project_sessions(project_id.clone(), [project_root])
+            .await
+            .expect("registered project sessions");
+        drop(mounted);
+        gate.wait_until_blocked().await;
+
+        let mut replacement = registry
+            .reserve_project_session_replacement(&project_id)
+            .await
+            .expect("reserve prior session owner")
+            .expect("mounted session owner");
+        let graph_target = replacement
+            .graph_retirement_target()
+            .expect("prior graph target");
+        let graph = registry
+            .graph_registry
+            .reserve_retirement_batch(vec![graph_target])
+            .expect("reserve prior graph");
+        let store_target = replacement
+            .reserve_store_target()
+            .expect("reserve prior Store target");
+        let store = match registry
+            .registry
+            .reserve_retirement_batch(vec![store_target])
+        {
+            StoreRuntimeRetirementResult::Reserved(reservation) => reservation,
+            StoreRuntimeRetirementResult::Blocked(refusal) => {
+                panic!(
+                    "settled session relation graph open task still holds a session client lease: {refusal:?}"
+                )
+            }
+        };
+        drop(ProjectSessionNativeRetirementV1::new(
+            replacement,
+            graph,
+            store,
+        ));
+        gate.release();
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn recovered_candidate_pre_native_retirement_retry_stays_recovery_required() {
         let temporary = tempfile::tempdir().expect("temporary project parent");
