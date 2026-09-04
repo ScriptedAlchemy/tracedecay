@@ -10,7 +10,7 @@ use super::candidate_output;
 use super::candidate_output::{
     CandidateOutputError, CandidateWorkloadV1, DirectEvaluatedProfileMaterialV1,
     GenerateCandidateOutputsResultV1, OptionalStageMeasurementV1, OptionalStageMeasurementsV1,
-    ProductionCandidateOutputV1, ResourceMeasurementStatusV1, WorkloadQueryV1,
+    ProductionCandidateOutputV1, ResourceMeasurementStatusV1, ResourceSampleV1, WorkloadQueryV1,
     compute_corpus_digest, compute_profile_material_digest, compute_workload_digest,
     direct_evaluated_profile_material, validate_workload_for_tuning,
 };
@@ -930,36 +930,60 @@ fn evaluate_resources(output: &ProductionCandidateOutputV1) -> DirectEvaluationS
         let Some(sample) = output.resources.get(name) else {
             return DirectEvaluationStatusV1::Fail;
         };
-        match sample.status {
-            ResourceMeasurementStatusV1::Measured => {
-                if sample.pending_reason.is_some()
-                    || sample.peak_rss_bytes.is_none()
-                    || sample.measured_queries != sample.latency_samples_us.len() as u64
-                    || sample.measured_queries != output.queries.len() as u64
-                    || sample.latency_samples_us.is_empty()
-                {
-                    return DirectEvaluationStatusV1::Fail;
-                }
-            }
-            ResourceMeasurementStatusV1::Pending => {
-                if sample.peak_rss_bytes.is_some()
-                    || sample.measured_queries != 0
-                    || !sample.latency_samples_us.is_empty()
-                    || sample
-                        .pending_reason
-                        .as_deref()
-                        .is_none_or(|reason| reason.trim().is_empty())
-                {
-                    return DirectEvaluationStatusV1::Fail;
-                }
-                pending = true;
-            }
+        match resource_sample_verdict(sample, output.queries.len() as u64) {
+            Some(DirectEvaluationStatusV1::Pending) => pending = true,
+            Some(DirectEvaluationStatusV1::Pass) => {}
+            _ => return DirectEvaluationStatusV1::Fail,
         }
     }
     if pending {
         DirectEvaluationStatusV1::Pending
     } else {
         DirectEvaluationStatusV1::Pass
+    }
+}
+
+/// Whether one resource sample is internally consistent, and if so whether
+/// it is complete (`Pass`) or still `Pending`. `None` is an inconsistent
+/// sample.
+///
+/// A pending sample has no peak RSS and names its reason. It is either not
+/// run at all (no latency samples, zero measured queries) or a complete
+/// latency run whose peak RSS the host could not report: the producer reads
+/// `/proc/self/status`, which macOS does not have, so every macOS sample
+/// carries every query's latency under `Pending`. Latency evidence without
+/// RSS is still evidence; only the RSS half stays pending.
+fn resource_sample_verdict(
+    sample: &ResourceSampleV1,
+    expected_queries: u64,
+) -> Option<DirectEvaluationStatusV1> {
+    let latency_samples = sample.latency_samples_us.len() as u64;
+    if sample.measured_queries != latency_samples {
+        return None;
+    }
+    match sample.status {
+        ResourceMeasurementStatusV1::Measured => {
+            if sample.pending_reason.is_some()
+                || sample.peak_rss_bytes.is_none()
+                || sample.measured_queries != expected_queries
+                || sample.latency_samples_us.is_empty()
+            {
+                return None;
+            }
+            Some(DirectEvaluationStatusV1::Pass)
+        }
+        ResourceMeasurementStatusV1::Pending => {
+            if sample.peak_rss_bytes.is_some()
+                || (sample.measured_queries != 0 && sample.measured_queries != expected_queries)
+                || sample
+                    .pending_reason
+                    .as_deref()
+                    .is_none_or(|reason| reason.trim().is_empty())
+            {
+                return None;
+            }
+            Some(DirectEvaluationStatusV1::Pending)
+        }
     }
 }
 
@@ -1116,7 +1140,8 @@ mod tests {
     };
     use crate::search_quality::candidate_output::{
         HistoricalQueryExecutionV1, OptionalStageMeasurementV1, OptionalStageMeasurementsV1,
-        QueryCandidateRowV1, RankedCandidateRowV1, WorkloadQueryV1,
+        QueryCandidateRowV1, RankedCandidateRowV1, ResourceMeasurementStatusV1, ResourceSampleV1,
+        WorkloadQueryV1,
     };
     use crate::search_quality::report::{
         DirectProfileEvaluationV1, DirectQualityMetricsV1, DirectStratumQualityV1,
@@ -1375,6 +1400,95 @@ mod tests {
         assert_eq!(
             aggregate_profile_status(&[baseline, candidate]),
             super::DirectEvaluationStatusV1::Pass
+        );
+    }
+
+    fn resource_sample(
+        status: ResourceMeasurementStatusV1,
+        peak_rss_bytes: Option<u64>,
+        latency_samples_us: Vec<u64>,
+        pending_reason: Option<&str>,
+    ) -> ResourceSampleV1 {
+        ResourceSampleV1 {
+            status,
+            eligible_chunks: 64,
+            peak_rss_bytes,
+            measured_queries: latency_samples_us.len() as u64,
+            latency_samples_us,
+            pending_reason: pending_reason.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn pending_resource_sample_with_a_complete_latency_run_stays_pending() {
+        // macOS cannot report peak RSS, so its producer emits every query's
+        // latency under `Pending`; the latency half is evidence, not a fault.
+        let sample = resource_sample(
+            ResourceMeasurementStatusV1::Pending,
+            None,
+            vec![10, 20, 30],
+            Some("Linux peak RSS measurement is unavailable"),
+        );
+        assert_eq!(
+            super::resource_sample_verdict(&sample, 3),
+            Some(super::DirectEvaluationStatusV1::Pending)
+        );
+        let not_run = resource_sample(
+            ResourceMeasurementStatusV1::Pending,
+            None,
+            Vec::new(),
+            Some("native semantic resource measurement pending"),
+        );
+        assert_eq!(
+            super::resource_sample_verdict(&not_run, 3),
+            Some(super::DirectEvaluationStatusV1::Pending)
+        );
+    }
+
+    #[test]
+    fn inconsistent_resource_samples_are_rejected() {
+        let partial_pending = resource_sample(
+            ResourceMeasurementStatusV1::Pending,
+            None,
+            vec![10, 20],
+            Some("Linux peak RSS measurement is unavailable"),
+        );
+        assert_eq!(
+            super::resource_sample_verdict(&partial_pending, 3),
+            None,
+            "a partial latency run is neither not-run nor complete"
+        );
+        let pending_with_rss = resource_sample(
+            ResourceMeasurementStatusV1::Pending,
+            Some(4096),
+            vec![10, 20, 30],
+            Some("Linux peak RSS measurement is unavailable"),
+        );
+        assert_eq!(super::resource_sample_verdict(&pending_with_rss, 3), None);
+        let unexplained = resource_sample(
+            ResourceMeasurementStatusV1::Pending,
+            None,
+            vec![10, 20, 30],
+            Some("  "),
+        );
+        assert_eq!(super::resource_sample_verdict(&unexplained, 3), None);
+        let mut miscounted = resource_sample(
+            ResourceMeasurementStatusV1::Measured,
+            Some(4096),
+            vec![10, 20, 30],
+            None,
+        );
+        miscounted.measured_queries = 2;
+        assert_eq!(super::resource_sample_verdict(&miscounted, 3), None);
+        let measured = resource_sample(
+            ResourceMeasurementStatusV1::Measured,
+            Some(4096),
+            vec![10, 20, 30],
+            None,
+        );
+        assert_eq!(
+            super::resource_sample_verdict(&measured, 3),
+            Some(super::DirectEvaluationStatusV1::Pass)
         );
     }
 }

@@ -3439,10 +3439,14 @@ mod tests {
         current.latency_samples_us.fill(u64::MAX);
         let report = crate::evaluate_generated_outputs(fixture_root, &workload, &large_measurement)
             .expect("evaluate");
-        assert_eq!(
-            report.profiles[0].resource_status,
+        // Only "current" was rewritten as measured; "10x" keeps the host's
+        // own sample, which stays pending where peak RSS is unreadable.
+        let expected_large = if peak_rss_bytes().is_some() {
             crate::DirectEvaluationStatusV1::Pass
-        );
+        } else {
+            crate::DirectEvaluationStatusV1::Pending
+        };
+        assert_eq!(report.profiles[0].resource_status, expected_large);
 
         let mut extra_resource = result;
         let synthetic = extra_resource.outputs[0]
