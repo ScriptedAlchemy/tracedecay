@@ -312,6 +312,18 @@ pub async fn ensure_schema_current(database: &crate::db::Database) -> Result<()>
     ensure_schema_current_engine_connection(&connection).await
 }
 
+/// Steps a store that is exactly one sanctioned step behind the final shape
+/// (v34 -> v35) and reports whether a step ran. Any other stamp is left for
+/// [`verify_final_schema_connection`] to judge. This is the writer-side
+/// remedy the read-only verifier names for a pending step.
+pub(crate) async fn step_schema_if_pending<C: Executor>(conn: &C) -> Result<bool> {
+    if get_version(conn).await? != PAYLOAD_DIGEST_STEP_SOURCE_VERSION {
+        return Ok(false);
+    }
+    step_payload_digests(conn).await?;
+    Ok(true)
+}
+
 async fn ensure_schema_current_engine_connection(
     conn: &DatabaseEngineWriteConnection,
 ) -> Result<()> {
@@ -330,7 +342,7 @@ async fn ensure_schema_current_engine_connection(
 /// short write, so the writer is released between chunks and an interrupted
 /// run resumes from the rows still missing a digest. The stamp moves only
 /// after the last chunk and the receipt are durable.
-async fn step_payload_digests(conn: &DatabaseEngineWriteConnection) -> Result<()> {
+async fn step_payload_digests<C: Executor>(conn: &C) -> Result<()> {
     const OPERATION: &str = "step_payload_digests";
     final_shape::require_final_shape_except_payload_digests(conn).await?;
     conn.execute_batch(super::memory_v2::PAYLOAD_DIGESTS_SCHEMA)
@@ -502,69 +514,9 @@ pub(crate) async fn ensure_schema_current_connection(conn: &Connection) -> Resul
         return create_schema_connection(conn).await;
     }
     if current == PAYLOAD_DIGEST_STEP_SOURCE_VERSION {
-        step_payload_digests_connection(conn).await?;
+        step_payload_digests(conn).await?;
     }
     verify_final_schema_connection(conn).await
-}
-
-/// Test-runtime twin of [`step_payload_digests`] on a plain connection.
-#[cfg(test)]
-async fn step_payload_digests_connection(conn: &Connection) -> Result<()> {
-    const OPERATION: &str = "step_payload_digests";
-    final_shape::require_final_shape_except_payload_digests(conn).await?;
-    conn.execute_batch(super::memory_v2::PAYLOAD_DIGESTS_SCHEMA)
-        .await
-        .map_err(|error| TraceDecayError::Database {
-            message: format!("failed to create payload digest objects: {error}"),
-            operation: OPERATION.to_owned(),
-        })?;
-    let mut cursor: i64 = 0;
-    let mut backfilled: u64 = 0;
-    loop {
-        let chunk = payload_digest_backfill_chunk(conn, cursor).await?;
-        let Some(last_rowid) = chunk.last().map(|row| row.rowid) else {
-            break;
-        };
-        for row in &chunk {
-            let digest = payload_content_digest(&row.content);
-            conn.execute(
-                "INSERT OR IGNORE INTO memory_v2_assertion_payload_digests(
-                    payload_rowid, assertion_id, fact_id, owner_kind, project_id, content_digest
-                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    row.rowid,
-                    row.assertion_id.as_str(),
-                    row.fact_id.as_str(),
-                    row.owner_kind.as_str(),
-                    row.project_id.as_str(),
-                    digest.as_str(),
-                ],
-            )
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("failed to backfill payload digest: {error}"),
-                operation: OPERATION.to_owned(),
-            })?;
-            backfilled += 1;
-        }
-        cursor = last_rowid;
-    }
-    let receipt = serde_json::json!({
-        "from_version": PAYLOAD_DIGEST_STEP_SOURCE_VERSION,
-        "to_version": SCHEMA_VERSION,
-        "backfilled_rows": backfilled,
-        "chunk_rows": PAYLOAD_DIGEST_BACKFILL_CHUNK_ROWS,
-    });
-    conn.execute(
-        "INSERT OR REPLACE INTO metadata (key, value) VALUES (?1, ?2)",
-        params![PAYLOAD_DIGEST_BACKFILL_RECEIPT_KEY, receipt.to_string()],
-    )
-    .await
-    .map_err(|error| TraceDecayError::Database {
-        message: format!("failed to journal payload digest backfill receipt: {error}"),
-        operation: OPERATION.to_owned(),
-    })?;
-    set_version(conn, SCHEMA_VERSION).await
 }
 
 #[cfg(test)]

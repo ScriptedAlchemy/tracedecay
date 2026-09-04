@@ -35,7 +35,17 @@ use crate::common::GLOBAL_DB_ENV;
 
 /// Bump when the template layout or fixture sources change, so stale
 /// templates from previous revisions in a cached target dir are ignored.
-const TEMPLATE_DIR_NAME: &str = "mcp-suite-store-template-v6";
+const TEMPLATE_DIR_REVISION: &str = "mcp-suite-store-template-v6";
+
+/// The template directory is also keyed on the runtime-core schema version:
+/// a template seeded by a binary one schema step behind would otherwise be
+/// copied into every fixture and refused (or stepped) on admission.
+fn template_dir_name() -> String {
+    format!(
+        "{TEMPLATE_DIR_REVISION}-schema{}",
+        tracedecay_runtime_core::db::migrations::SCHEMA_VERSION
+    )
+}
 
 const EMPTY_FLAVOR: &str = "empty";
 
@@ -206,13 +216,14 @@ async fn template_root() -> Option<&'static Path> {
 /// every concurrent process blocks briefly and then finds READY.
 async fn ensure_template() -> Option<PathBuf> {
     let tmp_root = Path::new(env!("CARGO_TARGET_TMPDIR"));
-    let shared = tmp_root.join(TEMPLATE_DIR_NAME);
+    let template_dir_name = template_dir_name();
+    let shared = tmp_root.join(&template_dir_name);
     if shared.join("READY").is_file() {
         return Some(shared);
     }
 
     fs::create_dir_all(tmp_root).ok()?;
-    let lock_path = tmp_root.join(format!("{TEMPLATE_DIR_NAME}.lock"));
+    let lock_path = tmp_root.join(format!("{template_dir_name}.lock"));
     let lock_file = tokio::task::spawn_blocking(move || -> io::Result<fs::File> {
         let file = fs::OpenOptions::new()
             .create(true)
@@ -232,7 +243,7 @@ async fn ensure_template() -> Option<PathBuf> {
         return Some(shared);
     }
 
-    let build = shared.with_file_name(format!("{TEMPLATE_DIR_NAME}-build-{}", std::process::id()));
+    let build = shared.with_file_name(format!("{template_dir_name}-build-{}", std::process::id()));
     let _ = fs::remove_dir_all(&build);
     let built = build_template(&build).await;
     let result = match built {
