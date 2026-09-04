@@ -390,6 +390,14 @@ jobs:
           command -v kache >/dev/null 2>&1 || cargo install kache --locked
           kache init --no-service
           echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
+
+      # Compile this portable historical-artifact journey before the large
+      # root test binaries monopolize the hosted runner. The workspace and
+      # feature selection match the archive, so Cargo reuses the result below.
+      - name: Compile Windows search-quality portability target
+        shell: pwsh
+        run: cargo test --no-run --workspace --locked --features tracedecay/test-helpers --test search_quality_suite
+
       - name: Build nextest archive
         shell: pwsh
         run: cargo nextest archive --workspace --locked --features tracedecay/test-helpers --timings --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst"
