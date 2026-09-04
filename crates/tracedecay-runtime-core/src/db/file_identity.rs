@@ -39,6 +39,7 @@ pub enum SqliteFileIdentityErrorCategory {
     NotFound,
     PermissionDenied,
     InvalidInput,
+    InvalidData,
     ResourceUnavailable,
     Interrupted,
     Unsupported,
@@ -51,9 +52,9 @@ impl SqliteFileIdentityErrorCategory {
             std::io::ErrorKind::NotFound => Self::NotFound,
             std::io::ErrorKind::PermissionDenied => Self::PermissionDenied,
             std::io::ErrorKind::InvalidInput
-            | std::io::ErrorKind::InvalidData
             | std::io::ErrorKind::NotADirectory
             | std::io::ErrorKind::IsADirectory => Self::InvalidInput,
+            std::io::ErrorKind::InvalidData => Self::InvalidData,
             std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => {
                 Self::ResourceUnavailable
             }
@@ -69,6 +70,7 @@ impl SqliteFileIdentityErrorCategory {
             Self::NotFound => "not_found",
             Self::PermissionDenied => "permission_denied",
             Self::InvalidInput => "invalid_input",
+            Self::InvalidData => "invalid_data",
             Self::ResourceUnavailable => "resource_unavailable",
             Self::Interrupted => "interrupted",
             Self::Unsupported => "unsupported",
@@ -222,6 +224,10 @@ mod tests {
                 SqliteFileIdentityErrorCategory::InvalidInput,
             ),
             (
+                std::io::ErrorKind::InvalidData,
+                SqliteFileIdentityErrorCategory::InvalidData,
+            ),
+            (
                 std::io::ErrorKind::WouldBlock,
                 SqliteFileIdentityErrorCategory::ResourceUnavailable,
             ),
@@ -241,5 +247,25 @@ mod tests {
             let error = std::io::Error::new(kind, "private raw operating-system detail");
             assert_eq!(SqliteFileIdentityErrorCategory::from_io(&error), expected);
         }
+    }
+
+    #[test]
+    fn invalid_identity_data_serializes_without_raw_io_detail() {
+        let raw = std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "private provider/session bytes were malformed",
+        );
+        let error = super::SqliteFileIdentityError::io(SqliteFileIdentityOperation::Identify, &raw);
+
+        assert_eq!(
+            error.category(),
+            SqliteFileIdentityErrorCategory::InvalidData
+        );
+        assert_eq!(
+            serde_json::to_string(&error).expect("serialize invalid-data classification"),
+            r#"{"operation":"identify","category":"invalid_data"}"#
+        );
+        assert!(!error.to_string().contains("provider/session"));
+        assert!(!error.to_string().contains("malformed"));
     }
 }
