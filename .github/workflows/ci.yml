@@ -280,6 +280,21 @@ jobs:
       - name: Build workspace binaries for the test lane
         run: cargo build --workspace --bins --locked --features tracedecay/test-helpers
 
+      # This parity test must execute separate feature-off/on binaries. Copy
+      # each result immediately so the second Cargo resolution cannot replace
+      # the first executable in target/debug/examples.
+      - name: Build controlled-workload hotpath parity executables
+        shell: bash
+        run: |
+          set -euo pipefail
+          helper_dir=target/controlled-workload-hotpath
+          example=target/debug/examples/emit_controlled_workload_reports
+          mkdir -p "$helper_dir"
+          cargo build -p tracedecay-search-eval --profile test --example emit_controlled_workload_reports --locked
+          cp "$example" "$helper_dir/hotpath-off"
+          cargo build -p tracedecay-search-eval --profile test --example emit_controlled_workload_reports --locked --features controlled-workload-hotpath
+          cp "$example" "$helper_dir/hotpath-on"
+
       # `nested_chunk_fanout_admits_stolen_workers_without_exceeding_width`
       # installs the process-global background CPU authority at width 2, and
       # that authority is a set-once `OnceLock` with no uninstall. Inside the
@@ -398,9 +413,24 @@ jobs:
         shell: pwsh
         run: cargo test --no-run --workspace --locked --features tracedecay/test-helpers --test search_quality_suite
 
+      # Preserve both feature resolutions as named artifacts before nextest
+      # builds the ordinary feature-off workspace and packages the pair.
+      - name: Build controlled-workload hotpath parity executables
+        shell: pwsh
+        run: |
+          $helperDir = Join-Path "target" "controlled-workload-hotpath"
+          $example = Join-Path "target" "debug/examples/emit_controlled_workload_reports.exe"
+          New-Item -ItemType Directory -Force -Path $helperDir | Out-Null
+          cargo build -p tracedecay-search-eval --profile test --example emit_controlled_workload_reports --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item -Force $example (Join-Path $helperDir "hotpath-off.exe")
+          cargo build -p tracedecay-search-eval --profile test --example emit_controlled_workload_reports --locked --features controlled-workload-hotpath
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item -Force $example (Join-Path $helperDir "hotpath-on.exe")
+
       - name: Build nextest archive
         shell: pwsh
-        run: cargo nextest archive --workspace --locked --features tracedecay/test-helpers --timings --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst"
+        run: cargo nextest archive --workspace --profile ci --locked --features tracedecay/test-helpers --timings --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst"
 
       - name: Upload Windows archive build timings
         if: always()
