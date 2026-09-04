@@ -125,6 +125,17 @@ main() {
     test -f "$config"
     test -f "$fake_home/.config/opencode/plugins/tracedecay.ts"
 
+    # OpenCode's first run in a fresh HOME installs the plugin's npm
+    # dependencies into ~/.config/opencode/node_modules and fetches its model
+    # catalog; measured locally at 1-3 s once warm and over 90 s cold, and it
+    # exceeded 180 s on a CI runner (exit 124) without our config or plugin
+    # being involved (an empty config stalls the same way cold). Warm that
+    # one-time install under its own generous budget so the strict loader
+    # below times the loader, not the network.
+    echo "== stock opencode first-run warm-up (dependency install, untimed check)"
+    (cd "$project" && HOME="$fake_home" XDG_CONFIG_HOME="$fake_home/.config" \
+        timeout 600 "$opencode_bin" debug config) > /dev/null || \
+        echo "warning: opencode first-run warm-up exited $?; the strict loader below is authoritative" >&2
     echo "== stock opencode debug config (host-owned strict loader)"
     (cd "$project" && HOME="$fake_home" XDG_CONFIG_HOME="$fake_home/.config" \
         timeout 180 "$opencode_bin" debug config) > "$STAGE/resolved-config.json"
