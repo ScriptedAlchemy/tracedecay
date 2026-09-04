@@ -975,11 +975,17 @@ async fn project_tokens_saved_schema_and_queries_still_work() {
     assert_eq!(db.get_project_tokens(&project_one).await, 33);
     assert_eq!(db.get_project_tokens(&project_two.join(".")).await, 22);
     assert_eq!(db.global_tokens_saved().await, 55);
+    // The ledger stores the resolved root, so the expectation must resolve
+    // too: on macOS a tempdir is handed out as `/var/folders/...` while the
+    // registry records `/private/var/folders/...` for the same directory.
     assert_eq!(
         db.project_ledger_paths_for_test()
             .await
             .expect("project ledger path listing should succeed"),
-        vec![project_one, project_two]
+        vec![
+            project_one.canonicalize().unwrap(),
+            project_two.canonicalize().unwrap(),
+        ]
     );
     close_profile_runtime(db).await;
 }

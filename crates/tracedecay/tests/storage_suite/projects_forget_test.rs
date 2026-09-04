@@ -168,9 +168,12 @@ async fn forget_project_removes_exactly_one_registered_project() {
         .unwrap();
     assert!(db.get_code_project("proj_a").await.unwrap().is_none());
     assert!(db.get_code_project("proj_b").await.unwrap().is_some());
+    // The ledger stores the resolved root, so the expectation must resolve
+    // too: on macOS a tempdir is handed out as `/var/folders/...` while the
+    // registry records `/private/var/folders/...` for the same directory.
     assert_eq!(
         db.project_ledger_paths_for_test().await.unwrap(),
-        vec![root_b.clone()],
+        vec![root_b.canonicalize().unwrap()],
         "only the forgotten project's token-ledger row is retired"
     );
     close_profile_runtime(db).await;
