@@ -165,7 +165,12 @@ pub(crate) async fn handle_runtime(
         label = "mcp.health.runtime.telemetry"
     )
     .await?;
-    let mut value = serde_json::to_value(&snap).unwrap_or_else(|_| json!({}));
+    // A snapshot that cannot be serialized is a contract bug, not an empty
+    // status: swallowing it into `{}` made doctor report "omitted database
+    // telemetry" with no trace of the cause.
+    let mut value = serde_json::to_value(&snap).map_err(|error| TraceDecayError::Config {
+        message: format!("runtime telemetry snapshot could not be serialized: {error}"),
+    })?;
     // Doctor historically keys temporal health off `authority_audit`. Keep that
     // coupling, and also allow an explicit independent opt-in.
     let include_session_temporal_health = authority_audit
