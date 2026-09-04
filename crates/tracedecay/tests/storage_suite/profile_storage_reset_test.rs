@@ -193,7 +193,13 @@ async fn incompatible_profile_store_requires_reset_without_in_place_changes() {
     let db_path = initialized.db_path().to_path_buf();
     drop(initialized);
 
-    let incompatible_version = tracedecay_runtime_core::db::migrations::SCHEMA_VERSION - 1;
+    // Not `SCHEMA_VERSION - 1`: that stamp is
+    // `PAYLOAD_DIGEST_STEP_SOURCE_VERSION`, the one sanctioned step this binary
+    // *does* carry forward in place, so an open of it upgrades instead of
+    // refusing. The reset contract covers every other stamp, so the store is
+    // aged one step past the sanctioned source.
+    let incompatible_version =
+        tracedecay_runtime_core::db::migrations::PAYLOAD_DIGEST_STEP_SOURCE_VERSION - 1;
     let connection = rusqlite::Connection::open(&db_path).unwrap();
     connection
         .pragma_update(None, "user_version", incompatible_version)
