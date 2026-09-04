@@ -190,17 +190,37 @@ impl TestProfile {
             }),
         );
 
+        // Production registers the project while the daemon owns the profile
+        // writer, before opening a project graph. Once the graph is retained,
+        // its maintenance scope must overlap the daemon scope only for reads;
+        // a later registry write is correctly refused as split authority.
+        Box::pin(registry.upsert_code_project(
+            &project_id_text,
+            &project_root,
+            tracedecay_runtime_core::worktree::git_common_dir(&project_root).as_deref(),
+            None,
+            tracedecay_runtime_core::branch::current_branch(&project_root).as_deref(),
+        ))
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "register fixture project '{}' at {}: {error}",
+                project_id_text,
+                project_root.display()
+            )
+        });
+
         // Initialize through that same runtime wherever the registered seam
         // exists, so a fixture never opens a second database scope on one
         // profile. The public entry point is the fallback for builds without
         // the seam; it resolves the same identity from the marker just written.
         let open_options = self.open_options();
-        #[cfg(feature = "test-transport")]
+        #[cfg(any(feature = "test-helpers", feature = "test-transport"))]
         let graph = Box::pin(
             registry.initialize_project_graph_for_test(&project_root, open_options.clone()),
         )
         .await;
-        #[cfg(not(feature = "test-transport"))]
+        #[cfg(not(any(feature = "test-helpers", feature = "test-transport")))]
         let graph = Box::pin(TraceDecay::init_with_options(
             &project_root,
             open_options.clone(),
@@ -222,26 +242,6 @@ impl TestProfile {
             Some(project_id_text.as_str()),
             "fixture graph identity must match the registered project identity"
         );
-
-        // Initializing a graph does not register it, and a selector resolves
-        // against the registry of the profile serving the call. The result was
-        // previously dropped on the floor, so a fixture whose root the registry
-        // refused produced tests that failed far away from the cause.
-        Box::pin(registry.upsert_code_project(
-            &project_id_text,
-            &project_root,
-            tracedecay_runtime_core::worktree::git_common_dir(&project_root).as_deref(),
-            None,
-            tracedecay_runtime_core::branch::current_branch(&project_root).as_deref(),
-        ))
-        .await
-        .unwrap_or_else(|error| {
-            panic!(
-                "register fixture project '{}' at {}: {error}",
-                project_id_text,
-                project_root.display()
-            )
-        });
 
         RegisteredProject {
             profile: self.clone(),
