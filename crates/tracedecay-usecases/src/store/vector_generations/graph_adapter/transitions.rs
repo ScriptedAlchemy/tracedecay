@@ -229,9 +229,11 @@ impl GraphVectorGenerationStoreV1 {
                 })?;
             let mut attempt = result.clone();
             let mut superseded_stage = false;
+            let mut completion_authority = None;
             let (stage, published) = loop {
+                let operation_authority = completion_authority.as_ref().unwrap_or(&authority);
                 let stage_plan =
-                    self.semantic_stage_plan(&plan, &attempt, &descriptor, &authority)?;
+                    self.semantic_stage_plan(&plan, &attempt, &descriptor, operation_authority)?;
                 let published_key = SemanticVectorPublishedGenerationKey {
                     projection: stage_plan.key.projection.clone(),
                     semantic_generation_id: stage_plan.semantic_generation_id.clone(),
@@ -241,23 +243,26 @@ impl GraphVectorGenerationStoreV1 {
                     verified_head,
                 } = self
                     .runtime
-                    .published_semantic_generation(&published_key, &authority)
+                    .published_semantic_generation(&published_key, operation_authority)
                     .map_err(map_graph_error)?
                 {
                     require_same_semantic_plan(&record, &stage_plan)?;
-                    let publication =
-                        self.recover_published_generation(&plan, &verified_head, &authority)?;
+                    let publication = self.recover_published_generation(
+                        &plan,
+                        &verified_head,
+                        operation_authority,
+                    )?;
                     break (*record, Some(publication));
                 }
                 match self
                     .runtime
-                    .resume_stage(&stage_plan.key, &authority)
+                    .resume_stage(&stage_plan.key, operation_authority)
                     .map_err(map_graph_error)?
                 {
                     SemanticVectorStageResumeOutcome::Missing => {
                         let stage = match self
                             .runtime
-                            .begin_stage(&stage_plan, &authority)
+                            .begin_stage(&stage_plan, operation_authority)
                             .map_err(map_graph_error)?
                         {
                             VerifiedGenerationBeginV1::Begun(stage)
@@ -284,9 +289,15 @@ impl GraphVectorGenerationStoreV1 {
                                         format!("writer_fence={:?}", existing.plan.writer_fence),
                                     )));
                                 }
+                                let adoption_authority = completion_authority.insert(
+                                    SemanticGraphExecutionAuthorityV1::new(
+                                        Arc::new(NeverCancelled),
+                                        Instant::now() + GRAPH_BACKGROUND_OPERATION_BUDGET,
+                                    ),
+                                );
                                 let adopted = match self
                                     .runtime
-                                    .resume_stage(&existing.plan.key, &authority)
+                                    .resume_stage(&existing.plan.key, adoption_authority)
                                     .map_err(map_graph_error)?
                                 {
                                     SemanticVectorStageResumeOutcome::Pending(record) => record,
@@ -327,7 +338,7 @@ impl GraphVectorGenerationStoreV1 {
                                 }
                                 match self
                                     .runtime
-                                    .cancel_stage(&adopted.plan.key, &authority)
+                                    .cancel_stage(&adopted.plan.key, adoption_authority)
                                     .map_err(map_graph_error)?
                                 {
                                     SemanticVectorStageCancelOutcome::Cancelled(record)
@@ -403,7 +414,7 @@ impl GraphVectorGenerationStoreV1 {
                         require_resumed_plan(&stage, &stage_plan)?;
                         match self
                             .runtime
-                            .cancel_stage(&stage.plan.key, &authority)
+                            .cancel_stage(&stage.plan.key, operation_authority)
                             .map_err(map_graph_error)?
                         {
                             SemanticVectorStageCancelOutcome::Cancelled(record)
@@ -423,7 +434,7 @@ impl GraphVectorGenerationStoreV1 {
                                 require_resumed_plan(&record, &stage_plan)?;
                                 match self
                                     .runtime
-                                    .resume_stage(&stage_plan.key, &authority)
+                                    .resume_stage(&stage_plan.key, operation_authority)
                                     .map_err(map_graph_error)?
                                 {
                                     SemanticVectorStageResumeOutcome::Published {
@@ -434,7 +445,7 @@ impl GraphVectorGenerationStoreV1 {
                                         let publication = self.recover_published_generation(
                                             &plan,
                                             &verified_head,
-                                            &authority,
+                                            operation_authority,
                                         )?;
                                         break (*record, Some(publication));
                                     }
@@ -465,8 +476,11 @@ impl GraphVectorGenerationStoreV1 {
                         verified_head,
                     } => {
                         require_resumed_plan(&record, &stage_plan)?;
-                        let publication =
-                            self.recover_published_generation(&plan, &verified_head, &authority)?;
+                        let publication = self.recover_published_generation(
+                            &plan,
+                            &verified_head,
+                            operation_authority,
+                        )?;
                         break (*record, Some(publication));
                     }
                     SemanticVectorStageResumeOutcome::Cancelled(record) => {

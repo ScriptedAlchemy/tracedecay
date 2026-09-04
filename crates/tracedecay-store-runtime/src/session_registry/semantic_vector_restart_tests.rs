@@ -1,6 +1,9 @@
 use std::path::Path;
 use std::process::Command;
-use std::sync::{Arc, atomic::AtomicBool};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use tracedecay_code_index_retention::code_index_generations::DurablePublicationPointerV1;
 use tracedecay_code_index_runtime::CodeGraphReplayBindingV1;
@@ -16,11 +19,23 @@ use tracedecay_domain::{
     EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1, PrivacyDomainId, ProjectId,
     ProjectionBatchRequestV1, ProjectionOperationV1, ProjectionOutcomeV1, ProjectionReplayReasonV1,
 };
-use tracedecay_graph_db::NeverCancelled;
+use tracedecay_graph_db::{
+    GraphCancellation, GraphDbError, GraphWriteBatch, NeverCancelled,
+    VerifiedGenerationBatchCommit, VerifiedGenerationBeginV1, VerifiedGraphSnapshot,
+};
 use tracedecay_semantic::projector::PreparedVectorGenerationV1;
 use tracedecay_semantic::projector::{ProjectedChunkVectorV1, vector_output_digest};
+use tracedecay_store::{
+    GraphPublicationKeyV1, GraphVerifiedHeadV1, SemanticVectorPublishedGenerationKey,
+    SemanticVectorPublishedGenerationLookup, SemanticVectorStageBatchReceipt,
+    SemanticVectorStageCancelOutcome, SemanticVectorStageKey, SemanticVectorStagePlan,
+    SemanticVectorStagePublicationPrepareOutcome, SemanticVectorStagePublishOutcome,
+    SemanticVectorStagePublishSettlement, SemanticVectorStageResumeOutcome, StoreRuntimeBindingV1,
+    StoreShardIdV1,
+};
 use tracedecay_usecases::semantic_runtime::{
-    RetainedSemanticVectorGraphV1, SemanticVectorGraphScopeV1,
+    RetainedSemanticVectorGraphV1, SemanticGraphExecutionAuthorityV1, SemanticVectorGraphScopeV1,
+    SemanticVectorRetentionAuthorizationV1, VerifiedSemanticVectorGraphRuntimeV1,
 };
 use tracedecay_usecases::store::vector_generations::{
     GraphVectorGenerationStoreV1, SemanticVectorStageDescriptorV1, VectorGenerationPlanV1,
@@ -28,6 +43,212 @@ use tracedecay_usecases::store::vector_generations::{
 
 use super::DaemonSessionRuntimeRegistryV1;
 use super::code_graph::RetainedCodeGraphRuntimeV1;
+
+struct AtomicCancellation(Arc<AtomicBool>);
+
+impl GraphCancellation for AtomicCancellation {
+    fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+struct CancelRequestAfterAdoptionRuntime {
+    inner: Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>,
+    request_cancelled: Arc<AtomicBool>,
+}
+
+impl VerifiedSemanticVectorGraphRuntimeV1 for CancelRequestAfterAdoptionRuntime {
+    fn scope(&self) -> &SemanticVectorGraphScopeV1 {
+        self.inner.scope()
+    }
+
+    fn recover_verified_snapshot(
+        &self,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<Option<VerifiedGraphSnapshot>, GraphDbError> {
+        self.inner.recover_verified_snapshot(authority)
+    }
+
+    fn recover_verified_generation(
+        &self,
+        publication: &GraphPublicationKeyV1,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<VerifiedGraphSnapshot, GraphDbError> {
+        self.inner
+            .recover_verified_generation(publication, authority)
+    }
+
+    fn staging_binding(&self) -> (&StoreShardIdV1, &StoreRuntimeBindingV1) {
+        self.inner.staging_binding()
+    }
+
+    fn verified_head(
+        &self,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<Option<GraphVerifiedHeadV1>, GraphDbError> {
+        self.inner.verified_head(authority)
+    }
+
+    fn begin_stage(
+        &self,
+        plan: &SemanticVectorStagePlan,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<VerifiedGenerationBeginV1, GraphDbError> {
+        self.inner.begin_stage(plan, authority)
+    }
+
+    fn resume_stage(
+        &self,
+        stage: &SemanticVectorStageKey,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<SemanticVectorStageResumeOutcome, GraphDbError> {
+        let outcome = self.inner.resume_stage(stage, authority)?;
+        if matches!(outcome, SemanticVectorStageResumeOutcome::Pending(_)) {
+            self.request_cancelled.store(true, Ordering::Release);
+        }
+        Ok(outcome)
+    }
+
+    fn published_semantic_generation(
+        &self,
+        key: &SemanticVectorPublishedGenerationKey,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<SemanticVectorPublishedGenerationLookup, GraphDbError> {
+        self.inner.published_semantic_generation(key, authority)
+    }
+
+    fn append_stage_batch(
+        &self,
+        receipt: &SemanticVectorStageBatchReceipt,
+        batch: GraphWriteBatch,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<VerifiedGenerationBatchCommit, GraphDbError> {
+        self.inner.append_stage_batch(receipt, batch, authority)
+    }
+
+    fn cancel_stage(
+        &self,
+        stage: &SemanticVectorStageKey,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<SemanticVectorStageCancelOutcome, GraphDbError> {
+        self.inner.cancel_stage(stage, authority)
+    }
+
+    fn prepare_publication_from_staged_native(
+        &self,
+        stage: &SemanticVectorStageKey,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<SemanticVectorStagePublicationPrepareOutcome, GraphDbError> {
+        self.inner
+            .prepare_publication_from_staged_native(stage, authority)
+    }
+
+    fn publish_ready_stage(
+        &self,
+        stage: &SemanticVectorStageKey,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<VerifiedGraphSnapshot, GraphDbError> {
+        self.inner.publish_ready_stage(stage, authority)
+    }
+
+    fn settle_published(
+        &self,
+        settlement: &SemanticVectorStagePublishSettlement,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<SemanticVectorStagePublishOutcome, GraphDbError> {
+        self.inner.settle_published(settlement, authority)
+    }
+
+    fn reserve_one_generation(
+        &self,
+        after: Option<tracedecay_store::SemanticVectorStageCensusCursor>,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<tracedecay_graph_db::SemanticVectorRetentionStep, GraphDbError> {
+        self.inner.reserve_one_generation(after, authority)
+    }
+
+    fn finalize_reserved_generation(
+        &self,
+        reservation: tracedecay_graph_db::SemanticVectorRetirementReservation,
+        authorization: &SemanticVectorRetentionAuthorizationV1,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<tracedecay_graph_db::SemanticVectorRetentionAction, GraphDbError> {
+        self.inner
+            .finalize_reserved_generation(reservation, authorization, authority)
+    }
+
+    fn release_reserved_generation(
+        &self,
+        reservation: tracedecay_graph_db::SemanticVectorRetirementReservation,
+    ) -> Result<(), GraphDbError> {
+        self.inner.release_reserved_generation(reservation)
+    }
+
+    fn source_generation_has_live_reference(
+        &self,
+        generation: &tracedecay_store::SemanticVectorSourceGenerationId,
+        expected_revision: tracedecay_store::SemanticVectorStageCensusRevision,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<bool, GraphDbError> {
+        self.inner
+            .source_generation_has_live_reference(generation, expected_revision, authority)
+    }
+
+    fn source_scope_has_live_reference(
+        &self,
+        source_scope: &StoreShardIdV1,
+        expected_revision: tracedecay_store::SemanticVectorStageCensusRevision,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<bool, GraphDbError> {
+        self.inner
+            .source_scope_has_live_reference(source_scope, expected_revision, authority)
+    }
+
+    fn published_generation_dependency(
+        &self,
+        generation: &tracedecay_domain::VectorGenerationIdV1,
+        expected_revision: tracedecay_store::SemanticVectorStageCensusRevision,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<tracedecay_store::SemanticVectorPublishedGenerationDependencyLookup, GraphDbError>
+    {
+        self.inner
+            .published_generation_dependency(generation, expected_revision, authority)
+    }
+
+    fn validate_project_census_revision(
+        &self,
+        expected_revision: tracedecay_store::SemanticVectorStageCensusRevision,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<(), GraphDbError> {
+        self.inner
+            .validate_project_census_revision(expected_revision, authority)
+    }
+
+    fn source_scope_binding(
+        &self,
+        code_scope_hash: &tracedecay_store::SemanticVectorCodeScopeHash,
+        expected_revision: tracedecay_store::SemanticVectorStageCensusRevision,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<tracedecay_store::SemanticVectorSourceScopeBindingLookup, GraphDbError> {
+        self.inner
+            .source_scope_binding(code_scope_hash, expected_revision, authority)
+    }
+
+    fn remove_source_scope_binding(
+        &self,
+        code_scope_hash: &tracedecay_store::SemanticVectorCodeScopeHash,
+        source_scope: &StoreShardIdV1,
+        expected_revision: tracedecay_store::SemanticVectorStageCensusRevision,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<bool, GraphDbError> {
+        self.inner.remove_source_scope_binding(
+            code_scope_hash,
+            source_scope,
+            expected_revision,
+            authority,
+        )
+    }
+}
 
 fn git(root: &Path, args: &[&str]) {
     let output = Command::new("git")
@@ -338,19 +559,30 @@ async fn prior_daemon_pending_stage_is_adopted_and_replacement_publishes() {
     let restarted_retained = retain_semantic_graph(restarted_runtime, &canonical_project);
     let restarted_binding = restarted_retained.runtime().staging_binding().1.clone();
     assert_ne!(first_binding, restarted_binding);
+    let request_cancelled = Arc::new(AtomicBool::new(false));
+    let cancellation: Arc<dyn GraphCancellation> =
+        Arc::new(AtomicCancellation(Arc::clone(&request_cancelled)));
+    let cancellation_probe: Arc<dyn VerifiedSemanticVectorGraphRuntimeV1> =
+        Arc::new(CancelRequestAfterAdoptionRuntime {
+            inner: Arc::clone(restarted_retained.runtime()),
+            request_cancelled: Arc::clone(&request_cancelled),
+        });
+    let cancellation_retained =
+        RetainedSemanticVectorGraphV1::new(cancellation_probe, Arc::new(NeverCancelled));
     let (replacement_plan, replacement_prepared, replacement_descriptor) =
         prepared_generation(&source, "chunk.after-restart", 'b');
-    let replacement_store = GraphVectorGenerationStoreV1::open(&restarted_retained)
+    let replacement_store = GraphVectorGenerationStoreV1::open(&cancellation_retained)
         .expect("open restarted semantic vector store");
     replacement_store
         .configure_stage(replacement_descriptor)
         .expect("configure replacement semantic stage");
     let replacement_build = replacement_store
-        .begin_generation(replacement_plan, Arc::new(NeverCancelled))
+        .begin_generation(replacement_plan, cancellation)
         .await
-        .expect("adopt and supersede the prior daemon stage")
+        .expect("complete supersession after request cancellation follows adoption")
         .build_id()
         .clone();
+    assert!(request_cancelled.load(Ordering::Acquire));
     replacement_store
         .commit_batch(
             &replacement_build,
@@ -367,6 +599,7 @@ async fn prior_daemon_pending_stage_is_adopted_and_replacement_publishes() {
     assert_eq!(publication.checkpoint.source_generation, source);
     drop((
         replacement_store,
+        cancellation_retained,
         restarted_retained,
         restarted_database,
         restarted_registry,
