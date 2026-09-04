@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use tracedecay_automation::config::validate_schedule as validate_leaf_schedule;
 pub use tracedecay_automation::config::{AutomationSchedule, CronSchedule, parse_schedule};
 use tracedecay_automation::evidence_budget::{
-    SESSION_EVIDENCE_BUDGET_EXHAUSTED, SESSION_EVIDENCE_BUDGET_SUPPRESSED,
-    SessionEvidenceBudgetBackoff, SessionEvidenceBudgetExceeded, SessionEvidenceBudgetGate,
+    SESSION_EVIDENCE_BUDGET_SUPPRESSED, SessionEvidenceBudgetBackoff,
+    SessionEvidenceBudgetExceeded, SessionEvidenceBudgetGate,
 };
 
 use super::backend::{
@@ -27,8 +27,8 @@ use super::config::{
 };
 use super::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
-    canonical_record_started_at_seconds, latest_record_by_canonical_completion,
-    latest_record_by_canonical_completion_key,
+    canonical_record_started_at_seconds, is_session_evidence_budget_exhausted_reason,
+    latest_record_by_canonical_completion, latest_record_by_canonical_completion_key,
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::ports::session_store::AutomationSessionStore;
@@ -659,7 +659,7 @@ fn live_session_evidence_budget_exhaustion(
         latest_record_by_canonical_completion_key(records.iter().filter(|record| {
             record.task == task
                 && record.status == AutomationRunStatus::Skipped
-                && record.error.as_deref() == Some(SESSION_EVIDENCE_BUDGET_EXHAUSTED)
+                && is_session_evidence_budget_exhausted_reason(record.error.as_deref())
         }))?
     else {
         return Ok(None);
@@ -1429,6 +1429,7 @@ mod tests {
     use super::super::config::AutomationTaskSet;
     use super::*;
     use tempfile::tempdir;
+    use tracedecay_automation::evidence_budget::SESSION_EVIDENCE_BUDGET_EXHAUSTED;
 
     fn session_evidence_task_config() -> AutomationTaskConfig {
         AutomationTaskConfig {
@@ -1861,13 +1862,82 @@ evidence about it",
         task: AgentTaskKind,
         completed_at: i64,
     ) -> AutomationRunLedgerRecord {
+        budget_exhausted_skip_with_reason(
+            run_id,
+            task,
+            SESSION_EVIDENCE_BUDGET_EXHAUSTED,
+            completed_at,
+        )
+    }
+
+    fn budget_exhausted_skip_with_reason(
+        run_id: &str,
+        task: AgentTaskKind,
+        reason: &'static str,
+        completed_at: i64,
+    ) -> AutomationRunLedgerRecord {
         scheduler_ledger_record(
             run_id,
             task,
             AutomationRunStatus::Skipped,
-            Some(SESSION_EVIDENCE_BUDGET_EXHAUSTED),
+            Some(reason),
             completed_at,
         )
+    }
+
+    #[test]
+    fn legacy_and_stage_specific_budget_reasons_share_the_same_backoff() {
+        const EXHAUSTION_REASONS: &[&str] = &[
+            SESSION_EVIDENCE_BUDGET_EXHAUSTED,
+            "session_evidence_budget_exhausted_request_result_limit",
+            "session_evidence_budget_exhausted_request_hydration_limit",
+            "session_evidence_budget_exhausted_request_context_bytes",
+            "session_evidence_budget_exhausted_request_candidate_bytes",
+            "session_evidence_budget_exhausted_request_record_bytes",
+            "session_evidence_budget_exhausted_request_hydration_bytes",
+            "session_evidence_budget_exhausted_estimator_version_mismatch",
+            "session_evidence_budget_exhausted_execution_work_exhausted",
+            "session_evidence_budget_exhausted_kernel_result_limit",
+            "session_evidence_budget_exhausted_participant_manifest_participants",
+            "session_evidence_budget_exhausted_participant_manifest_canonical_bytes",
+            "session_evidence_budget_exhausted_hydration_bytes",
+            "session_evidence_budget_exhausted_context_bytes",
+            "session_evidence_budget_exhausted_context_tokens",
+        ];
+
+        let config = session_evidence_config();
+        for reason in EXHAUSTION_REASONS {
+            let records = vec![budget_exhausted_skip_with_reason(
+                "run-exhausted",
+                AgentTaskKind::SessionReflector,
+                reason,
+                2_000,
+            )];
+
+            assert_eq!(
+                schedule_decision(
+                    &config,
+                    AgentTaskKind::SessionReflector,
+                    &records,
+                    SessionActivity::at(2_500),
+                    2_060,
+                )
+                .skip_reason(),
+                Some(SESSION_EVIDENCE_BUDGET_SUPPRESSED),
+                "{reason} must activate the same backoff",
+            );
+            assert!(
+                schedule_decision(
+                    &config,
+                    AgentTaskKind::SessionReflector,
+                    &records,
+                    SessionActivity::at(2_500),
+                    2_000 + 3_600,
+                )
+                .is_due(),
+                "{reason} must release at the same boundary",
+            );
+        }
     }
 
     #[test]
