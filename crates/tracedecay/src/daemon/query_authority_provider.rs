@@ -217,26 +217,43 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
                         .ok_or(("active_vector_generation", ObserverError::Unavailable))?;
                     let source_generation = vectors.source_generation().clone();
                     if !runtime.cache_ready_for(pins, &source_generation) {
-                        let code = project_semantic_retained_code_generation(
+                        // The process-local retained map keeps only the latest
+                        // capture until the retention proof runs, so a vector
+                        // generation built from a source that a newer capture
+                        // has since superseded is served from the durable store.
+                        let code = match project_semantic_retained_code_generation(
                             &project_root,
                             &source_generation,
-                        )
-                        .ok_or_else(|| {
-                            tracing::warn!(
-                                event = "semantic_query_activation",
-                                step = "retained_code_generation",
-                                project_root = %project_root.display(),
-                                source_generation = %source_generation,
-                                vector_generation = ?pins.vector_generation_id,
-                                "the activated vector generation cites a source code generation this daemon does not retain"
-                            );
-                            ("retained_code_generation", ObserverError::Unavailable)
-                        })?;
+                        ) {
+                            Some(code) => code,
+                            None => registry
+                                .published_generation(&project_root, &source_generation)
+                                .await
+                                .ok_or_else(|| {
+                                    tracing::warn!(
+                                        event = "semantic_query_activation",
+                                        step = "retained_code_generation",
+                                        project_root = %project_root.display(),
+                                        source_generation = %source_generation,
+                                        vector_generation = ?pins.vector_generation_id,
+                                        "the activated vector generation cites a source code generation that is neither retained in this process nor published in its store"
+                                    );
+                                    ("retained_code_generation", ObserverError::Unavailable)
+                                })?,
+                        };
                         Some(
                             runtime
                                 .prepare_restore_current(&code, &pins.vector_generation_id)
                                 .await
-                                .map_err(|_| {
+                                .map_err(|error| {
+                                    tracing::warn!(
+                                        event = "semantic_query_activation",
+                                        step = "prepare_restore_current",
+                                        error = ?error,
+                                        source_generation = %source_generation,
+                                        vector_generation = ?pins.vector_generation_id,
+                                        "the activated vector generation's cache could not be restored"
+                                    );
                                     ("prepare_restore_current", ObserverError::Unavailable)
                                 })?
                                 .ok_or((
