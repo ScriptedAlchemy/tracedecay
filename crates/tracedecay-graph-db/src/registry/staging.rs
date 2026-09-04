@@ -14,6 +14,7 @@ use tracedecay_store::{
 
 use super::publication_support::{check_all, map_publication_error, require_publication_binding};
 use super::{GraphDbRegistration, GraphDbRegistry};
+use crate::generation_runtime::GenerationContentsDeletion;
 use crate::{GraphCommit, GraphDbError, GraphWriteBatch, VerifiedGraphCommit};
 
 #[derive(Clone, Debug)]
@@ -397,7 +398,9 @@ impl GraphDbRegistry {
                 match authority.stage(stage, context) {
                     Ok(Some(observed)) if observed.state == SemanticVectorStageState::Cancelled => {
                         let check = || check_all(&registration, context, "generation.staging");
-                        database.delete_cancelled_staged_generation(&observed.plan, &check)?;
+                        let deletion =
+                            database.delete_cancelled_staged_generation(&observed.plan, &check)?;
+                        record_cancelled_generation_cleanup(&observed.plan, deletion);
                     }
                     Ok(Some(_)) => {
                         database.clear_staged_generation_retirement(&record.plan)?;
@@ -411,7 +414,9 @@ impl GraphDbRegistry {
             tracedecay_store::SemanticVectorStageCancelOutcome::Cancelled(cancelled)
             | tracedecay_store::SemanticVectorStageCancelOutcome::ExactReplay(cancelled) => {
                 let check = || check_all(&registration, context, "generation.staging");
-                database.delete_cancelled_staged_generation(&cancelled.plan, &check)?;
+                let deletion =
+                    database.delete_cancelled_staged_generation(&cancelled.plan, &check)?;
+                record_cancelled_generation_cleanup(&cancelled.plan, deletion);
             }
             tracedecay_store::SemanticVectorStageCancelOutcome::StaleFence { .. }
             | tracedecay_store::SemanticVectorStageCancelOutcome::ReadyToPublish(_)
@@ -714,7 +719,23 @@ fn cleanup_cancelled_generation(
     require_unpublished_stage(authority, context, record)?;
     database.reserve_staged_generation_retirement(&record.plan)?;
     let check = || check_all(registration, context, "generation.staging");
-    database.delete_cancelled_staged_generation(&record.plan, &check)
+    let deletion = database.delete_cancelled_staged_generation(&record.plan, &check)?;
+    record_cancelled_generation_cleanup(&record.plan, deletion);
+    Ok(())
+}
+
+fn record_cancelled_generation_cleanup(
+    plan: &SemanticVectorStagePlan,
+    deletion: GenerationContentsDeletion,
+) {
+    if matches!(deletion, GenerationContentsDeletion::RetentionPending) {
+        tracing::info!(
+            event = "graph_cancelled_generation_cleanup_pending",
+            generation = %plan.publication_key.generation,
+            reason = "staging_engine_hibernated",
+            "cancelled generation rows remain for a later open cleanup"
+        );
+    }
 }
 
 fn require_stage_replay_intent(

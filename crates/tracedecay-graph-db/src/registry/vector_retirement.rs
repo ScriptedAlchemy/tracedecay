@@ -18,6 +18,7 @@ use super::publication_support::{
 };
 use super::staging::{map_staging_error, require_authority_binding};
 use super::{GraphDbRegistration, GraphDbRegistry, check_registration_request};
+use crate::generation_runtime::GenerationContentsDeletion;
 use crate::{GraphDbError, GraphDbLeaseV1};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -471,11 +472,20 @@ fn finish_reserved_cancelled(
             "vector_retirement.finish_reserved_cancelled",
         ));
     }
-    if let Err(error) = database.delete_cancelled_staged_generation(&record.plan, &|| {
+    let deletion = match database.delete_cancelled_staged_generation(&record.plan, &|| {
         check_registration_request(registration, "vector.retirement.cleanup")
     }) {
+        Ok(deletion) => deletion,
+        Err(error) => {
+            reservation.preserve_cleanup_fence();
+            return Err(error);
+        }
+    };
+    if matches!(deletion, GenerationContentsDeletion::RetentionPending) {
         reservation.preserve_cleanup_fence();
-        return Err(error);
+        return Ok(SemanticVectorRetentionAction::Retained(
+            record.plan.semantic_generation_id,
+        ));
     }
     let outcome = hotpath::measure_block!("graph_db.vector.retire.authority", {
         authority
@@ -577,12 +587,19 @@ fn finish_reserved_published(
             // failures must retain this fence so replay can converge without a
             // reader reopening bytes whose authority has already retired.
             reservation.preserve_cleanup_fence();
-            database.delete_generation_contents(&locator, &|| {
+            let deletion = database.delete_generation_contents(&locator, &|| {
                 check_registration_request(registration, "vector.retirement.cleanup")
             })?;
-            Ok(SemanticVectorRetentionAction::Retired(
-                record.plan.semantic_generation_id.clone(),
-            ))
+            match deletion {
+                GenerationContentsDeletion::Deleted => Ok(SemanticVectorRetentionAction::Retired(
+                    record.plan.semantic_generation_id.clone(),
+                )),
+                GenerationContentsDeletion::RetentionPending => {
+                    Ok(SemanticVectorRetentionAction::Retained(
+                        record.plan.semantic_generation_id.clone(),
+                    ))
+                }
+            }
         }
         SemanticVectorPublishedRetirementOutcome::CurrentVerifiedHead { .. }
         | SemanticVectorPublishedRetirementOutcome::PendingReplay => {
@@ -616,9 +633,16 @@ fn converge_retired_cleanup(
     };
     cleanup.retirement.writer_fence = writer_fence.clone();
     let locator = locator_from_key(&cleanup.retirement.replay.key)?;
-    database.delete_generation_contents(&locator, &|| {
-        check_registration_request(registration, "vector.retirement.cleanup")
-    })?;
+    if matches!(
+        database.delete_generation_contents(&locator, &|| {
+            check_registration_request(registration, "vector.retirement.cleanup")
+        })?,
+        GenerationContentsDeletion::RetentionPending
+    ) {
+        return Ok(Some(SemanticVectorRetentionAction::Retained(
+            cleanup.retirement.semantic_generation_id,
+        )));
+    }
     match authority
         .finalize_retired_replay_cleanup(&cleanup.retirement.replay, context)
         .map_err(map_publication_error)?

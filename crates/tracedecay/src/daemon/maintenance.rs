@@ -310,6 +310,8 @@ pub(super) struct StoreTelemetrySamplingRegistry {
     semantic_vector_retention:
         Arc<std::sync::Mutex<HashMap<PathBuf, SemanticVectorRetentionProgressV1>>>,
     graph_replay_release: Arc<std::sync::Mutex<HashMap<PathBuf, GraphReplayReleaseProgressV1>>>,
+    graph_staging_release:
+        Arc<std::sync::Mutex<HashMap<PathBuf, tracedecay_store::GraphProjectionIdentityV1>>>,
     /// Last by-design retention operator line per lane and project. A
     /// persistent unavailable-by-design condition logs once, then counts on
     /// [`daemon.git.maintenance.retention_quiet_total`]; a state change or a
@@ -554,6 +556,10 @@ impl StoreTelemetrySamplingRegistry {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .retain(|project, _| active_projects.contains(project));
+        self.graph_staging_release
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|project, _| active_projects.contains(project));
         self.retention_operator_log
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -640,6 +646,33 @@ impl StoreTelemetrySamplingRegistry {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(project_root)
             .and_then(|state| state.cursor.clone())
+    }
+
+    pub(super) fn graph_staging_release_cursor(
+        &self,
+        project_root: &Path,
+    ) -> Option<tracedecay_store::GraphProjectionIdentityV1> {
+        self.graph_staging_release
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(project_root)
+            .cloned()
+    }
+
+    pub(super) fn record_graph_staging_release_cursor(
+        &self,
+        project_root: &Path,
+        cursor: Option<tracedecay_store::GraphProjectionIdentityV1>,
+    ) {
+        let mut cursors = self
+            .graph_staging_release
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(cursor) = cursor {
+            cursors.insert(project_root.to_path_buf(), cursor);
+        } else {
+            cursors.remove(project_root);
+        }
     }
 
     /// Open a fresh per-tick loud-vs-quiet window before any retention pass
