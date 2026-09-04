@@ -1491,11 +1491,25 @@ async fn register_semantic_activation_owner(
                 false
             }
         };
+        // A project with no published retrieval-profile state retains no
+        // vector generation. Seat that as the known-empty retention authority
+        // here, at the same point in project open where a published profile
+        // commits its own: leaving the record absent makes retention and
+        // Doctor read `None`, which is the "project not mounted" answer, for a
+        // project this call is in the middle of mounting. It installs no
+        // activation authority and no Ready receipt, and never replaces an
+        // existing record.
+        let retention_roots_seated =
+            tracedecay_usecases::semantic_runtime::commit_project_absent_semantic_roots(
+                project_root.to_path_buf(),
+                configuration_pin.revision_id.clone(),
+            );
         tracing::debug!(
             event = "semantic_activation_registration",
             outcome = "unavailable",
             project_id = %scope.project_id,
             core_query_available,
+            retention_roots_seated,
             "no genuinely evaluated optional-stage profile is published"
         );
     }

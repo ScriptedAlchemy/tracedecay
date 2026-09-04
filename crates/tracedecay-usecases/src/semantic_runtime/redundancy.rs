@@ -331,6 +331,47 @@ pub fn commit_project_initial_semantic_roots(
     true
 }
 
+/// Seat the known-empty retention authority for a project whose scope has no
+/// published retrieval-profile state at all.
+///
+/// A fresh project store bootstraps its query-only retrieval profile lazily, on
+/// the first semantic configuration operation, so project open frequently
+/// resolves no committed state at all. Leaving the process-local record absent
+/// makes every retention and Doctor read answer `None`, which means "this
+/// project is not mounted" — indistinguishable from a mounted project whose
+/// committed profile pins nothing. The truthful answer for a mounted project
+/// without a profile is the known-empty set at the current configuration
+/// revision.
+///
+/// No activation authority and no Ready receipt are installed: only a committed
+/// linked activation can produce those. An existing record always wins, so this
+/// can never demote a real committed authority to the empty projection.
+pub fn commit_project_absent_semantic_roots(
+    project_root: PathBuf,
+    revision: ConfigurationRevisionId,
+) -> bool {
+    let activation = project_semantic_activation_gate(&project_root);
+    let _activation = activation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut states = redundancy_states()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if states.contains_key(&project_root) {
+        return false;
+    }
+    states.insert(
+        project_root,
+        SemanticProjectRedundancyStateV1 {
+            revision,
+            roots: SemanticRetainedVectorGenerationsV1::default(),
+            authority: None,
+            activation_receipt: None,
+        },
+    );
+    true
+}
+
 #[hotpath::measure(label = "usecases.semantic.commit_redundancy")]
 pub fn commit_project_semantic_redundancy_authority(
     project_root: PathBuf,

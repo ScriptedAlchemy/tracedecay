@@ -109,8 +109,8 @@ pub use publish_failure_memo::{
 };
 pub use redundancy::{
     PreparedSemanticRedundancyAuthorityV1, SemanticRedundancyGenerationV1,
-    SemanticRedundancyProfileV1, SemanticRedundancyVectorV1, commit_project_initial_semantic_roots,
-    commit_project_semantic_redundancy_authority,
+    SemanticRedundancyProfileV1, SemanticRedundancyVectorV1, commit_project_absent_semantic_roots,
+    commit_project_initial_semantic_roots, commit_project_semantic_redundancy_authority,
     commit_project_semantic_redundancy_authority_under_gate,
     prepare_project_semantic_redundancy_authority, project_committed_semantic_pins,
     project_semantic_activation_gate, project_semantic_activation_receipt,
