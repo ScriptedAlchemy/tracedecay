@@ -2923,6 +2923,76 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
     }
 }
 
+#[test]
+fn partitioned_codec_reads_pre_paging_evidence_descriptor() {
+    let (expected, manifest, segments) = partitioned_codec_fixture();
+    let mut envelope: serde_json::Value =
+        serde_json::from_slice(&manifest).expect("partitioned manifest JSON");
+    let evidence = envelope["generation"]["generation_evidence"]
+        .as_object_mut()
+        .expect("generation evidence descriptor");
+    let evidence_digest = evidence["segment_digest"]
+        .as_str()
+        .expect("generation evidence digest")
+        .to_owned();
+    evidence
+        .remove("pages")
+        .expect("current descriptor carries evidence pages");
+    let state_digest = sealed_generation_payload_digest(
+        SEALED_GENERATION_FORMAT_REVISION_V1,
+        &envelope["generation"],
+    )
+    .expect("legacy payload digest");
+    envelope["state_digest"] = serde_json::Value::String(state_digest.as_str().to_owned());
+    let legacy_manifest =
+        serde_json::to_vec(&envelope).expect("pre-paging partitioned manifest JSON");
+    let whole_evidence_reads = Cell::new(0_usize);
+    let ranged_evidence_reads = Cell::new(0_usize);
+
+    let restored = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+        &legacy_manifest,
+        |request, buffer| {
+            let (digest, offset, length) = match request {
+                SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
+                    if digest.as_str() == evidence_digest {
+                        whole_evidence_reads.set(whole_evidence_reads.get() + 1);
+                    }
+                    (digest, 0, size_bytes)
+                }
+                SealedGenerationSegmentReadV1::Range {
+                    digest,
+                    offset,
+                    length,
+                    ..
+                } => {
+                    if digest.as_str() == evidence_digest {
+                        ranged_evidence_reads.set(ranged_evidence_reads.get() + 1);
+                    }
+                    (digest, offset, length)
+                }
+            };
+            let bytes = segments.get(digest.as_str()).ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract("legacy segment is missing".to_owned())
+            })?;
+            let start = usize::try_from(offset).expect("legacy segment offset");
+            let end = start + usize::try_from(length).expect("legacy segment length");
+            buffer.clear();
+            buffer.extend_from_slice(&bytes[start..end]);
+            Ok(())
+        },
+    )
+    .expect("pre-paging partitioned bytes decode")
+    .expect("revision seven partitioned manifest");
+
+    assert_eq!(whole_evidence_reads.get(), 1);
+    assert_eq!(ranged_evidence_reads.get(), 0);
+    assert_eq!(
+        restored.encode_sealed().expect("restored generation seals"),
+        expected.encode_sealed().expect("expected generation seals"),
+        "legacy evidence must restore the same typed generation"
+    );
+}
+
 /// One edited file must publish exactly one file segment, whatever the rest of
 /// the repository holds: every unchanged file keeps the parent generation's
 /// content address, so its bytes are never re-encoded, re-hashed or rewritten.
