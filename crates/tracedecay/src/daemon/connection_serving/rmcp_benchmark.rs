@@ -152,10 +152,14 @@ impl BenchmarkConnection {
 /// persistent distribution means exactly one typed `tools/call` round trip.
 /// A reconnect sample starts before socket connection and includes typed
 /// initialize, `tracedecay_status`, client close, and daemon-route teardown.
-pub async fn run_rmcp_connection_pipeline(
+pub async fn run_rmcp_connection_pipeline<F>(
     persistent_requests: usize,
     reconnect_rounds: usize,
-) -> Result<RmcpConnectionPipelineMeasurement, String> {
+    before_measurement: F,
+) -> Result<RmcpConnectionPipelineMeasurement, String>
+where
+    F: FnOnce(),
+{
     if persistent_requests == 0 || reconnect_rounds == 0 {
         return Err("RMCP benchmark requires non-zero persistent and reconnect samples".to_owned());
     }
@@ -174,6 +178,8 @@ pub async fn run_rmcp_connection_pipeline(
     let (listener, endpoint) = BrokerListener::bind(&default_loopback_endpoint())
         .await
         .map_err(|error| format!("bind benchmark RMCP broker listener: {error}"))?;
+
+    before_measurement();
 
     let persistent =
         BenchmarkConnection::connect(&listener, &endpoint, Arc::clone(&server)).await?;

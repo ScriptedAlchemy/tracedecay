@@ -31,13 +31,27 @@ const RMCP_DISPATCH_LABEL: &str = "mcp.server.rmcp.dispatch";
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() {
     #[cfg(feature = "hotpath")]
-    let (report_path, hotpath_guard) = hotpath_guard();
+    let mut hotpath = None;
 
-    let measurement =
-        run_rmcp_connection_pipeline(PERSISTENT_MEASURED_REQUESTS, RECONNECT_MEASURED_ROUNDS)
-            .await
-            .expect("run typed RMCP production connection benchmark");
+    let measurement = run_rmcp_connection_pipeline(
+        PERSISTENT_MEASURED_REQUESTS,
+        RECONNECT_MEASURED_ROUNDS,
+        || {
+            // Opening the full production composition is intentionally outside
+            // the measurement window. Start Hotpath immediately before the
+            // first broker connection so it observes only RMCP initialization,
+            // dispatch, and teardown.
+            #[cfg(feature = "hotpath")]
+            {
+                hotpath = Some(hotpath_guard());
+            }
+        },
+    )
+    .await
+    .expect("run typed RMCP production connection benchmark");
 
+    #[cfg(feature = "hotpath")]
+    let (report_path, hotpath_guard) = hotpath.expect("start RMCP Hotpath measurement");
     #[cfg(feature = "hotpath")]
     drop(hotpath_guard);
 
@@ -62,11 +76,6 @@ fn hotpath_guard() -> (PathBuf, hotpath::HotpathGuard) {
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::temp_dir().join("tracedecay-rmcp-connection-hotpath.json"));
-    if std::env::var_os("HOTPATH_METRICS_SERVER_OFF").is_none() {
-        // SAFETY: this binary sets its optional profiling environment before
-        // it creates the Tokio runtime or starts any worker thread.
-        unsafe { std::env::set_var("HOTPATH_METRICS_SERVER_OFF", "1") };
-    }
     (
         report_path.clone(),
         hotpath::HotpathGuardBuilder::new("rmcp-connection-pipeline")
