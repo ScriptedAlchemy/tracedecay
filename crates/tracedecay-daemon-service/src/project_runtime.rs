@@ -154,9 +154,7 @@ pub struct ProjectRuntime {
     #[cfg(any(test, feature = "test-helpers"))]
     test_marker: Option<Arc<dyn Any + Send + Sync>>,
     semantic: Option<tracedecay_semantic::DaemonSemanticRuntimeHandleV1>,
-    semantic_activation_reconciler: Option<
-        Arc<tracedecay_code_index_runtime::semantic_activation_reconciler::DaemonSemanticActivationReconcilerV1>,
-    >,
+    semantic_activation_reconciler: Option<RegisteredSemanticActivationOwnerV1>,
     observability: Option<RegisteredObservabilityProducerV1>,
     reservations: Vec<TypeId>,
     registration_builds: BTreeMap<TypeId, Arc<ProjectRuntimeBuildReservationV1>>,
@@ -172,6 +170,17 @@ pub struct ProjectRuntime {
     recording_second: Option<RecordingComponent<2>>,
     #[cfg(test)]
     recovery_cancel_probe: Option<RecoveryCancelProbe>,
+}
+
+/// One atomically published semantic activation owner. Keeping the coordinator
+/// beside its reconciler lets every racing installer recover the same
+/// coordinator identity before exposing it through the configuration runtime.
+pub(crate) struct RegisteredSemanticActivationOwnerV1 {
+    pub(crate) coordinator:
+        Arc<tracedecay_usecases::semantic_runtime::ProductionSemanticActivationCoordinatorV1>,
+    pub(crate) reconciler: Arc<
+        tracedecay_code_index_runtime::semantic_activation_reconciler::DaemonSemanticActivationReconcilerV1,
+    >,
 }
 
 impl ProjectRuntime {
@@ -274,7 +283,7 @@ project_runtime_components!(
     RegisteredRetainedRuntime => retained,
     DaemonLspInvocationOwner => lsp_owner,
     tracedecay_semantic::DaemonSemanticRuntimeHandleV1 => semantic,
-    Arc<tracedecay_code_index_runtime::semantic_activation_reconciler::DaemonSemanticActivationReconcilerV1> => semantic_activation_reconciler,
+    RegisteredSemanticActivationOwnerV1 => semantic_activation_reconciler,
     RegisteredObservabilityProducerV1 => observability,
 );
 

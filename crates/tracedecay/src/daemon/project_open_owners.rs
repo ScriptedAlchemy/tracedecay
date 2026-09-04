@@ -1499,28 +1499,13 @@ async fn register_semantic_activation_owner(
             "no genuinely evaluated optional-stage profile is published"
         );
     }
-    let Some(inspector) =
-        tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(project_root)
-    else {
-        return Ok(());
-    };
-    let lifecycle_events = inspector.verified_ready_events();
-    let owner = Arc::new(
-        tracedecay_usecases::semantic_runtime::ProductionSemanticActivationCoordinatorV1::new(
-            configuration_store,
-            graph.configuration_runtime().configuration_store(),
-            inspector,
-            observer,
-        ),
-    );
-    graph
-        .configuration_runtime()
-        .install_semantic_runtime(Arc::clone(&owner))?;
-    invocation
-        .configuration_runtime_registrar()
-        .install_semantic_activation_reconciler(project_root, owner, lifecycle_events)
-        .await?;
-    Ok(())
+    install_semantic_activation_runtime_owner(
+        invocation,
+        project_root,
+        Arc::clone(graph.configuration_runtime()),
+        scope,
+    )
+    .await
 }
 
 /// Complete activation ownership after the deferred code-index mount creates
@@ -1532,18 +1517,11 @@ pub(super) async fn install_semantic_activation_runtime_owner(
     configuration_runtime: Arc<tracedecay_configuration::ProjectConfigurationRuntime>,
     scope: ResolvedScope,
 ) -> Result<()> {
-    if configuration_runtime
-        .semantic_activation_coordinator()
-        .is_some()
-    {
-        return Ok(());
-    }
-    let inspector =
+    let Some(inspector) =
         tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(project_root)
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "semantic production runtime is unavailable after code-index mount"
-                    .to_owned(),
-            })?;
+    else {
+        return Ok(());
+    };
     let configuration_store =
         tracedecay_usecases::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1::open(
             configuration_runtime.registered_database(),
@@ -1555,7 +1533,7 @@ pub(super) async fn install_semantic_activation_runtime_owner(
     let observer = invocation
         .query_activation_registrar(project_root, configuration_runtime.registered_database());
     let lifecycle_events = inspector.verified_ready_events();
-    let owner = Arc::new(
+    let candidate = Arc::new(
         tracedecay_usecases::semantic_runtime::ProductionSemanticActivationCoordinatorV1::new(
             configuration_store,
             configuration_runtime.configuration_store(),
@@ -1563,11 +1541,11 @@ pub(super) async fn install_semantic_activation_runtime_owner(
             observer,
         ),
     );
-    configuration_runtime.install_semantic_runtime(Arc::clone(&owner))?;
-    invocation
+    let owner = invocation
         .configuration_runtime_registrar()
-        .install_semantic_activation_reconciler(project_root, owner, lifecycle_events)
+        .install_semantic_activation_owner(project_root, candidate, lifecycle_events)
         .await?;
+    configuration_runtime.install_semantic_runtime(owner)?;
     Ok(())
 }
 

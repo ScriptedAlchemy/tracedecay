@@ -922,7 +922,7 @@ impl DaemonConfigurationRuntimeRegistrar {
     }
 
     #[hotpath::skip]
-    pub async fn install_semantic_activation_reconciler(
+    pub async fn install_semantic_activation_owner(
         &self,
         project_root: &Path,
         coordinator: Arc<
@@ -931,7 +931,10 @@ impl DaemonConfigurationRuntimeRegistrar {
         lifecycle_events: tokio::sync::watch::Receiver<
             tracedecay_semantic_contracts::SemanticLifecycleVerifiedReadyEventV1,
         >,
-    ) -> Result<(), TraceDecayError> {
+    ) -> Result<
+        Arc<tracedecay_usecases::semantic_runtime::ProductionSemanticActivationCoordinatorV1>,
+        TraceDecayError,
+    > {
         let committed_activation_wake = self
             .service
             .project_runtimes
@@ -944,19 +947,38 @@ impl DaemonConfigurationRuntimeRegistrar {
                     "semantic activation reconciler requires a registered configuration runtime"
                         .to_owned(),
             })?;
-        let reconciler = Arc::new(
-            tracedecay_code_index_runtime::semantic_activation_reconciler::DaemonSemanticActivationReconcilerV1::spawn(
-                coordinator,
-                lifecycle_events,
-                committed_activation_wake,
-            ),
-        );
+        let project_root = project_root.to_path_buf();
         self.service
             .project_runtimes
-            .register(project_root.to_path_buf(), reconciler)
+            .register_or_reconcile::<RegisteredSemanticActivationOwnerV1, TraceDecayError, _, _, _>(
+                project_root.clone(),
+                |_incumbent| Ok(()),
+                move || async move {
+                    let reconciler = Arc::new(
+                        tracedecay_code_index_runtime::semantic_activation_reconciler::DaemonSemanticActivationReconcilerV1::spawn(
+                            Arc::clone(&coordinator),
+                            lifecycle_events,
+                            committed_activation_wake,
+                        ),
+                    );
+                    Ok(RegisteredSemanticActivationOwnerV1 {
+                        coordinator,
+                        reconciler,
+                    })
+                },
+            )
             .await
-            .map_err(|_| TraceDecayError::Config {
-                message: "semantic activation reconciler is already registered".to_owned(),
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("semantic activation owner registration failed: {error}"),
+            })?;
+        self.service
+            .project_runtimes
+            .read::<RegisteredSemanticActivationOwnerV1, _, _>(&project_root, |registered| {
+                Arc::clone(&registered.coordinator)
+            })
+            .await
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "semantic activation owner disappeared after registration".to_owned(),
             })
     }
 }

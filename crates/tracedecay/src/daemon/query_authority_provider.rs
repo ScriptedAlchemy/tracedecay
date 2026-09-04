@@ -273,10 +273,13 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
                             &source_generation,
                         ) {
                             Some(code) => code,
-                            None => registry
-                                .published_generation(&project_root, &source_generation)
-                                .await
-                                .ok_or_else(|| {
+                            None => match classify_published_generation_lookup(
+                                registry
+                                    .published_generation(&project_root, &source_generation)
+                                    .await,
+                            ) {
+                                Ok(Some(code)) => code,
+                                Ok(None) => {
                                     tracing::warn!(
                                         event = "semantic_query_activation",
                                         step = "retained_code_generation",
@@ -285,8 +288,27 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
                                         vector_generation = ?pins.vector_generation_id,
                                         "the activated vector generation cites a source code generation that is neither retained in this process nor published in its store"
                                     );
-                                    ("retained_code_generation", ObserverError::Unavailable)
-                                })?,
+                                    return Err((
+                                        "retained_code_generation",
+                                        ObserverError::Unavailable,
+                                    ));
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        event = "semantic_query_activation",
+                                        step = "published_code_generation_read",
+                                        error = %error,
+                                        project_root = %project_root.display(),
+                                        source_generation = %source_generation,
+                                        vector_generation = ?pins.vector_generation_id,
+                                        "the activated vector generation's durable source code generation could not be read"
+                                    );
+                                    return Err((
+                                        "published_code_generation_read",
+                                        ObserverError::Unavailable,
+                                    ));
+                                }
+                            },
                         };
                         Some(
                             runtime
@@ -985,6 +1007,20 @@ fn map_update_observer_error(
             RetrievalProfileActivationObserverErrorV1::Conflict
         }
     }
+}
+
+fn classify_published_generation_lookup(
+    lookup: Option<
+        Result<
+            Option<Arc<tracedecay_code_index::production::CodeIndexPublishedGenerationV1>>,
+            tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerErrorV1,
+        >,
+    >,
+) -> Result<
+    Option<Arc<tracedecay_code_index::production::CodeIndexPublishedGenerationV1>>,
+    tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerErrorV1,
+> {
+    lookup.unwrap_or(Ok(None))
 }
 
 #[cfg(test)]

@@ -508,6 +508,7 @@ pub struct CodeIndexGenerationPublishedV1 {
 pub struct QueryActivationAttemptV1 {
     revision: ConfigurationRevisionId,
     token: u64,
+    preserves_existing_authority: bool,
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -4435,6 +4436,7 @@ impl CodeIndexSchedulerRegistryV1 {
         Ok(QueryActivationAttemptV1 {
             revision: result_revision.clone(),
             token: worktree.query_activation_attempt,
+            preserves_existing_authority: exact_retry,
         })
     }
 
@@ -4495,14 +4497,16 @@ impl CodeIndexSchedulerRegistryV1 {
         }
         if let Some(prepared_cache) = prepared_cache {
             if !prepared_cache.commit() {
-                worktree.semantic_query_authority = None;
-                worktree.query_activation_revision =
-                    Some(prepared.configuration_revision().clone());
-                tracedecay_usecases::semantic_runtime::commit_project_semantic_redundancy_authority_under_gate(
-                    project_root.clone(),
-                    &prepared_redundancy,
-                    false,
-                );
+                if !attempt.preserves_existing_authority {
+                    worktree.semantic_query_authority = None;
+                    worktree.query_activation_revision =
+                        Some(prepared.configuration_revision().clone());
+                    tracedecay_usecases::semantic_runtime::commit_project_semantic_redundancy_authority_under_gate(
+                        project_root.clone(),
+                        &prepared_redundancy,
+                        false,
+                    );
+                }
                 return Err(CodeIndexSchedulerErrorV1::Identity(
                     "prepared semantic cache became stale before coherent installation".to_owned(),
                 ));
@@ -4516,13 +4520,16 @@ impl CodeIndexSchedulerRegistryV1 {
             );
         }
         if let Err(error) = commit_prepared() {
-            worktree.semantic_query_authority = None;
-            worktree.query_activation_revision = Some(prepared.configuration_revision().clone());
-            tracedecay_usecases::semantic_runtime::commit_project_semantic_redundancy_authority_under_gate(
-                project_root.clone(),
-                &prepared_redundancy,
-                false,
-            );
+            if !attempt.preserves_existing_authority {
+                worktree.semantic_query_authority = None;
+                worktree.query_activation_revision =
+                    Some(prepared.configuration_revision().clone());
+                tracedecay_usecases::semantic_runtime::commit_project_semantic_redundancy_authority_under_gate(
+                    project_root.clone(),
+                    &prepared_redundancy,
+                    false,
+                );
+            }
             return Err(CodeIndexSchedulerErrorV1::Identity(error));
         }
         tracedecay_usecases::semantic_runtime::commit_project_semantic_redundancy_authority_under_gate(
@@ -4577,6 +4584,9 @@ impl CodeIndexSchedulerRegistryV1 {
             && failed_redundancy.configuration_revision() == &attempt.revision
             && worktree.query_activation_redundancy.as_ref() == Some(&failed_redundancy)
         {
+            if attempt.preserves_existing_authority {
+                return Ok(false);
+            }
             worktree.semantic_query_authority = None;
             tracedecay_usecases::semantic_runtime::commit_project_semantic_redundancy_authority_under_gate(
                 project_root.clone(),
@@ -4910,7 +4920,8 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         project_root: &Path,
         generation_id: &CodeGenerationId,
-    ) -> Option<Arc<CodeIndexPublishedGenerationV1>> {
+    ) -> Option<Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexSchedulerErrorV1>>
+    {
         let project_root = project_root.canonicalize().ok()?;
         let owner = {
             let mounted = self.mounted.lock().await;
@@ -4920,11 +4931,15 @@ impl CodeIndexSchedulerRegistryV1 {
                 .clone()
         };
         let generation_id = generation_id.clone();
-        tokio::task::spawn_blocking(move || owner.published_generation(&generation_id))
-            .await
-            .ok()?
-            .ok()
-            .flatten()
+        Some(
+            tokio::task::spawn_blocking(move || owner.published_generation(&generation_id))
+                .await
+                .unwrap_or_else(|error| {
+                    Err(CodeIndexSchedulerErrorV1::Identity(format!(
+                        "published-generation read task failed: {error}"
+                    )))
+                }),
+        )
     }
 
     pub async fn latest_generation_id(&self, project_root: &Path) -> Option<CodeGenerationId> {

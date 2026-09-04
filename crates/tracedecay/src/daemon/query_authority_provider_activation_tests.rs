@@ -196,7 +196,7 @@ async fn committed_query_routes_install_and_rollback_as_one_revision() {
         "redundancy roots and authority publish under the installed query revision"
     );
 
-    registry
+    let exact_reobservation_attempt = registry
         .begin_committed_query_activation(
             project.path(),
             &scope,
@@ -222,6 +222,35 @@ async fn committed_query_routes_install_and_rollback_as_one_revision() {
         project_committed_semantic_pins(project.path()).map(|pins| pins.vector_generation_id),
         Some(semantic_generation.clone()),
         "an exact reobservation must preserve the coherent semantic authority"
+    );
+    assert!(
+        !registry
+            .clear_failed_query_activation(
+                project.path(),
+                &scope,
+                Some(&semantic_generation),
+                prepare_project_semantic_redundancy_authority(&semantic),
+                &exact_reobservation_attempt,
+            )
+            .await
+            .expect("settle failed exact semantic reobservation"),
+        "failed exact reobservation cleanup must preserve the installed authority and cache"
+    );
+    assert_eq!(
+        registry
+            .query_authority_installation_for_scope(&scope)
+            .await,
+        Some((
+            true,
+            true,
+            Some(semantic.state.configuration_revision().clone())
+        )),
+        "failed exact reobservation must keep both healthy routes installed"
+    );
+    assert_eq!(
+        project_committed_semantic_pins(project.path()).map(|pins| pins.vector_generation_id),
+        Some(semantic_generation.clone()),
+        "failed exact reobservation must keep its committed semantic cache binding"
     );
 
     let rollback = query_rollback_committed_state(&semantic);

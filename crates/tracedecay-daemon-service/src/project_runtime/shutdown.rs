@@ -303,7 +303,7 @@ async fn shut_down_semantic(
     let mut clean = true;
     for runtime in runtimes.values_mut() {
         if let Some(reconciler) = runtime.semantic_activation_reconciler.take() {
-            reconciler.cancel_and_join().await;
+            reconciler.reconciler.cancel_and_join().await;
         }
         if let Some(configuration) = runtime.configuration.as_ref() {
             let receipt = tracedecay_code_index_runtime::collect_semantic_evaluation_shutdown(
