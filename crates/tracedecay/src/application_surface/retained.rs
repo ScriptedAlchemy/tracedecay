@@ -155,9 +155,12 @@ impl RegisteredHttpOperation for RetainedSurfaceOperation {
 
     fn registry(
         self,
-    ) -> Result<tracedecay_tool_catalog::ExecutableBindingRegistryV1, ApplicationSurfaceAdapterError>
-    {
+    ) -> Result<
+        std::borrow::Cow<'static, tracedecay_tool_catalog::ExecutableBindingRegistryV1>,
+        ApplicationSurfaceAdapterError,
+    > {
         tracedecay_application::retained_surface_executable_binding_registry()
+            .map(std::borrow::Cow::Owned)
             .map_err(ApplicationSurfaceAdapterError::Contract)
     }
 }

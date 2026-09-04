@@ -456,10 +456,12 @@ impl RegisteredHttpOperation for WorkOperation {
 
     fn registry(
         self,
-    ) -> Result<tracedecay_tool_catalog::ExecutableBindingRegistryV1, ApplicationSurfaceAdapterError>
-    {
+    ) -> Result<
+        std::borrow::Cow<'static, tracedecay_tool_catalog::ExecutableBindingRegistryV1>,
+        ApplicationSurfaceAdapterError,
+    > {
         tracedecay_application::work_executable_binding_registry()
-            .cloned()
+            .map(std::borrow::Cow::Borrowed)
             .map_err(ApplicationSurfaceAdapterError::CatalogValidation)
     }
 }
@@ -483,10 +485,12 @@ impl RegisteredHttpOperation for WorkflowOperation {
 
     fn registry(
         self,
-    ) -> Result<tracedecay_tool_catalog::ExecutableBindingRegistryV1, ApplicationSurfaceAdapterError>
-    {
+    ) -> Result<
+        std::borrow::Cow<'static, tracedecay_tool_catalog::ExecutableBindingRegistryV1>,
+        ApplicationSurfaceAdapterError,
+    > {
         tracedecay_application::workflow_executable_binding_registry()
-            .cloned()
+            .map(std::borrow::Cow::Borrowed)
             .map_err(ApplicationSurfaceAdapterError::CatalogValidation)
     }
 }
@@ -514,9 +518,12 @@ impl RegisteredHttpOperation for HandoffOperation {
 
     fn registry(
         self,
-    ) -> Result<tracedecay_tool_catalog::ExecutableBindingRegistryV1, ApplicationSurfaceAdapterError>
-    {
+    ) -> Result<
+        std::borrow::Cow<'static, tracedecay_tool_catalog::ExecutableBindingRegistryV1>,
+        ApplicationSurfaceAdapterError,
+    > {
         tracedecay_application::handoff_executable_binding_registry()
+            .map(std::borrow::Cow::Owned)
             .map_err(ApplicationSurfaceAdapterError::CatalogValidation)
     }
 }

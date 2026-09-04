@@ -4,6 +4,7 @@
 //! capability's already-mounted transport into the stable SDK method spelling
 //! the generator emits and retains typed unavailability for incomplete wires.
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 
 use tracedecay_tool_catalog::{
@@ -33,20 +34,20 @@ use crate::{
 /// exposed in the generated Rust and TypeScript SDKs by the same edit. Each
 /// operation ID names its own family, so the list needs no parallel labels.
 fn mounted_executable_binding_registries()
--> Result<Vec<ExecutableBindingRegistryV1>, ApplicationContractError> {
+-> Result<Vec<Cow<'static, ExecutableBindingRegistryV1>>, ApplicationContractError> {
     Ok(vec![
-        git_surface_executable_binding_registry()?,
-        native_worktree_executable_binding_registry()?,
-        code_search_executable_binding_registry()?,
-        feedback_http_executable_binding_registry()?,
-        primitive_http_executable_binding_registry()?,
-        work_executable_binding_registry()?.clone(),
-        workflow_executable_binding_registry()?.clone(),
-        configuration_executable_binding_registry()?,
-        context_scout_executable_binding_registry()?,
-        retained_surface_executable_binding_registry()?,
-        handoff_executable_binding_registry()?,
-        multi_root_executable_binding_registry()?,
+        Cow::Owned(git_surface_executable_binding_registry()?),
+        Cow::Owned(native_worktree_executable_binding_registry()?),
+        Cow::Owned(code_search_executable_binding_registry()?),
+        Cow::Owned(feedback_http_executable_binding_registry()?),
+        Cow::Owned(primitive_http_executable_binding_registry()?),
+        Cow::Borrowed(work_executable_binding_registry()?),
+        Cow::Borrowed(workflow_executable_binding_registry()?),
+        Cow::Owned(configuration_executable_binding_registry()?),
+        Cow::Owned(context_scout_executable_binding_registry()?),
+        Cow::Owned(retained_surface_executable_binding_registry()?),
+        Cow::Owned(handoff_executable_binding_registry()?),
+        Cow::Owned(multi_root_executable_binding_registry()?),
     ])
 }
 
@@ -61,7 +62,7 @@ pub fn sdk_executable_binding_registry()
     let mounted = mounted_executable_binding_registries()?;
     let mut bindings = mounted
         .iter()
-        .flat_map(|registry| registry.iter())
+        .flat_map(|registry| registry.as_ref().iter())
         .map(project_http_binding)
         .collect::<Result<Vec<_>, _>>()?;
     let http_operations = bindings
@@ -233,6 +234,7 @@ fn sdk_method_name(operation_id: &OperationId) -> Result<String, CatalogValidati
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
     use std::collections::BTreeSet;
 
     use schemars::JsonSchema;
@@ -262,6 +264,26 @@ mod tests {
     #[allow(dead_code)]
     struct TestGitStatusResult {
         changed_paths: Vec<String>,
+    }
+
+    #[test]
+    fn sdk_projection_borrows_process_static_work_registries() {
+        let mounted = mounted_executable_binding_registries().expect("mounted registries");
+
+        for operation_id in ["operation.work.create", "operation.workflow.get_run"] {
+            let source = mounted
+                .iter()
+                .find(|source| {
+                    source
+                        .iter()
+                        .any(|binding| binding.operation_id().as_str() == operation_id)
+                })
+                .unwrap_or_else(|| panic!("missing mounted registry for {operation_id}"));
+            assert!(
+                matches!(source, Cow::Borrowed(_)),
+                "SDK projection must borrow the process-static registry containing {operation_id}",
+            );
+        }
     }
 
     /// Every mounted product family reaches the official SDK.

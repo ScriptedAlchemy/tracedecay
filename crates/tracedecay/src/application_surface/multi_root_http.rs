@@ -82,9 +82,12 @@ impl RegisteredHttpOperation for MultiRootHttpOperation {
 
     fn registry(
         self,
-    ) -> Result<tracedecay_tool_catalog::ExecutableBindingRegistryV1, ApplicationSurfaceAdapterError>
-    {
+    ) -> Result<
+        std::borrow::Cow<'static, tracedecay_tool_catalog::ExecutableBindingRegistryV1>,
+        ApplicationSurfaceAdapterError,
+    > {
         multi_root_executable_binding_registry()
+            .map(std::borrow::Cow::Owned)
             .map_err(ApplicationSurfaceAdapterError::CatalogValidation)
     }
 }

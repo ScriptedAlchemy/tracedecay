@@ -18,7 +18,7 @@ pub(crate) trait RegisteredHttpOperation: Copy {
     fn registry(
         self,
     ) -> Result<
-        tracedecay_tool_catalog::ExecutableBindingRegistryV1,
+        std::borrow::Cow<'static, tracedecay_tool_catalog::ExecutableBindingRegistryV1>,
         super::ApplicationSurfaceAdapterError,
     >;
 }
