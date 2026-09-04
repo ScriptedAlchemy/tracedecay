@@ -33,10 +33,8 @@ async fn main() {
     #[cfg(feature = "hotpath")]
     let mut hotpath = None;
 
-    let measurement = run_rmcp_connection_pipeline(
-        PERSISTENT_MEASURED_REQUESTS,
-        RECONNECT_MEASURED_ROUNDS,
-        || {
+    let measurement = {
+        let mut before_measurement = || {
             // Opening the full production composition is intentionally outside
             // the measurement window. Start Hotpath immediately before the
             // first broker connection so it observes only RMCP initialization,
@@ -45,9 +43,14 @@ async fn main() {
             {
                 hotpath = Some(hotpath_guard());
             }
-        },
-    )
-    .await
+        };
+        run_rmcp_connection_pipeline(
+            PERSISTENT_MEASURED_REQUESTS,
+            RECONNECT_MEASURED_ROUNDS,
+            &mut before_measurement,
+        )
+        .await
+    }
     .expect("run typed RMCP production connection benchmark");
 
     #[cfg(feature = "hotpath")]
