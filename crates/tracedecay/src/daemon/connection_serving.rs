@@ -9,6 +9,14 @@ use super::*;
 use tracedecay_daemon_protocol::DaemonInvocationPayload;
 use tracedecay_daemon_service::{DaemonInvocationService, Lease, cancel, register};
 
+/// Hermetic production-route benchmark support for the typed RMCP transport.
+///
+/// This is test-only so the benchmark can enter the same broker connection,
+/// routing, selected-project response, delivery-settlement, and RMCP adapter
+/// path as the daemon without adding a shipped benchmark API.
+#[cfg(feature = "test-transport")]
+pub mod rmcp_benchmark;
+
 type ProjectOwnerAwaitFutureV1<'a, T> = std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<Option<(T, VecDeque<String>)>>> + Send + 'a>,
 >;
