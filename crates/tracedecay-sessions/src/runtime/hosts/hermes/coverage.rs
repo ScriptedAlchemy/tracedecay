@@ -16,7 +16,7 @@ use tracedecay_store::observation::{ObservationCoverageReason, ObservationCursor
 use crate::admission::{HostAdmission, HostAdmissionOutcome};
 use crate::observation::{CaptureObservationOutcome, ObservationCancellation};
 use crate::runtime::shared::TranscriptIngestStats;
-use tracedecay_runtime_core::db::{SqliteFileIdentityError, sqlite_generation_identity};
+use tracedecay_runtime_core::db::{SqliteFileIdentityOperation, sqlite_generation_identity};
 
 use super::observation::{
     HermesAdmission, HermesAdmissionAction, HermesProjectionMetadata, observation_source,
@@ -29,15 +29,15 @@ pub(super) fn sqlite_incarnation(
     path: &Path,
 ) -> Result<(ObservationSourceGenerationV1, u64, u64), String> {
     let file_identity = sqlite_generation_identity(path).map_err(|error| {
-        match error {
-            SqliteFileIdentityError::Open => "could not open Hermes SQLite authority",
-            SqliteFileIdentityError::Inspect => "could not inspect Hermes SQLite authority",
-            SqliteFileIdentityError::Identify => "could not identify Hermes SQLite authority",
-            SqliteFileIdentityError::Unavailable => {
+        let operation = match error.operation() {
+            SqliteFileIdentityOperation::Open => "could not open Hermes SQLite authority",
+            SqliteFileIdentityOperation::Inspect => "could not inspect Hermes SQLite authority",
+            SqliteFileIdentityOperation::Identify => "could not identify Hermes SQLite authority",
+            SqliteFileIdentityOperation::PlatformSupport => {
                 "Hermes SQLite physical identity is unavailable"
             }
-        }
-        .to_string()
+        };
+        format!("{operation} ({})", error.category().as_str())
     })?;
     let resume_fingerprint = sqlite_resume_fingerprint(path, file_identity)?;
     let generation = ObservationSourceGenerationV1::new(file_identity)

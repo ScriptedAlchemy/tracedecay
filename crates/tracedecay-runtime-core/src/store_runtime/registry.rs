@@ -286,10 +286,12 @@ impl StoreRuntimeLeaseSource {
         operation: &'static str,
     ) -> Result<u64, StoreRuntimeRegistryFailure> {
         let current_file_identity = crate::db::sqlite_generation_identity(self.locator().path())
-            .map_err(|_| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                operation,
-                message: "could not verify the registered SQLite file identity".to_owned(),
-            })?;
+            .map_err(
+                |source| StoreRuntimeRegistryFailure::SqliteFileIdentityInspectionFailed {
+                    operation,
+                    source,
+                },
+            )?;
         if current_file_identity != self.opened_file_identity {
             return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
                 operation,
@@ -763,12 +765,19 @@ impl RuntimeDatabaseWriteAuthority {
             .require_active_write_scope(intent)
             .map_err(|error| error.to_string())?;
         let current_file_identity = crate::db::sqlite_generation_identity(&self.canonical_path)
-            .map_err(|_| "could not verify the registered SQLite file identity".to_owned())?;
+            .map_err(|source| sqlite_file_identity_authority_denial(intent, source))?;
         if current_file_identity != self.opened_file_identity {
             return Err("database file identity changed after registry attachment".to_owned());
         }
         Ok(())
     }
+}
+
+pub(super) fn sqlite_file_identity_authority_denial(
+    operation: &str,
+    source: crate::db::SqliteFileIdentityError,
+) -> String {
+    format!("{operation}: registered SQLite file identity inspection failed: {source}")
 }
 
 impl tracedecay_rusqlite_runtime::RuntimeWriteAuthority for RuntimeDatabaseWriteAuthority {
@@ -1344,6 +1353,10 @@ pub enum StoreRuntimeRegistryFailure {
     PhysicalRuntimeFailed {
         operation: &'static str,
         message: String,
+    },
+    SqliteFileIdentityInspectionFailed {
+        operation: &'static str,
+        source: crate::db::SqliteFileIdentityError,
     },
     StorageRuntime(Box<StorageRuntimeErrorV1>),
     PhysicalRuntimeNotDrained {
