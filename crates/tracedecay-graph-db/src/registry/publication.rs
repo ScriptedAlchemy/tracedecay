@@ -13,6 +13,7 @@ use tracedecay_store::runtime::{
     MAX_GRAPH_PUBLICATION_PROJECTION_PAGE_RECORDS_V1, MAX_GRAPH_REPLAY_PAGE_RECORDS_V1,
 };
 
+use super::code_graph_namespace::is_legacy_per_generation_code_graph_namespace_str;
 use super::path::canonical_graph_database_file;
 use super::publication_support::{
     RegisteredGraphDbOperationV1, check_all, clear_retiring_fence, collect_closure,
@@ -521,13 +522,32 @@ impl GraphDbRegistry {
         match retirement_outcome {
             GraphReplayRetirementOutcomeV1::Retired(_)
             | GraphReplayRetirementOutcomeV1::ExactReplay(_) => {
+                let legacy_layout = is_legacy_per_generation_code_graph_namespace_str(
+                    replay.publication.key.projection.namespace.as_str(),
+                );
                 if selected_head.is_some() {
                     tracing::info!(
                         event = "graph_replay_head_retired",
                         generation = generation.as_str(),
                         graph_generation = %locator.generation,
                         replay_sequence = replay.sequence.get(),
+                        legacy_layout,
                         "verified per-generation graph replay head retired"
+                    );
+                }
+                if legacy_layout {
+                    // Migration evidence for issue #836: this projection was
+                    // written under the retired per-generation namespace, so
+                    // reclaiming it is the explicit drain of pre-cutover
+                    // persisted state, not ordinary supersession.
+                    tracing::info!(
+                        event = "graph_legacy_code_graph_projection_retired",
+                        generation = generation.as_str(),
+                        graph_generation = %locator.generation,
+                        namespace = replay.publication.key.projection.namespace.as_str(),
+                        head_retired = selected_head.is_some(),
+                        "reclaimed a code-graph projection persisted under the retired \
+                         per-generation namespace layout"
                     );
                 }
                 // Retirement is the linearization point. A failure after it
