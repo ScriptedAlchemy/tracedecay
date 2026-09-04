@@ -638,6 +638,10 @@ impl ProductionProjectCompositionHarnessV1 {
         long_lived_session_maintenance_for_test: bool,
         wait_for_code_index: bool,
     ) -> ProductionHarnessOpenFuture {
+        // Embedded compositions skip the binary's logging bootstrap, so
+        // daemon `tracing` diagnostics (activation reconciler retries, owner
+        // refusals) would otherwise vanish from test output.
+        install_stderr_tracing(StderrTracingDefault::Warn);
         Box::pin(async move {
             let _composition_admission = production_composition_admission_gate().acquire().await?;
             // Embedded test compositions never pass through the binary's
