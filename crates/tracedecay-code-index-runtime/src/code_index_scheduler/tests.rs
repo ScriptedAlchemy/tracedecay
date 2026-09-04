@@ -1107,6 +1107,41 @@ fn partitioned_publication_reuses_unchanged_file_segments() {
          {first_generation_segment_bytes}-byte first generation"
     );
 
+    let orphan_bytes = b"evidence pack committed before its manifest";
+    let orphan_digest = hex::encode(Sha256::digest(orphan_bytes));
+    let orphan_pack = segment_root.join(format!("segment-{orphan_digest}.json"));
+    std::fs::write(&orphan_pack, orphan_bytes).expect("write committed orphan evidence pack");
+    let orphan_report = tracedecay_code_index_retention::code_index_generations::run_code_generation_retention(
+        store.path(),
+        &BTreeSet::new(),
+        tracedecay_code_index_retention::code_index_generations::DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        tracedecay_code_index_retention::code_index_generations::CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(8_000_000),
+        None,
+    )
+    .expect("sweep committed orphan without collecting a generation");
+    assert!(
+        orphan_report.deleted_generations.is_empty(),
+        "both pointer-addressable generations must remain retained"
+    );
+    assert!(
+        !orphan_pack.exists(),
+        "retention must sweep an unreferenced final pack even without a generation deletion"
+    );
+    for live_segment in [&shared_segment, &first_evidence_pack, &second_evidence_pack] {
+        assert!(
+            segment_root
+                .join(format!(
+                    "segment-{}.json",
+                    live_segment
+                        .strip_prefix("sha256:")
+                        .expect("tagged live segment digest")
+                ))
+                .is_file(),
+            "active, retained, and parent-reused segment {live_segment} must remain marked"
+        );
+    }
+
     remove_historical_pointer_entries(store.path());
     let report = tracedecay_code_index_retention::code_index_generations::run_code_generation_retention(
         store.path(),
@@ -1356,13 +1391,16 @@ fn evidence_pack_failure_after_pages_never_publishes_manifest_or_pointer() {
             .expect("read source pointer"),
     )
     .expect("decode source pointer");
+    let source_generation_file = source_pointer["generation_file"]
+        .as_str()
+        .expect("source generation manifest path")
+        .to_owned();
     let source_manifest: serde_json::Value = serde_json::from_slice(
         &std::fs::read(
-            source_store.path().join("code-generations-v1").join(
-                source_pointer["generation_file"]
-                    .as_str()
-                    .expect("source generation manifest path"),
-            ),
+            source_store
+                .path()
+                .join("code-generations-v1")
+                .join(&source_generation_file),
         )
         .expect("read source manifest"),
     )
@@ -1381,6 +1419,10 @@ fn evidence_pack_failure_after_pages_never_publishes_manifest_or_pointer() {
         .expect("evidence pack digest")
         .strip_prefix("sha256:")
         .expect("tagged evidence pack digest");
+    let source_pack = source_store
+        .path()
+        .join("code-generation-segments-v1")
+        .join(format!("segment-{evidence_digest}.json"));
 
     let failed_store = TempDir::new().expect("failed publication store root");
     let mut publication = super::DaemonCodeIndexPublicationStoreV1::new(
@@ -1443,6 +1485,75 @@ fn evidence_pack_failure_after_pages_never_publishes_manifest_or_pointer() {
                     .starts_with(".evidence-pack-publication.")
             }),
         "a failed aggregate commit must remove its incomplete evidence temporary"
+    );
+
+    std::fs::remove_file(&colliding_pack).expect("remove injected collision");
+    let colliding_manifest = failed_store
+        .path()
+        .join("code-generations-v1")
+        .join(&source_generation_file);
+    std::fs::write(&colliding_manifest, b"wrong immutable generation manifest")
+        .expect("seed corrupt immutable generation target");
+    let error = publication
+        .publish_atomically(&generation.sealed_scope(), None, Arc::clone(&generation))
+        .expect_err("a post-pack manifest collision must fail publication");
+    assert!(
+        error
+            .to_string()
+            .contains("immutable code-generation path contains different bytes"),
+        "the real manifest commit must reject the conflicting generation: {error}"
+    );
+    assert_eq!(
+        publication
+            .seal_evidence_durable_transaction_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "the failure must occur after the final evidence-pack durability transaction"
+    );
+    assert!(
+        !colliding_pack.exists(),
+        "a pre-manifest publication failure must immediately roll back its final pack"
+    );
+    assert!(
+        !failed_store
+            .path()
+            .join("active-code-generation-v1.json")
+            .exists(),
+        "a post-pack manifest failure must not publish a pointer"
+    );
+    std::fs::remove_file(colliding_manifest).expect("remove injected manifest collision");
+
+    std::fs::copy(&source_pack, &colliding_pack)
+        .expect("simulate a crash after the final evidence-pack rename");
+    drop(publication);
+    let _reopened = super::DaemonCodeIndexPublicationStoreV1::new(
+        failed_store.path(),
+        fixture.path(),
+        SanitizerRevision::new(tracedecay_runtime_core::privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
+            .expect("sanitizer revision"),
+    )
+    .expect("reopen after committed-pack crash");
+    assert!(
+        colliding_pack.exists(),
+        "publication-store construction lacks graph replay liveness and must not sweep final packs"
+    );
+
+    let graph_replay_pool = failed_store.path().join("graph-replay-pool");
+    tracedecay_private_fs::create_private_directory(&graph_replay_pool)
+        .expect("create graph replay pool");
+    let report = tracedecay_code_index_retention::code_index_generations::run_code_generation_retention(
+        failed_store.path(),
+        &BTreeSet::new(),
+        tracedecay_code_index_retention::code_index_generations::DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        tracedecay_code_index_retention::code_index_generations::CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(8_100_000),
+        Some(&graph_replay_pool),
+    )
+    .expect("maintenance sweeps committed-pack crash debris");
+    assert!(report.deleted_generations.is_empty());
+    assert!(
+        !colliding_pack.exists(),
+        "canonical locked maintenance must remove a final pack with no durable manifest"
     );
 }
 

@@ -101,6 +101,136 @@ fn publisher_between_probe_and_execute_defers_without_exposure() {
 }
 
 #[test]
+fn segment_only_sweep_defers_while_the_replay_pool_is_held() {
+    let store = tempfile::TempDir::new().expect("store root");
+    std::fs::create_dir_all(store.path().join(GENERATIONS_DIRECTORY))
+        .expect("create generation root");
+    let segments_root = store.path().join(GENERATION_SEGMENTS_DIRECTORY);
+    std::fs::create_dir_all(&segments_root).expect("create segment root");
+    let orphan_bytes = b"unreferenced final evidence pack";
+    let orphan_digest = encode_lowercase_hex(&Sha256::digest(orphan_bytes));
+    let orphan_path = segments_root.join(format!("segment-{orphan_digest}.json"));
+    std::fs::write(&orphan_path, orphan_bytes).expect("write orphan segment");
+    let pool_root = store.path().join("graph-replay-pool");
+    ensure_replay_pool(&pool_root);
+    let plan = prepare_next_code_generation_retention_cancellable(
+        store.path(),
+        &BTreeSet::new(),
+        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        &|| false,
+        Some(&pool_root),
+    )
+    .expect("plan segment-only sweep");
+    assert!(plan.collectable_generations.is_empty());
+    assert!(plan.has_collectable_work());
+
+    let publisher = hold_replay_pool(&pool_root);
+    let error = execute_code_generation_retention(
+        store.path(),
+        plan,
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(122),
+        Some(&pool_root),
+    )
+    .expect_err("a segment-only sweep must respect the replay-pool lock");
+    assert!(matches!(
+        error,
+        CodeGenerationRetentionErrorV1::GraphReplayPoolBusy
+    ));
+    assert!(
+        orphan_path.is_file(),
+        "a deferred segment-only sweep must not unlink any segment"
+    );
+    drop(publisher);
+}
+
+#[test]
+fn segment_sweep_marks_a_replay_unlink_while_staged() {
+    let store = tempfile::TempDir::new().expect("store root");
+    std::fs::create_dir_all(store.path().join(GENERATIONS_DIRECTORY))
+        .expect("create generation root");
+    let segments_root = store.path().join(GENERATION_SEGMENTS_DIRECTORY);
+    std::fs::create_dir_all(&segments_root).expect("create segment root");
+    let orphan_bytes = b"unreferenced final evidence pack";
+    let orphan_digest = encode_lowercase_hex(&Sha256::digest(orphan_bytes));
+    let orphan_path = segments_root.join(format!("segment-{orphan_digest}.json"));
+    std::fs::write(&orphan_path, orphan_bytes).expect("write orphan segment");
+
+    let pool_root = store.path().join("graph-replay-pool");
+    ensure_replay_pool(&pool_root);
+    let replay_manifest = serde_json::to_vec(&serde_json::json!({
+        "state_digest": format!("sha256:{}", "0".repeat(64)),
+        "generation": {
+            "format_revision": SEALED_GENERATION_FORMAT_REVISION_V1,
+            "snapshot": { "files": [] },
+            "file_segments": [],
+            "generation_evidence": {
+                "segment_digest": format!("sha256:{orphan_digest}"),
+                "segment_size_bytes": orphan_bytes.len(),
+                "pages": [{
+                    "page_ordinal": 0,
+                    "page_digest": format!("sha256:{orphan_digest}"),
+                    "page_size_bytes": orphan_bytes.len()
+                }]
+            }
+        }
+    }))
+    .expect("encode staged replay manifest");
+    let replay_digest = encode_lowercase_hex(&Sha256::digest(&replay_manifest));
+    let staged_unlink = pool_root.join(format!(".generation-{replay_digest}.unlink-123-456-1"));
+    let mut corrupted_replay_manifest = replay_manifest.clone();
+    corrupted_replay_manifest.push(b' ');
+    std::fs::write(&staged_unlink, corrupted_replay_manifest).expect("stage corrupt replay unlink");
+    let error = prepare_next_code_generation_retention_cancellable(
+        store.path(),
+        &BTreeSet::new(),
+        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        &|| false,
+        Some(&pool_root),
+    )
+    .expect_err("a replay entry that changed under its content address must fail closed");
+    assert!(matches!(
+        error,
+        CodeGenerationRetentionErrorV1::UnsafeState(_)
+    ));
+    assert!(orphan_path.is_file());
+    std::fs::write(&staged_unlink, replay_manifest).expect("stage replay unlink");
+
+    let plan = prepare_next_code_generation_retention_cancellable(
+        store.path(),
+        &BTreeSet::new(),
+        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        &|| false,
+        Some(&pool_root),
+    )
+    .expect("mark while replay unlink is staged");
+    assert!(
+        !plan.has_collectable_work(),
+        "the hidden replay manifest must mark its evidence pack live"
+    );
+    assert!(
+        orphan_path.is_file(),
+        "planning must preserve the segment while replay liveness is ambiguous"
+    );
+
+    std::fs::remove_file(&staged_unlink).expect("finish staged replay unlink");
+    let report = run_code_generation_retention(
+        store.path(),
+        &BTreeSet::new(),
+        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(123),
+        Some(&pool_root),
+    )
+    .expect("collect after replay pool becomes empty");
+    assert!(report.deleted_generations.is_empty());
+    assert!(
+        !orphan_path.exists(),
+        "maintenance must reclaim the orphan after replay ambiguity clears"
+    );
+}
+
+#[test]
 fn checked_acquire_returns_cancelled_without_waiting_out_the_budget() {
     let (_root, pool) = isolated_pool();
     let publisher = hold_replay_pool(&pool);
