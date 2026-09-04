@@ -373,40 +373,13 @@ fn decode_verified_seal(
         }
         tracedecay_code_index::production::CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
             &manifest,
-            |digest, expected_size, buffer| {
+            |request, buffer| {
                 (check)().map_err(|error| {
                     tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(
                         error.to_string(),
                     )
                 })?;
-                let digest_hex = digest.as_str().strip_prefix("sha256:").ok_or_else(|| {
-                    tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(
-                        "sealed segment digest is not sha256".to_owned(),
-                    )
-                })?;
-                let segment_path = segments_root.join(format!("segment-{digest_hex}.json"));
-                let metadata = segment_path.symlink_metadata().map_err(|error| {
-                    tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(
-                        format!("sealed generation segment is unavailable: {error}"),
-                    )
-                })?;
-                if !metadata.file_type().is_file() || metadata.len() != expected_size {
-                    return Err(
-                        tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(
-                            "sealed generation segment identity does not match its manifest"
-                                .to_owned(),
-                        ),
-                    );
-                }
-                buffer.clear();
-                File::open(&segment_path)
-                    .and_then(|mut file| file.read_to_end(buffer))
-                    .map(|_| ())
-                    .map_err(|error| {
-                        tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(
-                            format!("sealed generation segment read failed: {error}"),
-                        )
-                    })
+                read_partitioned_segment(segments_root, request, buffer)
             },
         )
         .map_err(|error| GraphDbError::Corrupt {
@@ -441,6 +414,66 @@ fn decode_verified_seal(
         });
     }
     Ok(generation)
+}
+
+fn read_partitioned_segment(
+    segments_root: &std::path::Path,
+    request: tracedecay_code_index::production::SealedGenerationSegmentReadV1<'_>,
+    buffer: &mut Vec<u8>,
+) -> Result<(), tracedecay_code_index::production::CodeIndexProductionErrorV1> {
+    use tracedecay_code_index::production::{
+        CodeIndexProductionErrorV1, SealedGenerationSegmentReadV1,
+    };
+    let (digest, expected_size, offset, length) = match request {
+        SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
+            (digest, size_bytes, 0, size_bytes)
+        }
+        SealedGenerationSegmentReadV1::Range {
+            digest,
+            size_bytes,
+            offset,
+            length,
+        } => (digest, size_bytes, offset, length),
+    };
+    if offset
+        .checked_add(length)
+        .is_none_or(|end| end > expected_size)
+    {
+        return Err(CodeIndexProductionErrorV1::Contract(
+            "sealed generation segment range exceeds its manifest identity".to_owned(),
+        ));
+    }
+    let digest_hex = digest.as_str().strip_prefix("sha256:").ok_or_else(|| {
+        CodeIndexProductionErrorV1::Contract("sealed segment digest is not sha256".to_owned())
+    })?;
+    let segment_path = segments_root.join(format!("segment-{digest_hex}.json"));
+    let metadata = segment_path.symlink_metadata().map_err(|error| {
+        CodeIndexProductionErrorV1::Contract(format!(
+            "sealed generation segment is unavailable: {error}"
+        ))
+    })?;
+    if !metadata.file_type().is_file() || metadata.len() != expected_size {
+        return Err(CodeIndexProductionErrorV1::Contract(
+            "sealed generation segment identity does not match its manifest".to_owned(),
+        ));
+    }
+    let length = usize::try_from(length).map_err(|_| {
+        CodeIndexProductionErrorV1::Contract(
+            "sealed generation segment range exceeds addressable memory".to_owned(),
+        )
+    })?;
+    buffer.clear();
+    buffer.resize(length, 0);
+    File::open(segment_path)
+        .and_then(|mut file| {
+            file.seek(SeekFrom::Start(offset))?;
+            file.read_exact(buffer)
+        })
+        .map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed generation segment read failed: {error}"
+            ))
+        })
 }
 
 #[hotpath::measure(label = "daemon.session_registry.seal.verify")]
@@ -503,39 +536,13 @@ fn verify_checked_seal_bundle(
     })?;
     tracedecay_code_index::production::CodeIndexPublishedGenerationV1::verify_partitioned_sealed(
         &manifest,
-        |digest, expected_size, buffer| {
+        |request, buffer| {
             (check)().map_err(|error| {
                 tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(
                     error.to_string(),
                 )
             })?;
-            let digest_hex = digest.as_str().strip_prefix("sha256:").ok_or_else(|| {
-                tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(
-                    "sealed segment digest is not sha256".to_owned(),
-                )
-            })?;
-            let segment_path = segments_root.join(format!("segment-{digest_hex}.json"));
-            let metadata = segment_path.symlink_metadata().map_err(|error| {
-                tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(format!(
-                    "sealed generation segment is unavailable: {error}"
-                ))
-            })?;
-            if !metadata.file_type().is_file() || metadata.len() != expected_size {
-                return Err(
-                    tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(
-                        "sealed generation segment identity does not match its manifest".to_owned(),
-                    ),
-                );
-            }
-            buffer.clear();
-            File::open(segment_path)
-                .and_then(|mut file| file.read_to_end(buffer))
-                .map(|_| ())
-                .map_err(|error| {
-                    tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(
-                        format!("sealed generation segment read failed: {error}"),
-                    )
-                })
+            read_partitioned_segment(segments_root, request, buffer)
         },
     )
     .map_err(|error| GraphDbError::Corrupt {
