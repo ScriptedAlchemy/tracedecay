@@ -380,6 +380,36 @@ pub enum GenerationDigestVerificationV1 {
     MetadataOnly,
 }
 
+/// What a census learned about content-addressed generation segments.
+///
+/// Marking live segments means streaming every retained manifest end to end —
+/// the same multi-gigabyte read [`GenerationDigestVerificationV1::MetadataOnly`]
+/// exists to avoid, and one that fails closed when a manifest no longer matches
+/// its content-addressed file name. A metadata-only census therefore refuses to
+/// guess: it reports [`Self::NoneFound`] only from the bounded directory listing
+/// that proves no segment file exists at all, and [`Self::Unknown`] otherwise.
+/// `Unknown` counts as collectable work so the segment sweep is still reached,
+/// never skipped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GenerationSegmentCensusV1 {
+    /// The mark-and-sweep proved no unreferenced segment exists, or the store
+    /// holds no segment files at all.
+    NoneFound,
+    /// The mark-and-sweep found at least one unreferenced segment.
+    Present,
+    /// Segment files exist and this census did not pay the mark phase that
+    /// would classify them. Only a full-verification census resolves this.
+    Unknown,
+}
+
+impl GenerationSegmentCensusV1 {
+    /// Whether a retention pass still has segment work to reach.
+    #[must_use]
+    pub const fn may_have_collectable_segments(self) -> bool {
+        matches!(self, Self::Present | Self::Unknown)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeGenerationRetentionGenerationV1 {
@@ -426,11 +456,11 @@ pub struct CodeGenerationRetentionPlanV1 {
     /// inventory. Descriptor-referenced and still-in-progress staging files
     /// are deliberately absent.
     collectable_text_artifacts: Vec<CodeTextArtifactRetentionCandidateV1>,
-    /// A fully content-addressed segment exists outside every retained
+    /// Whether a fully content-addressed segment exists outside every retained
     /// generation manifest (and, when configured, the graph replay pool).
     /// This is a mark-phase wake signal only: execution recomputes the exact
     /// live set under the canonical store lock before unlinking anything.
-    collectable_generation_segments: bool,
+    collectable_generation_segments: GenerationSegmentCensusV1,
     /// Unique bytes seen in the bounded text-artifact inventory: durable
     /// descriptor targets, the one resumable active staging file, and this
     /// pass's selected debris candidates. A descriptor shared by retained
@@ -467,7 +497,15 @@ impl CodeGenerationRetentionPlanV1 {
     pub fn has_collectable_work(&self) -> bool {
         !self.collectable_generations.is_empty()
             || !self.collectable_text_artifacts.is_empty()
-            || self.collectable_generation_segments
+            || self
+                .collectable_generation_segments
+                .may_have_collectable_segments()
+    }
+
+    /// What this plan proved about unreferenced generation segments.
+    #[must_use]
+    pub const fn generation_segment_census(&self) -> GenerationSegmentCensusV1 {
+        self.collectable_generation_segments
     }
 }
 
@@ -682,7 +720,7 @@ pub fn prepare_next_code_generation_retention_cancellable(
     // when this exact census found bytes that may be unlinked. The executor
     // still refuses metadata-only plans, so no deletion can cross this gate
     // without the canonical full verification below.
-    let census = plan_code_generation_retention_with_verification_cancellable(
+    let mut census = plan_code_generation_retention_with_verification_cancellable(
         store_root,
         vector_readable_sources,
         rollback_floor,
@@ -690,6 +728,25 @@ pub fn prepare_next_code_generation_retention_cancellable(
         graph_replay_pool_root,
         is_cancelled,
     )?;
+    // The bounded census leaves segments typed unknown rather than paying the
+    // mark phase. Resolve exactly that question with the sweep alone: a store
+    // whose only possible work is segments must still reach them, and running
+    // a whole full-digest plan to find out would cost a second pass over every
+    // sealed byte on every quiet maintenance tick.
+    if census.collectable_generations.is_empty()
+        && census.collectable_text_artifacts.is_empty()
+        && census.collectable_generation_segments == GenerationSegmentCensusV1::Unknown
+    {
+        census.collectable_generation_segments = if has_unreferenced_generation_segments(
+            store_root,
+            graph_replay_pool_root,
+            is_cancelled,
+        )? {
+            GenerationSegmentCensusV1::Present
+        } else {
+            GenerationSegmentCensusV1::NoneFound
+        };
+    }
     if !census.has_collectable_work() {
         return Ok(census);
     }
@@ -897,8 +954,35 @@ fn plan_code_generation_retention_with_verification_cancellable(
         verification,
         is_cancelled,
     )?;
-    let collectable_generation_segments =
-        has_unreferenced_generation_segments(store_root, graph_replay_pool_root, is_cancelled)?;
+    // The segment mark phase streams every retained manifest end to end and
+    // fails closed when one no longer matches its content-addressed name. That
+    // is exactly the multi-gigabyte read a metadata-only census promises not to
+    // pay, and paying it here made a bounded observability census error out on
+    // stores whose generations are individually larger than any byte budget.
+    // Metadata-only callers get the bounded directory answer plus a typed
+    // unknown; `prepare_next_code_generation_retention_cancellable` resolves
+    // that unknown with the sweep alone, so maintenance still reaches segments
+    // without a second full-digest pass.
+    let collectable_generation_segments = match verification {
+        GenerationDigestVerificationV1::Full => {
+            if has_unreferenced_generation_segments(
+                store_root,
+                graph_replay_pool_root,
+                is_cancelled,
+            )? {
+                GenerationSegmentCensusV1::Present
+            } else {
+                GenerationSegmentCensusV1::NoneFound
+            }
+        }
+        GenerationDigestVerificationV1::MetadataOnly => {
+            if store_holds_generation_segments(store_root, is_cancelled)? {
+                GenerationSegmentCensusV1::Unknown
+            } else {
+                GenerationSegmentCensusV1::NoneFound
+            }
+        }
+    };
     #[cfg(feature = "hotpath")]
     {
         let planned_bytes = total_bytes(&collectable_generations).saturating_add(
@@ -1123,6 +1207,41 @@ fn replay_generation_file_digest(file_name: &str) -> Option<&str> {
     })
 }
 
+/// Whether the store holds any content-addressed segment file at all.
+///
+/// A bounded directory listing: no manifest is opened, so this is the only
+/// segment question a metadata-only census may answer. An empty or absent
+/// directory proves there is nothing to collect; anything else stays typed
+/// unknown until the mark-and-sweep runs.
+fn store_holds_generation_segments(
+    store_root: &Path,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<bool, CodeGenerationRetentionErrorV1> {
+    let entries = match std::fs::read_dir(store_root.join(GENERATION_SEGMENTS_DIRECTORY)) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(storage(error)),
+    };
+    for entry in entries {
+        if observe_cancel(is_cancelled) {
+            return Err(CodeGenerationRetentionErrorV1::Cancelled);
+        }
+        let entry = entry.map_err(storage)?;
+        let path = entry.path();
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if file_name
+            .strip_prefix("segment-")
+            .and_then(|name| name.strip_suffix(".json"))
+            .is_some_and(|digest| is_lowercase_hex(digest, 64))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn has_unreferenced_generation_segments(
     store_root: &Path,
     graph_replay_pool_root: Option<&Path>,
@@ -1217,26 +1336,27 @@ pub fn execute_code_generation_retention_cancellable(
             "active generation changed after the retention mark phase".to_owned(),
         ));
     }
-    let mut reclaimed_segment_bytes =
-        if plan.collectable_generations.is_empty() && plan.collectable_generation_segments {
-            let graph_replay_pool_lock = match graph_replay_pool_root {
-                Some(pool_root) => Some(acquire_graph_replay_pool_lock_checked(
-                    pool_root,
-                    Instant::now() + GRAPH_REPLAY_POOL_ACQUIRE_BUDGET,
-                    is_cancelled,
-                )?),
-                None => None,
-            };
-            let reclaimed = collect_unreferenced_generation_segments(
-                store_root,
-                graph_replay_pool_root,
+    let mut reclaimed_segment_bytes = if plan.collectable_generations.is_empty()
+        && plan.collectable_generation_segments == GenerationSegmentCensusV1::Present
+    {
+        let graph_replay_pool_lock = match graph_replay_pool_root {
+            Some(pool_root) => Some(acquire_graph_replay_pool_lock_checked(
+                pool_root,
+                Instant::now() + GRAPH_REPLAY_POOL_ACQUIRE_BUDGET,
                 is_cancelled,
-            )?;
-            drop(graph_replay_pool_lock);
-            reclaimed
-        } else {
-            0
+            )?),
+            None => None,
         };
+        let reclaimed = collect_unreferenced_generation_segments(
+            store_root,
+            graph_replay_pool_root,
+            is_cancelled,
+        )?;
+        drop(graph_replay_pool_lock);
+        reclaimed
+    } else {
+        0
+    };
     let (deleted_generations, receipt) = if plan.collectable_generations.is_empty() {
         (Vec::new(), None)
     } else {

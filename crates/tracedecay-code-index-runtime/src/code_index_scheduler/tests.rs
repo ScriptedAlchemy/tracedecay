@@ -6889,8 +6889,15 @@ fn moved_reference_scope(scope: &ResolvedScope) -> ResolvedScope {
 /// last complete generation stays in `serving_generation`. A seat whose
 /// currency witness still re-proves against the unchanged checkout serves as
 /// current; once the checkout drifts under the held mutex the witness
-/// disproves, the ready gate abstains, and the fallback serves the same
-/// complete generation reported stale.
+/// disproves and the fallback serves the same complete generation reported
+/// stale.
+///
+/// The ready gate itself no longer abstains for this window. Decoupling
+/// freshness from publication work moved readiness onto the per-worktree
+/// source-freshness state, so the gate reads it without the scheduler and an
+/// unchanged checkout stays ready while a rebuild owns the mutex — which is
+/// the point of the decoupling, and what the witnessed assertion below
+/// already required of the query path.
 // Holding the scheduler guard across the awaits is the scenario, not an
 // oversight: it is how this test occupies the rebuild window that the fallback
 // exists to serve through. The guard is released before shutdown.
@@ -6929,8 +6936,9 @@ async fn search_serves_the_last_complete_generation_while_the_scheduler_rebuilds
         registry
             .latest_complete_ready_for_scope(&scope)
             .await
-            .is_none(),
-        "the ready gate abstains for the whole rebuild window"
+            .is_some(),
+        "the ready gate reads source freshness without the scheduler, so a rebuild \
+         window over an unchanged checkout does not make it abstain"
     );
     assert!(
         registry
@@ -6954,11 +6962,22 @@ async fn search_serves_the_last_complete_generation_while_the_scheduler_rebuilds
     // Drift the checkout while the rebuild still owns the scheduler: the
     // witness disproves, the ready gate abstains, and the fallback serves the
     // last complete generation reported stale.
+    //
+    // The drift is Git-mediated because that is what the decoupled freshness
+    // authority observes without the scheduler. A bare worktree write is the
+    // documented tier-2 case: it is proven only by the periodic
+    // stat-signature ladder, and until that ladder runs the bounded-staleness
+    // contract deliberately keeps serving the preceding generation as
+    // current. Using it here would assert against that contract rather than
+    // against this test's subject, which is what search reports once the seat
+    // *is* disproved mid-rebuild.
     std::fs::write(
         fixture.path().join("src/main.rs"),
         "fn main() { drifted(); }\n",
     )
     .expect("drift the checkout under the held scheduler");
+    git(fixture.path(), &["add", "src/main.rs"]);
+    git(fixture.path(), &["commit", "-qm", "drift under rebuild"]);
     let stale = registry
         .execute_query_search(&scope, core_search_request("main"))
         .await
