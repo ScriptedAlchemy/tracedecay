@@ -242,6 +242,7 @@ async fn corpus_scaled_publication_uses_fresh_background_authority_per_phase() {
         .unwrap();
     store.runtime = Arc::new(PublicationAuthorityProbeRuntime {
         inner: Arc::clone(&store.runtime),
+        require_background_begin: false,
         prepare_deadline: Mutex::new(None),
     });
 
@@ -253,8 +254,43 @@ async fn corpus_scaled_publication_uses_fresh_background_authority_per_phase() {
     assert_eq!(publication.checkpoint.source_generation, source);
 }
 
+#[tokio::test]
+async fn corpus_scaled_generation_begin_uses_background_authority() {
+    let source = CodeGenerationId::new("code-generation.background-begin").unwrap();
+    let cancellation: Arc<dyn GraphCancellation> = Arc::new(NeverCancelled);
+    let graph = Arc::new(
+        IsolatedSemanticEvaluationGraphV1::open_source_generations(
+            std::slice::from_ref(&source),
+            Arc::clone(&cancellation),
+        )
+        .unwrap(),
+    );
+    let retained = graph.retained(&source).unwrap();
+    let mut store = GraphVectorGenerationStoreV1::open(&retained).unwrap();
+    let (plan, _, descriptor) = prepared_generation(
+        &source,
+        "chunk.background-begin",
+        'd',
+        &admitted_embedding(),
+    );
+    store.configure_stage(descriptor).unwrap();
+    store.runtime = Arc::new(PublicationAuthorityProbeRuntime {
+        inner: Arc::clone(&store.runtime),
+        require_background_begin: true,
+        prepare_deadline: Mutex::new(None),
+    });
+
+    let outcome = store.begin_generation(plan, cancellation).await.unwrap();
+
+    assert!(matches!(
+        outcome,
+        VectorGenerationBeginOutcomeV1::ReplayFromStart { .. }
+    ));
+}
+
 struct PublicationAuthorityProbeRuntime {
     inner: Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>,
+    require_background_begin: bool,
     prepare_deadline: Mutex<Option<Instant>>,
 }
 
@@ -295,6 +331,15 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for PublicationAuthorityProbeRuntime {
         plan: &SemanticVectorStagePlan,
         authority: &SemanticGraphExecutionAuthorityV1,
     ) -> Result<VerifiedGenerationBeginV1, GraphDbError> {
+        if self.require_background_begin {
+            let remaining = authority
+                .deadline()
+                .checked_duration_since(Instant::now())
+                .ok_or(GraphDbError::DeadlineExceeded)?;
+            if remaining < Duration::from_secs(24 * 60 * 60) {
+                return Err(GraphDbError::DeadlineExceeded);
+            }
+        }
         self.inner.begin_stage(plan, authority)
     }
 
