@@ -325,9 +325,14 @@ async fn recovery_quiescence_retires_only_the_selected_projects_lsp_owners() {
     let scope_set = AuthorizedScopeSetAuthority::authorize_registered(
         ScopeSetId::new("scope-set.recovery-stale").expect("scope set id"),
         ScopeSetRevision::new(1).expect("revision"),
+        // One federated scope set is one profile store locator: registered
+        // roots that resolve under different profiles can no longer be
+        // authorized together (`AuthorizedScopeSetError::Invalid`). Both roots
+        // here belong to the same project, so profile A is their one locator
+        // profile; the separately installed owners keep their own profiles.
         vec![
             admission("recovery-a", &profile_a, &scope_a, &root_a),
-            admission("recovery-b", &profile_b, &scope_b, &root_b),
+            admission("recovery-b", &profile_a, &scope_b, &root_b),
         ],
         &capability,
         &use_case,
