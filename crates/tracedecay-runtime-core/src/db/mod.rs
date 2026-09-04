@@ -57,7 +57,10 @@ pub use connection::{
     TestDatabaseRuntimeMode, TestDatabaseRuntimeScope, TestRuntimeProfileIdentityV1,
 };
 pub use external_source::install_external_source_schema;
-pub use file_identity::{SqliteFileIdentityError, sqlite_generation_identity};
+pub use file_identity::{
+    SqliteFileIdentityError, SqliteFileIdentityErrorCategory, SqliteFileIdentityOperation,
+    sqlite_generation_identity,
+};
 pub use memory_connection::MemoryConnection;
 pub use metadata::BoundedMetadataValue;
 pub(crate) use retrieval_anchor_authority::{
