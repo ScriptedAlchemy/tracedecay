@@ -636,6 +636,10 @@ async fn concurrent_full_batches_converge_without_split_brain_or_partial_writes(
         TranscriptStoreError::Conflict { actual, .. } if actual == higher_offset
     ));
 
+    // Transcript persistence never projects summary nodes: a `kind = "summary"`
+    // transcript message is durable raw evidence, and `lcm_summary_nodes` rows
+    // are only written by the explicit immutable-summary publication API
+    // (`lcm_publish_immutable_summary_guarded`).
     assert_eq!(
         store_counts(&db, "cursor", "concurrent-full-session", &transcript_path,).await,
         StoreCounts {
@@ -644,7 +648,7 @@ async fn concurrent_full_batches_converge_without_split_brain_or_partial_writes(
             raw_messages: 3,
             raw_fts: 3,
             all_raw_fts: 3,
-            summaries: 1,
+            summaries: 0,
             cursors: 1,
         }
     );
