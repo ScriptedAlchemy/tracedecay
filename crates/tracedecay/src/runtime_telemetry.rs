@@ -94,7 +94,7 @@ async fn collect_database_with_generation_census(
         Ok(tracedecay_runtime_core::db::WriterOwnership::Active(owner)) => {
             WriterOwnerSnapshot::Active {
                 pid: owner.pid,
-                started_epoch_ms: owner.started_epoch_ms,
+                started_epoch_ms: u64::try_from(owner.started_epoch_ms).unwrap_or(u64::MAX),
                 version: owner.version,
                 intent: owner.intent,
             }
