@@ -111,9 +111,14 @@ async fn convert_final_temporal_schema_to_released_v3(db_path: &Path) {
 
     conn.execute_batch(
         "DROP TRIGGER session_refresh_progress_insert_guard_v1;
+         DROP INDEX idx_session_relation_receipts_recovery_due;
          ALTER TABLE session_temporal_projection_receipts DROP COLUMN batch_item_count;
          ALTER TABLE session_temporal_projection_receipts DROP COLUMN committed_item_count;
-         ALTER TABLE session_temporal_projection_receipts DROP COLUMN committed_copy_count;",
+         ALTER TABLE session_temporal_projection_receipts DROP COLUMN committed_copy_count;
+         ALTER TABLE session_relation_receipts DROP COLUMN recovery_state;
+         ALTER TABLE session_relation_receipts DROP COLUMN recovery_failure_code;
+         ALTER TABLE session_relation_receipts DROP COLUMN recovery_failure_count;
+         ALTER TABLE session_relation_receipts DROP COLUMN recovery_next_attempt_at;",
     )
     .await
     .unwrap();

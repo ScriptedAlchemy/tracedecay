@@ -985,6 +985,10 @@ pub(super) const TABLES: &[Table] = &[
             column("graph_watermark", "TEXT", false, None, 0),
             column("created_at", "INTEGER", true, None, 0),
             column("applied_at", "INTEGER", false, None, 0),
+            column("recovery_state", "TEXT", true, Some("'pending'"), 0),
+            column("recovery_failure_code", "TEXT", false, None, 0),
+            column("recovery_failure_count", "INTEGER", true, Some("0"), 0),
+            column("recovery_next_attempt_at", "INTEGER", true, Some("0"), 0),
         ],
         [
             foreign_key(
@@ -2066,6 +2070,20 @@ pub(super) const INDEXES: &[Index] = &[
         unique: false,
         origin: "c",
         columns: &["state", "created_at", "session_id", "generation"],
+    },
+    Index {
+        table: "session_relation_receipts",
+        name: Some("idx_session_relation_receipts_recovery_due"),
+        unique: false,
+        origin: "c",
+        columns: &[
+            "state",
+            "recovery_state",
+            "recovery_next_attempt_at",
+            "created_at",
+            "session_id",
+            "generation",
+        ],
     },
     Index {
         table: "session_query_cursor_keys",

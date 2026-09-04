@@ -176,6 +176,18 @@ async fn current_profiles_install_the_unreleased_queue_shape_in_place() {
             "missing in-place queue column {column}"
         );
     }
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM sqlite_schema
+             WHERE type = 'table' AND name = 'lcm_summary_convergence_dirty_raw'",
+            (),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -269,5 +281,123 @@ async fn protected_content_revision_requeues_a_current_session() {
         .await
         .unwrap(),
         "an outcome from the superseded raw generation must lose its CAS"
+    );
+}
+
+#[tokio::test]
+async fn disjoint_raw_revisions_drain_as_distinct_restart_safe_work_items() {
+    let temp = tempfile::tempdir().unwrap();
+    let conn = TestConnection::open(&temp.path().join("sessions.db"));
+    conn.execute_batch(
+        "CREATE TABLE sessions (
+            provider TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            project_key TEXT NOT NULL,
+            project_path TEXT NOT NULL,
+            PRIMARY KEY(provider, session_id)
+         );
+         CREATE TABLE session_messages (
+            provider TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            timestamp INTEGER,
+            ordinal INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            metadata_json TEXT,
+            PRIMARY KEY(provider, message_id)
+         );
+         INSERT INTO sessions(provider, session_id, project_key, project_path)
+         VALUES ('cursor', 'disjoint-revisions', 'project.revised', '/revised');",
+    )
+    .await
+    .unwrap();
+    schema::ensure_lcm_schema(&conn).await.unwrap();
+    for ordinal in 1..=2 {
+        conn.execute(
+            "INSERT INTO lcm_raw_messages (
+                provider, message_id, session_id, role, ordinal, content,
+                content_hash, storage_kind, snippet_text, index_text, metadata_json
+             ) VALUES ('cursor', ?1, 'disjoint-revisions', 'assistant', ?2,
+                       ?1, ?1, 'inline', ?1, ?1,
+                       '{\"ingest_protection\":{\"sanitization_receipt\":{}}}')",
+            params![format!("message-{ordinal}"), ordinal],
+        )
+        .await
+        .unwrap();
+    }
+    let current = summary_convergence::next_candidate(&conn, i64::MAX)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        summary_convergence::record_outcome(
+            &conn,
+            &current,
+            summary_convergence::LcmSummaryConvergenceQueueState::Current,
+            None,
+            0,
+            0,
+        )
+        .await
+        .unwrap()
+    );
+    conn.execute(
+        "UPDATE lcm_raw_messages SET ordinal = 101
+         WHERE provider = 'cursor' AND message_id = 'message-1'",
+        (),
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "UPDATE lcm_raw_messages SET content_hash = 'revised-2'
+         WHERE provider = 'cursor' AND message_id = 'message-2'",
+        (),
+    )
+    .await
+    .unwrap();
+    let first = summary_convergence::next_candidate(&conn, i64::MAX)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.stale_from_store_id, Some(1));
+    assert!(
+        summary_convergence::complete_stale_raw_revision(&conn, &first)
+            .await
+            .unwrap()
+    );
+    let after_restart =
+        summary_convergence::candidate_for_session(&conn, "cursor", "disjoint-revisions")
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(after_restart.stale_from_store_id, Some(2));
+    assert!(
+        summary_convergence::complete_stale_raw_revision(&conn, &after_restart)
+            .await
+            .unwrap()
+    );
+    let drained = summary_convergence::candidate_for_session(&conn, "cursor", "disjoint-revisions")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(drained.stale_from_store_id, None);
+    assert!(
+        summary_convergence::record_outcome(
+            &conn,
+            &drained,
+            summary_convergence::LcmSummaryConvergenceQueueState::Current,
+            None,
+            0,
+            0,
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        summary_convergence::next_candidate(&conn, i64::MAX)
+            .await
+            .unwrap()
+            .is_none()
     );
 }

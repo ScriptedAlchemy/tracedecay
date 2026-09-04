@@ -508,6 +508,9 @@ pub enum LcmError {
         expected: i64,
         actual: Option<i64>,
     },
+    StaleRawProtectionSource {
+        store_id: i64,
+    },
     StaleSummarySourceRange {
         expected_from: i64,
         expected_to: i64,
@@ -604,6 +607,10 @@ impl std::fmt::Display for LcmError {
                     "raw revision compare-and-swap failed: expected {expected}, actual {actual:?}"
                 )
             }
+            Self::StaleRawProtectionSource { store_id } => write!(
+                f,
+                "raw protection source {store_id} changed while payloads were staged"
+            ),
             Self::StaleSummarySourceRange {
                 expected_from,
                 expected_to,

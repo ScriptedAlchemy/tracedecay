@@ -16,6 +16,119 @@ use crate::runtime::SessionMessageRecord;
 
 use super::super::registered_db::{SessionRegisteredDb, SessionStoreAccess, SessionWriteTxn};
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RawProtectionRevision {
+    role: String,
+    ordinal: i64,
+    timestamp: Option<i64>,
+    content_hash: String,
+    storage_kind: String,
+    payload_ref: Option<String>,
+    metadata_json: Option<String>,
+}
+
+struct RawProtectionInput {
+    store_id: i64,
+    message: SessionMessageRecord,
+    raw_revision: RawProtectionRevision,
+}
+
+async fn require_current_protection_input(
+    conn: &(impl QueryExecutor + ?Sized),
+    expected: &RawProtectionInput,
+) -> Result<(), LcmError> {
+    let mut rows = conn
+        .query(
+            "SELECT message.provider, message.message_id, message.session_id,
+                    message.role, message.timestamp, message.ordinal, message.text,
+                    message.kind, message.model, message.tool_names, message.source_path,
+                    message.source_offset, message.metadata_json,
+                    raw.role, raw.ordinal, raw.timestamp, raw.content_hash,
+                    raw.storage_kind, raw.payload_ref, raw.metadata_json
+             FROM lcm_raw_messages AS raw
+             JOIN session_messages AS message
+               ON message.provider = raw.provider
+              AND message.message_id = raw.message_id
+              AND message.session_id = raw.session_id
+             WHERE raw.store_id = ?1 AND raw.provider = ?2
+               AND raw.session_id = ?3 AND raw.message_id = ?4
+             LIMIT 1",
+            params![
+                expected.store_id,
+                expected.message.provider.as_str(),
+                expected.message.session_id.as_str(),
+                expected.message.message_id.as_str(),
+            ],
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Err(LcmError::StaleRawProtectionSource {
+            store_id: expected.store_id,
+        });
+    };
+    let actual_message = SessionMessageRecord {
+        provider: row.get(0)?,
+        message_id: row.get(1)?,
+        session_id: row.get(2)?,
+        role: row.get(3)?,
+        timestamp: row.get(4)?,
+        ordinal: row.get(5)?,
+        text: row.get(6)?,
+        kind: row.get(7)?,
+        model: row.get(8)?,
+        tool_names: row.get(9)?,
+        source_path: row.get(10)?,
+        source_offset: row.get(11)?,
+        metadata_json: row.get(12)?,
+    };
+    let actual_raw_revision = RawProtectionRevision {
+        role: row.get(13)?,
+        ordinal: row.get(14)?,
+        timestamp: row.get(15)?,
+        content_hash: row.get(16)?,
+        storage_kind: row.get(17)?,
+        payload_ref: row.get(18)?,
+        metadata_json: row.get(19)?,
+    };
+    if actual_message != expected.message || actual_raw_revision != expected.raw_revision {
+        return Err(LcmError::StaleRawProtectionSource {
+            store_id: expected.store_id,
+        });
+    }
+    Ok(())
+}
+
+async fn require_current_raw_protection_revision(
+    conn: &(impl QueryExecutor + ?Sized),
+    store_id: i64,
+    expected: &RawProtectionRevision,
+) -> Result<(), LcmError> {
+    let mut rows = conn
+        .query(
+            "SELECT role, ordinal, timestamp, content_hash, storage_kind,
+                    payload_ref, metadata_json
+             FROM lcm_raw_messages WHERE store_id = ?1 LIMIT 1",
+            params![store_id],
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Err(LcmError::StaleRawProtectionSource { store_id });
+    };
+    let actual = RawProtectionRevision {
+        role: row.get(0)?,
+        ordinal: row.get(1)?,
+        timestamp: row.get(2)?,
+        content_hash: row.get(3)?,
+        storage_kind: row.get(4)?,
+        payload_ref: row.get(5)?,
+        metadata_json: row.get(6)?,
+    };
+    if &actual != expected {
+        return Err(LcmError::StaleRawProtectionSource { store_id });
+    }
+    Ok(())
+}
+
 impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
     #[hotpath::skip]
     pub async fn lcm_read_snapshot(&self) -> Result<DatabaseEngineReadSnapshot, LcmError> {
@@ -338,12 +451,9 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
         page_max_bytes: u64,
     ) -> Result<tracedecay_lcm::summary_convergence::LcmRawProtectionPage, LcmError> {
         let storage_root = self.lcm_storage_root()?.to_path_buf();
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| LcmError::Db(error.to_string()))?;
+        let snapshot = self.lcm_read_snapshot().await?;
         let mut rows = QueryExecutor::query(
-            &transaction,
+            &snapshot,
             "SELECT raw.store_id,
                         CASE WHEN json_extract(
                             raw.metadata_json,
@@ -353,7 +463,9 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
                         message.provider, message.message_id, message.session_id, message.role,
                         message.timestamp, message.ordinal, message.text, message.kind,
                         message.model, message.tool_names, message.source_path,
-                        message.source_offset, message.metadata_json
+                        message.source_offset, message.metadata_json,
+                        raw.role, raw.ordinal, raw.timestamp, raw.content_hash,
+                        raw.storage_kind, raw.payload_ref, raw.metadata_json
                  FROM lcm_raw_messages AS raw
                  LEFT JOIN session_messages AS message
                    ON raw.provider = message.provider
@@ -373,6 +485,7 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
         )
         .await?;
         let mut unprotected = Vec::new();
+        let mut scanned_revisions = Vec::new();
         let mut rows_scanned = 0_usize;
         let mut bytes_scanned = 0_u64;
         let mut frontier_store_id = after_store_id;
@@ -393,10 +506,20 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
             rows_scanned = rows_scanned.saturating_add(1);
             bytes_scanned = bytes_scanned.saturating_add(row_bytes);
             frontier_store_id = store_id;
+            let raw_revision = RawProtectionRevision {
+                role: row.get(16)?,
+                ordinal: row.get(17)?,
+                timestamp: row.get(18)?,
+                content_hash: row.get(19)?,
+                storage_kind: row.get(20)?,
+                payload_ref: row.get(21)?,
+                metadata_json: row.get(22)?,
+            };
+            scanned_revisions.push((store_id, raw_revision.clone()));
             if !needs_protection {
                 continue;
             }
-            unprotected.push(SessionMessageRecord {
+            let message = SessionMessageRecord {
                 provider: row.get::<Option<String>>(3)?.ok_or_else(|| {
                     LcmError::SummarySourceUnavailable {
                         source_id: store_id.to_string(),
@@ -440,11 +563,24 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
                 source_path: row.get(13)?,
                 source_offset: row.get(14)?,
                 metadata_json: row.get(15)?,
+            };
+            unprotected.push(RawProtectionInput {
+                store_id,
+                message,
+                raw_revision,
             });
         }
         drop(rows);
+        drop(snapshot);
         let has_more = byte_limited || rows_scanned == page_limit.max(1);
         if unprotected.is_empty() {
+            let transaction = self
+                .begin_write_transaction()
+                .await
+                .map_err(|error| LcmError::Db(error.to_string()))?;
+            for (store_id, revision) in &scanned_revisions {
+                require_current_raw_protection_revision(&transaction, *store_id, revision).await?;
+            }
             tracedecay_lcm::summary_convergence::record_current_protection_progress(
                 &transaction,
                 provider,
@@ -464,15 +600,25 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
         let mut payload_rollback =
             payload::PayloadFileRollback::begin_cancellation_safe(&storage_root);
         let mut staged = Vec::with_capacity(unprotected.len());
-        for message in &unprotected {
+        for input in &unprotected {
             staged.push(raw::stage_raw_message_with_payload_tracked(
                 &storage_root,
-                message,
+                &input.message,
                 &mut payload_rollback,
             )?);
         }
-        for (message, staged) in unprotected.iter().zip(staged) {
-            raw::commit_staged_raw_message(&transaction, message, staged).await?;
+        let transaction = self
+            .begin_write_transaction()
+            .await
+            .map_err(|error| LcmError::Db(error.to_string()))?;
+        for (store_id, revision) in &scanned_revisions {
+            require_current_raw_protection_revision(&transaction, *store_id, revision).await?;
+        }
+        for input in &unprotected {
+            require_current_protection_input(&transaction, input).await?;
+        }
+        for (input, staged) in unprotected.iter().zip(staged) {
+            raw::commit_staged_raw_message(&transaction, &input.message, staged).await?;
         }
         tracedecay_lcm::summary_convergence::record_current_protection_progress(
             &transaction,

@@ -232,7 +232,8 @@ async fn claude_summary_pair_is_exact(
         .map_err(|error| LcmError::Db(error.to_string()))?;
     let Some(boundary) = metadata
         .as_deref()
-        .and_then(|metadata| serde_json::from_str::<CanonicalObservationEnvelopeV1>(metadata).ok())
+        .and_then(|metadata| serde_json::from_str::<Value>(metadata).ok())
+        .and_then(super::decode_canonical_observation_metadata)
     else {
         return Ok(false);
     };
