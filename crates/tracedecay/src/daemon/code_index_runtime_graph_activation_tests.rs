@@ -369,7 +369,7 @@ async fn restart_status_tracks_immediate_settled_and_stale_graph_serving_states(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn corrupt_graph_restart_stays_pending_then_repairs_in_background() {
+async fn corrupt_graph_restart_repairs_through_canonical_serialized_activation() {
     restart_status_case(true, false).await;
 }
 
@@ -624,7 +624,9 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
                     ))
                     .await;
                 if matches!(
-                    stale_read.as_ref().map(|read| read.freshness()),
+                    stale_read
+                        .as_ref()
+                        .map(tracedecay_graph_query::VerifiedCodeGraphRead::freshness),
                     Ok(CodeGraphReadFreshnessV1::LastCompleteStale { .. })
                 ) {
                     let retained = registry
@@ -672,7 +674,13 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
-    if dirty_before_restart {
+    if corrupt_graph {
+        assert_eq!(
+            settled.metadata().manifest().generation_id,
+            seeded_generation_id,
+            "repairing a corrupt retained graph must not fabricate a dirty source successor"
+        );
+    } else if dirty_before_restart {
         assert_ne!(
             settled.metadata().manifest().generation_id,
             seeded_generation_id,
@@ -722,7 +730,8 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
     if corrupt_graph {
         assert!(
             sealed_decode_count > 0,
-            "corrupt Grafeo state must enter canonical background replay"
+            "a corrupt retained graph must defer its typed direct-recovery failure to the \
+             canonical serialized activation path"
         );
     } else if !dirty_before_restart {
         assert_eq!(

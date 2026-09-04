@@ -116,7 +116,11 @@ pub(crate) fn open_direct_sealed_generation(
         sealed_database_options(sealed_path),
         PersistentGraphStoreState::Existing,
     )
-    .map_err(|error| sealed_store_failure("reopen failed", error))?;
+    .map_err(|error| match error {
+        error @ (GraphDbError::ProjectionMismatch { .. }
+        | GraphDbError::GenerationMismatch { .. }) => error,
+        error => sealed_store_failure("reopen failed", error),
+    })?;
     let identity = {
         let guard = database.read_guard()?;
         let native = guard.as_ref().ok_or(GraphDbError::Closed)?;
@@ -140,10 +144,11 @@ pub(crate) fn open_direct_sealed_generation(
     // fresh or moved container pays the full row proof and files the marker.
     if let Err(error) = sealed_copy_proof(&database, &identity, expected, check) {
         let _ = database.close();
-        return Err(sealed_store_failure(
-            "post-reopen verification failed",
-            error,
-        ));
+        return Err(match error {
+            error @ (GraphDbError::ProjectionMismatch { .. }
+            | GraphDbError::GenerationMismatch { .. }) => error,
+            error => sealed_store_failure("post-reopen verification failed", error),
+        });
     }
     database.mark_sealed_read_only();
     let lease = crate::owner::issue_derived_read_lease(database, authority_lease)?;
