@@ -259,6 +259,8 @@ tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", fe
 # fixture via `#[path]` and need the extern.
 tracedecay-lcm = { path = "../tracedecay-lcm", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-semantic-contracts.workspace = true
 tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
 # Dev-only: `tests/work_route_exposure_conformance.rs` still asserts against
 # the usecases `operation_stream` authority; production code is off usecases.

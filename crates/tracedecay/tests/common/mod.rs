@@ -953,9 +953,10 @@ pub fn ensure_tracedecay_daemon(home: &Path) {
     TEST_DAEMONS.with(|daemons| {
         let mut daemons = daemons.borrow_mut();
         daemons.retain(|existing_home, daemon| existing_home == &home && daemon.is_running());
-        daemons
-            .entry(home.clone())
-            .or_insert_with(|| spawn_tracedecay_daemon_process(&home, |_| {}));
+        daemons.entry(home.clone()).or_insert_with(|| {
+            let binary = tracedecay_bin();
+            spawn_tracedecay_daemon_process(&home, &binary, |_| {})
+        });
     });
 }
 
@@ -996,7 +997,16 @@ pub fn spawn_tracedecay_daemon(home: &Path) -> DaemonProcess {
     if let Some(daemon) = take_managed_daemon(&home) {
         return daemon;
     }
-    spawn_tracedecay_daemon_process(&home, |_| {})
+    let binary = tracedecay_bin();
+    spawn_tracedecay_daemon_process(&home, &binary, |_| {})
+}
+
+/// Starts the explicitly selected shipped binary under the canonical bounded
+/// test-daemon authority, without resolving or probing a workspace binary.
+pub fn spawn_tracedecay_daemon_from(home: &Path, binary: &Path) -> DaemonProcess {
+    let home = canonical_existing_path(home);
+    drop(take_managed_daemon(&home));
+    spawn_tracedecay_daemon_process(&home, binary, |_| {})
 }
 
 /// Spawns a test daemon after applying caller-supplied command customization.
@@ -1012,11 +1022,13 @@ pub fn spawn_tracedecay_daemon_with(
 ) -> DaemonProcess {
     let home = canonical_existing_path(home);
     drop(take_managed_daemon(&home));
-    spawn_tracedecay_daemon_process(&home, configure)
+    let binary = tracedecay_bin();
+    spawn_tracedecay_daemon_process(&home, &binary, configure)
 }
 
 fn spawn_tracedecay_daemon_process(
     home: &Path,
+    binary: &Path,
     configure: impl FnOnce(&mut Command),
 ) -> DaemonProcess {
     let profile_root = canonical_existing_path(home).join(".tracedecay");
@@ -1049,7 +1061,7 @@ fn spawn_tracedecay_daemon_process(
         authority_path.display()
     );
 
-    let mut command = Command::new(tracedecay_bin());
+    let mut command = Command::new(binary);
     apply_tracedecay_home_env(&mut command, home);
     command
         .args(["daemon", "run"])
