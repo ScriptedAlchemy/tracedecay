@@ -863,6 +863,12 @@ impl Worker {
             checkpoint.evaluate_scheduled(snapshot_blockers)
         }) {
             Ok(result) => self.publish_checkpoint_result(result),
+            // A scheduled checkpoint that could not run this time because
+            // readers still hold snapshots, the authority lapsed, or SQLite
+            // reported the WAL busy is retried on the next schedule; only a
+            // broken policy or a real driver failure faults the writer, the
+            // same classification the requested path applies.
+            Err(error) if scheduled_checkpoint_error_is_transient(&error) => {}
             Err(_) => {
                 self.state
                     .store(WriterState::Faulted as u8, Ordering::Release);
@@ -1178,6 +1184,27 @@ fn build_batches(
         batches.push(batch);
     }
     batches
+}
+
+/// Whether a failed scheduled checkpoint is a deferral rather than a fault.
+fn scheduled_checkpoint_error_is_transient(
+    error: &crate::checkpoint::CheckpointError<crate::checkpoint::RusqliteCheckpointError>,
+) -> bool {
+    match error {
+        crate::checkpoint::CheckpointError::MaintenanceStillDraining(_)
+        | crate::checkpoint::CheckpointError::AuthorityDenied(_) => true,
+        crate::checkpoint::CheckpointError::Driver(
+            crate::checkpoint::RusqliteCheckpointError::Sqlite(rusqlite::Error::SqliteFailure(
+                failure,
+                _,
+            )),
+        ) => matches!(
+            failure.code,
+            rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+        ),
+        crate::checkpoint::CheckpointError::Driver(_)
+        | crate::checkpoint::CheckpointError::InvalidConfig(_) => false,
+    }
 }
 
 #[cfg(test)]
