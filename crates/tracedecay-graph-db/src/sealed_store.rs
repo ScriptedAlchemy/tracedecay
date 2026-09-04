@@ -106,9 +106,15 @@ pub(crate) fn open_direct_sealed_generation(
             "sealed generation store receipt does not bind this generation".to_owned(),
         ));
     }
-    let database = GraphDb::open_with_store_state(
+    // Lazily, for the same reason as `open_sealed_store`, and additionally so
+    // the owner's lease-drop hibernation applies: an eagerly opened handle
+    // has no lazy store state, so `hibernate_if_lazy` was a no-op and this
+    // direct sealed serving path retained its whole graph past its last
+    // lease. The identity read below reopens it immediately; the release
+    // happens when the last operation lease goes away.
+    let database = GraphDb::open_lazy_with_store_state(
         sealed_database_options(sealed_path),
-        Some(PersistentGraphStoreState::Existing),
+        PersistentGraphStoreState::Existing,
     )
     .map_err(|error| sealed_store_failure("reopen failed", error))?;
     let identity = {
@@ -229,6 +235,21 @@ pub(crate) enum SealedStoreInstall {
     Installed { staging_proof: Option<u64> },
 }
 
+/// Retained sealed generation readers and how much of that retention is
+/// currently materialized as a native engine.
+///
+/// `retained` counts identities this database can serve without touching the
+/// staging container; `resident` counts the subset that is actually holding a
+/// grafeo store in RAM right now. The gap between them is the point of
+/// hibernation, and the pair is what makes a pressure decision falsifiable.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct SealedGenerationCensusV1 {
+    pub(crate) retained: usize,
+    pub(crate) resident: usize,
+    pub(crate) retained_canonical_bytes: u64,
+    pub(crate) resident_canonical_bytes: u64,
+}
+
 /// A reopened, digest-verified, compacted single-generation store.
 pub(crate) struct SealedGenerationStore {
     locator: GenerationLocator,
@@ -264,6 +285,20 @@ impl SealedGenerationStore {
 
     pub(crate) fn row_counts(&self) -> (usize, usize) {
         (self.entity_count, self.relation_count)
+    }
+
+    /// Canonical bytes the post-reopen digest proof covered — the served
+    /// index size this generation is retained for.
+    pub(crate) fn canonical_bytes(&self) -> u64 {
+        self.canonical_bytes
+    }
+
+    /// Whether this reader's native engine is currently materialized.
+    ///
+    /// A retained sealed generation with no resident engine costs its
+    /// identity and nothing else; this is the falsifiable form of that claim.
+    pub(crate) fn engine_resident(&self) -> bool {
+        self.database.native_engine_open().unwrap_or(false)
     }
 
     /// Best-effort teardown used only when the generation is quarantined or
@@ -621,16 +656,112 @@ impl GraphDb {
         locator: GenerationLocator,
         store: Arc<SealedGenerationStore>,
     ) -> Result<(), GraphDbError> {
-        let mut sealed =
-            self.inner.sealed_generations.write().map_err(|_| {
+        let superseded = {
+            let mut sealed = self.inner.sealed_generations.write().map_err(|_| {
                 GraphDbError::unavailable("sealed generation store lock is poisoned")
             })?;
-        if let Some(previous) = sealed.insert(locator, store) {
+            sealed.insert(locator.clone(), store)
+        };
+        if let Some(previous) = superseded {
             // The replacement shares the artifact directory, so only the
             // superseded handle is closed; the files stay for the new reader.
             let _ = previous.database.close();
         }
+        // Newly installed generation aside, every other retained sealed
+        // reader is now a non-serving owner. Step each idle one down to its
+        // identity so the count of concurrently materialized graphs stays
+        // bounded by what is actually being read, not by how many
+        // generations this process has ever sealed.
+        self.hibernate_idle_sealed_generation_engines(Some(&locator));
+        self.publish_sealed_generation_census();
         Ok(())
+    }
+
+    /// Releases the native engine of every retained sealed reader except
+    /// `serving`, skipping any a reader currently holds. Returns how many
+    /// engines were released.
+    ///
+    /// Never loses truth and never evicts a leased serving generation: the
+    /// artifact and its receipt stay on disk, the reader keeps its exact
+    /// locator, digest, row counts and canonical byte census, and the next
+    /// read reopens the same container. A generation whose snapshot gate is
+    /// busy is left resident.
+    pub(crate) fn hibernate_idle_sealed_generation_engines(
+        &self,
+        serving: Option<&GenerationLocator>,
+    ) -> usize {
+        let Ok(sealed) = self.inner.sealed_generations.read() else {
+            return 0;
+        };
+        let candidates = sealed
+            .iter()
+            .filter(|(locator, _)| Some(*locator) != serving)
+            .map(|(_, store)| Arc::clone(store))
+            .collect::<Vec<_>>();
+        drop(sealed);
+        let mut released = 0usize;
+        for store in candidates {
+            match store.database.hibernate_if_lazy_when_idle() {
+                Ok(true) => released += 1,
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "sealed generation engine could not hibernate; it stays resident"
+                    );
+                }
+            }
+        }
+        released
+    }
+
+    /// Per-generation retained census: how many sealed readers this database
+    /// holds, how many of them have a materialized engine right now, and the
+    /// canonical bytes those readers were proven over.
+    pub(crate) fn sealed_generation_census(&self) -> SealedGenerationCensusV1 {
+        let Ok(sealed) = self.inner.sealed_generations.read() else {
+            return SealedGenerationCensusV1::default();
+        };
+        let mut census = SealedGenerationCensusV1::default();
+        for store in sealed.values() {
+            census.retained += 1;
+            census.retained_canonical_bytes = census
+                .retained_canonical_bytes
+                .saturating_add(store.canonical_bytes());
+            if store.engine_resident() {
+                census.resident += 1;
+                census.resident_canonical_bytes = census
+                    .resident_canonical_bytes
+                    .saturating_add(store.canonical_bytes());
+            }
+        }
+        census
+    }
+
+    fn publish_sealed_generation_census(&self) {
+        let census = self.sealed_generation_census();
+        hotpath::gauge!("graph_db.sealed_store.retained").set(census.retained as f64);
+        hotpath::gauge!("graph_db.sealed_store.resident").set(census.resident as f64);
+        hotpath::gauge!("graph_db.sealed_store.retained_canonical_bytes")
+            .set(census.retained_canonical_bytes as f64);
+        hotpath::gauge!("graph_db.sealed_store.resident_canonical_bytes")
+            .set(census.resident_canonical_bytes as f64);
+        tracing::debug!(
+            event = "graph_sealed_generation_census",
+            retained = census.retained,
+            resident = census.resident,
+            retained_canonical_bytes = census.retained_canonical_bytes,
+            resident_canonical_bytes = census.resident_canonical_bytes,
+            "retained sealed generation readers and their materialized engines"
+        );
+    }
+
+    /// Retained sealed readers and how many hold a materialized engine.
+    #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
+    #[must_use]
+    pub fn sealed_generation_engine_census(&self) -> (usize, usize) {
+        let census = self.sealed_generation_census();
+        (census.retained, census.resident)
     }
 
     /// Retires the sealed artifact for `locator`: uninstalls the reader and
@@ -1102,9 +1233,18 @@ fn open_sealed_store(
             "sealed generation store receipt does not bind this generation".to_owned(),
         ));
     }
-    let database = GraphDb::open_with_store_state(
+    // Lazily: installing a sealed reader must not cost a whole in-memory
+    // graph. grafeo's store is heap resident, so an eager open here replayed
+    // the artifact's entire block log into RAM for every generation this
+    // process ever sealed — five retained generations meant five whole graphs
+    // (#799), and one published worktree scope meant one more (#830). The
+    // proof below resolves by stat whenever the verify-once marker covers
+    // these exact container bytes, so a retained-but-unread generation now
+    // materializes nothing at all; anything that does read it reopens the
+    // same container through `ensure_opened` on first use.
+    let database = GraphDb::open_lazy_with_store_state(
         sealed_database_options(database_path),
-        Some(PersistentGraphStoreState::Existing),
+        PersistentGraphStoreState::Existing,
     )
     .map_err(|error| sealed_store_failure("reopen failed", error))?;
     // Prove the compacted, reopened store serves exactly the sealed rows
@@ -1126,6 +1266,14 @@ fn open_sealed_store(
         }
     };
     database.mark_sealed_read_only();
+    // A full proof had to materialize the engine to stream the rows. The
+    // proof is filed now, so the engine is pure resident cost until a read
+    // actually arrives: release it and let the first read reopen. A marker
+    // hit never opened it, and hibernation is then a no-op.
+    if let Err(error) = database.hibernate_if_lazy() {
+        let _ = database.close();
+        return Err(sealed_store_failure("post-proof hibernation failed", error));
+    }
     Ok(Some(Arc::new(SealedGenerationStore {
         locator: GenerationLocator::new(identity.projection.clone(), identity.generation.clone()),
         recovered_digest: expected.as_str().to_owned(),

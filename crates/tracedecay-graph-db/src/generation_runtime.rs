@@ -55,11 +55,60 @@ pub enum SealedStagingRetentionReason {
     StagingEngineHibernated,
 }
 
+impl SealedStagingRetentionReason {
+    /// Stable operator-facing name for the `graph_staging_rows_retained`
+    /// event. A sweep that answers `Retained` and logs nothing is why 13
+    /// queued releases sat pending for a day while the staging container kept
+    /// every sealed generation's rows; the reason has to be readable.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NoSealedStore => "no_sealed_store",
+            Self::NoSealedCodeGenerationReplay => "no_sealed_code_generation_replay",
+            Self::SealedDigestMismatch => "sealed_digest_mismatch",
+            Self::DependencyBearing => "dependency_bearing",
+            Self::NoVerifiedLease => "no_verified_lease",
+            Self::StoredDependent => "stored_dependent",
+            Self::Retiring => "retiring",
+            Self::Collected => "collected",
+            Self::Quarantined => "quarantined",
+            Self::StagingEngineHibernated => "staging_engine_hibernated",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SealedStagingRelease {
     Released { entities: usize, relations: usize },
     AlreadyReleased,
     Retained(SealedStagingRetentionReason),
+}
+
+/// What authorizes releasing one sealed generation's duplicate staging rows.
+///
+/// A resident lease is the strongest form and stays preferred. It is not
+/// available in the case this exists for: at project open the daemon recovers
+/// the memory graph's head and the serving code generation, so every other
+/// sealed code scope has no lease in this process and its rows were retained
+/// forever — the staging container reached 8.6 GB on disk and cost 20+ GB of
+/// heap on every open, entirely for rows nothing reads. The sealed artifact
+/// is the serving authority for those generations: it was built from these
+/// exact rows and reopened under a digest proof against the relational head,
+/// so it is sufficient evidence that the staging copy is redundant.
+enum SealedStagingReleaseAuthorityV1 {
+    Lease(Arc<VerifiedGenerationLease>),
+    /// The installed, digest-verified sealed artifact for this locator, with
+    /// the recovered digest the caller resolved from the relational head.
+    SealedArtifact(String),
+}
+
+impl SealedStagingReleaseAuthorityV1 {
+    fn recovered_digest(&self) -> &str {
+        match self {
+            Self::Lease(lease) => lease.head.recovered_digest.as_str(),
+            Self::SealedArtifact(digest) => digest.as_str(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1463,34 +1512,103 @@ impl GraphDb {
         Ok(())
     }
 
+    /// Releases against whatever authority this process holds, without a
+    /// caller-supplied head digest. See
+    /// [`Self::release_sealed_generation_staging_rows_with`].
     pub(crate) fn release_sealed_generation_staging_rows(
         &self,
         locator: &GenerationLocator,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<SealedStagingRelease, GraphDbError> {
+        self.release_sealed_generation_staging_rows_with(locator, None, check)
+    }
+
+    /// Releases one sealed generation's duplicate staging rows.
+    ///
+    /// `relational_recovered_digest` is the digest the relational authority
+    /// records for this projection's verified head, when the caller has it.
+    /// Supplying it is the stronger contract: the installed sealed artifact
+    /// must reproduce that exact digest before anything is deleted. The
+    /// registry hook for it is
+    /// `registry::publication::release_sealed_generation_staging_rows`, which
+    /// already reads `relational_head` — passing
+    /// `Some(relational_head.recovered_digest.as_str())` here binds the
+    /// release to the authority's head instead of letting the artifact vouch
+    /// for itself.
+    pub(crate) fn release_sealed_generation_staging_rows_with(
+        &self,
+        locator: &GenerationLocator,
+        relational_recovered_digest: Option<&str>,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<SealedStagingRelease, GraphDbError> {
         check()?;
         let Some(sealed) = self.sealed_generation_reader(locator) else {
-            return Ok(SealedStagingRelease::Retained(
+            return Ok(Self::retained(
+                locator,
                 SealedStagingRetentionReason::NoSealedStore,
             ));
         };
+        // A caller-supplied head digest is the authority; it must agree with
+        // the artifact this process installed before anything is deleted.
+        if let Some(expected) = relational_recovered_digest
+            && sealed.recovered_digest() != expected
+        {
+            return Ok(Self::retained(
+                locator,
+                SealedStagingRetentionReason::SealedDigestMismatch,
+            ));
+        }
         let state = self.inner.verified_generations.read().map_err(|_| {
             GraphDbError::unavailable("verified graph generation state lock is poisoned")
         })?;
-        let (lease, was_sealed_only) =
+        let (authority, was_sealed_only) =
             match Self::sealed_staging_release_lease(&state, locator, sealed.recovered_digest()) {
                 Ok(eligible) => eligible,
-                Err(reason) => return Ok(SealedStagingRelease::Retained(reason)),
+                Err(reason) => return Ok(Self::retained(locator, reason)),
             };
         drop(state);
-        if !self.native_engine_open()? {
-            return Ok(SealedStagingRelease::Retained(
-                SealedStagingRetentionReason::StagingEngineHibernated,
-            ));
+        // A hibernated staging engine used to end the release here, and the
+        // live daemon reported `staging_engine_hibernated` for every queued
+        // generation forever: the release needs the engine, the engine only
+        // opens for work, and the only work waiting was the release. Deleting
+        // rows is exactly the work that makes the *next* open cheaper, so it
+        // is worth one open now — and the engine goes straight back to
+        // hibernation afterwards, so the sweep never leaves a container
+        // resident that was not resident before it ran.
+        let hibernated_on_entry = !self.native_engine_open()?;
+        if hibernated_on_entry {
+            self.ensure_opened()?;
         }
+        let release = self.release_sealed_generation_staging_rows_locked(
+            locator,
+            authority,
+            was_sealed_only,
+            &sealed,
+            check,
+        );
+        if hibernated_on_entry && let Err(error) = self.hibernate_if_lazy() {
+            tracing::warn!(
+                %error,
+                namespace = locator.projection.namespace.as_str(),
+                projection = locator.projection.projection.as_str(),
+                "staging engine opened for a release sweep could not hibernate again"
+            );
+        }
+        release
+    }
+
+    fn release_sealed_generation_staging_rows_locked(
+        &self,
+        locator: &GenerationLocator,
+        authority: SealedStagingReleaseAuthorityV1,
+        was_sealed_only: bool,
+        sealed: &Arc<crate::sealed_store::SealedGenerationStore>,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<SealedStagingRelease, GraphDbError> {
         let removed_rows = match self.delete_staged_generation_rows(locator, check)? {
             StagedGenerationRowsDeletion::RetentionPending => {
-                return Ok(SealedStagingRelease::Retained(
+                return Ok(Self::retained(
+                    locator,
                     SealedStagingRetentionReason::StagingEngineHibernated,
                 ));
             }
@@ -1500,10 +1618,11 @@ impl GraphDb {
         let (current, now_sealed_only) =
             match Self::sealed_staging_release_lease(&state, locator, sealed.recovered_digest()) {
                 Ok(eligible) => eligible,
-                Err(reason) => return Ok(SealedStagingRelease::Retained(reason)),
+                Err(reason) => return Ok(Self::retained(locator, reason)),
             };
-        if current.head != lease.head {
-            return Ok(SealedStagingRelease::Retained(
+        if current.recovered_digest() != authority.recovered_digest() {
+            return Ok(Self::retained(
+                locator,
                 SealedStagingRetentionReason::NoVerifiedLease,
             ));
         }
@@ -1529,11 +1648,45 @@ impl GraphDb {
         }
     }
 
+    /// Records why one generation's staging rows stayed, at the only place
+    /// that knows the generation as well as the reason.
+    fn retained(
+        locator: &GenerationLocator,
+        reason: SealedStagingRetentionReason,
+    ) -> SealedStagingRelease {
+        tracing::info!(
+            event = "graph_staging_rows_retained",
+            namespace = locator.projection.namespace.as_str(),
+            projection = locator.projection.projection.as_str(),
+            generation = locator.generation.as_str(),
+            reason = reason.as_str(),
+            "sealed generation kept its duplicate staging rows"
+        );
+        SealedStagingRelease::Retained(reason)
+    }
+
+    /// Decides whether this generation's staging rows are redundant, and on
+    /// what authority.
+    ///
+    /// Every fail-closed check below is unconditional: a retiring, collected,
+    /// quarantined, depended-on, dependency-bearing or digest-mismatched
+    /// generation keeps its rows regardless of which authority applies.
+    ///
+    /// The lease arm is preferred. When no lease is resident, the installed
+    /// sealed artifact stands in — see
+    /// [`SealedStagingReleaseAuthorityV1::SealedArtifact`]. The caller
+    /// resolved this locator from the relational verified head and installed
+    /// the artifact for it, and the artifact only installs after its reopened
+    /// rows reproduce the digest that head names, so "the head names this
+    /// generation and the sealed store reproduces its digest" already holds
+    /// here. Without this arm the sweep answered `NoVerifiedLease` for every
+    /// code scope a freshly opened daemon had not recovered a lease for,
+    /// which is every scope but the serving one.
     fn sealed_staging_release_lease(
         state: &VerifiedGenerationState,
         locator: &GenerationLocator,
         sealed_digest: &str,
-    ) -> Result<(Arc<VerifiedGenerationLease>, bool), SealedStagingRetentionReason> {
+    ) -> Result<(SealedStagingReleaseAuthorityV1, bool), SealedStagingRetentionReason> {
         if state.retiring.contains(locator) {
             return Err(SealedStagingRetentionReason::Retiring);
         }
@@ -1550,20 +1703,69 @@ impl GraphDb {
         {
             return Err(SealedStagingRetentionReason::StoredDependent);
         }
-        let lease = state
+        let sealed_only = state.sealed_only.contains(locator);
+        let Some(lease) = state
             .heads
             .get(&locator.projection)
             .filter(|head| head.locator == *locator)
             .cloned()
             .or_else(|| state.known.get(locator).and_then(std::sync::Weak::upgrade))
-            .ok_or(SealedStagingRetentionReason::NoVerifiedLease)?;
+        else {
+            // No lease in this process. The generation must still carry no
+            // stored dependencies of its own, and the sealed artifact's
+            // digest is the one the release is authorized against.
+            if state
+                .stored
+                .get(locator)
+                .is_some_and(|dependencies| !dependencies.is_empty())
+            {
+                return Err(SealedStagingRetentionReason::DependencyBearing);
+            }
+            return Ok((
+                SealedStagingReleaseAuthorityV1::SealedArtifact(sealed_digest.to_owned()),
+                sealed_only,
+            ));
+        };
         if !lease.dependency_identities.is_empty() {
             return Err(SealedStagingRetentionReason::DependencyBearing);
         }
         if sealed_digest != lease.head.recovered_digest.as_str() {
             return Err(SealedStagingRetentionReason::SealedDigestMismatch);
         }
-        Ok((lease, state.sealed_only.contains(locator)))
+        Ok((SealedStagingReleaseAuthorityV1::Lease(lease), sealed_only))
+    }
+
+    /// Drops every resident verified-generation lease while keeping the
+    /// durable ledger — stored rows, sealed-only marks, and installed sealed
+    /// readers — exactly as it stands.
+    ///
+    /// This is the state a freshly opened daemon is in for every code scope
+    /// it has not activated: the sealed artifact is adopted from disk and the
+    /// staging rows are still there, but no lease for that generation exists
+    /// in the process. Retention behaviour in that state is what the
+    /// lease-independent release contract is about, so tests need to be able
+    /// to reach it without a restart.
+    #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
+    pub fn forget_resident_verified_leases(&self) -> Result<(), GraphDbError> {
+        let mut state = self.wait_verified_generations_write()?;
+        state.heads.clear();
+        state.known.clear();
+        Ok(())
+    }
+
+    /// Test surface for
+    /// [`Self::release_sealed_generation_staging_rows_for_relational_head`].
+    #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
+    pub fn release_staging_rows_for_relational_head(
+        &self,
+        identity: &GraphGenerationManifestIdentity,
+        relational_recovered_digest: &str,
+    ) -> Result<SealedStagingRelease, GraphDbError> {
+        self.release_sealed_generation_staging_rows_with(
+            &GenerationLocator::new(identity.projection.clone(), identity.generation.clone()),
+            Some(relational_recovered_digest),
+            &|| Ok(()),
+        )
     }
 
     #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
