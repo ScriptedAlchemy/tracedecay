@@ -671,6 +671,7 @@ struct TemporaryEvidencePackV1 {
     size_bytes: u64,
     page_count: u32,
     committed: bool,
+    published_path: Option<PathBuf>,
 }
 
 impl TemporaryEvidencePackV1 {
@@ -687,6 +688,7 @@ impl TemporaryEvidencePackV1 {
             size_bytes: 0,
             page_count: 0,
             committed: false,
+            published_path: None,
         })
     }
 
@@ -793,11 +795,45 @@ impl TemporaryEvidencePackV1 {
             .sync_all()
             .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
         drop(self.file.take());
-        std::fs::rename(&self.path, final_path)
+        std::fs::rename(&self.path, &final_path)
             .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
+        self.published_path = Some(final_path);
         DaemonCodeIndexPublicationStoreV1::sync_directory(root)?;
-        self.committed = true;
         Ok(true)
+    }
+
+    fn attach_to_manifest(&mut self) {
+        self.committed = true;
+    }
+
+    fn rollback_unattached(&mut self, root: &Path) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        if self.committed {
+            return Ok(());
+        }
+        drop(self.file.take());
+        let mut removed_final = false;
+        if let Some(path) = self.published_path.take() {
+            std::fs::remove_file(path).map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
+            removed_final = true;
+        }
+        match self.path.symlink_metadata() {
+            Ok(metadata) if metadata.file_type().is_file() => {
+                std::fs::remove_file(&self.path)
+                    .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
+            }
+            Ok(_) => {
+                return Err(DaemonCodeIndexPublicationStoreV1::unavailable(
+                    "sealed evidence pack temporary path is not a regular file",
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(DaemonCodeIndexPublicationStoreV1::unavailable(error)),
+        }
+        if removed_final {
+            DaemonCodeIndexPublicationStoreV1::sync_directory(root)?;
+        }
+        self.committed = true;
+        Ok(())
     }
 }
 
@@ -805,6 +841,9 @@ impl Drop for TemporaryEvidencePackV1 {
     fn drop(&mut self) {
         if !self.committed {
             drop(self.file.take());
+            if let Some(path) = self.published_path.take() {
+                let _ = std::fs::remove_file(path);
+            }
             let _ = std::fs::remove_file(&self.path);
         }
     }
@@ -820,6 +859,31 @@ impl TemporaryGenerationFileV1 {
 
     fn commit(&mut self) {
         self.committed = true;
+    }
+
+    fn rollback_uncommitted(
+        &mut self,
+        root: &Path,
+    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        if self.committed {
+            return Ok(());
+        }
+        match self.path.symlink_metadata() {
+            Ok(metadata) if metadata.file_type().is_file() => {
+                std::fs::remove_file(&self.path)
+                    .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
+                DaemonCodeIndexPublicationStoreV1::sync_directory(root)?;
+            }
+            Ok(_) => {
+                return Err(DaemonCodeIndexPublicationStoreV1::unavailable(
+                    "sealed code-generation temporary path is not a regular file",
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(DaemonCodeIndexPublicationStoreV1::unavailable(error)),
+        }
+        self.committed = true;
+        Ok(())
     }
 }
 
@@ -2010,8 +2074,14 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                     Ok(())
                 },
             )
-        )
-        .map_err(Self::unavailable)?;
+        );
+        let manifest_bytes = match manifest_bytes {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                evidence_pack.rollback_unattached(&self.segments_root)?;
+                return Err(Self::unavailable(error));
+            }
+        };
         #[cfg(feature = "hotpath")]
         {
             hotpath::gauge!("code_index.generation.publish.encoded_file_segment_bytes")
@@ -2027,51 +2097,67 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                     .load(Ordering::Relaxed),
             );
         }
-        hotpath::measure_block!("code_index.generation.publish.seal_fsync", {
-            Self::write_durable(&temporary.path, &manifest_bytes)?;
-            Ok::<(), CodeIndexPublicationStoreErrorV1>(())
-        })?;
-        let generation_size = u64::try_from(manifest_bytes.len()).map_err(Self::unavailable)?;
-        if generation_size > MAX_DURABLE_GENERATION_INDEX_BYTES_V1 {
-            return Err(Self::unavailable(
-                "sealed code generation exceeds the durable history byte bound",
-            ));
-        }
-        let state_digest = hotpath::measure_block!(
-            "code_index.generation.publish.state_digest",
-            Self::state_digest_file(&temporary.path)
-        )?;
-        #[cfg(feature = "hotpath")]
-        hotpath::gauge!("code_index.generation.publish.digest_bytes")
-            .set(generation_size.saturating_add(referenced_segment_bytes));
-        let generation_file = format!(
-            "generation-{}.json",
-            state_digest
-                .strip_prefix("sha256:")
-                .unwrap_or(&state_digest)
-        );
-        let generation_path = self.generations_root.join(&generation_file);
-        match generation_path.symlink_metadata() {
-            Ok(_) => {
-                let equal = hotpath::measure_block!(
-                    "code_index.generation.publish.dedupe_compare",
-                    Self::files_equal(&generation_path, &temporary.path)
-                )?;
-                if !equal {
-                    return Err(Self::unavailable(
-                        "immutable code-generation path contains different bytes",
-                    ));
+        let manifest_publication = (|| {
+            hotpath::measure_block!("code_index.generation.publish.seal_fsync", {
+                Self::write_durable(&temporary.path, &manifest_bytes)?;
+                Ok::<(), CodeIndexPublicationStoreErrorV1>(())
+            })?;
+            let generation_size = u64::try_from(manifest_bytes.len()).map_err(Self::unavailable)?;
+            if generation_size > MAX_DURABLE_GENERATION_INDEX_BYTES_V1 {
+                return Err(Self::unavailable(
+                    "sealed code generation exceeds the durable history byte bound",
+                ));
+            }
+            let state_digest = hotpath::measure_block!(
+                "code_index.generation.publish.state_digest",
+                Self::state_digest_file(&temporary.path)
+            )?;
+            #[cfg(feature = "hotpath")]
+            hotpath::gauge!("code_index.generation.publish.digest_bytes")
+                .set(generation_size.saturating_add(referenced_segment_bytes));
+            let generation_file = format!(
+                "generation-{}.json",
+                state_digest
+                    .strip_prefix("sha256:")
+                    .unwrap_or(&state_digest)
+            );
+            let generation_path = self.generations_root.join(&generation_file);
+            match generation_path.symlink_metadata() {
+                Ok(_) => {
+                    let equal = hotpath::measure_block!(
+                        "code_index.generation.publish.dedupe_compare",
+                        Self::files_equal(&generation_path, &temporary.path)
+                    )?;
+                    if !equal {
+                        return Err(Self::unavailable(
+                            "immutable code-generation path contains different bytes",
+                        ));
+                    }
+                    std::fs::remove_file(&temporary.path).map_err(Self::unavailable)?;
+                    temporary.commit();
                 }
-                std::fs::remove_file(&temporary.path).map_err(Self::unavailable)?;
-                temporary.commit();
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    std::fs::rename(&temporary.path, &generation_path)
+                        .map_err(Self::unavailable)?;
+                    temporary.path = generation_path;
+                    Self::sync_directory(&self.generations_root)?;
+                    temporary.commit();
+                }
+                Err(error) => return Err(Self::unavailable(error)),
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                std::fs::rename(&temporary.path, &generation_path).map_err(Self::unavailable)?;
-                temporary.commit();
-                Self::sync_directory(&self.generations_root)?;
+            Ok((generation_size, state_digest, generation_file))
+        })();
+        let (generation_size, state_digest, generation_file) = match manifest_publication {
+            Ok(published) => published,
+            Err(error) => {
+                let generation_rollback = temporary.rollback_uncommitted(&self.generations_root);
+                let evidence_rollback = evidence_pack.rollback_unattached(&self.segments_root);
+                generation_rollback?;
+                evidence_rollback?;
+                return Err(error);
             }
-            Err(error) => return Err(Self::unavailable(error)),
-        }
+        };
+        evidence_pack.attach_to_manifest();
 
         let exact_git_evidence = self.exact_git_evidence(&generation)?;
         let mut generation_index = prior_pointer

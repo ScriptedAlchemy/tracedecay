@@ -173,6 +173,58 @@ struct PartitionedFormatProbeV1 {
     format_revision: u32,
 }
 
+/// Minimal streaming projection used by retention after the generation file's
+/// outer content address has already been verified. It retains every field
+/// needed to prove that the segment list is complete and canonically keyed,
+/// while omitting snapshot bodies and symbol marker maps.
+#[derive(Deserialize)]
+struct PartitionedSegmentIdentityEnvelopeV1 {
+    #[serde(rename = "state_digest")]
+    _state_digest: ManifestDigest,
+    generation: PartitionedSegmentIdentityGenerationV1,
+}
+
+#[derive(Deserialize)]
+struct PartitionedSegmentIdentityGenerationV1 {
+    format_revision: u32,
+    snapshot: PartitionedSegmentIdentitySnapshotV1,
+    file_segments: Vec<PartitionedFileSegmentIdentityV1>,
+    generation_evidence: PartitionedEvidenceSegmentIdentityV1,
+}
+
+#[derive(Deserialize)]
+struct PartitionedSegmentIdentitySnapshotV1 {
+    files: Vec<PartitionedSnapshotFileIdentityV1>,
+}
+
+#[derive(Deserialize)]
+struct PartitionedSnapshotFileIdentityV1 {
+    file_occurrence_id: FileOccurrenceId,
+}
+
+#[derive(Deserialize)]
+struct PartitionedFileSegmentIdentityV1 {
+    file_key: u32,
+    segment_digest: ManifestDigest,
+    segment_size_bytes: u64,
+    file_occurrence_id: FileOccurrenceId,
+}
+
+#[derive(Deserialize)]
+struct PartitionedEvidenceSegmentIdentityV1 {
+    segment_digest: ManifestDigest,
+    segment_size_bytes: u64,
+    pages: Vec<PartitionedEvidencePageIdentityV1>,
+}
+
+#[derive(Deserialize)]
+struct PartitionedEvidencePageIdentityV1 {
+    page_ordinal: u32,
+    #[serde(rename = "page_digest")]
+    _page_digest: ManifestDigest,
+    page_size_bytes: u64,
+}
+
 /// The stored file segment envelope. Encoding writes the two fields directly
 /// (rule 2) and decoding borrows the payload without parsing it into a tree.
 #[derive(Deserialize)]
@@ -1362,6 +1414,96 @@ impl CodeIndexPublishedGenerationV1 {
         Ok(Some(identities))
     }
 
+    /// Stream only revision-7 segment descriptors from a generation manifest.
+    ///
+    /// This projection intentionally does not re-materialize the enclosing
+    /// manifest. Retention must first authenticate the complete outer file
+    /// against its content-addressed name. It must never replace
+    /// [`Self::verify_partitioned_sealed`] at a serving boundary.
+    pub fn partitioned_segment_identities_from_reader(
+        reader: impl Read,
+    ) -> Result<Option<Vec<SealedGenerationSegmentIdentityV1>>, CodeIndexProductionErrorV1> {
+        let envelope: PartitionedSegmentIdentityEnvelopeV1 = serde_json::from_reader(reader)
+            .map_err(|error| {
+                CodeIndexProductionErrorV1::Contract(format!(
+                    "sealed generation segment descriptor decoding failed: {error}"
+                ))
+            })?;
+        let generation = envelope.generation;
+        if generation.format_revision != SEALED_GENERATION_FORMAT_REVISION_V1 {
+            return Ok(None);
+        }
+        if generation.file_segments.len() != generation.snapshot.files.len() {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed generation segment count does not match its snapshot".to_owned(),
+            ));
+        }
+        let mut identities = Vec::with_capacity(generation.file_segments.len().saturating_add(1));
+        for (expected_key, segment) in generation.file_segments.into_iter().enumerate() {
+            let expected_key = u32::try_from(expected_key).map_err(|_| {
+                CodeIndexProductionErrorV1::Contract(
+                    "sealed generation file key exceeds u32".to_owned(),
+                )
+            })?;
+            if segment.file_key != expected_key
+                || generation.snapshot.files[expected_key as usize].file_occurrence_id
+                    != segment.file_occurrence_id
+            {
+                return Err(CodeIndexProductionErrorV1::Contract(
+                    "sealed generation file segments are not canonically keyed".to_owned(),
+                ));
+            }
+            identities.push(SealedGenerationSegmentIdentityV1 {
+                digest: segment.segment_digest,
+                size_bytes: segment.segment_size_bytes,
+            });
+        }
+        if generation.generation_evidence.pages.is_empty() {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed generation evidence has no pages".to_owned(),
+            ));
+        }
+        let page_max = u64::try_from(GENERATION_EVIDENCE_PAGE_MAX_BYTES_V1).map_err(|_| {
+            CodeIndexProductionErrorV1::Contract(
+                "sealed generation evidence page bound exceeds u64".to_owned(),
+            )
+        })?;
+        let mut evidence_size_bytes = 0_u64;
+        for (expected_ordinal, page) in generation.generation_evidence.pages.iter().enumerate() {
+            let expected_ordinal = u32::try_from(expected_ordinal).map_err(|_| {
+                CodeIndexProductionErrorV1::Contract(
+                    "sealed generation evidence page count exceeds u32".to_owned(),
+                )
+            })?;
+            if page.page_ordinal != expected_ordinal
+                || page.page_size_bytes == 0
+                || page.page_size_bytes > page_max
+            {
+                return Err(CodeIndexProductionErrorV1::Contract(
+                    "sealed generation evidence pages are not canonically bounded and ordered"
+                        .to_owned(),
+                ));
+            }
+            evidence_size_bytes = evidence_size_bytes
+                .checked_add(page.page_size_bytes)
+                .ok_or_else(|| {
+                    CodeIndexProductionErrorV1::Contract(
+                        "sealed generation evidence segment length exceeds u64".to_owned(),
+                    )
+                })?;
+        }
+        if evidence_size_bytes != generation.generation_evidence.segment_size_bytes {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed generation evidence segment byte size does not match its pages".to_owned(),
+            ));
+        }
+        identities.push(SealedGenerationSegmentIdentityV1 {
+            digest: generation.generation_evidence.segment_digest,
+            size_bytes: generation.generation_evidence.segment_size_bytes,
+        });
+        Ok(Some(identities))
+    }
+
     pub fn verify_partitioned_sealed(
         bytes: &[u8],
         mut read_segment: impl FnMut(
@@ -1412,6 +1554,48 @@ mod tests {
     use serde_json::Value;
 
     use super::*;
+
+    #[test]
+    fn streamed_segment_projection_refuses_an_incomplete_descriptor_set() {
+        let digest = format!("sha256:{}", "0".repeat(64));
+        let manifest = serde_json::json!({
+            "state_digest": digest,
+            "generation": {
+                "format_revision": SEALED_GENERATION_FORMAT_REVISION_V1,
+                "snapshot": {
+                    "files": [
+                        { "file_occurrence_id": FIXTURE_FILE },
+                        { "file_occurrence_id": "file.partitioned.missing" }
+                    ]
+                },
+                "file_segments": [{
+                    "file_key": 0,
+                    "segment_digest": format!("sha256:{}", "1".repeat(64)),
+                    "segment_size_bytes": 12,
+                    "file_occurrence_id": FIXTURE_FILE
+                }],
+                "generation_evidence": {
+                    "segment_digest": format!("sha256:{}", "2".repeat(64)),
+                    "segment_size_bytes": 8,
+                    "pages": [{
+                        "page_ordinal": 0,
+                        "page_digest": format!("sha256:{}", "3".repeat(64)),
+                        "page_size_bytes": 8
+                    }]
+                }
+            }
+        });
+        let bytes = serde_json::to_vec(&manifest).expect("encode malformed manifest");
+
+        let error = CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
+            bytes.as_slice(),
+        )
+        .expect_err("a partial descriptor set must not authorize segment sweeping");
+        assert!(
+            error.to_string().contains("segment count"),
+            "unexpected projection error: {error}"
+        );
+    }
 
     #[test]
     fn snapshot_file_key_index_preserves_canonical_positions() {

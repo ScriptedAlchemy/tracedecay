@@ -10,6 +10,29 @@ use super::{
     MAX_GENERATION_METADATA_PREFIX_BYTES, SealedGenerationManifestMetadataV1, storage,
 };
 
+const MAX_FORMAT_REVISION_PREFIX_BYTES: usize = 4 * 1024;
+
+pub(super) fn read_generation_format_revision(
+    path: &Path,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<u32, CodeGenerationRetentionErrorV1> {
+    let mut file = File::open(path).map_err(storage)?;
+    let mut prefix = vec![0_u8; MAX_FORMAT_REVISION_PREFIX_BYTES];
+    let bytes_read = file.read(&mut prefix).map_err(storage)?;
+    crate::hotpath_observe::retention_inspected(bytes_read as u64);
+    if is_cancelled() {
+        crate::hotpath_observe::retention_cancelled();
+        return Err(CodeGenerationRetentionErrorV1::Cancelled);
+    }
+    prefix.truncate(bytes_read);
+    parse_json_u32_field(&prefix, b"format_revision").ok_or_else(|| {
+        CodeGenerationRetentionErrorV1::UnsafeState(format!(
+            "generation file '{}' has no readable format revision in its bounded prefix",
+            path.display()
+        ))
+    })
+}
+
 #[hotpath::measure(label = "usecases.retention.read_metadata")]
 pub(super) fn read_generation_metadata(
     path: &Path,
