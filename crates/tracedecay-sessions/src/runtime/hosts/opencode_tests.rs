@@ -627,15 +627,24 @@ async fn durable_sql_frontier_reaches_rows_beyond_a_poisoned_pass_after_restart(
     connection
         .execute("DELETE FROM message WHERE session_id = 'ses_project'", ())
         .unwrap();
-    for ordinal in 0..super::MAX_MESSAGES_PER_PASS {
-        connection
-            .execute(
+    connection.execute_batch("BEGIN").unwrap();
+    {
+        let mut poison = connection
+            .prepare(
                 "INSERT INTO message(id, session_id, time_created, data)
                  VALUES (?1, 'ses_project', ?2, '{')",
-                rusqlite::params![format!("poison-{ordinal:05}"), ordinal as i64],
             )
             .unwrap();
+        for ordinal in 0..super::MAX_MESSAGES_PER_PASS {
+            poison
+                .execute(rusqlite::params![
+                    format!("poison-{ordinal:05}"),
+                    ordinal as i64
+                ])
+                .unwrap();
+        }
     }
+    connection.execute_batch("COMMIT").unwrap();
     connection
         .execute(
             "INSERT INTO message(id, session_id, time_created, data)
@@ -664,7 +673,7 @@ async fn durable_sql_frontier_reaches_rows_beyond_a_poisoned_pass_after_restart(
     .await
     .unwrap();
     assert_eq!(first.stats.messages_upserted, 0);
-    let frontier = admission
+    let mut frontier = admission
         .get_parse_offset(
             &ObservationScopeV1::Profile,
             super::OPENCODE_SQL_FRONTIER_KEY,
@@ -674,16 +683,53 @@ async fn durable_sql_frontier_reaches_rows_beyond_a_poisoned_pass_after_restart(
         .unwrap();
     assert!(frontier.byte_offset > 0);
 
-    let resumed = capture_opencode_observations(
-        &admission,
-        &source,
-        ObservationScopeV1::Profile,
-        None,
-        &ObservationCancellation::default(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(resumed.stats.messages_upserted, 1);
+    // How many restarts the poison costs is a property of the host, not of the
+    // frontier contract. A pass ends at whichever bound trips first, and
+    // `HOST_SCAN_WINDOW` trips before the `MAX_MESSAGES_PER_PASS` row budget on
+    // any machine that cannot scan the whole poisoned span inside that window,
+    // so "one restart clears every poisoned row" only holds on a fast, idle
+    // host. What must hold everywhere is that the persisted frontier never
+    // rewinds across a restart and that the row past the poison is eventually
+    // admitted exactly once. Each restart that makes progress retires at least
+    // one `MAX_MESSAGES_PER_PAGE` page, which bounds the poisoned span.
+    let restart_bound = super::MAX_MESSAGES_PER_PASS / super::MAX_MESSAGES_PER_PAGE + 1;
+    let mut upserted = first.stats.messages_upserted;
+    let mut restarts = 0_usize;
+    while upserted == 0 {
+        restarts += 1;
+        assert!(
+            restarts <= restart_bound,
+            "the poisoned span never yielded the row past it in {restart_bound} restarts; \
+             the durable frontier stalled at {}",
+            frontier.byte_offset
+        );
+        let resumed = capture_opencode_observations(
+            &admission,
+            &source,
+            ObservationScopeV1::Profile,
+            None,
+            &ObservationCancellation::default(),
+        )
+        .await
+        .unwrap();
+        upserted += resumed.stats.messages_upserted;
+        let resumed_frontier = admission
+            .get_parse_offset(
+                &ObservationScopeV1::Profile,
+                super::OPENCODE_SQL_FRONTIER_KEY,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            resumed_frontier.byte_offset >= frontier.byte_offset,
+            "restart {restarts} rewound the durable frontier from {} to {}",
+            frontier.byte_offset,
+            resumed_frontier.byte_offset
+        );
+        frontier = resumed_frontier;
+    }
+    assert_eq!(upserted, 1);
     assert!(admission.observations().iter().any(|stored| {
         stored
             .observation()

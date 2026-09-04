@@ -2577,6 +2577,13 @@ mod tests {
                 "clone repository fixture: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
+            // The workload pins historical commits by object identity. Rebasing
+            // the integration branch re-parents those commits, so the pinned
+            // identities survive only as unreachable objects that a
+            // wire-protocol clone never transfers. Backfill the checked-in
+            // evaluator pack so the fixture resolves the same history CI does.
+            crate::packaged_assets::write_checked_in_object_pack(&root.join(".git"))
+                .expect("materialize checked-in historical Git objects");
             Self { _temp: temp, root }
         }
     }
@@ -3432,10 +3439,14 @@ mod tests {
         current.latency_samples_us.fill(u64::MAX);
         let report = crate::evaluate_generated_outputs(fixture_root, &workload, &large_measurement)
             .expect("evaluate");
-        assert_eq!(
-            report.profiles[0].resource_status,
+        // Only "current" was rewritten as measured; "10x" keeps the host's
+        // own sample, which stays pending where peak RSS is unreadable.
+        let expected_large = if peak_rss_bytes().is_some() {
             crate::DirectEvaluationStatusV1::Pass
-        );
+        } else {
+            crate::DirectEvaluationStatusV1::Pending
+        };
+        assert_eq!(report.profiles[0].resource_status, expected_large);
 
         let mut extra_resource = result;
         let synthetic = extra_resource.outputs[0]
@@ -3536,14 +3547,18 @@ mod tests {
         );
 
         let historical = retrieve("train-012");
-        assert!(historical.ranked.iter().take(10).any(|candidate| {
-            candidate.anchor
+        let historical_top = historical.ranked.iter().take(10).collect::<Vec<_>>();
+        assert!(
+            historical_top.iter().any(|candidate| {
+                candidate.anchor
                 == "git:01b0a0afe34c3342d6b5b076383f86ed8a8d0c66:crates/tracedecay-domain/src/session.rs::ClosedUtcIntervalV1"
                 || candidate.anchors.iter().any(|anchor| {
                     anchor
                         == "git:01b0a0afe34c3342d6b5b076383f86ed8a8d0c66:crates/tracedecay-domain/src/session.rs::ClosedUtcIntervalV1"
                 })
-        }));
+            }),
+            "historical top 10: {historical_top:#?}"
+        );
     }
 
     #[test]

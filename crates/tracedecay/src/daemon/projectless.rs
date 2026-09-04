@@ -3,6 +3,7 @@
 
 use serde_json::json;
 
+use tracedecay_daemon_identity::authority;
 use tracedecay_daemon_protocol::DaemonClientIdentity;
 use tracedecay_domain::errors::Result;
 use tracedecay_mcp::{
@@ -35,12 +36,45 @@ struct ProjectlessConnectionStateV1 {
     profile_authority: crate::daemon::retained_owner::ProfileRetainedConnectionAuthorityV1,
 }
 
+/// Two profile roots name the same profile when they resolve to the same
+/// physical directory.
+///
+/// The authority side is always canonical: `profile_identity::load_or_create`
+/// runs `canonical_identity_path` before it pins the record. The client side
+/// carries whatever path the host process derived from its own environment,
+/// which is never canonicalized on the wire. A byte comparison therefore
+/// refuses a connection that is in fact addressing the very same directory
+/// whenever any component of the client's profile root is a symlink — the
+/// default on macOS, where the per-user temporary root and anything under
+/// `/var` resolve through `/var -> /private/var`. Project routing already
+/// canonicalizes this exact field before it compares
+/// (`project_routing::resolve_project_route`); projectless admission must
+/// agree with it or the same client is admitted for projects and refused for
+/// user-scoped tools.
+fn profile_roots_match(authority_root: &Path, client_root: &Path) -> bool {
+    if authority_root == client_root {
+        return true;
+    }
+    match (
+        authority::canonical_identity_path(authority_root),
+        authority::canonical_identity_path(client_root),
+    ) {
+        (Ok(authority_root), Ok(client_root)) => authority_root == client_root,
+        // A root that cannot be resolved stays refused: admission is
+        // fail-closed, never fail-open.
+        _ => false,
+    }
+}
+
 fn admit_projectless_connection(
     client_identity: &DaemonClientIdentity,
     store_administration: &StoreAdministration,
 ) -> Result<ProjectlessConnectionStateV1> {
     let profile_identity = store_administration.profile_identity()?;
-    if profile_identity.profile_root() != client_identity.profile_root {
+    if !profile_roots_match(
+        profile_identity.profile_root(),
+        &client_identity.profile_root,
+    ) {
         return Err(TraceDecayError::Config {
             message: "projectless connection profile does not match its authenticated identity"
                 .to_owned(),
@@ -529,4 +563,83 @@ pub(super) fn projectless_user_session_request(request: Option<&JsonRpcRequest>)
             .get("storage_scope")
             .and_then(serde_json::Value::as_str)
             == Some("user")
+}
+
+#[cfg(all(test, unix))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod projectless_admission_tests {
+    use super::*;
+
+    /// Build a private profile root plus a symlinked spelling of the same
+    /// directory. On macOS the runner's own `TMPDIR` is already reached
+    /// through `/var -> /private/var`, so a client's profile root and the
+    /// pinned authority differ by exactly this much on every connection; on
+    /// Linux the symlink has to be made explicitly to reproduce it.
+    fn linked_profile_root(temp: &std::path::Path) -> (PathBuf, PathBuf) {
+        let real_root = temp.join("real").join(".tracedecay");
+        std::fs::create_dir_all(&real_root).expect("create profile root");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&real_root, std::fs::Permissions::from_mode(0o700))
+                .expect("restrict profile root");
+        }
+        let link = temp.join("linked");
+        std::os::unix::fs::symlink(temp.join("real"), &link).expect("link profile parent");
+        (real_root, link.join(".tracedecay"))
+    }
+
+    #[test]
+    fn a_symlinked_client_profile_root_is_the_same_profile() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (real_root, linked_root) = linked_profile_root(temp.path());
+        assert_ne!(real_root, linked_root, "the two spellings must differ");
+
+        let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&real_root)
+            .expect("pin profile identity");
+        let administration = StoreAdministration::default().with_profile_identity(identity);
+        let client = DaemonClientIdentity::new(linked_root.clone(), linked_root.join("global.db"));
+
+        admit_projectless_connection(&client, &administration)
+            .expect("a symlinked spelling of the pinned profile root must be admitted");
+    }
+
+    #[test]
+    fn an_unrelated_client_profile_root_stays_refused() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (real_root, _linked_root) = linked_profile_root(temp.path());
+        let foreign_root = temp.path().join("foreign").join(".tracedecay");
+        std::fs::create_dir_all(&foreign_root).expect("create foreign root");
+
+        let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&real_root)
+            .expect("pin profile identity");
+        let administration = StoreAdministration::default().with_profile_identity(identity);
+        let client =
+            DaemonClientIdentity::new(foreign_root.clone(), foreign_root.join("global.db"));
+
+        let Err(error) = admit_projectless_connection(&client, &administration) else {
+            panic!("an unrelated profile root must stay refused")
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("projectless connection profile does not match"),
+            "unexpected refusal: {error}"
+        );
+    }
+
+    #[test]
+    fn an_unresolvable_client_profile_root_stays_refused() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (real_root, _linked_root) = linked_profile_root(temp.path());
+        let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&real_root)
+            .expect("pin profile identity");
+        let administration = StoreAdministration::default().with_profile_identity(identity);
+        let missing = temp.path().join("never-created").join(".tracedecay");
+        let client = DaemonClientIdentity::new(missing.clone(), missing.join("global.db"));
+
+        assert!(
+            admit_projectless_connection(&client, &administration).is_err(),
+            "a profile root that resolves to nothing must stay refused"
+        );
+    }
 }
