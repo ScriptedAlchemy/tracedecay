@@ -187,6 +187,46 @@ async fn process_candidate(
         ));
     }
 
+    if candidate.stale_from_store_id.is_some() {
+        let invalidation = database
+            .lcm_invalidate_retained_raw_revision_page(
+                &candidate,
+                tracedecay_lcm::LCM_SCAN_PAGE_ROWS as usize,
+            )
+            .await;
+        let (_, has_more) = match invalidation {
+            Ok(page) => page,
+            Err(error) => {
+                return record_candidate_error(database, candidate, error, now_unix_ms).await;
+            }
+        };
+        let Some(refreshed_candidate) =
+            load_session_candidate(database, &candidate.provider, &candidate.session_id).await?
+        else {
+            return Ok(session_result(
+                candidate,
+                LcmSummaryConvergenceDisposition::Current,
+                0,
+                protection.rows_scanned,
+                protection.bytes_scanned,
+                0,
+                0,
+            ));
+        };
+        candidate = refreshed_candidate;
+        if has_more || candidate.stale_from_store_id.is_some() {
+            return Ok(session_result(
+                candidate,
+                LcmSummaryConvergenceDisposition::Preparing,
+                0,
+                protection.rows_scanned,
+                protection.bytes_scanned,
+                0,
+                0,
+            ));
+        }
+    }
+
     let bounded =
         match super::lcm_effects::DaemonLcmEffectService::new(database.clone(), None, None)
             .compress_retained_page(compression_request(&candidate), &candidate)
@@ -320,6 +360,7 @@ fn is_retryable(error: &LcmError) -> bool {
             | LcmError::DeadlineExceeded
             | LcmError::StaleSummaryGeneration { .. }
             | LcmError::StaleRawRevision { .. }
+            | LcmError::StaleRawProtectionSource { .. }
             | LcmError::StaleSummarySourceRange { .. }
             | LcmError::LifecycleStateNotFound
     )
@@ -346,6 +387,7 @@ fn error_code(error: &LcmError) -> &'static str {
         LcmError::SummarySourceUnavailable { .. } => "summary_source_unavailable",
         LcmError::StaleSummaryGeneration { .. } => "stale_summary_generation",
         LcmError::StaleRawRevision { .. } => "stale_raw_revision",
+        LcmError::StaleRawProtectionSource { .. } => "stale_raw_protection_source",
         LcmError::StaleSummarySourceRange { .. } => "stale_summary_source_range",
         LcmError::LifecycleStateNotFound => "lifecycle_state_not_found",
         LcmError::Cancelled => "cancelled",

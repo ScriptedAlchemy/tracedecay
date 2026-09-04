@@ -89,7 +89,7 @@ pub(super) async fn native_summary_evidence(
                           AND predecessor.store_id < raw.store_id
                         ORDER BY predecessor.store_id DESC
                         LIMIT 1
-                    ))
+                    )), raw.store_id
              FROM session_messages AS message
              LEFT JOIN lcm_raw_messages AS raw
                ON raw.provider = message.provider
@@ -126,11 +126,17 @@ pub(super) async fn native_summary_evidence(
                 .map_err(|error| LcmError::Db(error.to_string()))?,
             row.get::<Option<i64>>(5)
                 .map_err(|error| LcmError::Db(error.to_string()))?,
+            row.get::<Option<i64>>(6)
+                .map_err(|error| LcmError::Db(error.to_string()))?,
         ));
     }
     drop(rows);
     let recognizers = native_summary_recognizers(provider);
-    for (message_id, text, kind, metadata_json, range_from, range_to) in candidates {
+    let mut previous_native_store_id = None;
+    let mut matched = None;
+    for (message_id, text, kind, metadata_json, range_from, range_to, store_id) in
+        candidates.into_iter().rev()
+    {
         let Some(metadata) = metadata_json
             .as_deref()
             .and_then(|metadata| serde_json::from_str::<Value>(metadata).ok())
@@ -141,8 +147,7 @@ pub(super) async fn native_summary_evidence(
         // records raw metadata instead of a canonical envelope still has to be
         // recognizable, so failure to decode leaves `envelope` empty and lets
         // the recognizers decide.
-        let envelope =
-            serde_json::from_value::<CanonicalObservationEnvelopeV1>(metadata.clone()).ok();
+        let envelope = decode_canonical_observation_metadata(metadata.clone());
         let candidate = NativeSummaryCandidate {
             provider,
             message_id: &message_id,
@@ -159,20 +164,19 @@ pub(super) async fn native_summary_evidence(
             }
         }
         if let Some(route) = route {
-            let source_range = range_from.zip(range_to).map_or_else(
-                || {
-                    metadata
-                        .get("tracedecay_lcm_source_range")
-                        .cloned()
-                        .and_then(|value| serde_json::from_value(value).ok())
-                },
-                |(from_store_id, to_store_id)| {
-                    Some(LcmSummarySourceRange {
+            let explicit_range = metadata
+                .get("tracedecay_lcm_source_range")
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok());
+            let source_range = explicit_range.or_else(|| {
+                previous_native_store_id.or(range_from).zip(range_to).map(
+                    |(from_store_id, to_store_id)| LcmSummarySourceRange {
                         from_store_id,
                         to_store_id,
-                    })
-                },
-            );
+                    },
+                )
+            });
+            previous_native_store_id = store_id.or(previous_native_store_id);
             if let Some(required_source) = required_source
                 && !native_source_membership_is_exact(
                     &snapshot,
@@ -185,14 +189,21 @@ pub(super) async fn native_summary_evidence(
             {
                 continue;
             }
-            return Ok(Some(AuthoritativeSummary {
+            matched = Some(AuthoritativeSummary {
                 text,
                 route: route.to_string(),
                 source_range,
-            }));
+            });
         }
     }
-    Ok(None)
+    Ok(matched)
+}
+
+pub(super) fn decode_canonical_observation_metadata(
+    mut metadata: Value,
+) -> Option<CanonicalObservationEnvelopeV1> {
+    metadata.as_object_mut()?.remove("ingest_protection");
+    serde_json::from_value(metadata).ok()
 }
 
 async fn native_source_membership_is_exact(

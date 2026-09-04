@@ -16,6 +16,7 @@ const MAX_LINEAGE_NODES: usize = 4_096;
 pub struct RawSummaryInvalidation {
     pub rewind_frontier_store_id: i64,
     pub stale_summary_count: usize,
+    pub has_more: bool,
 }
 
 /// Starts a new canonical generation in which every summary transitively
@@ -37,6 +38,7 @@ pub async fn invalidate_raw_summary_revision(
         return Ok(RawSummaryInvalidation {
             rewind_frontier_store_id: raw_store_id.saturating_sub(1).max(0),
             stale_summary_count: 0,
+            has_more: false,
         });
     };
     let limit = i64::try_from(max_affected.saturating_add(1))
@@ -46,11 +48,6 @@ pub async fn invalidate_raw_summary_revision(
             "WITH RECURSIVE affected(node_id, depth) AS (
                SELECT source.node_id, 0
                FROM lcm_summary_sources AS source
-               JOIN session_summary_availability AS availability
-                 ON availability.session_id = ?2
-                AND availability.generation = ?3
-                AND availability.summary_id = source.node_id
-                AND availability.availability = 'available'
                WHERE source.source_kind = 'raw_message' AND source.source_id = ?1
                UNION
                SELECT parent.node_id, affected.depth + 1
@@ -58,21 +55,25 @@ pub async fn invalidate_raw_summary_revision(
                JOIN lcm_summary_sources AS parent
                  ON parent.source_kind = 'summary_node'
                 AND parent.source_id = affected.node_id
-               JOIN session_summary_availability AS availability
-                 ON availability.session_id = ?2
-                AND availability.generation = ?3
-                AND availability.summary_id = parent.node_id
-                AND availability.availability = 'available'
                WHERE affected.depth < ?4
-               LIMIT ?5
+               LIMIT ?6
              )
-             SELECT node_id FROM affected ORDER BY node_id",
+             SELECT DISTINCT affected.node_id
+             FROM affected
+             JOIN session_summary_availability AS availability
+               ON availability.session_id = ?2
+              AND availability.generation = ?3
+              AND availability.summary_id = affected.node_id
+              AND availability.availability = 'available'
+             ORDER BY affected.node_id
+             LIMIT ?5",
             params![
                 raw_store_id.to_string(),
                 session_id,
                 active,
                 i64::try_from(MAX_LINEAGE_DEPTH).unwrap_or(i64::MAX),
                 limit,
+                i64::try_from(MAX_LINEAGE_NODES.saturating_add(1)).unwrap_or(i64::MAX),
             ],
         )
         .await?;
@@ -81,16 +82,13 @@ pub async fn invalidate_raw_summary_revision(
         affected.push(row.get::<String>(0)?);
     }
     drop(rows);
-    if affected.len() > max_affected {
-        return Err(lineage_limit(
-            session_id,
-            "raw_revision_invalidation_budget_exhausted",
-        ));
-    }
+    let has_more = affected.len() > max_affected;
+    affected.truncate(max_affected);
     if affected.is_empty() {
         return Ok(RawSummaryInvalidation {
             rewind_frontier_store_id: raw_store_id.saturating_sub(1).max(0),
             stale_summary_count: 0,
+            has_more: false,
         });
     }
 
@@ -126,6 +124,7 @@ pub async fn invalidate_raw_summary_revision(
     Ok(RawSummaryInvalidation {
         rewind_frontier_store_id: first_source.saturating_sub(1).max(0),
         stale_summary_count: affected.len(),
+        has_more,
     })
 }
 

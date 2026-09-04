@@ -61,6 +61,12 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
         graph_watermark TEXT,
         created_at INTEGER NOT NULL,
         applied_at INTEGER,
+        recovery_state TEXT NOT NULL DEFAULT 'pending'
+            CHECK(recovery_state IN ('pending', 'retryable', 'permanent')),
+        recovery_failure_code TEXT,
+        recovery_failure_count INTEGER NOT NULL DEFAULT 0
+            CHECK(recovery_failure_count >= 0),
+        recovery_next_attempt_at INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY(session_id, generation),
         CHECK(
             (state = 'pending' AND graph_watermark IS NULL AND applied_at IS NULL)
@@ -72,6 +78,11 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
     );
     CREATE INDEX IF NOT EXISTS idx_session_relation_receipts_pending
         ON session_relation_receipts(state, created_at, session_id, generation);
+    CREATE INDEX IF NOT EXISTS idx_session_relation_receipts_recovery_due
+        ON session_relation_receipts(
+            state, recovery_state, recovery_next_attempt_at,
+            created_at, session_id, generation
+        );
 
     CREATE TABLE IF NOT EXISTS session_relation_effect_journal (
         session_id TEXT NOT NULL,
@@ -588,7 +599,22 @@ pub(crate) async fn migrate_released_v3_session_temporal_schema(
              CHECK(committed_item_count >= 0);
          ALTER TABLE session_temporal_projection_receipts
              ADD COLUMN committed_copy_count INTEGER NOT NULL DEFAULT 0
-             CHECK(committed_copy_count >= 0);",
+             CHECK(committed_copy_count >= 0);
+         ALTER TABLE session_relation_receipts
+             ADD COLUMN recovery_state TEXT NOT NULL DEFAULT 'pending'
+             CHECK(recovery_state IN ('pending', 'retryable', 'permanent'));
+         ALTER TABLE session_relation_receipts
+             ADD COLUMN recovery_failure_code TEXT;
+         ALTER TABLE session_relation_receipts
+             ADD COLUMN recovery_failure_count INTEGER NOT NULL DEFAULT 0
+             CHECK(recovery_failure_count >= 0);
+         ALTER TABLE session_relation_receipts
+             ADD COLUMN recovery_next_attempt_at INTEGER NOT NULL DEFAULT 0;
+         CREATE INDEX IF NOT EXISTS idx_session_relation_receipts_recovery_due
+             ON session_relation_receipts(
+                 state, recovery_state, recovery_next_attempt_at,
+                 created_at, session_id, generation
+             );",
     )
     .await
     .map_err(|error| global_db_operation_error(OPERATION, error))?;
