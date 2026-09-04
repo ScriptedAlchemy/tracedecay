@@ -270,6 +270,8 @@ pub struct TraceDecayStorageEnvGuard {
     global_db_path: PathBuf,
     _home_guard: EnvVarGuard,
     _userprofile_guard: EnvVarGuard,
+    _config_home_guard: EnvVarGuard,
+    _runtime_dir_guard: EnvVarGuard,
     _data_dir_guard: EnvVarGuard,
     _global_db_guard: GlobalDbEnvGuard,
     _holder_scan_guard: EnvVarGuard,
@@ -294,6 +296,35 @@ impl TraceDecayStorageEnvGuard {
             );
         }
         let global_db_path = canonicalize_test_db_path(&profile_root.join("global.db"));
+        // Service-manager isolation, not storage isolation. The installed
+        // daemon's unit path is `$XDG_CONFIG_HOME/systemd/user/tracedecay.service`
+        // (`tracedecay-daemon-control::service::unit_file`), and any in-process
+        // lifecycle path that finds that file quiesces the unit it names with
+        // `systemctl --user stop`. `$HOME` alone does not decide it: the XDG
+        // variable wins when the ambient environment exports one, so a fixture
+        // that pinned only `HOME` would stop the developer's or operator's real
+        // `tracedecay.service`. Pin the config home inside the throwaway home so
+        // no unit file is ever found, and pin the runtime dir alongside it so a
+        // stray `systemctl --user` cannot reach the real user manager's socket
+        // either. `apply_tracedecay_home_env` pins the same pair for spawned
+        // child processes.
+        let config_home = home.join(".config");
+        let runtime_dir = home.join("run");
+        for directory in [&config_home, &runtime_dir] {
+            fs::create_dir_all(directory).unwrap_or_else(|err| {
+                panic!(
+                    "failed to create isolated directory '{}': {err}",
+                    directory.display()
+                )
+            });
+        }
+        #[cfg(unix)]
+        fs::set_permissions(&runtime_dir, fs::Permissions::from_mode(0o700)).unwrap_or_else(|err| {
+            panic!(
+                "failed to restrict isolated runtime directory '{}': {err}",
+                runtime_dir.display()
+            )
+        });
 
         Self {
             home: home.clone(),
@@ -301,6 +332,8 @@ impl TraceDecayStorageEnvGuard {
             global_db_path: global_db_path.clone(),
             _home_guard: EnvVarGuard::set("HOME", &home),
             _userprofile_guard: EnvVarGuard::set("USERPROFILE", &home),
+            _config_home_guard: EnvVarGuard::set("XDG_CONFIG_HOME", &config_home),
+            _runtime_dir_guard: EnvVarGuard::set("XDG_RUNTIME_DIR", &runtime_dir),
             _data_dir_guard: EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root),
             _global_db_guard: GlobalDbEnvGuard::set(&global_db_path),
             _holder_scan_guard: EnvVarGuard::set(
@@ -726,10 +759,16 @@ fn detach_from_test_process_group(command: &mut Command) {
 
 pub fn apply_tracedecay_home_env(command: &mut Command, home: &Path) {
     let home = canonical_existing_path(home);
+    // `XDG_RUNTIME_DIR` joins `XDG_CONFIG_HOME` here for the same reason the
+    // in-process guard pins both: a child that resolves an installed unit file
+    // would otherwise reach the real `systemctl --user` manager.
+    let runtime_dir = home.join("run");
+    let _ = fs::create_dir_all(&runtime_dir);
     command
         .env("HOME", &home)
         .env("USERPROFILE", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
         .env(USER_DATA_DIR_ENV, home.join(".tracedecay"))
         .env(GLOBAL_DB_ENV, home.join(".tracedecay/global.db"));
     detach_from_test_process_group(command);
