@@ -382,7 +382,17 @@ async fn linked_worktree_code_scopes_share_one_project_graph_lease() {
     assert_eq!(primary.generation_id(), &primary_generation);
     assert_eq!(linked.generation_id(), &linked_generation);
     assert_ne!(primary.namespace(), linked.namespace());
-    assert_ne!(primary.namespace(), primary_next.namespace());
+    // The namespace names the code scope, not the generation: a later
+    // generation of the same scope resolves to the same projection so its
+    // publication supersedes the previous verified head (issue #836).
+    assert_eq!(primary.namespace(), primary_next.namespace());
+    assert!(
+        primary
+            .namespace()
+            .as_str()
+            .starts_with(tracedecay_graph_db::CODE_GRAPH_SHARD_NAMESPACE_PREFIX),
+        "code scopes publish under the canonical per-shard namespace layout"
+    );
     assert_eq!(resolver.graph_calls.load(Ordering::SeqCst), 3);
     assert_eq!(
         publisher.calls.load(Ordering::SeqCst),
