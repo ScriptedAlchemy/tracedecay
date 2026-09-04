@@ -160,6 +160,13 @@ async fn projectless_profile_capture_uses_the_daemon_profile_worker_plan() {
 
 #[tokio::test]
 async fn host_ingress_binds_provenance_to_authoritative_project_and_replays_stably() {
+    // These fixtures build a `HostAdmissionFacade` directly instead of going
+    // through `HostAdmissionTestRuntimeV1`, so nothing has installed this
+    // process's worker plan. Observation capture reads the background CPU
+    // authority that plan publishes and refuses with
+    // `Unavailable/background_cpu_unavailable` when it is absent.
+    crate::host_admission::ensure_process_background_cpu_authority()
+        .expect("install the process background CPU authority");
     let root = TempDir::new().unwrap();
     let repository_root = root.path().join("repository");
     initialize_repository(&repository_root);
@@ -354,6 +361,13 @@ async fn host_ingress_binds_provenance_to_authoritative_project_and_replays_stab
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn registered_profile_runtime_is_required_and_mismatch_never_falls_back() {
+    // These fixtures build a `HostAdmissionFacade` directly instead of going
+    // through `HostAdmissionTestRuntimeV1`, so nothing has installed this
+    // process's worker plan. Observation capture reads the background CPU
+    // authority that plan publishes and refuses with
+    // `Unavailable/background_cpu_unavailable` when it is absent.
+    crate::host_admission::ensure_process_background_cpu_authority()
+        .expect("install the process background CPU authority");
     let temporary = TempDir::new().unwrap();
     let profile_root = temporary.path().join("profile");
     let identity =
@@ -468,6 +482,13 @@ async fn registered_profile_runtime_is_required_and_mismatch_never_falls_back() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn registered_project_runtime_is_exact_and_revocation_never_falls_back() {
+    // These fixtures build a `HostAdmissionFacade` directly instead of going
+    // through `HostAdmissionTestRuntimeV1`, so nothing has installed this
+    // process's worker plan. Observation capture reads the background CPU
+    // authority that plan publishes and refuses with
+    // `Unavailable/background_cpu_unavailable` when it is absent.
+    crate::host_admission::ensure_process_background_cpu_authority()
+        .expect("install the process background CPU authority");
     let temporary = TempDir::new().unwrap();
     let profile_root = temporary.path().join("profile");
     let project_root = temporary.path().join("project");
