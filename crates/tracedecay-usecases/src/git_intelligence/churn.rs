@@ -10,7 +10,8 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 /// Returns a map of `file_path` → `commit_count` for the last `days` days.
 /// Shells out to `git log --format= --name-only --since='{days} days ago'`.
 /// Returns a typed unavailable error if Git cannot be spawned and an empty map
-/// when the project is not a Git repository.
+/// when the project is not a Git repository — including when its directory does
+/// not exist at all.
 #[hotpath::measure(label = "usecases.git_intelligence.file_churn", future = true)]
 pub async fn file_churn(project_root: &Path, days: u32) -> Result<HashMap<String, usize>> {
     let git = tracedecay_runtime_core::git::try_git_program().map_err(|_| {
@@ -28,17 +29,20 @@ pub async fn file_churn(project_root: &Path, days: u32) -> Result<HashMap<String
         ])
         .current_dir(project_root)
         .output()
-        .await
-        .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                TraceDecayError::HostCliUnavailable {
-                    program: "git".to_string(),
-                    lifecycle: "Git churn analysis".to_string(),
-                }
-            } else {
-                TraceDecayError::Io(error)
-            }
-        })?;
+        .await;
+    let output = match output {
+        Ok(output) => output,
+        // A spawn reports `NotFound` both for a missing program and for a
+        // missing working directory, and `try_git_program` above already
+        // resolved the program: a `NotFound` here is the checkout, not the host
+        // CLI. Reporting it as an unavailable Git turns "this project root is
+        // gone" into a host-installation problem, so it stays the same
+        // "no churn to read" answer a non-repository directory gets.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(HashMap::new());
+        }
+        Err(error) => return Err(TraceDecayError::Io(error)),
+    };
 
     if !output.status.success() {
         // Not a git repo, or another non-fatal git error
