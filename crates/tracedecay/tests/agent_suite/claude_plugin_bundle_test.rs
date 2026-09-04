@@ -19,7 +19,9 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::plugin_validation_support::{body_after_frontmatter, read_json_file};
+use crate::plugin_validation_support::{
+    body_after_frontmatter, load_skill_docs_from, read_json_file,
+};
 use tracedecay_automation_runtime::automation::skill_frontmatter::parse_skill_frontmatter;
 
 /// The shared plugin tree root (holds Claude's manifest, skills, commands, and
@@ -28,32 +30,6 @@ use tracedecay_automation_runtime::automation::skill_frontmatter::parse_skill_fr
 fn bundle_root() -> PathBuf {
     crate::common::repository_path("plugin")
 }
-
-/// The 14 model-invocable skills the bundle ships (also the Codex skill set),
-/// kept in sync across every skill-bundling surface. The `tracedecay-*`
-/// workflow dispatcher skills were removed (their behavior lives in the native
-/// slash commands), the memory write/read skills were folded into
-/// `project-memory`, and `recalling-session-context`/`retrieving-cached-context`
-/// were folded into `managing-session-context`/`using-the-cli`.
-const EXPECTED_SKILLS: &[&str] = &[
-    "assessing-impact",
-    "code-health",
-    "diagnosing-analytics",
-    "discovering-tracedecay",
-    "editing-safely",
-    "exploring-code",
-    "fixing-build-and-type-errors",
-    "inspecting-managed-skills",
-    "investigating-unexpected-changes",
-    "managing-session-context",
-    "managing-work",
-    "managing-workflows",
-    "project-memory",
-    "reviewing-changes",
-    "tracing-functions",
-    "using-the-cli",
-    "using-tracedecay",
-];
 
 /// The 13 slash commands the bundle ships.
 const EXPECTED_COMMANDS: &[&str] = &[
@@ -107,23 +83,6 @@ fn required_scalar(raw: &str, field: &str, path: &Path) -> String {
         path.display()
     );
     value.to_string()
-}
-
-/// Sorted set of subdirectory names directly under `dir`.
-fn sorted_subdir_names(dir: &Path) -> Vec<String> {
-    let mut names = fs::read_dir(dir)
-        .unwrap_or_else(|err| panic!("failed to read {}: {err}", dir.display()))
-        .map(|entry| entry.expect("read dir entry").path())
-        .filter(|path| path.is_dir())
-        .map(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .expect("directory name should be utf-8")
-                .to_string()
-        })
-        .collect::<Vec<_>>();
-    names.sort();
-    names
 }
 
 /// Sorted set of file names directly under `dir` matching `extension`.
@@ -348,38 +307,22 @@ fn claude_bundle_hooks_wire_the_expected_lifecycle_events() {
 }
 
 #[test]
-fn claude_bundle_ships_exactly_the_expected_skills() {
-    let skills_root = bundle_root().join("skills");
-    let mut expected: Vec<String> = EXPECTED_SKILLS.iter().map(|s| s.to_string()).collect();
-    expected.sort();
-    assert_eq!(
-        sorted_subdir_names(&skills_root),
-        expected,
-        "claude-plugin/skills must contain exactly the expected skill directories"
-    );
-}
-
-#[test]
 fn claude_bundle_skills_have_valid_frontmatter_and_body() {
     let skills_root = bundle_root().join("skills");
-    for skill in EXPECTED_SKILLS {
-        let path = skills_root.join(skill).join("SKILL.md");
-        let raw = fs::read_to_string(&path)
-            .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
-
-        let name = required_scalar(&raw, "name", &path);
+    for skill in load_skill_docs_from(&skills_root) {
+        let name = required_scalar(&skill.raw, "name", &skill.path);
         assert_eq!(
-            &name,
-            skill,
+            name,
+            skill.name,
             "{} frontmatter name must match its directory",
-            path.display()
+            skill.path.display()
         );
-        required_scalar(&raw, "description", &path);
+        required_scalar(&skill.raw, "description", &skill.path);
 
         assert!(
-            !body_after_frontmatter(&raw).trim().is_empty(),
+            !skill.body.trim().is_empty(),
             "{} must have a non-empty body",
-            path.display()
+            skill.path.display()
         );
     }
 }

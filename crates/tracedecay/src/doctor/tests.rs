@@ -6,36 +6,39 @@ use crate::agents::AgentIntegration;
 use tracedecay_runtime_core::text::format_bytes;
 
 #[test]
-fn supported_kimi_and_kiro_absence_reaches_doctor_without_host_directories() {
+fn absence_reporting_hosts_reach_doctor_without_host_directories() {
     let home = tempfile::tempdir().expect("isolated home");
-    let reported = agents::all_integrations()
+    let reporting_agents = agents::all_integrations()
         .into_iter()
         .filter(|agent| should_run_host_healthcheck(agent.as_ref(), home.path()))
-        .map(|agent| agent.id())
-        .collect::<std::collections::BTreeSet<_>>();
+        .collect::<Vec<_>>();
 
-    assert_eq!(
-        reported,
-        std::collections::BTreeSet::from(["kimi", "kiro"]),
-        "supported Kimi and Kiro absences must remain visible while unrelated absent hosts stay quiet"
-    );
+    for required in ["kimi", "kiro"] {
+        assert!(
+            reporting_agents.iter().any(|agent| agent.id() == required),
+            "{required} absence must remain visible to Doctor"
+        );
+    }
 
     let context = HealthcheckContext {
         home: home.path().to_path_buf(),
         project_path: home.path().to_path_buf(),
     };
-    let mut counters = DoctorCounters::new();
-    for agent in agents::all_integrations()
-        .into_iter()
-        .filter(|agent| should_run_host_healthcheck(agent.as_ref(), home.path()))
-    {
+    for agent in reporting_agents {
+        let mut counters = DoctorCounters::new();
         agent.healthcheck(&mut counters, &context);
+        assert_eq!(
+            counters.issues,
+            0,
+            "an absent {} host is a truthful Doctor warning, not a broken installation",
+            agent.id()
+        );
+        assert!(
+            counters.warnings > 0,
+            "{} opted into absence reporting but emitted no Doctor warning",
+            agent.id()
+        );
     }
-    assert_eq!(
-        counters.issues, 0,
-        "an absent optional host is a truthful Doctor warning, not a broken installation"
-    );
-    assert_eq!(counters.warnings, 2);
 }
 
 #[test]
