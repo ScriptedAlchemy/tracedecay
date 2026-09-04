@@ -582,6 +582,7 @@ impl GraphDb {
         check()?;
         manifest.validate_checked(check)?;
         let identity = manifest.identity();
+        let expected_row_counts = manifest.row_counts();
         let context = GenerationStageContext {
             locator: GenerationLocator::new(
                 identity.projection.clone(),
@@ -596,7 +597,8 @@ impl GraphDb {
             .sealed_only
             .remove(&context.locator);
         if !restaging_sealed_only
-            && let Some(commit) = self.reseat_complete_staged_generation(&identity, &context)?
+            && let Some(commit) =
+                self.reseat_complete_staged_generation(&identity, &context, expected_row_counts)?
         {
             // A complete durable generation is already seated; these rows were
             // never needed.
@@ -652,16 +654,24 @@ impl GraphDb {
         &self,
         identity: &GraphGenerationManifestIdentity,
         context: &GenerationStageContext,
+        expected_row_counts: (usize, usize),
     ) -> Result<Option<GraphCommit>, GraphDbError> {
         let _snapshot_gate = self.wait_snapshot_gate_upgradable();
-        let existing = {
+        let (existing, actual_row_counts) = {
             let guard = self.read_guard()?;
             let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-            latest_projection(
-                database,
-                &context.physical_namespace,
-                &identity.projection.projection,
-            )?
+            (
+                latest_projection(
+                    database,
+                    &context.physical_namespace,
+                    &identity.projection.projection,
+                )?,
+                projection_node_counts(
+                    database,
+                    &context.physical_namespace,
+                    &identity.projection.projection,
+                )?,
+            )
         };
         let Some(existing) = existing else {
             return Ok(None);
@@ -670,6 +680,7 @@ impl GraphDb {
             || existing.commit.watermark != identity.watermark
             || existing.commit.generation_dependency_digest.as_ref()
                 != Some(&context.dependency_digest)
+            || actual_row_counts != expected_row_counts
         {
             return Ok(None);
         }
@@ -2747,7 +2758,10 @@ mod tests {
         VectorMetric,
     };
 
-    use super::{GenerationLocator, GenerationStageOutcome, generation_stage_pages};
+    use super::{
+        GenerationLocator, GenerationStageOutcome, StagedGenerationRowsDeletion,
+        generation_stage_pages,
+    };
 
     fn manifest(source: &str, watermark: &str) -> GraphGenerationManifest {
         GraphGenerationManifest::new(
@@ -3214,6 +3228,65 @@ mod tests {
             "the whole retry admission streams the rows exactly once, at the reopen proof"
         );
         owner.close().unwrap();
+    }
+
+    #[test]
+    fn persistent_reopen_replays_released_rows_instead_of_false_reseat() {
+        let temp = TempDir::new().unwrap();
+        let manifest = large_manifest("released-row-replay");
+        let sealed = sealed_digest(&manifest);
+        let retained_manifest = arc_manifest(&manifest);
+        let locator =
+            GenerationLocator::new(manifest.projection.clone(), manifest.generation.clone());
+        let (owner, database) = persistent_database(&temp);
+        let staged = database
+            .apply_generation_unverified_with_digest_observed(
+                Arc::clone(&retained_manifest),
+                &sealed,
+                &|| Ok(()),
+            )
+            .unwrap();
+        assert!(matches!(staged, GenerationStageOutcome::Applied(_)));
+        assert!(matches!(
+            database.delete_staged_generation_rows(&locator, &|| Ok(())),
+            Ok(StagedGenerationRowsDeletion::Deleted { removed_rows: true })
+        ));
+        assert_eq!(
+            database
+                .staging_generation_row_counts(&manifest.identity())
+                .unwrap(),
+            (0, 0),
+            "released staging rows must remain absent across a process restart"
+        );
+        drop(database);
+        owner.close().unwrap();
+
+        let (reopened_owner, reopened) = persistent_database(&temp);
+        let replayed = reopened
+            .apply_generation_unverified_with_digest_observed(
+                Arc::clone(&retained_manifest),
+                &sealed,
+                &|| Ok(()),
+            )
+            .unwrap();
+        assert!(matches!(replayed, GenerationStageOutcome::Applied(_)));
+        assert_eq!(
+            reopened
+                .staging_generation_row_counts(&manifest.identity())
+                .unwrap(),
+            manifest.row_counts(),
+            "a cold re-open must restage the exact retained generation before publication"
+        );
+        let (_, recovered) = reopened
+            .reopen_and_verify_existing_generation(
+                &manifest.identity(),
+                &sealed,
+                manifest.row_counts(),
+                &|| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(recovered, sealed);
+        reopened_owner.close().unwrap();
     }
 
     #[test]
