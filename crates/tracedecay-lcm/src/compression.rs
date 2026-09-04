@@ -15,7 +15,7 @@ use super::compression_decision::{
 };
 use super::extraction;
 use super::summarizer::CompressionSummarizerAdapter;
-use super::types::{LcmExtractionResult, LcmRelationProjectionStatus};
+use super::types::{LcmExtractionResult, LcmRelationProjectionStatus, LcmSummarySourceRange};
 use super::{
     LCM_DEFAULT_FRESH_TAIL_COUNT, LcmCompressionRequest, LcmCompressionResponse, LcmError,
     LcmLifecycleState, LcmLifecycleUpdate, LcmMaintenanceDebt, LcmPreflightRequest,
@@ -91,10 +91,11 @@ struct CompressionTransactionContext {
     retained: bool,
 }
 
-#[derive(Clone, Copy)]
-struct RetainedRawScanLimit {
-    rows: usize,
-    bytes: u64,
+#[derive(Clone)]
+pub struct RetainedCompressionGuard {
+    pub row_limit: usize,
+    pub byte_limit: u64,
+    pub expected_summary_source_range: Option<LcmSummarySourceRange>,
 }
 
 pub async fn update_lifecycle(
@@ -404,8 +405,7 @@ pub async fn compress_retained_page(
     storage_root: &Path,
     request: LcmCompressionRequest,
     payload_rollback: &mut payload::PayloadFileRollback,
-    row_limit: usize,
-    byte_limit: u64,
+    guard: RetainedCompressionGuard,
 ) -> Result<super::summary_convergence::LcmBoundedCompressionResponse, LcmError> {
     let response = compress_inner(
         conn,
@@ -413,10 +413,7 @@ pub async fn compress_retained_page(
         storage_root,
         request,
         payload_rollback,
-        Some(RetainedRawScanLimit {
-            rows: row_limit.max(1),
-            bytes: byte_limit,
-        }),
+        Some(guard),
     )
     .await;
     if response.is_err() {
@@ -431,7 +428,7 @@ async fn compress_inner(
     storage_root: &Path,
     request: LcmCompressionRequest,
     payload_rollback: &mut payload::PayloadFileRollback,
-    retained_scan: Option<RetainedRawScanLimit>,
+    retained_scan: Option<RetainedCompressionGuard>,
 ) -> Result<super::summary_convergence::LcmBoundedCompressionResponse, LcmError> {
     let mut request = request;
     request.max_assembly_tokens =
@@ -531,9 +528,33 @@ async fn compress_in_transaction(
     publisher: &impl dag::LcmSummaryPublicationPort,
     request: LcmCompressionRequest,
     summarizer: &CompressionSummarizerAdapter,
-    retained_scan: Option<RetainedRawScanLimit>,
+    retained_scan: Option<RetainedCompressionGuard>,
 ) -> Result<(LcmCompressionResponse, usize, u64, bool), LcmError> {
+    let expected_summary_source_range = retained_scan
+        .as_ref()
+        .and_then(|guard| guard.expected_summary_source_range.as_ref())
+        .cloned();
     let context = prepare_compression_context(conn, &request, retained_scan).await?;
+    if let Some(expected) = &expected_summary_source_range {
+        let actual_from = context
+            .plan
+            .selected_backlog
+            .first()
+            .map(|message| message.store_id);
+        let actual_to = context
+            .plan
+            .selected_backlog
+            .last()
+            .map(|message| message.store_id);
+        if actual_from != Some(expected.from_store_id) || actual_to != Some(expected.to_store_id) {
+            return Err(LcmError::StaleSummarySourceRange {
+                expected_from: expected.from_store_id,
+                expected_to: expected.to_store_id,
+                actual_from,
+                actual_to,
+            });
+        }
+    }
     let scan = (
         context.raw_rows_scanned,
         context.raw_bytes_scanned,
@@ -567,9 +588,10 @@ async fn compress_in_transaction(
 async fn prepare_compression_context(
     conn: &impl QueryExecutor,
     request: &LcmCompressionRequest,
-    retained_scan: Option<RetainedRawScanLimit>,
+    retained_scan: Option<RetainedCompressionGuard>,
 ) -> Result<CompressionTransactionContext, LcmError> {
     let conversation_id = request.session_id.clone();
+    let retained = retained_scan.is_some();
     let existing_frontier = lifecycle_state_or_default(
         conn,
         &request.provider,
@@ -627,7 +649,7 @@ async fn prepare_compression_context(
         raw_rows_scanned,
         raw_bytes_scanned,
         raw_has_more,
-        retained: retained_scan.is_some(),
+        retained,
     })
 }
 
@@ -2511,9 +2533,9 @@ async fn load_raw_messages_for_session_page(
     provider: &str,
     session_id: &str,
     after_store_id: i64,
-    limit: RetainedRawScanLimit,
+    limit: RetainedCompressionGuard,
 ) -> Result<RetainedRawMessagePage, LcmError> {
-    let row_limit = i64::try_from(limit.rows)
+    let row_limit = i64::try_from(limit.row_limit.max(1))
         .map_err(|_| LcmError::Db("retained compression row limit overflow".to_string()))?;
     let mut rows = conn
         .query(
@@ -2538,7 +2560,7 @@ async fn load_raw_messages_for_session_page(
         let row_bytes = u64::try_from(row.get::<i64>(15)?).map_err(|error| {
             LcmError::Db(format!("invalid retained compression byte count: {error}"))
         })?;
-        if bytes_scanned.saturating_add(row_bytes) > limit.bytes {
+        if bytes_scanned.saturating_add(row_bytes) > limit.byte_limit {
             if messages.is_empty() {
                 return Err(LcmError::BudgetExhausted);
             }
@@ -2553,7 +2575,7 @@ async fn load_raw_messages_for_session_page(
         messages,
         rows_scanned,
         bytes_scanned,
-        has_more: byte_limited || rows_scanned == limit.rows,
+        has_more: byte_limited || rows_scanned == limit.row_limit.max(1),
     })
 }
 
