@@ -14,9 +14,10 @@ use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay_graph_db::{
-    GraphCancellation, GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig, GraphEntity,
-    GraphEntityId, GraphMutation, GraphNamespace, GraphProjectionId, GraphTraversalDirection,
-    GraphWatermark, GraphWriteBatch, NeverCancelled, SourceGeneration, TraversalRequest,
+    GraphCancellation, GraphDbOwnerRegistrationV1, GraphDbRegistration, GraphDbRegistry,
+    GraphDbRegistryConfig, GraphEntity, GraphEntityId, GraphMutation, GraphNamespace,
+    GraphProjectionId, GraphTraversalDirection, GraphWatermark, GraphWriteBatch, NeverCancelled,
+    SourceGeneration, TraversalRequest,
 };
 use tracedecay_maintenance::profile_backup::{
     ProfileBackupError, create_complete_profile_backup, rehearse_complete_profile_backup,
@@ -26,7 +27,8 @@ use tracedecay_runtime_core::storage::{
     write_store_manifest_to_path,
 };
 use tracedecay_store::{
-    BrainId, ProjectId, RetainedGraphStoreLeaseV1, StoreAuthorityEpochV1, StoreIncarnationV1,
+    BrainId, ProjectId, RetainedGraphStoreLeaseV1, RetainedGraphStoreOwnerAttachmentV1,
+    RetainedGraphStoreOwnerOperationLeaseErrorV1, StoreAuthorityEpochV1, StoreIncarnationV1,
     StoreRuntimeBindingV1, UserProfileId, VerifiedStoreLocatorV1, canonical_store_locator_digest,
 };
 
@@ -53,6 +55,31 @@ impl RetainedGraphStoreLeaseV1 for HarnessGraphLease {
 
     fn canonical_path(&self) -> &Path {
         &self.canonical_path
+    }
+}
+
+impl RetainedGraphStoreOwnerAttachmentV1 for HarnessGraphLease {
+    fn binding(&self) -> &StoreRuntimeBindingV1 {
+        &self.binding
+    }
+
+    fn verified_locator(&self) -> &VerifiedStoreLocatorV1 {
+        &self.verified_locator
+    }
+
+    fn canonical_path(&self) -> &Path {
+        &self.canonical_path
+    }
+
+    fn issue_operation_lease(
+        &self,
+    ) -> Result<Arc<dyn RetainedGraphStoreLeaseV1>, RetainedGraphStoreOwnerOperationLeaseErrorV1>
+    {
+        Ok(Arc::new(Self {
+            binding: self.binding.clone(),
+            verified_locator: self.verified_locator.clone(),
+            canonical_path: self.canonical_path.clone(),
+        }))
     }
 }
 
@@ -87,8 +114,32 @@ fn registration(graph_path: &Path) -> GraphDbRegistration {
     }
 }
 
+/// The registry only hands out operation leases for a shard its map owner has
+/// already attached; `resolve` on an unmounted shard is a typed
+/// "graph runtime is not mounted by its owner attachment". Mounting through the
+/// owner registration is what production does before it resolves, so this
+/// harness does the same. The attachment itself is dropped: ownership lives in
+/// the registry map, not in the returned handle.
+fn mount_owner(registry: &GraphDbRegistry, graph_path: &Path) {
+    let operation = registration(graph_path);
+    let authority_attachment = Box::new(HarnessGraphLease {
+        binding: operation.authority_lease.binding().clone(),
+        verified_locator: operation.authority_lease.verified_locator().clone(),
+        canonical_path: operation.authority_lease.canonical_path().to_path_buf(),
+    });
+    drop(
+        registry
+            .resolve_owner_attachment(GraphDbOwnerRegistrationV1 {
+                operation,
+                authority_attachment,
+            })
+            .unwrap(),
+    );
+}
+
 fn seed_graph_store(graph_path: &Path) {
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
+    mount_owner(&registry, graph_path);
     let database = registry.resolve(registration(graph_path)).unwrap();
     database
         .apply_unverified(
@@ -116,6 +167,7 @@ fn seed_graph_store(graph_path: &Path) {
 
 fn assert_graph_store_serves_seeded_entity(graph_path: &Path) {
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
+    mount_owner(&registry, graph_path);
     let database = registry.resolve(registration(graph_path)).unwrap();
     let result = database
         .traverse(TraversalRequest {
