@@ -206,38 +206,33 @@ impl GraphDbRegistry {
             ));
         }
         let locator = locator_from_key(&relational_head.key)?;
-        if !database.native_engine_open()? {
-            return Ok(SealedStagingRelease::Retained(
-                SealedStagingRetentionReason::StagingEngineHibernated,
-            ));
-        }
-        let installed = match database.installed_verified_generation(&locator)? {
-            Some(installed) => installed,
-            None => {
-                drop(self.recover_verified_snapshot(
-                    registration.clone(),
-                    authority,
-                    context,
-                    projection,
-                )?);
-                database
-                    .installed_verified_generation(&locator)?
-                    .ok_or_else(|| {
-                        GraphDbError::unavailable(
-                            "verified graph recovery did not install its relational head",
-                        )
-                    })?
+        // The relational head is the authority for which sealed artifact may
+        // stand in for the staging rows: the runtime verifies the sealed
+        // store's recovered digest against it, opens the staging engine if
+        // it is hibernated, releases, and re-hibernates. Requiring an
+        // installed lease here left every scope a freshly opened daemon had
+        // not activated (only the memory head and the serving generation are)
+        // answering NoVerifiedLease forever, which is how a multi-gigabyte
+        // staging container accumulated fifteen sealed generations' rows.
+        if database.installed_verified_generation(&locator)?.is_none() {
+            let recovered = self.recover_verified_snapshot(
+                registration.clone(),
+                authority,
+                context,
+                projection,
+            );
+            if let Ok(snapshot) = recovered {
+                drop(snapshot);
             }
-        };
-        if installed.head.recovered_digest != relational_head.recovered_digest {
-            return Ok(SealedStagingRelease::Retained(
-                SealedStagingRetentionReason::NoVerifiedLease,
-            ));
         }
-        database.open_installed_sealed_generation_store_if_present(&installed)?;
-        database.release_sealed_generation_staging_rows(&locator, &|| {
-            check_all(&registration, context, "generation.release_sealed_staging")
-        })
+        if let Some(installed) = database.installed_verified_generation(&locator)? {
+            database.open_installed_sealed_generation_store_if_present(&installed)?;
+        }
+        database.release_sealed_generation_staging_rows_with(
+            &locator,
+            Some(relational_head.recovered_digest.as_str()),
+            &|| check_all(&registration, context, "generation.release_sealed_staging"),
+        )
     }
 
     /// Retire one replay after its sealed code generation has been deleted.
