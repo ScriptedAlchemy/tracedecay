@@ -19,14 +19,7 @@ fn supported_optional_host_absences_reach_doctor_without_host_directories() {
     // an informational Doctor warning, and every other absent host stays quiet.
     assert_eq!(
         reported,
-        std::collections::BTreeSet::from([
-            "antigravity",
-            "devin",
-            "kimi",
-            "kiro",
-            "vibe",
-            "zed"
-        ]),
+        std::collections::BTreeSet::from(["antigravity", "devin", "kimi", "kiro", "vibe", "zed"]),
         "supported optional-host absences must remain visible while unrelated absent hosts stay quiet"
     );
 

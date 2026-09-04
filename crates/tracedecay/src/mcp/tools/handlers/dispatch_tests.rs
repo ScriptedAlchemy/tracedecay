@@ -1068,7 +1068,10 @@ async fn selected_project_retrieve_finds_selected_project_response_handle() {
                 .unwrap_or_else(|| panic!("retrieve page content: {payload}")),
         );
         pages += 1;
-        assert!(pages < 64, "selected-project retrieve paging did not settle");
+        assert!(
+            pages < 64,
+            "selected-project retrieve paging did not settle"
+        );
         match payload["next_offset"].as_u64() {
             Some(next) => offset = next,
             None => break,
