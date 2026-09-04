@@ -379,22 +379,23 @@ impl RmcpConnectionAdapter {
         connection: &mut ConnectionRouteState,
     ) -> Result<JsonRpcResponse, ErrorData> {
         let pre_cancelled = request_cancellation.is_cancelled();
+        // The legacy MCP route already erases this shared dispatch authority
+        // before awaiting it. Keep the typed RMCP route at the same ownership
+        // boundary: the cancellation combinator otherwise stores the complete
+        // catalog-dispatch future inline in rmcp's generated request future.
+        let handling = Box::pin(self.server.dispatch_envelope(
+            request,
+            self.timings_enabled,
+            connection,
+            pre_cancelled,
+        ));
         let response = if pre_cancelled {
-            Some(
-                self.server
-                    .dispatch_envelope(request, self.timings_enabled, connection, true)
-                    .await,
-            )
+            Some(handling.await)
         } else {
-            await_dispatch_with_cancellation(
+            await_dispatch_with_cancellation(handling, request_cancellation.cancelled(), || {
                 self.server
-                    .dispatch_envelope(request, self.timings_enabled, connection, false),
-                request_cancellation.cancelled(),
-                || {
-                    self.server
-                        .cancel_application_surface_request(&id, &self.memory_request_scope)
-                },
-            )
+                    .cancel_application_surface_request(&id, &self.memory_request_scope)
+            })
             .await
         }
         .ok_or_else(|| {
