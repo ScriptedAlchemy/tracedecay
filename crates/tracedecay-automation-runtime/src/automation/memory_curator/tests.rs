@@ -289,6 +289,41 @@ fn memory_curator_review_contract_contains_no_local_similarity_authority() {
     assert!(review.get("similarity_millionths").is_none());
 }
 
+#[tokio::test]
+async fn memory_curator_review_skips_an_unavailable_graph_when_no_facts_are_eligible() {
+    use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+    use crate::store::memory::DatabaseFactStore;
+    use std::sync::Arc;
+
+    let temp = tempfile::tempdir().unwrap();
+    let database_path = temp.path().join("empty-memory.db");
+    crate::register_test_schema_installer();
+    let authority =
+        DatabaseAuthority::acquire_test(&database_path, "empty curator review").unwrap();
+    let (database, _) = Database::publish_test_runtime(
+        &database_path,
+        &authority,
+        TestDatabaseRuntimeMode::Initialize,
+    )
+    .await
+    .unwrap();
+    let owner = FactOwnerV1::Profile;
+    let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&database)).unwrap();
+    let run_control = AutomationRunControl::from_interrupted(Arc::new(|| false));
+
+    let page = memory_curator_review(&memory, &owner, 8, None, &run_control)
+        .await
+        .unwrap();
+
+    assert_eq!(page.review["status"], json!("up_to_date"));
+    assert_eq!(page.review["facts_reviewed"], json!(0));
+    assert_eq!(page.review["relations"], json!([]));
+    assert!(
+        database.issue_memory_graph_runtime_operation().is_err(),
+        "the fixture intentionally leaves the graph authority unavailable"
+    );
+}
+
 #[test]
 fn memory_curator_request_stays_below_codex_limit_for_large_review() {
     const CODEX_APP_SERVER_MAX_INPUT_CHARS: usize = 1_048_576;

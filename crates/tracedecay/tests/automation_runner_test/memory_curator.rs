@@ -54,6 +54,61 @@ fn exact_fact(fact_id: &str, expected_last_event_id: &str) -> Value {
 }
 
 #[tokio::test]
+async fn memory_curator_empty_store_skips_without_a_backend_attempt_and_releases_lock() {
+    let temp = tempdir().unwrap();
+    let cg = init_project(temp.path()).await;
+    let backend = JsonBackend::new(json!({"ops": []}));
+    let config = AutomationConfig {
+        enabled: true,
+        backend: AutomationBackend::CodexAppServer,
+        host_mode: AutomationHostMode::Standalone,
+        tasks: AutomationTaskSet {
+            memory_curator: AutomationTaskConfig {
+                enabled: true,
+                schedule: Some("manual".to_string()),
+                ..AutomationTaskConfig::default()
+            },
+            ..AutomationTaskSet::default()
+        },
+        ..AutomationConfig::default()
+    };
+    let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
+
+    let run = tracedecay_automation_runtime::automation::runner::run_memory_curator_with_backend(
+        &cg,
+        &config,
+        &test_configuration_revision(),
+        &backend,
+        MemoryCuratorAutomationOptions {
+            trigger: AutomationTrigger::ManualCli,
+            fact_review_limit: 4,
+            min_confidence: 0.5,
+            run_id: None,
+        },
+        &run_control,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
+    assert_eq!(
+        run.ledger_record.error.as_deref(),
+        Some("nothing_to_review")
+    );
+    assert_eq!(backend.calls(), 0);
+    assert_eq!(run.ledger_record.backend_attempt_count, 0);
+    assert!(run.ledger_record.backend_attempts.is_empty());
+    assert!(
+        !cg.store_layout()
+            .dashboard_root
+            .join("automation_locks")
+            .join("memory_curator.lock")
+            .exists(),
+        "the empty run must release its scheduler lock"
+    );
+}
+
+#[tokio::test]
 async fn memory_curator_repairs_then_applies_validated_ops_and_records_ledger() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
