@@ -2156,6 +2156,21 @@ fn generation_stage_pages_with_limits(
         maximum_mutations,
         maximum_live_bytes,
     )?;
+    // A generation with no rows still owns a projection: the page loop is
+    // what writes the projection state, publication record, and commit
+    // marker, so an empty manifest must apply exactly one empty page.
+    // Without it the staged generation has no projection node, the
+    // post-stage verification reports "recovered generation is missing",
+    // and the projection is quarantined by its own publication (observed
+    // live on a project whose memory graph had zero facts).
+    if pages.is_empty() {
+        pages.push(GenerationStagePage {
+            ordinal: 0,
+            kind: GenerationStagePageKind::Entities,
+            range: 0..0,
+            live_bytes: 0,
+        });
+    }
     Ok(pages)
 }
 

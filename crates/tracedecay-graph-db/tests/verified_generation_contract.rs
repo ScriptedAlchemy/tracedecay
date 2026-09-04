@@ -610,6 +610,70 @@ fn stage_manifest(
     )
 }
 
+/// A generation with no rows still owns its projection. The live daemon
+/// published an empty memory graph (a project with zero facts): the page loop
+/// wrote nothing, the post-stage verification reported the generation
+/// missing, and the projection was quarantined by its own publication. Both
+/// the publish and a recover from a reopened container must succeed.
+#[test]
+fn empty_generation_publishes_and_recovers_its_projection() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("namespace:empty-memory", "memory");
+    let published = GraphGenerationManifest::new(
+        identity.clone(),
+        GraphGenerationId::new("empty-g1").unwrap(),
+        SourceGeneration::new("source:empty-g1").unwrap(),
+        GraphWatermark::new("watermark:empty-g1").unwrap(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .unwrap();
+    let record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &published,
+        "publish:empty-g1",
+        None,
+        'e',
+    );
+    let commit = registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &record.publication.key,
+            None,
+        )
+        .expect("an empty generation must publish its projection marker");
+    assert_eq!(commit.snapshot.generation(), &published.generation);
+
+    // The commit's snapshot leases the engine; release it before reopening
+    // the container from a fresh registry, as a restarted daemon would.
+    drop(commit);
+    registered
+        .close()
+        .expect("close the registered graph before reopening it");
+    drop(registered);
+    let reopened = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let recovered = reopened
+        .registry
+        .recover_verified_snapshot(
+            registration(reopened.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &record.publication.key.projection,
+        )
+        .expect("an empty generation must recover from its projection marker after reopen");
+    assert_eq!(recovered.generation(), &published.generation);
+    assert_eq!(recovered.projection(), &identity);
+}
+
 /// A no-change recover of an already-installed verified head must not decode
 /// the journaled replay or re-hydrate the generation. Idle daemon polls take
 /// this path; re-reading the full replay/native generation is the 334MiB
