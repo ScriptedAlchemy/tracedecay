@@ -850,11 +850,15 @@ mod tests {
         let db_path = initialized.store_layout().graph_db_path.clone();
         initialized.close();
         let connection = rusqlite::Connection::open(&db_path).expect("open graph fixture");
+        // Not `SCHEMA_VERSION - 1`: that stamp is
+        // `PAYLOAD_DIGEST_STEP_SOURCE_VERSION`, the one sanctioned step this
+        // binary carries forward in place, so an open of it upgrades instead
+        // of refusing. Age the store one step past the sanctioned source.
         connection
             .pragma_update(
                 None,
                 "user_version",
-                tracedecay_runtime_core::db::migrations::SCHEMA_VERSION - 1,
+                tracedecay_runtime_core::db::migrations::PAYLOAD_DIGEST_STEP_SOURCE_VERSION - 1,
             )
             .expect("stamp incompatible graph schema");
         drop(connection);
