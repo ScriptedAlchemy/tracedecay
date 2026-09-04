@@ -138,7 +138,11 @@ pub(crate) async fn handle_real_server_tool_call(
                     .expect("retrieved response text"),
             )
             .expect("retrieved response JSON");
-            content.push_str(page["content"].as_str().expect("retrieved page content"));
+            content.push_str(
+                page["content"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("retrieved page without content: {page}")),
+            );
             if page["has_more"] != Value::Bool(true) {
                 break;
             }
