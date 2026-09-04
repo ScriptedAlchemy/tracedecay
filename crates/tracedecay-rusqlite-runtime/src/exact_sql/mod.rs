@@ -911,13 +911,44 @@ pub(crate) fn execute_query(
     )
 }
 
+/// Prepares a read statement, riding out the short window in which a
+/// freshly opened WAL database is still being recovered by its writer.
+///
+/// SQLite answers a reader that arrives during WAL recovery with
+/// `SQLITE_BUSY_RECOVERY`, which bypasses the connection's busy handler, so
+/// a reader started right after its writer could fail its very first
+/// statement with "database is locked" under load. The window is bounded by
+/// recovery itself; retry a few times before surfacing the error.
+fn prepare_read_statement<'c>(
+    connection: &'c Connection,
+    sql: &str,
+) -> Result<rusqlite::CachedStatement<'c>, ExactSqlError> {
+    const ATTEMPTS: u32 = 8;
+    const BACKOFF: std::time::Duration = std::time::Duration::from_millis(25);
+    let mut attempt = 0;
+    loop {
+        match connection.prepare_cached(sql) {
+            Ok(statement) => return Ok(statement),
+            Err(rusqlite::Error::SqliteFailure(failure, _))
+                if attempt < ATTEMPTS
+                    && matches!(
+                        failure.code,
+                        rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                    ) =>
+            {
+                attempt += 1;
+                std::thread::sleep(BACKOFF);
+            }
+            Err(error) => return Err(sqlite_error("prepare query", error)),
+        }
+    }
+}
+
 fn execute_query_unchecked(
     connection: &Connection,
     request: ExactSqlStatement,
 ) -> Result<ExactSqlRows, ExactSqlError> {
-    let mut statement = connection
-        .prepare_cached(&request.sql)
-        .map_err(|error| sqlite_error("prepare query", error))?;
+    let mut statement = prepare_read_statement(connection, &request.sql)?;
     let columns = statement
         .column_names()
         .into_iter()
