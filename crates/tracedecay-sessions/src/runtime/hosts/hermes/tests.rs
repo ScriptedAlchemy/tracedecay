@@ -20,7 +20,7 @@ use tracedecay_runtime_core::privacy::{
     MAX_OBSERVATION_RECORD_BYTES, parse_normalized_observation_record_v1,
 };
 
-use super::coverage::admit_rows_with_admission_and_cancellation;
+use super::coverage::{admit_rows_with_admission_and_cancellation, sqlite_incarnation};
 use super::ingest::HermesProfileSource;
 use super::*;
 
@@ -44,6 +44,22 @@ async fn initialize_owned_store_before_foreign_fixture(directory: &std::path::Pa
             );
         })
         .await;
+}
+
+#[cfg(unix)]
+#[test]
+fn missing_sqlite_incarnation_reports_only_safe_identity_classification() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("private-hermes-session.sqlite3");
+
+    let error = sqlite_incarnation(&path).unwrap_err();
+
+    assert_eq!(
+        error,
+        "could not inspect Hermes SQLite authority (not_found)"
+    );
+    assert!(!error.contains("private-hermes-session"));
+    assert!(!error.contains("No such file"));
 }
 
 #[cfg(windows)]

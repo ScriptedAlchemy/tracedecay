@@ -327,9 +327,12 @@ impl tracedecay_rusqlite_runtime::exact_sql::ExactSqlWriteAuthority
                 )
             })?;
         let identity =
-            crate::db::sqlite_generation_identity(&self.canonical_path).map_err(|_| {
+            crate::db::sqlite_generation_identity(&self.canonical_path).map_err(|source| {
                 tracedecay_rusqlite_runtime::exact_sql::ExactSqlError::AuthorityDenied(
-                    "could not verify initialized SQLite file identity".to_owned(),
+                    super::sqlite_file_identity_authority_denial(
+                        "install final schema for initialized SQLite runtime",
+                        source,
+                    ),
                 )
             })?;
         if identity != self.opened_file_identity {
