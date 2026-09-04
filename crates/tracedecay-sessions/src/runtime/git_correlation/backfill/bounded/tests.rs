@@ -2,6 +2,7 @@ use std::io::Write as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use tracedecay_runtime_core::db::engine::{
@@ -103,6 +104,29 @@ fn repository_fixture() -> tempfile::TempDir {
     let fixture = tempfile::tempdir().unwrap();
     initialize_repository(fixture.path());
     fixture
+}
+
+struct FailCommitLogCall {
+    calls: AtomicUsize,
+    fail_on: usize,
+}
+
+impl GitReflogSource for FailCommitLogCall {
+    fn reflog(&self, worktree: &Path) -> Option<String> {
+        SystemGit.reflog(worktree)
+    }
+
+    fn current_branch(&self, worktree: &Path) -> Option<String> {
+        SystemGit.current_branch(worktree)
+    }
+
+    fn commit_log(&self, worktree: &Path, branch: &str, since: i64) -> Option<String> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == self.fail_on {
+            None
+        } else {
+            SystemGit.commit_log(worktree, branch, since)
+        }
+    }
 }
 
 fn initialize_repository(path: &Path) {
@@ -262,6 +286,74 @@ async fn incremental_publication_failure_holds_frontier_until_retry_succeeds() {
             .sessions_scanned,
         0
     );
+}
+
+#[tokio::test]
+async fn incremental_missing_commit_log_holds_frontier_until_retry_succeeds() {
+    let repository = repository_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    let git = FailCommitLogCall {
+        calls: AtomicUsize::new(0),
+        fail_on: 0,
+    };
+
+    let failed = run_incremental_backfill(&store, &git, 1).await.unwrap();
+    assert_eq!(failed.skipped_git_error, 1);
+    assert!(!failed.frontier_advanced);
+    assert_eq!(
+        read_meta_value(&store.connection, AUTO_BACKFILL_WATERMARK_KEY)
+            .await
+            .unwrap(),
+        None
+    );
+
+    let retried = run_incremental_backfill(&store, &git, 1).await.unwrap();
+    assert_eq!(retried.skipped_git_error, 0);
+    assert!(retried.frontier_advanced);
+}
+
+#[tokio::test]
+async fn later_attribution_failure_returns_committed_backfill_progress() {
+    let repository = repository_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    let git = FailCommitLogCall {
+        calls: AtomicUsize::new(0),
+        fail_on: 1,
+    };
+
+    let partial = run_incremental_backfill_outcome(&store, &git, 1)
+        .await
+        .unwrap();
+    assert!(partial.stats.frontier_advanced);
+    assert!(partial.stats.spans_written > 0);
+    assert_eq!(partial.stats.skipped_git_error, 1);
+    assert!(matches!(
+        partial.later_failure,
+        Some(GitCorrelationError::Unavailable(_))
+    ));
+
+    let retried = run_incremental_backfill(&store, &SystemGit, 1)
+        .await
+        .unwrap();
+    assert_eq!(retried.sessions_scanned, 0);
+    assert_eq!(retried.skipped_git_error, 0);
+}
+
+#[tokio::test]
+async fn unavailable_attribution_target_is_a_retryable_error() {
+    let repository = repository_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    run_incremental_backfill(&store, &SystemGit, 1)
+        .await
+        .unwrap();
+
+    let error = run_commit_attribution_sweep(&store, 0, |_| TargetScan::Unavailable)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, GitCorrelationError::Unavailable(_)));
 }
 
 #[tokio::test]

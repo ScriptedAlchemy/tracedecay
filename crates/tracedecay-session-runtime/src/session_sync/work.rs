@@ -408,14 +408,15 @@ fn import_transcript_stats(
 }
 
 fn git_convergence_deferred_units(
-    convergence: &tracedecay_global_db::GitEvidenceConvergenceStats,
+    convergence: &tracedecay_global_db::GitEvidenceConvergenceOutcome,
 ) -> u64 {
-    convergence
+    let stats = convergence.stats();
+    stats
         .pending_publications
-        .saturating_add(u64::from(convergence.backfill_page_saturated))
-        .saturating_add(saturating_usize_to_u64(
-            convergence.backfill.skipped_git_error,
-        ))
+        .unwrap_or(1)
+        .saturating_add(u64::from(stats.backfill_page_saturated))
+        .saturating_add(saturating_usize_to_u64(stats.backfill.skipped_git_error))
+        .saturating_add(u64::from(convergence.later_failure().is_some()))
 }
 
 impl SessionSyncProjectContext {
@@ -574,10 +575,16 @@ impl SessionSyncProjectContext {
                 project.stats,
                 git_convergence
                     .as_ref()
-                    .and_then(|result| result.as_ref().ok()),
+                    .and_then(|result| result.as_ref().ok())
+                    .map(tracedecay_global_db::GitEvidenceConvergenceOutcome::stats),
             );
             let git_deferred_units = match git_convergence.as_ref() {
-                Some(Ok(convergence)) => git_convergence_deferred_units(convergence),
+                Some(Ok(convergence)) => {
+                    if let Some(error) = convergence.later_failure() {
+                        tracing::warn!(%error, "startup session Git convergence made partial progress");
+                    }
+                    git_convergence_deferred_units(convergence)
+                }
                 Some(Err(error)) => {
                     tracing::warn!(%error, "startup session Git convergence failed");
                     1
@@ -612,7 +619,7 @@ impl SessionSyncProjectContext {
             let project_frontiers = project_progress.unwrap_or_default();
             let git_convergence_committed = git_convergence.as_ref().is_some_and(|result| {
                 result.as_ref().is_ok_and(
-                    tracedecay_global_db::GitEvidenceConvergenceStats::committed_progress,
+                    tracedecay_global_db::GitEvidenceConvergenceOutcome::committed_progress,
                 )
             });
 
@@ -665,7 +672,8 @@ impl SessionSyncProjectContext {
                 combined,
                 git_convergence
                     .as_ref()
-                    .and_then(|result| result.as_ref().ok()),
+                    .and_then(|result| result.as_ref().ok())
+                    .map(tracedecay_global_db::GitEvidenceConvergenceOutcome::stats),
             );
             let mut coverage = project_coverage;
             coverage.push(user.as_ref().map_or_else(
@@ -1049,23 +1057,25 @@ mod tests {
 
     #[test]
     fn saturated_git_only_import_preserves_committed_partial_receipt_evidence() {
-        let convergence = tracedecay_global_db::GitEvidenceConvergenceStats {
-            replayed_publications: 0,
-            pending_publications: 0,
-            backfill: tracedecay_sessions::runtime::git_correlation::BackfillStats {
-                sessions_scanned: 50,
-                spans_written: 2,
-                commits_attributed: 3,
-                skipped_not_worktree: 4,
-                frontier_advanced: true,
-                ..tracedecay_sessions::runtime::git_correlation::BackfillStats::default()
+        let convergence = tracedecay_global_db::GitEvidenceConvergenceOutcome::Complete(
+            tracedecay_global_db::GitEvidenceConvergenceStats {
+                replayed_publications: 0,
+                pending_publications: Some(0),
+                backfill: tracedecay_sessions::runtime::git_correlation::BackfillStats {
+                    sessions_scanned: 50,
+                    spans_written: 2,
+                    commits_attributed: 3,
+                    skipped_not_worktree: 4,
+                    frontier_advanced: true,
+                    ..tracedecay_sessions::runtime::git_correlation::BackfillStats::default()
+                },
+                backfill_page_saturated: true,
             },
-            backfill_page_saturated: true,
-        };
+        );
 
         let stats = import_transcript_stats(
             tracedecay_sessions::TranscriptIngestStats::default(),
-            Some(&convergence),
+            Some(convergence.stats()),
         );
 
         assert_eq!(stats.sessions_imported, 0);
@@ -1080,5 +1090,36 @@ mod tests {
             completion_termination(None, true, &stats, false, true),
             OperationTermination::Partial
         );
+    }
+
+    #[test]
+    fn later_git_failure_preserves_committed_startup_progress() {
+        let convergence = tracedecay_global_db::GitEvidenceConvergenceOutcome::Partial {
+            progress: tracedecay_global_db::GitEvidenceConvergenceStats {
+                replayed_publications: 1,
+                pending_publications: Some(0),
+                backfill: tracedecay_sessions::runtime::git_correlation::BackfillStats {
+                    sessions_scanned: 1,
+                    spans_written: 1,
+                    frontier_advanced: true,
+                    skipped_git_error: 1,
+                    ..Default::default()
+                },
+                backfill_page_saturated: false,
+            },
+            later_failure:
+                tracedecay_sessions::runtime::git_correlation::GitCorrelationError::Unavailable(
+                    "retained worktree temporarily unreadable".to_owned(),
+                ),
+        };
+
+        let stats = import_transcript_stats(
+            tracedecay_sessions::TranscriptIngestStats::default(),
+            Some(convergence.stats()),
+        );
+        assert_eq!(stats.sessions_scanned, 1);
+        assert_eq!(stats.spans_written, 1);
+        assert!(git_convergence_deferred_units(&convergence) > 0);
+        assert!(convergence.committed_progress());
     }
 }

@@ -1060,13 +1060,15 @@ pub use backfill::{
     BackfillOptions, BackfillSkipReason, BackfillStats, BoundedBackfillInterruption,
     BoundedBackfillOutcome, BoundedGitControl, BranchTimelineEntry,
     DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS, GitHistoryIndexFrontier, GitReflogSource,
-    SessionActivityRow, SystemGit, WindowBranchSegment, branch_timeline_from_reflog,
-    parse_commit_log, run_bounded_history_index_page, window_branch_segments,
+    IncrementalBackfillOutcome, SessionActivityRow, SystemGit, WindowBranchSegment,
+    branch_timeline_from_reflog, parse_commit_log, run_bounded_history_index_page,
+    run_incremental_backfill_outcome, window_branch_segments,
 };
 pub use backfill::{run_backfill, run_incremental_backfill};
 pub use publication_outbox::{
-    DEFAULT_GIT_EVIDENCE_PUBLICATION_REPLAY_LIMIT, enqueue_git_evidence_publication,
-    pending_git_evidence_publication_count, replay_pending_git_evidence_publications,
+    DEFAULT_GIT_EVIDENCE_PUBLICATION_REPLAY_LIMIT, GitEvidencePublicationReplayOutcome,
+    enqueue_git_evidence_publication, pending_git_evidence_publication_count,
+    replay_pending_git_evidence_publications, replay_pending_git_evidence_publications_outcome,
 };
 pub use store::{
     AnalyticsSessionTimestamp, AnalyticsSessionTimestampSource, GitCorrelationSessionStore,

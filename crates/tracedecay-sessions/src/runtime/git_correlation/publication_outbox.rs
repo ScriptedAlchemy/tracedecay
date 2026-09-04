@@ -25,6 +25,15 @@ struct PendingGitEvidencePublicationV1 {
     evidence_json: String,
 }
 
+/// Replay progress retained when a later receipt cannot be published or
+/// settled. `replayed_publications` counts verified graph publications, even
+/// when their receipt remains for idempotent settlement after restart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitEvidencePublicationReplayOutcome {
+    pub replayed_publications: usize,
+    pub later_failure: Option<GitCorrelationError>,
+}
+
 /// Stages exact graph-publication material in the caller's raw transcript
 /// transaction. Empty evidence creates no receipt.
 #[hotpath::measure(
@@ -160,22 +169,46 @@ pub async fn replay_pending_git_evidence_publications<S: GitCorrelationSessionSt
     session_store: &S,
     limit: usize,
 ) -> Result<usize, GitCorrelationError> {
+    let outcome = replay_pending_git_evidence_publications_outcome(session_store, limit).await?;
+    match outcome.later_failure {
+        Some(error) => Err(error),
+        None => Ok(outcome.replayed_publications),
+    }
+}
+
+/// Replays receipts without discarding verified publications when settlement
+/// of that receipt or a later receipt fails.
+#[hotpath::measure(
+    label = "sessions.git_correlation.publication_outbox.replay_outcome",
+    future = true
+)]
+pub async fn replay_pending_git_evidence_publications_outcome<S: GitCorrelationSessionStore>(
+    session_store: &S,
+    limit: usize,
+) -> Result<GitEvidencePublicationReplayOutcome, GitCorrelationError> {
     session_store.require_project_sessions_authority()?;
     let snapshot = session_store.read_snapshot().await?;
     let pending = read_pending_git_evidence_publications(&snapshot, limit).await?;
     drop(snapshot);
     let mut replayed = 0_usize;
     for receipt in pending {
-        publish_transcript_graph_evidence(
+        if let Err(error) = publish_transcript_graph_evidence(
             session_store,
             &receipt.publication_prefix,
             &receipt.payload.span_observations,
             &receipt.payload.commit_records,
             super::DEFAULT_SPAN_MERGE_GAP_SECS,
-        )?;
-        let transaction = session_store.open_write_transaction().await?;
-        let deleted = transaction
-            .execute(
+        ) {
+            return Ok(GitEvidencePublicationReplayOutcome {
+                replayed_publications: replayed,
+                later_failure: Some(error),
+            });
+        }
+        replayed = replayed.saturating_add(1);
+        let settlement = async {
+            let transaction = session_store.open_write_transaction().await?;
+            let deleted = transaction
+                .execute(
                 "DELETE FROM git_evidence_publication_outbox
                  WHERE receipt_id = ?1 AND publication_prefix = ?2 AND evidence_json = ?3",
                 params![
@@ -183,36 +216,44 @@ pub async fn replay_pending_git_evidence_publications<S: GitCorrelationSessionSt
                     receipt.publication_prefix.as_str(),
                     receipt.evidence_json.as_str()
                 ],
-            )
-            .await?;
-        if deleted == 0 {
-            let mut rows = transaction
-                .query(
+                )
+                .await?;
+            if deleted == 0 {
+                let mut rows = transaction
+                    .query(
                     "SELECT publication_prefix, evidence_json
                      FROM git_evidence_publication_outbox WHERE receipt_id = ?1",
                     params![receipt.receipt_id.as_str()],
-                )
-                .await?;
-            if let Some(row) = rows.next().await? {
-                let stored_prefix = row.get::<String>(0)?;
-                let stored_json = row.get::<String>(1)?;
-                return Err(GitCorrelationError::Corrupt(format!(
-                    "Git evidence publication receipt changed before settlement: prefix_match={}, payload_match={}",
-                    stored_prefix == receipt.publication_prefix,
-                    stored_json == receipt.evidence_json,
-                )));
+                    )
+                    .await?;
+                if let Some(row) = rows.next().await? {
+                    let stored_prefix = row.get::<String>(0)?;
+                    let stored_json = row.get::<String>(1)?;
+                    return Err(GitCorrelationError::Corrupt(format!(
+                        "Git evidence publication receipt changed before settlement: prefix_match={}, payload_match={}",
+                        stored_prefix == receipt.publication_prefix,
+                        stored_json == receipt.evidence_json,
+                    )));
+                }
+            } else if deleted != 1 {
+                return Err(GitCorrelationError::Corrupt(
+                    "Git evidence publication receipt settlement deleted multiple rows".to_owned(),
+                ));
             }
-        } else if deleted != 1 {
-            return Err(GitCorrelationError::Corrupt(
-                "Git evidence publication receipt settlement deleted multiple rows".to_owned(),
-            ));
+            GitCorrelationWriteTxn::commit(transaction).await
         }
-        GitCorrelationWriteTxn::commit(transaction).await?;
-        if deleted == 1 {
-            replayed = replayed.saturating_add(1);
+        .await;
+        if let Err(error) = settlement {
+            return Ok(GitEvidencePublicationReplayOutcome {
+                replayed_publications: replayed,
+                later_failure: Some(error),
+            });
         }
     }
-    Ok(replayed)
+    Ok(GitEvidencePublicationReplayOutcome {
+        replayed_publications: replayed,
+        later_failure: None,
+    })
 }
 
 #[cfg(test)]
@@ -228,7 +269,7 @@ mod tests {
 
     use super::{
         enqueue_git_evidence_publication, pending_git_evidence_publication_count,
-        replay_pending_git_evidence_publications,
+        replay_pending_git_evidence_publications, replay_pending_git_evidence_publications_outcome,
     };
     use crate::runtime::git_correlation::test_support::MemoryEvidenceGraphRuntime;
     use crate::runtime::git_correlation::{
@@ -413,5 +454,57 @@ mod tests {
         assert_eq!(projection.projection().spans().len(), 1);
         assert_eq!(projection.projection().commit_sessions().len(), 1);
         assert!(!receipt.is_empty());
+    }
+
+    #[tokio::test]
+    async fn later_replay_failure_returns_prior_durable_publication_progress() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("sessions.db");
+        let graph = Arc::new(MemoryEvidenceGraphRuntime::default());
+        let store = TestStore::open(&database, Arc::clone(&graph));
+        ensure_git_correlation_receipt_schema_in_transaction(&store.connection)
+            .await
+            .unwrap();
+
+        for suffix in ["a", "b"] {
+            let mut observation = span();
+            observation.session_id = format!("session-{suffix}");
+            let transaction = store.open_write_transaction().await.unwrap();
+            enqueue_git_evidence_publication(
+                &transaction,
+                &format!("transcript-{suffix}"),
+                &[],
+                &[observation],
+            )
+            .await
+            .unwrap();
+            transaction.commit().await.unwrap();
+        }
+
+        graph.fail_after_successful_publications(1);
+        let partial = replay_pending_git_evidence_publications_outcome(&store, 8)
+            .await
+            .unwrap();
+        assert_eq!(partial.replayed_publications, 1);
+        assert!(partial.later_failure.is_some());
+        assert_eq!(
+            pending_git_evidence_publication_count(&store)
+                .await
+                .unwrap(),
+            1
+        );
+
+        assert_eq!(
+            replay_pending_git_evidence_publications(&store, 8)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            pending_git_evidence_publication_count(&store)
+                .await
+                .unwrap(),
+            0
+        );
     }
 }
