@@ -1353,23 +1353,15 @@ async fn http_operation_events(
             );
         }
     };
-    if query.resume_token.is_none()
-        && let Some(executor) = state.executor.as_deref()
-    {
-        return http_operation_events_through_executor(
-            executor,
-            &operation_id,
-            &request_id,
-            &controls,
-            next_sequence,
-        )
-        .await;
-    }
+    // Same owner rule as cancellation: this authority answers for the
+    // operations it began, and only an operation it does not own is delegated
+    // to the daemon executor. A resume token is always redeemed locally — the
+    // token names this authority's own retained frontier.
     let context = match resolve_authenticated_http_request_context(
         &state,
         &operation_id,
         request_id.clone(),
-        controls.deadline,
+        controls.deadline.clone(),
         controls.cancellation.context(),
         observed_at,
         query.resume_token.as_ref(),
@@ -1378,6 +1370,19 @@ async fn http_operation_events(
     {
         Ok(context) => context,
         Err(error) => {
+            if matches!(error, OperationEventError::NotFoundOrNotAuthorized)
+                && query.resume_token.is_none()
+                && let Some(executor) = state.executor.as_deref()
+            {
+                return http_operation_events_through_executor(
+                    executor,
+                    &operation_id,
+                    &request_id,
+                    &controls,
+                    next_sequence,
+                )
+                .await;
+            }
             emit_http_feedback_observation(
                 &state,
                 observation_subject.as_ref(),
@@ -1625,22 +1630,19 @@ async fn http_operation_cancel(
             );
         }
     };
-    if let Some(executor) = state.executor.as_deref() {
-        return http_operation_cancel_through_executor(
-            &state,
-            executor,
-            &operation_id,
-            &request_id,
-            &controls,
-            observed_at,
-        )
-        .await;
-    }
+    // The canonical owner of an operation is whichever authority began it. The
+    // daemon mounts these routes with its *own* process-global authority and an
+    // invocation client pointed back at its own socket, so delegating first
+    // sent every cancel on a round trip out of the process and back to reach
+    // in-memory state this handler already holds — and reported the typed
+    // `operation_event.unavailable` whenever that socket was momentarily
+    // unreachable. Resolve locally first; delegate only for an operation this
+    // authority does not own.
     let context = match resolve_authenticated_http_request_context(
         &state,
         &operation_id,
         request_id.clone(),
-        controls.deadline,
+        controls.deadline.clone(),
         controls.cancellation.context(),
         observed_at,
         None,
@@ -1649,6 +1651,19 @@ async fn http_operation_cancel(
     {
         Ok(context) => context,
         Err(error) => {
+            if matches!(error, OperationEventError::NotFoundOrNotAuthorized)
+                && let Some(executor) = state.executor.as_deref()
+            {
+                return http_operation_cancel_through_executor(
+                    &state,
+                    executor,
+                    &operation_id,
+                    &request_id,
+                    &controls,
+                    observed_at,
+                )
+                .await;
+            }
             emit_http_feedback_observation(
                 &state,
                 observation_subject.as_ref(),
