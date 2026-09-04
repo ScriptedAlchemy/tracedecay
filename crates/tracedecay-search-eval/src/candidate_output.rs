@@ -402,7 +402,17 @@ impl PublishedCorpusCache {
         admitted_scope: AdmittedCorpusScopeFn,
     ) -> Result<(), CandidateOutputError> {
         if let Entry::Vacant(entry) = self.by_scale.entry(copies) {
-            let published = publish_corpus_with_scale(repo_root, workload, copies, admitted_scope)?;
+            let published = match copies {
+                1 => hotpath::measure_block!(
+                    "search_eval.corpus.publish.current",
+                    publish_corpus_with_scale(repo_root, workload, copies, admitted_scope)
+                ),
+                10 => hotpath::measure_block!(
+                    "search_eval.corpus.publish.10x",
+                    publish_corpus_with_scale(repo_root, workload, copies, admitted_scope)
+                ),
+                _ => publish_corpus_with_scale(repo_root, workload, copies, admitted_scope),
+            }?;
             entry.insert(published);
         }
         Ok(())
@@ -544,7 +554,10 @@ pub fn generate_candidate_outputs_with_native(
     // and 10x corpora, and the native phase reuses those exact builds instead
     // of republishing byte-identical ones.
     let mut corpora = PublishedCorpusCache::default();
-    let mut generated = generate_candidate_outputs_sharing_corpora(options, &mut corpora)?;
+    let mut generated = hotpath::measure_block!(
+        "search_eval.fallback.generate",
+        generate_candidate_outputs_sharing_corpora(options, &mut corpora)
+    )?;
     let workload_path = options.workload_path.map_or_else(
         || options.repo_root.join(WORKLOAD_RELATIVE),
         Path::to_path_buf,

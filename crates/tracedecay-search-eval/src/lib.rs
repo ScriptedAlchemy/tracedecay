@@ -99,9 +99,11 @@ pub fn default_workload_path(repo_root: &Path) -> PathBuf {
 fn load_authoritative_default_workload()
 -> Result<packaged_assets::PackagedEvaluatorAssets, SearchEvalError> {
     let assets = packaged_assets::materialize()?;
-    tracedecay_query::search_quality::evaluate::validate_activation_profile_matrix(
-        assets.workload(),
-    )?;
+    hotpath::measure_block!("search_eval.package.activation_verify", {
+        tracedecay_query::search_quality::evaluate::validate_activation_profile_matrix(
+            assets.workload(),
+        )
+    })?;
     Ok(assets)
 }
 
