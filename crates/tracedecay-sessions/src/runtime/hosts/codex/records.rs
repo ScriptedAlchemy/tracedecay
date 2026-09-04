@@ -7,11 +7,11 @@ use serde_json::Value;
 use tracedecay_capture::codex::{codex_current_user_message, codex_message_visible_text};
 
 use super::PROVIDER;
-use super::goals::{CodexGoalContext, codex_goal_context_from_text};
 use super::meta::CodexMeta;
 use crate::host_ports::parse_timestamp;
 use crate::runtime::SessionMessageRecord;
 use crate::runtime::shared::{append_tool_calls_metadata, content_storage_text_and_tools};
+use tracedecay_store::{CodexGoalContext, codex_goal_context_from_text};
 
 /// Threshold above which a tool call's arguments / a tool output is flagged as
 /// truncated in metadata. Raw tool-call arguments and tool outputs are never
