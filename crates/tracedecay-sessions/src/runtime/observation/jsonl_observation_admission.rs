@@ -238,7 +238,7 @@ pub(in crate::runtime) struct JsonlObservationAdmissionProgress {
 }
 
 #[derive(Clone, Copy)]
-pub(in crate::runtime) struct JsonlObservationScan {
+pub(in crate::runtime) struct JsonlObservationScan<'scan> {
     pub resumed: bool,
     /// True when a prior cursor existed but the scan restarted at offset 0
     /// (truncate/rename replacement). Callers use this to keep projected
@@ -247,6 +247,16 @@ pub(in crate::runtime) struct JsonlObservationScan {
     pub start_offset: u64,
     pub generation: u64,
     pub mtime: u64,
+    frames: &'scan [SharedJsonlFrame],
+}
+
+impl JsonlObservationScan<'_> {
+    /// Raw frames in this exact bounded admission page. Host-specific state
+    /// may use this view for decisions that require pairing two native records
+    /// without issuing a second file read or retaining the page bytes.
+    pub fn frame_bytes(&self) -> impl Iterator<Item = &[u8]> {
+        self.frames.iter().map(|frame| frame.bytes.as_ref())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -2027,6 +2037,7 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
         start_offset: raw.start_offset,
         generation: raw.new_cursor.file_id,
         mtime: raw.new_cursor.mtime,
+        frames: &raw.frames,
     });
     let active = ActiveAdmission {
         provider,

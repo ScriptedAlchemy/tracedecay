@@ -764,7 +764,7 @@ mod goal_event_tests {
     }
 
     #[test]
-    fn goal_context_response_item_defers_to_stable_user_item() {
+    fn response_only_goal_context_keeps_legacy_stable_identity() {
         let native = json!({
             "timestamp": "2026-01-01T00:00:15.100Z",
             "type": "response_item",
@@ -788,12 +788,19 @@ mod goal_event_tests {
         )
         .unwrap();
         assert_eq!(
-            envelope.facts(),
-            &[CanonicalObservationFactV1::Unknown {
-                native_kind: "response_item.message.user".to_owned(),
-                state: CanonicalUnknownStateV1::Unsupported,
-            }]
+            envelope.relations().message_id(),
+            Some(envelope.stable_record_id())
         );
+        assert!(matches!(
+            &envelope.facts()[0],
+            CanonicalObservationFactV1::Message {
+                role: tracedecay_domain::CanonicalMessageRoleV1::User,
+                content,
+                ..
+            } if tracedecay_store::codex_message_visible_text(content).contains(
+                "ensure all provider session messages are ingested"
+            )
+        ));
     }
 
     #[tokio::test]

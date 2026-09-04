@@ -1,16 +1,18 @@
 //! Codex rollout observation admission and canonical-envelope normalization.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
+use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 
 pub(super) use tracedecay_capture::codex::codex_native_record_id;
 #[cfg(test)]
 pub use tracedecay_capture::codex::normalize_codex_observation;
 use tracedecay_capture::codex::{
-    CodexObservationLocation, codex_observation_record_supported,
+    CodexObservationLocation, codex_current_user_message, codex_message_visible_text,
+    codex_observation_record_supported, codex_response_goal_context,
     normalize_codex_observation_with_location,
 };
 use tracedecay_domain::{
@@ -253,6 +255,56 @@ impl CodexObservationAdmission<'_> {
 struct CodexAdmissionState {
     context: CodexContextState,
     scope_verdict: Option<bool>,
+    current_goal_contexts: Arc<HashSet<[u8; 32]>>,
+}
+
+fn goal_context_identity(text: &str) -> Option<[u8; 32]> {
+    let goal = tracedecay_store::codex_goal_context_from_text(text)?;
+    let encoded = serde_json::to_vec(&goal.metadata()).ok()?;
+    Some(Sha256::digest(encoded).into())
+}
+
+fn current_goal_contexts_in_batch(
+    scan: &crate::runtime::jsonl_observation_admission::JsonlObservationScan<'_>,
+    mut context: CodexContextState,
+    path: &Path,
+    meta: &super::meta::CodexMeta,
+    scope_matcher: &TranscriptScopeMatcher,
+) -> HashSet<[u8; 32]> {
+    let mut scope_verdict = None;
+    scan.frame_bytes()
+        .filter_map(|bytes| {
+            // Decode only records that can change scope or carry the paired
+            // current item. Any escape stays eligible because JSON may encode
+            // these discriminators with Unicode escapes.
+            const CANDIDATES: [&[u8]; 3] = [b"session_meta", b"turn_context", b"UserMessage"];
+            if !bytes.contains(&b'\\')
+                && !CANDIDATES.iter().any(|candidate| {
+                    bytes
+                        .windows(candidate.len())
+                        .any(|window| window == *candidate)
+                })
+            {
+                return None;
+            }
+            let native = serde_json::from_slice::<serde_json::Value>(bytes).ok()?;
+            if context.observe_context_record(&native, path, meta) {
+                scope_verdict = None;
+                return None;
+            }
+            if !*scope_verdict.get_or_insert_with(|| scope_matcher.accepts(context.cwd.as_deref()))
+            {
+                return None;
+            }
+            if native.get("type").and_then(serde_json::Value::as_str) != Some("event_msg") {
+                return None;
+            }
+            let payload = native.get("payload").unwrap_or(&native);
+            let message = codex_current_user_message(payload)?;
+            let visible_text = codex_message_visible_text(message.content);
+            goal_context_identity(&visible_text)
+        })
+        .collect()
 }
 
 async fn shared_session_meta_with_provenance(
@@ -413,6 +465,13 @@ async fn try_admit_codex_jsonl_observations(
                 CodexContextState::from_meta(&meta)
             };
             CodexAdmissionState {
+                current_goal_contexts: Arc::new(current_goal_contexts_in_batch(
+                    &scan,
+                    context.clone(),
+                    path,
+                    &meta,
+                    &scope_matcher,
+                )),
                 context,
                 scope_verdict: None,
             }
@@ -450,6 +509,16 @@ async fn try_admit_codex_jsonl_observations(
                     return Err(ObservationRecordParseErrorV1::NormalizationFailed);
                 }
                 if !codex_observation_record_supported(native) {
+                    non_durable_reason = Some(ObservationCoverageReason::UnsupportedFact);
+                    return Err(ObservationRecordParseErrorV1::NormalizationFailed);
+                }
+                let payload = native.get("payload").unwrap_or(native);
+                if native.get("type").and_then(serde_json::Value::as_str) == Some("response_item")
+                    && codex_response_goal_context(payload).is_some_and(|goal| {
+                        goal_context_identity(&goal.visible_text)
+                            .is_some_and(|identity| state.current_goal_contexts.contains(&identity))
+                    })
+                {
                     non_durable_reason = Some(ObservationCoverageReason::UnsupportedFact);
                     return Err(ObservationRecordParseErrorV1::NormalizationFailed);
                 }
