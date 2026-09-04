@@ -425,6 +425,8 @@ mod tests {
         run_framed_log_durability_workload, write_controlled_workload_reports,
     };
 
+    const BUILD_IDENTITY_FILE: &str = "controlled-workload-build-identity.json";
+
     #[test]
     fn framed_log_workload_recovers_the_first_frame_and_verifies_publish() {
         let root = tempfile::tempdir().expect("framed-log workload root");
@@ -573,13 +575,20 @@ mod tests {
     #[test]
     fn hotpath_off_vs_on_durable_results_are_identical() {
         let scratch = tempfile::tempdir().expect("identity scratch");
-        let target_dir = isolated_target_dir();
-        std::fs::create_dir_all(&target_dir).expect("isolated target");
         let off_dir = scratch.path().join("off");
         let on_dir = scratch.path().join("on");
 
-        emit_reports_via_cargo(&off_dir, &target_dir, false);
-        emit_reports_via_cargo(&on_dir, &target_dir, true);
+        emit_reports_via_cargo(&off_dir, false);
+        emit_reports_via_cargo(&on_dir, true);
+
+        let off_build = load_build_identity(&off_dir);
+        let on_build = load_build_identity(&on_dir);
+        assert_eq!(off_build["feature_mode"], "hotpath-off");
+        assert_eq!(on_build["feature_mode"], "hotpath-on");
+        assert_ne!(
+            off_build["executable_sha256"], on_build["executable_sha256"],
+            "feature-off and feature-on reports must come from distinct executable bytes"
+        );
 
         assert_durable_identity(
             FRAMED_LOG_WORKLOAD,
@@ -628,6 +637,14 @@ mod tests {
             .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()))
     }
 
+    fn load_build_identity(report_dir: &Path) -> serde_json::Value {
+        let path = report_dir.join(BUILD_IDENTITY_FILE);
+        let bytes =
+            std::fs::read(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        serde_json::from_slice(&bytes)
+            .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()))
+    }
+
     fn assert_durable_identity(
         workload: &str,
         off: &ControlledWorkloadReportV1,
@@ -650,17 +667,18 @@ mod tests {
         assert!(comparison.durable_results_identical());
     }
 
-    fn emit_reports_via_cargo(report_dir: &Path, target_dir: &Path, hotpath_on: bool) {
+    fn emit_reports_via_cargo(report_dir: &Path, hotpath_on: bool) {
         std::fs::create_dir_all(report_dir).expect("report dir");
         let mut command = Command::new(env!("CARGO"));
         command
             .current_dir(workspace_root())
-            .env("CARGO_TARGET_DIR", target_dir)
             .env("CARGO_TERM_COLOR", "never")
             .args([
                 "run",
                 "-p",
                 "tracedecay-search-eval",
+                "--profile",
+                "test",
                 "--example",
                 "emit_controlled_workload_reports",
                 "--locked",
@@ -668,10 +686,7 @@ mod tests {
                 "--quiet",
             ]);
         if hotpath_on {
-            command.args([
-                "--features",
-                "tracedecay-capture/hotpath,tracedecay-private-fs/hotpath",
-            ]);
+            command.args(["--features", "controlled-workload-hotpath"]);
         }
         command.arg("--").arg(report_dir);
         let output = command.output().expect("spawn cargo");
@@ -682,14 +697,6 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-    }
-
-    fn isolated_target_dir() -> PathBuf {
-        std::env::var_os("TRACEDECAY_SEARCH_EVAL_HOTPATH_IDENTITY_TARGET")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                std::env::temp_dir().join("tracedecay-search-eval-hotpath-identity-target")
-            })
     }
 
     fn workspace_root() -> PathBuf {
