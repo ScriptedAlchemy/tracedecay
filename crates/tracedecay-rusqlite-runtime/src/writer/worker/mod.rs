@@ -445,7 +445,19 @@ impl Worker {
         }
         let state = Arc::clone(&self.state);
         let telemetry = self.telemetry.clone();
-        if catch_unwind(AssertUnwindSafe(|| self.run_loop(checkpoint, runtime))).is_err() {
+        if let Err(payload) = catch_unwind(AssertUnwindSafe(|| self.run_loop(checkpoint, runtime)))
+        {
+            // The fault is otherwise invisible: every later request only sees
+            // "writer unavailable". Name the panic so a faulted writer can be
+            // traced from the process log.
+            let message = payload
+                .downcast_ref::<&str>()
+                .map(|message| (*message).to_owned())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "non-string panic payload".to_owned());
+            eprintln!(
+                "[tracedecay] rusqlite writer worker panicked; writer is now faulted: {message}"
+            );
             state.store(WriterState::Faulted as u8, Ordering::Release);
             telemetry.fault_unsettled();
         }
