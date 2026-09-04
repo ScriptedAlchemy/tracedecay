@@ -3385,12 +3385,41 @@ mod safe_config_tests {
 mod path_normalize_tests {
     use super::*;
 
+    /// Report whether `directory`'s filesystem accepts a name that is not
+    /// valid UTF-8.
+    ///
+    /// `cfg(unix)` is a compile gate, not a filesystem capability: APFS
+    /// refuses such a name outright with `EILSEQ`, so a macOS run failed at
+    /// the fixture instead of exercising the lookup. Probing keeps the
+    /// coverage everywhere the bytes are really accepted and makes the skip
+    /// visible where they are not.
+    #[cfg(unix)]
+    fn non_utf8_file_names_supported(directory: &Path) -> bool {
+        use std::os::unix::ffi::OsStringExt;
+
+        let probe = directory.join(std::ffi::OsString::from_vec(vec![b'p', 0xff]));
+        match std::fs::write(&probe, b"") {
+            Ok(()) => {
+                let _ = std::fs::remove_file(&probe);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn path_lookup_preserves_non_unicode_parent_components() {
         use std::os::unix::ffi::OsStringExt;
 
         let dir = tempfile::tempdir().unwrap();
+        if !non_utf8_file_names_supported(dir.path()) {
+            println!(
+                "skipping path_lookup_preserves_non_unicode_parent_components: \
+                 this filesystem refuses non-UTF-8 file names"
+            );
+            return;
+        }
         let invalid_parent = dir
             .path()
             .join(std::ffi::OsString::from_vec(vec![b'n', b'o', b'n', 0xff]));
