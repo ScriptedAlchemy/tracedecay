@@ -95,30 +95,35 @@ async fn refusal_census_is_empty_without_refusals() {
 }
 
 #[tokio::test]
-async fn unknown_reason_strings_stay_visible_in_the_census() {
+async fn unknown_reason_strings_stay_visible_as_opaque_fingerprints() {
     let temporary = tempfile::TempDir::new().unwrap();
     let runtime = RegisteredGlobalDbTestRuntime::profile(temporary.path())
         .await
         .expect("profile runtime");
+    let short_secret = "provider-private-transcript-secret";
+    let long_secret = format!("provider-private-transcript-{}", "x".repeat(16 * 1024));
 
-    insert_advance(&runtime, "cursor", 0, "future_disposition").await;
+    insert_advance(&runtime, "cursor", 0, short_secret).await;
+    insert_advance(&runtime, "cursor", 1, &long_secret).await;
 
     let census = runtime
         .profile_database()
         .observation_refusal_census()
         .await;
 
-    assert_eq!(
-        census,
-        ObservationRefusalCensusV1::Observed {
-            refusals: vec![ObservationRefusalCountV1 {
-                provider: "cursor".to_owned(),
-                reason: "future_disposition".to_owned(),
-                count: 1,
-            }],
-        },
-        "a reason this binary does not recognize must never be classified as benign"
-    );
+    let serialized = serde_json::to_string(&census).expect("serialize census");
+    assert!(!serialized.contains(short_secret));
+    assert!(!serialized.contains(&long_secret));
+    let ObservationRefusalCensusV1::Observed { refusals } = census else {
+        panic!("available census must remain observed");
+    };
+    assert_eq!(refusals.len(), 2);
+    assert!(refusals.iter().all(|refusal| {
+        refusal.provider == "cursor"
+            && refusal.reason.starts_with("sha256:")
+            && refusal.reason.len() == "sha256:".len() + 64
+            && refusal.count == 1
+    }));
 }
 
 #[tokio::test]
