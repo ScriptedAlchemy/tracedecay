@@ -88,6 +88,7 @@ struct CompressionTransactionContext {
     raw_rows_scanned: usize,
     raw_bytes_scanned: u64,
     raw_has_more: bool,
+    retained: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -626,6 +627,7 @@ async fn prepare_compression_context(
         raw_rows_scanned,
         raw_bytes_scanned,
         raw_has_more,
+        retained: retained_scan.is_some(),
     })
 }
 
@@ -665,6 +667,21 @@ async fn no_backlog_compression_response(
 ) -> Result<Option<LcmCompressionResponse>, LcmError> {
     if !context.window.backlog.is_empty() {
         return Ok(None);
+    }
+    if context.retained {
+        return Ok(Some(compression_response(
+            "ok",
+            "no_backlog_to_compress",
+            Vec::new(),
+            retained_replay_messages(
+                &context.window.pinned_anchors,
+                &[],
+                &context.window.fresh_tail,
+            ),
+            context.existing_frontier.clone(),
+            None,
+            request.max_assembly_tokens,
+        )));
     }
     if context.plan.forced_overflow_recovery {
         return Ok(Some(
@@ -773,19 +790,27 @@ async fn backlog_below_threshold_response(
         return Ok(None);
     }
 
-    let replay_messages = assemble_replay_context(
-        conn,
-        &request.provider,
-        &request.session_id,
-        &context.raw_messages,
-        ReplayWindowParts {
-            pinned_anchors: &context.window.pinned_anchors,
-            deferred_backlog: &context.window.backlog,
-            fresh_tail: &context.window.fresh_tail,
-        },
-        request.max_assembly_tokens,
-    )
-    .await?;
+    let replay_messages = if context.retained {
+        retained_replay_messages(
+            &context.window.pinned_anchors,
+            &context.window.backlog,
+            &context.window.fresh_tail,
+        )
+    } else {
+        assemble_replay_context(
+            conn,
+            &request.provider,
+            &request.session_id,
+            &context.raw_messages,
+            ReplayWindowParts {
+                pinned_anchors: &context.window.pinned_anchors,
+                deferred_backlog: &context.window.backlog,
+                fresh_tail: &context.window.fresh_tail,
+            },
+            request.max_assembly_tokens,
+        )
+        .await?
+    };
     Ok(Some(compression_response(
         "ok",
         "backlog_below_leaf_chunk_threshold",
@@ -857,7 +882,13 @@ async fn persist_and_replay_backlog_compression(
         deferred_backlog: &write_result.remaining_backlog,
         fresh_tail: &context.window.fresh_tail,
     };
-    let replay_messages = if context.plan.forced_overflow_recovery {
+    let replay_messages = if context.retained {
+        retained_replay_messages(
+            &context.window.pinned_anchors,
+            &write_result.remaining_backlog,
+            &context.window.fresh_tail,
+        )
+    } else if context.plan.forced_overflow_recovery {
         assemble_overflow_recovery_replay(
             conn,
             &request.provider,
@@ -1195,6 +1226,20 @@ fn replay_without_summary(
             .map(replay_transactions::raw_replay_message),
     );
     replay_transactions::normalize_replay_tool_pairs(&replay_messages)
+}
+
+fn retained_replay_messages(
+    pinned_anchors: &[LcmRawMessage],
+    deferred_backlog: &[LcmRawMessage],
+    fresh_tail: &[LcmRawMessage],
+) -> Vec<Value> {
+    let replay = pinned_anchors
+        .iter()
+        .chain(deferred_backlog)
+        .chain(fresh_tail)
+        .map(replay_transactions::raw_replay_message)
+        .collect::<Vec<_>>();
+    replay_transactions::normalize_replay_tool_pairs(&replay)
 }
 
 const SUMMARY_REPLAY_PRIORITY: u8 = 0;
