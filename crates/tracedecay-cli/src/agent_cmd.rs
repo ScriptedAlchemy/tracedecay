@@ -3940,6 +3940,24 @@ mod tests {
             unsafe { std::env::set_var(key, value) };
             Self { key, previous }
         }
+
+        /// Put `dir` in front of the inherited `PATH` instead of replacing it.
+        ///
+        /// A host lifecycle test needs its fake host CLI to win resolution on
+        /// a developer machine that also has the real one installed, but the
+        /// same tests resolve `tracedecay` itself off `PATH`
+        /// (`which_tracedecay`) and must keep seeing whatever the ambient
+        /// environment offers — replacing `PATH` outright would silently
+        /// change the staged binary identity the activation probe compares.
+        #[cfg(unix)]
+        fn prepend_path(dir: &Path) -> Self {
+            let mut entries = vec![dir.to_path_buf()];
+            if let Some(existing) = std::env::var_os("PATH") {
+                entries.extend(std::env::split_paths(&existing));
+            }
+            let joined = std::env::join_paths(entries).expect("join PATH entries");
+            Self::set("PATH", joined)
+        }
     }
 
     impl Drop for EnvVarGuard {
@@ -3998,6 +4016,87 @@ esac
             .permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(path, permissions).expect("chmod fake kiro-cli");
+    }
+
+    /// Install a fake `codex` on `PATH` for the Core lifecycle tests, and hand
+    /// back both the `PATH` guard and the directory that holds it.
+    ///
+    /// Core activation drives Codex's own `codex plugin add`
+    /// (`plugin_registry::require_codex_plugin_cli`), which is a *requirement*,
+    /// not a preference: the host-capability doctrine forbids a fallback that
+    /// edits Codex-owned files behind the host's back. CI runners carry no
+    /// `codex` binary, so a test that exercises activation has to supply the
+    /// host CLI the same way the Kiro and MCP-registry tests supply theirs.
+    #[cfg(unix)]
+    fn install_fake_codex_cli(dir: &std::path::Path) -> EnvVarGuard {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Mirrors the probed behaviour recorded in
+        // `agents::codex::plugin_registry`: `plugin add` enables
+        // `[plugins."tracedecay@<marketplace>"]` in `config.toml` and copies
+        // the staged source into the versioned cache; `plugin remove` undoes
+        // exactly those two. Peer plugins, `[mcp_servers]`, and `[hooks]` are
+        // preserved because the entry is appended and removed in place —
+        // rewriting the file would trip the registry's own region guard.
+        //
+        // The child is launched with a cleared environment, so the script
+        // establishes its own `PATH` for the utilities it calls and derives
+        // everything else from the admitted `HOME`.
+        let body = format!(
+            r#"#!/bin/sh
+set -eu
+PATH=/usr/bin:/bin
+export PATH
+selector="${{3-}}"
+case "$selector" in
+  tracedecay@?*) ;;
+  *) echo "unexpected codex plugin selector: $*" >&2; exit 64 ;;
+esac
+marketplace="${{selector#tracedecay@}}"
+config="$HOME/.codex/config.toml"
+entry='[plugins."'"$selector"'"]'
+source_dir="$HOME/.codex/plugins/tracedecay"
+cache_dir="$HOME/.codex/plugins/cache/$marketplace/tracedecay/{version}"
+case "${{1-}} ${{2-}}" in
+  "plugin add")
+    mkdir -p "$HOME/.codex"
+    if [ ! -f "$config" ] || ! grep -qF "$entry" "$config"; then
+      printf '\n%s\nenabled = true\n' "$entry" >> "$config"
+    fi
+    rm -rf "$cache_dir"
+    mkdir -p "$cache_dir"
+    cp -R "$source_dir/." "$cache_dir/"
+    ;;
+  "plugin remove")
+    if [ -f "$config" ]; then
+      awk -v entry="$entry" '
+        BEGIN {{ dropping = 0 }}
+        $0 == entry {{ dropping = 1; next }}
+        dropping == 1 && substr($0, 1, 1) == "[" {{ dropping = 0 }}
+        dropping == 0 {{ print }}
+      ' "$config" > "$config.next"
+      mv "$config.next" "$config"
+    fi
+    rm -rf "$cache_dir"
+    ;;
+  *)
+    echo "unexpected codex invocation: $*" >&2
+    exit 64
+    ;;
+esac
+exit 0
+"#,
+            version = tracedecay_agent_hosts::PRODUCT_VERSION,
+        );
+
+        let path = dir.join("codex");
+        std::fs::write(&path, body).expect("write fake codex");
+        let mut permissions = std::fs::metadata(&path)
+            .expect("fake codex metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).expect("chmod fake codex");
+        EnvVarGuard::prepend_path(dir)
     }
 
     fn seed_opencode_non_context_state(home: &std::path::Path) -> (PathBuf, PathBuf, PathBuf) {
@@ -4875,9 +4974,15 @@ esac
         assert_eq!(std::fs::read(&prompt_path).unwrap(), original_prompt);
     }
 
+    #[cfg(unix)]
     #[test]
     fn codex_core_rollback_restores_generated_agent_exports_byte_for_byte() {
         let _profile = pinned_host_profile();
+        // Core `apply` drives Codex's own `codex plugin add`, which is a hard
+        // requirement of that path. Supply the host CLI rather than depending
+        // on whatever the machine happens to have installed.
+        let codex_cli_dir = tempfile::tempdir().unwrap();
+        let _codex_path = install_fake_codex_cli(codex_cli_dir.path());
         let home = host_cli_tempdir();
         // Same filesystem as `home`: the receipt transaction backs up a
         // staged artifact by renaming it into `lifecycle`, and rename cannot
@@ -5516,6 +5621,7 @@ esac
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn codex_native_activated_retry_tracks_component_set() {
         use tracedecay::agents::host_bundle_v2::{
@@ -5524,6 +5630,11 @@ esac
         };
 
         let _profile = pinned_host_profile();
+        // The stale-cache leg below is exactly the leg that has to re-drive
+        // `codex plugin add`, so the host CLI is a precondition of the
+        // behaviour under test, not an ambient machine detail.
+        let codex_cli_dir = tempfile::tempdir().unwrap();
+        let _codex_path = install_fake_codex_cli(codex_cli_dir.path());
         let home = host_cli_tempdir();
         // Keep the lifecycle root on the same filesystem as `home`: receipt
         // transactions back up staged artifacts with an atomic rename.
