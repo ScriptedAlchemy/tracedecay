@@ -515,7 +515,10 @@ where
             continue;
         }
         let TargetScan::Scanned(commits) = scan(target) else {
-            continue;
+            return Err(GitCorrelationError::Unavailable(format!(
+                "cannot scan Git history for retained span target {}",
+                target.worktree
+            )));
         };
         for commit in commits {
             records.extend(match_commit_to_spans(

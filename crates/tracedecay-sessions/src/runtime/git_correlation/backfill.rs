@@ -267,6 +267,19 @@ impl BackfillStats {
     pub const fn skipped_total(&self) -> usize {
         self.skipped_no_window + self.skipped_not_worktree + self.skipped_git_error
     }
+
+    /// Whether this pass durably published evidence or advanced its source
+    /// tuple. Skip counters alone are observations, not committed progress.
+    pub const fn committed_progress(&self) -> bool {
+        self.frontier_advanced || self.spans_written > 0 || self.commits_attributed > 0
+    }
+}
+
+/// One incremental pass, including a failure observed after durable progress.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncrementalBackfillOutcome {
+    pub stats: BackfillStats,
+    pub later_failure: Option<GitCorrelationError>,
 }
 
 /// Abstracts the git subprocess surface the backfill needs, so tests can run
@@ -420,6 +433,27 @@ pub async fn run_incremental_backfill<S: GitCorrelationSessionStore, G>(
 where
     G: GitReflogSource + ?Sized,
 {
+    let outcome = run_incremental_backfill_outcome(session_store, git, limit_sessions).await?;
+    match outcome.later_failure {
+        Some(error) => Err(error),
+        None => Ok(outcome.stats),
+    }
+}
+
+/// Runs one incremental pass without discarding already-committed counters
+/// when the later attribution phase fails.
+#[hotpath::measure(
+    label = "sessions.git_correlation.backfill.incremental_outcome",
+    future = true
+)]
+pub async fn run_incremental_backfill_outcome<S: GitCorrelationSessionStore, G>(
+    session_store: &S,
+    git: &G,
+    limit_sessions: usize,
+) -> Result<IncrementalBackfillOutcome, GitCorrelationError>
+where
+    G: GitReflogSource + ?Sized,
+{
     session_store.require_project_sessions_authority()?;
     let mut stats = BackfillStats::default();
     if limit_sessions == 0 {
@@ -489,16 +523,29 @@ where
     // would stay unattributed until a transcript ingest happens to run. The
     // Graph publication is content-addressed and idempotent, so running it on
     // every pass (including passes with zero new session rows) is safe.
-    stats.commits_attributed +=
-        run_commit_attribution_sweep(session_store, opts.merge_gap_secs, |target| {
+    let later_failure =
+        match run_commit_attribution_sweep(session_store, opts.merge_gap_secs, |target| {
             scan_span_target(git, target, opts.merge_gap_secs, opts.max_commits_per_repo)
         })
-        .await?;
+        .await
+        {
+            Ok(commits_attributed) => {
+                stats.commits_attributed += commits_attributed;
+                None
+            }
+            Err(error) => {
+                stats.skipped_git_error = stats.skipped_git_error.saturating_add(1);
+                Some(error)
+            }
+        };
     crate::runtime::pipeline_metrics::record_git_backfill(
         stats.sessions_scanned,
         stats.spans_written,
     );
-    Ok(stats)
+    Ok(IncrementalBackfillOutcome {
+        stats,
+        later_failure,
+    })
 }
 
 pub(super) async fn advance_history_frontier(
@@ -696,9 +743,9 @@ async fn backfill_one_session<S: GitCorrelationSessionStore, G: GitReflogSource 
         let Some(branch) = segment.branch.as_deref() else {
             continue;
         };
-        let Some(log_text) = git.commit_log(&worktree_root, branch, segment.start) else {
-            continue;
-        };
+        let log_text = git
+            .commit_log(&worktree_root, branch, segment.start)
+            .ok_or(BackfillSkipReason::GitError)?;
         for (sha, committed_at) in parse_commit_log(&log_text, opts.max_commits_per_repo) {
             if committed_at < segment.start || committed_at > segment.end {
                 continue;

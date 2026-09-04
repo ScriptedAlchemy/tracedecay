@@ -24,8 +24,8 @@ use tracedecay_sessions::runtime::git_correlation::{
     GitEvidenceProjectionStore, GitReflogSource, SessionGitCorrelationHit, SessionsForQuery,
     SpanObservation, git_evidence_projection_identity, pending_git_evidence_publication_count,
     publish_transcript_graph_evidence, read_meta_value, recover_git_evidence_projection,
-    replay_pending_git_evidence_publications, run_bounded_history_index_page,
-    run_incremental_backfill,
+    replay_pending_git_evidence_publications, replay_pending_git_evidence_publications_outcome,
+    run_bounded_history_index_page, run_incremental_backfill, run_incremental_backfill_outcome,
 };
 #[cfg(any(test, feature = "test-helpers"))]
 use tracedecay_sessions::runtime::git_correlation::{
@@ -44,7 +44,9 @@ static GIT_EVIDENCE_PUBLICATION_LOCKS: OnceLock<
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitEvidenceConvergenceStats {
     pub replayed_publications: usize,
-    pub pending_publications: u64,
+    /// Known pending receipt count after replay. `None` means that authority
+    /// failed after another phase had already committed progress.
+    pub pending_publications: Option<u64>,
     pub backfill: BackfillStats,
     /// Conservative signal: a full page means another retained-history page
     /// may exist and callers must not describe this pass as fully drained.
@@ -54,10 +56,55 @@ pub struct GitEvidenceConvergenceStats {
 impl GitEvidenceConvergenceStats {
     /// Whether this pass durably changed Git evidence or its session frontier.
     pub fn committed_progress(&self) -> bool {
-        self.replayed_publications > 0
-            || self.backfill.frontier_advanced
-            || self.backfill.spans_written > 0
-            || self.backfill.commits_attributed > 0
+        self.replayed_publications > 0 || self.backfill.committed_progress()
+    }
+}
+
+/// Truthful result of one bounded convergence attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GitEvidenceConvergenceOutcome {
+    Complete(GitEvidenceConvergenceStats),
+    Partial {
+        progress: GitEvidenceConvergenceStats,
+        later_failure: GitCorrelationError,
+    },
+}
+
+impl GitEvidenceConvergenceOutcome {
+    pub const fn stats(&self) -> &GitEvidenceConvergenceStats {
+        match self {
+            Self::Complete(stats)
+            | Self::Partial {
+                progress: stats, ..
+            } => stats,
+        }
+    }
+
+    pub const fn later_failure(&self) -> Option<&GitCorrelationError> {
+        match self {
+            Self::Complete(_) => None,
+            Self::Partial { later_failure, .. } => Some(later_failure),
+        }
+    }
+
+    pub fn committed_progress(&self) -> bool {
+        self.stats().committed_progress()
+    }
+}
+
+fn settle_git_evidence_convergence(
+    progress: GitEvidenceConvergenceStats,
+    later_failure: Option<GitCorrelationError>,
+) -> Result<GitEvidenceConvergenceOutcome, GitCorrelationError> {
+    match later_failure {
+        Some(later_failure) if progress.committed_progress() => {
+            Ok(GitEvidenceConvergenceOutcome::Partial {
+                progress,
+                later_failure,
+            })
+        }
+        Some(error) => Err(error),
+        None => Ok(GitEvidenceConvergenceOutcome::Complete(progress)),
     }
 }
 
@@ -93,7 +140,7 @@ async fn converge_session_git_evidence<S, G>(
     git: &G,
     backfill_session_limit: usize,
     publication_replay_limit: usize,
-) -> Result<GitEvidenceConvergenceStats, GitCorrelationError>
+) -> Result<GitEvidenceConvergenceOutcome, GitCorrelationError>
 where
     S: GitCorrelationSessionStore,
     G: GitReflogSource + ?Sized,
@@ -109,16 +156,59 @@ where
             "Git evidence convergence replay limit must be positive".to_owned(),
         ));
     }
-    let replayed_publications =
-        replay_pending_git_evidence_publications(session_store, publication_replay_limit).await?;
-    let backfill = run_incremental_backfill(session_store, git, backfill_session_limit).await?;
-    let pending_publications = pending_git_evidence_publication_count(session_store).await?;
-    Ok(GitEvidenceConvergenceStats {
+    let replay =
+        replay_pending_git_evidence_publications_outcome(session_store, publication_replay_limit)
+            .await?;
+    let replayed_publications = replay.replayed_publications;
+    let pending_publications = match pending_git_evidence_publication_count(session_store).await {
+        Ok(pending) => Some(pending),
+        Err(error) if replayed_publications > 0 => {
+            return Ok(GitEvidenceConvergenceOutcome::Partial {
+                progress: GitEvidenceConvergenceStats {
+                    replayed_publications,
+                    pending_publications: None,
+                    backfill: BackfillStats::default(),
+                    backfill_page_saturated: false,
+                },
+                later_failure: error,
+            });
+        }
+        Err(error) => return Err(error),
+    };
+    if let Some(later_failure) = replay.later_failure {
+        return settle_git_evidence_convergence(
+            GitEvidenceConvergenceStats {
+                replayed_publications,
+                pending_publications,
+                backfill: BackfillStats::default(),
+                backfill_page_saturated: false,
+            },
+            Some(later_failure),
+        );
+    }
+    let backfill_outcome =
+        match run_incremental_backfill_outcome(session_store, git, backfill_session_limit).await {
+            Ok(outcome) => outcome,
+            Err(error) if replayed_publications > 0 => {
+                return Ok(GitEvidenceConvergenceOutcome::Partial {
+                    progress: GitEvidenceConvergenceStats {
+                        replayed_publications,
+                        pending_publications,
+                        backfill: BackfillStats::default(),
+                        backfill_page_saturated: false,
+                    },
+                    later_failure: error,
+                });
+            }
+            Err(error) => return Err(error),
+        };
+    let progress = GitEvidenceConvergenceStats {
         replayed_publications,
         pending_publications,
-        backfill_page_saturated: backfill.sessions_scanned == backfill_session_limit,
-        backfill,
-    })
+        backfill_page_saturated: backfill_outcome.stats.sessions_scanned == backfill_session_limit,
+        backfill: backfill_outcome.stats,
+    };
+    settle_git_evidence_convergence(progress, backfill_outcome.later_failure)
 }
 
 /// Adapter over an already-open project-sessions database.
@@ -146,7 +236,7 @@ impl RegisteredGlobalDb {
         git: &G,
         backfill_session_limit: usize,
         publication_replay_limit: usize,
-    ) -> Result<GitEvidenceConvergenceStats, GitCorrelationError> {
+    ) -> Result<GitEvidenceConvergenceOutcome, GitCorrelationError> {
         converge_session_git_evidence(self, git, backfill_session_limit, publication_replay_limit)
             .await
     }
@@ -295,7 +385,7 @@ where
         git: &G,
         backfill_session_limit: usize,
         publication_replay_limit: usize,
-    ) -> Result<GitEvidenceConvergenceStats, GitCorrelationError> {
+    ) -> Result<GitEvidenceConvergenceOutcome, GitCorrelationError> {
         converge_session_git_evidence(self, git, backfill_session_limit, publication_replay_limit)
             .await
     }
@@ -503,7 +593,10 @@ impl GitCorrelationSessionStore for RegisteredGlobalDb {
 
 #[cfg(test)]
 mod tests {
-    use super::{GlobalDbGitCorrelationStore, shared_git_evidence_publication_lock_for_identity};
+    use super::{
+        GitEvidenceConvergenceOutcome, GitEvidenceConvergenceStats, GlobalDbGitCorrelationStore,
+        settle_git_evidence_convergence, shared_git_evidence_publication_lock_for_identity,
+    };
     use crate::{
         ParseOffset, TranscriptPersistenceError, tests::harness::RegisteredGlobalDbHarness,
     };
@@ -530,6 +623,29 @@ mod tests {
 
         assert!(Arc::ptr_eq(&first, &same));
         assert!(!Arc::ptr_eq(&first, &foreign));
+    }
+
+    #[test]
+    fn later_failure_returns_committed_partial_convergence() {
+        let progress = GitEvidenceConvergenceStats {
+            replayed_publications: 1,
+            pending_publications: Some(0),
+            backfill: Default::default(),
+            backfill_page_saturated: false,
+        };
+        let failure = GitCorrelationError::Unavailable("git log failed".to_owned());
+
+        let outcome = settle_git_evidence_convergence(progress.clone(), Some(failure.clone()))
+            .expect("committed work must be returned as partial progress");
+
+        assert_eq!(
+            outcome,
+            GitEvidenceConvergenceOutcome::Partial {
+                progress,
+                later_failure: failure,
+            }
+        );
+        assert!(outcome.committed_progress());
     }
 
     #[tokio::test]
