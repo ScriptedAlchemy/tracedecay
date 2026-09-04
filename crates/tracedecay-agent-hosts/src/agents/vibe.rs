@@ -58,6 +58,15 @@ fn original_config_path(config: &Path) -> PathBuf {
     PathBuf::from(format!("{}.tracedecay-original", config.display()))
 }
 
+/// Whether one Vibe home (user-level or project-level) carries a live
+/// tracedecay registration in either of its two documents.
+fn vibe_home_has_tracedecay(vibe_home: &Path) -> bool {
+    mcp_registration_state(&vibe_home.join("config.toml"), None)
+        == HostBundleRegistrationStateV1::Current
+        || prompt_registration_state(&vibe_home.join("prompts/cli.md"))
+            == HostBundleRegistrationStateV1::Current
+}
+
 impl AgentIntegration for VibeIntegration {
     fn name(&self) -> &'static str {
         "Mistral Vibe"
@@ -120,10 +129,7 @@ impl AgentIntegration for VibeIntegration {
     }
 
     fn has_tracedecay(&self, home: &Path) -> bool {
-        mcp_registration_state(&vibe_config_path(home), None)
-            == HostBundleRegistrationStateV1::Current
-            || prompt_registration_state(&vibe_prompt_path(home))
-                == HostBundleRegistrationStateV1::Current
+        vibe_home_has_tracedecay(&vibe_home(home))
     }
 
     fn primary_config_path(&self, home: &Path) -> Option<PathBuf> {
@@ -223,7 +229,7 @@ impl AgentIntegration for VibeIntegration {
         profile_root: &Path,
     ) -> Result<Vec<SkillInstallSummary>> {
         let prompt_path = vibe_prompt_path(home);
-        if !prompt_path.exists() {
+        if !prompt_path.exists() || !self.has_tracedecay(home) {
             return Ok(Vec::new());
         }
         Ok(vec![install_managed_skills(
@@ -238,8 +244,12 @@ impl AgentIntegration for VibeIntegration {
         project_root: &Path,
         profile_root: &Path,
     ) -> Result<Vec<SkillInstallSummary>> {
-        let prompt_path = project_root.join(".vibe/prompts/cli.md");
-        if !prompt_path.exists() {
+        // A project Vibe home is an export destination only when it actually
+        // registers tracedecay. An operator's own `.vibe/prompts/cli.md`
+        // beside a foreign `[[mcp_servers]]` entry must stay untouched.
+        let project_home = project_vibe_home(project_root);
+        let prompt_path = project_home.join("prompts/cli.md");
+        if !prompt_path.exists() || !vibe_home_has_tracedecay(&project_home) {
             return Ok(Vec::new());
         }
         Ok(vec![install_managed_skills(
