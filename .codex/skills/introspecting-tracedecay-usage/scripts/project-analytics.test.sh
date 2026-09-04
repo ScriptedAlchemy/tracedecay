@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HELPER="$SCRIPT_DIR/project-analytics.sh"
+MIRROR="$SCRIPT_DIR/../../../../.claude/skills/introspecting-tracedecay-usage/scripts/project-analytics.sh"
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
@@ -36,17 +37,19 @@ cat >"$FAKE_BIN/tracedecay" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '{
-  "status":"ok",
-  "read_only":false,
-  "database_bytes":4096,
-  "page_size_bytes":4096,
-  "page_count":1,
-  "freelist_pages":0,
-  "details":[],
-  "project_id":"proj_current",
-  "store_path":"%s",
-  "history":[],
-  "history_coverage":"durable_project_store_history"
+  "outcome":{"outcome":"evidence","value":{"payload":{
+    "status":"ok",
+    "read_only":false,
+    "database_bytes":4096,
+    "page_size_bytes":4096,
+    "page_count":1,
+    "freelist_pages":0,
+    "details":[],
+    "project_id":"proj_current",
+    "store_path":"%s",
+    "history":[],
+    "history_coverage":"durable_project_store_history"
+  }}}
 }\n' "$SERVING_DB"
 EOF
 
@@ -58,17 +61,17 @@ query="${*: -1}"
 [[ -f "$database" ]] || exit 92
 case "$query" in
   *"GROUP BY tool_name"*)
-    case "$query" in
-      *"project_id='proj_current'"*) ;;
-      *) exit 91 ;;
+    case "${TD_EXPECT_SCOPE:?}" in
+      project) [[ "$query" == *"project_id='proj_current'"* ]] || exit 91 ;;
+      all) [[ "$query" != *"project_id='proj_current'"* ]] || exit 91 ;;
     esac
     printf 'tracedecay_status  3  1\n'
     ;;
   *"COUNT(*) FROM analytics_events"*) printf '3\n' ;;
-  *"FROM memory_facts"*) printf '2  4  1  1  0  1  2\n' ;;
-  *"FROM memory_feedback_events"*) ;;
-  *"FROM memory_oplog GROUP BY"*) printf '  add: 2\n' ;;
-  *"SUM(op IN"*) printf '2\n' ;;
+  *"FROM memory_v2_current_facts"*) printf '2  4  1  1  0  1  2\n' ;;
+  *"FROM memory_v2_feedback_history"*) ;;
+  *"FROM memory_v2_operation_receipts GROUP BY"*) printf '  add: 2\n' ;;
+  *"SUM(operation_kind IN"*) printf '2\n' ;;
   *)
     printf 'unexpected query: %s\n' "$query" >&2
     exit 90
@@ -78,22 +81,30 @@ EOF
 
 chmod +x "$FAKE_BIN/tracedecay" "$FAKE_BIN/sqlite3"
 
-output="$({
-  PATH="$FAKE_BIN:$PATH" SERVING_DB="$SERVING_DB" "$HELPER"
-} 2>&1)"
+cmp -s "$HELPER" "$MIRROR" || fail "Codex and Claude helper mirrors differ"
 
-assert_contains "$output" "TraceDecay usage & fact-store adoption — proj_current"
-assert_contains "$output" "serving store: graph.db"
-assert_contains "$output" "total mcp_tool_call events: 3"
-assert_contains "$output" "facts stored:              2"
-assert_excludes "$output" "KeyError"
+for scope in project all; do
+  if [ "$scope" = all ]; then args=(--all); else args=(); fi
+  for helper in "$HELPER" "$MIRROR"; do
+    output="$({
+      PATH="$FAKE_BIN:$PATH" SERVING_DB="$SERVING_DB" TD_EXPECT_SCOPE="$scope" "$helper" "${args[@]}"
+    } 2>&1)"
 
-printf 'ok - beta.11 storage-status shape drives the analytics snapshot\n'
+    assert_contains "$output" "TraceDecay usage & fact-store adoption — proj_current"
+    assert_contains "$output" "serving store: graph.db"
+    assert_contains "$output" "total mcp_tool_call events: 3"
+    assert_contains "$output" "facts stored:              2"
+    assert_contains "$output" "memory_v2_feedback_history"
+    assert_excludes "$output" "KeyError"
+  done
+done
+
+printf 'ok - typed storage-status payload drives active and all-project analytics\n'
 
 rm "$SERVING_DB"
 set +e
 unavailable_output="$({
-  PATH="$FAKE_BIN:$PATH" SERVING_DB="$SERVING_DB" "$HELPER"
+  PATH="$FAKE_BIN:$PATH" SERVING_DB="$SERVING_DB" TD_EXPECT_SCOPE=project "$HELPER"
 } 2>&1)"
 unavailable_status=$?
 set -e

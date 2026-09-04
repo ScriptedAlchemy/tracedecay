@@ -24,8 +24,11 @@ SS="$(tracedecay tool storage_status --args '{"format":"json"}' 2>/dev/null || t
 if [ -z "$SS" ]; then echo "error: could not read 'tracedecay tool storage_status'" >&2; exit 4; fi
 if ! STORAGE_FIELDS="$(printf '%s' "$SS" | "$PY" -c 'import sys,json
 d=json.load(sys.stdin)
-store_path=d.get("store_path")
-project_id=d.get("project_id")
+payload=d.get("outcome", {}).get("value", {}).get("payload")
+if not isinstance(payload, dict):
+    payload=d
+store_path=payload.get("store_path")
+project_id=payload.get("project_id")
 if not isinstance(store_path, str) or not store_path or not isinstance(project_id, str) or not project_id:
     raise SystemExit(1)
 print(f"{store_path}\t{project_id}")')"; then
@@ -75,7 +78,7 @@ echo "## Fact-store adoption (serving store: $(basename "$SERVING_DB"))"
 read -r FACTS RETR ACC HELP UNH RATED RETRIEVED <<EOF
 $(q "$SERVING_DB" "SELECT COUNT(*), COALESCE(SUM(retrieval_count),0), COALESCE(SUM(access_count),0),
      COALESCE(SUM(helpful_count),0), COALESCE(SUM(unhelpful_count),0),
-     SUM(helpful_count+unhelpful_count>0), SUM(retrieval_count>0) FROM memory_facts;")
+     SUM(helpful_count+unhelpful_count>0), SUM(retrieval_count>0) FROM memory_v2_current_facts;")
 EOF
 FB=$(( ${HELP:-0} + ${UNH:-0} ))
 SEEN=$(( ${RETR:-0} + ${ACC:-0} ))
@@ -98,16 +101,16 @@ fi
 
 # --- 3. Feedback ledger (transport-agnostic: CLI + MCP + automation). ---------
 echo
-echo "## Feedback ledger (memory_feedback_events — all transports)"
-LEDGER="$(q "$SERVING_DB" "SELECT action, datetime(created_at,'unixepoch'), source, substr(COALESCE(note,''),1,60)
-              FROM memory_feedback_events ORDER BY created_at;")"
+echo "## Feedback ledger (memory_v2_feedback_history — all transports)"
+LEDGER="$(q "$SERVING_DB" "SELECT action, datetime(occurred_at,'unixepoch'), COALESCE(source,'unknown'), substr(COALESCE(note,''),1,60)
+              FROM memory_v2_feedback_history ORDER BY occurred_at, event_id;")"
 if [ -n "$LEDGER" ]; then printf '%s\n' "$LEDGER" | sed 's/^/  /'; else echo "  (none — no fact has ever received feedback)"; fi
 
 # --- 4. Read vs write activity (oplog is write-side; retrievals are read-side).
 echo
-echo "## Write ops (memory_oplog) vs read activity"
-q "$SERVING_DB" "SELECT '  '||op||': '||COUNT(*) FROM memory_oplog GROUP BY op ORDER BY COUNT(*) DESC;"
-WRITES=$(q "$SERVING_DB" "SELECT COALESCE(SUM(op IN ('add','update','remove')),0) FROM memory_oplog;")
+echo "## Write ops (memory_v2_operation_receipts) vs read activity"
+q "$SERVING_DB" "SELECT '  '||operation_kind||': '||COUNT(*) FROM memory_v2_operation_receipts GROUP BY operation_kind ORDER BY COUNT(*) DESC;"
+WRITES=$(q "$SERVING_DB" "SELECT COALESCE(SUM(operation_kind IN ('add','update','remove')),0) FROM memory_v2_operation_receipts;")
 echo "  ------------------------------------------------------------"
 echo "  write ops (add+update+remove): ${WRITES:-0}   |   retrieval yield (facts returned): ${RETR:-0}"
 echo
