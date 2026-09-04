@@ -1,6 +1,7 @@
 use std::io::Write as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tracedecay_runtime_core::db::engine::{
@@ -65,7 +66,9 @@ impl GitCorrelationSessionStore for TestStore {
             .map_err(GitCorrelationError::from)
     }
 
-    fn git_evidence_publication_lock(&self) -> Result<&std::sync::Mutex<()>, GitCorrelationError> {
+    fn git_evidence_publication_lock(
+        &self,
+    ) -> Result<Arc<std::sync::Mutex<()>>, GitCorrelationError> {
         Ok(self.graph.git_evidence_publication_lock())
     }
 
